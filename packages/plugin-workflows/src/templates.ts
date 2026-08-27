@@ -71,9 +71,12 @@ const dailyTriageDigest: WorkflowDefinition = {
       id: "linear_issues",
       type: "tool",
       service: "linear",
-      action: "list_my_issues",
+      action: "list_issues",
+      // Linear's MCP `list_issues` reads the assignee filter as "me" for the
+      // authenticated user (the tool's own description: "For my issues, use
+      // 'me' as the assignee.").
+      params: { assignee: "me" },
       summary: "Issues assigned to you",
-      params: {},
     },
     {
       id: "slack_channels",
@@ -168,9 +171,12 @@ const meetingPrep: WorkflowDefinition = {
       id: "linear_issues",
       type: "tool",
       service: "linear",
-      action: "list_my_issues",
+      action: "list_issues",
+      // Linear's MCP `list_issues` reads the assignee filter as "me" for the
+      // authenticated user (the tool's own description: "For my issues, use
+      // 'me' as the assignee.").
+      params: { assignee: "me" },
       summary: "Issues assigned to you",
-      params: {},
     },
     {
       id: "slack_channels",

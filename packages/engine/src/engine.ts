@@ -29,6 +29,7 @@ export class Engine {
     if (this.sessions.has(id)) return this.sessions.get(id)!;
 
     const { attachment, sandbox, policySandbox } = await this.materializeSandbox(
+      id,
       opts.sandbox,
       opts.sandboxReadyTimeoutMs,
       opts.specProvider,
@@ -46,6 +47,7 @@ export class Engine {
     const data = await this.opts.providers.store.getSession(args.sessionId);
     if (!data) throw new Error(`session not found: ${args.sessionId}`);
     const { attachment, sandbox, policySandbox } = await this.materializeSandbox(
+      args.sessionId,
       args.options.sandbox,
       args.options.sandboxReadyTimeoutMs,
       args.options.specProvider,
@@ -82,6 +84,7 @@ export class Engine {
    * turn does (`Thread.runTurn`).
    */
   private async materializeSandbox(
+    sessionId: string,
     arg: Sandbox | SandboxCreateOpts | undefined,
     readyTimeoutMs: number | undefined,
     specProvider?: SpecProvider,
@@ -94,7 +97,14 @@ export class Engine {
       attachment = SandboxAttachment.forSandbox(arg as Sandbox);
     } else {
       const provider = this.opts.providers.sandboxProvider ?? new VirtualSandboxProvider();
-      attachment = new SandboxAttachment(provider, (arg ?? {}) as SandboxCreateOpts, specProvider);
+      // Stamp the owning session on the create opts so providers with a
+      // `list()` seam can map the backing resource to its session — the
+      // reconcile sweep's orphan detection depends on it. The stamp is
+      // applied AFTER the spread and unconditionally: an opts object cloned
+      // from another session (or carrying an explicit `sessionId: undefined`
+      // key) must never annotate the sandbox with the wrong owner.
+      const createOpts: SandboxCreateOpts = { ...((arg ?? {}) as SandboxCreateOpts), sessionId };
+      attachment = new SandboxAttachment(provider, createOpts, specProvider);
     }
     const policySandbox = new PolicySandbox(attachment, { readyTimeoutMs });
     return { attachment, sandbox: policySandbox, policySandbox };

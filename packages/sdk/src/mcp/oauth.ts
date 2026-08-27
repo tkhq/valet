@@ -24,6 +24,9 @@ export interface TokenResponse {
   refresh_token?: string;
   expires_in?: number;
   token_type?: string;
+  /** Granted scopes, space-delimited (RFC 6749 §5.1). May be narrower than
+   * the request, or "" for a token with no scopes. */
+  scope?: string;
 }
 
 // ─── RFC 9728 + RFC 8414: Authorization Server Metadata Discovery ───────────
@@ -143,10 +146,13 @@ export async function discoverAuthServer(mcpServerUrl: string): Promise<AuthServ
 
 // ─── RFC 7591: Dynamic Client Registration ──────────────────────────────────
 
-/** Register a dynamic OAuth client with the authorization server. */
+/** Register a dynamic OAuth client with the authorization server. `scope`
+ * (RFC 7591 §2, space-delimited) declares the scopes the client will
+ * request — a server that constrains grants to the registered scope set
+ * needs it here, not only in the authorize request. */
 export async function registerClient(
   registrationEndpoint: string,
-  params: { clientName: string; redirectUris: string[] },
+  params: { clientName: string; redirectUris: string[]; scope?: string },
 ): Promise<RegisteredClient> {
   const res = await fetch(registrationEndpoint, {
     method: 'POST',
@@ -157,6 +163,7 @@ export async function registerClient(
       grant_types: ['authorization_code', 'refresh_token'],
       response_types: ['code'],
       token_endpoint_auth_method: 'none',
+      ...(params.scope ? { scope: params.scope } : {}),
     }),
   });
   if (!res.ok) {

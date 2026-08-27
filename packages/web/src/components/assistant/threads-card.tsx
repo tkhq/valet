@@ -122,12 +122,17 @@ export function ThreadsCard() {
               <Link
                 to="/chat"
                 search={{ thread: thread.id }}
-                className="flex items-center gap-2.5 px-4 py-2 hover:bg-ink-wash/60 transition-colors"
+                className="flex items-center gap-2.5 px-4 py-2 hover:bg-ink-wash transition-colors"
               >
                 <span
                   className={cn(
                     "h-1.5 w-1.5 shrink-0 rounded-full",
-                    running > 0 ? "bg-moss animate-pulse motion-reduce:animate-none" : "bg-muted/40",
+                    // `bg-muted-wash`, not `bg-muted/40` — the slash modifier
+                    // on a `var()` token emits no rule (theme.css trap note),
+                    // so the idle dot rendered invisible. Same trap killed the
+                    // row hover above: `hover:bg-ink-wash/60` emitted nothing;
+                    // the wash token carries its own alpha, so it is used bare.
+                    running > 0 ? "bg-moss animate-pulse motion-reduce:animate-none" : "bg-muted-wash",
                   )}
                   aria-label={running > 0 ? `${running} running` : "idle"}
                 />

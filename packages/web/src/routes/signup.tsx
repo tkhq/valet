@@ -1,10 +1,12 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useState, type FormEvent } from "react";
 import { signUpEmailWithInvite } from "~/lib/auth-client";
+import { safeNextPath } from "~/lib/next-path";
 import { Button, Input, Label, Spinner } from "~/components/primitives";
 
 interface SignupSearch {
   invite?: string;
+  next?: string;
 }
 
 /**
@@ -12,20 +14,24 @@ interface SignupSearch {
  * (prefilled, readonly) when the visitor arrived via an invite link
  * (`?invite=…`) — signup with no code relies on `evaluateAdmission`'s
  * email-domain/first-user rules server-side, same as today.
+ *
+ * `?next=` mirrors `/login`'s (artifacts design): a visitor who followed a
+ * shared link and needs an account still lands on the document afterward.
  */
 export const Route = createFileRoute("/signup")({
   validateSearch: (raw): SignupSearch => ({
     invite: typeof raw.invite === "string" ? raw.invite : undefined,
+    next: safeNextPath(raw.next),
   }),
   component: SignupRoute,
 });
 
 function SignupRoute() {
-  const { invite } = Route.useSearch();
-  return <SignupPage invite={invite} />;
+  const { invite, next } = Route.useSearch();
+  return <SignupPage invite={invite} next={next} />;
 }
 
-export function SignupPage({ invite }: { invite?: string }) {
+export function SignupPage({ invite, next }: { invite?: string; next?: string }) {
   const navigate = useNavigate();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -48,7 +54,7 @@ export function SignupPage({ invite }: { invite?: string }) {
       setError(signUpError.message ?? "Couldn't create your account.");
       return;
     }
-    navigate({ to: "/" });
+    navigate({ to: next ?? "/" });
   }
 
   return (
@@ -108,7 +114,7 @@ export function SignupPage({ invite }: { invite?: string }) {
 
         <p className="text-center text-sm text-muted">
           Already have an account?{" "}
-          <Link to="/login" className="text-moss hover:underline">
+          <Link to="/login" search={{ next }} className="text-moss hover:underline">
             Sign in
           </Link>
         </p>

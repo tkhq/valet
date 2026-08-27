@@ -56,8 +56,42 @@ export interface StreamMessage extends Message {
    */
   settledError?: string;
   queueItemId?: string;
+  /**
+   * Prior queue item id when this bubble was remapped by a promote
+   * (followup q-1 → steer q-2). `submission.settled` for the old id must
+   * not badge this bubble as superseded — the row still represents the
+   * live prompt.
+   */
+  promotedFromItemId?: string;
 }
 
+/**
+ * Live agent status for one thread. Wire `status`/`turn_end` frames carry a
+ * `threadId`; this is the per-thread slice they update.
+ */
+export interface ThreadLiveStatus {
+  /** Engine-reported agent status; mirrors the wire `status` event. */
+  status: AgentStatus;
+  /**
+   * Wire timestamp (`WireEvent.ts`) of the first non-idle `status` event in
+   * the current turn — server-stamped, not `Date.now()`, so it isn't thrown
+   * off by client clock skew. `undefined` while idle. Drives the elapsed-
+   * time counter on `AgentStatusBadge`; does not reset on an idle→non-idle
+   * status change WITHIN a turn (thinking → tool_calling → streaming), only
+   * on idle → non-idle.
+   */
+  turnStartedAt?: number;
+}
+
+/**
+ * RULE: a wire frame that carries a `threadId` MUST land in a per-thread
+ * map (`statusByThread`, `errorByThread`, `queueByThread`, gates keyed by
+ * id with a threadId field) — never in a session-scoped field. A
+ * session-scoped copy of thread state paints one thread's signal onto
+ * every other thread's view; we shipped that bug for status AND errors.
+ * Session-scoped fields are only for state with no thread: the socket
+ * (`conn`, `lastOffset`), the sandbox, `sessionError`.
+ */
 export interface SessionStreamState {
   /** Whether the WS is currently open. */
   conn: ConnectionStatus;
@@ -70,17 +104,13 @@ export interface SessionStreamState {
    * reconnect, but durable offsets do.
    */
   lastOffset: string;
-  /** Engine-reported agent status; mirrors the wire `status` event. */
-  agentStatus: AgentStatus;
   /**
-   * Wire timestamp (`WireEvent.ts`) of the first non-idle `status` event in
-   * the current turn — server-stamped, not `Date.now()`, so it isn't thrown
-   * off by client clock skew. `undefined` while idle. Drives the elapsed-
-   * time counter on `AgentStatusBadge`; does not reset on an idle→non-idle
-   * status change WITHIN a turn (thinking → tool_calling → streaming), only
-   * on idle → non-idle.
+   * Per-thread agent status, keyed by threadId. Wire `status` frames carry
+   * the originating thread; keying by it keeps one thread's state (e.g.
+   * `blocked_on_decision_gate`) from painting the status badge on every
+   * other thread in the session. A thread with no entry is idle.
    */
-  turnStartedAt?: number;
+  statusByThread: Record<string, ThreadLiveStatus>;
   /** Live message list. Server `init` seeds it; wire events mutate it. */
   messages: StreamMessage[];
   /**
@@ -101,8 +131,18 @@ export interface SessionStreamState {
    * so the header picker never shows a stale model.
    */
   modelSwitchNonce: number;
-  /** Last error message from the wire (if any). Cleared on successful turn_end. */
-  error?: { code: string; message: string };
+  /**
+   * Last wire error per thread. Wire `error` frames carry the originating
+   * threadId; keying by it keeps thread B's failure banner off thread A's
+   * view. Cleared per thread when that thread streams a new message or the
+   * user sends a new prompt on it — never by another thread's activity.
+   */
+  errorByThread: Record<string, { code: string; message: string }>;
+  /**
+   * A wire error with no threadId (e.g. `ws_open_failed`) — a session-level
+   * failure, shown whatever thread is active.
+   */
+  sessionError?: { code: string; message: string };
   /**
    * Ambient sandbox attachment status, mirroring the wire `sandbox.status`
    * frame. Session-scoped (no threadId). Undefined until the first event
@@ -188,7 +228,8 @@ export interface StreamStore {
 const EMPTY: SessionStreamState = {
   conn: "idle",
   lastOffset: "",
-  agentStatus: "idle",
+  statusByThread: {},
+  errorByThread: {},
   messages: [],
   pendingGates: {},
   queueByThread: {},
@@ -232,16 +273,21 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       // make an awaiting-approval card flicker out of view. The bootstrap
       // GET /decisions seeds them on first load; subsequent gates arrive
       // on the wire.
-      next.error = undefined;
-      next.agentStatus = "idle";
-      next.turnStartedAt = undefined;
+      next.errorByThread = {};
+      next.sessionError = undefined;
+      next.statusByThread = {};
       return next;
     }
 
     case "message_start": {
-      // A new message is actually streaming — any error banner from a prior
-      // failed turn is stale now.
-      next.error = undefined;
+      // A new message is actually streaming on THIS thread — its own error
+      // banner from a prior failed turn is stale now. Only this thread's:
+      // another thread starting a turn says nothing about this one's
+      // failure, and orchestrator sessions stream on siblings constantly.
+      if (slice.errorByThread[ev.threadId]) {
+        const { [ev.threadId]: _, ...rest } = slice.errorByThread;
+        next.errorByThread = rest;
+      }
       // Any part still `streaming` on this thread belongs to a dead attempt
       // (zombie deltas from a superseded run are unfenced and can arrive
       // after its cleanup) — sweep before the new message begins.
@@ -405,30 +451,59 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
     }
 
     case "status": {
-      if (slice.agentStatus === "idle" && ev.status !== "idle") next.turnStartedAt = ev.ts;
-      next.agentStatus = ev.status;
+      const prev = slice.statusByThread[ev.threadId];
+      const wasIdle = prev === undefined || prev.status === "idle";
+      const turnStartedAt =
+        ev.status === "idle" ? undefined : wasIdle ? ev.ts : prev.turnStartedAt;
+      // Duplicate frames are routine (the engine re-emits tool_calling per
+      // tool; the handshake seed and durable replay overlap) — skip them so
+      // the entry keeps its identity and subscribers do not re-render. An
+      // offset-carrying frame still advances lastOffset via `next`.
+      const unchanged = prev
+        ? prev.status === ev.status && prev.turnStartedAt === turnStartedAt
+        : ev.status === "idle";
+      if (unchanged) return ev.offset ? next : slice;
+      next.statusByThread = {
+        ...slice.statusByThread,
+        [ev.threadId]: { status: ev.status, turnStartedAt },
+      };
       return next;
     }
 
     case "turn_end": {
-      next.agentStatus = "idle";
-      next.turnStartedAt = undefined;
+      next.statusByThread = { ...slice.statusByThread, [ev.threadId]: { status: "idle" } };
       // No further tool activity can arrive for this turn — any part still
       // `streaming` (superseded attempt, dropped upgrade) is dead. Sweep it
       // and its scratch so zombie state cannot outlive the turn.
       sweepStreamingParts(next, ev.threadId);
-      // Deliberately KEEP `slice.error`: on a failed turn the engine emits
-      // `error` then `turn_end` within the same tick, so clearing here made
-      // the error banner flash for milliseconds and vanish — a failing turn
-      // (exhausted credits, bad key) looked like a silent empty reply. The
-      // error clears when a new message actually streams (`message_start`)
-      // or when the user sends a new prompt (`addUserMessage`).
+      // Deliberately KEEP the thread's error: on a failed turn the engine
+      // emits `error` then `turn_end` within the same tick, so clearing here
+      // made the error banner flash for milliseconds and vanish — a failing
+      // turn (exhausted credits, bad key) looked like a silent empty reply.
+      // The error clears when this thread streams a new message
+      // (`message_start`) or the user sends it a new prompt
+      // (`addUserMessage`).
       return next;
     }
 
     case "error": {
-      next.error = { code: ev.code, message: ev.message };
-      next.agentStatus = "error";
+      // Engine-originated errors name their thread; store the banner and
+      // flip the badge for that thread only. A session-level error (no
+      // threadId, e.g. `ws_open_failed`) lands in `sessionError` and shows
+      // whatever thread is active.
+      if (ev.threadId !== undefined) {
+        next.errorByThread = {
+          ...slice.errorByThread,
+          [ev.threadId]: { code: ev.code, message: ev.message },
+        };
+        const prev = slice.statusByThread[ev.threadId];
+        next.statusByThread = {
+          ...slice.statusByThread,
+          [ev.threadId]: { status: "error", turnStartedAt: prev?.turnStartedAt },
+        };
+      } else {
+        next.sessionError = { code: ev.code, message: ev.message };
+      }
       return next;
     }
 
@@ -480,6 +555,18 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       // thread. With two or more candidates the heuristic is ambiguous
       // (queued prompt A vs. B), so we drop the event rather than badge the
       // wrong message.
+      //
+      // Promote remaps the same bubble from the followup id to the steer
+      // successor. A superseded settle for the old id must not badge that
+      // bubble — it now represents the promoted prompt.
+      if (
+        ev.outcome === "superseded" &&
+        slice.messages.some(
+          (m) => m.threadId === ev.threadId && m.promotedFromItemId === ev.queueItemId,
+        )
+      ) {
+        return next;
+      }
       const idx = (() => {
         const direct = lastIndex(
           slice.messages,
@@ -640,12 +727,19 @@ export const useStreamStore = create<StreamStore>((set) => ({
         // overwrite this row with the server's canonical attachments field.
         ...(attachments && attachments.length > 0 ? { attachments } : {}),
       };
+      // A fresh prompt supersedes this thread's lingering error banner from
+      // the previous failed turn (see the `turn_end` reducer note). Other
+      // threads' errors stay; the guard matches the `message_start` case so
+      // an error-free thread keeps the map's identity.
+      let errorByThread = slice.errorByThread;
+      if (errorByThread[threadId]) {
+        const { [threadId]: _, ...rest } = errorByThread;
+        errorByThread = rest;
+      }
       return {
         bySession: {
           ...state.bySession,
-          // A fresh prompt supersedes any lingering error banner from the
-          // previous failed turn (see the `turn_end` reducer note).
-          [sessionId]: { ...slice, messages: [...slice.messages, message], error: undefined },
+          [sessionId]: { ...slice, messages: [...slice.messages, message], errorByThread },
         },
       };
     });
@@ -657,7 +751,20 @@ export const useStreamStore = create<StreamStore>((set) => ({
       const slice = ensure(state, sessionId);
       const idx = slice.messages.findIndex((m) => m.id === messageId);
       if (idx < 0) return state;
-      const updated: StreamMessage = { ...slice.messages[idx], queueItemId };
+      const prev = slice.messages[idx];
+      const remapping =
+        prev.queueItemId !== undefined && prev.queueItemId !== queueItemId;
+      const updated: StreamMessage = remapping
+        ? {
+            ...prev,
+            queueItemId,
+            promotedFromItemId: prev.queueItemId,
+            // The original followup settles superseded. This bubble is the
+            // successor — drop any badge copied from that settle.
+            settledOutcome: undefined,
+            settledError: undefined,
+          }
+        : { ...prev, queueItemId };
       return {
         bySession: {
           ...state.bySession,
@@ -713,6 +820,17 @@ export const useStreamStore = create<StreamStore>((set) => ({
   setPendingGates: (sessionId, gates) =>
     set((state) => {
       const slice = ensure(state, sessionId);
+      // Identity guard: seeding is idempotent, and more than one surface
+      // seeds (SessionView and ThreadTree both call usePendingGatesSeed).
+      // Rebuilding the record for equal content would re-render every
+      // pendingGates subscriber once per seeding mount.
+      const prev = slice.pendingGates;
+      if (
+        gates.length === Object.keys(prev).length &&
+        gates.every((g) => prev[g.id]?.updatedAt === g.updatedAt)
+      ) {
+        return state;
+      }
       const next: Record<string, DecisionGate> = {};
       for (const g of gates) next[g.id] = g;
       return {
@@ -738,6 +856,43 @@ export const useStreamStore = create<StreamStore>((set) => ({
 
 export function useSessionStream(sessionId: string): SessionStreamState {
   return useStreamStore((s) => s.bySession[sessionId] ?? EMPTY);
+}
+
+/**
+ * Stable idle value so the selector returns a referentially equal object for
+ * threads with no live status — zustand re-renders on identity change.
+ */
+const IDLE_THREAD_STATUS: ThreadLiveStatus = { status: "idle" };
+
+/**
+ * Live status for one thread, defaulting to idle. Undefined `threadId`
+ * (thread list still loading) also reads idle — the queue-state fallback in
+ * the consumers covers the connect-mid-turn window.
+ */
+export function useThreadLiveStatus(
+  sessionId: string,
+  threadId: string | undefined,
+): ThreadLiveStatus {
+  return useStreamStore((s) => {
+    if (!threadId) return IDLE_THREAD_STATUS;
+    return s.bySession[sessionId]?.statusByThread[threadId] ?? IDLE_THREAD_STATUS;
+  });
+}
+
+/**
+ * The error banner for one thread: the thread's own error, or the
+ * session-level error (no threadId on the wire frame) which shows whatever
+ * thread is active. Undefined when neither exists.
+ */
+export function useErrorForThread(
+  sessionId: string,
+  threadId: string | undefined,
+): { code: string; message: string } | undefined {
+  return useStreamStore((s) => {
+    const slice = s.bySession[sessionId];
+    if (!slice) return undefined;
+    return (threadId ? slice.errorByThread[threadId] : undefined) ?? slice.sessionError;
+  });
 }
 
 /**

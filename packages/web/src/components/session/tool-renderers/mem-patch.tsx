@@ -1,6 +1,7 @@
 import { NotebookPen } from "lucide-react";
 import { formatDiffStats } from "./diff-view";
 import { MarkdownDiffBody } from "./markdown-view";
+import { useMemoryViewer } from "./memory-viewer";
 import { PathLabel, ToolBody } from "./tool-shell";
 import { resultText, type ToolRenderer } from "./types";
 
@@ -38,6 +39,7 @@ export const memPatchRenderer: ToolRenderer = {
     const before = getStr(args, "oldString");
     const after = getStr(args, "newString");
     const failed = status === "error";
+    const viewer = useMemoryViewer(path);
 
     const header = (
       <span className="flex items-center gap-2 min-w-0">
@@ -63,13 +65,20 @@ export const memPatchRenderer: ToolRenderer = {
           </>
         ) : (
           // Memory files are markdown, so the preview toggle is always on.
-          <MarkdownDiffBody before={before} after={after} left={header} />
+          <MarkdownDiffBody
+            before={before}
+            after={after}
+            left={header}
+            actions={viewer.expandButton}
+            memoryLinks={viewer.memoryLinks}
+          />
         )}
         {failed && (error || resultText(result)) && (
           <div className="px-3 py-2 border-t border-danger-500/30 bg-danger-500/5 text-[11px] text-danger-700 dark:text-danger-400 font-mono whitespace-pre-wrap">
             {error || resultText(result)}
           </div>
         )}
+        {viewer.dialog}
       </ToolBody>
     );
   },

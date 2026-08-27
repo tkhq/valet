@@ -42,6 +42,7 @@ import {
   parseWorkflowImport,
   previewWorkflowImport,
   suggestedImportName,
+  type ParsedWorkflowImport,
   type WorkflowImport,
 } from "./import-workflow";
 
@@ -83,12 +84,38 @@ export function ImportWorkflowDialog({
   const [ref, setRef] = useState("");
   const [name, setName] = useState("");
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
+  /**
+   * Which open this dialog is on. Every async task below holds the count it
+   * started under and writes no state once `close` has moved it on —
+   * otherwise a read that lands after a cancel leaves the next open on a
+   * review step for a file nobody chose.
+   */
+  const opened = useRef(0);
 
   /** Parsed text → the review step, or the parser's messages. `from` names
    * the origin on screen; `fileName` seeds the name field when the file
-   * carried no name of its own. Pasted text has no file name. */
-  function review(fileText: string, from: string, fileName?: string): void {
-    const parsed = parseWorkflowImport(fileText);
+   * carried no name of its own.
+   *
+   * The parser returns a result for every input; the catch is here because
+   * the callers start this with `void`, and a rejection would leave the
+   * dialog on the step it was on with its button looking dead. */
+  async function review(fileText: string, from: string, fileName?: string): Promise<void> {
+    const open = opened.current;
+    let parsed: ParsedWorkflowImport;
+    try {
+      parsed = await parseWorkflowImport(fileText, fileName);
+    } catch (err) {
+      if (opened.current !== open) return;
+      const detail = err instanceof Error ? `: ${err.message}` : "";
+      setPhase({
+        kind: "error",
+        messages: [
+          `Valet could not read ${from}${detail}. Check that the file holds a workflow definition, then try again.`,
+        ],
+      });
+      return;
+    }
+    if (opened.current !== open) return;
     if (!parsed.ok) {
       setPhase({ kind: "error", messages: parsed.errors });
       return;
@@ -98,6 +125,7 @@ export function ImportWorkflowDialog({
   }
 
   function onPickFile(e: ChangeEvent<HTMLInputElement>): void {
+    const open = opened.current;
     const file = e.target.files?.[0];
     e.target.value = ""; // so the same file can be chosen again after a fix
     if (!file) return;
@@ -112,14 +140,19 @@ export function ImportWorkflowDialog({
     }
     void file.text().then(
       (fileText) => {
+        if (opened.current !== open) return;
         setText(fileText);
-        review(fileText, file.name, file.name);
+        void review(fileText, file.name, file.name);
       },
-      () => setPhase({ kind: "error", messages: ["Could not read that file. Choose it again."] }),
+      () => {
+        if (opened.current !== open) return;
+        setPhase({ kind: "error", messages: ["Could not read that file. Choose it again."] });
+      },
     );
   }
 
   async function readFromRepo(): Promise<void> {
+    const open = opened.current;
     setPhase({ kind: "busy", label: "Reading…" });
     try {
       const file = await api.getWorkflowImportFile({
@@ -127,8 +160,10 @@ export function ImportWorkflowDialog({
         path: path.trim(),
         ...(ref.trim() === "" ? {} : { ref: ref.trim() }),
       });
-      review(file.content, `${file.repo}/${file.path}`, file.path);
+      if (opened.current !== open) return;
+      await review(file.content, `${file.repo}/${file.path}`, file.path);
     } catch (err) {
+      if (opened.current !== open) return;
       setPhase({ kind: "error", messages: errorMessages(err) });
     }
   }
@@ -153,8 +188,10 @@ export function ImportWorkflowDialog({
   }
 
   /** Closing clears the form. A half-typed repository address left over from
-   * a failed read reads as the state of the NEXT import, which it is not. */
+   * a failed read reads as the state of the NEXT import, which it is not.
+   * The count moves on so a read still in flight writes nothing. */
   function close(): void {
+    opened.current += 1;
     setPhase({ kind: "idle" });
     setText("");
     setRepo("");
@@ -206,19 +243,19 @@ export function ImportWorkflowDialog({
                 aria-labelledby={`${tabPanelId(TABLIST_LABEL, "file")}-tab`}
                 className="grid gap-2"
               >
-                <Label htmlFor={`${fieldId}-text`}>Workflow JSON</Label>
+                <Label htmlFor={`${fieldId}-text`}>Workflow YAML or JSON</Label>
                 <Textarea
                   id={`${fieldId}-text`}
                   value={text}
                   onChange={(e) => setText(e.target.value)}
                   rows={8}
                   spellCheck={false}
-                  placeholder='{ "version": "dag/v1", "nodes": [...], "edges": [...] }'
+                  placeholder={'valet: workflow/v1\nname: Nightly triage\ndefinition:\n  version: dag/v1\n  nodes: [...]\n  edges: [...]'}
                   className="font-mono text-xs"
                 />
                 <p className="text-xs text-muted">
-                  Paste a definition, or choose a file. The editor&apos;s JSON view shows the
-                  definition of any workflow you already have.
+                  Paste a workflow file, or choose one. YAML and JSON both work, and the
+                  editor&apos;s JSON view shows the definition of any workflow you already have.
                 </p>
                 <div>
                   <Button
@@ -233,7 +270,7 @@ export function ImportWorkflowDialog({
                 <input
                   ref={fileInputRef}
                   type="file"
-                  accept="application/json,.json"
+                  accept="application/json,.json,.yaml,.yml"
                   className="hidden"
                   aria-label="Workflow file"
                   onChange={onPickFile}
@@ -314,7 +351,10 @@ export function ImportWorkflowDialog({
                 Cancel
               </Button>
               {source === "file" ? (
-                <Button onClick={() => review(text, "pasted JSON")} disabled={busy || text.trim() === ""}>
+                <Button
+                  onClick={() => void review(text, "pasted file")}
+                  disabled={busy || text.trim() === ""}
+                >
                   Review
                 </Button>
               ) : (
@@ -355,6 +395,13 @@ function ReviewStep({
         <Label htmlFor={`${id}-name`}>Name</Label>
         <Input id={`${id}-name`} value={name} onChange={(e) => onName(e.target.value)} autoFocus />
       </div>
+
+      {value.skipped.length > 0 && (
+        <p className="text-xs text-muted">
+          The file also carries {value.skipped.join(", ")}. The import creates the workflow and its
+          graph only. Arm a schedule or an event trigger in Triggers after it is created.
+        </p>
+      )}
 
       <div className="rounded border border-line bg-ink-wash px-3 py-2">
         <p className="text-xs text-ink">

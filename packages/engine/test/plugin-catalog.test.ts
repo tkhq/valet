@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { ObjectOptions, Type } from "typebox";
 import type { TObject } from "typebox";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@mariozechner/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import {
   pluginCatalogTools,
   pinnedToolName,

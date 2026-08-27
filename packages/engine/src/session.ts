@@ -6,7 +6,13 @@ import { dispatchCommand } from "./commands/dispatch.js";
 import { parseCommandArgs } from "./commands/args.js";
 import { executeBuiltin } from "./commands/builtins.js";
 import { invokeAction, type InvokeActionResult } from "./plugin-catalog.js";
-import { GateManager, fromRequest, isDecisionGateExpired } from "./decision-gate.js";
+import {
+  GateManager,
+  fromRequest,
+  isDecisionGateExpired,
+  isDecisionGateWithdrawn,
+  persistTerminalGate,
+} from "./decision-gate.js";
 import type {
   CommandDef,
   CommandSource,
@@ -17,7 +23,7 @@ import type { PolicySandbox } from "./sandbox/policy.js";
 import { NoCredentialsError, StaleAttemptError, ValidationError } from "./errors.js";
 import { detachedFromTrace, withSpan } from "./tracing.js";
 import { recordCredentialRead } from "./metrics.js";
-import type { Model } from "@mariozechner/pi-ai";
+import type { Model } from "@earendil-works/pi-ai/compat";
 import type {
   BusEvent,
   CommandResultEntry,
@@ -713,7 +719,16 @@ export class Session {
     if (text?.startsWith("/")) {
       const outcome = dispatchCommand(text, this.commandRegistry());
       if (outcome.kind === "expand") {
-        return thread.submitPrompt(withText(content, outcome.text), opts);
+        // Stamp the skill identity onto the submission so the persisted
+        // entry (and its wire projection) can render the expansion as a
+        // skill card without re-parsing the text.
+        const opts2 = outcome.skill
+          ? {
+              ...opts,
+              metadata: { ...opts.metadata, skill: outcome.skill.name, skillArgs: outcome.skill.args },
+            }
+          : opts;
+        return thread.submitPrompt(withText(content, outcome.text), opts2);
       }
       if (outcome.kind === "execute") {
         return this.executeCommand(thread, outcome.resolved, outcome.args, text);
@@ -891,6 +906,12 @@ export class Session {
         return {
           ok: false,
           output: "Approval expired before anyone resolved it. Send the command again to retry.",
+        };
+      }
+      if (isDecisionGateWithdrawn(err)) {
+        return {
+          ok: false,
+          output: "Approval was withdrawn before the command ran. Send the command again to retry.",
         };
       }
       throw err;
@@ -1078,12 +1099,9 @@ export class Session {
       const existing = await this.providers.store.getDecisionGate(this.id, gateId);
       this.commandGates.resolve(gateId, resolution);
       if (existing) {
-        const resolved: DecisionGate = { ...existing, status: "resolved", updatedAt: Date.now() };
-        await this.providers.store.saveDecisionGate(this.id, existing.threadId, resolved);
-        await this.providers.store.updateDecisionGateEntry(this.id, existing.threadId, gateId, {
-          gate: resolved,
+        await persistTerminalGate(this.providers.store, this.id, existing.threadId, existing, {
+          status: "resolved",
           resolution,
-          resolvedAt: new Date(resolution.resolvedAt).toISOString(),
         });
         await this.emit(
           { type: "decision_gate_resolved", threadId: existing.threadId, gateId, resolution },
@@ -1098,7 +1116,13 @@ export class Session {
         return;
       }
     }
-    // Fallback: gate may have already been resolved or never registered.
+    // Orphan repair (TKAI-238): a pending row with no in-memory waiter can
+    // never resolve through the paths above — the row survives every refresh
+    // as an unresolvable approval card. Such rows exist in deployed databases
+    // (gate opens that failed partway on older builds) and can still appear
+    // in the crash window between gate persist and waiter registration, so
+    // this user-initiated repair terminalizes them on the next click.
+    await this.terminalizeOrphanedGate(gateId, { resolution });
   }
 
   /**
@@ -1147,12 +1171,90 @@ export class Session {
   }
 
   async withdrawDecision(gateId: string, reason: DecisionWithdrawReason): Promise<void> {
+    // Command gates first — session-level, not owned by any thread (mirrors
+    // resolveDecision). Command gates never write a suspended-turn
+    // checkpoint, so without this branch the orphan repair below would
+    // terminalize a LIVE command gate's row while its waiter stays armed.
+    if (this.commandGates.isPending(gateId)) {
+      const existing = await this.providers.store.getDecisionGate(this.id, gateId);
+      this.commandGates.withdraw(gateId, reason);
+      if (existing) {
+        await persistTerminalGate(this.providers.store, this.id, existing.threadId, existing, {
+          status: "withdrawn",
+          reason,
+        });
+        await this.emit(
+          { type: "decision_gate_withdrawn", threadId: existing.threadId, gateId, reason },
+          { eventKey: `gate:${gateId}:withdrawn` },
+        );
+      }
+      return;
+    }
     for (const t of this.threads.values()) {
       if (t.isPendingGate(gateId)) {
         t.withdrawDecision(gateId, reason);
         return;
       }
     }
+    // Orphan repair — see resolveDecision.
+    await this.terminalizeOrphanedGate(gateId, { withdrawReason: reason });
+  }
+
+  /**
+   * Terminalize a pending gate row that has no registered waiter. Guard: a
+   * gate referenced by its thread's suspended-turn checkpoint is NOT an
+   * orphan — reconciliation re-arms it for replay after a restart — so it is
+   * left alone. Persists the terminal status, updates the DAG entry, and
+   * emits the matching event so live clients drop the card.
+   */
+  private async terminalizeOrphanedGate(
+    gateId: string,
+    outcome: { resolution: DecisionResolution } | { withdrawReason: DecisionWithdrawReason },
+  ): Promise<void> {
+    const store = this.providers.store;
+    const existing = await store.getDecisionGate(this.id, gateId);
+    if (!existing || existing.status !== "pending") return;
+    const suspended = await store.getSuspendedTurn(this.id, existing.threadId);
+    if (suspended?.gateId === gateId) return;
+    console.warn(
+      `[engine] terminalizing orphaned decision gate ${gateId} (pending row, no registered waiter)`,
+    );
+    if ("resolution" in outcome) {
+      // Stamp the gate's ordinal like every other resolve path, so the
+      // persisted record and event stay self-describing for consumers that
+      // distinguish replay double-fires from fresh repeats by ordinal.
+      const resolution: DecisionResolution = {
+        ...outcome.resolution,
+        gateOrdinal: existing.ordinal,
+      };
+      await persistTerminalGate(store, this.id, existing.threadId, existing, {
+        status: "resolved",
+        resolution,
+      });
+      await this.emit(
+        {
+          type: "decision_gate_resolved",
+          threadId: existing.threadId,
+          gateId,
+          resolution,
+        },
+        { eventKey: `gate:${gateId}:resolved` },
+      );
+      return;
+    }
+    await persistTerminalGate(store, this.id, existing.threadId, existing, {
+      status: "withdrawn",
+      reason: outcome.withdrawReason,
+    });
+    await this.emit(
+      {
+        type: "decision_gate_withdrawn",
+        threadId: existing.threadId,
+        gateId,
+        reason: outcome.withdrawReason,
+      },
+      { eventKey: `gate:${gateId}:withdrawn` },
+    );
   }
 
   async abort(opts: { threadId?: string } = {}): Promise<void> {

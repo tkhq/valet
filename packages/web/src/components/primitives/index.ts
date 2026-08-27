@@ -3,6 +3,7 @@ export * from "./input.js";
 export * from "./label.js";
 export * from "./dialog.js";
 export * from "./dropdown-menu.js";
+export * from "./popover.js";
 export * from "./tooltip.js";
 export * from "./card.js";
 export * from "./avatar.js";

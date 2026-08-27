@@ -30,8 +30,8 @@
  * are inherently one-shot, so there's nothing to dedupe against.
  */
 import { randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
-import type { Principal } from "@valet/engine";
+import { and, eq, isNull, like } from "drizzle-orm";
+import type { DecisionAction, Principal } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { notifications, orgMembers, teamMembers, userNotificationPreferences } from "../schema/index.js";
 
@@ -54,6 +54,14 @@ export interface AttentionEvent {
    * Omit for one-shot events with no natural replay key.
    */
   dedupeKey?: string;
+  /**
+   * Set when the event announces a pending decision gate (`kind:
+   * "approval"`). A channel deliverer that can render interactive prompts
+   * uses the gate's id and actions to send real approve/deny buttons
+   * instead of a plain link; deliverers without that ability ignore this
+   * field. The gate lives on `sessionId`.
+   */
+  gate?: { id: string; actions: DecisionAction[] };
 }
 
 /**
@@ -144,6 +152,40 @@ async function isWebEnabled(db: AppDb, userId: string, kind: AttentionKind): Pro
 function notificationId(event: AttentionEvent, userId: string): string {
   if (event.dedupeKey) return `n-${event.kind}-${event.dedupeKey}-${userId}`;
   return `n-${event.kind}-${randomUUID()}-${userId}`;
+}
+
+/** Escapes LIKE metacharacters for a literal prefix match. Gate ids embed
+ * session ids, which routinely contain `_` (`assistant:asst_x:...`) — an
+ * unescaped `_` would match any character and could hit another gate's rows. */
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, (c) => `\\${c}`);
+}
+
+/**
+ * Marks every recipient's notification for `gateId` read. Called when the
+ * gate leaves the pending state (resolved, expired, or withdrawn): the
+ * notification exists to get a person to answer the gate, and once the gate
+ * is terminal that call to action is void for every recipient — the web dot
+ * and bell must stop asking. This mirrors the client stream store, which
+ * drops a gate from `pendingGates` on all three terminal frames, and the
+ * channel path, which edits its prompt messages with the outcome.
+ *
+ * The row id is the only place the gate id is recorded
+ * (`n-approval-{gateId}-{userId}`, see `notificationId`), hence the prefix
+ * match. `n-approval-` is the one kind `decision_gate` events produce
+ * (`attention-wiring.ts`); a producer that announces gates under another
+ * kind must extend this match too.
+ */
+export async function markGateNotificationsRead(db: AppDb, gateId: string): Promise<void> {
+  await db
+    .update(notifications)
+    .set({ readAt: Date.now() })
+    .where(
+      and(
+        isNull(notifications.readAt),
+        like(notifications.id, `n-approval-${escapeLike(gateId)}-%`),
+      ),
+    );
 }
 
 /**

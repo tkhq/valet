@@ -19,6 +19,7 @@ import {
   listSkillSources,
   ownedSkillSourceRow,
   parseRepoInput,
+  readableSkillSourceRow,
   SKILL_SOURCE_DEFAULT_LIMIT,
   SkillSourceConflictError,
   SkillSourceInputError,
@@ -111,6 +112,19 @@ describe("skill sources service", () => {
 
     expect(await ownedSkillSourceRow(db, owner("u2"), mine.id)).toBeNull();
     expect(await ownedSkillSourceRow(db, owner("u2"), "skillsrc_missing")).toBeNull();
+    expect(await readableSkillSourceRow(db, owner("u2"), mine.id)).toBeNull();
+  });
+
+  it("lets a member read an org source they cannot write", async () => {
+    const orgSource = await createSkillSource(db, owner("u1"), {
+      repo: "tkhq/theirs",
+      ownerType: "org",
+      isOrgAdmin: true,
+    });
+
+    expect(await ownedSkillSourceRow(db, owner("u2"), orgSource.id)).toBeNull();
+    expect(await ownedSkillSourceRow(db, owner("u2"), orgSource.id, { isOrgAdmin: true })).not.toBeNull();
+    expect(await readableSkillSourceRow(db, owner("u2"), orgSource.id)).not.toBeNull();
   });
 
   it("rejects the same repository and subdirectory twice in one owner scope", async () => {
@@ -148,6 +162,28 @@ describe("skill sources service", () => {
     // the row and never sees what `createSkillSource` returned.
     const stored = await ownedSkillSourceRow(db, owner("u1"), teamSource.id);
     expect(stored?.createdBy).toBe("u1");
+  });
+
+  it("drops org rows when includeOrg is false", async () => {
+    await createSkillSource(db, owner("u1"), { repo: "tkhq/mine" });
+    await createSkillSource(db, owner("u1"), {
+      repo: "tkhq/theirs",
+      ownerType: "org",
+      isOrgAdmin: true,
+    });
+
+    const whole = await listSkillSources(db, owner("u1"), undefined, SKILL_SOURCE_DEFAULT_LIMIT, undefined);
+    expect(whole.rows.map((r) => r.repoFullName).sort()).toEqual(["tkhq/mine", "tkhq/theirs"]);
+
+    const withoutOrg = await listSkillSources(
+      db,
+      owner("u1"),
+      undefined,
+      SKILL_SOURCE_DEFAULT_LIMIT,
+      undefined,
+      { includeOrg: false },
+    );
+    expect(withoutOrg.rows.map((r) => r.repoFullName)).toEqual(["tkhq/mine"]);
   });
 
   it("lists the caller's own sources and every team source they can reach", async () => {

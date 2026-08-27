@@ -37,6 +37,12 @@ const FULL_PROFILE_COMMAND = [
 export const WORKSPACE_VOLUME_NAME = "workspace";
 export const WORKSPACE_MOUNT_PATH = "/workspace";
 export const SESSION_LABEL_KEY = "valet.dev/session-id";
+/** CR annotation carrying the owning session's id (`SandboxCreateOpts.sessionId`).
+ * An annotation, not a label: session ids contain characters a label value
+ * rejects (`:` in `wf:{runId}:{nodeId}`). The reconcile sweep reads it back
+ * through `SandboxProvider.list` to map a CR to its session; absent on CRs
+ * created before session stamping existed. */
+export const SESSION_ANNOTATION_KEY = "valet.dev/session";
 export const SANDBOX_CONTAINER_NAME = "sandbox";
 
 /** Mount path for the per-sandbox credential files (see `SandboxCreateOpts.credsFiles`). */
@@ -298,6 +304,7 @@ export function buildSandboxManifest(
     metadata: {
       name,
       labels,
+      ...(opts.sessionId ? { annotations: { [SESSION_ANNOTATION_KEY]: opts.sessionId } } : {}),
     },
     spec,
   };

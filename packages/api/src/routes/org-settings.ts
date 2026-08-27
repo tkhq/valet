@@ -1,9 +1,10 @@
 /**
- * `PATCH /api/org/settings` — org-level bare-skill-commands toggle
- * (slash-commands plan, Task 3). Org-admin gated via `requireOrgAdmin`.
+ * `PATCH /api/org/settings` — org-level toggles: bare-skill-commands
+ * (slash-commands plan, Task 3) and the public-artifact opt-in
+ * (artifacts design). Org-admin gated via `requireOrgAdmin`.
  *
- * Accepts `{ bareSkillCommands?: boolean }`. Unknown fields 400.
- * Responds with the updated org settings row.
+ * Accepts `{ bareSkillCommands?, allowPublicArtifacts? }` booleans.
+ * Unknown fields 400. Responds with the updated org settings row.
  */
 import { Hono } from "hono";
 import { eq } from "drizzle-orm";
@@ -14,7 +15,7 @@ import type { OrgSettingsResponse } from "../wire/types.js";
 
 export const orgSettingsRouter = new Hono<AppEnv>();
 
-const PATCH_FIELDS = new Set(["bareSkillCommands"]);
+const PATCH_FIELDS = new Set(["bareSkillCommands", "allowPublicArtifacts"]);
 
 orgSettingsRouter.patch("/", async (c) => {
   const gate = await requireOrgAdmin(c);
@@ -35,13 +36,20 @@ orgSettingsRouter.patch("/", async (c) => {
     return c.json({ error: `unknown field(s): ${unknownFields.join(", ")}` }, 400);
   }
 
-  const update: { bareSkillCommands?: boolean } = {};
+  const update: { bareSkillCommands?: boolean; allowPublicArtifacts?: boolean } = {};
 
   if ("bareSkillCommands" in raw) {
     if (typeof raw.bareSkillCommands !== "boolean") {
       return c.json({ error: "bareSkillCommands must be a boolean" }, 400);
     }
     update.bareSkillCommands = raw.bareSkillCommands;
+  }
+
+  if ("allowPublicArtifacts" in raw) {
+    if (typeof raw.allowPublicArtifacts !== "boolean") {
+      return c.json({ error: "allowPublicArtifacts must be a boolean" }, 400);
+    }
+    update.allowPublicArtifacts = raw.allowPublicArtifacts;
   }
 
   if (Object.keys(update).length === 0) {
@@ -54,6 +62,9 @@ orgSettingsRouter.patch("/", async (c) => {
   const row = rows[0];
   if (!row) return c.json({ error: "org not found" }, 404);
 
-  const resp: OrgSettingsResponse = { bareSkillCommands: row.bareSkillCommands };
+  const resp: OrgSettingsResponse = {
+    bareSkillCommands: row.bareSkillCommands,
+    allowPublicArtifacts: row.allowPublicArtifacts,
+  };
   return c.json(resp);
 });

@@ -68,11 +68,17 @@ export {
 } from "./tracing.js";
 export {
   recordCredentialRead,
+  recordSandboxCapacityWait,
+  recordSandboxCreated,
+  recordSandboxDestroyed,
   recordSandboxExec,
+  recordSandboxFlagged,
   recordSandboxProvision,
   recordSettlement,
   recordToolExecution,
   recordTurn,
+  type SandboxDestroyReason,
+  type SandboxFlagKind,
 } from "./metrics.js";
 export { Engine } from "./engine.js";
 export { Session } from "./session.js";
@@ -226,3 +232,4 @@ export {
   type Turn,
 } from "./compaction.js";
 export { entriesToAgentMessages } from "./thread.js";
+export { formatFileAttachmentsNote } from "./file-attachment-formatter.js";

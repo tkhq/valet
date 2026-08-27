@@ -167,6 +167,30 @@ export async function isAuthorizedForOwner(
   return false;
 }
 
+/**
+ * The sync core of `isAuthorizedForOwner`, against a pre-fetched team-id
+ * set instead of a live per-team query. `canAccessTriggerRow` and
+ * `ownedDefinitionFilterWith` build on it, so the owner arms exist in
+ * exactly one place. Callers get the set from `callerTeamIds`, re-read per
+ * request for the same leave-a-team reason `isAuthorizedForOwner` states.
+ */
+export function isAuthorizedForOwnerWith(
+  teamIds: Set<string>,
+  owner: WorkflowOwner,
+  target: { ownerType: string; ownerId: string },
+): boolean {
+  if (target.ownerType === "user") return target.ownerId === owner.userId;
+  if (target.ownerType === "team") return teamIds.has(target.ownerId);
+  return false;
+}
+
+/** Ids of every team the caller is a live member of — the one membership
+ * read behind `ownedDefinitionFilter` and `triggerAccessSets`. */
+async function callerTeamIds(db: AppDb, userId: string): Promise<Set<string>> {
+  const myTeams = await listTeamsForUser(db, userId);
+  return new Set(myTeams.map((t) => t.id));
+}
+
 /** Exported so other workflow-domain services (`webhook-service.ts`,
  * `schedule-service.ts`, `trigger-service.ts`) share this exact ownership
  * check instead of hand-duplicating it or checking `orgId` alone (which
@@ -189,12 +213,17 @@ export async function ownedDefinitionRow(
  * `ownedWorkflowIds` so the two can never disagree about reach. Membership
  * is re-read on every call for the same reason `isAuthorizedFor` does. */
 async function ownedDefinitionFilter(db: AppDb, owner: WorkflowOwner) {
-  const myTeams = await listTeamsForUser(db, owner.userId);
-  const teamIds = myTeams.map((t) => t.id);
+  return ownedDefinitionFilterWith(await callerTeamIds(db, owner.userId), owner);
+}
+
+/** SQL form of `isAuthorizedForOwnerWith` over `workflow_definitions` —
+ * the same owner arms, pushed into the WHERE clause. Takes the team set so
+ * `triggerAccessSets` can reuse one membership read across both queries. */
+function ownedDefinitionFilterWith(teamIds: Set<string>, owner: WorkflowOwner) {
   const ownerMatch = and(eq(workflowDefinitions.ownerType, "user"), eq(workflowDefinitions.ownerId, owner.userId));
   const teamMatch =
-    teamIds.length > 0
-      ? and(eq(workflowDefinitions.ownerType, "team"), inArray(workflowDefinitions.ownerId, teamIds))
+    teamIds.size > 0
+      ? and(eq(workflowDefinitions.ownerType, "team"), inArray(workflowDefinitions.ownerId, [...teamIds]))
       : undefined;
   return teamMatch ? or(ownerMatch, teamMatch) : ownerMatch;
 }
@@ -209,6 +238,47 @@ export async function ownedWorkflowIds(db: AppDb, owner: WorkflowOwner): Promise
     .from(workflowDefinitions)
     .where(await ownedDefinitionFilter(db, owner));
   return rows.map((r) => r.id);
+}
+
+/** The two sets `canAccessTriggerRow` checks against, loaded once per
+ * request so a list filter does not re-query per row. */
+export interface TriggerAccessSets {
+  teamIds: Set<string>;
+  workflowIds: Set<string>;
+}
+
+export async function triggerAccessSets(db: AppDb, owner: WorkflowOwner): Promise<TriggerAccessSets> {
+  const teamIds = await callerTeamIds(db, owner.userId);
+  const rows = await db
+    .select({ id: workflowDefinitions.id })
+    .from(workflowDefinitions)
+    .where(ownedDefinitionFilterWith(teamIds, owner));
+  return { teamIds, workflowIds: new Set(rows.map((r) => r.id)) };
+}
+
+/**
+ * The one access rule for schedule and event-trigger rows (the Triggers
+ * surface): the caller may see and change a row when they own it, are a
+ * member of the owning team, or may reach its target workflow.
+ *
+ * The workflow-reach arm is not redundant with the owner arms. Event
+ * triggers are created with the CREATOR as row owner even on a team
+ * workflow, and rows that pre-date the team owner column were widened to
+ * the org — for both, the target workflow is the accurate authority. The
+ * owner arms are `isAuthorizedForOwnerWith` — the same core rule the
+ * workflow surfaces use, in set form so list filtering stays O(rows).
+ *
+ * Checking `orgId` alone here was TKAI-227: every org member could read,
+ * edit, delete, and fire everyone's personal triggers — including the
+ * prompt text of personal orchestrator schedules.
+ */
+export function canAccessTriggerRow(
+  owner: WorkflowOwner,
+  sets: TriggerAccessSets,
+  row: { ownerType: string; ownerId: string; workflowId?: string | null },
+): boolean {
+  if (isAuthorizedForOwnerWith(sets.teamIds, owner, row)) return true;
+  return row.workflowId != null && sets.workflowIds.has(row.workflowId);
 }
 
 /** The same read as `ownedWorkflowIds`, with the display name each id needs

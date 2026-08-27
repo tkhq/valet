@@ -14,6 +14,8 @@ import {
   exchangeAuthorizationCodeRaw,
 } from "./integration-oauth.js";
 import type { ValetPlugin } from "@valet/engine";
+import { eq } from "drizzle-orm";
+import { mcpOauthClients } from "../schema/index.js";
 
 let fake: FakeOAuthServer;
 let testDb: TestPgDb;
@@ -49,6 +51,132 @@ describe("ensureMcpOAuthClient", () => {
       ensureMcpOAuthClient({ db: testDb.appDb }, "linear", fake.url, "https://valet.example/cb"),
     ]);
     expect(a.clientId).toBe(b.clientId);
+  });
+
+  it("registers with the declared scopes as the RFC 7591 scope string", async () => {
+    await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", fake.url, "https://valet.example/cb", [
+      "agent:query",
+      "agent:search",
+    ]);
+    expect(fake.registrations).toHaveLength(1);
+    expect(fake.registrations[0]?.scope).toBe("agent:query agent:search");
+  });
+
+  it("re-registers when the declared scopes change, replacing the stored client", async () => {
+    const first = await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", fake.url, "https://valet.example/cb");
+    expect(first.clientId).toBe("client-1");
+
+    // Scopes appear (the TKAI-242 rollout shape: row registered pre-scopes).
+    const second = await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", fake.url, "https://valet.example/cb", [
+      "agent:query",
+    ]);
+    expect(second.clientId).toBe("client-2");
+    expect(fake.registrations).toHaveLength(2);
+    expect(fake.registrations[1]?.scope).toBe("agent:query");
+
+    // Same scopes again → stored client reused.
+    const third = await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", fake.url, "https://valet.example/cb", [
+      "agent:query",
+    ]);
+    expect(third.clientId).toBe("client-2");
+    expect(fake.registrations).toHaveLength(2);
+  });
+
+  it("scope order does not trigger re-registration", async () => {
+    await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", fake.url, "https://valet.example/cb", ["a", "b"]);
+    await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", fake.url, "https://valet.example/cb", ["b", "a"]);
+    expect(fake.registrations).toHaveLength(1);
+  });
+
+  it("warns when no scopes are declared but the server advertises scopes_supported", async () => {
+    const scoped = await startFakeOAuthServer({ scopesSupported: ["agent:query", "mb:full"] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", scoped.url, "https://valet.example/cb");
+      const messages = warn.mock.calls.map((c) => String(c[0]));
+      expect(messages.some((m) => m.includes("metabase") && m.includes("scopes"))).toBe(true);
+    } finally {
+      warn.mockRestore();
+      await scoped.close();
+    }
+  });
+
+  it("keeps warning on later scopeless connects from the stored scopes_supported, without re-discovery", async () => {
+    const scoped = await startFakeOAuthServer({ scopesSupported: ["agent:query"] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", scoped.url, "https://valet.example/cb");
+      const discoveriesAfterRegistration = scoped.discoveryRequests.count;
+      warn.mockClear();
+
+      await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", scoped.url, "https://valet.example/cb");
+      const messages = warn.mock.calls.map((c) => String(c[0]));
+      expect(messages.some((m) => m.includes("metabase") && m.includes("scopes"))).toBe(true);
+      expect(scoped.discoveryRequests.count).toBe(discoveriesAfterRegistration);
+      expect(scoped.registrations).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+      await scoped.close();
+    }
+  });
+
+  it("backfills scopes_supported on a pre-column row, then warns from the stored value", async () => {
+    const scoped = await startFakeOAuthServer({ scopesSupported: ["agent:query"] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", scoped.url, "https://valet.example/cb");
+      // Simulate a row written before the scopes_supported column existed.
+      await testDb.appDb
+        .update(mcpOauthClients)
+        .set({ scopesSupported: null })
+        .where(eq(mcpOauthClients.service, "metabase"));
+      warn.mockClear();
+
+      await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", scoped.url, "https://valet.example/cb");
+      const messages = warn.mock.calls.map((c) => String(c[0]));
+      expect(messages.some((m) => m.includes("metabase") && m.includes("scopes"))).toBe(true);
+      // The backfill re-discovered once and stored the result; no re-registration.
+      expect(scoped.registrations).toHaveLength(1);
+      const rows = await testDb.appDb
+        .select()
+        .from(mcpOauthClients)
+        .where(eq(mcpOauthClients.service, "metabase"));
+      expect(rows[0]?.scopesSupported).toEqual(["agent:query"]);
+    } finally {
+      warn.mockRestore();
+      await scoped.close();
+    }
+  });
+
+  it("a failed scopes_supported backfill does not block the connect", async () => {
+    await ensureMcpOAuthClient({ db: testDb.appDb }, "linear", fake.url, "https://valet.example/cb");
+    await testDb.appDb
+      .update(mcpOauthClients)
+      .set({ scopesSupported: null })
+      .where(eq(mcpOauthClients.service, "linear"));
+    await fake.close(); // discovery now fails
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const row = await ensureMcpOAuthClient({ db: testDb.appDb }, "linear", fake.url, "https://valet.example/cb");
+      expect(row.clientId).toBe("client-1");
+    } finally {
+      warn.mockRestore();
+      fake = await startFakeOAuthServer(); // afterEach closes it
+    }
+  });
+
+  it("does not warn when scopes are declared", async () => {
+    const scoped = await startFakeOAuthServer({ scopesSupported: ["agent:query"] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await ensureMcpOAuthClient({ db: testDb.appDb }, "metabase", scoped.url, "https://valet.example/cb", [
+        "agent:query",
+      ]);
+      expect(warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes("scopes_supported"))).toEqual([]);
+    } finally {
+      warn.mockRestore();
+      await scoped.close();
+    }
   });
 
   it("throws when discovery reports no registration_endpoint", async () => {

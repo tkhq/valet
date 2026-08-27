@@ -1,4 +1,4 @@
-import { getModel, calculateCost } from "@mariozechner/pi-ai";
+import { getModel, calculateCost } from "@earendil-works/pi-ai/compat";
 import type { ProviderKind, ProxyUsage } from "../proxy/types.js";
 
 /** pi-ai provider key for our two proxy kinds. Codex talks the Responses

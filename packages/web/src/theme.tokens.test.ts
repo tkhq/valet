@@ -100,6 +100,7 @@ describe("theme.css", () => {
       "--ink-wash-strong",
       "--moss-wash",
       "--moss-wash-strong",
+      "--muted-wash",
       "--success-wash",
       "--danger-wash",
       "--warning-wash",

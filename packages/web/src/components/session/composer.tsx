@@ -8,11 +8,13 @@ import {
   type DragEvent,
   type KeyboardEvent,
 } from "react";
-import { ImagePlus, Send, Square } from "lucide-react";
+import { Paperclip, Send, Square } from "lucide-react";
 import { Button, Textarea } from "~/components/primitives";
 import { useAbortThread, useSendPrompt } from "~/api/queries";
+import { ApiError } from "~/api/client";
 import { queueBusy, useStreamStore, useQueueStateForThread, type AgentStatus } from "~/stores/stream";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
+import { draftKey, useComposerDraft, useComposerDraftStore } from "~/stores/composer-drafts";
 import { useCommands } from "~/hooks/use-commands";
 import { cn } from "~/lib/cn";
 import {
@@ -22,11 +24,13 @@ import {
 } from "~/lib/command-recency";
 import { CommandPopup, commandsToItems, type PopupItem } from "./command-popup";
 import { ComposerImageErrors, ComposerImageStrip } from "./composer-image-strip";
+import { ComposerFileErrors, ComposerFileStrip } from "./composer-file-strip";
 import { useComposerDrop } from "./composer-drop-context";
 import {
   acceptImages,
   filesFromClipboard,
   filesFromList,
+  isSupportedImageType,
   readFailure,
   readImage,
   toPromptAttachments,
@@ -36,16 +40,24 @@ import {
   MAX_IMAGES,
   type ComposerImage,
 } from "./composer-images";
+import {
+  acceptFiles,
+  createComposerFile,
+  isFileUploading,
+  toFileRefs,
+  FILE_UPLOADS_ENABLED,
+  MAX_FILES,
+  type ComposerFile,
+} from "./composer-files";
+import { useFileUpload } from "~/hooks/use-file-upload";
 
 /**
  * What the submit button does with the text in the composer.
  *
- * `steer` and `queue` are not interchangeable, and the difference is not the
- * client's to guess: the engine gives a user's own orchestrator the `steer`
- * queue mode and every other principal — a team orchestrator included — the
- * `followup` mode (`packages/api/src/engine/host.ts`). A "Steer" label on a
- * followup queue promises an interrupt that does not happen, so the label
- * comes from the live `queue.state` frame or falls back to `queue`.
+ * Mid-turn Enter queues (`followup`) even on a user orchestrator whose
+ * thread default is `steer`. A second Enter on an empty composer promotes
+ * that queued item into a steer. The engine thread default is left alone
+ * so Slack and other channels can still steer on first submit.
  */
 type SubmitAction = "send" | "steer" | "queue";
 
@@ -59,20 +71,19 @@ const ACTION_LABEL: Record<SubmitAction, string> = {
  * One line of copy that tells the user what happens to the message. Shown
  * only while the agent works — while it is idle, "Send" needs no gloss.
  *
- * The steer wording is literal. A steer admission supersedes the running
- * submission and aborts the live agent run, then the claim loop starts the
- * new message (`Thread.handleSteerSupersession`). It does not append to the
- * turn that is already in flight.
+ * Mid-turn the first Enter queues. A second empty Enter promotes that
+ * queued item into a steer (`Thread.promoteQueuedItem`) so the same
+ * bubble becomes the new prompt. It does not POST the text again.
  */
 const ACTION_HINT: Record<SubmitAction, string> = {
   send: "",
-  steer: "Steer stops the current turn. The agent starts your message immediately.",
+  steer: "Queued. Press Enter again to interrupt the current turn.",
   queue: "The agent completes the current turn. Then it reads your message.",
 };
 
 const ACTION_PLACEHOLDER: Record<SubmitAction, string> = {
   send: "Send a message — Enter to send, Shift+Enter for a new line",
-  steer: "Steer the current turn — Enter to steer, Shift+Enter for a new line",
+  steer: "Press Enter to interrupt the current turn, or type a new queued message",
   queue: "Queue a message for after this turn — Enter to queue, Shift+Enter for a new line",
 };
 
@@ -91,27 +102,40 @@ export function Composer({
   threadId?: string;
   agentStatus: AgentStatus;
 }) {
-  // Composer-prefill handoff (decision 17): memory doc's "Ask {name} to
-  // update this" sets this store then navigates to `/chat`; the next
-  // Composer to mount consumes it exactly once as its initial text. Reading
-  // via `getState()` (not the hook) so this is a one-time seed, not a live
-  // subscription — a later `set()` elsewhere shouldn't yank the draft out
-  // from under whatever the user is typing.
-  const [text, setText] = useState(() => useComposerPrefillStore.getState().consume() ?? "");
+  // The draft (text, images, files, intake errors) lives in the per-thread
+  // draft store, NOT component state: a draft typed for one thread must not
+  // send to another, and an upload finishing after a thread switch must
+  // still land in the thread it started on. See stores/composer-drafts.ts.
+  // Store actions are reached through `getState()` inside handlers so
+  // callback identities do not churn per keystroke.
+  const key = draftKey(sessionId, threadId);
+  const { text, images, files, imageErrors, fileErrors } = useComposerDraft(key);
+  const setText = (value: string) => useComposerDraftStore.getState().setText(key, value);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  // Images held for the next message. Paste, drop, and the picker all land
-  // here; `imageErrors` holds one line for each file the intake refused.
-  const [images, setImages] = useState<ComposerImage[]>([]);
-  // Ref mirror of `images` for `addFiles`. The intake callback is
-  // memoized on `intakeBlocked` so its identity stays stable for the drop
-  // context; reading through a ref keeps `acceptImages` seeing the latest
-  // list without churning the callback identity on every image change.
-  const imagesRef = useRef<ComposerImage[]>([]);
+  // Composer-prefill handoff (decision 17): memory doc's "Ask {name} to
+  // update this" sets this store then navigates to `/chat`; the next
+  // Composer to mount consumes it exactly once into the active draft slot.
+  // Reading via `getState()` (not the hook) so this is a one-time seed, not
+  // a live subscription — a later `set()` elsewhere shouldn't yank the
+  // draft out from under whatever the user is typing.
+  const prefillSeeded = useRef(false);
   useEffect(() => {
-    imagesRef.current = images;
-  }, [images]);
-  const [imageErrors, setImageErrors] = useState<string[]>([]);
+    if (prefillSeeded.current) return;
+    prefillSeeded.current = true;
+    const pending = useComposerPrefillStore.getState().consume();
+    if (pending !== null) useComposerDraftStore.getState().setText(key, pending);
+  }, [key]);
+  // This Composer can mount before the threads query resolves (threadId
+  // undefined) — typing and the prefill land in the session's no-thread
+  // slot. Adopt that slot into the real thread once it is known, so the
+  // draft does not silently vanish when `key` changes.
+  useEffect(() => {
+    if (threadId === undefined) return;
+    useComposerDraftStore.getState().adoptOrphanDraft(sessionId, threadId);
+  }, [sessionId, threadId]);
+
+  const { uploadFile } = useFileUpload(sessionId);
   const [dragActive, setDragActive] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Form element ref for the page-level drop target — used to skip
@@ -135,10 +159,15 @@ export function Composer({
   // Per-browser last-used ranking for the command popup. Loaded once per
   // mount; `submit` records each sent slash command and refreshes it.
   const [commandRecency, setCommandRecency] = useState<CommandRecency>(() => readCommandRecency());
-  const filteredCommands = commandQuery !== null
-    ? allCommands.filter((c) => c.name.startsWith(commandQuery))
-    : [];
-  const argCommand = argMatch ? allCommands.find((c) => c.name === argMatch[1]) : undefined;
+  // COMMAND mode hands the raw registry and the typed token to
+  // `commandsToItems`, the single owner of popup matching and ranking
+  // (case-insensitive substring match, tiered exact > prefix > substring,
+  // then recency) — see command-popup.tsx.
+  // The ARGUMENT-mode lookup is case-insensitive to match the popup and
+  // the engine's case-insensitive dispatch.
+  const argCommand = argMatch
+    ? allCommands.find((c) => c.name.toLowerCase() === argMatch[1].toLowerCase())
+    : undefined;
   const argPrefix = argMatch?.[2] ?? "";
   const argOptions = argCommand?.argOptions ?? [];
   const argPrefixLower = argPrefix.toLowerCase();
@@ -159,7 +188,7 @@ export function Composer({
     : [];
   const popupItems: PopupItem[] =
     commandQuery !== null
-      ? commandsToItems(filteredCommands, commandRecency)
+      ? commandsToItems(allCommands, commandRecency, commandQuery)
       : filteredArgs.map((o) => ({
           id: o.value,
           label: o.value,
@@ -215,6 +244,17 @@ export function Composer({
   const addUserMessage = useStreamStore((s) => s.addUserMessage);
   const setMessageQueueItemId = useStreamStore((s) => s.setMessageQueueItemId);
   const queueState = useQueueStateForThread(sessionId, threadId);
+  // Last followup this composer admitted, keyed by thread so a switch does
+  // not arm Steer with another thread's item. An empty Enter promotes that
+  // item; a new typed message queues another.
+  const [queuedFollowupByThread, setQueuedFollowupByThread] = useState<
+    Record<string, { localId: string; itemId: string }>
+  >({});
+  const queuedFollowup = threadId ? (queuedFollowupByThread[threadId] ?? null) : null;
+  // Item ids we have seen in `pendingIds`. Used so a lagging queue.state
+  // (empty pending after POST) does not disarm Steer before the item lands.
+  const followupSeenPendingRef = useRef<Record<string, string>>({});
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   // A mid-turn message is allowed — the engine admits it either way. Only
   // an in-flight POST or an unknown thread id blocks submit, and the thread
@@ -229,24 +269,58 @@ export function Composer({
   // there is something to abort.
   const working =
     (agentStatus !== "idle" && agentStatus !== "error") || queueBusy(queueState);
-  // `collect` also lands on `queue`: a collect-mode message waits for its
-  // window to close, so "after the current turn" stays true for it.
+  useEffect(() => {
+    if (!threadId) return;
+    setQueuedFollowupByThread((prev) => {
+      const current = prev[threadId];
+      if (!current) return prev;
+      const drop = () => {
+        delete followupSeenPendingRef.current[threadId];
+        const { [threadId]: _, ...rest } = prev;
+        return rest;
+      };
+      if (!working) return drop();
+      const pending = queueState?.pendingIds ?? [];
+      if (pending.includes(current.itemId)) {
+        followupSeenPendingRef.current[threadId] = current.itemId;
+      }
+      const claimed = queueState?.activeItemId === current.itemId;
+      const seen = followupSeenPendingRef.current[threadId] === current.itemId;
+      const leftQueue = seen && !pending.includes(current.itemId);
+      if (claimed || leftQueue) return drop();
+      return prev;
+    });
+  }, [working, queueState, threadId]);
+  // Mid-turn: first Enter queues. After a self-queued item, an empty
+  // composer steers that item in place. New text queues another followup.
   const action: SubmitAction = !working
     ? "send"
-    : queueState?.mode === "steer"
+    : queuedFollowup && text.trim().length === 0
       ? "steer"
       : "queue";
-  const canSend = !send.isPending && !!threadId && text.trim().length > 0;
-  // An image alone cannot go out: the route requires text on the prompt.
-  // Say so on the disabled button instead of leaving the user guessing.
+  // A send with a still-uploading file would drop it (the ref does not
+  // exist yet), so the button waits for the uploads. Steer is the empty
+  // Enter that promotes the already-queued item, so it does not need text.
+  const uploadsPending = files.some(isFileUploading);
+  const canSend =
+    !send.isPending &&
+    !!threadId &&
+    !uploadsPending &&
+    (action === "steer" || text.trim().length > 0);
+  // An attachment alone cannot go out: the route requires text on the
+  // prompt. Say so on the disabled button instead of leaving the user
+  // guessing.
   const sendTitle = working
     ? ACTION_HINT[action]
-    : images.length > 0 && text.trim().length === 0
-      ? "Add a message to send with the images."
-      : undefined;
+    : uploadsPending
+      ? "Wait for the file uploads to finish."
+      : (images.length > 0 || files.length > 0) && text.trim().length === 0
+        ? "Add a message to send with the attachments."
+        : undefined;
 
   /** True while the composer refuses new files. */
-  const intakeBlocked = !IMAGE_ATTACHMENTS_ENABLED || send.isPending || !threadId;
+  const intakeBlocked =
+    (!IMAGE_ATTACHMENTS_ENABLED && !FILE_UPLOADS_ENABLED) || send.isPending || !threadId;
 
   /**
    * Take files from a paste, a drop, or the picker. Refused files leave a
@@ -257,11 +331,52 @@ export function Composer({
    * page-level drop target reads this via the ComposerDropContext, and a
    * stable callback keeps the intake object it publishes stable too.
    */
+  /** Kick off one upload and fold its result back into the draft slot the
+   * upload STARTED in — the user may switch threads while it runs, and the
+   * result must not follow them. A file removed mid-upload maps to nothing
+   * — the result is dropped. */
+  const startUpload = useCallback(
+    (slot: string, composerFile: ComposerFile) => {
+      void uploadFile(composerFile).then((updated) => {
+        useComposerDraftStore
+          .getState()
+          .setFiles(slot, (prev) => prev.map((f) => (f.id === composerFile.id ? updated : f)));
+      });
+    },
+    [uploadFile],
+  );
+
   const addFiles = useCallback(
-    async (files: File[]) => {
-      if (intakeBlocked || files.length === 0) return;
-      const { accepted, rejected } = acceptImages(imagesRef.current, files);
-      setImageErrors(rejected);
+    async (incoming: File[]) => {
+      if (intakeBlocked || incoming.length === 0) return;
+      const drafts = useComposerDraftStore.getState();
+      // Supported image types keep the inline data-URL path; everything
+      // else uploads to the sandbox. With uploads disabled, every file
+      // goes through the image intake so an unsupported type still earns
+      // a message instead of vanishing.
+      const imageFiles = FILE_UPLOADS_ENABLED
+        ? incoming.filter((f) => isSupportedImageType(f.type))
+        : incoming;
+      const uploadable = FILE_UPLOADS_ENABLED
+        ? incoming.filter((f) => !isSupportedImageType(f.type))
+        : [];
+
+      if (uploadable.length > 0) {
+        const held = drafts.byKey[key]?.files ?? [];
+        const { accepted, rejected } = acceptFiles(held, uploadable);
+        drafts.setFileErrors(key, rejected);
+        const created = accepted.map(createComposerFile);
+        if (created.length > 0) {
+          // Cap re-applied at the state edge, mirroring the image intake.
+          drafts.setFiles(key, (prev) => [...prev, ...created].slice(0, MAX_FILES));
+          created.forEach((f) => startUpload(key, f));
+        }
+      }
+
+      if (imageFiles.length === 0) return;
+      const held = drafts.byKey[key]?.images ?? [];
+      const { accepted, rejected } = acceptImages(held, imageFiles);
+      drafts.setImageErrors(key, rejected);
       const read: ComposerImage[] = [];
       const failures: string[] = [];
       for (const file of accepted) {
@@ -271,15 +386,15 @@ export function Composer({
           failures.push(err instanceof Error ? err.message : readFailure(file.name));
         }
       }
-      if (failures.length > 0) setImageErrors((prev) => [...prev, ...failures]);
+      if (failures.length > 0) drafts.setImageErrors(key, (prev) => [...prev, ...failures]);
       if (read.length === 0) return;
       // `acceptImages` ran against the state this call captured. A second
       // intake that overlaps this one (a drop while a paste still reads)
       // would push past the cap, so the cap is applied again at the state
       // edge, where the real list is.
-      setImages((prev) => [...prev, ...read].slice(0, MAX_IMAGES));
+      drafts.setImages(key, (prev) => [...prev, ...read].slice(0, MAX_IMAGES));
     },
-    [intakeBlocked],
+    [intakeBlocked, startUpload, key],
   );
 
   function onPaste(e: ClipboardEvent<HTMLTextAreaElement>) {
@@ -328,49 +443,164 @@ export function Composer({
   }
 
   function removeImage(id: string) {
-    setImages((prev) => prev.filter((image) => image.id !== id));
+    useComposerDraftStore.getState().setImages(key, (prev) => prev.filter((image) => image.id !== id));
+  }
+
+  function removeFile(id: string) {
+    useComposerDraftStore.getState().setFiles(key, (prev) => prev.filter((f) => f.id !== id));
+  }
+
+  function retryFile(id: string) {
+    const drafts = useComposerDraftStore.getState();
+    const target = (drafts.byKey[key]?.files ?? []).find((f) => f.id === id);
+    if (!target) return;
+    // A fresh ComposerFile (no error, no ref) reads as "uploading" again.
+    const reset: ComposerFile = {
+      id: target.id,
+      name: target.name,
+      bytes: target.bytes,
+      file: target.file,
+    };
+    drafts.setFiles(key, (prev) => prev.map((f) => (f.id === id ? reset : f)));
+    startUpload(key, reset);
   }
 
   async function submit() {
+    if (send.isPending || !threadId || uploadsPending) return;
+
+    // Empty Enter after a self-queued followup promotes that item. Do not
+    // POST the same text again — that would write a second user entry.
+    if (action === "steer" && queuedFollowup) {
+      setSubmitError(null);
+      try {
+        const res = await send.mutateAsync({
+          text: "",
+          threadId,
+          promoteItemId: queuedFollowup.itemId,
+        });
+        if (res.messageId && res.messageId !== queuedFollowup.itemId) {
+          setMessageQueueItemId(sessionId, queuedFollowup.localId, res.messageId);
+        }
+        setQueuedFollowupByThread((prev) => {
+          if (!(threadId in prev)) return prev;
+          const { [threadId]: _, ...rest } = prev;
+          return rest;
+        });
+        delete followupSeenPendingRef.current[threadId];
+      } catch (err) {
+        // The optimistic bubble stays. Name the corrective action from
+        // the API so the user knows to send again or wait.
+        setSubmitError(
+          apiErrorDetail(
+            err,
+            "The promote did not complete. Send a new message, or wait for the current turn to finish.",
+          ),
+        );
+      }
+      return;
+    }
+
     const t = text.trim();
-    if (!t || send.isPending || !threadId) return;
+    if (!t) return;
+    setSubmitError(null);
+    // Capture the draft slot at send time: the failure path below must
+    // restore into the thread the message was written for, even if the
+    // user switches threads while the POST is in flight.
+    const slot = key;
     // Held images go with the message. Convert them to the wire format
     // and pass them in the request body.
     const pendingImages = images;
     const attachments = pendingImages.length > 0 ? toPromptAttachments(pendingImages) : undefined;
-    setText("");
-    setImages([]);
-    setImageErrors([]);
+    // Uploaded files ride as refs; a file whose upload failed is dropped
+    // (its chip showed the error and offered a retry before send).
+    const pendingFiles = files;
+    const fileRefs = toFileRefs(pendingFiles);
+    useComposerDraftStore.getState().clear(slot);
     // Optimistic local add — the engine doesn't emit a wire event for the
     // user's own message, so without this the prompt would only appear after
     // the next WS init (page reload). The next init replaces this row with
-    // the server's persisted copy.
+    // the server's persisted copy. File chips are not rendered optimistically
+    // — the server owns their sandbox paths; they appear on the next init.
     const localId = addUserMessage(sessionId, t, threadId, attachments);
     try {
       const res = await send.mutateAsync({
         text: t,
         threadId,
         attachments,
+        fileRefs: fileRefs.length > 0 ? fileRefs : undefined,
+        ...(working ? { queueMode: "followup" as const } : {}),
       });
       // `messageId` on the response is the engine's queue item id (see
       // POST /:id/messages). Stamping it closes the linkage so
       // `submission.settled` can match this exact message instead of
       // falling back to a recency heuristic. Null for slash commands —
       // they never queue, so there is nothing to link.
-      if (res.messageId) setMessageQueueItemId(sessionId, localId, res.messageId);
+      if (res.messageId) {
+        const itemId = res.messageId;
+        setMessageQueueItemId(sessionId, localId, itemId);
+        if (working) {
+          setQueuedFollowupByThread((prev) => ({
+            ...prev,
+            [threadId]: { localId, itemId },
+          }));
+        }
+      }
       // Recency ranking for the command popup. Recorded only for a name the
       // registry knows, and only after the send succeeded — a typo or a
-      // failed send is not a "use".
-      const commandName = /^\/(\S+)/.exec(t)?.[1];
-      if (commandName && allCommands.some((c) => c.name === commandName)) {
-        setCommandRecency(recordCommandUse(commandName));
+      // failed send is not a "use". Matched case-insensitively (dispatch
+      // is too) and recorded under the canonical name so the recency key
+      // always lines up with the popup's names.
+      const typedName = /^\/(\S+)/.exec(t)?.[1]?.toLowerCase();
+      const canonical = typedName
+        ? allCommands.find((c) => c.name.toLowerCase() === typedName)?.name
+        : undefined;
+      if (canonical) {
+        setCommandRecency(recordCommandUse(canonical));
       }
     } catch (err) {
-      // Restore the draft on failure so the user can retry. The optimistic
-      // message stays visible — they can see what they sent + retry; on the
-      // next reload it'll be reconciled against server truth.
-      setText(t);
-      setImages(pendingImages);
+      // Restore the draft on failure so the user can retry — into `slot`,
+      // the thread it was written for. The optimistic message stays
+      // visible — they can see what they sent + retry; on the next reload
+      // it'll be reconciled against server truth. The server restores
+      // consumed refs when a submit fails, so restored chips stay sendable
+      // — EXCEPT when the failure is the refs themselves.
+      const drafts = useComposerDraftStore.getState();
+      drafts.setText(slot, t);
+      drafts.setImages(slot, pendingImages);
+      const payload =
+        err instanceof ApiError && typeof err.payload === "object" && err.payload !== null
+          ? (err.payload as Record<string, unknown>)
+          : undefined;
+      // An unknown-attachment 400 means a ref is dead (15-minute TTL, or an
+      // api restart emptied the ref store). A restored chip must not read
+      // as uploaded: flip uploaded chips to the error state, whose retry
+      // button re-uploads the held File and mints a fresh ref.
+      const refsDead =
+        err instanceof ApiError &&
+        err.status === 400 &&
+        typeof payload?.error === "string" &&
+        payload.error.startsWith("unknown attachment");
+      drafts.setFiles(
+        slot,
+        refsDead
+          ? pendingFiles.map((f) =>
+              f.attachmentRef !== undefined
+                ? { ...f, attachmentRef: undefined, error: "Upload expired. Retry to upload again." }
+                : f,
+            )
+          : pendingFiles,
+      );
+      // The failure must be visible — a console-only error reads as a dead
+      // send button.
+      const detail =
+        typeof payload?.corrective === "string"
+          ? payload.corrective
+          : typeof payload?.error === "string"
+            ? payload.error
+            : err instanceof Error
+              ? err.message
+              : "Unknown error.";
+      drafts.setFileErrors(slot, [`The message did not send. ${detail}`]);
       console.error("send failed:", err);
     }
   }
@@ -493,9 +723,25 @@ export function Composer({
       )}
     >
       <QueueIndicator queueState={queueState} />
-      {dragActive && <p className="mb-2 text-xs text-muted">Drop the images to attach them.</p>}
-      <ComposerImageErrors messages={imageErrors} onDismiss={() => setImageErrors([])} />
+      {dragActive && (
+        <p className="mb-2 text-xs text-muted">
+          {FILE_UPLOADS_ENABLED ? "Drop the files to attach them." : "Drop the images to attach them."}
+        </p>
+      )}
+      <ComposerImageErrors
+        messages={imageErrors}
+        onDismiss={() => useComposerDraftStore.getState().setImageErrors(key, [])}
+      />
       <ComposerImageStrip images={images} onRemove={removeImage} />
+      <ComposerFileErrors
+        messages={fileErrors}
+        onDismiss={() => useComposerDraftStore.getState().setFileErrors(key, [])}
+      />
+      <ComposerFileErrors
+        messages={submitError ? [submitError] : []}
+        onDismiss={() => setSubmitError(null)}
+      />
+      <ComposerFileStrip files={files} onRemove={removeFile} onRetry={retryFile} />
       {working && <p className="mb-2 text-xs text-muted">{ACTION_HINT[action]}</p>}
       {/* `relative` anchors the command popup to the input row, so the hint
           above it never moves the popup. */}
@@ -525,12 +771,14 @@ export function Composer({
           className="flex-1"
           disabled={send.isPending || !threadId}
         />
-        {IMAGE_ATTACHMENTS_ENABLED && (
+        {(IMAGE_ATTACHMENTS_ENABLED || FILE_UPLOADS_ENABLED) && (
           <>
             <input
               ref={fileInputRef}
               type="file"
-              accept={IMAGE_ACCEPT_ATTRIBUTE}
+              // With file uploads on, the picker accepts anything; images
+              // still route to the inline image path in `addFiles`.
+              accept={FILE_UPLOADS_ENABLED ? undefined : IMAGE_ACCEPT_ATTRIBUTE}
               multiple
               className="hidden"
               onChange={onPickFiles}
@@ -542,10 +790,10 @@ export function Composer({
               size="lg"
               onClick={() => fileInputRef.current?.click()}
               disabled={intakeBlocked}
-              aria-label="Attach images"
-              title="Attach images"
+              aria-label={FILE_UPLOADS_ENABLED ? "Attach files" : "Attach images"}
+              title={FILE_UPLOADS_ENABLED ? "Attach files" : "Attach images"}
             >
-              <ImagePlus className="h-4 w-4" />
+              <Paperclip className="h-4 w-4" />
             </Button>
           </>
         )}
@@ -576,6 +824,17 @@ export function Composer({
       </div>
     </form>
   );
+}
+
+function apiErrorDetail(err: unknown, fallback: string): string {
+  const payload =
+    err instanceof ApiError && typeof err.payload === "object" && err.payload !== null
+      ? (err.payload as Record<string, unknown>)
+      : undefined;
+  if (typeof payload?.corrective === "string") return payload.corrective;
+  if (typeof payload?.error === "string") return payload.error;
+  if (err instanceof Error && err.message.length > 0) return err.message;
+  return fallback;
 }
 
 /**

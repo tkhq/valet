@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@mariozechner/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import {
   Engine,
   InMemoryEventStream,

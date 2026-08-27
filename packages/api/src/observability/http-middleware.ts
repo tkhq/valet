@@ -12,7 +12,9 @@ import type { MiddlewareHandler } from "hono";
 import { SpanStatusCode, metrics, trace, type Histogram } from "@opentelemetry/api";
 import type { AppEnv } from "../env.js";
 
-const EXCLUDED_PATHS = new Set(["/api/health"]);
+// /api/ready joins /api/health here for the same reason: the kubelet's
+// readinessProbe hits it every 5s for the pod's whole life.
+const EXCLUDED_PATHS = new Set(["/api/health", "/api/ready"]);
 
 export function traceRequests(): MiddlewareHandler<AppEnv> {
   const tracer = trace.getTracer("@valet/api-http");

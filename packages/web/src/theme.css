@@ -143,6 +143,11 @@
   --ink-wash-strong: oklch(20.5% 0.006 247 / 0.1);
   --moss-wash: oklch(53.5% 0.190 264 / 0.1);
   --moss-wash-strong: oklch(53.5% 0.190 264 / 0.18);
+  /* Mid-strength neutral fill for data marks — chart bars, idle dots —
+     that must read against an `--ink-wash` track. Same L/C/H as `--muted`;
+     the alpha lives in the token because a `/50` slash modifier on these
+     `var()` colors emits no rule at all (the trap above). */
+  --muted-wash: oklch(55.4% 0.015 247 / 0.5);
 
   /* Status washes. These exist for the same reason as the washes above,
      and they were added because the trap caught us: `badge.tsx` shipped
@@ -186,6 +191,7 @@
     --ink-wash-strong: oklch(98.5% 0.002 247 / 0.14);
     --moss-wash: oklch(69.0% 0.150 264 / 0.14);
     --moss-wash-strong: oklch(69.0% 0.150 264 / 0.22);
+    --muted-wash: oklch(55.4% 0.015 247 / 0.5);
 
     --success-wash: oklch(72.0% 0.150 145 / 0.20);
     --danger-wash: oklch(68.0% 0.200 27 / 0.20);
@@ -210,6 +216,7 @@
   --ink-wash-strong: oklch(98.5% 0.002 247 / 0.14);
   --moss-wash: oklch(69.0% 0.150 264 / 0.14);
   --moss-wash-strong: oklch(69.0% 0.150 264 / 0.22);
+  --muted-wash: oklch(55.4% 0.015 247 / 0.5);
 
   --success-wash: oklch(72.0% 0.150 145 / 0.20);
   --danger-wash: oklch(68.0% 0.200 27 / 0.20);
@@ -238,6 +245,7 @@
   --ink-wash-strong: oklch(21.5% 0.018 60 / 0.1);
   --moss-wash: oklch(52.0% 0.150 45 / 0.1);
   --moss-wash-strong: oklch(52.0% 0.150 45 / 0.18);
+  --muted-wash: oklch(52.5% 0.030 65 / 0.5);
 
   --success-wash: oklch(65.0% 0.150 145 / 0.15);
   --danger-wash: oklch(60.0% 0.220 27 / 0.15);
@@ -263,6 +271,7 @@
     --ink-wash-strong: oklch(97.0% 0.008 75 / 0.14);
     --moss-wash: oklch(72.0% 0.145 50 / 0.14);
     --moss-wash-strong: oklch(72.0% 0.145 50 / 0.22);
+    --muted-wash: oklch(66.0% 0.028 70 / 0.5);
 
     --success-wash: oklch(72.0% 0.150 145 / 0.20);
     --danger-wash: oklch(68.0% 0.200 27 / 0.20);
@@ -286,6 +295,7 @@
   --ink-wash-strong: oklch(97.0% 0.008 75 / 0.14);
   --moss-wash: oklch(72.0% 0.145 50 / 0.14);
   --moss-wash-strong: oklch(72.0% 0.145 50 / 0.22);
+  --muted-wash: oklch(66.0% 0.028 70 / 0.5);
 
   --success-wash: oklch(72.0% 0.150 145 / 0.20);
   --danger-wash: oklch(68.0% 0.200 27 / 0.20);
@@ -314,6 +324,7 @@
   --ink-wash-strong: oklch(21.0% 0.016 215 / 0.1);
   --moss-wash: oklch(51.0% 0.115 195 / 0.1);
   --moss-wash-strong: oklch(51.0% 0.115 195 / 0.18);
+  --muted-wash: oklch(52.5% 0.028 210 / 0.5);
 
   --success-wash: oklch(65.0% 0.150 145 / 0.15);
   --danger-wash: oklch(60.0% 0.220 27 / 0.15);
@@ -337,6 +348,7 @@
     --ink-wash-strong: oklch(97.0% 0.008 205 / 0.14);
     --moss-wash: oklch(74.0% 0.115 195 / 0.14);
     --moss-wash-strong: oklch(74.0% 0.115 195 / 0.22);
+    --muted-wash: oklch(66.0% 0.026 210 / 0.5);
 
     --success-wash: oklch(72.0% 0.150 145 / 0.20);
     --danger-wash: oklch(68.0% 0.200 27 / 0.20);
@@ -360,6 +372,7 @@
   --ink-wash-strong: oklch(97.0% 0.008 205 / 0.14);
   --moss-wash: oklch(74.0% 0.115 195 / 0.14);
   --moss-wash-strong: oklch(74.0% 0.115 195 / 0.22);
+  --muted-wash: oklch(66.0% 0.026 210 / 0.5);
 
   --success-wash: oklch(72.0% 0.150 145 / 0.20);
   --danger-wash: oklch(68.0% 0.200 27 / 0.20);
@@ -388,6 +401,7 @@
   --ink-wash-strong: oklch(21.5% 0.018 320 / 0.1);
   --moss-wash: oklch(52.0% 0.170 330 / 0.1);
   --moss-wash-strong: oklch(52.0% 0.170 330 / 0.18);
+  --muted-wash: oklch(52.5% 0.030 325 / 0.5);
 
   --success-wash: oklch(65.0% 0.150 145 / 0.15);
   --danger-wash: oklch(60.0% 0.220 27 / 0.15);
@@ -411,6 +425,7 @@
     --ink-wash-strong: oklch(97.0% 0.008 325 / 0.14);
     --moss-wash: oklch(72.0% 0.145 330 / 0.14);
     --moss-wash-strong: oklch(72.0% 0.145 330 / 0.22);
+    --muted-wash: oklch(66.0% 0.030 325 / 0.5);
 
     --success-wash: oklch(72.0% 0.150 145 / 0.20);
     --danger-wash: oklch(68.0% 0.200 27 / 0.20);
@@ -434,6 +449,7 @@
   --ink-wash-strong: oklch(97.0% 0.008 325 / 0.14);
   --moss-wash: oklch(72.0% 0.145 330 / 0.14);
   --moss-wash-strong: oklch(72.0% 0.145 330 / 0.22);
+  --muted-wash: oklch(66.0% 0.030 325 / 0.5);
 
   --success-wash: oklch(72.0% 0.150 145 / 0.20);
   --danger-wash: oklch(68.0% 0.200 27 / 0.20);

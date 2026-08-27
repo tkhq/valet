@@ -198,7 +198,22 @@ registry:
     repository: registry
     tag: "2"
   storageClassName: "" # "" = cluster default storage class
+  # Registry volume size. NOTE: Kubernetes rejects volumeClaimTemplate
+  # changes on an existing StatefulSet. To grow a live cluster's registry:
+  #   1. kubectl patch pvc data-<fullname>-registry-0 -n <sandbox ns> \
+  #        -p '{"spec":{"resources":{"requests":{"storage":"<new size>"}}}}'
+  #      (needs a storage class with allowVolumeExpansion: true)
+  #   2. kubectl delete statefulset <fullname>-registry -n <sandbox ns> \
+  #        --cascade=orphan
+  #   3. Set this value to the same size and helm upgrade (recreates the
+  #      StatefulSet around the kept pod + resized PVC).
   storageSize: 10Gi
+  # Per-org baked-image cache budget (VALET_PREBUILD_CACHE_BUDGET_GB) the
+  # eviction ceiling enforces. Keep it below storageSize - the api default
+  # (20) exceeds the 10Gi volume, which lets the disk fill before any
+  # eviction fires. Per ORG: a multi-org instance needs (orgs x budget)
+  # < storageSize, or a bigger volume.
+  cacheBudgetGb: 6
   # NodePort the bundled registry Service is exposed on. This is the PULL
   # endpoint: sandbox pod image refs use `localhost:<nodePort>`, which kubelet
   # resolves per-node (a ClusterIP-only Service name is NOT resolvable by the
@@ -228,6 +243,16 @@ externalRegistry:
   # `imagePullSecrets` on sandbox pods that pull a prebuilt image from this
   # registry. Ignored when `url` is unset.
   pullSecret: ""
+
+podJanitor:
+  # Nightly CronJob that deletes Failed pods in the release and sandbox
+  # namespaces — see templates/pod-janitor-cronjob.yaml for the rationale.
+  enabled: true
+  # After the registry GC (03:00) so the nightly jobs don't contend.
+  schedule: "30 3 * * *"
+  image:
+    repository: rancher/kubectl
+    tag: v1.31.0
 
 build:
   # BuildKit Job resource requests/limits (moby/buildkit:rootless container).

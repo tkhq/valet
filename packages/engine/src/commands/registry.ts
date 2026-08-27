@@ -63,11 +63,17 @@ function levenshtein(a: string, b: string): number {
 export function buildCommandRegistry(input: BuildRegistryInput): CommandRegistry {
   const { skills, pluginCommands, bareSkillNames } = input;
   const map = new Map<string, ResolvedCommand>();
+  // Case-folded mirror of `map` for case-insensitive resolution. Exact
+  // lookups win; the mirror only catches case variants ("/MODEL"). Two
+  // names that differ only by case collide here — last registration wins,
+  // matching the shadowing semantics of `map` itself.
+  const lowerMap = new Map<string, ResolvedCommand>();
   const infos: CommandInfo[] = [];
   const diags: RegistryDiagnostic[] = [];
 
   function register(name: string, resolved: ResolvedCommand, info: CommandInfo): void {
     map.set(name, resolved);
+    lowerMap.set(name.toLowerCase(), resolved);
     const idx = infos.findIndex((i) => i.name === name);
     if (idx !== -1) {
       infos.splice(idx, 1);
@@ -91,6 +97,7 @@ export function buildCommandRegistry(input: BuildRegistryInput): CommandRegistry
       infos.splice(idx, 1);
     }
     map.set(name, resolved);
+    lowerMap.set(name.toLowerCase(), resolved);
     infos.push(info);
   }
 
@@ -158,15 +165,22 @@ export function buildCommandRegistry(input: BuildRegistryInput): CommandRegistry
       return [...diags];
     },
     resolve(name: string): ResolvedCommand | undefined {
-      return map.get(name);
+      return map.get(name) ?? lowerMap.get(name.toLowerCase());
     },
     nearMiss(name: string): string | undefined {
-      if (map.has(name)) return undefined;
-      const names = [...map.keys()];
+      const lower = name.toLowerCase();
+      if (map.has(name) || lowerMap.has(lower)) return undefined;
+      // A namespaced command reached by its bare suffix is the likeliest
+      // intent: "review" means "skill:review". Levenshtein cannot bridge
+      // that gap (the namespace alone exceeds the distance cutoff), so
+      // check suffixes first.
+      for (const candidate of map.keys()) {
+        if (candidate.toLowerCase().endsWith(`:${lower}`)) return candidate;
+      }
       let best: string | undefined;
       let bestDist = Infinity;
-      for (const candidate of names) {
-        const dist = levenshtein(name, candidate);
+      for (const candidate of map.keys()) {
+        const dist = levenshtein(lower, candidate.toLowerCase());
         if (dist < bestDist) {
           bestDist = dist;
           best = candidate;

@@ -39,6 +39,7 @@ let orgData: OrgResponse = {
   name: "Acme",
   createdAt: 0,
   callerRole: "admin",
+  allowPublicArtifacts: false,
   features: { organizations: true, ssoTeamSync: false },
   ssoTeamGroups: [],
 };
@@ -87,7 +88,7 @@ import { SkillEditor } from "~/components/skills/skill-editor";
 
 describe("OrganizationLibraryPage — org skills panel", () => {
   beforeEach(() => {
-    orgData = { id: "org_1", name: "Acme", createdAt: 0, callerRole: "admin", features: { organizations: true, ssoTeamSync: false }, ssoTeamGroups: [] };
+    orgData = { id: "org_1", name: "Acme", createdAt: 0, callerRole: "admin", features: { organizations: true, ssoTeamSync: false }, ssoTeamGroups: [], allowPublicArtifacts: false };
     createSkill.mockClear();
     skillsQuery.mockClear();
     sourcesQuery.mockClear();
@@ -129,6 +130,14 @@ describe("OrganizationLibraryPage — org skills panel", () => {
     // The org cards still render read-only.
     expect(screen.getByText("Org playbook")).toBeTruthy();
   });
+
+  it("names that an admin adds, removes, and syncs, and that a private repo uses the GitHub App", () => {
+    render(<OrganizationLibraryPage />);
+
+    expect(screen.getByText(/An admin adds, removes, and syncs a repository/)).toBeTruthy();
+    expect(screen.getAllByText(/GitHub App installed for this organization/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/Any member can press Sync/)).toBeNull();
+  });
 });
 
 /**
@@ -138,7 +147,7 @@ describe("OrganizationLibraryPage — org skills panel", () => {
  */
 describe("SkillEditor — the org scope", () => {
   beforeEach(() => {
-    orgData = { id: "org_1", name: "Acme", createdAt: 0, callerRole: "admin", features: { organizations: true, ssoTeamSync: false }, ssoTeamGroups: [] };
+    orgData = { id: "org_1", name: "Acme", createdAt: 0, callerRole: "admin", features: { organizations: true, ssoTeamSync: false }, ssoTeamGroups: [], allowPublicArtifacts: false };
     createSkill.mockClear();
   });
 

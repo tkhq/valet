@@ -28,11 +28,20 @@ export type HibernationHooks = Pick<EngineHostOpts, "onHibernate" | "onWake" | "
  * `onHibernate` (fires from engine-internal hibernation) and the
  * `POST /:id/pause` route (fires from an explicit user pause) so there is
  * exactly one place that writes this transition.
+ *
+ * `sandboxId` is recorded as `hibernated_sandbox_id` — the reaper's destroy
+ * handle for sessions an api restart evicts from the host cache — and
+ * `sandbox_reclaimed_at` is cleared: every hibernate starts a fresh cycle.
  */
-export async function writeHibernated(db: AppDb, sessionId: string): Promise<void> {
+export async function writeHibernated(db: AppDb, sessionId: string, sandboxId?: string): Promise<void> {
   await db
     .update(agentSessions)
-    .set({ status: "hibernated", updatedAt: Date.now() })
+    .set({
+      status: "hibernated",
+      hibernatedSandboxId: sandboxId ?? null,
+      sandboxReclaimedAt: null,
+      updatedAt: Date.now(),
+    })
     .where(and(eq(agentSessions.id, sessionId), eq(agentSessions.status, "active")));
 }
 
@@ -40,13 +49,15 @@ export function buildHibernationHooks(db: AppDb): HibernationHooks {
   const clearHibernated = async (sessionId: string): Promise<void> => {
     await db
       .update(agentSessions)
-      .set({ status: "active", updatedAt: Date.now() })
+      // An awake session has no hibernated sandbox to reap; a stale handle
+      // would invite a misdirected destroy.
+      .set({ status: "active", hibernatedSandboxId: null, sandboxReclaimedAt: null, updatedAt: Date.now() })
       .where(and(eq(agentSessions.id, sessionId), eq(agentSessions.status, "hibernated")));
   };
 
   return {
-    onHibernate: async (sessionId: string) => {
-      await writeHibernated(db, sessionId);
+    onHibernate: async (sessionId: string, sandboxId?: string) => {
+      await writeHibernated(db, sessionId, sandboxId);
     },
     onWake: clearHibernated,
     onSessionReady: clearHibernated,

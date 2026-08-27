@@ -109,7 +109,7 @@ Each credential entry in the response gains `connect: "oauth" | "manual"` so the
 
 ## Registered-client storage: `mcp_oauth_clients`
 
-New app table (pre-1.0: edit `packages/api/migrations/pg/0000_app.sql` in place + add Drizzle schema; local `rm -rf ~/.valet/pg` required after):
+New app table (pre-1.0: edit `packages/api/migrations/pg/0000_app.sql` in place + add Drizzle schema; local `make dev-clean` required after):
 
 ```sql
 CREATE TABLE mcp_oauth_clients (
@@ -119,13 +119,19 @@ CREATE TABLE mcp_oauth_clients (
   authorization_endpoint TEXT NOT NULL,
   token_endpoint TEXT NOT NULL,
   registration_endpoint TEXT,
+  registered_scopes JSONB,           -- RFC 7591 scope set (sorted); NULL = registered pre-scopes
+  scopes_supported JSONB,            -- discovery's scopes_supported; [] = none; NULL = not yet captured
   metadata JSONB,
   created_at BIGINT NOT NULL,
   updated_at BIGINT NOT NULL
 );
 ```
 
-One row per service, shared across all users (as in v1's D1 table). `ensureMcpOAuthClient` reads the row; on miss, runs `discoverAuthServer(serverUrl)` → `registerClient(registration_endpoint, { clientName: "Valet", redirectUris: [callbackUrl] })` → `INSERT ... ON CONFLICT (service) DO NOTHING` then re-reads (concurrent starts converge on one client). Discovery without a `registration_endpoint` is a hard error surfaced as `?error=oauth_failed`. Rows are never deleted on disconnect — client registration is reusable. If the deployment's public URL changes, the registered redirect URI goes stale; recovery is deleting the row (documented, not automated — same posture as v1).
+One row per service, shared across all users (as in v1's D1 table). `ensureMcpOAuthClient` reads the row; on miss, runs `discoverAuthServer(serverUrl)` → `registerClient(registration_endpoint, { clientName: "Valet", redirectUris: [callbackUrl], scope })` → `INSERT ... ON CONFLICT (service) DO NOTHING` then re-reads (concurrent starts converge on one client). Discovery without a `registration_endpoint` is a hard error surfaced as `?error=oauth_failed`. Rows are never deleted on disconnect — client registration is reusable. If the deployment's public URL changes, the registered redirect URI goes stale; recovery is deleting the row (documented, not automated — same posture as v1).
+
+Scopes ride the registration as well as the authorize request (TKAI-243): the declaration's scope set becomes the RFC 7591 `scope` string, and the row stores it (sorted) in `registered_scopes`. When the declared set changes, `ensureMcpOAuthClient` registers a replacement client and updates the row in place — refresh tokens issued to the old client stop refreshing, and the user reconnects. A `NULL` `registered_scopes` (row from before scopes support) compares as "no scopes", so existing rows re-register only when a declaration actually names scopes.
+
+The row also captures discovery's `scopes_supported` (at registration, or lazily backfilled on the first connect of a pre-column row; the backfill fails soft so a dead discovery endpoint never blocks a connect). When a declaration names no scopes but the server advertises `scopes_supported`, EVERY connect logs a warning naming the entry and the fix — not just the first registration — because a scope-gated server grants a token with no scopes and lists zero tools with no other signal.
 
 ## Token refresh
 

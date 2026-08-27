@@ -123,10 +123,24 @@ export function computeTargetDirs(repos: RepoBinding[]): string[] {
   });
 }
 
+/** Upper bound for a refresh-path git exec (`git fetch` / `git checkout`)
+ * against an ALREADY-CLONED tree. Generous for a warm fetch of a large repo,
+ * but finite: the sha-a6eadbe rollout RCA traced a crash-loop to a `git
+ * fetch` wedged inside a full-disk sandbox, and an unbounded exec here hangs
+ * every caller that reaches prep — boot restore, run-start reconcile, and
+ * `sessionFor` from routes (whose single-flight map then pins every later
+ * request to the same never-resolving promise). Initial clones are NOT
+ * bounded by this — a cold clone of a large repo legitimately runs longer. */
+const GIT_REFRESH_TIMEOUT_MS = 180_000;
+
 /** Runs `sandbox.exec`, converting a rejection into a synthetic failed
  * `ExecResult` so callers can treat "exec threw" and "exec returned
  * non-zero" uniformly. */
-async function safeExec(sandbox: Sandbox, command: string, opts?: { cwd?: string }): Promise<ExecResult> {
+async function safeExec(
+  sandbox: Sandbox,
+  command: string,
+  opts?: { cwd?: string; timeout?: number },
+): Promise<ExecResult> {
   try {
     return await sandbox.exec(command, opts);
   } catch (err) {
@@ -251,14 +265,17 @@ async function assertCloneTargetEmpty(sandbox: Sandbox, dir: string): Promise<vo
  * `git checkout {ref}` when a ref is pinned. Offline-tolerant — failures
  * are logged and prep continues to the next binding, never thrown. */
 async function refreshExistingClone(sandbox: Sandbox, dir: string, binding: RepoBinding): Promise<void> {
-  const fetch = await safeExec(sandbox, "git fetch origin", { cwd: dir });
+  const fetch = await safeExec(sandbox, "git fetch origin", { cwd: dir, timeout: GIT_REFRESH_TIMEOUT_MS });
   if (fetch.exitCode !== 0) {
     console.error(
       `workspace prep: git fetch origin failed for ${binding.fullName} (${dir}) — continuing: ${fetch.stderr || fetch.stdout}`,
     );
   }
   if (binding.ref) {
-    const checkout = await safeExec(sandbox, `git checkout ${shQuote(binding.ref)}`, { cwd: dir });
+    const checkout = await safeExec(sandbox, `git checkout ${shQuote(binding.ref)}`, {
+      cwd: dir,
+      timeout: GIT_REFRESH_TIMEOUT_MS,
+    });
     if (checkout.exitCode !== 0) {
       console.error(
         `workspace prep: git checkout ${binding.ref} failed for ${binding.fullName} (${dir}) — continuing: ${checkout.stderr || checkout.stdout}`,
@@ -273,7 +290,10 @@ async function refreshExistingClone(sandbox: Sandbox, dir: string, binding: Repo
  * unparseable (e.g. a bare remote with no HEAD) — the caller then leaves the
  * staged tree at the baked commit rather than guessing a branch. */
 async function resolveRemoteDefaultBranch(sandbox: Sandbox, dir: string): Promise<string | null> {
-  const res = await safeExec(sandbox, "git symbolic-ref refs/remotes/origin/HEAD", { cwd: dir });
+  const res = await safeExec(sandbox, "git symbolic-ref refs/remotes/origin/HEAD", {
+    cwd: dir,
+    timeout: GIT_REFRESH_TIMEOUT_MS,
+  });
   if (res.exitCode !== 0) return null;
   const prefix = "refs/remotes/origin/";
   const ref = res.stdout.trim();
@@ -305,7 +325,7 @@ async function resolveRemoteDefaultBranch(sandbox: Sandbox, dir: string): Promis
  * warm restores keep the in-place `refreshExistingClone` behavior.
  */
 async function refreshStagedPrebuild(sandbox: Sandbox, dir: string, binding: RepoBinding): Promise<boolean> {
-  const fetch = await safeExec(sandbox, "git fetch origin", { cwd: dir });
+  const fetch = await safeExec(sandbox, "git fetch origin", { cwd: dir, timeout: GIT_REFRESH_TIMEOUT_MS });
   if (fetch.exitCode !== 0) {
     console.error(
       `workspace prep: git fetch origin failed for ${binding.fullName} (${dir}) — staying at the baked commit, skipping reinstall: ${fetch.stderr || fetch.stdout}`,
@@ -319,7 +339,10 @@ async function refreshStagedPrebuild(sandbox: Sandbox, dir: string, binding: Rep
     );
     return true;
   }
-  const checkout = await safeExec(sandbox, `git checkout -B ${shQuote(ref)} ${shQuote(`origin/${ref}`)}`, { cwd: dir });
+  const checkout = await safeExec(sandbox, `git checkout -B ${shQuote(ref)} ${shQuote(`origin/${ref}`)}`, {
+    cwd: dir,
+    timeout: GIT_REFRESH_TIMEOUT_MS,
+  });
   if (checkout.exitCode !== 0) {
     console.error(
       `workspace prep: git checkout -B ${ref} origin/${ref} failed for ${binding.fullName} (${dir}) — continuing: ${checkout.stderr || checkout.stdout}`,

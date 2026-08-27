@@ -1,5 +1,5 @@
 // packages/api/src/proxy/upstream.ts
-import { getEnvApiKey } from "@mariozechner/pi-ai";
+import { getEnvApiKey } from "@earendil-works/pi-ai/compat";
 import type { CredentialStore } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import type { ProviderKind, Upstream } from "./types.js";

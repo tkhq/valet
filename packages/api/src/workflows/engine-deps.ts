@@ -35,8 +35,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { definitionVersionId } from "./definition-version.js";
-import { completeSimple, getModel } from "@mariozechner/pi-ai";
-import type { Api, Model, Usage } from "@mariozechner/pi-ai";
+import { completeSimple, getModel } from "@earendil-works/pi-ai/compat";
+import type { Api, Model, Usage } from "@earendil-works/pi-ai/compat";
 import {
   parseAssistantSessionId,
   parsePrincipal,
@@ -221,6 +221,18 @@ function actorUserIdFor(principal: Principal): string {
  */
 function workspaceFor(parts: WorkflowSessionIdParts): string {
   return join(homedir(), ".valet", "workflows", parts.runId, parts.nodeId, String(parts.iteration ?? 0));
+}
+
+/**
+ * The workspace path a workflow session's sandbox was provisioned under —
+ * the same string `ensureSession` hands `workflowSessionFor`, and therefore
+ * the same key `SandboxProvider.deriveId` names the sandbox from. Exported
+ * for the settled-run sandbox reclaim (`sandbox-reclaim.ts`), which must
+ * destroy sandboxes of sessions that are no longer cached and have no
+ * recorded handle. Throws on a non-workflow session id.
+ */
+export function workflowSessionWorkspace(sessionId: string): string {
+  return workspaceFor(parseWorkflowSessionId(sessionId));
 }
 
 /**

@@ -15,9 +15,11 @@ import { fallbackRenderer } from "./fallback";
 import { findReplaceRenderer } from "./find-replace";
 import { memPatchRenderer } from "./mem-patch";
 import { memReadRenderer } from "./mem-read";
+import { memShareRenderer } from "./mem-share";
 import { memWriteRenderer } from "./mem-write";
 import { openaiMediaRenderer } from "./openai-media";
 import { readRenderer } from "./read";
+import { skillRenderer } from "./skill";
 import { threadReadRenderer } from "./thread-read";
 import { workflowRenderer } from "./workflow";
 import { writeRenderer } from "./write";
@@ -30,7 +32,9 @@ const RENDERERS: ToolRenderer[] = [
   editRenderer,
   memPatchRenderer,
   memReadRenderer,
+  memShareRenderer,
   memWriteRenderer,
+  skillRenderer,
   threadReadRenderer,
   workflowRenderer,
   findReplaceRenderer,

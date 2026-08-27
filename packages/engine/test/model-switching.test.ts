@@ -16,7 +16,7 @@ import {
   registerFauxProvider,
   type FauxProvider,
   type Model,
-} from "@mariozechner/pi-ai";
+} from "@earendil-works/pi-ai/compat";
 import {
   builtinTools,
   Engine,

@@ -71,6 +71,22 @@ export function describeSignalContract(makeStore: () => Promise<WorkflowStore> |
       expect(stored.payload).toEqual({ approved: true });
     });
 
+    it('a top-level string payload round-trips verbatim (no read-time re-parse)', async () => {
+      // Regression: a read-time re-parse throws on a non-JSON string payload.
+      const store = await setup();
+      const text = 'records[50]:\n  - record_id: 04b39761 (not JSON)';
+      await store.insertSignal(signal({ payload: text }));
+      const [stored] = await store.listSignals(RUN_ID);
+      expect(stored.payload).toBe(text);
+    });
+
+    it('a JSON-shaped string payload keeps its string type (no silent double-parse)', async () => {
+      const store = await setup();
+      await store.insertSignal(signal({ payload: '123' }));
+      const [stored] = await store.listSignals(RUN_ID);
+      expect(stored.payload).toBe('123');
+    });
+
     it('signal-before-wait delivery: a signal inserted before any wait is registered is found by listSignals(unconsumed)', async () => {
       const store = await setup();
       await store.insertSignal(signal());

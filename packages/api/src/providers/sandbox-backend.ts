@@ -119,6 +119,19 @@ export function resolveDefaultImage(env: NodeJS.ProcessEnv): string | undefined 
 }
 
 /**
+ * Shared parse for every numeric VALET_* knob in this file: unset/empty →
+ * the default; zero, negative, or non-numeric → 0 (which every consumer
+ * reads as "feature off"); otherwise the value scaled by `unit`. One place
+ * to change the disable semantics for all six knobs.
+ */
+function scaledEnvNumber(raw: string | undefined, defaultValue: number, unit: number): number {
+  if (raw === undefined || raw === "") return defaultValue;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return n * unit;
+}
+
+/**
  * Resolves `EngineHostOpts.idleMinutes` from `VALET_SANDBOX_IDLE_MINUTES`
  * (sandbox hibernation plan, Task 3). Unset → `30` (the default idle
  * window). `0`, negative, or non-numeric → `0`, which `EngineHost` reads as
@@ -127,11 +140,7 @@ export function resolveDefaultImage(env: NodeJS.ProcessEnv): string | undefined 
  * `capabilities().hibernation === true`.
  */
 export function resolveIdleMinutes(env: NodeJS.ProcessEnv): number {
-  const raw = env.VALET_SANDBOX_IDLE_MINUTES;
-  if (raw === undefined || raw === "") return 30;
-  const n = Number(raw);
-  if (!Number.isFinite(n) || n <= 0) return 0;
-  return n;
+  return scaledEnvNumber(env.VALET_SANDBOX_IDLE_MINUTES, 30, 1);
 }
 
 /**
@@ -142,11 +151,53 @@ export function resolveIdleMinutes(env: NodeJS.ProcessEnv): number {
  * elsewhere the child watcher never parks in the first place.
  */
 export function resolveChildRetentionMs(env: NodeJS.ProcessEnv): number {
-  const raw = env.VALET_CHILD_SANDBOX_RETENTION_HOURS;
-  if (raw === undefined || raw === "") return 72 * 3_600_000;
-  const n = Number(raw);
-  if (!Number.isFinite(n) || n <= 0) return 0;
-  return n * 3_600_000;
+  return scaledEnvNumber(env.VALET_CHILD_SANDBOX_RETENTION_HOURS, 72 * 3_600_000, 3_600_000);
+}
+
+/**
+ * How long a session may sit `hibernated` before the reaper
+ * (`engine/hibernation-reaper.ts`) destroys its sandbox
+ * (`VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES`, default 72h). The default
+ * outlasts a weekend: reaping only resets the workspace volume (chat
+ * history and memories live in postgres), but a Monday-morning user should
+ * still find Friday's uncommitted work. Zero, negative, or non-numeric
+ * disables the reaper entirely.
+ */
+export function resolveHibernatedRetentionMs(env: NodeJS.ProcessEnv): number {
+  return scaledEnvNumber(env.VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES, 72 * 60 * 60_000, 60_000);
+}
+
+/**
+ * Age past which the reconcile sweep (`engine/sandbox-reconcile-sweep.ts`)
+ * REPORTS a sandbox as an invariant violation:
+ * `VALET_SANDBOX_AGE_REPORT_HOURS`, default 168 (7 days). Report only —
+ * never a destroy; an age-based kill would mask the broken owner and wipe
+ * legitimately long-lived active workspaces (CLAUDE.md: "Invariants:
+ * alert, don't auto-repair"). Zero, negative, or non-numeric disables the
+ * report (the sweep's orphan rule stays on).
+ */
+export function resolveSandboxAgeReportMs(env: NodeJS.ProcessEnv): number {
+  return scaledEnvNumber(env.VALET_SANDBOX_AGE_REPORT_HOURS, 168 * 3_600_000, 3_600_000);
+}
+
+/**
+ * Max concurrent live sandboxes one org may hold
+ * (`VALET_ORG_SANDBOX_CEILING`, default 25), enforced by the capacity
+ * gate (`engine/gated-sandbox-provider.ts`). A fan-out that needs more
+ * WAITS at the gate instead of saturating the cluster. Zero, negative,
+ * or non-numeric disables the gate.
+ */
+export function resolveOrgSandboxCeiling(env: NodeJS.ProcessEnv): number {
+  return Math.floor(scaledEnvNumber(env.VALET_ORG_SANDBOX_CEILING, 25, 1));
+}
+
+/**
+ * How long an over-ceiling sandbox create waits for capacity before it
+ * fails terminally (`VALET_SANDBOX_CAPACITY_WAIT_MINUTES`, default 10).
+ * Zero, negative, or non-numeric means fail fast (no wait).
+ */
+export function resolveSandboxCapacityWaitMs(env: NodeJS.ProcessEnv): number {
+  return scaledEnvNumber(env.VALET_SANDBOX_CAPACITY_WAIT_MINUTES, 10 * 60_000, 60_000);
 }
 
 export interface BuildSandboxProviderDeps {

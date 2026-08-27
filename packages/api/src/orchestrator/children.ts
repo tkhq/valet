@@ -17,9 +17,10 @@ import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { and, count, eq, isNull, lte, ne, notExists, sql } from "drizzle-orm";
+import { and, count, eq, isNull, lte, notExists, sql } from "drizzle-orm";
 import {
   PendingCapError,
+  recordSandboxDestroyed,
   ValidationError as EngineValidationError,
   type ChildReader,
   type ChildSender,
@@ -40,8 +41,9 @@ import type { RepoBinding } from "../wire/types.js";
 import type { SourceService } from "../bakes/source-service.js";
 import { admitSignal, writeDropLog, SignalEdgeDeniedError } from "./signals.js";
 import { revokeSandboxTokens } from "../auth/sandbox-tokens.js";
+import { startSweepTimer, type SweepTimer } from "../lib/sweep-timer.js";
 import { writeHibernated } from "../engine/hibernation-hooks.js";
-import { MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR, ORG_ACTIVE_SESSION_CEILING } from "./limits.js";
+import { DEFAULT_ORG_ACTIVE_SESSION_CEILING, MAX_ACTIVE_CHILDREN_PER_ORCHESTRATOR } from "./limits.js";
 
 /** Delay before the in-process retry of a retryable watcher failure (decision 20). */
 const DEFAULT_WATCHER_RETRY_DELAY_MS = 30_000;
@@ -67,6 +69,12 @@ export interface ChildrenDeps {
    * `~/.valet/children`; tests point it at a tmp dir.
    */
   workspaceRoot?: string;
+  /**
+   * Org active-session ceiling, resolved at boot via
+   * `resolveOrgSessionCeiling(process.env)` in `buildNodeProviders`.
+   * Absent → `DEFAULT_ORG_ACTIVE_SESSION_CEILING`.
+   */
+  orgSessionCeiling?: number;
   /** Override for `ChildWatcher`'s retryable-failure backoff. Tests only. */
   retryDelayMs?: number;
   /** Override for `ChildWatcher`'s in-process retry budget. Tests only. */
@@ -127,7 +135,12 @@ export function parseTaskRepo(repo: string, branch?: string): RepoBinding | unde
  * Enforces decision-21 limits BEFORE anything is created. Throws
  * `ChildLimitError` (and drop-logs) on violation.
  */
-async function enforceLimits(db: AppDb, parentSessionId: string, orgId: string): Promise<void> {
+async function enforceLimits(
+  db: AppDb,
+  parentSessionId: string,
+  orgId: string,
+  orgSessionCeiling: number = DEFAULT_ORG_ACTIVE_SESSION_CEILING,
+): Promise<void> {
   const runningChildren = await db
     .select({ childSessionId: childWatches.childSessionId })
     .from(childWatches)
@@ -153,13 +166,19 @@ async function enforceLimits(db: AppDb, parentSessionId: string, orgId: string):
   // child once (unsettled watch), a settled child zero. Their agent_sessions
   // rows outlive settlement, so counting them here would double-count every
   // running child and hold a settled child's slot forever.
+  //
+  // Only `active` rows count. A `hibernated` session is parked (the idle
+  // sweep suspended its sandbox) and an `archived` session is shelved by the
+  // user — neither consumes compute, so neither may consume capacity. The
+  // old `!= deleted` filter made the ceiling a lifetime session counter:
+  // every org eventually hit it through accumulation alone.
   const [{ n: liveSessionsOrgWide }] = await db
     .select({ n: count() })
     .from(agentSessions)
     .where(
       and(
         eq(agentSessions.orgId, orgId),
-        ne(agentSessions.status, "deleted"),
+        eq(agentSessions.status, "active"),
         notExists(
           db
             .select({ one: sql`1` })
@@ -171,8 +190,8 @@ async function enforceLimits(db: AppDb, parentSessionId: string, orgId: string):
       ),
     );
   const total = Number(unsettledChildrenOrgWide ?? 0) + Number(liveSessionsOrgWide ?? 0);
-  if (total >= ORG_ACTIVE_SESSION_CEILING) {
-    const message = `[org_ceiling] org ${orgId} is at ${total} active sessions (unsettled children + live sessions), limit ${ORG_ACTIVE_SESSION_CEILING}`;
+  if (total >= orgSessionCeiling) {
+    const message = `[org_ceiling] org ${orgId} is at ${total} active sessions (unsettled children + active sessions), limit ${orgSessionCeiling}. Archive or delete idle sessions, or raise VALET_ORG_SESSION_CEILING.`;
     await writeDropLog(db, { orgId, reason: "org_ceiling", conversationKey: parentSessionId, detail: message });
     throw new ChildLimitError("org_ceiling", message);
   }
@@ -217,7 +236,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       );
     }
 
-    await enforceLimits(deps.db, ctx.parentSessionId, orgId);
+    await enforceLimits(deps.db, ctx.parentSessionId, orgId, deps.orgSessionCeiling);
 
     const childSessionId = newChildSessionId();
     const workspace = join(deps.workspaceRoot ?? join(homedir(), ".valet", "children"), childSessionId);
@@ -387,7 +406,7 @@ export function classifyWatcherError(err: unknown): WatcherErrorClassification {
 export class ChildWatcher {
   private readonly retryDelayMs: number;
   private readonly maxAttempts: number;
-  private retentionTimer: NodeJS.Timeout | undefined;
+  private retentionTimer: SweepTimer | undefined;
 
   constructor(private readonly deps: ChildrenDeps) {
     this.retryDelayMs = deps.retryDelayMs ?? DEFAULT_WATCHER_RETRY_DELAY_MS;
@@ -650,7 +669,7 @@ export class ChildWatcher {
         return;
       }
 
-      await live.attachment.destroy();
+      await live.attachment.destroy("child_settled");
       this.deps.engineHost.evictCache(childSessionId);
       // The sandbox bearer token outlives the container on backends whose
       // creds live outside it (docker host-dir mount) — revoke like
@@ -709,10 +728,11 @@ export class ChildWatcher {
           // the check above wins and the reclaim waits for the next pass.
           const recheck = await this.deps.engineStore.listUnsettledSubmissions(row.childSessionId);
           if (recheck.length > 0) continue;
-          await live.attachment.destroy();
+          await live.attachment.destroy("child_retention");
           this.deps.engineHost.evictCache(row.childSessionId);
         } else if (row.parkedSandboxId) {
           await this.deps.engineHost.destroySandbox(row.parkedSandboxId);
+          recordSandboxDestroyed("child_retention");
         } else {
           // Nothing destroyable from here: no cached session and no
           // recorded handle. Stamp the reclaim so the row stops sweeping,
@@ -731,19 +751,15 @@ export class ChildWatcher {
     }
   }
 
-  /** Start the retention interval (no-op when retention is off). Unref'd — never holds the process open. */
+  /** Start the retention interval (no-op when retention is off). */
   startRetentionSweep(): void {
     if (this.retentionTimer || (this.deps.retentionMs ?? 0) <= 0) return;
     const intervalMs = this.deps.retentionSweepIntervalMs ?? DEFAULT_RETENTION_SWEEP_INTERVAL_MS;
-    const timer = setInterval(() => {
-      void this.sweepRetention().catch((err) => console.error("ChildWatcher: retention sweep failed:", err));
-    }, intervalMs);
-    timer.unref();
-    this.retentionTimer = timer;
+    this.retentionTimer = startSweepTimer("ChildWatcher retention", intervalMs, () => this.sweepRetention());
   }
 
   stopRetentionSweep(): void {
-    if (this.retentionTimer) clearInterval(this.retentionTimer);
+    this.retentionTimer?.stop();
     this.retentionTimer = undefined;
   }
 
@@ -928,7 +944,7 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
     // same caps a spawn pays, BEFORE waking anything. A steer/followup to a
     // still-running child changes no counts and pays nothing.
     if (watchRow.settled) {
-      await enforceLimits(deps.db, ctx.parentSessionId, watchRow.orgId);
+      await enforceLimits(deps.db, ctx.parentSessionId, watchRow.orgId, deps.orgSessionCeiling);
     }
 
     const childData = await deps.engineStore.getSession(req.childSessionId);
@@ -941,6 +957,9 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
       req.childSessionId,
       await loadSessionMeta(deps.db, child),
     );
+    // A child_send is USE: a parked (hibernated) child's row heals to
+    // active even when the revived turn never touches the sandbox.
+    await deps.engineHost.markSessionUsed(req.childSessionId);
 
     const receipt = await childSession.prompt(req.message, {
       author: { id: ctx.actorUserId },

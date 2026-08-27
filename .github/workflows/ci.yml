@@ -107,18 +107,30 @@ jobs:
       - name: Test (shard ${{ matrix.shard }}/4)
         run: pnpm test --shard=${{ matrix.shard }}/4
 
+  # The same thresholded STE lint the e2e "docs-lint" suite runs, promoted to
+  # a blocking check. The runner's system python3 is enough; no setup step.
+  docs-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: STE prose lint (maintained docs)
+        run: python3 scripts/docs/docs_lint.py
+
   # One required check to point branch protection at, so the shard count can
   # change without editing the protection rule. `needs` alone is not enough:
   # a skipped or cancelled dependency still satisfies it, so the result is
   # asserted explicitly.
   ci:
     runs-on: ubuntu-latest
-    needs: [typecheck, test]
+    needs: [typecheck, test, docs-lint]
     if: always()
     steps:
       - name: Report
         run: |
           echo "typecheck: ${{ needs.typecheck.result }}"
           echo "test:      ${{ needs.test.result }}"
+          echo "docs-lint: ${{ needs.docs-lint.result }}"
           test "${{ needs.typecheck.result }}" = "success" \
-            && test "${{ needs.test.result }}" = "success"
+            && test "${{ needs.test.result }}" = "success" \
+            && test "${{ needs.docs-lint.result }}" = "success"

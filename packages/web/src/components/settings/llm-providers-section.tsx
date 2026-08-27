@@ -25,6 +25,7 @@ import {
   usePutLlmProviderKey,
   useTestLlmProvider,
 } from "~/api/settings";
+import { matchesNeedle } from "~/lib/text-match";
 
 type KnownKind = "anthropic" | "openai" | "google" | "openrouter";
 
@@ -239,7 +240,7 @@ function OpenrouterModelsEditor({ provider }: { provider: LlmProviderSummary }) 
   const filtered = (registryQ.data?.models ?? []).filter(
     (m) =>
       !selectedIds.has(m.id) &&
-      (filter.trim() === "" || m.id.toLowerCase().includes(filter.trim().toLowerCase())),
+      matchesNeedle(filter, [m.id]),
   );
 
   return (

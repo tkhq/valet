@@ -7,7 +7,7 @@
  * Kept pure (no React, no clipboard) so it's unit-testable and reusable —
  * the button component wraps `buildTranscript` + a clipboard write.
  */
-import type { Message, PromptImageAttachment, SessionDetail } from "@valet/api/wire";
+import type { Message, SessionDetail } from "@valet/api/wire";
 import { formatBytes } from "~/lib/format-bytes";
 import type { AgentStatus, ConnectionStatus } from "~/stores/stream";
 
@@ -64,8 +64,9 @@ function formatTimestamp(ms: number): string {
  */
 function shortenAttachmentUrls(m: Message): Message {
   if (!m.attachments || m.attachments.length === 0) return m;
-  const short: PromptImageAttachment[] = m.attachments.map((a) => {
-    if (a.url.length <= 80) return a;
+  const short = m.attachments.map((a) => {
+    // File attachments carry a sandbox path, not a url — nothing to shorten.
+    if (a.kind !== "image" || a.url.length <= 80) return a;
     return { ...a, url: `${a.url.slice(0, 80)}… [${a.url.length} chars]` };
   });
   return { ...m, attachments: short };
@@ -88,6 +89,10 @@ function renderMessage(m: Message, index: number): string {
     // via the same guard.
     lines.push("**attachments**");
     for (const a of m.attachments) {
+      if (a.kind === "file") {
+        lines.push(`- ${a.name} (${a.mimeType ?? "file"}, ${formatBytes(a.bytes)} at ${a.path})`);
+        continue;
+      }
       const kind = a.url.startsWith("data:") ? "data:URL" : "url";
       lines.push(`- ${a.name} (${a.mimeType}, ${kind} ${formatBytes(a.url.length)})`);
     }

@@ -76,6 +76,7 @@ import {
 import type { AppQueryable } from "../lib/drizzle.js";
 import { ingestEvent } from "../events/ingest.js";
 import { writeDropLog } from "../orchestrator/signals.js";
+import { findOrgSkillSourcesForPush, parseSkillPushPayload } from "../services/skill-sync-push.js";
 import { credentials, githubInstallations, orgs } from "../schema/index.js";
 import type {
   GetGithubAppResponse,
@@ -733,6 +734,20 @@ githubAppWebhookRouter.post("/", async (c) => {
 
   const event = c.req.header("x-github-event");
   const deps: GithubAppDeps = { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) };
+  // Org skill sources sync on `push`. Personal and team sources stay on
+  // the poll — they often have no App installation. `syncOnce` is the
+  // same path the sweep and the Sync button use.
+  if (event === "push") {
+    const push = parseSkillPushPayload(payload);
+    if (push) {
+      const sources = await findOrgSkillSourcesForPush(db, orgId, push);
+      for (const source of sources) {
+        await c.var.providers.skillSync.syncOnce(source.id).catch((err) => {
+          console.error(`skill sync ${source.id} (github push):`, err);
+        });
+      }
+    }
+  }
   if (event === "installation") {
     await handleInstallationEvent(deps, orgId, payload);
   } else if (event === "installation_repositories") {

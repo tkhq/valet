@@ -6,6 +6,7 @@ import {
   MAX_PHANTOM_NODES,
   MAX_SCAN_CHARS,
   resolveLinkTarget,
+  rewriteLinkTargets,
   type GraphSourceFile,
 } from "./memory-graph.js";
 
@@ -52,6 +53,31 @@ describe("extractLinkTargets", () => {
   it("ignores links inside code fences and inline code", () => {
     const body = ["```", "[x](/fenced.md)", "```", "`[y](/inline.md)` and [z](/real.md)"].join("\n");
     expect(extractLinkTargets("a.md", body)).toEqual(["real.md"]);
+  });
+});
+
+describe("rewriteLinkTargets", () => {
+  it("rewrites relative and rooted targets that resolve to the old path", () => {
+    const body = "see [alice](../people/alice.md) and [rooted](/people/alice.md) and [other](/people/bob.md)";
+    const { content, rewrote } = rewriteLinkTargets("journal/day.md", body, "people/alice.md", "people/alice-smith.md");
+    expect(rewrote).toBe(true);
+    expect(content).toBe(
+      "see [alice](/people/alice-smith.md) and [rooted](/people/alice-smith.md) and [other](/people/bob.md)",
+    );
+  });
+
+  it("preserves anchors and tolerates a missing .md extension", () => {
+    const body = "[a](/notes/a#section) stays anchored";
+    const { content, rewrote } = rewriteLinkTargets("x.md", body, "notes/a.md", "archive/a.md");
+    expect(rewrote).toBe(true);
+    expect(content).toBe("[a](/archive/a.md#section) stays anchored");
+  });
+
+  it("leaves code fences and inline code alone, and reports rewrote: false when nothing matches", () => {
+    const body = ["```", "[x](/old.md)", "```", "`[y](/old.md)` and [z](/unrelated.md)"].join("\n");
+    const result = rewriteLinkTargets("a.md", body, "old.md", "new.md");
+    expect(result.rewrote).toBe(false);
+    expect(result.content).toBe(body);
   });
 });
 

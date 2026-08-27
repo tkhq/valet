@@ -198,7 +198,7 @@ describe("createWorkflowSchedule authorization", () => {
   });
 });
 
-describe("listWorkflowSchedules / deleteWorkflowSchedule scope (documented, deliberately unchanged by this fix)", () => {
+describe("listWorkflowSchedules / deleteWorkflowSchedule owner scoping (TKAI-227)", () => {
   let db: AppDb;
   let pglite: PGlite;
 
@@ -216,7 +216,7 @@ describe("listWorkflowSchedules / deleteWorkflowSchedule scope (documented, deli
     await buildAppQueryable(pglite).query(`TRUNCATE workflow_definitions, workflow_schedules RESTART IDENTITY CASCADE`);
   });
 
-  it("any org member can list and delete a schedule they didn't create — org-shared visibility, matching event_subscriptions' own documented model, NOT the creation-time ownership bug this file's other describe block fixes", async () => {
+  it("another org member cannot list or delete a schedule on a workflow they cannot reach; the owner can do both", async () => {
     await db.insert(workflowDefinitions).values({
       id: "wf_1",
       orgId: "org-1",
@@ -235,10 +235,16 @@ describe("listWorkflowSchedules / deleteWorkflowSchedule scope (documented, deli
     expect(created.ok).toBe(true);
     if (!created.ok) return;
 
-    const listedByOther = await listWorkflowSchedules(db, "org-1");
-    expect(listedByOther.map((s) => s.scheduleId)).toContain(created.schedule.scheduleId);
+    const other = { userId: "other-org-member", orgId: "org-1" };
+    const listedByOther = await listWorkflowSchedules(db, other);
+    expect(listedByOther.map((s) => s.scheduleId)).not.toContain(created.schedule.scheduleId);
+    const deletedByOther = await deleteWorkflowSchedule(db, other, created.schedule.scheduleId);
+    expect(deletedByOther).toBe("not_found");
 
-    const deletedByOther = await deleteWorkflowSchedule(db, "org-1", created.schedule.scheduleId);
-    expect(deletedByOther).toBe("ok");
+    const owner = { userId: "owner-user", orgId: "org-1" };
+    const listedByOwner = await listWorkflowSchedules(db, owner);
+    expect(listedByOwner.map((s) => s.scheduleId)).toContain(created.schedule.scheduleId);
+    const deletedByOwner = await deleteWorkflowSchedule(db, owner, created.schedule.scheduleId);
+    expect(deletedByOwner).toBe("ok");
   });
 });

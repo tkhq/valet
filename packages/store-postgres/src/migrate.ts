@@ -7,7 +7,8 @@ import type { PgDb } from "./db.js";
  * every open so a stale/foreign db is rejected instead of silently
  * misbehaving. Pre-1.0: there is only ever one schema generation, so any
  * mismatch (including "older") means the db predates this migration set —
- * delete the pg data dir (`rm -rf ~/.valet/pg`) and let it recreate.
+ * delete the pg data dir and let it recreate (`make dev-clean` under
+ * `make dev-local`).
  */
 export const ENGINE_SCHEMA_VERSION = "3";
 
@@ -32,7 +33,7 @@ const migrationSql: Record<(typeof ENGINE_MIGRATION_FILES)[number], () => string
  * docs/specs/2026-07-15-postgres-backend-design.md). No pragmas — durability
  * is Postgres's job.
  */
-export async function applyEngineMigrations(db: PgDb): Promise<void> {
+export async function applyEngineMigrations(db: PgDb, pgDataDir?: string): Promise<void> {
   await db.query(`
     CREATE TABLE IF NOT EXISTS __valet_engine_migrations (
       filename text PRIMARY KEY,
@@ -64,7 +65,16 @@ export async function applyEngineMigrations(db: PgDb): Promise<void> {
     });
   }
 
-  await assertSchemaVersion(db);
+  await assertSchemaVersion(db, pgDataDir);
+}
+
+/** The corrective action for a stale db. Names the exact PGlite dir when the
+ * caller provided one; a caller on a real Postgres (`DATABASE_URL`) passes
+ * none, and gets the dialect-neutral wording. */
+function staleDbHint(pgDataDir?: string): string {
+  return pgDataDir
+    ? `Pre-1.0: delete the pg data dir (rm -rf ${pgDataDir}) and let it recreate.`
+    : "Pre-1.0: wipe the database and let the migrations recreate it.";
 }
 
 /**
@@ -74,14 +84,14 @@ export async function applyEngineMigrations(db: PgDb): Promise<void> {
  * `engine_meta` table or version mismatch always means a genuinely foreign
  * or pre-tracker database.
  */
-export async function assertSchemaVersion(db: PgDb): Promise<void> {
+export async function assertSchemaVersion(db: PgDb, pgDataDir?: string): Promise<void> {
   const metaTable = await db.query(
     "SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = 'engine_meta'",
   );
   if (metaTable.rows.length === 0) {
     throw new Error(
       "engine_meta table missing after migration — this db predates the submission-lifecycle schema. " +
-        "Pre-1.0: delete the pg data dir (rm -rf ~/.valet/pg) and let it recreate.",
+        staleDbHint(pgDataDir),
     );
   }
   const row = await db.query("SELECT value FROM engine_meta WHERE key = 'schema_version'");
@@ -89,7 +99,7 @@ export async function assertSchemaVersion(db: PgDb): Promise<void> {
   if (value !== ENGINE_SCHEMA_VERSION) {
     throw new Error(
       `engine schema_version mismatch: found ${value ?? "none"}, expected ${ENGINE_SCHEMA_VERSION}. ` +
-        "Pre-1.0: delete the pg data dir (rm -rf ~/.valet/pg) and let it recreate.",
+        staleDbHint(pgDataDir),
     );
   }
 }

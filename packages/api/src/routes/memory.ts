@@ -4,8 +4,10 @@
  *   GET    /api/memory?path=            → file (rendered doc) or directory (virtual index.md)
  *   PUT    /api/memory                  → write (create/update)
  *   POST   /api/memory/patch            → exact-replace body patch
+ *   POST   /api/memory/move             → rename + inbound-link rewrite
  *   DELETE /api/memory?path=            → remove
  *   GET    /api/memory/search?q=        → full-text search, with a matched-text snippet per hit
+ *   GET    /api/memory/links?path=      → one file's derived in/out link edges
  *   GET    /api/memory/export           → OKF bundle manifest (include=all only, decision 12)
  *   POST   /api/memory/import           → OKF bundle import
  *
@@ -26,7 +28,7 @@
  */
 import { Hono, type Context } from "hono";
 import { and, asc, eq } from "drizzle-orm";
-import { completeSimple, getModel } from "@mariozechner/pi-ai";
+import { completeSimple, getModel } from "@earendil-works/pi-ai/compat";
 import { parsePrincipal, type Principal } from "@valet/engine";
 import { NotFoundError, ValidationError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
@@ -40,6 +42,8 @@ import type { GetMemoryTreeResponse, MemoryTreeEntry } from "../wire/types.js";
 import {
   exportFiles,
   importFiles,
+  linksForFile,
+  moveFile,
   patchFile,
   readFile,
   removeFile,
@@ -135,8 +139,15 @@ function authorizeOwner(db: AppDb, owner: Principal, callerId: string, access: S
  * route that forgets to call `resolveScope` serves nothing, while a route
  * that forgot a separate authorization step would serve another team's
  * memory. One chokepoint cannot be half-applied.
+ *
+ * Exported for `routes/artifacts.ts`: sharing acts on a memory scope, so
+ * the share route resolves its caller (internal tool headers, or session
+ * user + `?ownerType=&ownerId=`) through this same chokepoint rather than
+ * a second copy of the ladder. The sandbox branch below never fires there
+ * — the auth middleware only admits sandbox tokens on `/api/memory` and
+ * `/api/sandbox` prefixes.
  */
-async function resolveScope(c: Context<AppEnv>, access: ScopeAccess): Promise<MemoryScope> {
+export async function resolveScope(c: Context<AppEnv>, access: ScopeAccess): Promise<MemoryScope> {
   const internalHeader = c.req.header("x-valet-internal");
   if (isValidInternalToken(internalHeader)) {
     const ownerHeader = c.req.header("x-valet-owner");
@@ -182,8 +193,10 @@ async function resolveScope(c: Context<AppEnv>, access: ScopeAccess): Promise<Me
 }
 
 /** Maps service-layer errors to HTTP responses. Rethrows anything else so
- * the app's global error handler produces a 500. */
-function handleServiceError(err: unknown): { body: { error: string; code?: string }; status: 400 | 404 } | null {
+ * the app's global error handler produces a 500. Exported for
+ * `routes/artifacts.ts`, whose share path runs through the same memory
+ * service and throws the same error shapes. */
+export function handleServiceError(err: unknown): { body: { error: string; code?: string }; status: 400 | 404 } | null {
   if (err instanceof ReservedPathError) {
     return { body: { error: err.message, code: "reserved_path" }, status: 400 };
   }
@@ -440,6 +453,37 @@ memoryRouter.post("/patch", async (c) => {
   }
 });
 
+memoryRouter.post("/move", async (c) => {
+  let scope: MemoryScope;
+  try {
+    scope = await resolveScope(c, "write");
+  } catch (err) {
+    const mapped = handleServiceError(err);
+    if (mapped) return c.json(mapped.body, mapped.status);
+    throw err;
+  }
+
+  let body: { from?: string; to?: string };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  if (!body.from || !body.to) {
+    return c.json({ error: "from and to are required" }, 400);
+  }
+
+  try {
+    const { db } = c.var.providers;
+    const result = await moveFile(db, scope, { from: body.from, to: body.to });
+    return c.json(result);
+  } catch (err) {
+    const mapped = handleServiceError(err);
+    if (mapped) return c.json(mapped.body, mapped.status);
+    throw err;
+  }
+});
+
 memoryRouter.delete("/", async (c) => {
   let scope: MemoryScope;
   try {
@@ -483,6 +527,35 @@ memoryRouter.get("/search", async (c) => {
     const { db } = c.var.providers;
     const results = await searchFiles(db, scope, { query: q, limit });
     return c.json({ results });
+  } catch (err) {
+    const mapped = handleServiceError(err);
+    if (mapped) return c.json(mapped.body, mapped.status);
+    throw err;
+  }
+});
+
+/**
+ * GET /api/memory/links — one file's derived in/out link edges. The
+ * per-file cut of the same derivation `/graph` does whole-bundle.
+ * Own-scope only, same reasoning as `/tree` and `/graph`.
+ */
+memoryRouter.get("/links", async (c) => {
+  let scope: MemoryScope;
+  try {
+    scope = await resolveScope(c, "read");
+  } catch (err) {
+    const mapped = handleServiceError(err);
+    if (mapped) return c.json(mapped.body, mapped.status);
+    throw err;
+  }
+
+  const path = c.req.query("path");
+  if (!path) return c.json({ error: "path is required" }, 400);
+
+  try {
+    const { db } = c.var.providers;
+    const result = await linksForFile(db, scope, path);
+    return c.json(result);
   } catch (err) {
     const mapped = handleServiceError(err);
     if (mapped) return c.json(mapped.body, mapped.status);

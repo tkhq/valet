@@ -20,7 +20,7 @@
 import { describe, it, expect } from "vitest";
 import { spawn } from "node:child_process";
 import { rm } from "node:fs/promises";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@mariozechner/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import { Engine, InMemoryEventStream, InMemorySessionStore, type BusEvent } from "@valet/engine";
 import { DockerSandboxProvider, createSandboxWorkspace } from "../src/index.js";
 

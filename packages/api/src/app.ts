@@ -17,7 +17,7 @@ import { buildAuthMiddleware } from "./middleware/auth.js";
 import { oAuthDiscoveryMetadata, oAuthProtectedResourceMetadata, type ValetAuth } from "./auth/index.js";
 import { mcpHandler } from "./auth/mcp.js";
 import type { AuthConfig } from "./auth/config.js";
-import type { AuthConfigResponse, HealthResponse } from "./wire/types.js";
+import type { AuthConfigResponse, HealthResponse, ReadyResponse } from "./wire/types.js";
 import { VALET_VERSION } from "./version.js";
 import { parseSandboxBackend } from "./providers/sandbox-backend.js";
 import { sessionsRouter, listStandaloneSessions } from "./routes/sessions.js";
@@ -51,6 +51,7 @@ import { linearConnectRouter } from "./routes/linear-connect.js";
 import { reposRouter } from "./routes/repos.js";
 import { sourcesRouter, sourcesPublicRouter } from "./routes/sources.js";
 import { sandboxGitCredentialRouter } from "./routes/sandbox-git-credential.js";
+import { fileUploadRouter } from "./routes/sandbox-file-upload.js";
 import { policiesRouter, actionLogRouter } from "./routes/policies.js";
 import { mePolicyOverridesRouter, meGrantsRouter } from "./routes/me-policies.js";
 import { registerWsRoutes } from "./routes/ws.js";
@@ -62,6 +63,7 @@ import { slackAppRouter } from "./routes/slack-app.js";
 import { SLACK_WEBHOOK_MOUNT } from "./services/slack-app.js";
 import { eventWebhooksRouter } from "./routes/event-webhooks.js";
 import { workflowHooksRouter } from "./routes/workflow-hooks.js";
+import { artifactsRouter, buildArtifactsPublicRouter } from "./routes/artifacts.js";
 import { eventsRouter } from "./routes/events.js";
 import { mountWebStatic } from "./static-web.js";
 import { traceRequests } from "./observability/http-middleware.js";
@@ -89,6 +91,16 @@ export interface CreateAppOpts {
    * server serves the web app. See `static-web.ts`.
    */
   webDistDir?: string;
+  /**
+   * Readiness source for `GET /api/ready`. `main.ts` passes a callback that
+   * flips true once the boot chain's traffic-protecting steps (session
+   * restore, child-watch re-arm, config reconcile) complete — the k8s
+   * readinessProbe reads it, so a new pod takes traffic only after that
+   * work is done, while `/api/health` (liveness/startup) answers from the
+   * moment the port binds. Absent → always ready (test harnesses and
+   * embedded callers have no boot chain).
+   */
+  isReady?: () => boolean;
 }
 
 /**
@@ -183,6 +195,15 @@ export function createApp(
   // that line.
   app.route("/api/hooks", workflowHooksRouter);
 
+  // PUBLIC artifact read (artifacts design) — `GET /api/artifacts/:token`.
+  // The token in the URL is the capability; the handler resolves the
+  // caller itself (`resolveOptionalUser`) because `org`-visibility
+  // artifacts still serve logged-in members. Mounted BEFORE
+  // `buildAuthMiddleware` like the webhook mounts above — do not move it
+  // below that line. The share/list/manage half of the surface is the
+  // authed `artifactsRouter` mounted at the same prefix below the gate.
+  app.route("/api/artifacts", buildArtifactsPublicRouter(auth ?? null));
+
   // Public health check (no auth). Carries the running binary's version and
   // the resolved sandbox backend so `valet status` can report client/server
   // versions + skew (single-binary CLI plan, T6; spec decisions 6 & 9).
@@ -195,6 +216,18 @@ export function createApp(
       sandboxBackend: parseSandboxBackend(process.env.VALET_SANDBOX_BACKEND),
     };
     return c.json(body);
+  });
+
+  // Public readiness check (no auth). Health above answers as soon as the
+  // port binds (liveness: "process up, event loop alive"); this one stays
+  // 503 until the boot chain finishes, so the k8s readinessProbe holds
+  // traffic off a pod that is still restoring — the pod is NEVER killed for
+  // slow boot work, it just stays NotReady. See `main.ts`'s background boot
+  // chain and the sha-a6eadbe rollout RCA that forced the split.
+  app.get("/api/ready", (c) => {
+    const ready = opts.isReady?.() ?? true;
+    const body: ReadyResponse = { ready };
+    return c.json(body, ready ? 200 : 503);
   });
 
   // better-auth owns everything under /api/auth/* (signup, login, session,
@@ -239,11 +272,15 @@ export function createApp(
   app.use("/api/*", buildAuthMiddleware({ auth: auth ?? null, db: providers.db }));
 
   app.route("/api/sessions", sessionsRouter);
-  // Messages + threads share /api/sessions/:id/* — mounted under same prefix.
+  // Messages + threads + file uploads share /api/sessions/:id/* — mounted under same prefix.
   app.route("/api/sessions", messagesRouter);
+  app.route("/api/sessions", fileUploadRouter);
   app.route("/api/admin", adminRouter);
   app.route("/api/teams", teamsRouter);
   app.route("/api/memory", memoryRouter);
+  // Authed artifact surface (share/list/manage). The public `GET /:token`
+  // half is mounted pre-auth above.
+  app.route("/api/artifacts", artifactsRouter);
   app.route("/api/orchestrator", orchestratorRouter);
   app.route("/api/assistants", assistantsRouter);
   app.route("/api/notifications", notificationsRouter);

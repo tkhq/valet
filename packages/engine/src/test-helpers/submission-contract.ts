@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError } from "../errors.js";
+import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError, ValidationError } from "../errors.js";
 import type {
   MessageEntry,
   QueueItem,
@@ -188,6 +188,48 @@ export function runSubmissionLifecycleContract(name: string, ctx: StoreContractC
       await expect(
         store.admitSubmission(SESSION_ID, THREAD_ID, makeItem(), { maxPending: 3 }),
       ).rejects.toThrow(PendingCapError);
+    });
+
+    it("promoteFromItemId refuses a claimed source and does not insert", async () => {
+      const source = makeItem();
+      await store.admitSubmission(SESSION_ID, THREAD_ID, source);
+      const claimed = await store.claimSubmission({
+        sessionId: SESSION_ID,
+        threadId: THREAD_ID,
+        itemId: source.id,
+        attemptId: "att-promo",
+        ownerId: "o",
+      });
+      expect(claimed?.status).toBe("running");
+
+      const clone = makeItem({ metadata: { promotedFromItemId: source.id } });
+      await expect(
+        store.admitSubmission(SESSION_ID, THREAD_ID, clone, {
+          steer: true,
+          promoteFromItemId: source.id,
+        }),
+      ).rejects.toThrow(ValidationError);
+
+      expect(await store.getQueueItem(SESSION_ID, clone.id)).toBeNull();
+      const still = await store.getQueueItem(SESSION_ID, source.id);
+      expect(still?.status).toBe("running");
+      expect(still?.supersededByItemId).toBeUndefined();
+    });
+
+    it("promoteFromItemId admits when the source is still queued", async () => {
+      const source = makeItem({ createdAt: 100, updatedAt: 100 });
+      await store.admitSubmission(SESSION_ID, THREAD_ID, source);
+      const clone = makeItem({
+        createdAt: 200,
+        updatedAt: 200,
+        metadata: { promotedFromItemId: source.id },
+      });
+      const result = await store.admitSubmission(SESSION_ID, THREAD_ID, clone, {
+        steer: true,
+        promoteFromItemId: source.id,
+      });
+      expect(result.admitted).toBe(true);
+      expect(result.supersededItemIds).toContain(source.id);
     });
 
     it("an idempotent replay at the cap dedups instead of throwing PendingCapError", async () => {

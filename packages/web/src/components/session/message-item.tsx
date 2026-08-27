@@ -1,5 +1,11 @@
-import { Bot, User as UserIcon } from "lucide-react";
-import type { MessagePart, PromptImageAttachment } from "@valet/api/wire";
+import { Bot, User as UserIcon, FileText } from "lucide-react";
+import { memo, useMemo } from "react";
+import type {
+  MessagePart,
+  MessageSkillInvocation,
+  PromptImageAttachment,
+  PromptFileAttachment,
+} from "@valet/api/wire";
 import type { SettledOutcome, StreamMessage } from "~/stores/stream";
 import { Avatar, AvatarFallback } from "~/components/primitives/avatar";
 import { Markdown } from "~/components/markdown";
@@ -8,16 +14,20 @@ import { pickRenderer, ToolShell } from "./tool-renderers";
 import { showsLiveBody } from "./tool-renderers/types";
 import { ToolBody } from "./tool-renderers/tool-shell";
 import { Thinking } from "./tool-renderers/thinking";
+import { extractSkillInvocation, type SkillBlock } from "./tool-renderers/skill";
 import { cn } from "~/lib/cn";
 
 export function MessageItem({
   message,
   suppressEmptyPlaceholder = false,
+  queued = false,
 }: {
   message: StreamMessage;
   /** True for the last message while the agent is mid-turn — an empty
    *  assistant row is then a streaming placeholder, not a failed turn. */
   suppressEmptyPlaceholder?: boolean;
+  /** True while this user message is still waiting in the queue. */
+  queued?: boolean;
 }) {
   const isUser = message.role === "user";
   const copyText = messageCopyText(message);
@@ -46,6 +56,11 @@ export function MessageItem({
                 {shortModelLabel(message.model)}
               </span>
             )}
+            {queued && !message.settledOutcome && (
+              <span className="rounded px-1.5 py-0.5 text-[10px] font-medium bg-accent-500/10 text-accent-700 dark:text-accent-400">
+                Queued
+              </span>
+            )}
             {message.settledOutcome && <SettledBadge outcome={message.settledOutcome} />}
             {copyText && (
               <CopyButton
@@ -60,10 +75,21 @@ export function MessageItem({
               <UserAttachmentStrip attachments={message.attachments} />
             )}
             {message.parts.length === 0 && message.content && (
-              <TextBlock text={message.content} />
+              <TextBlock text={message.content} skillMeta={isUser ? message.skill : undefined} detectSkill={isUser} />
             )}
             {message.parts.map((part, i) => (
-              <PartView key={i} part={part} />
+              // Tool cards hold per-mount UI state (expansion, user-touch
+              // override), so key them by their stable callId: an index key
+              // hands one call's state to a different call whenever the
+              // parts array shifts (streaming sweep, message_update
+              // replacement). Text/thinking parts are stateless and
+              // positional, so the index is fine for them.
+              <PartView
+                key={part.kind === "tool_call" ? `tc-${part.callId}` : `${part.kind}-${i}`}
+                part={part}
+                skillMeta={isUser ? message.skill : undefined}
+                detectSkill={isUser}
+              />
             ))}
             {!suppressEmptyPlaceholder && isEmptyAssistantMessage(message) && (
               <p className="text-xs italic text-muted">
@@ -106,14 +132,30 @@ export function messageCopyText(message: StreamMessage): string {
     .filter((p): p is Extract<MessagePart, { kind: "text" }> => p.kind === "text")
     .map((p) => p.text.trim())
     .filter(Boolean);
-  if (texts.length > 0) return texts.join("\n\n");
-  return message.content?.trim() ?? "";
+  const raw = texts.length > 0 ? texts.join("\n\n") : (message.content?.trim() ?? "");
+  // A skill-invocation user message displays as a card plus the typed
+  // arguments — copying the raw multi-KB expansion would paste internal
+  // markup that, re-sent, bypasses dispatch and persists the stale skill
+  // body. Copy the re-sendable command form instead.
+  if (message.role === "user" && raw) {
+    const block = extractSkillInvocation(raw, message.skill);
+    if (block) return `/skill:${block.name}${block.rest ? ` ${block.rest}` : ""}`;
+  }
+  return raw;
 }
 
-function PartView({ part }: { part: MessagePart }) {
+function PartView({
+  part,
+  skillMeta,
+  detectSkill,
+}: {
+  part: MessagePart;
+  skillMeta?: MessageSkillInvocation;
+  detectSkill?: boolean;
+}) {
   switch (part.kind) {
     case "text":
-      return <TextBlock text={part.text} />;
+      return <TextBlock text={part.text} skillMeta={skillMeta} detectSkill={detectSkill} />;
     case "thinking":
       return <Thinking text={part.text} />;
     case "tool_call":
@@ -121,27 +163,103 @@ function PartView({ part }: { part: MessagePart }) {
   }
 }
 
-function TextBlock({ text }: { text: string }) {
+function TextBlock({
+  text,
+  skillMeta,
+  detectSkill = false,
+}: {
+  text: string;
+  /** Wire skill stamp from the enclosing message (user messages only). */
+  skillMeta?: MessageSkillInvocation;
+  /** True only for user messages — the dispatcher writes skill blocks
+   *  nowhere else, and assistant prose that quotes one must stay prose. */
+  detectSkill?: boolean;
+}) {
+  // Memoized so streaming re-renders elsewhere in the thread don't re-run
+  // the extraction on static user text every frame.
+  const block = useMemo(
+    () => (detectSkill ? extractSkillInvocation(text, skillMeta) : null),
+    [text, skillMeta, detectSkill],
+  );
   if (!text) return null;
+  if (block) {
+    return (
+      <>
+        <SkillInvocationBlock block={block} />
+        {block.rest && <Markdown>{block.rest}</Markdown>}
+      </>
+    );
+  }
   return <Markdown>{text}</Markdown>;
 }
 
 /**
- * Read-only thumbnail strip for a user message's image attachments. Mirrors
- * the composer's `<ComposerImageStrip>` visually (small rounded thumbs on a
- * flex-wrap row), minus the remove control — sent messages are immutable.
+ * The transcript card for a skill-invocation user message. Synthesizes a
+ * settled `tool_call` part and renders it through the SAME ToolCallBlock
+ * as the model's own `skill` tool call, so the two paths cannot drift.
+ * Trailing user arguments are the caller's to render — they are the
+ * user's actual prompt, not part of the skill.
  */
-function UserAttachmentStrip({ attachments }: { attachments: PromptImageAttachment[] }) {
+export const SkillInvocationBlock = memo(function SkillInvocationBlock({
+  block,
+}: {
+  block: SkillBlock;
+}) {
+  const part = useMemo<Extract<MessagePart, { kind: "tool_call" }>>(
+    () => ({
+      kind: "tool_call",
+      callId: "skill-invocation",
+      toolName: "skill",
+      status: "completed",
+      args: { name: block.name },
+      result: { text: block.content },
+    }),
+    [block],
+  );
+  return <ToolCallBlock part={part} />;
+});
+
+/**
+ * Read-only strip for a user message's attachments (images and files).
+ * Images render as thumbnails; files as compact badges with icons.
+ * Sent messages are immutable — no remove control.
+ */
+function UserAttachmentStrip({
+  attachments,
+}: {
+  attachments: Array<PromptImageAttachment | PromptFileAttachment>;
+}) {
+  const images = attachments.filter((a): a is PromptImageAttachment => a.kind === "image");
+  const files = attachments.filter((a): a is PromptFileAttachment => a.kind === "file");
+
   return (
-    <div className="flex flex-wrap gap-2 mb-1.5" aria-label="Attached images">
-      {attachments.map((a, i) => (
-        <img
-          key={i}
-          src={a.url}
-          alt={a.name}
-          className="max-h-40 rounded-lg border border-[--border]"
-        />
-      ))}
+    <div className="mb-1.5 space-y-2">
+      {images.length > 0 && (
+        <div className="flex flex-wrap gap-2" aria-label="Attached images">
+          {images.map((a, i) => (
+            <img
+              key={`img-${i}`}
+              src={a.url}
+              alt={a.name}
+              className="max-h-40 rounded-lg border border-[--border]"
+            />
+          ))}
+        </div>
+      )}
+      {files.length > 0 && (
+        <div className="flex flex-wrap gap-2" aria-label="Attached files">
+          {files.map((f, i) => (
+            <div
+              key={`file-${i}`}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-[--border] bg-[--bg-secondary]"
+              title={f.path}
+            >
+              <FileText className="h-4 w-4 text-muted" />
+              <span className="truncate">{f.name}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

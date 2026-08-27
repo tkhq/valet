@@ -9,13 +9,19 @@
  * subscriptions have their own management surface (`/api/event-subscriptions`).
  */
 import { randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventSubscriptions } from "../schema/index.js";
 import { validateSubscription } from "../routes/events.js";
 import { catalogForService } from "../events/ingest.js";
-import { ownedDefinitionRow } from "./service.js";
+import {
+  canAccessTriggerRow,
+  ownedDefinitionRow,
+  triggerAccessSets,
+  type TriggerAccessSets,
+  type WorkflowOwner,
+} from "./service.js";
 
 export interface WorkflowTriggerSummary {
   triggerId: string;
@@ -103,16 +109,64 @@ export async function createWorkflowTrigger(
   return { ok: true, trigger };
 }
 
+/** The row shape `canAccessTriggerRow` judges. The row's own owner is the
+ * CREATOR, not the workflow's owner, so the workflow-reach arm is what
+ * admits teammates. One builder so the list filter and the single-row
+ * loader can never disagree about that shape. */
+function triggerAccessRow(
+  row: typeof eventSubscriptions.$inferSelect,
+  trigger: WorkflowTriggerSummary,
+): { ownerType: string; ownerId: string; workflowId: string } {
+  return { ownerType: row.ownerType, ownerId: row.ownerId, workflowId: trigger.workflowId };
+}
+
+/** Pass `sets` when the caller already holds this request's
+ * `triggerAccessSets` (the aggregated triggers read builds them once for
+ * both lists); omitted, the sets are fetched here. */
 export async function listWorkflowTriggers(
   db: AppDb,
-  orgId: string,
+  owner: WorkflowOwner,
   workflowId?: string,
+  sets?: TriggerAccessSets,
 ): Promise<WorkflowTriggerSummary[]> {
-  const rows = await db.select().from(eventSubscriptions).where(eq(eventSubscriptions.orgId, orgId));
+  const conditions = [eq(eventSubscriptions.orgId, owner.orgId)];
+  // `target` is JSONB; the workflow id lives at target->>'workflowId'.
+  if (workflowId !== undefined) conditions.push(sql`${eventSubscriptions.target}->>'workflowId' = ${workflowId}`);
+  const [rows, resolvedSets] = await Promise.all([
+    db.select().from(eventSubscriptions).where(and(...conditions)),
+    sets ?? triggerAccessSets(db, owner),
+  ]);
   return rows
-    .map(rowToTrigger)
-    .filter((t): t is WorkflowTriggerSummary => t !== null)
-    .filter((t) => workflowId === undefined || t.workflowId === workflowId);
+    .map((row) => {
+      const trigger = rowToTrigger(row);
+      if (!trigger) return null;
+      return canAccessTriggerRow(owner, resolvedSets, triggerAccessRow(row, trigger)) ? trigger : null;
+    })
+    .filter((t): t is WorkflowTriggerSummary => t !== null);
+}
+
+/**
+ * Loads one workflow-target trigger the caller may act on. Missing rows,
+ * non-workflow subscriptions, and rows the caller cannot access all return
+ * null — the route answers the same 404 for each, so a trigger id never
+ * confirms another member's automation exists.
+ */
+async function accessibleTriggerRow(
+  db: AppDb,
+  owner: WorkflowOwner,
+  triggerId: string,
+): Promise<{ row: typeof eventSubscriptions.$inferSelect; trigger: WorkflowTriggerSummary } | null> {
+  const rows = await db
+    .select()
+    .from(eventSubscriptions)
+    .where(and(eq(eventSubscriptions.id, triggerId), eq(eventSubscriptions.orgId, owner.orgId)))
+    .limit(1);
+  const row = rows[0];
+  if (!row) return null;
+  const trigger = rowToTrigger(row);
+  if (!trigger) return null;
+  if (!canAccessTriggerRow(owner, await triggerAccessSets(db, owner), triggerAccessRow(row, trigger))) return null;
+  return { row, trigger };
 }
 
 export interface WorkflowTriggerPatch {
@@ -125,21 +179,16 @@ export interface WorkflowTriggerPatch {
 export async function updateWorkflowTrigger(
   db: AppDb,
   plugins: ValetPlugin[],
-  orgId: string,
+  owner: WorkflowOwner,
   triggerId: string,
   patch: WorkflowTriggerPatch,
 ): Promise<
   | { ok: true; trigger: WorkflowTriggerSummary }
   | { ok: false; status: 400 | 404; error: string }
 > {
-  const rows = await db
-    .select()
-    .from(eventSubscriptions)
-    .where(and(eq(eventSubscriptions.id, triggerId), eq(eventSubscriptions.orgId, orgId)))
-    .limit(1);
-  const row = rows[0];
-  const current = row ? rowToTrigger(row) : null;
-  if (!row || !current) return { ok: false, status: 404, error: "trigger not found" };
+  const accessible = await accessibleTriggerRow(db, owner, triggerId);
+  if (!accessible) return { ok: false, status: 404, error: "trigger not found" };
+  const current = accessible.trigger;
 
   const name = patch.name ?? current.name;
   const eventKeys = patch.eventKeys ?? current.eventKeys;
@@ -155,7 +204,7 @@ export async function updateWorkflowTrigger(
   const updated = await db
     .update(eventSubscriptions)
     .set({ name, eventKeys, filters, enabled: patch.enabled ?? current.enabled, updatedAt: Date.now() })
-    .where(and(eq(eventSubscriptions.id, triggerId), eq(eventSubscriptions.orgId, orgId)))
+    .where(and(eq(eventSubscriptions.id, triggerId), eq(eventSubscriptions.orgId, owner.orgId)))
     .returning();
   const trigger = rowToTrigger(updated[0]!);
   if (!trigger) return { ok: false, status: 400, error: "trigger update produced an unexpected row shape" };
@@ -164,18 +213,13 @@ export async function updateWorkflowTrigger(
 
 export async function deleteWorkflowTrigger(
   db: AppDb,
-  orgId: string,
+  owner: WorkflowOwner,
   triggerId: string,
 ): Promise<"ok" | "not_found"> {
-  const rows = await db
-    .select()
-    .from(eventSubscriptions)
-    .where(and(eq(eventSubscriptions.id, triggerId), eq(eventSubscriptions.orgId, orgId)))
-    .limit(1);
-  const row = rows[0];
-  // Refuse to delete non-workflow subscriptions through this seam — those
-  // belong to the orchestrator subscription surface.
-  if (!row || rowToTrigger(row) === null) return "not_found";
-  await db.delete(eventSubscriptions).where(and(eq(eventSubscriptions.id, triggerId), eq(eventSubscriptions.orgId, orgId)));
+  // `accessibleTriggerRow` also refuses non-workflow subscriptions through
+  // this seam — those belong to the orchestrator subscription surface.
+  const accessible = await accessibleTriggerRow(db, owner, triggerId);
+  if (!accessible) return "not_found";
+  await db.delete(eventSubscriptions).where(and(eq(eventSubscriptions.id, triggerId), eq(eventSubscriptions.orgId, owner.orgId)));
   return "ok";
 }

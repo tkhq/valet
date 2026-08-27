@@ -1,4 +1,4 @@
-import type { Model } from "@mariozechner/pi-ai";
+import type { Model } from "@earendil-works/pi-ai/compat";
 import { eq } from "drizzle-orm";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -36,10 +36,11 @@ import {
   type PluginCatalog,
   type RepoInstructions,
   type Sandbox,
+  type SandboxStatus,
   type SkillSource,
 } from "@valet/engine";
 import { buildPolicyResolver, revokeSessionGrants } from "../policies/service.js";
-import { identityForUser } from "../channels/identity-links.js";
+import { withSlackOwnerMetadata } from "../channels/identity-links.js";
 import type { RepoBinding } from "../wire/types.js";
 import { makeCommandContext, makeWorkspaceSkillsProvider } from "./command-providers.js";
 import { makeRepoInstructionsProvider } from "./repo-instructions.js";
@@ -210,10 +211,12 @@ export interface EngineHostOpts {
    * Best-effort hook (sandbox hibernation plan, Task 3/4 seam): invoked
    * after the idle sweep successfully suspends a session's sandbox. Task 4
    * wires this to stamp `agent_sessions.status = "hibernated"` — this
-   * package (Task 3) only exposes the seam. Errors are caught and logged,
-   * never thrown into the sweep loop.
+   * package (Task 3) only exposes the seam. `sandboxId` is the suspended
+   * attachment's provider handle, recorded by the hibernated-sandbox reaper
+   * as its destroy handle. Errors are caught and logged, never thrown into
+   * the sweep loop.
    */
-  onHibernate?: (sessionId: string) => Promise<void> | void;
+  onHibernate?: (sessionId: string, sandboxId?: string) => Promise<void> | void;
   /**
    * Best-effort hook (sandbox hibernation plan, Task 3/4 seam): invoked the
    * first time a previously-suspended session's attachment reaches `ready`
@@ -401,13 +404,14 @@ export class EngineHost {
 
   /**
    * Idle sweep tick (sandbox hibernation plan, Task 3, decision 3/6):
-   * iterates the host's in-memory session cache ONLY — a session evicted
-   * from cache, or never restored after an api restart, keeps a running
-   * pod/sandbox that this sweep cannot see or suspend. Boot-restore only
-   * rehydrates sessions with unsettled submissions, so an idle-but-running
-   * sandbox from before a restart hibernates only when the session is next
-   * touched (accepted Stage 1 limitation — decision 6 rejected a second,
-   * cluster-side expiry authority).
+   * iterates the host's in-memory session cache ONLY. Sessions an api
+   * restart evicted (boot-restore only rehydrates unsettled work) are the
+   * `IdleHibernationSweep`'s jurisdiction — a DB-driven complement added
+   * after 32 stranded active-but-idle assistant pods saturated a node
+   * (2026-08-22; the original "hibernates only when next touched" Stage 1
+   * limitation proved too expensive). Jurisdiction rule: cached or
+   * mid-build sessions belong HERE (this sweep reads the gateway-touch
+   * activity signal the DB sweep cannot); everything else belongs there.
    */
   private async runIdleSweep(): Promise<void> {
     const idleMs = (this.opts.idleMinutes ?? 0) * 60_000;
@@ -470,7 +474,7 @@ export class EngineHost {
     await session.attachment.suspend();
 
     if (this.opts.onHibernate) {
-      Promise.resolve(this.opts.onHibernate(sessionId)).catch((err) =>
+      Promise.resolve(this.opts.onHibernate(sessionId, session.attachment.sandboxId)).catch((err) =>
         console.error(`EngineHost: onHibernate failed for session ${sessionId}:`, err),
       );
     }
@@ -1045,17 +1049,12 @@ export class EngineHost {
           const stored =
             (await credentials.get(owner, service)) ??
             (await credentials.get({ type: "org", id: orgId }, service));
-          if (stored) {
-            // Activates plugin-slack's dormant private-channel check (its
-            // V2-GAP comment): the identity link is the single source of
-            // truth for the owner's Slack user id, regardless of how the
-            // link was created.
-            const identity = await identityForUser(db, "slack", userId);
-            if (identity) {
-              return { ...stored, metadata: { ...stored.metadata, owner_slack_user_id: identity.externalId } };
-            }
-          }
-          return stored ?? null;
+          // Activates plugin-slack's private-channel check: the identity
+          // link is the single source of truth for the owner's Slack user
+          // id, regardless of how the link was created. Shared with the
+          // workflow action invoker (`plugins/action-invoker.ts`).
+          if (stored) return withSlackOwnerMetadata(db, userId, stored);
+          return null;
         }
         return await credentials.get(owner, service);
       }
@@ -1657,6 +1656,40 @@ export class EngineHost {
   }
 
   /**
+   * Cached OR currently mid-build (`inflight`). The stranded-session
+   * sweep's jurisdiction test: a session being restored right now is not
+   * yet in the cache, but suspending its sandbox out from under the build
+   * would hand the new attachment a scaled-down pod — mid-build counts as
+   * live.
+   */
+  sessionLiveOrBuilding(sessionId: string): boolean {
+    return this.cache.has(sessionId) || this.inflight.has(sessionId);
+  }
+
+  /**
+   * Flip a `hibernated` row back to `active` because the session is about
+   * to be USED — a prompt, a channel delivery, a child_send, an explicit
+   * open. Callers at those intent points invoke this after materializing
+   * the session; read-only paths (GET messages, WS attach, gateway
+   * proxying) must NOT — a view of a hibernated session is not a wake,
+   * and flipping the row on views would un-park suspended sandboxes from
+   * the reaper's retention indefinitely. Chat-only wakes never make a
+   * `ready` attachment transition, so neither `onWake` nor
+   * `onSessionReady` would fire for them — this is their heal path.
+   * Awaited (unlike the attachment-transition hooks) so a caller that
+   * immediately re-stamps status — the pause route — cannot be reordered
+   * against it. Guarded no-op for rows in any other status.
+   */
+  async markSessionUsed(sessionId: string): Promise<void> {
+    if (!this.opts.onWake) return;
+    try {
+      await this.opts.onWake(sessionId);
+    } catch (err) {
+      console.error(`EngineHost: markSessionUsed failed for session ${sessionId}:`, err);
+    }
+  }
+
+  /**
    * Narrow accessor for the rotate sweep (sandbox-reconciliation plan, Task
    * 12). Returns a snapshot of every cached session whose attachment is in a
    * state the sweep can act on (`ready` or `suspended`). Exposes only the
@@ -1707,6 +1740,33 @@ export class EngineHost {
     this.tokenMintedAt.set(sessionId, mintedAt);
   }
 
+  /** The cached session's org, or null when uncached — the capacity
+   * gate's org-resolution seam (`gated-sandbox-provider.ts`). A
+   * provisioning attachment always belongs to a cached session, so a null
+   * here means the create did not come from a session at all. */
+  sessionOrgId(sessionId: string): string | null {
+    return this.cache.get(sessionId)?.session.options.orgId ?? null;
+  }
+
+  /**
+   * How many cached sessions of this org hold (or are building) a live
+   * sandbox: attachment `provisioning` or `ready`. The capacity gate
+   * subtracts its own waiters from this count — their attachments already
+   * read `provisioning` while they hold no pod — so an admitted create
+   * stays counted through provider.create AND the post-create prep window
+   * (a live pod is never invisible to the gate). `suspended` is excluded
+   * because a suspended sandbox holds no pod; `error` frees the slot.
+   */
+  countLiveSandboxSessions(orgId: string): number {
+    let count = 0;
+    for (const entry of this.cache.values()) {
+      if (entry.session.options.orgId !== orgId) continue;
+      const state = entry.session.attachment.state;
+      if (state === "provisioning" || state === "ready") count += 1;
+    }
+    return count;
+  }
+
   /**
    * Stamps `sessionId`'s last-gateway-touch time to `Date.now()` (final-
    * review fix wave, hibernation arc). Called by `routes/gateway-proxy.ts`
@@ -1754,6 +1814,37 @@ export class EngineHost {
    */
   async destroySandbox(sandboxId: string): Promise<void> {
     await this.opts.sandboxProvider.destroy(sandboxId);
+  }
+
+  /**
+   * Suspend one sandbox by its provider id, without touching any session
+   * state. The stranded-session sweep (`idle-hibernation-sweep.ts`) uses
+   * this for an idle ACTIVE session an api restart evicted from the cache
+   * — there is no live attachment to call `suspend()` on. Throws when the
+   * backend has no hibernation seam; callers gate on
+   * `sandboxHibernationCapable()` first.
+   */
+  async suspendSandbox(sandboxId: string): Promise<void> {
+    const suspend = this.opts.sandboxProvider.suspend;
+    if (!suspend) {
+      throw new Error(
+        `EngineHost.suspendSandbox: the ${this.opts.sandboxProvider.backend} backend has no suspend seam. ` +
+          "Gate callers on sandboxHibernationCapable().",
+      );
+    }
+    await suspend.call(this.opts.sandboxProvider, sandboxId);
+  }
+
+  /** The provider's view of one sandbox — `state: "released"` means the
+   * backing resource does not exist. */
+  async sandboxStatus(sandboxId: string): Promise<SandboxStatus> {
+    return this.opts.sandboxProvider.status(sandboxId);
+  }
+
+  /** Recompute the sandbox id a workspace would provision under
+   * (`SandboxProvider.deriveId`); null for backend-assigned ids. */
+  deriveSandboxId(sessionKey: string): string | null {
+    return this.opts.sandboxProvider.deriveId?.(sessionKey) ?? null;
   }
 
   /**
@@ -2128,6 +2219,15 @@ export class EngineHost {
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(policyResolver ? { policyResolver } : {}),
       owner: opts.owner,
+      // Tier 0 (sandbox-tiering spec, 2026-08-22): workflow sessions are
+      // sandbox-less by default, like orchestrators. A session-node turn
+      // that only calls the LLM and api-side plugin actions never
+      // provisions a pod; the lazy PolicySandbox attachment provisions on
+      // the first tool that actually touches the filesystem. The
+      // saturation incident's triage workflow (slack read + LLM, 11-way
+      // foreach, every 10 minutes) would have provisioned ZERO sandboxes
+      // under this flag.
+      warmSandboxOnClaim: false,
       sandbox: {
         workspace: opts.workspace,
         image: this.opts.defaultImage,

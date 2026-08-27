@@ -25,6 +25,7 @@ function renderWithTooltip(ui: ReactElement) {
 
 const patchOrgMutate = vi.fn();
 const patchOrgMutateAsync = vi.fn().mockResolvedValue({ ok: true });
+const patchOrgSettingsMutate = vi.fn();
 const setOrgMemberRoleMutate = vi.fn();
 const navigateMock = vi.fn();
 
@@ -66,6 +67,7 @@ let orgData: {
   name: string;
   createdAt: number;
   callerRole: "admin" | "member";
+  allowPublicArtifacts?: boolean;
   features: { organizations: boolean; ssoTeamSync?: boolean };
 } = {
   id: "org_1",
@@ -163,6 +165,7 @@ vi.mock("~/api/settings", async (importOriginal) => {
       isPending: false,
       error: null,
     }),
+    usePatchOrgSettings: () => ({ mutate: patchOrgSettingsMutate, isPending: false, error: null }),
     useOrgMembers: () => ({ data: orgMembersData, isLoading: false, error: null }),
     useSetOrgMemberRole: () => ({ mutate: setOrgMemberRoleMutate, isPending: false, error: null }),
     useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
@@ -254,6 +257,7 @@ beforeEach(() => {
     name: "Acme",
     createdAt: 0,
     callerRole: "admin",
+    allowPublicArtifacts: false,
     features: { organizations: true },
   };
   orgMembersData = {
@@ -284,6 +288,22 @@ describe("OrganizationGeneralPage", () => {
   it("shows the read-only id row", () => {
     render(<OrganizationGeneralPage />);
     expect(screen.getByLabelText("Organization ID")).toHaveProperty("value", "org_1");
+  });
+
+  it("flipping the public-artifact-links switch PATCHes the org setting", () => {
+    render(<OrganizationGeneralPage />);
+    fireEvent.click(screen.getByRole("switch", { name: "Allow public artifact links" }));
+    expect(patchOrgSettingsMutate).toHaveBeenCalledWith({ allowPublicArtifacts: true });
+  });
+
+  /** The API 403s a member's flip; the switch must not offer it. */
+  it("disables the public-artifact-links switch for a non-admin member", () => {
+    orgData = { ...orgData, callerRole: "member" };
+    render(<OrganizationGeneralPage />);
+    const toggle = screen.getByRole("switch", { name: "Allow public artifact links" });
+    fireEvent.click(toggle);
+    expect(patchOrgSettingsMutate).not.toHaveBeenCalled();
+    expect(screen.getByText(/Only an org admin can change this/)).toBeTruthy();
   });
 
   it("confirming the disable-gate dialog PATCHes the gate off and navigates to profile", async () => {

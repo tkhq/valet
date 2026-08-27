@@ -127,6 +127,12 @@ export function useSessionWebSocket(sessionId: string) {
       cancelled = true;
       if (retryTimer) clearTimeout(retryTimer);
       socket?.close();
+      // `onclose` early-returns once cancelled, so without this the slice
+      // would report "open" forever after the last view of this session
+      // unmounts — and readers that trust an open connection as live gate
+      // truth (the assistant rail's needs-you dot) would keep believing a
+      // stale gate set.
+      setConnection(sessionId, "closed");
     };
     // We intentionally exclude the store actions from the dep list — Zustand
     // returns stable function refs per call but TypeScript can't prove that.

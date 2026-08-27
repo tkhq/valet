@@ -198,6 +198,12 @@ export async function ensureAssistantSession(
     sessionId: assistant.sessionId,
   });
   const sessionId = session.id;
+  // Every caller of this function intends USE (channel delivery, event
+  // dispatch, workflow orchestrator node, the explicit open-conversation
+  // route) — never a passive read. A hibernated row heals to active here;
+  // chat-only assistant turns make no ready transition, so the
+  // attachment-side hooks cannot.
+  await deps.engineHost.markSessionUsed(sessionId);
 
   const existingRows = await deps.db
     .select()

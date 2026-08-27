@@ -13,7 +13,7 @@
  */
 import { Hono, type Context } from "hono";
 import { eq, inArray } from "drizzle-orm";
-import { dispatchCommand } from "@valet/engine";
+import { dispatchCommand, NotFoundError, ValidationError } from "@valet/engine";
 import type { SessionEntry, Session as EngineSession } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { agentSessions, sessionThreads } from "../schema/index.js";
@@ -29,7 +29,9 @@ import type {
   Message,
   MessagePart,
   MessageRole,
+  MessageSkillInvocation,
   PatchThreadRequest,
+  PromptFileAttachment,
   PromptImageAttachment,
   ResolveDecisionRequest,
   SendPromptRequest,
@@ -39,10 +41,14 @@ import type {
 } from "../wire/types.js";
 import { commandResultEntryToMessage, engineGateToWire, engineSignalToWire, engineToWireParts } from "../engine/bridge.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
-import { GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
-import { isOrgAdmin } from "../services/org.js";
+import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
 import type { Providers } from "../providers/types.js";
-import { canViewSession } from "../services/session-access.js";
+import { canResolveSessionGate, canViewSession } from "../services/session-access.js";
+import {
+  getAttachmentRefStore,
+  UnknownAttachmentError,
+  type AttachmentInfo,
+} from "../services/attachment-refs.js";
 
 export const messagesRouter = new Hono<AppEnv>();
 
@@ -54,7 +60,7 @@ export const messagesRouter = new Hono<AppEnv>();
  * model change — in `routes/sessions.ts`) are NOT widened by this; talking
  * to a team's orchestrator is not the same decision as reconfiguring it.
  */
-async function loadOwnedSession(c: Context<AppEnv>) {
+export async function loadOwnedSession(c: Context<AppEnv>) {
   const { db } = c.var.providers;
   const id = c.req.param("id");
   const userId = c.var.user.id;
@@ -79,6 +85,7 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
   // either a `data:` URL or raw bytes; the wire ships one canonical
   // `data:` URL string. Skip entries missing both (nothing to render).
   const wireAttachments = projectAttachments(e.attachments);
+  const skill = skillInvocationFromMetadata(e.metadata, role);
   return {
     id: e.id,
     sessionId,
@@ -90,8 +97,27 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
     queueItemId: e.queueItemId,
     signal: engineSignalToWire(e.signal),
     model: e.model,
+    ...(skill ? { skill } : {}),
     ...(wireAttachments.length > 0 ? { attachments: wireAttachments } : {}),
   };
+}
+
+/**
+ * Wire projection of a skill-invocation stamp. Both producers write the
+ * same keys: the command dispatcher stamps `{ skill, skillArgs }` on a
+ * slash expansion, and `Thread.skill()` stamps `{ skill }` on a host
+ * invocation. Only user entries qualify — the stamp rides the queue item
+ * onto the user entry, never onto assistant output.
+ */
+function skillInvocationFromMetadata(
+  metadata: Record<string, unknown> | undefined,
+  role: MessageRole,
+): MessageSkillInvocation | undefined {
+  if (role !== "user" || !metadata) return undefined;
+  const name = metadata.skill;
+  if (typeof name !== "string" || name.length === 0) return undefined;
+  const args = metadata.skillArgs;
+  return { name, ...(typeof args === "string" && args ? { args } : {}) };
 }
 
 /**
@@ -100,31 +126,47 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
  * accepts today) or `{ data: Uint8Array }` (some day, when a plugin drops a
  * raw buffer in). The wire ships one canonical string per attachment; if
  * neither field is set, drop the entry rather than emit an empty img.
+ *
+ * File attachments (type: "file") are projected as `PromptFileAttachment`
+ * carrying the absolute sandbox path, size, hash, and optional markdown sidecar.
  */
 function projectAttachments(
   attachments: NonNullable<Extract<SessionEntry, { type: "message" }>["attachments"]> | undefined,
-): PromptImageAttachment[] {
+): Array<PromptImageAttachment | PromptFileAttachment> {
   if (!attachments || attachments.length === 0) return [];
-  const out: PromptImageAttachment[] = [];
+  const out: Array<PromptImageAttachment | PromptFileAttachment> = [];
   for (const att of attachments) {
-    if (att.type !== "image") continue;
-    let url: string | undefined;
-    if (typeof att.url === "string" && att.url.startsWith("data:")) {
-      url = att.url;
-    } else if (att.data) {
-      url = `data:${att.mimeType};base64,${Buffer.from(att.data).toString("base64")}`;
-    } else if (typeof att.url === "string") {
-      // Non-data URL (e.g. an http url) is passed through as-is; harmless
-      // if the client happens to already resolve it.
-      url = att.url;
+    if (att.type === "image") {
+      let url: string | undefined;
+      if (typeof att.url === "string" && att.url.startsWith("data:")) {
+        url = att.url;
+      } else if (att.data) {
+        url = `data:${att.mimeType};base64,${Buffer.from(att.data).toString("base64")}`;
+      } else if (typeof att.url === "string") {
+        // Non-data URL (e.g. an http url) is passed through as-is; harmless
+        // if the client happens to already resolve it.
+        url = att.url;
+      }
+      if (!url) continue;
+      out.push({
+        kind: "image",
+        url,
+        mimeType: att.mimeType,
+        name: att.name ?? "image",
+      });
+    } else if (att.type === "file") {
+      out.push({
+        kind: "file",
+        path: att.path,
+        bytes: att.bytes,
+        sha256: att.sha256,
+        mimeType: att.mimeType,
+        markdownPath: att.markdownPath,
+        extractedTo: att.extractedTo,
+        extractedFiles: att.extractedFiles,
+        name: att.name,
+      });
     }
-    if (!url) continue;
-    out.push({
-      kind: "image",
-      url,
-      mimeType: att.mimeType,
-      name: att.name ?? "image",
-    });
   }
   return out;
 }
@@ -408,13 +450,51 @@ export async function submitSessionPrompt(
   text: string,
   threadId?: string,
   attachments?: SendPromptRequest["attachments"],
+  fileRefs?: SendPromptRequest["fileRefs"],
+  admission?: { queueMode?: "followup" | "steer"; promoteItemId?: string },
 ): Promise<SendPromptResponse | null> {
   const { db, engineHost } = providers;
   const engineSession = await engineHost.sessionFor(row.id, await loadSessionMeta(db, row));
+  // A prompt is USE: a hibernated row flips back to active here even when
+  // the turn never touches the sandbox (chat-only — no ready transition
+  // ever fires the attachment-side hooks).
+  await engineHost.markSessionUsed(row.id);
 
   await engineSession.ensureDefaultThread();
   const thread = resolveThread(engineSession, threadId);
   if (!thread) return null;
+
+  if (admission?.promoteItemId) {
+    const receipt = await thread.promoteQueuedItem(admission.promoteItemId);
+    await db
+      .update(agentSessions)
+      .set({ updatedAt: Date.now() })
+      .where(eq(agentSessions.id, row.id));
+    return {
+      messageId: receipt.queueItemId || null,
+      threadId: receipt.threadId,
+    };
+  }
+
+  // Resolve file attachment refs. Consumption is atomic for the whole
+  // batch: the loop is synchronous, so two concurrent submits can never
+  // both take the same ref (single-use holds under races). A bad ref in
+  // the batch — or any failure before the prompt is queued — restores
+  // every ref this request took, so the good refs survive for a retry.
+  const attachmentRefStore = getAttachmentRefStore();
+  const resolvedFileAttachments: AttachmentInfo[] = [];
+
+  // The same ref listed twice in one request attaches its file once.
+  const uniqueRefs = [...new Set((fileRefs ?? []).map((r) => r.ref))];
+  for (const ref of uniqueRefs) {
+    const info = attachmentRefStore.consume(row.id, ref);
+    if (!info) {
+      // Ref not found, expired, already used, or wrong session.
+      attachmentRefStore.restore(resolvedFileAttachments);
+      throw new UnknownAttachmentError(ref);
+    }
+    resolvedFileAttachments.push(info);
+  }
 
   // Resolve "/"-text against the registry BEFORE choosing a path. Every
   // path targets the REQUESTED thread — never silently rerouted:
@@ -429,7 +509,10 @@ export async function submitSessionPrompt(
   // Build the prompt content once per text variant: plain text, or text +
   // attachments. The expand path swaps only the text; the attachment
   // mapping must stay identical on both paths.
-  const mappedAttachments =
+  //
+  // Image attachments map to the existing shape; file attachments add a
+  // system-authored note and persist on MessageEntry.attachments.
+  const imageAttachments =
     attachments && attachments.length > 0
       ? attachments.map((att) => ({
           type: "image" as const,
@@ -438,12 +521,60 @@ export async function submitSessionPrompt(
           name: att.name,
         }))
       : undefined;
-  const withAttachments = (t: string) => (mappedAttachments ? { text: t, attachments: mappedAttachments } : t);
 
-  const receipt =
-    outcome && outcome.kind === "execute"
-      ? await engineSession.prompt(withAttachments(text), { threadId: thread.id })
-      : await thread.submitPrompt(withAttachments(outcome?.kind === "expand" ? outcome.text : text), {});
+  // Build final attachment array: images + files
+  const allAttachments = [
+    ...(imageAttachments ?? []),
+    ...resolvedFileAttachments.map((info) => ({
+      type: "file" as const,
+      path: info.path,
+      bytes: info.bytes,
+      sha256: info.sha256,
+      mimeType: info.mimeType ?? "application/octet-stream",
+      markdownPath: info.markdownPath,
+      extractedTo: info.extractedTo,
+      extractedFiles: info.extractedFiles,
+      name: info.name,
+    })),
+  ];
+
+  // The file-attachment note is NOT baked into the prompt text here: the
+  // engine renders it at transcript-build time from the persisted
+  // MessageEntry.attachments (see `userContentBlocks` in the engine), so
+  // the persisted user text stays clean and slash-command dispatch below
+  // still sees text that starts with "/".
+  const promptText = outcome?.kind === "expand" ? outcome.text : text;
+
+  const withAttachments = (t: string) =>
+    allAttachments.length > 0 ? { text: t, attachments: allAttachments } : t;
+
+  // A submit failure hands the consumed refs back so a retry can resend
+  // them. Once the prompt is queued the refs stay consumed — the
+  // attachments are already part of the persisted prompt.
+  // A context-invocation skill expansion carries the skill identity as
+  // submission metadata; the persisted entry's wire projection renders it
+  // as a skill card without re-parsing the text.
+  const skillMetadata =
+    outcome?.kind === "expand" && outcome.skill
+      ? { skill: outcome.skill.name, skillArgs: outcome.skill.args }
+      : undefined;
+
+  let receipt;
+  try {
+    receipt =
+      outcome && outcome.kind === "execute"
+        ? await engineSession.prompt(withAttachments(promptText), {
+            threadId: thread.id,
+            ...(admission?.queueMode ? { queueMode: admission.queueMode } : {}),
+          })
+        : await thread.submitPrompt(withAttachments(promptText), {
+            ...(admission?.queueMode ? { queueMode: admission.queueMode } : {}),
+            ...(skillMetadata ? { metadata: skillMetadata } : {}),
+          });
+  } catch (err) {
+    attachmentRefStore.restore(resolvedFileAttachments);
+    throw err;
+  }
 
   await db
     .update(agentSessions)
@@ -467,8 +598,18 @@ messagesRouter.post("/:id/messages", async (c) => {
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
-  if (!body.text || typeof body.text !== "string") {
+  const promoteItemId =
+    typeof body.promoteItemId === "string" && body.promoteItemId.length > 0
+      ? body.promoteItemId
+      : undefined;
+  if (!promoteItemId && (!body.text || typeof body.text !== "string")) {
     return c.json({ error: "text is required" }, 400);
+  }
+  if (body.queueMode !== undefined && body.queueMode !== "followup" && body.queueMode !== "steer") {
+    return c.json(
+      { error: "queueMode must be 'followup' or 'steer'. Omit it to use the thread default." },
+      400,
+    );
   }
   if (body.attachments !== undefined) {
     const valid =
@@ -483,10 +624,56 @@ messagesRouter.post("/:id/messages", async (c) => {
       );
     }
   }
+  if (body.fileRefs !== undefined) {
+    const valid =
+      Array.isArray(body.fileRefs) &&
+      body.fileRefs.every((a) => a !== null && typeof a === "object" && typeof a.ref === "string");
+    if (!valid) {
+      return c.json(
+        { error: "fileRefs must be an array of { ref } objects. Re-upload the files and retry." },
+        400,
+      );
+    }
+  }
 
-  const resp = await submitSessionPrompt(c.var.providers, row, body.text, body.threadId, body.attachments);
-  if (!resp) return c.json({ error: "thread not found" }, 404);
-  return c.json(resp, 202);
+  try {
+    const resp = await submitSessionPrompt(
+      c.var.providers,
+      row,
+      body.text ?? "",
+      body.threadId,
+      body.attachments,
+      body.fileRefs,
+      {
+        ...(body.queueMode ? { queueMode: body.queueMode } : {}),
+        ...(promoteItemId ? { promoteItemId } : {}),
+      },
+    );
+    if (!resp) return c.json({ error: "thread not found" }, 404);
+    return c.json(resp, 202);
+  } catch (err) {
+    if (err instanceof UnknownAttachmentError) {
+      return c.json(
+        {
+          error: err.message,
+          corrective: "Re-upload the file and retry.",
+        },
+        400,
+      );
+    }
+    if (err instanceof NotFoundError && err.resource === "queue item") {
+      return c.json(
+        {
+          error: "That queued message was not found. Send the message again.",
+        },
+        404,
+      );
+    }
+    if (err instanceof ValidationError) {
+      return c.json({ error: err.message }, 400);
+    }
+    throw err;
+  }
 });
 
 // ── Thread abort ──────────────────────────────────────────────────────────
@@ -533,8 +720,18 @@ messagesRouter.get("/:id/decisions", async (c) => {
 messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
   const result = await loadEngineSession(c);
   if ("error" in result) return result.error;
-  const { engineSession } = result;
+  const { session, engineSession } = result;
   const gateId = c.req.param("gateId");
+
+  // Explicit resolve authorization, distinct from `loadEngineSession`'s
+  // view check: answering a gate acts on the session's behalf. The same
+  // named check gates the channel gate-callback path.
+  if (!(await canResolveSessionGate(c.var.providers.db, session, c.var.user.id))) {
+    return c.json(
+      { error: "Only the session owner or a member of its team can resolve this approval. Ask one of them." },
+      403,
+    );
+  }
 
   let body: ResolveDecisionRequest;
   try {
@@ -551,11 +748,11 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
   // closed for a non-admin resolver, but only after the engine has already
   // opened/consumed the gate. Rejecting here means a non-admin never sees
   // the button "work" only to fail late; the button itself should be hidden
-  // client-side, this is the server-side backstop.
+  // client-side, this is the server-side backstop. `canApplyAlwaysAllow` is
+  // the shared guard (also called by the channel gate-callback path) and is
+  // checked against the SESSION's org, the scope the policy write lands in.
   if (body.actionId === GATE_ACTION_ALWAYS_ALLOW) {
-    const { db } = c.var.providers;
-    const user = c.var.user;
-    if (!(await isOrgAdmin(db, user.orgId, user.id))) {
+    if (!(await canApplyAlwaysAllow(c.var.providers.db, session.orgId, c.var.user.id))) {
       return c.json({ error: "org admin required for always_allow" }, 403);
     }
   }
@@ -579,8 +776,17 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
 messagesRouter.post("/:id/decisions/:gateId/withdraw", async (c) => {
   const result = await loadEngineSession(c);
   if ("error" in result) return result.error;
-  const { engineSession } = result;
+  const { session, engineSession } = result;
   const gateId = c.req.param("gateId");
+
+  // Same explicit resolve authorization as the resolve route above —
+  // withdrawing settles the gate too.
+  if (!(await canResolveSessionGate(c.var.providers.db, session, c.var.user.id))) {
+    return c.json(
+      { error: "Only the session owner or a member of its team can resolve this approval. Ask one of them." },
+      403,
+    );
+  }
 
   let body: WithdrawDecisionRequest = {};
   try {

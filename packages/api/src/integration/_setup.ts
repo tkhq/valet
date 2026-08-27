@@ -28,6 +28,9 @@ import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost, type EngineHostOpts } from "../engine/host.js";
 import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
 import { buildChildReader, buildChildSender, buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
+import { HibernationReaper } from "../engine/hibernation-reaper.js";
+import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
+import { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
 import { ChannelHost } from "../channels/host.js";
 import { EventDispatcher } from "../events/dispatcher.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
@@ -45,6 +48,7 @@ import { orgMembers, orgs, users, workflowDefinitions } from "../schema/index.js
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { writeExecutionGrant } from "../policies/service.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
+import { WorkflowSandboxReclaimer } from "../workflows/sandbox-reclaim.js";
 import { WorkflowWebhookRateLimiter, type WorkflowWebhookRateLimiterOptions } from "../workflows/webhook-service.js";
 import { createApp, type AuthWiring } from "../app.js";
 import { SourceService } from "../bakes/source-service.js";
@@ -103,6 +107,11 @@ export interface BootTestApiOpts {
    * decision 3) point this at a temp dir with a fixture `index.html`. Unset
    * by every other caller, matching dev's unmounted-static behavior. */
   webDistDir?: string;
+  /** Passed through to `createApp`'s `CreateAppOpts.isReady` — readiness
+   * route tests drive `/api/ready` through a fake boot flag. Unset by every
+   * other caller: no callback means always ready, matching a harness with
+   * no background boot chain. */
+  isReady?: () => boolean;
   /** Public base URL forwarded to the constructed `ChannelHost` (Task 8) —
    * unset by default (long-poll/inert mode). Webhook-mode route tests set
    * this so the host registers webhook transports instead. */
@@ -341,6 +350,24 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   readerRef = buildChildReader(childrenDeps);
   senderRef = buildChildSender(childrenDeps, childWatcher);
 
+  // retentionMs 0 disables the sweep; behavior is tested in engine/hibernation-reaper.test.ts.
+  const hibernationReaper = new HibernationReaper({ db, engineHost, engineStore, retentionMs: 0 });
+
+  // Never started on its timer in tests; behavior is tested in
+  // engine/sandbox-reconcile-sweep.test.ts. ageReportMs 0 keeps the
+  // over-age report quiet even if a test drives sweep() by hand.
+  const sandboxReconcileSweep = new SandboxReconcileSweep({
+    db,
+    provider: sandboxProvider,
+    engineHost,
+    engineStore,
+    ageReportMs: 0,
+  });
+
+  // idleMs 0 disables the sweep; behavior is tested in
+  // engine/idle-hibernation-sweep.test.ts.
+  const idleHibernationSweep = new IdleHibernationSweep({ db, engineHost, engineStore, idleMs: 0 });
+
   const channelHost = new ChannelHost({
     db,
     engineHost,
@@ -356,6 +383,17 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   }
 
   const workflowStore = new PgWorkflowStore(pgdb);
+
+  // Never started on its timer in tests (matches the dispatcher/scheduler
+  // convention) — drive `reclaimRun`/`sweep` manually; behavior is tested
+  // in workflows/sandbox-reclaim.test.ts.
+  const workflowSandboxReclaimer = new WorkflowSandboxReclaimer({
+    db,
+    engineHost,
+    engineStore,
+    store: workflowStore,
+  });
+
   const workflowEngineDeps = buildWorkflowEngineDeps({
     host: engineHost,
     store: workflowStore,
@@ -450,6 +488,10 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     engineCredentials,
     engineHost,
     childWatcher,
+    hibernationReaper,
+    workflowSandboxReclaimer,
+    sandboxReconcileSweep,
+    idleHibernationSweep,
     channelHost,
     workflowStore,
     workflowRunHost,
@@ -474,7 +516,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   }
 
   // Node-only test boot: `createApp` defaults to the Node server adapter.
-  const { startServer } = createApp(providers, authWiring, { webDistDir: opts.webDistDir });
+  const { startServer } = createApp(providers, authWiring, { webDistDir: opts.webDistDir, isReady: opts.isReady });
   const server = await new Promise<ReturnType<typeof startServer>>((resolve) => {
     const handle = startServer({ port, onListen: () => resolve(handle) });
   });

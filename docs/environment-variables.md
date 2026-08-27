@@ -11,7 +11,7 @@ All variables are read by the `@valet/api` server process unless noted. The
 | `ANTHROPIC_API_KEY` | Yes | Anthropic key for the agent loop. The server exits without it. You can add org-level LLM providers in the UI |
 | `PORT` | No | HTTP port (default `8787`. `make dev-local` sets `8788`) |
 | `DATABASE_URL` | No | Postgres connection string. Set → node-postgres. Unset → embedded PGlite under the data dir |
-| `VALET_DATA_DIR` | No | Data root (default `~/.valet`): config, PGlite, blobs, serve.lock |
+| `VALET_DATA_DIR` | No | Data root (default `~/.valet`): config, PGlite, blobs, serve.lock. When it, `VALET_PG_DATA_DIR`, and `DATABASE_URL` are all unset, `make dev-local` sets it to `.valet-dev/` in the worktree, so each worktree gets its own database |
 | `VALET_PG_DATA_DIR` / `VALET_BLOBS_DIR` | No | Override the PGlite and blob-store locations individually |
 | `VALET_ENCRYPTION_KEY` | Prod | AES-256-GCM key for credentials at rest (warned if unset) |
 | `VALET_PLUGINS` | No | Extra plugin module specifiers to load beyond the bundled registry |
@@ -226,6 +226,7 @@ by hand as each user signs in. No wipe and no re-import is needed.
 
 | Variable | Description |
 |----------|-------------|
+| `VALET_MAX_UPLOAD_BYTES` | Per-upload size cap in bytes (default 52428800 = 50 MB). A request whose Content-Length exceeds the cap returns 413 before the body is parsed. A chunked body (no Content-Length) is buffered in memory before the cap check, so the cap bounds well-formed clients, not parser memory. Size the cap to your api memory budget. |
 | `VALET_SANDBOX_BACKEND` | `docker` (default) \| `local` \| `kubernetes` |
 | `VALET_SANDBOX_IMAGE` | Sandbox image ref (required for kubernetes; docker defaults to `node:20-bookworm`) |
 | `VALET_SANDBOX_IDLE_MINUTES` | Idle-hibernation window (default `30`, `0` disables). Only effective on backends with hibernation (kubernetes) |

@@ -4,7 +4,6 @@ import { X, ExternalLink } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   qk,
-  useDecisions,
   useMessages,
   useSession,
   useThreads,
@@ -17,6 +16,8 @@ import {
   useStreamStore,
   usePendingGateForThread,
   useQueueStateForThread,
+  useThreadLiveStatus,
+  useErrorForThread,
 } from "~/stores/stream";
 import { Composer } from "~/components/session/composer";
 import {
@@ -30,6 +31,7 @@ import { PageDropTarget } from "~/components/session/page-drop-target";
 import { SandboxTabs, type SandboxTabId } from "~/components/session/sandbox-tabs";
 import { SessionHeader } from "~/components/session/session-header";
 import { useInvalidateSessionOnModelSwitch } from "~/hooks/use-invalidate-session-on-model-switch";
+import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
 import { Button, Spinner } from "~/components/primitives";
 
 /**
@@ -120,27 +122,19 @@ export function SessionView({
     setThreadMessages(sessionId, effectiveThreadId, messagesQ.data.messages);
   }, [sessionId, effectiveThreadId, messagesQ.data, setThreadMessages]);
 
-  // Bootstrap pending decision gates from REST so the card shows
-  // immediately on load; subsequent gates arrive via the wire.
-  const decisionsQ = useDecisions(sessionId);
-  const setPendingGates = useStreamStore((s) => s.setPendingGates);
-  useEffect(() => {
-    if (!decisionsQ.data) return;
-    setPendingGates(
-      sessionId,
-      decisionsQ.data.gates.filter((g) => g.status === "pending"),
-    );
-  }, [sessionId, decisionsQ.data, setPendingGates]);
+  usePendingGatesSeed(sessionId);
 
   const pendingGate = usePendingGateForThread(sessionId, effectiveThreadId);
+  const threadError = useErrorForThread(sessionId, effectiveThreadId);
 
   // "Agent is busy" for the header badge and the transcript indicator, from
   // the same two signals the composer's Stop/Escape affordance uses: the
   // live `status` events plus the durable queue state (which the WS
   // handshake seeds, so it survives a mid-turn page load or reconnect).
   const threadQueueState = useQueueStateForThread(sessionId, effectiveThreadId);
+  const threadStatus = useThreadLiveStatus(sessionId, effectiveThreadId);
   const agentBusy =
-    (stream.agentStatus !== "idle" && stream.agentStatus !== "error") ||
+    (threadStatus.status !== "idle" && threadStatus.status !== "error") ||
     queueBusy(threadQueueState);
 
   // Auto-title: fire whenever we see an assistant reply on either an
@@ -255,8 +249,8 @@ export function SessionView({
       ) : (
         <SessionHeader
           session={session.data}
-          agentStatus={stream.agentStatus}
-          turnStartedAt={stream.turnStartedAt}
+          agentStatus={threadStatus.status}
+          turnStartedAt={threadStatus.turnStartedAt}
           conn={stream.conn}
           sandbox={stream.sandbox}
           threadId={effectiveThreadId}
@@ -277,14 +271,27 @@ export function SessionView({
             threadId={effectiveThreadId}
             onOpenChild={onOpenChild}
             agentBusy={agentBusy}
+            pendingIds={threadQueueState?.pendingIds}
           />
-          {stream.error && (
+          {threadError && (
             <div className="border-t border-danger-500/30 bg-danger-500/5 px-4 py-2 text-xs text-danger-600">
-              <span className="font-medium">{stream.error.code}:</span> {stream.error.message}
+              <span className="font-medium">{threadError.code}:</span> {threadError.message}
             </div>
           )}
-          {pendingGate && <DecisionGateCard sessionId={sessionId} gate={pendingGate} />}
-          <Composer sessionId={sessionId} threadId={effectiveThreadId} agentStatus={stream.agentStatus} />
+          {/* Keyed by gate id: the question input's draft must not carry
+              over when the pending gate changes (e.g. a thread switch to a
+              different pending gate). */}
+          {pendingGate && (
+            <DecisionGateCard key={pendingGate.id} sessionId={sessionId} gate={pendingGate} />
+          )}
+          {/* No key: drafts are per-thread in the composer-drafts store, so
+              a thread switch swaps the draft without a remount (a remount
+              would orphan in-flight uploads). */}
+          <Composer
+            sessionId={sessionId}
+            threadId={effectiveThreadId}
+            agentStatus={threadStatus.status}
+          />
         </PageDropTarget>
       ) : null}
     </div>

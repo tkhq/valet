@@ -10,6 +10,7 @@
  * see `packages/api/src/wire/types.ts`.
  */
 
+import { formatBytes as formatSize } from "@valet/shared";
 import type { PromptImageAttachment } from "@valet/api/wire";
 
 /**
@@ -79,16 +80,9 @@ export interface ComposerImage {
 // Export the wire type for re-export convenience
 export type { PromptImageAttachment } from "@valet/api/wire";
 
-/** Human size for limits and labels: "4.2 MB", "820 KB", "512 bytes". */
-export function formatSize(bytes: number): string {
-  if (bytes >= 1024 * 1024) {
-    const mb = bytes / (1024 * 1024);
-    // Whole numbers read better on the limits themselves ("5 MB", not "5.0 MB").
-    return `${Number.isInteger(mb) ? mb : mb.toFixed(1)} MB`;
-  }
-  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${bytes} bytes`;
-}
+/** Human size for limits and labels: "4.2 MB", "820 KB", "512 bytes".
+ * The shared formatter, under this file's established local name. */
+export { formatSize };
 
 /**
  * Split incoming files into the ones the composer keeps and a message for
@@ -144,7 +138,9 @@ export function acceptImages<T extends FileMeta>(
   return { accepted, rejected };
 }
 
-function isSupportedImageType(type: string): boolean {
+/** True when the composer's image path handles this MIME type. Anything
+ * else routes to the file-upload path when file uploads are enabled. */
+export function isSupportedImageType(type: string): boolean {
   return SUPPORTED_IMAGE_TYPES.some((supported) => supported === type);
 }
 

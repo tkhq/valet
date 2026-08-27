@@ -77,6 +77,7 @@ const MIN = 60_000;
  * file (the live block self-gates). lib.test.ts asserts the union of these
  * lists + dedicated rows covers the whole integration dir. */
 const INTEGRATION_CORE_FILES = [
+  "src/integration/artifacts.test.ts",
   "src/integration/assistants.test.ts",
   "src/integration/auth.e2e.test.ts",
   "src/integration/memory-routes.test.ts",

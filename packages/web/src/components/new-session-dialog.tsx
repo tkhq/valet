@@ -15,6 +15,7 @@ import { useRepoPrebuild, useRepos } from "~/api/repos";
 import { relativeTime } from "~/lib/relative-time";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { CreateScopeLine } from "~/components/workspace-clause";
+import { matchesNeedle } from "~/lib/text-match";
 
 const DEFAULT_WORKSPACE = "/tmp/valet/workspace";
 const MAX_REPOS = 5;
@@ -287,7 +288,7 @@ function RepoCombobox({
 }) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
-  const matches = repos.filter((r) => r.fullName.toLowerCase().includes(query.trim().toLowerCase()));
+  const matches = repos.filter((r) => matchesNeedle(query, [r.fullName]));
 
   // The close-on-blur timer below outlives the component if the dialog is
   // dismissed within its window: it then sets state on an unmounted tree,

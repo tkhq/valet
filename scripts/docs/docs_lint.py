@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Advisory STE lint over the repo's maintained prose (CLAUDE.md Writing
+"""Thresholded STE lint over the repo's maintained prose (CLAUDE.md Writing
 section). Runs the vendored heuristic linter (scripts/docs/ste_lint.py)
 over the curated file list and fails when a file exceeds its violation
-threshold (violations per 100 words).
+threshold (violations per 100 words). CI blocks on this check (the
+docs-lint job in .github/workflows/ci.yml); the e2e "docs-lint" suite
+runs the same script.
 
 The linter is diagnostic, not certification: quoted example words, code
 identifiers, and possessives produce false positives, so the thresholds
@@ -33,6 +35,11 @@ THRESHOLDS = {
     "docs/security-model.md": 5.0,
     "docs/environment-variables.md": 3.5,
     "docs/api-reference.md": 4.0,
+    "docs/guides/building-a-feature.md": 3.0,
+    "docs/guides/data-fetching.md": 3.0,
+    "docs/guides/placement.md": 2.5,
+    "docs/guides/styling.md": 3.5,
+    "docs/guides/web-performance.md": 2.5,
     "packages/engine/README.md": 3.5,
     "packages/api/README.md": 4.5,
     "packages/web/README.md": 3.0,

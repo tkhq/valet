@@ -31,9 +31,15 @@ metadata:
 spec:
   schedule: {{ .Values.registry.gcSchedule | quote }}
   concurrencyPolicy: Forbid
+  # Without history limits every finished/failed GC Job pod is retained
+  # forever, each occupying a kubelet pod slot.
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
   jobTemplate:
     spec:
       backoffLimit: 0
+      # Same one-hour TTL as the BuildKit Jobs (k8s-builder.ts).
+      ttlSecondsAfterFinished: 3600
       template:
         metadata:
           labels:

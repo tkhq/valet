@@ -28,6 +28,19 @@ describe.skipIf(!bundleExists)("built bundle guards", () => {
     expect(src).toContain('CREATE TABLE "engine_decision_gate_refs"');
     expect(src).toContain('CREATE TABLE "orgs"');
   });
+
+  it("keeps every static import resolvable without node_modules", () => {
+    const src = readFileSync(bundlePath, "utf8");
+    // The bundle must run from a bare directory (`node valet-api.mjs serve`).
+    // Statically importing an externalized package breaks that at load time.
+    // yauzl is pure JS and must stay bundled; @firecrawl/pdf-inspector is
+    // native and external, so its only references must be dynamic import()
+    // (lazy — a missing module fails PDF extraction, not boot).
+    expect(src).not.toMatch(/from\s*["']yauzl["']/);
+    expect(src).not.toMatch(/require\(["']yauzl["']\)/);
+    expect(src).not.toMatch(/from\s*["']@firecrawl\/pdf-inspector["']/);
+    expect(src).toContain('import("@firecrawl/pdf-inspector")');
+  });
 });
 
 describe("copied sibling assets", () => {

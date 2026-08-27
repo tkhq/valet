@@ -37,7 +37,7 @@ Two kinds of configuration exist today, and only one has a home:
 The second kind causes two recurring problems:
 
 - **Dev DB wipes lose everything.** Pre-1.0 we edit migrations in place and
-  wipe `~/.valet/pg` instead of migrating. Every wipe re-requires manual
+  wipe the dev database (`make dev-clean`) instead of migrating. Every wipe re-requires manual
   bootstrap: re-enable the `organizations` feature flag, re-add skill
   sources, re-invite members.
 - **Dev and prod drift.** The same instance state must be re-created by hand
@@ -481,6 +481,13 @@ reconciler upserts a `skillsrc_cfg_*` row; the existing `SkillSyncService`
 poller picks it up like any other source — the config file feeds the
 subsystem, it does not replace it.
 
+A boot that finds an existing `skillsrc_cfg_*` row does not set
+`next_attempt_at` to now. That punch would break a live claim lease and
+wipe retry backoff. The reconciler kicks only a dead claim: `status` is
+`pending`, `last_synced_at` is null, and `updated_at` is older than the
+five-minute claim lease. An error row keeps its backoff. The UPDATE
+repeats `last_synced_at IS NULL` so a finishing sync is not kicked.
+
 - A `skillsrc_cfg_*` row whose (repo, ref, subpath) no longer appears in
   the file → deleted through the existing delete path, which also deletes
   the mirrored `origin='repo'` skills (mirror semantics, per
@@ -509,6 +516,8 @@ mcpServers:
     displayName: Salesforce CRM # optional; connect-UI card title
     url: https://mcp.example.com/mcp   # required; http(s) MCP endpoint
     auth: oauth                 # required; none | oauth | api_key | bearer
+    scopes:                     # oauth only: scopes for the authorize request
+      - crm:read
     tokenEnv: SF_MCP_TOKEN      # bearer only: env var that holds the token
     authQueryParam: API_KEY     # api_key/bearer only: send token as query param
     connectLabel: Acme API key  # api_key only: connect-UI copy
@@ -522,7 +531,21 @@ Auth modes:
 - **`none`** — no credential. The server's tools are visible to every user.
 - **`oauth`** — per-user MCP OAuth against `url` (RFC 8414 discovery +
   RFC 7591 dynamic registration, PKCE). Each user connects in the
-  integrations UI, exactly like the bundled Linear plugin.
+  integrations UI, exactly like the bundled Linear plugin. `scopes` go
+  into the authorize request AND the RFC 7591 registration, and must name
+  at least one scope — an empty list behaves like an absent key, so
+  validation refuses it. Declare them for a scope-gated server: Metabase,
+  for one, grants a token with no scopes when the request names none —
+  the server does not fall back to the registered client's default scope
+  set — and then lists zero tools with no error anywhere. A scope-less
+  entry against a server that advertises `scopes_supported` logs a
+  warning at connect naming the entry and the fix. The callback stores
+  the scopes the token response grants (RFC 6749 `scope`), not the
+  declared list, so a narrower or empty grant is visible on the
+  credential. Changing `scopes` re-registers the dynamic client
+  (integration-oauth design); connected credentials cannot be upgraded by
+  refresh either way — the user must disconnect and reconnect after
+  scopes change.
 - **`api_key`** — per-user manual token entry in the connect UI.
 - **`bearer`** — one instance-wide token, read from `tokenEnv` at boot.
   The file never holds secrets, so the entry names the env var. A `bearer`
@@ -538,8 +561,8 @@ Rules:
   `mcp-config:` prefix so a config entry can never silently dedupe against
   a bundled plugin.
 - Mode-specific keys on the wrong mode fail validation (`tokenEnv` outside
-  `bearer`, `connectLabel` outside `api_key`, `authQueryParam` outside
-  `api_key`/`bearer`).
+  `bearer`, `scopes` outside `oauth`, `connectLabel` outside `api_key`,
+  `authQueryParam` outside `api_key`/`bearer`).
 - `displayName` is the human-readable name the connect UI shows as the
   card title (and in the default `connectLabel` for `api_key` entries).
   When absent, the synthesized plugin title-cases `name`
@@ -599,7 +622,7 @@ plugin's `defaultApprovalMode`, then the `riskLevel` default.
 ## Dev and prod wiring
 
 **Dev** — `make dev-local` exports `VALET_CONFIG=$(PWD)/config/valet.dev.yaml`
-when that file exists. After `rm -rf ~/.valet/pg`, the next boot restores
+when that file exists. After `make dev-clean`, the next boot restores
 the org flags, pending invites, and skill sources with no manual steps.
 
 **Prod (helm)** — the chart gains `api.instanceConfig` (string). When set,

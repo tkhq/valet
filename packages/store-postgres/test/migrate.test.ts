@@ -89,6 +89,12 @@ describe("applyEngineMigrations", () => {
     await db.query("UPDATE engine_meta SET value = $1 WHERE key = 'schema_version'", ["999"]);
     try {
       await expect(assertSchemaVersion(db)).rejects.toThrow(/schema_version mismatch/);
+      // The corrective action names the exact PGlite dir when the caller
+      // provides one, and stays dialect-neutral when it does not.
+      await expect(assertSchemaVersion(db, "/some/worktree/.valet-dev/pg")).rejects.toThrow(
+        /rm -rf \/some\/worktree\/\.valet-dev\/pg/,
+      );
+      await expect(assertSchemaVersion(db)).rejects.toThrow(/wipe the database/);
     } finally {
       await db.query("UPDATE engine_meta SET value = $1 WHERE key = 'schema_version'", [
         ENGINE_SCHEMA_VERSION,

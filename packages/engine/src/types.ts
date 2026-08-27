@@ -1,5 +1,5 @@
 import type { TSchema, Static } from "typebox";
-import type { Model } from "@mariozechner/pi-ai";
+import type { Model } from "@earendil-works/pi-ai/compat";
 // Type-only import — erased at runtime, so the plugin-catalog ↔ types cycle
 // exists only for the type checker (both directions are `import type`).
 import type { ApprovalMode } from "./plugin-catalog.js";
@@ -254,7 +254,27 @@ export type PromptContent =
 
 export type PromptAttachment =
   | { type: "image"; url?: string; data?: Uint8Array; mimeType: string; name?: string }
-  | { type: "file"; url?: string; data?: Uint8Array; mimeType: string; name: string }
+  | {
+      /**
+       * A file attachment. Two producer shapes share this variant:
+       * - Channel media (`data` + `mimeType`): raw bytes fetched from a
+       *   channel transport.
+       * - Sandbox files (`path` + `bytes` + `sha256`): a file that already
+       *   lives in the session sandbox (upload subsystem). These persist as
+       *   the `type: "file"` variant of `MessageEntry.attachments`.
+       */
+      type: "file";
+      url?: string;
+      data?: Uint8Array;
+      mimeType?: string;
+      path?: string; // absolute path inside the sandbox
+      bytes?: number;
+      sha256?: string;
+      markdownPath?: string; // for PDFs with a text sidecar
+      extractedTo?: string; // extract root for a zip that was extracted
+      extractedFiles?: string[]; // full listing of extracted files
+      name: string;
+    }
   | { type: "audio"; url?: string; data?: Uint8Array; mimeType: string; name?: string };
 
 export interface PromptOptions {
@@ -273,6 +293,12 @@ export interface PromptOptions {
   metadata?: Record<string, unknown>;
   /** Idempotent admission key. Re-submitting the same dispatchId returns the existing submission. */
   dispatchId?: string;
+  /**
+   * Promote this already-queued item into a steer instead of admitting a
+   * new prompt. `submitPrompt` rejects this field — call
+   * `Thread.promoteQueuedItem` instead.
+   */
+  promoteItemId?: string;
   /**
    * Set only by trusted host code (never by route handlers relaying raw
    * client input) when admitting a signal on behalf of another session —
@@ -363,10 +389,24 @@ export interface MessageEntry extends BaseEntry {
   /** Present only when the model is in pi-ai's pricing registry; unpriced turns omit. */
   cost?: MessageCost;
   /**
-   * Image attachments on a user message. Only present on user entries with
-   * attached images; never on assistant, tool, or system entries.
+   * Attachments on a user message (images or files). Only present on user
+   * entries with attached content; never on assistant, tool, or system entries.
+   * File attachments carry sandbox paths; image attachments carry URLs or data.
    */
-  attachments?: Array<{ type: "image"; url?: string; data?: Uint8Array; mimeType: string; name?: string }>;
+  attachments?: Array<
+    | { type: "image"; url?: string; data?: Uint8Array; mimeType: string; name?: string }
+    | {
+        type: "file";
+        path: string; // absolute path inside the sandbox
+        bytes: number;
+        sha256: string;
+        mimeType?: string;
+        markdownPath?: string; // for PDFs with a text sidecar
+        extractedTo?: string; // extract root for a zip that was extracted (e.g. "/workspace/uploads/data/")
+        extractedFiles?: string[]; // full listing of extracted files (may be truncated by producer)
+        name: string; // display name (basename of path)
+      }
+  >;
   /**
    * Present when this user entry originated from a `SignalContent` prompt.
    * `content` holds the raw (unescaped) body; rendering into LLM context
@@ -924,6 +964,16 @@ export interface SandboxCreateOpts {
   timeout?: number;
   resources?: { cpu?: number; memory?: string };
   metadata?: Record<string, unknown>;
+  /**
+   * The owning session's id. `Engine.materializeSandbox` stamps this on
+   * every attachment-built sandbox, and its stamp always wins — a value a
+   * host sets here is overwritten, so an opts object cloned from another
+   * session can never mis-attribute ownership. Providers that implement
+   * `list()` record it on the backing resource (sandbox-kubernetes: a CR
+   * annotation) so a reconcile sweep can map a listed sandbox back to its
+   * session.
+   */
+  sessionId?: string;
   /** Interactive-service profile. Default "headless" (agent-only). "full"
    * additionally runs ttyd + code-server + the auth gateway. */
   profile?: "headless" | "full";
@@ -1006,9 +1056,35 @@ export interface SandboxCapabilities {
 
 export interface SandboxStatus {
   id: string;
+  /**
+   * `released` is load-bearing for lifecycle sweeps: it means "the
+   * backing resource does not exist" — the workflow reclaimer permanently
+   * skips its destroy on it, and the stranded-idle sweep stamps rows
+   * hibernated without a suspend. Providers MUST throw on transient
+   * backend errors rather than report `released` (kubernetes does).
+   * Caveat: sandbox-docker reports `released` for any id its in-process
+   * map has forgotten (every sandbox after an api restart, even with the
+   * container still running) — today only capability gates
+   * (`deriveId`/`hibernation`, both absent on docker) keep the sweeps off
+   * that path; fix the map-miss conflation before pointing a
+   * released-trusting consumer at docker.
+   */
   state: "provisioning" | "ready" | "idle" | "snapshotting" | "released" | "error";
   startedAt?: number;
   error?: string;
+}
+
+/** One provider-side sandbox, as reported by `SandboxProvider.list` — the
+ * reconcile sweep's raw material. */
+export interface SandboxListing {
+  id: string;
+  /** The owning session recorded at create time (`SandboxCreateOpts.sessionId`).
+   * Null for sandboxes created before session stamping existed. */
+  sessionId: string | null;
+  /** Backend creation time (ms since epoch); null when the backend does not
+   * report one. The reconcile sweep's over-age report skips sandboxes
+   * without it. */
+  createdAtMs: number | null;
 }
 
 export interface SandboxProvider {
@@ -1031,6 +1107,24 @@ export interface SandboxProvider {
    * falls back to `destroy`.
    */
   release?(id: string): Promise<void>;
+  /**
+   * Optional deterministic-id seam. Providers whose sandbox ids are a pure
+   * function of the session key (sandbox-kubernetes: `sandboxCrName`)
+   * implement this so reapers can recompute a destroy handle that was never
+   * recorded. Providers with backend-assigned ids (modal/docker) must NOT
+   * implement this.
+   */
+  deriveId?(sessionKey: string): string;
+  /**
+   * Optional enumeration seam for reconcile sweeps: every sandbox this
+   * provider currently backs, with the owning session recorded at create
+   * time. Providers whose sandboxes durably outlive the api process
+   * (sandbox-kubernetes: the CR is the record) implement this so an
+   * orphan/TTL sweep can find leaked sandboxes no DB row points at.
+   * Providers whose handles are process-local (docker/local) omit it — a
+   * sweep treats an absent `list` as "nothing to reconcile".
+   */
+  list?(): Promise<SandboxListing[]>;
   /**
    * Optional hibernation seam (paired with `SandboxCapabilities.hibernation`).
    * `suspend` scales the sandbox to zero while retaining its workspace; `resume`
@@ -1322,12 +1416,17 @@ export interface SessionStore {
    * >= maxPending. Doing the check and the insert in one transaction is what
    * closes the TOCTOU window a separate pre-check would leave open under
    * concurrent admissions.
+   *
+   * opts.promoteFromItemId, when set, requires that item to still be queued
+   * and not superseded on this thread. If it is not, the call throws
+   * ValidationError and does not insert. Promote-to-steer uses this so a
+   * concurrent claim cannot admit a second user entry.
    */
   admitSubmission(
     sessionId: string,
     threadId: string,
     item: QueueItem,
-    opts?: { steer?: boolean; maxPending?: number },
+    opts?: { steer?: boolean; maxPending?: number; promoteFromItemId?: string },
   ): Promise<{ item: QueueItem; admitted: boolean; supersededItemIds: string[] }>;
   /**
    * CAS queued→running. Succeeds only when itemId is the thread's runnable

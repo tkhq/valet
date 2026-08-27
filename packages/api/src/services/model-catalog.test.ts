@@ -5,7 +5,7 @@
  * `docs/plans/2026-07-16-llm-providers.md` Task 4.
  */
 import { describe, expect, it, beforeEach, vi } from "vitest";
-import { getModels } from "@mariozechner/pi-ai";
+import { getModels } from "@earendil-works/pi-ai/compat";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";

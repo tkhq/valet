@@ -5,7 +5,7 @@
  * (no Stop button, Escape inert) until the next transition event.
  */
 import { describe, it, expect } from "vitest";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@mariozechner/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, Type } from "@earendil-works/pi-ai/compat";
 import {
   Engine,
   InMemoryEventStream,

@@ -349,10 +349,10 @@ export function useSendPrompt(sessionId: string) {
   return useMutation<
     { messageId: string | null; threadId: string },
     Error,
-    { text: string; threadId?: string; attachments?: import("@valet/api/wire").PromptImageAttachment[] }
+    import("@valet/api/wire").SendPromptRequest
   >({
-    mutationFn: ({ text, threadId, attachments }) =>
-      api.sendPrompt(sessionId, { text, threadId, attachments }),
+    mutationFn: (body) =>
+      api.sendPrompt(sessionId, body),
     // Invalidation is not needed for prompts — live updates flow through the
     // WS store. Slash commands are the exception: the command_result entry
     // persists before the POST returns, so a WS subscription still in its

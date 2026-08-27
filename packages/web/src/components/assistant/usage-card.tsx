@@ -23,7 +23,11 @@ export function UsageCard() {
   });
 
   const data = usageQ.data;
-  const maxMemberCost = Math.max(0, ...(data?.org?.members.map((m) => m.costUsd) ?? []));
+  // Rank only after the viewer's identity settles (loaded or errored).
+  // Ranking while /api/me is still in flight would paint the list without
+  // the "You" row, then append it and shift the layout when the id lands.
+  const org = data?.org && !me.isPending ? topMembers(data.org.members, me.data?.id) : null;
+  const maxMemberCost = Math.max(0, ...(org?.shown.map((m) => m.costUsd) ?? []));
 
   return (
     <section className="rounded-lg border border-line bg-paper flex flex-col min-h-0">
@@ -60,21 +64,18 @@ export function UsageCard() {
               <WindowStat label="30 days" window={data.me.month} />
             </div>
 
-            {data.org && data.org.members.length > 1 && (
+            {org && org.shown.length > 1 && (
               <div className="pt-1 space-y-1.5">
-                {/* These rows are `data.org.members` — the whole org
-                    roster, never a team's. "Team" now names a real,
-                    narrower thing in this product, so calling this that
-                    would misreport whose spend is on screen. */}
-                <div className="flex items-center justify-between">
-                  <div className="text-[10px] font-medium uppercase tracking-wider text-muted">
-                    Organization
-                  </div>
-                  <div className="text-[10px] text-muted">
-                    last {data.org.windowDays} days
-                  </div>
+                {/* These rows rank `data.org.members` — the whole org
+                    roster, never a team's — capped at the top spenders,
+                    with the viewer always included (see topMembers).
+                    "Team" now names a real, narrower thing in this
+                    product, so calling this that would misreport whose
+                    spend is on screen. */}
+                <div className="text-[10px] font-medium uppercase tracking-wider text-muted">
+                  Organization
                 </div>
-                {data.org.members.map((m) => (
+                {org.shown.map((m) => (
                   <MemberBar
                     key={m.userId}
                     member={m}
@@ -82,6 +83,9 @@ export function UsageCard() {
                     isMe={m.userId === me.data?.id}
                   />
                 ))}
+                {org.hidden > 0 && (
+                  <div className="text-[10px] text-muted">+ {org.hidden} more</div>
+                )}
               </div>
             )}
           </>
@@ -89,6 +93,58 @@ export function UsageCard() {
       </div>
     </section>
   );
+}
+
+/**
+ * Max org rows the card shows. Past this depth the list pushes the card
+ * far below the fold and the tail bars flatten into noise.
+ */
+export const ORG_MEMBER_CAP = 15;
+
+/**
+ * Top spenders for the org list, capped at ORG_MEMBER_CAP. Re-sorts with
+ * the API's own comparator (cost desc, then tokens — the other copy lives
+ * in packages/api/src/routes/usage.ts; keep them in sync) instead of
+ * trusting wire order, so the cap always drops the cheapest rows.
+ *
+ * When meId is known the viewer is always on the list: a viewer ranked
+ * below the cap is appended as one extra row, and a viewer with no spend
+ * at all gets a synthesized $0 row — the API aggregates only users with
+ * usage rows, so a zero-spend viewer is absent from `members` entirely.
+ * Exported pure function so the behavior is testable without rendering
+ * React.
+ */
+export function topMembers(
+  members: UsageMemberSummary[],
+  meId?: string,
+): {
+  shown: UsageMemberSummary[];
+  hidden: number;
+} {
+  const sorted = [...members].sort(
+    (a, b) => b.costUsd - a.costUsd || b.totalTokens - a.totalTokens,
+  );
+  const meIdx = meId === undefined ? -1 : sorted.findIndex((m) => m.userId === meId);
+  const shown = sorted.slice(0, ORG_MEMBER_CAP);
+  if (meIdx >= ORG_MEMBER_CAP) shown.push(sorted[meIdx]);
+  // `hidden` counts real members only, so it is fixed before the
+  // synthetic $0 row (which hides nobody) is appended.
+  const hidden = members.length - shown.length;
+  if (meId !== undefined && meIdx === -1) {
+    shown.push({
+      userId: meId,
+      name: "",
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 0,
+      costUsd: 0,
+      turns: 0,
+      unpricedTurns: 0,
+    });
+  }
+  return { shown, hidden };
 }
 
 export interface WindowCostDisplay {
@@ -148,8 +204,11 @@ function MemberBar({
         {isMe ? "You" : member.name}
       </span>
       <div className="flex-1 h-1.5 rounded-full bg-ink-wash overflow-hidden">
+        {/* `bg-muted-wash`, never `bg-muted/50`: the slash modifier on a
+            `var()` token emits no rule, which shipped these bars invisible
+            for everyone but the viewer. See theme.css's trap note. */}
         <div
-          className={cn("h-full rounded-full", isMe ? "bg-moss" : "bg-muted/50")}
+          className={cn("h-full rounded-full", isMe ? "bg-moss" : "bg-muted-wash")}
           style={{ width: `${Math.max(2, Math.round(fraction * 100))}%` }}
         />
       </div>

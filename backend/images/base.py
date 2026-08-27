@@ -17,7 +17,7 @@ import modal
 
 from config import NODE_VERSION
 
-OPENCODE_VERSION = "1.1.52"
+OPENCODE_VERSION = "1.18.18"
 
 
 def get_base_image() -> modal.Image:

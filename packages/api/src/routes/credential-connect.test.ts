@@ -22,11 +22,18 @@ import {
 let api: TestApi | undefined;
 let fake: FakeOAuthServer;
 
-function mcpPlugin(serverUrl: string): ValetPlugin {
+function mcpPlugin(serverUrl: string, scopes?: string[]): ValetPlugin {
   return {
     name: "linear",
     version: "0.1.0",
-    credentials: [{ type: "oauth2", configKeys: ["accessToken"], oauth: { mode: "mcp", serverUrl } }],
+    credentials: [
+      {
+        type: "oauth2",
+        ...(scopes ? { scopes } : {}),
+        configKeys: ["accessToken"],
+        oauth: { mode: "mcp", serverUrl },
+      },
+    ],
   };
 }
 function authCodePlugin(url: string): ValetPlugin {
@@ -216,6 +223,49 @@ describe("GET /api/credentials/oauth/callback", () => {
     expect(credentials[0]).toMatchObject({ service: "linear", type: "oauth2" });
     expect(typeof credentials[0]?.expiresAt).toBe("number"); // expires_in: 3600 mapped
     expect(JSON.stringify(credentials)).not.toContain("at-1");
+  });
+
+  it("mcp mode: stores the scopes the token response grants, not the declared list", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["agent:query", "agent:search", "agent:extra"])] });
+    fake.tokenResponse = { access_token: "at-1", expires_in: 3600, scope: "agent:query agent:search" };
+    const authUrl = await startConnect(api.baseUrl, "linear");
+    const state = authUrl.searchParams.get("state") ?? "";
+
+    await fetch(`${api.baseUrl}/api/credentials/oauth/callback?code=c&state=${encodeURIComponent(state)}`, {
+      redirect: "manual",
+    });
+
+    const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "linear");
+    expect(stored?.scopes).toEqual(["agent:query", "agent:search"]);
+  });
+
+  it("mcp mode: an empty scope grant stores an empty scopes list, not the declared one", async () => {
+    // Metabase returns scope: "" for a zero-scope token — the credential must
+    // record that honestly instead of the declared list masking the failure.
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["agent:query"])] });
+    fake.tokenResponse = { access_token: "at-1", expires_in: 3600, scope: "" };
+    const authUrl = await startConnect(api.baseUrl, "linear");
+    const state = authUrl.searchParams.get("state") ?? "";
+
+    await fetch(`${api.baseUrl}/api/credentials/oauth/callback?code=c&state=${encodeURIComponent(state)}`, {
+      redirect: "manual",
+    });
+
+    const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "linear");
+    expect(stored?.scopes).toEqual([]);
+  });
+
+  it("mcp mode: a token response without scope falls back to the declared list", async () => {
+    api = await bootTestApi({ plugins: [mcpPlugin(fake.url, ["agent:query"])] });
+    const authUrl = await startConnect(api.baseUrl, "linear");
+    const state = authUrl.searchParams.get("state") ?? "";
+
+    await fetch(`${api.baseUrl}/api/credentials/oauth/callback?code=c&state=${encodeURIComponent(state)}`, {
+      redirect: "manual",
+    });
+
+    const stored = await api.providers.engineCredentials.get({ type: "user", id: "local-user" }, "linear");
+    expect(stored?.scopes).toEqual(["agent:query"]);
   });
 
   it("provider error param redirects to /integrations with the error code", async () => {

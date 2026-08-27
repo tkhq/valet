@@ -405,6 +405,18 @@ export interface MessageCommand {
   ok: boolean;
 }
 
+/**
+ * Present on a user message that is a skill invocation: a slash-command
+ * expansion (stamped as submission metadata at dispatch) or a host-invoked
+ * `Thread.skill()` submission. `args` is the raw text the user typed after
+ * the command; absent for host invocations. The client renders such a
+ * message as a skill card instead of prose.
+ */
+export interface MessageSkillInvocation {
+  name: string;
+  args?: string;
+}
+
 export interface Message {
   id: string;
   sessionId: string;
@@ -435,18 +447,24 @@ export interface Message {
    */
   command?: MessageCommand;
   /**
+   * Present on a user message that is a skill invocation (see
+   * `MessageSkillInvocation`). Projected from the persisted entry's
+   * `metadata.skill` / `metadata.skillArgs`.
+   */
+  skill?: MessageSkillInvocation;
+  /**
    * Model that produced this entry (assistant messages). Gives the reply
    * visible attribution so a model switch is verifiable in the transcript,
    * not only in the header picker.
    */
   model?: string;
   /**
-   * Image attachments on a user message. Populated for user entries with
-   * attached images; never on assistant, tool, or system entries. The
+   * Attachments on a user message (images or files). Populated for user entries
+   * with attached content; never on assistant, tool, or system entries. The
    * engine's `MessageEntry.attachments` is the source of truth; this is
    * the wire projection.
    */
-  attachments?: PromptImageAttachment[];
+  attachments?: Array<PromptImageAttachment | PromptFileAttachment>;
 }
 
 export interface ListMessagesResponse {
@@ -463,12 +481,41 @@ export interface PromptImageAttachment {
   name: string;
 }
 
+export interface PromptFileAttachment {
+  kind: "file";
+  path: string;
+  bytes: number;
+  sha256: string;
+  mimeType?: string;
+  markdownPath?: string;
+  extractedTo?: string;
+  extractedFiles?: string[];
+  name: string;
+}
+
 export interface SendPromptRequest {
+  /**
+   * Prompt text. Required unless `promoteItemId` is set — a promote
+   * reuses the queued item's content and does not admit a new user entry.
+   */
   text: string;
   /** Target thread id. If omitted, server uses the session's default thread. */
   threadId?: string;
   /** Image attachments for the message. */
   attachments?: PromptImageAttachment[];
+  /** File attachment refs (from POST /sessions/:id/files). Single-use. */
+  fileRefs?: Array<{ ref: string }>;
+  /**
+   * Per-submit queue mode. When omitted, the thread's persisted default
+   * applies. Web mid-turn submits send `followup` so a user orchestrator
+   * (thread default `steer`) queues instead of aborting.
+   */
+  queueMode?: "followup" | "steer";
+  /**
+   * Promote this already-queued item into a steer. Same item content, no
+   * second user entry. `text` may be empty.
+   */
+  promoteItemId?: string;
 }
 
 export interface SendPromptResponse {
@@ -2082,12 +2129,72 @@ export type PatchMeResponse = MeResponse;
 /** Org-level settings response for `PATCH /api/org/settings`. */
 export interface OrgSettingsResponse {
   bareSkillCommands: boolean;
+  allowPublicArtifacts: boolean;
 }
 
 /** Org-level settings request for `PATCH /api/org/settings`. */
 export interface PatchOrgSettingsRequest {
   bareSkillCommands?: boolean;
+  allowPublicArtifacts?: boolean;
 }
+
+// ─── Artifacts (2026-08-22 artifacts design) ────────────────────────────
+
+export type ArtifactVisibility = "org" | "public";
+
+/** `POST /api/artifacts/share` — snapshot a memory file into a share link
+ * (or revoke the existing one). */
+export interface ShareArtifactRequest {
+  path: string;
+  revoke?: boolean;
+}
+
+export interface ShareArtifactResponse {
+  id: string;
+  path: string;
+  url: string;
+  visibility: ArtifactVisibility;
+  updatedAt: number;
+}
+
+/** `GET /api/artifacts/:token` — the public read. Content is the snapshot
+ * taken at share time, never the live memory file. */
+export interface GetArtifactResponse {
+  title: string;
+  content: string;
+  visibility: ArtifactVisibility;
+  updatedAt: number;
+  /** Sharer's display name — only present for `org` visibility, where the
+   * viewer is a logged-in teammate. Anonymous readers never see it. */
+  sharedBy?: string;
+}
+
+export interface ArtifactListItem {
+  id: string;
+  path: string;
+  title: string;
+  url: string;
+  visibility: ArtifactVisibility;
+  /** Who shared it. An org admin's list contains every member's artifacts,
+   * and paths are conventional (`journal/2026-08-27.md`), so a path-only
+   * client match can hit another member's row. Filter on this too. */
+  actorUserId: string;
+  revoked: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ListArtifactsResponse {
+  artifacts: ArtifactListItem[];
+}
+
+/** `PATCH /api/artifacts/:id` — widen or narrow one artifact. Widening to
+ * `public` requires the org's `allowPublicArtifacts` opt-in. */
+export interface PatchArtifactRequest {
+  visibility: ArtifactVisibility;
+}
+
+export type PatchArtifactResponse = ArtifactListItem;
 
 /** Namespaced `id` (`{providerKindOrRowId}/{modelId}`, bare = Anthropic
  * back-compat) — see `services/model-catalog.ts`. `active: false` marks a
@@ -2257,6 +2364,10 @@ export interface OrgResponse {
    * `auth.sso.teams.groups`, the file overwrites this list at every boot.
    */
   ssoTeamGroups: string[];
+  /** Whether this org allows widening an artifact to anonymous access —
+   * readable by every member (the share UI needs it to know whether to
+   * offer the `public` option), writable only via `PATCH /api/org/settings`. */
+  allowPublicArtifacts: boolean;
   callerRole: "admin" | "member";
 }
 
@@ -2986,6 +3097,15 @@ export interface HealthResponse {
   sandboxBackend?: string;
 }
 
+/** `GET /api/ready` — readiness, distinct from `/api/health` liveness. 200
+ * with `ready: true` once the boot chain's traffic-protecting steps
+ * (session restore, config reconcile) complete; 503 with `ready: false`
+ * before that. The k8s readinessProbe consumes the status code; `ready`
+ * mirrors it for humans. */
+export interface ReadyResponse {
+  ready: boolean;
+}
+
 // ── REST: slash commands (slash-commands plan, Task 10) ──────────────────
 //
 // `GET /api/sessions/:id/commands` — the merged command registry for a
@@ -3374,4 +3494,33 @@ export interface ProxyRequestDetail extends ProxyRequestListItem {
   parseError: string | null;
   providerResponseId: string | null;
   previousResponseId: string | null;
+}
+
+// ── Sandbox file upload ──────────────────────────────────────────────────
+
+export interface PostSessionFileUploadPdfInfo {
+  type: "TextBased" | "Scanned" | "ImageBased" | "Mixed";
+  confidence: number;
+  pages: number;
+  pagesNeedingOcr: number[];
+  /** Path to markdown sidecar. Present only when PDF has extractable text. */
+  markdownPath?: string;
+  needsOcr: boolean;
+}
+
+export interface PostSessionFileUploadResponse {
+  path: string;
+  bytes: number;
+  sha256: string;
+  attachmentRef: string;
+  /** Extracted file paths. Present only when a zip extracted at least one file. */
+  extracted?: string[];
+  /**
+   * Server-computed extract root (ends with "/"). Present exactly when
+   * `extracted` is. Clients print this verbatim — the naming rule lives on
+   * the server.
+   */
+  extractedTo?: string;
+  /** PDF metadata. Present only when the upload is a PDF. */
+  pdf?: PostSessionFileUploadPdfInfo;
 }

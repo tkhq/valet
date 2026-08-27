@@ -11,6 +11,7 @@ import { useModels } from "~/api/settings";
 import { curatedForCatalogId } from "~/lib/models";
 import type { ModelInfo } from "@valet/api/wire";
 import { cn } from "~/lib/cn";
+import { matchesNeedle } from "~/lib/text-match";
 
 /**
  * Model selector — a filterable, provider-grouped, keyboard-navigable
@@ -75,14 +76,8 @@ export function groupByProvider(models: ModelInfo[]): GroupedEntry[] {
 /** Substring match on name, id, and provider. Case-insensitive. Empty
  * query returns everything unchanged. */
 export function filterModels(models: ModelInfo[], query: string): ModelInfo[] {
-  const q = query.toLowerCase().trim();
-  if (!q) return models;
-  return models.filter(
-    (m) =>
-      m.name.toLowerCase().includes(q) ||
-      m.id.toLowerCase().includes(q) ||
-      m.providerName.toLowerCase().includes(q),
-  );
+  if (query.trim().length === 0) return models;
+  return models.filter((m) => matchesNeedle(query, [m.name, m.id, m.providerName]));
 }
 
 export function ModelPicker({

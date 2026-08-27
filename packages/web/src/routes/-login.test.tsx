@@ -101,6 +101,29 @@ describe("LoginPage", () => {
     });
   });
 
+  it("with a next path, email sign-in navigates there instead of home", async () => {
+    render(<LoginPage next="/a/tok123" />);
+    fireEvent.change(screen.getByLabelText("Email"), { target: { value: "a@b.com" } });
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "hunter2" } });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: "/a/tok123" }));
+  });
+
+  it("with a next path, social and SSO callbacks land on it", () => {
+    render(<LoginPage next="/a/tok123" />);
+    fireEvent.click(screen.getByRole("button", { name: "Continue with GitHub" }));
+    expect(signInSocial).toHaveBeenCalledWith({
+      provider: "github",
+      callbackURL: `${window.location.origin}/a/tok123`,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Continue with Keycloak" }));
+    expect(signInSso).toHaveBeenCalledWith({
+      providerId: "oidc",
+      callbackURL: `${window.location.origin}/a/tok123`,
+    });
+  });
+
   it("shows better-auth's error message inline on failed sign-in and does not navigate", async () => {
     signInEmail.mockResolvedValueOnce({
       data: null,

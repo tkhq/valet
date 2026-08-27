@@ -11,6 +11,7 @@ import {
   buildSandboxManifest,
   credsSecretName,
   sandboxCrName,
+  SESSION_ANNOTATION_KEY,
   SESSION_LABEL_KEY,
   WORKSPACE_MOUNT_PATH,
   WORKSPACE_VOLUME_NAME,
@@ -112,6 +113,16 @@ describe("buildSandboxManifest", () => {
   it("sets the session-id label from the CR name", () => {
     const manifest = buildSandboxManifest(baseConfig, "sess-1", opts);
     expect(manifest.metadata.labels).toEqual({ [SESSION_LABEL_KEY]: "sess-1" });
+  });
+
+  it("records the owning session as an annotation (label values reject the id's colons)", () => {
+    const manifest = buildSandboxManifest(baseConfig, "sess-1", { ...opts, sessionId: "wf:wfrun_1:step_a" });
+    expect(manifest.metadata.annotations).toEqual({ [SESSION_ANNOTATION_KEY]: "wf:wfrun_1:step_a" });
+  });
+
+  it("omits the session annotation when no session id is given (pre-stamping callers)", () => {
+    const manifest = buildSandboxManifest(baseConfig, "sess-1", opts);
+    expect(manifest.metadata.annotations).toBeUndefined();
   });
 
   it("uses cfg.defaultImage when opts.image is not provided", () => {

@@ -20,6 +20,7 @@ import {
   popCursor,
   pushCursor,
 } from "~/lib/cursor-stack";
+import { textParam } from "~/lib/search-params";
 
 /**
  * `/skills` — markdown documents the assistant can pull into a turn. One
@@ -33,10 +34,9 @@ import {
  *
  * The repositories panel above the grid is the other half of that rule: it
  * points Valet at a repository to mirror, and never edits a skill. It sits
- * here, over the skills it produces, and lists every source the caller
- * reaches — personal, team, and org — with the scope on the row's badge.
- * Settings keeps one repositories panel still: the org one, which an admin
- * uses to run the library every member reads.
+ * here, over the skills it produces, and lists personal and team sources.
+ * Organization repositories are tracked on Organization · Library. Org
+ * skills still appear in this grid; only the source rows move.
  *
  * One grid, in delivery order. Grouping into a section per plugin was tried
  * and reverted: 8 of the 9 plugins ship exactly one skill, so it produced 8
@@ -64,16 +64,12 @@ interface SkillsSearch {
  * names no filter reads as "all", which shows everything rather than an empty
  * page that gives no reason. */
 function readSkillsSearch(raw: unknown): SkillsSearch {
-  const search: Record<string, unknown> =
-    typeof raw === "object" && raw !== null ? { ...raw } : {};
-  const text = (key: string): string | undefined =>
-    typeof search[key] === "string" ? search[key] : undefined;
   return {
-    filter: text("filter"),
-    scope: text("scope"),
-    q: text("q"),
-    page: text("page"),
-    sourcePage: text("sourcePage"),
+    filter: textParam(raw, "filter"),
+    scope: textParam(raw, "scope"),
+    q: textParam(raw, "q"),
+    page: textParam(raw, "page"),
+    sourcePage: textParam(raw, "sourcePage"),
   };
 }
 
@@ -102,7 +98,7 @@ export function SkillsIndexPage() {
   // owner and would hide every ORG-owned skill, which is most of a catalog
   // built from an org-wide repository. See `useCatalogOwner`.
   const owner = useCatalogOwner();
-  const { data, isLoading, error } = useSkills({
+  const { data, isLoading, error, isPlaceholderData } = useSkills({
     ...skillFilterQuery(filters),
     ...(owner ? { ownerType: owner.ownerType, ownerId: owner.ownerId } : {}),
     ...(cursor === undefined ? {} : { cursor }),
@@ -139,12 +135,7 @@ export function SkillsIndexPage() {
               <Spinner size={14} /> Loading skills…
             </div>
           )}
-          {!isLoading && error && (
-            <div className="text-sm text-danger-500">
-              Could not load skills. Check that the server is running, then reload.
-            </div>
-          )}
-          {!isLoading && !error && (
+          {!isLoading && (
             <>
               <SkillGrid
                 skills={skills}
@@ -160,19 +151,29 @@ export function SkillsIndexPage() {
                   })
                 }
                 emptyLabel="No skills yet. Write one, or ask your assistant to write one for you."
+                // Through the grid, not in its place: a failed SEARCH must
+                // keep the box that can change or clear it.
+                errorLabel={
+                  error
+                    ? "Could not load skills. Check that the server is running, then reload."
+                    : undefined
+                }
               />
-              <Pager
-                label="skills"
-                page={pageNumber(skillCursors)}
-                hasPrevious={skillCursors.length > 0}
-                hasNext={data?.nextCursor != null}
-                onPrevious={() => go({ page: formatCursorStack(popCursor(skillCursors)) })}
-                onNext={() => {
-                  if (data?.nextCursor != null) {
-                    go({ page: formatCursorStack(pushCursor(skillCursors, data.nextCursor)) });
-                  }
-                }}
-              />
+              {!error && (
+                <Pager
+                  label="skills"
+                  page={pageNumber(skillCursors)}
+                  hasPrevious={skillCursors.length > 0}
+                  hasNext={data?.nextCursor != null}
+                  busy={isPlaceholderData}
+                  onPrevious={() => go({ page: formatCursorStack(popCursor(skillCursors)) })}
+                  onNext={() => {
+                    if (data?.nextCursor != null) {
+                      go({ page: formatCursorStack(pushCursor(skillCursors, data.nextCursor)) });
+                    }
+                  }}
+                />
+              )}
             </>
           )}
         </div>

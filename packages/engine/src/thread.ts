@@ -1,17 +1,20 @@
-import { Agent } from "@mariozechner/pi-agent-core";
-import type { AgentEvent, AgentMessage, AgentTool } from "@mariozechner/pi-agent-core";
-import { getModel, isContextOverflow } from "@mariozechner/pi-ai";
-import type { Api, Message, Model, TextContent, ThinkingContent, ToolCall } from "@mariozechner/pi-ai";
+import { Agent } from "@earendil-works/pi-agent-core";
+import type { AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
+import { getModel, isContextOverflow, streamSimple } from "@earendil-works/pi-ai/compat";
+import type { Api, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
 
 type PiModel = Model<Api>;
 import type { Session, EmitOptions } from "./session.js";
 import { toAgentTool } from "./tool-bridge.js";
 import {
+  DecisionGateWithdrawnError,
   fromRequest,
   GateManager,
   isDecisionGateExpired,
   isDecisionGateWithdrawn,
+  persistTerminalGate,
   shouldShortCircuit,
+  type GateContext,
 } from "./decision-gate.js";
 import { renderTemplate } from "./roles-skills/index.js";
 import {
@@ -28,6 +31,7 @@ import {
 import { NoCredentialsError, NotFoundError, StaleAttemptError, TimeoutError, ValidationError } from "./errors.js";
 import { extractStructuredOutput } from "./result-schema.js";
 import { buildRepoInstructionsFragment } from "./repo-instructions.js";
+import { formatFileAttachmentsNote } from "./file-attachment-formatter.js";
 import { capturePatch } from "./patch-capture.js";
 import { recordSettlement, recordTurn } from "./metrics.js";
 import {
@@ -170,6 +174,14 @@ export class Thread {
   /** Guards against the in-process timer and the session sweep both flushing the same window. */
   private flushingCollect = false;
   private gates = new GateManager();
+  /**
+   * Serializes gate open/wait cycles for this thread. pi-agent-core runs a
+   * block's tool calls in parallel, so two gated calls race the strict
+   * running↔blocked_on_decision_gate toggle and the single suspended-turn
+   * checkpoint slot; the loser's gate persists as a pending row with no
+   * waiter — an approval card no resolve can clear (TKAI-238).
+   */
+  private gateCycleTail: Promise<void> = Promise.resolve();
   private mode: QueueMode;
   private aborted = false;
   /**
@@ -316,16 +328,9 @@ export class Thread {
     const store = this.session.providers.store;
     const existing = await store.getDecisionGate(this.session.id, gateId);
     if (!existing) return;
-    const resolved: DecisionGate = {
-      ...existing,
+    await persistTerminalGate(store, this.session.id, this.id, existing, {
       status: "resolved",
-      updatedAt: Date.now(),
-    };
-    await store.saveDecisionGate(this.session.id, this.id, resolved);
-    await store.updateDecisionGateEntry(this.session.id, this.id, gateId, {
-      gate: resolved,
       resolution,
-      resolvedAt: new Date(resolution.resolvedAt).toISOString(),
     });
   }
 
@@ -346,6 +351,11 @@ export class Thread {
   }
 
   async submitPrompt(content: PromptContent, opts: PromptOptions): Promise<PromptReceipt> {
+    if (opts.promoteItemId) {
+      throw new ValidationError(
+        "submitPrompt does not accept promoteItemId. Call Thread.promoteQueuedItem to promote a queued item.",
+      );
+    }
     const effectiveMode: QueueMode = opts.queueMode ?? this.mode;
 
     if (effectiveMode === "collect") {
@@ -378,6 +388,51 @@ export class Thread {
       this.id,
       item,
       effectiveMode === "steer" ? { steer: true } : { maxPending: cap },
+    );
+    if (supersededItemIds.length > 0) {
+      await this.handleSteerSupersession(supersededItemIds);
+    }
+    await this.emitQueueState();
+    void this.kick();
+    return {
+      sessionId: this.session.id,
+      threadId: this.id,
+      queueItemId: admitted.id,
+      status: receiptStatus(admitted.status),
+    };
+  }
+
+  /**
+   * Promote a queued followup into a steer. Admits a new item with the same
+   * content and `steer: true` so the running turn and the original queued
+   * row are superseded together. The original item is never claimed, so it
+   * does not write a second user entry. The caller remaps the optimistic
+   * bubble onto the returned `queueItemId`.
+   */
+  async promoteQueuedItem(itemId: string): Promise<PromptReceipt> {
+    const store = this.session.providers.store;
+    const existing = await store.getQueueItem(this.session.id, itemId);
+    if (!existing || existing.threadId !== this.id) {
+      throw new NotFoundError("queue item", itemId);
+    }
+    if (existing.status !== "queued" || existing.supersededByItemId) {
+      throw new ValidationError(
+        "That message is no longer queued. Send a new message, or wait for the current turn to finish.",
+      );
+    }
+    const item = this.buildQueueItem(existing.content, {
+      author: existing.author,
+      channel: existing.channel,
+      replyTarget: existing.replyTarget,
+      model: existing.model,
+      role: existing.role,
+      metadata: { ...(existing.metadata ?? {}), promotedFromItemId: existing.id },
+    });
+    const { item: admitted, supersededItemIds } = await store.admitSubmission(
+      this.session.id,
+      this.id,
+      item,
+      { steer: true, promoteFromItemId: existing.id },
     );
     if (supersededItemIds.length > 0) {
       await this.handleSteerSupersession(supersededItemIds);
@@ -984,15 +1039,13 @@ export class Thread {
   private async terminalizeReconciledGate(gate: DecisionGate, err: unknown): Promise<void> {
     const store = this.session.providers.store;
     const reason = isDecisionGateWithdrawn(err) ? err.reason : undefined;
-    const status: DecisionGate["status"] = reason ? "withdrawn" : "expired";
-    const terminal: DecisionGate = { ...gate, status, updatedAt: Date.now() };
-    await store.saveDecisionGate(this.session.id, this.id, terminal);
-    await store.updateDecisionGateEntry(this.session.id, this.id, gate.id, {
-      gate: terminal,
-      ...(reason
-        ? { withdrawnReason: reason }
-        : { resolvedAt: new Date().toISOString() }),
-    });
+    await persistTerminalGate(
+      store,
+      this.session.id,
+      this.id,
+      gate,
+      reason ? { status: "withdrawn", reason } : { status: "expired" },
+    );
     if (!reason) {
       await this.session.emit(
         {
@@ -1010,6 +1063,277 @@ export class Thread {
         ? `decision gate withdrawn (${reason}) before resolution`
         : "decision gate expired before resolution";
       await this.driveResumeToCompletion(this.runningItem, message);
+    }
+  }
+
+  /**
+   * One full gate cycle: persist the gate, checkpoint the suspended turn,
+   * flip the durable block, await the human decision, then unwind. The
+   * caller MUST hold this thread's gate-cycle slot (`gateCycleTail`) — the
+   * strict running↔blocked_on_decision_gate toggle and the single
+   * suspended-turn checkpoint slot both assume one cycle at a time.
+   */
+  private async runGateCycle(args: {
+    req: DecisionGateRequest;
+    gateCtx: GateContext;
+    signal: AbortSignal;
+    toolCallId: string;
+    toolName: string;
+    toolArgs: Record<string, unknown>;
+  }): Promise<DecisionResolution> {
+    const { req, gateCtx, signal, toolCallId, toolName, toolArgs } = args;
+    const session = this.session;
+    // Ordinal resolution: reuse a still-pending gate for this
+    // (queueItemId, resumeKey) — JOIN it rather than open a duplicate — or,
+    // once the latest is terminal, mint a fresh gate at ordinal+1 (a retried
+    // action after a human decision gets a fresh decision). Null → ordinal 0.
+    const latestGate = await session.providers.store.getLatestGateForResume(
+      session.id,
+      this.id,
+      gateCtx.queueItemId,
+      gateCtx.resumeKey,
+    );
+    const joiningPending = latestGate?.status === "pending";
+    const ordinal = latestGate
+      ? joiningPending
+        ? latestGate.ordinal
+        : latestGate.ordinal + 1
+      : 0;
+    // Fence captured for the whole suspend/resume cycle of this claimed
+    // turn. Undefined only on the replay path, which short-circuits above.
+    const fence = this.fence;
+    const runningItemId = this.runningItem?.id;
+    // Fenced writes in the gate path route through fencedWrite (design
+    // point 3): a stale fence aborts the turn, marks it for skipped
+    // settlement, and unwinds the tool. The agent is already aborted at
+    // that point, so the unwind never reaches the model as a tool error.
+    // Non-stale errors (e.g. ConflictError from a wrong-direction blocked
+    // toggle) still propagate — they are deliberate contract violations.
+    const fencedGateWrite = async (fn: () => Promise<void>): Promise<void> => {
+      await this.fencedWrite(fn);
+      if (this.staleFenceDetected) {
+        throw new Error(`turn superseded: stale write fence for item ${runningItemId}`);
+      }
+    };
+    // When joining a still-pending gate the durable row + DAG entry already
+    // exist, so reuse them; only re-arm the wait and re-checkpoint below.
+    const gate = joiningPending && latestGate ? latestGate : fromRequest(req, { ...gateCtx, ordinal });
+    // The turn unwound while this call waited for the gate-cycle slot:
+    // Thread.abort sets `aborted`; steer supersession aborts the agent's
+    // run signal without setting it. Either way, do not persist a gate
+    // that no waiter will ever own.
+    if (this.aborted || signal.aborted) {
+      throw new DecisionGateWithdrawnError(gate.id, this.aborted ? "abort" : "steer");
+    }
+    try {
+      // Checkpoint FIRST — the suspended-turn row is the ownership anchor
+      // for `terminalizeOrphanedGate`'s guard: once it references this gate,
+      // a resolve/withdraw that lands before the waiter arms is left alone
+      // (retryable) instead of consumed by the store-side orphan repair. A
+      // crash in this window leaves a checkpoint without a row (inert; the
+      // next cycle overwrites it) rather than a row without a checkpoint
+      // (an orphan card). Use real toolName + toolArgs so restoreSession
+      // can replay this exact tool call.
+      await fencedGateWrite(() =>
+        session.providers.store.saveSuspendedTurn(
+          session.id,
+          this.id,
+          {
+            sessionId: session.id,
+            threadId: this.id,
+            queueItemId: runningItemId ?? "",
+            gateId: gate.id,
+            model: session.options.modelSpec ?? session.options.model.id,
+            toolCallId,
+            toolName,
+            toolArgs,
+            resumeKey: gateCtx.resumeKey,
+            ordinal: gate.ordinal,
+            attempt: 1,
+            createdAt: Date.now(),
+          },
+          fence,
+        ),
+      );
+
+      if (!joiningPending) {
+        await session.providers.store.saveDecisionGate(session.id, this.id, gate);
+        const gateEntry: SessionEntry = {
+          id: uid("e"),
+          sessionId: session.id,
+          threadId: this.id,
+          parentId: null,
+          type: "decision_gate",
+          gate,
+          queueItemId: runningItemId,
+          createdAt: Date.now(),
+        };
+        await fencedGateWrite(() =>
+          session.providers.store.appendEntries(session.id, this.id, [gateEntry], fence),
+        );
+      }
+
+      // Durable block flag under the fence (running → blocked). Gate-blocked
+      // turns retain their claim and do not settle until the gate resolves.
+      this.blockedGateId = gate.id;
+      if (fence && runningItemId) {
+        await fencedGateWrite(() =>
+          session.providers.store.setSubmissionBlocked(
+            session.id,
+            this.id,
+            runningItemId,
+            true,
+            fence,
+          ),
+        );
+      }
+      this.lastEmittedStatus = "blocked_on_decision_gate";
+      await this.fencedEmit(
+        {
+          type: "status",
+          threadId: this.id,
+          status: "blocked_on_decision_gate",
+        },
+        { queueItemId: runningItemId },
+      );
+      await session.emit(
+        { type: "decision_gate", threadId: this.id, gate },
+        { eventKey: `gate:${gate.id}:pending`, queueItemId: runningItemId },
+      );
+    } catch (err) {
+      // A partially-opened gate must not survive as a pending row with no
+      // registered waiter — that renders as an approval card that neither
+      // resolve nor refresh can clear (TKAI-238).
+      await this.cleanupFailedGateOpen(gate, fence, runningItemId);
+      throw err;
+    }
+
+    try {
+      const rawResolution = await this.gates.register(gate, async (gateId) => {
+        await session.providers.store.updateDecisionGateEntry(
+          session.id,
+          this.id,
+          gateId,
+          { resolvedAt: new Date().toISOString(), gate: { ...gate, status: "expired" } },
+        );
+        await session.emit(
+          { type: "decision_gate_expired", threadId: this.id, gateId },
+          { eventKey: `gate:${gateId}:expired`, queueItemId: runningItemId },
+        );
+      });
+      // Stamp the gate's ordinal onto the resolution before it is
+      // persisted or handed back to the calling tool — the caller (e.g.
+      // call_tool's policy audit) needs this to distinguish a
+      // restart-replay double-fire (same ordinal) from a fresh
+      // legitimate repeat (new ordinal) for the same resumeKey.
+      const resolution: DecisionResolution = { ...rawResolution, gateOrdinal: gate.ordinal };
+      // Mark gate resolved in store and update DAG entry
+      await persistTerminalGate(session.providers.store, session.id, this.id, gate, {
+        status: "resolved",
+        resolution,
+      });
+      this.blockedGateId = undefined;
+      if (fence && runningItemId) {
+        await fencedGateWrite(() =>
+          session.providers.store.setSubmissionBlocked(
+            session.id,
+            this.id,
+            runningItemId,
+            false,
+            fence,
+          ),
+        );
+      }
+      await fencedGateWrite(() =>
+        session.providers.store.clearSuspendedTurn(session.id, this.id, fence),
+      );
+      return resolution;
+    } catch (err) {
+      // Withdrawn or expired: persist the terminal status, then propagate.
+      const reason = isDecisionGateWithdrawn(err) ? err.reason : undefined;
+      await persistTerminalGate(
+        session.providers.store,
+        session.id,
+        this.id,
+        gate,
+        reason ? { status: "withdrawn", reason } : { status: "expired" },
+      );
+      this.blockedGateId = undefined;
+      // Flip the durable block back to running so the turn can end and
+      // settle normally (the model sees the gate's terminal state).
+      if (fence && runningItemId) {
+        await fencedGateWrite(() =>
+          session.providers.store.setSubmissionBlocked(
+            session.id,
+            this.id,
+            runningItemId,
+            false,
+            fence,
+          ),
+        );
+      }
+      await fencedGateWrite(() =>
+        session.providers.store.clearSuspendedTurn(session.id, this.id, fence),
+      );
+      throw err;
+    }
+  }
+
+  /**
+   * Best-effort unwind after a gate open failed partway. The original open
+   * error propagates from the caller regardless of what this method cleans.
+   *
+   * Stale fence: a successor incarnation owns the turn's durable state.
+   * Touch nothing — the row (if one persisted) stays pending so the
+   * successor's re-run can adopt it through the join path, and the fenced
+   * checkpoint/blocked cleanup below would fail stale anyway. An unfenced
+   * withdraw here would yank a gate the successor may have re-armed.
+   *
+   * Live fence: the turn continues and no waiter will ever own this gate —
+   * terminalize the row (created or joined) so it cannot render as an
+   * unresolvable approval card, then release the checkpoint and the blocked
+   * toggle. Cleanup failures are emitted, not swallowed: a blocked toggle
+   * that stays flipped wedges the whole thread (alert, don't auto-repair).
+   */
+  private async cleanupFailedGateOpen(
+    gate: DecisionGate,
+    fence: WriteFence | undefined,
+    runningItemId: string | undefined,
+  ): Promise<void> {
+    if (this.blockedGateId === gate.id) this.blockedGateId = undefined;
+    if (this.staleFenceDetected) return;
+    const store = this.session.providers.store;
+    try {
+      await persistTerminalGate(store, this.session.id, this.id, gate, {
+        status: "withdrawn",
+        reason: "abort",
+      });
+      await this.session.emit(
+        { type: "decision_gate_withdrawn", threadId: this.id, gateId: gate.id, reason: "abort" },
+        { eventKey: `gate:${gate.id}:withdrawn` },
+      );
+    } catch (e) {
+      this.emitError(
+        "gate_open_cleanup_failed",
+        e instanceof Error ? e.message : String(e),
+      );
+    }
+    try {
+      const suspended = await store.getSuspendedTurn(this.session.id, this.id);
+      if (suspended?.gateId === gate.id) {
+        await store.clearSuspendedTurn(this.session.id, this.id, fence);
+      }
+      if (fence && runningItemId) {
+        const item = await store.getQueueItem(this.session.id, runningItemId);
+        if (item?.status === "blocked_on_decision_gate") {
+          await store.setSubmissionBlocked(this.session.id, this.id, runningItemId, false, fence);
+        }
+      }
+    } catch (e) {
+      this.emitError(
+        "gate_open_cleanup_failed",
+        e instanceof Error ? e.message : String(e),
+      );
     }
   }
 
@@ -1798,11 +2122,9 @@ export class Thread {
     if (outcome.outcome === "superseded" && suspended) {
       const gate = await store.getDecisionGate(this.session.id, suspended.gateId);
       if (gate && gate.status === "pending") {
-        const withdrawn: DecisionGate = { ...gate, status: "withdrawn", updatedAt: Date.now() };
-        await store.saveDecisionGate(this.session.id, this.id, withdrawn);
-        await store.updateDecisionGateEntry(this.session.id, this.id, gate.id, {
-          gate: withdrawn,
-          withdrawnReason: "steer",
+        await persistTerminalGate(store, this.session.id, this.id, gate, {
+          status: "withdrawn",
+          reason: "steer",
         });
         await this.session.emit(
           {
@@ -2096,7 +2418,39 @@ export class Thread {
       // Runtime validation of each attachment element to guard against malformed wire data
       const validated: MessageEntry["attachments"] = [];
       for (const att of item.content.attachments) {
-        if (typeof att === "object" && att !== null && typeof att.mimeType === "string") {
+        if (typeof att !== "object" || att === null) continue;
+        if (att.type === "file") {
+          // Sandbox file (upload subsystem): persist path/size/hash so the
+          // REST projection and the transcript note survive reload. A
+          // malformed file attachment is DROPPED with a warning — it must
+          // never fall through to the image branch, where it would persist
+          // as a phantom image with no url/data and silently vanish from
+          // the projection and the transcript note on reload.
+          if (
+            typeof att.path === "string" &&
+            typeof att.bytes === "number" &&
+            typeof att.sha256 === "string" &&
+            typeof att.name === "string"
+          ) {
+            validated.push({
+              type: "file" as const,
+              path: att.path,
+              bytes: att.bytes,
+              sha256: att.sha256,
+              mimeType: att.mimeType,
+              markdownPath: att.markdownPath,
+              extractedTo: att.extractedTo,
+              extractedFiles: att.extractedFiles,
+              name: att.name,
+            });
+          } else {
+            console.warn(
+              `thread ${this.id}: dropping malformed file attachment (name=${String(att.name)})`,
+            );
+          }
+        } else if (typeof att.mimeType === "string") {
+          // Data/url-carrying media (images; channel audio/file bytes keep
+          // their long-standing image-shaped persistence).
           validated.push({
             type: "image" as const,
             url: att.url,
@@ -2323,15 +2677,19 @@ export class Thread {
    * unconditionally in the turn's finally, regardless of whether a role was
    * also applied this turn.
    *
-   * Skipped entirely for `warmSandboxOnClaim: false` sessions while the
-   * attachment isn't ready: nothing is provisioning in that case (no warm()
-   * kick happened this turn), so a "provisioning" hint would be false. The
-   * lazy attachment contract covers first touch silently instead.
+   * For `warmSandboxOnClaim: false` sessions the hint applies only while
+   * the attachment is actually `provisioning` — a lazy session's earlier
+   * turn may have kicked a provision that is still booting when this turn
+   * claims. In the `detached` state nothing is provisioning (no warm()
+   * kick happened), so a "provisioning" hint would be false and the lazy
+   * first-touch contract covers it silently instead.
    */
   private applyColdHintForTurn(): string {
     const preHintPrompt = this.agent.state.systemPrompt;
     if (this.session.attachment.state === "ready") return preHintPrompt;
-    if (this.session.options.warmSandboxOnClaim === false) return preHintPrompt;
+    if (this.session.options.warmSandboxOnClaim === false && this.session.attachment.state !== "provisioning") {
+      return preHintPrompt;
+    }
     const estimateMs = this.session.attachment.coldStartEstimateMs ?? 10_000;
     const hint = `\n\n[workspace status] The workspace sandbox is provisioning (~${Math.ceil(estimateMs / 1000)}s). Filesystem and shell tools will wait for it; sequence non-filesystem work first.`;
     this.agent.state.systemPrompt = preHintPrompt + hint;
@@ -2438,10 +2796,7 @@ export class Thread {
     text: string,
     attachments?: MessageEntry["attachments"],
   ): Promise<void> {
-    const content = [
-      { type: "text" as const, text },
-      ...attachmentsToImageBlocks(attachments),
-    ];
+    const content = userContentBlocks(text, attachments);
     await this.agent.prompt({
       role: "user",
       content,
@@ -2685,6 +3040,7 @@ export class Thread {
         model: this.session.options.model,
         systemPrompt: this.buildBaseSystemPrompt(),
       },
+      streamFn: streamSimple,
       // Filter out custom AgentMessage types (decision_gate, compaction, etc.)
       // before the LLM sees them. They live in the engine DAG, not in LLM context.
       convertToLlm: (messages: AgentMessage[]): Message[] => {
@@ -2785,184 +3141,19 @@ export class Thread {
           // record predates this field.
           return { ...sc.resolution, gateOrdinal: sc.resolution.gateOrdinal ?? replayOrdinal };
         }
-        // Ordinal resolution: reuse a still-pending gate for this
-        // (queueItemId, resumeKey) — JOIN it rather than open a duplicate — or,
-        // once the latest is terminal, mint a fresh gate at ordinal+1 (a retried
-        // action after a human decision gets a fresh decision). Null → ordinal 0.
-        const latestGate = await session.providers.store.getLatestGateForResume(
-          session.id,
-          this.id,
-          gateCtx.queueItemId,
-          req.resumeKey,
-        );
-        const joiningPending = latestGate?.status === "pending";
-        const ordinal = latestGate
-          ? joiningPending
-            ? latestGate.ordinal
-            : latestGate.ordinal + 1
-          : 0;
-        // Fence captured for the whole suspend/resume cycle of this claimed
-        // turn. Undefined only on the replay path, which short-circuits above.
-        const fence = this.fence;
-        const runningItemId = this.runningItem?.id;
-        // Fenced writes in the gate path route through fencedWrite (design
-        // point 3): a stale fence aborts the turn, marks it for skipped
-        // settlement, and unwinds the tool. The agent is already aborted at
-        // that point, so the unwind never reaches the model as a tool error.
-        // Non-stale errors (e.g. ConflictError from a wrong-direction blocked
-        // toggle) still propagate — they are deliberate contract violations.
-        const fencedGateWrite = async (fn: () => Promise<void>): Promise<void> => {
-          await this.fencedWrite(fn);
-          if (this.staleFenceDetected) {
-            throw new Error(`turn superseded: stale write fence for item ${runningItemId}`);
-          }
-        };
-        // When joining a still-pending gate the durable row + DAG entry already
-        // exist, so reuse them; only re-arm the wait and re-checkpoint below.
-        const gate = joiningPending && latestGate ? latestGate : fromRequest(req, { ...gateCtx, ordinal });
-        if (!joiningPending) {
-          await session.providers.store.saveDecisionGate(session.id, this.id, gate);
-          const gateEntry: SessionEntry = {
-            id: uid("e"),
-            sessionId: session.id,
-            threadId: this.id,
-            parentId: null,
-            type: "decision_gate",
-            gate,
-            queueItemId: runningItemId,
-            createdAt: Date.now(),
-          };
-          await fencedGateWrite(() =>
-            session.providers.store.appendEntries(session.id, this.id, [gateEntry], fence),
-          );
-        }
-
-        // checkpoint the suspended turn — use real toolName + toolArgs so
-        // restoreSession can replay this exact tool call.
-        await fencedGateWrite(() =>
-          session.providers.store.saveSuspendedTurn(
-            session.id,
-            this.id,
-            {
-              sessionId: session.id,
-              threadId: this.id,
-              queueItemId: runningItemId ?? "",
-              gateId: gate.id,
-              model: session.options.modelSpec ?? session.options.model.id,
-              toolCallId,
-              toolName,
-              toolArgs,
-              resumeKey: req.resumeKey ?? gate.id,
-              ordinal: gate.ordinal,
-              attempt: 1,
-              createdAt: Date.now(),
-            },
-            fence,
-          ),
-        );
-
-        // Durable block flag under the fence (running → blocked). Gate-blocked
-        // turns retain their claim and do not settle until the gate resolves.
-        this.blockedGateId = gate.id;
-        if (fence && runningItemId) {
-          await fencedGateWrite(() =>
-            session.providers.store.setSubmissionBlocked(
-              session.id,
-              this.id,
-              runningItemId,
-              true,
-              fence,
-            ),
-          );
-        }
-        this.lastEmittedStatus = "blocked_on_decision_gate";
-        await this.fencedEmit(
-          {
-            type: "status",
-            threadId: this.id,
-            status: "blocked_on_decision_gate",
-          },
-          { queueItemId: runningItemId },
-        );
-        await session.emit(
-          { type: "decision_gate", threadId: this.id, gate },
-          { eventKey: `gate:${gate.id}:pending`, queueItemId: runningItemId },
-        );
-
+        // One gate cycle at a time per thread (see gateCycleTail): the next
+        // open waits until the previous gate resolves and releases the
+        // durable blocked toggle (TKAI-238).
+        const prevCycle = this.gateCycleTail;
+        let releaseCycle!: () => void;
+        this.gateCycleTail = new Promise<void>((r) => {
+          releaseCycle = r;
+        });
+        await prevCycle;
         try {
-          const rawResolution = await this.gates.register(gate, async (gateId) => {
-            await session.providers.store.updateDecisionGateEntry(
-              session.id,
-              this.id,
-              gateId,
-              { resolvedAt: new Date().toISOString(), gate: { ...gate, status: "expired" } },
-            );
-            await session.emit(
-              { type: "decision_gate_expired", threadId: this.id, gateId },
-              { eventKey: `gate:${gateId}:expired`, queueItemId: runningItemId },
-            );
-          });
-          // Stamp the gate's ordinal onto the resolution before it is
-          // persisted or handed back to the calling tool — the caller (e.g.
-          // call_tool's policy audit) needs this to distinguish a
-          // restart-replay double-fire (same ordinal) from a fresh
-          // legitimate repeat (new ordinal) for the same resumeKey.
-          const resolution: DecisionResolution = { ...rawResolution, gateOrdinal: gate.ordinal };
-          // Mark gate resolved in store and update DAG entry
-          const resolved: DecisionGate = { ...gate, status: "resolved", updatedAt: Date.now() };
-          await session.providers.store.saveDecisionGate(session.id, this.id, resolved);
-          await session.providers.store.updateDecisionGateEntry(session.id, this.id, gate.id, {
-            gate: resolved,
-            resolution,
-            resolvedAt: new Date(resolution.resolvedAt).toISOString(),
-          });
-          this.blockedGateId = undefined;
-          if (fence && runningItemId) {
-            await fencedGateWrite(() =>
-              session.providers.store.setSubmissionBlocked(
-                session.id,
-                this.id,
-                runningItemId,
-                false,
-                fence,
-              ),
-            );
-          }
-          await fencedGateWrite(() =>
-            session.providers.store.clearSuspendedTurn(session.id, this.id, fence),
-          );
-          return resolution;
-        } catch (err) {
-          // Withdrawn or expired: persist the terminal status, then propagate.
-          const reason =
-            err instanceof Error && err.name === "DecisionGateWithdrawnError"
-              ? (err as { reason?: DecisionWithdrawReason }).reason ?? "cancel"
-              : undefined;
-          const status = reason ? "withdrawn" : "expired";
-          const terminal: DecisionGate = { ...gate, status, updatedAt: Date.now() };
-          await session.providers.store.saveDecisionGate(session.id, this.id, terminal);
-          await session.providers.store.updateDecisionGateEntry(session.id, this.id, gate.id, {
-            gate: terminal,
-            withdrawnReason: reason,
-          });
-          this.blockedGateId = undefined;
-          // Flip the durable block back to running so the turn can end and
-          // settle normally (the model sees the gate's terminal state).
-          if (fence && runningItemId) {
-            await fencedGateWrite(() =>
-              session.providers.store.setSubmissionBlocked(
-                session.id,
-                this.id,
-                runningItemId,
-                false,
-                fence,
-              ),
-            );
-          }
-          await fencedGateWrite(() =>
-            session.providers.store.clearSuspendedTurn(session.id, this.id, fence),
-          );
-          throw err;
+          return await this.runGateCycle({ req, gateCtx, signal, toolCallId, toolName, toolArgs });
+        } finally {
+          releaseCycle();
         }
       },
       threadRead: async (key, opts) => {
@@ -3727,6 +3918,31 @@ function findMostRecentCompaction(
  * that is not a base64 `data:` URL is dropped with a warning (the model
  * cannot fetch remote URLs from here).
  */
+/**
+ * Build the content blocks for a user message from its text and persisted
+ * attachments. Single source of truth for BOTH `entriesToAgentMessages`
+ * (historical entries on rehydrate / resume / compaction) AND
+ * `Thread.runAgent` (the current turn), so hot and cold transcripts agree.
+ *
+ * File attachments (sandbox uploads) render as a system-authored note
+ * prepended to the text — the model reads paths, not bytes. Image
+ * attachments render as image content blocks.
+ */
+export function userContentBlocks(
+  text: string,
+  attachments: MessageEntry["attachments"] | undefined,
+): Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> {
+  const files = (attachments ?? []).filter(
+    (a): a is Extract<NonNullable<MessageEntry["attachments"]>[number], { type: "file" }> =>
+      a.type === "file",
+  );
+  const note = formatFileAttachmentsNote(files);
+  return [
+    { type: "text" as const, text: note ? `${note}\n\n${text}` : text },
+    ...attachmentsToImageBlocks(attachments),
+  ];
+}
+
 export function attachmentsToImageBlocks(
   attachments: MessageEntry["attachments"] | undefined,
 ): Array<{ type: "image"; data: string; mimeType: string }> {
@@ -3790,10 +4006,7 @@ export function entriesToAgentMessages(
 
     if (e.role === "user") {
       const text = e.signal ? renderSignalEnvelope(e.signal, e.content) : e.content;
-      const contentBlocks: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [
-        { type: "text", text },
-        ...attachmentsToImageBlocks(e.attachments),
-      ];
+      const contentBlocks = userContentBlocks(text, e.attachments);
       out.push({
         role: "user",
         content: contentBlocks,

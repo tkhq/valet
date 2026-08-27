@@ -15,24 +15,26 @@ corepack enable         # once per machine — provisions the pnpm pinned in pac
                         #   (packageManager). No pnpm? `npm install -g pnpm` also works.
 pnpm install
 make dev-local          # api :8788 + web :5173 — needs ANTHROPIC_API_KEY + Docker
-                        # VALET_LOCAL_AUTH=1 stub auth; embedded PGlite in ~/.valet/pg
+                        # VALET_LOCAL_AUTH=1 stub auth; embedded PGlite in ./.valet-dev/pg
 ```
 
-### Start the local stack cleanly (one stack at a time)
+`make dev-local` keeps dev state worktree-local: the `dev-api-node` recipe exports `VALET_DATA_DIR=./.valet-dev` (PGlite at `.valet-dev/pg`, blobs at `.valet-dev/blobs`) when `VALET_DATA_DIR`, `VALET_PG_DATA_DIR`, and `DATABASE_URL` are all unset. Each worktree owns its own database. (The dir is `.valet-dev/`, not `.valet/` — that is tracked repo config.) Outside `make dev-local` — `valet serve`, or a bare `pnpm --filter @valet/api dev` — the default stays `~/.valet`; to point a worktree stack at that data, set `VALET_DATA_DIR=~/.valet` in `.env`. `make dev-clean` deletes the worktree's dev data. So do `git clean -xdf` and `git worktree remove` — the database lives inside the worktree.
 
-The stack assumes ports 8788 (api) and 5173 (web) are free and that no other process owns `~/.valet/pg`. PGlite allows exactly one owner. A second api does not fail cleanly: it can lose the port race but keep running and hold the database.
+### Start the local stack cleanly (ports are machine-wide)
+
+The database is per-worktree, but ports 8788 (api) and 5173 (web) are machine-wide: only one stack can listen at a time. The web dev server sets `strictPort`, so a second stack fails fast instead of proxying into the first stack's api. Within one worktree, PGlite still allows exactly one owner — an orphaned api keeps holding the database.
 
 1. Check the ports: `lsof -nP -iTCP:8788 -iTCP:5173 -sTCP:LISTEN`.
 2. If a listener exists, find its checkout: `lsof -p <pid> | grep cwd`. A stack from another worktree serves stale code, so your changes do not appear in the UI.
 3. If the old stack is stale, kill its listeners.
-4. Confirm nothing still holds the database: `lsof +D ~/.valet/pg` must return nothing. An orphaned api process here makes the next api crash at startup.
+4. If `.valet-dev/pg` exists, confirm nothing still holds it: from the worktree root, run `lsof +D .valet-dev/pg`. It must return nothing. An orphaned api process here makes the next api crash at startup.
 5. Run `make dev-local`.
 6. Confirm health: `curl -sf localhost:8788/api/health`. Startup is fast — if health is not ok within ~5 seconds, do not wait or poll. Read the log for one of the symptoms below.
 
 Symptom → cause:
 
 - Vite proxy `ECONNREFUSED /api/...` → the api is down (crashed, or it lost the port race to another stack).
-- PGlite WASM `Aborted()` stack trace at api startup → another process owns `~/.valet/pg` (step 4).
+- PGlite WASM `Aborted()` stack trace at api startup → another process owns the data dir (step 4).
 - The UI does not show your changes → :5173 is served from a different checkout (step 2).
 
 `make e2e` isolates its own state (scratch `VALET_DATA_DIR`, random ports 18790+), so it can run beside the dev stack — but Docker-heavy suites can flake from daemon contention while the dev stack's sandboxes run. If a Docker row goes red during concurrent work, re-run it in isolation before you treat it as real: `make e2e E2E_ARGS="--only <suite-id>"`.
@@ -83,7 +85,9 @@ Two repo-specific rules:
 - **Every user-facing error message names the corrective action when one exists.** "Missing GitHub access token. Connect the GitHub integration in Settings." is the model. A bare fact ("expected an array response") is incomplete when the user can act.
 - **Terminology:** "workspace" is overloaded — `SessionData.workspace` is a display label, `/workspace` is the in-sandbox path, workspace prep is the clone subsystem, and in web UI copy a workspace is the nav switcher's scope: personal or a team (`docs/specs/2026-08-17-team-workspace-ui-design.md`). Say which one you mean. UI copy reserves "workspace" for the switcher scope and calls the in-sandbox path the "working directory". Spell the session start reference "start-ref" in prose and `startRef` in code.
 
-`make e2e E2E_ARGS="--only docs-lint"` runs an advisory STE lint (`scripts/docs/docs_lint.py`) over the maintained docs with per-file thresholds. The `ste-plain-writing` skill has the full ruleset and a linter (`python3 scripts/ste_lint.py <file>` from the skill directory). The linter is diagnostic, not certification — code blocks and deliberate style choices produce false positives.
+`make e2e E2E_ARGS="--only docs-lint"` runs the STE lint (`scripts/docs/docs_lint.py`) over the maintained docs with per-file thresholds; CI runs the same script as a blocking check on every PR. The `ste-plain-writing` skill has the full ruleset and a linter (`python3 scripts/ste_lint.py <file>` from the skill directory). The linter is diagnostic, not certification — code blocks and deliberate style choices produce false positives.
+
+CI also lints every PR description (`scripts/docs/pr_description_lint.py`, the "PR lint" workflow). Hard rules: not empty, no em/en dashes, no marketing words, no filler hedges, 300 words max, a filled-in Validation section (`.github/PULL_REQUEST_TEMPLATE.md`). HTML comments and code blocks do not count. Fix the description and the check re-runs on edit.
 
 This section governs new and edited prose. Do not rewrite existing documents wholesale for style alone. Apply the rules to the text you touch.
 
@@ -98,6 +102,16 @@ This section governs new and edited prose. Do not rewrite existing documents who
 
 ## Rules learned the hard way
 
+### Invariants: alert, don't auto-repair
+
+Do not add a timer or guard that silently repairs invariant violations. Examples of such guards: TTL kills, blanket re-syncs, catch-all cleanups. Invariants here means properties the code depends on — every sandbox has an owner that deletes it, every submission settles, created − deleted trends to zero. A silent repair masks the bug that broke the invariant and converts it into a permanent, unmeasured cost. Instead:
+
+1. Give the invariant one owner: a single code path responsible for holding it.
+2. Emit a metric and an alert that make a violation visible (a created/deleted counter gap, an over-age gauge). A violation should page a human, not disappear.
+3. Add an auto-repair only when violations are expected in normal operation (crash windows, external deletes). If you add one, name that reason in a comment where the repair lives.
+
+Precedent (2026-08-22, sandbox lifecycle): the reconcile sweep destroys sandboxes whose owning session is gone — a real ownership rule — but deliberately has no max-lifetime kill. Over-age sandboxes are reported, not reaped.
+
 ### Tool-call persistence round trip
 
 We've broken tool-call rendering on reload three times; the root cause is always shape drift between what the engine writes, the wire ships, and the frontend renders. When touching any hop, verify all four end to end:
@@ -109,17 +123,21 @@ We've broken tool-call rendering on reload three times; the root cause is always
 
 Regression suites (run before claiming done): `pnpm --filter @valet/engine test happy-path`, `pnpm --filter @valet/engine test in-memory-store`, `pnpm --filter @valet/store-postgres test`, and the api integration suite. If you change the result shape, assert the actual TEXT is reachable — `expect(result).toBeDefined()` is the exact bug we keep shipping.
 
-"(empty output)" in the UI = shape mismatch, not lost data. Inspect `engine_entries.parts` directly: `psql` when `DATABASE_URL` is set; for dev PGlite, stop the api first (it owns `~/.valet/pg`), then from `packages/api` use plain `node --input-type=module` (NOT `tsx -e` — its eval mode rejects top-level await) with `@electric-sql/pglite` to query the data dir.
+"(empty output)" in the UI = shape mismatch, not lost data. Inspect `engine_entries.parts` directly: `psql` when `DATABASE_URL` is set; for dev PGlite, stop the api first (it holds the pg data dir shown as `pglite:` in its boot log), then from `packages/api` use plain `node --input-type=module` (NOT `tsx -e` — its eval mode rejects top-level await) with `@electric-sql/pglite` to query the data dir.
+
+### Mount-time state from props (web)
+
+`useState(<expr derived from a prop>)` is correct at mount and silently wrong when the prop changes — and every existing test can pass, because nothing renders the transition. Pair the `useState` with a `useEffect` that syncs on the prop, and gate the sync behind a `userTouched` ref when a manual override must win. If the component holds this kind of state in a mapped list, key it by a stable id, not the array index — an index key hands one item's state to another when the list shifts. Shipped example: `ToolShell`'s collapse policy (`docs/specs/2026-08-20-tool-card-collapse-policy-design.md`).
 
 ### Pre-1.0: edit migrations in place
 
-Edit `packages/store-postgres/migrations/pg/0000_engine.sql` / `packages/api/migrations/pg/0000_app.sql` directly — do NOT add numbered migrations. App tables also update the Drizzle schema (`packages/api/src/schema/index.ts`); engine tables are raw SQL — update the row interfaces + `rawTo*Row` mappers in `packages/store-postgres/src/helpers.ts` (bigint ms columns funnel through `toNum`). After editing, `rm -rf ~/.valet/pg` is MANDATORY — the migration tracker skips an already-applied `0000` and there is no backfill path. This rule flips to numbered migrations at 1.0.
+Edit `packages/store-postgres/migrations/pg/0000_engine.sql` / `packages/api/migrations/pg/0000_app.sql` directly — do NOT add numbered migrations. App tables also update the Drizzle schema (`packages/api/src/schema/index.ts`); engine tables are raw SQL — update the row interfaces + `rawTo*Row` mappers in `packages/store-postgres/src/helpers.ts` (bigint ms columns funnel through `toNum`). After editing, you MUST wipe the dev database: run `make dev-clean` in every worktree with dev data. If a stack ran outside `make dev-local`, also `rm -rf ~/.valet/pg`. The migration tracker skips an already-applied `0000`, and there is no local backfill path. An app-table edit that adds a nullable/DEFAULT column, table, or index ALSO needs a matching `SCHEMA_REPAIRS` entry in `packages/api/src/lib/drizzle.ts`, or deployed databases never get it and the rollout sticks on the old image. This rule flips to numbered migrations at 1.0.
 
 ### Node & workspace traps
 
 - Tests failing with `WebSocket is not defined` = the Node-20-vs-22 trap, not a regression. Re-verify under Node 22 (`nvm use 22`).
 - Any package importing `ws` must declare BOTH `@types/ws` AND `@types/node` in its own devDependencies, or pnpm may resolve the wrong Node types from an ancestor `node_modules`.
-- A new workspace dep edge can silently FORK a peer-dep'd "singleton" (e.g. `pi-ai`'s provider registry) into two copies. Symptom: a no-network test goes live, or module-level state stops being shared. Check `pnpm why <pkg>` for duplicate versions; fix by pinning via `overrides` in `pnpm-workspace.yaml` (see the `zod` pin). Do NOT use package.json's `pnpm.overrides` — pnpm 11 ignores that field and drops the pin silently.
+- A new workspace dep edge can silently FORK a peer-dep'd "singleton" (e.g. `pi-ai`'s provider registry) into two copies. Symptom: a no-network test goes live, or module-level state stops being shared. Check `pnpm why <pkg>` for duplicate versions; fix by pinning via `overrides` in `pnpm-workspace.yaml` (see the `typebox` pin). Do NOT use package.json's `pnpm.overrides` — pnpm 11 ignores that field and drops the pin silently.
 
 ### Sandbox gotchas
 
@@ -170,8 +188,10 @@ deploy/             # helm chart + vendored agent-sandbox controller
 docs/specs/         # dated YYYY-MM-DD-*-design.md = v2 (current, maintain these);
                     #   undated = legacy-stack specs (accurate for frozen code only)
 docs/plans/         # implementation plans
+docs/guides/        # contributor guides — read these before a first change
 ```
 
+- [docs/guides/](docs/guides/README.md) carries the conventions this file only summarizes: which package a new file belongs to, the build order for a change that cuts through the stack, and — for `packages/web` — data fetching, styling, and performance.
 - Web tool renderers (`packages/web/src/components/session/tool-renderers/`) are a registry — new renderer file + list it before the fallback in `index.ts`.
 - Optimistic UI messages must carry the active `threadId` (null + fallback matching leaked bubbles across threads).
 - Superpowers design specs → `docs/specs/YYYY-MM-DD-<topic>-design.md`; plans → `docs/plans/YYYY-MM-DD-<topic>.md`.

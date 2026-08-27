@@ -64,11 +64,14 @@
  * and its 404 names what to do. It does not climb to the App to keep
  * working, and a public repository does not stop syncing.
  *
- * The two tokenless results differ so the 404 can:
+ * The tokenless results differ so the 404 can:
  *
  *   - `none`        — there is no credential to use.
  *   - `unavailable` — a credential exists but the server cannot read it, for
- *                     example after the encryption key changed.
+ *                     example after the encryption key changed, or an org
+ *                     App token mint failed. The 404 names retry.
+ *   - `missing_app` — an org source has no App installation that covers the
+ *                     repository. The 404 names installing the App.
  */
 import type { SkillSourceRow } from "../schema/index.js";
 import {
@@ -88,13 +91,29 @@ import {
 /** No credential to use. The read is anonymous. */
 const ANONYMOUS: SkillRepoCredential = { kind: "none" };
 
+/** Org source whose App install is missing or does not cover the repo. */
+const MISSING_APP: SkillRepoCredential = { kind: "missing_app" };
+
+/** Credential exists but cannot be used. The 404 names retry, not reinstall. */
+const UNAVAILABLE: SkillRepoCredential = { kind: "unavailable" };
+
+/** `resolveGitHubToken` with `auth: "app"` throws this when mint returns
+ * null for the repository owner. Other `GitHubAuthError`s are mint or
+ * transport faults and must not tell the reader to reinstall the App. */
+function isAppNotInstalledOnOwner(err: GitHubAuthError): boolean {
+  return err.message.startsWith("the GitHub App is not installed on ");
+}
+
 /**
  * The credential this source may sync with. Never throws: a sync must not
  * fail a public repository over a credential it does not need.
  *
  * `GitHubAuthError` is the resolver's way of saying "no credential is
- * available", so it reads as `none`. Any OTHER failure is a fault in reading
- * the credential — a wrong `ENCRYPTION_KEY` makes `decryptSecret` throw a
+ * available". A user or team source reads that as `none`. An org source
+ * maps only "the GitHub App is not installed on <owner>" to `missing_app`.
+ * A mint or transport fault is `unavailable`, so the 404 names retry
+ * rather than reinstall. Any OTHER failure is a fault in reading the
+ * credential — a wrong `ENCRYPTION_KEY` makes `decryptSecret` throw a
  * raw crypto error through `CredentialStore.get`, for instance. That fault
  * is reported as `unavailable` and logged here, because letting it propagate
  * would fail the whole sync and write the crypto error onto
@@ -121,7 +140,7 @@ export async function resolveSkillSourceCredential(
         repo: { owner, name: repoOf(source.repoFullName) },
       });
       return resolved.token === null
-        ? ANONYMOUS
+        ? MISSING_APP
         : { kind: "installation", token: resolved.token };
     }
 
@@ -159,14 +178,17 @@ export async function resolveSkillSourceCredential(
       ? { kind: "user", token: resolved.token, ownerScope }
       : { kind: "user", token: resolved.token, ownerScope, login: resolved.login };
   } catch (err) {
-    if (err instanceof GitHubAuthError) return ANONYMOUS;
+    if (err instanceof GitHubAuthError) {
+      if (source.ownerType !== "org") return ANONYMOUS;
+      return isAppNotInstalledOnOwner(err) ? MISSING_APP : UNAVAILABLE;
+    }
     // Only the message, and only to the server log. The source row is shown
     // to users, and an arbitrary error is not written for them to read.
     console.error(
       `skill sync ${source.id}: cannot read the GitHub credential:`,
       err instanceof Error ? err.message : String(err),
     );
-    return { kind: "unavailable" };
+    return UNAVAILABLE;
   }
 }
 

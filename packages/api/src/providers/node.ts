@@ -26,7 +26,12 @@ import {
   buildChildStatusReader,
   ChildWatcher,
 } from "../orchestrator/children.js";
+import { HibernationReaper } from "../engine/hibernation-reaper.js";
+import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
+import { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
+import { withSandboxCapacityGate } from "../engine/gated-sandbox-provider.js";
 import { principalFromOwner, routeAttention } from "../orchestrator/attention.js";
+import { resolveOrgSessionCeiling } from "../orchestrator/limits.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { workflowsActionPlugin } from "../workflows/actions.js";
 import { skillsActionPlugin } from "../services/skills-actions.js";
@@ -43,6 +48,7 @@ import { configMcpPlugins } from "../plugins/config-mcp.js";
 import { buildWorkflowEngineDeps } from "../workflows/engine-deps.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
 import { buildRunSettledAttention } from "../workflows/run-attention.js";
+import { WorkflowSandboxReclaimer } from "../workflows/sandbox-reclaim.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
 import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
@@ -52,7 +58,16 @@ import { EventDispatcher } from "../events/dispatcher.js";
 import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
 import { FsBlobStore } from "./blob-fs.js";
 import { pgliteWasmOptions } from "../assets/base.js";
-import { buildSandboxProvider, resolveChildRetentionMs, resolveDefaultImage, resolveIdleMinutes } from "./sandbox-backend.js";
+import {
+  buildSandboxProvider,
+  resolveChildRetentionMs,
+  resolveDefaultImage,
+  resolveHibernatedRetentionMs,
+  resolveSandboxAgeReportMs,
+  resolveIdleMinutes,
+  resolveOrgSandboxCeiling,
+  resolveSandboxCapacityWaitMs,
+} from "./sandbox-backend.js";
 import { resolveImageBuilder, resolvePrebuildPreflight } from "./image-builder.js";
 import { SourceService } from "../bakes/source-service.js";
 import type { Providers } from "./types.js";
@@ -220,8 +235,11 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // handle over the SAME connection source.
   const pgdb = buildAppQueryable(source);
 
-  await applyAppMigrations(pgdb);
-  await applyEngineMigrations(pgdb);
+  // Pass the PGlite dir so a schema-mismatch error names the exact path to
+  // delete; on DATABASE_URL there is no dir and the hint stays generic.
+  const pgDirHint = opts.databaseUrl ? undefined : opts.pgDataDir;
+  await applyAppMigrations(pgdb, pgDirHint);
+  await applyEngineMigrations(pgdb, pgDirHint);
 
   const db = buildAppDb(source);
 
@@ -253,7 +271,24 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // Backend selection (kubernetes-deployment plan Task 6, spec decision 7):
   // VALET_SANDBOX_BACKEND=docker|kubernetes|local, default docker — the
   // pre-Task-6 unconditional `new DockerSandboxProvider()` behavior.
-  const sandboxProvider = buildSandboxProvider(process.env);
+  //
+  // Wrapped in the per-org capacity gate (D.5): a create beyond the org's
+  // sandbox ceiling waits for capacity instead of saturating the cluster.
+  // The gate reads the EngineHost cache through a late-bound ref (the host
+  // is constructed further down, with this provider as a dep). Only
+  // slot-FREEING backends are gated: without hibernation (docker/local) a
+  // ready attachment never releases its slot short of session deletion,
+  // so a long-lived dev stack would wedge every new create at the
+  // ceiling — and those backends have no bounded pod budget to protect.
+  const gateHostRef: { current: EngineHost | null } = { current: null };
+  const rawSandboxProvider = buildSandboxProvider(process.env);
+  const sandboxProvider = rawSandboxProvider.capabilities().hibernation
+    ? withSandboxCapacityGate(rawSandboxProvider, {
+        ceiling: resolveOrgSandboxCeiling(process.env),
+        waitMs: resolveSandboxCapacityWaitMs(process.env),
+        host: () => gateHostRef.current,
+      })
+    : rawSandboxProvider;
   const imageBuilder = resolveImageBuilder(process.env);
   const eventStream = new PgEventStream(pgdb);
   const baseCredentials = new PgCredentialStore(pgdb, deriveSecretKey(opts.encryptionKey));
@@ -384,6 +419,9 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       return statusRef(req, ctx);
     },
   });
+  // Arm the capacity gate now that the host exists — creates admitted
+  // before this line (none happen during construction) pass ungated.
+  gateHostRef.current = engineHost;
 
   // Prebuild orchestration (sandbox images v2 plan, Task 3). Same
   // `resolveGitHubToken`-shaped deps every other GitHub-credential consumer
@@ -402,12 +440,46 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineStore,
     prebuildService,
     retentionMs: resolveChildRetentionMs(process.env),
+    orgSessionCeiling: resolveOrgSessionCeiling(process.env),
   };
   const childWatcher = new ChildWatcher(childrenDeps);
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
   readerRef = buildChildReader(childrenDeps);
   senderRef = buildChildSender(childrenDeps, childWatcher);
   statusRef = buildChildStatusReader(childrenDeps);
+
+  // Destroys sandboxes hibernated past the retention window; `start()`/
+  // `stop()` are called from `main.ts`, next to the child retention sweep.
+  const hibernationReaper = new HibernationReaper({
+    db,
+    engineHost,
+    engineStore,
+    retentionMs: resolveHibernatedRetentionMs(process.env),
+  });
+
+  // Provider-side reconciler — the backstop under the DB-driven sweeps.
+  // Destroys orphans (owning session gone); reports over-age and unowned
+  // sandboxes without destroying them (CLAUDE.md: "Invariants: alert,
+  // don't auto-repair"). No-op on providers without `list()`
+  // (docker/local). `start()`/`stop()` are called from `main.ts`.
+  const sandboxReconcileSweep = new SandboxReconcileSweep({
+    db,
+    provider: sandboxProvider,
+    engineHost,
+    engineStore,
+    ageReportMs: resolveSandboxAgeReportMs(process.env),
+  });
+
+  // Hibernates idle ACTIVE sessions an api restart evicted from the host
+  // cache — the in-memory idle sweep cannot see them, and the reaper only
+  // reaps `hibernated` rows. Same idle window as the cache sweep.
+  // `start()`/`stop()` are called from `main.ts`.
+  const idleHibernationSweep = new IdleHibernationSweep({
+    db,
+    engineHost,
+    engineStore,
+    idleMs: resolveIdleMinutes(process.env) * 60_000,
+  });
 
   // Backfill default bases for existing orgs (idempotent). Fires once at
   // boot in the background; never blocks startup.
@@ -544,6 +616,17 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     }
   };
 
+  // Settled-run sandbox reclaim: destroys the sandboxes a run's `session`
+  // nodes provisioned, immediately on settle and via a retry sweep
+  // (`start()`/`stop()` from main.ts, next to the other sweeps).
+  const workflowSandboxReclaimer = new WorkflowSandboxReclaimer({
+    db,
+    engineHost,
+    engineStore,
+    store: workflowStore,
+  });
+  const runSettledAttention = buildRunSettledAttention({ db, store: workflowStore });
+
   const workflowRunHost = new LocalRunHost({
     store: workflowStore,
     engine: workflowEngineDeps,
@@ -554,7 +637,12 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     // Settle attention (batch-fanout design decision 4): a failed top-level
     // run raises a notification through the same router the approval park
     // above uses. See `run-attention.ts` for why child runs stay silent.
-    onRunSettled: buildRunSettledAttention({ db, store: workflowStore }),
+    // Then the sandbox reclaim — both are contained by contract, so a
+    // failure in either never abandons the drive lease.
+    onRunSettled: async (info) => {
+      await runSettledAttention(info);
+      await workflowSandboxReclaimer.reclaimRun(info.runId);
+    },
     crashAt: opts.workflowCrashAt,
   });
   workflowsDepsRef.current = { db, workflowStore, workflowRunHost, actionPluginByService, plugins };
@@ -595,6 +683,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       credentials: engineCredentials,
       key: deriveSecretKey(opts.encryptionKey),
     }),
+    orgWebhookLive: () => Boolean(publicUrlFromEnv(process.env)),
   });
 
   return {
@@ -608,6 +697,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineCredentials,
     engineHost,
     childWatcher,
+    hibernationReaper,
+    workflowSandboxReclaimer,
+    sandboxReconcileSweep,
+    idleHibernationSweep,
     channelHost,
     workflowStore,
     workflowRunHost,

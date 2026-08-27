@@ -93,7 +93,7 @@ assistants
 ```
 
 Pre-1.0 rules apply: `0000_app.sql` is edited in place and every developer
-runs `rm -rf ~/.valet/pg`. There is no backfill, and none is written.
+runs `make dev-clean`. There is no backfill, and none is written.
 
 ## Access
 

@@ -9,8 +9,9 @@ import {
   DialogFooter,
   Input,
   Spinner,
+  Switch,
 } from "~/components/primitives";
-import { useOrg, usePatchOrg } from "~/api/settings";
+import { useOrg, usePatchOrg, usePatchOrgSettings } from "~/api/settings";
 
 /**
  * `/settings/organization` (index) — Organization · General. Org name +
@@ -26,6 +27,7 @@ export const Route = createFileRoute("/settings/organization/")({
 export function OrganizationGeneralPage() {
   const orgQ = useOrg();
   const patchOrg = usePatchOrg();
+  const patchOrgSettings = usePatchOrgSettings();
   const navigate = useNavigate();
 
   const [name, setName] = useState("");
@@ -79,6 +81,27 @@ export function OrganizationGeneralPage() {
               <p className="text-xs text-danger-500">{patchOrg.error.message}</p>
             )}
           </div>
+
+          <FieldRow
+            label="Public artifact links"
+            hint={
+              orgQ.data.callerRole === "admin"
+                ? "Off: every shared document link requires a logged-in member of your org, and existing public links go back to requiring login. On: members can widen an individual link to anyone who has it — no login."
+                : "Off: every shared document link requires a logged-in member of your org. Only an org admin can change this."
+            }
+          >
+            <div className="flex items-center gap-3">
+              <Switch
+                checked={orgQ.data.allowPublicArtifacts}
+                disabled={patchOrgSettings.isPending || orgQ.data.callerRole !== "admin"}
+                onCheckedChange={(next) => patchOrgSettings.mutate({ allowPublicArtifacts: next })}
+                aria-label="Allow public artifact links"
+              />
+              {patchOrgSettings.error && (
+                <p className="text-xs text-danger-500">{patchOrgSettings.error.message}</p>
+              )}
+            </div>
+          </FieldRow>
 
           <FieldRow
             label="Organization features"

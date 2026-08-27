@@ -90,6 +90,9 @@ export default {
         "ink-wash-strong": "var(--ink-wash-strong)",
         "moss-wash": "var(--moss-wash)",
         "moss-wash-strong": "var(--moss-wash-strong)",
+        // Mid-strength neutral fill for data marks (chart bars, idle dots).
+        // `bg-muted/50` is the same trap: it emits no rule.
+        "muted-wash": "var(--muted-wash)",
         // Status washes. `success`/`danger` above are raw `oklch(...)`
         // strings, so `bg-success-500/15` emitted no rule at all and those
         // badges rendered with no background. Alpha lives in the token.

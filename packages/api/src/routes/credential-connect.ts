@@ -18,7 +18,7 @@
  */
 import { randomBytes } from "node:crypto";
 import { Hono } from "hono";
-import { buildAuthorizationUrl, exchangeCodePkce, generatePkceChallenge, type TokenResponse } from "@valet/sdk";
+import { buildAuthorizationUrl, exchangeCodePkce, generatePkceChallenge } from "@valet/sdk";
 import type { AppEnv } from "../env.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { isRecord, signState, verifyState, STATE_TTL_MS } from "../lib/oauth-state.js";
@@ -127,7 +127,7 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
   if (found.oauth.mode === "mcp") {
     let clientRow;
     try {
-      clientRow = await ensureMcpOAuthClient({ db }, service, found.oauth.serverUrl, redirectUri);
+      clientRow = await ensureMcpOAuthClient({ db }, service, found.oauth.serverUrl, redirectUri, found.decl.scopes);
     } catch (err) {
       console.error(`oauth connect: MCP client registration failed for ${service}:`, err);
       return c.redirect(`${returnTo}/integrations?error=oauth_failed`, 302);
@@ -177,6 +177,18 @@ credentialConnectRouter.get("/:service/connect", async (c) => {
   return c.redirect(`${found.oauth.authorizationUrl}?${query}`, 302);
 });
 
+/**
+ * Scopes to store on the saved credential: what the token response granted
+ * (RFC 6749 §5.1 `scope`, possibly "" for a token with no scopes), falling
+ * back to the declared list only when the response names none. Never store
+ * the declared list over a narrower grant — it would mask a scope-gated
+ * server's refusal (TKAI-242).
+ */
+function grantedScopes(scope: string | undefined, declared: string[] | undefined): string[] | undefined {
+  if (typeof scope !== "string") return declared;
+  return scope.split(" ").filter(Boolean);
+}
+
 credentialConnectRouter.get("/oauth/callback", async (c) => {
   const user = c.var.user;
   const { plugins, engineCredentials, encryptionKey, db } = c.var.providers;
@@ -213,7 +225,7 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
   try {
     if (found.oauth.mode === "mcp") {
       if (!verified.codeVerifier) return c.redirect(`${returnTo}/integrations?error=oauth_state`, 302);
-      const clientRow = await ensureMcpOAuthClient({ db }, verified.service, found.oauth.serverUrl, redirectUri);
+      const clientRow = await ensureMcpOAuthClient({ db }, verified.service, found.oauth.serverUrl, redirectUri, found.decl.scopes);
       const tokens = await exchangeCodePkce({
         tokenEndpoint: clientRow.tokenEndpoint,
         clientId: clientRow.clientId,
@@ -225,7 +237,7 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
         accessToken: tokens.access_token,
         refreshToken: tokens.refresh_token,
         expiresAt: typeof tokens.expires_in === "number" ? now + tokens.expires_in * 1000 : undefined,
-        scopes: found.decl.scopes,
+        scopes: grantedScopes(tokens.scope, found.decl.scopes),
         metadata: { connectedVia: "oauth" },
       };
     } else if (found.oauth.interpretTokenResponse) {
@@ -240,19 +252,17 @@ credentialConnectRouter.get("/oauth/callback", async (c) => {
         identity: interp.identity,
       };
     } else {
-      // TokenResponse is a minimal type; providers may also return `scope`
-      // per RFC 6749 §5.1 — access it via a widened intersection.
-      const tokens = (await exchangeAuthorizationCode({
+      const tokens = await exchangeAuthorizationCode({
         oauth: found.oauth,
         env: process.env,
         code,
         redirectUri,
-      })) as TokenResponse & { scope?: string };
+      });
       saved = {
         accessToken: tokens.access_token,
         refreshToken: tokens.refresh_token,
         expiresAt: typeof tokens.expires_in === "number" ? now + tokens.expires_in * 1000 : undefined,
-        scopes: typeof tokens.scope === "string" ? tokens.scope.split(" ") : found.decl.scopes,
+        scopes: grantedScopes(tokens.scope, found.decl.scopes),
         metadata: { connectedVia: "oauth" },
       };
     }

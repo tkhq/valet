@@ -2,7 +2,7 @@
  * Engine-level errors. Provider/adapter implementations throw these so
  * callers can branch on `instanceof` checks without sniffing message text.
  */
-import type { Model } from "@mariozechner/pi-ai";
+import type { Model } from "@earendil-works/pi-ai/compat";
 
 export class NotFoundError extends Error {
   constructor(

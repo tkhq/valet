@@ -47,9 +47,17 @@ import type {
   DeletePolicyOverrideRequest,
   DeletePolicyOverrideResponse,
   EnsureOrchestratorResponse,
+  GetArtifactResponse,
   GetGithubAppResponse,
   GetGithubOrgStatusResponse,
   GetMemoryTreeResponse,
+  ListArtifactsResponse,
+  PatchArtifactRequest,
+  PatchArtifactResponse,
+  ShareArtifactRequest,
+  ShareArtifactResponse,
+  OrgSettingsResponse,
+  PatchOrgSettingsRequest,
   GetOrchestratorChildrenResponse,
   GetOrchestratorInfoResponse,
   GetPrebuildForRepoResponse,
@@ -194,6 +202,7 @@ import type {
   MemoryGraphResponse,
   SearchMemoryResponse,
 } from "./memory-types";
+import { safeNextPath } from "~/lib/next-path";
 
 const BASE = "/api"; // Vite proxies /api → server; same in production.
 
@@ -282,7 +291,11 @@ async function maybeRedirectToLogin(): Promise<void> {
   const cfg = await fetchAuthConfig();
   if (cfg.stub) return;
   redirectingToLogin = true;
-  window.location.href = "/login";
+  // Carry the interrupted location so sign-in lands back here — the whole
+  // point for a shared `/a/{token}` link. The login page re-validates the
+  // value (`safeNextPath`), so a stale or mangled path degrades to "/".
+  const next = safeNextPath(window.location.pathname + window.location.search);
+  window.location.href = next ? `/login?next=${encodeURIComponent(next)}` : "/login";
 }
 
 /**
@@ -370,6 +383,10 @@ export interface SkillListQuery {
 export interface SkillSourceListQuery {
   ownerType?: "user" | "team" | "org";
   ownerId?: string;
+  /** Drop org rows from the unfiltered union. `/skills` sends this so org
+   * repositories stay on Organization · Library. Do not send it with an
+   * owner pin. */
+  excludeOrg?: boolean;
   limit?: number;
   cursor?: string;
 }
@@ -458,6 +475,21 @@ export const api = {
    * — a team's memory is the team's, not a view of yours. */
   getMemoryTree: (owner?: OwnerFilter) =>
     request<GetMemoryTreeResponse>("GET", `/memory/tree${ownerQuery(owner)}`),
+
+  // artifacts (artifacts design). `getArtifact` is the token-addressed
+  // read the public `/a/$token` page uses — org-visibility artifacts 401
+  // for signed-out callers, which the central 401 redirect handles.
+  getArtifact: (token: string) =>
+    request<GetArtifactResponse>("GET", `/artifacts/${encodeURIComponent(token)}`),
+  shareArtifact: (body: ShareArtifactRequest) =>
+    request<ShareArtifactResponse>("POST", "/artifacts/share", body),
+  listArtifacts: () => request<ListArtifactsResponse>("GET", "/artifacts"),
+  patchArtifact: (id: string, body: PatchArtifactRequest) =>
+    request<PatchArtifactResponse>("PATCH", `/artifacts/${encodeURIComponent(id)}`, body),
+  revokeArtifact: (id: string) =>
+    request<{ ok: boolean }>("DELETE", `/artifacts/${encodeURIComponent(id)}`),
+  patchOrgSettings: (body: PatchOrgSettingsRequest) =>
+    request<OrgSettingsResponse>("PATCH", "/org/settings", body),
   getMemoryDoc: (path: string, owner?: OwnerFilter) =>
     request<GetMemoryDocResponse>(
       "GET",
@@ -473,10 +505,10 @@ export const api = {
   // `content` and `pinned` are both optional: the route leaves the body
   // alone when `content` is absent, which is how the doc view pins a file
   // without rewriting it.
-  writeMemoryDoc: (body: { path: string; content?: string; pinned?: boolean }) =>
-    request<unknown>("PUT", "/memory", body),
-  deleteMemoryDoc: (path: string) =>
-    request<unknown>("DELETE", `/memory?path=${encodeURIComponent(path)}`),
+  writeMemoryDoc: (body: { path: string; content?: string; pinned?: boolean }, owner?: OwnerFilter) =>
+    request<unknown>("PUT", `/memory${ownerQuery(owner)}`, body),
+  deleteMemoryDoc: (path: string, owner?: OwnerFilter) =>
+    request<unknown>("DELETE", `/memory?path=${encodeURIComponent(path)}${ownerSuffix(owner)}`),
   exportMemory: () => request<ExportMemoryResponse>("GET", "/memory/export"),
   importMemory: (body: ImportMemoryRequest) =>
     request<ImportMemoryResponse>("POST", "/memory/import", body),
@@ -895,6 +927,7 @@ export const api = {
     const qs = new URLSearchParams();
     if (opts?.ownerType) qs.set("ownerType", opts.ownerType);
     if (opts?.ownerId) qs.set("ownerId", opts.ownerId);
+    if (opts?.excludeOrg) qs.set("excludeOrg", "1");
     if (opts?.limit) qs.set("limit", String(opts.limit));
     if (opts?.cursor) qs.set("cursor", opts.cursor);
     const tail = qs.toString() ? `?${qs}` : "";

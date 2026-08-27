@@ -30,6 +30,7 @@ import type {
   OpenrouterRegistryResponse,
   OrgMembersResponse,
   OrgResponse,
+  OrgSettingsResponse,
   PatchLlmProviderRequest,
   PatchLlmProviderResponse,
   PatchMeRequest,
@@ -38,6 +39,7 @@ import type {
   PatchOrgMemberResponse,
   PatchOrgRequest,
   PatchOrgResponse,
+  PatchOrgSettingsRequest,
   PostGithubAppCredentialRequest,
   PostGithubAppManifestRequest,
   PostGithubAppManifestResponse,
@@ -74,7 +76,7 @@ export const qkSettings = {
 
 // ── Reads ────────────────────────────────────────────────────────────────
 
-export function useMe(opts?: UseQueryOptions<MeResponse>) {
+export function useMe(opts?: Partial<UseQueryOptions<MeResponse>>) {
   return useQuery<MeResponse>({
     queryKey: qkSettings.me(),
     queryFn: () => api.getMe(),
@@ -82,7 +84,7 @@ export function useMe(opts?: UseQueryOptions<MeResponse>) {
   });
 }
 
-export function useOrg(opts?: UseQueryOptions<OrgResponse>) {
+export function useOrg(opts?: Partial<UseQueryOptions<OrgResponse>>) {
   return useQuery<OrgResponse>({
     queryKey: qkSettings.org(),
     queryFn: () => api.getOrg(),
@@ -143,7 +145,7 @@ export function useLlmProviderPreferences(opts?: UseQueryOptions<GetLlmProviderP
   });
 }
 
-export function useTeams(opts?: UseQueryOptions<ListTeamsResponse>) {
+export function useTeams(opts?: Partial<UseQueryOptions<ListTeamsResponse>>) {
   return useQuery<ListTeamsResponse>({
     queryKey: qkSettings.teams(),
     queryFn: () => api.listTeams(),
@@ -178,6 +180,18 @@ export function usePatchOrg() {
   const qc = useQueryClient();
   return useMutation<PatchOrgResponse, Error, PatchOrgRequest>({
     mutationFn: (body) => api.patchOrg(body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkSettings.org() });
+    },
+  });
+}
+
+/** Org-level toggles (`PATCH /api/org/settings`) — invalidates the org
+ * read, which is where `allowPublicArtifacts` is surfaced to members. */
+export function usePatchOrgSettings() {
+  const qc = useQueryClient();
+  return useMutation<OrgSettingsResponse, Error, PatchOrgSettingsRequest>({
+    mutationFn: (body) => api.patchOrgSettings(body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.org() });
     },

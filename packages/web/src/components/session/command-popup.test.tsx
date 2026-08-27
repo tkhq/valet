@@ -80,6 +80,59 @@ describe("commandsToItems", () => {
   });
 });
 
+describe("commandsToItems — query matching and ranking", () => {
+  // "top" (exact/prefix) vs "stop" (substring) exercises the tier keys;
+  // "top-issues" is a bare skill name (source "skill"), so prefix-vs-
+  // substring can also straddle two source groups.
+  const CANDIDATES: WireCommandInfo[] = [
+    { name: "status", description: "Show session status", source: "builtin" },
+    { name: "stop", description: "Stop the agent", source: "builtin" },
+    { name: "top", description: "Show resource usage", source: "builtin" },
+    { name: "skill:review", description: "Run code review", source: "skill" },
+    { name: "top-issues", description: "List top issues", source: "skill" },
+  ];
+
+  it("matches by substring, so a namespaced name matches its suffix", () => {
+    const items = commandsToItems(CANDIDATES, {}, "review");
+    expect(items.map((i) => i.label)).toEqual(["/skill:review"]);
+  });
+
+  it("matches case-insensitively", () => {
+    const items = commandsToItems(CANDIDATES, {}, "REVIEW");
+    expect(items.map((i) => i.label)).toEqual(["/skill:review"]);
+  });
+
+  it("ranks an exact match above a recently used substring match", () => {
+    // The user typed the full name "top"; a recency stamp on the
+    // substring match "stop" must not steal the top slot.
+    const items = commandsToItems(
+      [CANDIDATES[0], CANDIDATES[1], CANDIDATES[2]],
+      { stop: 5000 },
+      "top",
+    );
+    expect(items.map((i) => i.label)).toEqual(["/top", "/stop"]);
+  });
+
+  it("ranks a prefix-match group above a substring-match group, recency included", () => {
+    // "top-issues" (skill) is a prefix match; "stop" (builtin) is a
+    // substring match with a recency stamp. Match tier beats both the
+    // built-in-first source order and recency, and groups stay whole.
+    const items = commandsToItems(
+      [CANDIDATES[1], CANDIDATES[4]],
+      { stop: 5000 },
+      "top",
+    );
+    expect(items.map((i) => i.label)).toEqual(["/top-issues", "/stop"]);
+    expect(items.map((i) => i.group)).toEqual(["Skill", "Built-in"]);
+  });
+
+  it("an empty query keeps every command in registry order", () => {
+    const items = commandsToItems(CANDIDATES, {}, "");
+    expect(items).toHaveLength(CANDIDATES.length);
+    expect(items[0].label).toBe("/status");
+  });
+});
+
 describe("CommandPopup — rendering", () => {
   it("renders only the passed items", () => {
     const filtered = commandsToItems(FIXTURE.filter((c) => c.name.startsWith("sta")));

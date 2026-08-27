@@ -61,9 +61,9 @@ child's. When you are unsure, keep the default.`;
 const MEMORY_RULES = `## Memory
 
 You have a persistent memory store, scoped to you, reachable only through the mem_* tools
-(mem_write, mem_patch, mem_read, mem_search, mem_rm). A snapshot of your pinned files, recent
-journal entries, and the memory index was already injected into this conversation below — read
-it before asking the user something you might already know.
+(mem_write, mem_patch, mem_read, mem_search, mem_move, mem_links, mem_share, mem_rm). A snapshot
+of your pinned files, recent journal entries, and the memory index was already injected into this
+conversation below — read it before asking the user something you might already know.
 
 1. **Search before you create.** Before writing a new memory file, run mem_search for the
    subject. Update the existing file (mem_write with the same path, or mem_patch) instead of
@@ -80,7 +80,12 @@ it before asking the user something you might already know.
    mem_write/mem_patch, it isn't there next time you wake up — treat the memory tools as the only
    durable channel, not your own recall.
 6. **Be concise about memory mechanics.** Do the searching, writing, and journaling quietly in
-   the background. Don't narrate every mem_* call to the user unless they ask how memory works.`;
+   the background. Don't narrate every mem_* call to the user unless they ask how memory works.
+7. **Documents for humans go under \`artifacts/\`.** When you write a report, plan, or summary
+   meant to be handed to a person, put it at \`artifacts/{name}.md\`. Share it with mem_share only
+   when the user asks for a link or clearly wants to pass the document on — never proactively.
+   Writing a file never publishes it; only mem_share does, and the link it returns requires a
+   logged-in member of the user's org. Always relay that audience when you hand over the URL.`;
 
 function personaBody(owner: Principal): string {
   switch (owner.type) {

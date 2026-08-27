@@ -6,7 +6,12 @@
  * persistence-shape-drift guidance.
  */
 import { describe, it, expect, vi } from "vitest";
-import { restoreOneSession, type RestoreSessionDeps, type RestoreSessionMeta } from "./boot-restore.js";
+import {
+  restoreOneSession,
+  runBoundedRestore,
+  type RestoreSessionDeps,
+  type RestoreSessionMeta,
+} from "./boot-restore.js";
 
 function makeDeps(overrides: Partial<RestoreSessionDeps> = {}): {
   deps: RestoreSessionDeps;
@@ -107,5 +112,113 @@ describe("boot-restore loop isolation (via restoreOneSession)", () => {
     expect(errors).toHaveLength(1);
     expect(restored).toBe(1);
     expect(ensureWorkflowSession).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("runBoundedRestore", () => {
+  const opts = { concurrency: 4, timeoutMs: 5_000 };
+
+  it("restores every id and reports the count", async () => {
+    const restore = vi.fn(async () => undefined);
+
+    const result = await runBoundedRestore(["a", "b", "c"], restore, opts);
+
+    expect(result).toEqual({ restored: 3, failed: 0, timedOut: 0, stopped: false });
+    expect(restore).toHaveBeenCalledTimes(3);
+  });
+
+  it("isolates a rejecting session: counts it failed and restores the rest", async () => {
+    const restore = vi.fn(async (id: string) => {
+      if (id === "bad") throw new Error("bad row");
+    });
+
+    const result = await runBoundedRestore(["a", "bad", "c"], restore, opts);
+
+    expect(result.restored).toBe(2);
+    expect(result.failed).toBe(1);
+    expect(result.timedOut).toBe(0);
+  });
+
+  it("abandons a session past the timeout and still restores the ids behind it", async () => {
+    // One id hangs forever; with concurrency 1 it sits in front of the
+    // others, so only the timeout lets the queue advance — exactly the
+    // wedged-sandbox case from the sha-a6eadbe rollout RCA.
+    let hung: (() => void) | undefined;
+    const restore = vi.fn((id: string) => {
+      if (id === "wedged") return new Promise<void>((res) => (hung = res));
+      return Promise.resolve();
+    });
+
+    const result = await runBoundedRestore(["wedged", "b", "c"], restore, {
+      concurrency: 1,
+      timeoutMs: 20,
+    });
+
+    expect(result.restored).toBe(2);
+    expect(result.timedOut).toBe(1);
+    expect(restore).toHaveBeenCalledTimes(3);
+    hung?.(); // settle the abandoned promise so the test leaves nothing pending
+  });
+
+  it("logs a post-timeout failure instead of swallowing it", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    let rejectHung: ((err: Error) => void) | undefined;
+    const restore = vi.fn((id: string) => {
+      if (id === "wedged") return new Promise<void>((_res, rej) => (rejectHung = rej));
+      return Promise.resolve();
+    });
+
+    const result = await runBoundedRestore(["wedged", "b"], restore, {
+      concurrency: 1,
+      timeoutMs: 20,
+    });
+    expect(result.timedOut).toBe(1);
+    expect(result.restored).toBe(1);
+
+    // The abandoned attempt fails AFTER the pass completed — the late error
+    // must still reach the log (it is the only trail for a session that
+    // never came back), and it must not surface as an unhandledRejection.
+    rejectHung?.(new Error("late auth failure"));
+    await new Promise((r) => setTimeout(r, 0));
+    const logged = errSpy.mock.calls.some(
+      (call) => String(call[0]).includes("later failed in the background") && String(call[1]).includes("late auth failure"),
+    );
+    expect(logged).toBe(true);
+    errSpy.mockRestore();
+  });
+
+  it("never runs more sessions at once than the concurrency cap", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const restore = vi.fn(async () => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((res) => setTimeout(res, 5));
+      inFlight--;
+    });
+
+    const ids = Array.from({ length: 10 }, (_, i) => `s${i}`);
+    const result = await runBoundedRestore(ids, restore, { concurrency: 3, timeoutMs: 5_000 });
+
+    expect(result.restored).toBe(10);
+    expect(maxInFlight).toBeLessThanOrEqual(3);
+    expect(maxInFlight).toBeGreaterThan(1); // it actually parallelized
+  });
+
+  it("stops pulling new ids once shouldStop reports true", async () => {
+    const restored: string[] = [];
+    let calls = 0;
+    const restore = vi.fn(async (id: string) => {
+      restored.push(id);
+    });
+
+    const result = await runBoundedRestore(["a", "b", "c", "d"], restore, {
+      concurrency: 1,
+      timeoutMs: 5_000,
+      shouldStop: () => ++calls > 2,
+    });
+
+    expect(result.stopped).toBe(true);
+    expect(restored.length).toBeLessThan(4);
   });
 });

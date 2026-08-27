@@ -13,6 +13,7 @@ Commands:
   serve       Boot the Valet server (the full product)
   sessions    List and inspect sessions on an instance
   send        Send a prompt to a session
+  upload      Upload files to a session sandbox
   gates       List and resolve decision gates
   status      Show instance / session status
   login       Add or authenticate an instance profile
@@ -109,6 +110,47 @@ optionally `--thread <id>`). Without a session, it targets your
 orchestrator. If the turn stops on a decision gate, `send` prints the gate
 with a `valet gates resolve …` hint and exits with code `3`. It never
 blocks waiting for input.
+
+### `valet upload <session-id> <path...>`
+
+Upload one or more files to a session's sandbox at `/workspace/uploads/`.
+Each file is uploaded as a separate request. On success, returns the
+attachment ref for each file. With `--message`, sends a follow-up message
+with the refs spliced into its attachments and streams the reply.
+
+**Examples:**
+
+```bash
+# Upload a single file
+valet upload sess_abc report.pdf
+
+# Upload multiple files
+valet upload sess_abc data.zip README.md
+
+# Upload with custom destination
+valet upload sess_abc report.pdf --dest /workspace/uploads/custom.pdf
+
+# Disable extraction (default: auto-extract zips, auto-transcribe PDFs)
+valet upload sess_abc archive.zip --extract=false
+
+# Upload and follow with a message
+valet upload sess_abc report.pdf --message "summarize the findings"
+
+# Overwrite if the destination file exists
+valet upload sess_abc file.txt --overwrite
+```
+
+**Flags:**
+
+| Flag                      | Notes                                                                   |
+|---------------------------|-------------------------------------------------------------------------|
+| `--dest <path>`           | Target path inside the sandbox. Only valid with a single file.          |
+| `--extract auto\|true\|false` | Default `auto`. Controls zip extraction and PDF transcription.      |
+| `--overwrite`             | Allow overwriting an existing file at the destination.                  |
+| `--message "…"`           | After upload succeeds, send a follow-up message with the refs.          |
+
+**Exit codes:** `0` on success, `1` on upload failure or network error, `3` if
+the follow-up message blocks on a decision gate (same as `valet send`).
 
 ### `valet chat`
 

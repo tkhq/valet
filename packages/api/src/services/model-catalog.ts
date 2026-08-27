@@ -30,7 +30,7 @@
  * entries so `PATCH /api/me` and the preferences route can validate either
  * shape against one set.
  */
-import { getEnvApiKey, getModels } from "@mariozechner/pi-ai";
+import { getEnvApiKey, getModels } from "@earendil-works/pi-ai/compat";
 import type { CredentialOwner, CredentialStore } from "@valet/engine";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { getOrgModelPreferences } from "./org.js";

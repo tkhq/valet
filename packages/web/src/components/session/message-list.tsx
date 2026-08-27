@@ -28,6 +28,7 @@ export function MessageList({
   threadId,
   onOpenChild,
   agentBusy = false,
+  pendingIds,
 }: {
   messages: StreamMessage[];
   threadId?: string;
@@ -43,6 +44,8 @@ export function MessageList({
    * token, and must not flash as a failure.
    */
   agentBusy?: boolean;
+  /** Engine queue item ids still waiting. Marks those user bubbles Queued. */
+  pendingIds?: string[];
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -55,6 +58,16 @@ export function MessageList({
     if (!threadId) return messages;
     return messages.filter((m) => m.threadId === threadId);
   }, [messages, threadId]);
+
+  // A thread switch starts at the bottom: the previous thread's scroll
+  // position must not decide whether the new thread auto-scrolls or shows
+  // the "Latest" button. Reset only — `visible` recomputes on the same
+  // threadId change, so the effect below (declared after this one, runs
+  // after it) does the single scroll write.
+  useEffect(() => {
+    stickToBottomRef.current = true;
+    setScrolledAway(false);
+  }, [threadId]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -111,6 +124,7 @@ export function MessageList({
               key={m.id}
               message={m}
               suppressEmptyPlaceholder={agentBusy && i === visible.length - 1}
+              queued={!!m.queueItemId && (pendingIds?.includes(m.queueItemId) ?? false)}
             />
           ),
         )}

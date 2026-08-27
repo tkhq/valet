@@ -8,7 +8,9 @@
  * `/triggers` as a workflow id.
  */
 import { Hono } from "hono";
+import type { Context } from "hono";
 import type { AppEnv } from "../env.js";
+import { triggerAccessSets, type WorkflowOwner } from "../workflows/service.js";
 import {
   createWorkflowSchedule,
   deleteWorkflowSchedule,
@@ -36,6 +38,12 @@ import type {
 
 export const workflowTriggersRouter = new Hono<AppEnv>();
 
+/** The caller as a `WorkflowOwner` — one construction for every handler,
+ * so a change to the user context or the owner shape lands in one place. */
+function ownerFrom(c: Context<AppEnv>): WorkflowOwner {
+  return { userId: c.var.user.id, orgId: c.var.user.orgId };
+}
+
 const CRON_HINT = ' Use 5 fields, for example "0 9 * * 1-5" (09:00 on weekdays).';
 
 /** Cron/timezone service errors get the example appended once. */
@@ -45,12 +53,14 @@ function withCronHint(error: string): string {
 
 workflowTriggersRouter.get("/triggers", async (c) => {
   const { db } = c.var.providers;
-  const orgId = c.var.user.orgId;
+  const owner = ownerFrom(c);
   const workflowId = c.req.query("workflowId") || undefined;
 
+  // One access-set build serves both lists.
+  const sets = await triggerAccessSets(db, owner);
   const [schedules, events] = await Promise.all([
-    listWorkflowSchedules(db, orgId, workflowId),
-    listWorkflowTriggers(db, orgId, workflowId),
+    listWorkflowSchedules(db, owner, workflowId, sets),
+    listWorkflowTriggers(db, owner, workflowId, sets),
   ]);
   const triggers: WorkflowTriggerItem[] = [
     ...schedules.map((s): WorkflowTriggerItem => ({
@@ -147,11 +157,12 @@ workflowTriggersRouter.patch("/schedules/:id", async (c) => {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return c.json({ error: "Request body must be a JSON object." }, 400);
   }
-  const result = await updateWorkflowSchedule(db, c.var.user.orgId, c.req.param("id"), body);
+  const owner = ownerFrom(c);
+  const result = await updateWorkflowSchedule(db, owner, c.req.param("id"), body);
   if (!result.ok) {
     const msg =
       result.status === 404
-        ? `${result.error} Confirm the id and that it belongs to this org.`
+        ? `${result.error} Confirm the id and that you have access to it.`
         : withCronHint(result.error);
     return c.json({ error: msg }, result.status);
   }
@@ -161,18 +172,16 @@ workflowTriggersRouter.patch("/schedules/:id", async (c) => {
 
 workflowTriggersRouter.delete("/schedules/:id", async (c) => {
   const { db } = c.var.providers;
-  const result = await deleteWorkflowSchedule(db, c.var.user.orgId, c.req.param("id"));
-  if (result === "not_found") return c.json({ error: "schedule not found. Confirm the id and that it belongs to this org." }, 404);
+  const owner = ownerFrom(c);
+  const result = await deleteWorkflowSchedule(db, owner, c.req.param("id"));
+  if (result === "not_found") return c.json({ error: "schedule not found. Confirm the id and that you have access to it." }, 404);
   return c.json({ ok: true });
 });
 
 workflowTriggersRouter.post("/schedules/:id/run", async (c) => {
-  const result = await c.var.providers.workflowScheduler.fireNow(
-    c.var.user.orgId,
-    c.req.param("id"),
-  );
+  const result = await c.var.providers.workflowScheduler.fireNow(ownerFrom(c), c.req.param("id"));
   if (result === "not_found")
-    return c.json({ error: "schedule not found. Confirm the id and that it belongs to this org." }, 404);
+    return c.json({ error: "schedule not found. Confirm the id and that you have access to it." }, 404);
   if (result !== "ok") return c.json({ error: result.error }, 400);
   return c.json({ ok: true });
 });
@@ -213,11 +222,12 @@ workflowTriggersRouter.patch("/event-triggers/:id", async (c) => {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return c.json({ error: "Request body must be a JSON object." }, 400);
   }
-  const result = await updateWorkflowTrigger(db, plugins, c.var.user.orgId, c.req.param("id"), body);
+  const owner = ownerFrom(c);
+  const result = await updateWorkflowTrigger(db, plugins, owner, c.req.param("id"), body);
   if (!result.ok) {
     const msg =
       result.status === 404
-        ? `${result.error} Confirm the id and that it belongs to this org.`
+        ? `${result.error} Confirm the id and that you have access to it.`
         : result.error;
     return c.json({ error: msg }, result.status);
   }
@@ -227,9 +237,10 @@ workflowTriggersRouter.patch("/event-triggers/:id", async (c) => {
 
 workflowTriggersRouter.delete("/event-triggers/:id", async (c) => {
   const { db } = c.var.providers;
-  const result = await deleteWorkflowTrigger(db, c.var.user.orgId, c.req.param("id"));
+  const owner = ownerFrom(c);
+  const result = await deleteWorkflowTrigger(db, owner, c.req.param("id"));
   if (result === "not_found")
-    return c.json({ error: "trigger not found. Confirm the id and that it belongs to this org." }, 404);
+    return c.json({ error: "trigger not found. Confirm the id and that you have access to it." }, 404);
   return c.json({ ok: true });
 });
 
