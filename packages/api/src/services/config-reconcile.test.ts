@@ -876,10 +876,37 @@ describe("reconcileInstanceConfig — skillSources pass", () => {
       skillSources: [{ repo: "owner/repo" }],
     };
     await reconcileInstanceConfig(deps(db), cfg);
+    const id = configSkillSourceId("org", (await ensureOrg(db)).id, "owner/repo", "", "");
+    const future = Date.now() + 60_000;
+    await db
+      .update(skillSources)
+      .set({ nextAttemptAt: future, lastSyncedAt: Date.now(), status: "ok" })
+      .where(eq(skillSources.id, id));
+
     await reconcileInstanceConfig(deps(db), cfg);
 
     const rows = await db.select().from(skillSources);
     expect(rows).toHaveLength(1);
+    expect(rows[0]?.nextAttemptAt).toBe(future);
+  });
+
+  it("does not reset nextAttemptAt on an error row with backoff", async () => {
+    const cfg: InstanceConfig = {
+      version: 1,
+      skillSources: [{ repo: "owner/repo" }],
+    };
+    await reconcileInstanceConfig(deps(db), cfg);
+    const id = configSkillSourceId("org", (await ensureOrg(db)).id, "owner/repo", "", "");
+    const future = Date.now() + 120_000;
+    await db
+      .update(skillSources)
+      .set({ nextAttemptAt: future, lastSyncedAt: null, status: "error" })
+      .where(eq(skillSources.id, id));
+
+    await reconcileInstanceConfig(deps(db), cfg);
+
+    const [row] = await db.select().from(skillSources).where(eq(skillSources.id, id));
+    expect(row?.nextAttemptAt).toBe(future);
   });
 
   it("skips and warns when an unmanaged row already tracks the same repo+subpath", async () => {
@@ -1105,7 +1132,7 @@ describe("reconcileInstanceConfig — skillSources pass", () => {
     ).rejects.toThrow(/names team "Missing"/);
   });
 
-  it("lets two teams track the same repo and prunes only the removed config row", async () => {
+  it("lets two teams track the same repo and same subpath and prunes only the removed config row", async () => {
     await seedUser(db, "u1", "alice@example.com");
     const cfg: InstanceConfig = {
       version: 1,
@@ -1115,25 +1142,37 @@ describe("reconcileInstanceConfig — skillSources pass", () => {
         { name: "Design", members: [{ email: "alice@example.com", role: "admin" }] },
       ],
       skillSources: [
-        { repo: "owner/mono", subpath: "platform", team: "Platform" },
-        { repo: "owner/mono", subpath: "design", team: "Design" },
+        { repo: "owner/mono", subpath: "skills", team: "Platform" },
+        { repo: "owner/mono", subpath: "skills", team: "Design" },
       ],
     };
     await reconcileInstanceConfig(deps(db), cfg);
     await reconcileInstanceConfig(deps(db), cfg);
 
+    const [platform] = await db.select().from(teams).where(eq(teams.name, "Platform"));
+    const [design] = await db.select().from(teams).where(eq(teams.name, "Design"));
+    expect(platform).toBeDefined();
+    expect(design).toBeDefined();
     const first = await db.select().from(skillSources).where(like(skillSources.id, "skillsrc_cfg_%"));
     expect(first).toHaveLength(2);
-    expect(new Set(first.map((r) => r.ownerId)).size).toBe(2);
+    expect(new Set(first.map((r) => r.ownerId))).toEqual(new Set([platform!.id, design!.id]));
+    expect(new Set(first.map((r) => r.id))).toEqual(
+      new Set([
+        configSkillSourceId("team", platform!.id, "owner/mono", "", "skills"),
+        configSkillSourceId("team", design!.id, "owner/mono", "", "skills"),
+      ]),
+    );
+    expect(first.every((r) => r.subpath === "skills")).toBe(true);
 
     await reconcileInstanceConfig(deps(db), {
       ...cfg,
-      skillSources: [{ repo: "owner/mono", subpath: "platform", team: "Platform" }],
+      skillSources: [{ repo: "owner/mono", subpath: "skills", team: "Platform" }],
     });
 
     const after = await db.select().from(skillSources).where(like(skillSources.id, "skillsrc_cfg_%"));
     expect(after).toHaveLength(1);
-    expect(after[0]?.subpath).toBe("platform");
+    expect(after[0]?.ownerId).toBe(platform!.id);
+    expect(after[0]?.subpath).toBe("skills");
   });
 });
 

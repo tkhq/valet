@@ -475,7 +475,7 @@ function validateTeams(
     let members: InstanceMemberDecl[] | undefined;
     for (const [key, v] of Object.entries(obj)) {
       if (key === "name") {
-        name = assertString(v, `teams[${i}].name`, path);
+        name = assertNonEmptyString(v, `teams[${i}].name`, path);
       } else if (key === "members") {
         members = validateMembers(v, `teams[${i}].members`, path);
       } else {
