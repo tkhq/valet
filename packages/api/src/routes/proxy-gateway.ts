@@ -10,8 +10,10 @@
 import type { Hono, Context } from "hono";
 import type { AppEnv } from "../env.js";
 import type { ProviderKind } from "../proxy/types.js";
-import { resolveProxyPrincipal, wireError } from "../proxy/principal.js";
-import { resolveUpstream } from "../proxy/upstream.js";
+import { resolveProxyPrincipal, extractPassthroughKey, wireError } from "../proxy/principal.js";
+import { resolveUpstream, DEFAULT_BASE } from "../proxy/upstream.js";
+import { getProxyCredentialMode } from "../services/org.js";
+import type { Upstream } from "../proxy/types.js";
 import { recordProxyCall } from "../proxy/recorder.js";
 import { recordProxySpend } from "../proxy/metrics.js";
 import { llmProxyRequests } from "../schema/index.js";
@@ -104,10 +106,30 @@ export function registerProxyGateway(app: Hono<AppEnv>, deps: ProxyGatewayDeps):
     });
     if (principal instanceof Response) return principal;
 
-    const upstream = await resolveUpstream(db, c.var.providers.engineCredentials, principal.orgId, kind);
-    if (!upstream) {
-      const envVar = kind === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY";
-      return wireError(kind, 502, `No ${kind} provider configured. Add one in valet Settings, or set the ${envVar} env var.`);
+    // Credential strategy is an org-level setting. Centralized (default): use
+    // the org's stored key. Pass-through: forward the user's OWN provider key
+    // (the non-vlt_ credential the harness sent) so per-user keys/billing are
+    // preserved and valet only observes.
+    const mode = await getProxyCredentialMode(db, principal.orgId);
+    let upstream: Upstream;
+    if (mode === "passthrough") {
+      const userKey = extractPassthroughKey(c.req.raw.headers);
+      if (!userKey) {
+        const envVar = kind === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY";
+        return wireError(
+          kind,
+          400,
+          `Pass-through credential mode is on for your org: set your own ${envVar} in the harness alongside your valet key.`,
+        );
+      }
+      upstream = { baseUrl: DEFAULT_BASE[kind], apiKey: userKey };
+    } else {
+      const resolved = await resolveUpstream(db, c.var.providers.engineCredentials, principal.orgId, kind);
+      if (!resolved) {
+        const envVar = kind === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY";
+        return wireError(kind, 502, `No ${kind} provider configured. Add one in valet Settings, or set the ${envVar} env var.`);
+      }
+      upstream = resolved;
     }
 
     const url = new URL(c.req.url);

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { resolveProxyPrincipal, wireError } from "./principal.js";
+import { resolveProxyPrincipal, extractPassthroughKey, wireError } from "./principal.js";
 
 const ok = {
   verifyApiKey: vi.fn(async ({ key }: { key: string }) =>
@@ -39,6 +39,21 @@ describe("resolveProxyPrincipal", () => {
     const res = r as Response;
     expect(res.status).toBe(401);
     expect(await res.json()).toMatchObject({ error: { type: "invalid_request_error" } });
+  });
+});
+
+describe("extractPassthroughKey", () => {
+  it("returns the non-vlt_ provider key (Claude Code sends both)", () => {
+    const h = new Headers({ "x-api-key": "sk-ant-api03-REALKEY", authorization: "Bearer vlt_good" });
+    expect(extractPassthroughKey(h)).toBe("sk-ant-api03-REALKEY");
+  });
+  it("returns the bearer provider key when the vlt_ is in x-api-key", () => {
+    const h = new Headers({ "x-api-key": "vlt_good", authorization: "Bearer sk-real" });
+    expect(extractPassthroughKey(h)).toBe("sk-real");
+  });
+  it("returns undefined when only a valet key is present", () => {
+    const h = new Headers({ authorization: "Bearer vlt_good" });
+    expect(extractPassthroughKey(h)).toBeUndefined();
   });
 });
 

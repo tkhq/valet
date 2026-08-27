@@ -124,6 +124,32 @@ async function readRawFeatures(db: AppQueryable, orgId: string): Promise<Record<
 }
 
 /**
+ * Recording-gateway credential strategy (org-level). `centralized` (default):
+ * the gateway drops the harness's key and bills the org's stored upstream key.
+ * `passthrough`: the gateway forwards each user's OWN provider key upstream
+ * (the user still identifies with a `vlt_` key), so per-user keys and billing
+ * are preserved while valet only observes. Stored as a string key in the
+ * `orgs.features` jsonb (untyped at the DB level), so no schema change.
+ * Subscriptions (OAuth) are NOT supported by either mode — the proxy is an
+ * API-key path (see the gateway design doc).
+ */
+export type ProxyCredentialMode = "centralized" | "passthrough";
+
+export async function getProxyCredentialMode(db: AppQueryable, orgId: string): Promise<ProxyCredentialMode> {
+  const raw = await readRawFeatures(db, orgId);
+  return raw.proxyCredentialMode === "passthrough" ? "passthrough" : "centralized";
+}
+
+export async function setProxyCredentialMode(
+  db: AppQueryable,
+  orgId: string,
+  mode: ProxyCredentialMode,
+): Promise<void> {
+  const raw = await readRawFeatures(db, orgId);
+  await db.update(orgs).set({ features: { ...raw, proxyCredentialMode: mode } }).where(eq(orgs.id, orgId));
+}
+
+/**
  * Reads `orgs.features` (jsonb). An absent key reads as false, which is what
  * makes every gate here off for an operator who sets nothing.
  */

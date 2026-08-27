@@ -5,7 +5,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import type { ProviderKind, Upstream } from "./types.js";
 import { listLlmProviders, createLlmProvider } from "../services/llm-providers.js";
 
-const DEFAULT_BASE: Record<ProviderKind, string> = {
+export const DEFAULT_BASE: Record<ProviderKind, string> = {
   anthropic: "https://api.anthropic.com",
   openai: "https://api.openai.com",
 };

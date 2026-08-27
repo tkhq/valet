@@ -359,3 +359,45 @@ describe("GET /api/proxy/usage/summary — byDay buckets", () => {
     expect(buckets[0].costUsd).toBeCloseTo(0.007, 5);
   });
 });
+
+describe("GET/PUT /api/proxy/settings — credential mode", () => {
+  it("defaults to centralized", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/proxy/settings`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ mode: "centralized" });
+  });
+
+  it("an admin can switch to passthrough and it persists", async () => {
+    api = await bootTestApi();
+    const put = await fetch(`${api.baseUrl}/api/proxy/settings`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" }, // local-user is admin
+      body: JSON.stringify({ mode: "passthrough" }),
+    });
+    expect(put.status).toBe(200);
+    expect(await put.json()).toEqual({ mode: "passthrough" });
+    const get = await fetch(`${api.baseUrl}/api/proxy/settings`);
+    expect(await get.json()).toEqual({ mode: "passthrough" });
+  });
+
+  it("a non-admin member cannot change the mode (403)", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/proxy/settings`, {
+      method: "PUT",
+      headers: { "content-type": "application/json", "x-valet-test-user-id": "test-member" },
+      body: JSON.stringify({ mode: "passthrough" }),
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("rejects an invalid mode value (400)", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/proxy/settings`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ mode: "nonsense" }),
+    });
+    expect(res.status).toBe(400);
+  });
+});

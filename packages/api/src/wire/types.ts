@@ -3229,6 +3229,13 @@ export interface ProxyDayBucket {
   costUsd: number;
 }
 
+/** `GET`/`PUT /api/proxy/settings` — the org-level recording-gateway
+ * credential strategy. `centralized`: valet's stored key bills. `passthrough`:
+ * each user's own forwarded key bills. */
+export interface ProxySettingsResponse {
+  mode: "centralized" | "passthrough";
+}
+
 /**
  * `GET /api/proxy/usage/summary` — token and cost aggregates for the
  * requested time window. Members see only their own rows; org admins see

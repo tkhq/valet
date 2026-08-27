@@ -14,13 +14,19 @@ import { Hono } from "hono";
 import { and, desc, eq, gte, lt, lte, or, sql } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import { llmProxyRequests } from "../schema/index.js";
-import { isOrgAdmin } from "../services/org.js";
+import {
+  isOrgAdmin,
+  getProxyCredentialMode,
+  setProxyCredentialMode,
+  type ProxyCredentialMode,
+} from "../services/org.js";
 import type {
   ProxyDayBucket,
   ProxyHarnessBucket,
   ProxyModelBucket,
   ProxyRequestDetail,
   ProxyRequestListItem,
+  ProxySettingsResponse,
   ProxyUsageSummary,
   ProxyUserBucket,
 } from "../wire/types.js";
@@ -28,6 +34,31 @@ import type {
 export const proxyUsageRouter = new Hono<AppEnv>();
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** GET `/api/proxy/settings` — the org's credential mode. Any member may read
+ * it (the onboarding panel shows mode-specific setup). */
+proxyUsageRouter.get("/settings", async (c) => {
+  const db = c.var.providers.db;
+  const mode = await getProxyCredentialMode(db, c.var.user.orgId);
+  const body: ProxySettingsResponse = { mode };
+  return c.json(body);
+});
+
+/** PUT `/api/proxy/settings` — set the org's credential mode. Org-admin only;
+ * a non-admin 403s. Rejects any value other than the two known modes. */
+proxyUsageRouter.put("/settings", async (c) => {
+  const db = c.var.providers.db;
+  const user = c.var.user;
+  if (!(await isOrgAdmin(db, user.orgId, user.id))) return c.json({ error: "org admin required" }, 403);
+  const parsed: unknown = await c.req.json().catch(() => null);
+  const mode = (parsed as { mode?: unknown } | null)?.mode;
+  if (mode !== "centralized" && mode !== "passthrough") {
+    return c.json({ error: "mode must be 'centralized' or 'passthrough'" }, 400);
+  }
+  await setProxyCredentialMode(db, user.orgId, mode as ProxyCredentialMode);
+  const body: ProxySettingsResponse = { mode };
+  return c.json(body);
+});
 
 /** Parse the `?window=` query parameter into milliseconds. */
 function parseWindowMs(window: string | undefined): number {

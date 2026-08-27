@@ -22,13 +22,30 @@ const VALET_KEY_PREFIX = "vlt_";
  * and 401. Prefer whichever candidate carries the `vlt_` prefix; fall back to
  * the first present candidate only when neither is a valet key.
  */
-function extractKey(headers: Headers): string | undefined {
+function credentialCandidates(headers: Headers): string[] {
   const candidates: string[] = [];
   const xApiKey = headers.get("x-api-key");
   if (xApiKey) candidates.push(xApiKey);
   const auth = headers.get("authorization");
   if (auth?.toLowerCase().startsWith("bearer ")) candidates.push(auth.slice(7).trim());
+  return candidates;
+}
+
+function extractKey(headers: Headers): string | undefined {
+  const candidates = credentialCandidates(headers);
   return candidates.find((c) => c.startsWith(VALET_KEY_PREFIX)) ?? candidates[0];
+}
+
+/**
+ * The user's OWN provider key for pass-through credential mode: the first
+ * request credential that is NOT a valet key. Claude Code sends the real
+ * provider key as `x-api-key` (from `ANTHROPIC_API_KEY`) alongside the `vlt_`
+ * bearer, so this returns that real key — which the gateway forwards upstream
+ * instead of valet's org key, while the `vlt_` key still identifies the user.
+ * Returns undefined when the harness sent only a valet key (no BYO credential).
+ */
+export function extractPassthroughKey(headers: Headers): string | undefined {
+  return credentialCandidates(headers).find((c) => !c.startsWith(VALET_KEY_PREFIX));
 }
 
 export interface PrincipalDeps {
