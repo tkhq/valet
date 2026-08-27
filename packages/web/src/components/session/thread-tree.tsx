@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { Archive, ArchiveRestore, MessageSquare, MoreHorizontal, Plus, RefreshCw, Search, X } from "lucide-react";
-import type { OrchestratorChildSummary, ThreadSummary } from "@valet/api/wire";
+import type { DecisionGate, OrchestratorChildSummary, ThreadSummary } from "@valet/api/wire";
 import {
   useArchivedThreads,
   useCreateThread,
@@ -80,6 +80,20 @@ export function groupChildrenByThread(
     else map.set(c.parentThreadId, [c]);
   }
   return map;
+}
+
+/**
+ * Pure: the ids of threads that hold at least one pending gate. Feeds the
+ * per-thread needs-you dot (TKAI-258): the gate card and header badge are
+ * scoped to the ACTIVE thread, so this dot is the only in-session surface
+ * for a gate pending on a thread you are not looking at.
+ */
+export function threadIdsWithPendingGates(
+  gates: Record<string, DecisionGate> | undefined,
+): Set<string> {
+  const ids = new Set<string>();
+  for (const g of Object.values(gates ?? {})) ids.add(g.threadId);
+  return ids;
 }
 
 /** Pure: status-dot class for a child row. Calm-companion visual language —
@@ -166,6 +180,12 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   );
   const activeThreadId = search.thread ?? threads[0]?.id;
   const grouped = groupChildrenByThread(showChildren ? (childrenQ.data?.children ?? []) : []);
+
+  // Pending gates are already client-side (wire `gate.*` frames + the REST
+  // seed in SessionView); the record's identity only changes when a gate
+  // opens or resolves, so the derived set is cheap to keep fresh.
+  const pendingGates = useStreamStore((s) => s.bySession[sessionId]?.pendingGates);
+  const gatedThreadIds = useMemo(() => threadIdsWithPendingGates(pendingGates), [pendingGates]);
 
   const [bucket, setBucket] = useState<ThreadOriginBucket>(() => loadStoredBucket());
   const [query, setQuery] = useState("");
@@ -295,6 +315,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
               thread={t}
               index={threads.indexOf(t)}
               active={t.id === activeThreadId}
+              hasPendingGate={gatedThreadIds.has(t.id)}
               childSessions={grouped.get(t.id) ?? []}
               activeChildId={search.child}
               onArchive={(threadId) => {
@@ -351,6 +372,7 @@ function ThreadNode({
   thread,
   index,
   active,
+  hasPendingGate,
   childSessions,
   activeChildId,
   onArchive,
@@ -360,6 +382,8 @@ function ThreadNode({
   thread: ThreadSummary;
   index: number;
   active: boolean;
+  /** The thread holds a pending decision gate — show the needs-you dot. */
+  hasPendingGate: boolean;
   childSessions: OrchestratorChildSummary[];
   activeChildId?: string;
   onArchive: (threadId: string) => void;
@@ -398,6 +422,17 @@ function ThreadNode({
             )}
           >
             <span className="flex-1 truncate">{label}</span>
+            {hasPendingGate && (
+              // Amber = blocked on a person, the same vocabulary as the
+              // sessions-list "Needs you" chip. Static on purpose: pulse is
+              // reserved for progress (see childStatusDotClassName). Shown on
+              // the active thread too — the dot marks where gates are, not
+              // where you aren't.
+              <span
+                aria-label="Needs your decision"
+                className="ml-2 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500"
+              />
+            )}
           </Link>
         </Tooltip>
         <DropdownMenu>

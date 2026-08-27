@@ -6,10 +6,11 @@
  * precisely so they're testable without mounting all of that.
  */
 import { describe, expect, it } from "vitest";
-import type { OrchestratorChildSummary, ThreadSummary } from "@valet/api/wire";
+import type { DecisionGate, OrchestratorChildSummary, ThreadSummary } from "@valet/api/wire";
 import {
   childStatusDotClassName,
   groupChildrenByThread,
+  threadIdsWithPendingGates,
   untitledThreadLabel,
 } from "./thread-tree";
 
@@ -56,6 +57,46 @@ describe("childStatusDotClassName", () => {
     const cls = childStatusDotClassName("settled");
     expect(cls).toContain("bg-muted");
     expect(cls).not.toContain("animate-pulse");
+  });
+});
+
+/**
+ * TKAI-258: the gate card and header badge are scoped to the active thread,
+ * so this set is what tells the tree to mark OTHER threads that are blocked
+ * on a decision.
+ */
+describe("threadIdsWithPendingGates", () => {
+  const gate = (id: string, threadId: string): DecisionGate => ({
+    id,
+    sessionId: "s1",
+    threadId,
+    type: "approval",
+    title: "Approve the deploy",
+    actions: [{ id: "approve", label: "Approve" }],
+    status: "pending",
+    createdAt: 1_700_000_000_000,
+    updatedAt: 1_700_000_000_000,
+  });
+
+  it("collects the threadId of each pending gate", () => {
+    const ids = threadIdsWithPendingGates({
+      g1: gate("g1", "thread-a"),
+      g2: gate("g2", "thread-b"),
+    });
+    expect(ids).toEqual(new Set(["thread-a", "thread-b"]));
+  });
+
+  it("dedupes multiple gates on one thread", () => {
+    const ids = threadIdsWithPendingGates({
+      g1: gate("g1", "thread-a"),
+      g2: gate("g2", "thread-a"),
+    });
+    expect(ids).toEqual(new Set(["thread-a"]));
+  });
+
+  it("returns an empty set for no gates and for an unseeded store slice", () => {
+    expect(threadIdsWithPendingGates({})).toEqual(new Set());
+    expect(threadIdsWithPendingGates(undefined)).toEqual(new Set());
   });
 });
 
