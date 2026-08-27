@@ -145,7 +145,7 @@ export function useLlmProviderPreferences(opts?: UseQueryOptions<GetLlmProviderP
   });
 }
 
-export function useTeams(opts?: UseQueryOptions<ListTeamsResponse>) {
+export function useTeams(opts?: Partial<UseQueryOptions<ListTeamsResponse>>) {
   return useQuery<ListTeamsResponse>({
     queryKey: qkSettings.teams(),
     queryFn: () => api.listTeams(),

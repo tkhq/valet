@@ -360,3 +360,8 @@ themselves. Anything else degrades to `/`.
   expanding a team-scoped file shows the viewer's empty state instead of
   the team file. Threading the session owner into the tool renderers is
   future work; the renderers do not know it today.
+- The `/memory` page's doc pane now threads the active workspace owner
+  (TKAI-262), so a team file can render there. Share stays hidden for
+  team-owned docs — the same rule as the tool surface, which refuses
+  `team:{id}/...` paths in v1. Write actions (pin, edit, delete) show only
+  when the caller may administer the team, mirroring `authorizeOwner`.

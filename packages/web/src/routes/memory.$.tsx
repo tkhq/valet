@@ -1,5 +1,6 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { MemoryDoc } from "~/components/memory/memory-doc";
+import { useListOwner } from "~/lib/use-list-owner";
 
 /**
  * `/memory/$` — the explorer's document view. The splat param (`_splat`,
@@ -21,6 +22,10 @@ function MemoryDocPage() {
   const { _splat } = Route.useParams();
   const path = _splat ?? "";
   const navigate = useNavigate();
+  // The same workspace scope the tree pane lists from — without it, a team
+  // file the tree shows would load from the caller's PERSONAL corpus and
+  // 404 (TKAI-262).
+  const owner = useListOwner();
 
   function onNavigateToChat() {
     void navigate({ to: "/chat" });
@@ -42,6 +47,7 @@ function MemoryDocPage() {
     <div className="flex-1 min-h-0 overflow-y-auto">
       <MemoryDoc
         path={path}
+        owner={owner}
         onNavigateToChat={onNavigateToChat}
         onDeleted={onDeleted}
         onOpenPath={onOpenPath}

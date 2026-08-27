@@ -2,7 +2,8 @@ import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { qkMemory, useMemoryDoc } from "~/api/memory";
 import { useOrchestratorInfo } from "~/api/orchestrator";
-import { api, ApiError } from "~/api/client";
+import { useOrg, useTeams } from "~/api/settings";
+import { api, ApiError, type OwnerFilter } from "~/api/client";
 import { Badge, Button, Spinner } from "~/components/primitives";
 import { Markdown } from "~/components/markdown";
 import { MarkdownEditor } from "~/components/markdown-editor";
@@ -19,6 +20,15 @@ export function memoryDocPrefillText(path: string): string {
 
 export interface MemoryDocProps {
   path: string;
+  /**
+   * The workspace scope the file belongs to. The `/memory` route passes the
+   * active workspace (`useListOwner`) so a team file loads from the TEAM's
+   * corpus; without it the API defaults to the caller's own memory
+   * (TKAI-262: the tree listed team files the doc pane then 404'd on). The
+   * chat memory-viewer dialog deliberately omits it — tool renderers read
+   * the caller's own scope (artifacts design, Deviations).
+   */
+  owner?: OwnerFilter;
   /**
    * Called after the prefill store is seeded, to actually leave the page
    * (`navigate({ to: "/chat" })` in production). Kept as a callback rather
@@ -52,18 +62,37 @@ export interface MemoryDocProps {
  * Share opens the artifact controls (`share-controls.tsx`); Download saves
  * the full document, frontmatter included.
  */
-export function MemoryDoc({ path, onNavigateToChat, onDeleted, onOpenPath }: MemoryDocProps) {
-  const docQ = useMemoryDoc(path);
+export function MemoryDoc({ path, owner, onNavigateToChat, onDeleted, onOpenPath }: MemoryDocProps) {
+  const docQ = useMemoryDoc(path, owner);
   const info = useOrchestratorInfo();
   const queryClient = useQueryClient();
   const name = info.data?.name ?? "your assistant";
+
+  // Team memory: reads follow membership, writes follow authority (team
+  // admin or org admin — `authorizeOwner` in routes/memory.ts). Mirror that
+  // split here so a plain member doesn't get write buttons the API refuses.
+  // Sharing and the composer prefill stay own-scope only: `mem_share`
+  // refuses team paths in v1, and "Ask {name} to update this" writes the
+  // caller's own corpus, not the team's.
+  const isTeamScope = owner?.ownerType === "team";
+  const teamsQ = useTeams({ enabled: isTeamScope });
+  const orgQ = useOrg({ enabled: isTeamScope });
+  const canWrite =
+    !isTeamScope ||
+    orgQ.data?.callerRole === "admin" ||
+    teamsQ.data?.teams.some((t) => t.id === owner?.ownerId && t.callerRole === "admin") === true;
 
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [confirmingDelete, setConfirmingDelete] = useState(false);
 
+  // Invalidations use the OWNERLESS keys on purpose: react-query matches key
+  // prefixes, so `doc(path)` / `tree()` cover every owner variant of the same
+  // data — this pane's scoped copy AND the ownerless copies the dashboard
+  // memory card and the chat memory-viewer dialog hold. Owner-ful keys would
+  // match only this pane's copy and leave the others stale.
   const saveMutation = useMutation({
-    mutationFn: (content: string) => api.writeMemoryDoc({ path, content }),
+    mutationFn: (content: string) => api.writeMemoryDoc({ path, content }, owner),
     onSuccess: async () => {
       setEditing(false);
       await queryClient.invalidateQueries({ queryKey: qkMemory.doc(path) });
@@ -74,7 +103,7 @@ export function MemoryDoc({ path, onNavigateToChat, onDeleted, onOpenPath }: Mem
   // Metadata-only write: `PUT /api/memory` leaves the body untouched when
   // `content` is absent, so pinning never rewrites the document.
   const pinMutation = useMutation({
-    mutationFn: (pinned: boolean) => api.writeMemoryDoc({ path, pinned }),
+    mutationFn: (pinned: boolean) => api.writeMemoryDoc({ path, pinned }, owner),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: qkMemory.doc(path) });
       await queryClient.invalidateQueries({ queryKey: qkMemory.tree() });
@@ -82,7 +111,7 @@ export function MemoryDoc({ path, onNavigateToChat, onDeleted, onOpenPath }: Mem
   });
 
   const deleteMutation = useMutation({
-    mutationFn: () => api.deleteMemoryDoc(path),
+    mutationFn: () => api.deleteMemoryDoc(path, owner),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: qkMemory.tree() });
       queryClient.removeQueries({ queryKey: qkMemory.doc(path) });
@@ -161,7 +190,7 @@ export function MemoryDoc({ path, onNavigateToChat, onDeleted, onOpenPath }: Mem
           </h1>
           {!editing && (
             <div className="flex shrink-0 items-center gap-2 pt-2 text-xs">
-              <ShareControls path={path} />
+              {!isTeamScope && <ShareControls path={path} />}
               <button
                 type="button"
                 onClick={() => downloadTextFile(memoryDownloadName(path), rendered, "text/markdown")}
@@ -169,19 +198,23 @@ export function MemoryDoc({ path, onNavigateToChat, onDeleted, onOpenPath }: Mem
               >
                 Download
               </button>
-              <button
-                type="button"
-                onClick={() => pinMutation.mutate(!file.pinned)}
-                disabled={pinMutation.isPending}
-                aria-pressed={file.pinned}
-                className="text-muted hover:text-moss"
-              >
-                {file.pinned ? "Unpin" : "Pin"}
-              </button>
-              <button type="button" onClick={startEditing} className="text-muted hover:text-moss">
-                Edit
-              </button>
-              {confirmingDelete ? (
+              {canWrite && (
+                <button
+                  type="button"
+                  onClick={() => pinMutation.mutate(!file.pinned)}
+                  disabled={pinMutation.isPending}
+                  aria-pressed={file.pinned}
+                  className="text-muted hover:text-moss"
+                >
+                  {file.pinned ? "Unpin" : "Pin"}
+                </button>
+              )}
+              {canWrite && (
+                <button type="button" onClick={startEditing} className="text-muted hover:text-moss">
+                  Edit
+                </button>
+              )}
+              {canWrite && confirmingDelete ? (
                 <span className="flex items-center gap-1.5">
                   <button
                     type="button"
@@ -199,7 +232,7 @@ export function MemoryDoc({ path, onNavigateToChat, onDeleted, onOpenPath }: Mem
                     Cancel
                   </button>
                 </span>
-              ) : (
+              ) : canWrite ? (
                 <button
                   type="button"
                   onClick={() => setConfirmingDelete(true)}
@@ -207,7 +240,7 @@ export function MemoryDoc({ path, onNavigateToChat, onDeleted, onOpenPath }: Mem
                 >
                   Delete
                 </button>
-              )}
+              ) : null}
             </div>
           )}
         </div>
@@ -267,7 +300,7 @@ export function MemoryDoc({ path, onNavigateToChat, onDeleted, onOpenPath }: Mem
         </Markdown>
       )}
 
-      {!editing && (
+      {!editing && !isTeamScope && (
         <footer className="mt-12 border-t border-line pt-6">
           <button type="button" onClick={askToUpdate} className="text-sm text-moss hover:underline">
             Ask {name} to update this
