@@ -25,6 +25,15 @@ vi.mock("~/api/orchestrator", () => ({
   useOrchestratorInfo: () => ({ data: { name: "Nova" } }),
 }));
 
+const downloadMock = vi.fn();
+vi.mock("~/lib/download", async (importOriginal) => {
+  const original = await importOriginal<typeof import("~/lib/download")>();
+  return {
+    ...original,
+    downloadTextFile: (...args: Parameters<typeof original.downloadTextFile>) => downloadMock(...args),
+  };
+});
+
 import { MemoryDoc, memoryDocPrefillText } from "./memory-doc";
 
 // The component uses react-query mutations now — every render needs a
@@ -35,6 +44,27 @@ function renderWithClient(ui: ReactElement) {
   });
   return render(<QueryClientProvider client={client}>{ui}</QueryClientProvider>);
 }
+
+const meFixture = {
+  id: "user-me",
+  email: "me@example.com",
+  name: "Me",
+  avatarUrl: null,
+  role: "member" as const,
+  orgId: "org1",
+  orgRole: "member" as const,
+  defaultModel: null,
+};
+
+const orgFixture = {
+  id: "org1",
+  name: "Org",
+  createdAt: 0,
+  features: { organizations: true, ssoTeamSync: false },
+  ssoTeamGroups: [],
+  allowPublicArtifacts: false,
+  callerRole: "member" as const,
+};
 
 function renderedDoc(rendered: string) {
   return {
@@ -55,6 +85,7 @@ function renderedDoc(rendered: string) {
 describe("MemoryDoc", () => {
   beforeEach(() => {
     docMock.mockReset();
+    downloadMock.mockReset();
     useComposerPrefillStore.setState({ text: null });
   });
 
@@ -274,6 +305,96 @@ describe("MemoryDoc", () => {
       document.removeEventListener("click", cancel);
     }
     expect(onOpenPath).toHaveBeenCalledWith("people/alice.md");
+  });
+
+  it("downloads the full document (frontmatter included) under the path basename", () => {
+    const rendered = '---\ntype: "note"\n---\n\nBody.\n';
+    docMock.mockReturnValue({ isLoading: false, error: null, data: renderedDoc(rendered), refetch: vi.fn() });
+
+    renderWithClient(<MemoryDoc path="preferences/style.md" onNavigateToChat={vi.fn()} />);
+    fireEvent.click(screen.getByText("Download"));
+
+    expect(downloadMock).toHaveBeenCalledWith("style.md", rendered, "text/markdown");
+  });
+
+  /** The share half of the artifacts design used to live only in the chat
+   * memory-viewer dialog; the `/memory` page had no share affordance. It now
+   * rides `MemoryDoc`'s action row, so both surfaces get it. */
+  it("shares: the Share panel offers 'Create share link' and posts the share", async () => {
+    const rendered = '---\ntype: "note"\n---\n\nBody.\n';
+    docMock.mockReturnValue({ isLoading: false, error: null, data: renderedDoc(rendered), refetch: vi.fn() });
+    const me = vi.spyOn(api, "getMe").mockResolvedValue(meFixture);
+    const list = vi.spyOn(api, "listArtifacts").mockResolvedValue({ artifacts: [] });
+    const org = vi.spyOn(api, "getOrg").mockResolvedValue(orgFixture);
+    const share = vi.spyOn(api, "shareArtifact").mockResolvedValue({
+      id: "a1",
+      path: "preferences/style.md",
+      url: "https://valet.test/a/tok",
+      visibility: "org",
+      updatedAt: Date.now(),
+    });
+
+    renderWithClient(<MemoryDoc path="preferences/style.md" onNavigateToChat={vi.fn()} />);
+    expect(list).not.toHaveBeenCalled(); // panel closed → no list request
+    fireEvent.click(screen.getByText("Share"));
+
+    // The create button renders disabled until the artifact list resolves.
+    const create = await screen.findByRole("button", { name: "Create share link" });
+    await waitFor(() => expect((create as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(create);
+    await waitFor(() => expect(share).toHaveBeenCalledWith({ path: "preferences/style.md" }));
+
+    me.mockRestore();
+    list.mockRestore();
+    org.mockRestore();
+    share.mockRestore();
+  });
+
+  /** An org admin's artifact list holds EVERY member's rows, and memory
+   * paths are conventional, so a path-only match can land on a colleague's
+   * artifact — Revoke would then kill the colleague's live link. The panel
+   * must match on the sharer too. */
+  it("shares: the panel shows the caller's own artifact, not a colleague's at the same path", async () => {
+    const rendered = '---\ntype: "note"\n---\n\nBody.\n';
+    docMock.mockReturnValue({ isLoading: false, error: null, data: renderedDoc(rendered), refetch: vi.fn() });
+    const me = vi.spyOn(api, "getMe").mockResolvedValue(meFixture);
+    const org = vi.spyOn(api, "getOrg").mockResolvedValue(orgFixture);
+    const list = vi.spyOn(api, "listArtifacts").mockResolvedValue({
+      artifacts: [
+        {
+          id: "a-colleague",
+          path: "preferences/style.md",
+          title: "Writing style",
+          url: "https://valet.test/a/colleague-token",
+          visibility: "org",
+          actorUserId: "user-colleague",
+          revoked: false,
+          createdAt: 0,
+          updatedAt: 1,
+        },
+        {
+          id: "a-mine",
+          path: "preferences/style.md",
+          title: "Writing style",
+          url: "https://valet.test/a/my-token",
+          visibility: "org",
+          actorUserId: "user-me",
+          revoked: false,
+          createdAt: 0,
+          updatedAt: 0,
+        },
+      ],
+    });
+
+    renderWithClient(<MemoryDoc path="preferences/style.md" onNavigateToChat={vi.fn()} />);
+    fireEvent.click(screen.getByText("Share"));
+
+    const input = (await screen.findByLabelText("Share link")) as HTMLInputElement;
+    expect(input.value).toBe("https://valet.test/a/my-token");
+
+    me.mockRestore();
+    org.mockRestore();
+    list.mockRestore();
   });
 
   it("delete confirm can be cancelled without calling the API", () => {

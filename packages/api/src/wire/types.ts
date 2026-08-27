@@ -2142,6 +2142,10 @@ export interface ArtifactListItem {
   title: string;
   url: string;
   visibility: ArtifactVisibility;
+  /** Who shared it. An org admin's list contains every member's artifacts,
+   * and paths are conventional (`journal/2026-08-27.md`), so a path-only
+   * client match can hit another member's row. Filter on this too. */
+  actorUserId: string;
   revoked: boolean;
   createdAt: number;
   updatedAt: number;

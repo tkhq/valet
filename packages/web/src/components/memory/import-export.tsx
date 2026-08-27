@@ -5,6 +5,7 @@ import { api } from "~/api/client";
 import { qkMemory } from "~/api/memory";
 import type { ImportMemoryResponse } from "~/api/memory-types";
 import { Button, Spinner } from "~/components/primitives";
+import { downloadTextFile } from "~/lib/download";
 
 /** Parsed, validated bundle — what the confirm step shows and the import
  * request sends. */
@@ -114,13 +115,11 @@ export function MemoryImportExport() {
         fileCount: Object.keys(res.files).length,
         files: res.files,
       };
-      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `valet-memory-${new Date().toISOString().slice(0, 10)}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
+      downloadTextFile(
+        `valet-memory-${new Date().toISOString().slice(0, 10)}.json`,
+        JSON.stringify(bundle, null, 2),
+        "application/json",
+      );
       setPhase({ kind: "idle" });
     } catch (err) {
       setPhase({ kind: "error", message: err instanceof Error ? err.message : "Export failed." });

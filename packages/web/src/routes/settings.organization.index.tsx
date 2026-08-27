@@ -84,12 +84,16 @@ export function OrganizationGeneralPage() {
 
           <FieldRow
             label="Public artifact links"
-            hint="Off: every shared document link requires a logged-in member of your org. On: members can widen an individual link to anyone who has it — no login."
+            hint={
+              orgQ.data.callerRole === "admin"
+                ? "Off: every shared document link requires a logged-in member of your org, and existing public links go back to requiring login. On: members can widen an individual link to anyone who has it — no login."
+                : "Off: every shared document link requires a logged-in member of your org. Only an org admin can change this."
+            }
           >
             <div className="flex items-center gap-3">
               <Switch
                 checked={orgQ.data.allowPublicArtifacts}
-                disabled={patchOrgSettings.isPending}
+                disabled={patchOrgSettings.isPending || orgQ.data.callerRole !== "admin"}
                 onCheckedChange={(next) => patchOrgSettings.mutate({ allowPublicArtifacts: next })}
                 aria-label="Allow public artifact links"
               />
