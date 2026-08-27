@@ -135,34 +135,45 @@ async function readRawFeatures(db: AppQueryable, orgId: string): Promise<Record<
  */
 export type ProxyCredentialMode = "centralized" | "passthrough";
 
-export async function getProxyCredentialMode(db: AppQueryable, orgId: string): Promise<ProxyCredentialMode> {
-  const raw = await readRawFeatures(db, orgId);
-  return raw.proxyCredentialMode === "passthrough" ? "passthrough" : "centralized";
+/**
+ * Recording-gateway governance (org-level), stored together in the
+ * `orgs.features` jsonb:
+ *  - `enabled` — master on/off. Default OFF: the gateway forwards a provider
+ *    key and records prompts, so an org opts in explicitly on the Proxy
+ *    settings page. When off, `/proxy/*` 403s.
+ *  - `mode` — credential strategy (`centralized` vs `passthrough`).
+ */
+export interface ProxySettings {
+  enabled: boolean;
+  mode: ProxyCredentialMode;
 }
 
-export async function setProxyCredentialMode(
+function proxySettingsFrom(raw: Record<string, unknown>): ProxySettings {
+  return {
+    enabled: raw.proxyEnabled === true,
+    mode: raw.proxyCredentialMode === "passthrough" ? "passthrough" : "centralized",
+  };
+}
+
+/** Reads both governance fields in one `orgs.features` read (the gateway hot
+ * path and the settings endpoints both need the pair). */
+export async function getProxySettings(db: AppQueryable, orgId: string): Promise<ProxySettings> {
+  return proxySettingsFrom(await readRawFeatures(db, orgId));
+}
+
+/** Applies a partial governance update in ONE read-modify-write, so a combined
+ * `{enabled, mode}` PUT is a single write (not two that can interleave), and
+ * returns the resulting settings. */
+export async function setProxySettings(
   db: AppQueryable,
   orgId: string,
-  mode: ProxyCredentialMode,
-): Promise<void> {
-  const raw = await readRawFeatures(db, orgId);
-  await db.update(orgs).set({ features: { ...raw, proxyCredentialMode: mode } }).where(eq(orgs.id, orgId));
-}
-
-/**
- * Master on/off for the recording gateway (org-level). Default OFF: the
- * gateway forwards a provider key and records prompts, so an org opts in
- * explicitly on the Proxy settings page. When off, `/proxy/*` 403s. Stored in
- * the `orgs.features` jsonb alongside `proxyCredentialMode`.
- */
-export async function getProxyEnabled(db: AppQueryable, orgId: string): Promise<boolean> {
-  const raw = await readRawFeatures(db, orgId);
-  return raw.proxyEnabled === true;
-}
-
-export async function setProxyEnabled(db: AppQueryable, orgId: string, enabled: boolean): Promise<void> {
-  const raw = await readRawFeatures(db, orgId);
-  await db.update(orgs).set({ features: { ...raw, proxyEnabled: enabled } }).where(eq(orgs.id, orgId));
+  patch: { enabled?: boolean; mode?: ProxyCredentialMode },
+): Promise<ProxySettings> {
+  const next = { ...(await readRawFeatures(db, orgId)) };
+  if (patch.enabled !== undefined) next.proxyEnabled = patch.enabled;
+  if (patch.mode !== undefined) next.proxyCredentialMode = patch.mode;
+  await db.update(orgs).set({ features: next }).where(eq(orgs.id, orgId));
+  return proxySettingsFrom(next);
 }
 
 /**

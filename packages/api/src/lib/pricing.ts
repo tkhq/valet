@@ -14,23 +14,26 @@ function piProvider(kind: ProviderKind): "anthropic" | "openai" {
  * reprocess can price it. See spec finding 3.
  */
 export function priceUsage(kind: ProviderKind, modelId: string, usage: ProxyUsage): number | null {
-  let model;
+  // The WHOLE computation is guarded: an unknown model OR a throw from pi-ai's
+  // pricing returns null (UNPRICED), never propagates. The recorder prices
+  // inside its row build, so a pricing throw escaping here would abort the
+  // insert and LOSE the entire recording (raw bodies included).
   try {
     // getModel is generically typed on literal ids; at runtime it indexes
     // MODELS[provider][id]. Cast the id to the index type — a genuine
     // third-party-typing narrowing (CLAUDE.md rule 3), commented here.
-    model = getModel(piProvider(kind), modelId as never);
+    const model = getModel(piProvider(kind), modelId as never);
+    if (!model) return null;
+    const cost = calculateCost(model, {
+      input: usage.input,
+      output: usage.output,
+      cacheRead: usage.cacheRead,
+      cacheWrite: usage.cacheWrite,
+      totalTokens: usage.total,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    });
+    return cost.total;
   } catch {
     return null;
   }
-  if (!model) return null;
-  const cost = calculateCost(model, {
-    input: usage.input,
-    output: usage.output,
-    cacheRead: usage.cacheRead,
-    cacheWrite: usage.cacheWrite,
-    totalTokens: usage.total,
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-  });
-  return cost.total;
 }
