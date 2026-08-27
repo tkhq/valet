@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
 import { entriesToAgentMessages } from "../src/thread.js";
 import {
@@ -54,8 +57,12 @@ describe("transcript fingerprint", () => {
     }
   });
 
-  it("reads the installed pi-ai version at module load", () => {
-    expect(piAiVersion).toMatch(/^\d+\.\d+/);
+  it("matches the pinned pi-ai dependency", () => {
+    const pkg = JSON.parse(
+      readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8"),
+    ) as { dependencies?: Record<string, string> };
+    const pinned = pkg.dependencies?.["@earendil-works/pi-ai"] ?? "";
+    expect(piAiVersion).toBe(pinned.replace(/^[^\d]*/, ""));
   });
 
   it("prefixes count= and keeps the last lines under the byte cap", () => {

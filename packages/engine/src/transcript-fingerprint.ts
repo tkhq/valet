@@ -3,9 +3,6 @@
  * One line per message: role, stop reason, api, provider, model, block kinds.
  * No message content. Gate stdout on VALET_TRANSCRIPT_DEBUG=1.
  */
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { SessionEntry } from "./types.js";
 
@@ -14,24 +11,12 @@ export const FINGERPRINT_SPAN_MAX_LINES = 64;
 /** Byte cap for a span fingerprint attribute, including the count= header. */
 export const FINGERPRINT_SPAN_MAX_BYTES = 8192;
 
-function readPiAiVersion(): string {
-  try {
-    const here = dirname(fileURLToPath(import.meta.url));
-    const pkg = JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8")) as {
-      dependencies?: Record<string, string>;
-    };
-    const pinned = pkg.dependencies?.["@earendil-works/pi-ai"];
-    if (typeof pinned === "string" && pinned.length > 0) {
-      return pinned.replace(/^[^\d]*/, "");
-    }
-  } catch {
-    /* fall through */
-  }
-  return "unknown";
-}
-
-/** Installed pi-ai version, read once at module load. */
-export const piAiVersion = readPiAiVersion();
+/**
+ * Pinned `@earendil-works/pi-ai` version from `package.json`. Kept as a
+ * string so this module stays off `node:fs` — the engine barrel is in the
+ * web graph. The fingerprint test fails if this drifts from the pin.
+ */
+export const piAiVersion = "0.84.2";
 
 /**
  * Prefix `count=` and keep the last lines that fit the line and byte caps.
