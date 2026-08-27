@@ -99,17 +99,28 @@ const reqItem: ProxyRequestListItem = {
 
 const mockRequests = { items: [reqItem], nextCursor: undefined };
 
+// parsed uses the real Sample shape from packages/api/src/proxy/sample.ts:
+// { schema, provider, model, params, system, tools, previousResponseId,
+//   input: SampleMessage[], output: SampleMessage, stop_reason, usage }
 const mockDetail: ProxyRequestDetail = {
   ...reqItem,
   requestBody: '{"model":"claude-opus-4-5","messages":[{"role":"user","content":"Hello"}]}',
   responseBody: '{"id":"msg_1","content":[{"type":"text","text":"Hi there!"}]}',
   parsed: {
+    schema: "valet.llm-sample/v1",
+    provider: "anthropic",
+    parseVersion: 1,
     model: "claude-opus-4-5",
+    params: {},
     system: "You are a helpful assistant.",
-    messages: [
-      { role: "user", content: "Hello" },
-      { role: "assistant", content: "Hi there!" },
+    tools: [],
+    previousResponseId: null,
+    input: [
+      { role: "user", content: [{ type: "text", text: "Hello" }] },
     ],
+    output: { role: "assistant", content: [{ type: "text", text: "Hi there!" }] },
+    stop_reason: "end_turn",
+    usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, total: 15 },
   },
   parseVersion: 1,
   parseError: null,
@@ -232,6 +243,20 @@ describe("UsagePage — request log drill-down", () => {
 
     await waitFor(() => {
       expect(screen.getAllByText("claude-opus-4-5").length).toBeGreaterThan(0);
+    });
+  });
+
+  it("StructuredView renders the input user turn text and the assistant output text", async () => {
+    // Guards the real Sample shape contract: parsed.input/output, not parsed.messages.
+    render(<UsagePage />);
+    const rowEl = document.querySelector("tr[role='button']") as HTMLElement;
+    fireEvent.click(rowEl);
+
+    await waitFor(() => {
+      // The user input turn's text block must appear.
+      expect(screen.getByText("Hello")).toBeTruthy();
+      // The assistant output turn's text block must appear.
+      expect(screen.getByText("Hi there!")).toBeTruthy();
     });
   });
 

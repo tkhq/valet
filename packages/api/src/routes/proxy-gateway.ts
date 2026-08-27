@@ -17,7 +17,7 @@ import { recordProxySpend } from "../proxy/metrics.js";
 import { llmProxyRequests } from "../schema/index.js";
 import { orgMembers } from "../schema/index.js";
 import { resolveOrgId } from "../lib/org.js";
-import { eq } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 import type { PrincipalDeps } from "../proxy/principal.js";
 
 /** Hop-by-hop headers stripped before forwarding to the upstream provider. */
@@ -92,10 +92,12 @@ export function registerProxyGateway(app: Hono<AppEnv>, deps: ProxyGatewayDeps):
       userOrg: async (userId) => {
         // Single-org system: look up the user's org_members row, fall back to
         // the org-wide default (resolveOrgId) when the row is absent.
+        // orderBy createdAt asc, orgId asc: deterministic result for multi-org users.
         const rows = await db
           .select({ orgId: orgMembers.orgId })
           .from(orgMembers)
           .where(eq(orgMembers.userId, userId))
+          .orderBy(asc(orgMembers.createdAt), asc(orgMembers.orgId))
           .limit(1);
         return rows[0]?.orgId ?? (await resolveOrgId(db));
       },

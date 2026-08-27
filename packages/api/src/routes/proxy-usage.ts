@@ -214,8 +214,18 @@ proxyUsageRouter.get("/usage/summary", async (c) => {
   return c.json(body);
 });
 
+/** Metadata-only projection returned by the /requests list query. */
+type ListRow = Pick<
+  typeof llmProxyRequests.$inferSelect,
+  | "id" | "createdAt" | "orgId" | "userId" | "apiKeyId"
+  | "providerKind" | "model" | "harness" | "endpoint"
+  | "stream" | "statusCode"
+  | "inputTokens" | "outputTokens" | "cacheReadTokens" | "cacheWriteTokens" | "totalTokens"
+  | "costUsd" | "latencyMs" | "error"
+>;
+
 /** Columns the list endpoint returns (all except request/response/parsed). */
-function rowToListItem(row: typeof llmProxyRequests.$inferSelect): ProxyRequestListItem {
+function rowToListItem(row: ListRow): ProxyRequestListItem {
   return {
     id: row.id,
     createdAt: row.createdAt,
@@ -314,8 +324,30 @@ proxyUsageRouter.get("/requests", async (c) => {
     }
   }
 
+  // Select only metadata columns — omit request_body, response_body, parsed
+  // (large blobs) since rowToListItem does not need them.
   const rows = await db
-    .select()
+    .select({
+      id: llmProxyRequests.id,
+      createdAt: llmProxyRequests.createdAt,
+      orgId: llmProxyRequests.orgId,
+      userId: llmProxyRequests.userId,
+      apiKeyId: llmProxyRequests.apiKeyId,
+      providerKind: llmProxyRequests.providerKind,
+      model: llmProxyRequests.model,
+      harness: llmProxyRequests.harness,
+      endpoint: llmProxyRequests.endpoint,
+      stream: llmProxyRequests.stream,
+      statusCode: llmProxyRequests.statusCode,
+      inputTokens: llmProxyRequests.inputTokens,
+      outputTokens: llmProxyRequests.outputTokens,
+      cacheReadTokens: llmProxyRequests.cacheReadTokens,
+      cacheWriteTokens: llmProxyRequests.cacheWriteTokens,
+      totalTokens: llmProxyRequests.totalTokens,
+      costUsd: llmProxyRequests.costUsd,
+      latencyMs: llmProxyRequests.latencyMs,
+      error: llmProxyRequests.error,
+    })
     .from(llmProxyRequests)
     .where(and(...conditions))
     .orderBy(desc(llmProxyRequests.createdAt), desc(llmProxyRequests.id))

@@ -22,6 +22,21 @@ export interface RecorderDeps {
   metric: (costUsd: number, attrs: { model: string; userId: string; keyId: string; kind: string }) => void;
 }
 
+/**
+ * Read the `stream` boolean from the parsed request body (both Anthropic and
+ * OpenAI place a boolean `stream` field at the top level). Falls back to
+ * `!!ctx.stream` when the body does not parse or omits the field.
+ */
+function streamFlagFromBody(requestBody: string, fallback: boolean): boolean {
+  try {
+    const b = JSON.parse(requestBody) as Record<string, unknown>;
+    if (typeof b.stream === "boolean") return b.stream;
+  } catch {
+    // non-JSON body (e.g. empty string on GET) — use fallback
+  }
+  return fallback;
+}
+
 async function drain(stream: ReadableStream<Uint8Array> | null): Promise<string> {
   if (!stream) return "";
   const reader = stream.getReader();
@@ -42,7 +57,8 @@ function previousResponseId(kind: ProviderKind, requestBody: string): string | n
   if (kind !== "openai") return null;
   try {
     const b = JSON.parse(requestBody) as Record<string, unknown>;
-    return (b.previous_response_id as string) ?? null;
+    const v = b.previous_response_id;
+    return typeof v === "string" ? v : null;
   } catch {
     return null;
   }
@@ -83,7 +99,7 @@ export async function recordProxyCall(deps: RecorderDeps, ctx: RecordContext): P
       endpoint: ctx.endpoint,
       providerResponseId: parsedUsage?.providerResponseId ?? null,
       previousResponseId: previousResponseId(ctx.kind, ctx.requestBody),
-      stream: !!ctx.stream,
+      stream: streamFlagFromBody(ctx.requestBody, !!ctx.stream),
       statusCode: ctx.statusCode,
       requestBody: ctx.requestBody,
       responseBody,

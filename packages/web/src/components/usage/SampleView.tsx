@@ -14,36 +14,36 @@ interface SampleViewProps {
   onClose: () => void;
 }
 
-// Narrow shapes we can render as structured turns.
-interface TextBlock {
-  type: "text";
-  text: string;
-}
+// Mirrors the ContentBlock union from packages/api/src/proxy/sample.ts.
+// Kept local so the web package does not import from the api package directly.
+type ContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; source: Record<string, unknown> }
+  | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
+  | { type: "tool_result"; tool_use_id: string; content: unknown }
+  | { type: "reasoning"; thinking: string }
+  | { type: "unknown"; raw: unknown }
+  | { type: string; [k: string]: unknown };
 
-interface ToolUseBlock {
-  type: "tool_use";
-  name: string;
-  input: unknown;
-}
-
-interface ToolResultBlock {
-  type: "tool_result";
-  tool_use_id: string;
-  content: unknown;
-}
-
-type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock | { type: string; [k: string]: unknown };
-
-interface Turn {
+interface SampleMessage {
   role: string;
-  content: string | ContentBlock[];
+  content: ContentBlock[];
 }
 
+interface SampleTool {
+  name: string;
+  description?: string;
+}
+
+// Real shape produced by parseSample in packages/api/src/proxy/sample.ts.
 interface ParsedSample {
-  system?: string | ContentBlock[];
-  tools?: { name: string; description?: string }[];
-  messages?: Turn[];
+  schema?: string;
   model?: string;
+  system?: string | null;
+  tools?: SampleTool[];
+  input?: SampleMessage[];
+  output?: SampleMessage;
+  [k: string]: unknown;
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {
@@ -54,39 +54,75 @@ function isString(v: unknown): v is string {
   return typeof v === "string";
 }
 
-function isArray(v: unknown): v is unknown[] {
-  return Array.isArray(v);
+function isParsedSample(v: unknown): v is ParsedSample {
+  return isObject(v);
 }
 
-function contentText(content: unknown): string {
-  if (isString(content)) return content;
-  if (isArray(content)) {
-    return content
-      .map((b) => {
-        if (isObject(b) && b.type === "text" && isString(b.text)) return b.text;
-        if (isObject(b) && b.type === "tool_use") return `[tool: ${isString(b.name) ? b.name : "unknown"}]`;
-        if (isObject(b) && b.type === "tool_result") return `[tool_result]`;
-        return "";
-      })
-      .filter(Boolean)
-      .join("\n");
+/** Render a single ContentBlock as readable text. */
+function renderBlock(block: ContentBlock, i: number): React.ReactNode {
+  if (block.type === "text") {
+    return (
+      <pre key={i} className="whitespace-pre-wrap text-xs text-ink leading-relaxed overflow-auto max-h-64">
+        {block.text}
+      </pre>
+    );
   }
-  return JSON.stringify(content, null, 2);
+  if (block.type === "tool_use") {
+    return (
+      <div key={i} className="mb-1">
+        <span className="text-xs font-mono text-muted">tool_use: </span>
+        <span className="text-xs font-mono text-ink">{block.name}</span>
+        <pre className="whitespace-pre-wrap text-xs text-ink bg-paper-muted rounded p-2 border border-line overflow-auto max-h-32 mt-1">
+          {JSON.stringify(block.input, null, 2)}
+        </pre>
+      </div>
+    );
+  }
+  if (block.type === "tool_result") {
+    const contentStr = isString(block.content)
+      ? block.content
+      : JSON.stringify(block.content, null, 2);
+    return (
+      <div key={i} className="mb-1">
+        <span className="text-xs font-mono text-muted">tool_result</span>
+        <pre className="whitespace-pre-wrap text-xs text-ink bg-paper-muted rounded p-2 border border-line overflow-auto max-h-32 mt-1">
+          {contentStr}
+        </pre>
+      </div>
+    );
+  }
+  if (block.type === "image") {
+    return (
+      <div key={i} className="text-xs text-muted italic">[image attachment]</div>
+    );
+  }
+  if (block.type === "reasoning") {
+    return (
+      <pre key={i} className="whitespace-pre-wrap text-xs text-muted italic leading-relaxed overflow-auto max-h-32">
+        {(block as { type: "reasoning"; thinking: string }).thinking}
+      </pre>
+    );
+  }
+  // unknown — show raw JSON
+  return (
+    <pre key={i} className="whitespace-pre-wrap text-xs text-ink bg-paper-muted rounded p-2 border border-line overflow-auto max-h-32 mt-1">
+      {JSON.stringify((block as { type: string; raw?: unknown }).raw ?? block, null, 2)}
+    </pre>
+  );
 }
 
-function SystemBlock({ system }: { system: string | ContentBlock[] }) {
-  const text = isString(system) ? system : contentText(system);
+function SystemBlock({ system }: { system: string }) {
   return (
     <div className="mb-4">
       <div className="text-xs font-semibold uppercase tracking-wide text-muted mb-1">System</div>
       <pre className="whitespace-pre-wrap text-xs text-ink bg-paper-muted rounded p-3 border border-line overflow-auto max-h-48">
-        {text}
+        {system}
       </pre>
     </div>
   );
 }
 
-function ToolsBlock({ tools }: { tools: { name: string; description?: string }[] }) {
+function ToolsBlock({ tools }: { tools: SampleTool[] }) {
   return (
     <div className="mb-4">
       <div className="text-xs font-semibold uppercase tracking-wide text-muted mb-1">
@@ -107,22 +143,22 @@ function ToolsBlock({ tools }: { tools: { name: string; description?: string }[]
   );
 }
 
-function TurnBlock({ turn }: { turn: Turn }) {
-  const isAssistant = turn.role === "assistant";
-  const text = contentText(turn.content);
+function MessageBlock({ msg }: { msg: SampleMessage }) {
+  const isAssistant = msg.role === "assistant";
   return (
     <div className={`mb-3 ${isAssistant ? "pl-4 border-l-2 border-moss" : ""}`}>
       <div className="text-xs font-semibold uppercase tracking-wide text-muted mb-1">
-        {turn.role}
+        {msg.role}
       </div>
-      <pre className="whitespace-pre-wrap text-xs text-ink leading-relaxed overflow-auto max-h-64">
-        {text}
-      </pre>
+      {msg.content.map((block, i) => renderBlock(block, i))}
     </div>
   );
 }
 
 function StructuredView({ parsed }: { parsed: ParsedSample }) {
+  const inputTurns = parsed.input ?? [];
+  const output = parsed.output;
+
   return (
     <div>
       {parsed.model && (
@@ -132,22 +168,19 @@ function StructuredView({ parsed }: { parsed: ParsedSample }) {
       )}
       {parsed.system && <SystemBlock system={parsed.system} />}
       {parsed.tools && parsed.tools.length > 0 && <ToolsBlock tools={parsed.tools} />}
-      {parsed.messages && parsed.messages.length > 0 && (
+      {(inputTurns.length > 0 || output) && (
         <div>
           <div className="text-xs font-semibold uppercase tracking-wide text-muted mb-2">
-            Messages ({parsed.messages.length})
+            Conversation ({inputTurns.length + (output ? 1 : 0)} turns)
           </div>
-          {parsed.messages.map((turn, i) => (
-            <TurnBlock key={i} turn={turn} />
+          {inputTurns.map((msg, i) => (
+            <MessageBlock key={i} msg={msg} />
           ))}
+          {output && <MessageBlock msg={output} />}
         </div>
       )}
     </div>
   );
-}
-
-function isParsedSample(v: unknown): v is ParsedSample {
-  return isObject(v);
 }
 
 export function SampleView({ id, onClose }: SampleViewProps) {

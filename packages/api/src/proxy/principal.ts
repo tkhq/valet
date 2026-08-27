@@ -34,6 +34,6 @@ export async function resolveProxyPrincipal(
   const result = await deps.verifyApiKey({ key });
   if (!result.valid || !result.key) return wireError(kind, 401, "Invalid API key. Create a proxy key in valet Settings.");
   const orgId = await deps.userOrg(result.key.userId);
-  if (!orgId) return wireError(kind, 401, "API key is not linked to an organization.");
+  if (!orgId) return wireError(kind, 401, "API key is not linked to an organization. Contact your organization administrator.");
   return { userId: result.key.userId, orgId, keyId: result.key.id };
 }
