@@ -17,7 +17,7 @@ vi.mock("~/api/memory", async (importOriginal) => {
   const original = await importOriginal<typeof import("~/api/memory")>();
   return {
     ...original,
-    useMemoryDoc: (path: string) => docMock(path),
+    useMemoryDoc: (path: string, owner?: unknown) => docMock(path, owner),
   };
 });
 
@@ -213,7 +213,7 @@ describe("MemoryDoc", () => {
     fireEvent.click(screen.getByText("Save"));
 
     await waitFor(() =>
-      expect(write).toHaveBeenCalledWith({ path: "preferences/style.md", content: "new body" }),
+      expect(write).toHaveBeenCalledWith({ path: "preferences/style.md", content: "new body" }, undefined),
     );
     await waitFor(() => expect(screen.queryByLabelText("Memory content")).toBeNull());
     write.mockRestore();
@@ -242,7 +242,7 @@ describe("MemoryDoc", () => {
     expect(del).not.toHaveBeenCalled(); // first click only arms the confirm
     fireEvent.click(screen.getByText("Confirm delete"));
 
-    await waitFor(() => expect(del).toHaveBeenCalledWith("preferences/style.md"));
+    await waitFor(() => expect(del).toHaveBeenCalledWith("preferences/style.md", undefined));
     await waitFor(() => expect(onDeleted).toHaveBeenCalled());
     del.mockRestore();
   });
@@ -264,7 +264,7 @@ describe("MemoryDoc", () => {
     fireEvent.click(screen.getByText("Pin"));
 
     await waitFor(() =>
-      expect(write).toHaveBeenCalledWith({ path: "preferences/style.md", pinned: true }),
+      expect(write).toHaveBeenCalledWith({ path: "preferences/style.md", pinned: true }, undefined),
     );
     write.mockRestore();
   });
@@ -277,7 +277,7 @@ describe("MemoryDoc", () => {
     fireEvent.click(screen.getByText("Unpin"));
 
     await waitFor(() =>
-      expect(write).toHaveBeenCalledWith({ path: "preferences/style.md", pinned: false }),
+      expect(write).toHaveBeenCalledWith({ path: "preferences/style.md", pinned: false }, undefined),
     );
     write.mockRestore();
   });
@@ -408,6 +408,91 @@ describe("MemoryDoc", () => {
     expect(screen.queryByText("Confirm delete")).toBeNull();
     expect(del).not.toHaveBeenCalled();
     del.mockRestore();
+  });
+});
+
+describe("MemoryDoc team scope (TKAI-262)", () => {
+  const teamOwner = { ownerType: "team" as const, ownerId: "team_1" };
+
+  function teamsFixture(callerRole: "admin" | "member" | null) {
+    return {
+      teams: [
+        {
+          id: "team_1",
+          orgId: "org1",
+          name: "Platform",
+          origin: "local" as const,
+          externalId: null,
+          createdAt: 0,
+          memberCount: 2,
+          callerRole,
+        },
+      ],
+    };
+  }
+
+  beforeEach(() => {
+    docMock.mockReset();
+  });
+
+  it("threads the owner into the doc query", () => {
+    docMock.mockReturnValue({ isLoading: false, error: null, data: renderedDoc("body"), refetch: vi.fn() });
+    const teams = vi.spyOn(api, "listTeams").mockResolvedValue(teamsFixture("member"));
+    const org = vi.spyOn(api, "getOrg").mockResolvedValue(orgFixture);
+
+    renderWithClient(
+      <MemoryDoc path="notes/roadmap.md" owner={teamOwner} onNavigateToChat={vi.fn()} />,
+    );
+    expect(docMock).toHaveBeenCalledWith("notes/roadmap.md", teamOwner);
+
+    teams.mockRestore();
+    org.mockRestore();
+  });
+
+  /** Team writes need team-admin or org-admin authority (`authorizeOwner`);
+   * sharing and the composer prefill are own-scope only. A plain member
+   * gets a read-only view: Download stays, everything else goes. */
+  it("hides Share, write actions, and the prefill footer from a plain team member", async () => {
+    docMock.mockReturnValue({ isLoading: false, error: null, data: renderedDoc("body"), refetch: vi.fn() });
+    const teams = vi.spyOn(api, "listTeams").mockResolvedValue(teamsFixture("member"));
+    const org = vi.spyOn(api, "getOrg").mockResolvedValue(orgFixture);
+
+    renderWithClient(
+      <MemoryDoc path="notes/roadmap.md" owner={teamOwner} onNavigateToChat={vi.fn()} />,
+    );
+
+    expect(screen.getByText("Download")).toBeTruthy();
+    await waitFor(() => expect(teams).toHaveBeenCalled());
+    expect(screen.queryByText("Share")).toBeNull();
+    expect(screen.queryByText("Edit")).toBeNull();
+    expect(screen.queryByText("Delete")).toBeNull();
+    expect(screen.queryByText(/Ask .* to update this/)).toBeNull();
+
+    teams.mockRestore();
+    org.mockRestore();
+  });
+
+  it("shows write actions to a team admin, and writes carry the team owner", async () => {
+    docMock.mockReturnValue({ isLoading: false, error: null, data: renderedDoc("body"), refetch: vi.fn() });
+    const teams = vi.spyOn(api, "listTeams").mockResolvedValue(teamsFixture("admin"));
+    const org = vi.spyOn(api, "getOrg").mockResolvedValue(orgFixture);
+    const write = vi.spyOn(api, "writeMemoryDoc").mockResolvedValue({});
+
+    renderWithClient(
+      <MemoryDoc path="notes/roadmap.md" owner={teamOwner} onNavigateToChat={vi.fn()} />,
+    );
+
+    fireEvent.click(await screen.findByText("Unpin"));
+    await waitFor(() =>
+      expect(write).toHaveBeenCalledWith({ path: "notes/roadmap.md", pinned: false }, teamOwner),
+    );
+    // Sharing stays own-scope even for an admin — mem_share refuses team
+    // paths in v1, and the web surface follows the same rule.
+    expect(screen.queryByText("Share")).toBeNull();
+
+    teams.mockRestore();
+    org.mockRestore();
+    write.mockRestore();
   });
 });
 
