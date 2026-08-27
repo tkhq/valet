@@ -164,9 +164,7 @@ export function MemoryDoc({ path, onNavigateToChat, onDeleted, onOpenPath }: Mem
               <ShareControls path={path} />
               <button
                 type="button"
-                onClick={() =>
-                  downloadTextFile(memoryDownloadName(path), rendered ?? file.content, "text/markdown")
-                }
+                onClick={() => downloadTextFile(memoryDownloadName(path), rendered, "text/markdown")}
                 className="text-muted hover:text-moss"
               >
                 Download
