@@ -627,23 +627,59 @@ describe("pg app schema + migrations", () => {
     // view (a use_case column + a proxy UNION leg). A database migrated before
     // #432 has none of these, and the edited 0000_app.sql never re-runs, so the
     // repair list is the only catch-up path.
-    it("repairs the #432 proxy log table, its indexes, and the cost_entries view", async () => {
-      // Capture the migration-built view's columns so the repair-built view can
-      // be compared against them below — a true lockstep check (repair SELECT vs
-      // 0000_app.sql), independent of any hand-transcribed expectation.
-      const viewColumns = async (): Promise<string[]> => {
-        const r = await db.query(
-          "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'cost_entries' ORDER BY ordinal_position",
-        );
-        return r.rows.map((row) => row.column_name as string);
-      };
-      const migrationCols = await viewColumns();
-      expect(migrationCols).toContain("use_case"); // the #432 rewrite is present pre-drop
+    // The pre-#432 cost_entries view, verbatim from before the rewrite: the
+    // 17-column engine leg, no use_case, no proxy UNION. Seeding it lets the
+    // test drive the real production path (CREATE OR REPLACE over an existing
+    // old view), not just CREATE from nothing.
+    const PRE_432_COST_ENTRIES = `CREATE VIEW "cost_entries" AS
+      SELECT
+        e."id"                                                     AS "entry_id",
+        e."session_id"                                             AS "session_id",
+        e."created_at"                                             AS "created_at",
+        e."model"                                                  AS "model",
+        COALESCE(s."org_id", d."org_id")                           AS "org_id",
+        CASE
+          WHEN s."id" IS NOT NULL THEN s."user_id"
+          WHEN r."owner_type" = 'user' THEN NULLIF(r."owner_id", '')
+        END                                                        AS "user_id",
+        COALESCE(s."owner_type", r."owner_type")                   AS "owner_type",
+        NULLIF(COALESCE(s."owner_id", r."owner_id"), '')           AS "owner_id",
+        r."workflow_id"                                            AS "workflow_id",
+        r."id"                                                     AS "workflow_run_id",
+        COALESCE((e."usage"::jsonb->>'input')::bigint, 0)          AS "input_tokens",
+        COALESCE((e."usage"::jsonb->>'output')::bigint, 0)         AS "output_tokens",
+        COALESCE((e."usage"::jsonb->>'cacheRead')::bigint, 0)      AS "cache_read_tokens",
+        COALESCE((e."usage"::jsonb->>'cacheWrite')::bigint, 0)     AS "cache_write_tokens",
+        COALESCE((e."usage"::jsonb->>'total')::bigint, 0)          AS "total_tokens",
+        (e."cost"::jsonb->>'total')::float8                        AS "cost_total",
+        ((e."cost"::jsonb->>'total') IS NOT NULL)                  AS "priced"
+      FROM "engine_entries" e
+      LEFT JOIN "agent_sessions" s ON s."id" = e."session_id"
+      LEFT JOIN "workflow_runs" r ON e."session_id" LIKE 'wf:%' AND r."id" = split_part(e."session_id", ':', 2)
+      LEFT JOIN "workflow_definitions" d ON d."id" = r."workflow_id"
+      WHERE e."usage" IS NOT NULL AND COALESCE(s."org_id", d."org_id") IS NOT NULL`;
 
-      // Simulate the pre-#432 schema. Drop the view first: its UNION leg
-      // references the table, so the table cannot drop while the view exists.
-      await db.query('DROP VIEW "cost_entries"');
+    it("repairs the #432 proxy log table, its indexes, and the cost_entries view", async () => {
+      // Capture the migration-built view's FULL definition (columns, every
+      // expression, and both WHERE clauses) so the repair-built view can be
+      // compared against it. pg_get_viewdef normalizes the definition, so two
+      // semantically identical views produce identical text regardless of
+      // source whitespace — a lockstep check that catches an expression or
+      // WHERE-clause slip in the repair's copied SELECT, not just column drift.
+      const viewDef = async (): Promise<string> => {
+        const r = await db.query("SELECT pg_get_viewdef('cost_entries'::regclass, true) AS def");
+        return r.rows[0].def as string;
+      };
+      const migrationDef = await viewDef();
+      expect(migrationDef).toContain("use_case"); // the #432 rewrite is present pre-drop
+
+      // Simulate a real pre-#432 database: the OLD 17-column view is PRESENT
+      // and llm_proxy_requests is ABSENT. The old view does not reference the
+      // table, so drop the new view, drop the table, then seed the old view.
+      await db.query('DROP VIEW "cost_entries"'); // the new view references the table
       await db.query('DROP TABLE "llm_proxy_requests"'); // drops its indexes too
+      await db.query(PRE_432_COST_ENTRIES);
+      expect(await columnExists("cost_entries", "use_case")).toBe(false); // old shape
 
       const missing = (await missingSchemaRepairs(db)).map((r) => r.describe);
       expect(missing).toContain("llm_proxy_requests table");
@@ -653,15 +689,15 @@ describe("pg app schema + migrations", () => {
 
       // The table repair MUST run before the view repair (the view references
       // the table). applyAppMigrations completing without error proves the
-      // order — a view-first order would fail on the missing table.
+      // order: a view-first order would fail on the missing table. This also
+      // exercises CREATE OR REPLACE over the seeded old view, the deploy path.
       await applyAppMigrations(db);
 
       expect(await missingSchemaRepairs(db)).toEqual([]);
       expect(await columnExists("llm_proxy_requests", "endpoint")).toBe(true);
-      // Lockstep: the repair-built view exposes exactly the migration view's
-      // columns, in order. A transcription slip in the repair's copied SELECT
-      // (dropped, renamed, or reordered column) surfaces as a mismatch here.
-      expect(await viewColumns()).toEqual(migrationCols);
+      // Full lockstep: the repair-built view is byte-identical to the
+      // migration-built view (definition, not just columns).
+      expect(await viewDef()).toEqual(migrationDef);
       // The proxy UNION leg resolves against the repaired table (view queryable).
       await db.query("SELECT DISTINCT use_case FROM cost_entries");
     });
