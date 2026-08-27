@@ -69,6 +69,6 @@ workspaces/*
 .worktrees/
 .superpowers/
 
-# Worktree-local dev data (make dev-local: PGlite at ./.valet-dev/pg).
+# Worktree-local dev data (make dev-local: VALET_DATA_DIR=./.valet-dev).
 # NOT .valet/ — that directory is tracked repo config (prebuild.yaml).
 .valet-dev/

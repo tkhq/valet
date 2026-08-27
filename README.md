@@ -47,7 +47,7 @@ ANTHROPIC_API_KEY=sk-ant-... make dev-local
 # API on :8788, web UI on :5173 — open http://localhost:5173
 ```
 
-By default dev runs with a stubbed local user (`VALET_LOCAL_AUTH=1`) and an embedded Postgres (PGlite, data in `.valet-dev/pg` inside the checkout, so parallel checkouts get separate databases) — no database or auth setup required. Setting `BETTER_AUTH_SECRET` enables real auth (email/password, optional OIDC/social).
+By default dev runs with a stubbed local user (`VALET_LOCAL_AUTH=1`) and an embedded Postgres (PGlite; `make dev-local` keeps its data in `.valet-dev/` inside the worktree, so each worktree gets its own database) — no database or auth setup required. Setting `BETTER_AUTH_SECRET` enables real auth (email/password, optional OIDC/social).
 
 ### Validate changes
 

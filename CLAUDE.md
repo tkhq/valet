@@ -18,16 +18,16 @@ make dev-local          # api :8788 + web :5173 — needs ANTHROPIC_API_KEY + Do
                         # VALET_LOCAL_AUTH=1 stub auth; embedded PGlite in ./.valet-dev/pg
 ```
 
-`make dev-local` keeps the PGlite data dir worktree-local (`./.valet-dev/pg` — not `./.valet/`, which is tracked repo config), so each checkout owns its own database. The app default outside the harness (e.g. plain `valet serve`) stays `~/.valet/pg`; set `VALET_PG_DATA_DIR` (env or `.env`) to point a dev stack at shared data.
+`make dev-local` keeps dev state worktree-local: the `dev-api-node` recipe exports `VALET_DATA_DIR=./.valet-dev` (PGlite at `.valet-dev/pg`, blobs at `.valet-dev/blobs`) when `VALET_DATA_DIR`, `VALET_PG_DATA_DIR`, and `DATABASE_URL` are all unset. Each worktree owns its own database. (The dir is `.valet-dev/`, not `.valet/` — that is tracked repo config.) Outside `make dev-local` — `valet serve`, or a bare `pnpm --filter @valet/api dev` — the default stays `~/.valet`; to point a worktree stack at that data, set `VALET_DATA_DIR=~/.valet` in `.env`. `make dev-clean` deletes the worktree's dev data. So do `git clean -xdf` and `git worktree remove` — the database lives inside the worktree.
 
-### Start the local stack cleanly (one stack at a time)
+### Start the local stack cleanly (ports are machine-wide)
 
-The stack assumes ports 8788 (api) and 5173 (web) are free and that no other process owns this worktree's `.valet-dev/pg`. PGlite allows exactly one owner per data dir. A second api does not fail cleanly: it can lose the port race but keep running and hold the database.
+The database is per-worktree, but ports 8788 (api) and 5173 (web) are machine-wide: only one stack can listen at a time. The web dev server sets `strictPort`, so a second stack fails fast instead of proxying into the first stack's api. Within one worktree, PGlite still allows exactly one owner — an orphaned api keeps holding the database.
 
 1. Check the ports: `lsof -nP -iTCP:8788 -iTCP:5173 -sTCP:LISTEN`.
 2. If a listener exists, find its checkout: `lsof -p <pid> | grep cwd`. A stack from another worktree serves stale code, so your changes do not appear in the UI.
 3. If the old stack is stale, kill its listeners.
-4. Confirm nothing still holds the database: `lsof +D .valet-dev/pg` (from the worktree root) must return nothing. An orphaned api process here makes the next api crash at startup.
+4. If `.valet-dev/pg` exists, confirm nothing still holds it: from the worktree root, run `lsof +D .valet-dev/pg`. It must return nothing. An orphaned api process here makes the next api crash at startup.
 5. Run `make dev-local`.
 6. Confirm health: `curl -sf localhost:8788/api/health`. Startup is fast — if health is not ok within ~5 seconds, do not wait or poll. Read the log for one of the symptoms below.
 
@@ -123,7 +123,7 @@ We've broken tool-call rendering on reload three times; the root cause is always
 
 Regression suites (run before claiming done): `pnpm --filter @valet/engine test happy-path`, `pnpm --filter @valet/engine test in-memory-store`, `pnpm --filter @valet/store-postgres test`, and the api integration suite. If you change the result shape, assert the actual TEXT is reachable — `expect(result).toBeDefined()` is the exact bug we keep shipping.
 
-"(empty output)" in the UI = shape mismatch, not lost data. Inspect `engine_entries.parts` directly: `psql` when `DATABASE_URL` is set; for dev PGlite, stop the api first (it owns the worktree's `.valet-dev/pg`), then from `packages/api` use plain `node --input-type=module` (NOT `tsx -e` — its eval mode rejects top-level await) with `@electric-sql/pglite` to query the data dir.
+"(empty output)" in the UI = shape mismatch, not lost data. Inspect `engine_entries.parts` directly: `psql` when `DATABASE_URL` is set; for dev PGlite, stop the api first (it holds the pg data dir shown as `pglite:` in its boot log), then from `packages/api` use plain `node --input-type=module` (NOT `tsx -e` — its eval mode rejects top-level await) with `@electric-sql/pglite` to query the data dir.
 
 ### Mount-time state from props (web)
 
@@ -131,7 +131,7 @@ Regression suites (run before claiming done): `pnpm --filter @valet/engine test 
 
 ### Pre-1.0: edit migrations in place
 
-Edit `packages/store-postgres/migrations/pg/0000_engine.sql` / `packages/api/migrations/pg/0000_app.sql` directly — do NOT add numbered migrations. App tables also update the Drizzle schema (`packages/api/src/schema/index.ts`); engine tables are raw SQL — update the row interfaces + `rawTo*Row` mappers in `packages/store-postgres/src/helpers.ts` (bigint ms columns funnel through `toNum`). After editing, wiping the dev database is MANDATORY — `rm -rf .valet-dev/pg` in every worktree with dev data (`~/.valet/pg` for a stack started outside `make dev-local`) — the migration tracker skips an already-applied `0000` and there is no backfill path locally. An app-table edit that adds a nullable/DEFAULT column, table, or index ALSO needs a matching `SCHEMA_REPAIRS` entry in `packages/api/src/lib/drizzle.ts`, or deployed databases never get it and the rollout sticks on the old image. This rule flips to numbered migrations at 1.0.
+Edit `packages/store-postgres/migrations/pg/0000_engine.sql` / `packages/api/migrations/pg/0000_app.sql` directly — do NOT add numbered migrations. App tables also update the Drizzle schema (`packages/api/src/schema/index.ts`); engine tables are raw SQL — update the row interfaces + `rawTo*Row` mappers in `packages/store-postgres/src/helpers.ts` (bigint ms columns funnel through `toNum`). After editing, you MUST wipe the dev database: run `make dev-clean` in every worktree with dev data. If a stack ran outside `make dev-local`, also `rm -rf ~/.valet/pg`. The migration tracker skips an already-applied `0000`, and there is no local backfill path. An app-table edit that adds a nullable/DEFAULT column, table, or index ALSO needs a matching `SCHEMA_REPAIRS` entry in `packages/api/src/lib/drizzle.ts`, or deployed databases never get it and the rollout sticks on the old image. This rule flips to numbered migrations at 1.0.
 
 ### Node & workspace traps
 

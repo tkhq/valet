@@ -37,7 +37,7 @@ Two kinds of configuration exist today, and only one has a home:
 The second kind causes two recurring problems:
 
 - **Dev DB wipes lose everything.** Pre-1.0 we edit migrations in place and
-  wipe `~/.valet/pg` instead of migrating. Every wipe re-requires manual
+  wipe the dev database (`make dev-clean`) instead of migrating. Every wipe re-requires manual
   bootstrap: re-enable the `organizations` feature flag, re-add skill
   sources, re-invite members.
 - **Dev and prod drift.** The same instance state must be re-created by hand
@@ -615,7 +615,7 @@ plugin's `defaultApprovalMode`, then the `riskLevel` default.
 ## Dev and prod wiring
 
 **Dev** — `make dev-local` exports `VALET_CONFIG=$(PWD)/config/valet.dev.yaml`
-when that file exists. After `rm -rf ~/.valet/pg`, the next boot restores
+when that file exists. After `make dev-clean`, the next boot restores
 the org flags, pending invites, and skill sources with no manual steps.
 
 **Prod (helm)** — the chart gains `api.instanceConfig` (string). When set,

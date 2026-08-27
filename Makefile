@@ -7,7 +7,7 @@
 
 .PHONY: help install setup clean \
         dev dev-worker dev-opencode dev-client dev-all \
-        dev-api-node dev-web dev-local dev-keycloak dev-keycloak-down smoke-session smoke-orchestrator e2e e2e-clean \
+        dev-api-node dev-web dev-local dev-clean dev-keycloak dev-keycloak-down smoke-session smoke-orchestrator e2e e2e-clean \
         db-setup db-migrate db-seed db-reset \
         docker-build docker-up docker-down docker-logs \
         test test-unit test-integration test-e2e test-pg \
@@ -109,11 +109,10 @@ dev-opencode: docker-up ## Start OpenCode container
 # Independent of the legacy Cloudflare Worker. Runs the new @valet/api +
 # @valet/web together. Requires ANTHROPIC_API_KEY in your environment.
 #
-# The dev harness keeps the PGlite data dir worktree-local (./.valet-dev/pg,
-# not ./.valet/ — that is tracked repo config) so checkouts on one machine do
-# not fight over ~/.valet/pg (PGlite allows one owner per data dir). The app
-# default stays ~/.valet/pg; set VALET_PG_DATA_DIR (env or .env) to point a
-# stack at shared data.
+# dev-api-node keeps dev state worktree-local: when VALET_DATA_DIR,
+# VALET_PG_DATA_DIR, and DATABASE_URL are all unset, it exports
+# VALET_DATA_DIR=./.valet-dev (PGlite at .valet-dev/pg, blobs at
+# .valet-dev/blobs). Rationale and caveats: CLAUDE.md "The dev loop".
 
 dev-api-node: ## Start the new Node API (@valet/api) on :8788
 	@echo "$(GREEN)Starting @valet/api on :8788$(NC)"
@@ -121,7 +120,7 @@ dev-api-node: ## Start the new Node API (@valet/api) on :8788
 	if [ -z "$$ANTHROPIC_API_KEY" ]; then echo "$(RED)ANTHROPIC_API_KEY is required (env or .env)$(NC)"; exit 1; fi; \
 	if [ -z "$$BETTER_AUTH_SECRET" ] && [ -z "$$VALET_LOCAL_AUTH" ]; then export VALET_LOCAL_AUTH=1; fi; \
 	if [ -f config/valet.dev.yaml ] && [ -z "$$VALET_CONFIG" ]; then export VALET_CONFIG="$$(pwd)/config/valet.dev.yaml"; fi; \
-	if [ -z "$$VALET_PG_DATA_DIR" ] && [ -z "$$DATABASE_URL" ]; then export VALET_PG_DATA_DIR="$$(pwd)/.valet-dev/pg"; fi; \
+	if [ -z "$$VALET_DATA_DIR" ] && [ -z "$$VALET_PG_DATA_DIR" ] && [ -z "$$DATABASE_URL" ]; then export VALET_DATA_DIR="$$(pwd)/.valet-dev"; fi; \
 	cd packages/api && PORT=8788 $(PNPM) run dev
 
 dev-web: ## Start the new web client (@valet/web) on :5173
@@ -131,6 +130,10 @@ dev-web: ## Start the new web client (@valet/web) on :5173
 dev-local: ## Start API + web together (greenfield agent-loop stack)
 	@echo "$(GREEN)Starting greenfield API + web. Open http://localhost:5173$(NC)"
 	@make -j2 dev-api-node dev-web
+
+dev-clean: ## Delete this worktree's dev data (.valet-dev: PGlite db + blobs)
+	rm -rf .valet-dev
+	@echo "$(GREEN)Removed ./.valet-dev. The next 'make dev-local' starts a fresh database.$(NC)"
 
 dev-keycloak: ## Start local Keycloak (:8081) for testing the auth-v2 OIDC/SSO path
 	@echo "$(GREEN)Starting Keycloak on http://localhost:8081 (admin/admin)$(NC)"
