@@ -2,7 +2,8 @@ import { describe, expect, it, beforeEach } from "vitest";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
-import { createSkillSource, type SkillOwner } from "./skill-sources.js";
+import { createSkillSource } from "./skill-sources.js";
+import type { SkillOwner } from "./skills.js";
 import {
   findOrgSkillSourcesForPush,
   parseSkillPushPayload,
