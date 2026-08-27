@@ -371,7 +371,9 @@ it would be a new auth-config option, not a file concern.
 ### `teams` section
 
 A team's identity is its name — `teams` has a unique (org, name) index, so
-the reconciler keys by name and no id-prefix marking is needed:
+the reconciler keys by name and no id-prefix marking is needed. Parse trims
+`teams[].name` the same way it trims `skillSources[].team`, so a quoted
+name with padding still matches.
 
 - A declared team that does not exist → created with `origin: config` (id
   `team_cfg_<hash>` for traceability; identity remains the name).
@@ -481,6 +483,14 @@ Declared sources are org-owned (`owner_type='org'`) unless `team` names a
 team created by the teams pass. That field writes `owner_type='team'` and
 `owner_id` to that team's id. An unknown team name fails boot and names
 both the source and the team. Omit `team` to keep today's org owner.
+
+The insert omits `created_by`. There is no adding user. A UI team source
+uses that column's credential; a NULL there reads GitHub anonymously. A
+`skillsrc_cfg_*` team row is an operator declaration, so sync resolves
+GitHub with the org App (`auth: "app"`), the same privilege as an org
+config source. A private team folder therefore syncs when the App covers
+the repository. A UI-created team source (id not `skillsrc_cfg_`) still
+uses `created_by` and never climbs to the App.
 
 The config id hashes `(ownerType, ownerId, repo, ref, subpath)` so two
 teams can track the same folder without colliding. For each entry the
