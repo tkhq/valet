@@ -1,7 +1,7 @@
 // packages/api/src/proxy/recorder.ts
 import { parseUsage } from "./usage-parser.js";
 import { parseSample, PARSE_VERSION } from "./sample.js";
-import { priceUsage } from "../lib/pricing.js";
+import { priceUsage, resolveCanonicalModel } from "../lib/pricing.js";
 import type { ProviderKind, ProxyPrincipal } from "./types.js";
 
 export interface RecordContext {
@@ -89,16 +89,17 @@ export async function recordProxyCall(deps: RecorderDeps, ctx: RecordContext): P
     const usage = parsedUsage?.usage ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
     const responseModel = parsedUsage?.model ?? null;
     const requestModel = requestModelOf(ctx.requestBody);
-    // Row model prefers the response's (more specific) id; falls back to the
-    // requested id when the response omitted it.
+    // Row model prefers the response's (more specific, possibly dated) id;
+    // falls back to the requested id when the response omitted it.
     const model = responseModel ?? requestModel;
-    // Price by the response model, then fall back to the request model. OpenAI
-    // returns a fully-dated id (e.g. `gpt-4o-mini-2024-07-18`) that may not be
-    // a key in pi-ai's registry, while the requested id (`gpt-4o-mini`) is — so
-    // pricing the response id alone leaves every Codex row unpriced.
-    const cost =
-      (responseModel ? priceUsage(ctx.kind, responseModel, usage) : null) ??
-      (requestModel ? priceUsage(ctx.kind, requestModel, usage) : null);
+    // Resolve the registry key whose rate prices this call — the response id
+    // (date-stripped if needed, e.g. `gpt-4o-mini-2024-07-18` → `gpt-4o-mini`),
+    // else the requested id. Using the SAME id for the cost and the metric
+    // label keeps spend reconcilable with the rate that produced it.
+    const pricedModel =
+      (responseModel ? resolveCanonicalModel(ctx.kind, responseModel) : null) ??
+      (requestModel ? resolveCanonicalModel(ctx.kind, requestModel) : null);
+    const cost = pricedModel ? priceUsage(ctx.kind, pricedModel, usage) : null;
 
     let parsed: unknown = null;
     let parseError: string | null = null;
@@ -138,8 +139,11 @@ export async function recordProxyCall(deps: RecorderDeps, ctx: RecordContext): P
       parseError,
     });
 
-    if (cost && model) {
-      deps.metric(cost, { model, userId: ctx.principal.userId, keyId: ctx.principal.keyId, kind: ctx.kind });
+    // Emit whenever we have a price (including a legitimate $0 for a known
+    // model — the metric layer no-ops on 0), labeled with the model actually
+    // priced so the metric reconciles with the rate.
+    if (cost !== null && pricedModel) {
+      deps.metric(cost, { model: pricedModel, userId: ctx.principal.userId, keyId: ctx.principal.keyId, kind: ctx.kind });
     }
   } catch (err) {
     console.error("recordProxyCall failed (client stream already delivered):", err);

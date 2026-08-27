@@ -44,8 +44,9 @@ describe("recordProxyCall", () => {
 data: {"type":"response.completed","response":{"id":"resp_1","object":"response","model":"gpt-4o-mini-2024-07-18","output":[],"usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150}}}
 `;
     const inserted: Record<string, unknown>[] = [];
+    const metric = vi.fn();
     await recordProxyCall(
-      { insert: async (r) => { inserted.push(r); }, now: () => 1, id: () => "row3", metric: vi.fn() },
+      { insert: async (r) => { inserted.push(r); }, now: () => 1, id: () => "row3", metric },
       {
         principal: { userId: "u", orgId: "o", keyId: "k" },
         kind: "openai", endpoint: "/v1/responses", harness: "codex",
@@ -55,9 +56,12 @@ data: {"type":"response.completed","response":{"id":"resp_1","object":"response"
     );
     expect(inserted).toHaveLength(1);
     expect(inserted[0].model).toBe("gpt-4o-mini-2024-07-18"); // row keeps the specific id
-    expect(inserted[0].costUsd).not.toBeNull(); // but priced via the request model
+    expect(inserted[0].costUsd).not.toBeNull(); // priced via the canonical fallback
     expect(inserted[0].inputTokens).toBe(100);
     expect(inserted[0].outputTokens).toBe(50);
+    // Metric is labeled with the model actually priced (canonical), so spend
+    // reconciles with the rate — not the dated id.
+    expect(metric).toHaveBeenCalledWith(expect.any(Number), expect.objectContaining({ model: "gpt-4o-mini" }));
   });
   it("swallows a parse failure: row still written, cost null", async () => {
     const inserted: Record<string, unknown>[] = [];

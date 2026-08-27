@@ -7,6 +7,34 @@ function piProvider(kind: ProviderKind): "anthropic" | "openai" {
   return kind;
 }
 
+function inRegistry(kind: ProviderKind, id: string): boolean {
+  try {
+    // getModel is generically typed on literal ids; at runtime it indexes
+    // MODELS[provider][id]. Cast the id to the index type — a genuine
+    // third-party-typing narrowing (CLAUDE.md rule 3), commented here.
+    return !!getModel(piProvider(kind), id as never);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolves a provider model id to the pi-ai REGISTRY KEY whose rate prices it,
+ * or null if unpriceable. The id itself when pi-ai knows it; else its
+ * date-suffix-stripped form if THAT is known — providers return a dated id in
+ * responses (`gpt-4o-mini-2024-07-18`, `gpt-5-2025-08-07`,
+ * `claude-haiku-4-5-20251001`) that is not a registry key, while the base id
+ * (`gpt-4o-mini`, `gpt-5`, `claude-haiku-4-5`) is. Centralizing the fallback
+ * here keeps every caller from re-implementing the strip-and-retry.
+ */
+export function resolveCanonicalModel(kind: ProviderKind, id: string): string | null {
+  if (inRegistry(kind, id)) return id;
+  // OpenAI dates are `-YYYY-MM-DD`; Anthropic dates are `-YYYYMMDD`.
+  const stripped = id.match(/^(.*?)-(?:\d{4}-\d{2}-\d{2}|\d{8})$/)?.[1];
+  if (stripped && inRegistry(kind, stripped)) return stripped;
+  return null;
+}
+
 /**
  * Prices a proxied turn using the SAME table the engine's cost comes from
  * (pi-ai `calculateCost`). Returns null — UNPRICED, never 0 — when the model
@@ -19,10 +47,9 @@ export function priceUsage(kind: ProviderKind, modelId: string, usage: ProxyUsag
   // inside its row build, so a pricing throw escaping here would abort the
   // insert and LOSE the entire recording (raw bodies included).
   try {
-    // getModel is generically typed on literal ids; at runtime it indexes
-    // MODELS[provider][id]. Cast the id to the index type — a genuine
-    // third-party-typing narrowing (CLAUDE.md rule 3), commented here.
-    const model = getModel(piProvider(kind), modelId as never);
+    const canonical = resolveCanonicalModel(kind, modelId);
+    if (!canonical) return null;
+    const model = getModel(piProvider(kind), canonical as never);
     if (!model) return null;
     const cost = calculateCost(model, {
       input: usage.input,
