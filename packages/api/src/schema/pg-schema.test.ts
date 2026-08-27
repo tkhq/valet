@@ -623,6 +623,49 @@ describe("pg app schema + migrations", () => {
       expect(await missingSchemaRepairs(db)).toEqual([]);
     });
 
+    // #432 added llm_proxy_requests (+ 2 indexes) and rewrote the cost_entries
+    // view (a use_case column + a proxy UNION leg). A database migrated before
+    // #432 has none of these, and the edited 0000_app.sql never re-runs, so the
+    // repair list is the only catch-up path.
+    it("repairs the #432 proxy log table, its indexes, and the cost_entries view", async () => {
+      // Capture the migration-built view's columns so the repair-built view can
+      // be compared against them below — a true lockstep check (repair SELECT vs
+      // 0000_app.sql), independent of any hand-transcribed expectation.
+      const viewColumns = async (): Promise<string[]> => {
+        const r = await db.query(
+          "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'cost_entries' ORDER BY ordinal_position",
+        );
+        return r.rows.map((row) => row.column_name as string);
+      };
+      const migrationCols = await viewColumns();
+      expect(migrationCols).toContain("use_case"); // the #432 rewrite is present pre-drop
+
+      // Simulate the pre-#432 schema. Drop the view first: its UNION leg
+      // references the table, so the table cannot drop while the view exists.
+      await db.query('DROP VIEW "cost_entries"');
+      await db.query('DROP TABLE "llm_proxy_requests"'); // drops its indexes too
+
+      const missing = (await missingSchemaRepairs(db)).map((r) => r.describe);
+      expect(missing).toContain("llm_proxy_requests table");
+      expect(missing).toContain("llm_proxy_requests_org_created index");
+      expect(missing).toContain("llm_proxy_requests_user_created index");
+      expect(missing).toContain("cost_entries.use_case (view rewrite)");
+
+      // The table repair MUST run before the view repair (the view references
+      // the table). applyAppMigrations completing without error proves the
+      // order — a view-first order would fail on the missing table.
+      await applyAppMigrations(db);
+
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+      expect(await columnExists("llm_proxy_requests", "endpoint")).toBe(true);
+      // Lockstep: the repair-built view exposes exactly the migration view's
+      // columns, in order. A transcription slip in the repair's copied SELECT
+      // (dropped, renamed, or reordered column) surfaces as a mismatch here.
+      expect(await viewColumns()).toEqual(migrationCols);
+      // The proxy UNION leg resolves against the repaired table (view queryable).
+      await db.query("SELECT DISTINCT use_case FROM cost_entries");
+    });
+
     // The repair path's lock_timeout handling rides this store-postgres
     // helper — pin the contract where the dependency lives.
     it("isPgLockTimeout matches pg 55P03 directly and via cause", () => {
