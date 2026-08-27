@@ -35,11 +35,13 @@ import { textParam } from "~/lib/search-params";
  * page that used to sit beside both is gone — a row's scope is a badge now,
  * not a third page.
  *
- * An admin adds, syncs, and removes sources, and writes new org skills. A
- * member reads both — the status chips and the cards show, but the write
- * actions do not. `readOnly` on the sources panel and the missing "New org
- * skill" button carry that split, keyed off `useOrg()`'s `callerRole`, the
- * same admin signal the members page reads.
+ * An admin adds and removes sources, and writes new org skills. A member
+ * reads both and can press Sync. The Library heading says that split, and
+ * that a private repository is read with the GitHub App — public vs private
+ * does not change who may add or remove. `readOnly` on the sources panel
+ * hides Import and Remove, and the missing "New org skill" button carries
+ * the rest of that split, keyed off `useOrg()`'s `callerRole`, the same
+ * admin signal the members page reads.
  *
  * Both lists are paged, and both keep their filters and cursor stack in the
  * search params so Back pages back.
@@ -85,7 +87,7 @@ export function OrganizationLibraryPage() {
     <div className="space-y-10">
       <Section
         title="Library"
-        description="Track a GitHub repository to mirror its skills into every member's library."
+        description="An admin adds or removes a repository. Any member can press Sync. A private repository is read with the GitHub App installed for this organization."
       >
         {orgId === undefined ? (
           <div className="flex items-center gap-2 text-sm text-muted">

@@ -8,10 +8,10 @@
  * `origin='repo'` skills a source carries, and deleting a source deletes
  * them, because a mirror has no existence apart from what it mirrors.
  *
- * Access follows `services/skills.ts` exactly, through the same
- * `isAuthorizedFor`: your own rows plus the rows of every team you belong to,
- * with a row another owner holds reported as not found rather than as
- * forbidden.
+ * Access follows `services/skills.ts`: your own rows plus the rows of every
+ * team you belong to, plus org-library rows every member can read. A row
+ * another owner holds is reported as not found rather than as forbidden.
+ * Writes of an org source stay admin-only; a member may still kick Sync.
  */
 import { randomUUID } from "node:crypto";
 import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
@@ -233,8 +233,10 @@ export async function createSkillSource(
 }
 
 /**
- * One source, or null when it is missing OR the caller may not reach it. The
- * two cases are deliberately indistinguishable, as everywhere else.
+ * One source the caller may WRITE, or null when it is missing OR they may
+ * not change it. The two cases are deliberately indistinguishable, as
+ * everywhere else. Org rows stay admin-only here — add and remove keep that
+ * gate. Sync uses `readableSkillSourceRow` instead.
  */
 export async function ownedSkillSourceRow(
   db: AppDb,
@@ -246,6 +248,25 @@ export async function ownedSkillSourceRow(
   const row = rows[0];
   if (!row) return null;
   return (await isAuthorizedFor(db, owner, row, opts)) ? row : null;
+}
+
+/**
+ * One source the caller may READ (and kick a sync on), or null when it is
+ * missing OR out of reach. Mirrors `readableSkillRow`: an org-library row
+ * is readable by every member of that org. User and team rows still follow
+ * `isAuthorizedFor`.
+ */
+export async function readableSkillSourceRow(
+  db: AppDb,
+  owner: SkillOwner,
+  id: string,
+): Promise<SkillSourceRow | null> {
+  const rows = await db.select().from(skillSources).where(eq(skillSources.id, id)).limit(1);
+  const row = rows[0];
+  if (!row) return null;
+  if (row.orgId !== owner.orgId) return null;
+  if (row.ownerType === "org") return row;
+  return (await isAuthorizedFor(db, owner, row)) ? row : null;
 }
 
 export const SKILL_SOURCE_DEFAULT_LIMIT = 20;
@@ -288,10 +309,9 @@ export interface SkillSourcePage {
  * Every source the caller can reach: their own rows, the rows of every team
  * they belong to, and the org-library rows, sorted by repository name.
  *
- * Org rows show for EVERY member (read-only to a non-admin), the same rule
- * `listSkills` follows: `isAuthorizedFor` still returns false for a non-admin
- * org write, so `ownedSkillSourceRow` never treats an org row as the caller's
- * to change.
+ * Org rows show for EVERY member. Add and remove stay admin-only
+ * (`ownedSkillSourceRow`). Sync uses `readableSkillSourceRow`, so a member
+ * who can see the row can kick the same sweep an admin can.
  *
  * `scope` narrows the answer to ONE owner, and replaces the union rather
  * than adding to it — the same rule, and the same reason, as `listSkills`.

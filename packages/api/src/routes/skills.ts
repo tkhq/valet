@@ -83,6 +83,7 @@ import {
   listSkillSources,
   markSkillSourceDue,
   ownedSkillSourceRow,
+  readableSkillSourceRow,
   SKILL_SOURCE_DEFAULT_LIMIT,
   SKILL_SOURCE_MAX_LIMIT,
   SkillSourceConflictError,
@@ -649,8 +650,9 @@ skillsRouter.post("/sources", async (c) => {
 
 skillsRouter.post("/sources/:id/sync", async (c) => {
   const { db, skillSync } = c.var.providers;
-  const orgAdmin = await isOrgAdmin(db, c.var.user.orgId, c.var.user.id);
-  const row = await ownedSkillSourceRow(db, owner(c), c.req.param("id"), { isOrgAdmin: orgAdmin });
+  // Sync is a read-side kick: any member who can see the row can bring the
+  // sweep forward. Add and remove stay on ownedSkillSourceRow (admin for org).
+  const row = await readableSkillSourceRow(db, owner(c), c.req.param("id"));
   if (!row) return c.json({ error: "skill source not found" }, 404);
 
   await markSkillSourceDue(db, row.id);

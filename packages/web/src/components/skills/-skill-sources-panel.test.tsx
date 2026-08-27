@@ -46,6 +46,7 @@ let addState = { isPending: false, error: null as Error | null };
 let syncState = { isPending: false, error: null as Error | null, data: undefined as { excluded: number; discovered: number } | undefined };
 let removeState = { isPending: false, error: null as Error | null };
 let teamsData = { teams: [{ id: "team_1", orgId: "org_1", name: "Platform", createdAt: 1, memberCount: 2, callerRole: "member" as const }] };
+let orgCallerRole: "admin" | "member" = "admin";
 
 vi.mock("~/api/skill-sources", () => ({
   useSkillSources: (query: unknown) => {
@@ -68,7 +69,11 @@ vi.mock("@tanstack/react-router", () => ({
 
 vi.mock("~/api/settings", () => ({
   useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
-  useOrg: () => ({ data: { features: { organizations: true } }, isLoading: false, error: null }),
+  useOrg: () => ({
+    data: { features: { organizations: true }, callerRole: orgCallerRole },
+    isLoading: false,
+    error: null,
+  }),
 }));
 
 // The badge links by assistant id, so it reads the assistants list to find
@@ -136,6 +141,7 @@ describe("SkillSourcesPanel", () => {
     remove.mockReset();
     listQuery.mockReset();
     onCursorsChange.mockReset();
+    orgCallerRole = "admin";
   });
 
   it("says a public repository needs no GitHub connection, and names the one used for a private one", () => {
@@ -145,16 +151,23 @@ describe("SkillSourcesPanel", () => {
 
     expect(screen.getByText(/needs no GitHub connection/i)).toBeTruthy();
     expect(screen.getByText(/your connected GitHub account/i)).toBeTruthy();
+    expect(screen.getByText(/private organization repository is read with the GitHub App/i)).toBeTruthy();
     // The claim this change removes: sync reads private repositories now.
     expect(screen.queryByText(/public repositories only/i)).toBeNull();
   });
 
-  it("names the GitHub App instead on the org panel, where a personal account is not what reads", () => {
+  it("says any member can sync, and only an admin adds or removes an org repository", () => {
+    renderPanel();
+
+    expect(screen.getByText(/Any member can press Sync/)).toBeTruthy();
+    expect(screen.getByText(/Only an org admin can add or remove an organization repository/)).toBeTruthy();
+  });
+
+  it("names the GitHub App and the admin gate on the org panel, without opening Import", () => {
     renderPanel(PERSONAL, { owner: { type: "org", id: "org1" } });
 
-    fireEvent.click(screen.getByRole("button", { name: /import/i }));
-
     expect(screen.getByText(/GitHub App installed for this organization/i)).toBeTruthy();
+    expect(screen.getByText(/Only an org admin can add or remove a repository/)).toBeTruthy();
     expect(screen.queryByText(/your connected GitHub account/i)).toBeNull();
   });
 
@@ -327,15 +340,46 @@ describe("SkillSourcesPanel", () => {
     expect(add).toHaveBeenCalledWith({ repo: "tkhq/org-skills", ownerType: "org" });
   });
 
-  it("hides the add form and the row actions from a read-only reader", () => {
+  it("hides the add form and Remove from a read-only reader, and keeps Sync", () => {
     currentData = { sources: [source()], nextCursor: null };
     renderPanel(PERSONAL, { owner: { type: "org", id: "org_1" }, readOnly: true });
 
     expect(screen.queryByRole("button", { name: /import from github/i })).toBeNull();
-    expect(screen.queryByRole("button", { name: /^sync$/i })).toBeNull();
+    expect(screen.getByRole("button", { name: /^sync$/i })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /^remove$/i })).toBeNull();
     // The rows themselves still read.
     expect(screen.getByText("tkhq/skills")).toBeTruthy();
+    expect(screen.getByText(/Any member can press Sync/)).toBeTruthy();
+  });
+
+  it("hides Remove on an org row from a member, even when the panel is not read-only", () => {
+    orgCallerRole = "member";
+    currentData = {
+      sources: [source({ ownerType: "org", ownerId: "org_1" })],
+      nextCursor: null,
+    };
+    renderPanel();
+
+    expect(screen.getByRole("button", { name: /^sync$/i })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^remove$/i })).toBeNull();
+  });
+
+  it("keeps Remove on a personal row for a member", () => {
+    orgCallerRole = "member";
+    currentData = { sources: [source()], nextCursor: null };
+    renderPanel();
+
+    expect(screen.getByRole("button", { name: /^remove$/i })).toBeTruthy();
+  });
+
+  it("keeps Remove on an org row for an admin", () => {
+    currentData = {
+      sources: [source({ ownerType: "org", ownerId: "org_1" })],
+      nextCursor: null,
+    };
+    renderPanel();
+
+    expect(screen.getByRole("button", { name: /^remove$/i })).toBeTruthy();
   });
 
   it("reads the page its cursor stack names, and reports the next one up", () => {

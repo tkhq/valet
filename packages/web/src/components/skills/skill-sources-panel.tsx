@@ -28,8 +28,12 @@
  * active workspace, which the nav switcher sets: your own, or a team. No
  * Owner select asks a second time.
  *
- * `readOnly` hides the add form and the per-row Sync/Remove actions — the org
- * panel passes it for a member, who may read org sources but not change them.
+ * `readOnly` hides the add form and Remove. Sync stays: any member who can
+ * see the row can kick the sweep. The org panel passes `readOnly` for a
+ * member, who may not add or remove an org source. `/skills` does not pass
+ * `readOnly`, so an org row still hides Remove unless `useOrg()` says the
+ * caller is an admin. Public vs private does not change who may add or
+ * remove; it only picks the credential the sync uses.
  *
  * The listing is paged. `cursors` is the stack of cursors walked so far and
  * belongs to the route, which keeps it in the URL — see `~/lib/cursor-stack`
@@ -43,6 +47,7 @@ import { errorText } from "~/lib/error-text";
 import { OwnerBadge } from "~/components/owner-badge";
 import { currentCursor, pageNumber, popCursor, pushCursor } from "~/lib/cursor-stack";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
+import { useOrg } from "~/api/settings";
 import {
   useAddSkillSource,
   useRemoveSkillSource,
@@ -86,6 +91,9 @@ export function SkillSourcesPanel({
   // the panel could list one workspace's repositories while the form filed a
   // new one under another.
   const workspace = useWorkspaceScope();
+  const org = useOrg();
+  const isOrgAdmin = org.data?.callerRole === "admin";
+  const orgPinned = owner?.type === "org";
 
   function submit(e: FormEvent) {
     e.preventDefault();
@@ -101,13 +109,20 @@ export function SkillSourcesPanel({
 
   return (
     <section className="rounded-lg border border-line bg-paper">
-      <div className="flex items-center justify-between gap-3 px-4 py-3">
-        <h2 className="text-sm font-medium text-ink">Repositories</h2>
-        {!readOnly && (
-          <Button variant="ghost" size="sm" onClick={() => setOpen((v) => !v)}>
-            {open ? "Cancel" : "Import from GitHub"}
-          </Button>
-        )}
+      <div className="px-4 py-3">
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-sm font-medium text-ink">Repositories</h2>
+          {!readOnly && (
+            <Button variant="ghost" size="sm" onClick={() => setOpen((v) => !v)}>
+              {open ? "Cancel" : "Import from GitHub"}
+            </Button>
+          )}
+        </div>
+        <p className="mt-1 text-xs text-muted">
+          {orgPinned
+            ? "Any member can press Sync. Only an org admin can add or remove a repository. A private repository is read with the GitHub App installed for this organization."
+            : "Any member can press Sync. Only an org admin can add or remove an organization repository."}
+        </p>
       </div>
 
       {!readOnly && open && (
@@ -134,9 +149,9 @@ export function SkillSourcesPanel({
               personal account would send them to the wrong screen. */}
           <p className="mt-2 text-xs text-muted">
             A public repository needs no GitHub connection.{" "}
-            {owner?.type === "org"
+            {orgPinned
               ? "A private one is read with the GitHub App installed for this organization."
-              : "A private one is read with your connected GitHub account."}
+              : "A private personal or team repository is read with your connected GitHub account. A private organization repository is read with the GitHub App."}
           </p>
           {add.error && <p className="mt-1 text-xs text-danger-500">{errorText(add.error)}</p>}
         </form>
@@ -159,7 +174,11 @@ export function SkillSourcesPanel({
       )}
 
       {sources.map((source) => (
-        <SourceRow key={source.id} source={source} readOnly={readOnly} />
+        <SourceRow
+          key={source.id}
+          source={source}
+          canRemove={canRemoveSource(source, readOnly, isOrgAdmin)}
+        />
       ))}
 
       {/* The wrapper carries a rule above the pager, so it is conditional on
@@ -183,7 +202,20 @@ export function SkillSourcesPanel({
   );
 }
 
-function SourceRow({ source, readOnly }: { source: SkillSourceSummary; readOnly: boolean }) {
+/** Add and remove of an org source stay admin-only for every org
+ * repository, public or private. `readOnly` is the org Library's member
+ * pin; `/skills` still has to hide Remove on an org row for a member. */
+export function canRemoveSource(
+  source: SkillSourceSummary,
+  readOnly: boolean,
+  isOrgAdmin: boolean,
+): boolean {
+  if (readOnly) return false;
+  if (source.ownerType === "org") return isOrgAdmin;
+  return true;
+}
+
+function SourceRow({ source, canRemove }: { source: SkillSourceSummary; canRemove: boolean }) {
   const sync = useSyncSkillSource();
   const remove = useRemoveSkillSource();
   const pinned = [source.ref, source.subpath].filter((part) => part.length > 0).join(" · ");
@@ -248,16 +280,16 @@ function SourceRow({ source, readOnly }: { source: SkillSourceSummary; readOnly:
           <p className="mt-1 text-xs leading-relaxed text-danger-500">{errorText(remove.error)}</p>
         )}
       </div>
-      {!readOnly && (
-        <div className="flex shrink-0 items-center gap-1">
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={sync.isPending}
-            onClick={() => sync.mutate(source.id)}
-          >
-            {sync.isPending ? <Spinner size={14} /> : "Sync"}
-          </Button>
+      <div className="flex shrink-0 items-center gap-1">
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={sync.isPending}
+          onClick={() => sync.mutate(source.id)}
+        >
+          {sync.isPending ? <Spinner size={14} /> : "Sync"}
+        </Button>
+        {canRemove && (
           <Button
             variant="ghost"
             size="sm"
@@ -266,8 +298,8 @@ function SourceRow({ source, readOnly }: { source: SkillSourceSummary; readOnly:
           >
             Remove
           </Button>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }

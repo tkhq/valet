@@ -130,6 +130,15 @@ describe("OrganizationLibraryPage — org skills panel", () => {
     // The org cards still render read-only.
     expect(screen.getByText("Org playbook")).toBeTruthy();
   });
+
+  it("names who can add, remove, and sync, and that a private repo uses the GitHub App", () => {
+    orgData = { ...orgData, callerRole: "member" };
+    render(<OrganizationLibraryPage />);
+
+    expect(screen.getByText(/An admin adds or removes a repository/)).toBeTruthy();
+    expect(screen.getAllByText(/Any member can press Sync/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/GitHub App installed for this organization/).length).toBeGreaterThan(0);
+  });
 });
 
 /**
