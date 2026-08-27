@@ -3190,3 +3190,89 @@ export interface GetSlackAppResponse {
    * recorded at connect time. Empty when nothing is missing. */
   missingScopes: string[];
 }
+
+// ── REST: LLM proxy usage (`/api/proxy/*`) ───────────────────────────────
+//
+// Dashboard read surface for the LLM recording gateway. Gating:
+//   - org members see only their own rows.
+//   - org admins see all rows in their org.
+// A row outside the caller's org 404s (never 403 — same convention as
+// `routes/llm-providers.ts`).
+
+/** Aggregate bucket by a single dimension. */
+export interface ProxyUsageBucket {
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  costUsd: number;
+}
+
+export interface ProxyUserBucket extends ProxyUsageBucket {
+  userId: string;
+}
+
+export interface ProxyModelBucket extends ProxyUsageBucket {
+  model: string | null;
+}
+
+export interface ProxyHarnessBucket extends ProxyUsageBucket {
+  harness: string | null;
+}
+
+/**
+ * `GET /api/proxy/usage/summary` — token and cost aggregates for the
+ * requested time window. Members see only their own rows; org admins see
+ * the whole org.
+ */
+export interface ProxyUsageSummary {
+  windowMs: number;
+  totalRequests: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalTokens: number;
+  totalCostUsd: number;
+  byUser: ProxyUserBucket[];
+  byModel: ProxyModelBucket[];
+  byHarness: ProxyHarnessBucket[];
+}
+
+/**
+ * `GET /api/proxy/requests` list item — metadata only, no request or
+ * response bodies.
+ */
+export interface ProxyRequestListItem {
+  id: string;
+  createdAt: number;
+  orgId: string;
+  userId: string;
+  apiKeyId: string;
+  providerKind: "anthropic" | "openai";
+  model: string | null;
+  harness: string | null;
+  endpoint: string;
+  stream: boolean;
+  statusCode: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  totalTokens: number;
+  costUsd: number | null;
+  latencyMs: number | null;
+  error: string | null;
+}
+
+/**
+ * `GET /api/proxy/requests/:id` — full row including request and response
+ * bodies and the parsed representation.
+ */
+export interface ProxyRequestDetail extends ProxyRequestListItem {
+  requestBody: string;
+  responseBody: string | null;
+  parsed: unknown;
+  parseVersion: number | null;
+  parseError: string | null;
+  providerResponseId: string | null;
+  previousResponseId: string | null;
+}

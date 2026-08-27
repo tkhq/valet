@@ -40,6 +40,7 @@ import { identityLinksRouter } from "./routes/identity-links.js";
 import { meRouter } from "./routes/me.js";
 import { modelsRouter } from "./routes/models.js";
 import { usageRouter } from "./routes/usage.js";
+import { proxyUsageRouter } from "./routes/proxy-usage.js";
 import { orgRouter } from "./routes/org.js";
 import { orgInvitesRouter } from "./routes/org-invites.js";
 import { orgSettingsRouter } from "./routes/org-settings.js";
@@ -269,6 +270,7 @@ export function createApp(
   app.route("/api/me", meRouter);
   app.route("/api/models", modelsRouter);
   app.route("/api/usage", usageRouter);
+  app.route("/api/proxy", proxyUsageRouter);
   app.route("/api/org", orgRouter);
   app.route("/api/org/settings", orgSettingsRouter);
   app.route("/api/org/invites", orgInvitesRouter);
