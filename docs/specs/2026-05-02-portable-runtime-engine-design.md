@@ -1244,6 +1244,7 @@ interface DecisionGate {
   actions: DecisionAction[];
   expiresAt?: number;
   status: 'pending' | 'resolved' | 'expired' | 'withdrawn';
+  resolution?: DecisionResolution; // stamped on the row when status becomes 'resolved'
   context?: Record<string, unknown>;
   origin?: {
     channelType?: string;
@@ -1260,6 +1261,7 @@ interface DecisionAction {
   id: string;
   label: string;
   style?: 'primary' | 'danger';
+  approves?: boolean; // true when selecting this action approves the gated operation
 }
 
 interface DecisionResolution {
@@ -1301,7 +1303,7 @@ interface DecisionGateEntry {
 - `question`: asks the user for an answer. May include option actions or accept free text when `actions` is empty.
 - `credential_request`: asks the user to connect or re-authorize a service. Required context fields are `service`, `reason`, and optional `scopes`.
 
-**Expiry defaults:** `credential_request` gates default `expiresAt` to 24 hours — the user may need to be reached on another channel and complete an OAuth flow, so a minutes-scale default is guaranteed failure for anyone offline. `approval` and `question` gates default to 72 hours. All defaults are configurable per gate via `expiresAt`. Expiry emits the standard `decision_gate_expired` event and fails the suspended operation with a structured error.
+**Expiry defaults:** `credential_request` gates default `expiresAt` to 24 hours — the user may need to be reached on another channel and complete an OAuth flow, so a minutes-scale default is guaranteed failure for anyone offline. `approval` and `question` gates default to 72 hours. All defaults are configurable per gate via `expiresAt`. Expiry emits the standard `decision_gate_expired` event and fails the suspended operation with a structured error. Expiry is a terminal outcome: it must never re-open the same request (see Terminal stickiness below). The durable expiry sweep also terminalizes lapsed pending rows that no waiter or suspended-turn checkpoint owns — superseded rows expire in place (row + DAG entry + event) with no turn to resume, so they stop rendering as actionable approvals. Command gates are exempt: their waiters live in the session-level manager, so the sweep asks `Session.isCommandGatePending` before treating a row as unowned. Each unowned expiry records the `valet.gates.unowned_expired` counter and logs the gate id — a steady rate after the legacy backlog drains means something upstream is producing orphan rows.
 
 **Gate delivery contract:**
 
@@ -1338,7 +1340,9 @@ gateId = `gate:${sessionId}:${threadId}:${queueItemId}:${resumeKey}:${ordinal}`
 
 `resumeKey` is **required** on `DecisionGateRequest` (not optional). Tool authors choose a key that uniquely identifies the suspension point given the tool's inputs — typically a function of the tool's args (e.g. `"github.create_pr:owner/repo:head→base"`). The `ordinal` is engine-maintained per `(queueItemId, resumeKey)`, and it is what keeps crash-replay dedup from leaking into live execution:
 
-- **Live semantics:** a `requestDecision(...)` call whose `(resumeKey)` has no gate, or whose current gate is *pending*, uses the current ordinal (joining the pending gate). A call arriving after the current gate is **terminal** (resolved/expired/withdrawn) opens a **fresh gate with the next ordinal**. A model that retries an identical action after a denial — or after an approval — always gets a new human decision; a stored resolution is never silently reused for a genuinely new invocation.
+- **Live semantics:** a `requestDecision(...)` call whose `(resumeKey)` has no gate, or whose current gate is *pending*, uses the current ordinal (joining the pending gate). A call arriving after an **approval** opens a **fresh gate with the next ordinal** — a model that repeats an approved action gets a new human decision, never a silently reused resolution. The same applies after a **withdrawal** (steer/abort), which is engine-initiated rather than a human verdict on the action.
+- **Terminal stickiness (deny and expiry):** within one queue item, a denial and an expiry are FINAL for their dedupe scope. A later `requestDecision` whose scope contains a denied gate returns the stored denial; one whose scope contains an expired gate rejects immediately with the expiry error. Neither opens a new gate. Scope: with an explicit `dedupeKey`, a gate is in scope when its `resumeKey` equals the key or starts with `${dedupeKey}:`; without one, only the exact `resumeKey` matches — resumeKeys are free-form and may be colon-prefixes of one another, so prefix matching on the default would collapse distinct decisions. The approval path passes the qualified tool id as `dedupeKey`, so a re-issued call with tweaked args (a different args-hash suffix in `resumeKey`) collapses onto the human decision instead of dodging it. Denial stickiness applies to `approval` gates only, and a resolution counts as a denial when its action is not the built-in `approve` and not a gate action flagged `approves: true` — host rejection actions stick exactly like the built-in deny. The verdict is read from `DecisionGate.resolution`, stamped on the row at resolve time. Expiry stickiness applies to every gate type. A new queue item is a fresh dedupe scope: asking again in a new message re-gates normally. A same-args retry deliberately reuses the original gate's ordinal, so the policy audit sink collapses model retries of one denied call onto the one human decision record. Without stickiness, a retrying model turns a deny into a deny→retry→new-gate loop and resurrects an unanswered gate at every expiry — the 72h default becomes a 72h heartbeat.
+- **Expiry is terminal on the approval path:** `invokeAction` catches the expiry error and returns a terminal "approval expired — do not retry" tool result. A propagated throw reaches the model as a retryable error result (pi-agent-core continues the loop on tool errors), and the model's re-issued call is what used to re-arm expired gates forever.
 - **Replay semantics:** `SuspendedTurnState` records the ordinal, so a replayed execution reaching the same call site recomputes the same `(resumeKey, ordinal)` and matches the SAME persisted gate — the short-circuit works exactly as before.
 
 ```typescript
@@ -1351,6 +1355,7 @@ interface DecisionGateRequest {
   context?: Record<string, unknown>;
   origin?: { channelType?: string; channelId?: string; messageId?: string };
   resumeKey: string; // REQUIRED for restart-safe gates
+  dedupeKey?: string; // terminal-outcome scope; defaults to resumeKey
 }
 ```
 

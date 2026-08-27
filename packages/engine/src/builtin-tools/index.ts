@@ -1,5 +1,6 @@
 import { Type } from "typebox";
 import type { TSchema } from "typebox";
+import { isDecisionGateExpired } from "../decision-gate.js";
 import type {
   ChildReader,
   ChildSender,
@@ -585,17 +586,32 @@ export const askApprovalTool = defineTool({
     body: Type.Optional(Type.String({ description: "Details the user needs to decide." })),
   }),
   execute: async (args, ctx) => {
-    const resolution = await ctx.requestDecision({
-      type: "approval",
-      title: args.title,
-      body: args.body,
-      resumeKey: `ask_approval:${args.title}`,
-    });
+    let resolution;
+    try {
+      resolution = await ctx.requestDecision({
+        type: "approval",
+        title: args.title,
+        body: args.body,
+        resumeKey: `ask_approval:${args.title}`,
+      });
+    } catch (err) {
+      // Expiry is terminal for the turn — return guidance instead of a raw
+      // error result, which the model reads as retryable.
+      if (isDecisionGateExpired(err)) {
+        return {
+          text:
+            `approval request expired: "${args.title}". Nobody answered before the ` +
+            "deadline. Do not ask again in this turn. Tell the user the action did " +
+            "not run; they can ask again in a new message.",
+        };
+      }
+      throw err;
+    }
     return {
       text:
         resolution.actionId === "approve"
           ? `approved: ${args.title}`
-          : `denied: ${args.title}`,
+          : `denied: ${args.title}. This denial is final for the current turn — do not ask again. Tell the user what was denied.`,
     };
   },
 });

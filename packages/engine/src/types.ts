@@ -632,6 +632,15 @@ export interface DecisionAction {
   id: string;
   label: string;
   style?: "primary" | "danger";
+  /**
+   * True when selecting this action approves the gated operation. The
+   * engine's built-in "approve" action approves implicitly; host-supplied
+   * extra actions must set this to count as approvals. Persisted on the gate
+   * row so denial stickiness (`findStickyTerminalGate`) classifies host
+   * rejection actions the same way plugin-catalog's `isApprovedResolution`
+   * does.
+   */
+  approves?: boolean;
 }
 
 export interface DecisionGateRef {
@@ -661,6 +670,14 @@ export interface DecisionGate {
   actions: DecisionAction[];
   expiresAt?: number;
   status: DecisionGateStatus;
+  /**
+   * The human decision, stamped when `status` becomes `resolved`. The sticky
+   * terminal check (`findStickyTerminalGate`) reads `resolution.actionId` to
+   * tell a denial (final for the rest of the turn) from an approval (a
+   * retried call mints a fresh ordinal). Absent on pending/withdrawn/expired
+   * gates and on rows resolved before this field existed.
+   */
+  resolution?: DecisionResolution;
   context?: Record<string, unknown>;
   origin?: { channelType?: string; channelId?: string; messageId?: string };
   refs?: Array<{ channelType: string; ref: DecisionGateRef }>;
@@ -679,6 +696,20 @@ export interface DecisionGateRequest {
   origin?: DecisionGate["origin"];
   // stable ID for re-entrancy: tools must supply the same id when re-run with suspendedDecision
   resumeKey?: string;
+  /**
+   * Dedupe scope for terminal outcomes, wider than `resumeKey`. When set,
+   * a denial or expiry on ANY gate in the same queue item whose resumeKey
+   * equals this key — or starts with `${dedupeKey}:` — answers later
+   * requests in the scope without opening a new gate. This stops an agent
+   * from dodging a human decision by re-issuing the call with tweaked args
+   * (each args variant hashes to a different resumeKey suffix). Only set
+   * this when every resumeKey in the scope has the `${dedupeKey}:<suffix>`
+   * shape — the prefix rule is a string-format contract. When unset,
+   * stickiness matches the exact resumeKey only: free-form resumeKeys may
+   * be colon-prefixes of one another, so prefix matching on the default
+   * would collapse genuinely distinct decisions.
+   */
+  dedupeKey?: string;
 }
 
 export interface DecisionResolution {
@@ -773,8 +804,8 @@ export interface PolicyDecision {
   /**
    * Extra gate actions the host wants offered on a require_approval gate.
    * Actions flagged `approves: true` are treated as approval by `call_tool`
-   * AFTER `onResolution` runs. The engine strips the `approves` flag to plain
-   * `DecisionAction`s before opening the gate.
+   * AFTER `onResolution` runs. The flag is persisted on the gate's actions
+   * so denial stickiness classifies host rejection actions the same way.
    */
   extraGateActions?: (DecisionAction & { approves: boolean })[];
 }
@@ -1592,6 +1623,17 @@ export interface SessionStore {
     queueItemId: string,
     resumeKey: string,
   ): Promise<DecisionGate | null>;
+  /**
+   * Every gate (any status) opened by one queue item. One bounded read
+   * serves both the ordinal resolution and the sticky-terminal scan in
+   * `Thread.runGateCycle` — a whole-thread scan would grow without bound on
+   * long-lived threads.
+   */
+  listDecisionGatesForQueueItem(
+    sessionId: string,
+    threadId: string,
+    queueItemId: string,
+  ): Promise<DecisionGate[]>;
   getSuspendedTurn(sessionId: string, threadId: string): Promise<SuspendedTurnState | null>;
   deleteSession(id: string): Promise<void>;
 }

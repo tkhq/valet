@@ -315,6 +315,111 @@ describe("Session.prompt plugin command execution", () => {
     expect((await store.getDecisionGate(session.id, gateId))?.status).toBe("withdrawn");
   });
 
+  it("the thread expiry sweep leaves a live command gate alone (session-level waiter owns it)", async () => {
+    const faux = registerFauxProvider({ provider: "s-plugin-gate-sweep" });
+    cleanups.push(() => faux.unregister());
+    const { engine, store } = makeEngine();
+    const fx = echoFixture({ defaultApprovalMode: "require_approval" });
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/workspace",
+      sandbox: {},
+      model: faux.getModel(),
+      pluginCommands: fx.commands,
+      pluginCatalog: fx.catalog,
+    });
+    const threadId = session.thread().id;
+
+    const receiptP = session.prompt("/testplug:echo raced");
+    let gateId = "";
+    await vi.waitFor(async () => {
+      const entries = await store.getEntries(session.id, threadId);
+      const gateEntry = entries.find((e) => e.type === "decision_gate");
+      expect(gateEntry).toBeDefined();
+      if (gateEntry?.type === "decision_gate") gateId = gateEntry.gate.id;
+    });
+
+    // Lapse the ROW while the waiter's own (far-future) timer stays armed —
+    // the exact shape of a sweep tick racing the in-process expiry timer.
+    const row = await store.getDecisionGate(session.id, gateId);
+    await store.saveDecisionGate(session.id, threadId, {
+      ...row!,
+      expiresAt: Date.now() - 1,
+    });
+    await session.sweepOnce();
+
+    // The sweep must NOT expire it: the session-level waiter owns the gate.
+    expect((await store.getDecisionGate(session.id, gateId))?.status).toBe("pending");
+
+    // The human's approve still lands and the command runs.
+    await session.resolveDecision(gateId, {
+      actionId: "approve",
+      resolvedBy: "test-user",
+      resolvedAt: Date.now(),
+    });
+    await receiptP;
+    expect((await store.getDecisionGate(session.id, gateId))?.status).toBe("resolved");
+  });
+
+  it("a lapsed command-gate row with no waiter (post-restart) expires via the sweep", async () => {
+    const faux = registerFauxProvider({ provider: "s-plugin-gate-orphan" });
+    cleanups.push(() => faux.unregister());
+    const { engine, store } = makeEngine();
+    const fx = echoFixture({ defaultApprovalMode: "require_approval" });
+    const SID = "sess-cmd-orphan";
+    const session = await engine.createSession({
+      id: SID,
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/workspace",
+      sandbox: {},
+      model: faux.getModel(),
+      pluginCommands: fx.commands,
+      pluginCatalog: fx.catalog,
+    });
+    const threadId = session.thread().id;
+
+    // Abandoned on purpose: the command parks on its gate and the "process"
+    // then restarts, so no waiter survives for it.
+    void session.prompt("/testplug:echo orphaned");
+    let gateId = "";
+    await vi.waitFor(async () => {
+      const entries = await store.getEntries(SID, threadId);
+      const gateEntry = entries.find((e) => e.type === "decision_gate");
+      expect(gateEntry).toBeDefined();
+      if (gateEntry?.type === "decision_gate") gateId = gateEntry.gate.id;
+    });
+    const row = await store.getDecisionGate(SID, gateId);
+    await store.saveDecisionGate(SID, threadId, { ...row!, expiresAt: Date.now() - 1 });
+
+    // Fresh engine over the same store: command gates write no checkpoint,
+    // so nothing re-arms this gate — the sweep must expire the row in place.
+    const engine2 = new Engine({
+      providers: {
+        store,
+        stream: new InMemoryEventStream(),
+        sandboxProvider: new VirtualSandboxProvider(),
+      },
+    });
+    const session2 = await engine2.restoreSession({
+      sessionId: SID,
+      options: {
+        userId: "u1",
+        orgId: "o1",
+        workspace: "/workspace",
+        sandbox: {},
+        model: faux.getModel(),
+        pluginCommands: fx.commands,
+        pluginCatalog: fx.catalog,
+      },
+    });
+    await session2.sweepOnce();
+    await vi.waitFor(async () => {
+      expect((await store.getDecisionGate(SID, gateId))?.status).toBe("expired");
+    });
+  });
+
   it("missing credentials produce a corrective error", async () => {
     const faux = registerFauxProvider({ provider: "s-plugin-cred" });
     cleanups.push(() => faux.unregister());

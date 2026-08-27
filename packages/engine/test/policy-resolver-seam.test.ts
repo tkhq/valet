@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { Type } from "typebox";
 import {
+  DecisionGateExpiredError,
   pluginCatalogTools,
   type ActionPlugin,
   type Credential,
@@ -250,7 +251,7 @@ describe("policyResolver seam: resolve()", () => {
 });
 
 describe("policyResolver seam: require_approval gate", () => {
-  it("opens a gate with provenance in context + default actions plus stripped extras", async () => {
+  it("opens a gate with provenance in context + default actions plus extras (approves persisted)", async () => {
     let gateReq: DecisionGateRequest | undefined;
     const { resolver } = makeResolver({
       decision: {
@@ -276,11 +277,12 @@ describe("policyResolver seam: require_approval gate", () => {
       baseMode: "require_approval",
       source: "risk_high",
     });
-    // Default approve/deny plus the extra, with `approves` stripped.
+    // Default approve/deny plus the extra. `approves` rides along so the
+    // gate row can classify host actions for denial stickiness.
     expect(gateReq?.actions).toEqual([
       { id: "approve", label: "Approve", style: "primary" },
       { id: "deny", label: "Deny", style: "danger" },
-      { id: "approve_always", label: "Always allow", style: "primary" },
+      { id: "approve_always", label: "Always allow", style: "primary", approves: true },
     ]);
   });
 
@@ -538,6 +540,26 @@ describe("policyResolver seam: invocation record discriminators", () => {
     expect(invocations).toHaveLength(1);
     expect(invocations[0].status).toBe("rejected");
     expect(invocations[0].gateOrdinal).toBe(0);
+  });
+
+  it("require_approval: gate expiry emits a rejected record carrying the expired gate's ordinal", async () => {
+    const { resolver, invocations } = makeResolver({
+      decision: { mode: "require_approval", provenance: { baseMode: "require_approval", source: "s" } },
+    });
+    const [, callTool] = pluginCatalogTools({ plugins: [makePlugin(makeAction())] });
+    const result = await callTool.execute(
+      { tool_id: "github.get_issue", params: { n: 1 }, summary: "s" },
+      makeCtx({
+        policyResolver: resolver,
+        requestDecision: async () => {
+          throw new DecisionGateExpiredError("gate-x", 2);
+        },
+      }),
+    );
+    expect(result.text).toContain("expired");
+    expect(invocations).toHaveLength(1);
+    expect(invocations[0].status).toBe("rejected");
+    expect(invocations[0].gateOrdinal).toBe(2);
   });
 
   it("two sequential require_approval calls with identical args each carry the ordinal the gate layer assigned — a legitimate repeat gets a NEW ordinal, distinct from a replay of the first", async () => {
