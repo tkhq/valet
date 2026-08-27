@@ -20,11 +20,14 @@ import { cn } from "~/lib/cn";
 export function MessageItem({
   message,
   suppressEmptyPlaceholder = false,
+  queued = false,
 }: {
   message: StreamMessage;
   /** True for the last message while the agent is mid-turn — an empty
    *  assistant row is then a streaming placeholder, not a failed turn. */
   suppressEmptyPlaceholder?: boolean;
+  /** True while this user message is still waiting in the queue. */
+  queued?: boolean;
 }) {
   const isUser = message.role === "user";
   const copyText = messageCopyText(message);
@@ -51,6 +54,11 @@ export function MessageItem({
                 title={message.model}
               >
                 {shortModelLabel(message.model)}
+              </span>
+            )}
+            {queued && !message.settledOutcome && (
+              <span className="rounded px-1.5 py-0.5 text-[10px] font-medium bg-accent-500/10 text-accent-700 dark:text-accent-400">
+                Queued
               </span>
             )}
             {message.settledOutcome && <SettledBadge outcome={message.settledOutcome} />}

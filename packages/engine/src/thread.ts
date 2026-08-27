@@ -351,6 +351,11 @@ export class Thread {
   }
 
   async submitPrompt(content: PromptContent, opts: PromptOptions): Promise<PromptReceipt> {
+    if (opts.promoteItemId) {
+      throw new ValidationError(
+        "submitPrompt does not accept promoteItemId. Call Thread.promoteQueuedItem to promote a queued item.",
+      );
+    }
     const effectiveMode: QueueMode = opts.queueMode ?? this.mode;
 
     if (effectiveMode === "collect") {
@@ -383,6 +388,51 @@ export class Thread {
       this.id,
       item,
       effectiveMode === "steer" ? { steer: true } : { maxPending: cap },
+    );
+    if (supersededItemIds.length > 0) {
+      await this.handleSteerSupersession(supersededItemIds);
+    }
+    await this.emitQueueState();
+    void this.kick();
+    return {
+      sessionId: this.session.id,
+      threadId: this.id,
+      queueItemId: admitted.id,
+      status: receiptStatus(admitted.status),
+    };
+  }
+
+  /**
+   * Promote a queued followup into a steer. Admits a new item with the same
+   * content and `steer: true` so the running turn and the original queued
+   * row are superseded together. The original item is never claimed, so it
+   * does not write a second user entry. The caller remaps the optimistic
+   * bubble onto the returned `queueItemId`.
+   */
+  async promoteQueuedItem(itemId: string): Promise<PromptReceipt> {
+    const store = this.session.providers.store;
+    const existing = await store.getQueueItem(this.session.id, itemId);
+    if (!existing || existing.threadId !== this.id) {
+      throw new NotFoundError("queue item", itemId);
+    }
+    if (existing.status !== "queued" || existing.supersededByItemId) {
+      throw new ValidationError(
+        "That message is no longer queued. Send a new message, or wait for the current turn to finish.",
+      );
+    }
+    const item = this.buildQueueItem(existing.content, {
+      author: existing.author,
+      channel: existing.channel,
+      replyTarget: existing.replyTarget,
+      model: existing.model,
+      role: existing.role,
+      metadata: { ...(existing.metadata ?? {}), promotedFromItemId: existing.id },
+    });
+    const { item: admitted, supersededItemIds } = await store.admitSubmission(
+      this.session.id,
+      this.id,
+      item,
+      { steer: true, promoteFromItemId: existing.id },
     );
     if (supersededItemIds.length > 0) {
       await this.handleSteerSupersession(supersededItemIds);

@@ -494,6 +494,10 @@ export interface PromptFileAttachment {
 }
 
 export interface SendPromptRequest {
+  /**
+   * Prompt text. Required unless `promoteItemId` is set — a promote
+   * reuses the queued item's content and does not admit a new user entry.
+   */
   text: string;
   /** Target thread id. If omitted, server uses the session's default thread. */
   threadId?: string;
@@ -501,6 +505,17 @@ export interface SendPromptRequest {
   attachments?: PromptImageAttachment[];
   /** File attachment refs (from POST /sessions/:id/files). Single-use. */
   fileRefs?: Array<{ ref: string }>;
+  /**
+   * Per-submit queue mode. When omitted, the thread's persisted default
+   * applies. Web mid-turn submits send `followup` so a user orchestrator
+   * (thread default `steer`) queues instead of aborting.
+   */
+  queueMode?: "followup" | "steer";
+  /**
+   * Promote this already-queued item into a steer. Same item content, no
+   * second user entry. `text` may be empty.
+   */
+  promoteItemId?: string;
 }
 
 export interface SendPromptResponse {
