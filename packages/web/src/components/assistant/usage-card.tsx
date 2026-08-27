@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import type { UsageMemberSummary, UsageWindow } from "@valet/api/wire";
 import { api } from "~/api/client";
 import { useMe } from "~/api/settings";
@@ -28,9 +29,12 @@ export function UsageCard() {
     <section className="rounded-lg border border-line bg-paper flex flex-col min-h-0">
       <header className="px-4 py-3 border-b border-line flex items-center justify-between">
         <h2 className="font-display text-base text-ink">Usage</h2>
-        {data?.org && (
-          <span className="text-xs text-muted">last {data.org.windowDays} days</span>
-        )}
+        <Link
+          to="/usage"
+          className="text-xs text-moss hover:underline underline-offset-2"
+        >
+          View all usage →
+        </Link>
       </header>
 
       <div className="px-4 py-3 space-y-3">
@@ -62,8 +66,13 @@ export function UsageCard() {
                     roster, never a team's. "Team" now names a real,
                     narrower thing in this product, so calling this that
                     would misreport whose spend is on screen. */}
-                <div className="text-[10px] font-medium uppercase tracking-wider text-muted">
-                  Organization
+                <div className="flex items-center justify-between">
+                  <div className="text-[10px] font-medium uppercase tracking-wider text-muted">
+                    Organization
+                  </div>
+                  <div className="text-[10px] text-muted">
+                    last {data.org.windowDays} days
+                  </div>
                 </div>
                 {data.org.members.map((m) => (
                   <MemberBar
