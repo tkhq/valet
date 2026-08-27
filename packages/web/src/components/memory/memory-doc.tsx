@@ -230,7 +230,9 @@ export function MemoryDoc({ path, onNavigateToChat, onDeleted, onOpenPath }: Mem
           </p>
         )}
         {deleteMutation.error instanceof Error && (
-          <p className="text-xs text-danger-500">Delete failed: {deleteMutation.error.message}</p>
+          <p className="text-xs text-danger-500">
+            Delete failed: {deleteMutation.error.message}. Try again, or reload the page.
+          </p>
         )}
       </header>
 
@@ -238,7 +240,9 @@ export function MemoryDoc({ path, onNavigateToChat, onDeleted, onOpenPath }: Mem
         <div className="space-y-3">
           <MarkdownEditor value={draft} onChange={setDraft} ariaLabel="Memory content" autoFocus />
           {saveMutation.error instanceof Error && (
-            <p className="text-xs text-danger-500">Save failed: {saveMutation.error.message}</p>
+            <p className="text-xs text-danger-500">
+              Save failed: {saveMutation.error.message}. Try again — your draft is still here.
+            </p>
           )}
           <div className="flex items-center gap-2">
             <Button

@@ -84,7 +84,7 @@ export function useMe(opts?: UseQueryOptions<MeResponse>) {
   });
 }
 
-export function useOrg(opts?: UseQueryOptions<OrgResponse>) {
+export function useOrg(opts?: Partial<UseQueryOptions<OrgResponse>>) {
   return useQuery<OrgResponse>({
     queryKey: qkSettings.org(),
     queryFn: () => api.getOrg(),
