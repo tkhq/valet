@@ -237,11 +237,13 @@ New component `packages/web/src/components/memory/memory-viewer-dialog.tsx`.
 - In-dialog navigation: memory cross-links inside the dialog update local
   path state (with a back button) instead of routing. An "Open in Memory"
   action jumps to `/memory/$path` for the full two-pane page.
-- Share controls live in the dialog header: a Share button that calls the
+- Share controls (`share-controls.tsx`): a Share button that calls the
   authed share route and shows the link, a visibility control
   ("Org members" / "Anyone with the link"), and Revoke. The public option
   is disabled with a hint ("Ask an org admin to enable public sharing in
-  Settings → Organization") when `allowPublicArtifacts` is off.
+  Settings → Organization") when `allowPublicArtifacts` is off. The
+  controls render in `MemoryDoc`'s action row, so the dialog and the
+  `/memory` page share one implementation.
 
 Entry points in the chat session:
 
@@ -342,6 +344,13 @@ themselves. Anything else degrades to `/`.
 
 ## Deviations from this spec
 
+- Share controls moved from the dialog header into `MemoryDoc`'s action
+  row (`share-controls.tsx`). The spec put them in the dialog only, which
+  left the `/memory` page with no share affordance.
+- Download buttons were added: `MemoryDoc` downloads the full document
+  (frontmatter included) named after the path basename; the public
+  artifact page downloads the snapshot as markdown. Both are client-side
+  blob downloads of already-fetched content — no new API surface.
 - The memory viewer dialog reads the caller's OWN memory scope
   (`useMemoryDoc` with no owner filter). In a team assistant's session,
   expanding a team-scoped file shows the viewer's empty state instead of

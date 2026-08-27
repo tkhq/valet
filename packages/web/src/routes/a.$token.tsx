@@ -1,8 +1,10 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { Download } from "lucide-react";
 import { useArtifact } from "~/api/artifacts";
 import { ApiError } from "~/api/client";
 import { Markdown } from "~/components/markdown";
 import { Spinner } from "~/components/primitives";
+import { artifactDownloadName, downloadTextFile } from "~/lib/download";
 import { relativeTime } from "~/lib/relative-time";
 
 /**
@@ -67,7 +69,17 @@ function ArtifactPage() {
     <div className="min-h-screen">
       <article className="mx-auto max-w-[70ch] px-6 py-12">
         <header className="mb-8 space-y-2 border-b border-line pb-6">
-          <h1 className="font-display text-3xl leading-tight text-ink">{doc.title}</h1>
+          <div className="flex items-start justify-between gap-4">
+            <h1 className="font-display text-3xl leading-tight text-ink">{doc.title}</h1>
+            <button
+              type="button"
+              onClick={() => downloadTextFile(artifactDownloadName(doc.title), doc.content, "text/markdown")}
+              className="flex shrink-0 items-center gap-1 pt-2 text-xs text-muted hover:text-moss"
+            >
+              <Download className="h-3.5 w-3.5" aria-hidden />
+              Download
+            </button>
+          </div>
           <p className="text-xs text-muted">
             {doc.sharedBy ? `Shared by ${doc.sharedBy} · ` : "Shared "}
             via Valet · updated {relativeTime(doc.updatedAt)}

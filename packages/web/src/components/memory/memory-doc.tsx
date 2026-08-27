@@ -6,9 +6,11 @@ import { api, ApiError } from "~/api/client";
 import { Badge, Button, Spinner } from "~/components/primitives";
 import { Markdown } from "~/components/markdown";
 import { MarkdownEditor } from "~/components/markdown-editor";
+import { downloadTextFile, memoryDownloadName } from "~/lib/download";
 import { splitFrontmatter } from "~/lib/frontmatter";
 import { relativeTime } from "~/lib/relative-time";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
+import { ShareControls } from "./share-controls";
 
 /** Pure — the exact prefill text the footer hands off to the composer. */
 export function memoryDocPrefillText(path: string): string {
@@ -47,6 +49,8 @@ export interface MemoryDocProps {
  * the title and keeps type/tags/pinned as they were). Delete is
  * confirm-gated inline, no dialog. Pin toggles `pinned` through the same
  * `PUT /api/memory` write, with no `content` — a metadata-only update.
+ * Share opens the artifact controls (`share-controls.tsx`); Download saves
+ * the full document, frontmatter included.
  */
 export function MemoryDoc({ path, onNavigateToChat, onDeleted, onOpenPath }: MemoryDocProps) {
   const docQ = useMemoryDoc(path);
@@ -157,6 +161,16 @@ export function MemoryDoc({ path, onNavigateToChat, onDeleted, onOpenPath }: Mem
           </h1>
           {!editing && (
             <div className="flex shrink-0 items-center gap-2 pt-2 text-xs">
+              <ShareControls path={path} />
+              <button
+                type="button"
+                onClick={() =>
+                  downloadTextFile(memoryDownloadName(path), rendered ?? file.content, "text/markdown")
+                }
+                className="text-muted hover:text-moss"
+              >
+                Download
+              </button>
               <button
                 type="button"
                 onClick={() => pinMutation.mutate(!file.pinned)}

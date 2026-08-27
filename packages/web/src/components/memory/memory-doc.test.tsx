@@ -25,6 +25,15 @@ vi.mock("~/api/orchestrator", () => ({
   useOrchestratorInfo: () => ({ data: { name: "Nova" } }),
 }));
 
+const downloadMock = vi.fn();
+vi.mock("~/lib/download", async (importOriginal) => {
+  const original = await importOriginal<typeof import("~/lib/download")>();
+  return {
+    ...original,
+    downloadTextFile: (...args: Parameters<typeof original.downloadTextFile>) => downloadMock(...args),
+  };
+});
+
 import { MemoryDoc, memoryDocPrefillText } from "./memory-doc";
 
 // The component uses react-query mutations now — every render needs a
@@ -55,6 +64,7 @@ function renderedDoc(rendered: string) {
 describe("MemoryDoc", () => {
   beforeEach(() => {
     docMock.mockReset();
+    downloadMock.mockReset();
     useComposerPrefillStore.setState({ text: null });
   });
 
@@ -274,6 +284,55 @@ describe("MemoryDoc", () => {
       document.removeEventListener("click", cancel);
     }
     expect(onOpenPath).toHaveBeenCalledWith("people/alice.md");
+  });
+
+  it("downloads the full document (frontmatter included) under the path basename", () => {
+    const rendered = '---\ntype: "note"\n---\n\nBody.\n';
+    docMock.mockReturnValue({ isLoading: false, error: null, data: renderedDoc(rendered), refetch: vi.fn() });
+
+    renderWithClient(<MemoryDoc path="preferences/style.md" onNavigateToChat={vi.fn()} />);
+    fireEvent.click(screen.getByText("Download"));
+
+    expect(downloadMock).toHaveBeenCalledWith("style.md", rendered, "text/markdown");
+  });
+
+  /** The share half of the artifacts design used to live only in the chat
+   * memory-viewer dialog; the `/memory` page had no share affordance. It now
+   * rides `MemoryDoc`'s action row, so both surfaces get it. */
+  it("shares: the Share panel offers 'Create share link' and posts the share", async () => {
+    const rendered = '---\ntype: "note"\n---\n\nBody.\n';
+    docMock.mockReturnValue({ isLoading: false, error: null, data: renderedDoc(rendered), refetch: vi.fn() });
+    const list = vi.spyOn(api, "listArtifacts").mockResolvedValue({ artifacts: [] });
+    const org = vi.spyOn(api, "getOrg").mockResolvedValue({
+      id: "org1",
+      name: "Org",
+      createdAt: 0,
+      features: { organizations: true, ssoTeamSync: false },
+      ssoTeamGroups: [],
+      allowPublicArtifacts: false,
+      callerRole: "member",
+    });
+    const share = vi.spyOn(api, "shareArtifact").mockResolvedValue({
+      id: "a1",
+      path: "preferences/style.md",
+      url: "https://valet.test/a/tok",
+      visibility: "org",
+      updatedAt: Date.now(),
+    });
+
+    renderWithClient(<MemoryDoc path="preferences/style.md" onNavigateToChat={vi.fn()} />);
+    expect(list).not.toHaveBeenCalled(); // panel closed → no list request
+    fireEvent.click(screen.getByText("Share"));
+
+    // The create button renders disabled until the artifact list resolves.
+    const create = await screen.findByRole("button", { name: "Create share link" });
+    await waitFor(() => expect((create as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(create);
+    await waitFor(() => expect(share).toHaveBeenCalledWith({ path: "preferences/style.md" }));
+
+    list.mockRestore();
+    org.mockRestore();
+    share.mockRestore();
   });
 
   it("delete confirm can be cancelled without calling the API", () => {
