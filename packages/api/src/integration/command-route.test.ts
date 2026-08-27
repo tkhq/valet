@@ -274,10 +274,14 @@ describe("skill invocation REST round-trip", () => {
     });
     expect(postRes.status).toBe(202);
 
-    // The expansion is a queued prompt; the user entry persists when the
-    // claim loop starts the turn (the keyless model call then fails, which
-    // is fine — the entry stays). Poll the reload path briefly.
-    const deadline = Date.now() + 10_000;
+    // The expansion is a queued prompt. WHEN the user entry persists
+    // depends on credentials: with a provider key the turn starts and
+    // appends it immediately, but keyless (CI, make e2e) the engine
+    // releases the claim with NO entry for MAX_CREDENTIAL_ATTEMPTS cycles
+    // on the 5s sweep, and appends it only at the settle-cap (~10-15s).
+    // The deadline must sit clear of that cap, or this test fails in every
+    // scrubbed-key environment while passing on a keyed dev shell.
+    const deadline = Date.now() + 30_000;
     let user: ListMessagesResponse["messages"][number] | undefined;
     while (Date.now() < deadline && !user) {
       const msgsRes = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/messages`, {
