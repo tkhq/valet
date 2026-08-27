@@ -10,8 +10,10 @@ import type { DecisionGate, OrchestratorChildSummary, ThreadSummary } from "@val
 import {
   childStatusDotClassName,
   groupChildrenByThread,
+  hasGateOutsideList,
   threadIdsWithPendingGates,
   untitledThreadLabel,
+  visibleThreads,
 } from "./thread-tree";
 
 function child(overrides: Partial<OrchestratorChildSummary> = {}): OrchestratorChildSummary {
@@ -97,6 +99,53 @@ describe("threadIdsWithPendingGates", () => {
   it("returns an empty set for no gates and for an unseeded store slice", () => {
     expect(threadIdsWithPendingGates({})).toEqual(new Set());
     expect(threadIdsWithPendingGates(undefined)).toEqual(new Set());
+  });
+});
+
+/**
+ * A gated thread is exempt from the origin-bucket and search filters:
+ * hiding its row would hide the only in-session surface for the gate,
+ * which is the gap TKAI-258 closes.
+ */
+describe("visibleThreads", () => {
+  const t = (id: string, key: string, title: string): ThreadSummary => ({
+    id,
+    sessionId: "s1",
+    title,
+    createdAt: 1_000,
+    key,
+  });
+  const threads = [
+    t("t-web", "web:1", "Plan the launch"),
+    t("t-auto", "signal:workflow:r1", "Nightly digest"),
+  ];
+
+  it("applies bucket and search filters when no gates are pending", () => {
+    expect(visibleThreads(threads, "chat", "", new Set()).map((x) => x.id)).toEqual(["t-web"]);
+    expect(visibleThreads(threads, "all", "digest", new Set()).map((x) => x.id)).toEqual(["t-auto"]);
+  });
+
+  it("keeps a gated thread the bucket filter would hide", () => {
+    const ids = visibleThreads(threads, "chat", "", new Set(["t-auto"])).map((x) => x.id);
+    expect(ids).toEqual(["t-web", "t-auto"]);
+  });
+
+  it("keeps a gated thread the search query would hide, in original order", () => {
+    const ids = visibleThreads(threads, "all", "digest", new Set(["t-web"])).map((x) => x.id);
+    expect(ids).toEqual(["t-web", "t-auto"]);
+  });
+});
+
+describe("hasGateOutsideList", () => {
+  const t = (id: string): ThreadSummary => ({ id, sessionId: "s1", createdAt: 1_000, key: "web:1" });
+
+  it("true when a gate's thread is missing from the active list (archived)", () => {
+    expect(hasGateOutsideList([t("a")], new Set(["archived-thread"]))).toBe(true);
+  });
+
+  it("false when every gated thread is listed, and for no gates", () => {
+    expect(hasGateOutsideList([t("a")], new Set(["a"]))).toBe(false);
+    expect(hasGateOutsideList([t("a")], new Set())).toBe(false);
   });
 });
 

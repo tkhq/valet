@@ -2,15 +2,17 @@
 /**
  * Thread tree actions (orchestrator UX redesign): the per-thread context
  * menu (archive + session-wide replace sandbox), the "Show archived"
- * toggle with unarchive, and the dismiss affordance on settled children.
- * The tree's pure grouping/status logic lives in `thread-tree.test.ts`.
+ * toggle with unarchive, the dismiss affordance on settled children, and
+ * the per-thread pending-gate dot (TKAI-258). The pure helpers behind
+ * these live in `thread-tree.tsx` and are tested in `thread-tree.test.ts`;
+ * this file checks the DOM wiring.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { TooltipProvider } from "~/components/primitives";
-import type { OrchestratorChildSummary, ThreadSummary } from "@valet/api/wire";
+import type { DecisionGate, OrchestratorChildSummary, ThreadSummary } from "@valet/api/wire";
 
 const navigate = vi.fn();
 const setArchivedMutateAsync = vi.fn().mockResolvedValue({ id: "thread-1" });
@@ -20,6 +22,7 @@ const dismissMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 let threads: ThreadSummary[] = [];
 let archivedThreads: ThreadSummary[] = [];
 let children: OrchestratorChildSummary[] = [];
+let pendingGates: Record<string, DecisionGate> = {};
 
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, ...rest }: { children: ReactNode; [key: string]: unknown }) => (
@@ -44,6 +47,9 @@ vi.mock("~/api/queries", async (importOriginal) => {
     useCreateThread: () => ({ mutateAsync: vi.fn(), isPending: false }),
     useSetThreadArchived: () => ({ mutateAsync: setArchivedMutateAsync, isPending: false }),
     useReplaceSandbox: () => ({ mutateAsync: replaceMutateAsync, isPending: false }),
+    // The gate seed (usePendingGatesSeed) stays inert: with no data the
+    // effect never touches the store. Gates enter through `pendingGates`.
+    useDecisions: () => ({ data: undefined, isLoading: false, error: null }),
   };
 });
 
@@ -53,9 +59,23 @@ vi.mock("~/api/orchestrator", () => ({
   useDismissChild: () => ({ mutateAsync: dismissMutateAsync, isPending: false }),
 }));
 
-vi.mock("~/stores/stream", () => ({
-  useStreamStore: () => undefined,
-}));
+// Applies the component's real selectors against a minimal store shape:
+// `pendingGates` drives the gate dot, `queueByThread` the children
+// live-update hook, and the absent `setPendingGates` is never called
+// because the mocked useDecisions returns no data.
+vi.mock("~/stores/stream", () => {
+  interface FakeStreamState {
+    bySession: Record<
+      string,
+      { pendingGates: Record<string, DecisionGate>; queueByThread: Record<string, never> }
+    >;
+    setPendingGates?: (sessionId: string, gates: DecisionGate[]) => void;
+  }
+  return {
+    useStreamStore: (sel: (s: FakeStreamState) => unknown) =>
+      sel({ bySession: { "orchestrator:user-1": { pendingGates, queueByThread: {} } } }),
+  };
+});
 
 import { ThreadTree } from "./thread-tree";
 
@@ -80,6 +100,20 @@ function child(overrides: Partial<OrchestratorChildSummary> = {}): OrchestratorC
   };
 }
 
+function gate(id: string, threadId: string): DecisionGate {
+  return {
+    id,
+    sessionId: "orchestrator:user-1",
+    threadId,
+    type: "approval",
+    title: "Approve the deploy",
+    actions: [{ id: "approve", label: "Approve" }],
+    status: "pending",
+    createdAt: 1_700_000_000_000,
+    updatedAt: 1_700_000_000_000,
+  };
+}
+
 function renderTree() {
   return render(
     <TooltipProvider>
@@ -96,6 +130,7 @@ beforeEach(() => {
   threads = [thread()];
   archivedThreads = [];
   children = [];
+  pendingGates = {};
 });
 
 describe("ThreadTree — thread context menu", () => {
@@ -201,5 +236,81 @@ describe("ThreadTree — settled children", () => {
     const runningLink = screen.getByText("live-child").closest("a");
     expect(settledLink?.className ?? "").toMatch(/opacity/);
     expect(runningLink?.className ?? "").not.toMatch(/opacity/);
+  });
+});
+
+/**
+ * Per-thread needs-you dot (TKAI-258): a gate pending on thread A must be
+ * visible while the user looks at thread B. The gate card and the header
+ * badge are scoped to the active thread, so the tree row is the only
+ * in-session surface for it — including when a filter, a search query, or
+ * the archive would otherwise hide the row.
+ */
+describe("ThreadTree — pending-gate dot", () => {
+  it("marks a NON-active thread that holds a pending gate", () => {
+    threads = [
+      thread({ id: "thread-new", title: "Active thread", createdAt: 2_000 }),
+      thread({ id: "thread-old", title: "Gated thread", createdAt: 1_000 }),
+    ];
+    pendingGates = { g1: gate("g1", "thread-old") };
+    renderTree();
+
+    const dot = screen.getByLabelText("Needs your decision");
+    expect(dot.closest("a")?.textContent).toContain("Gated thread");
+  });
+
+  it("shows no dot when no gate is pending", () => {
+    renderTree();
+    expect(screen.queryByLabelText("Needs your decision")).toBeNull();
+    expect(screen.queryByLabelText("An archived thread needs your decision")).toBeNull();
+  });
+
+  it("marks each gated thread, and only those", () => {
+    threads = [
+      thread({ id: "thread-a", title: "Active thread", createdAt: 3_000 }),
+      thread({ id: "thread-b", title: "Gated B", createdAt: 2_000 }),
+      thread({ id: "thread-c", title: "Quiet C", createdAt: 1_000 }),
+    ];
+    pendingGates = { g1: gate("g1", "thread-a"), g2: gate("g2", "thread-b") };
+    renderTree();
+
+    const dots = screen.getAllByLabelText("Needs your decision");
+    const marked = dots.map((d) => d.closest("a")?.textContent ?? "");
+    expect(marked.some((t) => t.includes("Active thread"))).toBe(true);
+    expect(marked.some((t) => t.includes("Gated B"))).toBe(true);
+    expect(marked.some((t) => t.includes("Quiet C"))).toBe(false);
+    expect(dots).toHaveLength(2);
+  });
+
+  it("keeps a gated thread visible when the search query would hide it", async () => {
+    threads = [
+      thread({ id: "thread-new", title: "Newest", createdAt: 3_000 }),
+      thread({ id: "thread-gated", title: "Plan the launch", createdAt: 2_000 }),
+      thread({ id: "thread-quiet", title: "Old notes", createdAt: 1_000 }),
+    ];
+    pendingGates = { g1: gate("g1", "thread-gated") };
+    const user = userEvent.setup();
+    renderTree();
+
+    await user.type(screen.getByLabelText("Search threads"), "Newest");
+
+    expect(screen.getByText("Newest")).toBeTruthy();
+    expect(screen.getByText("Plan the launch")).toBeTruthy();
+    expect(screen.queryByText("Old notes")).toBeNull();
+    expect(screen.getByLabelText("Needs your decision")).toBeTruthy();
+  });
+
+  it("surfaces a gate on an archived thread: toggle dot, then row dot", async () => {
+    archivedThreads = [thread({ id: "thread-old", title: "Old gated" })];
+    pendingGates = { g1: gate("g1", "thread-old") };
+    const user = userEvent.setup();
+    renderTree();
+
+    // Closed section: the toggle itself carries the surface.
+    expect(screen.getByLabelText("An archived thread needs your decision")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: /show archived/i }));
+    const row = screen.getByText("Old gated").closest("li");
+    expect(row?.querySelector('[aria-label="Needs your decision"]')).toBeTruthy();
   });
 });
