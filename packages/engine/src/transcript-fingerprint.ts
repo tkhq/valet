@@ -92,7 +92,8 @@ export function fingerprintMessages(messages: readonly AgentMessage[]): string {
       const api = m.role === "assistant" ? dash(m.api) : "-";
       const provider = m.role === "assistant" ? dash(m.provider) : "-";
       const model = m.role === "assistant" ? dash(m.model) : "-";
-      return `${role} ${stop} ${api} ${provider} ${model} ${blockKinds(m.content)}`;
+      const content = "content" in m ? m.content : undefined;
+      return `${role} ${stop} ${api} ${provider} ${model} ${blockKinds(content)}`;
     })
     .join("\n");
 }
