@@ -46,4 +46,38 @@ data: {"type":"response.completed","response":{"id":"resp_now","model":"gpt-5","
     expect(s!.input[0].content[0]).toMatchObject({ type: "unknown" });
   });
   it("exposes the parser version", () => { expect(PARSE_VERSION).toBe(1); });
+  it("assembles a streamed tool_use block from content_block_start + input_json_delta", () => {
+    const resp = [
+      `event: content_block_start`,
+      `data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+      ``,
+      `event: content_block_delta`,
+      `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"thinking..."}}`,
+      ``,
+      `event: content_block_start`,
+      `data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file","input":{}}}`,
+      ``,
+      `event: content_block_delta`,
+      `data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":"}}`,
+      ``,
+      `event: content_block_delta`,
+      `data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\\"foo.ts\\"}"}}`,
+      ``,
+      `event: message_delta`,
+      `data: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}`,
+    ].join("\n");
+    const s = parseSample("anthropic", anthropicReq, resp);
+    expect(s).not.toBeNull();
+    const blocks = s!.output.content;
+    const textBlock = blocks.find((c) => c.type === "text");
+    expect(textBlock).toMatchObject({ type: "text", text: "thinking..." });
+    const toolBlock = blocks.find((c) => c.type === "tool_use");
+    expect(toolBlock).toMatchObject({ type: "tool_use", name: "read_file", input: { path: "foo.ts" } });
+    // Block order is preserved: text (index 0) before tool_use (index 1).
+    expect(blocks.indexOf(textBlock!)).toBeLessThan(blocks.indexOf(toolBlock!));
+    expect(s!.stop_reason).toBe("tool_use");
+  });
+  it("returns null for a malformed request body", () => {
+    expect(parseSample("anthropic", "not json", "")).toBeNull();
+  });
 });

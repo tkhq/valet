@@ -136,21 +136,55 @@ function parseSseEvents(text: string): Record<string, unknown>[] {
 // Response output assembly
 // ---------------------------------------------------------------------------
 
+// Block skeleton recorded from content_block_start events, keyed by index.
+interface BlockSkeleton {
+  kind: "text" | "tool_use" | "unknown";
+  // tool_use fields
+  id?: string;
+  name?: string;
+  rawBlock?: unknown;
+}
+
 function assembleAnthropicOutput(
   events: Record<string, unknown>[],
 ): { content: ContentBlock[]; stop_reason: string | null } {
-  // Accumulate text per block index
+  // Track block skeletons (type, id, name) per index from content_block_start.
+  const skeletonByIndex = new Map<number, BlockSkeleton>();
+  // Accumulate streamed text or partial_json per block index.
   const textByIndex = new Map<number, string>();
   let stop_reason: string | null = null;
 
   for (const e of events) {
-    if (e.type === "content_block_delta") {
+    if (e.type === "content_block_start") {
       const index = typeof e.index === "number" ? e.index : 0;
+      // Narrow the untyped SSE event field to access content_block properties.
+      const cb = e.content_block as Record<string, unknown> | undefined;
+      if (!cb) continue;
+      const cbType = cb.type;
+      if (cbType === "text") {
+        skeletonByIndex.set(index, { kind: "text" });
+      } else if (cbType === "tool_use") {
+        skeletonByIndex.set(index, {
+          kind: "tool_use",
+          id: typeof cb.id === "string" ? cb.id : "",
+          name: typeof cb.name === "string" ? cb.name : "",
+        });
+      } else {
+        // Preserve unrecognized block types rather than dropping them.
+        skeletonByIndex.set(index, { kind: "unknown", rawBlock: cb });
+      }
+    } else if (e.type === "content_block_delta") {
+      const index = typeof e.index === "number" ? e.index : 0;
+      // Narrow the untyped SSE event field to access delta type and content.
       const delta = e.delta as Record<string, unknown> | undefined;
-      if (delta?.type === "text_delta" && typeof delta.text === "string") {
+      if (!delta) continue;
+      if (delta.type === "text_delta" && typeof delta.text === "string") {
         textByIndex.set(index, (textByIndex.get(index) ?? "") + delta.text);
+      } else if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
+        textByIndex.set(index, (textByIndex.get(index) ?? "") + delta.partial_json);
       }
     } else if (e.type === "message_delta") {
+      // Narrow the untyped SSE event field to access stop_reason.
       const delta = e.delta as Record<string, unknown> | undefined;
       if (delta && typeof delta.stop_reason === "string") {
         stop_reason = delta.stop_reason;
@@ -158,9 +192,36 @@ function assembleAnthropicOutput(
     }
   }
 
+  // Determine the full set of indices from both skeletons and accumulated text.
+  const allIndices = new Set([...skeletonByIndex.keys(), ...textByIndex.keys()]);
+  const sorted = [...allIndices].sort((a, b) => a - b);
+
   const content: ContentBlock[] = [];
-  for (const [, text] of [...textByIndex.entries()].sort((a, b) => a[0] - b[0])) {
-    content.push({ type: "text", text });
+  for (const index of sorted) {
+    const skeleton = skeletonByIndex.get(index);
+    const accumulated = textByIndex.get(index) ?? "";
+
+    if (skeleton?.kind === "tool_use") {
+      let input: Record<string, unknown> = {};
+      if (accumulated) {
+        try {
+          const parsed: unknown = JSON.parse(accumulated);
+          if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+            input = parsed as Record<string, unknown>;
+          }
+        } catch {
+          // Bad partial_json — leave input as empty object.
+        }
+      }
+      content.push({ type: "tool_use", id: skeleton.id ?? "", name: skeleton.name ?? "", input });
+    } else if (skeleton?.kind === "unknown") {
+      content.push({ type: "unknown", raw: skeleton.rawBlock });
+    } else {
+      // Text block (explicit skeleton or delta-only index with no skeleton).
+      if (accumulated) {
+        content.push({ type: "text", text: accumulated });
+      }
+    }
   }
 
   return { content, stop_reason };
