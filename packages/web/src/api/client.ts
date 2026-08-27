@@ -1030,6 +1030,8 @@ export const api = {
     request<ProxySettingsResponse>("GET", "/proxy/settings"),
   setProxyMode: (mode: "centralized" | "passthrough") =>
     request<ProxySettingsResponse>("PUT", "/proxy/settings", { mode }),
+  updateProxySettings: (patch: { enabled?: boolean; mode?: "centralized" | "passthrough" }) =>
+    request<ProxySettingsResponse>("PUT", "/proxy/settings", patch),
 };
 
 export { ApiError };

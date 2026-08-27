@@ -99,3 +99,13 @@ export function useSetProxyMode() {
     },
   });
 }
+
+export function useSetProxyEnabled() {
+  const qc = useQueryClient();
+  return useMutation<ProxySettingsResponse, Error, boolean>({
+    mutationFn: (enabled) => api.updateProxySettings({ enabled }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qkProxy.settings() });
+    },
+  });
+}
