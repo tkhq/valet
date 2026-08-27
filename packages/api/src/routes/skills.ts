@@ -29,7 +29,10 @@
  *
  * Both listings take the same optional `?ownerType=&ownerId=` filter, for a
  * client that shows one workspace at a time. `readOwnerScope` reads it for
- * both, so the two pages cannot answer a bad filter differently.
+ * both, so the two pages cannot answer a bad filter differently. The
+ * sources listing also takes `?excludeOrg=1`, which drops org rows from
+ * the unfiltered union. `/skills` sends that; Organization · Library pins
+ * `ownerType=org` instead. The two must not be sent together.
  *
  * Both are keyset-paginated, in the shape the action log set
  * (`policies/admin.ts`): `?limit=` with a default and a cap, an opaque
@@ -83,7 +86,6 @@ import {
   listSkillSources,
   markSkillSourceDue,
   ownedSkillSourceRow,
-  readableSkillSourceRow,
   SKILL_SOURCE_DEFAULT_LIMIT,
   SKILL_SOURCE_MAX_LIMIT,
   SkillSourceConflictError,
@@ -589,7 +591,17 @@ skillsRouter.get("/sources", async (c) => {
     );
   }
 
-  const page = await listSkillSources(db, caller, filter.scope, limit, cursor);
+  const excludeOrg = c.req.query("excludeOrg") === "1";
+  if (excludeOrg && filter.scope !== undefined) {
+    return c.json(
+      { error: "Filter by owner or exclude org sources, not both. Remove excludeOrg, or remove ownerType and ownerId." },
+      400,
+    );
+  }
+
+  const page = await listSkillSources(db, caller, filter.scope, limit, cursor, {
+    includeOrg: !excludeOrg,
+  });
   // The count query is scoped to the page's ids, so it grows with the page
   // and not with the number of sources tracked.
   const counts = await countSkillsPerSource(
@@ -650,9 +662,11 @@ skillsRouter.post("/sources", async (c) => {
 
 skillsRouter.post("/sources/:id/sync", async (c) => {
   const { db, skillSync } = c.var.providers;
-  // Sync is a read-side kick: any member who can see the row can bring the
-  // sweep forward. Add and remove stay on ownedSkillSourceRow (admin for org).
-  const row = await readableSkillSourceRow(db, owner(c), c.req.param("id"));
+  const orgAdmin = await isOrgAdmin(db, c.var.user.orgId, c.var.user.id);
+  // Org sync stays admin-only, same gate as add and remove. Personal and
+  // team sources stay writable by their owner. The sweep keeps org
+  // catalogs fresh so a member does not need this button.
+  const row = await ownedSkillSourceRow(db, owner(c), c.req.param("id"), { isOrgAdmin: orgAdmin });
   if (!row) return c.json({ error: "skill source not found" }, 404);
 
   await markSkillSourceDue(db, row.id);

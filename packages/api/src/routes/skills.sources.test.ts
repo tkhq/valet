@@ -14,7 +14,7 @@ import {
   treeEntry,
   type GithubFixture,
 } from "../test-helpers/github-fixture.js";
-import { createTeam } from "../services/teams.js";
+import { addMember, createTeam } from "../services/teams.js";
 import type {
   CreateSkillSourceRequest,
   ListSkillSourcesResponse,
@@ -315,7 +315,7 @@ describe("org-scoped skill sources", () => {
     expect(del.status).toBe(404);
   });
 
-  it("member can sync an org source", async () => {
+  it("member cannot sync an org source", async () => {
     const f = serve({ sha: "commit-1", names: ["deploy"] });
     api = await bootTestApi({ githubApiUrl: f.url });
     const created = (await (
@@ -326,10 +326,44 @@ describe("org-scoped skill sources", () => {
       method: "POST",
       headers: { "x-valet-test-user-id": "test-member" },
     });
+    expect(sync.status).toBe(404);
+  });
+
+  it("a team member can sync a team source", async () => {
+    const f = serve({ sha: "commit-1", names: ["deploy"] });
+    api = await bootTestApi({ githubApiUrl: f.url });
+    const team = await createTeam(api.providers.db, {
+      orgId: "local-org",
+      name: "Platform",
+      creatorUserId: "local-user",
+    });
+    await addMember(api.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+    const created = (await (
+      await post(api.baseUrl, { repo: "tkhq/skills", teamId: team.id })
+    ).json()) as SkillSourceSyncResponse;
+
+    const sync = await fetch(`${api.baseUrl}/api/skills/sources/${created.source.id}/sync`, {
+      method: "POST",
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
     expect(sync.status).toBe(200);
     const body = (await sync.json()) as SkillSourceSyncResponse;
-    expect(body.source.id).toBe(created.source.id);
-    expect(body.source.ownerType).toBe("org");
+    expect(body.source.ownerType).toBe("team");
+  });
+
+  it("excludeOrg drops org rows from the unfiltered list", async () => {
+    const f = serve({ sha: "commit-1", names: ["deploy"] });
+    api = await bootTestApi({ githubApiUrl: f.url });
+    await post(api.baseUrl, { repo: "tkhq/org-skills", ownerType: "org" });
+    await post(api.baseUrl, { repo: "tkhq/mine" });
+
+    const all = (await (await fetch(`${api.baseUrl}/api/skills/sources`)).json()) as ListSkillSourcesResponse;
+    expect(all.sources.map((s) => s.repo).sort()).toEqual(["tkhq/mine", "tkhq/org-skills"]);
+
+    const filtered = (await (
+      await fetch(`${api.baseUrl}/api/skills/sources?excludeOrg=1`)
+    ).json()) as ListSkillSourcesResponse;
+    expect(filtered.sources.map((s) => s.repo)).toEqual(["tkhq/mine"]);
   });
 
   it("member still creates a personal source", async () => {

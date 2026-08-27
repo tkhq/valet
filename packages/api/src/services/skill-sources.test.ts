@@ -164,6 +164,28 @@ describe("skill sources service", () => {
     expect(stored?.createdBy).toBe("u1");
   });
 
+  it("drops org rows when includeOrg is false", async () => {
+    await createSkillSource(db, owner("u1"), { repo: "tkhq/mine" });
+    await createSkillSource(db, owner("u1"), {
+      repo: "tkhq/theirs",
+      ownerType: "org",
+      isOrgAdmin: true,
+    });
+
+    const whole = await listSkillSources(db, owner("u1"), undefined, SKILL_SOURCE_DEFAULT_LIMIT, undefined);
+    expect(whole.rows.map((r) => r.repoFullName).sort()).toEqual(["tkhq/mine", "tkhq/theirs"]);
+
+    const withoutOrg = await listSkillSources(
+      db,
+      owner("u1"),
+      undefined,
+      SKILL_SOURCE_DEFAULT_LIMIT,
+      undefined,
+      { includeOrg: false },
+    );
+    expect(withoutOrg.rows.map((r) => r.repoFullName)).toEqual(["tkhq/mine"]);
+  });
+
   it("lists the caller's own sources and every team source they can reach", async () => {
     const team = await createTeam(db, { orgId: ORG, name: "Platform", creatorUserId: "u1" });
     await createSkillSource(db, owner("u1"), { repo: "tkhq/mine" });

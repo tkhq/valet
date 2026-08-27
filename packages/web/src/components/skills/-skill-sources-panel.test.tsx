@@ -151,24 +151,33 @@ describe("SkillSourcesPanel", () => {
 
     expect(screen.getByText(/needs no GitHub connection/i)).toBeTruthy();
     expect(screen.getByText(/your connected GitHub account/i)).toBeTruthy();
-    expect(screen.getByText(/private organization repository is read with the GitHub App/i)).toBeTruthy();
     // The claim this change removes: sync reads private repositories now.
     expect(screen.queryByText(/public repositories only/i)).toBeNull();
   });
 
-  it("says any member can sync, and only an admin adds or removes an org repository", () => {
+  it("points personal and team tracking at Organization Library for org repositories", () => {
     renderPanel();
 
-    expect(screen.getByText(/Any member can press Sync/)).toBeTruthy();
-    expect(screen.getByText(/Only an org admin can add or remove an organization repository/)).toBeTruthy();
+    const link = screen.getByText("Organization Library").closest("a");
+    expect(link).toBeTruthy();
+    expect(link?.getAttribute("to")).toBe("/settings/organization/library");
+    expect(screen.queryByText(/Any member can press Sync/)).toBeNull();
   });
 
   it("names the GitHub App and the admin gate on the org panel, without opening Import", () => {
     renderPanel(PERSONAL, { owner: { type: "org", id: "org1" } });
 
     expect(screen.getByText(/GitHub App installed for this organization/i)).toBeTruthy();
-    expect(screen.getByText(/Only an org admin can add or remove a repository/)).toBeTruthy();
+    expect(screen.getByText(/Only an org admin can add, remove, or sync a repository/)).toBeTruthy();
     expect(screen.queryByText(/your connected GitHub account/i)).toBeNull();
+  });
+
+  it("does not link a member to Organization Library", () => {
+    orgCallerRole = "member";
+    renderPanel();
+
+    expect(screen.queryByRole("link", { name: "Organization Library" })).toBeNull();
+    expect(screen.getByText(/tracked by an org admin/)).toBeTruthy();
   });
 
   it("imports what was typed into the box", () => {
@@ -317,12 +326,12 @@ describe("SkillSourcesPanel", () => {
     expect(screen.getByText(/never synced/i)).toBeTruthy();
   });
 
-  it("asks for every scope it can reach when no owner is pinned", () => {
+  it("asks the server to drop org rows when no owner is pinned", () => {
     renderPanel();
 
-    // `/skills` shows personal, team, and org rows in one list. The scope is
-    // on each row's badge, which is what replaced the second page.
-    expect(listQuery).toHaveBeenCalledWith({});
+    // `/skills` tracks personal and team repositories. Org rows live on
+    // Organization · Library, so this listing must not mix them in.
+    expect(listQuery).toHaveBeenCalledWith({ excludeOrg: true });
   });
 
   it("asks the server for the pinned owner, and files a new source there", () => {
@@ -340,19 +349,18 @@ describe("SkillSourcesPanel", () => {
     expect(add).toHaveBeenCalledWith({ repo: "tkhq/org-skills", ownerType: "org" });
   });
 
-  it("hides the add form and Remove from a read-only reader, and keeps Sync", () => {
+  it("hides Import, Sync, and Remove from a read-only reader", () => {
     currentData = { sources: [source()], nextCursor: null };
     renderPanel(PERSONAL, { owner: { type: "org", id: "org_1" }, readOnly: true });
 
     expect(screen.queryByRole("button", { name: /import from github/i })).toBeNull();
-    expect(screen.getByRole("button", { name: /^sync$/i })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^sync$/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /^remove$/i })).toBeNull();
     // The rows themselves still read.
     expect(screen.getByText("tkhq/skills")).toBeTruthy();
-    expect(screen.getByText(/Any member can press Sync/)).toBeTruthy();
   });
 
-  it("hides Remove on an org row from a member, even when the panel is not read-only", () => {
+  it("hides Sync and Remove on an org row from a member", () => {
     orgCallerRole = "member";
     currentData = {
       sources: [source({ ownerType: "org", ownerId: "org_1" })],
@@ -360,15 +368,16 @@ describe("SkillSourcesPanel", () => {
     };
     renderPanel();
 
-    expect(screen.getByRole("button", { name: /^sync$/i })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^sync$/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /^remove$/i })).toBeNull();
   });
 
-  it("keeps Remove on a personal row for a member", () => {
+  it("keeps Sync and Remove on a personal row for a member", () => {
     orgCallerRole = "member";
     currentData = { sources: [source()], nextCursor: null };
     renderPanel();
 
+    expect(screen.getByRole("button", { name: /^sync$/i })).toBeTruthy();
     expect(screen.getByRole("button", { name: /^remove$/i })).toBeTruthy();
   });
 
@@ -386,7 +395,7 @@ describe("SkillSourcesPanel", () => {
     currentData = { sources: [source()], nextCursor: "cursor_2" };
     renderPanel(PERSONAL, { cursors: ["cursor_1"] });
 
-    expect(listQuery).toHaveBeenCalledWith({ cursor: "cursor_1" });
+    expect(listQuery).toHaveBeenCalledWith({ excludeOrg: true, cursor: "cursor_1" });
     expect(screen.getByText("Page 2")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Next" }));

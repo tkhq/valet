@@ -34,10 +34,9 @@ import { textParam } from "~/lib/search-params";
  *
  * The repositories panel above the grid is the other half of that rule: it
  * points Valet at a repository to mirror, and never edits a skill. It sits
- * here, over the skills it produces, and lists every source the caller
- * reaches — personal, team, and org — with the scope on the row's badge.
- * Settings keeps one repositories panel still: the org one, which an admin
- * uses to run the library every member reads.
+ * here, over the skills it produces, and lists personal and team sources.
+ * Organization repositories are tracked on Organization · Library. Org
+ * skills still appear in this grid; only the source rows move.
  *
  * One grid, in delivery order. Grouping into a section per plugin was tried
  * and reverted: 8 of the 9 plugins ship exactly one skill, so it produced 8

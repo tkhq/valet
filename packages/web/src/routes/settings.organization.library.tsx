@@ -29,19 +29,18 @@ import { textParam } from "~/lib/search-params";
  * own skills and prompts.
  *
  * This is the org half of a surface that also lives on `/skills`. The two do
- * not repeat each other: `/skills` shows every source a person reaches and
- * files a new one under the workspace they are in, while this page pins the
- * org, so an admin reads and changes the org library alone. The personal
- * page that used to sit beside both is gone — a row's scope is a badge now,
- * not a third page.
+ * not repeat each other: `/skills` lists personal and team sources and files
+ * a new one under the workspace they are in. This page pins the org, so an
+ * admin reads and changes the org library alone. Members do not open this
+ * page until RBAC lands. The personal page that used to sit beside both is
+ * gone — a row's scope is a badge now, not a third page.
  *
- * An admin adds and removes sources, and writes new org skills. A member
- * reads both and can press Sync. The Library heading says that split, and
- * that a private repository is read with the GitHub App — public vs private
- * does not change who may add or remove. `readOnly` on the sources panel
- * hides Import and Remove, and the missing "New org skill" button carries
- * the rest of that split, keyed off `useOrg()`'s `callerRole`, the same
- * admin signal the members page reads.
+ * An admin adds, removes, and syncs sources, and writes new org skills.
+ * The sweep re-reads each source every 5 minutes, so a member's catalog
+ * updates without a Sync button. `readOnly` hides Import, Sync, and Remove.
+ * The missing "New org skill" button carries the rest of that split, keyed
+ * off `useOrg()`'s `callerRole`, the same admin signal the members page
+ * reads.
  *
  * Both lists are paged, and both keep their filters and cursor stack in the
  * search params so Back pages back.
@@ -87,7 +86,7 @@ export function OrganizationLibraryPage() {
     <div className="space-y-10">
       <Section
         title="Library"
-        description="An admin adds or removes a repository. Any member can press Sync. A private repository is read with the GitHub App installed for this organization."
+        description="An admin adds, removes, and syncs a repository. Valet re-reads it every 5 minutes. A private repository is read with the GitHub App installed for this organization."
       >
         {orgId === undefined ? (
           <div className="flex items-center gap-2 text-sm text-muted">

@@ -153,10 +153,12 @@ import {
 
 /** How long a healthy source waits before its next poll. An anonymous read
  * gets 60 requests per hour per IP, and an unchanged source costs one, so
- * this budgets four calls per hour per source. An authenticated read has a
- * far larger budget, and keeps this interval anyway: the interval is also
- * how fresh a mirror is, and one number is easier to reason about than two. */
-export const SYNC_INTERVAL_MS = 15 * 60_000;
+ * this budgets twelve calls per hour per source. An authenticated read has
+ * a far larger budget, and keeps this interval anyway: the interval is also
+ * how fresh a mirror is, and one number is easier to reason about than two.
+ * Five minutes is short enough that a member watching an org catalog does
+ * not need a Sync button. */
+export const SYNC_INTERVAL_MS = 5 * 60_000;
 /** Retry backoff per consecutive failure. A failure past the last entry
  * repeats the last entry: a source is a standing subscription, not a
  * one-shot delivery, so it keeps retrying at the slowest rung instead of
