@@ -67,6 +67,19 @@ export function parseUsage(
           usage.output = num(u.output_tokens);
           sawUsage = true;
         }
+      } else if (e.type === "message") {
+        // Non-streaming: the full message object carries final usage (both
+        // input and output) in one body.
+        if (typeof e.model === "string") model = e.model;
+        if (typeof e.id === "string") providerResponseId = e.id;
+        const u = e.usage as Record<string, unknown> | undefined;
+        if (u) {
+          usage.input = num(u.input_tokens);
+          usage.output = num(u.output_tokens);
+          usage.cacheWrite = num(u.cache_creation_input_tokens);
+          usage.cacheRead = num(u.cache_read_input_tokens);
+          sawUsage = true;
+        }
       }
     }
     if (!sawUsage) return null;
@@ -76,8 +89,12 @@ export function parseUsage(
     // OpenAI Responses API
     let openaiReportedTotal = 0;
     for (const e of events) {
-      const resp = e.response as Record<string, unknown> | undefined;
-      if (resp && e.type === "response.completed") {
+      // Streaming emits `{type:"response.completed", response:{…}}`; a
+      // non-streaming body IS the response object (`{object:"response", …}`).
+      const resp =
+        (e.type === "response.completed" ? (e.response as Record<string, unknown> | undefined) : undefined) ??
+        (e.object === "response" ? e : undefined);
+      if (resp) {
         if (typeof resp.model === "string") model = resp.model;
         if (typeof resp.id === "string") providerResponseId = resp.id;
         const u = resp.usage as Record<string, unknown> | undefined;

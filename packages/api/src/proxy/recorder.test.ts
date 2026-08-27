@@ -37,6 +37,28 @@ describe("recordProxyCall", () => {
     expect(String(row.responseBody)).toContain("message_start");
     expect(row.parsed).toBeTruthy();
   });
+  it("prices a Codex row via the request model when the response model is a dated id", async () => {
+    // OpenAI reports `gpt-4o-mini-2024-07-18` (not a pi-ai registry key); the
+    // request asked for `gpt-4o-mini` (which is). Pricing must fall back to it.
+    const openaiResp = `event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","object":"response","model":"gpt-4o-mini-2024-07-18","output":[],"usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150}}}
+`;
+    const inserted: Record<string, unknown>[] = [];
+    await recordProxyCall(
+      { insert: async (r) => { inserted.push(r); }, now: () => 1, id: () => "row3", metric: vi.fn() },
+      {
+        principal: { userId: "u", orgId: "o", keyId: "k" },
+        kind: "openai", endpoint: "/v1/responses", harness: "codex",
+        requestBody: JSON.stringify({ model: "gpt-4o-mini", input: "hi" }),
+        stream: streamOf(openaiResp), statusCode: 200, startMs: 0,
+      },
+    );
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0].model).toBe("gpt-4o-mini-2024-07-18"); // row keeps the specific id
+    expect(inserted[0].costUsd).not.toBeNull(); // but priced via the request model
+    expect(inserted[0].inputTokens).toBe(100);
+    expect(inserted[0].outputTokens).toBe(50);
+  });
   it("swallows a parse failure: row still written, cost null", async () => {
     const inserted: Record<string, unknown>[] = [];
     await recordProxyCall(

@@ -40,4 +40,30 @@ describe("parseUsage", () => {
   it("returns null when no usage is present", () => {
     expect(parseUsage("anthropic", "event: ping\ndata: {}\n")).toBeNull();
   });
+  it("extracts usage from a NON-streaming Anthropic message body", () => {
+    const body = JSON.stringify({
+      type: "message",
+      id: "msg_ns",
+      model: "claude-haiku-4-5-20251001",
+      usage: { input_tokens: 12, output_tokens: 8, cache_creation_input_tokens: 4, cache_read_input_tokens: 2 },
+    });
+    const r = parseUsage("anthropic", body);
+    expect(r).not.toBeNull();
+    expect(r!.model).toBe("claude-haiku-4-5-20251001");
+    expect(r!.providerResponseId).toBe("msg_ns");
+    expect(r!.usage).toEqual({ input: 12, output: 8, cacheRead: 2, cacheWrite: 4, total: 26 });
+  });
+  it("extracts usage from a NON-streaming OpenAI Responses body", () => {
+    const body = JSON.stringify({
+      object: "response",
+      id: "resp_ns",
+      model: "gpt-4o-mini-2024-07-18",
+      usage: { input_tokens: 9, output_tokens: 11, total_tokens: 20, input_tokens_details: { cached_tokens: 3 } },
+    });
+    const r = parseUsage("openai", body);
+    expect(r).not.toBeNull();
+    expect(r!.model).toBe("gpt-4o-mini-2024-07-18");
+    expect(r!.providerResponseId).toBe("resp_ns");
+    expect(r!.usage).toEqual({ input: 9, output: 11, cacheRead: 3, cacheWrite: 0, total: 20 });
+  });
 });

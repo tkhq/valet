@@ -64,6 +64,18 @@ function previousResponseId(kind: ProviderKind, requestBody: string): string | n
   }
 }
 
+/** The model id the client requested (both APIs carry `model` in the request
+ * JSON). Used as a pricing fallback when the response reports a dated model id
+ * that isn't a key in pi-ai's registry. */
+function requestModelOf(requestBody: string): string | null {
+  try {
+    const v = (JSON.parse(requestBody) as Record<string, unknown>).model;
+    return typeof v === "string" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Consumes the recorder's tee branch to completion, parses usage, prices it,
  * normalizes the sample, and writes exactly one row. NEVER throws to the
@@ -75,8 +87,18 @@ export async function recordProxyCall(deps: RecorderDeps, ctx: RecordContext): P
     const responseBody = await drain(ctx.stream);
     const parsedUsage = parseUsage(ctx.kind, responseBody);
     const usage = parsedUsage?.usage ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
-    const model = parsedUsage?.model ?? null;
-    const cost = model ? priceUsage(ctx.kind, model, usage) : null;
+    const responseModel = parsedUsage?.model ?? null;
+    const requestModel = requestModelOf(ctx.requestBody);
+    // Row model prefers the response's (more specific) id; falls back to the
+    // requested id when the response omitted it.
+    const model = responseModel ?? requestModel;
+    // Price by the response model, then fall back to the request model. OpenAI
+    // returns a fully-dated id (e.g. `gpt-4o-mini-2024-07-18`) that may not be
+    // a key in pi-ai's registry, while the requested id (`gpt-4o-mini`) is — so
+    // pricing the response id alone leaves every Codex row unpriced.
+    const cost =
+      (responseModel ? priceUsage(ctx.kind, responseModel, usage) : null) ??
+      (requestModel ? priceUsage(ctx.kind, requestModel, usage) : null);
 
     let parsed: unknown = null;
     let parseError: string | null = null;
