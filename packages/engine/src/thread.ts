@@ -351,6 +351,11 @@ export class Thread {
   }
 
   async submitPrompt(content: PromptContent, opts: PromptOptions): Promise<PromptReceipt> {
+    if (opts.promoteItemId) {
+      throw new ValidationError(
+        "submitPrompt does not accept promoteItemId. Call Thread.promoteQueuedItem to promote a queued item.",
+      );
+    }
     const effectiveMode: QueueMode = opts.queueMode ?? this.mode;
 
     if (effectiveMode === "collect") {
@@ -427,7 +432,7 @@ export class Thread {
       this.session.id,
       this.id,
       item,
-      { steer: true },
+      { steer: true, promoteFromItemId: existing.id },
     );
     if (supersededItemIds.length > 0) {
       await this.handleSteerSupersession(supersededItemIds);

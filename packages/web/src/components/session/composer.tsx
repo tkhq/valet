@@ -244,12 +244,17 @@ export function Composer({
   const addUserMessage = useStreamStore((s) => s.addUserMessage);
   const setMessageQueueItemId = useStreamStore((s) => s.setMessageQueueItemId);
   const queueState = useQueueStateForThread(sessionId, threadId);
-  // The last followup this composer admitted while the agent was working.
-  // An empty Enter promotes that item; a new typed message queues another.
-  const [queuedFollowup, setQueuedFollowup] = useState<{
-    localId: string;
-    itemId: string;
-  } | null>(null);
+  // Last followup this composer admitted, keyed by thread so a switch does
+  // not arm Steer with another thread's item. An empty Enter promotes that
+  // item; a new typed message queues another.
+  const [queuedFollowupByThread, setQueuedFollowupByThread] = useState<
+    Record<string, { localId: string; itemId: string }>
+  >({});
+  const queuedFollowup = threadId ? (queuedFollowupByThread[threadId] ?? null) : null;
+  // Item ids we have seen in `pendingIds`. Used so a lagging queue.state
+  // (empty pending after POST) does not disarm Steer before the item lands.
+  const followupSeenPendingRef = useRef<Record<string, string>>({});
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   // A mid-turn message is allowed — the engine admits it either way. Only
   // an in-flight POST or an unknown thread id blocks submit, and the thread
@@ -265,8 +270,27 @@ export function Composer({
   const working =
     (agentStatus !== "idle" && agentStatus !== "error") || queueBusy(queueState);
   useEffect(() => {
-    if (!working) setQueuedFollowup(null);
-  }, [working]);
+    if (!threadId) return;
+    setQueuedFollowupByThread((prev) => {
+      const current = prev[threadId];
+      if (!current) return prev;
+      const drop = () => {
+        delete followupSeenPendingRef.current[threadId];
+        const { [threadId]: _, ...rest } = prev;
+        return rest;
+      };
+      if (!working) return drop();
+      const pending = queueState?.pendingIds ?? [];
+      if (pending.includes(current.itemId)) {
+        followupSeenPendingRef.current[threadId] = current.itemId;
+      }
+      const claimed = queueState?.activeItemId === current.itemId;
+      const seen = followupSeenPendingRef.current[threadId] === current.itemId;
+      const leftQueue = seen && !pending.includes(current.itemId);
+      if (claimed || leftQueue) return drop();
+      return prev;
+    });
+  }, [working, queueState, threadId]);
   // Mid-turn: first Enter queues. After a self-queued item, an empty
   // composer steers that item in place. New text queues another followup.
   const action: SubmitAction = !working
@@ -447,6 +471,7 @@ export function Composer({
     // Empty Enter after a self-queued followup promotes that item. Do not
     // POST the same text again — that would write a second user entry.
     if (action === "steer" && queuedFollowup) {
+      setSubmitError(null);
       try {
         const res = await send.mutateAsync({
           text: "",
@@ -456,16 +481,28 @@ export function Composer({
         if (res.messageId && res.messageId !== queuedFollowup.itemId) {
           setMessageQueueItemId(sessionId, queuedFollowup.localId, res.messageId);
         }
-        setQueuedFollowup(null);
-      } catch {
-        // The optimistic bubble stays. The user can retry the promote or
-        // type a new message.
+        setQueuedFollowupByThread((prev) => {
+          if (!(threadId in prev)) return prev;
+          const { [threadId]: _, ...rest } = prev;
+          return rest;
+        });
+        delete followupSeenPendingRef.current[threadId];
+      } catch (err) {
+        // The optimistic bubble stays. Name the corrective action from
+        // the API so the user knows to send again or wait.
+        setSubmitError(
+          apiErrorDetail(
+            err,
+            "The promote did not complete. Send a new message, or wait for the current turn to finish.",
+          ),
+        );
       }
       return;
     }
 
     const t = text.trim();
     if (!t) return;
+    setSubmitError(null);
     // Capture the draft slot at send time: the failure path below must
     // restore into the thread the message was written for, even if the
     // user switches threads while the POST is in flight.
@@ -499,8 +536,14 @@ export function Composer({
       // falling back to a recency heuristic. Null for slash commands —
       // they never queue, so there is nothing to link.
       if (res.messageId) {
-        setMessageQueueItemId(sessionId, localId, res.messageId);
-        if (working) setQueuedFollowup({ localId, itemId: res.messageId });
+        const itemId = res.messageId;
+        setMessageQueueItemId(sessionId, localId, itemId);
+        if (working) {
+          setQueuedFollowupByThread((prev) => ({
+            ...prev,
+            [threadId]: { localId, itemId },
+          }));
+        }
       }
       // Recency ranking for the command popup. Recorded only for a name the
       // registry knows, and only after the send succeeded — a typo or a
@@ -694,6 +737,10 @@ export function Composer({
         messages={fileErrors}
         onDismiss={() => useComposerDraftStore.getState().setFileErrors(key, [])}
       />
+      <ComposerFileErrors
+        messages={submitError ? [submitError] : []}
+        onDismiss={() => setSubmitError(null)}
+      />
       <ComposerFileStrip files={files} onRemove={removeFile} onRetry={retryFile} />
       {working && <p className="mb-2 text-xs text-muted">{ACTION_HINT[action]}</p>}
       {/* `relative` anchors the command popup to the input row, so the hint
@@ -777,6 +824,17 @@ export function Composer({
       </div>
     </form>
   );
+}
+
+function apiErrorDetail(err: unknown, fallback: string): string {
+  const payload =
+    err instanceof ApiError && typeof err.payload === "object" && err.payload !== null
+      ? (err.payload as Record<string, unknown>)
+      : undefined;
+  if (typeof payload?.corrective === "string") return payload.corrective;
+  if (typeof payload?.error === "string") return payload.error;
+  if (err instanceof Error && err.message.length > 0) return err.message;
+  return fallback;
 }
 
 /**

@@ -295,8 +295,8 @@ export interface PromptOptions {
   dispatchId?: string;
   /**
    * Promote this already-queued item into a steer instead of admitting a
-   * new prompt. Hosts pass it through `Thread.promoteQueuedItem`; it is
-   * not read by `submitPrompt`.
+   * new prompt. `submitPrompt` rejects this field — call
+   * `Thread.promoteQueuedItem` instead.
    */
   promoteItemId?: string;
   /**
@@ -1416,12 +1416,17 @@ export interface SessionStore {
    * >= maxPending. Doing the check and the insert in one transaction is what
    * closes the TOCTOU window a separate pre-check would leave open under
    * concurrent admissions.
+   *
+   * opts.promoteFromItemId, when set, requires that item to still be queued
+   * and not superseded on this thread. If it is not, the call throws
+   * ValidationError and does not insert. Promote-to-steer uses this so a
+   * concurrent claim cannot admit a second user entry.
    */
   admitSubmission(
     sessionId: string,
     threadId: string,
     item: QueueItem,
-    opts?: { steer?: boolean; maxPending?: number },
+    opts?: { steer?: boolean; maxPending?: number; promoteFromItemId?: string },
   ): Promise<{ item: QueueItem; admitted: boolean; supersededItemIds: string[] }>;
   /**
    * CAS queued→running. Succeeds only when itemId is the thread's runnable

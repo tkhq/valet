@@ -661,7 +661,7 @@ messagesRouter.post("/:id/messages", async (c) => {
         400,
       );
     }
-    if (err instanceof NotFoundError) {
+    if (err instanceof NotFoundError && err.resource === "queue item") {
       return c.json(
         {
           error: "That queued message was not found. Send the message again.",

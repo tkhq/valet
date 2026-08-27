@@ -11,6 +11,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { WireQueueState } from "@valet/api/wire";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
+import { ApiError } from "~/api/client";
 import { useComposerDraftStore } from "~/stores/composer-drafts";
 
 const abortMutateAsync = vi.fn().mockResolvedValue({ ok: true });
@@ -94,11 +95,15 @@ import { Composer } from "./composer";
 
 function renderComposer(agentStatus: "idle" | "streaming" = "idle") {
   const queryClient = new QueryClient();
-  return render(
+  const tree = (status: "idle" | "streaming") => (
     <QueryClientProvider client={queryClient}>
-      <Composer sessionId="orchestrator:user-1" threadId="thread-1" agentStatus={agentStatus} />
-    </QueryClientProvider>,
+      <Composer sessionId="orchestrator:user-1" threadId="thread-1" agentStatus={status} />
+    </QueryClientProvider>
   );
+  const view = render(tree(agentStatus));
+  return Object.assign(view, {
+    rerenderComposer: (status: "idle" | "streaming" = agentStatus) => view.rerender(tree(status)),
+  });
 }
 
 beforeEach(() => {
@@ -383,6 +388,64 @@ describe("Composer — mid-turn submit affordance", () => {
     renderComposer("streaming");
     const queueButton = screen.getByRole("button", { name: /^queue$/i }) as HTMLButtonElement;
     expect(queueButton.disabled).toBe(true);
+  });
+
+  it("omits queueMode on an idle Send", async () => {
+    const { default: userEvent } = await import("@testing-library/user-event");
+    renderComposer("idle");
+
+    await type("hello from idle");
+    await userEvent.click(screen.getByRole("button", { name: /^send$/i }));
+    await waitFor(() =>
+      expect(sendMutateAsync).toHaveBeenCalledWith({
+        text: "hello from idle",
+        threadId: "thread-1",
+      }),
+    );
+    expect(sendMutateAsync.mock.calls[0][0]).not.toHaveProperty("queueMode");
+  });
+
+  it("disarms Steer when the self-queued item is claimed or leaves the queue", async () => {
+    const { default: userEvent } = await import("@testing-library/user-event");
+    queueStateRef.current = queueState("steer");
+    const { rerenderComposer } = renderComposer("streaming");
+
+    await type("follow after this turn");
+    await userEvent.click(screen.getByRole("button", { name: /^queue$/i }));
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalled());
+    expect(screen.getByRole("button", { name: /^steer$/i })).toBeDefined();
+
+    queueStateRef.current = { ...queueState("steer"), pendingIds: ["q-1"] };
+    rerenderComposer();
+    expect(screen.getByRole("button", { name: /^steer$/i })).toBeDefined();
+
+    queueStateRef.current = { ...queueState("steer"), activeItemId: "q-1", pendingIds: [] };
+    rerenderComposer();
+    expect(screen.queryByRole("button", { name: /^steer$/i })).toBeNull();
+    expect(screen.getByRole("button", { name: /^queue$/i })).toBeDefined();
+  });
+
+  it("shows the API error when promote fails", async () => {
+    const { default: userEvent } = await import("@testing-library/user-event");
+    sendMutateAsync
+      .mockResolvedValueOnce({ messageId: "q-1", threadId: "thread-1" })
+      .mockRejectedValueOnce(
+        new ApiError(400, "That message is no longer queued.", {
+          error: "That message is no longer queued. Send a new message, or wait for the current turn to finish.",
+        }),
+      );
+    queueStateRef.current = queueState("steer");
+    renderComposer("streaming");
+
+    await type("follow after this turn");
+    await userEvent.click(screen.getByRole("button", { name: /^queue$/i }));
+    await waitFor(() => expect(sendMutateAsync).toHaveBeenCalledTimes(1));
+
+    await userEvent.click(screen.getByRole("button", { name: /^steer$/i }));
+    await waitFor(() =>
+      expect(screen.getByRole("alert").textContent).toMatch(/no longer queued/i),
+    );
+    expect(screen.getByRole("alert").textContent).toMatch(/send a new message/i);
   });
 });
 
