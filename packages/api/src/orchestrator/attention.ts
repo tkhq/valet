@@ -31,7 +31,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
-import type { Principal } from "@valet/engine";
+import type { DecisionAction, Principal } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { notifications, orgMembers, teamMembers, userNotificationPreferences } from "../schema/index.js";
 
@@ -54,6 +54,14 @@ export interface AttentionEvent {
    * Omit for one-shot events with no natural replay key.
    */
   dedupeKey?: string;
+  /**
+   * Set when the event announces a pending decision gate (`kind:
+   * "approval"`). A channel deliverer that can render interactive prompts
+   * uses the gate's id and actions to send real approve/deny buttons
+   * instead of a plain link; deliverers without that ability ignore this
+   * field. The gate lives on `sessionId`.
+   */
+  gate?: { id: string; actions: DecisionAction[] };
 }
 
 /**

@@ -112,6 +112,7 @@ async function handleDecisionGate(deps: AttentionWiringDeps, delivered: Delivere
     body: gate.body,
     href: attentionHref(sessionId),
     dedupeKey: gate.id,
+    gate: { id: gate.id, actions: gate.actions },
   });
 }
 

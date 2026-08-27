@@ -567,6 +567,32 @@ describe("gate prompts", () => {
     expect(ref.conversationKey).toBe(turnKey);
   });
 
+  it("re-keys a DM prompt's ref to the posted ts so the inbound click round-trips", async () => {
+    const transport = makeTransport();
+    // openDirectConversation mints a SYNTHETIC thread ts; the inbound click
+    // rebuilds the key from the REAL message ts. The returned ref must carry
+    // the real one, or gateForRef can never match (dead buttons).
+    const dmKey = await transport.openDirectConversation("U1");
+    const ref = await transport.sendGatePrompt(dmKey, {
+      gateId: "gate-88",
+      title: "Deploy?",
+      actions: [{ id: "approve", label: "Approve" }],
+    });
+    expect(ref.conversationKey).not.toBe(dmKey);
+    expect(ref.conversationKey).toBe(conversationKeyFor(TEAM, "D-U1", ref.messageId));
+
+    const inbound = transport.parseUpdate({
+      type: "block_actions",
+      trigger_id: "trig-1",
+      actions: [{ value: "g|gate-88|approve" }],
+      container: { message_ts: ref.messageId, channel_id: "D-U1" },
+      user: { id: "U1" },
+      team: { id: TEAM },
+    });
+    expect(inbound?.gateCallback?.ref).toEqual(ref);
+    expect(inbound?.gateCallback?.gateId).toBe("gate-88");
+  });
+
   it("appends the outcome and clears the buttons, pinning parse to none", async () => {
     const transport = makeTransport();
     const ref = await transport.sendGatePrompt(KEY, {
