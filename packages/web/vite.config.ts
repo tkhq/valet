@@ -16,6 +16,10 @@ export default defineConfig({
   ],
   server: {
     port: 5173,
+    // Fail instead of auto-incrementing to :5174: the /api proxy target is
+    // fixed, so a drifted port silently serves this checkout's frontend
+    // against another running stack's api and database.
+    strictPort: true,
     proxy: {
       "/api": {
         target: API_URL,

@@ -1,10 +1,18 @@
 /**
  * Dev-only seed: a fake Linear installation + webhook credential for the
  * stub org, so signed webhooks can be sent to POST /webhooks/events/linear
- * locally. Run with the api STOPPED (it owns ~/.valet/pg):
+ * locally. Run with the api STOPPED (it holds the PGlite dir exclusively):
  *
  *   cd packages/api && npx tsx scripts/dev-seed-linear.ts
+ *
+ * Targets the same database `make dev-local` uses: `VALET_PG_DATA_DIR`, else
+ * `VALET_DATA_DIR/pg`, else the worktree's `.valet-dev/pg` when it exists,
+ * else `~/.valet/pg`.
  */
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
 import { PgCredentialStore } from "../src/plugins/credential-store.js";
 import { deriveSecretKey } from "../src/lib/secret-crypto.js";
@@ -13,7 +21,16 @@ const ORG_ID = "local-org";
 const WORKSPACE_ID = "ws-dev-seed";
 export const DEV_WEBHOOK_SECRET = "dev-webhook-secret";
 
-const dataDir = `${process.env.HOME}/.valet/pg`;
+const repoRoot = fileURLToPath(new URL("../../..", import.meta.url));
+const worktreePg = join(repoRoot, ".valet-dev", "pg");
+const dataDir =
+  process.env.VALET_PG_DATA_DIR ??
+  (process.env.VALET_DATA_DIR
+    ? join(process.env.VALET_DATA_DIR, "pg")
+    : existsSync(worktreePg)
+      ? worktreePg
+      : join(homedir(), ".valet", "pg"));
+console.log(`seeding database: ${dataDir}`);
 const db = new PGlite(dataDir);
 await db.waitReady;
 

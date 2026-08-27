@@ -340,7 +340,7 @@ replaces the service/action inputs in `policies-section.tsx` (currently bare
 Note for operators: the screenshot failure that motivated this spec was the
 `action_policies` SELECT itself throwing. In dev that usually means the PGlite
 data dir predates the policies migration (pre-1.0 migrations edit `0000` in
-place). Delete `~/.valet/pg` and restart the stack.
+place). Run `make dev-clean` and restart the stack.
 
 ## Testing
 

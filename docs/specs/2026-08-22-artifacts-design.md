@@ -305,7 +305,7 @@ Two call sites stay opted out, on purpose:
 ## Implementation notes
 
 - `0000_app.sql` is edited in place (pre-1.0 rule), and local dev needs
-  `rm -rf ~/.valet/pg`. The dev-v2 deploy has already applied `0000`, so
+  `make dev-clean`. The dev-v2 deploy has already applied `0000`, so
   the new table and the new `orgs` column need the
   startup repair path (the `addColumnsMissingFromAppliedMigrations`
   mechanism, extended to create the `artifacts` table if missing) or the

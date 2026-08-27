@@ -92,8 +92,8 @@ const migrationSql: Record<(typeof APP_MIGRATION_FILES)[number], () => string> =
  * caller that also applies it explicitly (`providers/node.ts`) is unaffected.
  * The dependency only runs this way: the engine schema never reads app tables.
  */
-export async function applyAppMigrations(db: PgDb): Promise<void> {
-  await applyEngineMigrations(db);
+export async function applyAppMigrations(db: PgDb, pgDataDir?: string): Promise<void> {
+  await applyEngineMigrations(db, pgDataDir);
 
   await db.query(`
     CREATE TABLE IF NOT EXISTS __valet_app_migrations (
