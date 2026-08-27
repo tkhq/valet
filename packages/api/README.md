@@ -54,8 +54,8 @@ API key, stub) is documented in
 
 Postgres, either embedded or real. When `DATABASE_URL` is set, the server
 connects via `pg.Pool`. When it is unset, the server boots embedded PGlite
-at `VALET_PG_DATA_DIR` (default `~/.valet/pg/`). Two schema sets coexist
-in one database:
+at `VALET_PG_DATA_DIR` (default `~/.valet/pg/`; `make dev-local` sets it
+to `.valet-dev/pg` in the checkout). Two schema sets coexist in one database:
 
 - App schema: `packages/api/migrations/pg/0000_app.sql` (+ the Drizzle
   schema in `src/schema/index.ts`).

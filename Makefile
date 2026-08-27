@@ -108,6 +108,12 @@ dev-opencode: docker-up ## Start OpenCode container
 # ── Greenfield Node API + web (agent-loop only) ──
 # Independent of the legacy Cloudflare Worker. Runs the new @valet/api +
 # @valet/web together. Requires ANTHROPIC_API_KEY in your environment.
+#
+# The dev harness keeps the PGlite data dir worktree-local (./.valet-dev/pg,
+# not ./.valet/ — that is tracked repo config) so checkouts on one machine do
+# not fight over ~/.valet/pg (PGlite allows one owner per data dir). The app
+# default stays ~/.valet/pg; set VALET_PG_DATA_DIR (env or .env) to point a
+# stack at shared data.
 
 dev-api-node: ## Start the new Node API (@valet/api) on :8788
 	@echo "$(GREEN)Starting @valet/api on :8788$(NC)"
@@ -115,6 +121,7 @@ dev-api-node: ## Start the new Node API (@valet/api) on :8788
 	if [ -z "$$ANTHROPIC_API_KEY" ]; then echo "$(RED)ANTHROPIC_API_KEY is required (env or .env)$(NC)"; exit 1; fi; \
 	if [ -z "$$BETTER_AUTH_SECRET" ] && [ -z "$$VALET_LOCAL_AUTH" ]; then export VALET_LOCAL_AUTH=1; fi; \
 	if [ -f config/valet.dev.yaml ] && [ -z "$$VALET_CONFIG" ]; then export VALET_CONFIG="$$(pwd)/config/valet.dev.yaml"; fi; \
+	if [ -z "$$VALET_PG_DATA_DIR" ] && [ -z "$$DATABASE_URL" ]; then export VALET_PG_DATA_DIR="$$(pwd)/.valet-dev/pg"; fi; \
 	cd packages/api && PORT=8788 $(PNPM) run dev
 
 dev-web: ## Start the new web client (@valet/web) on :5173

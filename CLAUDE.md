@@ -15,24 +15,26 @@ corepack enable         # once per machine — provisions the pnpm pinned in pac
                         #   (packageManager). No pnpm? `npm install -g pnpm` also works.
 pnpm install
 make dev-local          # api :8788 + web :5173 — needs ANTHROPIC_API_KEY + Docker
-                        # VALET_LOCAL_AUTH=1 stub auth; embedded PGlite in ~/.valet/pg
+                        # VALET_LOCAL_AUTH=1 stub auth; embedded PGlite in ./.valet-dev/pg
 ```
+
+`make dev-local` keeps the PGlite data dir worktree-local (`./.valet-dev/pg` — not `./.valet/`, which is tracked repo config), so each checkout owns its own database. The app default outside the harness (e.g. plain `valet serve`) stays `~/.valet/pg`; set `VALET_PG_DATA_DIR` (env or `.env`) to point a dev stack at shared data.
 
 ### Start the local stack cleanly (one stack at a time)
 
-The stack assumes ports 8788 (api) and 5173 (web) are free and that no other process owns `~/.valet/pg`. PGlite allows exactly one owner. A second api does not fail cleanly: it can lose the port race but keep running and hold the database.
+The stack assumes ports 8788 (api) and 5173 (web) are free and that no other process owns this worktree's `.valet-dev/pg`. PGlite allows exactly one owner per data dir. A second api does not fail cleanly: it can lose the port race but keep running and hold the database.
 
 1. Check the ports: `lsof -nP -iTCP:8788 -iTCP:5173 -sTCP:LISTEN`.
 2. If a listener exists, find its checkout: `lsof -p <pid> | grep cwd`. A stack from another worktree serves stale code, so your changes do not appear in the UI.
 3. If the old stack is stale, kill its listeners.
-4. Confirm nothing still holds the database: `lsof +D ~/.valet/pg` must return nothing. An orphaned api process here makes the next api crash at startup.
+4. Confirm nothing still holds the database: `lsof +D .valet-dev/pg` (from the worktree root) must return nothing. An orphaned api process here makes the next api crash at startup.
 5. Run `make dev-local`.
 6. Confirm health: `curl -sf localhost:8788/api/health`. Startup is fast — if health is not ok within ~5 seconds, do not wait or poll. Read the log for one of the symptoms below.
 
 Symptom → cause:
 
 - Vite proxy `ECONNREFUSED /api/...` → the api is down (crashed, or it lost the port race to another stack).
-- PGlite WASM `Aborted()` stack trace at api startup → another process owns `~/.valet/pg` (step 4).
+- PGlite WASM `Aborted()` stack trace at api startup → another process owns the data dir (step 4).
 - The UI does not show your changes → :5173 is served from a different checkout (step 2).
 
 `make e2e` isolates its own state (scratch `VALET_DATA_DIR`, random ports 18790+), so it can run beside the dev stack — but Docker-heavy suites can flake from daemon contention while the dev stack's sandboxes run. If a Docker row goes red during concurrent work, re-run it in isolation before you treat it as real: `make e2e E2E_ARGS="--only <suite-id>"`.
@@ -121,7 +123,7 @@ We've broken tool-call rendering on reload three times; the root cause is always
 
 Regression suites (run before claiming done): `pnpm --filter @valet/engine test happy-path`, `pnpm --filter @valet/engine test in-memory-store`, `pnpm --filter @valet/store-postgres test`, and the api integration suite. If you change the result shape, assert the actual TEXT is reachable — `expect(result).toBeDefined()` is the exact bug we keep shipping.
 
-"(empty output)" in the UI = shape mismatch, not lost data. Inspect `engine_entries.parts` directly: `psql` when `DATABASE_URL` is set; for dev PGlite, stop the api first (it owns `~/.valet/pg`), then from `packages/api` use plain `node --input-type=module` (NOT `tsx -e` — its eval mode rejects top-level await) with `@electric-sql/pglite` to query the data dir.
+"(empty output)" in the UI = shape mismatch, not lost data. Inspect `engine_entries.parts` directly: `psql` when `DATABASE_URL` is set; for dev PGlite, stop the api first (it owns the worktree's `.valet-dev/pg`), then from `packages/api` use plain `node --input-type=module` (NOT `tsx -e` — its eval mode rejects top-level await) with `@electric-sql/pglite` to query the data dir.
 
 ### Mount-time state from props (web)
 
@@ -129,7 +131,7 @@ Regression suites (run before claiming done): `pnpm --filter @valet/engine test 
 
 ### Pre-1.0: edit migrations in place
 
-Edit `packages/store-postgres/migrations/pg/0000_engine.sql` / `packages/api/migrations/pg/0000_app.sql` directly — do NOT add numbered migrations. App tables also update the Drizzle schema (`packages/api/src/schema/index.ts`); engine tables are raw SQL — update the row interfaces + `rawTo*Row` mappers in `packages/store-postgres/src/helpers.ts` (bigint ms columns funnel through `toNum`). After editing, `rm -rf ~/.valet/pg` is MANDATORY — the migration tracker skips an already-applied `0000` and there is no backfill path locally. An app-table edit that adds a nullable/DEFAULT column, table, or index ALSO needs a matching `SCHEMA_REPAIRS` entry in `packages/api/src/lib/drizzle.ts`, or deployed databases never get it and the rollout sticks on the old image. This rule flips to numbered migrations at 1.0.
+Edit `packages/store-postgres/migrations/pg/0000_engine.sql` / `packages/api/migrations/pg/0000_app.sql` directly — do NOT add numbered migrations. App tables also update the Drizzle schema (`packages/api/src/schema/index.ts`); engine tables are raw SQL — update the row interfaces + `rawTo*Row` mappers in `packages/store-postgres/src/helpers.ts` (bigint ms columns funnel through `toNum`). After editing, wiping the dev database is MANDATORY — `rm -rf .valet-dev/pg` in every worktree with dev data (`~/.valet/pg` for a stack started outside `make dev-local`) — the migration tracker skips an already-applied `0000` and there is no backfill path locally. An app-table edit that adds a nullable/DEFAULT column, table, or index ALSO needs a matching `SCHEMA_REPAIRS` entry in `packages/api/src/lib/drizzle.ts`, or deployed databases never get it and the rollout sticks on the old image. This rule flips to numbered migrations at 1.0.
 
 ### Node & workspace traps
 

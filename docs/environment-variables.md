@@ -12,7 +12,7 @@ All variables are read by the `@valet/api` server process unless noted. The
 | `PORT` | No | HTTP port (default `8787`. `make dev-local` sets `8788`) |
 | `DATABASE_URL` | No | Postgres connection string. Set → node-postgres. Unset → embedded PGlite under the data dir |
 | `VALET_DATA_DIR` | No | Data root (default `~/.valet`): config, PGlite, blobs, serve.lock |
-| `VALET_PG_DATA_DIR` / `VALET_BLOBS_DIR` | No | Override the PGlite and blob-store locations individually |
+| `VALET_PG_DATA_DIR` / `VALET_BLOBS_DIR` | No | Override the PGlite and blob-store locations individually. When unset (and no `DATABASE_URL`), `make dev-local` sets the PGlite dir to `.valet-dev/pg` in the checkout so parallel checkouts get separate databases |
 | `VALET_ENCRYPTION_KEY` | Prod | AES-256-GCM key for credentials at rest (warned if unset) |
 | `VALET_PLUGINS` | No | Extra plugin module specifiers to load beyond the bundled registry |
 | `VALET_CONFIG` | No | Path to the instance config file (`valet.yaml`). `make dev-local` points it at `config/valet.dev.yaml`; the helm chart mounts `api.instanceConfig` and sets it. See docs/specs/2026-08-14-instance-config-design.md |
