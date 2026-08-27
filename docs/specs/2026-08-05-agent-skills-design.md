@@ -229,6 +229,8 @@ GitHub answers 404 both for a repository that is not there and for one the crede
 
 A credential that cannot be read is its own case because it is reachable in normal operations — an `ENCRYPTION_KEY` rotation, a database restored from another environment, or one corrupt `credentials` row all make `decryptSecret` throw. Resolution never propagates such a fault: it returns the `unavailable` credential and logs the cause server-side, so a PUBLIC repository that never needed a credential keeps syncing, and the message on the row names reconnecting GitHub instead of showing a raw crypto error that names no action.
 
+An org source maps `GitHubAuthError` the same way. Only "the GitHub App is not installed on this owner" is `missing_app`. A mint or transport fault is `unavailable`, so the 404 names retry rather than reinstall.
+
 The user-credential message is worded by owner, because the person who READS the error is often not the person whose credential the sync uses. On a personal source they are the same person, so the message names the account and tells them to get access. On a team source the message names no GitHub login — that would identify one person on a row that otherwise names nobody — and it gives the reader the two actions that actually work: ask the person who added the source, or add the source again themselves. Getting access personally would change nothing, because the sync keeps using `created_by`'s credential. `skill_sources.last_error` carries that message to the wire and the UI, so no token material may ever reach an error string: the reader keeps the token in its `Authorization` header and keeps only the credential's KIND for the message.
 
 ### Paging both listings

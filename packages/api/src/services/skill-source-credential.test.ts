@@ -429,6 +429,23 @@ describe("resolveSkillSourceCredential", () => {
       );
       expect(credential).toEqual({ kind: "missing_app" });
     });
+
+    it("maps a mint failure to unavailable, not missing_app", async () => {
+      await installApp();
+      fixture = startGithubFixture({
+        createInstallationToken: () => ({
+          status: 500,
+          body: { message: "internal error" },
+        }),
+      });
+
+      const credential = await resolveSkillSourceCredential(
+        deps(),
+        sourceRow({ ownerType: "org", ownerId: ORG, createdBy: "u1" }),
+      );
+
+      expect(credential).toEqual({ kind: "unavailable" });
+    });
   });
 
   it("carries no token material in what it returns for an anonymous read", async () => {
