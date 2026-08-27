@@ -2,8 +2,8 @@
  * `/usage` — LLM recording gateway dashboard.
  *
  * Displays per-user/model/harness spend, a daily spend chart, a paginated
- * request log with drill-down, and an onboarding panel for minting a proxy key.
- * Data comes from `GET /api/proxy/usage/summary` and `GET /api/proxy/requests`.
+ * request log with drill-down, and a callout linking to Settings → Proxy for
+ * key setup. Data comes from `GET /api/proxy/usage/summary` and `GET /api/proxy/requests`.
  */
 import { useState } from "react";
 import { Link, createFileRoute } from "@tanstack/react-router";
