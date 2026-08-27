@@ -18,6 +18,17 @@ describe("resolveProxyPrincipal", () => {
     const r = await resolveProxyPrincipal(h, "openai", ok);
     expect(r).toEqual({ userId: "u1", orgId: "org1", keyId: "k1" });
   });
+  it("401s a valid key whose user has no org membership (removed member)", async () => {
+    // verifyApiKey still passes (the vlt_ key was never revoked), but the user
+    // was removed from the org so userOrg returns null — the proxy must reject.
+    const removed = {
+      verifyApiKey: vi.fn(async () => ({ valid: true, key: { id: "k9", userId: "u-removed" } })),
+      userOrg: vi.fn(async () => null),
+    };
+    const r = await resolveProxyPrincipal(new Headers({ "x-api-key": "vlt_good" }), "anthropic", removed);
+    expect(r).toBeInstanceOf(Response);
+    expect((r as Response).status).toBe(401);
+  });
   it("prefers the vlt_ key when Claude Code also sends a real provider key as x-api-key", async () => {
     // Claude Code forwards ANTHROPIC_API_KEY as x-api-key even when the valet
     // key is in ANTHROPIC_AUTH_TOKEN (the bearer). The gateway must pick the

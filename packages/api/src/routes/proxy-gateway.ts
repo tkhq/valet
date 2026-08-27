@@ -18,7 +18,6 @@ import { recordProxyCall } from "../proxy/recorder.js";
 import { recordProxySpend } from "../proxy/metrics.js";
 import { llmProxyRequests } from "../schema/index.js";
 import { orgMembers } from "../schema/index.js";
-import { resolveOrgId } from "../lib/org.js";
 import { asc, eq } from "drizzle-orm";
 import type { PrincipalDeps } from "../proxy/principal.js";
 
@@ -98,16 +97,19 @@ export function registerProxyGateway(app: Hono<AppEnv>, deps: ProxyGatewayDeps):
     const principal = await resolveProxyPrincipal(c.req.raw.headers, kind, {
       verifyApiKey: deps.verifyApiKey,
       userOrg: async (userId) => {
-        // Single-org system: look up the user's org_members row, fall back to
-        // the org-wide default (resolveOrgId) when the row is absent.
-        // orderBy createdAt asc, orgId asc: deterministic result for multi-org users.
+        // The user's org comes from their org_members row. NO fallback: every
+        // legitimate user gets a row at provisioning (auth signup) or seed
+        // (local dev), so an ABSENT row means the user was REMOVED from the org
+        // (or never provisioned). Return null → the proxy 401s, so a removed
+        // member's still-valid vlt_ key stops working immediately, even before
+        // the key is revoked. orderBy is deterministic for a multi-org user.
         const rows = await db
           .select({ orgId: orgMembers.orgId })
           .from(orgMembers)
           .where(eq(orgMembers.userId, userId))
           .orderBy(asc(orgMembers.createdAt), asc(orgMembers.orgId))
           .limit(1);
-        return rows[0]?.orgId ?? (await resolveOrgId(db));
+        return rows[0]?.orgId ?? null;
       },
     });
     if (principal instanceof Response) return principal;
