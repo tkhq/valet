@@ -246,9 +246,13 @@ export interface OnboardingPanelProps {
     data: { enabled: boolean; mode: "centralized" | "passthrough" } | undefined;
     isLoading: boolean;
   };
+  /** When false, the "Step 1 — Gateway status" block is omitted from the
+   * pre-creation view (use when the page already shows gateway status above
+   * the panel). Defaults to true. */
+  showGatewayStatus?: boolean;
 }
 
-export function OnboardingPanel({ settingsQuery }: OnboardingPanelProps) {
+export function OnboardingPanel({ settingsQuery, showGatewayStatus = true }: OnboardingPanelProps) {
   const [createdKey, setCreatedKey] = useState<CreatedApiKey | null>(null);
   const createKey = useCreateApiKey();
 
@@ -268,14 +272,16 @@ export function OnboardingPanel({ settingsQuery }: OnboardingPanelProps) {
   return (
     <div className="rounded border border-line bg-paper p-5">
       <div className="space-y-6">
-        {/* Step 1 — Gateway status (shown before key creation too) */}
-        <div>
-          <StepHeading n={1} title="Gateway status" />
-          <GatewayStatus
-            enabled={settingsQuery.data?.enabled}
-            isLoading={settingsQuery.isLoading}
-          />
-        </div>
+        {/* Step 1 — Gateway status (shown before key creation too, unless suppressed) */}
+        {showGatewayStatus && (
+          <div>
+            <StepHeading n={1} title="Gateway status" />
+            <GatewayStatus
+              enabled={settingsQuery.data?.enabled}
+              isLoading={settingsQuery.isLoading}
+            />
+          </div>
+        )}
 
         {/* Step 2 — Create your key */}
         <div>

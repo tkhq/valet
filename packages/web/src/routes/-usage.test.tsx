@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 /**
  * `/usage` — LLM recording gateway dashboard. Mocks `~/api/proxy-usage`
- * and `~/api/api-keys` to assert:
+ * and `~/api/settings` to assert:
  *   - the spend total renders from a mocked summary;
  *   - a breakdown row per model renders;
  *   - clicking a request-log row opens the SampleView drill-down;
- *   - OnboardingPanel shows both the Claude Code and Codex snippets after a
- *     mocked key creation.
+ *   - the Settings → Proxy callout link renders (OnboardingPanel moved off this page);
+ *   - the disabled-gateway notice renders and links to Settings → Proxy.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
@@ -137,17 +137,6 @@ vi.mock("@tanstack/react-router", () => ({
   ),
 }));
 
-const createKeyMutate = vi.fn();
-
-vi.mock("~/api/api-keys", () => ({
-  useCreateApiKey: () => ({
-    mutate: createKeyMutate,
-    isPending: false,
-    error: null,
-    reset: vi.fn(),
-  }),
-}));
-
 // Mutable so individual tests can override.
 let summaryResult: { data: ProxyUsageSummary | undefined; isLoading: boolean; error: null | Error } = {
   data: mockSummary,
@@ -169,14 +158,11 @@ let settingsResult: { data: { enabled: boolean; mode: "centralized" | "passthrou
   isLoading: false,
 };
 
-const setModeMutate = vi.fn();
-
 vi.mock("~/api/proxy-usage", () => ({
   useProxyUsageSummary: () => summaryResult,
   useProxyRequests: () => requestsResult,
   useProxyRequestDetail: () => detailResult,
   useProxySettings: () => settingsResult,
-  useSetProxyMode: () => ({ mutate: setModeMutate, isPending: false, isError: false }),
   qkProxy: { summary: () => [], requests: () => [], detail: () => [], settings: () => [] },
 }));
 
@@ -199,7 +185,6 @@ beforeEach(() => {
   detailResult = { data: mockDetail, isLoading: false, error: null };
   settingsResult = { data: { enabled: true, mode: "centralized" }, isLoading: false };
   orgData = { data: { callerRole: "admin", features: { organizations: true } }, isLoading: false };
-  setModeMutate.mockReset();
 });
 
 describe("UsagePage — spend summary", () => {
@@ -298,60 +283,25 @@ describe("UsagePage — request log drill-down", () => {
   });
 });
 
-describe("UsagePage — OnboardingPanel", () => {
-  it("clicking Create proxy key calls mutate", () => {
+describe("UsagePage — Settings → Proxy link", () => {
+  it("renders Settings → Proxy link (onboarding panel moved off usage page)", () => {
     render(<UsagePage />);
-    fireEvent.click(screen.getByRole("button", { name: "Create proxy key" }));
-    expect(createKeyMutate).toHaveBeenCalledWith("proxy-key", expect.objectContaining({ onSuccess: expect.any(Function) }));
+    // The callout link to /settings/proxy must be present.
+    const link = document.querySelector("a[href='/settings/proxy']");
+    expect(link).toBeTruthy();
+    expect(link!.textContent).toMatch(/Settings.*Proxy|Settings → Proxy/);
   });
 
-  it("shows Claude Code and Codex snippets after key creation", () => {
-    const fakeKey = {
-      id: "key_1",
-      name: "proxy-key",
-      key: "vlt_testkey12345",
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      userId: "user_1",
-      enabled: true,
-      rateLimitEnabled: false,
-      rateLimitTimeWindow: null,
-      rateLimitMax: null,
-      requestCount: 0,
-      remainingRequests: null,
-      lastRequest: null,
-      expiresAt: null,
-      deletedAt: null,
-      refillAmount: null,
-      refillInterval: null,
-      permissions: null,
-      metadata: null,
-      prefix: "vlt_",
-    };
-    // Simulate the onSuccess callback.
-    createKeyMutate.mockImplementation((_name: string, opts: { onSuccess: (k: typeof fakeKey) => void }) => {
-      opts.onSuccess(fakeKey);
-    });
-
+  it("does not render the Create proxy key button (moved to Settings → Proxy)", () => {
     render(<UsagePage />);
-    fireEvent.click(screen.getByRole("button", { name: "Create proxy key" }));
-
-    // After success the panel shows both snippets.
-    // ANTHROPIC_BASE_URL is inside a <pre> block that may be one text node; use getAllBy.
-    expect(screen.getAllByText(/ANTHROPIC_BASE_URL/).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/ANTHROPIC_AUTH_TOKEN/).length).toBeGreaterThan(0);
-    // VALET_KEY appears in both the toml block and the env snippet.
-    expect(screen.getAllByText(/VALET_KEY/).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/config\.toml/).length).toBeGreaterThan(0);
-    // The key itself appears in the UI.
-    expect(screen.getByText("vlt_testkey12345")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Create proxy key" })).toBeNull();
   });
 });
 
 describe("UsagePage — credential mode", () => {
   // The mode toggle moved to Settings → Proxy. The usage page no longer renders
-  // CredentialModeControl; mode-awareness is covered by the OnboardingPanel snippet
-  // tests below. Both admin and member views have no mode group on this page.
+  // CredentialModeControl; mode-awareness is covered by the proxy settings page.
+  // Both admin and member views have no mode group on this page.
   it("mode toggle buttons do not appear on the usage page (moved to Settings → Proxy)", () => {
     orgData = { data: { callerRole: "admin", features: { organizations: true } }, isLoading: false };
     render(<UsagePage />);
@@ -373,106 +323,5 @@ describe("UsagePage — disabled-gateway notice", () => {
     settingsResult = { data: { enabled: true, mode: "centralized" }, isLoading: false };
     render(<UsagePage />);
     expect(screen.queryByText(/recording gateway is disabled/)).toBeNull();
-  });
-});
-
-describe("UsagePage — OnboardingPanel mode snippets", () => {
-  const fakeKey = {
-    id: "key_1",
-    name: "proxy-key",
-    key: "vlt_testkey12345",
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    userId: "user_1",
-    enabled: true,
-    rateLimitEnabled: false,
-    rateLimitTimeWindow: null,
-    rateLimitMax: null,
-    requestCount: 0,
-    remainingRequests: null,
-    lastRequest: null,
-    expiresAt: null,
-    deletedAt: null,
-    refillAmount: null,
-    refillInterval: null,
-    permissions: null,
-    metadata: null,
-    prefix: "vlt_",
-  };
-
-  beforeEach(() => {
-    createKeyMutate.mockImplementation((_name: string, opts: { onSuccess: (k: typeof fakeKey) => void }) => {
-      opts.onSuccess(fakeKey);
-    });
-  });
-
-  it("passthrough mode shows ANTHROPIC_API_KEY line after key creation", () => {
-    settingsResult = { data: { enabled: true, mode: "passthrough" }, isLoading: false };
-    render(<UsagePage />);
-    fireEvent.click(screen.getByRole("button", { name: "Create proxy key" }));
-    expect(screen.getAllByText(/ANTHROPIC_API_KEY/).length).toBeGreaterThan(0);
-  });
-
-  it("centralized mode shows unset note for ANTHROPIC_API_KEY after key creation", () => {
-    settingsResult = { data: { enabled: true, mode: "centralized" }, isLoading: false };
-    render(<UsagePage />);
-    fireEvent.click(screen.getByRole("button", { name: "Create proxy key" }));
-    // The centralized note says "unset it"
-    expect(screen.getByText(/unset it/)).toBeTruthy();
-    // The snippet itself does NOT include the ANTHROPIC_API_KEY env var line
-    const allText = document.body.textContent ?? "";
-    expect(allText).toContain("unset it");
-  });
-
-  // New tests per spec -------------------------------------------------------
-
-  it("numbered steps render after key creation", () => {
-    settingsResult = { data: { enabled: true, mode: "centralized" }, isLoading: false };
-    render(<UsagePage />);
-    fireEvent.click(screen.getByRole("button", { name: "Create proxy key" }));
-    // Each step heading contains "Step N"
-    expect(screen.getAllByText(/Step 1/).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/Step 2/).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/Step 3/).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/Step 4/).length).toBeGreaterThan(0);
-  });
-
-  it("disabled-gateway callout in onboarding panel when enabled=false", () => {
-    settingsResult = { data: { enabled: false, mode: "centralized" }, isLoading: false };
-    render(<UsagePage />);
-    // The onboarding panel shows the prerequisite callout alongside the page-level notice.
-    expect(screen.getByText(/admin must enable/)).toBeTruthy();
-    const links = document.querySelectorAll("a[href='/settings/organization/proxy']");
-    expect(links.length).toBeGreaterThan(0);
-  });
-
-  it("Codex pass-through snippet uses http_headers and OPENAI_API_KEY, not VALET_KEY as env_key", () => {
-    settingsResult = { data: { enabled: true, mode: "passthrough" }, isLoading: false };
-    render(<UsagePage />);
-    fireEvent.click(screen.getByRole("button", { name: "Create proxy key" }));
-    const allText = document.body.textContent ?? "";
-    expect(allText).toContain("http_headers");
-    expect(allText).toContain("OPENAI_API_KEY");
-    // env_key must not be VALET_KEY in pass-through mode
-    expect(allText).not.toContain('env_key = "VALET_KEY"');
-  });
-
-  it("Codex centralized snippet uses VALET_KEY and has no http_headers", () => {
-    settingsResult = { data: { enabled: true, mode: "centralized" }, isLoading: false };
-    render(<UsagePage />);
-    fireEvent.click(screen.getByRole("button", { name: "Create proxy key" }));
-    const allText = document.body.textContent ?? "";
-    expect(allText).toContain('env_key = "VALET_KEY"');
-    expect(allText).not.toContain("http_headers");
-  });
-
-  it("loading state hides mode-specific snippets", () => {
-    settingsResult = { data: undefined, isLoading: true };
-    render(<UsagePage />);
-    fireEvent.click(screen.getByRole("button", { name: "Create proxy key" }));
-    // Mode-specific env vars must not appear while settings are loading.
-    expect(screen.queryByText(/ANTHROPIC_BASE_URL/)).toBeNull();
-    // A loading indicator should be shown instead.
-    expect(screen.getByText(/Loading mode configuration/)).toBeTruthy();
   });
 });

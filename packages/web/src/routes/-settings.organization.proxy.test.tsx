@@ -158,14 +158,15 @@ describe("OrganizationProxyPage — non-admin read-only", () => {
     expect(document.querySelector("[role='group'][aria-label='Credential mode']")).toBeNull();
   });
 
-  it("member sees read-only mode label", () => {
+  it("member sees read-only gateway and mode summary", () => {
     orgData = {
       data: { callerRole: "member", features: { organizations: true } },
       isLoading: false,
     };
     settingsResult = { data: { enabled: true, mode: "centralized" }, isLoading: false };
     render(<OrganizationProxyPage />);
-    expect(screen.getByText("Centralized")).toBeTruthy();
+    expect(screen.getByText("Gateway: On · Centralized mode")).toBeTruthy();
+    expect(screen.getByText("Managed by your organization admins.")).toBeTruthy();
   });
 });
 

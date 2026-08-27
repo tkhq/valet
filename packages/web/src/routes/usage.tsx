@@ -12,7 +12,6 @@ import { SpendChart } from "~/components/usage/SpendChart";
 import { BreakdownTable, type BreakdownRow } from "~/components/usage/BreakdownTable";
 import { RequestLog } from "~/components/usage/RequestLog";
 import { SampleView } from "~/components/usage/SampleView";
-import { OnboardingPanel } from "~/components/usage/OnboardingPanel";
 import type { ProxyUserBucket, ProxyModelBucket, ProxyHarnessBucket } from "@valet/api/wire";
 
 export const Route = createFileRoute("/usage")({
@@ -190,8 +189,14 @@ export function UsagePage() {
           )}
         </div>
 
-        {/* Onboarding */}
-        <OnboardingPanel settingsQuery={settingsQ} />
+        {/* Key setup callout */}
+        <div className="rounded border border-line bg-paper px-4 py-3 text-sm text-muted">
+          Generate a key and set up your tools in{" "}
+          <Link to="/settings/proxy" className="text-moss underline-offset-2 hover:underline">
+            Settings → Proxy
+          </Link>
+          .
+        </div>
       </div>
     </div>
   );
