@@ -182,6 +182,9 @@ import type {
   ProxySettingsResponse,
   UsageBreakdownResponse,
   UsageSessionsResponse,
+  UsageDrillResponse,
+  UsageDrillItem,
+  UsageUseCase,
 } from "@valet/api/wire";
 import type {
   ExportMemoryResponse,
@@ -744,11 +747,18 @@ export const api = {
   patchMe: (body: PatchMeRequest) => request<PatchMeResponse>("PATCH", "/me", body),
   listModels: () => request<ListModelsResponse>("GET", "/models"),
   getUsageSummary: () => request<UsageSummaryResponse>("GET", "/usage/summary"),
-  usageBreakdown: (window: string = "7d") =>
-    request<UsageBreakdownResponse>(
-      "GET",
-      `/usage/breakdown?window=${encodeURIComponent(window)}`,
-    ),
+  usageBreakdown: (window: string = "7d", scope: "me" | "org" = "me") => {
+    const qs = new URLSearchParams({ window, scope });
+    return request<UsageBreakdownResponse>("GET", `/usage/breakdown?${qs}`);
+  },
+  usageItems: (window: string, scope: "me" | "org", useCase: UsageUseCase) => {
+    const qs = new URLSearchParams({ window, scope, useCase });
+    return request<UsageDrillResponse>("GET", `/usage/items?${qs}`);
+  },
+  usageExportCsvUrl: (window: string, scope: "me" | "org"): string => {
+    const qs = new URLSearchParams({ window, scope });
+    return `/api/usage/export.csv?${qs}`;
+  },
   usageSessions: (window: string = "7d", useCase?: "orchestrator" | "session") => {
     const qs = new URLSearchParams({ window });
     if (useCase) qs.set("useCase", useCase);

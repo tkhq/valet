@@ -2,25 +2,30 @@
  * `/usage` — unified spend dashboard.
  *
  * Shows total spend for the selected window across ALL use cases (engine
- * sessions, orchestrator, workflows, proxy). Primary breakdown is by use
- * case with expandable per-session drill-down for Orchestrator and Sessions.
- * The proxy request log with drill-down (SampleView) stays at the bottom —
- * it is the only place recorded prompts are visible.
+ * sessions, orchestrator, workflows, proxy). Token-type breakdown (input /
+ * output / cache-read / cache-write) and cache-hit-rate stat visible in the
+ * header and By-model table. Org admins can switch to org scope; the byUser
+ * table appears in org scope. All four use-case rows are expandable via
+ * /api/usage/items (symmetric drill-down). CSV export button respects the
+ * current window and scope.
  *
  * Data:
- *   GET /api/usage/breakdown  → UsageBreakdownResponse
- *   GET /api/usage/sessions   → UsageSessionsResponse  (lazy on expand)
+ *   GET /api/usage/breakdown?window=&scope=  → UsageBreakdownResponse
+ *   GET /api/usage/items?window=&scope=&useCase=  → UsageDrillResponse (lazy on expand)
+ *   GET /api/usage/export.csv?window=&scope=      → CSV download
  *   GET /api/proxy/requests   → paginated request log  (unchanged)
  *   GET /api/proxy/settings   → enabled flag           (unchanged)
  */
 import { useState } from "react";
 import { Link, createFileRoute } from "@tanstack/react-router";
-import { useUsageBreakdown, useUsageSessions } from "~/api/usage";
+import { useUsageBreakdown, useUsageItems } from "~/api/usage";
 import { useProxyRequests, useProxySettings } from "~/api/proxy-usage";
+import { useOrg } from "~/api/settings";
 import { SpendChart } from "~/components/usage/SpendChart";
 import { RequestLog } from "~/components/usage/RequestLog";
 import { SampleView } from "~/components/usage/SampleView";
-import type { UsageUseCase, UsageSessionRow } from "@valet/api/wire";
+import type { UsageUseCase, UsageDrillItem } from "@valet/api/wire";
+import { api } from "~/api/client";
 
 export const Route = createFileRoute("/usage")({
   component: UsagePage,
@@ -37,11 +42,24 @@ function fmtUsd(n: number) {
   return `$${n.toFixed(4)}`;
 }
 
-function StatCard({ label, value }: { label: string; value: string }) {
+function fmtPct(n: number) {
+  return `${(n * 100).toFixed(1)}%`;
+}
+
+function StatCard({
+  label,
+  value,
+  sub,
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+}) {
   return (
     <div className="rounded border border-line bg-paper p-4">
       <div className="text-xs text-muted uppercase tracking-wide mb-1">{label}</div>
       <div className="text-xl font-semibold text-ink tabular-nums">{value}</div>
+      {sub && <div className="text-xs text-muted mt-1">{sub}</div>}
     </div>
   );
 }
@@ -53,42 +71,42 @@ const USE_CASE_LABELS: Record<UsageUseCase, string> = {
   proxy: "Proxy (external tools)",
 };
 
-/** Nest child sessions under their parents. Returns roots in order, each
- * followed immediately by its children. */
-function nestSessions(sessions: UsageSessionRow[]): UsageSessionRow[] {
-  const roots: UsageSessionRow[] = [];
-  const byParent = new Map<string, UsageSessionRow[]>();
+/** Nest drill items by parentId — roots in order, each followed by children. */
+function nestItems(items: UsageDrillItem[]): UsageDrillItem[] {
+  const roots: UsageDrillItem[] = [];
+  const byParent = new Map<string, UsageDrillItem[]>();
 
-  for (const s of sessions) {
-    if (s.isChild && s.parentSessionId) {
-      const bucket = byParent.get(s.parentSessionId) ?? [];
-      bucket.push(s);
-      byParent.set(s.parentSessionId, bucket);
+  for (const item of items) {
+    if (item.isChild && item.parentId) {
+      const bucket = byParent.get(item.parentId) ?? [];
+      bucket.push(item);
+      byParent.set(item.parentId, bucket);
     } else {
-      roots.push(s);
+      roots.push(item);
     }
   }
 
-  const result: UsageSessionRow[] = [];
+  const result: UsageDrillItem[] = [];
   for (const root of roots) {
     result.push(root);
-    const children = byParent.get(root.sessionId) ?? [];
-    for (const child of children) {
+    for (const child of byParent.get(root.id) ?? []) {
       result.push(child);
     }
   }
   return result;
 }
 
-/** Expanded session list for one use case. Calls useUsageSessions lazily. */
-function SessionList({
+/** Lazy-loaded item list for one use case. */
+function ItemList({
   window,
+  scope,
   useCase,
 }: {
   window: string;
-  useCase: "orchestrator" | "session";
+  scope: "me" | "org";
+  useCase: UsageUseCase;
 }) {
-  const q = useUsageSessions(window, useCase);
+  const q = useUsageItems(window, scope, useCase);
 
   if (q.isLoading) {
     return <p className="text-xs text-muted px-4 py-2">Loading…</p>;
@@ -98,42 +116,44 @@ function SessionList({
       <p className="text-xs text-danger-600 px-4 py-2">{String(q.error)}</p>
     );
   }
-  const sessions = nestSessions(q.data?.sessions ?? []);
-  if (sessions.length === 0) {
-    return <p className="text-xs text-muted px-4 py-2">No sessions in this window.</p>;
+  const items = nestItems(q.data?.items ?? []);
+  if (items.length === 0) {
+    return <p className="text-xs text-muted px-4 py-2">No data in this window.</p>;
   }
 
   return (
     <div className="border-t border-line divide-y divide-line">
-      {sessions.map((s) => {
-        const isOrchId = s.sessionId.startsWith("orchestrator:");
-        const title = s.title ?? s.sessionId;
-        const titleEl = !isOrchId ? (
+      {items.map((item) => {
+        const isOrchId = item.sessionId?.startsWith("orchestrator:") ?? false;
+        const canLink = item.sessionId !== null && !isOrchId;
+        const labelEl = canLink ? (
           <Link
             to="/sessions/$sessionId"
-            params={{ sessionId: s.sessionId }}
+            params={{ sessionId: item.sessionId! }}
             className="text-moss hover:underline underline-offset-2 truncate"
           >
-            {title}
+            {item.label}
           </Link>
         ) : (
-          <span className="truncate text-muted">{title}</span>
+          <span className="truncate text-muted">{item.label}</span>
         );
 
         return (
           <div
-            key={s.sessionId}
-            className={`flex items-center gap-2 px-4 py-2 text-xs ${s.isChild ? "pl-8 bg-ink-wash/10" : ""}`}
+            key={item.id}
+            className={`flex items-center gap-2 px-4 py-2 text-xs ${
+              item.isChild ? "pl-8 bg-ink-wash/10" : ""
+            }`}
           >
-            <div className="flex-1 min-w-0">{titleEl}</div>
+            <div className="flex-1 min-w-0">{labelEl}</div>
             <span className="tabular-nums text-muted shrink-0">
-              {fmtUsd(s.costUsd)}
+              {fmtUsd(item.costUsd)}
             </span>
             <span className="tabular-nums text-muted shrink-0 w-20 text-right">
-              {fmt(s.totalTokens)} tok
+              {fmt(item.totalTokens)} tok
             </span>
             <span className="tabular-nums text-muted shrink-0 w-14 text-right">
-              {s.turns} turns
+              {item.turns} turns
             </span>
           </div>
         );
@@ -142,51 +162,43 @@ function SessionList({
   );
 }
 
-/** One expandable use-case row. Only orchestrator and session are expandable. */
+/** One expandable use-case row — all four use cases are now expandable. */
 function UseCaseRow({
   useCase,
   costUsd,
   totalTokens,
   turns,
   window,
+  scope,
 }: {
   useCase: UsageUseCase;
   costUsd: number;
   totalTokens: number;
   turns: number;
   window: string;
+  scope: "me" | "org";
 }) {
   const [expanded, setExpanded] = useState(false);
-  const expandable = useCase === "orchestrator" || useCase === "session";
 
   return (
     <div className="border-b border-line last:border-0">
       <div
-        className={`flex items-center gap-3 px-4 py-3 text-sm ${expandable ? "cursor-pointer hover:bg-ink-wash/20" : ""}`}
-        onClick={expandable ? () => setExpanded((v) => !v) : undefined}
-        role={expandable ? "button" : undefined}
-        tabIndex={expandable ? 0 : undefined}
-        onKeyDown={
-          expandable
-            ? (e) => {
-                if (e.key === "Enter" || e.key === " ") setExpanded((v) => !v);
-              }
-            : undefined
-        }
-        aria-expanded={expandable ? expanded : undefined}
-        aria-label={
-          expandable ? `${USE_CASE_LABELS[useCase]} — expand sessions` : undefined
-        }
+        className="flex items-center gap-3 px-4 py-3 text-sm cursor-pointer hover:bg-ink-wash/20"
+        onClick={() => setExpanded((v) => !v)}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") setExpanded((v) => !v);
+        }}
+        aria-expanded={expanded}
+        aria-label={`${USE_CASE_LABELS[useCase]} — expand items`}
       >
-        {expandable && (
-          <span
-            className={`text-muted transition-transform ${expanded ? "rotate-90" : ""}`}
-            aria-hidden
-          >
-            ›
-          </span>
-        )}
-        {!expandable && <span className="w-3" />}
+        <span
+          className={`text-muted transition-transform ${expanded ? "rotate-90" : ""}`}
+          aria-hidden
+        >
+          ›
+        </span>
         <span className="flex-1 text-ink font-medium">{USE_CASE_LABELS[useCase]}</span>
         <span className="tabular-nums text-muted w-24 text-right">{fmtUsd(costUsd)}</span>
         <span className="tabular-nums text-muted w-24 text-right">
@@ -194,11 +206,8 @@ function UseCaseRow({
         </span>
         <span className="tabular-nums text-muted w-16 text-right">{turns} turns</span>
       </div>
-      {expandable && expanded && (
-        <SessionList
-          window={window}
-          useCase={useCase as "orchestrator" | "session"}
-        />
+      {expanded && (
+        <ItemList window={window} scope={scope} useCase={useCase} />
       )}
     </div>
   );
@@ -206,15 +215,21 @@ function UseCaseRow({
 
 export function UsagePage() {
   const [window, setWindow] = useState<Window>("7d");
+  const [scope, setScope] = useState<"me" | "org">("me");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [cursor, setCursor] = useState<string | undefined>(undefined);
   const [items, setItems] = useState<Parameters<typeof RequestLog>[0]["items"]>([]);
 
-  const breakdownQ = useUsageBreakdown(window);
+  const orgQ = useOrg();
+  const isOrgAdmin =
+    orgQ.data?.features.organizations === true &&
+    orgQ.data?.callerRole === "admin";
+
+  const breakdownQ = useUsageBreakdown(window, scope);
   const requestsQ = useProxyRequests({ limit: 50, cursor });
   const settingsQ = useProxySettings();
 
-  // Accumulate items across page loads.
+  // Accumulate proxy request items across page loads.
   const [seenCursors] = useState(() => new Set<string | undefined>());
   if (!seenCursors.has(cursor) && requestsQ.data) {
     seenCursors.add(cursor);
@@ -235,7 +250,24 @@ export function UsagePage() {
   ];
 
   const modelRows = breakdown?.byModel ?? [];
+  const byUserRows = breakdown?.byUser ?? [];
   const chartBuckets = breakdown?.byDay ?? [];
+
+  // Cache-hit-rate = cacheReadTokens / (inputTokens + cacheReadTokens)
+  const cacheHitRate: number | null =
+    breakdown && breakdown.totalInputTokens + breakdown.totalCacheReadTokens > 0
+      ? breakdown.totalCacheReadTokens /
+        (breakdown.totalInputTokens + breakdown.totalCacheReadTokens)
+      : null;
+
+  const csvHref = api.usageExportCsvUrl(window, scope);
+
+  function handleWindowChange(w: Window) {
+    setWindow(w);
+    setCursor(undefined);
+    setItems([]);
+    seenCursors.clear();
+  }
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -262,18 +294,13 @@ export function UsagePage() {
           </div>
         )}
 
-        {/* Window selector */}
-        <div className="flex items-center gap-2">
+        {/* Window selector + scope toggle + CSV export */}
+        <div className="flex items-center gap-2 flex-wrap">
           {WINDOWS.map((w) => (
             <button
               key={w}
               type="button"
-              onClick={() => {
-                setWindow(w);
-                setCursor(undefined);
-                setItems([]);
-                seenCursors.clear();
-              }}
+              onClick={() => handleWindowChange(w)}
               className={`rounded px-3 py-1 text-sm border ${
                 window === w
                   ? "border-moss text-moss bg-moss/10 font-medium"
@@ -283,6 +310,42 @@ export function UsagePage() {
               {w}
             </button>
           ))}
+          {isOrgAdmin && (
+            <div className="flex items-center gap-1 ml-4 rounded border border-line overflow-hidden text-sm">
+              <button
+                type="button"
+                onClick={() => setScope("me")}
+                className={`px-3 py-1 ${
+                  scope === "me"
+                    ? "bg-moss/10 text-moss font-medium"
+                    : "text-muted hover:text-ink"
+                }`}
+                aria-pressed={scope === "me"}
+              >
+                My usage
+              </button>
+              <button
+                type="button"
+                onClick={() => setScope("org")}
+                className={`px-3 py-1 ${
+                  scope === "org"
+                    ? "bg-moss/10 text-moss font-medium"
+                    : "text-muted hover:text-ink"
+                }`}
+                aria-pressed={scope === "org"}
+              >
+                Organization
+              </button>
+            </div>
+          )}
+          <a
+            href={csvHref}
+            download
+            className="ml-auto rounded px-3 py-1 text-sm border border-line text-muted hover:text-ink hover:border-ink"
+            aria-label={`Download CSV (${window}, ${scope})`}
+          >
+            Download CSV ({window}, {scope})
+          </a>
         </div>
 
         {/* Totals + chart + by-use-case + by-model */}
@@ -292,13 +355,32 @@ export function UsagePage() {
           <p className="text-sm text-danger-600">{String(breakdownQ.error)}</p>
         ) : breakdown ? (
           <>
-            {/* Total stat cards */}
+            {/* Total stat cards — cost + token types + cache-hit-rate + unpriced */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
               <StatCard label="Total cost" value={fmtUsd(breakdown.totalCostUsd)} />
               <StatCard label="Total tokens" value={fmt(breakdown.totalTokens)} />
-              <StatCard label="Input tokens" value={fmt(breakdown.totalInputTokens)} />
-              <StatCard label="Output tokens" value={fmt(breakdown.totalOutputTokens)} />
+              <StatCard
+                label="Input / Output"
+                value={`${fmt(breakdown.totalInputTokens)} / ${fmt(breakdown.totalOutputTokens)}`}
+              />
+              <StatCard
+                label="Cache hit rate"
+                value={cacheHitRate !== null ? fmtPct(cacheHitRate) : "—"}
+                sub={
+                  cacheHitRate !== null
+                    ? `${fmt(breakdown.totalCacheReadTokens)} read / ${fmt(breakdown.totalCacheWriteTokens)} write`
+                    : undefined
+                }
+              />
             </div>
+
+            {/* Unpriced indicator */}
+            {breakdown.unpricedTurns > 0 && (
+              <div className="rounded border border-line bg-paper px-4 py-2 text-sm text-muted">
+                <span className="font-medium text-ink">{fmt(breakdown.unpricedTurns)} turns unpriced</span>
+                {" "}— these turns used custom or dev models with no list price. The cost shown is a floor, not a total.
+              </div>
+            )}
 
             {/* Daily spend chart */}
             <div>
@@ -306,7 +388,7 @@ export function UsagePage() {
               <SpendChart buckets={chartBuckets} />
             </div>
 
-            {/* By use case — primary, expandable for orchestrator + sessions */}
+            {/* By use case — all four rows expandable */}
             <div>
               <h2 className="text-sm font-medium text-ink mb-3">By use case</h2>
               <div className="rounded border border-line overflow-hidden">
@@ -329,6 +411,7 @@ export function UsagePage() {
                       totalTokens={bucket.totalTokens}
                       turns={bucket.turns}
                       window={window}
+                      scope={scope}
                     />
                   );
                 })}
@@ -340,7 +423,7 @@ export function UsagePage() {
               </div>
             </div>
 
-            {/* By model */}
+            {/* By model — with input/output/cache columns */}
             <div>
               <h2 className="text-sm font-medium text-ink mb-3">By model</h2>
               {modelRows.length === 0 ? (
@@ -350,18 +433,13 @@ export function UsagePage() {
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="border-b border-line bg-paper-muted">
-                        <th className="px-3 py-2 text-left font-medium text-muted">
-                          Model
-                        </th>
-                        <th className="px-3 py-2 text-right font-medium text-muted">
-                          Turns
-                        </th>
-                        <th className="px-3 py-2 text-right font-medium text-muted">
-                          Tokens
-                        </th>
-                        <th className="px-3 py-2 text-right font-medium text-muted">
-                          Cost (USD)
-                        </th>
+                        <th className="px-3 py-2 text-left font-medium text-muted">Model</th>
+                        <th className="px-3 py-2 text-right font-medium text-muted">Turns</th>
+                        <th className="px-3 py-2 text-right font-medium text-muted">Input tok</th>
+                        <th className="px-3 py-2 text-right font-medium text-muted">Output tok</th>
+                        <th className="px-3 py-2 text-right font-medium text-muted">Cache read</th>
+                        <th className="px-3 py-2 text-right font-medium text-muted">Cache write</th>
+                        <th className="px-3 py-2 text-right font-medium text-muted">Cost (USD)</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -382,7 +460,16 @@ export function UsagePage() {
                             {row.turns.toLocaleString()}
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums text-muted">
-                            {row.totalTokens.toLocaleString()}
+                            {row.inputTokens.toLocaleString()}
+                          </td>
+                          <td className="px-3 py-2 text-right tabular-nums text-muted">
+                            {row.outputTokens.toLocaleString()}
+                          </td>
+                          <td className="px-3 py-2 text-right tabular-nums text-muted">
+                            {row.cacheReadTokens.toLocaleString()}
+                          </td>
+                          <td className="px-3 py-2 text-right tabular-nums text-muted">
+                            {row.cacheWriteTokens.toLocaleString()}
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums text-muted">
                             ${row.costUsd.toFixed(4)}
@@ -394,6 +481,46 @@ export function UsagePage() {
                 </div>
               )}
             </div>
+
+            {/* By member — org scope only, when byUser present */}
+            {scope === "org" && byUserRows.length > 0 && (
+              <div>
+                <h2 className="text-sm font-medium text-ink mb-3">By member</h2>
+                <div className="overflow-x-auto rounded border border-line">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-line bg-paper-muted">
+                        <th className="px-3 py-2 text-left font-medium text-muted">Member</th>
+                        <th className="px-3 py-2 text-right font-medium text-muted">Turns</th>
+                        <th className="px-3 py-2 text-right font-medium text-muted">Tokens</th>
+                        <th className="px-3 py-2 text-right font-medium text-muted">Cost (USD)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {byUserRows.map((row) => (
+                        <tr
+                          key={row.userId}
+                          className="border-b border-line last:border-0 hover:bg-ink-wash/30"
+                        >
+                          <td className="px-3 py-2 text-ink truncate max-w-[14rem]" title={row.name}>
+                            {row.name || <span className="text-muted italic">unknown</span>}
+                          </td>
+                          <td className="px-3 py-2 text-right tabular-nums text-muted">
+                            {row.turns.toLocaleString()}
+                          </td>
+                          <td className="px-3 py-2 text-right tabular-nums text-muted">
+                            {row.totalTokens.toLocaleString()}
+                          </td>
+                          <td className="px-3 py-2 text-right tabular-nums text-muted">
+                            ${row.costUsd.toFixed(4)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
           </>
         ) : null}
 

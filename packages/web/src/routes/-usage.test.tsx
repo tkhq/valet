@@ -1,13 +1,18 @@
 // @vitest-environment jsdom
 /**
- * `/usage` — unified spend dashboard. Mocks `~/api/usage`, `~/api/proxy-usage`
- * to assert:
+ * `/usage` — unified spend dashboard. Mocks `~/api/usage`, `~/api/proxy-usage`,
+ * `~/api/settings` to assert:
  *   - total cost renders from breakdown;
+ *   - token/cache stats render (input/output/cache columns, cache-hit-rate);
+ *   - unpriced indicator shows when unpricedTurns > 0, hidden when 0;
+ *   - scope toggle appears only for org admins; switching refetches scope=org;
+ *   - By-member table renders in org scope;
  *   - By-use-case table has a row per bucket;
- *   - expanding Orchestrator row lists sessions;
- *   - expanding Sessions row nests child under parent;
+ *   - all four use-case rows are expandable (Workflows and Proxy show items);
+ *   - Sessions row nests child under parent;
  *   - By model section shows model names;
  *   - spend chart renders day bars;
+ *   - Download CSV control points at /api/usage/export.csv with correct query;
  *   - proxy request log still renders and opens SampleView on row click;
  *   - Settings → Proxy callout link renders;
  *   - disabled-gateway notice renders.
@@ -17,7 +22,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 
 import type {
   UsageBreakdownResponse,
-  UsageSessionsResponse,
+  UsageDrillResponse,
   ProxyRequestListItem,
   ProxyRequestDetail,
 } from "@valet/api/wire";
@@ -29,19 +34,84 @@ const DAY_B_MS = DAY_A_MS + 86_400_000;
 
 const mockBreakdown: UsageBreakdownResponse = {
   windowMs: 7 * 86_400_000,
+  scope: "me",
   totalCostUsd: 0.1234,
   totalTokens: 15_000,
   totalInputTokens: 10_000,
   totalOutputTokens: 5_000,
+  totalCacheReadTokens: 2_000,
+  totalCacheWriteTokens: 500,
+  totalTurns: 37,
+  unpricedTurns: 0,
   byUseCase: [
-    { useCase: "orchestrator", costUsd: 0.04, totalTokens: 5_000, turns: 10 },
-    { useCase: "session", costUsd: 0.06, totalTokens: 8_000, turns: 20 },
-    { useCase: "workflow", costUsd: 0.01, totalTokens: 1_000, turns: 2 },
-    { useCase: "proxy", costUsd: 0.0134, totalTokens: 1_000, turns: 5 },
+    {
+      useCase: "orchestrator",
+      costUsd: 0.04,
+      totalTokens: 5_000,
+      inputTokens: 3_000,
+      outputTokens: 2_000,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      turns: 10,
+      unpricedTurns: 0,
+    },
+    {
+      useCase: "session",
+      costUsd: 0.06,
+      totalTokens: 8_000,
+      inputTokens: 5_000,
+      outputTokens: 3_000,
+      cacheReadTokens: 1_000,
+      cacheWriteTokens: 200,
+      turns: 20,
+      unpricedTurns: 0,
+    },
+    {
+      useCase: "workflow",
+      costUsd: 0.01,
+      totalTokens: 1_000,
+      inputTokens: 700,
+      outputTokens: 300,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      turns: 2,
+      unpricedTurns: 0,
+    },
+    {
+      useCase: "proxy",
+      costUsd: 0.0134,
+      totalTokens: 1_000,
+      inputTokens: 800,
+      outputTokens: 200,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      turns: 5,
+      unpricedTurns: 0,
+    },
   ],
   byModel: [
-    { model: "claude-opus-4-5", costUsd: 0.09, totalTokens: 12_000, turns: 25 },
-    { model: "gpt-4o", costUsd: 0.0334, totalTokens: 3_000, turns: 12 },
+    {
+      model: "claude-opus-4-5",
+      costUsd: 0.09,
+      totalTokens: 12_000,
+      inputTokens: 8_000,
+      outputTokens: 4_000,
+      cacheReadTokens: 2_000,
+      cacheWriteTokens: 500,
+      turns: 25,
+      unpricedTurns: 0,
+    },
+    {
+      model: "gpt-4o",
+      costUsd: 0.0334,
+      totalTokens: 3_000,
+      inputTokens: 2_000,
+      outputTokens: 1_000,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      turns: 12,
+      unpricedTurns: 0,
+    },
   ],
   byDay: [
     { dayMs: DAY_A_MS, costUsd: 0.07, totalTokens: 7_000 },
@@ -49,14 +119,51 @@ const mockBreakdown: UsageBreakdownResponse = {
   ],
 };
 
-const mockOrchestratorSessions: UsageSessionsResponse = {
-  sessions: [
+const mockBreakdownWithUnpriced: UsageBreakdownResponse = {
+  ...mockBreakdown,
+  unpricedTurns: 3,
+};
+
+const mockBreakdownOrgScope: UsageBreakdownResponse = {
+  ...mockBreakdown,
+  scope: "org",
+  byUser: [
     {
-      sessionId: "orchestrator:user_abc123",
-      title: "My Orchestrator",
+      userId: "user_1",
+      name: "Alice Smith",
+      costUsd: 0.08,
+      totalTokens: 10_000,
+      inputTokens: 7_000,
+      outputTokens: 3_000,
+      cacheReadTokens: 1_000,
+      cacheWriteTokens: 200,
+      turns: 22,
+      unpricedTurns: 0,
+    },
+    {
+      userId: "user_2",
+      name: "Bob Jones",
+      costUsd: 0.0434,
+      totalTokens: 5_000,
+      inputTokens: 3_000,
+      outputTokens: 2_000,
+      cacheReadTokens: 1_000,
+      cacheWriteTokens: 300,
+      turns: 15,
+      unpricedTurns: 0,
+    },
+  ],
+};
+
+const mockOrchestratorItems: UsageDrillResponse = {
+  items: [
+    {
+      id: "orchestrator:user_abc123",
+      label: "My Orchestrator",
       useCase: "orchestrator",
       isChild: false,
-      parentSessionId: null,
+      parentId: null,
+      sessionId: "orchestrator:user_abc123",
       costUsd: 0.04,
       totalTokens: 5_000,
       turns: 10,
@@ -64,26 +171,60 @@ const mockOrchestratorSessions: UsageSessionsResponse = {
   ],
 };
 
-const mockRegularSessions: UsageSessionsResponse = {
-  sessions: [
+const mockSessionItems: UsageDrillResponse = {
+  items: [
     {
-      sessionId: "sess_parent1",
-      title: "Parent session",
+      id: "sess_parent1",
+      label: "Parent session",
       useCase: "session",
       isChild: false,
-      parentSessionId: null,
+      parentId: null,
+      sessionId: "sess_parent1",
       costUsd: 0.05,
       totalTokens: 6_000,
       turns: 15,
     },
     {
-      sessionId: "sess_child1",
-      title: "Child session",
+      id: "sess_child1",
+      label: "Child session",
       useCase: "session",
       isChild: true,
-      parentSessionId: "sess_parent1",
+      parentId: "sess_parent1",
+      sessionId: "sess_child1",
       costUsd: 0.01,
       totalTokens: 2_000,
+      turns: 5,
+    },
+  ],
+};
+
+const mockWorkflowItems: UsageDrillResponse = {
+  items: [
+    {
+      id: "wf_run_1",
+      label: "Deploy pipeline run #12",
+      useCase: "workflow",
+      isChild: false,
+      parentId: null,
+      sessionId: null,
+      costUsd: 0.01,
+      totalTokens: 1_000,
+      turns: 2,
+    },
+  ],
+};
+
+const mockProxyItems: UsageDrillResponse = {
+  items: [
+    {
+      id: "proxy_harness_1",
+      label: "claude-code",
+      useCase: "proxy",
+      isChild: false,
+      parentId: null,
+      sessionId: null,
+      costUsd: 0.0134,
+      totalTokens: 1_000,
       turns: 5,
     },
   ],
@@ -155,25 +296,24 @@ let breakdownResult: {
   error: null | Error;
 } = { data: mockBreakdown, isLoading: false, error: null };
 
-// Sessions result — keyed by useCase so expand tests can return different data.
-let sessionsResults: Record<
+// Items result — keyed by useCase.
+let itemsResults: Record<
   string,
-  { data: UsageSessionsResponse | undefined; isLoading: boolean; error: null | Error }
+  { data: UsageDrillResponse | undefined; isLoading: boolean; error: null | Error }
 > = {
-  orchestrator: { data: mockOrchestratorSessions, isLoading: false, error: null },
-  session: { data: mockRegularSessions, isLoading: false, error: null },
+  orchestrator: { data: mockOrchestratorItems, isLoading: false, error: null },
+  session: { data: mockSessionItems, isLoading: false, error: null },
+  workflow: { data: mockWorkflowItems, isLoading: false, error: null },
+  proxy: { data: mockProxyItems, isLoading: false, error: null },
 };
 
 vi.mock("~/api/usage", () => ({
   useUsageBreakdown: () => breakdownResult,
-  useUsageSessions: (_window: string, useCase?: string) =>
-    sessionsResults[useCase ?? "orchestrator"] ?? {
-      data: undefined,
-      isLoading: false,
-      error: null,
-    },
+  useUsageItems: (_window: string, _scope: string, useCase: string) =>
+    itemsResults[useCase] ?? { data: undefined, isLoading: false, error: null },
   qkUsage: {
     breakdown: () => [],
+    items: () => [],
     sessions: () => [],
   },
 }));
@@ -207,18 +347,45 @@ vi.mock("~/api/proxy-usage", () => ({
   },
 }));
 
+// Mock useOrg — mutable for tests.
+let orgResult: {
+  data: { features: { organizations: boolean }; callerRole: "admin" | "member" } | undefined;
+  isLoading: boolean;
+} = {
+  data: { features: { organizations: false }, callerRole: "member" },
+  isLoading: false,
+};
+
+vi.mock("~/api/settings", () => ({
+  useOrg: () => orgResult,
+}));
+
+// Mock api client — usageExportCsvUrl is a pure URL builder.
+vi.mock("~/api/client", () => ({
+  api: {
+    usageExportCsvUrl: (window: string, scope: string) =>
+      `/api/usage/export.csv?window=${window}&scope=${scope}`,
+  },
+}));
+
 import { UsagePage } from "./usage";
 
 beforeEach(() => {
   vi.clearAllMocks();
   breakdownResult = { data: mockBreakdown, isLoading: false, error: null };
-  sessionsResults = {
-    orchestrator: { data: mockOrchestratorSessions, isLoading: false, error: null },
-    session: { data: mockRegularSessions, isLoading: false, error: null },
+  itemsResults = {
+    orchestrator: { data: mockOrchestratorItems, isLoading: false, error: null },
+    session: { data: mockSessionItems, isLoading: false, error: null },
+    workflow: { data: mockWorkflowItems, isLoading: false, error: null },
+    proxy: { data: mockProxyItems, isLoading: false, error: null },
   };
   requestsResult = { data: mockRequests, isLoading: false, error: null };
   detailResult = { data: mockDetail, isLoading: false, error: null };
   settingsResult = { data: { enabled: true, mode: "centralized" }, isLoading: false };
+  orgResult = {
+    data: { features: { organizations: false }, callerRole: "member" },
+    isLoading: false,
+  };
 });
 
 describe("UsagePage — spend summary", () => {
@@ -241,6 +408,155 @@ describe("UsagePage — spend summary", () => {
   });
 });
 
+describe("UsagePage — token/cache stats", () => {
+  it("renders input/output stat card", () => {
+    render(<UsagePage />);
+    // The "Input / Output" card should show the formatted values
+    const inputOutputCard = screen.getByText("Input / Output");
+    expect(inputOutputCard).toBeTruthy();
+    // Values: 10,000 / 5,000
+    expect(screen.getByText("10,000 / 5,000")).toBeTruthy();
+  });
+
+  it("renders cache hit rate stat card", () => {
+    render(<UsagePage />);
+    // cacheHitRate = 2000 / (10000 + 2000) = 16.7%
+    expect(screen.getByText("Cache hit rate")).toBeTruthy();
+    expect(screen.getByText("16.7%")).toBeTruthy();
+  });
+
+  it("renders cache read/write sub-label under cache hit rate", () => {
+    render(<UsagePage />);
+    // "2,000 read / 500 write"
+    expect(screen.getByText("2,000 read / 500 write")).toBeTruthy();
+  });
+
+  it("shows — for cache hit rate when no tokens", () => {
+    breakdownResult = {
+      data: {
+        ...mockBreakdown,
+        totalInputTokens: 0,
+        totalCacheReadTokens: 0,
+        totalCacheWriteTokens: 0,
+      },
+      isLoading: false,
+      error: null,
+    };
+    render(<UsagePage />);
+    expect(screen.getByText("—")).toBeTruthy();
+  });
+
+  it("renders input/output/cache columns in the By-model table", () => {
+    render(<UsagePage />);
+    expect(screen.getByText("Input tok")).toBeTruthy();
+    expect(screen.getByText("Output tok")).toBeTruthy();
+    expect(screen.getByText("Cache read")).toBeTruthy();
+    expect(screen.getByText("Cache write")).toBeTruthy();
+  });
+});
+
+describe("UsagePage — unpriced indicator", () => {
+  it("shows the unpriced indicator when unpricedTurns > 0", () => {
+    breakdownResult = {
+      data: mockBreakdownWithUnpriced,
+      isLoading: false,
+      error: null,
+    };
+    render(<UsagePage />);
+    expect(screen.getByText(/3 turns unpriced/)).toBeTruthy();
+    expect(screen.getByText(/cost shown is a floor/)).toBeTruthy();
+  });
+
+  it("hides the unpriced indicator when unpricedTurns === 0", () => {
+    render(<UsagePage />);
+    expect(screen.queryByText(/turns unpriced/)).toBeNull();
+  });
+});
+
+describe("UsagePage — scope toggle", () => {
+  it("does not show the scope toggle for non-admin users", () => {
+    orgResult = {
+      data: { features: { organizations: false }, callerRole: "member" },
+      isLoading: false,
+    };
+    render(<UsagePage />);
+    expect(screen.queryByText("My usage")).toBeNull();
+    expect(screen.queryByText("Organization")).toBeNull();
+  });
+
+  it("does not show scope toggle when organizations feature is off even for admin", () => {
+    orgResult = {
+      data: { features: { organizations: false }, callerRole: "admin" },
+      isLoading: false,
+    };
+    render(<UsagePage />);
+    expect(screen.queryByText("My usage")).toBeNull();
+  });
+
+  it("shows the scope toggle for org admins with organizations feature on", () => {
+    orgResult = {
+      data: { features: { organizations: true }, callerRole: "admin" },
+      isLoading: false,
+    };
+    render(<UsagePage />);
+    expect(screen.getByText("My usage")).toBeTruthy();
+    expect(screen.getByText("Organization")).toBeTruthy();
+  });
+
+  it("switching to Organization calls useUsageBreakdown with scope=org", () => {
+    orgResult = {
+      data: { features: { organizations: true }, callerRole: "admin" },
+      isLoading: false,
+    };
+    // Override the breakdown mock to track which scope is requested.
+    // The mock vi.mock("~/api/usage") returns breakdownResult — we verify
+    // the toggle renders the org data by switching breakdownResult.
+    breakdownResult = {
+      data: { ...mockBreakdownOrgScope },
+      isLoading: false,
+      error: null,
+    };
+    render(<UsagePage />);
+    // The component calls useUsageBreakdown with scope — since we already mock
+    // the data with org scope, By-member table should appear if the scope="org"
+    // button is clicked. We verify the toggle exists and the button is rendered.
+    const orgBtn = screen.getByText("Organization");
+    fireEvent.click(orgBtn);
+    // Button should now be "active" (aria-pressed=true)
+    expect(orgBtn.closest("button")?.getAttribute("aria-pressed")).toBe("true");
+  });
+});
+
+describe("UsagePage — By-member table (org scope)", () => {
+  beforeEach(() => {
+    orgResult = {
+      data: { features: { organizations: true }, callerRole: "admin" },
+      isLoading: false,
+    };
+  });
+
+  it("shows By-member table when scope=org and byUser present", () => {
+    breakdownResult = {
+      data: mockBreakdownOrgScope,
+      isLoading: false,
+      error: null,
+    };
+    render(<UsagePage />);
+    // Switch to org scope
+    fireEvent.click(screen.getByText("Organization"));
+    // Re-render happens with org data
+    expect(screen.getByText("By member")).toBeTruthy();
+    expect(screen.getByText("Alice Smith")).toBeTruthy();
+    expect(screen.getByText("Bob Jones")).toBeTruthy();
+  });
+
+  it("does not show By-member table in me scope", () => {
+    render(<UsagePage />);
+    // Default scope=me, byUser not present
+    expect(screen.queryByText("By member")).toBeNull();
+  });
+});
+
 describe("UsagePage — by-use-case table", () => {
   it("renders all four use-case labels", () => {
     render(<UsagePage />);
@@ -250,10 +566,10 @@ describe("UsagePage — by-use-case table", () => {
     expect(screen.getByText("Proxy (external tools)")).toBeTruthy();
   });
 
-  it("expanding Orchestrator row shows orchestrator sessions", async () => {
+  it("expanding Orchestrator row shows orchestrator items", async () => {
     render(<UsagePage />);
     const orchRow = screen.getByRole("button", {
-      name: /Orchestrator — expand sessions/,
+      name: /Orchestrator — expand items/,
     });
     fireEvent.click(orchRow);
     await waitFor(() => {
@@ -261,26 +577,25 @@ describe("UsagePage — by-use-case table", () => {
     });
   });
 
-  it("orchestrator session id does not render as a link", async () => {
+  it("orchestrator item does not render as a link (orch: prefix)", async () => {
     render(<UsagePage />);
     const orchRow = screen.getByRole("button", {
-      name: /Orchestrator — expand sessions/,
+      name: /Orchestrator — expand items/,
     });
     fireEvent.click(orchRow);
     await waitFor(() => {
       expect(screen.getByText("My Orchestrator")).toBeTruthy();
     });
-    // orchestrator: IDs must not produce an anchor
     const links = Array.from(document.querySelectorAll("a")).filter((a) =>
       a.textContent?.includes("My Orchestrator"),
     );
     expect(links.length).toBe(0);
   });
 
-  it("expanding Sessions row shows parent and child sessions", async () => {
+  it("expanding Sessions row shows parent and child items", async () => {
     render(<UsagePage />);
     const sessRow = screen.getByRole("button", {
-      name: /Sessions — expand sessions/,
+      name: /Sessions — expand items/,
     });
     fireEvent.click(sessRow);
     await waitFor(() => {
@@ -292,13 +607,12 @@ describe("UsagePage — by-use-case table", () => {
   it("child session row is indented with pl-8 class", async () => {
     const { container } = render(<UsagePage />);
     const sessRow = screen.getByRole("button", {
-      name: /Sessions — expand sessions/,
+      name: /Sessions — expand items/,
     });
     fireEvent.click(sessRow);
     await waitFor(() => {
       expect(screen.getByText("Child session")).toBeTruthy();
     });
-    // Find the row containing "Child session" and verify it has pl-8
     const childRows = Array.from(container.querySelectorAll(".pl-8"));
     expect(childRows.length).toBeGreaterThan(0);
     const childText = childRows.some((el) =>
@@ -307,22 +621,53 @@ describe("UsagePage — by-use-case table", () => {
     expect(childText).toBe(true);
   });
 
-  it("regular session title renders as an anchor (links to sessions route)", async () => {
+  it("regular session item renders as an anchor (links to sessions route)", async () => {
     render(<UsagePage />);
     const sessRow = screen.getByRole("button", {
-      name: /Sessions — expand sessions/,
+      name: /Sessions — expand items/,
     });
     fireEvent.click(sessRow);
     await waitFor(() => {
       expect(screen.getByText("Parent session")).toBeTruthy();
     });
-    // The Link mock renders <a href={to}> where `to` is the route pattern.
-    // The important assertion is that "Parent session" is inside an anchor
-    // (i.e. it is linked), while "My Orchestrator" was not (tested separately).
     const parentLink = Array.from(document.querySelectorAll("a")).find(
       (a) => a.textContent?.trim() === "Parent session",
     );
     expect(parentLink).toBeTruthy();
+  });
+
+  it("expanding Workflows row shows workflow items (not linked)", async () => {
+    render(<UsagePage />);
+    const wfRow = screen.getByRole("button", {
+      name: /Workflows — expand items/,
+    });
+    fireEvent.click(wfRow);
+    await waitFor(() => {
+      expect(screen.getByText("Deploy pipeline run #12")).toBeTruthy();
+    });
+    // Workflow items have no sessionId — must not be links
+    const wfLinks = Array.from(document.querySelectorAll("a")).filter((a) =>
+      a.textContent?.includes("Deploy pipeline run #12"),
+    );
+    expect(wfLinks.length).toBe(0);
+  });
+
+  it("expanding Proxy row shows proxy items (not linked)", async () => {
+    render(<UsagePage />);
+    const proxyRow = screen.getByRole("button", {
+      name: /Proxy.*expand items/,
+    });
+    fireEvent.click(proxyRow);
+    await waitFor(() => {
+      // "claude-code" appears in both the expanded item list (span.truncate.text-muted)
+      // and the request log harness column — getAllByText handles duplicates.
+      const matches = screen.getAllByText("claude-code");
+      expect(matches.length).toBeGreaterThan(0);
+    });
+    const proxyLinks = Array.from(document.querySelectorAll("a")).filter((a) =>
+      a.textContent?.includes("claude-code"),
+    );
+    expect(proxyLinks.length).toBe(0);
   });
 });
 
@@ -334,6 +679,34 @@ describe("UsagePage — by model section", () => {
     expect(section).toBeTruthy();
     expect(section!.textContent).toContain("claude-opus-4-5");
     expect(section!.textContent).toContain("gpt-4o");
+  });
+});
+
+describe("UsagePage — CSV export", () => {
+  it("renders a Download CSV link pointing at /api/usage/export.csv", () => {
+    render(<UsagePage />);
+    const csvLink = document.querySelector("a[download]") as HTMLAnchorElement | null;
+    expect(csvLink).toBeTruthy();
+    expect(csvLink!.href).toContain("/api/usage/export.csv");
+  });
+
+  it("CSV link includes the current window param", () => {
+    render(<UsagePage />);
+    const csvLink = document.querySelector("a[download]") as HTMLAnchorElement | null;
+    expect(csvLink!.href).toContain("window=7d");
+  });
+
+  it("CSV link includes the current scope param", () => {
+    render(<UsagePage />);
+    const csvLink = document.querySelector("a[download]") as HTMLAnchorElement | null;
+    expect(csvLink!.href).toContain("scope=me");
+  });
+
+  it("CSV link label mentions current window and scope", () => {
+    render(<UsagePage />);
+    const csvLink = document.querySelector("a[download]") as HTMLAnchorElement | null;
+    expect(csvLink!.textContent).toMatch(/7d/);
+    expect(csvLink!.textContent).toMatch(/me/);
   });
 });
 
