@@ -18,6 +18,14 @@ describe("resolveProxyPrincipal", () => {
     const r = await resolveProxyPrincipal(h, "openai", ok);
     expect(r).toEqual({ userId: "u1", orgId: "org1", keyId: "k1" });
   });
+  it("prefers the vlt_ key when Claude Code also sends a real provider key as x-api-key", async () => {
+    // Claude Code forwards ANTHROPIC_API_KEY as x-api-key even when the valet
+    // key is in ANTHROPIC_AUTH_TOKEN (the bearer). The gateway must pick the
+    // verifiable valet key, not the passed-through provider key.
+    const h = new Headers({ "x-api-key": "sk-ant-api03-REALKEY", authorization: "Bearer vlt_good" });
+    const r = await resolveProxyPrincipal(h, "anthropic", ok);
+    expect(r).toEqual({ userId: "u1", orgId: "org1", keyId: "k1" });
+  });
   it("returns a 401 anthropic-shaped body for a missing key", async () => {
     const r = await resolveProxyPrincipal(new Headers(), "anthropic", ok);
     expect(r).toBeInstanceOf(Response);

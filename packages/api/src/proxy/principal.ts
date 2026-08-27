@@ -7,12 +7,28 @@ export function wireError(kind: ProviderKind, status: number, message: string): 
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
+/** The better-auth apiKey plugin mints valet keys with this prefix
+ * (`defaultPrefix`, see `auth/index.ts`). It is how the gateway tells a valet
+ * key from a real provider key that a harness also sends. */
+const VALET_KEY_PREFIX = "vlt_";
+
+/**
+ * Extracts the valet key from the request. A harness may present a credential
+ * in `x-api-key` (Anthropic form) OR `Authorization: Bearer` (OpenAI/Codex
+ * form, and Claude Code's `ANTHROPIC_AUTH_TOKEN`). Claude Code sends BOTH: the
+ * valet key as the bearer AND — when `ANTHROPIC_API_KEY` is set in the user's
+ * environment — the real provider key as `x-api-key`. So a naive
+ * `x-api-key`-first rule would pick the real provider key (unverifiable here)
+ * and 401. Prefer whichever candidate carries the `vlt_` prefix; fall back to
+ * the first present candidate only when neither is a valet key.
+ */
 function extractKey(headers: Headers): string | undefined {
+  const candidates: string[] = [];
   const xApiKey = headers.get("x-api-key");
-  if (xApiKey) return xApiKey;
+  if (xApiKey) candidates.push(xApiKey);
   const auth = headers.get("authorization");
-  if (auth?.toLowerCase().startsWith("bearer ")) return auth.slice(7).trim();
-  return undefined;
+  if (auth?.toLowerCase().startsWith("bearer ")) candidates.push(auth.slice(7).trim());
+  return candidates.find((c) => c.startsWith(VALET_KEY_PREFIX)) ?? candidates[0];
 }
 
 export interface PrincipalDeps {
