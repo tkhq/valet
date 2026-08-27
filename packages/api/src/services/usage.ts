@@ -30,6 +30,11 @@ export const USAGE_WINDOWS: Record<string, number> = {
 export function windowMsFrom(q: string | undefined): number {
   return USAGE_WINDOWS[q ?? "30d"] ?? 30 * DAY_MS;
 }
+/** The canonical window key for labels (e.g. the CSV filename), so an unknown
+ * `?window=` doesn't mislabel a file as a range it doesn't cover. */
+export function windowLabelFrom(q: string | undefined): string {
+  return q && q in USAGE_WINDOWS ? q : "30d";
+}
 
 const USE_CASES: readonly UsageUseCase[] = ["orchestrator", "session", "workflow", "proxy"];
 export function isUsageUseCase(v: string): v is UsageUseCase {
@@ -124,20 +129,30 @@ export async function getUsageBreakdown(
   const [byUseCase, byModel, byDay, totals, byUser] = await Promise.all([
     db.execute(sql`SELECT use_case, ${BUCKET_COLS} FROM cost_entries WHERE ${where} GROUP BY use_case`) as Promise<{ rows: (BucketRow & { use_case: string })[] }>,
     db.execute(sql`SELECT model, ${BUCKET_COLS} FROM cost_entries WHERE ${where} GROUP BY model ORDER BY cost_usd DESC`) as Promise<{ rows: (BucketRow & { model: string | null })[] }>,
-    db.execute(sql`SELECT (created_at / ${DAY_MS}) * ${DAY_MS} AS day_ms, COALESCE(SUM(cost_total),0) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens FROM cost_entries WHERE ${where} GROUP BY day_ms ORDER BY day_ms ASC`) as Promise<{ rows: { day_ms: unknown; cost_usd: unknown; total_tokens: unknown }[] }>,
+    // `floor` truncates the day index deterministically whether Postgres infers
+    // the `${DAY_MS}` parameter as integer or float (a plain `bigint / param`
+    // could do float division on real Postgres → one bucket per row).
+    db.execute(sql`SELECT (floor(created_at / ${DAY_MS}) * ${DAY_MS})::bigint AS day_ms, COALESCE(SUM(cost_total),0) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens FROM cost_entries WHERE ${where} GROUP BY 1 ORDER BY 1 ASC`) as Promise<{ rows: { day_ms: unknown; cost_usd: unknown; total_tokens: unknown }[] }>,
     db.execute(sql`SELECT ${BUCKET_COLS} FROM cost_entries WHERE ${where}`) as Promise<{ rows: BucketRow[] }>,
     opts.scope.isOrg
-      ? (db.execute(sql`SELECT user_id, ${BUCKET_COLS} FROM cost_entries WHERE ${where} AND user_id IS NOT NULL GROUP BY user_id ORDER BY cost_usd DESC`) as Promise<{ rows: (BucketRow & { user_id: string })[] }>)
-      : Promise.resolve({ rows: [] as (BucketRow & { user_id: string })[] }),
+      ? // Keep the NULL user_id group (team-/org-owned turns, e.g. team-owned
+        // workflow runs) so the per-member sum reconciles with the total —
+        // dropping it made Σ byUser < totalCostUsd.
+        (db.execute(sql`SELECT user_id, ${BUCKET_COLS} FROM cost_entries WHERE ${where} GROUP BY user_id ORDER BY cost_usd DESC`) as Promise<{ rows: (BucketRow & { user_id: string | null })[] }>)
+      : Promise.resolve({ rows: [] as (BucketRow & { user_id: string | null })[] }),
   ]);
 
   const total = toBucket(totals.rows[0]);
   let byUserOut: (UsageBucket & { userId: string; name: string })[] | undefined;
   if (opts.scope.isOrg) {
-    const ids = byUser.rows.map((r) => r.user_id);
+    const ids = byUser.rows.map((r) => r.user_id).filter((id): id is string => id !== null);
     const userRows = ids.length === 0 ? [] : await db.select({ id: users.id, name: users.name, email: users.email }).from(users).where(inArray(users.id, ids));
     const nameById = new Map(userRows.map((u) => [u.id, u.name || u.email] as const));
-    byUserOut = byUser.rows.map((r) => ({ userId: r.user_id, name: nameById.get(r.user_id) ?? r.user_id, ...toBucket(r) }));
+    byUserOut = byUser.rows.map((r) => ({
+      userId: r.user_id ?? "shared",
+      name: r.user_id === null ? "Team / shared" : (nameById.get(r.user_id) ?? r.user_id),
+      ...toBucket(r),
+    }));
   }
 
   return {
@@ -224,7 +239,10 @@ export async function getUsageSessions(
   opts: { windowMs: number; orgId: string; userId: string; useCase?: string },
 ): Promise<UsageSessionRow[]> {
   const since = Date.now() - opts.windowMs;
-  const useCaseFilter = opts.useCase && isUsageUseCase(opts.useCase) ? sql`AND ce.use_case = ${opts.useCase}` : sql``;
+  // This endpoint only covers the two agent-session use cases; a workflow/proxy
+  // filter would contradict the `IN ('orchestrator','session')` clause and
+  // silently return nothing, so ignore any other value.
+  const useCaseFilter = opts.useCase === "orchestrator" || opts.useCase === "session" ? sql`AND ce.use_case = ${opts.useCase}` : sql``;
   interface Row { session_id: string; title: string | null; use_case: string; parent_session_id: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
   const result = (await db.execute(sql`
     SELECT ce.session_id, s.title, ce.use_case, cw.parent_session_id,
@@ -255,7 +273,9 @@ const CSV_HEADER = "timestamp,use_case,model,session_id,workflow_run_id,user_id,
 
 function csvEscape(v: unknown): string {
   const s = v === null || v === undefined ? "" : String(v);
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  // Quote on comma, quote, newline OR carriage return — a lone \r in a title
+  // would otherwise break a CSV row boundary.
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
 /** One CSV row per billable turn for the window/scope, capped at 100k rows. */

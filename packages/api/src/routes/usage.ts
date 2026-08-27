@@ -15,6 +15,7 @@ import {
   getUsageSummary,
   isUsageUseCase,
   resolveUsageScope,
+  windowLabelFrom,
   windowMsFrom,
 } from "../services/usage.js";
 
@@ -73,7 +74,7 @@ usageRouter.get("/export.csv", async (c) => {
   const user = c.var.user;
   const scope = await resolveUsageScope(db, { orgId: user.orgId, userId: user.id, requestedScope: c.req.query("scope") });
   if (scope === "forbidden") return c.json(FORBIDDEN, 403);
-  const windowLabel = c.req.query("window") ?? "30d";
+  const windowLabel = windowLabelFrom(c.req.query("window"));
   const csv = await getUsageExportCsv(db, { windowMs: windowMsFrom(c.req.query("window")), scope });
   c.header("Content-Type", "text/csv; charset=utf-8");
   c.header("Content-Disposition", `attachment; filename="valet-usage-${scope.scope}-${windowLabel}.csv"`);

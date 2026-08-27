@@ -48,23 +48,6 @@ export async function resolveUpstream(
 }
 
 /**
- * The upstream base URL for a kind, honoring an org's first configured
- * provider `baseUrl` (e.g. an Azure/private endpoint), else the public
- * default. Used by pass-through mode, which supplies the user's own key but
- * must still hit the SAME host centralized mode would — otherwise switching
- * modes silently redirects traffic off the org's configured endpoint.
- */
-export async function resolveUpstreamBase(
-  db: AppDb,
-  orgId: string,
-  kind: ProviderKind,
-  deps: UpstreamDeps = defaultDeps(db, orgId),
-): Promise<string> {
-  const rows = await deps.listProviders(kind);
-  return rows.find((r) => r.baseUrl)?.baseUrl || DEFAULT_BASE[kind];
-}
-
-/**
  * Boot step: for each kind, if the env key is set and the org has no
  * provider of that kind, seed one (name `env:{kind}`) with the env key in
  * CredentialStore, so the Settings UI shows a provider and the demo works

@@ -1,11 +1,38 @@
 // packages/api/src/proxy/recorder.test.ts
 import { describe, it, expect, vi } from "vitest";
-import { recordProxyCall } from "./recorder.js";
+import { recordProxyCall, drain } from "./recorder.js";
 
 function streamOf(text: string): ReadableStream<Uint8Array> {
   const bytes = new TextEncoder().encode(text);
   return new ReadableStream({ start(c) { c.enqueue(bytes); c.close(); } });
 }
+/** Emit `text` as many small chunks so drain's per-chunk head cap engages. */
+function chunkedStreamOf(text: string, chunkSize: number): ReadableStream<Uint8Array> {
+  const bytes = new TextEncoder().encode(text);
+  return new ReadableStream({
+    start(c) {
+      for (let i = 0; i < bytes.length; i += chunkSize) c.enqueue(bytes.subarray(i, i + chunkSize));
+      c.close();
+    },
+  });
+}
+
+describe("drain", () => {
+  it("keeps the stream tail past the head cap so terminal usage survives truncation", async () => {
+    const head = "HEAD_START";
+    const filler = "x".repeat(4000);
+    const tail = "TERMINAL_USAGE_EVENT";
+    const out = await drain(chunkedStreamOf(head + filler + tail, 100), { maxHeadBytes: 500, tailBytes: 200 });
+    expect(out).toContain(head); // head retained
+    expect(out).toContain(tail); // terminal event retained via rolling tail
+    expect(out).toContain("truncated middle"); // marker shows the gap
+    expect(out).not.toContain(filler); // the middle is dropped
+  });
+  it("returns the whole body untouched when under the head cap", async () => {
+    const out = await drain(streamOf("small body"), { maxHeadBytes: 500, tailBytes: 200 });
+    expect(out).toBe("small body");
+  });
+});
 const anthropicResp = `event: message_start
 data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-4-5-20250929","role":"assistant","content":[],"usage":{"input_tokens":100,"output_tokens":1}}}
 

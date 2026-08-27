@@ -39,34 +39,53 @@ function streamFlagFromBody(requestBody: string, fallback: boolean): boolean {
 
 /** Cap the recorder's in-memory buffer of the tee'd response. A large tool
  * result (or a slow client back-pressuring the tee) would otherwise hold the
- * full body in heap per request. Past the cap we keep draining (so the tee
- * doesn't stall the client's branch) but stop accumulating — usage is parsed
- * from the head, and the stored body is truncated with a marker. */
-const MAX_RECORDED_BODY_BYTES = 5 * 1024 * 1024;
+ * full body in heap per request. Past the head cap we keep draining (so the tee
+ * doesn't stall the client's branch) and keep a rolling TAIL — the usage event
+ * (`message_delta` / `response.completed`) lives at the END of the stream, so
+ * dropping it would leave a >5MB response unpriced. Head + tail keeps usage
+ * parseable while bounding memory. */
+const MAX_RECORDED_HEAD_BYTES = 5 * 1024 * 1024;
+const RECORDED_TAIL_BYTES = 256 * 1024;
 
-async function drain(stream: ReadableStream<Uint8Array> | null): Promise<string> {
+export async function drain(
+  stream: ReadableStream<Uint8Array> | null,
+  opts?: { maxHeadBytes?: number; tailBytes?: number },
+): Promise<string> {
   if (!stream) return "";
+  const maxHead = opts?.maxHeadBytes ?? MAX_RECORDED_HEAD_BYTES;
+  const tailMax = opts?.tailBytes ?? RECORDED_TAIL_BYTES;
   const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  let bytes = 0;
+  const head: Uint8Array[] = [];
+  const tail: Uint8Array[] = [];
+  let headBytes = 0;
+  let tailBytes = 0;
   let truncated = false;
   try {
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
       if (!value) continue;
-      if (bytes < MAX_RECORDED_BODY_BYTES) {
-        chunks.push(value);
-        bytes += value.byteLength;
+      if (headBytes < maxHead) {
+        head.push(value);
+        headBytes += value.byteLength;
       } else {
-        truncated = true; // keep reading to drain the tee, but stop buffering
+        truncated = true;
+        tail.push(value);
+        tailBytes += value.byteLength;
+        while (tailBytes > RECORDED_TAIL_BYTES && tail.length > 1) {
+          tailBytes -= tail[0].byteLength;
+          tail.shift();
+        }
       }
     }
   } catch {
     /* client disconnect mid-stream: record what arrived */
   }
-  const text = new TextDecoder().decode(await new Blob(chunks).arrayBuffer());
-  return truncated ? `${text}\n…[truncated at ${MAX_RECORDED_BODY_BYTES} bytes]` : text;
+  const decode = async (chunks: Uint8Array[]): Promise<string> => new TextDecoder().decode(await new Blob(chunks).arrayBuffer());
+  const headText = await decode(head);
+  if (!truncated) return headText;
+  // The tail carries the terminal usage/completion events for parsing.
+  return `${headText}\n…[truncated middle]…\n${await decode(tail)}`;
 }
 
 function previousResponseId(kind: ProviderKind, requestBody: string): string | null {

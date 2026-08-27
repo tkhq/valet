@@ -11,7 +11,7 @@ import type { Hono, Context } from "hono";
 import type { AppEnv } from "../env.js";
 import type { ProviderKind } from "../proxy/types.js";
 import { resolveProxyPrincipal, extractPassthroughKey, wireError } from "../proxy/principal.js";
-import { resolveUpstream, resolveUpstreamBase } from "../proxy/upstream.js";
+import { resolveUpstream, DEFAULT_BASE } from "../proxy/upstream.js";
 import { getProxySettings } from "../services/org.js";
 import type { Upstream } from "../proxy/types.js";
 import { recordProxyCall } from "../proxy/recorder.js";
@@ -124,11 +124,11 @@ export function registerProxyGateway(app: Hono<AppEnv>, deps: ProxyGatewayDeps):
       return wireError(kind, 403, "The recording gateway is disabled for your org. An admin can enable it in Settings → Proxy.");
     }
 
-    // Credential strategy. Centralized (default): use the org's stored key.
+    // Credential strategy. Centralized (default): use the org's stored key at
+    // the org's configured endpoint (which may be a custom/Azure host).
     // Pass-through: forward the user's OWN provider key (the non-vlt_ credential
-    // the harness sent) so per-user keys/billing are preserved and valet only
-    // observes. Both modes resolve the SAME base URL (honoring an org's custom
-    // provider endpoint, e.g. Azure) — only the key differs.
+    // the harness sent) to the PUBLIC provider — a personal key is valid at the
+    // public API, not at an org's corporate gateway that expects org-level auth.
     let upstream: Upstream;
     if (settings.mode === "passthrough") {
       const userKey = extractPassthroughKey(c.req.raw.headers);
@@ -140,7 +140,7 @@ export function registerProxyGateway(app: Hono<AppEnv>, deps: ProxyGatewayDeps):
           `Pass-through credential mode is on for your org: set your own ${envVar} in the harness alongside your valet key.`,
         );
       }
-      upstream = { baseUrl: await resolveUpstreamBase(db, principal.orgId, kind), apiKey: userKey };
+      upstream = { baseUrl: DEFAULT_BASE[kind], apiKey: userKey };
     } else {
       const resolved = await resolveUpstream(db, c.var.providers.engineCredentials, principal.orgId, kind);
       if (!resolved) {
