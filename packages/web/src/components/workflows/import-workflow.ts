@@ -3,92 +3,115 @@
  * out. No React, so the shapes it accepts and the messages it refuses with
  * are tested directly.
  *
- * One parser reads both sources the import dialog offers — a pasted or
- * uploaded file, and a file read out of a public repository through
- * `GET /api/workflows/import/repo-file`. A second parser for the second
- * source would drift into accepting a shape the first one rejects.
+ * The shapes are `parseWorkflowFileValue`'s in `@valet/workflow`, so the
+ * browser and the server cannot drift apart. This module supplies the
+ * decoder: `JSON.parse` first, because every exported file and every API
+ * response is JSON, then a YAML chunk that `import("yaml")` keeps out of the
+ * main bundle for everyone who imports no YAML.
  */
 import {
-  isWorkflowDefinitionShape,
-  validateWorkflowDefinition,
+  parseWorkflowFileValue,
+  WORKFLOW_FILE_EXTENSIONS,
   type WorkflowDefinition,
-} from "~/components/workflows/editor-model";
+} from "@valet/workflow";
 
-/**
- * Refuse a file bigger than this before reading it. `JSON.parse` of a
- * multi-megabyte string blocks the main thread, and no workflow definition
- * is anywhere near this size.
- */
+/** Refuse a file bigger than this before reading it. Parsing a multi-megabyte
+ * string blocks the main thread. */
 export const MAX_IMPORT_BYTES = 2 * 1024 * 1024;
 
 export interface WorkflowImport {
   /** The name the file carried, when it carried one. */
   name?: string;
   definition: WorkflowDefinition;
+  /**
+   * The envelope blocks this import does NOT create, as short phrases for
+   * the review step to print. `POST /api/workflows` writes a name and a
+   * definition; a schedule, event triggers and a description have nowhere to
+   * land, and dropped in silence they import as a workflow that never runs.
+   */
+  skipped: string[];
 }
 
 export type ParsedWorkflowImport =
   | { ok: true; value: WorkflowImport }
   | { ok: false; errors: string[] };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 /**
- * File text → a definition to import.
+ * File text → a definition to import. Three shapes parse: the
+ * `valet: workflow/v1` envelope, a bare definition (the editor's JSON view),
+ * and `{ name, definition }` (what `GET /api/workflows/:id` answers with). A
+ * `valet: workflow-template/v1` file imports as the workflow its graph
+ * describes, under the template's name.
  *
- * Two shapes are accepted, and both already have a producer:
- *   1. A bare definition — what the editor's JSON view shows.
- *   2. `{ name, definition }` — what `GET /api/workflows/:id` answers with,
- *      so a saved API response imports as it stands, with its name.
+ * When the shape is right but the graph is wrong, the validator's own
+ * messages come back unaltered: they name the node and the field to correct.
+ * A file this function cannot decode at all gets a message from here.
  *
- * A failure returns the messages to show. When the shape is right but the
- * graph is wrong, those messages are the validator's own, unaltered: they
- * name the node and the field to correct, and a summary in their place
- * leaves the author with nothing to act on.
- *
- * The browser has no plugin catalog, so this cannot know which services the
- * deployment has. `POST /api/workflows` runs the same validator WITH that
- * knowledge and refuses an unknown service there. A definition that passes
- * here can still be refused at create, which is why the dialog shows the
- * server's messages too.
+ * The browser has no plugin catalog, so a definition that passes here can
+ * still be refused by `POST /api/workflows`, which runs the same validator
+ * with one.
  */
-export function parseWorkflowImport(text: string): ParsedWorkflowImport {
+export async function parseWorkflowImport(
+  text: string,
+  fileName?: string,
+): Promise<ParsedWorkflowImport> {
+  const label = fileName === undefined || fileName.trim() === "" ? "The pasted text" : fileName;
   let raw: unknown;
   try {
     raw = JSON.parse(text);
   } catch {
-    return {
-      ok: false,
-      errors: ["That file is not JSON. Choose an exported workflow definition (.json)."],
-    };
+    // A chunk that does not arrive says nothing about the file. One catch
+    // for both would send the reader to edit a file that was correct.
+    let yaml: typeof import("yaml");
+    try {
+      yaml = await import("yaml");
+    } catch (err) {
+      return {
+        ok: false,
+        errors: [
+          `Valet could not load the YAML reader: ${detail(err)}. Reload the page, then try again. A JSON file imports without this reader.`,
+        ],
+      };
+    }
+    try {
+      raw = yaml.parse(text);
+    } catch (err) {
+      return {
+        ok: false,
+        errors: [
+          `${label} is neither JSON nor YAML: ${detail(err)}. Choose an exported workflow file.`,
+        ],
+      };
+    }
   }
 
-  if (!isRecord(raw)) {
-    return {
-      ok: false,
-      errors: ["A workflow file holds a JSON object. Choose an exported workflow definition."],
-    };
+  const parsed = parseWorkflowFileValue(raw, label);
+  if (!parsed.ok) return { ok: false, errors: parsed.errors };
+
+  const file = parsed.file;
+  const name = file.kind === "template" ? file.template.name : file.name;
+  const description = file.kind === "template" ? file.template.description : file.description;
+
+  const skipped: string[] = [];
+  if (file.schedule !== undefined) skipped.push("a schedule");
+  if (file.events !== undefined && file.events.length > 0) {
+    skipped.push(
+      file.events.length === 1 ? "an event trigger" : `${file.events.length} event triggers`,
+    );
   }
+  if (description !== undefined && description.trim() !== "") skipped.push("a description");
 
-  const envelope = isRecord(raw.definition) ? raw.definition : undefined;
-  const candidate: unknown = envelope ?? raw;
-  const name = typeof raw.name === "string" && raw.name.trim() !== "" ? raw.name.trim() : undefined;
+  return {
+    ok: true,
+    value:
+      name === undefined
+        ? { definition: file.definition, skipped }
+        : { name, definition: file.definition, skipped },
+  };
+}
 
-  if (!isWorkflowDefinitionShape(candidate)) {
-    return {
-      ok: false,
-      errors: [
-        'That file holds no workflow definition. A definition carries "version", "nodes" and "edges" — export one from a workflow, or copy it from the editor\'s JSON view.',
-      ],
-    };
-  }
-
-  const result = validateWorkflowDefinition(candidate);
-  if (!result.ok) return { ok: false, errors: result.errors };
-
-  return { ok: true, value: name === undefined ? { definition: candidate } : { name, definition: candidate } };
+function detail(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 export interface ImportPreview {
@@ -100,8 +123,7 @@ export interface ImportPreview {
 }
 
 /** What the definition contains, for the step the user reads before they
- * commit. A foreach body is a node the run executes, so its service counts
- * the same as a top-level one. */
+ * commit. A foreach body is a node the run executes, so its service counts. */
 export function previewWorkflowImport(definition: WorkflowDefinition): ImportPreview {
   const counts = new Map<string, number>();
   const services: string[] = [];
@@ -126,13 +148,15 @@ export function previewWorkflowImport(definition: WorkflowDefinition): ImportPre
   };
 }
 
-/**
- * The name to offer when the file carried none. A file name is the closest
- * thing to one an author chose, so `workflows/nightly-deploy.json` becomes
- * "nightly-deploy". Pasted text has no file name and falls back.
- */
+/** The name to offer when the file carried none: `nightly-deploy.yaml` becomes
+ * "nightly-deploy". Pasted text has no file name and falls back. */
 export function suggestedImportName(fileName: string | undefined): string {
   const base = (fileName ?? "").split("/").pop() ?? "";
-  const withoutExtension = base.replace(/\.json$/i, "").trim();
+  const extension = WORKFLOW_FILE_EXTENSIONS.find((suffix) =>
+    base.toLowerCase().endsWith(suffix),
+  );
+  const withoutExtension = (
+    extension === undefined ? base : base.slice(0, -extension.length)
+  ).trim();
   return withoutExtension === "" ? "Imported workflow" : withoutExtension;
 }
