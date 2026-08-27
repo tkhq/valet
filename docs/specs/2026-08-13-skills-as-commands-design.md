@@ -183,3 +183,14 @@ Recorded at implementation time (2026-08-13):
   stored skills through the host's `skillsProviderFor` and replaces the
   session's skill map, so the registry and `skill`-tool lookups stay
   consistent with the database.
+- (2026-08-27) The web transcript renders a skill invocation as a
+  collapsed skill card, not as raw message text. The `<skill>` block
+  format lives in `@valet/shared` (`buildSkillBlock` /
+  `sliceSkillBlock` / `parseSkillBlock`); the dispatcher builds with it
+  and stamps `{ skill, skillArgs }` onto the submission's metadata, which
+  the wire projects as `Message.skill`. The client recovers the card in
+  fidelity order: exact slice from the stamp (delimiter-proof), whole-text
+  body for a host `Thread.skill()` submission, then the anchored regex for
+  rows persisted before the stamp existed. Detection is gated to user
+  messages; trailing arguments render as prose below the card, and the
+  message copy button yields the re-sendable `/skill:<name> <args>` form.

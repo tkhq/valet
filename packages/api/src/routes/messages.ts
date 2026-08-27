@@ -29,6 +29,7 @@ import type {
   Message,
   MessagePart,
   MessageRole,
+  MessageSkillInvocation,
   PatchThreadRequest,
   PromptFileAttachment,
   PromptImageAttachment,
@@ -84,6 +85,7 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
   // either a `data:` URL or raw bytes; the wire ships one canonical
   // `data:` URL string. Skip entries missing both (nothing to render).
   const wireAttachments = projectAttachments(e.attachments);
+  const skill = skillInvocationFromMetadata(e.metadata, role);
   return {
     id: e.id,
     sessionId,
@@ -95,8 +97,27 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
     queueItemId: e.queueItemId,
     signal: engineSignalToWire(e.signal),
     model: e.model,
+    ...(skill ? { skill } : {}),
     ...(wireAttachments.length > 0 ? { attachments: wireAttachments } : {}),
   };
+}
+
+/**
+ * Wire projection of a skill-invocation stamp. Both producers write the
+ * same keys: the command dispatcher stamps `{ skill, skillArgs }` on a
+ * slash expansion, and `Thread.skill()` stamps `{ skill }` on a host
+ * invocation. Only user entries qualify — the stamp rides the queue item
+ * onto the user entry, never onto assistant output.
+ */
+function skillInvocationFromMetadata(
+  metadata: Record<string, unknown> | undefined,
+  role: MessageRole,
+): MessageSkillInvocation | undefined {
+  if (role !== "user" || !metadata) return undefined;
+  const name = metadata.skill;
+  if (typeof name !== "string" || name.length === 0) return undefined;
+  const args = metadata.skillArgs;
+  return { name, ...(typeof args === "string" && args ? { args } : {}) };
 }
 
 /**
@@ -517,12 +538,23 @@ export async function submitSessionPrompt(
   // A submit failure hands the consumed refs back so a retry can resend
   // them. Once the prompt is queued the refs stay consumed — the
   // attachments are already part of the persisted prompt.
+  // A context-invocation skill expansion carries the skill identity as
+  // submission metadata; the persisted entry's wire projection renders it
+  // as a skill card without re-parsing the text.
+  const skillMetadata =
+    outcome?.kind === "expand" && outcome.skill
+      ? { skill: outcome.skill.name, skillArgs: outcome.skill.args }
+      : undefined;
+
   let receipt;
   try {
     receipt =
       outcome && outcome.kind === "execute"
         ? await engineSession.prompt(withAttachments(promptText), { threadId: thread.id })
-        : await thread.submitPrompt(withAttachments(promptText), {});
+        : await thread.submitPrompt(
+            withAttachments(promptText),
+            skillMetadata ? { metadata: skillMetadata } : {},
+          );
   } catch (err) {
     attachmentRefStore.restore(resolvedFileAttachments);
     throw err;

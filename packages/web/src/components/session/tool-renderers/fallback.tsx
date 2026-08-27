@@ -140,7 +140,7 @@ function SectionLabel({
   );
 }
 
-function KeyValueTable({ entries }: { entries: [string, unknown][] }) {
+export function KeyValueTable({ entries }: { entries: [string, unknown][] }) {
   return (
     <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-0.5 text-[12px]">
       {entries.map(([k, v]) => (

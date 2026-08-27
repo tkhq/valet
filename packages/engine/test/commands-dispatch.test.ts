@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { buildSkillBlock } from "@valet/shared";
 import { buildCommandRegistry } from "../src/commands/registry.js";
 import { dispatchCommand } from "../src/commands/dispatch.js";
 
@@ -50,6 +51,13 @@ describe("dispatchCommand", () => {
     if (o.kind === "expand") {
       expect(o.text).toContain('<skill name="review">');
       expect(o.text.endsWith("src/")).toBe(true);
+      // The expansion is EXACTLY the shared builder's output — the web
+      // client recovers it with the shared parser, so any format change
+      // must land in @valet/shared where both sides see it.
+      expect(o.text).toBe(buildSkillBlock("review", reviewSkill.content, "src/"));
+      // The skill stamp lets callers put the invocation on the submission's
+      // metadata so clients render a card without re-parsing the text.
+      expect(o.skill).toEqual({ name: "review", args: "src/" });
     }
   });
 
@@ -64,6 +72,9 @@ describe("dispatchCommand", () => {
     if (o.kind === "expand") {
       expect(o.text).toBe("Summarize auth today. Audience: the team.");
       expect(o.text).not.toContain("<skill");
+      // Prompt skills expand to the user's own message — never stamped,
+      // never rendered as a card.
+      expect(o.skill).toBeUndefined();
     }
   });
 

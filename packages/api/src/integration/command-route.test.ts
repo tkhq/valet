@@ -255,3 +255,45 @@ describe("command_result REST round-trip (Task 11)", () => {
     expect(onDefault.messages.some((m) => m.command?.name === "status")).toBe(false);
   });
 });
+
+describe("skill invocation REST round-trip", () => {
+  it("a context skill expansion carries Message.skill after reload", async () => {
+    api = await bootTestApi();
+    await createSkill(api.providers.db, OWNER, {
+      name: "review",
+      description: "Review code",
+      content: "# Review\n\nDo a thorough review.",
+      frontmatter: {}, // invocation defaults to context
+    });
+
+    const sessionId = await createSession(api.baseUrl);
+    const postRes = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/messages`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ text: "/skill:review src/ please" }),
+    });
+    expect(postRes.status).toBe(202);
+
+    // The expansion is a queued prompt; the user entry persists when the
+    // claim loop starts the turn (the keyless model call then fails, which
+    // is fine — the entry stays). Poll the reload path briefly.
+    const deadline = Date.now() + 10_000;
+    let user: ListMessagesResponse["messages"][number] | undefined;
+    while (Date.now() < deadline && !user) {
+      const msgsRes = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/messages`, {
+        headers: HEADERS,
+      });
+      expect(msgsRes.status).toBe(200);
+      const { messages } = (await msgsRes.json()) as ListMessagesResponse;
+      user = messages.find((m) => m.role === "user");
+      if (!user) await new Promise((r) => setTimeout(r, 200));
+    }
+
+    expect(user).toBeDefined();
+    // The persisted text is the dispatcher expansion...
+    expect(user?.content).toContain('<skill name="review">');
+    expect(user?.content.endsWith("src/ please")).toBe(true);
+    // ...and the wire carries the structured stamp the client renders from.
+    expect(user?.skill).toEqual({ name: "review", args: "src/ please" });
+  });
+});

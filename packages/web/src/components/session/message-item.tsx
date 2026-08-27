@@ -1,5 +1,11 @@
 import { Bot, User as UserIcon, FileText } from "lucide-react";
-import type { MessagePart, PromptImageAttachment, PromptFileAttachment } from "@valet/api/wire";
+import { memo, useMemo } from "react";
+import type {
+  MessagePart,
+  MessageSkillInvocation,
+  PromptImageAttachment,
+  PromptFileAttachment,
+} from "@valet/api/wire";
 import type { SettledOutcome, StreamMessage } from "~/stores/stream";
 import { Avatar, AvatarFallback } from "~/components/primitives/avatar";
 import { Markdown } from "~/components/markdown";
@@ -8,6 +14,7 @@ import { pickRenderer, ToolShell } from "./tool-renderers";
 import { showsLiveBody } from "./tool-renderers/types";
 import { ToolBody } from "./tool-renderers/tool-shell";
 import { Thinking } from "./tool-renderers/thinking";
+import { extractSkillInvocation, type SkillBlock } from "./tool-renderers/skill";
 import { cn } from "~/lib/cn";
 
 export function MessageItem({
@@ -60,7 +67,7 @@ export function MessageItem({
               <UserAttachmentStrip attachments={message.attachments} />
             )}
             {message.parts.length === 0 && message.content && (
-              <TextBlock text={message.content} />
+              <TextBlock text={message.content} skillMeta={isUser ? message.skill : undefined} detectSkill={isUser} />
             )}
             {message.parts.map((part, i) => (
               // Tool cards hold per-mount UI state (expansion, user-touch
@@ -72,6 +79,8 @@ export function MessageItem({
               <PartView
                 key={part.kind === "tool_call" ? `tc-${part.callId}` : `${part.kind}-${i}`}
                 part={part}
+                skillMeta={isUser ? message.skill : undefined}
+                detectSkill={isUser}
               />
             ))}
             {!suppressEmptyPlaceholder && isEmptyAssistantMessage(message) && (
@@ -115,14 +124,30 @@ export function messageCopyText(message: StreamMessage): string {
     .filter((p): p is Extract<MessagePart, { kind: "text" }> => p.kind === "text")
     .map((p) => p.text.trim())
     .filter(Boolean);
-  if (texts.length > 0) return texts.join("\n\n");
-  return message.content?.trim() ?? "";
+  const raw = texts.length > 0 ? texts.join("\n\n") : (message.content?.trim() ?? "");
+  // A skill-invocation user message displays as a card plus the typed
+  // arguments — copying the raw multi-KB expansion would paste internal
+  // markup that, re-sent, bypasses dispatch and persists the stale skill
+  // body. Copy the re-sendable command form instead.
+  if (message.role === "user" && raw) {
+    const block = extractSkillInvocation(raw, message.skill);
+    if (block) return `/skill:${block.name}${block.rest ? ` ${block.rest}` : ""}`;
+  }
+  return raw;
 }
 
-function PartView({ part }: { part: MessagePart }) {
+function PartView({
+  part,
+  skillMeta,
+  detectSkill,
+}: {
+  part: MessagePart;
+  skillMeta?: MessageSkillInvocation;
+  detectSkill?: boolean;
+}) {
   switch (part.kind) {
     case "text":
-      return <TextBlock text={part.text} />;
+      return <TextBlock text={part.text} skillMeta={skillMeta} detectSkill={detectSkill} />;
     case "thinking":
       return <Thinking text={part.text} />;
     case "tool_call":
@@ -130,10 +155,61 @@ function PartView({ part }: { part: MessagePart }) {
   }
 }
 
-function TextBlock({ text }: { text: string }) {
+function TextBlock({
+  text,
+  skillMeta,
+  detectSkill = false,
+}: {
+  text: string;
+  /** Wire skill stamp from the enclosing message (user messages only). */
+  skillMeta?: MessageSkillInvocation;
+  /** True only for user messages — the dispatcher writes skill blocks
+   *  nowhere else, and assistant prose that quotes one must stay prose. */
+  detectSkill?: boolean;
+}) {
+  // Memoized so streaming re-renders elsewhere in the thread don't re-run
+  // the extraction on static user text every frame.
+  const block = useMemo(
+    () => (detectSkill ? extractSkillInvocation(text, skillMeta) : null),
+    [text, skillMeta, detectSkill],
+  );
   if (!text) return null;
+  if (block) {
+    return (
+      <>
+        <SkillInvocationBlock block={block} />
+        {block.rest && <Markdown>{block.rest}</Markdown>}
+      </>
+    );
+  }
   return <Markdown>{text}</Markdown>;
 }
+
+/**
+ * The transcript card for a skill-invocation user message. Synthesizes a
+ * settled `tool_call` part and renders it through the SAME ToolCallBlock
+ * as the model's own `skill` tool call, so the two paths cannot drift.
+ * Trailing user arguments are the caller's to render — they are the
+ * user's actual prompt, not part of the skill.
+ */
+export const SkillInvocationBlock = memo(function SkillInvocationBlock({
+  block,
+}: {
+  block: SkillBlock;
+}) {
+  const part = useMemo<Extract<MessagePart, { kind: "tool_call" }>>(
+    () => ({
+      kind: "tool_call",
+      callId: "skill-invocation",
+      toolName: "skill",
+      status: "completed",
+      args: { name: block.name },
+      result: { text: block.content },
+    }),
+    [block],
+  );
+  return <ToolCallBlock part={part} />;
+});
 
 /**
  * Read-only strip for a user message's attachments (images and files).

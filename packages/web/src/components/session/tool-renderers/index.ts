@@ -19,6 +19,7 @@ import { memShareRenderer } from "./mem-share";
 import { memWriteRenderer } from "./mem-write";
 import { openaiMediaRenderer } from "./openai-media";
 import { readRenderer } from "./read";
+import { skillRenderer } from "./skill";
 import { threadReadRenderer } from "./thread-read";
 import { workflowRenderer } from "./workflow";
 import { writeRenderer } from "./write";
@@ -33,6 +34,7 @@ const RENDERERS: ToolRenderer[] = [
   memReadRenderer,
   memShareRenderer,
   memWriteRenderer,
+  skillRenderer,
   threadReadRenderer,
   workflowRenderer,
   findReplaceRenderer,
