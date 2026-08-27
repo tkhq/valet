@@ -67,12 +67,19 @@ the switcher — legible and trustworthy.
    (TKAI-226). A team workspace pins `/usage` to `scope=team&teamId=`,
    which the usage endpoints (`/breakdown`, `/items`, `/export.csv`)
    answer with the team's owned spend (`cost_entries.owner_type =
-   'team'`) after a live `isTeamMember` check. The me/org toggle,
-   the proxy request log, and the key-setup callout are personal
-   surfaces: proxy traffic is never team-owned, so they render only in
-   the personal workspace. The proxy drill-down returns no rows in team
-   scope for the same reason. Team scope shows no per-member table —
-   `byUser` stays an org-admin view.
+   'team'`) after resolving the team in the caller's org
+   (`getTeamInOrg`) and a live `isTeamMember` check. An unknown team, a
+   foreign org's team, and a team the caller is not on all answer the
+   same 404 — the existence-hiding convention the sessions, teams, and
+   events routes use. The me/org toggle, the proxy request log, and
+   the key-setup callout are personal surfaces: proxy traffic is never
+   team-owned, so they render only in the personal workspace. The proxy
+   drill-down returns no rows in team scope for the same reason. Team
+   scope shows no per-member data — `byUser` stays an org-admin view,
+   and the team CSV blanks `user_id` so a member cannot reconstruct it.
+   The page holds its queries until the switcher's stored key is
+   validated against the team list, so a stale key from a team the
+   caller left cannot flash a 404 in place of the totals.
 
 ## Known limits
 

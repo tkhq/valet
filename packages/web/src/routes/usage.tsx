@@ -26,8 +26,7 @@ import { useOrg } from "~/api/settings";
 import { SpendChart } from "~/components/usage/SpendChart";
 import { RequestLog } from "~/components/usage/RequestLog";
 import { SampleView } from "~/components/usage/SampleView";
-import { WorkspaceClause } from "~/components/workspace-clause";
-import { useWorkspaceScope } from "~/lib/workspace-scope";
+import { WorkspaceClause, useActiveWorkspace } from "~/components/workspace-clause";
 import type { UsageUseCase, UsageDrillItem, UsageScopeName } from "@valet/api/wire";
 import { api } from "~/api/client";
 
@@ -236,12 +235,22 @@ export function UsagePage() {
   // A team workspace pins the scope to that team; the me/org toggle only
   // exists in the personal workspace. The toggle's state survives a visit to
   // a team workspace, so switching back restores the view you had.
-  const teamId = useWorkspaceScope().teamId;
+  //
+  // The switcher's stored key can name a team the caller has left until the
+  // team list loads; useActiveWorkspace resolves to undefined in that window.
+  // Firing a team query on the raw key would 404 and flash an error in place
+  // of the totals — hold the queries until the workspace can be named.
+  const ws = useActiveWorkspace();
+  const scopeKnown = ws !== undefined;
+  const personalWorkspace = ws?.kind === "personal";
+  const teamId = ws?.kind === "team" ? ws.team.id : undefined;
   const scope: UsageScopeName = teamId !== undefined ? "team" : personalScope;
 
-  const breakdownQ = useUsageBreakdown(window, scope, teamId);
-  const requestsQ = useProxyRequests({ limit: 50, cursor });
-  const settingsQ = useProxySettings();
+  const breakdownQ = useUsageBreakdown(window, scope, teamId, { enabled: scopeKnown });
+  // Proxy traffic is personal; every consumer of these two queries renders
+  // only in the personal workspace, so do not fetch outside it.
+  const requestsQ = useProxyRequests({ limit: 50, cursor }, { enabled: personalWorkspace });
+  const settingsQ = useProxySettings({ enabled: personalWorkspace });
 
   // Accumulate proxy request items across page loads.
   const [seenCursors] = useState(() => new Set<string | undefined>());
@@ -251,7 +260,7 @@ export function UsagePage() {
   // workspace starts from page one, not a mid-list cursor.
   useEffect(() => {
     setCursor(undefined);
-    setItems([]);
+    setItems((prev) => (prev.length === 0 ? prev : []));
     seenCursors.clear();
     setSelectedId(null);
   }, [teamId, seenCursors]);
@@ -312,7 +321,7 @@ export function UsagePage() {
         </div>
 
         {/* Disabled-gateway notice */}
-        {scope !== "team" && settingsQ.data?.enabled === false && (
+        {personalWorkspace && settingsQ.data?.enabled === false && (
           <div className="rounded border border-line bg-paper px-4 py-3 text-sm text-muted">
             The recording gateway is disabled — enable it in{" "}
             <Link
@@ -341,7 +350,7 @@ export function UsagePage() {
               {w}
             </button>
           ))}
-          {teamId === undefined && isOrgAdmin && (
+          {personalWorkspace && isOrgAdmin && (
             <div className="flex items-center gap-1 ml-4 rounded border border-line overflow-hidden text-sm">
               <button
                 type="button"
@@ -369,18 +378,21 @@ export function UsagePage() {
               </button>
             </div>
           )}
-          <a
-            href={csvHref}
-            download
-            className="ml-auto rounded px-3 py-1 text-sm border border-line text-muted hover:text-ink hover:border-ink"
-            aria-label={`Download CSV (${window}, ${scope})`}
-          >
-            Download CSV ({window}, {scope})
-          </a>
+          {scopeKnown && (
+            <a
+              href={csvHref}
+              download
+              className="ml-auto rounded px-3 py-1 text-sm border border-line text-muted hover:text-ink hover:border-ink"
+              aria-label={`Download CSV (${window}, ${scope})`}
+            >
+              Download CSV ({window}, {scope})
+            </a>
+          )}
         </div>
 
-        {/* Totals + chart + by-use-case + by-model */}
-        {breakdownQ.isLoading ? (
+        {/* Totals + chart + by-use-case + by-model. A disabled query (scope
+            still resolving) reports isLoading=false, so gate on both. */}
+        {!scopeKnown || breakdownQ.isLoading ? (
           <p className="text-sm text-muted">Loading…</p>
         ) : breakdownQ.error ? (
           <p className="text-sm text-danger-600">{String(breakdownQ.error)}</p>
@@ -419,13 +431,15 @@ export function UsagePage() {
               <SpendChart buckets={chartBuckets} />
             </div>
 
-            {/* By use case — all four rows expandable. Keyed by the scope so
-                a workspace switch remounts the rows: an expanded drill list
-                must not carry over into a different workspace's view. */}
+            {/* By use case — all four rows expandable. Keyed by the WORKSPACE
+                so a workspace switch remounts the rows: an expanded drill
+                list must not carry over into a different workspace's view.
+                The me/org toggle deliberately does not remount — an admin
+                comparing scopes keeps their expanded rows. */}
             <div>
               <h2 className="text-sm font-medium text-ink mb-3">By use case</h2>
               <div
-                key={`${scope}:${teamId ?? ""}`}
+                key={teamId ?? "personal"}
                 className="rounded border border-line overflow-hidden"
               >
                 {/* Header row */}
@@ -564,7 +578,7 @@ export function UsagePage() {
         {/* Proxy (external tools) — request log + drill-down. Proxy traffic is
             always personal (never team-owned), so the log and the key-setup
             callout stay out of a team workspace's view. */}
-        {scope !== "team" && (
+        {personalWorkspace && (
         <div>
           <h2 className="text-sm font-medium text-ink mb-1">
             Proxy (external tools) — request log
@@ -596,7 +610,7 @@ export function UsagePage() {
         )}
 
         {/* Key setup callout */}
-        {scope !== "team" && (
+        {personalWorkspace && (
         <div className="rounded border border-line bg-paper px-4 py-3 text-sm text-muted">
           Generate a key and set up your tools in{" "}
           <Link

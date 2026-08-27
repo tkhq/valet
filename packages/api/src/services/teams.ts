@@ -455,6 +455,20 @@ export async function canAdministerTeam(db: AppQueryable, teamId: string, userId
 }
 
 /**
+ * The team row, only when the team belongs to `orgId`. The one definition of
+ * "this team is reachable from this org context", shared by the team routes
+ * and team-scoped queries (usage) so the rule cannot drift. An unknown id
+ * resolves the same as a foreign org's team — callers must not reveal which
+ * of the two it was (existence hiding).
+ */
+export async function getTeamInOrg(db: AppQueryable, orgId: string, teamId: string): Promise<TeamRow | undefined> {
+  const rows = await db.select().from(teams).where(eq(teams.id, teamId)).limit(1);
+  const row = rows[0];
+  if (!row || row.orgId !== orgId) return undefined;
+  return row;
+}
+
+/**
  * Lists every team in an org, regardless of the caller's own membership.
  * Org admins manage the whole roster, not just teams they happen to belong
  * to — `listTeamsForUser` alone would hide a team from an admin who isn't

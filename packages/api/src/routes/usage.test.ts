@@ -111,7 +111,7 @@ describe("GET /api/usage — scope=team", () => {
     await seedEngineEntry(api, "e-mine", "s-mine", now);
   }
 
-  it("breakdown covers the team's owned spend only; non-member 403s; missing teamId 400s", async () => {
+  it("breakdown covers the team's owned spend only; non-member 404s; missing teamId 400s", async () => {
     api = await bootTestApi();
     const now = Date.now();
     await seedTeamSpend(api, now);
@@ -123,16 +123,18 @@ describe("GET /api/usage — scope=team", () => {
     expect(body.totalTurns).toBe(1); // s-team only, not s-mine
     expect(body.totalCostUsd).toBeCloseTo(0.003, 6);
 
-    // A non-member cannot see the team's usage.
+    // A non-member gets 404, not 403 — a team you are not on must be
+    // indistinguishable from one that does not exist (the sessions/teams
+    // routes' existence-hiding convention).
     const nonMember = await fetch(`${api.baseUrl}/api/usage/breakdown?scope=team&teamId=team-x`, { headers: { "x-valet-test-user-id": "test-member" } });
-    expect(nonMember.status).toBe(403);
+    expect(nonMember.status).toBe(404);
 
     // scope=team without a teamId is a request error, not a permission error.
     const missing = await fetch(`${api.baseUrl}/api/usage/breakdown?scope=team`);
     expect(missing.status).toBe(400);
   });
 
-  it("refuses a teamId outside the caller's org, and an unknown teamId", async () => {
+  it("answers a foreign org's teamId and an unknown teamId with the same 404", async () => {
     api = await bootTestApi();
     const now = Date.now();
     const db = api.providers.db;
@@ -143,10 +145,13 @@ describe("GET /api/usage — scope=team", () => {
     await db.insert(teamMembers).values({ teamId: "team-foreign", userId: "local-user", role: "member" });
 
     const foreign = await fetch(`${api.baseUrl}/api/usage/breakdown?scope=team&teamId=team-foreign`);
-    expect(foreign.status).toBe(403);
+    expect(foreign.status).toBe(404);
 
     const unknown = await fetch(`${api.baseUrl}/api/usage/breakdown?scope=team&teamId=no-such-team`);
-    expect(unknown.status).toBe(403);
+    expect(unknown.status).toBe(404);
+
+    // Same body for both — the response must not reveal which case it was.
+    expect(await foreign.json()).toEqual(await unknown.json());
   });
 
   it("drill-down lists the team's sessions only, and the proxy drill is empty", async () => {
@@ -167,17 +172,20 @@ describe("GET /api/usage — scope=team", () => {
     expect(px.items).toEqual([]);
   });
 
-  it("CSV export carries the team's rows only and names the scope in the filename", async () => {
+  it("CSV export carries the team's rows only, names the team in the filename, and withholds user_id", async () => {
     api = await bootTestApi();
     const now = Date.now();
     await seedTeamSpend(api, now);
 
     const res = await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d&scope=team&teamId=team-x`);
     expect(res.status).toBe(200);
-    expect(res.headers.get("content-disposition")).toContain("valet-usage-team-30d.csv");
+    expect(res.headers.get("content-disposition")).toContain("valet-usage-team-team-x-30d.csv");
     const text = await res.text();
     expect(text).toContain("s-team");
     expect(text).not.toContain("s-mine");
+    // Per-member attribution stays an org-admin view (byUser); the team CSV
+    // must not carry it.
+    expect(text).not.toContain("local-user");
   });
 });
 
