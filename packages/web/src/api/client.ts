@@ -180,6 +180,8 @@ import type {
   ProxyRequestDetail,
   ProxyRequestListItem,
   ProxySettingsResponse,
+  UsageBreakdownResponse,
+  UsageSessionsResponse,
 } from "@valet/api/wire";
 import type {
   ExportMemoryResponse,
@@ -742,6 +744,16 @@ export const api = {
   patchMe: (body: PatchMeRequest) => request<PatchMeResponse>("PATCH", "/me", body),
   listModels: () => request<ListModelsResponse>("GET", "/models"),
   getUsageSummary: () => request<UsageSummaryResponse>("GET", "/usage/summary"),
+  usageBreakdown: (window: string = "7d") =>
+    request<UsageBreakdownResponse>(
+      "GET",
+      `/usage/breakdown?window=${encodeURIComponent(window)}`,
+    ),
+  usageSessions: (window: string = "7d", useCase?: "orchestrator" | "session") => {
+    const qs = new URLSearchParams({ window });
+    if (useCase) qs.set("useCase", useCase);
+    return request<UsageSessionsResponse>("GET", `/usage/sessions?${qs}`);
+  },
   getJournalSummary: () =>
     request<{ date: string; summary: string | null }>("GET", "/memory/journal-summary"),
   getOrg: () => request<OrgResponse>("GET", "/org"),
