@@ -41,4 +41,8 @@ describe("resolveCanonicalModel", () => {
   it("returns null when neither the id nor its stripped form is known", () => {
     expect(resolveCanonicalModel("openai", "totally-made-up-2024-01-01")).toBeNull();
   });
+  it("does NOT strip a non-date 8-digit suffix (avoids mis-pricing)", () => {
+    // 12345678 is not a valid YYYYMMDD (month 34), so no strip → unknown id.
+    expect(resolveCanonicalModel("openai", "gpt-4o-mini-12345678")).toBeNull();
+  });
 });

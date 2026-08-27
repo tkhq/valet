@@ -56,11 +56,17 @@ export function outboundHeaders(raw: Headers, kind: ProviderKind, apiKey: string
   return out;
 }
 
-/** Strip hop-by-hop headers from the upstream response before forwarding to client. */
-function sanitizeResponseHeaders(res: Response): Headers {
+/**
+ * Response headers forwarded to the client. Strips hop-by-hop headers (the tee
+ * decodes the body, so content/transfer-encoding no longer apply) AND any
+ * `set-cookie` the upstream provider set — the harness authenticates with its
+ * valet key, and forwarding an upstream session cookie would hand the client
+ * provider-side session material it must never see.
+ */
+export function sanitizeResponseHeaders(res: Response): Headers {
   const h = new Headers(res.headers);
-  h.delete("content-encoding");
-  h.delete("transfer-encoding");
+  for (const name of HOP_BY_HOP) h.delete(name);
+  h.delete("set-cookie");
   return h;
 }
 

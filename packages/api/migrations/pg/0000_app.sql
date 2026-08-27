@@ -1007,4 +1007,9 @@ SELECT
 	NULL AS "workflow_id", NULL AS "workflow_run_id",
 	p."input_tokens", p."output_tokens", p."cache_read_tokens", p."cache_write_tokens", p."total_tokens",
 	p."cost_usd" AS "cost_total", (p."cost_usd" IS NOT NULL) AS "priced"
-FROM "llm_proxy_requests" p;
+FROM "llm_proxy_requests" p
+-- Only rows that carry usage count as billable turns — mirrors the engine
+-- side's `WHERE e."usage" IS NOT NULL`. Excludes failed/4xx proxy calls and
+-- non-completion passthroughs (0 tokens), which would otherwise inflate
+-- `/api/usage` turn counts.
+WHERE p."total_tokens" > 0;

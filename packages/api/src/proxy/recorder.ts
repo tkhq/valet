@@ -37,20 +37,36 @@ function streamFlagFromBody(requestBody: string, fallback: boolean): boolean {
   return fallback;
 }
 
+/** Cap the recorder's in-memory buffer of the tee'd response. A large tool
+ * result (or a slow client back-pressuring the tee) would otherwise hold the
+ * full body in heap per request. Past the cap we keep draining (so the tee
+ * doesn't stall the client's branch) but stop accumulating — usage is parsed
+ * from the head, and the stored body is truncated with a marker. */
+const MAX_RECORDED_BODY_BYTES = 5 * 1024 * 1024;
+
 async function drain(stream: ReadableStream<Uint8Array> | null): Promise<string> {
   if (!stream) return "";
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  let truncated = false;
   try {
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
-      if (value) chunks.push(value);
+      if (!value) continue;
+      if (bytes < MAX_RECORDED_BODY_BYTES) {
+        chunks.push(value);
+        bytes += value.byteLength;
+      } else {
+        truncated = true; // keep reading to drain the tee, but stop buffering
+      }
     }
   } catch {
     /* client disconnect mid-stream: record what arrived */
   }
-  return new TextDecoder().decode(await new Blob(chunks).arrayBuffer());
+  const text = new TextDecoder().decode(await new Blob(chunks).arrayBuffer());
+  return truncated ? `${text}\n…[truncated at ${MAX_RECORDED_BODY_BYTES} bytes]` : text;
 }
 
 function previousResponseId(kind: ProviderKind, requestBody: string): string | null {

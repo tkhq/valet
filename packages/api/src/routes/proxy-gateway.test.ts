@@ -1,6 +1,26 @@
 // packages/api/src/routes/proxy-gateway.test.ts
 import { describe, it, expect } from "vitest";
-import { outboundHeaders } from "./proxy-gateway.js";
+import { outboundHeaders, sanitizeResponseHeaders } from "./proxy-gateway.js";
+
+describe("sanitizeResponseHeaders", () => {
+  it("strips upstream set-cookie and hop-by-hop, keeps the rest", () => {
+    const res = new Response(null, {
+      headers: {
+        "set-cookie": "sess=upstream-secret; HttpOnly",
+        "content-encoding": "gzip",
+        connection: "keep-alive",
+        "content-type": "application/json",
+        "anthropic-ratelimit-requests-remaining": "42",
+      },
+    });
+    const out = sanitizeResponseHeaders(res);
+    expect(out.get("set-cookie")).toBeNull();          // upstream session material never reaches the client
+    expect(out.get("content-encoding")).toBeNull();     // tee decodes the body
+    expect(out.get("connection")).toBeNull();
+    expect(out.get("content-type")).toBe("application/json");
+    expect(out.get("anthropic-ratelimit-requests-remaining")).toBe("42");
+  });
+});
 
 describe("outboundHeaders", () => {
   it("forwards provider headers, drops the valet key + hop-by-hop, sets real auth", () => {

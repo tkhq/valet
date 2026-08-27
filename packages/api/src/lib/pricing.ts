@@ -29,8 +29,12 @@ function inRegistry(kind: ProviderKind, id: string): boolean {
  */
 export function resolveCanonicalModel(kind: ProviderKind, id: string): string | null {
   if (inRegistry(kind, id)) return id;
-  // OpenAI dates are `-YYYY-MM-DD`; Anthropic dates are `-YYYYMMDD`.
-  const stripped = id.match(/^(.*?)-(?:\d{4}-\d{2}-\d{2}|\d{8})$/)?.[1];
+  // Strip only a trailing PLAUSIBLE calendar date so an id whose base name
+  // merely ends in digits isn't mis-stripped onto a different model. OpenAI
+  // dates are `-YYYY-MM-DD`; Anthropic dates are `-YYYYMMDD`. Month 01-12,
+  // day 01-31. The `inRegistry` guard below is the real safety net.
+  const date = "(?:20\\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])|20\\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\\d|3[01]))";
+  const stripped = id.match(new RegExp(`^(.*?)-${date}$`))?.[1];
   if (stripped && inRegistry(kind, stripped)) return stripped;
   return null;
 }
