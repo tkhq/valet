@@ -1,6 +1,6 @@
 /**
  * Wires the shared EventStream's producers into the attention router
- * (decision 19's "Wired producers"). Two subscriptions:
+ * (decision 19's "Wired producers"). Three subscriptions:
  *
  *  - `submission_stuck` → kind 'escalation', routed to the stuck session's
  *    own owner. Title names the session (its app-row title if one exists,
@@ -12,6 +12,16 @@
  *    no independent audience). Every other session — standalone, user
  *    orchestrator, team orchestrator — has its own audience, so the gate
  *    routes to that session's own owner.
+ *  - `decision_gate_resolved` / `_expired` / `_withdrawn` → mark the gate's
+ *    notifications read (`markGateNotificationsRead`). A terminal gate's
+ *    call to action is void; leaving the rows unread keeps the web bell,
+ *    title count, and rail dot asking for an answer nobody can give.
+ *
+ * The kind-per-producer mapping here has a client-side mirror: the web's
+ * `GATE_BACKED` list (`packages/web/src/lib/use-attention-ping.ts`) names
+ * the kinds that announce a decision gate so live sessions can trust the
+ * stream store over the notifications poll. A new producer or a new kind
+ * must update both, or the rail dot mishandles it.
  *
  * `href` points at the surface where the person can actually answer, which
  * is not the same route for both kinds of session — see `attentionHref`.
@@ -24,7 +34,12 @@ import { parseAssistantSessionId } from "@valet/engine";
 import type { DeliveredBusEvent, EventStream, SessionStore } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions } from "../schema/index.js";
-import { routeAttention, type AttentionChannelDeliverer, type AttentionDeps } from "./attention.js";
+import {
+  markGateNotificationsRead,
+  routeAttention,
+  type AttentionChannelDeliverer,
+  type AttentionDeps,
+} from "./attention.js";
 
 export interface AttentionWiringDeps extends AttentionDeps {
   db: AppDb;
@@ -136,8 +151,26 @@ export function wireAttentionRouter(deps: AttentionWiringDeps): () => void {
     });
   });
 
+  const unsubSettled = deps.eventStream.subscribe(
+    { eventTypes: ["decision_gate_resolved", "decision_gate_expired", "decision_gate_withdrawn"] },
+    (delivered) => {
+      const e = delivered.event;
+      if (
+        e.type !== "decision_gate_resolved" &&
+        e.type !== "decision_gate_expired" &&
+        e.type !== "decision_gate_withdrawn"
+      ) {
+        return;
+      }
+      markGateNotificationsRead(deps.db, e.gateId).catch((err) => {
+        console.error("attention router: gate-settled handler failed:", err);
+      });
+    },
+  );
+
   return () => {
     unsubStuck();
     unsubGate();
+    unsubSettled();
   };
 }

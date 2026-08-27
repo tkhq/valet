@@ -76,6 +76,30 @@ function gateEvent(sessionId: string, gateId: string, title: string): BusEvent {
   };
 }
 
+/** A terminal-gate BusEvent on `sessionId`, shaped as the engine emits it. */
+function gateSettledEvent(
+  sessionId: string,
+  gateId: string,
+  type: "decision_gate_resolved" | "decision_gate_expired" | "decision_gate_withdrawn",
+): BusEvent {
+  const base = { sessionId, threadId: "th-1", timestamp: Date.now() };
+  if (type === "decision_gate_resolved") {
+    return {
+      ...base,
+      event: {
+        type,
+        threadId: "th-1",
+        gateId,
+        resolution: { actionId: "approve", resolvedBy: "local-user", resolvedAt: Date.now() },
+      },
+    };
+  }
+  if (type === "decision_gate_withdrawn") {
+    return { ...base, event: { type, threadId: "th-1", gateId, reason: "cancel" } };
+  }
+  return { ...base, event: { type, threadId: "th-1", gateId } };
+}
+
 describe("wireAttentionRouter", () => {
   it("submission_stuck produces an escalation notification for the session's owner", async () => {
     api = await bootTestApi();
@@ -263,6 +287,81 @@ describe("wireAttentionRouter", () => {
     // implicitly, so the reader lands in the right context instead of
     // looking at a conversation their current scope excludes.
     expect(rows[0]?.href).toBe("/chat?assistant=asst_attention");
+  });
+
+  it("marks a gate's notification read when the gate resolves, and only that gate's", async () => {
+    api = await bootTestApi();
+    const { db, engineStore, eventStream } = api.providers;
+    unsub = wireAttentionRouter({ db, engineStore, eventStream });
+
+    const sessionId = `sess-${randomUUID()}`;
+    await engineStore.saveSession(baseSession({ id: sessionId }));
+
+    // The second gate's id is a LIKE-metacharacter trap for the first's:
+    // without escaping, the prefix match `n-approval-g_1:...` would treat
+    // `_` as "any character" and mark `gx1`'s row read too.
+    const suffix = randomUUID();
+    const gateId = `g_1:${suffix}`;
+    const lookalikeId = `gx1:${suffix}`;
+    await eventStream.append(gateEvent(sessionId, gateId, "Approve A?"), `test-a-${randomUUID()}`);
+    await eventStream.append(
+      gateEvent(sessionId, lookalikeId, "Approve B?"),
+      `test-b-${randomUUID()}`,
+    );
+
+    await waitFor(async () => {
+      const rows = await db.select().from(notifications).where(eq(notifications.kind, "approval"));
+      return rows.length === 2;
+    });
+
+    await eventStream.append(
+      gateSettledEvent(sessionId, gateId, "decision_gate_resolved"),
+      `test-resolved-${randomUUID()}`,
+    );
+
+    await waitFor(async () => {
+      const rows = await db.select().from(notifications).where(eq(notifications.id, `n-approval-${gateId}-local-user`));
+      return rows[0]?.readAt != null;
+    });
+
+    const lookalike = await db
+      .select()
+      .from(notifications)
+      .where(eq(notifications.id, `n-approval-${lookalikeId}-local-user`));
+    expect(lookalike[0]?.readAt).toBeNull();
+  });
+
+  it("marks a gate's notification read when the gate expires or is withdrawn", async () => {
+    api = await bootTestApi();
+    const { db, engineStore, eventStream } = api.providers;
+    unsub = wireAttentionRouter({ db, engineStore, eventStream });
+
+    const sessionId = `sess-${randomUUID()}`;
+    await engineStore.saveSession(baseSession({ id: sessionId }));
+
+    const expiredId = `gate-${randomUUID()}`;
+    const withdrawnId = `gate-${randomUUID()}`;
+    await eventStream.append(gateEvent(sessionId, expiredId, "Approve C?"), `test-c-${randomUUID()}`);
+    await eventStream.append(gateEvent(sessionId, withdrawnId, "Approve D?"), `test-d-${randomUUID()}`);
+
+    await waitFor(async () => {
+      const rows = await db.select().from(notifications).where(eq(notifications.kind, "approval"));
+      return rows.length === 2;
+    });
+
+    await eventStream.append(
+      gateSettledEvent(sessionId, expiredId, "decision_gate_expired"),
+      `test-expired-${randomUUID()}`,
+    );
+    await eventStream.append(
+      gateSettledEvent(sessionId, withdrawnId, "decision_gate_withdrawn"),
+      `test-withdrawn-${randomUUID()}`,
+    );
+
+    await waitFor(async () => {
+      const rows = await db.select().from(notifications).where(eq(notifications.kind, "approval"));
+      return rows.length === 2 && rows.every((r) => r.readAt != null);
+    });
   });
 
   it("decision_gate on a child whose parent row is gone falls back to the child's own owner", async () => {

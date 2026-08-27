@@ -110,6 +110,7 @@ vi.mock("./thread-tree", () => ({
 import { TooltipProvider } from "~/components/primitives";
 import { AssistantRail, eligibleTeams } from "./assistant-rail";
 import { WorkspaceScopeProvider } from "~/lib/workspace-scope";
+import { useStreamStore } from "~/stores/stream";
 
 /** Team rows carry a "shared with N people" tooltip, so the rail needs the
  * provider its real parent (`AppShell`) supplies. */
@@ -191,11 +192,34 @@ function teamAssistant(over: Partial<AssistantSummary> = {}): AssistantSummary {
   };
 }
 
+/** Puts a session in the state the rail trusts as live: WS open, with the
+ * given gates pending. The store is the real module-level one, so each test
+ * that touches it relies on the beforeEach wipe below. */
+function liveSession(sessionId: string, gateIds: string[]) {
+  useStreamStore.getState().setConnection(sessionId, "open");
+  useStreamStore.getState().setPendingGates(
+    sessionId,
+    gateIds.map((id) => ({
+      id,
+      sessionId,
+      threadId: "t1",
+      type: "approval" as const,
+      title: "Approve the deploy",
+      actions: [{ id: "approve", label: "Approve" }],
+      status: "pending" as const,
+      createdAt: 1,
+      updatedAt: 1,
+    })),
+  );
+}
+
 beforeEach(() => {
   // The workspace scope persists, and jsdom shares localStorage across a
   // file. Without this, whichever test last selected a team would decide the
   // starting workspace of every test after it.
   window.localStorage.clear();
+  // The stream store is module-level state shared across tests the same way.
+  useStreamStore.setState({ bySession: {} });
   teamsData = { teams: [] };
   orgData = org(true);
   meData = me();
@@ -457,5 +481,38 @@ describe("AssistantRail", () => {
     searchParams = { assistant: "asst_team" };
     renderRail();
     expect(screen.getByLabelText("Waiting on you")).toBeTruthy();
+  });
+
+  it("marks a live session's row the moment a gate opens, before any poll", () => {
+    // The decision gate card is already on screen via the WS; the
+    // notification row is up to 30s away. The dot must not lag the card
+    // (TKAI-257).
+    teamsData = { teams: [team()] };
+    assistantsData = { assistants: [mine(), teamAssistant()] };
+    searchParams = { assistant: "asst_team" };
+    liveSession("assistant:asst_team", ["g1"]);
+    renderRail();
+    expect(screen.getByLabelText("Waiting on you")).toBeTruthy();
+  });
+
+  it("clears a live session's row when its gates resolve, unread notification or not", () => {
+    // Resolving a gate does not mark its notification read, so the poll
+    // alone would keep the dot lit until the user opens the bell.
+    teamsData = { teams: [team()] };
+    assistantsData = { assistants: [mine(), teamAssistant()] };
+    notifications = [
+      {
+        id: "n1",
+        kind: "approval",
+        urgency: "high",
+        title: "Approve the deploy",
+        sessionId: "assistant:asst_team",
+        createdAt: 1,
+      },
+    ];
+    searchParams = { assistant: "asst_team" };
+    liveSession("assistant:asst_team", []);
+    renderRail();
+    expect(screen.queryByLabelText("Waiting on you")).toBeNull();
   });
 });
