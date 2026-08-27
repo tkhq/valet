@@ -143,6 +143,7 @@ proxyUsageRouter.get("/usage/summary", async (c) => {
       FROM llm_proxy_requests
       WHERE created_at >= ${sinceMs}
         AND ${scopeClause}
+        AND total_tokens > 0
       GROUP BY user_id
     `)) as { rows: UserAggRow[] };
   }
@@ -158,6 +159,7 @@ proxyUsageRouter.get("/usage/summary", async (c) => {
       FROM llm_proxy_requests
       WHERE created_at >= ${sinceMs}
         AND ${scopeClause}
+        AND total_tokens > 0
       GROUP BY model
     `)) as { rows: ModelAggRow[] };
   }
@@ -173,6 +175,7 @@ proxyUsageRouter.get("/usage/summary", async (c) => {
       FROM llm_proxy_requests
       WHERE created_at >= ${sinceMs}
         AND ${scopeClause}
+        AND total_tokens > 0
       GROUP BY harness
     `)) as { rows: HarnessAggRow[] };
   }
@@ -186,6 +189,7 @@ proxyUsageRouter.get("/usage/summary", async (c) => {
       FROM llm_proxy_requests
       WHERE created_at >= ${sinceMs}
         AND ${scopeClause}
+        AND total_tokens > 0
       GROUP BY (created_at / 86400000) * 86400000
       ORDER BY day_ms ASC
     `)) as { rows: DayAggRow[] };

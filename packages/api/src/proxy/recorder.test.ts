@@ -27,6 +27,8 @@ describe("drain", () => {
     expect(out).toContain(tail); // terminal event retained via rolling tail
     expect(out).toContain("truncated middle"); // marker shows the gap
     expect(out).not.toContain(filler); // the middle is dropped
+    // Capping is honored: head (~500) + marker + tail (~200), far below the 4030-byte body.
+    expect(out.length).toBeLessThan(1000);
   });
   it("returns the whole body untouched when under the head cap", async () => {
     const out = await drain(streamOf("small body"), { maxHeadBytes: 500, tailBytes: 200 });

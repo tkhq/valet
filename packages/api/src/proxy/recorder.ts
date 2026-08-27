@@ -72,7 +72,7 @@ export async function drain(
         truncated = true;
         tail.push(value);
         tailBytes += value.byteLength;
-        while (tailBytes > RECORDED_TAIL_BYTES && tail.length > 1) {
+        while (tailBytes > tailMax && tail.length > 1) {
           tailBytes -= tail[0].byteLength;
           tail.shift();
         }
