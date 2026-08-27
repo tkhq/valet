@@ -98,6 +98,17 @@ export function matches(renderer: ToolRenderer, toolName: string, args?: unknown
 }
 
 /**
+ * Header summary for a text-document result: "N lines", or undefined for
+ * empty text so the header never contradicts an "(empty)" body
+ * (`"".split("\n").length` is 1, not 0).
+ */
+export function lineCountSummary(text: string): string | undefined {
+  if (!text) return undefined;
+  const lines = text.split("\n").length;
+  return `${lines} ${lines === 1 ? "line" : "lines"}`;
+}
+
+/**
  * Extract a printable string from whatever shape the engine persisted as a
  * tool result. We handle three shapes because the persistence layer has
  * shifted under us before:

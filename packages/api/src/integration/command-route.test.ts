@@ -255,3 +255,49 @@ describe("command_result REST round-trip (Task 11)", () => {
     expect(onDefault.messages.some((m) => m.command?.name === "status")).toBe(false);
   });
 });
+
+describe("skill invocation REST round-trip", () => {
+  it("a context skill expansion carries Message.skill after reload", async () => {
+    api = await bootTestApi();
+    await createSkill(api.providers.db, OWNER, {
+      name: "review",
+      description: "Review code",
+      content: "# Review\n\nDo a thorough review.",
+      frontmatter: {}, // invocation defaults to context
+    });
+
+    const sessionId = await createSession(api.baseUrl);
+    const postRes = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/messages`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ text: "/skill:review src/ please" }),
+    });
+    expect(postRes.status).toBe(202);
+
+    // The expansion is a queued prompt. WHEN the user entry persists
+    // depends on credentials: with a provider key the turn starts and
+    // appends it immediately, but keyless (CI, make e2e) the engine
+    // releases the claim with NO entry for MAX_CREDENTIAL_ATTEMPTS cycles
+    // on the 5s sweep, and appends it only at the settle-cap (~10-15s).
+    // The deadline must sit clear of that cap, or this test fails in every
+    // scrubbed-key environment while passing on a keyed dev shell.
+    const deadline = Date.now() + 30_000;
+    let user: ListMessagesResponse["messages"][number] | undefined;
+    while (Date.now() < deadline && !user) {
+      const msgsRes = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/messages`, {
+        headers: HEADERS,
+      });
+      expect(msgsRes.status).toBe(200);
+      const { messages } = (await msgsRes.json()) as ListMessagesResponse;
+      user = messages.find((m) => m.role === "user");
+      if (!user) await new Promise((r) => setTimeout(r, 200));
+    }
+
+    expect(user).toBeDefined();
+    // The persisted text is the dispatcher expansion...
+    expect(user?.content).toContain('<skill name="review">');
+    expect(user?.content.endsWith("src/ please")).toBe(true);
+    // ...and the wire carries the structured stamp the client renders from.
+    expect(user?.skill).toEqual({ name: "review", args: "src/ please" });
+  });
+});

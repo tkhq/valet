@@ -130,7 +130,7 @@ The persistence round trip has four hops. Verify all four (see CLAUDE.md, "Tool-
 
 ## Data changes
 
-- `user_prompt_templates` app table: edit `packages/api/migrations/pg/0000_app.sql` in place and update the Drizzle schema (`packages/api/src/schema/index.ts`), per the pre-1.0 migration rule. Then `rm -rf ~/.valet/pg`.
+- `user_prompt_templates` app table: edit `packages/api/migrations/pg/0000_app.sql` in place and update the Drizzle schema (`packages/api/src/schema/index.ts`), per the pre-1.0 migration rule. Then `make dev-clean`.
 - Engine `command_result` entry kind: update the raw SQL migration (`packages/store-postgres/migrations/pg/0000_engine.sql`) only if the entry envelope needs a new column; otherwise it rides the existing entries table.
 - Per-user bare-skill-names setting: existing user-settings storage.
 - CRUD routes for user templates plus a simple web editor.

@@ -7,6 +7,7 @@
 import { describe, expect, it } from "vitest";
 import type { NotificationKind, NotificationSummary } from "@valet/api/wire";
 import {
+  attentionSessionIds,
   hrefMatchesLocation,
   isActionable,
   shouldPing,
@@ -41,6 +42,46 @@ describe("isActionable", () => {
 
   it("excludes anything already read", () => {
     expect(isActionable(notif("approval", { readAt: 5 }))).toBe(false);
+  });
+});
+
+describe("attentionSessionIds", () => {
+  it("collects sessions with an unread actionable notification", () => {
+    const out = attentionSessionIds([
+      notif("approval", { sessionId: "s1" }),
+      notif("notification", { id: "n2", sessionId: "s2" }),
+      notif("question", { id: "n3", readAt: 5, sessionId: "s3" }),
+    ]);
+    expect(out).toEqual(new Set(["s1"]));
+  });
+
+  it("lights a live session from its pending gate before any poll arrives", () => {
+    // The gate frame reaches the stream store the moment the gate opens;
+    // the notification row shows up on the next 30s poll. The dot must not
+    // wait for the poll (TKAI-257).
+    expect(attentionSessionIds([], { s1: true })).toEqual(new Set(["s1"]));
+  });
+
+  it("clears a live session the moment its gates resolve, unread notification or not", () => {
+    // Resolving a gate does not mark its notification read, so the poll
+    // keeps listing the session until the user opens the bell. The live
+    // store says the gate is gone — believe it.
+    const out = attentionSessionIds([notif("approval", { sessionId: "s1" })], { s1: false });
+    expect(out).toEqual(new Set());
+  });
+
+  it("keeps an escalation lit even when the live session has no gates", () => {
+    // A stuck submission has no decision gate behind it, so the stream
+    // store never sees it. Only the poll can clear it.
+    const out = attentionSessionIds([notif("escalation", { sessionId: "s1" })], { s1: false });
+    expect(out).toEqual(new Set(["s1"]));
+  });
+
+  it("falls back to the poll for a session with no open socket", () => {
+    // No key in the live map = no WS. Its slice may be missing or stale;
+    // the poll is the only truth available.
+    const out = attentionSessionIds([notif("approval", { sessionId: "s1" })], {});
+    expect(out).toEqual(new Set(["s1"]));
   });
 });
 

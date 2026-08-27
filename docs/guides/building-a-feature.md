@@ -73,13 +73,14 @@ Drizzle schema at `packages/api/src/schema/index.ts`. Both must change together.
 After editing either migration, delete the dev database:
 
 ```bash
-rm -rf ~/.valet/pg
+make dev-clean          # wipes this worktree's .valet-dev (the make dev-local data)
+rm -rf ~/.valet/pg      # also, for any stack started outside make dev-local
 ```
 
 This is mandatory, not housekeeping. The migration tracker skips a `0000` it has
 already applied, and there is no backfill path, so an edited migration against an
 existing data directory leaves a schema that does not match the code. Stop the
-api first — it owns `~/.valet/pg`, and PGlite allows exactly one owner.
+api first — it holds the pg data dir, and PGlite allows exactly one owner.
 
 ## 3. Add engine behavior
 
@@ -334,7 +335,7 @@ array in `src/plugin.ts`. Re-run `make generate-registries` only when you change
 `plugin.yaml`, not for a new action inside an existing plugin.
 
 **Changing a stored shape.** Edit the `0000` migration, the row interface, and
-the `rawTo*Row` mapper together, then `rm -rf ~/.valet/pg`. Changing one without
+the `rawTo*Row` mapper together, then `make dev-clean`. Changing one without
 the others gives a schema and a mapper that disagree, and the failure surfaces as
 a read error far from the edit.
 

@@ -5,6 +5,7 @@
  * button).
  */
 import { describe, expect, it } from "vitest";
+import { buildSkillBlock } from "@valet/shared";
 import type { StreamMessage } from "~/stores/stream";
 import { isEmptyAssistantMessage, messageCopyText } from "./message-item";
 
@@ -71,5 +72,25 @@ describe("messageCopyText", () => {
   it("returns an empty string when there is nothing to copy", () => {
     expect(messageCopyText(msg({}))).toBe("");
     expect(messageCopyText(msg({ parts: [{ kind: "text", text: "  " }] }))).toBe("");
+  });
+
+  it("copies the re-sendable command form for a skill-invocation user message", () => {
+    // The bubble shows a collapsed card + the typed args; copying the raw
+    // multi-KB expansion would paste internal markup that bypasses dispatch.
+    const expansion = buildSkillBlock("review", "# Review\n\nbody", "src/ please");
+    expect(
+      messageCopyText(
+        msg({ role: "user", content: expansion, skill: { name: "review", args: "src/ please" } }),
+      ),
+    ).toBe("/skill:review src/ please");
+    // Legacy rows without the metadata stamp go through the regex tier.
+    expect(messageCopyText(msg({ role: "user", content: buildSkillBlock("review", "body") }))).toBe(
+      "/skill:review",
+    );
+  });
+
+  it("never rewrites assistant text, even when it looks like a skill block", () => {
+    const echoed = buildSkillBlock("review", "body");
+    expect(messageCopyText(msg({ role: "assistant", content: echoed }))).toBe(echoed);
   });
 });

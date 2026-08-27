@@ -4,4 +4,5 @@ export * from './types/runner-protocol.js';
 export * from './errors.js';
 export * from './format-bytes.js';
 export * from './scope-key.js';
+export * from './skill-block.js';
 export * from './upload-limits.js';

@@ -69,6 +69,8 @@ export type SkillRepoOwnerScope = "user" | "team";
  *   - `none`        — the source has no credential to use. Read anonymously.
  *   - `unavailable` — a credential exists but the server cannot read it.
  *                     Also read anonymously, but say something different.
+ *   - `missing_app` — an org source has no App installation that covers the
+ *                     repository. Read anonymously; the 404 names the App.
  *   - `user`        — one person's own GitHub credential.
  *   - `installation`— the org's GitHub App installation token.
  *
@@ -77,6 +79,7 @@ export type SkillRepoOwnerScope = "user" | "team";
 export type SkillRepoCredential =
   | { kind: "none" }
   | { kind: "unavailable" }
+  | { kind: "missing_app" }
   | {
       kind: "user";
       token: string;
@@ -94,6 +97,7 @@ export type SkillRepoCredential =
 export type SkillRepoCredentialDescriptor =
   | { kind: "none" }
   | { kind: "unavailable" }
+  | { kind: "missing_app" }
   | { kind: "user"; ownerScope: SkillRepoOwnerScope; login?: string }
   | { kind: "installation" };
 
@@ -153,6 +157,9 @@ function correctiveAction(credential: SkillRepoCredentialDescriptor): string {
   }
   if (credential.kind === "unavailable") {
     return "Valet has a GitHub credential for this source but cannot read it. This occurs after a change to the server encryption key. Connect GitHub again in Settings → Connected accounts, then sync again.";
+  }
+  if (credential.kind === "missing_app") {
+    return "Valet has no GitHub App installation that can read this repository. Install the GitHub App for this organization, or add the repository to the App installation, then sync again.";
   }
   return "Valet read it with no GitHub credential. To read a private repository, connect GitHub in Settings → Connected accounts, then sync again. If the repository is public, check the name for a spelling mistake.";
 }

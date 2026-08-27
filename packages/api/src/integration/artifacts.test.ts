@@ -278,4 +278,45 @@ describe("api integration: artifacts", () => {
       await api.cleanup();
     }
   });
+
+  it("the list carries the sharer, so same-path artifacts from two members stay distinct", async () => {
+    const api = await bootTestApi();
+    try {
+      // Memory paths are conventional (journal dates, preferences), so two
+      // members sharing their own file at the SAME path is the normal case.
+      // An org admin's list contains both rows; without `actorUserId` a
+      // path-only client match can land on the colleague's link.
+      const path = "journal/2026-08-27.md";
+      await writeMemoryFile(api.baseUrl, path, "# Mine\n\nBody.\n");
+      const mine = await share(api.baseUrl, path);
+
+      const memberHeaders = { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" };
+      const memberWrite = await fetch(`${api.baseUrl}/api/memory`, {
+        method: "PUT",
+        headers: memberHeaders,
+        body: JSON.stringify({ path, content: "# Theirs\n\nBody.\n" }),
+      });
+      expect(memberWrite.status).toBe(200);
+      const memberShare = await fetch(`${api.baseUrl}/api/artifacts/share`, {
+        method: "POST",
+        headers: memberHeaders,
+        body: JSON.stringify({ path }),
+      });
+      expect(memberShare.status).toBe(200);
+      const theirs = (await memberShare.json()) as ShareArtifactResponse;
+      expect(theirs.id).not.toBe(mine.id);
+
+      // The default stub caller is an org admin — the list holds both rows,
+      // disambiguated by actorUserId.
+      const list = await fetch(`${api.baseUrl}/api/artifacts`);
+      const listBody = (await list.json()) as ListArtifactsResponse;
+      const atPath = listBody.artifacts.filter((a) => a.path === path);
+      expect(atPath).toHaveLength(2);
+      const actors = new Set(atPath.map((a) => a.actorUserId));
+      expect(actors.size).toBe(2);
+      for (const item of atPath) expect(item.actorUserId.length).toBeGreaterThan(0);
+    } finally {
+      await api.cleanup();
+    }
+  });
 });

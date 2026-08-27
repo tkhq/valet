@@ -668,23 +668,31 @@ export class SlackTransport implements ChannelTransport {
           action_id: action.id,
           // Slack allows 2,000-char values, so the real gate id rides along
           // instead of being looked up by message reference (Telegram's
-          // 64-byte callback_data cannot carry it). The host reads it from
-          // `gateCallback.gateId`. It does not do so yet — `gateForRef` still
-          // resolves through the in-memory ref map — so an api restart still
-          // loses a pending gate until that call site changes.
+          // 64-byte callback_data cannot carry it). The host uses it as a
+          // fallback when its in-memory ref map misses, but the map's
+          // sessionId is still required to resolve — an api restart still
+          // loses a pending gate.
           value: `g|${gate.gateId}|${action.id}`,
           ...(action.style !== undefined ? { style: action.style } : {}),
         })),
       },
     ];
+    const threadTs = this.lastTurn.get(conversationKey);
     const res = await this.api.postMessage({
       channel: target.channelId,
       text,
-      threadTs: this.lastTurn.get(conversationKey),
+      threadTs,
       blocks,
     });
-    this.remember(this.gateTexts, `${conversationKey}#${res.ts}`, text);
-    return { conversationKey, messageId: res.ts };
+    // The returned ref must round-trip through the inbound click:
+    // `parseBlockActions` rebuilds the conversationKey from
+    // `container.thread_ts ?? message_ts` — the REAL thread ts. A key minted
+    // by `openDirectConversation` carries a synthetic ts and would never
+    // match, so re-key the ref by what the click will actually carry: the
+    // thread we posted into, or the message's own ts for a root post.
+    const refKey = conversationKeyFor(target.teamId, target.channelId, threadTs ?? res.ts);
+    this.remember(this.gateTexts, `${refKey}#${res.ts}`, text);
+    return { conversationKey: refKey, messageId: res.ts };
   }
 
   async updateGatePrompt(ref: GatePromptRef, resolution: ChannelGateResolution): Promise<void> {

@@ -37,7 +37,7 @@ Two kinds of configuration exist today, and only one has a home:
 The second kind causes two recurring problems:
 
 - **Dev DB wipes lose everything.** Pre-1.0 we edit migrations in place and
-  wipe `~/.valet/pg` instead of migrating. Every wipe re-requires manual
+  wipe the dev database (`make dev-clean`) instead of migrating. Every wipe re-requires manual
   bootstrap: re-enable the `organizations` feature flag, re-add skill
   sources, re-invite members.
 - **Dev and prod drift.** The same instance state must be re-created by hand
@@ -481,6 +481,13 @@ reconciler upserts a `skillsrc_cfg_*` row; the existing `SkillSyncService`
 poller picks it up like any other source — the config file feeds the
 subsystem, it does not replace it.
 
+A boot that finds an existing `skillsrc_cfg_*` row does not set
+`next_attempt_at` to now. That punch would break a live claim lease and
+wipe retry backoff. The reconciler kicks only a dead claim: `status` is
+`pending`, `last_synced_at` is null, and `updated_at` is older than the
+five-minute claim lease. An error row keeps its backoff. The UPDATE
+repeats `last_synced_at IS NULL` so a finishing sync is not kicked.
+
 - A `skillsrc_cfg_*` row whose (repo, ref, subpath) no longer appears in
   the file → deleted through the existing delete path, which also deletes
   the mirrored `origin='repo'` skills (mirror semantics, per
@@ -615,7 +622,7 @@ plugin's `defaultApprovalMode`, then the `riskLevel` default.
 ## Dev and prod wiring
 
 **Dev** — `make dev-local` exports `VALET_CONFIG=$(PWD)/config/valet.dev.yaml`
-when that file exists. After `rm -rf ~/.valet/pg`, the next boot restores
+when that file exists. After `make dev-clean`, the next boot restores
 the org flags, pending invites, and skill sources with no manual steps.
 
 **Prod (helm)** — the chart gains `api.instanceConfig` (string). When set,

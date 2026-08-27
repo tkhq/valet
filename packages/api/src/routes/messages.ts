@@ -29,6 +29,7 @@ import type {
   Message,
   MessagePart,
   MessageRole,
+  MessageSkillInvocation,
   PatchThreadRequest,
   PromptFileAttachment,
   PromptImageAttachment,
@@ -40,10 +41,9 @@ import type {
 } from "../wire/types.js";
 import { commandResultEntryToMessage, engineGateToWire, engineSignalToWire, engineToWireParts } from "../engine/bridge.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
-import { GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
-import { isOrgAdmin } from "../services/org.js";
+import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
 import type { Providers } from "../providers/types.js";
-import { canViewSession } from "../services/session-access.js";
+import { canResolveSessionGate, canViewSession } from "../services/session-access.js";
 import {
   getAttachmentRefStore,
   UnknownAttachmentError,
@@ -85,6 +85,7 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
   // either a `data:` URL or raw bytes; the wire ships one canonical
   // `data:` URL string. Skip entries missing both (nothing to render).
   const wireAttachments = projectAttachments(e.attachments);
+  const skill = skillInvocationFromMetadata(e.metadata, role);
   return {
     id: e.id,
     sessionId,
@@ -96,8 +97,27 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
     queueItemId: e.queueItemId,
     signal: engineSignalToWire(e.signal),
     model: e.model,
+    ...(skill ? { skill } : {}),
     ...(wireAttachments.length > 0 ? { attachments: wireAttachments } : {}),
   };
+}
+
+/**
+ * Wire projection of a skill-invocation stamp. Both producers write the
+ * same keys: the command dispatcher stamps `{ skill, skillArgs }` on a
+ * slash expansion, and `Thread.skill()` stamps `{ skill }` on a host
+ * invocation. Only user entries qualify — the stamp rides the queue item
+ * onto the user entry, never onto assistant output.
+ */
+function skillInvocationFromMetadata(
+  metadata: Record<string, unknown> | undefined,
+  role: MessageRole,
+): MessageSkillInvocation | undefined {
+  if (role !== "user" || !metadata) return undefined;
+  const name = metadata.skill;
+  if (typeof name !== "string" || name.length === 0) return undefined;
+  const args = metadata.skillArgs;
+  return { name, ...(typeof args === "string" && args ? { args } : {}) };
 }
 
 /**
@@ -518,12 +538,23 @@ export async function submitSessionPrompt(
   // A submit failure hands the consumed refs back so a retry can resend
   // them. Once the prompt is queued the refs stay consumed — the
   // attachments are already part of the persisted prompt.
+  // A context-invocation skill expansion carries the skill identity as
+  // submission metadata; the persisted entry's wire projection renders it
+  // as a skill card without re-parsing the text.
+  const skillMetadata =
+    outcome?.kind === "expand" && outcome.skill
+      ? { skill: outcome.skill.name, skillArgs: outcome.skill.args }
+      : undefined;
+
   let receipt;
   try {
     receipt =
       outcome && outcome.kind === "execute"
         ? await engineSession.prompt(withAttachments(promptText), { threadId: thread.id })
-        : await thread.submitPrompt(withAttachments(promptText), {});
+        : await thread.submitPrompt(
+            withAttachments(promptText),
+            skillMetadata ? { metadata: skillMetadata } : {},
+          );
   } catch (err) {
     attachmentRefStore.restore(resolvedFileAttachments);
     throw err;
@@ -648,8 +679,18 @@ messagesRouter.get("/:id/decisions", async (c) => {
 messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
   const result = await loadEngineSession(c);
   if ("error" in result) return result.error;
-  const { engineSession } = result;
+  const { session, engineSession } = result;
   const gateId = c.req.param("gateId");
+
+  // Explicit resolve authorization, distinct from `loadEngineSession`'s
+  // view check: answering a gate acts on the session's behalf. The same
+  // named check gates the channel gate-callback path.
+  if (!(await canResolveSessionGate(c.var.providers.db, session, c.var.user.id))) {
+    return c.json(
+      { error: "Only the session owner or a member of its team can resolve this approval. Ask one of them." },
+      403,
+    );
+  }
 
   let body: ResolveDecisionRequest;
   try {
@@ -666,11 +707,11 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
   // closed for a non-admin resolver, but only after the engine has already
   // opened/consumed the gate. Rejecting here means a non-admin never sees
   // the button "work" only to fail late; the button itself should be hidden
-  // client-side, this is the server-side backstop.
+  // client-side, this is the server-side backstop. `canApplyAlwaysAllow` is
+  // the shared guard (also called by the channel gate-callback path) and is
+  // checked against the SESSION's org, the scope the policy write lands in.
   if (body.actionId === GATE_ACTION_ALWAYS_ALLOW) {
-    const { db } = c.var.providers;
-    const user = c.var.user;
-    if (!(await isOrgAdmin(db, user.orgId, user.id))) {
+    if (!(await canApplyAlwaysAllow(c.var.providers.db, session.orgId, c.var.user.id))) {
       return c.json({ error: "org admin required for always_allow" }, 403);
     }
   }
@@ -694,8 +735,17 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
 messagesRouter.post("/:id/decisions/:gateId/withdraw", async (c) => {
   const result = await loadEngineSession(c);
   if ("error" in result) return result.error;
-  const { engineSession } = result;
+  const { session, engineSession } = result;
   const gateId = c.req.param("gateId");
+
+  // Same explicit resolve authorization as the resolve route above —
+  // withdrawing settles the gate too.
+  if (!(await canResolveSessionGate(c.var.providers.db, session, c.var.user.id))) {
+    return c.json(
+      { error: "Only the session owner or a member of its team can resolve this approval. Ask one of them." },
+      403,
+    );
+  }
 
   let body: WithdrawDecisionRequest = {};
   try {

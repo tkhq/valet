@@ -76,7 +76,7 @@ export const qkSettings = {
 
 // ── Reads ────────────────────────────────────────────────────────────────
 
-export function useMe(opts?: UseQueryOptions<MeResponse>) {
+export function useMe(opts?: Partial<UseQueryOptions<MeResponse>>) {
   return useQuery<MeResponse>({
     queryKey: qkSettings.me(),
     queryFn: () => api.getMe(),
@@ -84,7 +84,7 @@ export function useMe(opts?: UseQueryOptions<MeResponse>) {
   });
 }
 
-export function useOrg(opts?: UseQueryOptions<OrgResponse>) {
+export function useOrg(opts?: Partial<UseQueryOptions<OrgResponse>>) {
   return useQuery<OrgResponse>({
     queryKey: qkSettings.org(),
     queryFn: () => api.getOrg(),
@@ -145,7 +145,7 @@ export function useLlmProviderPreferences(opts?: UseQueryOptions<GetLlmProviderP
   });
 }
 
-export function useTeams(opts?: UseQueryOptions<ListTeamsResponse>) {
+export function useTeams(opts?: Partial<UseQueryOptions<ListTeamsResponse>>) {
   return useQuery<ListTeamsResponse>({
     queryKey: qkSettings.teams(),
     queryFn: () => api.listTeams(),

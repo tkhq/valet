@@ -487,6 +487,9 @@ async function runBootChain(): Promise<void> {
       console.error(e instanceof InstanceConfigError ? e.message : `FATAL: instance config reconcile failed: ${e}`);
       process.exit(1);
     }
+    // Config rows are inserted pending and due. Poll once here so they do
+    // not wait for `skillSync.start()` later in this chain.
+    void providers.skillSync.pollOnce();
   }
 
   if (closed) return;

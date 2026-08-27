@@ -228,3 +228,26 @@ describe("entryToMessage — attachments projection", () => {
     expect(msg?.attachments?.every((a) => a.kind === "image" || a.kind === "file")).toBe(true);
   });
 });
+
+describe("entryToMessage — skill invocation projection", () => {
+  it("projects metadata.skill / metadata.skillArgs on a user entry", () => {
+    const entry = baseEntry({
+      metadata: { skill: "review", skillArgs: "src/ please" },
+    });
+    const msg = entryToMessage(entry, "sess", "th");
+    expect(msg?.skill).toEqual({ name: "review", args: "src/ please" });
+  });
+
+  it("omits args when the stamp has none (host Thread.skill submission)", () => {
+    const entry = baseEntry({ metadata: { skill: "deploy", syntheticFrom: "skill" } });
+    expect(entryToMessage(entry, "sess", "th")?.skill).toEqual({ name: "deploy" });
+  });
+
+  it("drops the field for non-user roles and unstamped entries", () => {
+    expect(entryToMessage(baseEntry({}), "sess", "th")?.skill).toBeUndefined();
+    const assistant = baseEntry({ role: "assistant", metadata: { skill: "review" } });
+    expect(entryToMessage(assistant, "sess", "th")?.skill).toBeUndefined();
+    const badType = baseEntry({ metadata: { skill: 42 } });
+    expect(entryToMessage(badType, "sess", "th")?.skill).toBeUndefined();
+  });
+});

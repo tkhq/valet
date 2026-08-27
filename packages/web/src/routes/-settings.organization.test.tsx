@@ -296,6 +296,16 @@ describe("OrganizationGeneralPage", () => {
     expect(patchOrgSettingsMutate).toHaveBeenCalledWith({ allowPublicArtifacts: true });
   });
 
+  /** The API 403s a member's flip; the switch must not offer it. */
+  it("disables the public-artifact-links switch for a non-admin member", () => {
+    orgData = { ...orgData, callerRole: "member" };
+    render(<OrganizationGeneralPage />);
+    const toggle = screen.getByRole("switch", { name: "Allow public artifact links" });
+    fireEvent.click(toggle);
+    expect(patchOrgSettingsMutate).not.toHaveBeenCalled();
+    expect(screen.getByText(/Only an org admin can change this/)).toBeTruthy();
+  });
+
   it("confirming the disable-gate dialog PATCHes the gate off and navigates to profile", async () => {
     render(<OrganizationGeneralPage />);
     fireEvent.click(screen.getByRole("button", { name: "Turn off organization features" }));

@@ -1,10 +1,22 @@
+import { buildSkillBlock } from "@valet/shared";
 import { parseCommandArgs, substituteArgs } from "./args.js";
 import type { CommandRegistry } from "./registry.js";
 import type { ResolvedCommand } from "./types.js";
 
 export type DispatchOutcome =
   | { kind: "pass"; nearMiss?: string }
-  | { kind: "expand"; text: string }
+  | {
+      kind: "expand";
+      text: string;
+      /**
+       * Set for a context-invocation skill: the skill name and the raw
+       * args the user typed. Callers stamp these onto the submission's
+       * metadata so clients can render the expansion as a skill card
+       * without re-parsing the text. Absent for prompt-invocation skills —
+       * their expansion IS the user's message and renders as prose.
+       */
+      skill?: { name: string; args: string };
+    }
   | { kind: "execute"; resolved: ResolvedCommand; args: string[]; raw: string };
 
 /**
@@ -44,8 +56,11 @@ export function dispatchCommand(text: string, registry: CommandRegistry): Dispat
         const args = parseCommandArgs(raw);
         return { kind: "expand", text: substituteArgs(skill.content, args) };
       }
-      const block = `<skill name="${skill.name}">\n${skill.content.trim()}\n</skill>`;
-      return { kind: "expand", text: raw ? `${block}\n\n${raw}` : block };
+      return {
+        kind: "expand",
+        text: buildSkillBlock(skill.name, skill.content, raw),
+        skill: { name: skill.name, args: raw },
+      };
     }
 
     case "builtin":

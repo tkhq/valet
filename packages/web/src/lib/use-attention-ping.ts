@@ -52,17 +52,35 @@ export function isActionable(n: NotificationSummary): boolean {
   return n.readAt === undefined && NEEDS_ACTION.includes(n.kind);
 }
 
+/** Kinds that announce a decision gate. For a session with an open WS the
+ * stream store holds the live gate set, so these kinds defer to it — the
+ * store both lights and clears without waiting for the poll. `escalation`
+ * (a stuck submission) has no gate behind it and only the poll carries it. */
+const GATE_BACKED: readonly NotificationKind[] = ["question", "approval"];
+
 /**
  * Sessions with something unanswered waiting on a person, keyed by session
  * id. The notifications query is already polling for the bell, so a caller
  * that wants to mark a row costs no extra request.
+ *
+ * `livePendingGates` (see `useLivePendingGates`) upgrades the poll to live
+ * data where it exists: a key is a session with an open WS, its value
+ * whether any gate is pending there. For those sessions the store decides
+ * the gate-backed kinds — a poll row lags the truth by up to 30s on open
+ * and until the user reads the notification after resolve (TKAI-257).
  */
 export function attentionSessionIds(
   notifications: NotificationSummary[] | undefined,
+  livePendingGates?: Readonly<Record<string, boolean>>,
 ): ReadonlySet<string> {
   const out = new Set<string>();
   for (const n of notifications ?? []) {
-    if (isActionable(n) && n.sessionId !== undefined) out.add(n.sessionId);
+    if (!isActionable(n) || n.sessionId === undefined) continue;
+    if (GATE_BACKED.includes(n.kind) && livePendingGates?.[n.sessionId] !== undefined) continue;
+    out.add(n.sessionId);
+  }
+  for (const [sessionId, hasGates] of Object.entries(livePendingGates ?? {})) {
+    if (hasGates) out.add(sessionId);
   }
   return out;
 }

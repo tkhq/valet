@@ -12,6 +12,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ApiError } from "~/api/client";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
+import { useComposerDraftStore } from "~/stores/composer-drafts";
 import type { ComposerFile } from "./composer-files";
 
 const sendMutateAsync = vi.fn().mockResolvedValue({ messageId: "q-1", threadId: "thread-1" });
@@ -82,6 +83,9 @@ function pasteFiles(target: Element, files: File[]) {
 
 beforeEach(() => {
   useComposerPrefillStore.setState({ text: null });
+  // Drafts live in a module-global store keyed by (session, thread) — the
+  // same key across tests would leak one test's chips into the next.
+  useComposerDraftStore.setState({ byKey: {} });
   sendMutateAsync.mockClear();
   addUserMessage.mockClear();
   uploadFile.mockClear();

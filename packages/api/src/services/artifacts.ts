@@ -162,6 +162,7 @@ export interface ArtifactSummaryRow {
   sourceMemoryPath: string;
   title: string;
   visibility: "org" | "public";
+  actorUserId: string;
   revokedAt: number | null;
   createdAt: number;
   updatedAt: number;
@@ -173,6 +174,7 @@ const summaryColumns = {
   sourceMemoryPath: artifacts.sourceMemoryPath,
   title: artifacts.title,
   visibility: artifacts.visibility,
+  actorUserId: artifacts.actorUserId,
   revokedAt: artifacts.revokedAt,
   createdAt: artifacts.createdAt,
   updatedAt: artifacts.updatedAt,

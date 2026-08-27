@@ -43,7 +43,7 @@ vi.mock("~/stores/stream", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/stores/stream")>();
   return {
     ...actual,
-    useSessionStream: () => ({ messages: [], agentStatus: "idle", conn: "open" }),
+    useSessionStream: () => ({ messages: [], statusByThread: {}, conn: "open" }),
     useStreamStore: (selector: (s: { setThreadMessages: () => void; setPendingGates: () => void }) => unknown) =>
       selector({ setThreadMessages: vi.fn(), setPendingGates: vi.fn() }),
     usePendingGateForThread: () => undefined,

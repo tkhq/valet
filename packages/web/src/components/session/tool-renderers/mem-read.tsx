@@ -2,7 +2,7 @@ import { BookOpen } from "lucide-react";
 import { MarkdownBody } from "./markdown-view";
 import { useMemoryViewer } from "./memory-viewer";
 import { PathLabel, ToolBody } from "./tool-shell";
-import { resultText, type ToolRenderer } from "./types";
+import { lineCountSummary, resultText, type ToolRenderer } from "./types";
 
 /**
  * Renderer for the orchestrator's `mem_read` tool. The result text is the
@@ -25,8 +25,7 @@ export const memReadRenderer: ToolRenderer = {
   formatTarget: (args) => getPath(args) || "/",
   formatSummary: (_args, result, status) => {
     if (status !== "completed") return undefined;
-    const lines = resultText(result).split("\n").length;
-    return `${lines} ${lines === 1 ? "line" : "lines"}`;
+    return lineCountSummary(resultText(result));
   },
   Body: ({ args, status, result, error }) => {
     const path = getPath(args);

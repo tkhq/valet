@@ -770,6 +770,103 @@ describe("reconcileInstanceConfig — skillSources pass", () => {
     expect(row.ownerType).toBe("org");
     expect(row.status).toBe("pending");
     expect(row.enabled).toBe(true);
+    expect(row.nextAttemptAt).toBeLessThanOrEqual(Date.now());
+  });
+
+  it("does not punch a live claim lease on a never-synced config row", async () => {
+    const cfg: InstanceConfig = {
+      version: 1,
+      skillSources: [{ repo: "owner/repo" }],
+    };
+    await reconcileInstanceConfig(deps(db), cfg);
+    const id = configSkillSourceId("owner/repo", "", "");
+    const claimedUntil = Date.now() + 60_000;
+    await db
+      .update(skillSources)
+      .set({ nextAttemptAt: claimedUntil, status: "pending", lastSyncedAt: null })
+      .where(eq(skillSources.id, id));
+
+    await reconcileInstanceConfig(deps(db), cfg);
+
+    const [row] = await db.select().from(skillSources).where(eq(skillSources.id, id));
+    expect(row?.nextAttemptAt).toBe(claimedUntil);
+  });
+
+  it("kicks a dead never-synced pending claim", async () => {
+    const cfg: InstanceConfig = {
+      version: 1,
+      skillSources: [{ repo: "owner/repo" }],
+    };
+    await reconcileInstanceConfig(deps(db), cfg);
+    const id = configSkillSourceId("owner/repo", "", "");
+    const claimedUntil = Date.now() + 60_000;
+    await db
+      .update(skillSources)
+      .set({
+        nextAttemptAt: claimedUntil,
+        status: "pending",
+        lastSyncedAt: null,
+        updatedAt: Date.now() - 6 * 60_000,
+      })
+      .where(eq(skillSources.id, id));
+
+    await reconcileInstanceConfig(deps(db), cfg);
+
+    const [row] = await db.select().from(skillSources).where(eq(skillSources.id, id));
+    expect(row?.nextAttemptAt).toBeLessThanOrEqual(Date.now());
+  });
+
+  it("leaves a synced config row's schedule alone", async () => {
+    const cfg: InstanceConfig = {
+      version: 1,
+      skillSources: [{ repo: "owner/repo" }],
+    };
+    await reconcileInstanceConfig(deps(db), cfg);
+    const id = configSkillSourceId("owner/repo", "", "");
+    const nextAttemptAt = Date.now() + 120_000;
+    await db
+      .update(skillSources)
+      .set({
+        nextAttemptAt,
+        status: "pending",
+        lastSyncedAt: Date.now(),
+        updatedAt: Date.now() - 6 * 60_000,
+      })
+      .where(eq(skillSources.id, id));
+
+    await reconcileInstanceConfig(deps(db), cfg);
+
+    const [row] = await db.select().from(skillSources).where(eq(skillSources.id, id));
+    expect(row?.nextAttemptAt).toBe(nextAttemptAt);
+    expect(row?.lastSyncedAt).not.toBeNull();
+  });
+
+  it("does not reset an error row's retry backoff", async () => {
+    const cfg: InstanceConfig = {
+      version: 1,
+      skillSources: [{ repo: "owner/repo" }],
+    };
+    await reconcileInstanceConfig(deps(db), cfg);
+    const id = configSkillSourceId("owner/repo", "", "");
+    const backoffUntil = Date.now() + 600_000;
+    await db
+      .update(skillSources)
+      .set({
+        nextAttemptAt: backoffUntil,
+        status: "error",
+        lastSyncedAt: null,
+        lastError: "GitHub returned 502",
+        attempts: 2,
+        updatedAt: Date.now() - 6 * 60_000,
+      })
+      .where(eq(skillSources.id, id));
+
+    await reconcileInstanceConfig(deps(db), cfg);
+
+    const [row] = await db.select().from(skillSources).where(eq(skillSources.id, id));
+    expect(row?.nextAttemptAt).toBe(backoffUntil);
+    expect(row?.status).toBe("error");
+    expect(row?.attempts).toBe(2);
   });
 
   it("second run on same source is a no-op", async () => {

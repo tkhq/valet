@@ -88,7 +88,7 @@ for `https://valet.localdev`, image rebuild flow, full-reset procedure — is
 Schema migrations (engine: `packages/store-postgres/migrations/pg/`, app:
 `packages/api/migrations/pg/`) run automatically at server boot. Pre-1.0 they
 are edited in place as a single `0000` file — a schema change on the embedded
-PGlite dev store requires wiping the data dir (`rm -rf ~/.valet/pg`).
+PGlite dev store requires wiping the data dir (`make dev-clean`; see CLAUDE.md).
 
 ## Legacy stack
 

@@ -405,6 +405,18 @@ export interface MessageCommand {
   ok: boolean;
 }
 
+/**
+ * Present on a user message that is a skill invocation: a slash-command
+ * expansion (stamped as submission metadata at dispatch) or a host-invoked
+ * `Thread.skill()` submission. `args` is the raw text the user typed after
+ * the command; absent for host invocations. The client renders such a
+ * message as a skill card instead of prose.
+ */
+export interface MessageSkillInvocation {
+  name: string;
+  args?: string;
+}
+
 export interface Message {
   id: string;
   sessionId: string;
@@ -434,6 +446,12 @@ export interface Message {
    * The renderer uses `ok` to show success/failure styling.
    */
   command?: MessageCommand;
+  /**
+   * Present on a user message that is a skill invocation (see
+   * `MessageSkillInvocation`). Projected from the persisted entry's
+   * `metadata.skill` / `metadata.skillArgs`.
+   */
+  skill?: MessageSkillInvocation;
   /**
    * Model that produced this entry (assistant messages). Gives the reply
    * visible attribution so a model switch is verifiable in the transcript,
@@ -2177,6 +2195,10 @@ export interface ArtifactListItem {
   title: string;
   url: string;
   visibility: ArtifactVisibility;
+  /** Who shared it. An org admin's list contains every member's artifacts,
+   * and paths are conventional (`journal/2026-08-27.md`), so a path-only
+   * client match can hit another member's row. Filter on this too. */
+  actorUserId: string;
   revoked: boolean;
   createdAt: number;
   updatedAt: number;

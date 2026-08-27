@@ -513,10 +513,10 @@ export const api = {
   // `content` and `pinned` are both optional: the route leaves the body
   // alone when `content` is absent, which is how the doc view pins a file
   // without rewriting it.
-  writeMemoryDoc: (body: { path: string; content?: string; pinned?: boolean }) =>
-    request<unknown>("PUT", "/memory", body),
-  deleteMemoryDoc: (path: string) =>
-    request<unknown>("DELETE", `/memory?path=${encodeURIComponent(path)}`),
+  writeMemoryDoc: (body: { path: string; content?: string; pinned?: boolean }, owner?: OwnerFilter) =>
+    request<unknown>("PUT", `/memory${ownerQuery(owner)}`, body),
+  deleteMemoryDoc: (path: string, owner?: OwnerFilter) =>
+    request<unknown>("DELETE", `/memory?path=${encodeURIComponent(path)}${ownerSuffix(owner)}`),
   exportMemory: () => request<ExportMemoryResponse>("GET", "/memory/export"),
   importMemory: (body: ImportMemoryRequest) =>
     request<ImportMemoryResponse>("POST", "/memory/import", body),

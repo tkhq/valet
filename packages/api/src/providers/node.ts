@@ -237,8 +237,11 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // handle over the SAME connection source.
   const pgdb = buildAppQueryable(source);
 
-  await applyAppMigrations(pgdb);
-  await applyEngineMigrations(pgdb);
+  // Pass the PGlite dir so a schema-mismatch error names the exact path to
+  // delete; on DATABASE_URL there is no dir and the hint stays generic.
+  const pgDirHint = opts.databaseUrl ? undefined : opts.pgDataDir;
+  await applyAppMigrations(pgdb, pgDirHint);
+  await applyEngineMigrations(pgdb, pgDirHint);
 
   const db = buildAppDb(source);
 

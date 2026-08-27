@@ -281,7 +281,8 @@ just-admitted submission wins over the sweep. `agent_sessions.status` tracks
 ## Data Model
 
 Two schema domains share one Postgres database. Dev/test uses embedded PGlite
-(`~/.valet/pg`); setting `DATABASE_URL` switches to node-postgres. Both are
+(`.valet-dev/pg` in the worktree under `make dev-local`, `~/.valet/pg`
+otherwise); setting `DATABASE_URL` switches to node-postgres. Both are
 single pre-1.0 `0000` migrations, edited in place.
 
 **Engine tables** (`packages/store-postgres/migrations/pg/0000_engine.sql`):

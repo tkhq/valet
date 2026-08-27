@@ -15,7 +15,7 @@ import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from "../lib/drizzle.js";
 import { orgMembers, teamMembers, teams } from "../schema/index.js";
-import { canAdministerSession, canViewSession } from "./session-access.js";
+import { canAdministerSession, canResolveSessionGate, canViewSession } from "./session-access.js";
 
 let db: AppDb;
 let pglite: PGlite;
@@ -213,6 +213,58 @@ describe("canAdministerSession", () => {
     await seedOrgMember("org-admin-user", "admin");
 
     const ok = await canAdministerSession(
+      db,
+      { userId: "org:org-1", ownerType: "org", ownerId: "org-1" },
+      "org-admin-user",
+    );
+    expect(ok).toBe(false);
+  });
+});
+
+describe("canResolveSessionGate", () => {
+  it("allows the owner of a user-owned session", async () => {
+    const ok = await canResolveSessionGate(db, { userId: "u1", ownerType: "user", ownerId: "u1" }, "u1");
+    expect(ok).toBe(true);
+  });
+
+  it("rejects a different user for a user-owned session", async () => {
+    const ok = await canResolveSessionGate(db, { userId: "u1", ownerType: "user", ownerId: "u1" }, "u2");
+    expect(ok).toBe(false);
+  });
+
+  it("allows a live team member — the same audience the attention router notifies", async () => {
+    await seedTeam("team_1", [{ userId: "member-user", role: "member" }]);
+
+    const ok = await canResolveSessionGate(
+      db,
+      { userId: "first-opener", ownerType: "team", ownerId: "team_1" },
+      "member-user",
+    );
+    expect(ok).toBe(true);
+  });
+
+  it("rejects a non-member for a team-owned session, including the stamped first opener", async () => {
+    await seedTeam("team_1", [{ userId: "bob", role: "member" }]);
+
+    const ok = await canResolveSessionGate(
+      db,
+      { userId: "first-opener", ownerType: "team", ownerId: "team_1" },
+      "first-opener",
+    );
+    expect(ok).toBe(false);
+  });
+
+  it("rejects an org admin for a user-owned session — resolving is not an admin power", async () => {
+    await seedOrgMember("org-admin-user", "admin");
+
+    const ok = await canResolveSessionGate(db, { userId: "u1", ownerType: "user", ownerId: "u1" }, "org-admin-user");
+    expect(ok).toBe(false);
+  });
+
+  it("rejects an org-owned session — org-level resolution is a separate, not-yet-built decision", async () => {
+    await seedOrgMember("org-admin-user", "admin");
+
+    const ok = await canResolveSessionGate(
       db,
       { userId: "org:org-1", ownerType: "org", ownerId: "org-1" },
       "org-admin-user",

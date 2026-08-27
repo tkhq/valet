@@ -109,7 +109,7 @@ Each credential entry in the response gains `connect: "oauth" | "manual"` so the
 
 ## Registered-client storage: `mcp_oauth_clients`
 
-New app table (pre-1.0: edit `packages/api/migrations/pg/0000_app.sql` in place + add Drizzle schema; local `rm -rf ~/.valet/pg` required after):
+New app table (pre-1.0: edit `packages/api/migrations/pg/0000_app.sql` in place + add Drizzle schema; local `make dev-clean` required after):
 
 ```sql
 CREATE TABLE mcp_oauth_clients (

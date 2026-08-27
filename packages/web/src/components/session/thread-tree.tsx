@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { Archive, ArchiveRestore, MessageSquare, MoreHorizontal, Plus, RefreshCw, Search, X } from "lucide-react";
-import type { OrchestratorChildSummary, ThreadSummary } from "@valet/api/wire";
+import type { DecisionGate, OrchestratorChildSummary, ThreadSummary } from "@valet/api/wire";
 import {
   useArchivedThreads,
   useCreateThread,
@@ -11,6 +11,7 @@ import {
 } from "~/api/queries";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { useDismissChild, useOrchestratorChildren, useOrchestratorInfo } from "~/api/orchestrator";
+import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
 import { useStreamStore } from "~/stores/stream";
 import { createDebouncer } from "~/lib/debounce";
 import {
@@ -80,6 +81,54 @@ export function groupChildrenByThread(
     else map.set(c.parentThreadId, [c]);
   }
   return map;
+}
+
+/**
+ * Pure: the ids of threads that hold at least one pending gate. Feeds the
+ * per-thread needs-you dot (TKAI-258): the gate card and header badge are
+ * scoped to the ACTIVE thread, so this dot is the only in-session surface
+ * for a gate pending on a thread you are not looking at.
+ */
+export function threadIdsWithPendingGates(
+  gates: Record<string, DecisionGate> | undefined,
+): Set<string> {
+  const ids = new Set<string>();
+  for (const g of Object.values(gates ?? {})) ids.add(g.threadId);
+  return ids;
+}
+
+/**
+ * Pure: the rows the tree renders. Applies the origin-bucket and search
+ * filters, but a thread with a pending gate is exempt from both — hiding
+ * the row would hide the only in-session surface for its gate.
+ */
+export function visibleThreads(
+  threads: ThreadSummary[],
+  bucket: ThreadOriginBucket,
+  query: string,
+  gatedThreadIds: Set<string>,
+): ThreadSummary[] {
+  const filtered = filterThreads(threads, bucket, query);
+  if (gatedThreadIds.size === 0) return filtered;
+  const shown = new Set(filtered.map((t) => t.id));
+  return threads.filter((t) => shown.has(t.id) || gatedThreadIds.has(t.id));
+}
+
+/**
+ * Pure: true when a pending gate sits on a thread that is NOT in the
+ * active-thread list — an archived thread. Marks the "Show archived"
+ * toggle so the gate has a surface while the section is closed.
+ */
+export function hasGateOutsideList(
+  threads: ThreadSummary[],
+  gatedThreadIds: Set<string>,
+): boolean {
+  if (gatedThreadIds.size === 0) return false;
+  const listed = new Set(threads.map((t) => t.id));
+  for (const id of gatedThreadIds) {
+    if (!listed.has(id)) return true;
+  }
+  return false;
 }
 
 /** Pure: status-dot class for a child row. Calm-companion visual language —
@@ -167,6 +216,14 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   const activeThreadId = search.thread ?? threads[0]?.id;
   const grouped = groupChildrenByThread(showChildren ? (childrenQ.data?.children ?? []) : []);
 
+  // Seed pending gates from REST for ourselves — the tree must not depend
+  // on a SessionView being mounted for the same session. Live updates
+  // arrive via the wire (`gate.*` frames); the record's identity only
+  // changes when a gate opens or resolves, so the derived set is cheap.
+  usePendingGatesSeed(sessionId);
+  const pendingGates = useStreamStore((s) => s.bySession[sessionId]?.pendingGates);
+  const gatedThreadIds = useMemo(() => threadIdsWithPendingGates(pendingGates), [pendingGates]);
+
   const [bucket, setBucket] = useState<ThreadOriginBucket>(() => loadStoredBucket());
   const [query, setQuery] = useState("");
   const counts = useMemo(() => bucketCounts(threads), [threads]);
@@ -176,9 +233,12 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   const showFilters = bucketsInUse.length > 1;
   const effectiveBucket = showFilters ? bucket : "all";
   const visible = useMemo(
-    () => filterThreads(threads, effectiveBucket, query),
-    [threads, effectiveBucket, query],
+    () => visibleThreads(threads, effectiveBucket, query, gatedThreadIds),
+    [threads, effectiveBucket, query, gatedThreadIds],
   );
+  // A gate on an archived thread has no row in `visible`; without this the
+  // gate would be invisible while the archived section is closed.
+  const archivedGated = threadsQ.data !== undefined && hasGateOutsideList(threads, gatedThreadIds);
 
   // Auto-switch when the ACTIVE thread would be filtered out (deep link
   // into an automation thread while the chip says Chat) — the selection
@@ -295,6 +355,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
               thread={t}
               index={threads.indexOf(t)}
               active={t.id === activeThreadId}
+              hasPendingGate={gatedThreadIds.has(t.id)}
               childSessions={grouped.get(t.id) ?? []}
               activeChildId={search.child}
               onArchive={(threadId) => {
@@ -320,6 +381,13 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
           >
             <Archive className="h-3 w-3 shrink-0" aria-hidden />
             <span>{showArchived ? "Hide archived" : "Show archived"}</span>
+            {archivedGated && (
+              <span
+                role="img"
+                aria-label="An archived thread needs your decision"
+                className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500"
+              />
+            )}
           </button>
           {showArchived && (
             <ul className="mt-1 space-y-0.5">
@@ -329,6 +397,13 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
               {(archivedQ.data?.threads ?? []).map((t) => (
                 <li key={t.id} className="flex items-center gap-1 px-2 py-1 text-xs text-muted">
                   <span className="flex-1 truncate">{t.title ?? t.id}</span>
+                  {gatedThreadIds.has(t.id) && (
+                    <span
+                      role="img"
+                      aria-label="Needs your decision"
+                      className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500"
+                    />
+                  )}
                   <button
                     type="button"
                     aria-label={`Unarchive ${t.title ?? t.id}`}
@@ -351,6 +426,7 @@ function ThreadNode({
   thread,
   index,
   active,
+  hasPendingGate,
   childSessions,
   activeChildId,
   onArchive,
@@ -360,6 +436,8 @@ function ThreadNode({
   thread: ThreadSummary;
   index: number;
   active: boolean;
+  /** The thread holds a pending decision gate — show the needs-you dot. */
+  hasPendingGate: boolean;
   childSessions: OrchestratorChildSummary[];
   activeChildId?: string;
   onArchive: (threadId: string) => void;
@@ -398,6 +476,21 @@ function ThreadNode({
             )}
           >
             <span className="flex-1 truncate">{label}</span>
+            {hasPendingGate && (
+              // Amber = blocked on a person, the same vocabulary as the
+              // sessions-list "Needs you" chip. Static on purpose: pulse is
+              // reserved for progress (see childStatusDotClassName). Shown on
+              // the active thread too — the dot marks where gates are, not
+              // where you aren't.
+              <span
+                // role="img": ARIA prohibits accessible names on a bare
+                // span (role generic), so without it screen readers skip
+                // the label entirely.
+                role="img"
+                aria-label="Needs your decision"
+                className="ml-2 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500"
+              />
+            )}
           </Link>
         </Tooltip>
         <DropdownMenu>
@@ -443,11 +536,12 @@ function ThreadNode({
                 <MessageSquare className="h-3 w-3 shrink-0" />
                 <span className="flex-1 truncate">{c.title || c.sessionId}</span>
                 {c.status === "settled" ? (
-                  <span aria-label="settled" className="shrink-0 text-muted">
+                  <span role="img" aria-label="settled" className="shrink-0 text-muted">
                     ✓
                   </span>
                 ) : (
                   <span
+                    role="img"
                     aria-label="running"
                     className={cn("h-1.5 w-1.5 shrink-0 rounded-full", childStatusDotClassName(c.status))}
                   />
