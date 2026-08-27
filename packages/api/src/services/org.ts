@@ -150,6 +150,22 @@ export async function setProxyCredentialMode(
 }
 
 /**
+ * Master on/off for the recording gateway (org-level). Default OFF: the
+ * gateway forwards a provider key and records prompts, so an org opts in
+ * explicitly on the Proxy settings page. When off, `/proxy/*` 403s. Stored in
+ * the `orgs.features` jsonb alongside `proxyCredentialMode`.
+ */
+export async function getProxyEnabled(db: AppQueryable, orgId: string): Promise<boolean> {
+  const raw = await readRawFeatures(db, orgId);
+  return raw.proxyEnabled === true;
+}
+
+export async function setProxyEnabled(db: AppQueryable, orgId: string, enabled: boolean): Promise<void> {
+  const raw = await readRawFeatures(db, orgId);
+  await db.update(orgs).set({ features: { ...raw, proxyEnabled: enabled } }).where(eq(orgs.id, orgId));
+}
+
+/**
  * Reads `orgs.features` (jsonb). An absent key reads as false, which is what
  * makes every gate here off for an operator who sets nothing.
  */

@@ -12,7 +12,7 @@ import type { AppEnv } from "../env.js";
 import type { ProviderKind } from "../proxy/types.js";
 import { resolveProxyPrincipal, extractPassthroughKey, wireError } from "../proxy/principal.js";
 import { resolveUpstream, DEFAULT_BASE } from "../proxy/upstream.js";
-import { getProxyCredentialMode } from "../services/org.js";
+import { getProxyCredentialMode, getProxyEnabled } from "../services/org.js";
 import type { Upstream } from "../proxy/types.js";
 import { recordProxyCall } from "../proxy/recorder.js";
 import { recordProxySpend } from "../proxy/metrics.js";
@@ -105,6 +105,12 @@ export function registerProxyGateway(app: Hono<AppEnv>, deps: ProxyGatewayDeps):
       },
     });
     if (principal instanceof Response) return principal;
+
+    // Master on/off (org-level, default off). When disabled, the gateway
+    // records nothing and forwards nothing — a wire-correct 403 tells the user.
+    if (!(await getProxyEnabled(db, principal.orgId))) {
+      return wireError(kind, 403, "The recording gateway is disabled for your org. An admin can enable it in Settings → Proxy.");
+    }
 
     // Credential strategy is an org-level setting. Centralized (default): use
     // the org's stored key. Pass-through: forward the user's OWN provider key

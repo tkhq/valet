@@ -360,44 +360,57 @@ describe("GET /api/proxy/usage/summary — byDay buckets", () => {
   });
 });
 
-describe("GET/PUT /api/proxy/settings — credential mode", () => {
-  it("defaults to centralized", async () => {
+describe("GET/PUT /api/proxy/settings — governance (enabled + mode)", () => {
+  it("defaults to disabled + centralized", async () => {
     api = await bootTestApi();
     const res = await fetch(`${api.baseUrl}/api/proxy/settings`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ mode: "centralized" });
+    expect(await res.json()).toEqual({ enabled: false, mode: "centralized" });
   });
 
-  it("an admin can switch to passthrough and it persists", async () => {
+  it("an admin can enable the gateway (persists)", async () => {
     api = await bootTestApi();
     const put = await fetch(`${api.baseUrl}/api/proxy/settings`, {
       method: "PUT",
       headers: { "content-type": "application/json" }, // local-user is admin
-      body: JSON.stringify({ mode: "passthrough" }),
+      body: JSON.stringify({ enabled: true }),
     });
     expect(put.status).toBe(200);
-    expect(await put.json()).toEqual({ mode: "passthrough" });
+    expect(await put.json()).toEqual({ enabled: true, mode: "centralized" });
     const get = await fetch(`${api.baseUrl}/api/proxy/settings`);
-    expect(await get.json()).toEqual({ mode: "passthrough" });
+    expect(await get.json()).toEqual({ enabled: true, mode: "centralized" });
   });
 
-  it("a non-admin member cannot change the mode (403)", async () => {
+  it("an admin can switch mode without touching enabled", async () => {
+    api = await bootTestApi();
+    await fetch(`${api.baseUrl}/api/proxy/settings`, {
+      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: true }),
+    });
+    const put = await fetch(`${api.baseUrl}/api/proxy/settings`, {
+      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ mode: "passthrough" }),
+    });
+    expect(await put.json()).toEqual({ enabled: true, mode: "passthrough" });
+  });
+
+  it("a non-admin member cannot change settings (403)", async () => {
     api = await bootTestApi();
     const res = await fetch(`${api.baseUrl}/api/proxy/settings`, {
       method: "PUT",
       headers: { "content-type": "application/json", "x-valet-test-user-id": "test-member" },
-      body: JSON.stringify({ mode: "passthrough" }),
+      body: JSON.stringify({ enabled: true }),
     });
     expect(res.status).toBe(403);
   });
 
-  it("rejects an invalid mode value (400)", async () => {
+  it("rejects an invalid mode value and a non-boolean enabled (400)", async () => {
     api = await bootTestApi();
-    const res = await fetch(`${api.baseUrl}/api/proxy/settings`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ mode: "nonsense" }),
+    const bad1 = await fetch(`${api.baseUrl}/api/proxy/settings`, {
+      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ mode: "nonsense" }),
     });
-    expect(res.status).toBe(400);
+    expect(bad1.status).toBe(400);
+    const bad2 = await fetch(`${api.baseUrl}/api/proxy/settings`, {
+      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled: "yes" }),
+    });
+    expect(bad2.status).toBe(400);
   });
 });

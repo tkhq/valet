@@ -18,6 +18,8 @@ import {
   isOrgAdmin,
   getProxyCredentialMode,
   setProxyCredentialMode,
+  getProxyEnabled,
+  setProxyEnabled,
   type ProxyCredentialMode,
 } from "../services/org.js";
 import type {
@@ -35,28 +37,44 @@ export const proxyUsageRouter = new Hono<AppEnv>();
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** GET `/api/proxy/settings` — the org's credential mode. Any member may read
- * it (the onboarding panel shows mode-specific setup). */
+/** GET `/api/proxy/settings` — the org's gateway governance (enabled + mode).
+ * Any member may read it (the onboarding panel shows mode-specific setup and
+ * whether the gateway is on). */
 proxyUsageRouter.get("/settings", async (c) => {
   const db = c.var.providers.db;
-  const mode = await getProxyCredentialMode(db, c.var.user.orgId);
-  const body: ProxySettingsResponse = { mode };
+  const orgId = c.var.user.orgId;
+  const body: ProxySettingsResponse = {
+    enabled: await getProxyEnabled(db, orgId),
+    mode: await getProxyCredentialMode(db, orgId),
+  };
   return c.json(body);
 });
 
-/** PUT `/api/proxy/settings` — set the org's credential mode. Org-admin only;
- * a non-admin 403s. Rejects any value other than the two known modes. */
+/** PUT `/api/proxy/settings` — set the gateway's enabled flag and/or credential
+ * mode. Org-admin only (explicit check; a non-admin 403s). Either field may be
+ * sent alone; an invalid value 400s. Returns the full resulting settings. */
 proxyUsageRouter.put("/settings", async (c) => {
   const db = c.var.providers.db;
   const user = c.var.user;
   if (!(await isOrgAdmin(db, user.orgId, user.id))) return c.json({ error: "org admin required" }, 403);
-  const parsed: unknown = await c.req.json().catch(() => null);
-  const mode = (parsed as { mode?: unknown } | null)?.mode;
-  if (mode !== "centralized" && mode !== "passthrough") {
-    return c.json({ error: "mode must be 'centralized' or 'passthrough'" }, 400);
+  const parsed = (await c.req.json().catch(() => null)) as { enabled?: unknown; mode?: unknown } | null;
+  if (!parsed || (parsed.enabled === undefined && parsed.mode === undefined)) {
+    return c.json({ error: "provide 'enabled' (boolean) and/or 'mode'" }, 400);
   }
-  await setProxyCredentialMode(db, user.orgId, mode as ProxyCredentialMode);
-  const body: ProxySettingsResponse = { mode };
+  if (parsed.enabled !== undefined) {
+    if (typeof parsed.enabled !== "boolean") return c.json({ error: "'enabled' must be a boolean" }, 400);
+    await setProxyEnabled(db, user.orgId, parsed.enabled);
+  }
+  if (parsed.mode !== undefined) {
+    if (parsed.mode !== "centralized" && parsed.mode !== "passthrough") {
+      return c.json({ error: "'mode' must be 'centralized' or 'passthrough'" }, 400);
+    }
+    await setProxyCredentialMode(db, user.orgId, parsed.mode as ProxyCredentialMode);
+  }
+  const body: ProxySettingsResponse = {
+    enabled: await getProxyEnabled(db, user.orgId),
+    mode: await getProxyCredentialMode(db, user.orgId),
+  };
   return c.json(body);
 });
 
