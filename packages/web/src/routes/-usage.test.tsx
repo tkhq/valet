@@ -132,6 +132,9 @@ const mockDetail: ProxyRequestDetail = {
 
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
+  Link: ({ children, to }: { children: React.ReactNode; to: string }) => (
+    <a href={to}>{children}</a>
+  ),
 }));
 
 const createKeyMutate = vi.fn();
@@ -161,8 +164,8 @@ let detailResult: { data: ProxyRequestDetail | undefined; isLoading: boolean; er
   isLoading: false,
   error: null,
 };
-let settingsResult: { data: { mode: "centralized" | "passthrough" } | undefined; isLoading: boolean } = {
-  data: { mode: "centralized" },
+let settingsResult: { data: { enabled: boolean; mode: "centralized" | "passthrough" } | undefined; isLoading: boolean } = {
+  data: { enabled: true, mode: "centralized" },
   isLoading: false,
 };
 
@@ -194,7 +197,7 @@ beforeEach(() => {
   summaryResult = { data: mockSummary, isLoading: false, error: null };
   requestsResult = { data: mockRequests, isLoading: false, error: null };
   detailResult = { data: mockDetail, isLoading: false, error: null };
-  settingsResult = { data: { mode: "centralized" }, isLoading: false };
+  settingsResult = { data: { enabled: true, mode: "centralized" }, isLoading: false };
   orgData = { data: { callerRole: "admin", features: { organizations: true } }, isLoading: false };
   setModeMutate.mockReset();
 });
@@ -346,30 +349,30 @@ describe("UsagePage — OnboardingPanel", () => {
 });
 
 describe("UsagePage — credential mode", () => {
-  it("shows Centralized when mode=centralized", () => {
-    settingsResult = { data: { mode: "centralized" }, isLoading: false };
-    render(<UsagePage />);
-    expect(screen.getAllByText(/Centralized/).length).toBeGreaterThan(0);
-  });
-
-  it("shows Pass-through when mode=passthrough", () => {
-    settingsResult = { data: { mode: "passthrough" }, isLoading: false };
-    render(<UsagePage />);
-    expect(screen.getAllByText(/Pass-through/).length).toBeGreaterThan(0);
-  });
-
-  it("admin sees the mode toggle buttons", () => {
+  // The mode toggle moved to Settings → Proxy. The usage page no longer renders
+  // CredentialModeControl; mode-awareness is covered by the OnboardingPanel snippet
+  // tests below. Both admin and member views have no mode group on this page.
+  it("mode toggle buttons do not appear on the usage page (moved to Settings → Proxy)", () => {
     orgData = { data: { callerRole: "admin", features: { organizations: true } }, isLoading: false };
     render(<UsagePage />);
     const group = document.querySelector("[role='group'][aria-label='Credential mode']");
-    expect(group).toBeTruthy();
+    expect(group).toBeNull();
+  });
+});
+
+describe("UsagePage — disabled-gateway notice", () => {
+  it("shows the notice when enabled=false", () => {
+    settingsResult = { data: { enabled: false, mode: "centralized" }, isLoading: false };
+    render(<UsagePage />);
+    expect(screen.getByText(/recording gateway is disabled/)).toBeTruthy();
+    const link = document.querySelector("a[href='/settings/organization/proxy']");
+    expect(link).toBeTruthy();
   });
 
-  it("member does not see the mode toggle buttons", () => {
-    orgData = { data: { callerRole: "member", features: { organizations: true } }, isLoading: false };
+  it("does not show the notice when enabled=true", () => {
+    settingsResult = { data: { enabled: true, mode: "centralized" }, isLoading: false };
     render(<UsagePage />);
-    const group = document.querySelector("[role='group'][aria-label='Credential mode']");
-    expect(group).toBeNull();
+    expect(screen.queryByText(/recording gateway is disabled/)).toBeNull();
   });
 });
 
@@ -404,14 +407,14 @@ describe("UsagePage — OnboardingPanel mode snippets", () => {
   });
 
   it("passthrough mode shows ANTHROPIC_API_KEY line after key creation", () => {
-    settingsResult = { data: { mode: "passthrough" }, isLoading: false };
+    settingsResult = { data: { enabled: true, mode: "passthrough" }, isLoading: false };
     render(<UsagePage />);
     fireEvent.click(screen.getByRole("button", { name: "Create proxy key" }));
     expect(screen.getAllByText(/ANTHROPIC_API_KEY/).length).toBeGreaterThan(0);
   });
 
   it("centralized mode shows unset note for ANTHROPIC_API_KEY after key creation", () => {
-    settingsResult = { data: { mode: "centralized" }, isLoading: false };
+    settingsResult = { data: { enabled: true, mode: "centralized" }, isLoading: false };
     render(<UsagePage />);
     fireEvent.click(screen.getByRole("button", { name: "Create proxy key" }));
     // The centralized note says "unset it"
