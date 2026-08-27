@@ -9,8 +9,12 @@ import { fileURLToPath } from "node:url";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { SessionEntry } from "./types.js";
 
-/** Installed pi-ai version, read from this package's pinned dependency. */
-export function piAiVersion(): string {
+/** Last lines kept on a span attribute. Stop-reason drift is at the tail. */
+export const FINGERPRINT_SPAN_MAX_LINES = 64;
+/** Byte cap for a span fingerprint attribute, including the count= header. */
+export const FINGERPRINT_SPAN_MAX_BYTES = 8192;
+
+function readPiAiVersion(): string {
   try {
     const here = dirname(fileURLToPath(import.meta.url));
     const pkg = JSON.parse(readFileSync(join(here, "..", "package.json"), "utf8")) as {
@@ -24,6 +28,43 @@ export function piAiVersion(): string {
     /* fall through */
   }
   return "unknown";
+}
+
+/** Installed pi-ai version, read once at module load. */
+export const piAiVersion = readPiAiVersion();
+
+/**
+ * Prefix `count=` and keep the last lines that fit the line and byte caps.
+ * Span attributes drop the head of a long transcript; the tail carries
+ * the stop-reason lines that distinguish a live thread from a rebuild.
+ */
+export function boundFingerprint(
+  fp: string,
+  opts?: { maxBytes?: number; maxLines?: number },
+): string {
+  const maxBytes = opts?.maxBytes ?? FINGERPRINT_SPAN_MAX_BYTES;
+  const maxLines = opts?.maxLines ?? FINGERPRINT_SPAN_MAX_LINES;
+  const lines = fp.length === 0 ? [] : fp.split("\n");
+  const header = `count=${lines.length}`;
+  if (lines.length === 0) return header;
+
+  const tail = lines.slice(-maxLines);
+  const kept: string[] = [];
+  let size = header.length + 1;
+  for (let i = tail.length - 1; i >= 0; i--) {
+    const line = tail[i]!;
+    const add = line.length + 1;
+    if (kept.length > 0 && size + add > maxBytes) break;
+    if (kept.length === 0 && size + add > maxBytes) {
+      const room = maxBytes - size;
+      if (room > 0) kept.push(line.slice(-room));
+      break;
+    }
+    kept.push(line);
+    size += add;
+  }
+  kept.reverse();
+  return [header, ...kept].join("\n");
 }
 
 function blockKinds(content: unknown): string {

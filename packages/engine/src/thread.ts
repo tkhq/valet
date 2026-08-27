@@ -35,6 +35,7 @@ import { formatFileAttachmentsNote } from "./file-attachment-formatter.js";
 import { capturePatch } from "./patch-capture.js";
 import { recordSettlement, recordTurn } from "./metrics.js";
 import {
+  boundFingerprint,
   fingerprintEntries,
   fingerprintMessages,
   piAiVersion,
@@ -1319,31 +1320,35 @@ export class Thread {
     messages: readonly AgentMessage[],
     entries?: readonly SessionEntry[],
   ): void {
-    const messagesFp = fingerprintMessages(messages);
-    const entriesFp = entries ? fingerprintEntries(entries) : undefined;
-    const version = piAiVersion();
-    const attrs = {
-      "valet.transcript.source": source,
-      "valet.transcript.messages": messagesFp,
-      ...(entriesFp !== undefined ? { "valet.transcript.entries": entriesFp } : {}),
-      "valet.thread.id": this.id,
-      "valet.pi_ai.version": version,
-    };
-    const span = this.turnSpan ?? this.submissionSpan ?? otelTrace.getActiveSpan();
-    if (span) {
-      span.addEvent("transcript.shape", attrs);
-    } else {
-      const orphan = engineTracer().startSpan("transcript.shape");
-      orphan.addEvent("transcript.shape", attrs);
-      orphan.end();
-    }
-    if (process.env.VALET_TRANSCRIPT_DEBUG === "1") {
-      const lines = [
-        `[transcript] source=${source} thread=${this.id} pi-ai=${version}`,
-        messagesFp && `messages:\n${messagesFp}`,
-        entriesFp && `entries:\n${entriesFp}`,
-      ].filter(Boolean);
-      console.log(lines.join("\n"));
+    try {
+      const messagesFp = boundFingerprint(fingerprintMessages(messages));
+      const entriesFp = entries ? boundFingerprint(fingerprintEntries(entries)) : undefined;
+      const version = piAiVersion;
+      const attrs = {
+        "valet.transcript.source": source,
+        "valet.transcript.messages": messagesFp,
+        ...(entriesFp !== undefined ? { "valet.transcript.entries": entriesFp } : {}),
+        "valet.thread.id": this.id,
+        "valet.pi_ai.version": version,
+      };
+      const span = this.turnSpan ?? this.submissionSpan ?? otelTrace.getActiveSpan();
+      if (span) {
+        span.addEvent("transcript.shape", attrs);
+      } else {
+        const orphan = engineTracer().startSpan("transcript.shape");
+        orphan.addEvent("transcript.shape", attrs);
+        orphan.end();
+      }
+      if (process.env.VALET_TRANSCRIPT_DEBUG === "1") {
+        const lines = [
+          `[transcript] source=${source} thread=${this.id} pi-ai=${version}`,
+          messagesFp && `messages:\n${messagesFp}`,
+          entriesFp && `entries:\n${entriesFp}`,
+        ].filter(Boolean);
+        console.log(lines.join("\n"));
+      }
+    } catch {
+      // Diagnostics must not fail a turn.
     }
   }
 

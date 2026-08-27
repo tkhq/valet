@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
@@ -279,34 +279,52 @@ describe("engine traces: transcript.shape on rehydrate", () => {
   });
 
   it("rehydrate emits one transcript.shape event carrying source rehydrate", async () => {
+    const prevDebug = process.env.VALET_TRANSCRIPT_DEBUG;
+    delete process.env.VALET_TRANSCRIPT_DEBUG;
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     const faux = registerFauxProvider({ provider: "traces-fp" });
-    faux.setResponses([fauxAssistantMessage("ok")]);
-    const { engine, store, events } = makeEngine();
-    const session = await engine.createSession({
-      userId: "u1",
-      orgId: "o1",
-      workspace: "/workspace",
-      sandbox: {},
-      model: faux.getModel(),
-    });
-    const receipt = await session.prompt("hi");
-    await waitFor(() =>
-      events.some((e) => e.event.type === "submission_settled" && e.event.queueItemId === receipt.queueItemId),
-    );
-
-    const entries = await store.getEntries(session.id, receipt.threadId);
-    session.thread().rehydrateTranscript(entries);
-
-    const rehydrateEvents = exporter
-      .getFinishedSpans()
-      .flatMap((s) => s.events)
-      .filter(
-        (e) =>
-          e.name === "transcript.shape" && e.attributes?.["valet.transcript.source"] === "rehydrate",
+    try {
+      faux.setResponses([fauxAssistantMessage("ok")]);
+      const { engine, store, events } = makeEngine();
+      const session = await engine.createSession({
+        userId: "u1",
+        orgId: "o1",
+        workspace: "/workspace",
+        sandbox: {},
+        model: faux.getModel(),
+      });
+      const receipt = await session.prompt("hi");
+      await waitFor(() =>
+        events.some((e) => e.event.type === "submission_settled" && e.event.queueItemId === receipt.queueItemId),
       );
-    expect(rehydrateEvents).toHaveLength(1);
-    expect(String(rehydrateEvents[0]?.attributes?.["valet.pi_ai.version"])).toMatch(/^\d+\.\d+/);
 
-    faux.unregister();
+      const entries = await store.getEntries(session.id, receipt.threadId);
+      session.thread().rehydrateTranscript(entries);
+
+      const rehydrateEvents = exporter
+        .getFinishedSpans()
+        .flatMap((s) => s.events)
+        .filter(
+          (e) =>
+            e.name === "transcript.shape" && e.attributes?.["valet.transcript.source"] === "rehydrate",
+        );
+      expect(rehydrateEvents).toHaveLength(1);
+      const attrs = rehydrateEvents[0]?.attributes ?? {};
+      expect(String(attrs["valet.pi_ai.version"])).toMatch(/^\d+\.\d+/);
+      const messagesFp = String(attrs["valet.transcript.messages"] ?? "");
+      const entriesFp = String(attrs["valet.transcript.entries"] ?? "");
+      expect(messagesFp).toMatch(/^count=\d+/);
+      expect(entriesFp).toMatch(/^count=\d+/);
+      for (const text of ["do the work", "starting", "hi"] as const) {
+        expect(messagesFp).not.toContain(text);
+        expect(entriesFp).not.toContain(text);
+      }
+      expect(logSpy.mock.calls.some((c) => String(c[0]).includes("[transcript]"))).toBe(false);
+    } finally {
+      logSpy.mockRestore();
+      faux.unregister();
+      if (prevDebug === undefined) delete process.env.VALET_TRANSCRIPT_DEBUG;
+      else process.env.VALET_TRANSCRIPT_DEBUG = prevDebug;
+    }
   });
 });
