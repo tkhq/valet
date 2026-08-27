@@ -340,13 +340,47 @@ export type InvokeActionResult =
 async function requestApprovalDecision(
   ctx: ToolContext,
   req: DecisionGateRequest,
-): Promise<{ kind: "resolved"; resolution: DecisionResolution } | { kind: "expired" }> {
+): Promise<
+  | { kind: "resolved"; resolution: DecisionResolution }
+  | { kind: "expired"; gateOrdinal?: number }
+> {
   try {
     return { kind: "resolved", resolution: await ctx.requestDecision(req) };
   } catch (err) {
-    if (isDecisionGateExpired(err)) return { kind: "expired" };
+    // Carry the expired gate's ordinal into the audit record — the policy
+    // sink derives its deterministic invocation id from it.
+    if (isDecisionGateExpired(err)) return { kind: "expired", gateOrdinal: err.ordinal };
     throw err;
   }
+}
+
+/**
+ * The shared head of the approval-gate request both invokeAction paths open.
+ * `dedupeKey` is the qualified tool id: terminal outcomes stick per tool id,
+ * not per (tool id, args) — a re-issued call with tweaked args must not
+ * dodge a deny/expiry. Safe for the prefix rule because every approval
+ * resumeKey is `${qualifiedId}:<argsHash>`.
+ */
+function approvalGateRequest(
+  entry: CatalogEntry,
+  actionId: string,
+  args: Record<string, unknown> | undefined,
+  summary: string,
+  resumeKey: string,
+): DecisionGateRequest {
+  return {
+    type: "approval",
+    title: `Approve ${entry.action.name}?`,
+    body: `${summary}\n\ntool_id=${actionId}\nargs=${stableJson(args ?? {})}`,
+    resumeKey,
+    dedupeKey: qualifiedId(entry),
+    context: {
+      riskLevel: entry.action.riskLevel,
+      service: entry.service,
+      tool_id: actionId,
+      args,
+    },
+  };
 }
 
 export async function invokeAction(
@@ -396,21 +430,10 @@ export async function invokeAction(
     const approvalMode = approvalModeFor(entry);
     if (approvalMode === "deny") return { kind: "denied-policy" };
     if (approvalMode === "require_approval") {
-      const gateOutcome = await requestApprovalDecision(ctx, {
-        type: "approval",
-        title: `Approve ${entry.action.name}?`,
-        body: `${summary}\n\ntool_id=${actionId}\nargs=${stableJson(args ?? {})}`,
-        resumeKey,
-        // Terminal outcomes stick per tool id, not per (tool id, args) — a
-        // re-issued call with tweaked args must not dodge a deny/expiry.
-        dedupeKey: qualifiedId(entry),
-        context: {
-          riskLevel: entry.action.riskLevel,
-          service: entry.service,
-          tool_id: actionId,
-          args,
-        },
-      });
+      const gateOutcome = await requestApprovalDecision(
+        ctx,
+        approvalGateRequest(entry, actionId, args, summary, resumeKey),
+      );
       if (gateOutcome.kind === "expired") return { kind: "expired-approval" };
       const resolution = gateOutcome.resolution;
       // No resolution / an explicit "pending" action means the gate has not
@@ -498,41 +521,31 @@ export async function invokeAction(
         };
       }
     }
-    // Strip `approves` before the gate — the gate only understands
-    // DecisionActions; the approval semantics stay engine-side.
-    const extras: DecisionAction[] = (decision.extraGateActions ?? []).map(
-      ({ approves: _approves, ...rest }) => rest,
-    );
+    // Pass `approves` through to the gate — DecisionAction persists it on
+    // the row so denial stickiness classifies host rejection actions the
+    // same way isApprovedResolution does.
+    const extras: DecisionAction[] = decision.extraGateActions ?? [];
+    const baseReq = approvalGateRequest(entry, actionId, args, summary, resumeKey);
     const gateOutcome = await requestApprovalDecision(ctx, {
-      type: "approval",
-      title: `Approve ${entry.action.name}?`,
-      body: `${summary}\n\ntool_id=${actionId}\nargs=${stableJson(args ?? {})}`,
-      resumeKey,
-      // Terminal outcomes stick per tool id, not per (tool id, args) — a
-      // re-issued call with tweaked args must not dodge a deny/expiry.
-      dedupeKey: qualifiedId(entry),
+      ...baseReq,
       actions: [
         { id: "approve", label: "Approve", style: "primary" },
         { id: "deny", label: "Deny", style: "danger" },
         ...extras,
       ],
-      context: {
-        riskLevel: entry.action.riskLevel,
-        service: entry.service,
-        tool_id: actionId,
-        args,
-        provenance: decision.provenance,
-      },
+      context: { ...baseReq.context, provenance: decision.provenance },
     });
     if (gateOutcome.kind === "expired") {
       // The gate opened and nobody answered before the deadline — a terminal
       // non-approval. Audit it like a rejection so the invocation trail shows
-      // the action never ran.
+      // the action never ran. gateOrdinal links the record to the expired
+      // gate row and lets the sink dedupe sticky-expired retries.
       emitInvocation(resolver, {
         ...baseRecord,
         status: "rejected",
         resolvedMode: "require_approval",
         provenance: decision.provenance,
+        gateOrdinal: gateOutcome.gateOrdinal,
       });
       return { kind: "expired-approval" };
     }

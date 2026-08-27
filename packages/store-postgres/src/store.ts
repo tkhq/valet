@@ -671,6 +671,19 @@ export class PgSessionStore implements SessionStore {
     return raw ? rowToGate(rawToGateRow(raw)) : null;
   }
 
+  async listDecisionGatesForQueueItem(
+    sessionId: string,
+    threadId: string,
+    queueItemId: string,
+  ): Promise<DecisionGate[]> {
+    const result = await this.db.query(
+      `SELECT * FROM engine_decision_gates
+       WHERE session_id = $1 AND thread_id = $2 AND queue_item_id = $3`,
+      [sessionId, threadId, queueItemId],
+    );
+    return result.rows.map((raw) => rowToGate(rawToGateRow(raw)));
+  }
+
   async getLatestGateForResume(
     sessionId: string,
     threadId: string,

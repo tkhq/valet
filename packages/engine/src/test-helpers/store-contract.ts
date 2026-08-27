@@ -386,6 +386,47 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       expect(viaResume?.resolution?.actionId).toBe("deny");
     });
 
+    it("listDecisionGatesForQueueItem returns only that queue item's gates", async () => {
+      await store.saveSession(newSession());
+      await store.saveThread("sess-1", newThread("sess-1"));
+      const base = {
+        sessionId: "sess-1",
+        threadId: "th-1",
+        type: "approval" as const,
+        status: "pending" as const,
+        title: "x",
+        actions: [],
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      await store.saveDecisionGate("sess-1", "th-1", {
+        ...base,
+        id: "g-q1-a",
+        queueItemId: "q-1",
+        resumeKey: "rk-a",
+        ordinal: 0,
+      });
+      await store.saveDecisionGate("sess-1", "th-1", {
+        ...base,
+        id: "g-q1-b",
+        queueItemId: "q-1",
+        resumeKey: "rk-b",
+        ordinal: 0,
+      });
+      await store.saveDecisionGate("sess-1", "th-1", {
+        ...base,
+        id: "g-q2",
+        queueItemId: "q-2",
+        resumeKey: "rk-a",
+        ordinal: 0,
+      });
+
+      const q1 = await store.listDecisionGatesForQueueItem("sess-1", "th-1", "q-1");
+      expect(q1.map((g) => g.id).sort()).toEqual(["g-q1-a", "g-q1-b"]);
+      const q3 = await store.listDecisionGatesForQueueItem("sess-1", "th-1", "q-3");
+      expect(q3).toEqual([]);
+    });
+
     it("getLatestGateForResume returns the highest ordinal for a (queueItem, resumeKey)", async () => {
       await store.saveSession(newSession());
       await store.saveThread("sess-1", newThread("sess-1"));

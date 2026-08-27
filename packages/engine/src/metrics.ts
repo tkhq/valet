@@ -31,6 +31,7 @@ interface Instruments {
   sandboxExecDuration: Histogram;
   provisionDuration: Histogram;
   credentialReads: Counter;
+  gatesUnownedExpired: Counter;
   sandboxCreated: Counter;
   sandboxDestroyed: Counter;
   sandboxFlagged: Counter;
@@ -74,6 +75,10 @@ function inst(): Instruments {
     provisionDuration: meter.createHistogram("valet.sandbox.provision.duration", {
       unit: "ms",
       description: "Sandbox cold-boot duration (provider.create + prepareSandbox)",
+    }),
+    gatesUnownedExpired: meter.createCounter("valet.gates.unowned_expired", {
+      description:
+        "Lapsed pending decision-gate rows expired by the sweep with no owning waiter or checkpoint. A steady rate after the pre-stickiness backlog drains means something is producing orphan gate rows — investigate, do not ignore.",
     }),
     credentialReads: meter.createCounter("valet.credential.reads", {
       description: "Credential accesses, by service and hit/miss",
@@ -184,4 +189,8 @@ export function recordSandboxFlagged(kind: SandboxFlagKind, count: number): void
  * create actually waited (or timed out) — an uncontended admit is silent. */
 export function recordSandboxCapacityWait(waitedMs: number, outcome: "admitted" | "timeout"): void {
   inst().sandboxCapacityWait.record(waitedMs, { outcome });
+}
+
+export function recordGateUnownedExpired(gateType: string): void {
+  inst().gatesUnownedExpired.add(1, { type: gateType });
 }

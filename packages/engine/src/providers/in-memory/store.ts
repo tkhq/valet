@@ -217,6 +217,16 @@ export class InMemorySessionStore implements SessionStore {
     return this.row(sessionId).gates.get(gateId) ?? null;
   }
 
+  async listDecisionGatesForQueueItem(
+    sessionId: string,
+    threadId: string,
+    queueItemId: string,
+  ): Promise<DecisionGate[]> {
+    return [...this.row(sessionId).gates.values()]
+      .filter((g) => g.threadId === threadId && g.queueItemId === queueItemId)
+      .map((g) => ({ ...g }));
+  }
+
   async getLatestGateForResume(
     sessionId: string,
     threadId: string,

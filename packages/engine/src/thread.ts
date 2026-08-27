@@ -14,6 +14,7 @@ import {
   GateManager,
   isDecisionGateExpired,
   isDecisionGateWithdrawn,
+  latestGateForResume,
   persistTerminalGate,
   shouldShortCircuit,
   type GateContext,
@@ -35,7 +36,7 @@ import { extractStructuredOutput } from "./result-schema.js";
 import { buildRepoInstructionsFragment } from "./repo-instructions.js";
 import { formatFileAttachmentsNote } from "./file-attachment-formatter.js";
 import { capturePatch } from "./patch-capture.js";
-import { recordSettlement, recordTurn } from "./metrics.js";
+import { recordGateUnownedExpired, recordSettlement, recordTurn } from "./metrics.js";
 import {
   TRACEPARENT_METADATA_KEY,
   activeTraceparent,
@@ -962,6 +963,8 @@ export class Thread {
     const store = this.session.providers.store;
     const now = Date.now();
     const gates = await store.listDecisionGates(this.session.id, this.id);
+    // Lazily fetched once per sweep pass, shared by every lapsed gate.
+    let suspended: SuspendedTurnState | null | undefined;
     for (const gate of gates) {
       if (gate.status !== "pending") continue;
       if (gate.expiresAt === undefined || gate.expiresAt > now) continue;
@@ -969,7 +972,15 @@ export class Thread {
         this.gates.expire(gate.id);
         continue;
       }
-      const suspended = await store.getSuspendedTurn(this.session.id, this.id);
+      // Command gates live on this thread's rows but their waiter is armed
+      // in the SESSION-level manager (awaitCommandGate) — a live one is
+      // owned, not orphaned. Its own timer terminalizes it.
+      if (this.session.isCommandGatePending(gate.id)) continue;
+      // One read serves every gate this tick — the checkpoint cannot change
+      // under the sweep (reconcileGate re-validates before acting).
+      if (suspended === undefined) {
+        suspended = await store.getSuspendedTurn(this.session.id, this.id);
+      }
       if (!suspended || suspended.gateId !== gate.id) {
         // No armed waiter and no checkpoint reference this row: it is a
         // superseded pending gate (its turn moved on to a later gate, or a
@@ -997,12 +1008,23 @@ export class Thread {
    * clients, so the approval card clears everywhere. Deliberately does NOT
    * touch queue items or the transcript — there is no suspended turn to
    * resume for these rows.
+   *
+   * Visibility (alert, don't auto-repair): every hit records the
+   * `valet.gates.unowned_expired` counter and logs the gate id, so a
+   * violation of the checkpoint-first open ordering shows up as a signal
+   * distinct from ordinary expiry instead of being silently reaped. A
+   * steady rate after the pre-stickiness backlog drains is a bug upstream.
    */
   private async expireUnownedGateRow(gate: DecisionGate): Promise<void> {
     try {
       await persistTerminalGate(this.session.providers.store, this.session.id, this.id, gate, {
         status: "expired",
       });
+      recordGateUnownedExpired(gate.type);
+      console.warn(
+        `[engine] expired unowned pending gate ${gate.id} (session=${this.session.id} ` +
+          `thread=${this.id} type=${gate.type}): no waiter or checkpoint owned it`,
+      );
       await this.session.emit(
         { type: "decision_gate_expired", threadId: this.id, gateId: gate.id },
         { eventKey: `gate:${gate.id}:expired` },
@@ -1075,33 +1097,15 @@ export class Thread {
     // (queueItemId, resumeKey) — JOIN it rather than open a duplicate — or,
     // once the latest is terminal, mint a fresh gate at ordinal+1 (a retried
     // action after a human decision gets a fresh decision). Null → ordinal 0.
-    const latestGate = await session.providers.store.getLatestGateForResume(
+    // One bounded read serves the ordinal resolution AND the sticky scan
+    // below — both scope to this queue item's gates.
+    const queueGates = await session.providers.store.listDecisionGatesForQueueItem(
       session.id,
       this.id,
       gateCtx.queueItemId,
-      gateCtx.resumeKey,
     );
+    const latestGate = latestGateForResume(queueGates, gateCtx.queueItemId, gateCtx.resumeKey);
     const joiningPending = latestGate?.status === "pending";
-    // Sticky terminal outcomes: within this queue item, a human denial or an
-    // unanswered expiry in the request's dedupe scope is final. Return the
-    // stored denial (or re-throw expiry) instead of opening a fresh gate —
-    // otherwise an agent that retries after deny/expiry mints new gates
-    // forever (tweaked args hash to a new resumeKey; a lapsed 72h gate
-    // resurrects itself every 72h). A still-pending gate for this exact
-    // resumeKey takes precedence: join it below and let the human answer.
-    if (!joiningPending) {
-      const threadGates = await session.providers.store.listDecisionGates(session.id, this.id);
-      const sticky = findStickyTerminalGate(threadGates, {
-        queueItemId: gateCtx.queueItemId,
-        dedupeKey: req.dedupeKey ?? gateCtx.resumeKey,
-      });
-      if (sticky?.kind === "denied") {
-        return { ...sticky.resolution, gateOrdinal: sticky.gate.ordinal };
-      }
-      if (sticky?.kind === "expired") {
-        throw new DecisionGateExpiredError(sticky.gate.id);
-      }
-    }
     const ordinal = latestGate
       ? joiningPending
         ? latestGate.ordinal
@@ -1129,9 +1133,35 @@ export class Thread {
     // The turn unwound while this call waited for the gate-cycle slot:
     // Thread.abort sets `aborted`; steer supersession aborts the agent's
     // run signal without setting it. Either way, do not persist a gate
-    // that no waiter will ever own.
+    // that no waiter will ever own. This check runs BEFORE the sticky
+    // scan: an unwinding turn must get the withdrawal, not a stored
+    // resolution that would let it run onResolution side effects and emit
+    // audit records on behalf of a discarded attempt.
     if (this.aborted || signal.aborted) {
       throw new DecisionGateWithdrawnError(gate.id, this.aborted ? "abort" : "steer");
+    }
+    // Sticky terminal outcomes: within this queue item, a human denial or an
+    // unanswered expiry in the request's dedupe scope is final. Return the
+    // stored denial (or re-throw expiry) instead of opening a fresh gate —
+    // otherwise an agent that retries after deny/expiry mints new gates
+    // forever (tweaked args hash to a new resumeKey; a lapsed 72h gate
+    // resurrects itself every 72h). A still-pending gate for this exact
+    // resumeKey takes precedence: join it below and let the human answer.
+    // A same-args retry returns the ORIGINAL ordinal on purpose — the policy
+    // audit sink dedupes on (queueItemId, resumeKey, gateOrdinal), so model
+    // retries of one denied call collapse onto the one human decision record.
+    if (!joiningPending) {
+      const sticky = findStickyTerminalGate(queueGates, {
+        queueItemId: gateCtx.queueItemId,
+        resumeKey: gateCtx.resumeKey,
+        dedupeKey: req.dedupeKey,
+      });
+      if (sticky?.kind === "denied") {
+        return { ...sticky.resolution, gateOrdinal: sticky.gate.ordinal };
+      }
+      if (sticky?.kind === "expired") {
+        throw new DecisionGateExpiredError(sticky.gate.id, sticky.gate.ordinal);
+      }
     }
     try {
       // Checkpoint FIRST — the suspended-turn row is the ownership anchor

@@ -926,7 +926,7 @@ describe("decision gates: findStickyTerminalGate (pure)", () => {
   const deny = { actionId: "deny", resolvedBy: "u", resolvedAt: 5 };
   const approve = { actionId: "approve", resolvedBy: "u", resolvedAt: 5 };
 
-  it("matches exact resumeKey and colon-prefixed (args-hashed) variants", () => {
+  it("matches colon-prefixed (args-hashed) variants only under an explicit dedupeKey", () => {
     const denied: DecisionGate = {
       ...base,
       id: "g0",
@@ -937,18 +937,103 @@ describe("decision gates: findStickyTerminalGate (pure)", () => {
       resolution: deny,
     };
     expect(
-      findStickyTerminalGate([denied], { queueItemId: "q1", dedupeKey: "svc.act" })?.kind,
-    ).toBe("denied");
-    expect(
-      findStickyTerminalGate([denied], { queueItemId: "q1", dedupeKey: "svc.act:hash-a" })?.kind,
+      findStickyTerminalGate([denied], {
+        queueItemId: "q1",
+        resumeKey: "svc.act:hash-b",
+        dedupeKey: "svc.act",
+      })?.kind,
     ).toBe("denied");
     // A different tool with a shared name prefix must NOT match.
     expect(
-      findStickyTerminalGate([denied], { queueItemId: "q1", dedupeKey: "svc.ac" }),
+      findStickyTerminalGate([denied], {
+        queueItemId: "q1",
+        resumeKey: "svc.ac:hash-a",
+        dedupeKey: "svc.ac",
+      }),
     ).toBeUndefined();
-    // Another queue item is a fresh consent scope.
+    // Another queue item is a fresh dedupe scope.
     expect(
-      findStickyTerminalGate([denied], { queueItemId: "q2", dedupeKey: "svc.act" }),
+      findStickyTerminalGate([denied], {
+        queueItemId: "q2",
+        resumeKey: "svc.act:hash-a",
+        dedupeKey: "svc.act",
+      }),
+    ).toBeUndefined();
+  });
+
+  it("without an explicit dedupeKey the scope is the exact resumeKey — colon prefixes do not collapse", () => {
+    // ask_approval-style free-form resumeKeys: one title being a colon-prefix
+    // of another must NOT put two different human questions in one scope.
+    const denied: DecisionGate = {
+      ...base,
+      id: "g0",
+      queueItemId: "q1",
+      resumeKey: "ask_approval:deploy: wipe old data?",
+      ordinal: 0,
+      status: "resolved",
+      resolution: deny,
+    };
+    expect(
+      findStickyTerminalGate([denied], {
+        queueItemId: "q1",
+        resumeKey: "ask_approval:deploy",
+      }),
+    ).toBeUndefined();
+    expect(
+      findStickyTerminalGate([denied], {
+        queueItemId: "q1",
+        resumeKey: "ask_approval:deploy: wipe old data?",
+      })?.kind,
+    ).toBe("denied");
+  });
+
+  it("denial stickiness is approval-gates-only and approves-aware", () => {
+    // A question gate's resolution is an answer, not a verdict — never sticky.
+    const question: DecisionGate = {
+      ...base,
+      id: "gq",
+      queueItemId: "q1",
+      resumeKey: "k",
+      ordinal: 0,
+      type: "question",
+      status: "resolved",
+      resolution: deny,
+    };
+    expect(
+      findStickyTerminalGate([question], { queueItemId: "q1", resumeKey: "k" }),
+    ).toBeUndefined();
+
+    // A host extra action WITHOUT approves is a rejection → sticky.
+    const extraRejected: DecisionGate = {
+      ...base,
+      id: "gr",
+      queueItemId: "q1",
+      resumeKey: "k",
+      ordinal: 0,
+      status: "resolved",
+      actions: [
+        { id: "approve", label: "Approve" },
+        { id: "deny", label: "Deny" },
+        { id: "reject_and_flag", label: "Reject + flag" },
+      ],
+      resolution: { actionId: "reject_and_flag", resolvedBy: "u", resolvedAt: 5 },
+    };
+    expect(
+      findStickyTerminalGate([extraRejected], { queueItemId: "q1", resumeKey: "k" })?.kind,
+    ).toBe("denied");
+
+    // A host extra action WITH approves: true approved the action → not sticky.
+    const extraApproved: DecisionGate = {
+      ...extraRejected,
+      id: "ga",
+      actions: [
+        { id: "approve", label: "Approve" },
+        { id: "approve_once", label: "Approve once", approves: true },
+      ],
+      resolution: { actionId: "approve_once", resolvedBy: "u", resolvedAt: 5 },
+    };
+    expect(
+      findStickyTerminalGate([extraApproved], { queueItemId: "q1", resumeKey: "k" }),
     ).toBeUndefined();
   });
 
@@ -974,7 +1059,7 @@ describe("decision gates: findStickyTerminalGate (pure)", () => {
     };
     const sticky = findStickyTerminalGate([expired, denied], {
       queueItemId: "q1",
-      dedupeKey: "k",
+      resumeKey: "k",
     });
     expect(sticky?.kind).toBe("denied");
     expect(sticky?.gate.id).toBe("g2");
@@ -997,7 +1082,7 @@ describe("decision gates: findStickyTerminalGate (pure)", () => {
       status: "withdrawn",
     };
     expect(
-      findStickyTerminalGate([approved, withdrawn], { queueItemId: "q1", dedupeKey: "k" }),
+      findStickyTerminalGate([approved, withdrawn], { queueItemId: "q1", resumeKey: "k" }),
     ).toBeUndefined();
   });
 
@@ -1013,7 +1098,7 @@ describe("decision gates: findStickyTerminalGate (pure)", () => {
       status: "resolved",
     };
     expect(
-      findStickyTerminalGate([legacyResolved], { queueItemId: "q1", dedupeKey: "k" }),
+      findStickyTerminalGate([legacyResolved], { queueItemId: "q1", resumeKey: "k" }),
     ).toBeUndefined();
   });
 });
