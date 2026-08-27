@@ -43,7 +43,7 @@ import { loadSessionMeta } from "../engine/session-meta.js";
 import { GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
 import { isOrgAdmin } from "../services/org.js";
 import type { Providers } from "../providers/types.js";
-import { canViewSession } from "../services/session-access.js";
+import { canResolveSessionGate, canViewSession } from "../services/session-access.js";
 import {
   getAttachmentRefStore,
   UnknownAttachmentError,
@@ -648,8 +648,15 @@ messagesRouter.get("/:id/decisions", async (c) => {
 messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
   const result = await loadEngineSession(c);
   if ("error" in result) return result.error;
-  const { engineSession } = result;
+  const { session, engineSession } = result;
   const gateId = c.req.param("gateId");
+
+  // Explicit resolve authorization, distinct from `loadEngineSession`'s
+  // view check: answering a gate acts on the session's behalf. The same
+  // named check gates the channel gate-callback path.
+  if (!(await canResolveSessionGate(c.var.providers.db, session, c.var.user.id))) {
+    return c.json({ error: "not allowed to resolve gates on this session" }, 403);
+  }
 
   let body: ResolveDecisionRequest;
   try {
@@ -694,8 +701,14 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
 messagesRouter.post("/:id/decisions/:gateId/withdraw", async (c) => {
   const result = await loadEngineSession(c);
   if ("error" in result) return result.error;
-  const { engineSession } = result;
+  const { session, engineSession } = result;
   const gateId = c.req.param("gateId");
+
+  // Same explicit resolve authorization as the resolve route above —
+  // withdrawing settles the gate too.
+  if (!(await canResolveSessionGate(c.var.providers.db, session, c.var.user.id))) {
+    return c.json({ error: "not allowed to resolve gates on this session" }, 403);
+  }
 
   let body: WithdrawDecisionRequest = {};
   try {

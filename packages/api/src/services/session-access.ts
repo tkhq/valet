@@ -101,3 +101,22 @@ export async function canAdministerSession(
   if (session.ownerType === "team") return canAdministerTeam(db, session.ownerId, callerId);
   return session.userId === callerId;
 }
+
+/**
+ * True when `caller` may resolve or withdraw a decision gate on `session`.
+ *
+ * Today the rule matches `canViewSession` — the direct owner, or a live
+ * member of the owning team (the same audience the attention router
+ * notifies for `kind: "approval"`). It is still a separate, named check:
+ * answering a gate acts on the session's behalf, so every resolver (the web
+ * decision routes and the channel gate-callback path) must make that
+ * decision explicitly rather than inherit it from "may read this".
+ */
+export async function canResolveSessionGate(
+  db: AppDb,
+  session: SessionOwnerLike,
+  callerId: string,
+): Promise<boolean> {
+  if (session.ownerType === "team") return isTeamMember(db, session.ownerId, callerId);
+  return session.userId === callerId;
+}
