@@ -38,6 +38,8 @@ import { publicUrlFromEnv } from "./channels/host.js";
 import { wireAttentionRouter } from "./orchestrator/attention-wiring.js";
 import { initTelemetry } from "./observability/otel.js";
 import { ensureWorkflowSession } from "./workflows/engine-deps.js";
+import { ensureEnvProviders } from "./proxy/upstream.js";
+import { resolveOrgId } from "./lib/org.js";
 import { restoreOneSession, type RestoreSessionDeps } from "./boot-restore.js";
 import { webDistPath } from "./assets/base.js";
 import { startRotateSweep, type RotateSweepHandle } from "./engine/rotate-sweep.js";
@@ -349,6 +351,14 @@ providers.skillSync.start();
 // short-circuits.
 await providers.prebuildService.start().catch((err) => {
   console.error("prebuildService.start failed:", err);
+});
+
+// LLM proxy env-key bootstrap (llm-recording-gateway plan, Task 8): for each
+// provider kind, if the env key is set and the org has no configured provider,
+// seed one named `env:{kind}` so the recording proxy works with zero setup.
+// Idempotent; runs after providers are built and the org row exists.
+await ensureEnvProviders(providers.db, providers.engineCredentials, await resolveOrgId(providers.db)).catch((err) => {
+  console.error("ensureEnvProviders failed (continuing to serve):", err);
 });
 
 // Hourly sandbox-token rotation (sandbox-reconciliation plan, Task 12):
