@@ -11,7 +11,7 @@
  * logic can upsert safely.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { and, eq, isNull, like, notLike, sql } from "drizzle-orm";
+import { and, eq, isNull, like, lte, notLike, sql } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import {
   actionPolicies,
@@ -642,6 +642,10 @@ async function reconcileLlmProvidersPass(db: AppDb, cfg: InstanceConfig): Promis
 // Skill sources pass
 // ---------------------------------------------------------------------------
 
+/** Same five-minute claim lease `skill-sync.ts` uses. A pending never-synced
+ * row older than this is a dead claim, not a live one. */
+const CLAIM_LEASE_MS = 5 * 60_000;
+
 async function reconcileSkillSourcesPass(db: AppDb, cfg: InstanceConfig): Promise<void> {
   if (!cfg.skillSources) return;
 
@@ -685,19 +689,21 @@ async function reconcileSkillSourcesPass(db: AppDb, cfg: InstanceConfig): Promis
       .limit(1);
 
     if (existingById[0]) {
-      // A prior boot can leave a never-synced config row past its claim
-      // lease. Mark it due so the sweep picks it up after reconcile.
-      const [existing] = await db
-        .select({ lastSyncedAt: skillSources.lastSyncedAt })
-        .from(skillSources)
-        .where(eq(skillSources.id, desiredId))
-        .limit(1);
-      if (existing && existing.lastSyncedAt === null) {
-        await db
-          .update(skillSources)
-          .set({ nextAttemptAt: now, updatedAt: now })
-          .where(eq(skillSources.id, desiredId));
-      }
+      // Kick only a dead claim. Setting nextAttemptAt=now on every
+      // never-synced row punches a live claim lease and wipes retry
+      // backoff. A finishing sync can set lastSyncedAt between a select
+      // and this write, so lastSyncedAt IS NULL stays on the UPDATE.
+      await db
+        .update(skillSources)
+        .set({ nextAttemptAt: now, updatedAt: now })
+        .where(
+          and(
+            eq(skillSources.id, desiredId),
+            isNull(skillSources.lastSyncedAt),
+            eq(skillSources.status, "pending"),
+            lte(skillSources.updatedAt, now - CLAIM_LEASE_MS),
+          ),
+        );
       continue;
     }
 
