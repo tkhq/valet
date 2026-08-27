@@ -10,6 +10,7 @@ import {
 } from "~/api/assistants";
 import { useNotifications } from "~/api/queries";
 import { attentionSessionIds } from "~/lib/use-attention-ping";
+import { useLivePendingGates } from "~/hooks/use-live-pending-gates";
 import { useMe, useOrg, useTeams } from "~/api/settings";
 import {
   Button,
@@ -78,9 +79,16 @@ export function AssistantRail() {
   // default rather than rendering a session the viewer cannot read.
   const active = findAssistant(groups, search.assistant) ?? ownDefaultAssistant(groups);
 
-  // Costs no request: the bell is already polling this query.
+  // Costs no request: the bell is already polling this query. For the
+  // session with an open WS (the open conversation), the stream store's
+  // live gate set overrides the poll's gate-backed rows — the poll lags a
+  // gate opening by up to 30s and a resolve until the user reads the
+  // notification (TKAI-257).
   const notificationsQ = useNotifications();
-  const needsAttention = attentionSessionIds(notificationsQ.data?.notifications);
+  const liveGates = useLivePendingGates(
+    groups.flatMap((g) => g.assistants.map((a) => a.sessionId)),
+  );
+  const needsAttention = attentionSessionIds(notificationsQ.data?.notifications, liveGates);
   // One workspace at a time. The switcher beside the logo chooses it, and
   // the workspace scope names it — and on `/chat` the scope follows the open
   // assistant — so the rail draws exactly the group the open conversation
