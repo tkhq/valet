@@ -19,23 +19,27 @@
  * "Remove" and not "Disable".
  *
  * `owner` pins the listing to ONE owner, server-side. The `/skills` panel
- * sends none and lists every source the caller reaches — their own, their
- * teams', and the org's — with the row badge carrying the scope, so tracking
- * a repository no longer starts with picking which page to open. A row's
- * scope was the reason there were two personal pages; now it is a badge.
+ * sends none and lists personal and team sources, asking the server to drop
+ * org rows (`excludeOrg`). Organization repositories live on
+ * `/settings/organization/library`. A row's scope was the reason there were
+ * two personal pages; now it is a badge on personal and team rows.
  *
  * A new source goes to the org when `owner` names it, and otherwise to the
  * active workspace, which the nav switcher sets: your own, or a team. No
  * Owner select asks a second time.
  *
- * `readOnly` hides the add form and the per-row Sync/Remove actions — the org
- * panel passes it for a member, who may read org sources but not change them.
+ * `readOnly` hides Import, Sync, and Remove. The org panel passes it for a
+ * member, who may not change an org source. Org Sync is admin-only; the
+ * sweep keeps the catalog fresh. Personal and team rows on `/skills` keep
+ * Sync. Public vs private does not change who may add or remove; it only
+ * picks the credential the sync uses.
  *
  * The listing is paged. `cursors` is the stack of cursors walked so far and
  * belongs to the route, which keeps it in the URL — see `~/lib/cursor-stack`
  * for why the pager cannot own it.
  */
 import { useState, type FormEvent } from "react";
+import { Link } from "@tanstack/react-router";
 import { Button, Input, Spinner } from "~/components/primitives";
 import { Pager } from "~/components/pager";
 import { relativeTime } from "~/lib/relative-time";
@@ -43,6 +47,7 @@ import { errorText } from "~/lib/error-text";
 import { OwnerBadge } from "~/components/owner-badge";
 import { currentCursor, pageNumber, popCursor, pushCursor } from "~/lib/cursor-stack";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
+import { useOrg } from "~/api/settings";
 import {
   useAddSkillSource,
   useRemoveSkillSource,
@@ -71,7 +76,9 @@ export function SkillSourcesPanel({
 }) {
   const cursor = currentCursor(cursors);
   const { data, isLoading, error } = useSkillSources({
-    ...(owner === undefined ? {} : { ownerType: owner.type, ownerId: owner.id }),
+    ...(owner === undefined
+      ? { excludeOrg: true }
+      : { ownerType: owner.type, ownerId: owner.id }),
     ...(cursor === undefined ? {} : { cursor }),
   });
   const sources = data?.sources ?? [];
@@ -86,6 +93,9 @@ export function SkillSourcesPanel({
   // the panel could list one workspace's repositories while the form filed a
   // new one under another.
   const workspace = useWorkspaceScope();
+  const org = useOrg();
+  const isOrgAdmin = org.data?.callerRole === "admin";
+  const orgPinned = owner?.type === "org";
 
   function submit(e: FormEvent) {
     e.preventDefault();
@@ -101,13 +111,30 @@ export function SkillSourcesPanel({
 
   return (
     <section className="rounded-lg border border-line bg-paper">
-      <div className="flex items-center justify-between gap-3 px-4 py-3">
-        <h2 className="text-sm font-medium text-ink">Repositories</h2>
-        {!readOnly && (
-          <Button variant="ghost" size="sm" onClick={() => setOpen((v) => !v)}>
-            {open ? "Cancel" : "Import from GitHub"}
-          </Button>
-        )}
+      <div className="px-4 py-3">
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-sm font-medium text-ink">Repositories</h2>
+          {!readOnly && (
+            <Button variant="ghost" size="sm" onClick={() => setOpen((v) => !v)}>
+              {open ? "Cancel" : "Import from GitHub"}
+            </Button>
+          )}
+        </div>
+        <p className="mt-1 text-xs text-muted">
+          {orgPinned ? (
+            "Only an org admin can add, remove, or sync a repository. A private repository is read with the GitHub App installed for this organization. Valet re-reads it on each GitHub push, or every 5 minutes if the webhook is not live."
+          ) : isOrgAdmin ? (
+            <>
+              Organization repositories are tracked in{" "}
+              <Link to="/settings/organization/library" className="underline underline-offset-2">
+                Organization Library
+              </Link>
+              .
+            </>
+          ) : (
+            "Organization repositories are tracked by an org admin."
+          )}
+        </p>
       </div>
 
       {!readOnly && open && (
@@ -134,7 +161,7 @@ export function SkillSourcesPanel({
               personal account would send them to the wrong screen. */}
           <p className="mt-2 text-xs text-muted">
             A public repository needs no GitHub connection.{" "}
-            {owner?.type === "org"
+            {orgPinned
               ? "A private one is read with the GitHub App installed for this organization."
               : "A private one is read with your connected GitHub account."}
           </p>
@@ -159,7 +186,12 @@ export function SkillSourcesPanel({
       )}
 
       {sources.map((source) => (
-        <SourceRow key={source.id} source={source} readOnly={readOnly} />
+        <SourceRow
+          key={source.id}
+          source={source}
+          canSync={canSyncSource(source, readOnly, isOrgAdmin)}
+          canRemove={canRemoveSource(source, readOnly, isOrgAdmin)}
+        />
       ))}
 
       {/* The wrapper carries a rule above the pager, so it is conditional on
@@ -183,7 +215,37 @@ export function SkillSourcesPanel({
   );
 }
 
-function SourceRow({ source, readOnly }: { source: SkillSourceSummary; readOnly: boolean }) {
+/** Add, remove, and Sync of an org source stay admin-only for every org
+ * repository, public or private. Personal and team rows keep Sync for the
+ * person who can already see them. `readOnly` is the org Library's member
+ * pin and hides every write. */
+export function canSyncSource(
+  source: SkillSourceSummary,
+  readOnly: boolean,
+  isOrgAdmin: boolean,
+): boolean {
+  if (readOnly) return false;
+  if (source.ownerType === "org") return isOrgAdmin;
+  return true;
+}
+
+export function canRemoveSource(
+  source: SkillSourceSummary,
+  readOnly: boolean,
+  isOrgAdmin: boolean,
+): boolean {
+  return canSyncSource(source, readOnly, isOrgAdmin);
+}
+
+function SourceRow({
+  source,
+  canSync,
+  canRemove,
+}: {
+  source: SkillSourceSummary;
+  canSync: boolean;
+  canRemove: boolean;
+}) {
   const sync = useSyncSkillSource();
   const remove = useRemoveSkillSource();
   const pinned = [source.ref, source.subpath].filter((part) => part.length > 0).join(" · ");
@@ -248,8 +310,8 @@ function SourceRow({ source, readOnly }: { source: SkillSourceSummary; readOnly:
           <p className="mt-1 text-xs leading-relaxed text-danger-500">{errorText(remove.error)}</p>
         )}
       </div>
-      {!readOnly && (
-        <div className="flex shrink-0 items-center gap-1">
+      <div className="flex shrink-0 items-center gap-1">
+        {canSync && (
           <Button
             variant="ghost"
             size="sm"
@@ -258,6 +320,8 @@ function SourceRow({ source, readOnly }: { source: SkillSourceSummary; readOnly:
           >
             {sync.isPending ? <Spinner size={14} /> : "Sync"}
           </Button>
+        )}
+        {canRemove && (
           <Button
             variant="ghost"
             size="sm"
@@ -266,8 +330,8 @@ function SourceRow({ source, readOnly }: { source: SkillSourceSummary; readOnly:
           >
             Remove
           </Button>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }

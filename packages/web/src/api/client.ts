@@ -374,6 +374,10 @@ export interface SkillListQuery {
 export interface SkillSourceListQuery {
   ownerType?: "user" | "team" | "org";
   ownerId?: string;
+  /** Drop org rows from the unfiltered union. `/skills` sends this so org
+   * repositories stay on Organization · Library. Do not send it with an
+   * owner pin. */
+  excludeOrg?: boolean;
   limit?: number;
   cursor?: string;
 }
@@ -897,6 +901,7 @@ export const api = {
     const qs = new URLSearchParams();
     if (opts?.ownerType) qs.set("ownerType", opts.ownerType);
     if (opts?.ownerId) qs.set("ownerId", opts.ownerId);
+    if (opts?.excludeOrg) qs.set("excludeOrg", "1");
     if (opts?.limit) qs.set("limit", String(opts.limit));
     if (opts?.cursor) qs.set("cursor", opts.cursor);
     const tail = qs.toString() ? `?${qs}` : "";

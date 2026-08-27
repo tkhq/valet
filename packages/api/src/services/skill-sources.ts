@@ -8,10 +8,11 @@
  * `origin='repo'` skills a source carries, and deleting a source deletes
  * them, because a mirror has no existence apart from what it mirrors.
  *
- * Access follows `services/skills.ts` exactly, through the same
- * `isAuthorizedFor`: your own rows plus the rows of every team you belong to,
- * with a row another owner holds reported as not found rather than as
- * forbidden.
+ * Access follows `services/skills.ts`: your own rows plus the rows of every
+ * team you belong to, plus org-library rows every member can read. A row
+ * another owner holds is reported as not found rather than as forbidden.
+ * Writes of an org source stay admin-only, including Sync. A member
+ * still reads org-library rows. The sweep keeps those rows fresh.
  */
 import { randomUUID } from "node:crypto";
 import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
@@ -233,8 +234,10 @@ export async function createSkillSource(
 }
 
 /**
- * One source, or null when it is missing OR the caller may not reach it. The
- * two cases are deliberately indistinguishable, as everywhere else.
+ * One source the caller may WRITE, or null when it is missing OR they may
+ * not change it. The two cases are deliberately indistinguishable, as
+ * everywhere else. Org rows stay admin-only here — add, remove, and Sync
+ * keep that gate.
  */
 export async function ownedSkillSourceRow(
   db: AppDb,
@@ -246,6 +249,25 @@ export async function ownedSkillSourceRow(
   const row = rows[0];
   if (!row) return null;
   return (await isAuthorizedFor(db, owner, row, opts)) ? row : null;
+}
+
+/**
+ * One source the caller may READ, or null when it is missing OR out of
+ * reach. Mirrors `readableSkillRow`: an org-library row is readable by
+ * every member of that org. User and team rows still follow
+ * `isAuthorizedFor`. Sync does not use this.
+ */
+export async function readableSkillSourceRow(
+  db: AppDb,
+  owner: SkillOwner,
+  id: string,
+): Promise<SkillSourceRow | null> {
+  const rows = await db.select().from(skillSources).where(eq(skillSources.id, id)).limit(1);
+  const row = rows[0];
+  if (!row) return null;
+  if (row.orgId !== owner.orgId) return null;
+  if (row.ownerType === "org") return row;
+  return (await isAuthorizedFor(db, owner, row)) ? row : null;
 }
 
 export const SKILL_SOURCE_DEFAULT_LIMIT = 20;
@@ -288,15 +310,19 @@ export interface SkillSourcePage {
  * Every source the caller can reach: their own rows, the rows of every team
  * they belong to, and the org-library rows, sorted by repository name.
  *
- * Org rows show for EVERY member (read-only to a non-admin), the same rule
- * `listSkills` follows: `isAuthorizedFor` still returns false for a non-admin
- * org write, so `ownedSkillSourceRow` never treats an org row as the caller's
- * to change.
+ * Org rows show for EVERY member on an org-pinned list. Add, remove, and
+ * Sync stay admin-only (`ownedSkillSourceRow`). The sweep keeps the
+ * catalog fresh so a member does not press Sync.
  *
  * `scope` narrows the answer to ONE owner, and replaces the union rather
  * than adding to it — the same rule, and the same reason, as `listSkills`.
  * Reaching `scope` is the caller's question to answer first: `routes/skills.ts`
  * runs the query string through `readOwnerScope` before it gets here.
+ *
+ * `includeOrg: false` drops org rows from the unfiltered union. `/skills`
+ * uses that: org repositories are tracked on Organization · Library, not
+ * beside personal and team sources. A pinned `scope` already names one
+ * owner, so this flag does nothing there.
  *
  * Keyset-paginated on `(repo_full_name, subpath, id)`, the same shape the
  * action log uses (`policies/admin.ts`). Keyset, not `OFFSET`, so a source
@@ -310,7 +336,9 @@ export async function listSkillSources(
   scope: Principal | undefined,
   limit: number,
   cursor: SkillSourceCursor | undefined,
+  opts: { includeOrg?: boolean } = {},
 ): Promise<SkillSourcePage> {
+  const includeOrg = opts.includeOrg !== false;
   const teamIds = scope ? [] : (await listTeamsForUser(db, owner.userId)).map((t) => t.id);
   const ownerMatch = and(eq(skillSources.ownerType, "user"), eq(skillSources.ownerId, owner.userId));
   const teamMatch =
@@ -319,12 +347,16 @@ export async function listSkillSources(
       : undefined;
   // Every org row in the caller's own org — the `orgId` predicate below bounds
   // it — because the org library is readable by every member.
-  const orgMatch = eq(skillSources.ownerType, "org");
+  const orgMatch = includeOrg ? eq(skillSources.ownerType, "org") : undefined;
   const reach = scope
     ? and(eq(skillSources.ownerType, scope.type), eq(skillSources.ownerId, scope.id))
-    : teamMatch
+    : teamMatch && orgMatch
       ? or(ownerMatch, teamMatch, orgMatch)
-      : or(ownerMatch, orgMatch);
+      : teamMatch
+        ? or(ownerMatch, teamMatch)
+        : orgMatch
+          ? or(ownerMatch, orgMatch)
+          : ownerMatch;
 
   const after = cursor
     ? sql`(${skillSources.repoFullName}, ${skillSources.subpath}, ${skillSources.id}) > (${cursor.repo}, ${cursor.sub}, ${cursor.id})`
