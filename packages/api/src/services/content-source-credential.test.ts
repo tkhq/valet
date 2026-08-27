@@ -463,7 +463,7 @@ describe("resolveContentSourceCredential", () => {
 
     it("names the App install when no token is available", async () => {
       fixture = startGithubFixture();
-      const credential = await resolveSkillSourceCredential(
+      const credential = await resolveContentSourceCredential(
         deps(),
         sourceRow({ ownerType: "org", ownerId: ORG }),
       );
@@ -479,7 +479,7 @@ describe("resolveContentSourceCredential", () => {
         }),
       });
 
-      const credential = await resolveSkillSourceCredential(
+      const credential = await resolveContentSourceCredential(
         deps(),
         sourceRow({ ownerType: "org", ownerId: ORG, createdBy: "u1" }),
       );
