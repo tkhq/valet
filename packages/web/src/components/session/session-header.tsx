@@ -550,7 +550,9 @@ function AgentStatusBadge({
   const busy = status !== "idle" || queueBusy;
   const elapsed = useElapsedSeconds(busy ? turnStartedAt : undefined);
   if (!busy) return <Badge variant="neutral">idle</Badge>;
-  const label = status === "idle" ? "working" : status.replace("_", " ");
+  // replaceAll, not replace: "blocked_on_decision_gate" has four segments
+  // and a single replace rendered "blocked on_decision_gate".
+  const label = status === "idle" ? "working" : status.replaceAll("_", " ");
   // "queued" and "blocked_on_decision_gate" stay neutral on purpose (the
   // pre-fallback behavior): nothing is executing while queued, and a
   // gate-blocked turn already renders the prominent DecisionGateCard — an

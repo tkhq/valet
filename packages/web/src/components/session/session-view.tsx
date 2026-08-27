@@ -17,6 +17,8 @@ import {
   useStreamStore,
   usePendingGateForThread,
   useQueueStateForThread,
+  useThreadLiveStatus,
+  useErrorForThread,
 } from "~/stores/stream";
 import { Composer } from "~/components/session/composer";
 import {
@@ -133,14 +135,16 @@ export function SessionView({
   }, [sessionId, decisionsQ.data, setPendingGates]);
 
   const pendingGate = usePendingGateForThread(sessionId, effectiveThreadId);
+  const threadError = useErrorForThread(sessionId, effectiveThreadId);
 
   // "Agent is busy" for the header badge and the transcript indicator, from
   // the same two signals the composer's Stop/Escape affordance uses: the
   // live `status` events plus the durable queue state (which the WS
   // handshake seeds, so it survives a mid-turn page load or reconnect).
   const threadQueueState = useQueueStateForThread(sessionId, effectiveThreadId);
+  const threadStatus = useThreadLiveStatus(sessionId, effectiveThreadId);
   const agentBusy =
-    (stream.agentStatus !== "idle" && stream.agentStatus !== "error") ||
+    (threadStatus.status !== "idle" && threadStatus.status !== "error") ||
     queueBusy(threadQueueState);
 
   // Auto-title: fire whenever we see an assistant reply on either an
@@ -255,8 +259,8 @@ export function SessionView({
       ) : (
         <SessionHeader
           session={session.data}
-          agentStatus={stream.agentStatus}
-          turnStartedAt={stream.turnStartedAt}
+          agentStatus={threadStatus.status}
+          turnStartedAt={threadStatus.turnStartedAt}
           conn={stream.conn}
           sandbox={stream.sandbox}
           threadId={effectiveThreadId}
@@ -278,13 +282,25 @@ export function SessionView({
             onOpenChild={onOpenChild}
             agentBusy={agentBusy}
           />
-          {stream.error && (
+          {threadError && (
             <div className="border-t border-danger-500/30 bg-danger-500/5 px-4 py-2 text-xs text-danger-600">
-              <span className="font-medium">{stream.error.code}:</span> {stream.error.message}
+              <span className="font-medium">{threadError.code}:</span> {threadError.message}
             </div>
           )}
-          {pendingGate && <DecisionGateCard sessionId={sessionId} gate={pendingGate} />}
-          <Composer sessionId={sessionId} threadId={effectiveThreadId} agentStatus={stream.agentStatus} />
+          {/* Keyed by gate id: the question input's draft must not carry
+              over when the pending gate changes (e.g. a thread switch to a
+              different pending gate). */}
+          {pendingGate && (
+            <DecisionGateCard key={pendingGate.id} sessionId={sessionId} gate={pendingGate} />
+          )}
+          {/* No key: drafts are per-thread in the composer-drafts store, so
+              a thread switch swaps the draft without a remount (a remount
+              would orphan in-flight uploads). */}
+          <Composer
+            sessionId={sessionId}
+            threadId={effectiveThreadId}
+            agentStatus={threadStatus.status}
+          />
         </PageDropTarget>
       ) : null}
     </div>

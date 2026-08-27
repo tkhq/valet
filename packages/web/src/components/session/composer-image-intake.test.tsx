@@ -13,6 +13,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { PromptImageAttachment } from "@valet/api/wire";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
+import { useComposerDraftStore } from "~/stores/composer-drafts";
 
 const sendMutateAsync = vi.fn().mockResolvedValue({ messageId: "q-1", threadId: "thread-1" });
 // Typed with the store's real signature so `mock.calls` carries the
@@ -92,6 +93,9 @@ function dropFiles(target: Element, files: File[]) {
 
 beforeEach(() => {
   useComposerPrefillStore.setState({ text: null });
+  // Drafts live in a module-global store keyed by (session, thread) — the
+  // same key across tests would leak one test's chips into the next.
+  useComposerDraftStore.setState({ byKey: {} });
   sendMutateAsync.mockClear();
   addUserMessage.mockClear();
 });
