@@ -14,6 +14,7 @@ import { useAbortThread, useSendPrompt } from "~/api/queries";
 import { ApiError } from "~/api/client";
 import { queueBusy, useStreamStore, useQueueStateForThread, type AgentStatus } from "~/stores/stream";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
+import { draftKey, useComposerDraft, useComposerDraftStore } from "~/stores/composer-drafts";
 import { useCommands } from "~/hooks/use-commands";
 import { cn } from "~/lib/cn";
 import {
@@ -104,36 +105,39 @@ export function Composer({
   threadId?: string;
   agentStatus: AgentStatus;
 }) {
-  // Composer-prefill handoff (decision 17): memory doc's "Ask {name} to
-  // update this" sets this store then navigates to `/chat`; the next
-  // Composer to mount consumes it exactly once as its initial text. Reading
-  // via `getState()` (not the hook) so this is a one-time seed, not a live
-  // subscription — a later `set()` elsewhere shouldn't yank the draft out
-  // from under whatever the user is typing.
-  const [text, setText] = useState(() => useComposerPrefillStore.getState().consume() ?? "");
+  // The draft (text, images, files, intake errors) lives in the per-thread
+  // draft store, NOT component state: a draft typed for one thread must not
+  // send to another, and an upload finishing after a thread switch must
+  // still land in the thread it started on. See stores/composer-drafts.ts.
+  // Store actions are reached through `getState()` inside handlers so
+  // callback identities do not churn per keystroke.
+  const key = draftKey(sessionId, threadId);
+  const { text, images, files, imageErrors, fileErrors } = useComposerDraft(key);
+  const setText = (value: string) => useComposerDraftStore.getState().setText(key, value);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  // Images held for the next message. Paste, drop, and the picker all land
-  // here; `imageErrors` holds one line for each file the intake refused.
-  const [images, setImages] = useState<ComposerImage[]>([]);
-  // Ref mirror of `images` for `addFiles`. The intake callback is
-  // memoized on `intakeBlocked` so its identity stays stable for the drop
-  // context; reading through a ref keeps `acceptImages` seeing the latest
-  // list without churning the callback identity on every image change.
-  const imagesRef = useRef<ComposerImage[]>([]);
+  // Composer-prefill handoff (decision 17): memory doc's "Ask {name} to
+  // update this" sets this store then navigates to `/chat`; the next
+  // Composer to mount consumes it exactly once into the active draft slot.
+  // Reading via `getState()` (not the hook) so this is a one-time seed, not
+  // a live subscription — a later `set()` elsewhere shouldn't yank the
+  // draft out from under whatever the user is typing.
+  const prefillSeeded = useRef(false);
   useEffect(() => {
-    imagesRef.current = images;
-  }, [images]);
-  const [imageErrors, setImageErrors] = useState<string[]>([]);
-  // Files held for the next message. Non-image drops, pastes, and picks
-  // land here and upload to the sandbox immediately; the send request
-  // carries only their attachment refs.
-  const [files, setFiles] = useState<ComposerFile[]>([]);
-  const filesRef = useRef<ComposerFile[]>([]);
+    if (prefillSeeded.current) return;
+    prefillSeeded.current = true;
+    const pending = useComposerPrefillStore.getState().consume();
+    if (pending !== null) useComposerDraftStore.getState().setText(key, pending);
+  }, [key]);
+  // This Composer can mount before the threads query resolves (threadId
+  // undefined) — typing and the prefill land in the session's no-thread
+  // slot. Adopt that slot into the real thread once it is known, so the
+  // draft does not silently vanish when `key` changes.
   useEffect(() => {
-    filesRef.current = files;
-  }, [files]);
-  const [fileErrors, setFileErrors] = useState<string[]>([]);
+    if (threadId === undefined) return;
+    useComposerDraftStore.getState().adoptOrphanDraft(sessionId, threadId);
+  }, [sessionId, threadId]);
+
   const { uploadFile } = useFileUpload(sessionId);
   const [dragActive, setDragActive] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -292,12 +296,16 @@ export function Composer({
    * page-level drop target reads this via the ComposerDropContext, and a
    * stable callback keeps the intake object it publishes stable too.
    */
-  /** Kick off one upload and fold its result back into the strip. A file
-   * removed mid-upload maps to nothing — the result is dropped. */
+  /** Kick off one upload and fold its result back into the draft slot the
+   * upload STARTED in — the user may switch threads while it runs, and the
+   * result must not follow them. A file removed mid-upload maps to nothing
+   * — the result is dropped. */
   const startUpload = useCallback(
-    (composerFile: ComposerFile) => {
+    (slot: string, composerFile: ComposerFile) => {
       void uploadFile(composerFile).then((updated) => {
-        setFiles((prev) => prev.map((f) => (f.id === composerFile.id ? updated : f)));
+        useComposerDraftStore
+          .getState()
+          .setFiles(slot, (prev) => prev.map((f) => (f.id === composerFile.id ? updated : f)));
       });
     },
     [uploadFile],
@@ -306,6 +314,7 @@ export function Composer({
   const addFiles = useCallback(
     async (incoming: File[]) => {
       if (intakeBlocked || incoming.length === 0) return;
+      const drafts = useComposerDraftStore.getState();
       // Supported image types keep the inline data-URL path; everything
       // else uploads to the sandbox. With uploads disabled, every file
       // goes through the image intake so an unsupported type still earns
@@ -318,19 +327,21 @@ export function Composer({
         : [];
 
       if (uploadable.length > 0) {
-        const { accepted, rejected } = acceptFiles(filesRef.current, uploadable);
-        setFileErrors(rejected);
+        const held = drafts.byKey[key]?.files ?? [];
+        const { accepted, rejected } = acceptFiles(held, uploadable);
+        drafts.setFileErrors(key, rejected);
         const created = accepted.map(createComposerFile);
         if (created.length > 0) {
           // Cap re-applied at the state edge, mirroring the image intake.
-          setFiles((prev) => [...prev, ...created].slice(0, MAX_FILES));
-          created.forEach(startUpload);
+          drafts.setFiles(key, (prev) => [...prev, ...created].slice(0, MAX_FILES));
+          created.forEach((f) => startUpload(key, f));
         }
       }
 
       if (imageFiles.length === 0) return;
-      const { accepted, rejected } = acceptImages(imagesRef.current, imageFiles);
-      setImageErrors(rejected);
+      const held = drafts.byKey[key]?.images ?? [];
+      const { accepted, rejected } = acceptImages(held, imageFiles);
+      drafts.setImageErrors(key, rejected);
       const read: ComposerImage[] = [];
       const failures: string[] = [];
       for (const file of accepted) {
@@ -340,15 +351,15 @@ export function Composer({
           failures.push(err instanceof Error ? err.message : readFailure(file.name));
         }
       }
-      if (failures.length > 0) setImageErrors((prev) => [...prev, ...failures]);
+      if (failures.length > 0) drafts.setImageErrors(key, (prev) => [...prev, ...failures]);
       if (read.length === 0) return;
       // `acceptImages` ran against the state this call captured. A second
       // intake that overlaps this one (a drop while a paste still reads)
       // would push past the cap, so the cap is applied again at the state
       // edge, where the real list is.
-      setImages((prev) => [...prev, ...read].slice(0, MAX_IMAGES));
+      drafts.setImages(key, (prev) => [...prev, ...read].slice(0, MAX_IMAGES));
     },
-    [intakeBlocked, startUpload],
+    [intakeBlocked, startUpload, key],
   );
 
   function onPaste(e: ClipboardEvent<HTMLTextAreaElement>) {
@@ -397,15 +408,16 @@ export function Composer({
   }
 
   function removeImage(id: string) {
-    setImages((prev) => prev.filter((image) => image.id !== id));
+    useComposerDraftStore.getState().setImages(key, (prev) => prev.filter((image) => image.id !== id));
   }
 
   function removeFile(id: string) {
-    setFiles((prev) => prev.filter((f) => f.id !== id));
+    useComposerDraftStore.getState().setFiles(key, (prev) => prev.filter((f) => f.id !== id));
   }
 
   function retryFile(id: string) {
-    const target = filesRef.current.find((f) => f.id === id);
+    const drafts = useComposerDraftStore.getState();
+    const target = (drafts.byKey[key]?.files ?? []).find((f) => f.id === id);
     if (!target) return;
     // A fresh ComposerFile (no error, no ref) reads as "uploading" again.
     const reset: ComposerFile = {
@@ -414,13 +426,17 @@ export function Composer({
       bytes: target.bytes,
       file: target.file,
     };
-    setFiles((prev) => prev.map((f) => (f.id === id ? reset : f)));
-    startUpload(reset);
+    drafts.setFiles(key, (prev) => prev.map((f) => (f.id === id ? reset : f)));
+    startUpload(key, reset);
   }
 
   async function submit() {
     const t = text.trim();
     if (!t || send.isPending || !threadId || uploadsPending) return;
+    // Capture the draft slot at send time: the failure path below must
+    // restore into the thread the message was written for, even if the
+    // user switches threads while the POST is in flight.
+    const slot = key;
     // Held images go with the message. Convert them to the wire format
     // and pass them in the request body.
     const pendingImages = images;
@@ -429,11 +445,7 @@ export function Composer({
     // (its chip showed the error and offered a retry before send).
     const pendingFiles = files;
     const fileRefs = toFileRefs(pendingFiles);
-    setText("");
-    setImages([]);
-    setImageErrors([]);
-    setFiles([]);
-    setFileErrors([]);
+    useComposerDraftStore.getState().clear(slot);
     // Optimistic local add — the engine doesn't emit a wire event for the
     // user's own message, so without this the prompt would only appear after
     // the next WS init (page reload). The next init replaces this row with
@@ -466,13 +478,15 @@ export function Composer({
         setCommandRecency(recordCommandUse(canonical));
       }
     } catch (err) {
-      // Restore the draft on failure so the user can retry. The optimistic
-      // message stays visible — they can see what they sent + retry; on the
-      // next reload it'll be reconciled against server truth. The server
-      // restores consumed refs when a submit fails, so restored chips stay
-      // sendable — EXCEPT when the failure is the refs themselves.
-      setText(t);
-      setImages(pendingImages);
+      // Restore the draft on failure so the user can retry — into `slot`,
+      // the thread it was written for. The optimistic message stays
+      // visible — they can see what they sent + retry; on the next reload
+      // it'll be reconciled against server truth. The server restores
+      // consumed refs when a submit fails, so restored chips stay sendable
+      // — EXCEPT when the failure is the refs themselves.
+      const drafts = useComposerDraftStore.getState();
+      drafts.setText(slot, t);
+      drafts.setImages(slot, pendingImages);
       const payload =
         err instanceof ApiError && typeof err.payload === "object" && err.payload !== null
           ? (err.payload as Record<string, unknown>)
@@ -486,7 +500,8 @@ export function Composer({
         err.status === 400 &&
         typeof payload?.error === "string" &&
         payload.error.startsWith("unknown attachment");
-      setFiles(
+      drafts.setFiles(
+        slot,
         refsDead
           ? pendingFiles.map((f) =>
               f.attachmentRef !== undefined
@@ -505,7 +520,7 @@ export function Composer({
             : err instanceof Error
               ? err.message
               : "Unknown error.";
-      setFileErrors([`The message did not send. ${detail}`]);
+      drafts.setFileErrors(slot, [`The message did not send. ${detail}`]);
       console.error("send failed:", err);
     }
   }
@@ -633,9 +648,15 @@ export function Composer({
           {FILE_UPLOADS_ENABLED ? "Drop the files to attach them." : "Drop the images to attach them."}
         </p>
       )}
-      <ComposerImageErrors messages={imageErrors} onDismiss={() => setImageErrors([])} />
+      <ComposerImageErrors
+        messages={imageErrors}
+        onDismiss={() => useComposerDraftStore.getState().setImageErrors(key, [])}
+      />
       <ComposerImageStrip images={images} onRemove={removeImage} />
-      <ComposerFileErrors messages={fileErrors} onDismiss={() => setFileErrors([])} />
+      <ComposerFileErrors
+        messages={fileErrors}
+        onDismiss={() => useComposerDraftStore.getState().setFileErrors(key, [])}
+      />
       <ComposerFileStrip files={files} onRemove={removeFile} onRetry={retryFile} />
       {working && <p className="mb-2 text-xs text-muted">{ACTION_HINT[action]}</p>}
       {/* `relative` anchors the command popup to the input row, so the hint

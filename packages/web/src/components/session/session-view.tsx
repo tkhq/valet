@@ -293,10 +293,10 @@ export function SessionView({
           {pendingGate && (
             <DecisionGateCard key={pendingGate.id} sessionId={sessionId} gate={pendingGate} />
           )}
-          {/* Keyed by thread: a draft (text, images, files) typed for one
-              thread must not survive a switch and get sent to another. */}
+          {/* No key: drafts are per-thread in the composer-drafts store, so
+              a thread switch swaps the draft without a remount (a remount
+              would orphan in-flight uploads). */}
           <Composer
-            key={effectiveThreadId ?? "no-thread"}
             sessionId={sessionId}
             threadId={effectiveThreadId}
             agentStatus={threadStatus.status}

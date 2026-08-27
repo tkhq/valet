@@ -76,6 +76,15 @@ export interface ThreadLiveStatus {
   turnStartedAt?: number;
 }
 
+/**
+ * RULE: a wire frame that carries a `threadId` MUST land in a per-thread
+ * map (`statusByThread`, `errorByThread`, `queueByThread`, gates keyed by
+ * id with a threadId field) — never in a session-scoped field. A
+ * session-scoped copy of thread state paints one thread's signal onto
+ * every other thread's view; we shipped that bug for status AND errors.
+ * Session-scoped fields are only for state with no thread: the socket
+ * (`conn`, `lastOffset`), the sandbox, `sessionError`.
+ */
 export interface SessionStreamState {
   /** Whether the WS is currently open. */
   conn: ConnectionStatus;
@@ -439,6 +448,14 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       const wasIdle = prev === undefined || prev.status === "idle";
       const turnStartedAt =
         ev.status === "idle" ? undefined : wasIdle ? ev.ts : prev.turnStartedAt;
+      // Duplicate frames are routine (the engine re-emits tool_calling per
+      // tool; the handshake seed and durable replay overlap) — skip them so
+      // the entry keeps its identity and subscribers do not re-render. An
+      // offset-carrying frame still advances lastOffset via `next`.
+      const unchanged = prev
+        ? prev.status === ev.status && prev.turnStartedAt === turnStartedAt
+        : ev.status === "idle";
+      if (unchanged) return ev.offset ? next : slice;
       next.statusByThread = {
         ...slice.statusByThread,
         [ev.threadId]: { status: ev.status, turnStartedAt },
@@ -693,8 +710,13 @@ export const useStreamStore = create<StreamStore>((set) => ({
       };
       // A fresh prompt supersedes this thread's lingering error banner from
       // the previous failed turn (see the `turn_end` reducer note). Other
-      // threads' errors stay.
-      const { [threadId]: _, ...errorByThread } = slice.errorByThread;
+      // threads' errors stay; the guard matches the `message_start` case so
+      // an error-free thread keeps the map's identity.
+      let errorByThread = slice.errorByThread;
+      if (errorByThread[threadId]) {
+        const { [threadId]: _, ...rest } = errorByThread;
+        errorByThread = rest;
+      }
       return {
         bySession: {
           ...state.bySession,

@@ -58,12 +58,12 @@ export function MessageList({
 
   // A thread switch starts at the bottom: the previous thread's scroll
   // position must not decide whether the new thread auto-scrolls or shows
-  // the "Latest" button.
+  // the "Latest" button. Reset only — `visible` recomputes on the same
+  // threadId change, so the effect below (declared after this one, runs
+  // after it) does the single scroll write.
   useEffect(() => {
     stickToBottomRef.current = true;
     setScrolledAway(false);
-    const el = containerRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
   }, [threadId]);
 
   useEffect(() => {

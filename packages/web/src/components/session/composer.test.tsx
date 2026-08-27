@@ -11,6 +11,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { WireQueueState } from "@valet/api/wire";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
+import { useComposerDraftStore } from "~/stores/composer-drafts";
 
 const abortMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const abortMutate = vi.fn();
@@ -103,6 +104,9 @@ function renderComposer(agentStatus: "idle" | "streaming" = "idle") {
 beforeEach(() => {
   queueStateRef.current = undefined;
   useComposerPrefillStore.setState({ text: null });
+  // Drafts live in a module-global store keyed by (session, thread) — the
+  // same key across tests would leak one test's draft into the next.
+  useComposerDraftStore.setState({ byKey: {} });
   sendMutateAsync.mockClear();
   abortMutateAsync.mockClear();
 });

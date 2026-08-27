@@ -33,6 +33,14 @@ function messageStart(id: string, off: number): WireEvent {
   };
 }
 
+function statusEvent(
+  threadId: string,
+  status: "queued" | "thinking" | "blocked_on_decision_gate" | "idle",
+  ts: number,
+): WireEvent {
+  return { seq: ts, ts, type: "status", threadId, status };
+}
+
 describe("stream store reducer", () => {
   beforeEach(reset);
 
@@ -840,39 +848,35 @@ describe("turn error visibility", () => {
 describe("turnStartedAt", () => {
   beforeEach(reset);
 
-  function statusEvent(status: "queued" | "thinking" | "idle", ts: number): WireEvent {
-    return { seq: ts, ts, type: "status", threadId: THREAD, status } as WireEvent;
-  }
-
   function threadStatus(threadId = THREAD) {
     return useStreamStore.getState().bySession[SESSION].statusByThread[threadId];
   }
 
   it("stamps turnStartedAt on the first non-idle status after idle", () => {
     const { ingest } = useStreamStore.getState();
-    ingest(SESSION, statusEvent("queued", 1000));
+    ingest(SESSION, statusEvent(THREAD, "queued", 1000));
     expect(threadStatus().turnStartedAt).toBe(1000);
   });
 
   it("does not re-stamp on a later non-idle status within the same turn", () => {
     const { ingest } = useStreamStore.getState();
-    ingest(SESSION, statusEvent("queued", 1000));
-    ingest(SESSION, statusEvent("thinking", 2000));
+    ingest(SESSION, statusEvent(THREAD, "queued", 1000));
+    ingest(SESSION, statusEvent(THREAD, "thinking", 2000));
     expect(threadStatus().turnStartedAt).toBe(1000);
   });
 
   it("clears turnStartedAt on turn_end", () => {
     const { ingest } = useStreamStore.getState();
-    ingest(SESSION, statusEvent("queued", 1000));
+    ingest(SESSION, statusEvent(THREAD, "queued", 1000));
     ingest(SESSION, { seq: 2, ts: 2000, type: "turn_end", threadId: THREAD, reason: "end_turn" } as WireEvent);
     expect(threadStatus().turnStartedAt).toBeUndefined();
   });
 
   it("stamps again on the next turn after idle", () => {
     const { ingest } = useStreamStore.getState();
-    ingest(SESSION, statusEvent("queued", 1000));
+    ingest(SESSION, statusEvent(THREAD, "queued", 1000));
     ingest(SESSION, { seq: 2, ts: 2000, type: "turn_end", threadId: THREAD, reason: "end_turn" } as WireEvent);
-    ingest(SESSION, statusEvent("queued", 3000));
+    ingest(SESSION, statusEvent(THREAD, "queued", 3000));
     expect(threadStatus().turnStartedAt).toBe(3000);
   });
 });
@@ -882,9 +886,16 @@ describe("per-thread status scoping", () => {
 
   const THREAD_B = "thread-b";
 
-  function statusEvent(threadId: string, status: "thinking" | "blocked_on_decision_gate" | "idle", ts: number): WireEvent {
-    return { seq: ts, ts, type: "status", threadId, status } as WireEvent;
-  }
+  it("drops a duplicate status frame without churning the entry identity", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, statusEvent(THREAD, "thinking", 1000));
+    const before = useStreamStore.getState().bySession[SESSION].statusByThread;
+    // Same status again (the engine re-emits tool phases; the handshake
+    // seed and durable replay overlap) — the map must keep its identity so
+    // subscribers do not re-render.
+    ingest(SESSION, statusEvent(THREAD, "thinking", 2000));
+    expect(useStreamStore.getState().bySession[SESSION].statusByThread).toBe(before);
+  });
 
   it("a gate-blocked thread does not change another thread's status", () => {
     const { ingest } = useStreamStore.getState();
