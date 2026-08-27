@@ -2,7 +2,7 @@
 import type { ProviderKind, ParsedUsage, ProxyUsage } from "./types.js";
 
 /** Parse SSE `data:` payloads (and a bare JSON body) into JSON objects. */
-function dataObjects(text: string): Record<string, unknown>[] {
+export function dataObjects(text: string): Record<string, unknown>[] {
   const trimmed = text.trimStart();
   if (trimmed.startsWith("{")) {
     try {
@@ -30,9 +30,20 @@ function num(v: unknown): number {
   return typeof v === "number" ? v : 0;
 }
 
+/** OpenAI wire shapes split by endpoint: `/v1/responses` reports usage as
+ * `input_tokens`/`output_tokens`, while `/v1/chat/completions` and the legacy
+ * `/v1/completions` report `prompt_tokens`/`completion_tokens`. Both live under
+ * the same `openai` provider kind, so the endpoint picks the shape. */
+export const OPENAI_CHAT_ENDPOINTS = new Set(["/v1/chat/completions", "/v1/completions"]);
+
+export function isChatCompletionsEndpoint(endpoint: string | undefined): boolean {
+  return endpoint !== undefined && OPENAI_CHAT_ENDPOINTS.has(endpoint);
+}
+
 export function parseUsage(
   kind: ProviderKind,
   responseText: string,
+  endpoint?: string,
 ): ParsedUsage | null {
   const events = dataObjects(responseText);
   const usage: ProxyUsage = {
@@ -85,6 +96,30 @@ export function parseUsage(
     if (!sawUsage) return null;
     // Cache tokens are separate from input tokens for Anthropic.
     usage.total = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+  } else if (isChatCompletionsEndpoint(endpoint)) {
+    // OpenAI Chat Completions / legacy Completions. Usage shape is
+    // `prompt_tokens`/`completion_tokens`/`total_tokens`. Non-streaming carries
+    // it on the single body object; streaming carries it on a terminal chunk
+    // with `choices: []` (present only when the request set
+    // `stream_options.include_usage` — the gateway auto-injects that). Model
+    // and id repeat on every chunk, so read them wherever they appear.
+    let reportedTotal = 0;
+    for (const e of events) {
+      if (typeof e.model === "string") model = e.model;
+      if (typeof e.id === "string") providerResponseId = e.id;
+      const u = e.usage as Record<string, unknown> | undefined;
+      if (u) {
+        usage.input = num(u.prompt_tokens);
+        usage.output = num(u.completion_tokens);
+        reportedTotal = num(u.total_tokens);
+        // cached_tokens is a subset of prompt_tokens, not additive.
+        const details = u.prompt_tokens_details as Record<string, unknown> | undefined;
+        usage.cacheRead = num(details?.cached_tokens);
+        sawUsage = true;
+      }
+    }
+    if (!sawUsage) return null;
+    usage.total = reportedTotal || usage.input + usage.output;
   } else {
     // OpenAI Responses API
     let openaiReportedTotal = 0;

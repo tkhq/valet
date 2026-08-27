@@ -1,6 +1,34 @@
 // packages/api/src/routes/proxy-gateway.test.ts
 import { describe, it, expect } from "vitest";
-import { outboundHeaders, sanitizeResponseHeaders } from "./proxy-gateway.js";
+import { outboundHeaders, sanitizeResponseHeaders, injectIncludeUsage } from "./proxy-gateway.js";
+
+describe("injectIncludeUsage", () => {
+  const chat = "/v1/chat/completions";
+  it("adds stream_options.include_usage to a streaming chat/completions request", () => {
+    const out = JSON.parse(injectIncludeUsage("openai", chat, JSON.stringify({ model: "gpt-5", stream: true, messages: [] })));
+    expect(out.stream_options).toEqual({ include_usage: true });
+  });
+  it("preserves other stream_options fields", () => {
+    const out = JSON.parse(injectIncludeUsage("openai", chat, JSON.stringify({ stream: true, stream_options: { foo: 1 } })));
+    expect(out.stream_options).toEqual({ foo: 1, include_usage: true });
+  });
+  it("leaves a NON-streaming chat request untouched (usage already returned)", () => {
+    const body = JSON.stringify({ model: "gpt-5", stream: false, messages: [] });
+    expect(injectIncludeUsage("openai", chat, body)).toBe(body);
+  });
+  it("leaves a request that already opted in untouched", () => {
+    const body = JSON.stringify({ stream: true, stream_options: { include_usage: true } });
+    expect(injectIncludeUsage("openai", chat, body)).toBe(body);
+  });
+  it("does not touch the Responses endpoint or anthropic", () => {
+    const body = JSON.stringify({ stream: true });
+    expect(injectIncludeUsage("openai", "/v1/responses", body)).toBe(body);
+    expect(injectIncludeUsage("anthropic", "/v1/messages", body)).toBe(body);
+  });
+  it("returns a non-JSON body unchanged", () => {
+    expect(injectIncludeUsage("openai", chat, "not json")).toBe("not json");
+  });
+});
 
 describe("sanitizeResponseHeaders", () => {
   it("strips upstream set-cookie and hop-by-hop, keeps the rest", () => {

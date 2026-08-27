@@ -4,8 +4,8 @@
  * Authenticates a vlt_ API key, resolves the org's real upstream provider,
  * forwards the request verbatim, tees the streamed response to the recorder,
  * and streams it back to the client. Recordable paths (/v1/messages,
- * /v1/responses) write one row to llm_proxy_requests; all other subpaths
- * forward without recording.
+ * /v1/responses, /v1/chat/completions, /v1/completions) write one row to
+ * llm_proxy_requests; all other subpaths forward without recording.
  */
 import type { Hono, Context } from "hono";
 import type { AppEnv } from "../env.js";
@@ -15,7 +15,8 @@ import { resolveUpstream, DEFAULT_BASE } from "../proxy/upstream.js";
 import { getProxySettings } from "../services/org.js";
 import type { Upstream } from "../proxy/types.js";
 import { recordProxyCall } from "../proxy/recorder.js";
-import { recordProxySpend } from "../proxy/metrics.js";
+import { recordProxySpend, recordProxyUnpriced } from "../proxy/metrics.js";
+import { OPENAI_CHAT_ENDPOINTS, isChatCompletionsEndpoint } from "../proxy/usage-parser.js";
 import { llmProxyRequests } from "../schema/index.js";
 import { orgMembers } from "../schema/index.js";
 import { asc, eq } from "drizzle-orm";
@@ -77,8 +78,33 @@ function harnessFrom(ua: string | null): string {
   return "unknown";
 }
 
-/** Subpaths that get a recorder row; all others forward without recording. */
-const RECORDABLE = new Set(["/v1/messages", "/v1/responses"]);
+/** Subpaths that get a recorder row; all others forward without recording.
+ * Anthropic Messages + OpenAI Responses (the harness paths) and OpenAI Chat
+ * Completions / legacy Completions (the self-service SDK paths). */
+const RECORDABLE = new Set(["/v1/messages", "/v1/responses", ...OPENAI_CHAT_ENDPOINTS]);
+
+/**
+ * For a streaming OpenAI Chat Completions / Completions request, force
+ * `stream_options.include_usage = true` so the provider appends a terminal
+ * usage chunk. Without it, streamed chunks carry no usage and the call records
+ * as unbilled. Returns the body unchanged for every other case (non-openai,
+ * other endpoints, non-JSON body, non-streaming, or already opted in). The
+ * forwarded AND recorded body is the mutated one, so the stored request matches
+ * the response it produced.
+ */
+export function injectIncludeUsage(kind: ProviderKind, subpath: string, body: string): string {
+  if (kind !== "openai" || !isChatCompletionsEndpoint(subpath)) return body;
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(body) as Record<string, unknown>;
+  } catch {
+    return body;
+  }
+  if (parsed.stream !== true) return body;
+  const existing = parsed.stream_options as Record<string, unknown> | undefined;
+  if (existing?.include_usage === true) return body;
+  return JSON.stringify({ ...parsed, stream_options: { ...(existing ?? {}), include_usage: true } });
+}
 
 /** Deps injected at registration time and captured in the handler closure. */
 export interface ProxyGatewayDeps {
@@ -158,7 +184,10 @@ export function registerProxyGateway(app: Hono<AppEnv>, deps: ProxyGatewayDeps):
     }
 
     const hasBody = c.req.method !== "GET" && c.req.method !== "HEAD";
-    const reqText = hasBody ? await c.req.text() : "";
+    const rawBody = hasBody ? await c.req.text() : "";
+    // For streaming Chat/Completions, force include_usage so usage is captured.
+    // The forwarded and recorded body are the same mutated string.
+    const reqText = injectIncludeUsage(kind, subpath, rawBody);
     const start = Date.now();
 
     let res: Response;
@@ -188,6 +217,7 @@ export function registerProxyGateway(app: Hono<AppEnv>, deps: ProxyGatewayDeps):
         now: () => Date.now(),
         id: () => crypto.randomUUID(),
         metric: recordProxySpend,
+        unpriced: recordProxyUnpriced,
       },
       {
         principal,

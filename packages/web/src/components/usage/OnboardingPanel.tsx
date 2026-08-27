@@ -152,6 +152,39 @@ function ModeSnippets({ apiKey, mode }: ModeSnippetsProps) {
           `# Your Valet identity goes in http_headers above (already in the config).`,
         ].join("\n");
 
+  // OpenAI SDK snippet for self-service scripts. Centralized: the proxy key is
+  // the api_key (sent as Bearer). Passthrough: your own key is forwarded and
+  // bills your account, and the proxy key identifies you via x-api-key.
+  const openaiSdkSnippet =
+    mode === "centralized"
+      ? [
+          `from openai import OpenAI`,
+          ``,
+          `client = OpenAI(`,
+          `    base_url="${origin}/proxy/openai/v1",`,
+          `    api_key="${key}",  # your Valet proxy key`,
+          `)`,
+          `resp = client.chat.completions.create(`,
+          `    model="gpt-4o-mini",`,
+          `    messages=[{"role": "user", "content": "hello"}],`,
+          `)`,
+          `print(resp.choices[0].message.content)`,
+        ].join("\n")
+      : [
+          `from openai import OpenAI`,
+          ``,
+          `client = OpenAI(`,
+          `    base_url="${origin}/proxy/openai/v1",`,
+          `    api_key="<your-own-openai-key>",       # forwarded upstream, bills you`,
+          `    default_headers={"x-api-key": "${key}"},  # your Valet identity`,
+          `)`,
+          `resp = client.chat.completions.create(`,
+          `    model="gpt-4o-mini",`,
+          `    messages=[{"role": "user", "content": "hello"}],`,
+          `)`,
+          `print(resp.choices[0].message.content)`,
+        ].join("\n");
+
   const baseUrlNote = `This is your Valet instance's origin — ${origin}.`;
 
   return (
@@ -166,6 +199,13 @@ function ModeSnippets({ apiKey, mode }: ModeSnippetsProps) {
       <p className="text-xs text-muted mb-2">{baseUrlNote}</p>
       <CodeBlock label="~/.codex/config.toml" code={codexTomlSnippet} />
       <CodeBlock label="Shell env" code={codexEnvSnippet} />
+
+      {/* Self-service SDK */}
+      <h4 className="text-sm font-medium text-ink mb-1 mt-4">OpenAI SDK (scripts)</h4>
+      <p className="text-xs text-muted mb-2">
+        Point any OpenAI-SDK script at Valet — `chat.completions`, `responses`, and legacy `completions` are all recorded.
+      </p>
+      <CodeBlock label="Python" code={openaiSdkSnippet} />
     </div>
   );
 }

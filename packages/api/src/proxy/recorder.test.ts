@@ -46,7 +46,7 @@ describe("recordProxyCall", () => {
   it("inserts one row with usage, cost, bodies, and parsed sample", async () => {
     const inserted: Record<string, unknown>[] = [];
     await recordProxyCall(
-      { insert: async (row) => { inserted.push(row); }, now: () => 1000, id: () => "row1", metric: vi.fn() },
+      { insert: async (row) => { inserted.push(row); }, now: () => 1000, id: () => "row1", metric: vi.fn(), unpriced: vi.fn() },
       {
         principal: { userId: "u1", orgId: "org1", keyId: "k1" },
         kind: "anthropic", endpoint: "/v1/messages", harness: "claude-code",
@@ -75,7 +75,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","object":"response"
     const inserted: Record<string, unknown>[] = [];
     const metric = vi.fn();
     await recordProxyCall(
-      { insert: async (r) => { inserted.push(r); }, now: () => 1, id: () => "row3", metric },
+      { insert: async (r) => { inserted.push(r); }, now: () => 1, id: () => "row3", metric, unpriced: vi.fn() },
       {
         principal: { userId: "u", orgId: "o", keyId: "k" },
         kind: "openai", endpoint: "/v1/responses", harness: "codex",
@@ -95,11 +95,67 @@ data: {"type":"response.completed","response":{"id":"resp_1","object":"response"
   it("swallows a parse failure: row still written, cost null", async () => {
     const inserted: Record<string, unknown>[] = [];
     await recordProxyCall(
-      { insert: async (r) => { inserted.push(r); }, now: () => 1, id: () => "row2", metric: vi.fn() },
+      { insert: async (r) => { inserted.push(r); }, now: () => 1, id: () => "row2", metric: vi.fn(), unpriced: vi.fn() },
       { principal: { userId: "u", orgId: "o", keyId: "k" }, kind: "openai", endpoint: "/v1/responses",
         harness: "codex", requestBody: "not json", stream: streamOf("garbage"), statusCode: 200, startMs: 0 },
     );
     expect(inserted).toHaveLength(1);
     expect(inserted[0].costUsd).toBeNull();
+  });
+
+  it("records a streaming Chat Completions call: prompt/completion tokens + cost", async () => {
+    // OpenAI Chat Completions streaming shape: content chunks, then a terminal
+    // usage chunk (present because the request set include_usage). Usage uses
+    // prompt_tokens/completion_tokens, not input_tokens/output_tokens.
+    const chatResp = [
+      `data: {"id":"chatcmpl-1","object":"chat.completion.chunk","model":"gpt-4o-mini-2024-07-18","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}`,
+      `data: {"id":"chatcmpl-1","object":"chat.completion.chunk","model":"gpt-4o-mini-2024-07-18","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+      `data: {"id":"chatcmpl-1","object":"chat.completion.chunk","model":"gpt-4o-mini-2024-07-18","choices":[],"usage":{"prompt_tokens":80,"completion_tokens":20,"total_tokens":100,"prompt_tokens_details":{"cached_tokens":16}}}`,
+      `data: [DONE]`,
+    ].join("\n\n") + "\n";
+    const inserted: Record<string, unknown>[] = [];
+    const metric = vi.fn();
+    await recordProxyCall(
+      { insert: async (r) => { inserted.push(r); }, now: () => 2, id: () => "row4", metric, unpriced: vi.fn() },
+      {
+        principal: { userId: "u", orgId: "o", keyId: "k" },
+        kind: "openai", endpoint: "/v1/chat/completions", harness: "unknown",
+        requestBody: JSON.stringify({ model: "gpt-4o-mini", stream: true, messages: [{ role: "user", content: "hi" }] }),
+        stream: streamOf(chatResp), statusCode: 200, startMs: 0,
+      },
+    );
+    expect(inserted).toHaveLength(1);
+    const row = inserted[0];
+    expect(row).toMatchObject({
+      model: "gpt-4o-mini-2024-07-18", inputTokens: 80, outputTokens: 20, totalTokens: 100,
+      cacheReadTokens: 16, providerResponseId: "chatcmpl-1", endpoint: "/v1/chat/completions",
+    });
+    expect(row.costUsd).not.toBeNull(); // priced via the canonical (date-stripped) id
+    expect(metric).toHaveBeenCalledWith(expect.any(Number), expect.objectContaining({ model: "gpt-4o-mini" }));
+    expect(row.parsed).toBeTruthy(); // normalized sample assembled from deltas
+  });
+
+  it("alerts on a successful Chat Completions stream that carried no usage", async () => {
+    // A streamed chat response with no terminal usage chunk (the include_usage
+    // opt-in slipped past): recorded with zero usage/null cost AND an unpriced
+    // metric so the unbilled traffic is visible.
+    const noUsage = `data: {"id":"c2","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"hey"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n`;
+    const inserted: Record<string, unknown>[] = [];
+    const unpriced = vi.fn();
+    await recordProxyCall(
+      { insert: async (r) => { inserted.push(r); }, now: () => 3, id: () => "row5", metric: vi.fn(), unpriced },
+      {
+        principal: { userId: "u", orgId: "o", keyId: "k" },
+        kind: "openai", endpoint: "/v1/chat/completions", harness: "unknown",
+        requestBody: JSON.stringify({ model: "gpt-4o-mini", stream: true, messages: [] }),
+        stream: streamOf(noUsage), statusCode: 200, startMs: 0,
+      },
+    );
+    expect(inserted).toHaveLength(1);
+    // Known model + zero usage prices to $0 (NOT null) — the silent-$0 case the
+    // alert exists to catch. The unpriced metric keys on zero usage, not null.
+    expect(inserted[0].costUsd).toBe(0);
+    expect(inserted[0].totalTokens).toBe(0);
+    expect(unpriced).toHaveBeenCalledWith(expect.objectContaining({ endpoint: "/v1/chat/completions", reason: "no_usage" }));
   });
 });

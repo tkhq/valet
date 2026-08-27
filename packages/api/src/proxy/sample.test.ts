@@ -77,6 +77,43 @@ data: {"type":"response.completed","response":{"id":"resp_now","model":"gpt-5","
     expect(blocks.indexOf(textBlock!)).toBeLessThan(blocks.indexOf(toolBlock!));
     expect(s!.stop_reason).toBe("tool_use");
   });
+  it("normalizes a streaming Chat Completions sample: messages, tool call, tools", () => {
+    const req = JSON.stringify({
+      model: "gpt-4o-mini",
+      stream: true,
+      messages: [
+        { role: "system", content: "be terse" },
+        { role: "user", content: "read foo.ts" },
+      ],
+      tools: [{ type: "function", function: { name: "read_file", description: "Read a file", parameters: { type: "object" } } }],
+    });
+    const resp = [
+      `data: {"id":"cc1","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"content":"ok"}}]}`,
+      `data: {"id":"cc1","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{\\"path\\":"}}]}}]}`,
+      `data: {"id":"cc1","object":"chat.completion.chunk","model":"gpt-4o-mini","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"foo.ts\\"}"}}]},"finish_reason":"tool_calls"}]}`,
+      `data: [DONE]`,
+    ].join("\n\n") + "\n";
+    const s = parseSample("openai", req, resp, "/v1/chat/completions");
+    expect(s).not.toBeNull();
+    // Input messages preserved (system captured as a role, not a top-level field).
+    expect(s!.input.map((m) => m.role)).toEqual(["system", "user"]);
+    // Tools normalized from the nested `function` shape.
+    expect(s!.tools).toEqual([{ name: "read_file", description: "Read a file", input_schema: { type: "object" } }]);
+    // Output: streamed text + a tool_use assembled from argument deltas.
+    const text = s!.output.content.find((c) => c.type === "text");
+    expect(text).toMatchObject({ type: "text", text: "ok" });
+    const tool = s!.output.content.find((c) => c.type === "tool_use");
+    expect(tool).toMatchObject({ type: "tool_use", id: "call_1", name: "read_file", input: { path: "foo.ts" } });
+    expect(s!.stop_reason).toBe("tool_calls");
+  });
+  it("normalizes a legacy Completions prompt into a user message", () => {
+    const req = JSON.stringify({ model: "gpt-3.5-turbo-instruct", prompt: "say hi" });
+    const resp = JSON.stringify({ id: "cmpl", object: "text_completion", model: "gpt-3.5-turbo-instruct", choices: [{ text: "hi", finish_reason: "stop" }], usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 } });
+    const s = parseSample("openai", req, resp, "/v1/completions");
+    expect(s).not.toBeNull();
+    expect(s!.input).toEqual([{ role: "user", content: [{ type: "text", text: "say hi" }] }]);
+    expect(s!.output.content).toEqual([{ type: "text", text: "hi" }]);
+  });
   it("returns null for a malformed request body", () => {
     expect(parseSample("anthropic", "not json", "")).toBeNull();
   });

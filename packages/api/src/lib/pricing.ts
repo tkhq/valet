@@ -1,3 +1,6 @@
+// `getModel` is the compat catalog read; `calculateCost` is the same pricing
+// table the engine's cost comes from. (The newer `getBuiltinModel` lives under
+// `/providers/all`, not `/compat`, so the whole app stays on `/compat`.)
 import { getModel, calculateCost } from "@earendil-works/pi-ai/compat";
 import type { ProviderKind, ProxyUsage } from "../proxy/types.js";
 
@@ -9,8 +12,8 @@ function piProvider(kind: ProviderKind): "anthropic" | "openai" {
 
 function inRegistry(kind: ProviderKind, id: string): boolean {
   try {
-    // getModel is generically typed on literal ids; at runtime it indexes
-    // MODELS[provider][id]. Cast the id to the index type — a genuine
+    // getModel is generically typed on literal ids; at runtime it
+    // indexes MODELS[provider][id]. Cast the id to the index type — a genuine
     // third-party-typing narrowing (CLAUDE.md rule 3), commented here.
     return !!getModel(piProvider(kind), id as never);
   } catch {

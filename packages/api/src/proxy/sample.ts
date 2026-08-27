@@ -1,6 +1,6 @@
 // packages/api/src/proxy/sample.ts
 import type { ProviderKind, ProxyUsage } from "./types.js";
-import { parseUsage } from "./usage-parser.js";
+import { parseUsage, isChatCompletionsEndpoint, dataObjects } from "./usage-parser.js";
 
 export const PARSE_VERSION = 1;
 
@@ -110,26 +110,6 @@ function normalizeContent(content: unknown): ContentBlock[] {
     // Any unrecognized type is preserved as unknown
     return { type: "unknown", raw: block };
   });
-}
-
-// ---------------------------------------------------------------------------
-// SSE parsing helpers
-// ---------------------------------------------------------------------------
-
-function parseSseEvents(text: string): Record<string, unknown>[] {
-  const out: Record<string, unknown>[] = [];
-  for (const line of text.split("\n")) {
-    const s = line.trimStart();
-    if (!s.startsWith("data:")) continue;
-    const payload = s.slice(5).trim();
-    if (!payload || payload === "[DONE]") continue;
-    try {
-      out.push(JSON.parse(payload) as Record<string, unknown>);
-    } catch {
-      // skip malformed lines
-    }
-  }
-  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -252,19 +232,93 @@ function assembleOpenAIOutput(
   return { content: [], stop_reason: null };
 }
 
+/**
+ * Assemble the assistant output for OpenAI Chat Completions and legacy
+ * Completions. Non-streaming carries the full message on `choices[0].message`
+ * (chat) or `choices[0].text` (completions); streaming accumulates
+ * `choices[0].delta` (chat) or `choices[0].text` (completions) across chunks,
+ * plus `tool_calls` deltas keyed by index. Terminal usage chunks have empty
+ * `choices` and are skipped here.
+ */
+function assembleOpenAIChatOutput(
+  events: Record<string, unknown>[],
+): { content: ContentBlock[]; stop_reason: string | null } {
+  let text = "";
+  let stop_reason: string | null = null;
+  // tool_call fragments accumulated by index (streaming) or read whole (non-streaming).
+  const toolCalls = new Map<number, { id: string; name: string; args: string }>();
+
+  for (const e of events) {
+    const choices = e.choices;
+    if (!Array.isArray(choices) || choices.length === 0) continue;
+    const choice = choices[0] as Record<string, unknown>;
+    if (typeof choice.finish_reason === "string") stop_reason = choice.finish_reason;
+    // Legacy completions put text directly on the choice.
+    if (typeof choice.text === "string") text += choice.text;
+    // Chat: `message` (non-streaming) or `delta` (streaming).
+    const msg = (choice.message ?? choice.delta) as Record<string, unknown> | undefined;
+    if (!msg) continue;
+    if (typeof msg.content === "string") text += msg.content;
+    if (Array.isArray(msg.tool_calls)) {
+      for (const call of msg.tool_calls) {
+        if (typeof call !== "object" || call === null) continue;
+        const cc = call as Record<string, unknown>;
+        const idx = typeof cc.index === "number" ? cc.index : 0;
+        const entry = toolCalls.get(idx) ?? { id: "", name: "", args: "" };
+        if (typeof cc.id === "string") entry.id = cc.id;
+        const fn = cc.function as Record<string, unknown> | undefined;
+        if (fn) {
+          // name arrives whole in the first delta; arguments stream in pieces.
+          if (typeof fn.name === "string") entry.name = fn.name;
+          if (typeof fn.arguments === "string") entry.args += fn.arguments;
+        }
+        toolCalls.set(idx, entry);
+      }
+    }
+  }
+
+  const content: ContentBlock[] = [];
+  if (text) content.push({ type: "text", text });
+  for (const idx of [...toolCalls.keys()].sort((a, b) => a - b)) {
+    const call = toolCalls.get(idx);
+    if (!call) continue;
+    let input: Record<string, unknown> = {};
+    if (call.args) {
+      try {
+        const parsed: unknown = JSON.parse(call.args);
+        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+          input = parsed as Record<string, unknown>;
+        }
+      } catch {
+        // Incomplete/invalid arguments JSON — leave input empty.
+      }
+    }
+    content.push({ type: "tool_use", id: call.id, name: call.name, input });
+  }
+  return { content, stop_reason };
+}
+
 // ---------------------------------------------------------------------------
 // Tool normalization
 // ---------------------------------------------------------------------------
 
 function normalizeTool(raw: unknown): SampleTool | null {
   if (typeof raw !== "object" || raw === null) return null;
-  const t = raw as Record<string, unknown>;
+  const outer = raw as Record<string, unknown>;
+  // OpenAI Chat Completions nests the tool under `function`; Anthropic and the
+  // Responses API put name/description/schema at the top level.
+  const t =
+    outer.type === "function" && typeof outer.function === "object" && outer.function !== null
+      ? (outer.function as Record<string, unknown>)
+      : outer;
   const name = typeof t.name === "string" ? t.name : null;
   if (!name) return null;
   const tool: SampleTool = { name };
   if (typeof t.description === "string") tool.description = t.description;
-  if (typeof t.input_schema === "object" && t.input_schema !== null) {
-    tool.input_schema = t.input_schema as Record<string, unknown>;
+  // Anthropic/Responses use `input_schema`; Chat Completions uses `parameters`.
+  const schema = t.input_schema ?? t.parameters;
+  if (typeof schema === "object" && schema !== null) {
+    tool.input_schema = schema as Record<string, unknown>;
   }
   return tool;
 }
@@ -277,7 +331,9 @@ export function parseSample(
   kind: ProviderKind,
   requestBody: string,
   responseText: string,
+  endpoint?: string,
 ): Sample | null {
+  const isChat = isChatCompletionsEndpoint(endpoint);
   let req: Record<string, unknown>;
   try {
     const parsed = JSON.parse(requestBody);
@@ -295,6 +351,8 @@ export function parseSample(
   // Params (best-effort, only present keys)
   const params: SampleParams = {};
   if (typeof req.max_tokens === "number") params.max_tokens = req.max_tokens;
+  // Chat Completions renamed max_tokens → max_completion_tokens.
+  else if (typeof req.max_completion_tokens === "number") params.max_tokens = req.max_completion_tokens;
   if (typeof req.temperature === "number") params.temperature = req.temperature;
   if (typeof req.top_p === "number") params.top_p = req.top_p;
   if (req.stop !== undefined) params.stop = req.stop;
@@ -316,40 +374,56 @@ export function parseSample(
   const previousResponseId =
     typeof req.previous_response_id === "string" ? req.previous_response_id : null;
 
-  // Input messages
-  const rawMessages =
-    kind === "anthropic"
-      ? (Array.isArray(req.messages) ? req.messages : [])
-      : (Array.isArray(req.input) ? req.input : []);
+  // Input messages. Anthropic Messages and OpenAI Chat Completions use
+  // `messages`; the Responses API uses `input`; legacy Completions carries a
+  // bare `prompt` string (or array of strings) with no roles.
+  let input: SampleMessage[];
+  if (endpoint === "/v1/completions") {
+    const prompt = req.prompt;
+    const text =
+      typeof prompt === "string"
+        ? prompt
+        : Array.isArray(prompt)
+          ? prompt.filter((p): p is string => typeof p === "string").join("")
+          : "";
+    input = text ? [{ role: "user", content: [{ type: "text", text }] }] : [];
+  } else {
+    const rawMessages =
+      kind === "anthropic" || isChat
+        ? (Array.isArray(req.messages) ? req.messages : [])
+        : (Array.isArray(req.input) ? req.input : []);
+    input = rawMessages.map((m): SampleMessage => {
+      if (typeof m !== "object" || m === null) {
+        return { role: "user", content: [] };
+      }
+      const msg = m as Record<string, unknown>;
+      return {
+        role: typeof msg.role === "string" ? msg.role : "user",
+        content: normalizeContent(msg.content),
+      };
+    });
+  }
 
-  const input: SampleMessage[] = rawMessages.map((m): SampleMessage => {
-    if (typeof m !== "object" || m === null) {
-      return { role: "user", content: [] };
-    }
-    const msg = m as Record<string, unknown>;
-    return {
-      role: typeof msg.role === "string" ? msg.role : "user",
-      content: normalizeContent(msg.content),
-    };
-  });
-
-  // Parse SSE events for response
-  const events = parseSseEvents(responseText);
+  // Parse the response into events — SSE `data:` chunks (streaming) or a single
+  // bare-JSON object (non-streaming).
+  const events = dataObjects(responseText);
 
   let content: ContentBlock[];
   let stop_reason: string | null;
 
   if (kind === "anthropic") {
     ({ content, stop_reason } = assembleAnthropicOutput(events));
+  } else if (isChat) {
+    ({ content, stop_reason } = assembleOpenAIChatOutput(events));
   } else {
     ({ content, stop_reason } = assembleOpenAIOutput(events));
   }
 
   const output: SampleMessage = { role: "assistant", content };
 
-  // Usage via Task 5's parseUsage
+  // Usage via parseUsage (endpoint picks the OpenAI wire shape).
   const zero: ProxyUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
-  const usage = parseUsage(kind, responseText)?.usage ?? zero;
+  const usage = parseUsage(kind, responseText, endpoint)?.usage ?? zero;
 
   return {
     schema: "valet.llm-sample/v1",

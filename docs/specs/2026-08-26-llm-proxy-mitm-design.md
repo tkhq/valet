@@ -64,8 +64,11 @@ A new router mounted at `/proxy`, separate from `/api`, because the path shapes 
 
 - **Claude Code:** `ANTHROPIC_BASE_URL=http://localhost:8788/proxy/anthropic`. The harness calls `POST /proxy/anthropic/v1/messages`, and auxiliary paths such as `/proxy/anthropic/v1/messages/count_tokens` and `/proxy/anthropic/v1/models`.
 - **Codex:** provider `base_url = http://localhost:8788/proxy/openai/v1`, `wire_api = "responses"`. The harness calls `POST /proxy/openai/v1/responses`, and auxiliary paths such as `/proxy/openai/v1/models`.
+- **Self-service SDK scripts:** the gateway is also a base-LLM portal, so a user does not need a provider key of their own. Any OpenAI-SDK script points `base_url` at `/proxy/openai/v1` with a `vlt_` key and calls `chat.completions`, `responses`, or legacy `completions`; any Anthropic-SDK script uses `/proxy/anthropic` and `messages`.
 
-Every path under a prefix forwards to the real provider host (`https://api.anthropic.com`, `https://api.openai.com`). Only the completion endpoints (`/v1/messages`, `/v1/responses`) are recorded; auxiliary paths forward without a row so the harness works fully, but do not clutter the spend log.
+Every path under a prefix forwards to the real provider host (`https://api.anthropic.com`, `https://api.openai.com`). The recorded completion endpoints are `/v1/messages`, `/v1/responses`, `/v1/chat/completions`, and `/v1/completions`; auxiliary paths forward without a row so the harness works fully, but do not clutter the spend log. Chat Completions and Responses use different usage shapes (`prompt_tokens`/`completion_tokens` vs `input_tokens`/`output_tokens`), so the recorder dispatches on the endpoint.
+
+**Streaming usage capture.** Streaming Chat Completions and Completions omit usage from the SSE chunks unless the request sets `stream_options.include_usage`. The gateway auto-injects it for those streaming requests so usage is always recorded; the forwarded and stored request body both carry the injection, so the recorded request matches the response it produced. As a backstop, any successful (2xx) recorded call whose captured usage is zero — or whose model is not in the pricing registry — increments the `valet.proxy.unpriced.count` metric (`reason=no_usage|unpriced_model`), so unbilled traffic is visible rather than a silent `$0`.
 
 The `/proxy` router does NOT run the `/api` auth ladder. It runs its own `resolveProxyPrincipal` first-line check.
 

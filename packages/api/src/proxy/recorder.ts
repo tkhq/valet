@@ -20,6 +20,8 @@ export interface RecorderDeps {
   now: () => number;
   id: () => string;
   metric: (costUsd: number, attrs: { model: string; userId: string; keyId: string; kind: string }) => void;
+  /** Records a successful-but-unpriced call so unbilled traffic is visible. */
+  unpriced: (attrs: { model: string | null; kind: string; endpoint: string; reason: string }) => void;
 }
 
 /**
@@ -120,7 +122,7 @@ function requestModelOf(requestBody: string): string | null {
 export async function recordProxyCall(deps: RecorderDeps, ctx: RecordContext): Promise<void> {
   try {
     const responseBody = await drain(ctx.stream);
-    const parsedUsage = parseUsage(ctx.kind, responseBody);
+    const parsedUsage = parseUsage(ctx.kind, responseBody, ctx.endpoint);
     const usage = parsedUsage?.usage ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
     const responseModel = parsedUsage?.model ?? null;
     const requestModel = requestModelOf(ctx.requestBody);
@@ -139,7 +141,7 @@ export async function recordProxyCall(deps: RecorderDeps, ctx: RecordContext): P
     let parsed: unknown = null;
     let parseError: string | null = null;
     try {
-      parsed = parseSample(ctx.kind, ctx.requestBody, responseBody);
+      parsed = parseSample(ctx.kind, ctx.requestBody, responseBody, ctx.endpoint);
     } catch (e) {
       parseError = e instanceof Error ? e.message : String(e);
     }
@@ -179,6 +181,23 @@ export async function recordProxyCall(deps: RecorderDeps, ctx: RecordContext): P
     // priced so the metric reconciles with the rate.
     if (cost !== null && pricedModel) {
       deps.metric(cost, { model: pricedModel, userId: ctx.principal.userId, keyId: ctx.principal.keyId, kind: ctx.kind });
+    }
+
+    // Alert on a SUCCESSFUL call whose spend we failed to capture — unbilled
+    // traffic that must be visible, never silently lost. Independent of the
+    // spend metric above, because the worst case (a known model with zero
+    // usage) prices to $0, not null, and would otherwise pass unnoticed:
+    //   - `no_usage`: no usage on a 2xx completion — e.g. a streaming Chat
+    //     Completions call whose `stream_options.include_usage` slipped past
+    //     the gateway's auto-inject, so real tokens went unrecorded.
+    //   - `unpriced_model`: usage captured, but the model is not in the pricing
+    //     registry, so cost is null.
+    if (ctx.statusCode < 400) {
+      if (usage.total === 0) {
+        deps.unpriced({ model, kind: ctx.kind, endpoint: ctx.endpoint, reason: "no_usage" });
+      } else if (cost === null) {
+        deps.unpriced({ model, kind: ctx.kind, endpoint: ctx.endpoint, reason: "unpriced_model" });
+      }
     }
   } catch (err) {
     console.error("recordProxyCall failed (client stream already delivered):", err);
