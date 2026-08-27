@@ -345,6 +345,47 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       expect(single?.title).toBe("x");
     });
 
+    it("gate resolution round-trips on the row (sticky-denial source of truth)", async () => {
+      await store.saveSession(newSession());
+      await store.saveThread("sess-1", newThread("sess-1"));
+      const pending: DecisionGate = {
+        id: "g-res",
+        sessionId: "sess-1",
+        threadId: "th-1",
+        queueItemId: "q-1",
+        resumeKey: "rk",
+        ordinal: 0,
+        type: "approval",
+        status: "pending",
+        title: "x",
+        actions: [],
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      await store.saveDecisionGate("sess-1", "th-1", pending);
+      expect((await store.getDecisionGate("sess-1", "g-res"))?.resolution).toBeFalsy();
+
+      const resolution = {
+        actionId: "deny",
+        resolvedBy: "u-1",
+        resolvedAt: 42,
+        gateOrdinal: 0,
+      };
+      // Same upsert path persistTerminalGate uses: the resolution must
+      // survive the ON CONFLICT update, not only the initial insert.
+      await store.saveDecisionGate("sess-1", "th-1", {
+        ...pending,
+        status: "resolved",
+        resolution,
+        updatedAt: 2,
+      });
+      const reloaded = await store.getDecisionGate("sess-1", "g-res");
+      expect(reloaded?.status).toBe("resolved");
+      expect(reloaded?.resolution).toEqual(resolution);
+      const viaResume = await store.getLatestGateForResume("sess-1", "th-1", "q-1", "rk");
+      expect(viaResume?.resolution?.actionId).toBe("deny");
+    });
+
     it("getLatestGateForResume returns the highest ordinal for a (queueItem, resumeKey)", async () => {
       await store.saveSession(newSession());
       await store.saveThread("sess-1", newThread("sess-1"));

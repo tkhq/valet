@@ -655,6 +655,14 @@ export interface DecisionGate {
   actions: DecisionAction[];
   expiresAt?: number;
   status: DecisionGateStatus;
+  /**
+   * The human decision, stamped when `status` becomes `resolved`. The sticky
+   * terminal check (`findStickyTerminalGate`) reads `resolution.actionId` to
+   * tell a denial (final for the rest of the turn) from an approval (a
+   * retried call mints a fresh ordinal). Absent on pending/withdrawn/expired
+   * gates and on rows resolved before this field existed.
+   */
+  resolution?: DecisionResolution;
   context?: Record<string, unknown>;
   origin?: { channelType?: string; channelId?: string; messageId?: string };
   refs?: Array<{ channelType: string; ref: DecisionGateRef }>;
@@ -673,6 +681,16 @@ export interface DecisionGateRequest {
   origin?: DecisionGate["origin"];
   // stable ID for re-entrancy: tools must supply the same id when re-run with suspendedDecision
   resumeKey?: string;
+  /**
+   * Terminal-outcome scope for this suspension point, wider than `resumeKey`.
+   * Within one queue item, a denial or expiry on ANY gate whose resumeKey
+   * equals this key — or starts with `${dedupeKey}:` — answers later requests
+   * in the same scope without opening a new gate. This stops an agent from
+   * dodging a human decision by re-issuing the call with tweaked args (each
+   * args variant hashes to a different resumeKey). Defaults to `resumeKey`
+   * (exact-match stickiness only).
+   */
+  dedupeKey?: string;
 }
 
 export interface DecisionResolution {

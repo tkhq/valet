@@ -5,6 +5,7 @@ import { builtinTools } from "./builtin-tools/index.js";
 import type {
   CredentialProvider,
   DecisionAction,
+  DecisionGateRequest,
   DecisionResolution,
   PolicyDecision,
   PolicyInvocationRecord,
@@ -16,6 +17,7 @@ import type {
   ToolDef,
   ToolResult,
 } from "./types.js";
+import { isDecisionGateExpired } from "./decision-gate.js";
 
 /**
  * Plugin catalog: indirection layer that exposes plugin actions to the LLM
@@ -310,6 +312,7 @@ export type InvokeActionResult =
   | { kind: "invalid-args"; error: string }
   | { kind: "denied-policy" }
   | { kind: "denied-approval"; reason?: "approval-processing-failed" }
+  | { kind: "expired-approval" }
   | { kind: "pending-approval" }
   | { kind: "missing-credential"; service: string }
   | { kind: "error"; message: string }
@@ -327,6 +330,25 @@ export type InvokeActionResult =
  * the command path, or the LLM-supplied `params` on the tool path).
  * `summary` is the approval-gate body line.
  */
+/**
+ * Request an approval decision, treating gate expiry as a terminal outcome.
+ * A propagated expiry throw surfaces to the model as a retryable tool error;
+ * the model then re-issues the call, which used to mint a fresh 72h gate on
+ * every retry. Withdrawal still propagates — it unwinds an aborted or
+ * steered turn and must not reach the model as a result.
+ */
+async function requestApprovalDecision(
+  ctx: ToolContext,
+  req: DecisionGateRequest,
+): Promise<{ kind: "resolved"; resolution: DecisionResolution } | { kind: "expired" }> {
+  try {
+    return { kind: "resolved", resolution: await ctx.requestDecision(req) };
+  } catch (err) {
+    if (isDecisionGateExpired(err)) return { kind: "expired" };
+    throw err;
+  }
+}
+
 export async function invokeAction(
   catalog: PluginCatalog,
   actionId: string,
@@ -374,11 +396,14 @@ export async function invokeAction(
     const approvalMode = approvalModeFor(entry);
     if (approvalMode === "deny") return { kind: "denied-policy" };
     if (approvalMode === "require_approval") {
-      const resolution = await ctx.requestDecision({
+      const gateOutcome = await requestApprovalDecision(ctx, {
         type: "approval",
         title: `Approve ${entry.action.name}?`,
         body: `${summary}\n\ntool_id=${actionId}\nargs=${stableJson(args ?? {})}`,
         resumeKey,
+        // Terminal outcomes stick per tool id, not per (tool id, args) — a
+        // re-issued call with tweaked args must not dodge a deny/expiry.
+        dedupeKey: qualifiedId(entry),
         context: {
           riskLevel: entry.action.riskLevel,
           service: entry.service,
@@ -386,6 +411,8 @@ export async function invokeAction(
           args,
         },
       });
+      if (gateOutcome.kind === "expired") return { kind: "expired-approval" };
+      const resolution = gateOutcome.resolution;
       // No resolution / an explicit "pending" action means the gate has not
       // yet been decided — distinct from an outright deny.
       if (resolution.actionId === "pending") return { kind: "pending-approval" };
@@ -476,11 +503,14 @@ export async function invokeAction(
     const extras: DecisionAction[] = (decision.extraGateActions ?? []).map(
       ({ approves: _approves, ...rest }) => rest,
     );
-    const resolution = await ctx.requestDecision({
+    const gateOutcome = await requestApprovalDecision(ctx, {
       type: "approval",
       title: `Approve ${entry.action.name}?`,
       body: `${summary}\n\ntool_id=${actionId}\nargs=${stableJson(args ?? {})}`,
       resumeKey,
+      // Terminal outcomes stick per tool id, not per (tool id, args) — a
+      // re-issued call with tweaked args must not dodge a deny/expiry.
+      dedupeKey: qualifiedId(entry),
       actions: [
         { id: "approve", label: "Approve", style: "primary" },
         { id: "deny", label: "Deny", style: "danger" },
@@ -494,6 +524,19 @@ export async function invokeAction(
         provenance: decision.provenance,
       },
     });
+    if (gateOutcome.kind === "expired") {
+      // The gate opened and nobody answered before the deadline — a terminal
+      // non-approval. Audit it like a rejection so the invocation trail shows
+      // the action never ran.
+      emitInvocation(resolver, {
+        ...baseRecord,
+        status: "rejected",
+        resolvedMode: "require_approval",
+        provenance: decision.provenance,
+      });
+      return { kind: "expired-approval" };
+    }
+    const resolution = gateOutcome.resolution;
     // An undecided gate (command path): no resolution happened, so no
     // onResolution side effects run and no audit record is emitted here —
     // the re-driven invocation after the gate resolves emits the terminal
@@ -852,7 +895,11 @@ function renderInvokeOutcome(outcome: InvokeActionResult, toolId: string): ToolR
         text:
           outcome.reason === "approval-processing-failed"
             ? `denied: approval processing failed, so ${toolId} did not approve`
-            : `denied: user did not approve ${toolId}`,
+            : `denied: user did not approve ${toolId}. This denial is final for the current turn — do not call ${toolId} again, with these or modified arguments. Tell the user what was denied; they can ask again in a new message.`,
+      };
+    case "expired-approval":
+      return {
+        text: `denied: the approval request for ${toolId} expired before anyone answered. This outcome is final for the current turn — do not call ${toolId} again. Tell the user the action did not run; they can ask again in a new message.`,
       };
     case "pending-approval":
       return { text: `denied: user did not approve ${toolId}` };

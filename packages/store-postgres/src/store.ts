@@ -489,6 +489,7 @@ export class PgSessionStore implements SessionStore {
          body = EXCLUDED.body,
          actions = EXCLUDED.actions,
          context = EXCLUDED.context,
+         resolution = EXCLUDED.resolution,
          updated_at = EXCLUDED.updated_at`,
       [
         gate.id,
@@ -504,7 +505,7 @@ export class PgSessionStore implements SessionStore {
         JSON.stringify(gate.actions),
         jsonOrNull(gate.origin),
         jsonOrNull(gate.context),
-        null,
+        jsonOrNull(gate.resolution),
         gate.expiresAt ?? null,
         gate.createdAt,
         gate.updatedAt,

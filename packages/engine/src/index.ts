@@ -187,6 +187,7 @@ export {
   isDecisionGateExpired,
   GATE_EXPIRY_DEFAULT_MS,
   deterministicGateId,
+  findStickyTerminalGate,
 } from "./decision-gate.js";
 export {
   BUILTIN_COMMAND_NAMES,

@@ -7,7 +7,9 @@ type PiModel = Model<Api>;
 import type { Session, EmitOptions } from "./session.js";
 import { toAgentTool } from "./tool-bridge.js";
 import {
+  DecisionGateExpiredError,
   DecisionGateWithdrawnError,
+  findStickyTerminalGate,
   fromRequest,
   GateManager,
   isDecisionGateExpired,
@@ -967,13 +969,49 @@ export class Thread {
         this.gates.expire(gate.id);
         continue;
       }
-      // Not armed: a live turn (if any) owns the thread — leave it be.
-      if (this.runningItem) continue;
       const suspended = await store.getSuspendedTurn(this.session.id, this.id);
-      if (!suspended || suspended.gateId !== gate.id) continue;
+      if (!suspended || suspended.gateId !== gate.id) {
+        // No armed waiter and no checkpoint reference this row: it is a
+        // superseded pending gate (its turn moved on to a later gate, or a
+        // pre-stickiness build left it behind). No turn state to repair —
+        // expire the row in place so it stops rendering as an actionable
+        // approval, and skip a row whose queue item is the live turn (that
+        // turn's own gate cycle owns it).
+        if (gate.queueItemId !== this.runningItem?.id) {
+          await this.expireUnownedGateRow(gate);
+        }
+        continue;
+      }
+      // Checkpointed but not armed: a live turn (if any) owns the thread —
+      // leave it be.
+      if (this.runningItem) continue;
       const item = await store.getQueueItem(this.session.id, suspended.queueItemId);
       if (!item) continue;
       await this.reconcileGate(item, suspended, "rearm");
+    }
+  }
+
+  /**
+   * Expire a lapsed pending gate row that no waiter or checkpoint owns.
+   * Row + DAG entry flip to `expired` and the expiry event reaches live
+   * clients, so the approval card clears everywhere. Deliberately does NOT
+   * touch queue items or the transcript — there is no suspended turn to
+   * resume for these rows.
+   */
+  private async expireUnownedGateRow(gate: DecisionGate): Promise<void> {
+    try {
+      await persistTerminalGate(this.session.providers.store, this.session.id, this.id, gate, {
+        status: "expired",
+      });
+      await this.session.emit(
+        { type: "decision_gate_expired", threadId: this.id, gateId: gate.id },
+        { eventKey: `gate:${gate.id}:expired` },
+      );
+    } catch (err) {
+      this.emitError(
+        "expire_unowned_gate_failed",
+        err instanceof Error ? err.message : String(err),
+      );
     }
   }
 
@@ -1044,6 +1082,26 @@ export class Thread {
       gateCtx.resumeKey,
     );
     const joiningPending = latestGate?.status === "pending";
+    // Sticky terminal outcomes: within this queue item, a human denial or an
+    // unanswered expiry in the request's dedupe scope is final. Return the
+    // stored denial (or re-throw expiry) instead of opening a fresh gate —
+    // otherwise an agent that retries after deny/expiry mints new gates
+    // forever (tweaked args hash to a new resumeKey; a lapsed 72h gate
+    // resurrects itself every 72h). A still-pending gate for this exact
+    // resumeKey takes precedence: join it below and let the human answer.
+    if (!joiningPending) {
+      const threadGates = await session.providers.store.listDecisionGates(session.id, this.id);
+      const sticky = findStickyTerminalGate(threadGates, {
+        queueItemId: gateCtx.queueItemId,
+        dedupeKey: req.dedupeKey ?? gateCtx.resumeKey,
+      });
+      if (sticky?.kind === "denied") {
+        return { ...sticky.resolution, gateOrdinal: sticky.gate.ordinal };
+      }
+      if (sticky?.kind === "expired") {
+        throw new DecisionGateExpiredError(sticky.gate.id);
+      }
+    }
     const ordinal = latestGate
       ? joiningPending
         ? latestGate.ordinal

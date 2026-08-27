@@ -14,8 +14,18 @@ import type {
  * V1 contract: a tool that calls ctx.requestDecision(...) blocks until the
  * gate transitions out of `pending`. Resolution returns the `DecisionResolution`.
  * Withdrawal throws `DecisionGateWithdrawnError`. Expiry throws
- * `DecisionGateExpiredError`. Tools should let these errors propagate so the
- * agent loop ends the turn cleanly.
+ * `DecisionGateExpiredError`. A propagated throw becomes an error tool result
+ * that the model reads — pi-agent-core continues the loop, it does not end
+ * the turn. Tools that must NOT let the model retry (the approval path in
+ * plugin-catalog) catch expiry and return a terminal "do not retry" result
+ * instead.
+ *
+ * Terminal stickiness: within one queue item, a denial or an expiry is final
+ * for its dedupe scope. A later requestDecision in the same scope returns the
+ * stored denial (or re-throws expiry) instead of opening a fresh gate — see
+ * `findStickyTerminalGate`. Without this, an agent that retries after a deny
+ * or an unanswered gate mints ordinal+1 (or a new args-hash identity) forever:
+ * a 72h-expiry gate resurrects itself every 72h.
  *
  * Restart-safe re-entrancy: when SuspendedTurnState is reloaded from a
  * persistent store (reconcileGate/armPendingGateForRestart/replayBlocked in
@@ -176,6 +186,53 @@ export function shouldShortCircuit(args: {
   return { match: true, resolution: suspendedDecision.resolution };
 }
 
+/**
+ * Sticky terminal outcome for a new gate request, computed over the thread's
+ * persisted gates. Within one queue item (one turn), a human denial or an
+ * unanswered expiry is FINAL for its dedupe scope:
+ *
+ * - `denied` — a resolved gate in scope carries a "deny" resolution. The
+ *   caller returns that stored resolution instead of opening a new gate.
+ * - `expired` — a gate in scope expired unanswered. The caller throws
+ *   `DecisionGateExpiredError` for that gate instead of opening a new one.
+ *
+ * A gate is in scope when it belongs to the same queue item and its resumeKey
+ * equals `dedupeKey` or starts with `${dedupeKey}:`. The colon-prefix form
+ * collapses args-hashed resumeKeys (`service.action:<argsHash>`) onto their
+ * tool id, so a re-issued call with tweaked args cannot dodge the decision.
+ * A denial wins over an expiry when both exist; among several of the same
+ * kind the newest (highest updatedAt) wins.
+ *
+ * Approvals and withdrawals are NOT sticky: a retried call after an approval
+ * legitimately mints a fresh ordinal (a new human decision), and withdrawal
+ * is engine-initiated (steer/abort), not a human verdict on the action.
+ *
+ * Pure function — kept testable in isolation from Thread/Agent timing.
+ */
+export function findStickyTerminalGate(
+  gates: DecisionGate[],
+  args: { queueItemId: string; dedupeKey: string },
+):
+  | { kind: "denied"; gate: DecisionGate; resolution: DecisionResolution }
+  | { kind: "expired"; gate: DecisionGate }
+  | undefined {
+  const { queueItemId, dedupeKey } = args;
+  const inScope = gates.filter(
+    (g) =>
+      g.queueItemId === queueItemId &&
+      (g.resumeKey === dedupeKey || g.resumeKey.startsWith(`${dedupeKey}:`)),
+  );
+  const newestFirst = [...inScope].sort((a, b) => b.updatedAt - a.updatedAt);
+  for (const g of newestFirst) {
+    if (g.status === "resolved" && g.resolution && g.resolution.actionId === "deny") {
+      return { kind: "denied", gate: g, resolution: g.resolution };
+    }
+  }
+  const expired = newestFirst.find((g) => g.status === "expired");
+  if (expired) return { kind: "expired", gate: expired };
+  return undefined;
+}
+
 /** Terminal outcome for a gate row + its DAG entry. */
 export type GateTerminalOutcome =
   | { status: "resolved"; resolution: DecisionResolution }
@@ -196,7 +253,14 @@ export async function persistTerminalGate(
   gate: DecisionGate,
   outcome: GateTerminalOutcome,
 ): Promise<DecisionGate> {
-  const terminal: DecisionGate = { ...gate, status: outcome.status, updatedAt: Date.now() };
+  const terminal: DecisionGate = {
+    ...gate,
+    status: outcome.status,
+    // The resolution lands on the ROW (not only the DAG entry) so the sticky
+    // terminal check can read the outcome without a DAG scan.
+    ...(outcome.status === "resolved" ? { resolution: outcome.resolution } : {}),
+    updatedAt: Date.now(),
+  };
   await store.saveDecisionGate(sessionId, threadId, terminal);
   await store.updateDecisionGateEntry(sessionId, threadId, gate.id, {
     gate: terminal,

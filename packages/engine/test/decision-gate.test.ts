@@ -12,7 +12,7 @@ import {
   type ToolDef,
   type WriteFence,
 } from "../src/index.js";
-import { fromRequest } from "../src/decision-gate.js";
+import { findStickyTerminalGate, fromRequest } from "../src/decision-gate.js";
 
 function makeEngine() {
   const store = new InMemorySessionStore();
@@ -313,7 +313,7 @@ describe("decision gates: ordinal defaults (fromRequest)", () => {
   });
 });
 
-describe("decision gates: retry after denial mints a fresh ordinal", () => {
+describe("decision gates: retry after approval mints a fresh ordinal", () => {
   it("a second requestDecision with the same resumeKey opens gate :1 while :0 stays resolved", async () => {
     const faux = registerFauxProvider({ provider: "gate-retry" });
     faux.setResponses([
@@ -323,7 +323,8 @@ describe("decision gates: retry after denial mints a fresh ordinal", () => {
       fauxAssistantMessage("all settled"),
     ]);
 
-    // Tool asks twice under the SAME resumeKey: a denial triggers a retry.
+    // Tool asks twice under the SAME resumeKey: an approval leads to a
+    // second, separately-gated ask (e.g. a two-step confirmation).
     const retryTool: ToolDef = {
       name: "retry_thing",
       description: "asks twice under one resumeKey",
@@ -334,15 +335,15 @@ describe("decision gates: retry after denial mints a fresh ordinal", () => {
           title: "first",
           resumeKey: "rk",
         });
-        if (r1.actionId === "deny") {
+        if (r1.actionId === "approve") {
           const r2 = await ctx.requestDecision({
             type: "approval",
-            title: "retry",
+            title: "again",
             resumeKey: "rk",
           });
           return { text: `second=${r2.actionId}` };
         }
-        return { text: "approved first" };
+        return { text: "denied first" };
       },
     };
 
@@ -365,9 +366,9 @@ describe("decision gates: retry after denial mints a fresh ordinal", () => {
     expect(gate0.id.endsWith(":0")).toBe(true);
     expect(gate0.ordinal).toBe(0);
 
-    // Deny gate 0 → the tool retries and opens a fresh gate.
+    // Approve gate 0 → the tool asks again and opens a fresh gate.
     await session.resolveDecision(gate0.id, {
-      actionId: "deny",
+      actionId: "approve",
       resolvedBy: "u1",
       resolvedAt: Date.now(),
     });
@@ -383,7 +384,7 @@ describe("decision gates: retry after denial mints a fresh ordinal", () => {
     expect(gate1.id.endsWith(":1")).toBe(true);
     expect(gate1.ordinal).toBe(1);
 
-    // Gate 0 stays terminal (resolved) — the retry did not mutate it.
+    // Gate 0 stays terminal (resolved) — the second ask did not mutate it.
     expect((await store.getDecisionGate(session.id, gate0.id))?.status).toBe("resolved");
 
     // Approve gate 1 → the turn completes.
@@ -395,6 +396,216 @@ describe("decision gates: retry after denial mints a fresh ordinal", () => {
     await waitFor(() =>
       events.some((e) => e.event.type === "status" && e.event.status === "idle"),
     );
+
+    faux.unregister();
+  });
+});
+
+describe("decision gates: denial is sticky for the rest of the turn", () => {
+  it("a retry under the same resumeKey returns the stored denial without a new gate", async () => {
+    const faux = registerFauxProvider({ provider: "gate-deny-sticky" });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("retry_thing", {}, { id: "tcD" })], {
+        stopReason: "toolUse",
+      }),
+      fauxAssistantMessage("acknowledged the denial"),
+    ]);
+
+    const retryTool: ToolDef = {
+      name: "retry_thing",
+      description: "retries after a denial under one resumeKey",
+      parameters: Type.Object({}),
+      execute: async (_args, ctx) => {
+        const r1 = await ctx.requestDecision({
+          type: "approval",
+          title: "first",
+          resumeKey: "rk",
+        });
+        if (r1.actionId === "deny") {
+          const r2 = await ctx.requestDecision({
+            type: "approval",
+            title: "retry",
+            resumeKey: "rk",
+          });
+          return { text: `second=${r2.actionId} ordinal=${r2.gateOrdinal}` };
+        }
+        return { text: "approved first" };
+      },
+    };
+
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+      tools: [retryTool],
+    });
+
+    void session.prompt("go");
+
+    await waitFor(() => gatesFrom(events).length >= 1);
+    const gate0 = gatesFrom(events)[0]!;
+
+    await session.resolveDecision(gate0.id, {
+      actionId: "deny",
+      resolvedBy: "u1",
+      resolvedAt: Date.now(),
+    });
+
+    await waitFor(() =>
+      events.some((e) => e.event.type === "status" && e.event.status === "idle"),
+    );
+
+    // The retry got the STORED denial: same ordinal, no second gate event,
+    // one persisted gate.
+    const toolEnd = events.find((e) => e.event.type === "tool_end");
+    if (!toolEnd || toolEnd.event.type !== "tool_end") throw new Error("no tool_end");
+    expect(toolEnd.event.result).toContain("second=deny");
+    expect(toolEnd.event.result).toContain("ordinal=0");
+    expect(gatesFrom(events)).toHaveLength(1);
+    const gates = await store.listDecisionGates(session.id);
+    expect(gates).toHaveLength(1);
+    expect(gates[0]!.status).toBe("resolved");
+    expect(gates[0]!.resolution?.actionId).toBe("deny");
+
+    faux.unregister();
+  });
+
+  it("a retry with different args collapses onto the denial via dedupeKey", async () => {
+    const faux = registerFauxProvider({ provider: "gate-dedupe" });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("hashed_thing", {}, { id: "tcH" })], {
+        stopReason: "toolUse",
+      }),
+      fauxAssistantMessage("acknowledged"),
+    ]);
+
+    // Mirrors the plugin-catalog approval path: resumeKey embeds an args
+    // hash, dedupeKey is the bare tool id. A denial on args-variant A must
+    // answer the retry with args-variant B.
+    const hashedTool: ToolDef = {
+      name: "hashed_thing",
+      description: "retries a denial under a different args hash",
+      parameters: Type.Object({}),
+      execute: async (_args, ctx) => {
+        const r1 = await ctx.requestDecision({
+          type: "approval",
+          title: "variant A",
+          resumeKey: "svc.action:hash-a",
+          dedupeKey: "svc.action",
+        });
+        if (r1.actionId === "deny") {
+          const r2 = await ctx.requestDecision({
+            type: "approval",
+            title: "variant B",
+            resumeKey: "svc.action:hash-b",
+            dedupeKey: "svc.action",
+          });
+          return { text: `second=${r2.actionId}` };
+        }
+        return { text: "approved first" };
+      },
+    };
+
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+      tools: [hashedTool],
+    });
+
+    void session.prompt("go");
+    await waitFor(() => gatesFrom(events).length >= 1);
+    const gate0 = gatesFrom(events)[0]!;
+
+    await session.resolveDecision(gate0.id, {
+      actionId: "deny",
+      resolvedBy: "u1",
+      resolvedAt: Date.now(),
+    });
+
+    await waitFor(() =>
+      events.some((e) => e.event.type === "status" && e.event.status === "idle"),
+    );
+
+    const toolEnd = events.find((e) => e.event.type === "tool_end");
+    if (!toolEnd || toolEnd.event.type !== "tool_end") throw new Error("no tool_end");
+    expect(toolEnd.event.result).toContain("second=deny");
+    expect(gatesFrom(events)).toHaveLength(1);
+    expect(await store.listDecisionGates(session.id)).toHaveLength(1);
+
+    faux.unregister();
+  });
+});
+
+describe("decision gates: expiry is sticky for the rest of the turn", () => {
+  it("a retry after expiry rejects immediately without a new gate", async () => {
+    const faux = registerFauxProvider({ provider: "gate-expiry-sticky" });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("expiring", {}, { id: "tcE" })], {
+        stopReason: "toolUse",
+      }),
+      fauxAssistantMessage("gave up"),
+    ]);
+
+    const expiringTool: ToolDef = {
+      name: "expiring",
+      description: "retries after expiry under one resumeKey",
+      parameters: Type.Object({}),
+      execute: async (_args, ctx) => {
+        try {
+          await ctx.requestDecision({
+            type: "approval",
+            title: "expire me",
+            expiresAt: Date.now() + 30,
+            resumeKey: "rk",
+          });
+          return { text: "first=resolved" };
+        } catch {
+          // Retry under the same key — must reject immediately from the
+          // sticky expired outcome, not open a fresh 72h gate.
+          try {
+            await ctx.requestDecision({
+              type: "approval",
+              title: "retry",
+              resumeKey: "rk",
+            });
+            return { text: "second=resolved" };
+          } catch {
+            return { text: "second=expired-immediately" };
+          }
+        }
+      },
+    };
+
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+      tools: [expiringTool],
+    });
+
+    void session.prompt("go");
+    await waitFor(() =>
+      events.some((e) => e.event.type === "status" && e.event.status === "idle"),
+      5000,
+    );
+
+    const toolEnd = events.find((e) => e.event.type === "tool_end");
+    if (!toolEnd || toolEnd.event.type !== "tool_end") throw new Error("no tool_end");
+    expect(toolEnd.event.result).toContain("second=expired-immediately");
+    expect(gatesFrom(events)).toHaveLength(1);
+    const gates = await store.listDecisionGates(session.id);
+    expect(gates).toHaveLength(1);
+    expect(gates[0]!.status).toBe("expired");
 
     faux.unregister();
   });
@@ -697,6 +908,175 @@ describe("decision gates: gate open fails partway (TKAI-238)", () => {
     // The checkpoint did not leak either.
     const threadId = gates[0]!.threadId;
     expect(await store.getSuspendedTurn(session.id, threadId)).toBeFalsy();
+
+    faux.unregister();
+  });
+});
+
+describe("decision gates: findStickyTerminalGate (pure)", () => {
+  const base = {
+    sessionId: "s",
+    threadId: "t",
+    type: "approval" as const,
+    title: "x",
+    actions: [],
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const deny = { actionId: "deny", resolvedBy: "u", resolvedAt: 5 };
+  const approve = { actionId: "approve", resolvedBy: "u", resolvedAt: 5 };
+
+  it("matches exact resumeKey and colon-prefixed (args-hashed) variants", () => {
+    const denied: DecisionGate = {
+      ...base,
+      id: "g0",
+      queueItemId: "q1",
+      resumeKey: "svc.act:hash-a",
+      ordinal: 0,
+      status: "resolved",
+      resolution: deny,
+    };
+    expect(
+      findStickyTerminalGate([denied], { queueItemId: "q1", dedupeKey: "svc.act" })?.kind,
+    ).toBe("denied");
+    expect(
+      findStickyTerminalGate([denied], { queueItemId: "q1", dedupeKey: "svc.act:hash-a" })?.kind,
+    ).toBe("denied");
+    // A different tool with a shared name prefix must NOT match.
+    expect(
+      findStickyTerminalGate([denied], { queueItemId: "q1", dedupeKey: "svc.ac" }),
+    ).toBeUndefined();
+    // Another queue item is a fresh consent scope.
+    expect(
+      findStickyTerminalGate([denied], { queueItemId: "q2", dedupeKey: "svc.act" }),
+    ).toBeUndefined();
+  });
+
+  it("denial wins over expiry; approvals and withdrawals are not sticky", () => {
+    const expired: DecisionGate = {
+      ...base,
+      id: "g1",
+      queueItemId: "q1",
+      resumeKey: "k",
+      ordinal: 0,
+      status: "expired",
+      updatedAt: 10,
+    };
+    const denied: DecisionGate = {
+      ...base,
+      id: "g2",
+      queueItemId: "q1",
+      resumeKey: "k",
+      ordinal: 1,
+      status: "resolved",
+      resolution: deny,
+      updatedAt: 5,
+    };
+    const sticky = findStickyTerminalGate([expired, denied], {
+      queueItemId: "q1",
+      dedupeKey: "k",
+    });
+    expect(sticky?.kind).toBe("denied");
+    expect(sticky?.gate.id).toBe("g2");
+
+    const approved: DecisionGate = {
+      ...base,
+      id: "g3",
+      queueItemId: "q1",
+      resumeKey: "k",
+      ordinal: 0,
+      status: "resolved",
+      resolution: approve,
+    };
+    const withdrawn: DecisionGate = {
+      ...base,
+      id: "g4",
+      queueItemId: "q1",
+      resumeKey: "k",
+      ordinal: 1,
+      status: "withdrawn",
+    };
+    expect(
+      findStickyTerminalGate([approved, withdrawn], { queueItemId: "q1", dedupeKey: "k" }),
+    ).toBeUndefined();
+  });
+
+  it("a resolved gate without a stored resolution is not treated as denied", () => {
+    // Rows resolved before DecisionGate.resolution existed have no verdict
+    // on the row; the check must not guess.
+    const legacyResolved: DecisionGate = {
+      ...base,
+      id: "g5",
+      queueItemId: "q1",
+      resumeKey: "k",
+      ordinal: 0,
+      status: "resolved",
+    };
+    expect(
+      findStickyTerminalGate([legacyResolved], { queueItemId: "q1", dedupeKey: "k" }),
+    ).toBeUndefined();
+  });
+});
+
+describe("decision gates: sweep expires unowned lapsed pending rows", () => {
+  it("a due pending row with no waiter and no checkpoint terminalizes without a resume", async () => {
+    const faux = registerFauxProvider({ provider: "gate-sweep-unowned" });
+    faux.setResponses([fauxAssistantMessage("hi")]);
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+      tools: [],
+    });
+    await session.prompt("hello");
+    await waitFor(() =>
+      events.some((e) => e.event.type === "status" && e.event.status === "idle"),
+    );
+    const threadId = (await session.readEntries("web:default"))[0]!.threadId;
+
+    // A lapsed pending gate whose turn moved on: no armed waiter, no
+    // suspended checkpoint (the exact shape of the Aug-2026 zombie backlog).
+    const gate = fromRequest(
+      { type: "approval", title: "stale?", resumeKey: "stale-key", expiresAt: Date.now() - 1 },
+      {
+        sessionId: session.id,
+        threadId,
+        queueItemId: "q-old",
+        resumeKey: "stale-key",
+        ordinal: 0,
+      },
+    );
+    await store.saveDecisionGate(session.id, threadId, gate);
+    const entry: SessionEntry = {
+      id: "e-stale",
+      sessionId: session.id,
+      threadId,
+      parentId: null,
+      type: "decision_gate",
+      gate,
+      createdAt: Date.now(),
+    };
+    await store.appendEntries(session.id, threadId, [entry]);
+
+    await session.sweepOnce();
+
+    await waitForAsync(
+      async () => (await store.getDecisionGate(session.id, gate.id))?.status === "expired",
+      3000,
+    );
+    // Live clients heard about it, and the DAG entry is terminal too, so
+    // neither the web card nor a Slack surface renders it as actionable.
+    expect(
+      events.some(
+        (e) => e.event.type === "decision_gate_expired" && e.event.gateId === gate.id,
+      ),
+    ).toBe(true);
+    const entries = await session.readEntries("web:default");
+    const ge = entries.find((e) => e.type === "decision_gate" && e.gate.id === gate.id);
+    expect(ge && ge.type === "decision_gate" ? ge.gate.status : undefined).toBe("expired");
 
     faux.unregister();
   });

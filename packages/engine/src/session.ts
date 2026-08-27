@@ -123,6 +123,11 @@ function formatPluginOutcome(
         ok: false,
         output: "Approval was denied. Adjust action policies in Settings to allow this action.",
       };
+    case "expired-approval":
+      return {
+        ok: false,
+        output: "Approval expired before anyone resolved it. Send the command again to retry.",
+      };
     case "pending-approval":
       return {
         ok: false,

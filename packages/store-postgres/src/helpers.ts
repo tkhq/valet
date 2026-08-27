@@ -646,6 +646,7 @@ export function rowToGate(row: GateRow): DecisionGate {
     actions: parseJson(row.actions) ?? [],
     origin: parseJson(row.origin),
     context: parseJson(row.context),
+    resolution: parseJson(row.resolution),
     expiresAt: row.expiresAt ?? undefined,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
