@@ -788,6 +788,17 @@ export const useStreamStore = create<StreamStore>((set) => ({
   setPendingGates: (sessionId, gates) =>
     set((state) => {
       const slice = ensure(state, sessionId);
+      // Identity guard: seeding is idempotent, and more than one surface
+      // seeds (SessionView and ThreadTree both call usePendingGatesSeed).
+      // Rebuilding the record for equal content would re-render every
+      // pendingGates subscriber once per seeding mount.
+      const prev = slice.pendingGates;
+      if (
+        gates.length === Object.keys(prev).length &&
+        gates.every((g) => prev[g.id]?.updatedAt === g.updatedAt)
+      ) {
+        return state;
+      }
       const next: Record<string, DecisionGate> = {};
       for (const g of gates) next[g.id] = g;
       return {

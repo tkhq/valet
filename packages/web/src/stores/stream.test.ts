@@ -325,6 +325,33 @@ describe("stream store reducer", () => {
     expect(slice.lastOffset).toBe(offset(6));
   });
 
+  it("setPendingGates keeps the record identity for equal content (idempotent seeding)", () => {
+    // More than one surface seeds (SessionView and ThreadTree via
+    // usePendingGatesSeed); an equal-content re-seed must not rebuild the
+    // record, or every subscriber re-renders once per seeding mount.
+    const { setPendingGates } = useStreamStore.getState();
+    const gate = {
+      id: "gate-1",
+      sessionId: SESSION,
+      threadId: THREAD,
+      type: "approval" as const,
+      title: "Approve?",
+      actions: [],
+      status: "pending" as const,
+      createdAt: 1_700_000_000_000,
+      updatedAt: 1_700_000_000_000,
+    };
+
+    setPendingGates(SESSION, [gate]);
+    const first = useStreamStore.getState().bySession[SESSION].pendingGates;
+    setPendingGates(SESSION, [gate]);
+    expect(useStreamStore.getState().bySession[SESSION].pendingGates).toBe(first);
+
+    // A content change (here: the gate resolved away) still lands.
+    setPendingGates(SESSION, []);
+    expect(useStreamStore.getState().bySession[SESSION].pendingGates).toEqual({});
+  });
+
   it("applies sandbox.status updates", () => {
     const { ingest } = useStreamStore.getState();
     ingest(SESSION, {

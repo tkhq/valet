@@ -4,7 +4,6 @@ import { X, ExternalLink } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   qk,
-  useDecisions,
   useMessages,
   useSession,
   useThreads,
@@ -32,6 +31,7 @@ import { PageDropTarget } from "~/components/session/page-drop-target";
 import { SandboxTabs, type SandboxTabId } from "~/components/session/sandbox-tabs";
 import { SessionHeader } from "~/components/session/session-header";
 import { useInvalidateSessionOnModelSwitch } from "~/hooks/use-invalidate-session-on-model-switch";
+import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
 import { Button, Spinner } from "~/components/primitives";
 
 /**
@@ -122,17 +122,7 @@ export function SessionView({
     setThreadMessages(sessionId, effectiveThreadId, messagesQ.data.messages);
   }, [sessionId, effectiveThreadId, messagesQ.data, setThreadMessages]);
 
-  // Bootstrap pending decision gates from REST so the card shows
-  // immediately on load; subsequent gates arrive via the wire.
-  const decisionsQ = useDecisions(sessionId);
-  const setPendingGates = useStreamStore((s) => s.setPendingGates);
-  useEffect(() => {
-    if (!decisionsQ.data) return;
-    setPendingGates(
-      sessionId,
-      decisionsQ.data.gates.filter((g) => g.status === "pending"),
-    );
-  }, [sessionId, decisionsQ.data, setPendingGates]);
+  usePendingGatesSeed(sessionId);
 
   const pendingGate = usePendingGateForThread(sessionId, effectiveThreadId);
   const threadError = useErrorForThread(sessionId, effectiveThreadId);
