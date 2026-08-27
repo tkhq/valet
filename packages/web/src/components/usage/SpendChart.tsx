@@ -2,10 +2,15 @@
  * Inline-SVG bar chart of cost per day bucket. No chart library dependency.
  * Heights scale to the max bucket; empty data shows a flat baseline.
  */
-import type { ProxyDayBucket } from "@valet/api/wire";
+/** Minimal bucket shape — both `ProxyDayBucket` and `UsageBreakdownResponse.byDay`
+ * items satisfy this interface because both carry `dayMs` and `costUsd`. */
+interface DayBucket {
+  dayMs: number;
+  costUsd: number;
+}
 
 interface SpendChartProps {
-  buckets: ProxyDayBucket[];
+  buckets: DayBucket[];
 }
 
 const CHART_H = 80;
