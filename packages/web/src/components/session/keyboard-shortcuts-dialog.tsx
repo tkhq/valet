@@ -1,5 +1,6 @@
 import { Dialog, DialogContent } from "~/components/primitives";
-import { CHAT_KEYBINDINGS, formatChord } from "~/lib/chat-keybindings";
+import { cn } from "~/lib/cn";
+import { CHAT_KEYBINDINGS, chordParts } from "~/lib/chat-keybindings";
 
 /**
  * Claude-style "show all shortcuts" panel (⌘/Ctrl+/). Lists the chat
@@ -16,35 +17,49 @@ export function KeyboardShortcutsDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent title="Keyboard shortcuts" description="Chat shortcuts, aligned with Claude.">
-        <ul className="grid gap-2 text-sm">
+        <ul className="grid gap-2.5 text-sm">
           {CHAT_KEYBINDINGS.map((b) => (
-            <li key={b.id} className="flex items-center justify-between gap-4">
-              <span className="text-ink">{b.label}</span>
-              <kbd className="shrink-0 rounded border border-line bg-ink-wash/40 px-1.5 py-0.5 font-mono text-[11px] text-muted">
-                {formatChord(b.keys)}
-              </kbd>
-            </li>
+            <ShortcutRow key={b.id} label={b.label} keys={chordParts(b.keys)} />
           ))}
-          <li className="flex items-center justify-between gap-4 border-t border-line/60 pt-2">
-            <span className="text-ink">Send message</span>
-            <kbd className="shrink-0 rounded border border-line bg-ink-wash/40 px-1.5 py-0.5 font-mono text-[11px] text-muted">
-              Enter
-            </kbd>
-          </li>
-          <li className="flex items-center justify-between gap-4">
-            <span className="text-ink">New line</span>
-            <kbd className="shrink-0 rounded border border-line bg-ink-wash/40 px-1.5 py-0.5 font-mono text-[11px] text-muted">
-              Shift+Enter
-            </kbd>
-          </li>
-          <li className="flex items-center justify-between gap-4">
-            <span className="text-ink">Stop generation</span>
-            <kbd className="shrink-0 rounded border border-line bg-ink-wash/40 px-1.5 py-0.5 font-mono text-[11px] text-muted">
-              Esc
-            </kbd>
-          </li>
+          <ShortcutRow label="Send message" keys={["Enter"]} divider />
+          <ShortcutRow label="New line" keys={["Shift", "Enter"]} />
+          <ShortcutRow label="Stop generation" keys={["Esc"]} />
         </ul>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function ShortcutRow({
+  label,
+  keys,
+  divider,
+}: {
+  label: string;
+  keys: readonly string[];
+  divider?: boolean;
+}) {
+  return (
+    <li
+      className={cn(
+        "grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4",
+        divider && "mt-1 border-t border-line pt-3",
+      )}
+    >
+      <span className="text-ink">{label}</span>
+      <span className="flex items-center justify-end gap-1">
+        {keys.map((key) => (
+          <KeyCap key={key}>{key}</KeyCap>
+        ))}
+      </span>
+    </li>
+  );
+}
+
+function KeyCap({ children }: { children: string }) {
+  return (
+    <kbd className="inline-flex h-6 min-w-6 items-center justify-center rounded border border-line bg-ink-wash px-1.5 font-mono text-xs leading-none text-ink">
+      {children}
+    </kbd>
   );
 }

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   CHAT_KEYBINDINGS,
   findMatchedBinding,
+  chordParts,
   formatChord,
   isEditableTarget,
   matchChatKeybinding,
@@ -66,6 +67,13 @@ describe("chat-keybindings", () => {
     expect(formatChord({ shift: true, key: "o" }, true)).toBe("⌘⇧O");
     expect(formatChord({ shift: true, key: "Backspace" }, false)).toBe("Ctrl+Shift+Backspace");
     expect(formatChord({ key: "/" }, true)).toBe("⌘/");
+    expect(chordParts({ shift: true, key: "o" }, true)).toEqual(["⌘", "⇧", "O"]);
+    expect(chordParts({ key: "/" }, true)).toEqual(["⌘", "/"]);
+    expect(chordParts({ shift: true, key: "Backspace" }, false)).toEqual([
+      "Ctrl",
+      "Shift",
+      "Backspace",
+    ]);
   });
 
   it("detects editable targets", () => {

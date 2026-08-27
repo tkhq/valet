@@ -57,14 +57,23 @@ export function modSymbol(apple = isApplePlatform()): string {
   return apple ? "⌘" : "Ctrl";
 }
 
+/** One glyph or word per key, for the shortcuts dialog's keycaps. */
+export function chordParts(
+  keys: ChatKeybinding["keys"],
+  apple = isApplePlatform(),
+): string[] {
+  const parts: string[] = [modSymbol(apple)];
+  if (keys.shift) parts.push(apple ? "⇧" : "Shift");
+  parts.push(displayKey(keys.key, apple));
+  return parts;
+}
+
 /** Compact chord string, e.g. `⌘⇧O` on Mac or `Ctrl+Shift+O` elsewhere. */
 export function formatChord(
   keys: ChatKeybinding["keys"],
   apple = isApplePlatform(),
 ): string {
-  const parts: string[] = [modSymbol(apple)];
-  if (keys.shift) parts.push(apple ? "⇧" : "Shift");
-  parts.push(displayKey(keys.key, apple));
+  const parts = chordParts(keys, apple);
   return apple ? parts.join("") : parts.join("+");
 }
 
