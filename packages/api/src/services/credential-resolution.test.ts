@@ -50,11 +50,9 @@ function fakeOnePassword(
   };
 }
 
-describe("reserved onepassword service guard", () => {
-  // The `onepassword` rows are the service-account TOKENS. Without this
-  // guard a user-row miss would hand back the org's raw 1Password token as
-  // an ordinary credential. Symmetric with the write path's reserved-name
-  // rejection in routes/credentials.ts.
+describe("internal-service deny list", () => {
+  // `onepassword` / `github_app` / `llm:*` rows are internal secrets. Without
+  // this guard a user-row miss would hand them back as ordinary credentials.
   it("resolveUserCredentialRead returns null for service 'onepassword' even when the org token row exists", async () => {
     const credentials = fakeCredentialStore();
     await credentials.save({ type: "org", id: orgId }, "onepassword", {
@@ -85,6 +83,51 @@ describe("reserved onepassword service guard", () => {
     });
 
     const result = await resolveOrgCredentialRead({ credentials, onePassword }, { orgId }, "onepassword");
+
+    expect(result).toBeNull();
+  });
+
+  it("resolveUserCredentialRead returns null for service 'github_app'", async () => {
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "org", id: orgId }, "github_app", {
+      type: "service_account",
+      apiKey: "-----BEGIN RSA PRIVATE KEY-----",
+    });
+    const onePassword = fakeOnePassword(async () => {
+      throw new Error("must not resolve — denied service");
+    });
+
+    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "github_app");
+
+    expect(result).toBeNull();
+  });
+
+  it("resolveOrgCredentialRead returns null for service 'github_app'", async () => {
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "org", id: orgId }, "github_app", {
+      type: "service_account",
+      apiKey: "-----BEGIN RSA PRIVATE KEY-----",
+    });
+    const onePassword = fakeOnePassword(async () => {
+      throw new Error("must not resolve — denied service");
+    });
+
+    const result = await resolveOrgCredentialRead({ credentials, onePassword }, { orgId }, "github_app");
+
+    expect(result).toBeNull();
+  });
+
+  it("resolveUserCredentialRead returns null for llm:* provider keys", async () => {
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "org", id: orgId }, "llm:prov_1", {
+      type: "api_key",
+      apiKey: "sk-org-provider",
+    });
+    const onePassword = fakeOnePassword(async () => {
+      throw new Error("must not resolve — denied service");
+    });
+
+    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "llm:prov_1");
 
     expect(result).toBeNull();
   });

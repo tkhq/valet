@@ -2,10 +2,11 @@
  * Shared org-admin gate (GitHub/repo integration plan, Task 5). Extracted
  * from the identical `requireOrgAdmin` copies in `routes/llm-providers.ts`
  * and `routes/org-invites.ts` — same DB-backed check against
- * `org_members.role` (NOT the JWT-role variant `routes/credentials.ts`
- * uses). New admin-gated routers should import this instead of adding a
- * fourth copy; the two pre-existing copies are left as-is (not worth the
- * churn of retrofitting routes that already work).
+ * `org_members.role` (NOT `users.role`, the global operator flag).
+ * `routes/credentials.ts` and `routes/onepassword.ts` import this helper
+ * for org-scoped writes. New admin-gated routers should import this
+ * instead of adding another copy; the two pre-existing local copies are
+ * left as-is.
  */
 import type { Context } from "hono";
 import type { AppEnv } from "../env.js";

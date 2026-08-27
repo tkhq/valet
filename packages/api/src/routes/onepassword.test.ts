@@ -6,7 +6,9 @@
  * real `@1password/sdk`.
  */
 import { describe, it, expect, afterEach } from "vitest";
+import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { orgMembers, users } from "../schema/index.js";
 import { OnePasswordAuthError, type OnePasswordCtx, type OnePasswordScope, type OnePasswordService } from "../services/onepassword.js";
 import type {
   ListOpItemsResponse,
@@ -78,6 +80,35 @@ describe("GET/PUT /api/onepassword/settings", () => {
 
     const getRes = await fetch(`${api.baseUrl}/api/onepassword/settings`, { headers: MEMBER_HEADERS });
     expect(getRes.status).toBe(200);
+
+    const putRes = await fetch(`${api.baseUrl}/api/onepassword/settings`, {
+      method: "PUT",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ allowPersonal: false }),
+    });
+    expect(putRes.status).toBe(403);
+    expect(await putRes.json()).toEqual({ error: "org admin required" });
+  });
+
+  it("org_members admin with users.role=member can PUT settings", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = new FakeOnePasswordService();
+    await api.providers.db.update(users).set({ role: "member" }).where(eq(users.id, "test-admin"));
+
+    const putRes = await fetch(`${api.baseUrl}/api/onepassword/settings`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "x-valet-test-user-id": "test-admin" },
+      body: JSON.stringify({ allowPersonal: false }),
+    });
+    expect(putRes.status).toBe(200);
+    expect((await putRes.json() as OnePasswordSettingsResponse).allowPersonal).toBe(false);
+  });
+
+  it("global operator who is not an org admin cannot PUT settings", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = new FakeOnePasswordService();
+    await api.providers.db.update(users).set({ role: "admin" }).where(eq(users.id, "test-member"));
+    await api.providers.db.update(orgMembers).set({ role: "member" }).where(eq(orgMembers.userId, "test-member"));
 
     const putRes = await fetch(`${api.baseUrl}/api/onepassword/settings`, {
       method: "PUT",
@@ -167,6 +198,23 @@ describe("GET /api/onepassword/vaults", () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     expect(body.error).toContain("personal 1Password service account token");
+  });
+
+  it("raw SDK rejection maps to 502 without leaking the SDK text", async () => {
+    api = await bootTestApi();
+    const fake = new FakeOnePasswordService();
+    fake.orgToken = true;
+    fake.listVaults = async () => {
+      throw new Error("vault boom secret=xyz");
+    };
+    api.providers.onePassword = fake;
+
+    const res = await fetch(`${api.baseUrl}/api/onepassword/vaults?scope=org`);
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { error: string };
+    expect(body).toEqual({ error: "1Password request failed" });
+    expect(JSON.stringify(body)).not.toContain("vault boom");
+    expect(JSON.stringify(body)).not.toContain("secret=xyz");
   });
 
   it("401s without auth configured", async () => {

@@ -9,7 +9,7 @@
  * engine's `Session.credentialProvider` read at call time. `PUT`'s optional
  * `scope: "org"` body field (and `GET`/`DELETE`'s `?scope=org` query param)
  * maps the owner to `{type:"org", id:user.orgId}` instead — org admins only
- * (403 `"org admin required"` otherwise, matching `routes/org.ts`'s copy).
+ * (`requireOrgAdmin` against `org_members.role`, not `users.role`).
  * This is how an org admin pastes a shared credential (e.g. a Telegram bot
  * token `ChannelHost` resolves at `{type:"org",id}`) rather than a personal
  * one.
@@ -45,6 +45,7 @@
 import { Hono } from "hono";
 import type { CredentialOwner, StoredCredential } from "@valet/engine";
 import type { AppEnv } from "../env.js";
+import { requireOrgAdmin } from "./_org-admin.js";
 import { requiredScopeError, verifySlackBotToken } from "../services/slack-connect.js";
 import { connectModeFor, findCredentialDeclaration } from "../services/integration-availability.js";
 import { ONEPASSWORD_SERVICE, OnePasswordAuthError, onePasswordMeta } from "../services/onepassword.js";
@@ -61,8 +62,8 @@ export const credentialsRouter = new Hono<AppEnv>();
 
 const CREDENTIAL_TYPES: PutCredentialRequest["type"][] = ["oauth2", "api_key", "bot_token", "service_account"];
 
-const ORG_ADMIN_REQUIRED = { error: "org admin required" } as const;
 const PERSONAL_DISABLED = { error: "personal 1Password tokens are disabled by your organization" } as const;
+const ONEPASSWORD_REQUEST_FAILED = { error: "1Password request failed" } as const;
 const ONEPASSWORD_REFERENCE_TYPES: PutCredentialRequest["type"][] = ["api_key", "oauth2"];
 
 function ownerFor(user: { id: string; orgId: string }, scope: "user" | "org"): CredentialOwner {
@@ -73,12 +74,30 @@ function isCredentialKind(type: StoredCredential["type"]): type is PutCredential
   return (CREDENTIAL_TYPES as StoredCredential["type"][]).includes(type);
 }
 
+function parseOnePasswordField(
+  value: unknown,
+): { ok: true; reference: string; tokenScope: "org" | "personal" } | { ok: false; error: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, error: "onepassword must be an object with reference and tokenScope" };
+  }
+  const candidate = value as Record<string, unknown>;
+  const { reference, tokenScope } = candidate;
+  if (typeof reference !== "string" || !reference.startsWith("op://")) {
+    return { ok: false, error: "onepassword.reference must be a string that starts with op://" };
+  }
+  if (tokenScope !== "org" && tokenScope !== "personal") {
+    return { ok: false, error: "onepassword.tokenScope must be org or personal" };
+  }
+  return { ok: true, reference, tokenScope };
+}
+
 credentialsRouter.get("/", async (c) => {
   const { engineCredentials } = c.var.providers;
   const user = c.var.user;
   const scope = c.req.query("scope") === "org" ? "org" : "user";
-  if (scope === "org" && user.role !== "admin") {
-    return c.json(ORG_ADMIN_REQUIRED, 403);
+  if (scope === "org") {
+    const gate = await requireOrgAdmin(c);
+    if (gate) return gate;
   }
   const owner = ownerFor(user, scope);
 
@@ -124,8 +143,9 @@ credentialsRouter.put("/:service", async (c) => {
   }
 
   const scope = body.scope === "org" ? "org" : "user";
-  if (scope === "org" && user.role !== "admin") {
-    return c.json(ORG_ADMIN_REQUIRED, 403);
+  if (scope === "org") {
+    const gate = await requireOrgAdmin(c);
+    if (gate) return gate;
   }
   const owner = ownerFor(user, scope);
 
@@ -208,7 +228,15 @@ credentialsRouter.put("/:service", async (c) => {
     if (!ONEPASSWORD_REFERENCE_TYPES.includes(body.type)) {
       return c.json({ error: `type must be one of ${ONEPASSWORD_REFERENCE_TYPES.join("|")} for an onepassword reference` }, 400);
     }
-    const { reference, tokenScope } = body.onepassword;
+    const parsed = parseOnePasswordField(body.onepassword);
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    if (scope === "org" && parsed.tokenScope === "personal") {
+      return c.json(
+        { error: "An org-scoped credential cannot use a personal 1Password token. Set tokenScope to org." },
+        400,
+      );
+    }
+    const { reference, tokenScope } = parsed;
     if (tokenScope === "personal") {
       const allowed = await getAllowPersonalOnePassword(db, user.orgId);
       if (!allowed) {
@@ -222,12 +250,13 @@ credentialsRouter.put("/:service", async (c) => {
       if (err instanceof OnePasswordAuthError) {
         return c.json({ error: err.message }, 400);
       }
-      throw err;
+      console.error("onepassword: resolveReference failed:", err);
+      return c.json(ONEPASSWORD_REQUEST_FAILED, 502);
     }
 
     const credential: StoredCredential = {
       type: body.type,
-      metadata: { ...body.metadata, onepassword: body.onepassword },
+      metadata: { ...body.metadata, onepassword: { reference, tokenScope } },
     };
     await engineCredentials.save(owner, service, credential);
     const resp: PutCredentialResponse = { ok: true };
@@ -313,8 +342,9 @@ credentialsRouter.delete("/:service", async (c) => {
   const { engineCredentials } = c.var.providers;
   const user = c.var.user;
   const scope = c.req.query("scope") === "org" ? "org" : "user";
-  if (scope === "org" && user.role !== "admin") {
-    return c.json(ORG_ADMIN_REQUIRED, 403);
+  if (scope === "org") {
+    const gate = await requireOrgAdmin(c);
+    if (gate) return gate;
   }
   const owner = ownerFor(user, scope);
   const service = c.req.param("service");

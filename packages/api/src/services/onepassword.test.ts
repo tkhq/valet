@@ -250,12 +250,13 @@ describe("createOnePasswordService", () => {
     ).toBeNull();
   });
 
-  it("wraps SDK failures in OnePasswordAuthError naming the reference but never the secret", async () => {
+  it("wraps SDK failures as a fixed client message and never interpolates the SDK text or reference", async () => {
     const credentials = memStore();
     await credentials.save({ type: "org", id: ctx.orgId }, ONEPASSWORD_SERVICE, {
       type: "service_account",
       apiKey: "org-token",
     });
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const svc = createOnePasswordService({
       credentials,
       getAllowPersonal: async () => true,
@@ -274,20 +275,25 @@ describe("createOnePasswordService", () => {
     } catch (err) {
       expect(err).toBeInstanceOf(OnePasswordAuthError);
       const message = (err as Error).message;
-      expect(message).toContain("op://Vault/Item/field");
-      // The resolve call never succeeded, so no resolved secret value
-      // (which would look like "secret-for-<ref>" per the fake client) can
-      // possibly appear in the wrapped message.
+      expect(message).toBe("1Password request failed");
+      expect(message).not.toContain("item not found");
+      expect(message).not.toContain("op://Vault/Item/field");
       expect(message).not.toContain("secret-for-");
+      expect(log).toHaveBeenCalled();
+      const logged = String(log.mock.calls[0]?.[0]);
+      expect(logged).toContain("op://Vault/Item/field");
+    } finally {
+      log.mockRestore();
     }
   });
 
-  it("wraps a listing call's SDK failure (client construction) in OnePasswordAuthError", async () => {
+  it("wraps a listing call's SDK failure (client construction) without leaking the SDK text", async () => {
     const credentials = memStore();
     await credentials.save({ type: "org", id: ctx.orgId }, ONEPASSWORD_SERVICE, {
       type: "service_account",
       apiKey: "org-token",
     });
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const svc = createOnePasswordService({
       credentials,
       getAllowPersonal: async () => true,
@@ -295,8 +301,12 @@ describe("createOnePasswordService", () => {
         throw new Error("token expired");
       },
     });
-    await expect(svc.listVaults("org", ctx)).rejects.toThrow(OnePasswordAuthError);
-    await expect(svc.listVaults("org", ctx)).rejects.toThrow(/token expired/);
+    try {
+      await expect(svc.listVaults("org", ctx)).rejects.toBeInstanceOf(OnePasswordAuthError);
+      await expect(svc.listVaults("org", ctx)).rejects.toThrow("1Password request failed");
+    } finally {
+      log.mockRestore();
+    }
   });
 
   it("wraps a listing call's SDK failure (client method) without double-wrapping an already-typed error", async () => {
@@ -343,17 +353,22 @@ describe("createOnePasswordService", () => {
       }
       return fakeClient();
     });
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const svc = createOnePasswordService({
       credentials,
       getAllowPersonal: async () => true,
       createClient,
     });
 
-    await expect(svc.listVaults("org", ctx)).rejects.toThrow(OnePasswordAuthError);
-    expect(createClient).toHaveBeenCalledTimes(1);
+    try {
+      await expect(svc.listVaults("org", ctx)).rejects.toThrow(OnePasswordAuthError);
+      expect(createClient).toHaveBeenCalledTimes(1);
 
-    const vaults = await svc.listVaults("org", ctx);
-    expect(vaults).toEqual([{ id: "v1", title: "Vault One" }]);
-    expect(createClient).toHaveBeenCalledTimes(2);
+      const vaults = await svc.listVaults("org", ctx);
+      expect(vaults).toEqual([{ id: "v1", title: "Vault One" }]);
+      expect(createClient).toHaveBeenCalledTimes(2);
+    } finally {
+      log.mockRestore();
+    }
   });
 });

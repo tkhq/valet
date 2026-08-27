@@ -17,8 +17,10 @@
  *     Rows without `metadata.onepassword` pass through unchanged (same
  *     object, no clone) — byte-identical to today for non-1Password rows.
  *
- * No secret material ever appears in an `OnePasswordAuthError` message —
- * only the reference and the owning scope/token gap.
+ * Known `OnePasswordAuthError` cases (missing token, personal toggle off)
+ * carry a typed hint. SDK/network failures never interpolate `err.message`
+ * or the secret reference into that message — the client sees a fixed
+ * `"1Password request failed"`; the original is logged server-side only.
  */
 
 import type { CredentialOwner, CredentialStore, StoredCredential } from "@valet/engine";
@@ -161,15 +163,20 @@ function tokenOwner(scope: OnePasswordScope, ctx: OnePasswordCtx): CredentialOwn
   return scope === "org" ? { type: "org", id: ctx.orgId } : { type: "user", id: ctx.userId };
 }
 
+const SDK_REQUEST_FAILED = "1Password request failed";
+
 /**
- * Wraps any SDK rejection as `OnePasswordAuthError`, prefixed with `context`.
- * Already-typed errors (missing token, disabled toggle, a prior wrap) pass
- * through unchanged — never double-wrapped.
+ * Wraps any SDK rejection as `OnePasswordAuthError` with a fixed client
+ * message. Already-typed errors (missing token, disabled toggle, a prior
+ * wrap) pass through unchanged — never double-wrapped. The original
+ * rejection and `context` are logged server-side only; neither
+ * `err.message` nor a secret reference is interpolated into the
+ * client-visible text.
  */
 function wrapSdkError(err: unknown, context: string): OnePasswordAuthError {
   if (err instanceof OnePasswordAuthError) return err;
-  const msg = err instanceof Error ? err.message : String(err);
-  return new OnePasswordAuthError(`${context}: ${msg}`);
+  console.error(`onepassword: ${context}:`, err);
+  return new OnePasswordAuthError(SDK_REQUEST_FAILED);
 }
 
 export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordService {
@@ -210,7 +217,7 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
         // SDK hiccup) must not permanently poison this token's cache entry
         // until process restart. The next call re-attempts construction.
         clientCache.delete(token);
-        throw wrapSdkError(err, "1Password client initialization failed");
+        throw wrapSdkError(err, "client initialization failed");
       });
       clientCache.set(token, pending);
     }
@@ -235,7 +242,7 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
       resolveCache.set(cacheKey, { value, at: nowMs });
       return value;
     } catch (err) {
-      throw wrapSdkError(err, `1Password resolution failed for ${reference}`);
+      throw wrapSdkError(err, `resolution failed for ${reference}`);
     }
   }
 
@@ -266,7 +273,7 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
       try {
         return await client.vaults.list();
       } catch (err) {
-        throw wrapSdkError(err, "1Password vault listing failed");
+        throw wrapSdkError(err, "vault listing failed");
       }
     },
     async listItems(scope, ctx, vaultId) {
@@ -274,7 +281,7 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
       try {
         return await client.items.list(vaultId);
       } catch (err) {
-        throw wrapSdkError(err, "1Password item listing failed");
+        throw wrapSdkError(err, "item listing failed");
       }
     },
     async getItem(scope, ctx, vaultId, itemId) {
@@ -282,7 +289,7 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
       try {
         return await client.items.get(vaultId, itemId);
       } catch (err) {
-        throw wrapSdkError(err, "1Password item lookup failed");
+        throw wrapSdkError(err, "item lookup failed");
       }
     },
     resolveReference,

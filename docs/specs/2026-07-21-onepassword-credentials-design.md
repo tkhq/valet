@@ -324,3 +324,27 @@ code as of the implementing commits:
   to ANY row kind, not just references — the former "plain-org-invisible"
   test was rewritten to pin the new "plain org row now resolves" contract
   instead (same file, same test name updated).
+- **Org-admin gate uses `org_members.role`, not `users.role`.**
+  `PUT /api/onepassword/settings` and `GET`/`PUT`/`DELETE /api/credentials`
+  with `scope=org` call `requireOrgAdmin` from
+  `packages/api/src/routes/_org-admin.ts`. A caller with
+  `org_members.role=admin` and `users.role=member` can write. A global
+  operator (`users.role=admin`) who is not an org admin cannot.
+- **SDK failures never leak `err.message` or the secret reference to the
+  client.** `wrapSdkError` logs the original rejection server-side and
+  throws `OnePasswordAuthError` with the fixed text
+  `"1Password request failed"`. Known typed cases (missing token, personal
+  toggle off) keep their hint. Routes map unknown rejections to 502 with
+  the same fixed text.
+- **Production OpenAI path uses `resolveUserCredentialRead` after the
+  LLM-provider key probe.** When `db` is wired, `resolveOpenAiCredential`
+  no longer does a raw `credentials.get` for the stored `"openai"` row, so
+  a 1Password-backed openai credential resolves in production the same way
+  it does on the db-less path.
+- **Internal-service deny list on credential reads.**
+  `resolveUserCredentialRead` and `resolveOrgCredentialRead` return null
+  for `onepassword`, `github_app`, and any `llm:*` service. Session
+  `get("github_app")` therefore cannot surface the GitHub App PEM.
+- **`body.onepassword` is validated at write time.** `reference` must be a
+  string that starts with `op://`. `tokenScope` must be exactly `org` or
+  `personal`. `scope=org` with `tokenScope=personal` is rejected.

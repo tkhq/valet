@@ -970,8 +970,10 @@ export class EngineHost {
    *    installation-tier request (the binding's owner, else the org's sole
    *    installation). `null` when no installation resolves, or when `db`/
    *    `githubTokenDeps` are not wired.
-   *  - `openai` → `resolveOpenAiCredential` (org OpenAI LLM-provider key →
-   *    stored "openai" credential → OPENAI_API_KEY env).
+   *  - `openai` → `resolveOpenAiCredential` when `db` is wired (org OpenAI
+   *    LLM-provider key → `resolveUserCredentialRead` for a stored "openai"
+   *    row, including 1Password references → OPENAI_API_KEY env). Without
+   *    `db`, the stored-row half runs directly via `resolveUserCredentialRead`.
    *  - `slack` → `resolveUserCredentialRead` (user row, then org row), then
    *    `withSlackOwnerMetadata` when a credential is found and `db` is wired.
    *    The identity link injects `metadata.owner_slack_user_id` for
@@ -1044,7 +1046,7 @@ export class EngineHost {
     const credentials = this.opts.engineCredentials;
     const onePassword = this.opts.onePassword;
     if ((!tokenDeps || !db) && !onePassword) return undefined;
-    return async (owner, service) => {
+    return async (_owner, service) => {
       if (service === GITHUB_INSTALLATION_CREDENTIAL_SERVICE) {
         // Explicit installation-tier request (github.list_repos with
         // `scope: "installation"`): mint the App installation token directly
@@ -1071,12 +1073,13 @@ export class EngineHost {
       }
       if (service === "openai") {
         // plugin-openai's key probe: org OpenAI LLM-provider key → stored
-        // "openai" credential → OPENAI_API_KEY env. `null` keeps the openai
-        // tools hidden in list_tools (requiresCredential gating).
+        // "openai" credential (owner-precedence + 1Password) → OPENAI_API_KEY
+        // env. `null` keeps the openai tools hidden in list_tools
+        // (requiresCredential gating).
         if (!db) {
           return resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, service);
         }
-        return resolveOpenAiCredential(db, credentials, owner, orgId);
+        return resolveOpenAiCredential(db, credentials, { orgId, userId }, process.env, onePassword);
       }
       if (service === "github" && tokenDeps && db) {
         const resolved = await resolveSessionGitHubToken(

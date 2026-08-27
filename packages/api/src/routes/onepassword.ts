@@ -28,6 +28,7 @@
  */
 import { Hono, type Context } from "hono";
 import type { AppEnv } from "../env.js";
+import { requireOrgAdmin } from "./_org-admin.js";
 import { OnePasswordAuthError, type OnePasswordScope } from "../services/onepassword.js";
 import { getAllowPersonalOnePassword, setOrgFeatures } from "../services/org.js";
 import type {
@@ -40,7 +41,6 @@ import type {
 
 export const onePasswordRouter = new Hono<AppEnv>();
 
-const ORG_ADMIN_REQUIRED = { error: "org admin required" } as const;
 const PERSONAL_DISABLED = { error: "personal 1Password tokens are disabled by your organization" } as const;
 const REQUEST_FAILED = { error: "1Password request failed" } as const;
 
@@ -92,11 +92,11 @@ onePasswordRouter.get("/settings", async (c) => {
 });
 
 onePasswordRouter.put("/settings", async (c) => {
+  const gate = await requireOrgAdmin(c);
+  if (gate) return gate;
+
   const { db, onePassword } = c.var.providers;
   const user = c.var.user;
-  if (user.role !== "admin") {
-    return c.json(ORG_ADMIN_REQUIRED, 403);
-  }
 
   let body: PutOnePasswordSettingsRequest;
   try {

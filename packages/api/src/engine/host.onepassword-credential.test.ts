@@ -22,6 +22,8 @@ import {
   type OnePasswordCtx,
   type OnePasswordService,
 } from "../services/onepassword.js";
+import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
+import { orgs } from "../schema/index.js";
 import { EngineHost, type EngineHostOpts } from "./host.js";
 
 const orgId = "op-org";
@@ -276,5 +278,47 @@ describe("EngineHost session 1Password credential resolution", () => {
 
     expect(githubCred?.accessToken).toBe("raw-github-token");
     expect(opCred?.accessToken).toBe("secret-for-acme-service");
+  });
+
+  it("session get('github_app') returns null even when the org App row exists", async () => {
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "org", id: orgId }, "github_app", {
+      type: "service_account",
+      apiKey: "-----BEGIN RSA PRIVATE KEY-----",
+    });
+    const onePassword = fakeOnePassword(async () => {
+      throw new Error("resolveCredential must not be called for a denied service");
+    });
+    const h = makeHost(credentials, { onePassword });
+
+    const session = await h.sessionFor("sess-op-deny-github-app", { userId, orgId, workspace: "/tmp" });
+    const cred = await session.credentialProvider().get("github_app");
+
+    expect(cred).toBeNull();
+  });
+
+  it("db wired + 1Password openai row resolves through the service (LLM-provider probe does not skip it)", async () => {
+    const { appDb } = await freshTestPgDb();
+    await appDb.insert(orgs).values({ id: orgId, name: "Org", createdAt: Date.now() });
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "user", id: userId }, "openai", {
+      type: "api_key",
+      metadata: { onepassword: { reference: "op://vault/openai/key", tokenScope: "org" } },
+    });
+    let sawRow: StoredCredential | undefined;
+    const onePassword = fakeOnePassword(async (row) => {
+      sawRow = row;
+      return { type: row.type, metadata: row.metadata, apiKey: "sk-from-1password" };
+    });
+    const h = makeHost(credentials, { db: appDb, onePassword });
+
+    const session = await h.sessionFor("sess-op-openai-db", { userId, orgId, workspace: "/tmp" });
+    const cred = await session.credentialProvider().get("openai");
+
+    expect(sawRow?.metadata?.onepassword).toEqual({
+      reference: "op://vault/openai/key",
+      tokenScope: "org",
+    });
+    expect(cred?.accessToken).toBe("sk-from-1password");
   });
 });
