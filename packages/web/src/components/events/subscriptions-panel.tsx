@@ -23,6 +23,7 @@ import {
 import { useMe, useOrg, useTeams } from "~/api/settings";
 import { useWorkflows } from "~/api/workflows";
 import { errorText } from "~/lib/error-text";
+import { useListOwner } from "~/lib/use-list-owner";
 import { OwnerBadge } from "~/components/owner-badge";
 import { eligibleTeams } from "~/components/session/assistant-rail";
 import { SubscriptionCreateDialog } from "./subscription-create-dialog";
@@ -61,11 +62,24 @@ function describeTarget(
  * a workflow run or an orchestrator prompt. List with enable/disable and
  * delete; create via `SubscriptionCreateDialog`. Rows show filters
  * read-only (filters are API-only for now).
+ *
+ * The list is the active workspace's, plus every org-owned subscription. An
+ * org-owned row belongs to no single workspace, so the route returns it in
+ * all of them — otherwise the create dialog's "Notify the org assistant"
+ * option writes a row this page can never disable.
  */
 export function SubscriptionsPanel() {
-  const subsQ = useEventSubscriptions();
-  const workflowsQ = useWorkflows();
+  const owner = useListOwner();
   const meQ = useMe();
+  // `useListOwner` also answers undefined when identity FAILS, and that
+  // hold never ends. Report it instead.
+  const ownerFailed = owner === undefined && meQ.isError;
+  // An owner-less request lists every subscription in the org, so hold the
+  // query until the owner resolves. Same gate the feed uses.
+  const subsQ = useEventSubscriptions(owner, {
+    enabled: owner !== undefined,
+  });
+  const workflowsQ = useWorkflows();
   const teamsQ = useTeams();
   const [creating, setCreating] = useState(false);
 
@@ -101,8 +115,16 @@ export function SubscriptionsPanel() {
         </Button>
       </div>
 
-      {subsQ.isLoading && <LoadingRow label="Loading subscriptions…" />}
+      {/* `isPending`, not `isLoading`: a held query still counts as
+          loading. */}
+      {subsQ.isPending && !ownerFailed && <LoadingRow label="Loading subscriptions…" />}
       {subsQ.error != null && <ErrorRow>Failed to load subscriptions.</ErrorRow>}
+      {ownerFailed && (
+        <ErrorRow>
+          Could not load your workspace, so subscriptions cannot be listed for it. Reload the page
+          to try again.
+        </ErrorRow>
+      )}
 
       {subsQ.data && subsQ.data.subscriptions.length === 0 && (
         <EmptyRow>No subscriptions yet. Create one above.</EmptyRow>
@@ -157,12 +179,11 @@ function SubscriptionRow({
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-2">
           <span className="truncate text-sm font-medium text-ink">{sub.name}</span>
-          {/* Ownership varies row to row here, so it is badged: "Org" for
-              org-owned, the team's name for a team's (`OwnerBadge`), and
-              "Personal" for a COLLEAGUE's — the list carries every
-              subscription in the org, so an unbadged row means yours only
-              because everyone else's personal rows say whose kind they
-              are. */}
+          {/* Ownership varies row to row, so it is badged: "Org", the
+              team's name (`OwnerBadge`), or "Personal" for a COLLEAGUE's.
+              An unbadged row is yours. The scoped list returns no
+              colleague's row, so "Personal" marks one the server should not
+              have sent. */}
           {sub.ownerType === "org" && (
             <Badge variant="accent" className="shrink-0">
               Org

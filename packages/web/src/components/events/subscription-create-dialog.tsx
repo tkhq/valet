@@ -20,6 +20,16 @@ function targetFor(scopedTeamId: string | undefined): TargetChoice {
 }
 
 /**
+ * Which owner `POST /api/event-subscriptions` will stamp on the row, read
+ * off the target the same way the route reads it. Ownership follows the
+ * TARGET, not the active workspace, so a workflow target is filed to the
+ * caller even when the workflow and the workspace are a team's.
+ */
+function filedOwnerType(target: TargetChoice): "user" | "team" | "org" {
+  return target.kind === "workflow" ? "user" : target.orchestrator;
+}
+
+/**
  * Create dialog for an event subscription. Offers only catalog keys, so a
  * subscription cannot name an event the ingest matcher can never match.
  * Filters are API-only for now — this dialog does not build them.
@@ -196,6 +206,15 @@ export function SubscriptionCreateDialog({
               )}
             </div>
           </div>
+
+          {/* Only a personally-filed row can go missing from the workspace
+              it was created in, so say where it will be instead. */}
+          {scopedTeam && filedOwnerType(target) === "user" && (
+            <p className="text-xs text-muted">
+              Ownership follows the target. This subscription will be listed in your personal
+              workspace, not in {scopedTeam.name}.
+            </p>
+          )}
 
           {error && <p className="text-xs text-danger-500">{error}</p>}
         </div>

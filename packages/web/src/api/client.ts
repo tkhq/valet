@@ -698,20 +698,22 @@ export const api = {
     ),
 
   // events (event-system design): org feed, per-event detail with delivery
-  // attempts, the plugin trigger catalog, and subscription CRUD
+  // attempts, the plugin trigger catalog, and subscription CRUD. Both lists
+  // take an optional workspace owner.
   getEventCatalog: () => request<GetEventCatalogResponse>("GET", "/events/catalog"),
-  listEvents: (params?: { service?: string; key?: string }) => {
+  listEvents: (params?: { service?: string; key?: string }, owner?: OwnerFilter) => {
     const qs = new URLSearchParams();
     if (params?.service) qs.set("service", params.service);
     if (params?.key) qs.set("key", params.key);
     const q = qs.toString();
-    return request<ListEventsResponse>("GET", q ? `/events?${q}` : "/events");
+    const path = q ? `/events?${q}${ownerSuffix(owner)}` : `/events${ownerQuery(owner)}`;
+    return request<ListEventsResponse>("GET", path);
   },
   getEvent: (id: string) => request<GetEventResponse>("GET", `/events/${encodeURIComponent(id)}`),
   redeliverEvent: (id: string) =>
     request<RedeliverEventResponse>("POST", `/events/${encodeURIComponent(id)}/redeliver`),
-  listEventSubscriptions: () =>
-    request<ListEventSubscriptionsResponse>("GET", "/event-subscriptions"),
+  listEventSubscriptions: (owner?: OwnerFilter) =>
+    request<ListEventSubscriptionsResponse>("GET", `/event-subscriptions${ownerQuery(owner)}`),
   createEventSubscription: (body: CreateEventSubscriptionRequest) =>
     request<CreateEventSubscriptionResponse>("POST", "/event-subscriptions", body),
   patchEventSubscription: (id: string, body: PatchEventSubscriptionRequest) =>

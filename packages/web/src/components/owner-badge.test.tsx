@@ -99,7 +99,10 @@ describe("OwnerBadge", () => {
     expect(container.textContent).toBe("");
   });
 
-  it("says nothing about an org-owned row either, which no route creates yet", () => {
+  // Org-owned rows exist (event subscriptions with an org orchestrator
+  // target). This badge stays silent for one because it links to a team's
+  // assistant; the subscriptions panel labels its own org rows.
+  it("says nothing about an org-owned row either", () => {
     teamsData = { teams: [team()] };
     const { container } = show("org", "org_1");
     expect(container.textContent).toBe("");

@@ -44,6 +44,11 @@ async function boot(): Promise<TestApi> {
   return api;
 }
 
+/** The message both owner-filtered listings answer with when one half of
+ * the pair is missing. The same string the workflows and skills suites
+ * assert, because one client builds one query for all of them. */
+const HALF_FILTER_ERROR = "Filter by owner with both ownerType and ownerId, or send neither.";
+
 const VALID_BODY: CreateEventSubscriptionRequest = {
   name: "pr opens",
   eventKeys: ["github.pull_request.opened"],
@@ -69,6 +74,10 @@ interface SeedSubscriptionOpts {
   filters?: EventSubscriptionFilterWire[];
   target?: EventSubscriptionTargetWire;
   enabled?: boolean;
+  /** Defaults to the colleague pair `user`/`someone` — neither the stub
+   * caller (`local-user`) nor the alternate identity (`test-member`). */
+  ownerType?: "user" | "team" | "org";
+  ownerId?: string;
 }
 
 /** Seeds a subscription row directly (bypassing route validation) — used for
@@ -85,8 +94,8 @@ async function seedSubscriptionRow(
   await a.providers.db.insert(eventSubscriptions).values({
     id,
     orgId,
-    ownerType: "user",
-    ownerId: "someone",
+    ownerType: opts.ownerType ?? "user",
+    ownerId: opts.ownerId ?? "someone",
     name: opts.name ?? `seeded ${id}`,
     eventKeys: opts.eventKeys ?? ["github.push"],
     filters: opts.filters ?? [],
@@ -375,18 +384,120 @@ describe("POST /api/event-subscriptions", () => {
   });
 });
 
+// Visibility reversed on 2026-08-24 (small-fixes design, decision 1): the
+// list used to be org-wide for every caller, and the page now names the
+// workspace switcher's owner. An owner narrows to that owner's rows PLUS
+// the org's own, which belong to every workspace. An unscoped call keeps
+// the old answer, so both behaviors are pinned here.
 describe("GET /api/event-subscriptions", () => {
-  it("lists only the caller's org's subscriptions", async () => {
+  it("with no owner, lists every subscription in the caller's org", async () => {
     const a = await boot();
     const created = await postSubscription(a.baseUrl, VALID_BODY);
     expect(created.status).toBe(201);
+    await seedSubscriptionRow(a, "sub_colleague", "local-org", { name: "a colleague's" });
     await seedSubscriptionRow(a, "sub_foreign", "other-org");
 
     const res = await fetch(`${a.baseUrl}/api/event-subscriptions`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as ListEventSubscriptionsResponse;
+    expect(body.subscriptions.map((s) => s.name).sort()).toEqual(["a colleague's", "pr opens"]);
+  });
+
+  it("with the caller's own owner, lists only the caller's subscriptions", async () => {
+    const a = await boot();
+    const created = await postSubscription(a.baseUrl, VALID_BODY);
+    expect(created.status).toBe(201);
+    // Same org, another member — the row the old org-wide list showed and
+    // the scoped list must not.
+    await seedSubscriptionRow(a, "sub_colleague", "local-org", { name: "a colleague's" });
+
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions?ownerType=user&ownerId=local-user`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListEventSubscriptionsResponse;
     expect(body.subscriptions).toHaveLength(1);
     expect(body.subscriptions[0].name).toBe("pr opens");
+  });
+
+  it("with a team owner, lists that team's subscriptions only", async () => {
+    const a = await boot();
+    const created = await postSubscription(a.baseUrl, VALID_BODY);
+    expect(created.status).toBe(201);
+    await seedSubscriptionRow(a, "sub_team", "local-org", {
+      name: "team automation",
+      ownerType: "team",
+      ownerId: "t_eng",
+    });
+
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions?ownerType=team&ownerId=t_eng`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListEventSubscriptionsResponse;
+    expect(body.subscriptions).toHaveLength(1);
+    expect(body.subscriptions[0].name).toBe("team automation");
+  });
+
+  // An org-owned subscription has no workspace of its own. If the owner
+  // filter excluded it, the create dialog's "Notify the org assistant"
+  // option would write a row that appears in no list and can never be
+  // disabled from the UI, while it keeps firing on every matching webhook.
+  it("lists org-owned subscriptions in the personal workspace too", async () => {
+    const a = await boot();
+    const created = await postSubscription(a.baseUrl, {
+      ...VALID_BODY,
+      name: "org watch",
+      target: { kind: "orchestrator", orchestrator: "org" },
+    });
+    expect(created.status).toBe(201);
+    await seedSubscriptionRow(a, "sub_mine", "local-org", { name: "mine", ownerId: "local-user" });
+    await seedSubscriptionRow(a, "sub_colleague", "local-org", { name: "a colleague's" });
+
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions?ownerType=user&ownerId=local-user`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListEventSubscriptionsResponse;
+    expect(body.subscriptions.map((s) => s.name).sort()).toEqual(["mine", "org watch"]);
+  });
+
+  it("lists org-owned subscriptions in a team workspace too", async () => {
+    const a = await boot();
+    const created = await postSubscription(a.baseUrl, {
+      ...VALID_BODY,
+      name: "org watch",
+      target: { kind: "orchestrator", orchestrator: "org" },
+    });
+    expect(created.status).toBe(201);
+    await seedSubscriptionRow(a, "sub_team", "local-org", {
+      name: "team automation",
+      ownerType: "team",
+      ownerId: "t_eng",
+    });
+    await seedSubscriptionRow(a, "sub_colleague", "local-org", { name: "a colleague's" });
+
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions?ownerType=team&ownerId=t_eng`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListEventSubscriptionsResponse;
+    expect(body.subscriptions.map((s) => s.name).sort()).toEqual(["org watch", "team automation"]);
+  });
+
+  it("keeps another org's org-owned rows out of the union", async () => {
+    const a = await boot();
+    await seedSubscriptionRow(a, "sub_foreign_org", "other-org", {
+      name: "another org's",
+      ownerType: "org",
+      ownerId: "other-org",
+    });
+
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions?ownerType=user&ownerId=local-user`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListEventSubscriptionsResponse;
+    expect(body.subscriptions).toHaveLength(0);
+  });
+
+  it("400s a half-specified owner pair, naming both parameters", async () => {
+    const a = await boot();
+
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions?ownerType=user`);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe(HALF_FILTER_ERROR);
   });
 });
 
@@ -544,6 +655,170 @@ describe("GET /api/events", () => {
 
     const limited = (await (await fetch(`${a.baseUrl}/api/events?limit=1`)).json()) as ListEventsResponse;
     expect(limited.events.map((e) => e.id)).toEqual(["ev_c"]);
+  });
+
+  // The owner filter is what the page's "This workspace" state sends. It reads
+  // ownership through the deliveries, because the events table has no owner
+  // column (small-fixes design, decision 2). It also carries a 30-day lower
+  // bound on `received_at`, so these rows are seeded relative to now.
+  it("with an owner, returns only events delivered to that owner's subscriptions", async () => {
+    const a = await boot();
+    await seedSubscriptionRow(a, "sub_mine", "local-org", { ownerId: "local-user" });
+    await seedSubscriptionRow(a, "sub_colleague", "local-org", { ownerId: "someone" });
+
+    const now = Date.now();
+    await seedEventRow(a, { id: "ev_mine", receivedAt: now - 3_000 });
+    await seedEventRow(a, { id: "ev_theirs", receivedAt: now - 4_000 });
+    await seedEventRow(a, { id: "ev_undelivered", receivedAt: now - 5_000 });
+
+    await a.providers.db.insert(eventDeliveries).values([
+      {
+        id: "del_mine",
+        eventId: "ev_mine",
+        subscriptionId: "sub_mine",
+        status: "delivered" as const,
+        attempts: 1,
+        nextAttemptAt: 0,
+        createdAt: 1_000,
+      },
+      {
+        id: "del_theirs",
+        eventId: "ev_theirs",
+        subscriptionId: "sub_colleague",
+        status: "delivered" as const,
+        attempts: 1,
+        nextAttemptAt: 0,
+        createdAt: 1_000,
+      },
+    ]);
+
+    const scoped = (await (
+      await fetch(`${a.baseUrl}/api/events?ownerType=user&ownerId=local-user`)
+    ).json()) as ListEventsResponse;
+    expect(scoped.events.map((e) => e.id)).toEqual(["ev_mine"]);
+
+    // The same three events, unscoped: the filter narrows the feed, it does
+    // not change what the feed holds.
+    const all = (await (await fetch(`${a.baseUrl}/api/events`)).json()) as ListEventsResponse;
+    expect(all.events.map((e) => e.id)).toEqual(["ev_mine", "ev_theirs", "ev_undelivered"]);
+  });
+
+  // The subscriptions list returns org-owned rows in every workspace, so the
+  // feed beside it has to show what those rows received. A workspace that
+  // lists a subscription and hides its events contradicts the tab next to it.
+  it("with an owner, also returns events delivered to an ORG-owned subscription", async () => {
+    const a = await boot();
+    await seedSubscriptionRow(a, "sub_org", "local-org", {
+      ownerType: "org",
+      ownerId: "local-org",
+    });
+    await seedSubscriptionRow(a, "sub_colleague", "local-org", { ownerId: "someone" });
+
+    const now = Date.now();
+    await seedEventRow(a, { id: "ev_org", receivedAt: now - 3_000 });
+    await seedEventRow(a, { id: "ev_theirs", receivedAt: now - 4_000 });
+    await a.providers.db.insert(eventDeliveries).values([
+      {
+        id: "del_org",
+        eventId: "ev_org",
+        subscriptionId: "sub_org",
+        status: "delivered" as const,
+        attempts: 1,
+        nextAttemptAt: 0,
+        createdAt: 1_000,
+      },
+      {
+        id: "del_theirs",
+        eventId: "ev_theirs",
+        subscriptionId: "sub_colleague",
+        status: "delivered" as const,
+        attempts: 1,
+        nextAttemptAt: 0,
+        createdAt: 1_000,
+      },
+    ]);
+
+    // The caller owns no subscription at all here: the org-owned row is the
+    // only reason this event joins their workspace.
+    const scoped = (await (
+      await fetch(`${a.baseUrl}/api/events?ownerType=user&ownerId=local-user`)
+    ).json()) as ListEventsResponse;
+    expect(scoped.events.map((e) => e.id)).toEqual(["ev_org"]);
+  });
+
+  it("combines the owner filter with the service and key filters", async () => {
+    const a = await boot();
+    await seedSubscriptionRow(a, "sub_mine", "local-org", { ownerId: "local-user" });
+    const now = Date.now();
+    await seedEventRow(a, { id: "ev_pr", eventKey: "github.pull_request.opened", receivedAt: now - 2_000 });
+    await seedEventRow(a, { id: "ev_push", eventKey: "github.push", receivedAt: now - 3_000 });
+    await a.providers.db.insert(eventDeliveries).values([
+      {
+        id: "del_pr",
+        eventId: "ev_pr",
+        subscriptionId: "sub_mine",
+        status: "delivered" as const,
+        attempts: 1,
+        nextAttemptAt: 0,
+        createdAt: 1_000,
+      },
+      {
+        id: "del_push",
+        eventId: "ev_push",
+        subscriptionId: "sub_mine",
+        status: "delivered" as const,
+        attempts: 1,
+        nextAttemptAt: 0,
+        createdAt: 1_000,
+      },
+    ]);
+
+    const res = await fetch(
+      `${a.baseUrl}/api/events?ownerType=user&ownerId=local-user&key=github.push`,
+    );
+    const body = (await res.json()) as ListEventsResponse;
+    expect(body.events.map((e) => e.id)).toEqual(["ev_push"]);
+  });
+
+  // Without a lower bound the `EXISTS` walks the org's whole event history
+  // to fill a page it can never fill, because no index can pre-select the
+  // rows it rejects. The window is the bound; "All" keeps the full history.
+  it("with an owner, looks back 30 days only, while All keeps the history", async () => {
+    const a = await boot();
+    await seedSubscriptionRow(a, "sub_mine", "local-org", { ownerId: "local-user" });
+
+    const now = Date.now();
+    const day = 24 * 60 * 60 * 1000;
+    await seedEventRow(a, { id: "ev_recent", receivedAt: now - day });
+    await seedEventRow(a, { id: "ev_old", receivedAt: now - 31 * day });
+    await a.providers.db.insert(eventDeliveries).values(
+      ["ev_recent", "ev_old"].map((eventId) => ({
+        id: `del_${eventId}`,
+        eventId,
+        subscriptionId: "sub_mine",
+        status: "delivered" as const,
+        attempts: 1,
+        nextAttemptAt: 0,
+        createdAt: now,
+      })),
+    );
+
+    const scoped = (await (
+      await fetch(`${a.baseUrl}/api/events?ownerType=user&ownerId=local-user`)
+    ).json()) as ListEventsResponse;
+    expect(scoped.events.map((e) => e.id)).toEqual(["ev_recent"]);
+
+    const all = (await (await fetch(`${a.baseUrl}/api/events`)).json()) as ListEventsResponse;
+    expect(all.events.map((e) => e.id)).toEqual(["ev_recent", "ev_old"]);
+  });
+
+  it("400s a half-specified owner pair, naming both parameters", async () => {
+    const a = await boot();
+
+    const res = await fetch(`${a.baseUrl}/api/events?ownerId=local-user`);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe(HALF_FILTER_ERROR);
   });
 });
 
