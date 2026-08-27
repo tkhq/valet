@@ -2,6 +2,9 @@
  * TanStack Query hooks for the recording-gateway usage API.
  * Consumes `GET /api/proxy/usage/summary`, `GET /api/proxy/requests`, and
  * `GET /api/proxy/requests/:id` (LLM recording gateway, Task 9 backend).
+ *
+ * Routed through the central `api` client so 401→login handling and the
+ * 30-second request timeout apply the same way as every other page.
  */
 import { useQuery, type UseQueryOptions } from "@tanstack/react-query";
 import type {
@@ -9,14 +12,7 @@ import type {
   ProxyRequestListItem,
   ProxyRequestDetail,
 } from "@valet/api/wire";
-
-const BASE = "/api";
-
-async function proxyGet<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`);
-  if (!res.ok) throw new Error(`GET ${path} → ${res.status}`);
-  return (await res.json()) as T;
-}
+import { api } from "~/api/client";
 
 export const qkProxy = {
   summary: (window: string) => ["proxy", "usage", "summary", window] as const,
@@ -45,7 +41,7 @@ export function useProxyUsageSummary(
 ) {
   return useQuery<ProxyUsageSummary>({
     queryKey: qkProxy.summary(window),
-    queryFn: () => proxyGet(`/proxy/usage/summary?window=${encodeURIComponent(window)}`),
+    queryFn: () => api.proxyUsageSummary(window),
     staleTime: 60_000,
     ...opts,
   });
@@ -57,17 +53,11 @@ export function useProxyRequests(
 ) {
   return useQuery<ProxyRequestListResponse>({
     queryKey: qkProxy.requests(filters),
-    queryFn: () => {
-      const qs = new URLSearchParams();
-      if (filters.user) qs.set("user", filters.user);
-      if (filters.model) qs.set("model", filters.model);
-      if (filters.harness) qs.set("harness", filters.harness);
-      if (filters.from !== undefined) qs.set("from", String(filters.from));
-      if (filters.to !== undefined) qs.set("to", String(filters.to));
-      if (filters.cursor) qs.set("cursor", filters.cursor);
-      if (filters.limit !== undefined) qs.set("limit", String(filters.limit));
-      const tail = qs.toString() ? `?${qs}` : "";
-      return proxyGet(`/proxy/requests${tail}`);
+    queryFn: async () => {
+      const raw = await api.proxyRequests(filters);
+      // The backend returns `{ requests, nextCursor }` but the hook exposes
+      // `{ items, nextCursor }` so callers don't need to know the key name.
+      return { items: raw.requests, nextCursor: raw.nextCursor };
     },
     staleTime: 30_000,
     ...opts,
@@ -80,7 +70,7 @@ export function useProxyRequestDetail(
 ) {
   return useQuery<ProxyRequestDetail>({
     queryKey: qkProxy.detail(id),
-    queryFn: () => proxyGet(`/proxy/requests/${encodeURIComponent(id)}`),
+    queryFn: () => api.proxyRequestDetail(id),
     enabled: !!id,
     staleTime: 5 * 60_000,
     ...opts,

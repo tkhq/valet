@@ -19,6 +19,11 @@ import type {
 
 // --- mock data -----------------------------------------------------------
 
+// Two day buckets at known epoch-ms day boundaries so the chart renders
+// non-flat bars (costUsd > 0 on both days).
+const DAY_A_MS = Math.floor(1_750_000_000_000 / 86_400_000) * 86_400_000;
+const DAY_B_MS = DAY_A_MS + 86_400_000;
+
 const mockSummary: ProxyUsageSummary = {
   windowMs: 7 * 86_400_000,
   totalRequests: 42,
@@ -63,6 +68,10 @@ const mockSummary: ProxyUsageSummary = {
       totalTokens: 9_000,
       costUsd: 0.07,
     },
+  ],
+  byDay: [
+    { dayMs: DAY_A_MS, requests: 20, totalTokens: 7_000, costUsd: 0.07 },
+    { dayMs: DAY_B_MS, requests: 22, totalTokens: 8_000, costUsd: 0.0534 },
   ],
 };
 
@@ -146,7 +155,6 @@ vi.mock("~/api/proxy-usage", () => ({
   useProxyUsageSummary: () => summaryResult,
   useProxyRequests: () => requestsResult,
   useProxyRequestDetail: () => detailResult,
-  buildDayBuckets: () => [],
   qkProxy: { summary: () => [], requests: () => [], detail: () => [] },
 }));
 
@@ -170,14 +178,29 @@ describe("UsagePage — spend summary", () => {
     render(<UsagePage />);
     expect(screen.getByText("42")).toBeTruthy();
   });
+
+  it("renders the spend chart with the correct number of day bars", () => {
+    const { container } = render(<UsagePage />);
+    // mockSummary.byDay has 2 entries; SpendChart renders one <rect> per bucket.
+    const rects = container.querySelectorAll("svg[aria-label='Daily spend chart'] rect");
+    expect(rects.length).toBe(2);
+    // Both bars must have a height attribute greater than the 2px minimum floor,
+    // confirming that real costUsd values (not zeroes) drove the scaling.
+    const heights = Array.from(rects).map((r) => Number(r.getAttribute("height")));
+    expect(heights.every((h) => h > 2)).toBe(true);
+  });
 });
 
 describe("UsagePage — breakdown tables", () => {
-  it("renders a row for each model", () => {
+  it("renders a row for each model in the breakdown table", () => {
     render(<UsagePage />);
-    // The model name appears in both the breakdown table and the request log.
-    expect(screen.getAllByText("claude-opus-4-5").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("gpt-4o").length).toBeGreaterThan(0);
+    // Find the "By model" heading, then assert both model names appear inside
+    // the same section (the parent wrapper div of BreakdownTable).
+    const heading = screen.getByText("By model");
+    const section = heading.closest("div");
+    expect(section).toBeTruthy();
+    expect(section!.textContent).toContain("claude-opus-4-5");
+    expect(section!.textContent).toContain("gpt-4o");
   });
 
   it("renders harness row", () => {
@@ -191,10 +214,6 @@ describe("UsagePage — request log drill-down", () => {
   it("clicking a request row opens the SampleView", async () => {
     render(<UsagePage />);
 
-    // The request item is in the log. Click the row.
-    const row = screen.getAllByRole("button").find(
-      (el) => el.getAttribute("aria-pressed") === "false",
-    );
     // Row renders as role=button with aria-pressed
     const rowEl = document.querySelector("tr[role='button']") as HTMLElement;
     expect(rowEl).toBeTruthy();

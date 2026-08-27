@@ -8,7 +8,7 @@
 import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { useProxyUsageSummary, useProxyRequests } from "~/api/proxy-usage";
-import { SpendChart, buildDayBuckets } from "~/components/usage/SpendChart";
+import { SpendChart } from "~/components/usage/SpendChart";
 import { BreakdownTable, type BreakdownRow } from "~/components/usage/BreakdownTable";
 import { RequestLog } from "~/components/usage/RequestLog";
 import { SampleView } from "~/components/usage/SampleView";
@@ -88,10 +88,8 @@ export function UsagePage() {
       costUsd: b.costUsd,
     })) ?? [];
 
-  // Build chart buckets from windowMs.
-  const chartBuckets = summary
-    ? buildDayBuckets(summary.windowMs)
-    : [];
+  // Use the real per-day buckets from the summary endpoint.
+  const chartBuckets = summary?.byDay ?? [];
 
   return (
     <div className="flex-1 overflow-y-auto">

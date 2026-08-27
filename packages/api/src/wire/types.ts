@@ -3220,6 +3220,15 @@ export interface ProxyHarnessBucket extends ProxyUsageBucket {
   harness: string | null;
 }
 
+/** One UTC day's aggregate in a `ProxyUsageSummary`. `dayMs` is epoch ms
+ * floor-truncated to the day boundary (`created_at / 86400000 * 86400000`). */
+export interface ProxyDayBucket {
+  dayMs: number;
+  requests: number;
+  totalTokens: number;
+  costUsd: number;
+}
+
 /**
  * `GET /api/proxy/usage/summary` — token and cost aggregates for the
  * requested time window. Members see only their own rows; org admins see
@@ -3235,6 +3244,8 @@ export interface ProxyUsageSummary {
   byUser: ProxyUserBucket[];
   byModel: ProxyModelBucket[];
   byHarness: ProxyHarnessBucket[];
+  /** Per-UTC-day aggregates ordered by day ascending, for the spend chart. */
+  byDay: ProxyDayBucket[];
 }
 
 /**

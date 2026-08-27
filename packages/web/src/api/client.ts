@@ -176,6 +176,9 @@ import type {
   WorkflowScheduleResponse,
   WithdrawDecisionRequest,
   ListCommandsResponse,
+  ProxyUsageSummary,
+  ProxyRequestDetail,
+  ProxyRequestListItem,
 } from "@valet/api/wire";
 import type {
   ExportMemoryResponse,
@@ -996,6 +999,32 @@ export const api = {
   listMyGrants: () => request<ListGrantsResponse>("GET", "/me/grants"),
   deleteMyGrant: (body: DeleteGrantRequest) =>
     request<DeleteGrantResponse>("DELETE", "/me/grants", body),
+
+  // ── LLM proxy usage (recording-gateway dashboard) ──────────────────────
+  proxyUsageSummary: (window: string = "7d") =>
+    request<ProxyUsageSummary>("GET", `/proxy/usage/summary?window=${encodeURIComponent(window)}`),
+  proxyRequests: (opts: {
+    user?: string;
+    model?: string;
+    harness?: string;
+    from?: number;
+    to?: number;
+    cursor?: string;
+    limit?: number;
+  } = {}) => {
+    const qs = new URLSearchParams();
+    if (opts.user) qs.set("user", opts.user);
+    if (opts.model) qs.set("model", opts.model);
+    if (opts.harness) qs.set("harness", opts.harness);
+    if (opts.from !== undefined) qs.set("from", String(opts.from));
+    if (opts.to !== undefined) qs.set("to", String(opts.to));
+    if (opts.cursor) qs.set("cursor", opts.cursor);
+    if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+    const tail = qs.toString() ? `?${qs}` : "";
+    return request<{ requests: ProxyRequestListItem[]; nextCursor?: string }>("GET", `/proxy/requests${tail}`);
+  },
+  proxyRequestDetail: (id: string) =>
+    request<ProxyRequestDetail>("GET", `/proxy/requests/${encodeURIComponent(id)}`),
 };
 
 export { ApiError };

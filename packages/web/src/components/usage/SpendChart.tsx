@@ -2,14 +2,10 @@
  * Inline-SVG bar chart of cost per day bucket. No chart library dependency.
  * Heights scale to the max bucket; empty data shows a flat baseline.
  */
-
-interface DayBucket {
-  label: string; // e.g. "Mon 18"
-  costUsd: number;
-}
+import type { ProxyDayBucket } from "@valet/api/wire";
 
 interface SpendChartProps {
-  buckets: DayBucket[];
+  buckets: ProxyDayBucket[];
 }
 
 const CHART_H = 80;
@@ -17,6 +13,13 @@ const BAR_W = 16;
 const GAP = 6;
 const PADDING_TOP = 8;
 const LABEL_H = 16;
+
+/** Format epoch-ms to a short day label, e.g. "Mon 18". */
+function dayLabel(dayMs: number): string {
+  return new Date(dayMs)
+    .toLocaleDateString(undefined, { weekday: "short", day: "numeric" })
+    .replace(",", "");
+}
 
 export function SpendChart({ buckets }: SpendChartProps) {
   if (buckets.length === 0) {
@@ -42,13 +45,14 @@ export function SpendChart({ buckets }: SpendChartProps) {
         style={{ minWidth: `${svgW}px` }}
       >
         {buckets.map((bucket, i) => {
+          const label = dayLabel(bucket.dayMs);
           const barH = Math.max(2, (bucket.costUsd / maxCost) * (CHART_H - PADDING_TOP));
           const x = i * (BAR_W + GAP);
           const y = CHART_H - barH;
           return (
-            <g key={bucket.label}>
+            <g key={bucket.dayMs}>
               <title>
-                {bucket.label}: ${bucket.costUsd.toFixed(4)}
+                {label}: ${bucket.costUsd.toFixed(4)}
               </title>
               <rect
                 x={x}
@@ -65,7 +69,7 @@ export function SpendChart({ buckets }: SpendChartProps) {
                 fontSize={9}
                 className="fill-muted"
               >
-                {bucket.label}
+                {label}
               </text>
             </g>
           );
@@ -75,19 +79,4 @@ export function SpendChart({ buckets }: SpendChartProps) {
       </svg>
     </div>
   );
-}
-
-/** Build day buckets from a flat windowMs span + a cost total per day-key. */
-export function buildDayBuckets(
-  windowMs: number,
-  nowMs: number = Date.now(),
-): DayBucket[] {
-  const days = Math.max(1, Math.round(windowMs / 86_400_000));
-  const buckets: DayBucket[] = [];
-  for (let i = days - 1; i >= 0; i--) {
-    const d = new Date(nowMs - i * 86_400_000);
-    const label = d.toLocaleDateString(undefined, { weekday: "short", day: "numeric" }).replace(",", "");
-    buckets.push({ label, costUsd: 0 });
-  }
-  return buckets;
 }

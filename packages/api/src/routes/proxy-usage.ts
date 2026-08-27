@@ -16,6 +16,7 @@ import type { AppEnv } from "../env.js";
 import { llmProxyRequests } from "../schema/index.js";
 import { isOrgAdmin } from "../services/org.js";
 import type {
+  ProxyDayBucket,
   ProxyHarnessBucket,
   ProxyModelBucket,
   ProxyRequestDetail,
@@ -60,6 +61,13 @@ interface ModelAggRow extends AggRow {
 
 interface HarnessAggRow extends AggRow {
   harness: string | null;
+}
+
+interface DayAggRow {
+  day_ms: string | number;
+  requests: string | number;
+  total_tokens: string | number;
+  cost_usd: string | number | null;
 }
 
 function toBucket(row: AggRow): Omit<ProxyUserBucket, "userId"> {
@@ -133,10 +141,25 @@ proxyUsageRouter.get("/usage/summary", async (c) => {
     `)) as { rows: HarnessAggRow[] };
   }
 
-  const [byUserResult, byModelResult, byHarnessResult] = await Promise.all([
+  async function aggByDay(): Promise<{ rows: DayAggRow[] }> {
+    return (await db.execute(sql`
+      SELECT (created_at / 86400000) * 86400000 AS day_ms,
+             COUNT(*)                            AS requests,
+             COALESCE(SUM(total_tokens), 0)      AS total_tokens,
+             COALESCE(SUM(cost_usd), 0)          AS cost_usd
+      FROM llm_proxy_requests
+      WHERE created_at >= ${sinceMs}
+        AND ${scopeClause}
+      GROUP BY (created_at / 86400000) * 86400000
+      ORDER BY day_ms ASC
+    `)) as { rows: DayAggRow[] };
+  }
+
+  const [byUserResult, byModelResult, byHarnessResult, byDayResult] = await Promise.all([
     aggByUser(),
     aggByModel(),
     aggByHarness(),
+    aggByDay(),
   ]);
 
   const byUser: ProxyUserBucket[] = byUserResult.rows.map((r) => ({
@@ -154,7 +177,14 @@ proxyUsageRouter.get("/usage/summary", async (c) => {
     ...toBucket(r),
   }));
 
-  // Compute totals by summing per-user buckets (avoids a fourth query).
+  const byDay: ProxyDayBucket[] = byDayResult.rows.map((r) => ({
+    dayMs: Number(r.day_ms),
+    requests: Number(r.requests),
+    totalTokens: Number(r.total_tokens),
+    costUsd: Number(r.cost_usd ?? 0),
+  }));
+
+  // Compute totals by summing per-user buckets (avoids a fifth query).
   let totalRequests = 0;
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
@@ -178,6 +208,7 @@ proxyUsageRouter.get("/usage/summary", async (c) => {
     byUser,
     byModel,
     byHarness,
+    byDay,
   };
 
   return c.json(body);

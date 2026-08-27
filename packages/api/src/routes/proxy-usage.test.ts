@@ -7,7 +7,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { llmProxyRequests, orgMembers, orgs, users } from "../schema/index.js";
-import type { ProxyUsageSummary, ProxyRequestListItem, ProxyRequestDetail } from "../wire/types.js";
+import type { ProxyUsageSummary, ProxyRequestListItem, ProxyRequestDetail, ProxyDayBucket } from "../wire/types.js";
 
 let api: TestApi | undefined;
 
@@ -287,5 +287,75 @@ describe("GET /api/proxy/usage/summary — cost aggregation", () => {
     expect(body.totalRequests).toBe(1);
     expect(body.totalCostUsd).toBeCloseTo(0.001, 5);
     expect(body.byUser.every((u) => u.userId === "test-member")).toBe(true);
+  });
+});
+
+describe("GET /api/proxy/usage/summary — byDay buckets", () => {
+  it("groups rows by UTC day with correct cost sums", async () => {
+    api = await bootTestApi();
+
+    // Two rows on "today", one row two days ago — within a 7d window.
+    const now = Date.now();
+    const todayBucket = Math.floor(now / 86_400_000) * 86_400_000;
+    const twoDaysAgo = now - 2 * 86_400_000;
+    const twoDaysAgoBucket = Math.floor(twoDaysAgo / 86_400_000) * 86_400_000;
+
+    await api.providers.db.insert(llmProxyRequests).values(
+      makeRow({ id: "req-d1", userId: "local-user", costUsd: 0.01, totalTokens: 100, createdAt: now - 1000 }),
+    );
+    await api.providers.db.insert(llmProxyRequests).values(
+      makeRow({ id: "req-d2", userId: "local-user", costUsd: 0.02, totalTokens: 200, createdAt: now - 2000 }),
+    );
+    await api.providers.db.insert(llmProxyRequests).values(
+      makeRow({ id: "req-d3", userId: "local-user", costUsd: 0.05, totalTokens: 500, createdAt: twoDaysAgo }),
+    );
+
+    const res = await fetch(`${api.baseUrl}/api/proxy/usage/summary?window=7d`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ProxyUsageSummary;
+
+    expect(Array.isArray(body.byDay)).toBe(true);
+    // Must contain exactly two day buckets (today + two-days-ago).
+    expect(body.byDay).toHaveLength(2);
+
+    const buckets = body.byDay as ProxyDayBucket[];
+    // Ordered ascending by day: two-days-ago first, then today.
+    expect(buckets[0].dayMs).toBe(twoDaysAgoBucket);
+    expect(buckets[1].dayMs).toBe(todayBucket);
+
+    // Two-days-ago: one row costing 0.05.
+    expect(buckets[0].requests).toBe(1);
+    expect(buckets[0].costUsd).toBeCloseTo(0.05, 5);
+
+    // Today: two rows summing 0.03.
+    expect(buckets[1].requests).toBe(2);
+    expect(buckets[1].costUsd).toBeCloseTo(0.03, 5);
+  });
+
+  it("byDay respects member scoping — a member only sees their own rows", async () => {
+    api = await bootTestApi();
+
+    const now = Date.now();
+    const todayBucket = Math.floor(now / 86_400_000) * 86_400_000;
+
+    await api.providers.db.insert(llmProxyRequests).values(
+      makeRow({ id: "req-scope-member", userId: "test-member", costUsd: 0.007, totalTokens: 70, createdAt: now - 1000 }),
+    );
+    await api.providers.db.insert(llmProxyRequests).values(
+      makeRow({ id: "req-scope-admin", userId: "local-user", costUsd: 0.999, totalTokens: 9999, createdAt: now - 2000 }),
+    );
+
+    const res = await fetch(`${api.baseUrl}/api/proxy/usage/summary?window=7d`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ProxyUsageSummary;
+
+    const buckets = body.byDay as ProxyDayBucket[];
+    // Member sees only one day bucket covering their own row.
+    expect(buckets).toHaveLength(1);
+    expect(buckets[0].dayMs).toBe(todayBucket);
+    expect(buckets[0].requests).toBe(1);
+    expect(buckets[0].costUsd).toBeCloseTo(0.007, 5);
   });
 });
