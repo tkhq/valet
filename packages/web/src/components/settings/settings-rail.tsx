@@ -40,6 +40,7 @@ const ORGANIZATION_ITEMS = [
   { to: "/settings/organization/members", label: "Members" },
   { to: "/settings/organization/teams", label: "Teams" },
   { to: "/settings/organization/models", label: "Models" },
+  { to: "/settings/organization/proxy", label: "Proxy" },
   { to: "/settings/organization/library", label: "Library" },
   { to: "/settings/organization/github", label: "GitHub" },
   { to: "/settings/organization/slack", label: "Slack" },
