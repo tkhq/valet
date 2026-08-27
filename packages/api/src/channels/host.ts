@@ -33,11 +33,10 @@ import {
 } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
-import { agentSessions } from "../schema/index.js";
+import { agentSessions, assistants } from "../schema/index.js";
 import { ensureDefaultAssistantSession, loadAssistant } from "../assistants/service.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
-import { GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
-import { isOrgAdmin } from "../services/org.js";
+import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
 import { canResolveSessionGate } from "../services/session-access.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import type { AttentionChannelDeliverer, AttentionEvent } from "../orchestrator/attention.js";
@@ -140,6 +139,13 @@ export class ChannelHost {
    * one attention DM per recipient. Resolution edits every one of them. */
   private gatePrompts = new Map<string, GatePromptRef[]>();
   private gateActions = new Map<string, DecisionAction[]>();
+  /** Recent gate resolutions, bounded FIFO (cap `DEDUP_CAP`). A prompt can be
+   * recorded AFTER its gate settled — `routeAttention` fires deliverers
+   * without awaiting them, so a fast resolution legitimately beats an
+   * in-flight DM send. This map lets the late prompt get the resolution edit
+   * immediately instead of keeping live buttons forever. */
+  private settledGates = new Map<string, DecisionResolution>();
+  private settledOrder: string[] = [];
   private orgId: string | null = null;
   private outboundUnsub: Unsubscribe | null = null;
   private delivered = new Set<string>();
@@ -171,8 +177,9 @@ export class ChannelHost {
       markDelivered: (dedupeKey) => this.markDelivered(dedupeKey),
       abortTurn: async (sessionId, threadId) => {
         // Streams only ever run on a channel thread, and channel threads only
-        // exist on an assistant's session (see `handleGateCallback`'s note on
-        // the same invariant). An assistant session id names the assistant,
+        // exist on an assistant's session (`handleMessage` always threads
+        // through `ensureDefaultAssistantSession`, which is what enforces
+        // the invariant). An assistant session id names the assistant,
         // not its owner, so the owner is read from the row: only a
         // user-owned assistant has a single actor to abort as.
         const assistantId = parseAssistantSessionId(sessionId);
@@ -567,18 +574,49 @@ export class ChannelHost {
     // no defined order and the reader would sometimes see the card first.
     await this.streamBridge.closeForGate(sessionId, gate.threadId);
 
-    const ref = await transport.sendGatePrompt(mapped.conversationKey, {
-      gateId: gate.id,
-      title: gate.title,
-      body: gate.body,
-      actions: gate.actions,
-    });
-    this.gateActions.set(gate.id, gate.actions);
-    this.recordGatePrompt(gate.id, ref, sessionId);
+    await this.sendAndRecordGatePrompt(
+      transport,
+      mapped.conversationKey,
+      { gateId: gate.id, title: gate.title, body: gate.body, actions: gate.actions },
+      sessionId,
+    );
+  }
+
+  /**
+   * Sends a gate prompt, records its ref for the inbound `gate_callback`
+   * path, and — when the gate settled while the send was in flight — replays
+   * the resolution edit so the new message never keeps live buttons for a
+   * settled gate. The one writer both send sites (the channel-thread card and
+   * the attention DM) go through, so ref bookkeeping cannot drift between
+   * them.
+   */
+  private async sendAndRecordGatePrompt(
+    transport: ChannelTransport,
+    conversationKey: string,
+    prompt: { gateId: string; title: string; body?: string; actions: DecisionAction[] },
+    sessionId: string,
+  ): Promise<void> {
+    const ref = await transport.sendGatePrompt(conversationKey, prompt);
+    this.gateActions.set(prompt.gateId, prompt.actions);
+    this.recordGatePrompt(prompt.gateId, ref, sessionId);
+    const settled = this.settledGates.get(prompt.gateId);
+    if (settled) {
+      await this.deliverGateResolution(prompt.gateId, settled);
+    }
   }
 
   /** Rule 4: decision_gate_resolved → edit every prompt message with the outcome label, then clear all gate maps. */
   private async deliverGateResolution(gateId: string, resolution: DecisionResolution): Promise<void> {
+    // Remember the resolution BEFORE the refs check: a prompt still in
+    // flight has no ref yet, and `sendAndRecordGatePrompt` reads this map to
+    // backfill the edit when that send lands.
+    this.settledGates.set(gateId, resolution);
+    this.settledOrder.push(gateId);
+    if (this.settledOrder.length > DEDUP_CAP) {
+      const evict = this.settledOrder.shift();
+      if (evict !== undefined) this.settledGates.delete(evict);
+    }
+
     const refs = this.gatePrompts.get(gateId);
     if (!refs || refs.length === 0) return;
     const actions = this.gateActions.get(gateId) ?? [];
@@ -809,7 +847,15 @@ export class ChannelHost {
       await this.dropLog(orgId, "unsupported_kind", event.conversationKey, "gate_callback missing payload");
       return;
     }
-    const mapped = this.gateForRef(gateCallback.ref);
+    let mapped = this.gateForRef(gateCallback.ref);
+    if (!mapped && gateCallback.gateId) {
+      // Fallback: the ref key is rebuilt by the transport from the clicked
+      // message and can drift from the recorded one (thread-ts codecs, LRU
+      // eviction of the send-side key). The gate id embedded in the button
+      // payload recovers the mapping while the gate is still tracked.
+      const firstRef = this.gatePrompts.get(gateCallback.gateId)?.[0];
+      if (firstRef) mapped = this.gateForRef(firstRef);
+    }
     if (!mapped) {
       await transport?.answerCallback?.(gateCallback.callbackId, "This approval has expired — resolve it on the web.");
       await this.dropLog(orgId, "unsupported_kind", event.conversationKey, "unknown_gate_ref");
@@ -829,16 +875,16 @@ export class ChannelHost {
     const sessionRow = rows[0];
     if (!sessionRow || !(await canResolveSessionGate(this.deps.db, sessionRow, userId))) {
       await transport?.answerCallback?.(gateCallback.callbackId, "This approval has expired — resolve it on the web.");
-      await this.dropLog(orgId, "unsupported_kind", event.conversationKey, "unknown_gate_ref");
+      await this.dropLog(orgId, "unauthorized", event.conversationKey, "sender may not resolve this session's gates");
       return;
     }
 
-    // Same backstop as the web resolve route: `always_allow` widens policy
-    // for the whole org, so a non-admin's click must fail here with a clear
-    // answer, not late inside the engine.
-    if (gateCallback.actionId === GATE_ACTION_ALWAYS_ALLOW && !(await isOrgAdmin(this.deps.db, orgId, userId))) {
+    // Same backstop as the web resolve route, via the same shared guard:
+    // `always_allow` widens policy for the SESSION's org, so a non-admin's
+    // click must fail here with a clear answer, not late inside the engine.
+    if (gateCallback.actionId === GATE_ACTION_ALWAYS_ALLOW && !(await canApplyAlwaysAllow(this.deps.db, sessionRow.orgId, userId))) {
       await transport?.answerCallback?.(gateCallback.callbackId, "Only an org admin can choose Always allow — resolve it on the web.");
-      await this.dropLog(orgId, "unsupported_kind", event.conversationKey, "always_allow requires org admin");
+      await this.dropLog(orgId, "unauthorized", event.conversationKey, "always_allow requires org admin");
       return;
     }
 
@@ -846,20 +892,41 @@ export class ChannelHost {
     // recorded from two senders — the channel-thread card (always the
     // sender's default assistant session) and an attention DM (any session
     // the recipient may resolve) — so the assistant-only shortcut this path
-    // used before no longer covers it. `sessionFor` routes assistant ids
-    // through `assistantSessionFor` itself. A gate no longer pending on the
-    // session makes `resolveDecision` throw — caught by `handleUpdate`'s
-    // try/catch (fails safe, not silently wrong).
-    const session = await this.deps.engineHost.sessionFor(
-      mapped.sessionId,
-      await loadSessionMeta(this.deps.db, sessionRow),
-    );
-    await session.resolveDecision(mapped.gateId, {
-      actionId: gateCallback.actionId,
-      resolvedBy: userId,
-      resolvedAt: this.now(),
-      source: { channelType, channelId: event.conversationKey, messageId: gateCallback.ref.messageId },
-    });
+    // used before no longer covers it. Assistant sessions must still wake
+    // through `assistantSessionFor`: rows migrated from
+    // orchestrator_identities keep legacy `orchestrator:*` session ids that
+    // `sessionFor`'s prefix parse cannot recognize, and a generic build
+    // cached under that id would serve later assistant wakes without persona
+    // or memory. The assistants table is the authority on which ids those
+    // are (`assistants_session` unique index).
+    const assistantRows = await this.deps.db
+      .select({ id: assistants.id })
+      .from(assistants)
+      .where(eq(assistants.sessionId, mapped.sessionId))
+      .limit(1);
+    const session = assistantRows[0]
+      ? await this.deps.engineHost.assistantSessionFor(assistantRows[0].id, { actorUserId: userId, orgId })
+      : await this.deps.engineHost.sessionFor(mapped.sessionId, await loadSessionMeta(this.deps.db, sessionRow));
+    try {
+      await session.resolveDecision(mapped.gateId, {
+        actionId: gateCallback.actionId,
+        resolvedBy: userId,
+        resolvedAt: this.now(),
+        source: { channelType, channelId: event.conversationKey, messageId: gateCallback.ref.messageId },
+      });
+    } catch (err) {
+      // Routine collision, not an anomaly: one gate holds several prompt
+      // messages (channel card + one DM per recipient), so a second
+      // recipient can click after the first resolution settles the gate.
+      // Every other rejection branch answers the callback — this one must
+      // too, or the clicker's UI spins forever.
+      console.error("[channels] gate resolve failed (already settled?)", err);
+      await transport?.answerCallback?.(
+        gateCallback.callbackId,
+        "This approval was already resolved. Open the session in Valet to see the outcome.",
+      );
+      return;
+    }
     await transport?.answerCallback?.(gateCallback.callbackId);
   }
 
@@ -885,24 +952,40 @@ export class ChannelHost {
             const conversationKey = hasOpenDirect(transport)
               ? await transport.openDirectConversation(link.externalId)
               : `${channelType}:dm:${link.externalId}`;
-            // An approval event carries its gate, so the DM is a real prompt:
-            // the same buttons the channel-thread card gets, answered through
-            // the same inbound `gate_callback` path. Everything else stays a
-            // plain summary message.
+            // An approval event carries its gate, so the DM can be a real
+            // prompt: the same buttons the channel-thread card gets, answered
+            // through the same inbound `gate_callback` path. Buttons go only
+            // to a recipient whose click would be authorized — an audience
+            // can be broader than the resolver set (org admins for an
+            // org-owned session), and a button that always answers "expired"
+            // is worse than the plain summary.
             if (event.gate && event.sessionId) {
-              const ref = await transport.sendGatePrompt(conversationKey, {
-                gateId: event.gate.id,
-                title: event.title,
-                body: this.attentionBody(event),
-                actions: event.gate.actions,
-              });
-              this.gateActions.set(event.gate.id, event.gate.actions);
-              this.recordGatePrompt(event.gate.id, ref, event.sessionId);
-            } else {
-              await transport.send(conversationKey, {
-                markdown: this.attentionMarkdown(event),
-              });
+              const rows = await this.deps.db
+                .select()
+                .from(agentSessions)
+                .where(eq(agentSessions.id, event.sessionId))
+                .limit(1);
+              const sessionRow = rows[0];
+              if (sessionRow && (await canResolveSessionGate(this.deps.db, sessionRow, userId))) {
+                await this.sendAndRecordGatePrompt(
+                  transport,
+                  conversationKey,
+                  {
+                    gateId: event.gate.id,
+                    title: event.title,
+                    body: this.attentionBody(event),
+                    actions: event.gate.actions,
+                  },
+                  event.sessionId,
+                );
+                continue;
+              }
+              // Recipient cannot resolve this gate (or its app row is gone):
+              // fall through to the plain summary with the web link.
             }
+            await transport.send(conversationKey, {
+              markdown: this.attentionMarkdown(event),
+            });
           } catch (err) {
             console.error(`[channels] ${channelType}: attention delivery failed`, err);
           }
@@ -921,11 +1004,7 @@ export class ChannelHost {
   }
 
   private attentionMarkdown(event: AttentionEvent): string {
-    let markdown = `**${event.title}**`;
-    if (event.body) markdown += `\n\n${event.body}`;
-    if (event.href && this.deps.publicUrl) {
-      markdown += `\n\n[Open in Valet](${this.deps.publicUrl}${event.href})`;
-    }
-    return markdown;
+    const rest = this.attentionBody(event);
+    return rest === undefined ? `**${event.title}**` : `**${event.title}**\n\n${rest}`;
   }
 }

@@ -21,7 +21,7 @@ import {
   type ValetPlugin,
 } from "@valet/engine";
 import { PgSessionStore, PgEventStream } from "@valet/store-postgres";
-import { agentSessions } from "../schema/index.js";
+import { agentSessions, teamMembers, teams } from "../schema/index.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost } from "../engine/host.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
@@ -685,9 +685,25 @@ describe("ChannelHost.attentionDeliverer", () => {
     expect(fakeTransport.sent[0]?.message.markdown).not.toContain("Open in Valet");
   });
 
+  /** The eligibility gate reads the session's app row, so deliverer tests
+   * that expect buttons must seed one the recipient may resolve. */
+  async function seedUserSession(id: string, ownerId = USER_ID): Promise<void> {
+    await testDb.appDb.insert(agentSessions).values({
+      id,
+      userId: ownerId,
+      orgId: ORG_ID,
+      workspace: "w",
+      ownerType: "user",
+      ownerId,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+  }
+
   it("approval event with a gate sends a real prompt: buttons, link in the body, ref recorded", async () => {
     host = await buildHost({ publicUrl: "https://valet.example.com" });
     await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    await seedUserSession("sess-1");
 
     await host.attentionDeliverer().deliver(
       USER_ID,
@@ -740,6 +756,21 @@ describe("ChannelHost.attentionDeliverer", () => {
     await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
     await linkIdentity(testDb.appDb, { provider: "fake", externalId: "88", userId: "second-user" });
 
+    // A team-owned session, so BOTH recipients pass the eligibility gate.
+    await testDb.appDb.insert(teams).values({ id: "team-appr", orgId: ORG_ID, name: "Approvers", createdAt: 1 });
+    await testDb.appDb.insert(teamMembers).values({ teamId: "team-appr", userId: USER_ID, role: "member" });
+    await testDb.appDb.insert(teamMembers).values({ teamId: "team-appr", userId: "second-user", role: "member" });
+    await testDb.appDb.insert(agentSessions).values({
+      id: "sess-1",
+      userId: USER_ID,
+      orgId: ORG_ID,
+      workspace: "w",
+      ownerType: "team",
+      ownerId: "team-appr",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
     const approval = event({
       kind: "approval",
       sessionId: "sess-1",
@@ -775,5 +806,67 @@ describe("ChannelHost.attentionDeliverer", () => {
     for (const p of fakeTransport.gatePrompts) {
       expect(host.gateForRef({ conversationKey: p.conversationKey, messageId: p.messageId })).toBeNull();
     }
+  });
+
+  it("a recipient who may not resolve the gate gets the plain summary, not dead buttons", async () => {
+    host = await buildHost({ publicUrl: "https://valet.example.com" });
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    await seedUserSession("sess-foreign", "someone-else");
+
+    await host.attentionDeliverer().deliver(
+      USER_ID,
+      event({
+        kind: "approval",
+        sessionId: "sess-foreign",
+        href: "/sessions/sess-foreign",
+        gate: { id: "gate-foreign", actions: [{ id: "approve", label: "Approve" }] },
+      }),
+    );
+
+    expect(fakeTransport.gatePrompts).toHaveLength(0);
+    expect(fakeTransport.sent).toHaveLength(1);
+    expect(fakeTransport.sent[0]?.message.markdown).toContain("Open in Valet");
+  });
+
+  it("a prompt recorded AFTER its gate settled is edited immediately, not left with live buttons", async () => {
+    host = await buildHost({ publicUrl: "https://valet.example.com" });
+    await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    await seedUserSession("sess-race");
+
+    // The gate settles before the DM prompt lands — routeAttention fires
+    // deliverers without awaiting them, so this ordering is legitimate.
+    await eventStream.append(
+      {
+        sessionId: "sess-race",
+        threadId: "t-1",
+        timestamp: Date.now(),
+        event: {
+          type: "decision_gate_resolved",
+          threadId: "t-1",
+          gateId: "gate-race",
+          resolution: { actionId: "approve", resolvedBy: USER_ID, resolvedAt: Date.now() },
+        },
+      },
+      `race-${randomUUID()}`,
+    );
+    // No refs exist yet, so the resolved event changes nothing observable;
+    // give the subscription a beat to record the settled resolution.
+    await new Promise((r) => setTimeout(r, 300));
+
+    await host.attentionDeliverer().deliver(
+      USER_ID,
+      event({
+        kind: "approval",
+        sessionId: "sess-race",
+        gate: { id: "gate-race", actions: [{ id: "approve", label: "Approve" }] },
+      }),
+    );
+
+    expect(fakeTransport.gatePrompts).toHaveLength(1);
+    await vi.waitFor(() => {
+      expect(fakeTransport.gateEdits).toHaveLength(1);
+    });
+    const p = fakeTransport.gatePrompts[0];
+    expect(host.gateForRef({ conversationKey: p?.conversationKey ?? "", messageId: p?.messageId ?? "" })).toBeNull();
   });
 });

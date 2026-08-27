@@ -40,8 +40,7 @@ import type {
 } from "../wire/types.js";
 import { commandResultEntryToMessage, engineGateToWire, engineSignalToWire, engineToWireParts } from "../engine/bridge.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
-import { GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
-import { isOrgAdmin } from "../services/org.js";
+import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
 import type { Providers } from "../providers/types.js";
 import { canResolveSessionGate, canViewSession } from "../services/session-access.js";
 import {
@@ -655,7 +654,10 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
   // view check: answering a gate acts on the session's behalf. The same
   // named check gates the channel gate-callback path.
   if (!(await canResolveSessionGate(c.var.providers.db, session, c.var.user.id))) {
-    return c.json({ error: "not allowed to resolve gates on this session" }, 403);
+    return c.json(
+      { error: "Only the session owner or a member of its team can resolve this approval. Ask one of them." },
+      403,
+    );
   }
 
   let body: ResolveDecisionRequest;
@@ -673,11 +675,11 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
   // closed for a non-admin resolver, but only after the engine has already
   // opened/consumed the gate. Rejecting here means a non-admin never sees
   // the button "work" only to fail late; the button itself should be hidden
-  // client-side, this is the server-side backstop.
+  // client-side, this is the server-side backstop. `canApplyAlwaysAllow` is
+  // the shared guard (also called by the channel gate-callback path) and is
+  // checked against the SESSION's org, the scope the policy write lands in.
   if (body.actionId === GATE_ACTION_ALWAYS_ALLOW) {
-    const { db } = c.var.providers;
-    const user = c.var.user;
-    if (!(await isOrgAdmin(db, user.orgId, user.id))) {
+    if (!(await canApplyAlwaysAllow(c.var.providers.db, session.orgId, c.var.user.id))) {
       return c.json({ error: "org admin required for always_allow" }, 403);
     }
   }
@@ -707,7 +709,10 @@ messagesRouter.post("/:id/decisions/:gateId/withdraw", async (c) => {
   // Same explicit resolve authorization as the resolve route above —
   // withdrawing settles the gate too.
   if (!(await canResolveSessionGate(c.var.providers.db, session, c.var.user.id))) {
-    return c.json({ error: "not allowed to resolve gates on this session" }, 403);
+    return c.json(
+      { error: "Only the session owner or a member of its team can resolve this approval. Ask one of them." },
+      403,
+    );
   }
 
   let body: WithdrawDecisionRequest = {};

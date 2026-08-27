@@ -60,6 +60,20 @@ export const POLICY_AUDIT_FIELD_CAP = 8192;
 export const GATE_ACTION_APPROVE_SESSION = "approve_session";
 export const GATE_ACTION_ALWAYS_ALLOW = "always_allow";
 
+/**
+ * May `userId` pick `always_allow` on a gate raised in `sessionOrgId`?
+ * The action widens policy for that whole org, so only that org's admins
+ * qualify — checked against the SESSION's org, not the caller's or the
+ * deploy's. One definition for every resolver surface (the web decision
+ * routes and the channel gate-callback path), so a new surface cannot ship
+ * a weaker rule. Front half of a defense-in-depth pair: `onResolution` (T3)
+ * also fails closed for a non-admin resolver, but only after the engine has
+ * already consumed the gate.
+ */
+export async function canApplyAlwaysAllow(db: AppDb, sessionOrgId: string, userId: string): Promise<boolean> {
+  return isOrgAdmin(db, sessionOrgId, userId);
+}
+
 /** Deterministic row id for an "always allow" org policy minted from an
  *  approval prompt (binding carry-forward #1): a replayed gate resolution
  *  re-fires `onResolution`, so the write MUST be an upsert on a stable key —

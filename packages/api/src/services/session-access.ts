@@ -107,16 +107,17 @@ export async function canAdministerSession(
  *
  * Today the rule matches `canViewSession` — the direct owner, or a live
  * member of the owning team (the same audience the attention router
- * notifies for `kind: "approval"`). It is still a separate, named check:
- * answering a gate acts on the session's behalf, so every resolver (the web
- * decision routes and the channel gate-callback path) must make that
- * decision explicitly rather than inherit it from "may read this".
+ * notifies for `kind: "approval"`) — so the body delegates to it: one copy
+ * of the ownership matrix, and a future divergence has to be written here
+ * deliberately. It is still a separate, named check: answering a gate acts
+ * on the session's behalf, so every resolver (the web decision routes and
+ * the channel gate-callback path) must make that decision explicitly rather
+ * than inherit it from "may read this".
  */
 export async function canResolveSessionGate(
   db: AppDb,
   session: SessionOwnerLike,
   callerId: string,
 ): Promise<boolean> {
-  if (session.ownerType === "team") return isTeamMember(db, session.ownerId, callerId);
-  return session.userId === callerId;
+  return canViewSession(db, session, callerId);
 }
