@@ -423,4 +423,56 @@ describe("UsagePage — OnboardingPanel mode snippets", () => {
     const allText = document.body.textContent ?? "";
     expect(allText).toContain("unset it");
   });
+
+  // New tests per spec -------------------------------------------------------
+
+  it("numbered steps render after key creation", () => {
+    settingsResult = { data: { enabled: true, mode: "centralized" }, isLoading: false };
+    render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "Create proxy key" }));
+    // Each step heading contains "Step N"
+    expect(screen.getAllByText(/Step 1/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Step 2/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Step 3/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Step 4/).length).toBeGreaterThan(0);
+  });
+
+  it("disabled-gateway callout in onboarding panel when enabled=false", () => {
+    settingsResult = { data: { enabled: false, mode: "centralized" }, isLoading: false };
+    render(<UsagePage />);
+    // The onboarding panel shows the prerequisite callout alongside the page-level notice.
+    expect(screen.getByText(/admin must enable/)).toBeTruthy();
+    const links = document.querySelectorAll("a[href='/settings/organization/proxy']");
+    expect(links.length).toBeGreaterThan(0);
+  });
+
+  it("Codex pass-through snippet uses http_headers and OPENAI_API_KEY, not VALET_KEY as env_key", () => {
+    settingsResult = { data: { enabled: true, mode: "passthrough" }, isLoading: false };
+    render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "Create proxy key" }));
+    const allText = document.body.textContent ?? "";
+    expect(allText).toContain("http_headers");
+    expect(allText).toContain("OPENAI_API_KEY");
+    // env_key must not be VALET_KEY in pass-through mode
+    expect(allText).not.toContain('env_key = "VALET_KEY"');
+  });
+
+  it("Codex centralized snippet uses VALET_KEY and has no http_headers", () => {
+    settingsResult = { data: { enabled: true, mode: "centralized" }, isLoading: false };
+    render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "Create proxy key" }));
+    const allText = document.body.textContent ?? "";
+    expect(allText).toContain('env_key = "VALET_KEY"');
+    expect(allText).not.toContain("http_headers");
+  });
+
+  it("loading state hides mode-specific snippets", () => {
+    settingsResult = { data: undefined, isLoading: true };
+    render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "Create proxy key" }));
+    // Mode-specific env vars must not appear while settings are loading.
+    expect(screen.queryByText(/ANTHROPIC_BASE_URL/)).toBeNull();
+    // A loading indicator should be shown instead.
+    expect(screen.getByText(/Loading mode configuration/)).toBeTruthy();
+  });
 });

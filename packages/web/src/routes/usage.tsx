@@ -191,7 +191,7 @@ export function UsagePage() {
         </div>
 
         {/* Onboarding */}
-        <OnboardingPanel mode={settingsQ.data?.mode ?? "centralized"} />
+        <OnboardingPanel settingsQuery={settingsQ} />
       </div>
     </div>
   );
