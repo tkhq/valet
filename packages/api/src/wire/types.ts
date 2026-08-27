@@ -2140,29 +2140,65 @@ export interface UsageMemberSummary extends UsageWindow {
  * `workflow`, or `proxy` (external Claude Code / Codex). */
 export type UsageUseCase = "orchestrator" | "session" | "workflow" | "proxy";
 
+/** A spend bucket with the full token-type split (input/output/cache) so cache
+ * efficiency is visible, plus `unpricedTurns` (turns on custom/dev models that
+ * burn tokens but carry no cost). */
 export interface UsageBucket {
+  costUsd: number;
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  turns: number;
+  unpricedTurns: number;
+}
+
+/** `GET /api/usage/breakdown?window=&scope=me|org` — spend for a window across
+ * ALL use cases (engine sessions + workflows + proxy), from the single
+ * `cost_entries` definition. `scope=org` (org-admin only) covers every member;
+ * `byUser` is present only then. */
+export interface UsageBreakdownResponse {
+  windowMs: number;
+  scope: "me" | "org";
+  totalCostUsd: number;
+  totalTokens: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCacheReadTokens: number;
+  totalCacheWriteTokens: number;
+  totalTurns: number;
+  unpricedTurns: number;
+  byUseCase: (UsageBucket & { useCase: UsageUseCase })[];
+  byModel: (UsageBucket & { model: string | null })[];
+  /** Present only for `scope=org`. */
+  byUser?: (UsageBucket & { userId: string; name: string })[];
+  byDay: { dayMs: number; costUsd: number; totalTokens: number }[];
+}
+
+/** `GET /api/usage/items?window=&scope=&useCase=` — drill-down rows for ONE use
+ * case: sessions (title, child-nested via `child_watches`), workflow runs
+ * (workflow name), or proxy (by harness). `sessionId` is set only for
+ * agent-session rows so the UI can link to `/sessions/$id`. */
+export interface UsageDrillItem {
+  id: string;
+  label: string;
+  useCase: UsageUseCase;
+  isChild: boolean;
+  parentId: string | null;
+  sessionId: string | null;
   costUsd: number;
   totalTokens: number;
   turns: number;
 }
 
-/** `GET /api/usage/breakdown?window=` — the caller's total spend for a window,
- * across ALL use cases (engine sessions + workflows + proxy), from the single
- * `cost_entries` definition. */
-export interface UsageBreakdownResponse {
-  windowMs: number;
-  totalCostUsd: number;
-  totalTokens: number;
-  totalInputTokens: number;
-  totalOutputTokens: number;
-  byUseCase: (UsageBucket & { useCase: UsageUseCase })[];
-  byModel: (UsageBucket & { model: string | null })[];
-  byDay: { dayMs: number; costUsd: number; totalTokens: number }[];
+export interface UsageDrillResponse {
+  items: UsageDrillItem[];
 }
 
 /** `GET /api/usage/sessions?window=&useCase=` — per-session spend for the
- * agent-session use cases, for drill-down. `isChild`/`parentSessionId` come
- * from `child_watches` so an orchestrator's spawned children can be nested. */
+ * agent-session use cases, for drill-down. Superseded by `/items` but kept for
+ * the current dashboard; `isChild`/`parentSessionId` come from `child_watches`. */
 export interface UsageSessionRow {
   sessionId: string;
   title: string | null;
