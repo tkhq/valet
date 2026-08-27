@@ -24,21 +24,22 @@ The note's personas share one filesystem. Valet's sessions do not: each session 
 So the substrate moves from the filesystem to the app database, behind session-scoped tools:
 
 - `orchestration.yml` becomes a `security_engagements` row plus ordered `security_cells` rows.
-- Each persona's `state.yml` becomes append-only `security_state_docs` revisions. The content column stores the persona's YAML document verbatim — the note's interchange format survives, only the transport changes.
-- "Read peers' findings by path" becomes `sec_state_read` / `sec_findings_list` tool calls, readable by every persona in the engagement.
+- The personas' shared working directory becomes the **engagement tree**: a virtual filesystem addressed by `sec_fs_*` tools (`sec_fs_write`, `sec_fs_read`, `sec_fs_list`) and backed by append-only `security_files` revisions — the `mem_*` memory-tools shape, which is itself path-addressed. The persona still imagines a filesystem; the rows are the disk. Each cell's `state.yml` lives at a conventional path (`/cells/01-recon/state.yml`), stored verbatim — the note's interchange format survives, only the disk changes.
+- "Read peers' findings by absolute path" stays literal: `sec_fs_read` takes the path, and every persona in the engagement can read the whole tree.
 - "Atomic write of state.yml before the cell status flips" becomes a database transaction — an exclusion the note had to make (transactional `orchestration.yml` writes) that the substrate now gives for free.
 
-The properties the note derives from the file format hold identically: if a persona crashes after `sec_state_write`, its work persists; if the runner crashes, re-reading the cells resumes from the first non-completed cell. No transaction log, no heartbeat, no acknowledgments — the recovery path IS the read path.
+The properties the note derives from the file format hold identically: if a persona crashes after `sec_fs_write`, its work persists; if the runner crashes, re-reading the cells resumes from the first non-completed cell. No transaction log, no heartbeat, no acknowledgments — the recovery path IS the read path.
 
 | Concept note | Valet Security |
 |---|---|
 | Orchestrator process | Runner: an app session with `kind='security'` and the engagement-runner skill |
 | `orchestration.yml` (18 cells) | `security_engagements.plan` + `security_cells` rows |
 | Persona agent (fresh Claude instance) | Child session spawned per cell, persona role attached |
-| `state.yml` per persona working dir | `security_state_docs` append-only revisions (YAML verbatim) |
+| Shared filesystem of working dirs | Engagement tree: `sec_fs_*` tools over `security_files` rows |
+| `state.yml` per persona working dir | `/cells/<NN>-<goal slug>/state.yml`, append-only revisions (YAML verbatim) |
 | Findings list inside `state.yml` | `security_findings` rows via `sec_finding_report`; the state doc references finding ids |
-| Shared protocol file at a URL | Protocol markdown shipped in `packages/plugin-security`, injected into every dispatch prompt |
-| Dispatch prompt naming paths | Dispatch prompt naming the cell, the goal, and completed cells' ids |
+| Shared protocol file at a URL | Protocol markdown shipped in `packages/plugin-security`, mounted read-only at `/protocol.md`, injected into every dispatch prompt |
+| Dispatch prompt naming paths | Dispatch prompt naming the cell, the goal, and the tree paths of completed cells' state docs |
 | grep `checklist_pending=0` exit check | Server-side exit-condition check in `sec_cell_complete` |
 | Orchestrator crash → re-run same yml | Runner session resumes; `sec_status` + `sec_dispatch` pick the first non-completed cell |
 | Manifest of completed cells | `sec_close` computes the manifest from cells + findings |
@@ -51,7 +52,8 @@ One name for one thing, used in code, copy, and this spec:
 - **Cell** — one unit of dispatch: a persona, a mode, a goal. Cells run serially in ordinal order.
 - **Persona** — a specialist role (v1: `code-review`) a child session runs under.
 - **Runner** — the `kind='security'` session whose agent drives the cell loop.
-- **State doc** — a persona's YAML working state, append-only per cell.
+- **Engagement tree** — the engagement's virtual filesystem: paths addressed by `sec_fs_*` tools, backed by append-only `security_files` rows.
+- **State doc** — a persona's YAML working state at `/cells/<NN>-<goal slug>/state.yml`, append-only revisions.
 - **Finding** — a structured, immutable security observation tied to a cell.
 
 ## Architecture Overview
@@ -100,16 +102,17 @@ CREATE TABLE "security_cells" (
 CREATE UNIQUE INDEX "security_cells_engagement_ordinal_unique"
   ON "security_cells" ("engagement_id", "ordinal");
 
-CREATE TABLE "security_state_docs" (
+CREATE TABLE "security_files" (
   "id" text PRIMARY KEY NOT NULL,
   "engagement_id" text NOT NULL,
   "cell_id" text NOT NULL,
+  "path" text NOT NULL,
   "revision" integer NOT NULL,
   "content" text NOT NULL,
   "created_at" bigint NOT NULL
 );
-CREATE UNIQUE INDEX "security_state_docs_cell_revision_unique"
-  ON "security_state_docs" ("cell_id", "revision");
+CREATE UNIQUE INDEX "security_files_path_revision_unique"
+  ON "security_files" ("engagement_id", "path", "revision");
 
 CREATE TABLE "security_findings" (
   "id" text PRIMARY KEY NOT NULL,
@@ -135,15 +138,29 @@ Value sets:
 - `security_findings.severity`: `critical` | `high` | `medium` | `low` | `info`.
 - `security_findings.status`: `open` → `verified` | `refuted`. Forward-only; no route mutates title, body, file, line, or severity after insert. This is the verifier-gate mechanism the note wants ("verifier flips bits, never rewrites") — v1 ships the enum and the transition rule, and no persona exercises it.
 
-Foreign keys are by id-string convention, not SQL constraints, matching every other app table. Size guard: `sec_state_write` rejects content over 256 KB; state docs are working state, not report bodies.
+`security_files.cell_id` is the owning cell — in v1 every writable path belongs to exactly one cell. The read-only mounts (`/protocol.md`, `/plan.yml`) are virtual: `sec_fs_read` serves them from the plugin package and the engagement row, not from `security_files`.
+
+Foreign keys are by id-string convention, not SQL constraints, matching every other app table. Size guard: `sec_fs_write` rejects content over 256 KB per file and 512 revisions per path; the tree holds working state, not report bodies.
 
 ### Column changes to `agent_sessions`
 
 None new. Valet Security uses the `kind` column the Valet Design spec adds (`kind text DEFAULT 'code' NOT NULL`), extending its value set with `'security'`. See Dependencies.
 
-## The State Doc
+## The Engagement Tree and the State Doc
 
-A persona's state doc is YAML, stored verbatim. The server validates two things at `sec_state_write`: the content parses as YAML, and `protocol_version` is a known value. Field-level schema enforcement stays out of v1 (the note's exclusion holds); the protocol markdown is the contract personas follow.
+The tree's layout is conventional, not enforced beyond the write-scope rule:
+
+```
+/protocol.md                    read-only mount (from plugin-security)
+/plan.yml                       read-only mount (from security_engagements.plan)
+/cells/01-recon/state.yml       cell 1's state doc
+/cells/01-recon/notes.md        anything else the persona wants to keep
+/cells/02-authz-sweep/state.yml
+```
+
+Cell directories are named `<ordinal, 2 digits>-<goal slug>` (the persona repeats across cells in a preset; the goal is what distinguishes them) and stamped on the cell row at `sec_start`, so paths are stable and dispatch prompts can name them literally.
+
+A persona's state doc is YAML, stored verbatim. When a written path's basename is `state.yml`, the server validates two things: the content parses as YAML, and `protocol_version` is a known value. Other paths are free-form. Field-level schema enforcement stays out of v1 (the note's exclusion holds); the protocol markdown is the contract personas follow.
 
 ```yaml
 protocol_version: 1
@@ -177,9 +194,9 @@ Two tool sets, both built in `packages/api/src/engine/security-tools.ts`, both c
 
 **sec_status** — `{}`. Returns the engagement, all cells with statuses, finding counts by severity, and for a `running` cell its child's settled/liveness signal. This is the resume primitive: a fresh runner turn calls `sec_status` and knows exactly where the engagement stands.
 
-**sec_dispatch** — `{ cell_id?: string, mode?: 'fresh' | 'resume' }`. Dispatches the first `pending` cell (or re-dispatches a named `failed`/stuck `running` cell whose child is gone; `mode` overrides the cell's planned mode on re-dispatch, typically to `resume`). Refuses if another cell has a live child — v1 is serial, per the note's scope. In one transaction: spawns the child session (same repo binding, `ref` = pinned SHA, headless profile), stamps `child_session_id` and `dispatched_at`, sets status `running`. The dispatch prompt contains: the persona role, the shared protocol, the cell goal and mode, and the ids of completed cells whose state the persona should read via `sec_state_read`.
+**sec_dispatch** — `{ cell_id?: string, mode?: 'fresh' | 'resume' }`. Dispatches the first `pending` cell (or re-dispatches a named `failed`/stuck `running` cell whose child is gone; `mode` overrides the cell's planned mode on re-dispatch, typically to `resume`). Refuses if another cell has a live child — v1 is serial, per the note's scope. In one transaction: spawns the child session (same repo binding, `ref` = pinned SHA, headless profile), stamps `child_session_id` and `dispatched_at`, sets status `running`. The dispatch prompt contains: the persona role, the shared protocol, the cell goal and mode, the cell's own directory path, and the literal tree paths of completed cells' state docs to read via `sec_fs_read`.
 
-**sec_cell_complete** — `{ cell_id: string }`. Validates: the child settled, a state doc exists, the latest revision parses, and the exit condition holds. On pass: status `completed`, `settled_at` stamped. On fail: returns the violation (for example `queue.pending is 2, not 0`) so the runner can `child_send` the persona to keep looping.
+**sec_cell_complete** — `{ cell_id: string }`. Validates: the child settled, the cell's `/cells/<dir>/state.yml` exists, its latest revision parses, and the exit condition holds. On pass: status `completed`, `settled_at` stamped. On fail: returns the violation (for example `queue.pending is 2, not 0`) so the runner can `child_send` the persona to keep looping.
 
 **sec_cell_fail** — `{ cell_id: string, reason: string }`. Marks a cell `failed` with a reason. Explicit and agent-invoked; nothing sweeps cells to `failed` on a timer (see Invariants).
 
@@ -187,15 +204,17 @@ Two tool sets, both built in `packages/api/src/engine/security-tools.ts`, both c
 
 ### Persona tools (attached to cell-claimed child sessions)
 
-**sec_state_write** — `{ content: string }`. Appends the next state doc revision for the calling session's own cell. Validates YAML parse + `protocol_version`. Never updates in place — history rewrite is structurally impossible.
+**sec_fs_write** — `{ path: string, content: string }`. The path must sit under the calling session's own cell directory (`/cells/<own>/...`); anything else is refused — the path prefix IS the write claim, resolved from `security_cells.child_session_id`. A write to an existing path appends the next revision; nothing updates in place, so history rewrite is structurally impossible. Writes whose basename is `state.yml` get the YAML parse + `protocol_version` validation.
 
-**sec_state_read** — `{ cell_id: string, revision?: number }`. Reads any cell's state doc (latest by default) within the engagement. This is the note's "read peers' findings by absolute path", with the engagement as the visibility boundary.
+**sec_fs_read** — `{ path: string, revision?: number }`. Reads any path in the engagement tree, latest revision by default. This is the note's "read peers' findings by absolute path", with the engagement as the visibility boundary. Also serves the read-only mounts `/protocol.md` and `/plan.yml`.
+
+**sec_fs_list** — `{ prefix?: string }`. Lists paths under a prefix with each path's latest revision number and size. Personas discover peers' work the way the note intends: by looking at the filesystem.
 
 **sec_finding_report** — `{ severity, title, file?, line?, body }`. Inserts a finding for the calling cell. The server computes the fingerprint — sha256 over persona, file, line bucket (÷10), and normalized title, first 16 hex — and returns the finding id plus any existing findings sharing the fingerprint (advisory dedup; the persona decides whether it found something new).
 
 **sec_findings_list** — `{ cell_id?, severity? }`. Lists findings across the engagement.
 
-Runner sessions also get `sec_state_read` / `sec_findings_list` (read-only) so the runner can summarize without a child. The generic `task` / `child_read` / `child_send` / `child_status` tools stay available to the runner for steering; dispatch itself goes through `sec_dispatch` only, so bookkeeping and spawn cannot drift apart.
+Runner sessions also get `sec_fs_read` / `sec_fs_list` / `sec_findings_list` (read-only on the tree) so the runner can summarize without a child. The generic `task` / `child_read` / `child_send` / `child_status` tools stay available to the runner for steering; dispatch itself goes through `sec_dispatch` only, so bookkeeping and spawn cannot drift apart.
 
 ## The Loop, Crash, and Resume
 
@@ -206,7 +225,7 @@ The engagement-runner skill instructs this loop:
 3. If a cell is `pending` and nothing is running: `sec_dispatch`.
 4. If no cell is `pending` or `running`: `sec_close` and present the manifest.
 
-Crash recovery needs no machinery beyond this. The api restarts, the runner session's next turn (user says "continue", or the settled-child signal wakes the thread) starts at step 1, and the database answers. Completed cells never re-run. A persona that crashed after its last `sec_state_write` lost nothing; its replacement reads its own revisions in `resume` mode. This is the note's acceptance step 12, held by the substrate rather than by careful file ordering.
+Crash recovery needs no machinery beyond this. The api restarts, the runner session's next turn (user says "continue", or the settled-child signal wakes the thread) starts at step 1, and the database answers. Completed cells never re-run. A persona that crashed after its last `sec_fs_write` lost nothing; its replacement reads its own revisions in `resume` mode. This is the note's acceptance step 12, held by the substrate rather than by careful file ordering.
 
 **Invariants: alert, don't auto-repair.** Cell status has one owner: the security routes. No TTL kills a long-running cell and no sweep re-syncs statuses. The api emits a `security_cells` created/settled counter pair and an over-age `running` gauge (cell running with no child activity for 30+ minutes); the session page shows the same condition on the cell rail. A stuck cell is a page to a human (or the runner agent), not a silent repair. Re-dispatch is always an explicit `sec_dispatch` call.
 
@@ -216,7 +235,7 @@ Crash recovery needs no machinery beyond this. The api restarts, the runner sess
 
 - **Skill: `security-engagement-runner`** — the runner loop above, plan-authoring guidance, and how to present findings and the manifest.
 - **Role: `code-review` persona** — the v1 persona. Instructs: build a file checklist from the clone, loop it, write a state doc revision at every checkpoint (after each checklist section, before any long analysis), report findings the moment they are confirmed, keep looping until both pending counts are zero, and only then settle. Forbids: editing files, network calls beyond the clone, claiming completion with a non-empty queue.
-- **Protocol: `protocol/state-doc.md`** — the state doc contract (fields, exit condition, immutability rules). Injected verbatim into every dispatch prompt. Shipping it in the package instead of at a URL removes the note's schema-drift-by-unreachable-URL failure mode; the protocol version personas see is the version the server validates.
+- **Protocol: `protocol/state-doc.md`** — the state doc contract (fields, exit condition, immutability rules). Mounted read-only at `/protocol.md` in the engagement tree and injected verbatim into every dispatch prompt. Shipping it in the package instead of at a URL removes the note's schema-drift-by-unreachable-URL failure mode; the protocol version personas see is the version the server validates.
 - **Plan presets** — v1 ships one: `code-review` (four cells: recon, authz sweep, injection sweep, secrets-and-config sweep — all the `code-review` persona with different goals). The hub offers presets; chat can edit the plan before `sec_start`.
 
 The pure library (plan YAML parse/validate, state doc parse, exit-condition check, fingerprint computation) lives in the plugin as importable code with unit tests, and the API imports it — the `plugin-design` lib precedent.
@@ -243,14 +262,14 @@ Tool renderers: `sec_dispatch` (cell card with child link), `sec_finding_report`
 
 The note's threat list, plus what running inside Valet adds:
 
-1. **Schema drift** (note #1). `sec_state_write` validates YAML parse and `protocol_version` server-side; the protocol ships in the plugin, so personas and server cannot see different versions.
-2. **History rewrite** (note #2). State docs are append-only revisions; findings are insert-only with forward-only status. No update route exists to abuse.
+1. **Schema drift** (note #1). `sec_fs_write` validates YAML parse and `protocol_version` server-side on every `state.yml` write; the protocol ships in the plugin, so personas and server cannot see different versions.
+2. **History rewrite** (note #2). Every tree path is append-only revisions; findings are insert-only with forward-only status. No update route exists to abuse.
 3. **Silent truncation** (note #3). The exit condition is checked by `sec_cell_complete` on the server, not grepped by the runner.
 4. **Lost work across restarts** (note #4). State doc writes are single-row transactions; dispatch and completion are transactional with their side effects. Recovery is a read.
 5. **Cross-contamination** (note #5). Report generation is out of scope for v1; findings are immutable once written, so a future report writer consumes fixed inputs.
 6. **Child recursion blowup** (note #6). The engine gives child sessions no spawner. Structural, not contractual.
 7. **Stranded partial work** (note #7). Over-age running cells surface in metrics and the cell rail; re-dispatch is explicit. Alert, don't auto-repair.
-8. **Prompt injection from the scanned repo.** Personas read hostile code by design. Blast radius: a compromised persona can write only its own cell's state and findings (cell-scoped claims), cannot spawn children, cannot reach other sessions' sandboxes (gateway `sid` check), and holds only repo-read credentials. Findings render escaped in the client.
+8. **Prompt injection from the scanned repo.** Personas read hostile code by design. Blast radius: a compromised persona can write only under its own cell directory (path-prefix claim) and report findings for its own cell, cannot spawn children, cannot reach other sessions' sandboxes (gateway `sid` check), and holds only repo-read credentials. Findings render escaped in the client.
 9. **Cost blowout.** The `sec_start` gate names the cell count and personas before anything spawns; dispatch is serial; the plan is capped at 32 cells. Per-engagement token budgets are a re-entry seam (the Valet Design threat-7 precedent).
 10. **Cross-tenant reads.** Every `/security/*` route resolves session → engagement → owner and applies the session's existing access checks; persona tools additionally require the cell claim. Mutating routes get named `can*` checks, per the explicit-authz rule.
 11. **Findings disclosure.** v1 has no export or share surface. Findings are visible only to principals who can view the session.
@@ -268,7 +287,7 @@ The note's threat list, plus what running inside Valet adds:
 | Active verifier persona | Mechanism ships (status enum, forward-only); no persona uses it | A `verifier` persona flipping `open → verified/refuted` |
 | Concurrent cell dispatch | Note excludes; serial keeps the loop and cost legible | Lift the one-live-child check in `sec_dispatch`; cells already key state by cell id |
 | Concurrent engagements per session | One engagement per session keeps session == engagement | Drop the unique index on `session_id`, add engagement id to tool args |
-| Field-level state doc schema validation | Note excludes; parse + version check only | TypeBox schema on `sec_state_write` behind `protocol_version` 2 |
+| Field-level state doc schema validation | Note excludes; parse + version check only | TypeBox schema on `sec_fs_write` for `state.yml` behind `protocol_version` 2 |
 | Scheduled / CI-triggered engagements | v1 is chat-initiated | Workflow trigger node creating `kind='security'` sessions |
 | SARIF / GitHub code-scanning export | Disclosure surface needs its own review | Export route reading immutable findings |
 | Org-authored custom personas | v1 personas ship in the plugin | Persona registry keyed by org, same dispatch path |
@@ -287,7 +306,7 @@ Integration tests at the API level, `packages/api/src/integration/security-accep
 4. `sec_dispatch` spawns cell 1's child with the repo pinned to the SHA; cell 1 is `running` with a `child_session_id`.
 5. The persona writes state doc revisions and reports two findings; rows appear via REST while the child runs.
 6. Child settles with pending counts zero; `sec_cell_complete` passes; cell 1 `completed`.
-7. Cells 2 and 3 repeat; cell 2's persona calls `sec_state_read` on cell 1 and sees its state doc verbatim.
+7. Cells 2 and 3 repeat; cell 2's persona calls `sec_fs_read { path: "/cells/01-recon/state.yml" }` and sees cell 1's state doc verbatim.
 8. `sec_close` returns a manifest: 3 completed cells, findings by severity. Engagement `completed`.
 9. The findings table and cell rail reflect every transition (REST assertions).
 
@@ -307,7 +326,7 @@ Integration tests at the API level, `packages/api/src/integration/security-accep
 
 ## Resolved Decisions
 
-**Decision 1: substrate is app tables, not sandbox files. RESOLVED.** Child sessions do not share a filesystem, and the gateway's `sid` check makes cross-sandbox reads impossible by design. Rows behind cell-scoped tools give the same recovery-by-read property plus transactionality, immutability enforcement, and a free UI read path. The persona's YAML state doc survives verbatim as the interchange format.
+**Decision 1: substrate is app tables; the interface stays a filesystem. RESOLVED.** Child sessions do not share a filesystem, and the gateway's `sid` check makes cross-sandbox reads impossible by design. Rows give the same recovery-by-read property plus transactionality, immutability enforcement, and a free UI read path. The tools stay path-addressed (`sec_fs_write`/`sec_fs_read`/`sec_fs_list`, the `mem_write` path-param shape) so personas keep the note's filesystem mental model, dispatch prompts name literal paths, and new artifact types need no new tools. The persona's YAML state doc survives verbatim at a conventional path.
 
 **Decision 2: the runner is an agent session with server-enforced transitions, not a workflow DAG. RESOLVED.** Plans are authored and edited in chat, cells re-dispatch adaptively, and locked decision 5 makes agent sessions the orchestration primitive. The routes enforce every transition, so agent unreliability cannot corrupt the state machine — it can only stall it, which `sec_status` makes visible. Compiling a plan to a workflow definition is a re-entry seam, not v1.
 
@@ -321,7 +340,7 @@ Integration tests at the API level, `packages/api/src/integration/security-accep
 
 ## Deviations from the Concept Note
 
-1. **Filesystem → database.** Forced by session-isolated sandboxes; see The Move. The note's thesis properties are preserved and two of its exclusions (transactional work-list writes, atomic state-before-status ordering) dissolve.
+1. **The disk is a database; the interface is still a filesystem.** Forced by session-isolated sandboxes; see The Move. Personas keep path-addressed reads and writes (`sec_fs_*`), the note's thesis properties are preserved, and two of its exclusions (transactional work-list writes, atomic state-before-status ordering) dissolve.
 2. **Exit condition moves server-side.** The note's orchestrator greps the persona's file; a Valet runner is an LLM, so the check that defeats silent truncation cannot live in its judgment. `sec_cell_complete` owns it.
 3. **Findings are first-class rows** referenced by the state doc, not embedded in it (Decision 4).
 4. **Recursion prevention is structural.** The engine's children get no spawner; the note enforces this in persona markdown.
