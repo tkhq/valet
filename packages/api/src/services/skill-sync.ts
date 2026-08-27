@@ -151,14 +151,22 @@ import {
   type SkillCandidate,
 } from "./skill-discovery.js";
 
-/** How long a healthy source waits before its next poll. An anonymous read
- * gets 60 requests per hour per IP, and an unchanged source costs one, so
- * this budgets twelve calls per hour per source. An authenticated read has
- * a far larger budget, and keeps this interval anyway: the interval is also
- * how fresh a mirror is, and one number is easier to reason about than two.
- * Five minutes is short enough that a member watching an org catalog does
- * not need a Sync button. */
-export const SYNC_INTERVAL_MS = 5 * 60_000;
+/** How long a healthy personal or team source waits before its next poll.
+ * Those rows still have a Sync button, so they keep the old cadence. An
+ * anonymous read gets 60 requests per hour per IP, and an unchanged source
+ * costs one, so this budgets four calls per hour per source. */
+export const SYNC_INTERVAL_MS = 15 * 60_000;
+/** How long a healthy org source waits. Members cannot press Sync, so this
+ * is the only freshness path for an org catalog. An authenticated App read
+ * does not share the anonymous 60/hour bucket. */
+export const ORG_SYNC_INTERVAL_MS = 5 * 60_000;
+
+/** The wait after a healthy poll. Org sources poll more often because a
+ * member has no Sync button; personal and team sources keep the longer
+ * wait because they still do. */
+export function syncIntervalMs(ownerType: SkillSourceRow["ownerType"]): number {
+  return ownerType === "org" ? ORG_SYNC_INTERVAL_MS : SYNC_INTERVAL_MS;
+}
 /** Retry backoff per consecutive failure. A failure past the last entry
  * repeats the last entry: a source is a standing subscription, not a
  * one-shot delivery, so it keeps retrying at the slowest rung instead of
@@ -272,6 +280,24 @@ export async function claimDueSkillSources(
   return claimed.map((row) => row.id);
 }
 
+/**
+ * Sources that have been due longer than `olderThanMs`. The sweep reports
+ * these and does not repair them: a silent catch-up would hide a worker
+ * that cannot keep the org interval. Default is the org interval, because
+ * that is the freshness members depend on.
+ */
+export async function overdueSkillSources(
+  db: AppDb,
+  now: number,
+  olderThanMs: number = ORG_SYNC_INTERVAL_MS,
+): Promise<string[]> {
+  const rows = await db
+    .select({ id: skillSources.id })
+    .from(skillSources)
+    .where(and(eq(skillSources.enabled, true), lte(skillSources.nextAttemptAt, now - olderThanMs)));
+  return rows.map((row) => row.id);
+}
+
 export interface SkillManifestLists {
   /** Entries from a skill directory (`<dir>/<name>/SKILL.md`). */
   skillEntries: SkillManifestEntry[];
@@ -334,7 +360,15 @@ export class SkillSyncService {
     if (this.stopped || this.draining) return;
     this.draining = true;
     try {
-      for (const id of await claimDueSkillSources(this.deps.db, this.now())) {
+      const now = this.now();
+      const overdue = await overdueSkillSources(this.deps.db, now);
+      if (overdue.length > 0) {
+        console.warn(
+          `skill sync: ${overdue.length} source(s) have been due longer than the org interval. ` +
+            `The sweep is behind. Ids: ${overdue.join(", ")}.`,
+        );
+      }
+      for (const id of await claimDueSkillSources(this.deps.db, now)) {
         await this.syncOnce(id).catch((err) => console.error(`skill sync ${id}:`, err));
       }
     } catch (err) {
@@ -385,7 +419,7 @@ export class SkillSyncService {
       // Nothing was re-read, so this poll learned nothing that could clear
       // what the last one reported. `carryWarning` keeps that report on the
       // row; without it a source whose skills are all broken flips to a
-      // silent "ok" fifteen minutes later.
+      // silent "ok" on the next unchanged poll.
       return this.recordSuccess(source, {
         headSha: head.sha,
         manifestHash: source.lastManifestHash,
@@ -875,7 +909,7 @@ export class SkillSyncService {
       .set({
         status,
         attempts: 0,
-        nextAttemptAt: now + SYNC_INTERVAL_MS,
+        nextAttemptAt: now + syncIntervalMs(source.ownerType),
         lastSha: result.complete ? result.headSha : source.lastSha,
         lastManifestHash: result.complete ? result.manifestHash : source.lastManifestHash,
         lastSyncedAt: now,

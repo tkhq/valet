@@ -35,7 +35,14 @@ import { createSkillSource } from "./skill-sources.js";
 import { GitHubSkillRepoReader } from "./skill-repo-reader.js";
 import { skillRepoReaderFactory } from "./skill-source-credential.js";
 import { MAX_SKILL_CANDIDATES } from "./skill-discovery.js";
-import { claimDueSkillSources, SkillSyncService, SYNC_INTERVAL_MS } from "./skill-sync.js";
+import {
+  claimDueSkillSources,
+  overdueSkillSources,
+  SkillSyncService,
+  ORG_SYNC_INTERVAL_MS,
+  SYNC_INTERVAL_MS,
+  syncIntervalMs,
+} from "./skill-sync.js";
 
 const ORG = "org1";
 const TEAM = "team_1";
@@ -677,7 +684,7 @@ describe("skill sync", () => {
 
     it("keeps the report on the row when the next poll finds the commit unmoved", async () => {
       // Without this the row flips to a silent `ok` on the next sweep, and
-      // the person is back to "0 skills, no reason given" fifteen minutes
+      // the person is back to "0 skills, no reason given" five minutes
       // after reading the reason.
       const f = serve({ sha: "commit-1", skills: {} });
       const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/tk-brain" });
@@ -1575,6 +1582,12 @@ Read the reference.
   });
 
   describe("the sweep", () => {
+    it("picks the interval from the owner type", () => {
+      expect(syncIntervalMs("org")).toBe(ORG_SYNC_INTERVAL_MS);
+      expect(syncIntervalMs("user")).toBe(SYNC_INTERVAL_MS);
+      expect(syncIntervalMs("team")).toBe(SYNC_INTERVAL_MS);
+    });
+
     it("leases what it claims, so a second claim at the same instant gets nothing", async () => {
       const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
       const now = source.nextAttemptAt;
@@ -1620,6 +1633,30 @@ Read the reference.
       expect(row?.status).toBe("ok");
       // The sync's own schedule replaces the claim lease.
       expect(row?.nextAttemptAt).toBeGreaterThanOrEqual(beforeSync + SYNC_INTERVAL_MS);
+    });
+
+    it("schedules an org source on the shorter interval", async () => {
+      const f = serve({ sha: "commit-1", skills: { deploy: skillMd("deploy", "Deploy it.") } });
+      const source = await createSkillSource(db, owner("u1"), {
+        repo: "tkhq/org-skills",
+        ownerType: "org",
+      });
+      const beforeSync = Date.now();
+      await serviceFor(f).syncOnce(source.id);
+      const [row] = await db.select().from(skillSources).where(eq(skillSources.id, source.id));
+      expect(row?.nextAttemptAt).toBeGreaterThanOrEqual(beforeSync + ORG_SYNC_INTERVAL_MS);
+      expect(row?.nextAttemptAt).toBeLessThan(beforeSync + SYNC_INTERVAL_MS);
+    });
+
+    it("reports sources that have been due longer than the org interval", async () => {
+      const source = await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
+      const now = Date.now();
+      await db
+        .update(skillSources)
+        .set({ nextAttemptAt: now - ORG_SYNC_INTERVAL_MS })
+        .where(eq(skillSources.id, source.id));
+      expect(await overdueSkillSources(db, now)).toEqual([source.id]);
+      expect(await overdueSkillSources(db, now - 1)).toEqual([]);
     });
   });
 });

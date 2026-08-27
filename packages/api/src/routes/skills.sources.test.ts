@@ -366,6 +366,18 @@ describe("org-scoped skill sources", () => {
     expect(filtered.sources.map((s) => s.repo)).toEqual(["tkhq/mine"]);
   });
 
+  it("excludeOrg and an owner pin together return 400", async () => {
+    const f = serve({ sha: "commit-1", names: ["deploy"] });
+    api = await bootTestApi({ githubApiUrl: f.url });
+
+    const res = await fetch(
+      `${api.baseUrl}/api/skills/sources?excludeOrg=1&ownerType=org&ownerId=local-org`,
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/not both/);
+  });
+
   it("member still creates a personal source", async () => {
     const f = serve({ sha: "commit-1", names: ["deploy"] });
     api = await bootTestApi({ githubApiUrl: f.url });
