@@ -18,6 +18,7 @@ import { memReadRenderer } from "./mem-read";
 import { memWriteRenderer } from "./mem-write";
 import { openaiMediaRenderer } from "./openai-media";
 import { readRenderer } from "./read";
+import { skillRenderer } from "./skill";
 import { threadReadRenderer } from "./thread-read";
 import { workflowRenderer } from "./workflow";
 import { writeRenderer } from "./write";
@@ -31,6 +32,7 @@ const RENDERERS: ToolRenderer[] = [
   memPatchRenderer,
   memReadRenderer,
   memWriteRenderer,
+  skillRenderer,
   threadReadRenderer,
   workflowRenderer,
   findReplaceRenderer,

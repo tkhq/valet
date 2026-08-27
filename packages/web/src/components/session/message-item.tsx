@@ -8,6 +8,7 @@ import { pickRenderer, ToolShell } from "./tool-renderers";
 import { showsLiveBody } from "./tool-renderers/types";
 import { ToolBody } from "./tool-renderers/tool-shell";
 import { Thinking } from "./tool-renderers/thinking";
+import { parseSkillBlock, SkillInvocationBlock } from "./tool-renderers/skill";
 import { cn } from "~/lib/cn";
 
 export function MessageItem({
@@ -132,6 +133,19 @@ function PartView({ part }: { part: MessagePart }) {
 
 function TextBlock({ text }: { text: string }) {
   if (!text) return null;
+  // A slash-command skill invocation arrives as the dispatcher's
+  // `<skill name="...">…</skill>` expansion. Render it as the same card
+  // the `skill` tool call gets, with the user's trailing arguments (their
+  // actual prompt) as normal prose below it.
+  const skill = parseSkillBlock(text);
+  if (skill) {
+    return (
+      <>
+        <SkillInvocationBlock block={skill} />
+        {skill.rest && <Markdown>{skill.rest}</Markdown>}
+      </>
+    );
+  }
   return <Markdown>{text}</Markdown>;
 }
 
