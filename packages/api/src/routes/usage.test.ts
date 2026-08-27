@@ -170,3 +170,17 @@ describe("GET /api/usage/export.csv", () => {
     expect(rows.some((r) => r.includes("session"))).toBe(true);
   });
 });
+
+describe("GET /api/usage/summary", () => {
+  it("returns the caller's day/week/month windows from cost_entries", async () => {
+    api = await bootTestApi();
+    const now = Date.now();
+    await api.providers.db.insert(agentSessions).values({ id: "s-sum", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now, title: "Sum" });
+    await seedEngineEntry(api, "e-sum", "s-sum", now);
+    const res = await fetch(`${api.baseUrl}/api/usage/summary`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { me: { day: { costUsd: number; totalTokens: number } } };
+    expect(body.me.day.costUsd).toBeCloseTo(0.003, 6);
+    expect(body.me.day.totalTokens).toBe(120);
+  });
+});
