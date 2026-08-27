@@ -22,7 +22,14 @@ import { Hono } from "hono";
 import { eq, inArray, sql } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import { orgs, users } from "../schema/index.js";
-import type { UsageSummaryResponse, UsageWindow } from "../wire/types.js";
+import type {
+  UsageBreakdownResponse,
+  UsageSessionRow,
+  UsageSessionsResponse,
+  UsageSummaryResponse,
+  UsageUseCase,
+  UsageWindow,
+} from "../wire/types.js";
 
 export const usageRouter = new Hono<AppEnv>();
 
@@ -128,5 +135,116 @@ usageRouter.get("/summary", async (c) => {
     };
   }
 
+  return c.json(body);
+});
+
+// ── Window parsing (shared by the breakdown + sessions endpoints) ──────────
+const WINDOWS: Record<string, number> = {
+  "24h": DAY_MS,
+  "7d": 7 * DAY_MS,
+  "30d": 30 * DAY_MS,
+  "90d": 90 * DAY_MS,
+};
+function windowMsFrom(q: string | undefined): number {
+  return WINDOWS[q ?? "30d"] ?? 30 * DAY_MS;
+}
+const USE_CASES: readonly UsageUseCase[] = ["orchestrator", "session", "workflow", "proxy"];
+function toNum(v: unknown): number {
+  return Number(v ?? 0);
+}
+
+/**
+ * `GET /api/usage/breakdown?window=` — the caller's total spend for a window
+ * across ALL use cases, from the single `cost_entries` definition. Powers the
+ * unified `/usage` dashboard (not just proxy spend).
+ */
+usageRouter.get("/breakdown", async (c) => {
+  const { db } = c.var.providers;
+  const user = c.var.user;
+  const windowMs = windowMsFrom(c.req.query("window"));
+  const since = Date.now() - windowMs;
+  const scope = sql`created_at >= ${since} AND org_id = ${user.orgId} AND user_id = ${user.id}`;
+
+  interface UcRow { use_case: string; cost_usd: unknown; total_tokens: unknown; turns: unknown }
+  interface MdRow { model: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
+  interface DayRow { day_ms: unknown; cost_usd: unknown; total_tokens: unknown }
+  interface TotRow { cost_usd: unknown; total_tokens: unknown; input_tokens: unknown; output_tokens: unknown }
+
+  const [byUseCase, byModel, byDay, totals] = await Promise.all([
+    db.execute(sql`SELECT use_case, COALESCE(SUM(cost_total),0) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens, COUNT(*) AS turns FROM cost_entries WHERE ${scope} GROUP BY use_case`) as Promise<{ rows: UcRow[] }>,
+    db.execute(sql`SELECT model, COALESCE(SUM(cost_total),0) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens, COUNT(*) AS turns FROM cost_entries WHERE ${scope} GROUP BY model ORDER BY cost_usd DESC`) as Promise<{ rows: MdRow[] }>,
+    db.execute(sql`SELECT (created_at / ${DAY_MS}) * ${DAY_MS} AS day_ms, COALESCE(SUM(cost_total),0) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens FROM cost_entries WHERE ${scope} GROUP BY day_ms ORDER BY day_ms ASC`) as Promise<{ rows: DayRow[] }>,
+    db.execute(sql`SELECT COALESCE(SUM(cost_total),0) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens, COALESCE(SUM(input_tokens),0) AS input_tokens, COALESCE(SUM(output_tokens),0) AS output_tokens FROM cost_entries WHERE ${scope}`) as Promise<{ rows: TotRow[] }>,
+  ]);
+
+  const t = totals.rows[0];
+  const isUseCase = (v: string): v is UsageUseCase => (USE_CASES as readonly string[]).includes(v);
+  const body: UsageBreakdownResponse = {
+    windowMs,
+    totalCostUsd: toNum(t?.cost_usd),
+    totalTokens: toNum(t?.total_tokens),
+    totalInputTokens: toNum(t?.input_tokens),
+    totalOutputTokens: toNum(t?.output_tokens),
+    byUseCase: byUseCase.rows
+      .filter((r) => isUseCase(r.use_case))
+      .map((r) => ({ useCase: r.use_case as UsageUseCase, costUsd: toNum(r.cost_usd), totalTokens: toNum(r.total_tokens), turns: toNum(r.turns) }))
+      .sort((a, b) => b.costUsd - a.costUsd),
+    byModel: byModel.rows.map((r) => ({ model: r.model, costUsd: toNum(r.cost_usd), totalTokens: toNum(r.total_tokens), turns: toNum(r.turns) })),
+    byDay: byDay.rows.map((r) => ({ dayMs: toNum(r.day_ms), costUsd: toNum(r.cost_usd), totalTokens: toNum(r.total_tokens) })),
+  };
+  return c.json(body);
+});
+
+/**
+ * `GET /api/usage/sessions?window=&useCase=` — per-session spend for drill-down
+ * into the agent-session use cases (`orchestrator`/`session`). Joins
+ * `agent_sessions` for the title and `child_watches` so an orchestrator's
+ * spawned children carry `isChild`/`parentSessionId` and can be nested.
+ */
+usageRouter.get("/sessions", async (c) => {
+  const { db } = c.var.providers;
+  const user = c.var.user;
+  const windowMs = windowMsFrom(c.req.query("window"));
+  const since = Date.now() - windowMs;
+  const useCaseQ = c.req.query("useCase");
+  const useCaseFilter = useCaseQ && (USE_CASES as readonly string[]).includes(useCaseQ) ? sql`AND ce.use_case = ${useCaseQ}` : sql``;
+
+  interface Row {
+    session_id: string; title: string | null; use_case: string;
+    parent_session_id: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown;
+  }
+  const result = (await db.execute(sql`
+    SELECT ce.session_id,
+           s.title,
+           ce.use_case,
+           cw.parent_session_id,
+           COALESCE(SUM(ce.cost_total),0) AS cost_usd,
+           COALESCE(SUM(ce.total_tokens),0) AS total_tokens,
+           COUNT(*) AS turns
+    FROM cost_entries ce
+    LEFT JOIN agent_sessions s ON s.id = ce.session_id
+    LEFT JOIN child_watches cw ON cw.child_session_id = ce.session_id
+    WHERE ce.created_at >= ${since}
+      AND ce.org_id = ${user.orgId}
+      AND ce.user_id = ${user.id}
+      AND ce.session_id IS NOT NULL
+      AND ce.use_case IN ('orchestrator','session')
+      ${useCaseFilter}
+    GROUP BY ce.session_id, s.title, ce.use_case, cw.parent_session_id
+    ORDER BY cost_usd DESC
+    LIMIT 200
+  `)) as { rows: Row[] };
+
+  const sessions: UsageSessionRow[] = result.rows.map((r) => ({
+    sessionId: r.session_id,
+    title: r.title,
+    useCase: r.use_case as UsageUseCase,
+    isChild: r.parent_session_id !== null,
+    parentSessionId: r.parent_session_id,
+    costUsd: toNum(r.cost_usd),
+    totalTokens: toNum(r.total_tokens),
+    turns: toNum(r.turns),
+  }));
+  const body: UsageSessionsResponse = { sessions };
   return c.json(body);
 });

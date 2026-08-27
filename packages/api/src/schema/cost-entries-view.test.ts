@@ -207,6 +207,13 @@ describe("cost_entries view", () => {
     expect(await entryIds("WHERE org_id = 'org-b'")).toEqual(["e-other-org"]);
   });
 
+  it("classifies each entry's use_case from its session id", async () => {
+    expect((await rowFor("e-interactive"))?.use_case).toBe("session");
+    expect((await rowFor("e-orch"))?.use_case).toBe("orchestrator");
+    expect((await rowFor("e-wf"))?.use_case).toBe("workflow");
+    expect((await rowFor("p-ok"))?.use_case).toBe("proxy");
+  });
+
   it("includes a proxy row with usage but EXCLUDES a zero-token/failed proxy row", async () => {
     expect(await rowFor("p-ok")).toBeDefined();
     expect(await rowFor("p-fail")).toBeUndefined(); // 429, 0 tokens — not a billable turn

@@ -989,7 +989,14 @@ SELECT
 	COALESCE((e."usage"::jsonb->>'cacheWrite')::bigint, 0)     AS "cache_write_tokens",
 	COALESCE((e."usage"::jsonb->>'total')::bigint, 0)          AS "total_tokens",
 	(e."cost"::jsonb->>'total')::float8                        AS "cost_total",
-	((e."cost"::jsonb->>'total') IS NOT NULL)                  AS "priced"
+	((e."cost"::jsonb->>'total') IS NOT NULL)                  AS "priced",
+	-- Valet use case, derived from the session id shape so the one cost
+	-- definition can be broken down by activity kind (usage dashboard).
+	CASE
+		WHEN e."session_id" LIKE 'orchestrator:%' THEN 'orchestrator'
+		WHEN e."session_id" LIKE 'wf:%'           THEN 'workflow'
+		ELSE 'session'
+	END                                                        AS "use_case"
 FROM "engine_entries" e
 LEFT JOIN "agent_sessions" s
 	ON s."id" = e."session_id"
@@ -1006,7 +1013,7 @@ SELECT
 	p."org_id" AS "org_id", p."user_id" AS "user_id", 'user' AS "owner_type", p."user_id" AS "owner_id",
 	NULL AS "workflow_id", NULL AS "workflow_run_id",
 	p."input_tokens", p."output_tokens", p."cache_read_tokens", p."cache_write_tokens", p."total_tokens",
-	p."cost_usd" AS "cost_total", (p."cost_usd" IS NOT NULL) AS "priced"
+	p."cost_usd" AS "cost_total", (p."cost_usd" IS NOT NULL) AS "priced", 'proxy' AS "use_case"
 FROM "llm_proxy_requests" p
 -- Only rows that carry usage count as billable turns — mirrors the engine
 -- side's `WHERE e."usage" IS NOT NULL`. Excludes failed/4xx proxy calls and

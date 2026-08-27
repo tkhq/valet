@@ -2135,6 +2135,49 @@ export interface UsageMemberSummary extends UsageWindow {
   name: string;
 }
 
+/** A Valet activity kind, derived from the session id in `cost_entries`
+ * (`use_case`): `orchestrator`, `session` (interactive chat + child sessions),
+ * `workflow`, or `proxy` (external Claude Code / Codex). */
+export type UsageUseCase = "orchestrator" | "session" | "workflow" | "proxy";
+
+export interface UsageBucket {
+  costUsd: number;
+  totalTokens: number;
+  turns: number;
+}
+
+/** `GET /api/usage/breakdown?window=` — the caller's total spend for a window,
+ * across ALL use cases (engine sessions + workflows + proxy), from the single
+ * `cost_entries` definition. */
+export interface UsageBreakdownResponse {
+  windowMs: number;
+  totalCostUsd: number;
+  totalTokens: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  byUseCase: (UsageBucket & { useCase: UsageUseCase })[];
+  byModel: (UsageBucket & { model: string | null })[];
+  byDay: { dayMs: number; costUsd: number; totalTokens: number }[];
+}
+
+/** `GET /api/usage/sessions?window=&useCase=` — per-session spend for the
+ * agent-session use cases, for drill-down. `isChild`/`parentSessionId` come
+ * from `child_watches` so an orchestrator's spawned children can be nested. */
+export interface UsageSessionRow {
+  sessionId: string;
+  title: string | null;
+  useCase: UsageUseCase;
+  isChild: boolean;
+  parentSessionId: string | null;
+  costUsd: number;
+  totalTokens: number;
+  turns: number;
+}
+
+export interface UsageSessionsResponse {
+  sessions: UsageSessionRow[];
+}
+
 export interface UsageSummaryResponse {
   me: { day: UsageWindow; week: UsageWindow; month: UsageWindow };
   /** Present only when the org's `features.organizations` flag is on —
