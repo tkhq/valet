@@ -18,6 +18,21 @@ const BAR_W = 16;
 const GAP = 6;
 const PADDING_TOP = 8;
 const LABEL_H = 16;
+/** A "Mon 18" label at fontSize 9 is ~34px wide. Show at most one label per
+ * this much horizontal space so adjacent labels never collide. */
+const MIN_LABEL_PX = 34;
+
+/**
+ * Whether bar `index` (of `count`) shows its date label. Labels are thinned to
+ * one per `MIN_LABEL_PX` of width, because the bar pitch (BAR_W + GAP = 22px) is
+ * narrower than a label, so labeling every bar overlaps them. Anchored to the
+ * last bar (`count - 1`) so the most recent day is always labeled. Every bar
+ * keeps its hover tooltip regardless.
+ */
+export function isLabeledBar(index: number, count: number): boolean {
+  const every = Math.max(1, Math.ceil(MIN_LABEL_PX / (BAR_W + GAP)));
+  return (count - 1 - index) % every === 0;
+}
 
 /** Format epoch-ms to a short day label, e.g. "Mon 18". */
 function dayLabel(dayMs: number): string {
@@ -67,15 +82,17 @@ export function SpendChart({ buckets }: SpendChartProps) {
                 rx={2}
                 className="fill-moss opacity-80"
               />
-              <text
-                x={x + BAR_W / 2}
-                y={svgH - 2}
-                textAnchor="middle"
-                fontSize={9}
-                className="fill-muted"
-              >
-                {label}
-              </text>
+              {isLabeledBar(i, buckets.length) && (
+                <text
+                  x={x + BAR_W / 2}
+                  y={svgH - 2}
+                  textAnchor="middle"
+                  fontSize={9}
+                  className="fill-muted"
+                >
+                  {label}
+                </text>
+              )}
             </g>
           );
         })}
