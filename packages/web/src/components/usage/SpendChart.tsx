@@ -21,23 +21,27 @@ const LABEL_H = 16;
 /** A "Mon 18" label at fontSize 9 is ~34px wide. Show at most one label per
  * this much horizontal space so adjacent labels never collide. */
 const MIN_LABEL_PX = 34;
+/** Label one bar in every LABEL_EVERY, so shown labels are at least
+ * MIN_LABEL_PX apart. At the fixed BAR_W + GAP pitch this is a constant. */
+const LABEL_EVERY = Math.max(1, Math.ceil(MIN_LABEL_PX / (BAR_W + GAP)));
 
 /**
  * Whether bar `index` (of `count`) shows its date label. Labels are thinned to
- * one per `MIN_LABEL_PX` of width, because the bar pitch (BAR_W + GAP = 22px) is
+ * one per `LABEL_EVERY` bars, because the bar pitch (BAR_W + GAP = 22px) is
  * narrower than a label, so labeling every bar overlaps them. Anchored to the
  * last bar (`count - 1`) so the most recent day is always labeled. Every bar
  * keeps its hover tooltip regardless.
  */
 export function isLabeledBar(index: number, count: number): boolean {
-  const every = Math.max(1, Math.ceil(MIN_LABEL_PX / (BAR_W + GAP)));
-  return (count - 1 - index) % every === 0;
+  return (count - 1 - index) % LABEL_EVERY === 0;
 }
 
-/** Format epoch-ms to a short day label, e.g. "Mon 18". */
+/** Format a UTC-day-boundary epoch to a short day label, e.g. "Mon 18". The
+ * bucket key is a UTC midnight (the byDay query floors to a UTC day), so format
+ * in UTC too — otherwise a west-of-UTC viewer sees the previous day's label. */
 function dayLabel(dayMs: number): string {
   return new Date(dayMs)
-    .toLocaleDateString(undefined, { weekday: "short", day: "numeric" })
+    .toLocaleDateString(undefined, { weekday: "short", day: "numeric", timeZone: "UTC" })
     .replace(",", "");
 }
 

@@ -37,4 +37,14 @@ describe("SpendChart", () => {
     // Every bar keeps a hover tooltip regardless of whether it shows a label.
     expect(container.querySelectorAll("svg[aria-label='Daily spend chart'] title").length).toBe(8);
   });
+
+  it("labels the bucket's UTC day, not the viewer's local-timezone day", () => {
+    // dayMs is a UTC midnight (byDay floors created_at to a UTC day). Aug 26
+    // 00:00 UTC is still Aug 25 in any timezone west of UTC, so a local-time
+    // label would read "25". The label must read the UTC day, "26".
+    const dayMs = Date.UTC(2024, 7, 26);
+    const { container } = render(<SpendChart buckets={[{ dayMs, costUsd: 5 }]} />);
+    const label = container.querySelector("svg[aria-label='Daily spend chart'] text")?.textContent ?? "";
+    expect(label).toMatch(/\b26\b/);
+  });
 });
