@@ -36,8 +36,9 @@ import { textParam } from "~/lib/search-params";
  * gone — a row's scope is a badge now, not a third page.
  *
  * An admin adds, removes, and syncs sources, and writes new org skills.
- * The sweep re-reads each source every 5 minutes, so a member's catalog
- * updates without a Sync button. `readOnly` hides Import, Sync, and Remove.
+ * A GitHub push re-reads the source. If the App webhook is not live, the
+ * sweep re-reads every 5 minutes, so a member's catalog still updates
+ * without a Sync button. `readOnly` hides Import, Sync, and Remove.
  * The missing "New org skill" button carries the rest of that split, keyed
  * off `useOrg()`'s `callerRole`, the same admin signal the members page
  * reads.
@@ -86,7 +87,7 @@ export function OrganizationLibraryPage() {
     <div className="space-y-10">
       <Section
         title="Library"
-        description="An admin adds, removes, and syncs a repository. Valet re-reads it every 5 minutes. A private repository is read with the GitHub App installed for this organization."
+        description="An admin adds, removes, and syncs a repository. Valet re-reads it on each GitHub push. If the webhook is not live, it re-reads every 5 minutes. A private repository is read with the GitHub App installed for this organization."
       >
         {orgId === undefined ? (
           <div className="flex items-center gap-2 text-sm text-muted">

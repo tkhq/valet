@@ -156,16 +156,23 @@ import {
  * anonymous read gets 60 requests per hour per IP, and an unchanged source
  * costs one, so this budgets four calls per hour per source. */
 export const SYNC_INTERVAL_MS = 15 * 60_000;
-/** How long a healthy org source waits. Members cannot press Sync, so this
- * is the only freshness path for an org catalog. An authenticated App read
- * does not share the anonymous 60/hour bucket. */
+/** How long a healthy org source waits when the GitHub App webhook is
+ * not live. Members cannot press Sync, so this is the freshness path
+ * until a `push` delivery can replace it. */
 export const ORG_SYNC_INTERVAL_MS = 5 * 60_000;
+/** How long a healthy org source waits when the App webhook is live. A
+ * `push` calls `syncOnce`; this is only the backstop for a missed delivery. */
+export const ORG_WEBHOOK_BACKSTOP_MS = 6 * 60 * 60_000;
 
-/** The wait after a healthy poll. Org sources poll more often because a
- * member has no Sync button; personal and team sources keep the longer
- * wait because they still do. */
-export function syncIntervalMs(ownerType: SkillSourceRow["ownerType"]): number {
-  return ownerType === "org" ? ORG_SYNC_INTERVAL_MS : SYNC_INTERVAL_MS;
+/** The wait after a healthy poll. Personal and team sources keep the
+ * longer wait because they still have Sync. An org source waits 5 minutes
+ * unless the App webhook is live, in which case a `push` is the real path. */
+export function syncIntervalMs(
+  ownerType: SkillSourceRow["ownerType"],
+  opts: { orgWebhookLive?: boolean } = {},
+): number {
+  if (ownerType !== "org") return SYNC_INTERVAL_MS;
+  return opts.orgWebhookLive === true ? ORG_WEBHOOK_BACKSTOP_MS : ORG_SYNC_INTERVAL_MS;
 }
 /** Retry backoff per consecutive failure. A failure past the last entry
  * repeats the last entry: a source is a standing subscription, not a
@@ -238,6 +245,9 @@ export interface SkillSyncDeps {
   readerFor?: (source: SkillSourceRow) => Promise<SkillRepoReader>;
   /** Injected clock, for tests that need a deterministic schedule. */
   now?: () => number;
+  /** True when GitHub can deliver App webhooks to this instance. Org
+   * sources then use the long backstop; `push` is the real sync path. */
+  orgWebhookLive?: () => boolean;
 }
 
 /**
@@ -909,7 +919,9 @@ export class SkillSyncService {
       .set({
         status,
         attempts: 0,
-        nextAttemptAt: now + syncIntervalMs(source.ownerType),
+        nextAttemptAt:
+          now +
+          syncIntervalMs(source.ownerType, { orgWebhookLive: this.deps.orgWebhookLive?.() === true }),
         lastSha: result.complete ? result.headSha : source.lastSha,
         lastManifestHash: result.complete ? result.manifestHash : source.lastManifestHash,
         lastSyncedAt: now,

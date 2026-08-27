@@ -683,6 +683,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       credentials: engineCredentials,
       key: deriveSecretKey(opts.encryptionKey),
     }),
+    orgWebhookLive: () => Boolean(publicUrlFromEnv(process.env)),
   });
 
   return {

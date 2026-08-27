@@ -122,7 +122,7 @@ export function SkillSourcesPanel({
         </div>
         <p className="mt-1 text-xs text-muted">
           {orgPinned ? (
-            "Only an org admin can add, remove, or sync a repository. A private repository is read with the GitHub App installed for this organization. Valet re-reads it every 5 minutes."
+            "Only an org admin can add, remove, or sync a repository. A private repository is read with the GitHub App installed for this organization. Valet re-reads it on each GitHub push, or every 5 minutes if the webhook is not live."
           ) : isOrgAdmin ? (
             <>
               Organization repositories are tracked in{" "}

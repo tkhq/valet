@@ -11,7 +11,8 @@ import { eq } from "drizzle-orm";
 import githubPlugin from "@valet/plugin-github/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
-import { eventDeliveries, events, eventSubscriptions, githubInstallations } from "../schema/index.js";
+import { eventDeliveries, events, eventSubscriptions, githubInstallations, skillSources } from "../schema/index.js";
+import { createSkillSource } from "../services/skill-sources.js";
 import type { GetGithubAppResponse, PostGithubAppManifestResponse } from "../wire/types.js";
 
 const HEADERS = { "Content-Type": "application/json" };
@@ -806,6 +807,42 @@ describe("POST /webhooks/github-app", () => {
     const getRes = await fetch(`${api.baseUrl}/api/org/github-app`, { headers: HEADERS });
     const body = (await getRes.json()) as GetGithubAppResponse;
     expect(body.installations.some((i) => i.accountLogin === "newco")).toBe(true);
+  });
+
+  it("a push syncs the matching org skill source and leaves a personal one", async () => {
+    api = await bootTestApi();
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
+    const orgSource = await createSkillSource(
+      api.providers.db,
+      { userId: "local-user", orgId: "local-org" },
+      { repo: "tkhq/skills", ownerType: "org" },
+    );
+    const personal = await createSkillSource(
+      api.providers.db,
+      { userId: "local-user", orgId: "local-org" },
+      { repo: "tkhq/skills" },
+    );
+    expect(orgSource.status).toBe("pending");
+    expect(personal.status).toBe("pending");
+
+    const payload = {
+      ref: "refs/heads/main",
+      repository: { full_name: "tkhq/skills", default_branch: "main" },
+    };
+    const sig = signWebhookBody(JSON.stringify(payload), webhookSecret);
+    const res = await postWebhook(api.baseUrl, "push", payload, sig);
+    expect(res.status).toBe(204);
+
+    const [orgRow] = await api.providers.db
+      .select()
+      .from(skillSources)
+      .where(eq(skillSources.id, orgSource.id));
+    const [personalRow] = await api.providers.db
+      .select()
+      .from(skillSources)
+      .where(eq(skillSources.id, personal.id));
+    expect(orgRow?.status).not.toBe("pending");
+    expect(personalRow?.status).toBe("pending");
   });
 
   it("204s with no app configured anywhere", async () => {

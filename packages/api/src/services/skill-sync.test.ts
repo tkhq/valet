@@ -40,6 +40,7 @@ import {
   overdueSkillSources,
   SkillSyncService,
   ORG_SYNC_INTERVAL_MS,
+  ORG_WEBHOOK_BACKSTOP_MS,
   SYNC_INTERVAL_MS,
   syncIntervalMs,
 } from "./skill-sync.js";
@@ -1584,6 +1585,7 @@ Read the reference.
   describe("the sweep", () => {
     it("picks the interval from the owner type", () => {
       expect(syncIntervalMs("org")).toBe(ORG_SYNC_INTERVAL_MS);
+      expect(syncIntervalMs("org", { orgWebhookLive: true })).toBe(ORG_WEBHOOK_BACKSTOP_MS);
       expect(syncIntervalMs("user")).toBe(SYNC_INTERVAL_MS);
       expect(syncIntervalMs("team")).toBe(SYNC_INTERVAL_MS);
     });
@@ -1633,6 +1635,23 @@ Read the reference.
       expect(row?.status).toBe("ok");
       // The sync's own schedule replaces the claim lease.
       expect(row?.nextAttemptAt).toBeGreaterThanOrEqual(beforeSync + SYNC_INTERVAL_MS);
+    });
+
+    it("schedules an org source on the webhook backstop when the hook is live", async () => {
+      const f = serve({ sha: "commit-1", skills: { deploy: skillMd("deploy", "Deploy it.") } });
+      const source = await createSkillSource(db, owner("u1"), {
+        repo: "tkhq/org-skills",
+        ownerType: "org",
+      });
+      const beforeSync = Date.now();
+      const service = new SkillSyncService({
+        db,
+        reader: new GitHubSkillRepoReader({ apiUrl: f.url }),
+        orgWebhookLive: () => true,
+      });
+      await service.syncOnce(source.id);
+      const [row] = await db.select().from(skillSources).where(eq(skillSources.id, source.id));
+      expect(row?.nextAttemptAt).toBeGreaterThanOrEqual(beforeSync + ORG_WEBHOOK_BACKSTOP_MS);
     });
 
     it("schedules an org source on the shorter interval", async () => {
