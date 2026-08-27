@@ -406,7 +406,7 @@ describe("resolveSkillSourceCredential", () => {
         sourceRow({ ownerType: "org", ownerId: ORG, createdBy: "u1" }),
       );
 
-      expect(credential).toEqual({ kind: "none" });
+      expect(credential).toEqual({ kind: "missing_app" });
     });
 
     it("reads anonymously when the App does not cover the repository owner", async () => {
@@ -418,7 +418,33 @@ describe("resolveSkillSourceCredential", () => {
         sourceRow({ ownerType: "org", ownerId: ORG, repoFullName: "other-org/skills" }),
       );
 
-      expect(credential).toEqual({ kind: "none" });
+      expect(credential).toEqual({ kind: "missing_app" });
+    });
+
+    it("names the App install when no token is available", async () => {
+      fixture = startGithubFixture();
+      const credential = await resolveSkillSourceCredential(
+        deps(),
+        sourceRow({ ownerType: "org", ownerId: ORG }),
+      );
+      expect(credential).toEqual({ kind: "missing_app" });
+    });
+
+    it("maps a mint failure to unavailable, not missing_app", async () => {
+      await installApp();
+      fixture = startGithubFixture({
+        createInstallationToken: () => ({
+          status: 500,
+          body: { message: "internal error" },
+        }),
+      });
+
+      const credential = await resolveSkillSourceCredential(
+        deps(),
+        sourceRow({ ownerType: "org", ownerId: ORG, createdBy: "u1" }),
+      );
+
+      expect(credential).toEqual({ kind: "unavailable" });
     });
   });
 

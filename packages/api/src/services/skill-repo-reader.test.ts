@@ -306,12 +306,12 @@ describe("GitHubSkillRepoReader", () => {
       // 404 text, never whether the request goes out.
       fixture = startGithubFixture({ getCommit: () => ({ body: commitBody("commit-1") }) });
 
-      for (const credential of [{ kind: "none" }, { kind: "unavailable" }] as const) {
+      for (const credential of [{ kind: "none" }, { kind: "unavailable" }, { kind: "missing_app" }] as const) {
         const reader = new GitHubSkillRepoReader({ apiUrl: fixture.url, credential });
         expect((await reader.head("tkhq/skills", "")).sha).toBe("commit-1");
       }
 
-      expect(fixture.calls.map((call) => call.authHeader)).toEqual([undefined, undefined]);
+      expect(fixture.calls.map((call) => call.authHeader)).toEqual([undefined, undefined, undefined]);
     });
   });
 
@@ -397,6 +397,20 @@ describe("GitHubSkillRepoReader", () => {
       );
 
       expect(message).toContain("the connected GitHub account");
+    });
+
+    it("tells an org source to install the App when none covers the repository", async () => {
+      fixture = startGithubFixture({ getCommit: () => ({ status: 404, body: { message: "Not Found" } }) });
+
+      const message = await messageFor(
+        new GitHubSkillRepoReader({
+          apiUrl: fixture.url,
+          credential: { kind: "missing_app" },
+        }),
+      );
+
+      expect(message).toContain("Install the GitHub App for this organization");
+      expect(message).not.toContain("Connected accounts");
     });
 
     it("tells an org source to widen the App installation", async () => {

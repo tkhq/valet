@@ -481,6 +481,13 @@ reconciler upserts a `skillsrc_cfg_*` row; the existing `SkillSyncService`
 poller picks it up like any other source — the config file feeds the
 subsystem, it does not replace it.
 
+A boot that finds an existing `skillsrc_cfg_*` row does not set
+`next_attempt_at` to now. That punch would break a live claim lease and
+wipe retry backoff. The reconciler kicks only a dead claim: `status` is
+`pending`, `last_synced_at` is null, and `updated_at` is older than the
+five-minute claim lease. An error row keeps its backoff. The UPDATE
+repeats `last_synced_at IS NULL` so a finishing sync is not kicked.
+
 - A `skillsrc_cfg_*` row whose (repo, ref, subpath) no longer appears in
   the file → deleted through the existing delete path, which also deletes
   the mirrored `origin='repo'` skills (mirror semantics, per

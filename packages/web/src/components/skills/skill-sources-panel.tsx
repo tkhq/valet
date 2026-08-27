@@ -241,6 +241,12 @@ function SourceRow({ source, readOnly }: { source: SkillSourceSummary; readOnly:
             output, tests, and downloaded agent plugins.
           </p>
         )}
+        {sync.error && (
+          <p className="mt-1 text-xs leading-relaxed text-danger-500">{errorText(sync.error)}</p>
+        )}
+        {remove.error && (
+          <p className="mt-1 text-xs leading-relaxed text-danger-500">{errorText(remove.error)}</p>
+        )}
       </div>
       {!readOnly && (
         <div className="flex shrink-0 items-center gap-1">
