@@ -32,5 +32,5 @@ export function priceUsage(kind: ProviderKind, modelId: string, usage: ProxyUsag
     totalTokens: usage.total,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
   });
-  return cost.total > 0 ? cost.total : null;
+  return cost.total;
 }
