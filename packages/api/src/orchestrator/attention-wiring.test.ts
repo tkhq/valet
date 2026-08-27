@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import { assistantSessionId, type BusEvent, type SessionData } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { wireAttentionRouter } from "./attention-wiring.js";
+import type { AttentionEvent } from "./attention.js";
 import { notifications } from "../schema/index.js";
 
 let api: TestApi | undefined;
@@ -177,6 +178,33 @@ describe("wireAttentionRouter", () => {
     expect(rows[0]?.title).toBe("Approve deploy?");
     expect(rows[0]?.sessionId).toBe(childSessionId);
     expect(rows[0]?.href).toBe(`/sessions/${encodeURIComponent(childSessionId)}`);
+  });
+
+  it("decision_gate hands the gate's id and actions to channel deliverers", async () => {
+    api = await bootTestApi();
+    const { db, engineStore, eventStream } = api.providers;
+    const delivered: AttentionEvent[] = [];
+    unsub = wireAttentionRouter({
+      db,
+      engineStore,
+      eventStream,
+      channels: [
+        {
+          deliver: async (_userId, event) => {
+            delivered.push(event);
+          },
+        },
+      ],
+    });
+
+    const sessionId = `sess-${randomUUID()}`;
+    await engineStore.saveSession(baseSession({ id: sessionId }));
+    const gateId = `gate-${randomUUID()}`;
+    await eventStream.append(gateEvent(sessionId, gateId, "Approve the tool call?"), `test-gate-${randomUUID()}`);
+
+    await waitFor(async () => delivered.length > 0);
+    expect(delivered[0]?.gate).toEqual({ id: gateId, actions: [{ id: "approve", label: "Approve" }] });
+    expect(delivered[0]?.sessionId).toBe(sessionId);
   });
 
   it("decision_gate on a standalone session routes an approval to that session's own owner", async () => {

@@ -13,7 +13,7 @@
  * transports.
  */
 import { randomBytes } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import {
   parseAssistantSessionId,
   type ChannelTransport,
@@ -35,6 +35,10 @@ import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import { agentSessions } from "../schema/index.js";
 import { ensureDefaultAssistantSession, loadAssistant } from "../assistants/service.js";
+import { loadSessionMeta } from "../engine/session-meta.js";
+import { GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
+import { isOrgAdmin } from "../services/org.js";
+import { canResolveSessionGate } from "../services/session-access.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import type { AttentionChannelDeliverer, AttentionEvent } from "../orchestrator/attention.js";
 import { consumeLinkCode, identityForExternal, identityForUser, linkIdentity } from "./identity-links.js";
@@ -132,7 +136,9 @@ export class ChannelHost {
   private seenOrder: string[] = [];
   private unlinkedReplyAt = new Map<string, number>();
   private gateRefs = new Map<string, { gateId: string; sessionId: string }>();
-  private gatePrompts = new Map<string, GatePromptRef>();
+  /** One gate can have several prompt messages: the channel-thread card plus
+   * one attention DM per recipient. Resolution edits every one of them. */
+  private gatePrompts = new Map<string, GatePromptRef[]>();
   private gateActions = new Map<string, DecisionAction[]>();
   private orgId: string | null = null;
   private outboundUnsub: Unsubscribe | null = null;
@@ -206,7 +212,9 @@ export class ChannelHost {
 
   recordGatePrompt(gateId: string, ref: GatePromptRef, sessionId: string): void {
     this.gateRefs.set(`${ref.conversationKey}#${ref.messageId}`, { gateId, sessionId });
-    this.gatePrompts.set(gateId, ref);
+    const refs = this.gatePrompts.get(gateId) ?? [];
+    refs.push(ref);
+    this.gatePrompts.set(gateId, refs);
   }
 
   gateForRef(ref: GatePromptRef): { gateId: string; sessionId: string } | null {
@@ -569,22 +577,30 @@ export class ChannelHost {
     this.recordGatePrompt(gate.id, ref, sessionId);
   }
 
-  /** Rule 4: decision_gate_resolved → edit the prompt message with the outcome label, then clear all gate maps. */
+  /** Rule 4: decision_gate_resolved → edit every prompt message with the outcome label, then clear all gate maps. */
   private async deliverGateResolution(gateId: string, resolution: DecisionResolution): Promise<void> {
-    const ref = this.gatePrompts.get(gateId);
-    if (!ref) return;
+    const refs = this.gatePrompts.get(gateId);
+    if (!refs || refs.length === 0) return;
     const actions = this.gateActions.get(gateId) ?? [];
     const label = gateResolutionLabel(actions, resolution);
 
-    const channelType = ref.conversationKey.slice(0, ref.conversationKey.indexOf(":"));
-    const transport = this.transports.get(channelType);
-    if (transport) {
-      await transport.updateGatePrompt(ref, { actionId: resolution.actionId, label });
+    for (const ref of refs) {
+      const channelType = ref.conversationKey.slice(0, ref.conversationKey.indexOf(":"));
+      const transport = this.transports.get(channelType);
+      if (transport) {
+        try {
+          await transport.updateGatePrompt(ref, { actionId: resolution.actionId, label });
+        } catch (err) {
+          // One stale message (deleted DM, revoked scope) must not keep the
+          // other copies of the same prompt un-updated.
+          console.error(`[channels] ${channelType}: gate prompt update failed`, err);
+        }
+      }
+      this.gateRefs.delete(`${ref.conversationKey}#${ref.messageId}`);
     }
 
     this.gatePrompts.delete(gateId);
     this.gateActions.delete(gateId);
-    this.gateRefs.delete(`${ref.conversationKey}#${ref.messageId}`);
   }
 
   /** Rule 1: in-memory LRU dedup, cap `DEDUP_CAP`, FIFO eviction. */
@@ -800,34 +816,44 @@ export class ChannelHost {
       return;
     }
 
-    // User-ownership check: the agent_sessions row for the mapped session
-    // must belong to the linked user.
+    // Explicit resolve authorization — the same named check the web
+    // decision routes make (`canResolveSessionGate`): the session's direct
+    // owner, or a live member of the owning team. The reply deliberately
+    // matches the unknown-ref case so a probe cannot distinguish "not
+    // yours" from "gone".
     const rows = await this.deps.db
       .select()
       .from(agentSessions)
-      .where(and(eq(agentSessions.id, mapped.sessionId), eq(agentSessions.userId, userId)))
+      .where(eq(agentSessions.id, mapped.sessionId))
       .limit(1);
-    if (!rows[0]) {
+    const sessionRow = rows[0];
+    if (!sessionRow || !(await canResolveSessionGate(this.deps.db, sessionRow, userId))) {
       await transport?.answerCallback?.(gateCallback.callbackId, "This approval has expired — resolve it on the web.");
       await this.dropLog(orgId, "unsupported_kind", event.conversationKey, "unknown_gate_ref");
       return;
     }
 
-    // Resolution deliberately looks up the user's default assistant session
-    // rather than reusing `mapped.sessionId` — the ownership check above
-    // only proved `mapped.sessionId` belongs to `userId`, not that it IS
-    // that session. This relies on the invariant that channel-keyed threads
-    // (see `channelThreadFor`) exist only on the default assistant's
-    // session: `handleMessage` always threads through
-    // `ensureDefaultAssistantSession`, so any gate whose ref maps back to a
-    // channel thread must have been raised on that same session. If that
-    // invariant is ever violated, `resolveDecision` below throws on a
-    // gateId that doesn't exist on this session — caught by
-    // `handleUpdate`'s try/catch (fails safe, not silently wrong).
-    const { session } = await ensureDefaultAssistantSession({ db: this.deps.db, engineHost: this.deps.engineHost }, { type: "user", id: userId }, {
-      actorUserId: userId,
-      orgId,
-    });
+    // Same backstop as the web resolve route: `always_allow` widens policy
+    // for the whole org, so a non-admin's click must fail here with a clear
+    // answer, not late inside the engine.
+    if (gateCallback.actionId === GATE_ACTION_ALWAYS_ALLOW && !(await isOrgAdmin(this.deps.db, orgId, userId))) {
+      await transport?.answerCallback?.(gateCallback.callbackId, "Only an org admin can choose Always allow — resolve it on the web.");
+      await this.dropLog(orgId, "unsupported_kind", event.conversationKey, "always_allow requires org admin");
+      return;
+    }
+
+    // Resolve on the session the gate actually lives on. A gate prompt is
+    // recorded from two senders — the channel-thread card (always the
+    // sender's default assistant session) and an attention DM (any session
+    // the recipient may resolve) — so the assistant-only shortcut this path
+    // used before no longer covers it. `sessionFor` routes assistant ids
+    // through `assistantSessionFor` itself. A gate no longer pending on the
+    // session makes `resolveDecision` throw — caught by `handleUpdate`'s
+    // try/catch (fails safe, not silently wrong).
+    const session = await this.deps.engineHost.sessionFor(
+      mapped.sessionId,
+      await loadSessionMeta(this.deps.db, sessionRow),
+    );
     await session.resolveDecision(mapped.gateId, {
       actionId: gateCallback.actionId,
       resolvedBy: userId,
@@ -859,15 +885,39 @@ export class ChannelHost {
             const conversationKey = hasOpenDirect(transport)
               ? await transport.openDirectConversation(link.externalId)
               : `${channelType}:dm:${link.externalId}`;
-            await transport.send(conversationKey, {
-              markdown: this.attentionMarkdown(event),
-            });
+            // An approval event carries its gate, so the DM is a real prompt:
+            // the same buttons the channel-thread card gets, answered through
+            // the same inbound `gate_callback` path. Everything else stays a
+            // plain summary message.
+            if (event.gate && event.sessionId) {
+              const ref = await transport.sendGatePrompt(conversationKey, {
+                gateId: event.gate.id,
+                title: event.title,
+                body: this.attentionBody(event),
+                actions: event.gate.actions,
+              });
+              this.gateActions.set(event.gate.id, event.gate.actions);
+              this.recordGatePrompt(event.gate.id, ref, event.sessionId);
+            } else {
+              await transport.send(conversationKey, {
+                markdown: this.attentionMarkdown(event),
+              });
+            }
           } catch (err) {
             console.error(`[channels] ${channelType}: attention delivery failed`, err);
           }
         }
       },
     };
+  }
+
+  /** Body-only markdown (no title) for gate prompts, which render the title themselves. */
+  private attentionBody(event: AttentionEvent): string | undefined {
+    let markdown = event.body ?? "";
+    if (event.href && this.deps.publicUrl) {
+      markdown += `${markdown ? "\n\n" : ""}[Open in Valet](${this.deps.publicUrl}${event.href})`;
+    }
+    return markdown === "" ? undefined : markdown;
   }
 
   private attentionMarkdown(event: AttentionEvent): string {
