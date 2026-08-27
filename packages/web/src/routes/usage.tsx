@@ -7,7 +7,8 @@
  */
 import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import { useProxyUsageSummary, useProxyRequests } from "~/api/proxy-usage";
+import { useProxyUsageSummary, useProxyRequests, useProxySettings, useSetProxyMode } from "~/api/proxy-usage";
+import { useOrg } from "~/api/settings";
 import { SpendChart } from "~/components/usage/SpendChart";
 import { BreakdownTable, type BreakdownRow } from "~/components/usage/BreakdownTable";
 import { RequestLog } from "~/components/usage/RequestLog";
@@ -39,6 +40,76 @@ function StatCard({ label, value }: { label: string; value: string }) {
   );
 }
 
+/**
+ * Shows the current credential mode. Admins get a segmented toggle to switch;
+ * members see a read-only label.
+ */
+function CredentialModeControl() {
+  const orgQ = useOrg();
+  const settingsQ = useProxySettings();
+  const setMode = useSetProxyMode();
+
+  const isAdmin = orgQ.data?.callerRole === "admin";
+  const mode = settingsQ.data?.mode;
+
+  if (settingsQ.isLoading) return null;
+
+  const modes = [
+    {
+      id: "centralized" as const,
+      label: "Centralized",
+      desc: "Valet's configured key bills; users only need a valet key.",
+    },
+    {
+      id: "passthrough" as const,
+      label: "Pass-through",
+      desc: "Each user forwards their own provider key; valet only records.",
+    },
+  ] as const;
+
+  const current = modes.find((m) => m.id === mode);
+
+  if (isAdmin) {
+    return (
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center gap-1" role="group" aria-label="Credential mode">
+          {modes.map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              onClick={() => setMode.mutate(m.id)}
+              disabled={setMode.isPending}
+              className={`rounded px-3 py-1 text-sm border ${
+                mode === m.id
+                  ? "border-moss text-moss bg-moss/10 font-medium"
+                  : "border-line text-muted hover:text-ink hover:border-ink"
+              }`}
+            >
+              {m.label}
+            </button>
+          ))}
+        </div>
+        {current && (
+          <p className="text-xs text-muted">{current.desc}</p>
+        )}
+        {setMode.isError && (
+          <p className="text-xs text-danger-600">{setMode.error.message}</p>
+        )}
+      </div>
+    );
+  }
+
+  // Member: read-only
+  return (
+    <div>
+      <span className="rounded border border-line px-3 py-1 text-sm text-muted">
+        {current?.label ?? mode}
+      </span>
+      {current && <p className="mt-1 text-xs text-muted">{current.desc}</p>}
+    </div>
+  );
+}
+
 export function UsagePage() {
   const [window, setWindow] = useState<Window>("7d");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -47,6 +118,7 @@ export function UsagePage() {
 
   const summaryQ = useProxyUsageSummary(window);
   const requestsQ = useProxyRequests({ limit: 50, cursor });
+  const settingsQ = useProxySettings();
 
   // Accumulate items across page loads.
   const [seenCursors] = useState(() => new Set<string | undefined>());
@@ -100,6 +172,12 @@ export function UsagePage() {
           <p className="mt-1 text-sm text-muted">
             LLM proxy spend and request log across your org.
           </p>
+          <div className="mt-3">
+            <div className="text-xs font-semibold uppercase tracking-wide text-muted mb-1">
+              Credential mode
+            </div>
+            <CredentialModeControl />
+          </div>
         </div>
 
         {/* Window selector */}
@@ -176,7 +254,7 @@ export function UsagePage() {
         </div>
 
         {/* Onboarding */}
-        <OnboardingPanel />
+        <OnboardingPanel mode={settingsQ.data?.mode ?? "centralized"} />
       </div>
     </div>
   );

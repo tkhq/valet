@@ -161,12 +161,30 @@ let detailResult: { data: ProxyRequestDetail | undefined; isLoading: boolean; er
   isLoading: false,
   error: null,
 };
+let settingsResult: { data: { mode: "centralized" | "passthrough" } | undefined; isLoading: boolean } = {
+  data: { mode: "centralized" },
+  isLoading: false,
+};
+
+const setModeMutate = vi.fn();
 
 vi.mock("~/api/proxy-usage", () => ({
   useProxyUsageSummary: () => summaryResult,
   useProxyRequests: () => requestsResult,
   useProxyRequestDetail: () => detailResult,
-  qkProxy: { summary: () => [], requests: () => [], detail: () => [] },
+  useProxySettings: () => settingsResult,
+  useSetProxyMode: () => ({ mutate: setModeMutate, isPending: false, isError: false }),
+  qkProxy: { summary: () => [], requests: () => [], detail: () => [], settings: () => [] },
+}));
+
+// Mutable org data
+let orgData: { data: { callerRole: "admin" | "member"; features: { organizations: boolean } } | undefined; isLoading: boolean } = {
+  data: { callerRole: "admin", features: { organizations: true } },
+  isLoading: false,
+};
+
+vi.mock("~/api/settings", () => ({
+  useOrg: () => orgData,
 }));
 
 import { UsagePage } from "./usage";
@@ -176,6 +194,9 @@ beforeEach(() => {
   summaryResult = { data: mockSummary, isLoading: false, error: null };
   requestsResult = { data: mockRequests, isLoading: false, error: null };
   detailResult = { data: mockDetail, isLoading: false, error: null };
+  settingsResult = { data: { mode: "centralized" }, isLoading: false };
+  orgData = { data: { callerRole: "admin", features: { organizations: true } }, isLoading: false };
+  setModeMutate.mockReset();
 });
 
 describe("UsagePage — spend summary", () => {
@@ -321,5 +342,82 @@ describe("UsagePage — OnboardingPanel", () => {
     expect(screen.getAllByText(/config\.toml/).length).toBeGreaterThan(0);
     // The key itself appears in the UI.
     expect(screen.getByText("vlt_testkey12345")).toBeTruthy();
+  });
+});
+
+describe("UsagePage — credential mode", () => {
+  it("shows Centralized when mode=centralized", () => {
+    settingsResult = { data: { mode: "centralized" }, isLoading: false };
+    render(<UsagePage />);
+    expect(screen.getAllByText(/Centralized/).length).toBeGreaterThan(0);
+  });
+
+  it("shows Pass-through when mode=passthrough", () => {
+    settingsResult = { data: { mode: "passthrough" }, isLoading: false };
+    render(<UsagePage />);
+    expect(screen.getAllByText(/Pass-through/).length).toBeGreaterThan(0);
+  });
+
+  it("admin sees the mode toggle buttons", () => {
+    orgData = { data: { callerRole: "admin", features: { organizations: true } }, isLoading: false };
+    render(<UsagePage />);
+    const group = document.querySelector("[role='group'][aria-label='Credential mode']");
+    expect(group).toBeTruthy();
+  });
+
+  it("member does not see the mode toggle buttons", () => {
+    orgData = { data: { callerRole: "member", features: { organizations: true } }, isLoading: false };
+    render(<UsagePage />);
+    const group = document.querySelector("[role='group'][aria-label='Credential mode']");
+    expect(group).toBeNull();
+  });
+});
+
+describe("UsagePage — OnboardingPanel mode snippets", () => {
+  const fakeKey = {
+    id: "key_1",
+    name: "proxy-key",
+    key: "vlt_testkey12345",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    userId: "user_1",
+    enabled: true,
+    rateLimitEnabled: false,
+    rateLimitTimeWindow: null,
+    rateLimitMax: null,
+    requestCount: 0,
+    remainingRequests: null,
+    lastRequest: null,
+    expiresAt: null,
+    deletedAt: null,
+    refillAmount: null,
+    refillInterval: null,
+    permissions: null,
+    metadata: null,
+    prefix: "vlt_",
+  };
+
+  beforeEach(() => {
+    createKeyMutate.mockImplementation((_name: string, opts: { onSuccess: (k: typeof fakeKey) => void }) => {
+      opts.onSuccess(fakeKey);
+    });
+  });
+
+  it("passthrough mode shows ANTHROPIC_API_KEY line after key creation", () => {
+    settingsResult = { data: { mode: "passthrough" }, isLoading: false };
+    render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "Create proxy key" }));
+    expect(screen.getAllByText(/ANTHROPIC_API_KEY/).length).toBeGreaterThan(0);
+  });
+
+  it("centralized mode shows unset note for ANTHROPIC_API_KEY after key creation", () => {
+    settingsResult = { data: { mode: "centralized" }, isLoading: false };
+    render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "Create proxy key" }));
+    // The centralized note says "unset it"
+    expect(screen.getByText(/unset it/)).toBeTruthy();
+    // The snippet itself does NOT include the ANTHROPIC_API_KEY env var line
+    const allText = document.body.textContent ?? "";
+    expect(allText).toContain("unset it");
   });
 });

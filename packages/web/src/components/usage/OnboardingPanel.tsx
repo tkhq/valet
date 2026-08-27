@@ -41,25 +41,30 @@ function CodeBlock({ label, code }: { label: string; code: string }) {
 
 interface KeySnippetsProps {
   apiKey: CreatedApiKey;
+  mode: "centralized" | "passthrough";
 }
 
-function KeySnippets({ apiKey }: KeySnippetsProps) {
+function KeySnippets({ apiKey, mode }: KeySnippetsProps) {
   const origin = typeof window !== "undefined" ? window.location.origin : "";
   const key = apiKey.key ?? "";
 
-  const claudeCodeSnippet = `export ANTHROPIC_BASE_URL=${origin}/proxy/anthropic
-export ANTHROPIC_AUTH_TOKEN=${key}`;
+  // Claude Code snippets differ by mode
+  const claudeCodeSnippet =
+    mode === "centralized"
+      ? `export ANTHROPIC_BASE_URL=${origin}/proxy/anthropic\nexport ANTHROPIC_AUTH_TOKEN=${key}`
+      : `export ANTHROPIC_BASE_URL=${origin}/proxy/anthropic\nexport ANTHROPIC_AUTH_TOKEN=${key}\nexport ANTHROPIC_API_KEY=<your-own-anthropic-key>`;
 
-  const codexTomlSnippet = `# ~/.codex/config.toml
-model_provider = "valet"
+  const claudeCodeNote =
+    mode === "centralized"
+      ? "If you have ANTHROPIC_API_KEY set, unset it — in centralized mode valet uses its own key."
+      : "Pass-through mode: your own key is forwarded and billed; the valet key only identifies you.";
 
-[model_providers.valet]
-name = "valet"
-base_url = "${origin}/proxy/openai/v1"
-env_key = "VALET_KEY"
-wire_api = "responses"`;
+  const codexTomlSnippet = `# ~/.codex/config.toml\nmodel_provider = "valet"\n\n[model_providers.valet]\nname = "valet"\nbase_url = "${origin}/proxy/openai/v1"\nenv_key = "VALET_KEY"\nwire_api = "responses"`;
 
-  const codexEnvSnippet = `export VALET_KEY=${key}`;
+  const codexEnvSnippet =
+    mode === "passthrough"
+      ? `export VALET_KEY=${key}\n# Pass-through: set your real OpenAI key as the provider key instead of VALET_KEY`
+      : `export VALET_KEY=${key}`;
 
   return (
     <div>
@@ -76,6 +81,7 @@ wire_api = "responses"`;
       <div className="mt-6">
         <h4 className="text-sm font-medium text-ink mb-3">Claude Code</h4>
         <CodeBlock label="Shell env" code={claudeCodeSnippet} />
+        <p className="text-xs text-muted -mt-2 mb-4">{claudeCodeNote}</p>
       </div>
 
       <div className="mt-4">
@@ -87,7 +93,11 @@ wire_api = "responses"`;
   );
 }
 
-export function OnboardingPanel() {
+interface OnboardingPanelProps {
+  mode?: "centralized" | "passthrough";
+}
+
+export function OnboardingPanel({ mode = "centralized" }: OnboardingPanelProps) {
   const [createdKey, setCreatedKey] = useState<CreatedApiKey | null>(null);
   const createKey = useCreateApiKey();
 
@@ -95,7 +105,7 @@ export function OnboardingPanel() {
     return (
       <div className="rounded border border-line bg-paper p-5">
         <h2 className="text-base font-medium text-ink mb-4">Proxy key created</h2>
-        <KeySnippets apiKey={createdKey} />
+        <KeySnippets apiKey={createdKey} mode={mode} />
         <button
           type="button"
           onClick={() => setCreatedKey(null)}

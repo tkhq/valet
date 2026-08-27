@@ -6,11 +6,12 @@
  * Routed through the central `api` client so 401→login handling and the
  * 30-second request timeout apply the same way as every other page.
  */
-import { useQuery, type UseQueryOptions } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient, type UseQueryOptions } from "@tanstack/react-query";
 import type {
   ProxyUsageSummary,
   ProxyRequestListItem,
   ProxyRequestDetail,
+  ProxySettingsResponse,
 } from "@valet/api/wire";
 import { api } from "~/api/client";
 
@@ -18,6 +19,7 @@ export const qkProxy = {
   summary: (window: string) => ["proxy", "usage", "summary", window] as const,
   requests: (filters: ProxyRequestFilters) => ["proxy", "requests", filters] as const,
   detail: (id: string) => ["proxy", "requests", id] as const,
+  settings: () => ["proxy", "settings"] as const,
 };
 
 export interface ProxyRequestFilters {
@@ -74,5 +76,26 @@ export function useProxyRequestDetail(
     enabled: !!id,
     staleTime: 5 * 60_000,
     ...opts,
+  });
+}
+
+export function useProxySettings(
+  opts?: Partial<UseQueryOptions<ProxySettingsResponse>>,
+) {
+  return useQuery<ProxySettingsResponse>({
+    queryKey: qkProxy.settings(),
+    queryFn: () => api.proxySettings(),
+    staleTime: 60_000,
+    ...opts,
+  });
+}
+
+export function useSetProxyMode() {
+  const qc = useQueryClient();
+  return useMutation<ProxySettingsResponse, Error, "centralized" | "passthrough">({
+    mutationFn: (mode) => api.setProxyMode(mode),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qkProxy.settings() });
+    },
   });
 }

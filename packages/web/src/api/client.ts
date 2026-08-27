@@ -179,6 +179,7 @@ import type {
   ProxyUsageSummary,
   ProxyRequestDetail,
   ProxyRequestListItem,
+  ProxySettingsResponse,
 } from "@valet/api/wire";
 import type {
   ExportMemoryResponse,
@@ -1025,6 +1026,10 @@ export const api = {
   },
   proxyRequestDetail: (id: string) =>
     request<ProxyRequestDetail>("GET", `/proxy/requests/${encodeURIComponent(id)}`),
+  proxySettings: () =>
+    request<ProxySettingsResponse>("GET", "/proxy/settings"),
+  setProxyMode: (mode: "centralized" | "passthrough") =>
+    request<ProxySettingsResponse>("PUT", "/proxy/settings", { mode }),
 };
 
 export { ApiError };
