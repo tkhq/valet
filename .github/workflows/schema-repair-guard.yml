@@ -1,0 +1,32 @@
+name: Schema repair guard
+
+# A separate workflow, like PR lint, because the `edited` type must re-run the
+# check when someone adds the `no-schema-repair:` override to the PR body,
+# without re-running typecheck and the test shards. The pull_request trigger is
+# deliberately unfiltered by base branch, so stacked PRs are checked too.
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+jobs:
+  schema-repair:
+    # Bot PRs (dependabot and friends) do not touch migrations; skip them.
+    if: github.event.pull_request.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need both the base and head commits to diff the PR's changed files.
+          fetch-depth: 0
+
+      - name: An in-place 0000_app.sql edit must carry a schema repair
+        # The body goes through an env var, never inline interpolation into the
+        # script: a PR description is attacker-controlled input, and inline
+        # `${{ }}` in `run` is a shell-injection vector.
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git fetch --no-tags --quiet origin "$BASE_SHA" "$HEAD_SHA" || true
+          git diff --name-only "$BASE_SHA...$HEAD_SHA" | python3 scripts/ci/schema_repair_guard.py
