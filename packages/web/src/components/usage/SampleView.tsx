@@ -22,8 +22,7 @@ type ContentBlock =
   | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
   | { type: "tool_result"; tool_use_id: string; content: unknown }
   | { type: "reasoning"; thinking: string }
-  | { type: "unknown"; raw: unknown }
-  | { type: string; [k: string]: unknown };
+  | { type: "unknown"; raw: unknown };
 
 interface SampleMessage {
   role: string;
@@ -99,14 +98,14 @@ function renderBlock(block: ContentBlock, i: number): React.ReactNode {
   if (block.type === "reasoning") {
     return (
       <pre key={i} className="whitespace-pre-wrap text-xs text-muted italic leading-relaxed overflow-auto max-h-32">
-        {(block as { type: "reasoning"; thinking: string }).thinking}
+        {block.thinking}
       </pre>
     );
   }
   // unknown — show raw JSON
   return (
     <pre key={i} className="whitespace-pre-wrap text-xs text-ink bg-paper-muted rounded p-2 border border-line overflow-auto max-h-32 mt-1">
-      {JSON.stringify((block as { type: string; raw?: unknown }).raw ?? block, null, 2)}
+      {JSON.stringify(block.raw ?? block, null, 2)}
     </pre>
   );
 }
