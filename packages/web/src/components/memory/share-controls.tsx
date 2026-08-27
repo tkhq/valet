@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Check, Copy } from "lucide-react";
-import { useOrg } from "~/api/settings";
+import { useMe, useOrg } from "~/api/settings";
 import { usePatchArtifact, useRevokeArtifact, useArtifacts, useShareArtifact } from "~/api/artifacts";
 import { Button, Popover, PopoverContent, PopoverTrigger, Switch } from "~/components/primitives";
 import { useCopyToClipboard } from "~/lib/use-copy";
@@ -19,13 +19,20 @@ import { useCopyToClipboard } from "~/lib/use-copy";
 export function ShareControls({ path }: { path: string }) {
   const [panelOpen, setPanelOpen] = useState(false);
   const { copied, copy } = useCopyToClipboard();
+  const meQ = useMe({ enabled: panelOpen });
   const orgQ = useOrg({ enabled: panelOpen });
   const artifactsQ = useArtifacts({ enabled: panelOpen });
   const shareMutation = useShareArtifact();
   const patchMutation = usePatchArtifact();
   const revokeMutation = useRevokeArtifact();
 
-  const artifact = artifactsQ.data?.artifacts.find((a) => a.path === path && !a.revoked);
+  // Match on the sharer too, not just the path: an org admin's list holds
+  // every member's artifacts, and paths are conventional, so a path-only
+  // match can land on a colleague's link — and Revoke would kill it.
+  const me = meQ.data?.id;
+  const artifact = me
+    ? artifactsQ.data?.artifacts.find((a) => a.path === path && a.actorUserId === me && !a.revoked)
+    : undefined;
   const allowPublic = orgQ.data?.allowPublicArtifacts ?? false;
   const busy = shareMutation.isPending || patchMutation.isPending || revokeMutation.isPending;
 
@@ -101,7 +108,11 @@ export function ShareControls({ path }: { path: string }) {
               Create a link to this document. It serves a snapshot of the current content to logged-in
               members of your org.
             </p>
-            <Button size="sm" disabled={busy || artifactsQ.isLoading} onClick={() => shareMutation.mutate({ path })}>
+            <Button
+              size="sm"
+              disabled={busy || artifactsQ.isLoading || meQ.isLoading}
+              onClick={() => shareMutation.mutate({ path })}
+            >
               {shareMutation.isPending ? "Sharing…" : "Create share link"}
             </Button>
           </>

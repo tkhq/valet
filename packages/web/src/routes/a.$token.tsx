@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { Download } from "lucide-react";
 import { useArtifact } from "~/api/artifacts";
@@ -27,6 +28,17 @@ export const Route = createFileRoute("/a/$token")({
 function ArtifactPage() {
   const { token } = Route.useParams();
   const artifactQ = useArtifact(token);
+
+  // The tab should read as the document, not as the app.
+  const title = artifactQ.data?.title;
+  useEffect(() => {
+    if (!title) return;
+    const previous = document.title;
+    document.title = `${title} · Valet`;
+    return () => {
+      document.title = previous;
+    };
+  }, [title]);
 
   if (artifactQ.isLoading) {
     return (

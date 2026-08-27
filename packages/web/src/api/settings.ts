@@ -76,7 +76,7 @@ export const qkSettings = {
 
 // ── Reads ────────────────────────────────────────────────────────────────
 
-export function useMe(opts?: UseQueryOptions<MeResponse>) {
+export function useMe(opts?: Partial<UseQueryOptions<MeResponse>>) {
   return useQuery<MeResponse>({
     queryKey: qkSettings.me(),
     queryFn: () => api.getMe(),
