@@ -8,7 +8,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactElement } from "react";
-import { ApiError, api } from "~/api/client";
+import { ApiError, api, type OwnerFilter } from "~/api/client";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 
 const docMock = vi.fn();
@@ -17,7 +17,7 @@ vi.mock("~/api/memory", async (importOriginal) => {
   const original = await importOriginal<typeof import("~/api/memory")>();
   return {
     ...original,
-    useMemoryDoc: (path: string, owner?: unknown) => docMock(path, owner),
+    useMemoryDoc: (path: string, owner?: OwnerFilter) => docMock(path, owner),
   };
 });
 
@@ -470,6 +470,45 @@ describe("MemoryDoc team scope (TKAI-262)", () => {
 
     teams.mockRestore();
     org.mockRestore();
+  });
+
+  /** Mutation invalidations use OWNERLESS keys: react-query matches key
+   * prefixes, so `doc(path)`/`tree()` cover every owner variant — including
+   * the ownerless copies the dashboard card and chat dialog cache. Owner-ful
+   * keys match only their own variant; this pins the regression where a
+   * scoped save left the ownerless copies stale. */
+  it("a scoped save invalidates the ownerless doc/tree cache copies too", async () => {
+    docMock.mockReturnValue({ isLoading: false, error: null, data: renderedDoc("body"), refetch: vi.fn() });
+    const teams = vi.spyOn(api, "listTeams").mockResolvedValue(teamsFixture("admin"));
+    const org = vi.spyOn(api, "getOrg").mockResolvedValue(orgFixture);
+    const write = vi.spyOn(api, "writeMemoryDoc").mockResolvedValue({});
+
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    client.setQueryData(["memory", "doc", "notes/roadmap.md"], { kind: "file" });
+    client.setQueryData(["memory", "tree"], { entries: [] });
+
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryDoc path="notes/roadmap.md" owner={teamOwner} onNavigateToChat={vi.fn()} />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByText("Edit"));
+    fireEvent.change(screen.getByLabelText("Memory content"), { target: { value: "new body" } });
+    fireEvent.click(screen.getByText("Save"));
+    await waitFor(() => expect(write).toHaveBeenCalled());
+
+    await waitFor(() => {
+      const ownerlessDoc = client.getQueryCache().find({ queryKey: ["memory", "doc", "notes/roadmap.md"], exact: true });
+      const ownerlessTree = client.getQueryCache().find({ queryKey: ["memory", "tree"], exact: true });
+      expect(ownerlessDoc?.state.isInvalidated).toBe(true);
+      expect(ownerlessTree?.state.isInvalidated).toBe(true);
+    });
+
+    teams.mockRestore();
+    org.mockRestore();
+    write.mockRestore();
   });
 
   it("shows write actions to a team admin, and writes carry the team owner", async () => {

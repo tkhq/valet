@@ -86,12 +86,17 @@ export function MemoryDoc({ path, owner, onNavigateToChat, onDeleted, onOpenPath
   const [draft, setDraft] = useState("");
   const [confirmingDelete, setConfirmingDelete] = useState(false);
 
+  // Invalidations use the OWNERLESS keys on purpose: react-query matches key
+  // prefixes, so `doc(path)` / `tree()` cover every owner variant of the same
+  // data — this pane's scoped copy AND the ownerless copies the dashboard
+  // memory card and the chat memory-viewer dialog hold. Owner-ful keys would
+  // match only this pane's copy and leave the others stale.
   const saveMutation = useMutation({
     mutationFn: (content: string) => api.writeMemoryDoc({ path, content }, owner),
     onSuccess: async () => {
       setEditing(false);
-      await queryClient.invalidateQueries({ queryKey: qkMemory.doc(path, owner) });
-      await queryClient.invalidateQueries({ queryKey: qkMemory.tree(owner) });
+      await queryClient.invalidateQueries({ queryKey: qkMemory.doc(path) });
+      await queryClient.invalidateQueries({ queryKey: qkMemory.tree() });
     },
   });
 
@@ -100,16 +105,16 @@ export function MemoryDoc({ path, owner, onNavigateToChat, onDeleted, onOpenPath
   const pinMutation = useMutation({
     mutationFn: (pinned: boolean) => api.writeMemoryDoc({ path, pinned }, owner),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: qkMemory.doc(path, owner) });
-      await queryClient.invalidateQueries({ queryKey: qkMemory.tree(owner) });
+      await queryClient.invalidateQueries({ queryKey: qkMemory.doc(path) });
+      await queryClient.invalidateQueries({ queryKey: qkMemory.tree() });
     },
   });
 
   const deleteMutation = useMutation({
     mutationFn: () => api.deleteMemoryDoc(path, owner),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: qkMemory.tree(owner) });
-      queryClient.removeQueries({ queryKey: qkMemory.doc(path, owner) });
+      await queryClient.invalidateQueries({ queryKey: qkMemory.tree() });
+      queryClient.removeQueries({ queryKey: qkMemory.doc(path) });
       onDeleted?.();
     },
   });
