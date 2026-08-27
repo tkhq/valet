@@ -26,6 +26,13 @@ export default defineConfig({
         changeOrigin: true,
         ws: true,
       },
+      // The recording gateway is mounted at /proxy on the api (NOT under /api).
+      // Forward it too so the onboarding snippet's `${origin}/proxy/...` URL —
+      // which is same-origin in production — also works against the dev stack.
+      "/proxy": {
+        target: API_URL,
+        changeOrigin: true,
+      },
     },
   },
   resolve: {

@@ -40,6 +40,8 @@ import { wireAttentionRouter } from "./orchestrator/attention-wiring.js";
 import { initTelemetry } from "./observability/otel.js";
 import { ensureWorkflowSession } from "./workflows/engine-deps.js";
 import { restoreOneSession, runBoundedRestore, type RestoreSessionDeps } from "./boot-restore.js";
+import { ensureEnvProviders } from "./proxy/upstream.js";
+import { resolveOrgId } from "./lib/org.js";
 import { webDistPath } from "./assets/base.js";
 import { startRotateSweep, type RotateSweepHandle } from "./engine/rotate-sweep.js";
 import {
@@ -575,6 +577,14 @@ async function runBootChain(): Promise<void> {
   // short-circuits.
   await providers.prebuildService.start().catch((err) => {
     console.error("prebuildService.start failed:", err);
+  });
+
+  // LLM proxy env-key bootstrap (llm-recording-gateway plan, Task 8): for each
+  // provider kind, if the env key is set and the org has no configured
+  // provider, seed one named `env:{kind}` so the recording proxy works with
+  // zero setup. Idempotent; a failure must never block boot.
+  await ensureEnvProviders(providers.db, providers.engineCredentials, await resolveOrgId(providers.db)).catch((err) => {
+    console.error("ensureEnvProviders failed (continuing to serve):", err);
   });
 
   if (closed) return;

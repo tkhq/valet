@@ -40,6 +40,7 @@ import { identityLinksRouter } from "./routes/identity-links.js";
 import { meRouter } from "./routes/me.js";
 import { modelsRouter } from "./routes/models.js";
 import { usageRouter } from "./routes/usage.js";
+import { proxyUsageRouter } from "./routes/proxy-usage.js";
 import { orgRouter } from "./routes/org.js";
 import { orgInvitesRouter } from "./routes/org-invites.js";
 import { orgSettingsRouter } from "./routes/org-settings.js";
@@ -55,6 +56,7 @@ import { policiesRouter, actionLogRouter } from "./routes/policies.js";
 import { mePolicyOverridesRouter, meGrantsRouter } from "./routes/me-policies.js";
 import { registerWsRoutes } from "./routes/ws.js";
 import { registerGatewayHttpProxy, registerGatewayWsProxy } from "./routes/gateway-proxy.js";
+import { registerProxyGateway } from "./routes/proxy-gateway.js";
 import { channelsRouter } from "./routes/channels.js";
 import { slackWebhookRouter } from "./routes/slack-webhook.js";
 import { slackAppRouter } from "./routes/slack-app.js";
@@ -140,6 +142,22 @@ export function createApp(
     }),
   );
   app.use("*", providersMiddleware(providers));
+
+  // LLM recording proxy — /proxy/anthropic/* and /proxy/openai/*. Uses its
+  // own vlt_ key auth (resolveProxyPrincipal); intentionally outside /api/*
+  // so it never hits the cookie/session auth ladder. Placed here, after
+  // `providersMiddleware`, so `c.var.providers` is available inside the handler.
+  // Stub mode (no real auth instance) passes a verifyApiKey that always 401s —
+  // the proxy requires real vlt_ keys.
+  registerProxyGateway(app, {
+    verifyApiKey: auth
+      ? async (opts) => {
+          const r = await auth.api.verifyApiKey({ body: opts });
+          // Bridge ValetApiKeyRecord (referenceId) → PrincipalDeps (userId).
+          return { valid: r.valid, key: r.key ? { id: r.key.id, userId: r.key.referenceId } : null };
+        }
+      : async () => ({ valid: false, key: null }),
+  });
 
   // Public channel ingress (webhooks) — verification is transport-level
   // (`ChannelHost.handleWebhook` → `transport.verifyWebhook`), not the auth
@@ -289,6 +307,7 @@ export function createApp(
   app.route("/api/me", meRouter);
   app.route("/api/models", modelsRouter);
   app.route("/api/usage", usageRouter);
+  app.route("/api/proxy", proxyUsageRouter);
   app.route("/api/org", orgRouter);
   app.route("/api/org/settings", orgSettingsRouter);
   app.route("/api/org/invites", orgInvitesRouter);

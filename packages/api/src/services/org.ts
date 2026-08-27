@@ -124,6 +124,59 @@ async function readRawFeatures(db: AppQueryable, orgId: string): Promise<Record<
 }
 
 /**
+ * Recording-gateway credential strategy (org-level). `centralized` (default):
+ * the gateway drops the harness's key and bills the org's stored upstream key.
+ * `passthrough`: the gateway forwards each user's OWN provider key upstream
+ * (the user still identifies with a `vlt_` key), so per-user keys and billing
+ * are preserved while valet only observes. Stored as a string key in the
+ * `orgs.features` jsonb (untyped at the DB level), so no schema change.
+ * Subscriptions (OAuth) are NOT supported by either mode — the proxy is an
+ * API-key path (see the gateway design doc).
+ */
+export type ProxyCredentialMode = "centralized" | "passthrough";
+
+/**
+ * Recording-gateway governance (org-level), stored together in the
+ * `orgs.features` jsonb:
+ *  - `enabled` — master on/off. Default OFF: the gateway forwards a provider
+ *    key and records prompts, so an org opts in explicitly on the Proxy
+ *    settings page. When off, `/proxy/*` 403s.
+ *  - `mode` — credential strategy (`centralized` vs `passthrough`).
+ */
+export interface ProxySettings {
+  enabled: boolean;
+  mode: ProxyCredentialMode;
+}
+
+function proxySettingsFrom(raw: Record<string, unknown>): ProxySettings {
+  return {
+    enabled: raw.proxyEnabled === true,
+    mode: raw.proxyCredentialMode === "passthrough" ? "passthrough" : "centralized",
+  };
+}
+
+/** Reads both governance fields in one `orgs.features` read (the gateway hot
+ * path and the settings endpoints both need the pair). */
+export async function getProxySettings(db: AppQueryable, orgId: string): Promise<ProxySettings> {
+  return proxySettingsFrom(await readRawFeatures(db, orgId));
+}
+
+/** Applies a partial governance update in ONE read-modify-write, so a combined
+ * `{enabled, mode}` PUT is a single write (not two that can interleave), and
+ * returns the resulting settings. */
+export async function setProxySettings(
+  db: AppQueryable,
+  orgId: string,
+  patch: { enabled?: boolean; mode?: ProxyCredentialMode },
+): Promise<ProxySettings> {
+  const next = { ...(await readRawFeatures(db, orgId)) };
+  if (patch.enabled !== undefined) next.proxyEnabled = patch.enabled;
+  if (patch.mode !== undefined) next.proxyCredentialMode = patch.mode;
+  await db.update(orgs).set({ features: next }).where(eq(orgs.id, orgId));
+  return proxySettingsFrom(next);
+}
+
+/**
  * Reads `orgs.features` (jsonb). An absent key reads as false, which is what
  * makes every gate here off for an operator who sets nothing.
  */

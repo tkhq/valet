@@ -103,6 +103,18 @@ describe("cost_entries view", () => {
          ('e-invoke',      'wf:invoke:inv-1',      'th', 'message', 'assistant', 'claude', $2,   $3,   $1)`,
       [NOW, usageJson({ input: 100, output: 20, cacheRead: 900, cacheWrite: 40 }), priced],
     );
+
+    // Recording-gateway proxy rows: one real completion (usage > 0) and one
+    // failed/zero-token call. Only the former is a billable turn in the view.
+    await db.query(
+      `INSERT INTO llm_proxy_requests
+         (id, created_at, org_id, user_id, api_key_id, provider_kind, model, harness, endpoint,
+          stream, status_code, request_body, input_tokens, output_tokens, total_tokens, cost_usd)
+       VALUES
+         ('p-ok',   $1, 'org-a', 'u-alice', 'k1', 'anthropic', 'claude', 'claude-code', '/v1/messages', false, 200, '{}', 100, 20, 120, 0.0033),
+         ('p-fail', $1, 'org-a', 'u-alice', 'k1', 'openai',    NULL,     'codex',       '/v1/responses', false, 429, '{}', 0,   0,  0,   NULL)`,
+      [NOW],
+    );
   });
 
   afterAll(async () => {
@@ -195,6 +207,18 @@ describe("cost_entries view", () => {
     expect(await entryIds("WHERE org_id = 'org-b'")).toEqual(["e-other-org"]);
   });
 
+  it("classifies each entry's use_case from its session id", async () => {
+    expect((await rowFor("e-interactive"))?.use_case).toBe("session");
+    expect((await rowFor("e-orch"))?.use_case).toBe("orchestrator");
+    expect((await rowFor("e-wf"))?.use_case).toBe("workflow");
+    expect((await rowFor("p-ok"))?.use_case).toBe("proxy");
+  });
+
+  it("includes a proxy row with usage but EXCLUDES a zero-token/failed proxy row", async () => {
+    expect(await rowFor("p-ok")).toBeDefined();
+    expect(await rowFor("p-fail")).toBeUndefined(); // 429, 0 tokens — not a billable turn
+  });
+
   it("returns exactly one row per attributable entry", async () => {
     expect(await entryIds("")).toEqual([
       "e-interactive",
@@ -204,6 +228,7 @@ describe("cost_entries view", () => {
       "e-wf",
       "e-wf-foreach",
       "e-wf-team",
+      "p-ok",
     ]);
   });
 });

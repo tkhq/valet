@@ -126,6 +126,7 @@ describe("TopNav", () => {
       "Sessions",
       "Workflows",
       "Events",
+      "Usage",
       "Skills",
       "Integrations",
     ]);

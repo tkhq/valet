@@ -184,6 +184,15 @@ import type {
   WorkflowScheduleResponse,
   WithdrawDecisionRequest,
   ListCommandsResponse,
+  ProxyUsageSummary,
+  ProxyRequestDetail,
+  ProxyRequestListItem,
+  ProxySettingsResponse,
+  UsageBreakdownResponse,
+  UsageSessionsResponse,
+  UsageDrillResponse,
+  UsageDrillItem,
+  UsageUseCase,
 } from "@valet/api/wire";
 import type {
   ExportMemoryResponse,
@@ -772,6 +781,23 @@ export const api = {
   patchMe: (body: PatchMeRequest) => request<PatchMeResponse>("PATCH", "/me", body),
   listModels: () => request<ListModelsResponse>("GET", "/models"),
   getUsageSummary: () => request<UsageSummaryResponse>("GET", "/usage/summary"),
+  usageBreakdown: (window: string = "7d", scope: "me" | "org" = "me") => {
+    const qs = new URLSearchParams({ window, scope });
+    return request<UsageBreakdownResponse>("GET", `/usage/breakdown?${qs}`);
+  },
+  usageItems: (window: string, scope: "me" | "org", useCase: UsageUseCase) => {
+    const qs = new URLSearchParams({ window, scope, useCase });
+    return request<UsageDrillResponse>("GET", `/usage/items?${qs}`);
+  },
+  usageExportCsvUrl: (window: string, scope: "me" | "org"): string => {
+    const qs = new URLSearchParams({ window, scope });
+    return `/api/usage/export.csv?${qs}`;
+  },
+  usageSessions: (window: string = "7d", useCase?: "orchestrator" | "session") => {
+    const qs = new URLSearchParams({ window });
+    if (useCase) qs.set("useCase", useCase);
+    return request<UsageSessionsResponse>("GET", `/usage/sessions?${qs}`);
+  },
   getJournalSummary: () =>
     request<{ date: string; summary: string | null }>("GET", "/memory/journal-summary"),
   getOrg: () => request<OrgResponse>("GET", "/org"),
@@ -1031,6 +1057,38 @@ export const api = {
   listMyGrants: () => request<ListGrantsResponse>("GET", "/me/grants"),
   deleteMyGrant: (body: DeleteGrantRequest) =>
     request<DeleteGrantResponse>("DELETE", "/me/grants", body),
+
+  // ── LLM proxy usage (recording-gateway dashboard) ──────────────────────
+  proxyUsageSummary: (window: string = "7d") =>
+    request<ProxyUsageSummary>("GET", `/proxy/usage/summary?window=${encodeURIComponent(window)}`),
+  proxyRequests: (opts: {
+    user?: string;
+    model?: string;
+    harness?: string;
+    from?: number;
+    to?: number;
+    cursor?: string;
+    limit?: number;
+  } = {}) => {
+    const qs = new URLSearchParams();
+    if (opts.user) qs.set("user", opts.user);
+    if (opts.model) qs.set("model", opts.model);
+    if (opts.harness) qs.set("harness", opts.harness);
+    if (opts.from !== undefined) qs.set("from", String(opts.from));
+    if (opts.to !== undefined) qs.set("to", String(opts.to));
+    if (opts.cursor) qs.set("cursor", opts.cursor);
+    if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+    const tail = qs.toString() ? `?${qs}` : "";
+    return request<{ requests: ProxyRequestListItem[]; nextCursor?: string }>("GET", `/proxy/requests${tail}`);
+  },
+  proxyRequestDetail: (id: string) =>
+    request<ProxyRequestDetail>("GET", `/proxy/requests/${encodeURIComponent(id)}`),
+  proxySettings: () =>
+    request<ProxySettingsResponse>("GET", "/proxy/settings"),
+  setProxyMode: (mode: "centralized" | "passthrough") =>
+    request<ProxySettingsResponse>("PUT", "/proxy/settings", { mode }),
+  updateProxySettings: (patch: { enabled?: boolean; mode?: "centralized" | "passthrough" }) =>
+    request<ProxySettingsResponse>("PUT", "/proxy/settings", patch),
 };
 
 export { ApiError };

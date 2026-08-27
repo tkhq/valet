@@ -24,6 +24,7 @@ const YOU_ITEMS = [
   { to: "/settings/notifications", label: "Notifications" },
   { to: "/settings/connected-accounts", label: "Connected accounts" },
   { to: "/settings/api-keys", label: "API keys" },
+  { to: "/settings/proxy", label: "Proxy" },
   // No "Library sources" item: personal and team repositories are tracked on
   // /skills, beside the skills they produce. Organization · Library keeps the
   // org ones, which only an admin changes.
@@ -40,6 +41,7 @@ const ORGANIZATION_ITEMS = [
   { to: "/settings/organization/members", label: "Members" },
   { to: "/settings/organization/teams", label: "Teams" },
   { to: "/settings/organization/models", label: "Models" },
+  { to: "/settings/organization/proxy", label: "Proxy" },
   { to: "/settings/organization/library", label: "Library" },
   { to: "/settings/organization/github", label: "GitHub" },
   { to: "/settings/organization/slack", label: "Slack" },

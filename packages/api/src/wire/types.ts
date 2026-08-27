@@ -2242,6 +2242,85 @@ export interface UsageMemberSummary extends UsageWindow {
   name: string;
 }
 
+/** A Valet activity kind, derived from the session id in `cost_entries`
+ * (`use_case`): `orchestrator`, `session` (interactive chat + child sessions),
+ * `workflow`, or `proxy` (external Claude Code / Codex). */
+export type UsageUseCase = "orchestrator" | "session" | "workflow" | "proxy";
+
+/** A spend bucket with the full token-type split (input/output/cache) so cache
+ * efficiency is visible, plus `unpricedTurns` (turns on custom/dev models that
+ * burn tokens but carry no cost). */
+export interface UsageBucket {
+  costUsd: number;
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  turns: number;
+  unpricedTurns: number;
+}
+
+/** `GET /api/usage/breakdown?window=&scope=me|org` — spend for a window across
+ * ALL use cases (engine sessions + workflows + proxy), from the single
+ * `cost_entries` definition. `scope=org` (org-admin only) covers every member;
+ * `byUser` is present only then. */
+export interface UsageBreakdownResponse {
+  windowMs: number;
+  scope: "me" | "org";
+  totalCostUsd: number;
+  totalTokens: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCacheReadTokens: number;
+  totalCacheWriteTokens: number;
+  totalTurns: number;
+  unpricedTurns: number;
+  byUseCase: (UsageBucket & { useCase: UsageUseCase })[];
+  byModel: (UsageBucket & { model: string | null })[];
+  /** Present only for `scope=org`. */
+  byUser?: (UsageBucket & { userId: string; name: string })[];
+  byDay: { dayMs: number; costUsd: number; totalTokens: number }[];
+}
+
+/** `GET /api/usage/items?window=&scope=&useCase=` — drill-down rows for ONE use
+ * case: sessions (title, child-nested via `child_watches`), workflow runs
+ * (workflow name), or proxy (by harness). `sessionId` is set only for
+ * agent-session rows so the UI can link to `/sessions/$id`. */
+export interface UsageDrillItem {
+  id: string;
+  label: string;
+  useCase: UsageUseCase;
+  isChild: boolean;
+  parentId: string | null;
+  sessionId: string | null;
+  costUsd: number;
+  totalTokens: number;
+  turns: number;
+}
+
+export interface UsageDrillResponse {
+  items: UsageDrillItem[];
+}
+
+/** `GET /api/usage/sessions?window=&useCase=` — per-session spend for the
+ * agent-session use cases, for drill-down. Superseded by `/items` but kept for
+ * the current dashboard; `isChild`/`parentSessionId` come from `child_watches`. */
+export interface UsageSessionRow {
+  sessionId: string;
+  title: string | null;
+  useCase: UsageUseCase;
+  isChild: boolean;
+  parentSessionId: string | null;
+  costUsd: number;
+  totalTokens: number;
+  turns: number;
+}
+
+export interface UsageSessionsResponse {
+  sessions: UsageSessionRow[];
+}
+
 export interface UsageSummaryResponse {
   me: { day: UsageWindow; week: UsageWindow; month: UsageWindow };
   /** Present only when the org's `features.organizations` flag is on —
@@ -3309,6 +3388,112 @@ export interface GetSlackAppResponse {
   /** Requested scopes the installed app did not grant, from the scope list
    * recorded at connect time. Empty when nothing is missing. */
   missingScopes: string[];
+}
+
+// ── REST: LLM proxy usage (`/api/proxy/*`) ───────────────────────────────
+//
+// Dashboard read surface for the LLM recording gateway. Gating:
+//   - org members see only their own rows.
+//   - org admins see all rows in their org.
+// A row outside the caller's org 404s (never 403 — same convention as
+// `routes/llm-providers.ts`).
+
+/** Aggregate bucket by a single dimension. */
+export interface ProxyUsageBucket {
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  costUsd: number;
+}
+
+export interface ProxyUserBucket extends ProxyUsageBucket {
+  userId: string;
+}
+
+export interface ProxyModelBucket extends ProxyUsageBucket {
+  model: string | null;
+}
+
+export interface ProxyHarnessBucket extends ProxyUsageBucket {
+  harness: string | null;
+}
+
+/** One UTC day's aggregate in a `ProxyUsageSummary`. `dayMs` is epoch ms
+ * floor-truncated to the day boundary (`created_at / 86400000 * 86400000`). */
+export interface ProxyDayBucket {
+  dayMs: number;
+  requests: number;
+  totalTokens: number;
+  costUsd: number;
+}
+
+/** `GET`/`PUT /api/proxy/settings` — org-level recording-gateway governance.
+ * `enabled`: master on/off (off → `/proxy/*` 403s). `mode`: credential strategy
+ * — `centralized` (valet's stored key bills) vs `passthrough` (each user's own
+ * forwarded key bills). `PUT` accepts either field on its own. */
+export interface ProxySettingsResponse {
+  enabled: boolean;
+  mode: "centralized" | "passthrough";
+}
+
+/**
+ * `GET /api/proxy/usage/summary` — token and cost aggregates for the
+ * requested time window. Members see only their own rows; org admins see
+ * the whole org.
+ */
+export interface ProxyUsageSummary {
+  windowMs: number;
+  totalRequests: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalTokens: number;
+  totalCostUsd: number;
+  byUser: ProxyUserBucket[];
+  byModel: ProxyModelBucket[];
+  byHarness: ProxyHarnessBucket[];
+  /** Per-UTC-day aggregates ordered by day ascending, for the spend chart. */
+  byDay: ProxyDayBucket[];
+}
+
+/**
+ * `GET /api/proxy/requests` list item — metadata only, no request or
+ * response bodies.
+ */
+export interface ProxyRequestListItem {
+  id: string;
+  createdAt: number;
+  orgId: string;
+  userId: string;
+  apiKeyId: string;
+  providerKind: "anthropic" | "openai";
+  model: string | null;
+  harness: string | null;
+  endpoint: string;
+  stream: boolean;
+  statusCode: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  totalTokens: number;
+  costUsd: number | null;
+  latencyMs: number | null;
+  error: string | null;
+}
+
+/**
+ * `GET /api/proxy/requests/:id` — full row including request and response
+ * bodies and the parsed representation.
+ */
+export interface ProxyRequestDetail extends ProxyRequestListItem {
+  requestBody: string;
+  responseBody: string | null;
+  parsed: unknown;
+  parseVersion: number | null;
+  parseError: string | null;
+  providerResponseId: string | null;
+  previousResponseId: string | null;
 }
 
 // ── Sandbox file upload ──────────────────────────────────────────────────
