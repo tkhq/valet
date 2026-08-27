@@ -55,31 +55,39 @@ export function SpendChart({ buckets }: SpendChartProps) {
   }
 
   const maxCost = Math.max(...buckets.map((b) => b.costUsd), 0.0001);
-  const svgW = buckets.length * (BAR_W + GAP) - GAP;
+  // Natural width at the fixed bar pitch. The SVG fills its container (width
+  // 100%) so few bars spread across the width instead of bunching left; this
+  // is the floor below which it scrolls, so dense windows keep a >= 22px pitch.
+  const minW = buckets.length * (BAR_W + GAP) - GAP;
   const svgH = CHART_H + LABEL_H;
 
   return (
     <div className="overflow-x-auto">
       <svg
-        width={svgW}
+        width="100%"
         height={svgH}
         role="img"
         aria-label="Daily spend chart"
-        className="min-w-full"
-        style={{ minWidth: `${svgW}px` }}
+        style={{ minWidth: `${minW}px` }}
       >
         {buckets.map((bucket, i) => {
           const label = dayLabel(bucket.dayMs);
-          const barH = Math.max(2, (bucket.costUsd / maxCost) * (CHART_H - PADDING_TOP));
-          const x = i * (BAR_W + GAP);
+          // A zero-spend day is a flat baseline, not a 2px stub — the 2px floor
+          // only keeps a tiny-but-nonzero bar visible.
+          const barH = bucket.costUsd <= 0 ? 0 : Math.max(2, (bucket.costUsd / maxCost) * (CHART_H - PADDING_TOP));
           const y = CHART_H - barH;
+          // Slot center as a percentage of the (responsive) width, so bars
+          // stay evenly spaced whatever the container width. The rect is
+          // shifted left half a bar to center its fixed width on that point.
+          const cx = `${((i + 0.5) / buckets.length) * 100}%`;
           return (
             <g key={bucket.dayMs}>
               <title>
                 {label}: ${bucket.costUsd.toFixed(4)}
               </title>
               <rect
-                x={x}
+                x={cx}
+                transform={`translate(${-BAR_W / 2}, 0)`}
                 y={y}
                 width={BAR_W}
                 height={barH}
@@ -88,7 +96,7 @@ export function SpendChart({ buckets }: SpendChartProps) {
               />
               {isLabeledBar(i, buckets.length) && (
                 <text
-                  x={x + BAR_W / 2}
+                  x={cx}
                   y={svgH - 2}
                   textAnchor="middle"
                   fontSize={9}
@@ -101,7 +109,7 @@ export function SpendChart({ buckets }: SpendChartProps) {
           );
         })}
         {/* baseline */}
-        <line x1={0} y1={CHART_H} x2={svgW} y2={CHART_H} stroke="currentColor" strokeWidth={1} className="text-line" />
+        <line x1={0} y1={CHART_H} x2="100%" y2={CHART_H} stroke="currentColor" strokeWidth={1} className="text-line" />
       </svg>
     </div>
   );

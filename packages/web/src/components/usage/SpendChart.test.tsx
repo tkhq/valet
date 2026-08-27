@@ -38,6 +38,25 @@ describe("SpendChart", () => {
     expect(container.querySelectorAll("svg[aria-label='Daily spend chart'] title").length).toBe(8);
   });
 
+  it("renders a flat baseline (zero-height bars) when every day is zero spend", () => {
+    const zero = [0, 1, 2].map((i) => ({ dayMs: 1_700_000_000_000 + i * 86_400_000, costUsd: 0 }));
+    const { container } = render(<SpendChart buckets={zero} />);
+    const rects = container.querySelectorAll("svg[aria-label='Daily spend chart'] rect");
+    expect(rects.length).toBe(3);
+    // No 2px stub bars for zero spend: every bar is flat.
+    for (const rect of rects) expect(rect.getAttribute("height")).toBe("0");
+  });
+
+  it("fills the width responsively: SVG is 100% wide and bars are positioned by percentage", () => {
+    const { container } = render(<SpendChart buckets={buckets} />);
+    const svg = container.querySelector("svg[aria-label='Daily spend chart']");
+    expect(svg?.getAttribute("width")).toBe("100%");
+    const rects = container.querySelectorAll("svg[aria-label='Daily spend chart'] rect");
+    // Every bar's x is a percentage of the width, so few bars spread out instead
+    // of bunching at the left edge.
+    for (const rect of rects) expect(rect.getAttribute("x")).toMatch(/%$/);
+  });
+
   it("labels the bucket's UTC day, not the viewer's local-timezone day", () => {
     // dayMs is a UTC midnight (byDay floors created_at to a UTC day). Aug 26
     // 00:00 UTC is still Aug 25 in any timezone west of UTC, so a local-time
