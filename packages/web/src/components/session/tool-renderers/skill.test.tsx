@@ -1,67 +1,53 @@
 // @vitest-environment jsdom
 /**
- * The `skill` renderer serves two paths that must stay in lockstep:
- * the model's `skill` tool call, and a user's slash-command invocation
- * (the dispatcher's `<skill name="...">…</skill>` expansion). These tests
- * pin the parser to the dispatcher's exact output shape and pin the
- * invocation card to the tool-call presentation (collapsed card, not a
- * markdown dump).
+ * The `skill` renderer serves two paths that must stay in lockstep: the
+ * model's `skill` tool call, and a user's slash-command invocation. The
+ * invocation card goes through the SAME ToolCallBlock as a real tool
+ * call (see message-item.tsx), so these tests cover the shared renderer
+ * plus the extraction tiers. Fixtures come from the real producer format
+ * (`buildSkillBlock` in @valet/shared — the same builder the engine's
+ * dispatcher calls), not a hand-written mirror.
  */
 import { describe, expect, it } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
-import { parseSkillBlock, SkillInvocationBlock, skillRenderer } from "./skill";
+import { buildSkillBlock } from "@valet/shared";
+import { extractSkillInvocation, skillRenderer } from "./skill";
+import { SkillInvocationBlock } from "../message-item";
 import { pickRenderer } from "./index";
 
-// Mirror of engine `commands/dispatch.ts`: block, then optional "\n\n" + raw.
-function dispatcherExpansion(name: string, content: string, raw = ""): string {
-  const block = `<skill name="${name}">\n${content.trim()}\n</skill>`;
-  return raw ? `${block}\n\n${raw}` : block;
-}
+describe("extractSkillInvocation", () => {
+  it("tier 1: exact slice from wire metadata, immune to </skill> in the body", () => {
+    const body = 'Example:\n<skill name="x">\ninner\n</skill>\n\nMore instructions.';
+    const text = buildSkillBlock("meta", body, "src/");
+    expect(extractSkillInvocation(text, { name: "meta", args: "src/" })).toEqual({
+      name: "meta",
+      content: body,
+      rest: "src/",
+    });
+  });
 
-describe("parseSkillBlock", () => {
-  it("parses a bare block (no arguments)", () => {
-    const text = dispatcherExpansion("review", "# Review\n\nDo the review.");
-    expect(parseSkillBlock(text)).toEqual({
-      name: "review",
-      content: "# Review\n\nDo the review.",
+  it("tier 2: metadata with unwrapped text (host Thread.skill submission) — whole text is the body", () => {
+    const rendered = "# Deploy\n\nRun the deploy checklist.";
+    expect(extractSkillInvocation(rendered, { name: "deploy" })).toEqual({
+      name: "deploy",
+      content: rendered,
       rest: "",
     });
   });
 
-  it("parses trailing arguments after the blank line", () => {
-    const text = dispatcherExpansion("review", "# Review", "src/ and be thorough");
-    expect(parseSkillBlock(text)).toEqual({
+  it("tier 3: legacy rows without metadata parse via the anchored regex", () => {
+    const text = buildSkillBlock("review", "# Review", "src/ and be thorough");
+    expect(extractSkillInvocation(text)).toEqual({
       name: "review",
       content: "# Review",
       rest: "src/ and be thorough",
     });
   });
 
-  it("keeps multi-line arguments intact", () => {
-    const text = dispatcherExpansion("review", "body", "line one\nline two");
-    expect(parseSkillBlock(text)?.rest).toBe("line one\nline two");
-  });
-
-  it("parses an empty skill body", () => {
-    expect(parseSkillBlock(dispatcherExpansion("empty", ""))).toEqual({
-      name: "empty",
-      content: "",
-      rest: "",
-    });
-  });
-
-  it("returns null for plain text", () => {
-    expect(parseSkillBlock("just a normal message")).toBeNull();
-    expect(parseSkillBlock("")).toBeNull();
-  });
-
-  it("returns null when a skill block is quoted mid-prose", () => {
-    const quoted = `Look at this:\n${dispatcherExpansion("review", "body")}`;
-    expect(parseSkillBlock(quoted)).toBeNull();
-  });
-
-  it("returns null for an unclosed block", () => {
-    expect(parseSkillBlock('<skill name="review">\nbody with no close')).toBeNull();
+  it("returns null for plain text and mid-prose quotes without metadata", () => {
+    expect(extractSkillInvocation("just a normal message")).toBeNull();
+    expect(extractSkillInvocation("")).toBeNull();
+    expect(extractSkillInvocation(`Look:\n${buildSkillBlock("review", "body")}`)).toBeNull();
   });
 });
 
@@ -82,6 +68,48 @@ describe("skill renderer registration", () => {
     expect(
       skillRenderer.formatSummary?.({ name: "r" }, undefined, "running", "skill"),
     ).toBeUndefined();
+  });
+
+  it("suppresses the line count for an empty body (no '1 line' over '(no output)')", () => {
+    expect(
+      skillRenderer.formatSummary?.({ name: "r" }, { text: "" }, "completed", "skill"),
+    ).toBeUndefined();
+  });
+
+  it("summarizes producer failures as 'failed', not a line count", () => {
+    expect(
+      skillRenderer.formatSummary?.(
+        { name: "nope" },
+        { text: '[skill_not_found] There is no skill named "nope". Call skill again with one of: review.' },
+        "completed",
+        "skill",
+      ),
+    ).toBe("failed");
+  });
+});
+
+describe("skill renderer Body", () => {
+  const Body = skillRenderer.Body;
+
+  it("renders [skill_not_found] results danger-toned with a copy affordance", () => {
+    const message = '[skill_not_found] There is no skill named "nope". Call skill again with one of: review.';
+    render(<Body args={{ name: "nope" }} result={{ text: message }} status="completed" toolName="skill" />);
+    const el = screen.getByText(message);
+    expect(el.className).toContain("text-danger");
+    expect(screen.getByRole("button", { name: "Copy error" })).toBeTruthy();
+  });
+
+  it("shows the placeholder args the model passed", () => {
+    render(
+      <Body
+        args={{ name: "deploy", args: { env: "prod" } }}
+        result={{ text: "# Deploy" }}
+        status="completed"
+        toolName="skill"
+      />,
+    );
+    expect(screen.getByText("env")).toBeTruthy();
+    expect(screen.getByText("prod")).toBeTruthy();
   });
 });
 

@@ -1,25 +1,41 @@
 import { BookMarked } from "lucide-react";
+import { parseSkillBlock, sliceSkillBlock, type SkillBlock } from "@valet/shared";
+import type { MessageSkillInvocation } from "@valet/api/wire";
+import { cn } from "~/lib/cn";
+import { KeyValueTable } from "./fallback";
 import { MarkdownBody } from "./markdown-view";
-import { ToolBody, ToolShell } from "./tool-shell";
-import { resultText, type ToolRenderer } from "./types";
+import { CopyButton, ToolBody } from "./tool-shell";
+import { lineCountSummary, resultText, type ToolRenderer } from "./types";
 
 /**
- * Renderer for the `skill` tool — the model's read-a-skill request. The
- * result text is the skill's markdown body, so it renders as a document
- * with a source toggle, exactly like mem_read.
+ * Renderer for the `skill` tool — the model's read-a-skill request
+ * (packages/api/src/plugins/skill-tool.ts). The result text is the skill's
+ * markdown body, so it renders as a document with a source toggle.
  *
- * The same card also renders a slash-command skill invocation: the command
- * dispatcher expands `/skill:name` into a `<skill name="...">…</skill>`
- * block inside the USER message text (engine `commands/dispatch.ts`).
- * `parseSkillBlock` recognizes that block and `SkillInvocationBlock` shows
- * it through this renderer's Body, so both paths look identical in the
- * transcript instead of the user bubble dumping the full skill markdown.
+ * The producer returns failures as completed-status TEXT with a stable
+ * prefix (`[skill_not_found]`, `[skill_bad_args]`) so the model can
+ * self-correct without aborting the turn. The card must not dress those
+ * up as successful reads: they render danger-toned with no line count.
+ *
+ * The same card renders a user's slash-command skill invocation — see
+ * `extractSkillInvocation` below and `SkillInvocationBlock` in
+ * message-item.tsx.
  */
+
+const SKILL_FAILURE_RE = /^\[skill_(not_found|bad_args)\]/;
 
 function getName(args: unknown): string {
   if (!args || typeof args !== "object") return "";
   const n = (args as { name?: unknown }).name;
   return typeof n === "string" ? n : "";
+}
+
+/** The placeholder-value record the model passed, when present. */
+function getArgsRecord(args: unknown): [string, unknown][] {
+  if (!args || typeof args !== "object") return [];
+  const rec = (args as { args?: unknown }).args;
+  if (!rec || typeof rec !== "object" || Array.isArray(rec)) return [];
+  return Object.entries(rec as Record<string, unknown>);
 }
 
 export const skillRenderer: ToolRenderer = {
@@ -29,11 +45,14 @@ export const skillRenderer: ToolRenderer = {
   formatTarget: (args) => getName(args) || undefined,
   formatSummary: (_args, result, status) => {
     if (status !== "completed") return undefined;
-    const lines = resultText(result).split("\n").length;
-    return `${lines} ${lines === 1 ? "line" : "lines"}`;
-  },
-  Body: ({ status, result, error }) => {
     const text = resultText(result);
+    if (SKILL_FAILURE_RE.test(text)) return "failed";
+    return lineCountSummary(text);
+  },
+  Body: ({ args, status, result, error }) => {
+    const text = resultText(result);
+    const failed = status === "error" || SKILL_FAILURE_RE.test(text);
+    const argEntries = getArgsRecord(args);
 
     if (status === "running") {
       return (
@@ -42,73 +61,62 @@ export const skillRenderer: ToolRenderer = {
         </ToolBody>
       );
     }
-    if (status === "error" || !text) {
+    if (failed || !text) {
+      const message = error || text || "(no output)";
       return (
         <ToolBody>
-          <span className="text-muted font-mono text-[11px]">
-            {error || text || "(empty)"}
-          </span>
+          <div className="flex items-start justify-between gap-2">
+            <span
+              className={cn(
+                "font-mono text-[11px] whitespace-pre-wrap break-words min-w-0",
+                failed ? "text-danger-700 dark:text-danger-400" : "text-muted",
+              )}
+            >
+              {message}
+            </span>
+            {failed && (
+              <CopyButton label="Copy error" getText={() => message} className="-mt-0.5 shrink-0" />
+            )}
+          </div>
         </ToolBody>
       );
     }
     return (
       <ToolBody className="px-0 py-0">
+        {argEntries.length > 0 && (
+          <div className="px-3 py-2 border-b border-[--border]/60">
+            <KeyValueTable entries={argEntries} />
+          </div>
+        )}
         <MarkdownBody text={text} />
       </ToolBody>
     );
   },
 };
 
-/** A `<skill name="...">…</skill>` block parsed out of user message text. */
-export interface SkillBlock {
-  name: string;
-  content: string;
-  /** Text after the closing tag — the arguments the user typed after the
-   *  slash command. Empty string when the command had none. */
-  rest: string;
+/**
+ * Recover a skill invocation from user message text, in fidelity order:
+ *
+ * 1. Wire metadata + exact slice — delimiter-proof (`sliceSkillBlock`).
+ * 2. Wire metadata, unwrapped text — a host `Thread.skill()` submission:
+ *    the whole text IS the rendered skill body.
+ * 3. No metadata (legacy rows): anchored best-effort regex.
+ *
+ * Callers gate on `role === "user"` — the stamp only ever rides a queue
+ * item onto a user entry, and assistant prose that quotes a block must
+ * stay prose.
+ */
+export function extractSkillInvocation(
+  text: string,
+  meta?: MessageSkillInvocation,
+): SkillBlock | null {
+  if (!text) return null;
+  if (meta) {
+    const sliced = sliceSkillBlock(text, meta.name, meta.args ?? "");
+    if (sliced) return sliced;
+    return { name: meta.name, content: text, rest: "" };
+  }
+  return parseSkillBlock(text);
 }
 
-/**
- * Matches the exact shape the command dispatcher emits: the block starts
- * the message, the closing tag sits on its own line, and any user
- * arguments follow after one blank line. Anchored at both ends so a
- * message that merely QUOTES a skill block mid-prose stays plain text.
- * Lazy content match: a skill body that itself contains a literal
- * `\n</skill>` line would split early — no real skill does.
- */
-const SKILL_BLOCK_RE = /^<skill name="([^"\n]+)">\n([\s\S]*?)\n<\/skill>(?:\n\n([\s\S]*))?$/;
-
-/**
- * Parse a dispatcher-expanded skill invocation out of user message text.
- * Returns null for anything that is not exactly one leading skill block.
- * Exported for tests.
- */
-export function parseSkillBlock(text: string): SkillBlock | null {
-  const m = SKILL_BLOCK_RE.exec(text);
-  if (!m) return null;
-  return { name: m[1], content: m[2], rest: m[3]?.trim() ?? "" };
-}
-
-/**
- * The transcript card for a slash-command skill invocation. Synthesizes
- * the props the `skill` tool renderer expects (the block's body as the
- * tool result), so the user-invoked path and the model-invoked path render
- * through one component. Trailing user arguments are the caller's to
- * render — they are the user's actual prompt, not part of the skill.
- */
-export function SkillInvocationBlock({ block }: { block: SkillBlock }) {
-  const args = { name: block.name };
-  const result = { text: block.content };
-  return (
-    <ToolShell
-      toolName="skill"
-      category={skillRenderer.category}
-      Icon={skillRenderer.Icon}
-      target={skillRenderer.formatTarget(args, "skill")}
-      summary={skillRenderer.formatSummary?.(args, result, "completed", "skill")}
-      status="completed"
-    >
-      <skillRenderer.Body args={args} result={result} status="completed" toolName="skill" />
-    </ToolShell>
-  );
-}
+export type { SkillBlock };

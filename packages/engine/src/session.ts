@@ -719,7 +719,16 @@ export class Session {
     if (text?.startsWith("/")) {
       const outcome = dispatchCommand(text, this.commandRegistry());
       if (outcome.kind === "expand") {
-        return thread.submitPrompt(withText(content, outcome.text), opts);
+        // Stamp the skill identity onto the submission so the persisted
+        // entry (and its wire projection) can render the expansion as a
+        // skill card without re-parsing the text.
+        const opts2 = outcome.skill
+          ? {
+              ...opts,
+              metadata: { ...opts.metadata, skill: outcome.skill.name, skillArgs: outcome.skill.args },
+            }
+          : opts;
+        return thread.submitPrompt(withText(content, outcome.text), opts2);
       }
       if (outcome.kind === "execute") {
         return this.executeCommand(thread, outcome.resolved, outcome.args, text);
