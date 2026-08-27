@@ -18,7 +18,7 @@
  *   GET /api/proxy/requests   → paginated request log  (unchanged)
  *   GET /api/proxy/settings   → enabled flag           (unchanged)
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { useUsageBreakdown, useUsageItems } from "~/api/usage";
 import { useProxyRequests, useProxySettings } from "~/api/proxy-usage";
@@ -245,6 +245,17 @@ export function UsagePage() {
 
   // Accumulate proxy request items across page loads.
   const [seenCursors] = useState(() => new Set<string | undefined>());
+
+  // A workspace switch hides and reshapes the page; drop the proxy log's
+  // accumulated pages and any open detail so a return to the personal
+  // workspace starts from page one, not a mid-list cursor.
+  useEffect(() => {
+    setCursor(undefined);
+    setItems([]);
+    seenCursors.clear();
+    setSelectedId(null);
+  }, [teamId, seenCursors]);
+
   if (!seenCursors.has(cursor) && requestsQ.data) {
     seenCursors.add(cursor);
     const newItems = requestsQ.data.items ?? [];
@@ -408,10 +419,15 @@ export function UsagePage() {
               <SpendChart buckets={chartBuckets} />
             </div>
 
-            {/* By use case — all four rows expandable */}
+            {/* By use case — all four rows expandable. Keyed by the scope so
+                a workspace switch remounts the rows: an expanded drill list
+                must not carry over into a different workspace's view. */}
             <div>
               <h2 className="text-sm font-medium text-ink mb-3">By use case</h2>
-              <div className="rounded border border-line overflow-hidden">
+              <div
+                key={`${scope}:${teamId ?? ""}`}
+                className="rounded border border-line overflow-hidden"
+              >
                 {/* Header row */}
                 <div className="flex items-center gap-3 px-4 py-2 bg-paper-muted border-b border-line text-xs font-medium text-muted">
                   <span className="w-3" />

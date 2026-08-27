@@ -7,7 +7,7 @@
  */
 import { eq, inArray, sql, type SQL } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
-import { orgs, users } from "../schema/index.js";
+import { orgs, teams, users } from "../schema/index.js";
 import { isOrgAdmin } from "./org.js";
 import { isTeamMember } from "./teams.js";
 import type {
@@ -77,6 +77,11 @@ export async function resolveUsageScope(
   }
   if (opts.requestedScope === "team") {
     if (!opts.requestedTeamId) return "missing-team";
+    // The membership table alone does not tie a team to an org, so resolve
+    // the team row first: a teamId from another org (or none) is refused
+    // here, not answered as an empty 200 by the downstream org_id filter.
+    const teamRows = await db.select({ orgId: teams.orgId }).from(teams).where(eq(teams.id, opts.requestedTeamId)).limit(1);
+    if (teamRows[0]?.orgId !== opts.orgId) return "forbidden";
     const member = await isTeamMember(db, opts.requestedTeamId, opts.userId);
     if (!member) return "forbidden";
     return { scope: "team", isOrg: false, orgId: opts.orgId, userId: null, teamId: opts.requestedTeamId };

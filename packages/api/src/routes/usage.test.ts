@@ -132,6 +132,23 @@ describe("GET /api/usage — scope=team", () => {
     expect(missing.status).toBe(400);
   });
 
+  it("refuses a teamId outside the caller's org, and an unknown teamId", async () => {
+    api = await bootTestApi();
+    const now = Date.now();
+    const db = api.providers.db;
+    // A team in ANOTHER org that (pathologically) lists local-user as a
+    // member — the org-ownership check must refuse it before membership.
+    await db.execute(sql`INSERT INTO orgs (id, name, created_at) VALUES ('other-org', 'Other', ${now})`);
+    await db.insert(teams).values({ id: "team-foreign", orgId: "other-org", name: "Foreign", createdAt: now });
+    await db.insert(teamMembers).values({ teamId: "team-foreign", userId: "local-user", role: "member" });
+
+    const foreign = await fetch(`${api.baseUrl}/api/usage/breakdown?scope=team&teamId=team-foreign`);
+    expect(foreign.status).toBe(403);
+
+    const unknown = await fetch(`${api.baseUrl}/api/usage/breakdown?scope=team&teamId=no-such-team`);
+    expect(unknown.status).toBe(403);
+  });
+
   it("drill-down lists the team's sessions only, and the proxy drill is empty", async () => {
     api = await bootTestApi();
     const now = Date.now();
