@@ -192,6 +192,7 @@ import type {
   UsageSessionsResponse,
   UsageDrillResponse,
   UsageDrillItem,
+  UsageScopeName,
   UsageUseCase,
 } from "@valet/api/wire";
 import type {
@@ -781,16 +782,19 @@ export const api = {
   patchMe: (body: PatchMeRequest) => request<PatchMeResponse>("PATCH", "/me", body),
   listModels: () => request<ListModelsResponse>("GET", "/models"),
   getUsageSummary: () => request<UsageSummaryResponse>("GET", "/usage/summary"),
-  usageBreakdown: (window: string = "7d", scope: "me" | "org" = "me") => {
+  usageBreakdown: (window: string = "7d", scope: UsageScopeName = "me", teamId?: string) => {
     const qs = new URLSearchParams({ window, scope });
+    if (teamId !== undefined) qs.set("teamId", teamId);
     return request<UsageBreakdownResponse>("GET", `/usage/breakdown?${qs}`);
   },
-  usageItems: (window: string, scope: "me" | "org", useCase: UsageUseCase) => {
+  usageItems: (window: string, scope: UsageScopeName, useCase: UsageUseCase, teamId?: string) => {
     const qs = new URLSearchParams({ window, scope, useCase });
+    if (teamId !== undefined) qs.set("teamId", teamId);
     return request<UsageDrillResponse>("GET", `/usage/items?${qs}`);
   },
-  usageExportCsvUrl: (window: string, scope: "me" | "org"): string => {
+  usageExportCsvUrl: (window: string, scope: UsageScopeName, teamId?: string): string => {
     const qs = new URLSearchParams({ window, scope });
+    if (teamId !== undefined) qs.set("teamId", teamId);
     return `/api/usage/export.csv?${qs}`;
   },
   usageSessions: (window: string = "7d", useCase?: "orchestrator" | "session") => {

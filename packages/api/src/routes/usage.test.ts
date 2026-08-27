@@ -6,7 +6,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { sql } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, llmProxyRequests } from "../schema/index.js";
+import { agentSessions, llmProxyRequests, teams, teamMembers } from "../schema/index.js";
 import type { UsageBreakdownResponse, UsageDrillResponse, UsageSessionsResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -93,6 +93,74 @@ describe("GET /api/usage/breakdown", () => {
     expect(body.scope).toBe("org");
     expect(body.byUser?.length).toBe(2); // both users
     expect(body.totalCostUsd).toBeCloseTo(0.006, 6); // both sessions
+  });
+});
+
+describe("GET /api/usage — scope=team", () => {
+  /** A team with `local-user` as its one member, plus one team-owned and one
+   * personal session, each with one billable turn. */
+  async function seedTeamSpend(api: TestApi, now: number): Promise<void> {
+    const db = api.providers.db;
+    await db.insert(teams).values({ id: "team-x", orgId: "local-org", name: "Platform", createdAt: now });
+    await db.insert(teamMembers).values({ teamId: "team-x", userId: "local-user", role: "member" });
+    await db.insert(agentSessions).values([
+      { id: "s-team", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "team", ownerId: "team-x", createdAt: now, updatedAt: now, title: "Team chat" },
+      { id: "s-mine", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now, title: "My chat" },
+    ]);
+    await seedEngineEntry(api, "e-team", "s-team", now);
+    await seedEngineEntry(api, "e-mine", "s-mine", now);
+  }
+
+  it("breakdown covers the team's owned spend only; non-member 403s; missing teamId 400s", async () => {
+    api = await bootTestApi();
+    const now = Date.now();
+    await seedTeamSpend(api, now);
+
+    const res = await fetch(`${api.baseUrl}/api/usage/breakdown?scope=team&teamId=team-x`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as UsageBreakdownResponse;
+    expect(body.scope).toBe("team");
+    expect(body.totalTurns).toBe(1); // s-team only, not s-mine
+    expect(body.totalCostUsd).toBeCloseTo(0.003, 6);
+
+    // A non-member cannot see the team's usage.
+    const nonMember = await fetch(`${api.baseUrl}/api/usage/breakdown?scope=team&teamId=team-x`, { headers: { "x-valet-test-user-id": "test-member" } });
+    expect(nonMember.status).toBe(403);
+
+    // scope=team without a teamId is a request error, not a permission error.
+    const missing = await fetch(`${api.baseUrl}/api/usage/breakdown?scope=team`);
+    expect(missing.status).toBe(400);
+  });
+
+  it("drill-down lists the team's sessions only, and the proxy drill is empty", async () => {
+    api = await bootTestApi();
+    const now = Date.now();
+    await seedTeamSpend(api, now);
+    // A personal proxy row — must NOT leak into the team scope.
+    await api.providers.db.insert(llmProxyRequests).values({
+      id: "p-t", createdAt: now, orgId: "local-org", userId: "local-user", apiKeyId: "k",
+      providerKind: "anthropic", model: "claude", harness: "claude-code", endpoint: "/v1/messages",
+      stream: false, statusCode: 200, requestBody: "{}", inputTokens: 50, outputTokens: 10, totalTokens: 60, costUsd: 0.001,
+    });
+
+    const sess = (await (await fetch(`${api.baseUrl}/api/usage/items?useCase=session&scope=team&teamId=team-x`)).json()) as UsageDrillResponse;
+    expect(sess.items.map((i) => i.sessionId)).toEqual(["s-team"]);
+
+    const px = (await (await fetch(`${api.baseUrl}/api/usage/items?useCase=proxy&scope=team&teamId=team-x`)).json()) as UsageDrillResponse;
+    expect(px.items).toEqual([]);
+  });
+
+  it("CSV export carries the team's rows only and names the scope in the filename", async () => {
+    api = await bootTestApi();
+    const now = Date.now();
+    await seedTeamSpend(api, now);
+
+    const res = await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d&scope=team&teamId=team-x`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-disposition")).toContain("valet-usage-team-30d.csv");
+    const text = await res.text();
+    expect(text).toContain("s-team");
+    expect(text).not.toContain("s-mine");
   });
 });
 

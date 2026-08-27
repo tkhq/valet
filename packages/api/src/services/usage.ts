@@ -9,6 +9,7 @@ import { eq, inArray, sql, type SQL } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { orgs, users } from "../schema/index.js";
 import { isOrgAdmin } from "./org.js";
+import { isTeamMember } from "./teams.js";
 import type {
   UsageBreakdownResponse,
   UsageBucket,
@@ -48,30 +49,39 @@ function toNum(v: unknown): number {
 // ── Scope ──────────────────────────────────────────────────────────────────
 
 export interface UsageScope {
-  scope: "me" | "org";
+  scope: "me" | "org" | "team";
   isOrg: boolean;
   orgId: string;
   userId: string | null;
+  /** Set only for `scope: "team"`. */
+  teamId: string | null;
 }
 
 /**
  * Resolves the scope for a usage query. `scope=org` covers every member of the
- * org and is org-admin-only (the org feature must be on) — a caller who lacks
- * permission gets `"forbidden"`, which the handler maps to a 403. Anything else
- * is the caller's own spend.
+ * org and is org-admin-only (the org feature must be on). `scope=team` covers
+ * one team's spend and is team-member-only. A caller who lacks permission gets
+ * `"forbidden"` (→ 403); `scope=team` without a `teamId` gets `"missing-team"`
+ * (→ 400). Anything else is the caller's own spend.
  */
 export async function resolveUsageScope(
   db: AppDb,
-  opts: { orgId: string; userId: string; requestedScope: string | undefined },
-): Promise<UsageScope | "forbidden"> {
+  opts: { orgId: string; userId: string; requestedScope: string | undefined; requestedTeamId?: string | undefined },
+): Promise<UsageScope | "forbidden" | "missing-team"> {
   if (opts.requestedScope === "org") {
     const rows = await db.select({ features: orgs.features }).from(orgs).where(eq(orgs.id, opts.orgId)).limit(1);
     const features = (rows[0]?.features ?? {}) as { organizations?: boolean };
     const admin = await isOrgAdmin(db, opts.orgId, opts.userId);
     if (!features.organizations || !admin) return "forbidden";
-    return { scope: "org", isOrg: true, orgId: opts.orgId, userId: null };
+    return { scope: "org", isOrg: true, orgId: opts.orgId, userId: null, teamId: null };
   }
-  return { scope: "me", isOrg: false, orgId: opts.orgId, userId: opts.userId };
+  if (opts.requestedScope === "team") {
+    if (!opts.requestedTeamId) return "missing-team";
+    const member = await isTeamMember(db, opts.requestedTeamId, opts.userId);
+    if (!member) return "forbidden";
+    return { scope: "team", isOrg: false, orgId: opts.orgId, userId: null, teamId: opts.requestedTeamId };
+  }
+  return { scope: "me", isOrg: false, orgId: opts.orgId, userId: opts.userId, teamId: null };
 }
 
 /**
@@ -79,11 +89,17 @@ export async function resolveUsageScope(
  * alias (`prefix`, e.g. `"ce."`) so joined queries (where `workflow_definitions`
  * / `agent_sessions` share `org_id`/`created_at`) are unambiguous. `prefix` is a
  * hardcoded literal, never user input.
+ *
+ * The team clause reads `owner_type`/`owner_id`, which only the `cost_entries`
+ * view carries — do not apply a team scope to `llm_proxy_requests` directly
+ * (see the proxy branch of `getUsageDrillItems`).
  */
 function scopeWhere(prefix: "" | "ce.", since: number, s: UsageScope): SQL {
   const col = (name: string): SQL => sql.raw(`${prefix}${name}`);
-  const userClause = s.userId !== null ? sql` AND ${col("user_id")} = ${s.userId}` : sql``;
-  return sql`${col("created_at")} >= ${since} AND ${col("org_id")} = ${s.orgId}${userClause}`;
+  const base = sql`${col("created_at")} >= ${since} AND ${col("org_id")} = ${s.orgId}`;
+  if (s.scope === "team") return sql`${base} AND ${col("owner_type")} = 'team' AND ${col("owner_id")} = ${s.teamId}`;
+  if (s.userId !== null) return sql`${base} AND ${col("user_id")} = ${s.userId}`;
+  return base;
 }
 
 // ── Buckets (token-type split + unpriced, shared by every aggregate) ─────────
@@ -218,6 +234,10 @@ export async function getUsageDrillItems(
     }));
   }
   // proxy — group the raw proxy rows by harness (cost_entries has no harness).
+  // Proxy rows are always user-owned (the view stamps owner_type='user'), so a
+  // team scope matches none — and `llm_proxy_requests` has no owner columns,
+  // so the team WHERE clause would not even parse against it.
+  if (scope.scope === "team") return [];
   const whereProxy = scopeWhere("", since, scope);
   interface Row { harness: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
   const r = (await db.execute(sql`

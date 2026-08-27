@@ -360,11 +360,26 @@ vi.mock("~/api/settings", () => ({
   useOrg: () => orgResult,
 }));
 
+// Mock the workspace switcher's scope — mutable so tests can enter a team
+// workspace. The clause is presentational; the page only reads `teamId`.
+let workspaceTeamId: string | undefined = undefined;
+vi.mock("~/lib/workspace-scope", () => ({
+  useWorkspaceScope: () => ({
+    key: workspaceTeamId ?? "user",
+    teamId: workspaceTeamId,
+    available: ["user"],
+    setKey: () => {},
+  }),
+}));
+vi.mock("~/components/workspace-clause", () => ({
+  WorkspaceClause: () => null,
+}));
+
 // Mock api client — usageExportCsvUrl is a pure URL builder.
 vi.mock("~/api/client", () => ({
   api: {
-    usageExportCsvUrl: (window: string, scope: string) =>
-      `/api/usage/export.csv?window=${window}&scope=${scope}`,
+    usageExportCsvUrl: (window: string, scope: string, teamId?: string) =>
+      `/api/usage/export.csv?window=${window}&scope=${scope}${teamId !== undefined ? `&teamId=${teamId}` : ""}`,
   },
 }));
 
@@ -386,6 +401,7 @@ beforeEach(() => {
     data: { features: { organizations: false }, callerRole: "member" },
     isLoading: false,
   };
+  workspaceTeamId = undefined;
 });
 
 describe("UsagePage — spend summary", () => {
@@ -740,6 +756,50 @@ describe("UsagePage — request log drill-down", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Close detail" }));
     expect(screen.queryByText("Request detail")).toBeNull();
+  });
+});
+
+describe("UsagePage — team workspace scope", () => {
+  beforeEach(() => {
+    workspaceTeamId = "team-x";
+    breakdownResult = {
+      data: { ...mockBreakdown, scope: "team" },
+      isLoading: false,
+      error: null,
+    };
+  });
+
+  it("pins the CSV export to scope=team with the team id", () => {
+    render(<UsagePage />);
+    const csvLink = document.querySelector("a[download]") as HTMLAnchorElement | null;
+    expect(csvLink!.href).toContain("scope=team");
+    expect(csvLink!.href).toContain("teamId=team-x");
+  });
+
+  it("hides the me/org toggle even for org admins", () => {
+    orgResult = {
+      data: { features: { organizations: true }, callerRole: "admin" },
+      isLoading: false,
+    };
+    render(<UsagePage />);
+    expect(screen.queryByText("My usage")).toBeNull();
+    expect(screen.queryByText("Organization")).toBeNull();
+  });
+
+  it("hides the personal-only proxy surfaces (request log, key setup)", () => {
+    render(<UsagePage />);
+    expect(screen.queryByText(/request log/)).toBeNull();
+    expect(document.querySelector("a[href='/settings/proxy']")).toBeNull();
+  });
+
+  it("names the team in the subtitle", () => {
+    render(<UsagePage />);
+    expect(screen.getByText(/for this team/)).toBeTruthy();
+  });
+
+  it("still renders the breakdown totals", () => {
+    render(<UsagePage />);
+    expect(screen.getByText("$0.1234")).toBeTruthy();
   });
 });
 

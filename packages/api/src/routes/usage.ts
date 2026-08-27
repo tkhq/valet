@@ -21,7 +21,13 @@ import {
 
 export const usageRouter = new Hono<AppEnv>();
 
-const FORBIDDEN = { error: "Organization usage is available to org admins only." } as const;
+const MISSING_TEAM = { error: "scope=team needs a teamId query parameter. Pass the team's id." } as const;
+
+function forbiddenBody(requestedScope: string | undefined) {
+  return requestedScope === "team"
+    ? { error: "Team usage is available to team members only." }
+    : { error: "Organization usage is available to org admins only." };
+}
 
 usageRouter.get("/summary", async (c) => {
   const body = await getUsageSummary(c.var.providers.db, {
@@ -35,8 +41,10 @@ usageRouter.get("/summary", async (c) => {
 usageRouter.get("/breakdown", async (c) => {
   const { db } = c.var.providers;
   const user = c.var.user;
-  const scope = await resolveUsageScope(db, { orgId: user.orgId, userId: user.id, requestedScope: c.req.query("scope") });
-  if (scope === "forbidden") return c.json(FORBIDDEN, 403);
+  const requestedScope = c.req.query("scope");
+  const scope = await resolveUsageScope(db, { orgId: user.orgId, userId: user.id, requestedScope, requestedTeamId: c.req.query("teamId") });
+  if (scope === "missing-team") return c.json(MISSING_TEAM, 400);
+  if (scope === "forbidden") return c.json(forbiddenBody(requestedScope), 403);
   const body = await getUsageBreakdown(db, { windowMs: windowMsFrom(c.req.query("window")), scope });
   return c.json(body);
 });
@@ -61,8 +69,10 @@ usageRouter.get("/items", async (c) => {
   if (!useCaseQ || !isUsageUseCase(useCaseQ)) {
     return c.json({ error: "useCase must be one of orchestrator, session, workflow, proxy." }, 400);
   }
-  const scope = await resolveUsageScope(db, { orgId: user.orgId, userId: user.id, requestedScope: c.req.query("scope") });
-  if (scope === "forbidden") return c.json(FORBIDDEN, 403);
+  const requestedScope = c.req.query("scope");
+  const scope = await resolveUsageScope(db, { orgId: user.orgId, userId: user.id, requestedScope, requestedTeamId: c.req.query("teamId") });
+  if (scope === "missing-team") return c.json(MISSING_TEAM, 400);
+  if (scope === "forbidden") return c.json(forbiddenBody(requestedScope), 403);
   const body: UsageDrillResponse = {
     items: await getUsageDrillItems(db, { windowMs: windowMsFrom(c.req.query("window")), scope, useCase: useCaseQ }),
   };
@@ -72,8 +82,10 @@ usageRouter.get("/items", async (c) => {
 usageRouter.get("/export.csv", async (c) => {
   const { db } = c.var.providers;
   const user = c.var.user;
-  const scope = await resolveUsageScope(db, { orgId: user.orgId, userId: user.id, requestedScope: c.req.query("scope") });
-  if (scope === "forbidden") return c.json(FORBIDDEN, 403);
+  const requestedScope = c.req.query("scope");
+  const scope = await resolveUsageScope(db, { orgId: user.orgId, userId: user.id, requestedScope, requestedTeamId: c.req.query("teamId") });
+  if (scope === "missing-team") return c.json(MISSING_TEAM, 400);
+  if (scope === "forbidden") return c.json(forbiddenBody(requestedScope), 403);
   const windowLabel = windowLabelFrom(c.req.query("window"));
   const csv = await getUsageExportCsv(db, { windowMs: windowMsFrom(c.req.query("window")), scope });
   c.header("Content-Type", "text/csv; charset=utf-8");

@@ -2261,13 +2261,17 @@ export interface UsageBucket {
   unpricedTurns: number;
 }
 
-/** `GET /api/usage/breakdown?window=&scope=me|org` — spend for a window across
- * ALL use cases (engine sessions + workflows + proxy), from the single
+/** The `?scope=` a usage endpoint takes: the caller's own spend, the whole
+ * org (org-admin only), or one team (team-member only, needs `teamId=`). */
+export type UsageScopeName = "me" | "org" | "team";
+
+/** `GET /api/usage/breakdown?window=&scope=me|org|team` — spend for a window
+ * across ALL use cases (engine sessions + workflows + proxy), from the single
  * `cost_entries` definition. `scope=org` (org-admin only) covers every member;
- * `byUser` is present only then. */
+ * `byUser` is present only then. `scope=team` covers one team's owned spend. */
 export interface UsageBreakdownResponse {
   windowMs: number;
-  scope: "me" | "org";
+  scope: UsageScopeName;
   totalCostUsd: number;
   totalTokens: number;
   totalInputTokens: number;

@@ -63,6 +63,17 @@ the switcher — legible and trustworthy.
    assistant create used to silently revert the selection; the failure
    now shows below the nav.
 
+7. **The usage dashboard follows the switcher.** Amended 2026-08-27
+   (TKAI-226). A team workspace pins `/usage` to `scope=team&teamId=`,
+   which the usage endpoints (`/breakdown`, `/items`, `/export.csv`)
+   answer with the team's owned spend (`cost_entries.owner_type =
+   'team'`) after a live `isTeamMember` check. The me/org toggle,
+   the proxy request log, and the key-setup callout are personal
+   surfaces: proxy traffic is never team-owned, so they render only in
+   the personal workspace. The proxy drill-down returns no rows in team
+   scope for the same reason. Team scope shows no per-member table —
+   `byUser` stays an org-admin view.
+
 ## Known limits
 
 An adversarial review (2026-08-17) confirmed four limits this pass ships
