@@ -1,77 +1,91 @@
 // @vitest-environment jsdom
 /**
- * `/usage` — LLM recording gateway dashboard. Mocks `~/api/proxy-usage`
- * and `~/api/settings` to assert:
- *   - the spend total renders from a mocked summary;
- *   - a breakdown row per model renders;
- *   - clicking a request-log row opens the SampleView drill-down;
- *   - the Settings → Proxy callout link renders (OnboardingPanel moved off this page);
- *   - the disabled-gateway notice renders and links to Settings → Proxy.
+ * `/usage` — unified spend dashboard. Mocks `~/api/usage`, `~/api/proxy-usage`
+ * to assert:
+ *   - total cost renders from breakdown;
+ *   - By-use-case table has a row per bucket;
+ *   - expanding Orchestrator row lists sessions;
+ *   - expanding Sessions row nests child under parent;
+ *   - By model section shows model names;
+ *   - spend chart renders day bars;
+ *   - proxy request log still renders and opens SampleView on row click;
+ *   - Settings → Proxy callout link renders;
+ *   - disabled-gateway notice renders.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 
 import type {
-  ProxyUsageSummary,
+  UsageBreakdownResponse,
+  UsageSessionsResponse,
   ProxyRequestListItem,
   ProxyRequestDetail,
 } from "@valet/api/wire";
 
 // --- mock data -----------------------------------------------------------
 
-// Two day buckets at known epoch-ms day boundaries so the chart renders
-// non-flat bars (costUsd > 0 on both days).
 const DAY_A_MS = Math.floor(1_750_000_000_000 / 86_400_000) * 86_400_000;
 const DAY_B_MS = DAY_A_MS + 86_400_000;
 
-const mockSummary: ProxyUsageSummary = {
+const mockBreakdown: UsageBreakdownResponse = {
   windowMs: 7 * 86_400_000,
-  totalRequests: 42,
+  totalCostUsd: 0.1234,
+  totalTokens: 15_000,
   totalInputTokens: 10_000,
   totalOutputTokens: 5_000,
-  totalTokens: 15_000,
-  totalCostUsd: 0.1234,
-  byUser: [
-    {
-      userId: "user_abc123",
-      requests: 20,
-      inputTokens: 5_000,
-      outputTokens: 2_500,
-      totalTokens: 7_500,
-      costUsd: 0.06,
-    },
+  byUseCase: [
+    { useCase: "orchestrator", costUsd: 0.04, totalTokens: 5_000, turns: 10 },
+    { useCase: "session", costUsd: 0.06, totalTokens: 8_000, turns: 20 },
+    { useCase: "workflow", costUsd: 0.01, totalTokens: 1_000, turns: 2 },
+    { useCase: "proxy", costUsd: 0.0134, totalTokens: 1_000, turns: 5 },
   ],
   byModel: [
-    {
-      model: "claude-opus-4-5",
-      requests: 30,
-      inputTokens: 8_000,
-      outputTokens: 4_000,
-      totalTokens: 12_000,
-      costUsd: 0.09,
-    },
-    {
-      model: "gpt-4o",
-      requests: 12,
-      inputTokens: 2_000,
-      outputTokens: 1_000,
-      totalTokens: 3_000,
-      costUsd: 0.0334,
-    },
-  ],
-  byHarness: [
-    {
-      harness: "claude-code",
-      requests: 25,
-      inputTokens: 6_000,
-      outputTokens: 3_000,
-      totalTokens: 9_000,
-      costUsd: 0.07,
-    },
+    { model: "claude-opus-4-5", costUsd: 0.09, totalTokens: 12_000, turns: 25 },
+    { model: "gpt-4o", costUsd: 0.0334, totalTokens: 3_000, turns: 12 },
   ],
   byDay: [
-    { dayMs: DAY_A_MS, requests: 20, totalTokens: 7_000, costUsd: 0.07 },
-    { dayMs: DAY_B_MS, requests: 22, totalTokens: 8_000, costUsd: 0.0534 },
+    { dayMs: DAY_A_MS, costUsd: 0.07, totalTokens: 7_000 },
+    { dayMs: DAY_B_MS, costUsd: 0.0534, totalTokens: 8_000 },
+  ],
+};
+
+const mockOrchestratorSessions: UsageSessionsResponse = {
+  sessions: [
+    {
+      sessionId: "orchestrator:user_abc123",
+      title: "My Orchestrator",
+      useCase: "orchestrator",
+      isChild: false,
+      parentSessionId: null,
+      costUsd: 0.04,
+      totalTokens: 5_000,
+      turns: 10,
+    },
+  ],
+};
+
+const mockRegularSessions: UsageSessionsResponse = {
+  sessions: [
+    {
+      sessionId: "sess_parent1",
+      title: "Parent session",
+      useCase: "session",
+      isChild: false,
+      parentSessionId: null,
+      costUsd: 0.05,
+      totalTokens: 6_000,
+      turns: 15,
+    },
+    {
+      sessionId: "sess_child1",
+      title: "Child session",
+      useCase: "session",
+      isChild: true,
+      parentSessionId: "sess_parent1",
+      costUsd: 0.01,
+      totalTokens: 2_000,
+      turns: 5,
+    },
   ],
 };
 
@@ -99,9 +113,6 @@ const reqItem: ProxyRequestListItem = {
 
 const mockRequests = { items: [reqItem], nextCursor: undefined };
 
-// parsed uses the real Sample shape from packages/api/src/proxy/sample.ts:
-// { schema, provider, model, params, system, tools, previousResponseId,
-//   input: SampleMessage[], output: SampleMessage, stop_reason, usage }
 const mockDetail: ProxyRequestDetail = {
   ...reqItem,
   requestBody: '{"model":"claude-opus-4-5","messages":[{"role":"user","content":"Hello"}]}',
@@ -138,133 +149,211 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 // Mutable so individual tests can override.
-let summaryResult: { data: ProxyUsageSummary | undefined; isLoading: boolean; error: null | Error } = {
-  data: mockSummary,
-  isLoading: false,
-  error: null,
-};
-let requestsResult: { data: typeof mockRequests | undefined; isLoading: boolean; error: null | Error } = {
-  data: mockRequests,
-  isLoading: false,
-  error: null,
-};
-let detailResult: { data: ProxyRequestDetail | undefined; isLoading: boolean; error: null | Error } = {
-  data: mockDetail,
-  isLoading: false,
-  error: null,
-};
-let settingsResult: { data: { enabled: boolean; mode: "centralized" | "passthrough" } | undefined; isLoading: boolean } = {
-  data: { enabled: true, mode: "centralized" },
-  isLoading: false,
+let breakdownResult: {
+  data: UsageBreakdownResponse | undefined;
+  isLoading: boolean;
+  error: null | Error;
+} = { data: mockBreakdown, isLoading: false, error: null };
+
+// Sessions result — keyed by useCase so expand tests can return different data.
+let sessionsResults: Record<
+  string,
+  { data: UsageSessionsResponse | undefined; isLoading: boolean; error: null | Error }
+> = {
+  orchestrator: { data: mockOrchestratorSessions, isLoading: false, error: null },
+  session: { data: mockRegularSessions, isLoading: false, error: null },
 };
 
+vi.mock("~/api/usage", () => ({
+  useUsageBreakdown: () => breakdownResult,
+  useUsageSessions: (_window: string, useCase?: string) =>
+    sessionsResults[useCase ?? "orchestrator"] ?? {
+      data: undefined,
+      isLoading: false,
+      error: null,
+    },
+  qkUsage: {
+    breakdown: () => [],
+    sessions: () => [],
+  },
+}));
+
+let requestsResult: {
+  data: typeof mockRequests | undefined;
+  isLoading: boolean;
+  error: null | Error;
+} = { data: mockRequests, isLoading: false, error: null };
+
+let detailResult: {
+  data: ProxyRequestDetail | undefined;
+  isLoading: boolean;
+  error: null | Error;
+} = { data: mockDetail, isLoading: false, error: null };
+
+let settingsResult: {
+  data: { enabled: boolean; mode: "centralized" | "passthrough" } | undefined;
+  isLoading: boolean;
+} = { data: { enabled: true, mode: "centralized" }, isLoading: false };
+
 vi.mock("~/api/proxy-usage", () => ({
-  useProxyUsageSummary: () => summaryResult,
   useProxyRequests: () => requestsResult,
   useProxyRequestDetail: () => detailResult,
   useProxySettings: () => settingsResult,
-  qkProxy: { summary: () => [], requests: () => [], detail: () => [], settings: () => [] },
-}));
-
-// Mutable org data
-let orgData: { data: { callerRole: "admin" | "member"; features: { organizations: boolean } } | undefined; isLoading: boolean } = {
-  data: { callerRole: "admin", features: { organizations: true } },
-  isLoading: false,
-};
-
-vi.mock("~/api/settings", () => ({
-  useOrg: () => orgData,
+  qkProxy: {
+    summary: () => [],
+    requests: () => [],
+    detail: () => [],
+    settings: () => [],
+  },
 }));
 
 import { UsagePage } from "./usage";
 
 beforeEach(() => {
   vi.clearAllMocks();
-  summaryResult = { data: mockSummary, isLoading: false, error: null };
+  breakdownResult = { data: mockBreakdown, isLoading: false, error: null };
+  sessionsResults = {
+    orchestrator: { data: mockOrchestratorSessions, isLoading: false, error: null },
+    session: { data: mockRegularSessions, isLoading: false, error: null },
+  };
   requestsResult = { data: mockRequests, isLoading: false, error: null };
   detailResult = { data: mockDetail, isLoading: false, error: null };
   settingsResult = { data: { enabled: true, mode: "centralized" }, isLoading: false };
-  orgData = { data: { callerRole: "admin", features: { organizations: true } }, isLoading: false };
 });
 
 describe("UsagePage — spend summary", () => {
-  it("renders the total cost from the mocked summary", () => {
+  it("renders the total cost from the breakdown", () => {
     render(<UsagePage />);
-    // $0.1234 formatted
     expect(screen.getByText("$0.1234")).toBeTruthy();
   });
 
-  it("renders request count", () => {
+  it("renders total tokens stat", () => {
     render(<UsagePage />);
-    expect(screen.getByText("42")).toBeTruthy();
+    expect(screen.getByText("15,000")).toBeTruthy();
   });
 
   it("renders the spend chart with the correct number of day bars", () => {
     const { container } = render(<UsagePage />);
-    // mockSummary.byDay has 2 entries; SpendChart renders one <rect> per bucket.
     const rects = container.querySelectorAll("svg[aria-label='Daily spend chart'] rect");
     expect(rects.length).toBe(2);
-    // Both bars must have a height attribute greater than the 2px minimum floor,
-    // confirming that real costUsd values (not zeroes) drove the scaling.
     const heights = Array.from(rects).map((r) => Number(r.getAttribute("height")));
     expect(heights.every((h) => h > 2)).toBe(true);
   });
 });
 
-describe("UsagePage — breakdown tables", () => {
-  it("renders a row for each model in the breakdown table", () => {
+describe("UsagePage — by-use-case table", () => {
+  it("renders all four use-case labels", () => {
     render(<UsagePage />);
-    // Find the "By model" heading, then assert both model names appear inside
-    // the same section (the parent wrapper div of BreakdownTable).
+    expect(screen.getByText("Orchestrator")).toBeTruthy();
+    expect(screen.getByText("Sessions")).toBeTruthy();
+    expect(screen.getByText("Workflows")).toBeTruthy();
+    expect(screen.getByText("Proxy (external tools)")).toBeTruthy();
+  });
+
+  it("expanding Orchestrator row shows orchestrator sessions", async () => {
+    render(<UsagePage />);
+    const orchRow = screen.getByRole("button", {
+      name: /Orchestrator — expand sessions/,
+    });
+    fireEvent.click(orchRow);
+    await waitFor(() => {
+      expect(screen.getByText("My Orchestrator")).toBeTruthy();
+    });
+  });
+
+  it("orchestrator session id does not render as a link", async () => {
+    render(<UsagePage />);
+    const orchRow = screen.getByRole("button", {
+      name: /Orchestrator — expand sessions/,
+    });
+    fireEvent.click(orchRow);
+    await waitFor(() => {
+      expect(screen.getByText("My Orchestrator")).toBeTruthy();
+    });
+    // orchestrator: IDs must not produce an anchor
+    const links = Array.from(document.querySelectorAll("a")).filter((a) =>
+      a.textContent?.includes("My Orchestrator"),
+    );
+    expect(links.length).toBe(0);
+  });
+
+  it("expanding Sessions row shows parent and child sessions", async () => {
+    render(<UsagePage />);
+    const sessRow = screen.getByRole("button", {
+      name: /Sessions — expand sessions/,
+    });
+    fireEvent.click(sessRow);
+    await waitFor(() => {
+      expect(screen.getByText("Parent session")).toBeTruthy();
+      expect(screen.getByText("Child session")).toBeTruthy();
+    });
+  });
+
+  it("child session row is indented with pl-8 class", async () => {
+    const { container } = render(<UsagePage />);
+    const sessRow = screen.getByRole("button", {
+      name: /Sessions — expand sessions/,
+    });
+    fireEvent.click(sessRow);
+    await waitFor(() => {
+      expect(screen.getByText("Child session")).toBeTruthy();
+    });
+    // Find the row containing "Child session" and verify it has pl-8
+    const childRows = Array.from(container.querySelectorAll(".pl-8"));
+    expect(childRows.length).toBeGreaterThan(0);
+    const childText = childRows.some((el) =>
+      el.textContent?.includes("Child session"),
+    );
+    expect(childText).toBe(true);
+  });
+
+  it("regular session title renders as an anchor (links to sessions route)", async () => {
+    render(<UsagePage />);
+    const sessRow = screen.getByRole("button", {
+      name: /Sessions — expand sessions/,
+    });
+    fireEvent.click(sessRow);
+    await waitFor(() => {
+      expect(screen.getByText("Parent session")).toBeTruthy();
+    });
+    // The Link mock renders <a href={to}> where `to` is the route pattern.
+    // The important assertion is that "Parent session" is inside an anchor
+    // (i.e. it is linked), while "My Orchestrator" was not (tested separately).
+    const parentLink = Array.from(document.querySelectorAll("a")).find(
+      (a) => a.textContent?.trim() === "Parent session",
+    );
+    expect(parentLink).toBeTruthy();
+  });
+});
+
+describe("UsagePage — by model section", () => {
+  it("renders model names in the By model section", () => {
+    render(<UsagePage />);
     const heading = screen.getByText("By model");
     const section = heading.closest("div");
     expect(section).toBeTruthy();
     expect(section!.textContent).toContain("claude-opus-4-5");
     expect(section!.textContent).toContain("gpt-4o");
   });
-
-  it("renders harness row", () => {
-    render(<UsagePage />);
-    // "claude-code" appears in both the harness breakdown table and the request log.
-    expect(screen.getAllByText("claude-code").length).toBeGreaterThan(0);
-  });
 });
 
 describe("UsagePage — request log drill-down", () => {
   it("clicking a request row opens the SampleView", async () => {
     render(<UsagePage />);
-
-    // Row renders as role=button with aria-pressed
     const rowEl = document.querySelector("tr[role='button']") as HTMLElement;
     expect(rowEl).toBeTruthy();
     fireEvent.click(rowEl);
-
     await waitFor(() => {
-      // SampleView should render, showing the detail header.
       expect(screen.getByText("Request detail")).toBeTruthy();
     });
   });
 
-  it("SampleView shows the model from the detail", async () => {
+  it("SampleView shows structured content from parsed detail", async () => {
     render(<UsagePage />);
     const rowEl = document.querySelector("tr[role='button']") as HTMLElement;
     fireEvent.click(rowEl);
-
     await waitFor(() => {
-      expect(screen.getAllByText("claude-opus-4-5").length).toBeGreaterThan(0);
-    });
-  });
-
-  it("StructuredView renders the input user turn text and the assistant output text", async () => {
-    // Guards the real Sample shape contract: parsed.input/output, not parsed.messages.
-    render(<UsagePage />);
-    const rowEl = document.querySelector("tr[role='button']") as HTMLElement;
-    fireEvent.click(rowEl);
-
-    await waitFor(() => {
-      // The user input turn's text block must appear.
       expect(screen.getByText("Hello")).toBeTruthy();
-      // The assistant output turn's text block must appear.
       expect(screen.getByText("Hi there!")).toBeTruthy();
     });
   });
@@ -273,40 +362,20 @@ describe("UsagePage — request log drill-down", () => {
     render(<UsagePage />);
     const rowEl = document.querySelector("tr[role='button']") as HTMLElement;
     fireEvent.click(rowEl);
-
     await waitFor(() => {
       expect(screen.getByText("Request detail")).toBeTruthy();
     });
-
     fireEvent.click(screen.getByRole("button", { name: "Close detail" }));
     expect(screen.queryByText("Request detail")).toBeNull();
   });
 });
 
 describe("UsagePage — Settings → Proxy link", () => {
-  it("renders Settings → Proxy link (onboarding panel moved off usage page)", () => {
+  it("renders Settings → Proxy callout link", () => {
     render(<UsagePage />);
-    // The callout link to /settings/proxy must be present.
     const link = document.querySelector("a[href='/settings/proxy']");
     expect(link).toBeTruthy();
     expect(link!.textContent).toMatch(/Settings.*Proxy|Settings → Proxy/);
-  });
-
-  it("does not render the Create proxy key button (moved to Settings → Proxy)", () => {
-    render(<UsagePage />);
-    expect(screen.queryByRole("button", { name: "Create proxy key" })).toBeNull();
-  });
-});
-
-describe("UsagePage — credential mode", () => {
-  // The mode toggle moved to Settings → Proxy. The usage page no longer renders
-  // CredentialModeControl; mode-awareness is covered by the proxy settings page.
-  // Both admin and member views have no mode group on this page.
-  it("mode toggle buttons do not appear on the usage page (moved to Settings → Proxy)", () => {
-    orgData = { data: { callerRole: "admin", features: { organizations: true } }, isLoading: false };
-    render(<UsagePage />);
-    const group = document.querySelector("[role='group'][aria-label='Credential mode']");
-    expect(group).toBeNull();
   });
 });
 
