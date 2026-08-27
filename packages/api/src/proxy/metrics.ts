@@ -21,14 +21,18 @@ export function recordProxySpend(
  * unbilled traffic. `reason` is `no_usage` (response carried no usage event) or
  * `unpriced_model` (usage parsed, model not in the pricing registry). A rising
  * count is the alert that spend is escaping capture.
+ *
+ * Labels are bounded on purpose: `kind` (2), `endpoint` (≤4), `reason` (2). The
+ * model is DELIBERATELY not a label — it comes from the client's request/response
+ * and is unbounded, so it would explode metric cardinality (one time series per
+ * distinct string a caller invents). The exact model lives on the recorded row
+ * for anyone who needs to drill in.
  */
-export function recordProxyUnpriced(attrs: { model: string | null; kind: string; endpoint: string; reason: string }): void {
+export function recordProxyUnpriced(attrs: { kind: string; endpoint: string; reason: string }): void {
   if (!unpricedCounter) {
     unpricedCounter = metrics.getMeter("@valet/api").createCounter("valet.proxy.unpriced.count", {
       description: "Successful proxy calls recorded without a price, by kind/endpoint/reason",
     });
   }
-  // A null model is reported as the literal "unknown" — metric attributes must
-  // be non-null, and the reason label carries the diagnostic either way.
-  unpricedCounter.add(1, { model: attrs.model ?? "unknown", kind: attrs.kind, endpoint: attrs.endpoint, reason: attrs.reason });
+  unpricedCounter.add(1, { kind: attrs.kind, endpoint: attrs.endpoint, reason: attrs.reason });
 }

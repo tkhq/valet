@@ -28,6 +28,10 @@ describe("injectIncludeUsage", () => {
   it("returns a non-JSON body unchanged", () => {
     expect(injectIncludeUsage("openai", chat, "not json")).toBe("not json");
   });
+  it("treats a malformed (non-object) stream_options as empty instead of spreading it", () => {
+    const out = JSON.parse(injectIncludeUsage("openai", chat, JSON.stringify({ stream: true, stream_options: "oops" })));
+    expect(out.stream_options).toEqual({ include_usage: true }); // not {0:"o",1:"o",...}
+  });
 });
 
 describe("sanitizeResponseHeaders", () => {

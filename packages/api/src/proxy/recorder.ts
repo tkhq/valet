@@ -20,8 +20,9 @@ export interface RecorderDeps {
   now: () => number;
   id: () => string;
   metric: (costUsd: number, attrs: { model: string; userId: string; keyId: string; kind: string }) => void;
-  /** Records a successful-but-unpriced call so unbilled traffic is visible. */
-  unpriced: (attrs: { model: string | null; kind: string; endpoint: string; reason: string }) => void;
+  /** Records a successful-but-unpriced call so unbilled traffic is visible.
+   * Deliberately no model label — it is unbounded (see recordProxyUnpriced). */
+  unpriced: (attrs: { kind: string; endpoint: string; reason: string }) => void;
 }
 
 /**
@@ -194,9 +195,9 @@ export async function recordProxyCall(deps: RecorderDeps, ctx: RecordContext): P
     //     registry, so cost is null.
     if (ctx.statusCode < 400) {
       if (usage.total === 0) {
-        deps.unpriced({ model, kind: ctx.kind, endpoint: ctx.endpoint, reason: "no_usage" });
+        deps.unpriced({ kind: ctx.kind, endpoint: ctx.endpoint, reason: "no_usage" });
       } else if (cost === null) {
-        deps.unpriced({ model, kind: ctx.kind, endpoint: ctx.endpoint, reason: "unpriced_model" });
+        deps.unpriced({ kind: ctx.kind, endpoint: ctx.endpoint, reason: "unpriced_model" });
       }
     }
   } catch (err) {

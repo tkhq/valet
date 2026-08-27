@@ -101,9 +101,15 @@ export function injectIncludeUsage(kind: ProviderKind, subpath: string, body: st
     return body;
   }
   if (parsed.stream !== true) return body;
-  const existing = parsed.stream_options as Record<string, unknown> | undefined;
-  if (existing?.include_usage === true) return body;
-  return JSON.stringify({ ...parsed, stream_options: { ...(existing ?? {}), include_usage: true } });
+  // Treat a malformed stream_options (string/array/null) as empty rather than
+  // spreading it — spreading a string would emit `{0:"a",1:"b",...}` upstream.
+  const so = parsed.stream_options;
+  const existing = so !== null && typeof so === "object" && !Array.isArray(so) ? (so as Record<string, unknown>) : {};
+  if (existing.include_usage === true) return body;
+  // A billing proxy needs usage, so this overrides an explicit include_usage:false
+  // too. The injected terminal chunk has empty `choices: []` (spec-compliant);
+  // any conformant SDK ignores it.
+  return JSON.stringify({ ...parsed, stream_options: { ...existing, include_usage: true } });
 }
 
 /** Deps injected at registration time and captured in the handler closure. */

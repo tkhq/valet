@@ -251,6 +251,8 @@ function assembleOpenAIChatOutput(
   for (const e of events) {
     const choices = e.choices;
     if (!Array.isArray(choices) || choices.length === 0) continue;
+    // Only choices[0] is normalized; a request with n>1 records just the first
+    // completion in the sample (usage/cost, read elsewhere, are unaffected).
     const choice = choices[0] as Record<string, unknown>;
     if (typeof choice.finish_reason === "string") stop_reason = choice.finish_reason;
     // Legacy completions put text directly on the choice.
@@ -379,6 +381,9 @@ export function parseSample(
   // bare `prompt` string (or array of strings) with no roles.
   let input: SampleMessage[];
   if (endpoint === "/v1/completions") {
+    // `prompt` is a string or an array of strings. The token-id-array form
+    // (number[]) is not reconstructed into text — the sample input is left
+    // empty for it; usage/cost are still recorded from the response.
     const prompt = req.prompt;
     const text =
       typeof prompt === "string"
