@@ -13,6 +13,7 @@ import type {
   DecisionGate,
   GetSessionResponse,
   GetSessionSecurityResponse,
+  ListSecurityCoverageResponse,
   ListSecurityFindingsResponse,
 } from "@valet/api/wire";
 import { TooltipProvider } from "~/components/primitives";
@@ -22,6 +23,9 @@ const getSessionMock = vi.fn<(id: string) => Promise<GetSessionResponse>>();
 const getSecurityMock = vi.fn<(id: string) => Promise<GetSessionSecurityResponse>>();
 const listFindingsMock = vi.fn<() => Promise<ListSecurityFindingsResponse>>();
 const cancelReviewMock = vi.fn<(id: string) => Promise<GetSessionSecurityResponse>>();
+const getCoverageMock = vi.fn<(id: string) => Promise<ListSecurityCoverageResponse>>(() =>
+  Promise.resolve({ coverage: [], rollup: { assessed: 0, notAssessed: 0, gaps: [] } }),
+);
 
 vi.mock("~/api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/client")>();
@@ -32,6 +36,7 @@ vi.mock("~/api/client", async (importOriginal) => {
       getSession: (id: string) => getSessionMock(id),
       getSessionSecurity: (id: string) => getSecurityMock(id),
       listSecurityFindings: () => listFindingsMock(),
+      getSecurityCoverage: (id: string) => getCoverageMock(id),
       cancelSecurityReview: (id: string) => cancelReviewMock(id),
     },
   };

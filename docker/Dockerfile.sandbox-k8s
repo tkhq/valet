@@ -167,6 +167,15 @@ RUN case "${TARGETARCH:-amd64}" in \
     && rm /tmp/gitleaks.tar.gz \
     && gitleaks version
 
+# sec-preflight — the tool-presence probe the sast/secrets personas run before
+# they record coverage (NOT_ASSESSED ledger, M-P2d). It prints a tool table:
+# name, present(y/n), version, and the consequence that becomes NOT_ASSESSED
+# when the tool is absent. gitleaks probes present here; semgrep and the
+# language scanners probe absent (not baked — see the note above), so the
+# persona records them as not_assessed with the printed consequence.
+COPY docker/sec-preflight.sh /usr/local/bin/sec-preflight
+RUN chmod +x /usr/local/bin/sec-preflight
+
 # Browser automation. The bundled `browser` plugin skill tells the agent it
 # has `agent-browser`; without these two layers the agent follows the skill
 # and bash answers "command not found".

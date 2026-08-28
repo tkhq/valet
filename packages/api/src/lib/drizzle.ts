@@ -604,6 +604,30 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     probe: { kind: "index", index: "security_finding_comments_engagement" },
     sql: 'CREATE INDEX IF NOT EXISTS "security_finding_comments_engagement" ON "security_finding_comments" ("engagement_id")',
   },
+  {
+    describe: "security_coverage table",
+    probe: { kind: "table", table: "security_coverage" },
+    sql: `CREATE TABLE IF NOT EXISTS "security_coverage" (
+      "id" text PRIMARY KEY NOT NULL,
+      "engagement_id" text NOT NULL,
+      "cell_id" text NOT NULL,
+      "area" text NOT NULL,
+      "status" text NOT NULL,
+      "tool" text,
+      "reason" text,
+      "created_at" bigint NOT NULL
+    )`,
+  },
+  {
+    describe: "security_coverage_engagement index",
+    probe: { kind: "index", index: "security_coverage_engagement" },
+    sql: 'CREATE INDEX IF NOT EXISTS "security_coverage_engagement" ON "security_coverage" ("engagement_id")',
+  },
+  {
+    describe: "security_coverage_cell index",
+    probe: { kind: "index", index: "security_coverage_cell" },
+    sql: 'CREATE INDEX IF NOT EXISTS "security_coverage_cell" ON "security_coverage" ("cell_id")',
+  },
 ];
 
 /** The repairs this database still lacks, by catalog probe — one query per

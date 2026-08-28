@@ -84,6 +84,7 @@ const APP_TABLES = [
   "security_finding_links",
   "security_handoffs",
   "security_finding_comments",
+  "security_coverage",
 ];
 
 async function tableExists(db: PgDb, table: string): Promise<boolean> {
@@ -292,6 +293,27 @@ describe("pg app schema + migrations", () => {
     expect((rows.rows[0] as { id: string }).id).toBe("cmt1");
     expect((rows.rows[1] as { author_user_id: string }).author_user_id).toBe("user2");
     await db.query("DELETE FROM security_finding_comments WHERE engagement_id = 'eng1'");
+  });
+
+  it("round-trips coverage rows with no unique constraint per cell", async () => {
+    const now = Date.now();
+    // An assessed row (a check ran) and a not_assessed row (a tool absent) —
+    // both persist; the not_assessed carries a consequence reason.
+    await db.query(
+      "INSERT INTO security_coverage (id, engagement_id, cell_id, area, status, tool, reason, created_at) VALUES ('cov1', 'eng1', 'cell1', 'secrets scan', 'assessed', 'gitleaks', NULL, $1)",
+      [now],
+    );
+    await db.query(
+      "INSERT INTO security_coverage (id, engagement_id, cell_id, area, status, tool, reason, created_at) VALUES ('cov2', 'eng1', 'cell1', 'semgrep owasp', 'not_assessed', 'semgrep', 'OWASP sink rules not scanned because semgrep is missing.', $1)",
+      [now + 1],
+    );
+    const rows = await db.query(
+      "SELECT id, area, status, tool, reason FROM security_coverage WHERE engagement_id = 'eng1' ORDER BY created_at",
+    );
+    expect(rows.rows).toHaveLength(2);
+    expect((rows.rows[0] as { status: string }).status).toBe("assessed");
+    expect((rows.rows[1] as { reason: string }).reason).toContain("semgrep is missing");
+    await db.query("DELETE FROM security_coverage WHERE engagement_id = 'eng1'");
   });
 
   it("tracks the applied migration in __valet_app_migrations", async () => {

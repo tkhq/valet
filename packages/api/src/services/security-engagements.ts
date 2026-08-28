@@ -42,6 +42,7 @@ import {
 import type { AppDb } from "../lib/drizzle.js";
 import {
   securityCells,
+  securityCoverage,
   securityEngagements,
   securityFiles,
   securityFindingComments,
@@ -49,6 +50,7 @@ import {
   securityFindings,
   securityHandoffs,
   type SecurityCellRow,
+  type SecurityCoverageRow,
   type SecurityEngagementRow,
   type SecurityFindingCommentRow,
   type SecurityFindingRow,
@@ -80,6 +82,13 @@ export const STATE_DOC_STALE_MS = 10 * 60_000;
 
 export type FindingSeverity = "critical" | "high" | "medium" | "low" | "info";
 export type FindingStatus = "open" | "verified" | "refuted";
+export type CoverageStatus = "assessed" | "not_assessed";
+
+/** Cap on a coverage area label and its reason (NOT_ASSESSED ledger, M-P2d).
+ * An area is a short scope label ("secrets scan"); a reason is one sentence
+ * naming the consequence, not a report. */
+export const MAX_COVERAGE_AREA_CHARS = 200;
+export const MAX_COVERAGE_REASON_CHARS = 1000;
 
 const SEVERITIES: readonly FindingSeverity[] = ["critical", "high", "medium", "low", "info"];
 
@@ -156,12 +165,32 @@ export interface ManifestCell {
   findings: number;
 }
 
+/** One NOT_ASSESSED gap in the close manifest (M-P2d): a scope area that was
+ * not assessed, with the tool involved and the consequence. */
+export interface CoverageGap {
+  area: string;
+  tool: string | null;
+  reason: string;
+}
+
+/** The coverage rollup in the close manifest (NOT_ASSESSED ledger, M-P2d,
+ * spec §Coverage honesty). Counts assessed vs not_assessed, and lists every
+ * NOT_ASSESSED area with its reason so the report names the gaps the team
+ * should know about. */
+export interface CoverageRollup {
+  assessed: number;
+  notAssessed: number;
+  gaps: CoverageGap[];
+}
+
 export interface EngagementManifest {
   engagementId: string;
   status: "completed" | "failed";
   repoFullName: string;
   repoRef: string;
   cells: ManifestCell[];
+  /** Coverage honesty (M-P2d): the assessed/not_assessed rollup + gap list. */
+  coverage: CoverageRollup;
   findings: {
     /** All finding rows, near-duplicates included. */
     total: number;
@@ -1050,6 +1079,24 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
       }
     }
 
+    // Coverage rollup (NOT_ASSESSED ledger, M-P2d): count assessed vs
+    // not_assessed and collect every NOT_ASSESSED area with its reason, so the
+    // manifest names the gaps the team should know about.
+    const coverageRows = await listCoverage(engagementId);
+    const coverage: CoverageRollup = {
+      assessed: 0,
+      notAssessed: 0,
+      gaps: [],
+    };
+    for (const row of coverageRows) {
+      if (row.status === "not_assessed") {
+        coverage.notAssessed += 1;
+        coverage.gaps.push({ area: row.area, tool: row.tool, reason: row.reason ?? "" });
+      } else {
+        coverage.assessed += 1;
+      }
+    }
+
     const allCompleted = cells.every((c) => c.status === "completed");
     const finalStatus = allCompleted ? ("completed" as const) : ("failed" as const);
     await db
@@ -1063,6 +1110,7 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
       repoFullName: engagement.repoFullName,
       repoRef: engagement.repoRef,
       cells: manifestCells,
+      coverage,
       findings: {
         total: findings.length,
         distinctBySeverity: bySeverity,
@@ -1633,6 +1681,79 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     return inserted[0];
   }
 
+  /**
+   * Record one coverage claim for a cell (NOT_ASSESSED ledger, M-P2d, spec
+   * §Coverage honesty). Insert-only; no unique constraint — a cell records one
+   * row per area it covered or skipped. `area` is required and non-empty;
+   * `status` is `assessed` (a check ran) or `not_assessed` (a tool absent). A
+   * `not_assessed` row MUST carry a reason — the whole point of the ledger is
+   * that an absent tool names its consequence, never a silent gap. `tool` is the
+   * scanner involved, or null when no specific tool backs the area. The caller
+   * confirms the cell belongs to the engagement (the persona route does).
+   */
+  async function reportCoverage(
+    engagementId: string,
+    args: {
+      cellId: string;
+      area: string;
+      status: CoverageStatus;
+      tool?: string | null;
+      reason?: string | null;
+    },
+  ): Promise<SecurityCoverageRow> {
+    await loadEngagement(engagementId);
+    const cell = await loadCell(engagementId, args.cellId);
+    const area = args.area.trim();
+    if (area === "") {
+      throw new Error("Coverage needs an area. Name the scope, e.g. 'secrets scan' or 'semgrep owasp'.");
+    }
+    if (area.length > MAX_COVERAGE_AREA_CHARS) {
+      throw new Error(
+        `The coverage area is at most ${MAX_COVERAGE_AREA_CHARS} characters. Use a short scope label.`,
+      );
+    }
+    const reason = args.reason?.trim() ?? "";
+    if (args.status === "not_assessed" && reason === "") {
+      throw new Error(
+        "A not_assessed area needs a reason naming the consequence, e.g. 'secrets not scanned because gitleaks is missing'.",
+      );
+    }
+    if (reason.length > MAX_COVERAGE_REASON_CHARS) {
+      throw new Error(
+        `The coverage reason is at most ${MAX_COVERAGE_REASON_CHARS} characters. Name the consequence in one sentence.`,
+      );
+    }
+    const tool = args.tool?.trim();
+    const inserted = await db
+      .insert(securityCoverage)
+      .values({
+        id: `cov_${randomUUID()}`,
+        engagementId,
+        cellId: cell.id,
+        area,
+        status: args.status,
+        tool: tool !== undefined && tool !== "" ? tool : null,
+        reason: reason !== "" ? reason : null,
+        createdAt: now(),
+      })
+      .returning();
+    return inserted[0];
+  }
+
+  /** The engagement's coverage rows, oldest-first; optionally one cell. */
+  async function listCoverage(
+    engagementId: string,
+    options: { cellId?: string } = {},
+  ): Promise<SecurityCoverageRow[]> {
+    const conditions = [eq(securityCoverage.engagementId, engagementId)];
+    if (options.cellId !== undefined) conditions.push(eq(securityCoverage.cellId, options.cellId));
+    return db
+      .select()
+      .from(securityCoverage)
+      .where(and(...conditions))
+      .orderBy(asc(securityCoverage.createdAt), asc(securityCoverage.id));
+  }
+
   /** Notes on the engagement's findings, oldest-first (thread order);
    * optionally one finding. */
   async function listFindingComments(
@@ -1854,6 +1975,8 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     listHandoffs,
     addFindingComment,
     listFindingComments,
+    reportCoverage,
+    listCoverage,
     stampCellCompaction,
     getRunningCellProgress,
     getEngagementCost,

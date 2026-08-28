@@ -67,6 +67,7 @@ import type {
   GetSessionResponse,
   GetSessionSecurityResponse,
   GetSkillResponse,
+  ListSecurityCoverageResponse,
   ListSecurityFindingsResponse,
   SecurityAddFindingCommentResponse,
   SecurityDigestIssueResponse,
@@ -458,6 +459,13 @@ export const api = {
       `/sessions/${encodeURIComponent(id)}/security/findings${suffix}`,
     );
   },
+  /** GET /sessions/:id/security/coverage — the coverage ledger (NOT_ASSESSED,
+   * M-P2d): every coverage row + the assessed/not_assessed rollup with gaps. */
+  getSecurityCoverage: (id: string) =>
+    request<ListSecurityCoverageResponse>(
+      "GET",
+      `/sessions/${encodeURIComponent(id)}/security/coverage`,
+    ),
   /** POST /sessions/:id/security/plan/cells — replace the plan from structured
    * steps during planning (dynamic-config M-F2; session admin). The server
    * assigns dense ordinals in array order. Returns the new cell count. */

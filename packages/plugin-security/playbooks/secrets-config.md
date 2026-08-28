@@ -6,9 +6,10 @@ This cell is scanner-led. Run the pre-baked scanners first, triage their output,
 
 ## Method
 
-1. **Run the scanners.** Execute gitleaks over the clone (and any repo-local scanners the clone ships — a `.semgrep.yml`, a `Makefile` lint target). Capture the raw output.
-2. **Triage each secret hit.** For each candidate: is it a real credential (not a placeholder/example/test fixture)? Is it live (a production key, not a rotated or dummy value)? Is it committed to the tree the engagement pins (not just a local `.env` that is gitignored)? A committed live credential is CWE-798 and typically high or critical. A placeholder is a false positive — refute it explicitly.
-3. **Sweep crypto and config by hand** using the checklist below; scanners miss most of these because they are about *how* an API is used, not a matched string.
+1. **Run the preflight probe first.** Run `sec-preflight` in the sandbox. It prints one row per known tool: present (y/n), a version, and the consequence when the tool is absent. For every tool it marks ABSENT, record a NOT_ASSESSED coverage row: `sec_coverage_report status=not_assessed area=<the scan> tool=<the tool> reason=<the printed consequence>` (e.g. "secrets not scanned because gitleaks is missing"). Never silently skip an absent tool.
+2. **Run the present scanners.** Execute gitleaks over the clone (and any repo-local scanners the clone ships — a `.semgrep.yml`, a `Makefile` lint target). Capture the raw output. Record `sec_coverage_report status=assessed area='secrets scan' tool=gitleaks` for the scan you ran.
+3. **Triage each secret hit.** For each candidate: is it a real credential (not a placeholder/example/test fixture)? Is it live (a production key, not a rotated or dummy value)? Is it committed to the tree the engagement pins (not just a local `.env` that is gitignored)? A committed live credential is CWE-798 and typically high or critical. A placeholder is a false positive — refute it explicitly.
+4. **Sweep crypto and config by hand** using the checklist below; scanners miss most of these because they are about *how* an API is used, not a matched string. Record an assessed coverage row for the crypto and config sweeps.
 
 ## Secrets checklist
 

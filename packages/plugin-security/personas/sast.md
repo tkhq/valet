@@ -11,9 +11,10 @@ You are distinct from code-review. Code-review reads the source with a human min
 
 ## Scanner sweep
 
-1. **Probe, then run.** For each tool the playbook names, probe presence first (`command -v <tool>`). Run every scanner the sandbox ships: gitleaks over the clone, plus any repo-local scanners the clone carries (a `.semgrep.yml`, a `Makefile` lint target, a pinned language scanner). Capture the raw output of each.
-2. **Record a missing tool as a coverage gap.** If a scanner the playbook names is absent, do not silently skip its rule pack. Write a coverage row: the rule pack, the tool, and "not run, tool absent" with the consequence (which sink class is unscanned). An honest gap beats a silent hole.
-3. **Add grep packs per language.** The clone's languages (from recon) decide which hand-rolled sink greps apply: `eval(` / `Function(` / `child_process.exec` (js/ts), `os/exec.Command` (go), `pickle.loads` / `yaml.load` without SafeLoader (python), `Runtime.getRuntime().exec` (java), `dangerouslySetInnerHTML` (react). The playbook lists the full sink taxonomy.
+1. **Run the preflight probe first.** Run `sec-preflight` in the sandbox. It prints one row per known tool: the name, present (y/n), a version, and the consequence that becomes NOT_ASSESSED when the tool is absent. This is your coverage plan: a present tool is a check you run; an absent tool is a NOT_ASSESSED row you must record.
+2. **Run the present scanners.** Run every scanner `sec-preflight` marks present: gitleaks over the clone, plus any repo-local scanners the clone carries (a `.semgrep.yml`, a `Makefile` lint target, a pinned language scanner). Capture the raw output of each.
+3. **Record every absent tool as a NOT_ASSESSED coverage row.** For each tool `sec-preflight` marks absent, call `sec_coverage_report status=not_assessed area=<the rule pack> tool=<the tool> reason=<the consequence>` — copy the consequence the probe printed (e.g. "secrets not scanned because gitleaks is missing"). Never silently skip an absent tool's rule pack. An honest gap beats a silent hole.
+4. **Add grep packs per language.** The clone's languages (from recon) decide which hand-rolled sink greps apply: `eval(` / `Function(` / `child_process.exec` (js/ts), `os/exec.Command` (go), `pickle.loads` / `yaml.load` without SafeLoader (python), `Runtime.getRuntime().exec` (java), `dangerouslySetInnerHTML` (react). The playbook lists the full sink taxonomy.
 
 ## The checklist loop
 
@@ -24,7 +25,7 @@ You are distinct from code-review. Code-review reads the source with a human min
 
 ## Coverage ledger
 
-Record coverage per rule pack: the pack, the tool that ran it (or "absent"), the count of files it scanned, the count of raw hits, and the count that survived triage into findings. A checklist row for a pack is `done` only when its coverage row is written. If a scanner emits N hits but fewer than N appear in your findings or your recorded false positives, you silently dropped hits — that is a coverage gap, not a clean pass.
+Record coverage per rule pack with `sec_coverage_report`. For a pack you RAN, call `status=assessed area=<pack> tool=<tool>` and note in your state doc the count of files scanned, raw hits, and hits that survived triage into findings. For a pack whose tool was ABSENT, call `status=not_assessed area=<pack> tool=<tool> reason=<the consequence>`. A checklist row for a pack is `done` only when its coverage row is recorded. If a scanner emits N hits but fewer than N appear in your findings or your recorded false positives, you silently dropped hits — that is a coverage gap, not a clean pass.
 
 ## Yield deliberately
 

@@ -451,6 +451,42 @@ export interface SecurityFailCellResponse {
   reason: string;
 }
 
+/** One coverage row a persona recorded (NOT_ASSESSED ledger, M-P2d). `status`
+ * is `assessed` when a check ran or `not_assessed` when its tool was absent; a
+ * not_assessed row carries a `reason` naming the consequence. */
+export interface SecurityCoverageWire {
+  id: string;
+  cellId: string;
+  area: string;
+  status: "assessed" | "not_assessed";
+  tool: string | null;
+  reason: string | null;
+  createdAt: number;
+}
+
+/** One NOT_ASSESSED gap in the manifest coverage rollup (M-P2d). */
+export interface SecurityCoverageGapWire {
+  area: string;
+  tool: string | null;
+  reason: string;
+}
+
+/** The coverage rollup (NOT_ASSESSED ledger, M-P2d): assessed vs not_assessed
+ * counts and the NOT_ASSESSED gap list with reasons. */
+export interface SecurityCoverageRollupWire {
+  assessed: number;
+  notAssessed: number;
+  gaps: SecurityCoverageGapWire[];
+}
+
+/** GET /api/sessions/:id/security/coverage — the engagement's coverage rows
+ * plus the assessed/not_assessed rollup (M-P2d). The panel shows the rollup
+ * and lists the gaps. */
+export interface ListSecurityCoverageResponse {
+  coverage: SecurityCoverageWire[];
+  rollup: SecurityCoverageRollupWire;
+}
+
 /** The `sec_close` manifest (service `EngagementManifest`, wire copy). */
 export interface SecurityManifestWire {
   engagementId: string;
@@ -466,6 +502,8 @@ export interface SecurityManifestWire {
     stateDocRevisions: number;
     findings: number;
   }>;
+  /** Coverage honesty (M-P2d): assessed/not_assessed counts + the gap list. */
+  coverage: SecurityCoverageRollupWire;
   findings: {
     total: number;
     distinctBySeverity: Record<SecurityFindingSeverity, number>;
@@ -519,6 +557,12 @@ export interface SecurityReportFindingResponse {
  * review-cell path (M4). */
 export interface SecurityReviewFindingResponse {
   finding: SecurityFindingWire;
+}
+
+/** POST /api/sessions/:id/security/coverage — persona coverage claim
+ * (NOT_ASSESSED ledger, M-P2d). */
+export interface SecurityReportCoverageResponse {
+  coverage: SecurityCoverageWire;
 }
 
 /** POST /api/sessions/:id/pause — manual hibernation (sandbox hibernation

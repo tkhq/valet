@@ -16,6 +16,7 @@ import {
 import type {
   CreateSessionResponse,
   GetSessionSecurityResponse,
+  ListSecurityCoverageResponse,
   ListSecurityFindingsResponse,
   ListSessionsResponse,
   SecurityAddFindingCommentResponse,
@@ -42,6 +43,8 @@ export const qkSecurity = {
     ["sessions", "security-reviews", ...(owner ? [owner.ownerType, owner.ownerId] : [])] as const,
   /** Under `qk.session(id)` so invalidating the session row clears this too. */
   engagement: (sessionId: string) => ["sessions", sessionId, "security"] as const,
+  /** The coverage ledger (NOT_ASSESSED, M-P2d). Under the engagement prefix. */
+  coverage: (sessionId: string) => ["sessions", sessionId, "security", "coverage"] as const,
   /** Prefix for every findings page of a session, so one invalidation after
    * a review/filing write clears every filter combination at once. */
   findingsPrefix: (sessionId: string) => ["sessions", sessionId, "security", "findings"] as const,
@@ -111,6 +114,23 @@ export function useSecurityFindings(
     placeholderData: keepPreviousData,
     enabled: !!sessionId,
     refetchInterval: pollMs ?? false,
+  });
+}
+
+/**
+ * `GET /api/sessions/:id/security/coverage` — the coverage ledger (NOT_ASSESSED,
+ * M-P2d). The panel reads the rollup (assessed/not_assessed counts + the gap
+ * list) to show coverage honesty. `pollMs` refetches while the engagement runs.
+ */
+export function useSecurityCoverage(
+  sessionId: string,
+  opts?: Partial<UseQueryOptions<ListSecurityCoverageResponse>>,
+) {
+  return useQuery<ListSecurityCoverageResponse>({
+    queryKey: qkSecurity.coverage(sessionId),
+    queryFn: () => api.getSecurityCoverage(sessionId),
+    enabled: !!sessionId,
+    ...opts,
   });
 }
 

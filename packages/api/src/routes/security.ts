@@ -84,6 +84,7 @@ import {
   securityHandoffs,
   sessionRepos,
   type SecurityCellRow,
+  type SecurityCoverageRow,
   type SecurityEngagementRow,
   type SecurityFindingCommentRow,
   type SecurityFindingLinkRow,
@@ -120,9 +121,12 @@ import {
 import type {
   GetSecurityStatusResponse,
   GetSessionSecurityResponse,
+  ListSecurityCoverageResponse,
   ListSecurityFilesResponse,
   ListSecurityFindingsResponse,
   SecurityCellWire,
+  SecurityCoverageWire,
+  SecurityReportCoverageResponse,
   SecurityCloseResponse,
   SecurityCompleteCellResponse,
   SecurityDigestIssueResponse,
@@ -347,6 +351,18 @@ function commentToWire(c: SecurityFindingCommentRow): SecurityFindingCommentWire
   };
 }
 
+function coverageToWire(row: SecurityCoverageRow): SecurityCoverageWire {
+  return {
+    id: row.id,
+    cellId: row.cellId,
+    area: row.area,
+    status: row.status,
+    tool: row.tool,
+    reason: row.reason,
+    createdAt: row.createdAt,
+  };
+}
+
 const NO_ENGAGEMENT =
   "This session has no security engagement. Create the session with kind 'security' to start one.";
 
@@ -494,6 +510,36 @@ securityRouter.get("/:id/security/findings", async (c) => {
     // cursor; its message names the fix.
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
   }
+});
+
+/**
+ * GET /api/sessions/:id/security/coverage — the coverage ledger (NOT_ASSESSED,
+ * M-P2d, spec §Coverage honesty). View-gated, same ladder as the findings GET.
+ * Returns every coverage row plus the assessed/not_assessed rollup with the
+ * NOT_ASSESSED gap list, so the panel can show coverage honesty for the review.
+ */
+securityRouter.get("/:id/security/coverage", async (c) => {
+  const sessionId = c.req.param("id");
+  const row = await resolveViewableSession(c, sessionId);
+  if (!row) return c.json({ error: "session not found" }, 404);
+
+  const { db } = c.var.providers;
+  const security = createSecurityEngagementService({ db });
+  const result = await security.getEngagementBySession(sessionId);
+  if (!result) return c.json({ error: NO_ENGAGEMENT }, 404);
+
+  const rows = await security.listCoverage(result.engagement.id);
+  const rollup = { assessed: 0, notAssessed: 0, gaps: [] as ListSecurityCoverageResponse["rollup"]["gaps"] };
+  for (const row of rows) {
+    if (row.status === "not_assessed") {
+      rollup.notAssessed += 1;
+      rollup.gaps.push({ area: row.area, tool: row.tool, reason: row.reason ?? "" });
+    } else {
+      rollup.assessed += 1;
+    }
+  }
+  const body: ListSecurityCoverageResponse = { coverage: rows.map(coverageToWire), rollup };
+  return c.json(body);
 });
 
 // ── M3: runner tool backends ───────────────────────────────────────────────
@@ -1604,6 +1650,49 @@ securityRouter.post("/:id/security/findings/:findingId/review", async (c) => {
       actor: cell.id,
     });
     const response: SecurityReviewFindingResponse = { finding: findingToWire(finding) };
+    return c.json(response);
+  } catch (err) {
+    return serviceError(c, err);
+  }
+});
+
+/**
+ * POST /:id/security/coverage — a persona records one coverage claim
+ * (NOT_ASSESSED ledger, M-P2d, spec §Coverage honesty). Internal-token persona
+ * seam, same as the finding routes: the acting session's cell claim is the
+ * authority (`resolvePersonaActor`). A not_assessed area WITHOUT a reason is a
+ * corrective tool error — the service names the fix. The claiming cell is the
+ * coverage's owner.
+ */
+securityRouter.post("/:id/security/coverage", async (c) => {
+  const sessionId = c.req.param("id");
+  const resolved = await resolvePersonaActor(c, sessionId);
+  if ("failure" in resolved) return resolved.failure;
+  const { security, engagement, cell } = resolved.ok;
+
+  const body = await readJsonBody(c);
+  if (typeof body.area !== "string" || body.area.trim() === "") {
+    return c.json({ error: "Send { area } naming the scope, e.g. 'secrets scan'." }, 400);
+  }
+  if (body.status !== "assessed" && body.status !== "not_assessed") {
+    return c.json({ error: "status must be 'assessed' or 'not_assessed'." }, 400);
+  }
+  if (body.tool !== undefined && body.tool !== null && typeof body.tool !== "string") {
+    return c.json({ error: "tool must be a string or omitted." }, 400);
+  }
+  if (body.reason !== undefined && body.reason !== null && typeof body.reason !== "string") {
+    return c.json({ error: "reason must be a string or omitted." }, 400);
+  }
+
+  try {
+    const coverage = await security.reportCoverage(engagement.id, {
+      cellId: cell.id,
+      area: body.area,
+      status: body.status,
+      tool: typeof body.tool === "string" ? body.tool : undefined,
+      reason: typeof body.reason === "string" ? body.reason : undefined,
+    });
+    const response: SecurityReportCoverageResponse = { coverage: coverageToWire(coverage) };
     return c.json(response);
   } catch (err) {
     return serviceError(c, err);

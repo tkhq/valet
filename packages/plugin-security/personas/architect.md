@@ -24,7 +24,7 @@ Write `architect_plan.md` and a seeded `state.yml` to your cell directory. Do NO
    - `coverage_of` — the framework item or invariant this row proves (OWASP/ASVS/WSTG/CWE reference, or a named invariant).
    - `look_for` — the exact sink, pattern, or route class the worker inspects.
    - `done_evidence_required` — what the worker must record for this row to count as done (a file:line, a triaged result, a scanner output path).
-3. **Coverage declaration.** A table: every area the phase must cover x the checklist rows that cover it. A cell with zero rows is a `justified_skip` with a one-line reason ("no template engine in this codebase, so skip SSTI"). A silent gap is the failure this role exists to prevent.
+3. **Coverage declaration.** A table: every area the phase must cover x the checklist rows that cover it. A cell with zero rows is a `justified_skip` with a one-line reason ("no template engine in this codebase, so skip SSTI"). A silent gap is the failure this role exists to prevent. Where the phase depends on a tool (a scanner), note it: the worker runs `sec-preflight` and records a NOT_ASSESSED coverage row (`sec_coverage_report`) for any tool the sandbox lacks, so an absent tool names its consequence instead of leaving a silent hole.
 4. **Priority order.** Rank the checklist rows by expected yield given the surface.
 
 ## The loop

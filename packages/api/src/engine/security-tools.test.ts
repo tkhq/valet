@@ -511,6 +511,7 @@ describe("persona tool set (M4)", () => {
       "sec_fs_list",
       "sec_protocol_read",
       "sec_finding_report",
+      "sec_coverage_report",
     ]);
     expect(buildSecurityPersonaTools({ review: true }).map((t) => t.name)).toEqual([
       "sec_fs_write",
@@ -518,6 +519,7 @@ describe("persona tool set (M4)", () => {
       "sec_fs_list",
       "sec_protocol_read",
       "sec_finding_report",
+      "sec_coverage_report",
       "sec_finding_review",
     ]);
   });

@@ -817,6 +817,61 @@ export const secFindingReviewTool = defineTool({
   },
 });
 
+// ── sec_coverage_report (persona) ──────────────────────────────────────────
+
+/**
+ * The coverage-honesty tool (NOT_ASSESSED ledger, M-P2d, spec §Coverage
+ * honesty). A persona records what it assessed and, for every planned check
+ * whose tool is absent, an explicit `not_assessed` row naming the consequence
+ * ("secrets not scanned because gitleaks is missing"). A `not_assessed` without
+ * a reason comes back as a corrective tool error, never a silent gap.
+ */
+export const secCoverageReportTool = defineTool({
+  name: "sec_coverage_report",
+  description:
+    "Record one coverage claim for your cell. status='assessed' when a check ran; status='not_assessed' when its " +
+    "tool is absent — then reason MUST name the consequence (e.g. 'secrets not scanned because gitleaks is missing'). " +
+    "Run the preflight probes first, then record a row per planned check: assessed for the ones you ran, not_assessed " +
+    "for the ones whose tool the sandbox lacks. An honest gap beats a silent hole.",
+  parameters: Type.Object({
+    area: Type.String({ description: "The scope this covers, e.g. 'secrets scan' or 'semgrep owasp'." }),
+    status: Type.Union([Type.Literal("assessed"), Type.Literal("not_assessed")]),
+    tool: Type.Optional(Type.String({ description: "The tool involved, e.g. 'gitleaks' or 'semgrep'." })),
+    reason: Type.Optional(
+      Type.String({
+        description: "For not_assessed: the consequence — which oracle or sink class is unscanned, and why.",
+      }),
+    ),
+  }),
+  execute: async (args, ctx) => {
+    const cfg = resolveSecurityConfig(ctx);
+    if (!cfg) return { text: UNAVAILABLE_TEXT };
+    return securityRequest(
+      securityUrl(cfg, ctx, "/coverage"),
+      {
+        method: "POST",
+        headers: securityHeaders(cfg, ctx, true),
+        body: JSON.stringify({
+          area: args.area,
+          status: args.status,
+          tool: args.tool,
+          reason: args.reason,
+        }),
+      },
+      async (res) => {
+        const body = await parseJsonBody(res);
+        const coverage = isRecord(body) && isRecord(body.coverage) ? body.coverage : null;
+        if (!coverage) return { text: "[security_error] the coverage route returned an unexpected shape." };
+        const status = String(coverage.status);
+        const toolPart = typeof coverage.tool === "string" && coverage.tool !== "" ? ` [${coverage.tool}]` : "";
+        return {
+          text: `coverage recorded: ${String(coverage.area)}${toolPart} — ${status}`,
+        };
+      },
+    );
+  },
+});
+
 /** All eleven runner `sec_*` ToolDefs, in registration order. */
 export function buildSecurityRunnerTools(): ToolDef[] {
   return [
@@ -847,6 +902,7 @@ export function buildSecurityPersonaTools(opts: { review: boolean }): ToolDef[] 
     secFsListTool,
     secProtocolReadTool,
     secFindingReportTool,
+    secCoverageReportTool,
     ...(opts.review ? [secFindingReviewTool] : []),
   ];
 }

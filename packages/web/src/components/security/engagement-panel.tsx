@@ -2,6 +2,7 @@ import { useState, type ReactNode } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
   useEngagement,
+  useSecurityCoverage,
   useSecurityFindings,
   useCancelEngagement,
   useRescanReview,
@@ -17,6 +18,7 @@ import { cn } from "~/lib/cn";
 import { useResizablePane } from "~/lib/use-resizable-pane";
 import { CellRail } from "./cell-rail";
 import { ConfigEditor } from "./config-editor";
+import { CoverageSection } from "./coverage-section";
 import { CostChip } from "./cost-chip";
 import { FindingsReview } from "./findings-review";
 import { ManifestCard } from "./manifest-card";
@@ -73,6 +75,13 @@ export function EngagementPanel({
     engagementQ.data?.engagement.status === "completed" ||
     engagementQ.data?.engagement.status === "failed";
   const allFindingsQ = useSecurityFindings(closed ? sessionId : "", {});
+
+  // The coverage ledger (NOT_ASSESSED, M-P2d). Poll while the engagement runs
+  // so recorded gaps appear live; stop once terminal.
+  const running = engagementQ.data?.engagement.status === "running";
+  const coverageQ = useSecurityCoverage(sessionId, {
+    refetchInterval: running ? 5_000 : false,
+  });
 
   const cancelMutation = useCancelEngagement(sessionId);
   const [confirmCancel, setConfirmCancel] = useState(false);
@@ -193,6 +202,7 @@ export function EngagementPanel({
           review was told. */}
       <ConfigEditor sessionId={sessionId} engagement={engagement} editable={showPlanEditor} />
       {showPlanEditor && <PlanEditor sessionId={sessionId} planCells={planCells} />}
+      {coverageQ.data && <CoverageSection rollup={coverageQ.data.rollup} />}
       <CellRail cells={cells} onOpenChild={onOpenChild} />
       <div className="border-t border-line" />
       <FindingsReview

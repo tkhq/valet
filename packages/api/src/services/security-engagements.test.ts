@@ -887,6 +887,96 @@ describe("security engagement service", () => {
     expect(after?.engagement.status).toBe("completed");
   });
 
+  // ── Coverage ledger (NOT_ASSESSED, M-P2d) ────────────────────────────────
+
+  it("reportCoverage inserts assessed and not_assessed rows and listCoverage returns them", async () => {
+    const { engagement, cells } = await makeStarted();
+    const assessed = await svc.reportCoverage(engagement.id, {
+      cellId: cells[1].id,
+      area: "secrets scan",
+      status: "assessed",
+      tool: "gitleaks",
+    });
+    expect(assessed.status).toBe("assessed");
+    expect(assessed.reason).toBeNull();
+    const gap = await svc.reportCoverage(engagement.id, {
+      cellId: cells[1].id,
+      area: "semgrep owasp",
+      status: "not_assessed",
+      tool: "semgrep",
+      reason: "OWASP sink rules not scanned because semgrep is missing.",
+    });
+    expect(gap.status).toBe("not_assessed");
+    expect(gap.reason).toContain("semgrep is missing");
+
+    const all = await svc.listCoverage(engagement.id);
+    expect(all).toHaveLength(2);
+    expect(all.map((r) => r.area)).toEqual(["secrets scan", "semgrep owasp"]);
+    const scoped = await svc.listCoverage(engagement.id, { cellId: cells[1].id });
+    expect(scoped).toHaveLength(2);
+    const other = await svc.listCoverage(engagement.id, { cellId: cells[2].id });
+    expect(other).toHaveLength(0);
+  });
+
+  it("reportCoverage rejects a not_assessed area with no reason", async () => {
+    const { engagement, cells } = await makeStarted();
+    await expect(
+      svc.reportCoverage(engagement.id, {
+        cellId: cells[1].id,
+        area: "semgrep owasp",
+        status: "not_assessed",
+        tool: "semgrep",
+      }),
+    ).rejects.toThrow(/reason naming the consequence/);
+  });
+
+  it("reportCoverage rejects an empty area", async () => {
+    const { engagement, cells } = await makeStarted();
+    await expect(
+      svc.reportCoverage(engagement.id, { cellId: cells[1].id, area: "   ", status: "assessed" }),
+    ).rejects.toThrow(/Coverage needs an area/);
+  });
+
+  it("closeEngagement manifest includes the coverage rollup and the gap list", async () => {
+    const { engagement, cells } = await makeStarted();
+    await svc.reportCoverage(engagement.id, {
+      cellId: cells[1].id,
+      area: "secrets scan",
+      status: "assessed",
+      tool: "gitleaks",
+    });
+    await svc.reportCoverage(engagement.id, {
+      cellId: cells[1].id,
+      area: "authz sweep",
+      status: "assessed",
+    });
+    await svc.reportCoverage(engagement.id, {
+      cellId: cells[2].id,
+      area: "semgrep owasp",
+      status: "not_assessed",
+      tool: "semgrep",
+      reason: "OWASP sink rules not scanned because semgrep is missing.",
+    });
+    for (const cell of cells) await runCellToCompletion(engagement.id, cell);
+
+    const manifest = await svc.closeEngagement(engagement.id);
+    expect(manifest.coverage.assessed).toBe(2);
+    expect(manifest.coverage.notAssessed).toBe(1);
+    expect(manifest.coverage.gaps).toHaveLength(1);
+    expect(manifest.coverage.gaps[0]).toEqual({
+      area: "semgrep owasp",
+      tool: "semgrep",
+      reason: "OWASP sink rules not scanned because semgrep is missing.",
+    });
+  });
+
+  it("closeEngagement manifest reports an empty coverage rollup when none recorded", async () => {
+    const { engagement, cells } = await makeStarted();
+    for (const cell of cells) await runCellToCompletion(engagement.id, cell);
+    const manifest = await svc.closeEngagement(engagement.id);
+    expect(manifest.coverage).toEqual({ assessed: 0, notAssessed: 0, gaps: [] });
+  });
+
   it("closeEngagement marks the engagement failed when a cell failed", async () => {
     const { engagement, cells } = await makeStarted();
     for (const cell of cells.slice(0, 4)) {

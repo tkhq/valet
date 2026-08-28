@@ -1914,6 +1914,37 @@ export const securityFindingComments = pgTable(
   ],
 );
 
+// One row per coverage claim a persona records (NOT_ASSESSED ledger, M-P2d,
+// spec §Coverage honesty). `status` is `assessed` when a check ran or
+// `not_assessed` when its tool was absent; a not_assessed row carries a
+// `reason` naming the consequence ("secrets not scanned because gitleaks is
+// missing"). Insert-only, no unique constraint — a cell records one row per
+// area it covered or skipped. The close manifest rolls these into an
+// assessed/not_assessed count plus the gap list.
+export const securityCoverage = pgTable(
+  "security_coverage",
+  {
+    id: text("id").primaryKey(),
+    engagementId: text("engagement_id").notNull(),
+    // The cell that recorded the coverage — the persona's claim.
+    cellId: text("cell_id").notNull(),
+    // What was in scope, e.g. "secrets scan", "semgrep owasp".
+    area: text("area").notNull(),
+    status: text("status", { enum: ["assessed", "not_assessed"] }).notNull(),
+    // The tool involved (gitleaks, semgrep, …). Null when no specific tool
+    // backs the area.
+    tool: text("tool"),
+    // The consequence / why-not. Required for not_assessed (the service and
+    // route reject a not_assessed without one); null for an assessed row.
+    reason: text("reason"),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    index("security_coverage_engagement").on(t.engagementId),
+    index("security_coverage_cell").on(t.cellId),
+  ],
+);
+
 export type SecurityEngagementRow = typeof securityEngagements.$inferSelect;
 export type SecurityCellRow = typeof securityCells.$inferSelect;
 export type SecurityFileRow = typeof securityFiles.$inferSelect;
@@ -1921,3 +1952,4 @@ export type SecurityFindingRow = typeof securityFindings.$inferSelect;
 export type SecurityFindingLinkRow = typeof securityFindingLinks.$inferSelect;
 export type SecurityHandoffRow = typeof securityHandoffs.$inferSelect;
 export type SecurityFindingCommentRow = typeof securityFindingComments.$inferSelect;
+export type SecurityCoverageRow = typeof securityCoverage.$inferSelect;

@@ -1093,6 +1093,25 @@ CREATE INDEX "security_finding_comments_finding" ON "security_finding_comments" 
 --> statement-breakpoint
 CREATE INDEX "security_finding_comments_engagement" ON "security_finding_comments" ("engagement_id");
 --> statement-breakpoint
+-- One row per coverage claim a persona records (NOT_ASSESSED ledger, M-P2d).
+-- status is 'assessed' or 'not_assessed'; a not_assessed row carries a reason
+-- naming the consequence. No unique constraint — a cell records one row per
+-- area. The close manifest rolls these into a coverage summary + gap list.
+CREATE TABLE "security_coverage" (
+	"id" text PRIMARY KEY NOT NULL,
+	"engagement_id" text NOT NULL,
+	"cell_id" text NOT NULL,
+	"area" text NOT NULL,
+	"status" text NOT NULL,
+	"tool" text,
+	"reason" text,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "security_coverage_engagement" ON "security_coverage" ("engagement_id");
+--> statement-breakpoint
+CREATE INDEX "security_coverage_cell" ON "security_coverage" ("cell_id");
+--> statement-breakpoint
 -- ── cost_entries ──────────────────────────────────────────────────────────
 --
 -- One row per billable assistant turn, with the owner resolved. This is the
