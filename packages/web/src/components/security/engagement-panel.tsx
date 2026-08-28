@@ -1,0 +1,190 @@
+import { useState, type ReactNode } from "react";
+import { useEngagement, useSecurityFindings, flattenFindings } from "~/api/security";
+import { useMe, useTeams } from "~/api/settings";
+import { useSession } from "~/api/queries";
+import { useStreamStore } from "~/stores/stream";
+import { Spinner } from "~/components/primitives";
+import { cn } from "~/lib/cn";
+import { CellRail } from "./cell-rail";
+import { FindingsReview } from "./findings-review";
+import { ManifestCard } from "./manifest-card";
+
+/**
+ * The security engagement panel (valet-security design §engagement panel):
+ * manifest card once closed, the cell rail, and the findings review. No
+ * `host_event` wire events on this branch, so the engagement polls every
+ * 5s while it runs and the findings review polls on the same cadence.
+ */
+export function EngagementPanel({
+  sessionId,
+  initialFindingId,
+}: {
+  sessionId: string;
+  /** From the `?finding=` permalink param. */
+  initialFindingId?: string;
+}) {
+  const engagementQ = useEngagement(sessionId, {
+    refetchInterval: (query) =>
+      query.state.data?.engagement.status === "running" ? 5_000 : false,
+  });
+
+  // Admin gating mirrors the session header's rule: personal sessions are
+  // administered by their owner (who is the only viewer), team sessions by
+  // team admins and org admins. The routes enforce the real check; this
+  // only hides buttons that would 403.
+  const session = useSession(sessionId);
+  const me = useMe();
+  const teams = useTeams();
+  const owner = session.data?.owner;
+  const teamId = owner?.type === "team" ? owner.id : null;
+  const team = teamId !== null ? teams.data?.teams.find((t) => t.id === teamId) : undefined;
+  const canAdminister =
+    teamId === null || team?.callerRole === "admin" || me.data?.orgRole === "admin";
+
+  // The manifest card derives its tallies from the full (unfiltered)
+  // findings set — the sec_close manifest is not on any GET route. Only
+  // fetched once the engagement is closed.
+  const closed =
+    engagementQ.data?.engagement.status === "completed" ||
+    engagementQ.data?.engagement.status === "failed";
+  const allFindingsQ = useSecurityFindings(closed ? sessionId : "", {});
+
+  if (engagementQ.isPending) {
+    return (
+      <div className="p-4 text-xs text-muted">
+        <Spinner /> Loading engagement…
+      </div>
+    );
+  }
+  if (engagementQ.isError || !engagementQ.data) {
+    return (
+      <div className="p-4 text-xs text-danger-600">
+        Failed to load the security engagement. Reload the page to retry.
+      </div>
+    );
+  }
+
+  const { engagement, cells } = engagementQ.data;
+  return (
+    <div className="flex flex-col min-h-0">
+      {closed && (engagement.status === "completed" || engagement.status === "failed") && (
+        <ManifestCard
+          cells={cells}
+          findings={flattenFindings(allFindingsQ.data?.pages)}
+          status={engagement.status}
+        />
+      )}
+      <div className="border-b border-line px-4 py-2 text-xs text-muted">
+        <span className="font-mono text-ink">{engagement.repoFullName}</span>
+        {engagement.repoRef !== "" && (
+          <span className="font-mono"> @ {engagement.repoRef.slice(0, 12)}</span>
+        )}
+        <span> · {engagement.status}</span>
+      </div>
+      <CellRail cells={cells} />
+      <div className="border-t border-line" />
+      <FindingsReview
+        sessionId={sessionId}
+        engagement={engagement}
+        cells={cells}
+        canAdminister={canAdminister}
+        initialFindingId={initialFindingId}
+        polling={engagement.status === "running"}
+      />
+    </div>
+  );
+}
+
+type MobilePane = "chat" | "panel";
+
+/**
+ * Layout for `kind='security'` sessions: chat and panel side by side from
+ * `md` up; below `md`, a Chat | Panel toggle — the chat pane holds the
+ * decision gates, so the panel must never cover it without a way back
+ * (spec §engagement panel). The Chat tab shows a dot while a gate is
+ * pending anywhere in the session, from the same stream-store slice the
+ * gate cards render from.
+ */
+export function SecuritySessionLayout({
+  sessionId,
+  initialFindingId,
+  chat,
+}: {
+  sessionId: string;
+  initialFindingId?: string;
+  /** The session view element — rendered once, shown/hidden responsively. */
+  chat: ReactNode;
+}) {
+  const [pane, setPane] = useState<MobilePane>("chat");
+  const gatePending = useStreamStore(
+    (s) => Object.keys(s.bySession[sessionId]?.pendingGates ?? {}).length > 0,
+  );
+
+  return (
+    <div className="flex-1 flex flex-col min-h-0">
+      <div className="md:hidden flex border-b border-line" role="tablist" aria-label="Session panes">
+        <MobileTab
+          label="Chat"
+          active={pane === "chat"}
+          dot={gatePending}
+          onSelect={() => setPane("chat")}
+        />
+        <MobileTab label="Panel" active={pane === "panel"} onSelect={() => setPane("panel")} />
+      </div>
+      <div className="flex-1 flex min-h-0">
+        <div
+          className={cn(
+            "flex-1 min-w-0 flex-col min-h-0",
+            pane === "chat" ? "flex" : "hidden md:flex",
+          )}
+        >
+          {chat}
+        </div>
+        <aside
+          aria-label="Security panel"
+          className={cn(
+            "flex-col min-h-0 overflow-y-auto border-line",
+            "md:w-[30rem] xl:w-[42rem] md:border-l",
+            pane === "panel" ? "flex flex-1 md:flex-none" : "hidden md:flex",
+          )}
+        >
+          <EngagementPanel sessionId={sessionId} initialFindingId={initialFindingId} />
+        </aside>
+      </div>
+    </div>
+  );
+}
+
+function MobileTab({
+  label,
+  active,
+  dot,
+  onSelect,
+}: {
+  label: string;
+  active: boolean;
+  dot?: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={active}
+      onClick={onSelect}
+      className={cn(
+        "flex-1 px-3 py-2 text-xs font-medium inline-flex items-center justify-center gap-1.5",
+        active ? "text-ink border-b-2 border-moss" : "text-muted",
+      )}
+    >
+      {label}
+      {dot && (
+        <span
+          data-testid="pending-gate-dot"
+          aria-label="A decision gate is pending"
+          className="h-1.5 w-1.5 rounded-full bg-amber-500"
+        />
+      )}
+    </button>
+  );
+}

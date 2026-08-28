@@ -67,6 +67,12 @@ import type {
   GetSessionResponse,
   GetSessionSecurityResponse,
   GetSkillResponse,
+  ListSecurityFindingsResponse,
+  SecurityDigestIssueResponse,
+  SecurityFileIssueResponse,
+  SecurityFindingSeverity,
+  SecurityFindingStatus,
+  SecurityReviewFindingResponse,
   GetWorkflowResponse,
   GetWorkflowRunResponse,
   GetWorkflowTriggerCatalogResponse,
@@ -393,6 +399,17 @@ export interface SkillSourceListQuery {
   cursor?: string;
 }
 
+/** Filters + cursor page the security findings list accepts. Mirrors the
+ * route's query params (`GET /sessions/:id/security/findings`). */
+export interface SecurityFindingsQuery {
+  severity?: SecurityFindingSeverity;
+  status?: SecurityFindingStatus;
+  cellId?: string;
+  path?: string;
+  cursor?: string;
+  limit?: number;
+}
+
 /** Filters the cross-workflow run list accepts. Array fields match any-of. */
 export interface WorkflowRunFilter extends WorkflowRunPage {
   workflowIds?: string[];
@@ -421,6 +438,57 @@ export const api = {
    * (valet-security design §Web Surfaces). 404s for a non-security session. */
   getSessionSecurity: (id: string) =>
     request<GetSessionSecurityResponse>("GET", `/sessions/${encodeURIComponent(id)}/security`),
+  /** GET /sessions/:id/security/findings — filtered, cursor-paginated
+   * (valet-security design §Findings review). */
+  listSecurityFindings: (id: string, params: SecurityFindingsQuery = {}) => {
+    const qs = new URLSearchParams();
+    if (params.severity) qs.set("severity", params.severity);
+    if (params.status) qs.set("status", params.status);
+    if (params.cellId) qs.set("cellId", params.cellId);
+    if (params.path) qs.set("path", params.path);
+    if (params.cursor) qs.set("cursor", params.cursor);
+    if (params.limit !== undefined) qs.set("limit", String(params.limit));
+    const suffix = qs.size > 0 ? `?${qs.toString()}` : "";
+    return request<ListSecurityFindingsResponse>(
+      "GET",
+      `/sessions/${encodeURIComponent(id)}/security/findings${suffix}`,
+    );
+  },
+  /** POST /sessions/:id/security/findings/:findingId/status — human
+   * verify/refute (forward-only; session admin). */
+  reviewSecurityFinding: (
+    id: string,
+    findingId: string,
+    body: { status: "verified" | "refuted"; reason: string },
+  ) =>
+    request<SecurityReviewFindingResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/security/findings/${encodeURIComponent(findingId)}/status`,
+      body,
+    ),
+  /** POST /sessions/:id/security/findings/:findingId/issues — file one
+   * GitHub/Linear issue; idempotent per (finding, provider). */
+  fileSecurityIssue: (
+    id: string,
+    findingId: string,
+    body: { provider: "github" | "linear"; repo?: string; teamId?: string },
+  ) =>
+    request<SecurityFileIssueResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/security/findings/${encodeURIComponent(findingId)}/issues`,
+      body,
+    ),
+  /** POST /sessions/:id/security/issues/digest — one digest issue from many
+   * findings; writes no link rows. */
+  fileSecurityDigest: (
+    id: string,
+    body: { provider: "github" | "linear"; findingIds: string[]; repo?: string; teamId?: string },
+  ) =>
+    request<SecurityDigestIssueResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/security/issues/digest`,
+      body,
+    ),
   createSession: (body: CreateSessionRequest) =>
     request<CreateSessionResponse>("POST", "/sessions", body),
   deleteSession: (id: string) =>

@@ -1,12 +1,32 @@
 /**
  * Security engagement queries (valet-security design, §Web Surfaces). House
  * pattern: a query-key factory per resource file, mirroring `~/api/workflows`.
- * M7 ships the hub's reads; M8 extends this file with findings, triage
- * mutations, and polling.
+ * M7 ships the hub's reads; M8 adds findings (cursor-paged), the triage
+ * mutations, and the export download. Live updates poll — the `host_event`
+ * wire seam belongs to #396 (spec §Data and events).
  */
-import { useQuery, type UseQueryOptions } from "@tanstack/react-query";
-import type { GetSessionSecurityResponse, ListSessionsResponse } from "@valet/api/wire";
-import { api, type OwnerFilter } from "./client";
+import {
+  keepPreviousData,
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type UseQueryOptions,
+} from "@tanstack/react-query";
+import type {
+  GetSessionSecurityResponse,
+  ListSecurityFindingsResponse,
+  ListSessionsResponse,
+  SecurityDigestIssueResponse,
+  SecurityFileIssueResponse,
+  SecurityFindingWire,
+  SecurityReviewFindingResponse,
+} from "@valet/api/wire";
+import { api, ApiError, type OwnerFilter, type SecurityFindingsQuery } from "./client";
+
+/** Filters the findings surface holds; the cursor stays inside the
+ * infinite query, never in this shape. */
+export type SecurityFindingsFilters = Omit<SecurityFindingsQuery, "cursor" | "limit">;
 
 export const qkSecurity = {
   /** Under the `["sessions"]` prefix on purpose: `useCreateSession`
@@ -16,6 +36,20 @@ export const qkSecurity = {
     ["sessions", "security-reviews", ...(owner ? [owner.ownerType, owner.ownerId] : [])] as const,
   /** Under `qk.session(id)` so invalidating the session row clears this too. */
   engagement: (sessionId: string) => ["sessions", sessionId, "security"] as const,
+  /** Prefix for every findings page of a session, so one invalidation after
+   * a review/filing write clears every filter combination at once. */
+  findingsPrefix: (sessionId: string) => ["sessions", sessionId, "security", "findings"] as const,
+  findings: (sessionId: string, filters: SecurityFindingsFilters) =>
+    [
+      "sessions",
+      sessionId,
+      "security",
+      "findings",
+      filters.severity ?? "",
+      filters.status ?? "",
+      filters.cellId ?? "",
+      filters.path ?? "",
+    ] as const,
 };
 
 /** `GET /api/sessions?kind=security` — the hub's engagement list. `owner`
@@ -33,8 +67,8 @@ export function useSecurityReviews(
 }
 
 /** `GET /api/sessions/:id/security` — one session's engagement + cells.
- * The hub reads the engagement's status and repo per row; M8's panel reads
- * the cells. */
+ * The hub reads the engagement's status and repo per row; the panel reads
+ * the cells and passes `refetchInterval` to poll while running. */
 export function useEngagement(
   sessionId: string,
   opts?: Partial<UseQueryOptions<GetSessionSecurityResponse>>,
@@ -45,4 +79,151 @@ export function useEngagement(
     enabled: !!sessionId,
     ...opts,
   });
+}
+
+/**
+ * `GET /api/sessions/:id/security/findings` — cursor-paged behind an
+ * infinite query; `keepPreviousData` keeps the last page on screen while a
+ * filter change refetches, so the list never flashes empty mid-triage.
+ * `pollMs` refetches on the engagement's cadence while it runs (the panel
+ * is the only consumer, so "panel visible" == "query mounted").
+ */
+export function useSecurityFindings(
+  sessionId: string,
+  filters: SecurityFindingsFilters,
+  pollMs?: number | false,
+) {
+  return useInfiniteQuery({
+    queryKey: qkSecurity.findings(sessionId, filters),
+    queryFn: ({ pageParam }) =>
+      api.listSecurityFindings(sessionId, {
+        ...filters,
+        cursor: pageParam === "" ? undefined : pageParam,
+      }),
+    initialPageParam: "",
+    getNextPageParam: (last: ListSecurityFindingsResponse) => last.nextCursor ?? undefined,
+    placeholderData: keepPreviousData,
+    enabled: !!sessionId,
+    refetchInterval: pollMs ?? false,
+  });
+}
+
+/** Every loaded finding, flattened across pages. */
+export function flattenFindings(
+  pages: ListSecurityFindingsResponse[] | undefined,
+): SecurityFindingWire[] {
+  return pages?.flatMap((p) => p.findings) ?? [];
+}
+
+/** POST .../findings/:findingId/status — human verify/refute. Invalidates
+ * every findings page of the session (any filter may hold the row). */
+export function useReviewFinding(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<
+    SecurityReviewFindingResponse,
+    Error,
+    { findingId: string; status: "verified" | "refuted"; reason: string }
+  >({
+    mutationFn: ({ findingId, status, reason }) =>
+      api.reviewSecurityFinding(sessionId, findingId, { status, reason }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qkSecurity.findingsPrefix(sessionId) });
+    },
+  });
+}
+
+/** POST .../findings/:findingId/issues — file one issue. Idempotent on the
+ * server: a repeat answers `created: false` with the existing link. */
+export function useFileIssue(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<
+    SecurityFileIssueResponse,
+    Error,
+    { findingId: string; provider: "github" | "linear"; repo?: string; teamId?: string }
+  >({
+    mutationFn: ({ findingId, ...body }) => api.fileSecurityIssue(sessionId, findingId, body),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qkSecurity.findingsPrefix(sessionId) });
+    },
+  });
+}
+
+/** POST .../issues/digest — one digest issue from many findings. */
+export function useFileDigest(sessionId: string) {
+  return useMutation<
+    SecurityDigestIssueResponse,
+    Error,
+    { provider: "github" | "linear"; findingIds: string[]; repo?: string; teamId?: string }
+  >({
+    mutationFn: (body) => api.fileSecurityDigest(sessionId, body),
+  });
+}
+
+export type SecurityExportFormat = "md" | "sarif" | "json";
+
+/** The export route URL for one format + filter set (spec §Export). The
+ * export scope takes the same filters as the findings list, minus the
+ * path filter — the route does not accept it. */
+export function exportUrl(
+  sessionId: string,
+  format: SecurityExportFormat,
+  filters: SecurityFindingsFilters = {},
+): string {
+  const qs = new URLSearchParams({ format });
+  if (filters.severity) qs.set("severity", filters.severity);
+  if (filters.status) qs.set("status", filters.status);
+  if (filters.cellId) qs.set("cellId", filters.cellId);
+  return `/api/sessions/${encodeURIComponent(sessionId)}/security/export?${qs.toString()}`;
+}
+
+/** The corrective error text an API failure carries, for inline display.
+ * The route bodies put it in `{ error }`; fall back to the raw message. */
+export function apiErrorText(err: unknown): string {
+  if (err instanceof ApiError && typeof err.payload === "object" && err.payload !== null) {
+    const payload = err.payload as { error?: unknown };
+    if (typeof payload.error === "string") return payload.error;
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Authenticated export download: fetch → Blob → object-URL anchor click.
+ * Never a bare `<a href>` to the route — a 4xx there navigates the tab to
+ * raw JSON (the valet-design lesson named in the spec); this path surfaces
+ * the failure to the caller instead. Returns the filename it saved as.
+ */
+export async function downloadSecurityExport(
+  sessionId: string,
+  format: SecurityExportFormat,
+  filters: SecurityFindingsFilters = {},
+): Promise<string> {
+  const res = await fetch(exportUrl(sessionId, format, filters));
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const body: unknown = await res.json();
+      if (typeof body === "object" && body !== null) {
+        const e = (body as { error?: unknown }).error;
+        if (typeof e === "string") detail = e;
+      }
+    } catch {
+      // Non-JSON error body — the status alone has to do.
+    }
+    throw new Error(detail || `Export failed (${res.status}). Try again.`);
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get("content-disposition") ?? "";
+  const match = /filename="([^"]+)"/.exec(disposition);
+  const filename = match?.[1] ?? `valet-security-${sessionId}.${format}`;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  // Firefox honours `download` only on an in-DOM anchor; a synchronous
+  // revoke races the save — defer it a tick (same as ~/lib/download).
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+  return filename;
 }
