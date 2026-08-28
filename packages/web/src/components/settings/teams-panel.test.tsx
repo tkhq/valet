@@ -38,6 +38,11 @@ vi.mock("@tanstack/react-router", () => ({
   Link: RouterLinkStub,
 }));
 
+/** Shared across renders so the add-member tests can assert on the call. */
+const addMemberMutate = vi.fn();
+let addMemberError: Error | null = null;
+let addMemberPending = false;
+
 let callerRole: "admin" | "member" | null = "member";
 let orgRole: "admin" | "member" = "member";
 let origin: "local" | "config" | "idp" = "local";
@@ -103,7 +108,11 @@ vi.mock("~/api/settings", () => ({
   }),
   useCreateTeam: () => ({ mutate: vi.fn(), isPending: false }),
   useDeleteTeam: () => ({ mutate: vi.fn(), isPending: false, error: null }),
-  useAddTeamMember: () => ({ mutate: vi.fn(), isPending: false }),
+  useAddTeamMember: () => ({
+    mutate: addMemberMutate,
+    isPending: addMemberPending,
+    error: addMemberError,
+  }),
   useRemoveTeamMember: () => ({ mutate: vi.fn(), isPending: false }),
   useSetTeamMemberRole: () => ({ mutate: vi.fn(), isPending: false }),
 }));
@@ -114,6 +123,11 @@ const orgMembers: OrgMemberWire[] = [
   { userId: "u1", name: "One", email: "one@dev", role: "member", avatarUrl: null, joinedAt: 1 },
   { userId: "u2", name: "Two", email: "two@dev", role: "member", avatarUrl: null, joinedAt: 1 },
   { userId: "u3", name: "Three", email: "three@dev", role: "member", avatarUrl: null, joinedAt: 1 },
+  { userId: "u4", name: "Four", email: "four@dev", role: "member", avatarUrl: null, joinedAt: 1 },
+  // u6 sits BEFORE u5 so the prefix-ranking test proves ordering: "ada" is a
+  // mid-string match for Zed Prada and a prefix match for Ada Lovelace.
+  { userId: "u6", name: "Zed Prada", email: "zprada@dev", role: "member", avatarUrl: null, joinedAt: 1 },
+  { userId: "u5", name: "Ada Lovelace", email: "ada@dev", role: "member", avatarUrl: null, joinedAt: 1 },
 ];
 
 function openTeam() {
@@ -181,6 +195,162 @@ describe("TeamsPanel role gating", () => {
     orgRole = "admin";
     openTeam();
     expect(screen.getByRole("button", { name: "Platform actions" })).toBeTruthy();
+  });
+});
+
+/**
+ * The add-member control is a popover typeahead (see `AddMemberPicker`).
+ * These tests pin its contract: search narrows the list, the highlight is
+ * the Enter target and arrow keys move it, the DOM row count is capped, a
+ * failed add is reported, and a member already on the team never appears.
+ */
+describe("TeamsPanel — add-member picker", () => {
+  beforeEach(() => {
+    callerRole = "admin";
+    orgRole = "admin";
+    addMemberMutate.mockClear();
+    addMemberError = null;
+    addMemberPending = false;
+  });
+
+  function openPicker() {
+    openTeam();
+    fireEvent.click(screen.getByRole("button", { name: /Add member/ }));
+  }
+
+  it("opens a search input listing only members not on the team", () => {
+    openPicker();
+    expect(screen.getByRole("combobox", { name: /Search members/ })).toBeTruthy();
+    // u1/u2 are on the team already; the addable list is the other three.
+    expect(screen.getByRole("option", { name: /Three/ })).toBeTruthy();
+    expect(screen.getByRole("option", { name: /Four/ })).toBeTruthy();
+    expect(screen.getByRole("option", { name: /Ada Lovelace/ })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: /One/ })).toBeNull();
+  });
+
+  it("filters by name and by email as the query changes", () => {
+    openPicker();
+    const input = screen.getByRole("combobox", { name: /Search members/ });
+    fireEvent.change(input, { target: { value: "love" } });
+    expect(screen.getByRole("option", { name: /Ada Lovelace/ })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: /Three/ })).toBeNull();
+    fireEvent.change(input, { target: { value: "four@dev" } });
+    expect(screen.getByRole("option", { name: /Four/ })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: /Ada Lovelace/ })).toBeNull();
+  });
+
+  it("says so when nothing matches", () => {
+    openPicker();
+    fireEvent.change(screen.getByRole("combobox", { name: /Search members/ }), {
+      target: { value: "zzz" },
+    });
+    expect(screen.getByText("No matching members.")).toBeTruthy();
+    expect(screen.queryByRole("option")).toBeNull();
+  });
+
+  it("adds a member on click", () => {
+    openPicker();
+    fireEvent.click(screen.getByRole("option", { name: /Ada Lovelace/ }));
+    expect(addMemberMutate).toHaveBeenCalledWith({
+      teamId: "team_1",
+      body: { userId: "u5", role: "member" },
+    });
+  });
+
+  it("marks the highlighted row as the Enter target", () => {
+    openPicker();
+    const input = screen.getByRole("combobox", { name: /Search members/ });
+    fireEvent.change(input, { target: { value: "@dev" } });
+    const options = screen.getAllByRole("option");
+    expect(options[0]?.getAttribute("aria-selected")).toBe("true");
+    expect(options[1]?.getAttribute("aria-selected")).toBe("false");
+    expect(input.getAttribute("aria-activedescendant")).toBe(options[0]?.id);
+  });
+
+  it("moves the highlight with arrow keys and adds it on Enter", () => {
+    openPicker();
+    const input = screen.getByRole("combobox", { name: /Search members/ });
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    const options = screen.getAllByRole("option");
+    expect(options[1]?.getAttribute("aria-selected")).toBe("true");
+    expect(input.getAttribute("aria-activedescendant")).toBe(options[1]?.id);
+    fireEvent.keyDown(input, { key: "Enter" });
+    // Addable order is u3, u4, …; one ArrowDown lands on u4.
+    expect(addMemberMutate).toHaveBeenCalledWith({
+      teamId: "team_1",
+      body: { userId: "u4", role: "member" },
+    });
+  });
+
+  it("ranks a prefix match above a mid-string match", () => {
+    openPicker();
+    fireEvent.change(screen.getByRole("combobox", { name: /Search members/ }), {
+      target: { value: "ada" },
+    });
+    const options = screen.getAllByRole("option");
+    // Zed Prada precedes Ada Lovelace in the roster; the prefix match wins.
+    expect(options[0]?.textContent).toContain("Ada Lovelace");
+    expect(options[1]?.textContent).toContain("Zed Prada");
+  });
+
+  it("ignores the Enter that commits an IME composition", () => {
+    openPicker();
+    fireEvent.keyDown(screen.getByRole("combobox", { name: /Search members/ }), {
+      key: "Enter",
+      isComposing: true,
+    });
+    expect(addMemberMutate).not.toHaveBeenCalled();
+  });
+
+  it("caps the rendered rows and says how many are hidden", () => {
+    const many: OrgMemberWire[] = Array.from({ length: 60 }, (_, i) => ({
+      userId: `x${i}`,
+      name: `User ${String(i).padStart(2, "0")}`,
+      email: `x${i}@dev`,
+      role: "member",
+      avatarUrl: null,
+      joinedAt: 1,
+    }));
+    render(<TeamsPanel orgMembers={[...orgMembers.slice(0, 2), ...many]} />);
+    fireEvent.click(screen.getByRole("button", { name: "Expand Platform" }));
+    fireEvent.click(screen.getByRole("button", { name: /Add member/ }));
+    expect(screen.getAllByRole("option")).toHaveLength(50);
+    expect(screen.getByText(/10 more matches/)).toBeTruthy();
+  });
+
+  it("keeps the trigger mounted but inert when nobody is addable", () => {
+    // u1 and u2 are both on the team, so nothing is addable.
+    render(<TeamsPanel orgMembers={orgMembers.slice(0, 2)} />);
+    fireEvent.click(screen.getByRole("button", { name: "Expand Platform" }));
+    const trigger = screen.getByRole("button", { name: /Add member/ });
+    expect(trigger.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(trigger);
+    expect(screen.queryByRole("combobox", { name: /Search members/ })).toBeNull();
+  });
+
+  it("reports a failed add next to the picker", () => {
+    addMemberError = new Error("You are not an admin of this team.");
+    openTeam();
+    expect(screen.getByText(/Failed to add the member/)).toBeTruthy();
+  });
+
+  it("adds the first match on Enter", () => {
+    openPicker();
+    const input = screen.getByRole("combobox", { name: /Search members/ });
+    fireEvent.change(input, { target: { value: "ada" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(addMemberMutate).toHaveBeenCalledWith({
+      teamId: "team_1",
+      body: { userId: "u5", role: "member" },
+    });
+  });
+
+  it("does not add on Enter when nothing matches", () => {
+    openPicker();
+    const input = screen.getByRole("combobox", { name: /Search members/ });
+    fireEvent.change(input, { target: { value: "zzz" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(addMemberMutate).not.toHaveBeenCalled();
   });
 });
 

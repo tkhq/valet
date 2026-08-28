@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { Bot, ChevronRight, MoreHorizontal, UserPlus, X } from "lucide-react";
 import type { OrgMemberWire, TeamSummary } from "@valet/api/wire";
@@ -16,11 +16,15 @@ import {
   ErrorRow,
   Input,
   LoadingRow,
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
 } from "~/components/primitives";
 import { ApiError } from "~/api/client";
 import { defaultAssistantFor, useAssistants } from "~/api/assistants";
 import { errorText } from "~/lib/error-text";
 import { formatDate } from "~/lib/format-when";
+import { matchesNeedle } from "~/lib/text-match";
 import {
   useAddTeamMember,
   useCreateTeam,
@@ -454,28 +458,195 @@ function TeamMembers({
         );
       })}
 
-      {canMutate && !managed && addable.length > 0 && (
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button type="button" variant="ghost" size="sm" className="gap-1.5">
-              <UserPlus className="h-3.5 w-3.5" aria-hidden />
-              Add member
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start">
-            {addable.map((m) => (
-              <DropdownMenuItem
-                key={m.userId}
-                onSelect={() =>
-                  addMember.mutate({ teamId, body: { userId: m.userId, role: "member" } })
-                }
-              >
-                {m.name ?? m.email}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
+      {canMutate && !managed && (
+        <>
+          <AddMemberPicker
+            teamName={teamName}
+            addable={addable}
+            pending={addMember.isPending}
+            onAdd={(userId) => addMember.mutate({ teamId, body: { userId, role: "member" } })}
+          />
+          {addMember.error != null && (
+            <ErrorRow className="py-1 text-xs">
+              Failed to add the member: {errorText(addMember.error)}
+            </ErrorRow>
+          )}
+        </>
       )}
     </div>
+  );
+}
+
+/** DOM cap for the picker list. The height cap alone fixes the clipping, not
+ * the cost of mounting a row per org member; past this a footer row says to
+ * type more. */
+const ADD_MEMBER_VISIBLE_LIMIT = 50;
+
+/**
+ * "Add member" — a popover typeahead over the addable org members. The
+ * previous control was a plain dropdown menu with no filter and no height
+ * cap, so on a real org it ran past the bottom of the screen.
+ *
+ * Keyboard and ARIA mechanics follow `ServiceActionCombobox`: one highlighted
+ * row that arrow keys and hover both move, Enter adds it, and
+ * `aria-activedescendant` announces it. That combobox and `ModelCombobox`
+ * keep their own copies of these mechanics; folding the three into one
+ * primitive is deliberately out of scope here — their commit semantics
+ * differ (free-text commit, clear-to-default, strict pick).
+ *
+ * When nobody is addable the trigger stays mounted but inert (`aria-disabled`
+ * plus a title that says why). Unmounting it would drop keyboard focus to the
+ * body at the exact moment the last member is added, because Radix returns
+ * focus to this trigger on close.
+ */
+function AddMemberPicker({
+  teamName,
+  addable,
+  pending,
+  onAdd,
+}: {
+  teamName: string;
+  addable: OrgMemberWire[];
+  pending: boolean;
+  onAdd: (userId: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [highlighted, setHighlighted] = useState(0);
+  const listRef = useRef<HTMLDivElement>(null);
+  const listboxId = useId();
+
+  const matches = useMemo(() => {
+    const filtered = addable.filter((m) => matchesNeedle(query, [m.name, m.email]));
+    const needle = query.trim().toLowerCase();
+    if (!needle) return filtered;
+    // Prefix matches outrank substring matches: typing "dana" must put
+    // "Dana A" above "adana@…", or Enter adds the wrong person.
+    const rank = (m: OrgMemberWire) =>
+      m.name.toLowerCase().startsWith(needle) || m.email.toLowerCase().startsWith(needle) ? 0 : 1;
+    return filtered.sort((a, b) => rank(a) - rank(b));
+  }, [addable, query]);
+
+  const visible = matches.slice(0, ADD_MEMBER_VISIBLE_LIMIT);
+  const hidden = matches.length - visible.length;
+  // Clamp instead of trusting state: a background refetch can shrink the
+  // list under a highlight that pointed past its new end.
+  const active = Math.min(highlighted, Math.max(visible.length - 1, 0));
+  const optionId = (i: number) => `${listboxId}-opt-${i}`;
+  const inert = addable.length === 0 || pending;
+
+  useEffect(() => {
+    if (!open) return;
+    const el = listRef.current?.children[active];
+    if (el instanceof HTMLElement && typeof el.scrollIntoView === "function") {
+      el.scrollIntoView({ block: "nearest" });
+    }
+  }, [active, open]);
+
+  function add(userId: string) {
+    if (pending) return;
+    onAdd(userId);
+    setOpen(false);
+  }
+
+  return (
+    <Popover
+      open={open}
+      onOpenChange={(next) => {
+        if (next && inert) return;
+        setOpen(next);
+        // A reopened picker starts from the full list, not last time's filter.
+        if (next) {
+          setQuery("");
+          setHighlighted(0);
+        }
+      }}
+    >
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className={`gap-1.5 ${inert ? "text-muted" : ""}`}
+          aria-disabled={inert || undefined}
+          title={
+            addable.length === 0
+              ? `Everyone in the organization is already on ${teamName}.`
+              : undefined
+          }
+        >
+          <UserPlus className="h-3.5 w-3.5" aria-hidden />
+          Add member
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-72 p-0">
+        <div className="border-b border-line p-2">
+          <Input
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setHighlighted(0);
+            }}
+            onKeyDown={(e) => {
+              // Enter that commits an IME composition is not a selection.
+              if (e.nativeEvent.isComposing) return;
+              if (visible.length === 0) return;
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setHighlighted(Math.min(active + 1, visible.length - 1));
+              } else if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setHighlighted(Math.max(active - 1, 0));
+              } else if (e.key === "Enter") {
+                const target = visible[active];
+                if (target) add(target.userId);
+              }
+            }}
+            placeholder="Search members…"
+            aria-label={`Search members to add to ${teamName}`}
+            role="combobox"
+            aria-expanded={open}
+            aria-controls={listboxId}
+            aria-activedescendant={visible.length > 0 ? optionId(active) : undefined}
+            aria-autocomplete="list"
+            autoComplete="off"
+          />
+        </div>
+        <div
+          ref={listRef}
+          id={listboxId}
+          role="listbox"
+          aria-label={`Members to add to ${teamName}`}
+          className="max-h-64 overflow-y-auto py-1"
+        >
+          {visible.map((m, i) => (
+            <button
+              key={m.userId}
+              id={optionId(i)}
+              type="button"
+              role="option"
+              aria-selected={i === active}
+              onClick={() => add(m.userId)}
+              onMouseEnter={() => setHighlighted(i)}
+              className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm ${
+                i === active ? "bg-ink-wash" : ""
+              }`}
+            >
+              <span className="min-w-0 flex-1 truncate text-ink">{m.name || m.email}</span>
+              {m.name ? <span className="shrink-0 text-xs text-muted">{m.email}</span> : null}
+            </button>
+          ))}
+          {hidden > 0 && (
+            <div className="border-t border-line px-3 py-1.5 text-xs text-muted">
+              {hidden} more {hidden === 1 ? "match" : "matches"}. Type more letters to narrow the
+              list.
+            </div>
+          )}
+          {visible.length === 0 && (
+            <div className="px-3 py-1.5 text-sm text-muted">No matching members.</div>
+          )}
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }
