@@ -247,6 +247,15 @@ describe("TeamsPanel — add-member picker", () => {
     });
   });
 
+  it("marks the first match as the Enter target", () => {
+    openPicker();
+    const input = screen.getByRole("combobox", { name: /Search members/ });
+    fireEvent.change(input, { target: { value: "@dev" } });
+    const options = screen.getAllByRole("option");
+    expect(options[0]?.getAttribute("aria-selected")).toBe("true");
+    expect(options[1]?.getAttribute("aria-selected")).toBe("false");
+  });
+
   it("adds the first match on Enter", () => {
     openPicker();
     const input = screen.getByRole("combobox", { name: /Search members/ });

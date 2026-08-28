@@ -475,7 +475,9 @@ function TeamMembers({
  * no filter and no height cap, so on a real org it ran past the bottom of
  * the screen. This one filters as you type (the shared `matchesNeedle`
  * substring match, over name and email) and caps the list behind a scroll.
- * Enter adds the first match; Escape and outside-click close (Radix).
+ * Enter adds the first match, which renders highlighted so the Enter target
+ * is visible; Escape and outside-click close (Radix). Arrow-key navigation
+ * is not implemented — the same disclosed tradeoff as `ModelCombobox`.
  */
 function AddMemberPicker({
   teamName,
@@ -531,17 +533,21 @@ function AddMemberPicker({
           aria-label={`Members to add to ${teamName}`}
           className="max-h-64 overflow-y-auto py-1"
         >
-          {matches.map((m) => (
+          {matches.map((m, i) => (
             <button
               key={m.userId}
               type="button"
               role="option"
-              aria-selected={false}
+              // The first row is what Enter adds, so it must look active —
+              // an invisible Enter target reads as a random add.
+              aria-selected={i === 0}
               onClick={() => add(m.userId)}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-ink-wash"
+              className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-ink-wash ${
+                i === 0 ? "bg-ink-wash" : ""
+              }`}
             >
               <span className="min-w-0 flex-1 truncate text-ink">{m.name || m.email}</span>
-              <span className="shrink-0 text-xs text-muted">{m.email}</span>
+              {m.name.length > 0 && <span className="shrink-0 text-xs text-muted">{m.email}</span>}
             </button>
           ))}
           {matches.length === 0 && (
