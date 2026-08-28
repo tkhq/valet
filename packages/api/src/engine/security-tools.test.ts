@@ -40,6 +40,7 @@ import {
   secFsListTool,
   secFsReadTool,
   secFsWriteTool,
+  secProtocolReadTool,
   secStartTool,
   secStatusTool,
   ESTIMATED_TOKENS_PER_CELL,
@@ -458,15 +459,27 @@ describe("persona tool set (M4)", () => {
       "sec_fs_write",
       "sec_fs_read",
       "sec_fs_list",
+      "sec_protocol_read",
       "sec_finding_report",
     ]);
     expect(buildSecurityPersonaTools({ review: true }).map((t) => t.name)).toEqual([
       "sec_fs_write",
       "sec_fs_read",
       "sec_fs_list",
+      "sec_protocol_read",
       "sec_finding_report",
       "sec_finding_review",
     ]);
+  });
+
+  it("protects ONLY sec_protocol_read from pruning (M5 protection choice)", () => {
+    // Pruning protection is per tool name, so the protocol gets a dedicated
+    // protected tool; ordinary tree reads stay prunable (spec deviation 4).
+    expect(secProtocolReadTool.protectedFromPruning).toBe(true);
+    for (const tool of buildSecurityPersonaTools({ review: true })) {
+      if (tool.name === "sec_protocol_read") continue;
+      expect(tool.protectedFromPruning ?? false).toBe(false);
+    }
   });
 
   it("403s a claimless acting session with the corrective persona message", async () => {

@@ -12,6 +12,7 @@ type Counter = ReturnType<ReturnType<typeof metrics.getMeter>["createCounter"]>;
 
 let createdCounter: Counter | null = null;
 let settledCounter: Counter | null = null;
+let compactionStaleCounter: Counter | null = null;
 
 /** Cells materialized by startEngagement. */
 export function recordSecurityCellsCreated(count: number): void {
@@ -36,4 +37,19 @@ export function recordSecurityCellSettled(status: "completed" | "failed"): void 
     });
   }
   settledCounter.add(1, { status });
+}
+
+/**
+ * A cell-claimed child thread compacted while the cell's latest state doc
+ * was older than the checkpoint stride (M5, spec §Context Discipline).
+ * That is the moment work silently evaporates — this counter pages
+ * attention; nothing auto-repairs the cell.
+ */
+export function recordSecurityCompactionStale(): void {
+  if (!compactionStaleCounter) {
+    compactionStaleCounter = metrics.getMeter("@valet/api").createCounter("valet.security.compaction.stale", {
+      description: "Cell-claimed thread compactions with a stale state doc",
+    });
+  }
+  compactionStaleCounter.add(1);
 }

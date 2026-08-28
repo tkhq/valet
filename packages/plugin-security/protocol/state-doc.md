@@ -50,4 +50,4 @@ Every `sec_fs_write` appends a new revision. Nothing rewrites history. Write the
 
 ## Rehydration
 
-After any compaction, re-read `/protocol.md` and your own `state.yml` via `sec_fs_read` before continuing. Trust the tree over the summary.
+After any compaction, re-read the protocol with `sec_protocol_read` and your own `state.yml` with `sec_fs_read` before continuing. Trust the tree over the summary.

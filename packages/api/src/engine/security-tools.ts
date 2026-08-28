@@ -573,6 +573,36 @@ export const secFsListTool = defineTool({
   },
 });
 
+// ── sec_protocol_read (persona) ────────────────────────────────────────────
+
+/**
+ * Dedicated protocol read (M5, spec §Context Discipline): pruning protection
+ * is per TOOL NAME (`planPrune` keys on `part.toolName`), so protecting
+ * `sec_fs_read` wholesale would pin every state-doc read into context
+ * forever — the opposite of what pruning exists for. This tool reads ONLY
+ * `/protocol.md` and carries `protectedFromPruning`, so the contract the
+ * persona operates under survives compaction while ordinary tree reads
+ * stay prunable.
+ */
+export const secProtocolReadTool = defineTool({
+  name: "sec_protocol_read",
+  description:
+    "Read /protocol.md — the contract you operate under. Call it after any compaction, before continuing. " +
+    "The result survives context pruning; ordinary sec_fs_read results do not.",
+  parameters: Type.Object({}),
+  protectedFromPruning: true,
+  execute: async (_args, ctx) => {
+    const cfg = resolveSecurityConfig(ctx);
+    if (!cfg) return { text: UNAVAILABLE_TEXT };
+    const url = securityUrl(cfg, ctx, "/files");
+    url.searchParams.set("path", "/protocol.md");
+    return securityRequest(url, { method: "GET", headers: securityHeaders(cfg, ctx, false) }, async (res) => {
+      const body = await parseJsonBody(res);
+      return { text: isRecord(body) && typeof body.content === "string" ? body.content : "" };
+    });
+  },
+});
+
 // ── sec_findings_list ──────────────────────────────────────────────────────
 
 export const secFindingsListTool = defineTool({
@@ -773,6 +803,7 @@ export function buildSecurityPersonaTools(opts: { review: boolean }): ToolDef[] 
     secFsWriteTool,
     secFsReadTool,
     secFsListTool,
+    secProtocolReadTool,
     secFindingReportTool,
     ...(opts.review ? [secFindingReviewTool] : []),
   ];

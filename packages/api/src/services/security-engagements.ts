@@ -53,6 +53,14 @@ export const MAX_REVISIONS_PER_PATH = 512;
 export const MIN_FINDING_BODY_CHARS = 200;
 export const MAX_FINDINGS_PER_CELL = 100;
 
+/**
+ * The checkpoint stride (spec §Context Discipline): a cell-claimed thread
+ * that compacts while its latest state doc is older than this is losing
+ * work the tree never saw. The compaction hook emits the staleness metric
+ * past this age; nothing auto-repairs.
+ */
+export const STATE_DOC_STALE_MS = 10 * 60_000;
+
 export type FindingSeverity = "critical" | "high" | "medium" | "low" | "info";
 export type FindingStatus = "open" | "verified" | "refuted";
 
@@ -127,6 +135,15 @@ export interface TreeFile {
   /** Revision served; null for the virtual mounts (/protocol.md, /plan.yml). */
   revision: number | null;
   content: string;
+}
+
+export interface CellCompactionStamp {
+  cell: SecurityCellRow;
+  /** Age of the freshest durable checkpoint at compaction time: the latest
+   * state doc revision, or the dispatch when no doc exists yet. */
+  stateDocAgeMs: number;
+  /** True when `stateDocAgeMs` exceeds `STATE_DOC_STALE_MS`. */
+  stale: boolean;
 }
 
 export interface CellProgress {
@@ -929,6 +946,39 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     return { findings: page, nextCursor };
   }
 
+  /**
+   * Stamp a compaction on the running cell that claims `childSessionId`
+   * (M5, spec §Context Discipline). Alert, don't auto-repair: this stamps
+   * `compacted_at` and measures state-doc staleness for the caller to
+   * report — it never mutates cell status, re-dispatches, or kills
+   * anything. Returns null when no running cell claims the session (an
+   * unclaimed session's compaction is not a security event).
+   */
+  async function stampCellCompaction(childSessionId: string): Promise<CellCompactionStamp | null> {
+    const rows = await db
+      .select()
+      .from(securityCells)
+      .where(
+        and(eq(securityCells.childSessionId, childSessionId), eq(securityCells.status, "running")),
+      )
+      .limit(1);
+    const claimed = rows[0];
+    if (!claimed) return null;
+    const ts = now();
+    const updated = await db
+      .update(securityCells)
+      .set({ compactedAt: ts })
+      .where(eq(securityCells.id, claimed.id))
+      .returning();
+    const cell = updated[0];
+    const docRow = await latestStateDocRow(cell.engagementId, cell.dir);
+    // No state doc yet → measure from the dispatch: a persona that compacts
+    // without ever checkpointing is the staleness worst case, not a fresh one.
+    const reference = docRow?.createdAt ?? cell.dispatchedAt ?? cell.createdAt;
+    const stateDocAgeMs = Math.max(0, ts - reference);
+    return { cell, stateDocAgeMs, stale: stateDocAgeMs > STATE_DOC_STALE_MS };
+  }
+
   /** Tolerant progress read for the cell rail: null when nothing useful. */
   async function getRunningCellProgress(engagementId: string): Promise<CellProgress | null> {
     const cells = await loadCells(engagementId);
@@ -962,6 +1012,7 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     reportFinding,
     reviewFinding,
     listFindings,
+    stampCellCompaction,
     getRunningCellProgress,
   };
 }

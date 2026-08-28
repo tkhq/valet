@@ -241,6 +241,8 @@ Two tool sets, both built in `packages/api/src/engine/security-tools.ts`, both c
 
 **sec_fs_list** — `{ prefix?: string }`. Lists paths under a prefix with each path's latest revision number and size. Personas discover peers' work the way the note intends: by looking at the filesystem.
 
+**sec_protocol_read** — `{}`. Returns `/protocol.md` and nothing else. The ToolDef carries `protectedFromPruning`, so the contract the persona operates under survives context pruning while ordinary `sec_fs_read` results stay prunable (see Context Discipline and implementation deviation 4).
+
 **sec_finding_report** — `{ severity, title, file?, line?, body }`. Inserts a finding for the calling cell. The body must carry evidence: a code excerpt and the reasoning from source to impact. The server rejects bodies under 200 characters with a corrective error naming the evidence requirement — an unevidenced finding is noise wearing a severity badge. Caps at 100 findings per cell; the cap error tells the persona to consolidate instead of enumerate. The server computes the fingerprint — sha256 over file, line bucket (÷10), and normalized title, first 16 hex — and returns the finding id plus any existing findings sharing the fingerprint (advisory dedup; the persona decides whether it found something new).
 
 **sec_finding_review** — `{ finding_id: string, status: 'verified' | 'refuted', reason: string }`. Forward-only status flip, recorded with the calling cell as `status_actor`. Attached only to cells the plan marks `review: true` (the preset's verify cell) — a prompt-injected sweep persona must not be able to refute its peers' findings. Refuting requires the reason to name what the original evidence missed.
@@ -278,8 +280,8 @@ A checklist over a real repo does not fit one child context, so running out is n
 
 The engine already ships the seams (`CompactionConfig`, `compactionHooks`, `ToolDef.protectedFromPruning` — `packages/engine/src/types.ts`). Valet Security uses them as follows:
 
-- **Persona threads compact safely by construction.** The checkpoint cadence keeps the durable state at most one stride stale, and the protocol's rehydration rule says: after any compaction, re-read `/protocol.md` and your own `state.yml` via `sec_fs_read` before continuing — trust the tree over the summary.
-- **The contract survives pruning.** `sec_fs_read` results for `/protocol.md` are marked `protectedFromPruning`, so compaction cannot strip the rules the persona operates under.
+- **Persona threads compact safely by construction.** The checkpoint cadence keeps the durable state at most one stride stale, and the protocol's rehydration rule says: after any compaction, re-read the protocol with `sec_protocol_read` and your own `state.yml` with `sec_fs_read` before continuing — trust the tree over the summary.
+- **The contract survives pruning.** `sec_protocol_read` returns `/protocol.md` and carries `protectedFromPruning`, so compaction cannot strip the rules the persona operates under (why a dedicated tool: implementation deviation 4).
 - **Compaction is observable, not silent.** The host registers a `compactionHook` for cell-claimed threads: it stamps the event on the cell (surfaced as a badge on the cell rail) and emits a metric when a thread compacts while the cell's latest state doc is older than the checkpoint stride — a persona compacting on stale state is exactly the moment work silently evaporates, and it should page attention, not disappear (alert, don't auto-repair).
 - **The runner needs no memory.** `sec_status` reconstructs the loop's entire world; runner compaction is harmless by design, and the skill says so explicitly.
 
@@ -475,11 +477,12 @@ Web-level tests beside the panel components; API-level tests for the routes.
 5. **State doc writes are validated at write time** (YAML parse + protocol version). The note defers all validation to trust; a parse check at the write boundary is nearly free and converts threat #1 from "state becomes unreadable" to a tool error the persona fixes immediately. Field-level schema validation remains excluded, as in the note.
 6. **The plan gains a human gate.** `sec_start` puts an approval in front of the spawn plan — Valet's cost and audit posture, absent from the note's CLI framing.
 
-## Deviations from this spec (implementation, M4)
+## Deviations from this spec (implementation, M4–M5)
 
 1. **`sec_dispatch` stamps `child_session_id` BEFORE the spawn**, not after. The Tools section's "in one transaction: spawns ..., stamps ..." ordering is impossible in practice: the host builds the child's engine session inside the spawn, and that build resolves the cell claim to attach the persona tool set and role — the claim must already exist. The claim UPDATE (status `running`, `attempts` + 1, pre-minted `child_session_id`, `dispatched_at`) runs first; a spawn failure restores the row's prior values.
 2. **The write claim expires with the attempt.** The persona routes resolve the claim only while the cell is `running`. A settled cell's child gets the corrective 403 ("This session is not a dispatched persona cell."); a yielded cell's replacement child holds the next claim.
 3. **The persona role rides the engine's per-turn role mechanism.** The claimed child's build registers plugin-security's `code-review` `RoleSpec` in its `roles` option, and the dispatch prompt is submitted with `role: <persona>` — the engine overlays the role's markdown on the system prompt for that turn (`Thread.applyRoleForTurn`). Steered turns (`child_send`) run without the overlay; the protocol mount and the persona's own state doc carry the contract across them.
+4. **Protocol pruning protection is a dedicated tool, not a `sec_fs_read` flag.** The engine's pruning protection is per tool name (`planPrune` matches `part.toolName`; `ToolDef.protectedFromPruning` is all-or-nothing for the tool) — there is no per-arguments protection. Flagging `sec_fs_read` would pin EVERY tree read into context forever: personas re-read state docs by design, state docs run to 256 KB, and a long cell would drown in its own protected reads. So the persona set gains `sec_protocol_read` (`{}` → `/protocol.md`) with `protectedFromPruning`, and `sec_fs_read` stays prunable. The protocol's rehydration rule names both tools.
 
 ## Revisions from the Adversarial Review (2026-08-27)
 

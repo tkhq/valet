@@ -8,6 +8,7 @@ import {
   buildDispatchPrompt,
   createSecurityEngagementService,
   MAX_REVISIONS_PER_PATH,
+  STATE_DOC_STALE_MS,
   type SecurityEngagementService,
 } from "./security-engagements.js";
 
@@ -623,6 +624,63 @@ describe("security engagement service", () => {
         ),
       );
     expect(await svc.getRunningCellProgress(engagement.id)).toBeNull();
+  });
+
+  // ── Compaction stamps (M5) ───────────────────────────────────────────────
+
+  it("stampCellCompaction stamps compactedAt and measures staleness, mutating nothing else", async () => {
+    let clock = 1_000_000;
+    const clocked = createSecurityEngagementService({ db, now: () => clock });
+    const created = await clocked.createEngagement({
+      sessionId: `s_${Math.random().toString(36).slice(2)}`,
+      repoFullName: "acme/api",
+      plan: codeReviewPresetPlan(),
+    });
+    const { cells } = await clocked.startEngagement(created.id, { resolvedSha: SHA });
+    await clocked.dispatchCell(created.id, {
+      cellId: cells[0].id,
+      spawn: async () => ({ childSessionId: "child_stamp" }),
+    });
+
+    // No state doc yet → staleness measures from the dispatch. 5 minutes in
+    // is inside the stride: stamped, not stale.
+    clock += 5 * 60_000;
+    const fresh = await clocked.stampCellCompaction("child_stamp");
+    expect(fresh).not.toBeNull();
+    expect(fresh!.cell.compactedAt).toBe(clock);
+    expect(fresh!.stateDocAgeMs).toBe(5 * 60_000);
+    expect(fresh!.stale).toBe(false);
+
+    // A checkpoint now, compaction 11 minutes later → stale.
+    await clocked.writeFile(created.id, {
+      actorCellId: cells[0].id,
+      path: `/cells/${cells[0].dir}/state.yml`,
+      content: YIELD_DOC,
+    });
+    clock += STATE_DOC_STALE_MS + 60_000;
+    const stale = await clocked.stampCellCompaction("child_stamp");
+    expect(stale!.stale).toBe(true);
+    expect(stale!.stateDocAgeMs).toBe(STATE_DOC_STALE_MS + 60_000);
+    expect(stale!.cell.compactedAt).toBe(clock);
+
+    // Alert, don't auto-repair: the stamp is the ONLY mutation. Status,
+    // attempts, child claim, and settledAt are untouched.
+    const rows = await db.select().from(securityCells).where(eq(securityCells.id, cells[0].id)).limit(1);
+    expect(rows[0].compactedAt).toBe(clock);
+    expect(rows[0].status).toBe("running");
+    expect(rows[0].attempts).toBe(1);
+    expect(rows[0].childSessionId).toBe("child_stamp");
+    expect(rows[0].settledAt).toBeNull();
+  });
+
+  it("stampCellCompaction returns null for a session no running cell claims", async () => {
+    const { engagement, cells } = await makeStarted();
+    expect(await svc.stampCellCompaction("child_nobody")).toBeNull();
+    // A settled cell's claim no longer resolves either.
+    await runCellToCompletion(engagement.id, cells[0]);
+    expect(await svc.stampCellCompaction("child_1")).toBeNull();
+    const rows = await db.select().from(securityCells).where(eq(securityCells.id, cells[0].id)).limit(1);
+    expect(rows[0].compactedAt).toBeNull();
   });
 
   // ── Dispatch prompt ──────────────────────────────────────────────────────

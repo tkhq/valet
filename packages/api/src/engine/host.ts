@@ -75,6 +75,7 @@ import securityPlugin from "@valet/plugin-security/plugin";
 import { orchestratorPersona } from "../orchestrator/persona.js";
 import { buildMemoryTools } from "../orchestrator/memory-tools.js";
 import { buildSecurityPersonaTools, buildSecurityRunnerTools } from "./security-tools.js";
+import { securityCompactionHook } from "./security-compaction.js";
 import { assembleMemorySnapshot } from "../orchestrator/snapshot.js";
 import { ensureTodayJournal } from "../orchestrator/bootstrap.js";
 import { journalCompactionHook } from "../orchestrator/compaction.js";
@@ -701,6 +702,11 @@ export class EngineHost {
               ...(this.opts.apiBaseUrl ? { apiBaseUrl: this.opts.apiBaseUrl } : {}),
               internalToken: internalToken(),
             },
+            // Compaction is observable, not silent (M5, spec §Context
+            // Discipline): stamp + staleness alert on the claiming cell.
+            // `claimedSecurityCell` returned a row, so a db handle exists;
+            // the guard narrows the type only.
+            ...(this.opts.db ? { compactionHooks: [securityCompactionHook(this.opts.db)] } : {}),
           }
         : {};
     // The persona role registers on the session (roles registry) so the
@@ -2246,6 +2252,11 @@ export class EngineHost {
               ...(this.opts.apiBaseUrl ? { apiBaseUrl: this.opts.apiBaseUrl } : {}),
               internalToken: internalToken(),
             },
+            // Compaction is observable, not silent (M5, spec §Context
+            // Discipline) — same hook as the post-restart rebuild path in
+            // `buildSession`. Db guard narrows the type only (the claim
+            // lookup already required one).
+            ...(this.opts.db ? { compactionHooks: [securityCompactionHook(this.opts.db)] } : {}),
           }
         : {}),
       ...(skillsProvider ? { skillsProvider } : {}),
