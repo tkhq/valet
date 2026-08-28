@@ -89,6 +89,7 @@ const planningSecurity: GetSessionSecurityResponse = {
     categories: null,
     configPersonas: null,
     configTools: null,
+    authorizedScope: null,
     createdAt: 1,
     updatedAt: 2,
   },

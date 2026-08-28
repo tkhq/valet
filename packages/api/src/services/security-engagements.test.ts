@@ -1260,6 +1260,46 @@ describe("security engagement service", () => {
     expect(bare).not.toContain("high-signal finding");
   });
 
+  // ── Live personas + authorized scope (M-P4b) ────────────────────────────────
+
+  it("buildDispatchPrompt names the authorized scope for a live persona (M-P4b)", async () => {
+    const { engagement, cells } = await makeStarted();
+    const plan = parsePlan(engagement.plan, KNOWN_PERSONAS);
+    // A live cell: clone a materialized cell and set its persona to dast.
+    const live: SecurityCellRow = { ...cells[2], persona: "dast" };
+    const prompt = buildDispatchPrompt(live, plan, [], "PROTOCOL BODY", false, {
+      scopeHosts: ["staging.example.com", "api.staging.example.com"],
+    });
+    expect(prompt).toContain("--- Authorized scope (live testing) ---");
+    expect(prompt).toContain("You are a LIVE persona");
+    expect(prompt).toContain("- staging.example.com");
+    expect(prompt).toContain("- api.staging.example.com");
+    expect(prompt).toContain("A finding or action outside this scope is forbidden");
+    // The scope rides before the protocol body.
+    expect(prompt.indexOf("Authorized scope")).toBeLessThan(prompt.indexOf("PROTOCOL BODY"));
+  });
+
+  it("buildDispatchPrompt tells a live persona to stop when no scope is declared", async () => {
+    const { engagement, cells } = await makeStarted();
+    const plan = parsePlan(engagement.plan, KNOWN_PERSONAS);
+    const live: SecurityCellRow = { ...cells[2], persona: "fuzz" };
+    const prompt = buildDispatchPrompt(live, plan, [], "PROTOCOL BODY", false, { scopeHosts: [] });
+    expect(prompt).toContain("--- Authorized scope (live testing) ---");
+    expect(prompt).toContain("No authorized scope is declared");
+    expect(prompt).toContain("Do not guess a target");
+  });
+
+  it("buildDispatchPrompt adds NO scope block for a non-live persona", async () => {
+    const { engagement, cells } = await makeStarted();
+    const plan = parsePlan(engagement.plan, KNOWN_PERSONAS);
+    // cells[2] is a code-review cell — not a live persona.
+    const prompt = buildDispatchPrompt(cells[2], plan, [], "PROTOCOL BODY", false, {
+      scopeHosts: ["staging.example.com"],
+    });
+    expect(prompt).not.toContain("Authorized scope (live testing)");
+    expect(prompt).not.toContain("LIVE persona");
+  });
+
   // ── Focus + invariants config (M-F3) ───────────────────────────────────────
 
   it("setEngagementConfig updates focus + invariants while planning and refuses once running", async () => {
