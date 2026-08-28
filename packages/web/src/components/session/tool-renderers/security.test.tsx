@@ -16,6 +16,17 @@ vi.mock("@tanstack/react-router", () => ({
   ),
 }));
 
+// The handoff card polls the child via useSession/useMessages; drive them from
+// hoisted state so a test can set the fix session's run state and activity.
+const liveChild = vi.hoisted(() => ({
+  session: undefined as { runState: string } | undefined,
+  messages: undefined as { messages: unknown[] } | undefined,
+}));
+vi.mock("~/api/queries", () => ({
+  useSession: () => ({ data: liveChild.session }),
+  useMessages: () => ({ data: liveChild.messages }),
+}));
+
 import { pickRenderer } from "./index";
 import {
   secCellCompleteRenderer,
@@ -23,6 +34,7 @@ import {
   secDispatchRenderer,
   secFindingReportRenderer,
   secGenericRenderer,
+  secHandoffRenderer,
 } from "./security";
 
 const findingArgs = {
@@ -120,6 +132,49 @@ describe("sec_dispatch cell card", () => {
     expect(screen.getByText("01-recon")).toBeTruthy();
     expect(screen.getByText("attempt 2")).toBeTruthy();
     expect(screen.getByText("open child session")).toBeTruthy();
+  });
+});
+
+describe("sec_handoff fix-session card", () => {
+  const handoffText =
+    'spawned fix session ses_fix7 ("Fix: IDOR on sessions"). ' +
+    "Its settlement will arrive in this thread as a child.settled signal.";
+
+  it("links to the child and shows its live status + activity", () => {
+    liveChild.session = { runState: "working" };
+    liveChild.messages = {
+      messages: [{ role: "assistant", parts: [{ kind: "text", text: "Patching the ownership check" }] }],
+    };
+    render(
+      <secHandoffRenderer.Body
+        toolName="sec_handoff"
+        args={{ finding_id: "fnd_1" }}
+        result={contentResult(handoffText)}
+        status="completed"
+      />,
+    );
+    expect(screen.getByText("Fix: IDOR on sessions")).toBeTruthy();
+    expect(screen.getByText("working")).toBeTruthy();
+    expect(screen.getByText("Patching the ownership check")).toBeTruthy();
+    const link = screen.getByText("open fix session").closest("a");
+    expect(link).toBeTruthy();
+    expect(link?.getAttribute("params") ?? JSON.stringify(link)).toBeTruthy();
+  });
+
+  it("summarizes a running tool call when there is no text yet", () => {
+    liveChild.session = { runState: "working" };
+    liveChild.messages = {
+      messages: [{ role: "assistant", parts: [{ kind: "tool_call", toolName: "bash", callId: "c1", status: "running" }] }],
+    };
+    render(
+      <secHandoffRenderer.Body
+        toolName="sec_handoff"
+        args={{ finding_id: "fnd_1" }}
+        result={{ text: handoffText }}
+        status="completed"
+      />,
+    );
+    expect(screen.getByText("running bash")).toBeTruthy();
   });
 });
 

@@ -104,7 +104,7 @@ export function useSessions(
   });
 }
 
-export function useSession(id: string, opts?: UseQueryOptions<GetSessionResponse>) {
+export function useSession(id: string, opts?: Partial<UseQueryOptions<GetSessionResponse>>) {
   return useQuery<GetSessionResponse>({
     queryKey: qk.session(id),
     queryFn: () => api.getSession(id),
@@ -137,7 +137,7 @@ export function useArchivedThreads(id: string, opts?: Partial<UseQueryOptions<Li
 export function useMessages(
   id: string,
   threadId?: string,
-  opts?: UseQueryOptions<ListMessagesResponse>,
+  opts?: Partial<UseQueryOptions<ListMessagesResponse>>,
 ) {
   return useQuery<ListMessagesResponse>({
     queryKey: qk.messages(id, threadId),

@@ -1,7 +1,17 @@
 import { Link } from "@tanstack/react-router";
-import { Boxes, CheckCircle2, FileArchive, Play, ShieldAlert, ShieldHalf } from "lucide-react";
-import type { SecurityFindingSeverity } from "@valet/api/wire";
+import {
+  Boxes,
+  CheckCircle2,
+  FileArchive,
+  Play,
+  ShieldAlert,
+  ShieldHalf,
+  Wrench,
+} from "lucide-react";
+import type { Message, MessagePart, SecurityFindingSeverity, SessionRunState } from "@valet/api/wire";
+import { useMessages, useSession } from "~/api/queries";
 import { SeverityBadge } from "~/components/security/severity";
+import { Spinner } from "~/components/primitives";
 import { ToolBody, TruncatedText } from "./tool-shell";
 import { resultText, type ToolRenderer } from "./types";
 
@@ -260,7 +270,106 @@ export const secStartRenderer: ToolRenderer = {
   ),
 };
 
-/** Every other `sec_*` tool (status, plan, fs, handoff, reviews): a compact
+/** Which run states mean the fix session is still doing something, so the
+ * live card keeps polling. */
+const ACTIVE_RUN_STATES: ReadonlySet<SessionRunState> = new Set(["working", "needs_you"]);
+
+const RUN_STATE_LABEL: Record<SessionRunState, string> = {
+  working: "working",
+  needs_you: "needs input",
+  failed: "failed",
+  sleeping: "sleeping",
+  idle: "idle",
+};
+
+/** One line naming what the child last did — its latest text, or the tool it
+ * is running. Empty when there is nothing to show yet. */
+function childActivity(messages: Message[] | undefined): string {
+  if (!messages) return "";
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role !== "assistant") continue;
+    for (let j = m.parts.length - 1; j >= 0; j--) {
+      const part: MessagePart = m.parts[j];
+      if (part.kind === "text" && part.text.trim() !== "") return part.text.trim();
+      if (part.kind === "tool_call") return `running ${part.toolName}`;
+    }
+  }
+  return "";
+}
+
+/** Live status + a link to the spawned fix session. */
+function HandoffCard({ childId, title }: { childId: string; title?: string }) {
+  const session = useSession(childId, {
+    refetchInterval: (q) =>
+      q.state.data && ACTIVE_RUN_STATES.has(q.state.data.runState) ? 4_000 : false,
+  });
+  const runState = session.data?.runState;
+  const active = runState !== undefined && ACTIVE_RUN_STATES.has(runState);
+  // Only fetch the child's messages once it exists, and keep polling while it
+  // works so "what it's doing" stays live. The Body renders only when the card
+  // is expanded, so this does not fire for collapsed handoff calls.
+  const messages = useMessages(childId, undefined, {
+    enabled: session.data !== undefined,
+    refetchInterval: active ? 4_000 : false,
+  });
+  const activity = childActivity(messages.data?.messages);
+
+  return (
+    <div className="px-3 py-2 text-[12px] space-y-1.5">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="font-medium text-ink">{title ?? "Fix session"}</span>
+        {runState !== undefined && (
+          <span className="inline-flex items-center gap-1 text-muted">
+            {active && <Spinner />}
+            {RUN_STATE_LABEL[runState]}
+          </span>
+        )}
+        <Link
+          to="/sessions/$sessionId"
+          params={{ sessionId: childId }}
+          className="text-accent-600 dark:text-accent-100 hover:underline"
+        >
+          open fix session
+        </Link>
+      </div>
+      {activity !== "" && (
+        <div className="text-[11px] text-muted line-clamp-2">
+          <TruncatedText text={activity} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** `sec_handoff` — the fix session it spawned: title, a live status pill and
+ * activity line, and a link that opens it in the child slide-over. */
+export const secHandoffRenderer: ToolRenderer = {
+  matches: "sec_handoff",
+  category: "write",
+  Icon: Wrench,
+  formatTarget: (args) => argStr(args, "finding_id"),
+  Body: ({ result, status, error }) => {
+    const text = resultText(result);
+    const idMatch = /spawned fix session (\S+?)[\s".]/.exec(`${text} `);
+    const childId = idMatch?.[1];
+    const title = /\("([^"]+)"\)/.exec(text)?.[1];
+    if (status !== "completed" || !childId) {
+      return (
+        <ToolBody className="px-0 py-0">
+          <ResultStrip result={result} error={error} status={status} />
+        </ToolBody>
+      );
+    }
+    return (
+      <ToolBody className="px-0 py-0">
+        <HandoffCard childId={childId} title={title} />
+      </ToolBody>
+    );
+  },
+};
+
+/** Every other `sec_*` tool (status, plan, fs, reviews): a compact
  * text body. Registered after the specific renderers above, before the
  * global fallback. */
 export const secGenericRenderer: ToolRenderer = {
@@ -285,5 +394,6 @@ export const securityRenderers: ToolRenderer[] = [
   secCellCompleteRenderer,
   secCloseRenderer,
   secStartRenderer,
+  secHandoffRenderer,
   secGenericRenderer,
 ];
