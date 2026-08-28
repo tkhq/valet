@@ -572,47 +572,58 @@ function FindingRowLine({
   leading?: React.ReactNode;
   trailing?: React.ReactNode;
 }) {
+  const links = finding.links ?? [];
+  const fixCount = (finding.handoffs ?? []).length;
   return (
     <div
       role="option"
       aria-selected={selected}
       onClick={() => onSelect(finding.id)}
       className={cn(
-        "px-3 py-2 cursor-pointer text-xs flex items-center gap-1.5 min-w-0",
+        "px-3 py-2 cursor-pointer text-xs min-w-0",
         selected ? "bg-moss-wash" : "hover:bg-ink-wash",
       )}
     >
-      {leading}
-      <SeverityBadge severity={finding.severity} />
-      <span className="font-medium text-ink truncate min-w-0 flex-1">{finding.title}</span>
-      {finding.file && (
-        <span className="font-mono text-muted truncate max-w-[10rem]">
-          {finding.file}
-          {finding.line !== null ? `:${finding.line}` : ""}
+      {/* Line 1: severity + the full title (wraps to two lines instead of
+          truncating on one crowded row). */}
+      <div className="flex items-start gap-1.5 min-w-0">
+        {leading}
+        <span className="mt-px shrink-0">
+          <SeverityBadge severity={finding.severity} />
         </span>
-      )}
-      <FindingStatusChip status={finding.status} />
-      {cellDir && <span className="text-muted hidden sm:inline">{cellDir}</span>}
-      {(finding.links ?? []).map((link) => (
-        <a
-          key={link.id}
-          href={link.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={(e) => e.stopPropagation()}
-          aria-label={`Open ${link.provider} issue ${link.externalId}`}
-          className="shrink-0"
-        >
-          <ServiceIcon slug={link.provider} label={link.provider} size="sm" />
-        </a>
-      ))}
-      {(finding.handoffs ?? []).length > 0 && (
-        <Badge variant="neutral" className="shrink-0">
-          <Wrench className="h-3 w-3 mr-0.5" aria-hidden />
-          {(finding.handoffs ?? []).length} fix
-        </Badge>
-      )}
-      {trailing}
+        <span className="font-medium text-ink min-w-0 flex-1 line-clamp-2">{finding.title}</span>
+        {trailing && <span className="shrink-0">{trailing}</span>}
+      </div>
+      {/* Line 2: the metadata that used to crowd the title off the row. */}
+      <div className="mt-1 flex items-center flex-wrap gap-x-2 gap-y-1 text-[11px] text-muted">
+        <FindingStatusChip status={finding.status} />
+        {cellDir && <span className="shrink-0">{cellDir}</span>}
+        {finding.file && (
+          <span className="font-mono truncate max-w-full min-w-0">
+            {finding.file}
+            {finding.line !== null ? `:${finding.line}` : ""}
+          </span>
+        )}
+        {links.map((link) => (
+          <a
+            key={link.id}
+            href={link.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            aria-label={`Open ${link.provider} issue ${link.externalId}`}
+            className="shrink-0"
+          >
+            <ServiceIcon slug={link.provider} label={link.provider} size="sm" />
+          </a>
+        ))}
+        {fixCount > 0 && (
+          <span className="inline-flex items-center shrink-0">
+            <Wrench className="h-3 w-3 mr-0.5" aria-hidden />
+            {fixCount} fix
+          </span>
+        )}
+      </div>
     </div>
   );
 }
