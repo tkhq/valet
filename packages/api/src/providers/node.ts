@@ -29,6 +29,9 @@ import {
 import { HibernationReaper } from "../engine/hibernation-reaper.js";
 import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
 import { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
+import { SecurityRunnerDriver } from "../orchestrator/security-runner-driver.js";
+import { submitSessionPrompt } from "../routes/messages.js";
+import { resolveSecurityNudgeIntervalMs, resolveSecurityNudgeMaxStalls } from "./security-nudge.js";
 import { withSandboxCapacityGate } from "../engine/gated-sandbox-provider.js";
 import { principalFromOwner, routeAttention } from "../orchestrator/attention.js";
 import { resolveOrgSessionCeiling } from "../orchestrator/limits.js";
@@ -481,6 +484,19 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     idleMs: resolveIdleMinutes(process.env) * 60_000,
   });
 
+  // Autonomy nudge sweep (valet-security spec §Autonomy). Re-drives an idle
+  // security runner that stopped with work remaining; a stall cap alerts the
+  // user after N no-progress nudges instead of looping. Nudges through the
+  // same `submitSessionPrompt` path the kickoff uses. `start()`/`stop()` are
+  // called from `main.ts`, next to the other sweeps.
+  const securityRunnerDriver = new SecurityRunnerDriver({
+    db,
+    engineStore,
+    submit: (row, text) => submitSessionPrompt({ db, engineHost }, row, text),
+    sweepIntervalMs: resolveSecurityNudgeIntervalMs(process.env),
+    maxStalls: resolveSecurityNudgeMaxStalls(process.env),
+  });
+
   // Backfill default bases for existing orgs (idempotent). Fires once at
   // boot in the background; never blocks startup.
   (async () => {
@@ -707,6 +723,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     workflowSandboxReclaimer,
     sandboxReconcileSweep,
     idleHibernationSweep,
+    securityRunnerDriver,
     channelHost,
     workflowStore,
     workflowRunHost,

@@ -19,6 +19,7 @@ import type { HibernationReaper } from "../engine/hibernation-reaper.js";
 import type { WorkflowSandboxReclaimer } from "../workflows/sandbox-reclaim.js";
 import type { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
 import type { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
+import type { SecurityRunnerDriver } from "../orchestrator/security-runner-driver.js";
 import type { ChannelHost } from "../channels/host.js";
 import type { EventDispatcher } from "../events/dispatcher.js";
 import type { WorkflowScheduler } from "../workflows/scheduler.js";
@@ -72,6 +73,10 @@ export interface Providers {
   sandboxReconcileSweep: SandboxReconcileSweep;
   /** Hibernates idle active sessions evicted from the host cache; `start()`/`stop()` called from main.ts. */
   idleHibernationSweep: IdleHibernationSweep;
+  /** Autonomy nudge sweep — re-drives an idle security runner with work
+   * remaining, capped by a stall budget; `start()`/`stop()` called from
+   * main.ts (valet-security spec §Autonomy). */
+  securityRunnerDriver: SecurityRunnerDriver;
   /** Inbound/outbound channel transport routing (Task 8); `start()`/`stop()` called from main.ts. */
   channelHost: ChannelHost;
 

@@ -13,6 +13,7 @@ type Counter = ReturnType<ReturnType<typeof metrics.getMeter>["createCounter"]>;
 let createdCounter: Counter | null = null;
 let settledCounter: Counter | null = null;
 let compactionStaleCounter: Counter | null = null;
+let runnerStalledCounter: Counter | null = null;
 
 /** Cells materialized by startEngagement. */
 export function recordSecurityCellsCreated(count: number): void {
@@ -52,4 +53,20 @@ export function recordSecurityCompactionStale(): void {
     });
   }
   compactionStaleCounter.add(1);
+}
+
+/**
+ * The autonomy nudge sweep re-drove an idle runner N times with no progress,
+ * so it stopped nudging and asked the user to step in (`SecurityRunnerDriver`,
+ * spec §Autonomy). This is the capped driver's alert: a runner that a nudge
+ * cannot un-stick needs a human, and this counter pages that. Alert, don't
+ * loop forever.
+ */
+export function recordSecurityRunnerStalled(): void {
+  if (!runnerStalledCounter) {
+    runnerStalledCounter = metrics.getMeter("@valet/api").createCounter("valet.security.runner.stalled", {
+      description: "Idle security runners a capped nudge sweep could not un-stick",
+    });
+  }
+  runnerStalledCounter.add(1);
 }

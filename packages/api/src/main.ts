@@ -466,6 +466,13 @@ async function runBootChain(): Promise<void> {
   // only reaps hibernated rows, so these were stranded with running pods.
   providers.idleHibernationSweep.start();
 
+  // Autonomy nudge sweep (valet-security spec §Autonomy): re-drives an idle
+  // security runner that stopped with work remaining. The only pause is the
+  // sec_start approval gate (an unsettled submission), so the sweep never
+  // nudges during an approval. A stall cap alerts the user after N no-progress
+  // nudges instead of looping. No-op when the interval is <= 0.
+  providers.securityRunnerDriver.start();
+
   // Instance config reconciliation: apply the declarative config to the live
   // database (org name, members, teams, skill sources, etc.). Runs after the
   // restore passes so the db is settled before we write to it, and BEFORE the
@@ -704,6 +711,11 @@ async function close(): Promise<void> {
     providers.idleHibernationSweep.stop();
   } catch (err) {
     console.error("idleHibernationSweep.stop failed:", err);
+  }
+  try {
+    providers.securityRunnerDriver.stop();
+  } catch (err) {
+    console.error("securityRunnerDriver.stop failed:", err);
   }
   try {
     await providers.channelHost.stop();

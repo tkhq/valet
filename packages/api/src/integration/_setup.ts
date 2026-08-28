@@ -38,6 +38,8 @@ import {
 import { HibernationReaper } from "../engine/hibernation-reaper.js";
 import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
 import { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
+import { SecurityRunnerDriver } from "../orchestrator/security-runner-driver.js";
+import { submitSessionPrompt } from "../routes/messages.js";
 import { ChannelHost } from "../channels/host.js";
 import { EventDispatcher } from "../events/dispatcher.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
@@ -381,6 +383,15 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // engine/idle-hibernation-sweep.test.ts.
   const idleHibernationSweep = new IdleHibernationSweep({ db, engineHost, engineStore, idleMs: 0 });
 
+  // sweepIntervalMs 0 disables the sweep; behavior is tested in
+  // orchestrator/security-runner-driver.test.ts.
+  const securityRunnerDriver = new SecurityRunnerDriver({
+    db,
+    engineStore,
+    submit: (row, text) => submitSessionPrompt({ db, engineHost }, row, text),
+    sweepIntervalMs: 0,
+  });
+
   const channelHost = new ChannelHost({
     db,
     engineHost,
@@ -509,6 +520,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     workflowSandboxReclaimer,
     sandboxReconcileSweep,
     idleHibernationSweep,
+    securityRunnerDriver,
     channelHost,
     workflowStore,
     workflowRunHost,
