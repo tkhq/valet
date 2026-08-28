@@ -73,6 +73,7 @@ import {
   mintSandboxJwt,
   revokeSandboxTokens,
 } from "../auth/sandbox-tokens.js";
+import { CODING_SYSTEM_PROMPT } from "./prompt-rules.js";
 import { orchestratorPersona } from "../orchestrator/persona.js";
 import { buildMemoryTools } from "../orchestrator/memory-tools.js";
 import { assembleMemorySnapshot } from "../orchestrator/snapshot.js";
@@ -321,18 +322,7 @@ function pinnedIdSet(pins: readonly PinnedActionSpec[]): ReadonlySet<string> {
   return new Set(pins.map((p) => p.actionId));
 }
 
-const SYSTEM_PROMPT =
-  "You are a helpful coding assistant running inside a Docker sandbox. " +
-  "Your workspace is /workspace (the only mounted directory). " +
-  "All read/write/edit/bash tools operate against /workspace — use absolute " +
-  "paths under /workspace or relative paths (which resolve there). " +
-  "Your visible tool list is not your full capability set: integration " +
-  "actions (code hosting, email, chat, and more) are reachable through " +
-  "list_tools and call_tool, and installed skills through the skill tool " +
-  "when one is listed. Before you tell the user that something is not " +
-  "possible, call list_tools and check for a matching action. If the " +
-  "needed integration is not connected, say so and name the fix — never " +
-  "present a missing connection as a missing capability. Be concise.";
+const SYSTEM_PROMPT = CODING_SYSTEM_PROMPT;
 
 /**
  * Per-process cache of live `Engine`/`Session` pairs keyed by app session id.

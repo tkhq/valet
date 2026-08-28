@@ -18,7 +18,13 @@ describe("orchestratorPersona", () => {
   it("carries the shared rule sections, in order, for every owner kind", () => {
     for (const owner of OWNERS) {
       const persona = orchestratorPersona(owner);
-      const sections = ["## Capabilities", "## Delegation", "## Models", "## Memory"];
+      const sections = [
+        "## Capabilities",
+        "## Decision flow",
+        "## Delegation",
+        "## Models",
+        "## Memory",
+      ];
       const positions = sections.map((s) => persona.indexOf(s));
       expect(positions.every((p) => p >= 0), `${owner.type} persona has all sections`).toBe(true);
       expect([...positions].sort((a, b) => a - b)).toEqual(positions);
@@ -42,6 +48,16 @@ describe("orchestratorPersona", () => {
     const persona = flat(orchestratorPersona({ type: "user", id: "u1" }));
     expect(persona).toContain("no git or GitHub credentials");
     expect(persona).toContain("child_status");
+  });
+
+  it("ports the v1 decision flow and persistence brief onto v2 tools", () => {
+    const persona = flat(orchestratorPersona({ type: "user", id: "u1" }));
+    expect(persona).toContain("## Decision flow");
+    expect(persona).toContain("Call mem_search");
+    expect(persona).toContain("Wait for child.settled");
+    expect(persona).toContain("A turn that does work must contain a tool call");
+    expect(persona).toContain("the branch is pushed");
+    expect(persona).toContain("do not spawn child sessions");
   });
 
   it("keeps the owner-kind identity bodies distinct", () => {
