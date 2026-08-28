@@ -2356,8 +2356,10 @@ export type UsageScopeRequest = "me" | "org" | `team:${string}`;
 /** `GET /api/usage/breakdown?window=&scope=me|org|team:<id>` — spend for a
  * window across ALL use cases (engine sessions + workflows + proxy), from
  * the single `cost_entries` definition. `scope=org` (org-admin only) covers
- * every member; `byUser` is present only then. `scope=team:<id>` covers the
- * team's owned spend and reports by use case/model/day, never by member. */
+ * every member. `scope=team:<id>` covers the team's owned spend. `byUser`
+ * is present for the org scope, and for a team scope when the caller
+ * administers the team (team admin or org admin) — a plain member reads
+ * the team's aggregate without colleagues' individual spend. */
 export interface UsageBreakdownResponse {
   windowMs: number;
   scope: "me" | "org" | "team";

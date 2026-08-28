@@ -91,8 +91,10 @@ their team's spend: spend is a team resource like team memory and team
 workflows, and those are member-visible. `UsageBreakdownResponse.scope`
 widens to `"me" | "org" | "team"`. The CSV export accepts the same scope.
 
-`byUser` stays org-only: the team breakdown reports by use case, model and
-day, not by member.
+`byUser` is admin-gated: the org scope always reports it, and a team scope
+reports it when the caller administers the team (team admin or org admin).
+A plain member reads the team's aggregate by use case, model and day —
+never colleagues' individual spend.
 
 The `/usage` page exposes the scope: every team the caller is a member of
 gets a button beside "My usage", and "Organization" stays org-admin-only.

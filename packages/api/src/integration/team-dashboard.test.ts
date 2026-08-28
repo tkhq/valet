@@ -158,11 +158,31 @@ describe("GET /api/usage/breakdown?scope=team:<id>", () => {
     // Only the team session's one entry — the personal entry stays out.
     expect(body.totalTurns).toBe(1);
     expect(body.totalTokens).toBe(120);
+    // local-user administers team_1, so the per-member rows are present
+    // and attribute the team spend to its one spender.
+    expect(body.byUser).toBeDefined();
+    expect(body.byUser?.some((m) => m.userId === "local-user" && m.totalTokens === 120)).toBe(true);
 
-    const nonMember = await fetch(`${api.baseUrl}/api/usage/breakdown?window=24h&scope=team:team_1`, {
+    // A PLAIN member reads the aggregate, never colleagues' individual spend.
+    await db.insert(teamMembers).values({ teamId: "team_1", userId: "test-member", role: "member" });
+    const asMember = await fetch(`${api.baseUrl}/api/usage/breakdown?window=24h&scope=team:team_1`, {
       headers: NON_MEMBER_HEADERS,
     });
-    expect(nonMember.status).toBe(403);
+    expect(asMember.status).toBe(200);
+    const memberBody = (await asMember.json()) as UsageBreakdownResponse;
+    expect(memberBody.totalTokens).toBe(120);
+    expect(memberBody.byUser).toBeUndefined();
+  });
+
+  it("refuses a caller with no membership at all with 403", async () => {
+    api = await bootTestApi();
+    await api.providers.db
+      .insert(teams)
+      .values({ id: "team_1", orgId: "local-org", name: "Security", createdAt: Date.now() });
+    const res = await fetch(`${api.baseUrl}/api/usage/breakdown?window=24h&scope=team:team_1`, {
+      headers: NON_MEMBER_HEADERS,
+    });
+    expect(res.status).toBe(403);
   });
 });
 

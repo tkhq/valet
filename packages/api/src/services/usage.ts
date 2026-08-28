@@ -9,7 +9,7 @@ import { eq, inArray, sql, type SQL } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { orgs, users } from "../schema/index.js";
 import { isOrgAdmin } from "./org.js";
-import { isTeamMember } from "./teams.js";
+import { canAdministerTeam, isTeamMember } from "./teams.js";
 import type {
   UsageBreakdownResponse,
   UsageBucket,
@@ -55,6 +55,11 @@ export interface UsageScope {
   userId: string | null;
   /** Set for the team scope only: filters `cost_entries` by owner. */
   teamId: string | null;
+  /** Whether the breakdown may report per-member rows (`byUser`): true for
+   * the org scope, and for a team scope when the caller ADMINISTERS the
+   * team — a plain member sees the team's aggregate, not colleagues'
+   * individual spend. */
+  byMember: boolean;
 }
 
 /**
@@ -74,17 +79,19 @@ export async function resolveUsageScope(
     const features = (rows[0]?.features ?? {}) as { organizations?: boolean };
     const admin = await isOrgAdmin(db, opts.orgId, opts.userId);
     if (!features.organizations || !admin) return "forbidden";
-    return { scope: "org", isOrg: true, orgId: opts.orgId, userId: null, teamId: null };
+    return { scope: "org", isOrg: true, orgId: opts.orgId, userId: null, teamId: null, byMember: true };
   }
   if (opts.requestedScope?.startsWith("team:")) {
     const teamId = opts.requestedScope.slice("team:".length);
     if (teamId.length === 0) return "forbidden";
-    const allowed =
-      (await isTeamMember(db, teamId, opts.userId)) || (await isOrgAdmin(db, opts.orgId, opts.userId));
+    // canAdministerTeam = team admin or org admin. Admins also get the
+    // per-member rows; a plain member gets the aggregate view only.
+    const admin = await canAdministerTeam(db, teamId, opts.userId);
+    const allowed = admin || (await isTeamMember(db, teamId, opts.userId));
     if (!allowed) return "forbidden";
-    return { scope: "team", isOrg: false, orgId: opts.orgId, userId: null, teamId };
+    return { scope: "team", isOrg: false, orgId: opts.orgId, userId: null, teamId, byMember: admin };
   }
-  return { scope: "me", isOrg: false, orgId: opts.orgId, userId: opts.userId, teamId: null };
+  return { scope: "me", isOrg: false, orgId: opts.orgId, userId: opts.userId, teamId: null, byMember: false };
 }
 
 /**
@@ -151,7 +158,7 @@ export async function getUsageBreakdown(
     // could do float division on real Postgres → one bucket per row).
     db.execute(sql`SELECT (floor(created_at / ${DAY_MS}) * ${DAY_MS})::bigint AS day_ms, COALESCE(SUM(cost_total),0) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens FROM cost_entries WHERE ${where} GROUP BY 1 ORDER BY 1 ASC`) as Promise<{ rows: { day_ms: unknown; cost_usd: unknown; total_tokens: unknown }[] }>,
     db.execute(sql`SELECT ${BUCKET_COLS} FROM cost_entries WHERE ${where}`) as Promise<{ rows: BucketRow[] }>,
-    opts.scope.isOrg
+    opts.scope.byMember
       ? // Keep the NULL user_id group (team-/org-owned turns, e.g. team-owned
         // workflow runs) so the per-member sum reconciles with the total —
         // dropping it made Σ byUser < totalCostUsd.
@@ -161,7 +168,7 @@ export async function getUsageBreakdown(
 
   const total = toBucket(totals.rows[0]);
   let byUserOut: (UsageBucket & { userId: string; name: string })[] | undefined;
-  if (opts.scope.isOrg) {
+  if (opts.scope.byMember) {
     const ids = byUser.rows.map((r) => r.user_id).filter((id): id is string => id !== null);
     const userRows = ids.length === 0 ? [] : await db.select({ id: users.id, name: users.name, email: users.email }).from(users).where(inArray(users.id, ids));
     const nameById = new Map(userRows.map((u) => [u.id, u.name || u.email] as const));
