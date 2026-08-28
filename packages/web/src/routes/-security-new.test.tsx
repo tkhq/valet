@@ -33,21 +33,18 @@ const previewData: SecurityPreviewResponse = {
   ],
 };
 
-// A synchronous mutation stub: `mutate(vars, { onSuccess })` fires onSuccess
-// with `previewData` immediately, and reports success state after.
-const previewMutate = vi.fn(
-  (_vars: unknown, opts?: { onSuccess?: (data: SecurityPreviewResponse) => void }) => {
-    opts?.onSuccess?.(previewData);
-  },
-);
-const previewState = {
-  mutate: previewMutate,
-  isPending: false,
+// The preview is a query, not a mutation: the hook returns the resolved data
+// and the query flags. The page seeds its editors from `data` on arrival.
+const previewQueryState = {
+  data: previewData,
+  isLoading: false,
   isError: false,
   isSuccess: true,
-  data: previewData,
   error: null as Error | null,
 };
+const useSecurityPreviewMock = vi.fn(
+  (_body: unknown, _enabled: boolean) => previewQueryState,
+);
 
 const createMutate = vi.fn(
   (_vars: unknown, opts?: { onSuccess?: (data: { id: string }) => void }) => {
@@ -71,7 +68,7 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 vi.mock("~/api/security", () => ({
-  useSecurityPreview: () => previewState,
+  useSecurityPreview: (body: unknown, enabled: boolean) => useSecurityPreviewMock(body, enabled),
 }));
 
 vi.mock("~/api/queries", () => ({
@@ -81,19 +78,18 @@ vi.mock("~/api/queries", () => ({
 import { SecurityNewPage } from "./security.new";
 
 beforeEach(() => {
-  previewMutate.mockClear();
+  useSecurityPreviewMock.mockClear();
   createMutate.mockClear();
   navigate.mockClear();
 });
 
 describe("SecurityNewPage", () => {
-  it("fetches the preview on mount with the repo + preset", () => {
+  it("queries the preview with the repo + preset, enabled once a repo is set", () => {
     render(<SecurityNewPage />);
-    expect(previewMutate).toHaveBeenCalledTimes(1);
-    expect(previewMutate.mock.calls[0][0]).toMatchObject({
-      repo: "acme/site",
-      preset: "code-review",
-    });
+    expect(useSecurityPreviewMock).toHaveBeenCalled();
+    const [body, enabled] = useSecurityPreviewMock.mock.calls[0];
+    expect(body).toMatchObject({ repo: "acme/site", preset: "code-review" });
+    expect(enabled).toBe(true);
   });
 
   it("prefills the config form and plan editor from the preview", async () => {

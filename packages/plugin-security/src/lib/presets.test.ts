@@ -184,6 +184,25 @@ describe("serializePlan", () => {
       expect(serializePlan(parsePlan(twice, KNOWN_PERSONAS).cells)).toBe(twice);
     }
   });
+
+  it("round-trips a multi-line goal (a folded `>` config step) without breaking the scalar", () => {
+    // A `.valet/security.yml` step commonly uses a folded (`>`) goal, so the
+    // parsed goal holds real newlines (and can hold tabs). serializePlan must
+    // escape them, or the re-parse throws "missing closing quote".
+    const cells = [
+      {
+        ordinal: 1,
+        persona: "code-review",
+        mode: "fresh" as const,
+        name: "recon",
+        goal: "Map the surface.\nThen the trust boundaries.\n\tNote each sink.",
+        reads: [],
+      },
+    ];
+    const yaml = serializePlan(cells);
+    const reparsed = parsePlan(yaml, KNOWN_PERSONAS);
+    expect(reparsed.cells[0].goal).toBe("Map the surface.\nThen the trust boundaries.\n\tNote each sink.");
+  });
 });
 
 describe("securityKickoffPrompt", () => {

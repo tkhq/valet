@@ -246,11 +246,20 @@ const PRESET_SWEEPS: Record<string, SweepDef[]> = {
 const PRESET_HAS_REPORT: ReadonlySet<string> = new Set(["full-pentest"]);
 
 /**
- * Escape a scalar for a YAML double-quoted string. Goals and paths are plain
- * text, so only the backslash and the double quote need escaping.
+ * Escape a scalar for a YAML double-quoted string. Escape the backslash FIRST,
+ * then the quote, then the control characters. A `.valet/security.yml` step
+ * often writes a folded (`>`) goal, so `cell.goal` can hold real newlines and
+ * tabs; an unescaped newline breaks the double-quoted scalar and makes the
+ * re-parse throw "missing closing quote". Escaping them keeps serialize → parse
+ * a round trip.
  */
 function yamlQuote(text: string): string {
-  return `"${text.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+  return `"${text
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\t/g, "\\t")}"`;
 }
 
 /**

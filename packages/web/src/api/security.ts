@@ -147,13 +147,31 @@ export function flattenFindings(
 /**
  * POST /sessions/security/preview — the setup page's read-only preview of the
  * config + plan a review would seed from a repo's `.valet/security.yml` (or the
- * preset fallback). A mutation, not a query: the `/security/new` page fires it
- * once on mount with the repo + preset + paths from its search params. Creates
- * nothing on the server.
+ * preset fallback). Creates nothing on the server.
+ *
+ * A QUERY, not a mutation: the preview is idempotent, and a query self-settles
+ * and dedupes. Firing a mutation from a mount effect stalls under React
+ * StrictMode's double-invoke — the response lands on the torn-down instance and
+ * the visible one shows a spinner forever. The query keys on the repo + preset
+ * + ref + paths, so a re-render never re-runs it and never re-storms the server.
  */
-export function useSecurityPreview() {
-  return useMutation<SecurityPreviewResponse, Error, SecurityPreviewRequest>({
-    mutationFn: (body) => api.securityPreview(body),
+export function useSecurityPreview(body: SecurityPreviewRequest, enabled: boolean) {
+  return useQuery<SecurityPreviewResponse, Error>({
+    queryKey: [
+      "security-preview",
+      body.repo,
+      body.preset,
+      body.ref ?? "",
+      (body.paths ?? []).join(","),
+    ],
+    queryFn: () => api.securityPreview(body),
+    enabled,
+    // The seeded config + plan for a (repo, preset, ref) do not change within a
+    // setup session; never refetch and clobber the user's in-progress edits.
+    staleTime: Infinity,
+    gcTime: Infinity,
+    retry: false,
+    refetchOnWindowFocus: false,
   });
 }
 

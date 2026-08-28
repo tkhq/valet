@@ -1,0 +1,122 @@
+# Valet's own security review configuration.
+#
+# Valet Security reads this file at review start (through the GitHub contents
+# API at the reviewed ref) and seeds the plan, focus, invariants, and threat
+# categories from it. The bundled presets are the fallback when this file is
+# absent. Open /security/new to see it prefill the setup page, and trim the
+# plan there before you start — the plan you start with is what runs.
+version: 1
+
+focus: >
+  The crown jewels are the tenant-isolation boundary and the sandbox trust
+  model. Go deepest on: cross-tenant authorization (a user or a team must never
+  reach another tenant's sessions, findings, or sandboxes); the in-sandbox
+  gateway token model (a JWT is bound to one session id); GitHub token minting
+  and rotation; and the security-engagement persona seam, where a cell-claimed
+  child session drives the server-enforced sec_* tools.
+
+invariants:
+  - Every sandbox has one owning session that deletes it; created minus deleted trends to zero.
+  - The in-sandbox gateway enforces sid === VALET_SESSION_ID from the JWT; one session's token is rejected in another session's sandbox.
+  - Every mutating action runs a named canAction authorization check; view access never grants write.
+  - A security persona's sec_* tools act only on the cell its child session claimed; a claimless or cross-cell call is refused.
+  - REST is authoritative for thread history; the WebSocket init event is metadata-only and never carries messages.
+  - A caller in one workspace scope (personal or a team) can never read another tenant's sessions, findings, or engagement data.
+
+categories:
+  - authz
+  - authn
+  - multi-tenancy
+  - secrets-handling
+  - webhooks
+
+# A repo-defined persona: its role markdown lives in the clone and wins over any
+# bundled persona of the same id. A step below runs under it.
+personas:
+  sandbox-auditor: .claude/agents/sandbox-auditor.md
+
+steps:
+  - ordinal: 1
+    name: recon
+    persona: code-review
+    playbook: recon
+    goal: >
+      Map the security-relevant surface of the v2 stack: the Hono API routes and
+      their auth/authz guards, the engine's session/thread/persona seams, the
+      sandbox providers, GitHub token handling, and the security-engagement
+      service. Produce the entry-point and trust-boundary map the later cells read.
+    reads: []
+
+  - ordinal: 2
+    name: threat-model
+    persona: threat-model
+    goal: >
+      From recon, enumerate threats over STRIDE and the loaded categories against
+      the tenant-isolation boundary and the sandbox token model. Map each threat
+      to a concrete entry point or trust boundary the sweeps can check.
+    reads: [1]
+
+  - ordinal: 3
+    name: authz-sweep
+    persona: code-review
+    playbook: authz
+    triad: true
+    goal: >
+      Sweep the API routes and services for broken authorization: a mutating
+      action with no canAction check, view access that leaks into write, a
+      cross-tenant read of another team's or user's sessions/findings/sandboxes,
+      and the security routes' persona-vs-human gating (cell claim vs human-only).
+    paths:
+      - packages/api/src/routes/**
+      - packages/api/src/services/**
+    reads: [1, 2]
+
+  - ordinal: 4
+    name: secrets-and-tokens
+    persona: code-review
+    playbook: secrets-config
+    triad: true
+    goal: >
+      Audit secret and token handling: the in-sandbox gateway JWT (sid binding,
+      signing, expiry), VALET_SANDBOX_TOKEN minting and rotation, the
+      git-credential helper and valet-gh, better-auth session handling, and any
+      hard-coded or logged secret. Confirm a revoked token cannot still act.
+    paths:
+      - packages/api/src/**
+      - packages/sandbox-gateway/**
+    reads: [1, 2]
+
+  - ordinal: 5
+    name: sast
+    persona: sast
+    goal: >
+      Run the baked scanners (gitleaks) plus targeted grep packs over the tree,
+      triage the raw output into evidence-backed findings, and record coverage
+      per rule pack. Report every tool that is absent as a NOT_ASSESSED gap.
+    reads: [1]
+
+  - ordinal: 6
+    name: sandbox-boundary
+    persona: sandbox-auditor
+    goal: >
+      Audit the sandbox isolation and lifecycle: the ownership invariant (every
+      sandbox has an owner that deletes it), the reconcile sweep, cross-session
+      token rejection, and the docker/kubernetes provider boundaries. Confirm one
+      session cannot reach another session's sandbox or files.
+    paths:
+      - packages/sandbox-docker/**
+      - packages/sandbox-kubernetes/**
+      - packages/sandbox-gateway/**
+      - packages/api/src/engine/**
+    reads: [1, 2]
+
+  - ordinal: 7
+    name: verify
+    persona: code-review
+    playbook: verify
+    review: true
+    goal: >
+      Attack the top findings from the sweeps. Re-derive each finding's dataflow
+      end to end, refute what does not reach a real sink or is already mitigated,
+      and rank the survivors by exploitability and blast radius.
+    reads: [3, 4, 5, 6]

@@ -71,40 +71,37 @@ export function SecurityNewPage() {
   const search = readSearch(useSearch({ strict: false }) as Record<string, unknown>);
   const navigate = useNavigate();
 
-  const preview = useSecurityPreview();
   const create = useCreateSession();
   const [model, setModel] = useState(search.model);
   const [config, setConfig] = useState<ConfigDraft>({ focus: "", invariants: [], categories: [] });
   const [steps, setSteps] = useState<StepDraft[]>([]);
-  // Fetch the preview once on mount and seed the editors from it. A ref guards
-  // the effect against a double-run (React strict mode) and prop churn.
-  const requested = useRef(false);
   const paths = splitPaths(search.paths);
 
+  // The preview is a query, not a mount-fired mutation: it self-settles and
+  // dedupes, so no StrictMode double-run or orphaned-observer spinner.
+  const previewQ = useSecurityPreview(
+    {
+      repo: search.repo,
+      preset: search.preset,
+      ...(search.ref ? { ref: search.ref } : {}),
+      ...(paths.length > 0 ? { paths } : {}),
+    },
+    search.repo !== "",
+  );
+
+  // Seed the editors from the preview once it arrives. A ref guards the seed so
+  // a later re-render or refetch never clobbers the user's in-progress edits.
+  const seeded = useRef(false);
   useEffect(() => {
-    if (requested.current || search.repo === "") return;
-    requested.current = true;
-    preview.mutate(
-      {
-        repo: search.repo,
-        preset: search.preset,
-        ...(search.ref ? { ref: search.ref } : {}),
-        ...(paths.length > 0 ? { paths } : {}),
-      },
-      {
-        onSuccess: (data) => {
-          setConfig({
-            focus: data.config.focus ?? "",
-            invariants: data.config.invariants,
-            categories: data.config.categories,
-          });
-          setSteps(data.planCells.map(wireToDraft));
-        },
-      },
-    );
-    // Fire once; `preview` and the search fields are stable for a mount.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (seeded.current || !previewQ.data) return;
+    seeded.current = true;
+    setConfig({
+      focus: previewQ.data.config.focus ?? "",
+      invariants: previewQ.data.config.invariants,
+      categories: previewQ.data.config.categories,
+    });
+    setSteps(previewQ.data.planCells.map(wireToDraft));
+  }, [previewQ.data]);
 
   const planError = draftError(steps);
 
@@ -162,7 +159,7 @@ export function SecurityNewPage() {
           <span className="font-mono text-ink">{search.repo}</span>
           {search.ref ? <span className="font-mono"> @ {search.ref}</span> : null} · preset{" "}
           {search.preset}
-          {preview.data?.config.hasRepoConfig ? " · configured by .valet/security.yml" : ""}
+          {previewQ.data?.config.hasRepoConfig ? " · configured by .valet/security.yml" : ""}
         </p>
       </div>
 
@@ -182,21 +179,21 @@ export function SecurityNewPage() {
             </p>
           </div>
 
-          {preview.isPending && (
+          {previewQ.isLoading && (
             <div className="flex items-center gap-2 text-sm text-muted" data-testid="preview-loading">
               <Spinner size={14} /> Loading the seeded config and plan…
             </div>
           )}
-          {preview.isError && (
+          {previewQ.isError && (
             <div
               className="rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-xs text-danger-600"
               data-testid="preview-error"
             >
-              Could not load the review preview: {preview.error.message}
+              Could not load the review preview: {previewQ.error?.message ?? "unknown error"}
             </div>
           )}
 
-          {preview.isSuccess && (
+          {previewQ.isSuccess && (
             <>
               <section className="rounded border border-line bg-paper p-4">
                 <ConfigForm value={config} onChange={setConfig} />
