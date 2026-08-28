@@ -32,6 +32,7 @@ import {
   type InstanceConfig,
 } from "./config/instance-config.js";
 import { reconcileInstanceConfig } from "./services/config-reconcile.js";
+import { startSweepTimer, type SweepTimer } from "./lib/sweep-timer.js";
 import { findOrg, getOrgFeatures, getSsoTeamGroups } from "./services/org.js";
 import { reportTeamSyncState } from "./services/team-sync.js";
 import { syncAllAppWebhookUrls } from "./services/github-app.js";
@@ -356,6 +357,7 @@ let closed = false;
 let bootReady = false;
 let rotateSweep: RotateSweepHandle | undefined;
 let installationSweep: InstallationSweepHandle | undefined;
+let workspaceCheckpointSweep: SweepTimer | null = null;
 
 // `startServer` from createApp is renamed at the destructure so it can't
 // shadow this module's exported `startServer()` (we're inside its body).
@@ -465,6 +467,40 @@ async function runBootChain(): Promise<void> {
   // cache — the in-memory idle sweep only walks the cache, and the reaper
   // only reaps hibernated rows, so these were stranded with running pods.
   providers.idleHibernationSweep.start();
+
+  // Periodic workspace checkpoint (workspace-persistence spec, 07.3):
+  // bounds data loss on node death to one interval. Only fires when the
+  // provider implements the seam (kubernetes + object-store backend) and
+  // the operator's policy enables it; each pass is overlap-guarded and
+  // unref'd via the shared sweep timer.
+  const sweepWorkspaceCheckpoints = providers.sandboxProvider.sweepWorkspaceCheckpoints?.bind(
+    providers.sandboxProvider,
+  );
+  if (
+    sweepWorkspaceCheckpoints &&
+    // Only the object-store backend checkpoints; starting the timer for
+    // none/rwx-volume would fire a guaranteed no-op pass every interval
+    // and read as "periodic checkpoints run" when they never will.
+    instanceConfig?.workspacePersistence?.backend === "object-store" &&
+    instanceConfig.workspacePersistence.policy.periodicCheckpoint
+  ) {
+    const intervalMs = instanceConfig.workspacePersistence.policy.minCheckpointIntervalMs;
+    workspaceCheckpointSweep = startSweepTimer("WorkspaceCheckpointSweep", intervalMs, async () => {
+      const startedAt = Date.now();
+      await sweepWorkspaceCheckpoints();
+      const tookMs = Date.now() - startedAt;
+      // The sweep timer silently drops ticks while a pass runs, so an
+      // over-interval pass stretches the periodic data-loss bound without
+      // any other signal. Alert, don't auto-repair: make it visible.
+      if (tookMs > intervalMs) {
+        console.warn(
+          `WorkspaceCheckpointSweep: pass took ${Math.round(tookMs / 1000)}s, longer than the ` +
+            `${Math.round(intervalMs / 1000)}s interval — the periodic checkpoint bound is stretched. ` +
+            "Raise minCheckpointIntervalMinutes or reduce workspace sizes.",
+        );
+      }
+    });
+  }
 
   // Instance config reconciliation: apply the declarative config to the live
   // database (org name, members, teams, skill sources, etc.). Runs after the
@@ -690,6 +726,7 @@ async function close(): Promise<void> {
   } catch (err) {
     console.error("hibernationReaper.stop failed:", err);
   }
+  workspaceCheckpointSweep?.stop();
   try {
     providers.workflowSandboxReclaimer.stop();
   } catch (err) {

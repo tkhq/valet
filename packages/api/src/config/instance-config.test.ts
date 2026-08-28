@@ -803,3 +803,106 @@ describe("resolveSsoTeamMapping", () => {
     });
   });
 });
+
+describe("workspacePersistence validation", () => {
+  const configPath = "valet.yaml";
+  const parse = (yaml: string) => parseInstanceConfig(yaml, configPath);
+
+  it("resolves the spec's example block, converting minutes to ms", () => {
+    const cfg = parse(`
+version: 1
+workspacePersistence:
+  backend: object-store
+  objectStore:
+    bucket: valet-workspaces-dev
+    endpoint: "http://minio.valet-dev.svc:9000"
+    region: us-east-1
+    credentialsSecret: valet-workspace-store
+    gzip: true
+    keepCheckpoints: 2
+  policy:
+    minCheckpointIntervalMinutes: 5
+    checkpointOnReap: true
+    periodicCheckpoint: true
+    onRestoreFailure: fallback
+`);
+    expect(cfg.workspacePersistence).toEqual({
+      backend: "object-store",
+      objectStore: {
+        bucket: "valet-workspaces-dev",
+        endpoint: "http://minio.valet-dev.svc:9000",
+        region: "us-east-1",
+        prefix: "",
+        credentialsSecret: "valet-workspace-store",
+        gzip: true,
+        keepCheckpoints: 2,
+      },
+      policy: {
+        minCheckpointIntervalMs: 5 * 60_000,
+        checkpointOnReap: true,
+        periodicCheckpoint: true,
+        onRestoreFailure: "fallback",
+      },
+    });
+  });
+
+  it("defaults backend to object-store when the block is present (INV-5)", () => {
+    const cfg = parse(`
+version: 1
+workspacePersistence:
+  objectStore:
+    bucket: b
+`);
+    expect(cfg.workspacePersistence?.backend).toBe("object-store");
+  });
+
+  it("rejects an unknown backend, naming the bad value (INV-5)", () => {
+    expect(() =>
+      parse("version: 1\nworkspacePersistence:\n  backend: floppy-disk"),
+    ).toThrow(/floppy-disk/);
+  });
+
+  it("object-store without a bucket fails boot with the corrective action", () => {
+    expect(() => parse("version: 1\nworkspacePersistence:\n  backend: object-store")).toThrow(
+      InstanceConfigError,
+    );
+    expect(() =>
+      parse('version: 1\nworkspacePersistence:\n  backend: object-store\n  objectStore:\n    bucket: ""'),
+    ).toThrow(/bucket/);
+  });
+
+  it("rwx-volume requires a storageClassName", () => {
+    expect(() => parse("version: 1\nworkspacePersistence:\n  backend: rwx-volume")).toThrow(
+      /storageClassName/,
+    );
+    const cfg = parse(
+      "version: 1\nworkspacePersistence:\n  backend: rwx-volume\n  rwxVolume:\n    storageClassName: efs-sc",
+    );
+    expect(cfg.workspacePersistence?.rwxVolume).toEqual({ storageClassName: "efs-sc" });
+  });
+
+  it("none needs no further config and fills policy defaults", () => {
+    const cfg = parse("version: 1\nworkspacePersistence:\n  backend: none");
+    expect(cfg.workspacePersistence).toEqual({
+      backend: "none",
+      policy: {
+        minCheckpointIntervalMs: 5 * 60_000,
+        checkpointOnReap: true,
+        periodicCheckpoint: true,
+        onRestoreFailure: "fallback",
+      },
+    });
+  });
+
+  it("rejects an invalid onRestoreFailure value", () => {
+    expect(() =>
+      parse(
+        "version: 1\nworkspacePersistence:\n  backend: none\n  policy:\n    onRestoreFailure: explode",
+      ),
+    ).toThrow(/explode/);
+  });
+
+  it("absent block leaves workspacePersistence undefined (legacy PVC behavior)", () => {
+    expect(parse("version: 1").workspacePersistence).toBeUndefined();
+  });
+});

@@ -153,5 +153,8 @@ export function withSandboxCapacityGate(
   if (inner.suspend) gated.suspend = inner.suspend.bind(inner);
   if (inner.resume) gated.resume = inner.resume.bind(inner);
   if (inner.updateCreds) gated.updateCreds = inner.updateCreds.bind(inner);
+  if (inner.sweepWorkspaceCheckpoints) {
+    gated.sweepWorkspaceCheckpoints = inner.sweepWorkspaceCheckpoints.bind(inner);
+  }
   return gated;
 }

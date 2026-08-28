@@ -282,7 +282,9 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // so a long-lived dev stack would wedge every new create at the
   // ceiling — and those backends have no bounded pod budget to protect.
   const gateHostRef: { current: EngineHost | null } = { current: null };
-  const rawSandboxProvider = buildSandboxProvider(process.env);
+  const rawSandboxProvider = buildSandboxProvider(process.env, {
+    workspacePersistence: opts.instanceConfig?.workspacePersistence,
+  });
   const sandboxProvider = rawSandboxProvider.capabilities().hibernation
     ? withSandboxCapacityGate(rawSandboxProvider, {
         ceiling: resolveOrgSandboxCeiling(process.env),

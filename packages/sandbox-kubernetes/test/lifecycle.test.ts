@@ -398,11 +398,13 @@ describe("parseSandboxCRRead", () => {
     );
   });
 
-  it("throws when spec.podTemplate or volumeClaimTemplates is missing", () => {
+  it("throws when spec.podTemplate is missing", () => {
     expect(() => parseSandboxCRRead({ metadata: { name: "x" }, spec: {} })).toThrow(/spec.podTemplate/);
-    expect(() =>
-      parseSandboxCRRead({ metadata: { name: "x" }, spec: { podTemplate: {} } }),
-    ).toThrow(/spec.podTemplate/);
+  });
+
+  it("normalizes absent volumeClaimTemplates to [] (emptyDir-backed workspaces omit it)", () => {
+    const parsed = parseSandboxCRRead({ metadata: { name: "x" }, spec: { podTemplate: {} } });
+    expect(parsed.spec.volumeClaimTemplates).toEqual([]);
   });
 
   it("parses a minimal valid response", () => {

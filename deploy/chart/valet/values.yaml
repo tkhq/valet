@@ -91,6 +91,28 @@ api:
   # annotation). Leave blank to disable the ConfigMap and mount entirely.
   instanceConfig: ""
 
+  # Workspace persistence (docs/specs/2026-08-28-workspace-persistence-design.md)
+  # is configured through the instanceConfig block above, for example:
+  #
+  #   workspacePersistence:
+  #     backend: object-store          # object-store | rwx-volume | none
+  #     objectStore:
+  #       bucket: valet-workspaces-dev
+  #       region: us-east-1
+  #       credentialsSecret: valet-workspace-store   # Secret in the SANDBOX
+  #                          # namespace with AWS_ACCESS_KEY_ID +
+  #                          # AWS_SECRET_ACCESS_KEY (deliver via ESO)
+  #
+  # The api-side S3 client reads VALET_WORKSPACE_STORE_ACCESS_KEY_ID /
+  # VALET_WORKSPACE_STORE_SECRET_ACCESS_KEY from the api env (deliver via
+  # extraEnvFrom below), or falls back to the SDK default chain (IRSA).
+  #
+  # IAM: the sandbox restore credential needs s3:GetObject AND
+  # s3:ListBucket on the bucket. Without ListBucket, S3 answers 403 (not
+  # 404) for a missing key, and every NEW workspace reads as a restore
+  # failure. The api-side credential additionally needs s3:PutObject
+  # (presigned checkpoint uploads) and s3:DeleteObject (retention prune).
+
   # Additional envFrom entries appended to the api Deployment. Use this
   # to load env vars from Secrets/ConfigMaps managed outside the chart
   # (e.g. External Secrets Operator syncing from AWS Secrets Manager).

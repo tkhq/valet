@@ -9,6 +9,8 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
+import { WORKSPACE_PERSISTENCE_BACKENDS, type WorkspacePersistenceBackend } from "@valet/engine";
+import { DEFAULT_WORKSPACE_POLICY, type WorkspacePersistenceConfig } from "@valet/sandbox-kubernetes";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -107,6 +109,11 @@ export interface InstanceConfig {
   }[];
   skillSources?: { repo: string; ref?: string; subpath?: string; team?: string }[];
   mcpServers?: McpServerDecl[];
+  /** Workspace persistence for the kubernetes sandbox backend
+   * (workspace-persistence spec, Part 07.1). Resolved shape — the parser
+   * converts `minCheckpointIntervalMinutes` to ms and fills defaults.
+   * Absent block → legacy PVC behavior (see the spec's Deviations note). */
+  workspacePersistence?: WorkspacePersistenceConfig;
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +141,7 @@ const KNOWN_TOP_LEVEL_KEYS = new Set<string>([
   "llmProviders",
   "skillSources",
   "mcpServers",
+  "workspacePersistence",
 ]);
 
 const MCP_SERVER_AUTH_MODES = new Set<string>(["none", "oauth", "api_key", "bearer"]);
@@ -766,6 +774,134 @@ function validateMcpServers(value: unknown, path: string): McpServerDecl[] {
  * Parses + validates YAML text. Throws `InstanceConfigError` with the field
  * path and corrective action on any error.
  */
+/** Validates the `workspacePersistence` block (workspace-persistence spec,
+ * Part 07.1). Backend selection is fail-closed (INV-5): within the block it
+ * defaults to `object-store`, and an unknown name fails boot with the bad
+ * value named. Returns the resolved shape (interval in ms, defaults
+ * filled). */
+function validateWorkspacePersistence(value: unknown, path: string): WorkspacePersistenceConfig {
+  if (!isRecord(value)) {
+    err(`${path}: workspacePersistence must be an object.`);
+  }
+  const backendRaw = value.backend === undefined ? "object-store" : value.backend;
+  const backends: readonly string[] = WORKSPACE_PERSISTENCE_BACKENDS;
+  if (typeof backendRaw !== "string" || !backends.includes(backendRaw)) {
+    err(
+      `${path}: workspacePersistence.backend must be one of ${backends.join(", ")}, got ${JSON.stringify(backendRaw)}.`,
+    );
+  }
+  // Membership in WORKSPACE_PERSISTENCE_BACKENDS is checked above;
+  // Array.includes does not narrow a string to the union.
+  const backend = backendRaw as WorkspacePersistenceBackend;
+
+  const policyRaw = value.policy === undefined ? {} : value.policy;
+  if (!isRecord(policyRaw)) {
+    err(`${path}: workspacePersistence.policy must be an object.`);
+  }
+  // Defaults come from DEFAULT_WORKSPACE_POLICY — one source of truth for
+  // the policy defaults, shared with the provider package.
+  const minutes =
+    policyRaw.minCheckpointIntervalMinutes === undefined
+      ? DEFAULT_WORKSPACE_POLICY.minCheckpointIntervalMs / 60_000
+      : policyRaw.minCheckpointIntervalMinutes;
+  if (typeof minutes !== "number" || !Number.isFinite(minutes) || minutes <= 0) {
+    err(
+      `${path}: workspacePersistence.policy.minCheckpointIntervalMinutes must be a positive number, got ${JSON.stringify(minutes)}.`,
+    );
+  }
+  const onRestoreFailureRaw =
+    policyRaw.onRestoreFailure === undefined
+      ? DEFAULT_WORKSPACE_POLICY.onRestoreFailure
+      : policyRaw.onRestoreFailure;
+  if (onRestoreFailureRaw !== "fallback" && onRestoreFailureRaw !== "block") {
+    err(
+      `${path}: workspacePersistence.policy.onRestoreFailure must be "fallback" or "block", got ${JSON.stringify(onRestoreFailureRaw)}.`,
+    );
+  }
+  const onRestoreFailure: "fallback" | "block" = onRestoreFailureRaw;
+  const policy = {
+    minCheckpointIntervalMs: minutes * 60_000,
+    checkpointOnReap:
+      policyRaw.checkpointOnReap === undefined
+        ? DEFAULT_WORKSPACE_POLICY.checkpointOnReap
+        : assertBoolean(policyRaw.checkpointOnReap, "workspacePersistence.policy.checkpointOnReap", path),
+    periodicCheckpoint:
+      policyRaw.periodicCheckpoint === undefined
+        ? DEFAULT_WORKSPACE_POLICY.periodicCheckpoint
+        : assertBoolean(policyRaw.periodicCheckpoint, "workspacePersistence.policy.periodicCheckpoint", path),
+    onRestoreFailure,
+  };
+
+  const result: WorkspacePersistenceConfig = { backend, policy };
+
+  if (backend === "object-store") {
+    const os = value.objectStore;
+    if (!isRecord(os)) {
+      err(
+        `${path}: workspacePersistence.objectStore is required when backend is "object-store". Set objectStore.bucket, or select backend "none".`,
+      );
+    }
+    const bucket = assertString(os.bucket, "workspacePersistence.objectStore.bucket", path);
+    if (bucket === "") {
+      err(
+        `${path}: workspacePersistence.objectStore.bucket must not be empty. Name the S3-compatible bucket that holds workspace checkpoints.`,
+      );
+    }
+    const keep = os.keepCheckpoints === undefined ? 2 : os.keepCheckpoints;
+    if (typeof keep !== "number" || !Number.isInteger(keep) || keep < 1) {
+      err(
+        `${path}: workspacePersistence.objectStore.keepCheckpoints must be an integer >= 1, got ${JSON.stringify(keep)}.`,
+      );
+    }
+    result.objectStore = {
+      bucket,
+      endpoint:
+        os.endpoint === undefined
+          ? ""
+          : assertString(os.endpoint, "workspacePersistence.objectStore.endpoint", path),
+      region:
+        os.region === undefined
+          ? "us-east-1"
+          : assertString(os.region, "workspacePersistence.objectStore.region", path),
+      prefix:
+        os.prefix === undefined
+          ? ""
+          : assertString(os.prefix, "workspacePersistence.objectStore.prefix", path),
+      credentialsSecret:
+        os.credentialsSecret === undefined
+          ? "valet-workspace-store"
+          : assertString(os.credentialsSecret, "workspacePersistence.objectStore.credentialsSecret", path),
+      gzip:
+        os.gzip === undefined
+          ? true
+          : assertBoolean(os.gzip, "workspacePersistence.objectStore.gzip", path),
+      keepCheckpoints: keep,
+    };
+  }
+
+  if (backend === "rwx-volume") {
+    const rwx = value.rwxVolume;
+    if (!isRecord(rwx)) {
+      err(
+        `${path}: workspacePersistence.rwxVolume is required when backend is "rwx-volume". Set rwxVolume.storageClassName to the operator's ReadWriteMany StorageClass.`,
+      );
+    }
+    const storageClassName = assertString(
+      rwx.storageClassName,
+      "workspacePersistence.rwxVolume.storageClassName",
+      path,
+    );
+    if (storageClassName === "") {
+      err(
+        `${path}: workspacePersistence.rwxVolume.storageClassName must not be empty. Set it to the operator's ReadWriteMany StorageClass.`,
+      );
+    }
+    result.rwxVolume = { storageClassName };
+  }
+
+  return result;
+}
+
 export function parseInstanceConfig(yamlText: string, path: string): InstanceConfig {
   let raw: unknown;
   try {
@@ -803,6 +939,9 @@ export function parseInstanceConfig(yamlText: string, path: string): InstanceCon
   if ("llmProviders" in raw) cfg.llmProviders = validateLlmProviders(raw["llmProviders"], path);
   if ("skillSources" in raw) cfg.skillSources = validateSkillSources(raw["skillSources"], path);
   if ("mcpServers" in raw) cfg.mcpServers = validateMcpServers(raw["mcpServers"], path);
+  if ("workspacePersistence" in raw) {
+    cfg.workspacePersistence = validateWorkspacePersistence(raw["workspacePersistence"], path);
+  }
 
   assertNoTeamGroupOverlap(cfg, path);
 

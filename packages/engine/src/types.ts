@@ -1005,6 +1005,17 @@ export interface SandboxCreateOpts {
    * session.
    */
   sessionId?: string;
+  /**
+   * The owning org and user, for tenant-scoped workspace persistence
+   * (workspace-persistence spec, INV-3: the checkpoint object key derives
+   * from these). Stamped by `Engine.materializeSandbox` from the session's
+   * own `orgId`/`userId` — like `sessionId`, the stamp always wins over a
+   * host-set value. Providers that persist workspaces record them on the
+   * backing resource (sandbox-kubernetes: CR annotations) so checkpoint at
+   * suspend/reap time can rebuild the `WorkspaceRef` after an api restart.
+   */
+  orgId?: string;
+  ownerId?: string;
   /** Interactive-service profile. Default "headless" (agent-only). "full"
    * additionally runs ttyd + code-server + the auth gateway. */
   profile?: "headless" | "full";
@@ -1175,6 +1186,15 @@ export interface SandboxProvider {
    * (SandboxCapabilities.credsMount is false or absent).
    */
   updateCreds?(id: string, files: Record<string, string>): Promise<void>;
+  /**
+   * Optional workspace-persistence seam (workspace-persistence spec, Part
+   * 07.3). One pass of the periodic checkpoint: fire the `periodic` policy
+   * event for every live sandbox this provider backs. The host drives it
+   * from an overlap-guarded sweep timer when the configured policy enables
+   * periodic checkpoints. Best-effort per sandbox (INV-7): a failing
+   * checkpoint logs and emits a metric, never throws out of the pass.
+   */
+  sweepWorkspaceCheckpoints?(): Promise<void>;
 }
 
 // ── Blob store ─────────────────────────────────────────────────────

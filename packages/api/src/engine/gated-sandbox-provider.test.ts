@@ -308,6 +308,7 @@ describe("withSandboxCapacityGate", () => {
     expect(gatedBare.deriveId).toBeUndefined();
     expect(gatedBare.list).toBeUndefined();
     expect(gatedBare.suspend).toBeUndefined();
+    expect(gatedBare.sweepWorkspaceCheckpoints).toBeUndefined();
 
     const full = fakeInner({
       deriveId: (key) => `d-${key}`,
@@ -317,5 +318,20 @@ describe("withSandboxCapacityGate", () => {
     expect(gatedFull.deriveId?.("k")).toBe("d-k");
     expect(gatedFull.updateCreds).toBeDefined();
     expect(gatedFull.list).toBeUndefined();
+  });
+
+  it("forwards sweepWorkspaceCheckpoints so the periodic sweep can start", async () => {
+    // Regression: the wrapper dropped this member, so main.ts saw
+    // `undefined` and silently never started the checkpoint sweep timer.
+    let swept = 0;
+    const inner = fakeInner({
+      sweepWorkspaceCheckpoints: async () => {
+        swept += 1;
+      },
+    });
+    const gated = withSandboxCapacityGate(inner, { ceiling: 1, waitMs: 0, host: () => null });
+    expect(gated.sweepWorkspaceCheckpoints).toBeDefined();
+    await gated.sweepWorkspaceCheckpoints?.();
+    expect(swept).toBe(1);
   });
 });

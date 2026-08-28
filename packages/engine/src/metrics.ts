@@ -36,6 +36,9 @@ interface Instruments {
   sandboxDestroyed: Counter;
   sandboxFlagged: Counter;
   sandboxCapacityWait: Histogram;
+  workspaceCheckpoints: Counter;
+  workspaceCheckpointBytes: Counter;
+  workspaceRestores: Counter;
 }
 
 let instruments: Instruments | null = null;
@@ -97,6 +100,21 @@ function inst(): Instruments {
       unit: "ms",
       description:
         "Time a sandbox create spent waiting at the per-org capacity gate, by outcome (admitted/timeout). Non-zero rates mean an org is contending for its sandbox ceiling.",
+    }),
+    // No `_total` in these names — the Prometheus OTLP ingestion appends
+    // the counter suffix itself (see the file-header naming note), and the
+    // sibling counters above all rely on that. `outcome` carries the
+    // failed/skipped split; a `failed` outcome is the INV-7 visibility for
+    // best-effort checkpoints and restores.
+    workspaceCheckpoints: meter.createCounter("valet.workspace.checkpoints", {
+      description: "Workspace checkpoint attempts, by backend and outcome",
+    }),
+    workspaceCheckpointBytes: meter.createCounter("valet.workspace.checkpoint_bytes", {
+      description: "Bytes committed by successful workspace checkpoints, by backend",
+    }),
+    workspaceRestores: meter.createCounter("valet.workspace.restores", {
+      description:
+        "Workspace restore attempts, by backend and outcome (restored/cold_start/failed). cold_start = no committed checkpoint existed; failed = the restore itself failed (INV-7 visibility).",
     }),
   };
   return instruments;
@@ -193,4 +211,40 @@ export function recordSandboxCapacityWait(waitedMs: number, outcome: "admitted" 
 
 export function recordGateUnownedExpired(gateType: string): void {
   inst().gatesUnownedExpired.add(1, { type: gateType });
+}
+
+/** A checkpoint outcome (closed union so a typo'd outcome cannot fragment
+ * the series): `skipped` = policy said no (rate limit, no pod);
+ * `unchanged` = nothing changed since the last commit from this pod;
+ * `blocked_cold_start` = the cold-start clobber guard refused to commit
+ * over the last good checkpoint after a failed restore. */
+export type WorkspaceCheckpointOutcome =
+  | "committed"
+  | "skipped"
+  | "unchanged"
+  | "blocked_cold_start"
+  | "failed";
+
+/** A workspace checkpoint attempt (workspace-persistence spec, Part 07.2).
+ * Successful commits also record their size. */
+export function recordWorkspaceCheckpoint(
+  backend: string,
+  outcome: WorkspaceCheckpointOutcome,
+  sizeBytes?: number,
+): void {
+  const i = inst();
+  i.workspaceCheckpoints.add(1, { backend, outcome });
+  if (outcome === "committed" && sizeBytes !== undefined && sizeBytes > 0) {
+    i.workspaceCheckpointBytes.add(sizeBytes, { backend });
+  }
+}
+
+/** A workspace restore attempt. `cold_start` means no committed checkpoint
+ * existed and the sandbox started from the baked image; `failed` means the
+ * restore itself failed (and, under the default policy, fell back cold). */
+export function recordWorkspaceRestore(
+  backend: string,
+  outcome: "restored" | "cold_start" | "failed",
+): void {
+  inst().workspaceRestores.add(1, { backend, outcome });
 }
