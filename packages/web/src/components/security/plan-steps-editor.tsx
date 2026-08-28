@@ -1,29 +1,21 @@
-import { useEffect, useRef, useState } from "react";
 import type { SecurityPlanCellInput, SecurityPlanCellWire } from "@valet/api/wire";
 import { Button, Input, Label } from "~/components/primitives";
-import { cn } from "~/lib/cn";
-import { useSetPlanCells } from "~/api/security";
-import { apiErrorText } from "~/api/security";
 
 /**
- * The planning-phase step editor (dynamic-config M-F2, spec §Dynamic
- * configuration). It lets an admin add, remove, reorder, and edit the review's
- * steps during planning, without steering the runner in chat. The server is
- * the real gate: it assigns dense ordinals in array order, validates the
- * personas and playbooks, and refuses a running engagement. This editor holds
- * a local draft that seeds from `planCells` and resyncs while the admin has
- * not touched it.
+ * The controlled review-plan step editor (value + onChange, no data fetching or
+ * mutation). The setup page (`/security/new`) owns the draft state and posts it
+ * on create. The server is the real gate: it assigns dense ordinals in array
+ * order, validates personas and playbooks, and expands triads at start.
  *
- * The persona and playbook lists mirror the bundled registries (personas.ts,
- * playbooks.ts). The server validates the real set; a repo-declared persona
- * that the config added still round-trips, because it arrives in `planCells`.
+ * The persona and playbook lists mirror the bundled registries. A repo-declared
+ * persona that a preview seeded still round-trips, because it arrives on the
+ * step draft and stays selectable.
  */
 
 /** Bundled personas, mirrored from plugin-security's `BUNDLED_PERSONAS`. The id
  * feeds the plan; the label shows in the picker. The server validates against
- * the real registry ∪ the repo's config personas; this list only seeds the
- * picker. Keep the two in sync. */
-const BUNDLED_PERSONAS: readonly { id: string; label: string }[] = [
+ * the real registry ∪ the repo's config personas. Keep the two in sync. */
+export const BUNDLED_PERSONAS: readonly { id: string; label: string }[] = [
   { id: "code-review", label: "Code review" },
   { id: "architect", label: "Architect" },
   { id: "verifier", label: "Verifier" },
@@ -49,12 +41,12 @@ const KNOWN_PLAYBOOKS: readonly string[] = [
 ];
 
 /** The at-most step count the plan allows (mirrors `MAX_PLAN_CELLS`). */
-const MAX_STEPS = 32;
+export const MAX_STEPS = 32;
 
-/** The editor's per-step draft. `paths` is the raw comma/space text the admin
- * types; it is split on save. `reads` holds earlier step indexes (0-based in
- * the draft, mapped to 1-based ordinals on save). */
-interface StepDraft {
+/** The editor's per-step draft. `pathsText` is the raw comma/space text the
+ * user types; it is split on save. `reads` holds earlier step indexes (0-based
+ * in the draft, mapped to 1-based ordinals on save). */
+export interface StepDraft {
   /** Stable id so a mapped row keeps its state across reorders (mount-time
    * state rule: key by id, never array index). */
   key: string;
@@ -66,6 +58,8 @@ interface StepDraft {
   /** Indexes (0-based) of earlier steps this step reads. */
   reads: number[];
   review: boolean;
+  /** Run this phase as an architect → worker → verifier triad. */
+  triad: boolean;
 }
 
 let keySeq = 0;
@@ -74,7 +68,8 @@ function nextKey(): string {
   return `step-${keySeq}`;
 }
 
-function wireToDraft(cell: SecurityPlanCellWire): StepDraft {
+/** Map one wire step to an editable draft. */
+export function wireToDraft(cell: SecurityPlanCellWire): StepDraft {
   return {
     key: nextKey(),
     persona: cell.persona,
@@ -85,10 +80,12 @@ function wireToDraft(cell: SecurityPlanCellWire): StepDraft {
     // Ordinals are 1-based and dense, so ordinal N maps to draft index N-1.
     reads: cell.reads.map((ord) => ord - 1).filter((i) => i >= 0),
     review: cell.review,
+    triad: cell.triad === true,
   };
 }
 
-function emptyDraft(): StepDraft {
+/** A fresh empty draft for the "Add step" action. */
+export function emptyDraft(): StepDraft {
   return {
     key: nextKey(),
     persona: BUNDLED_PERSONA_IDS[0],
@@ -98,6 +95,7 @@ function emptyDraft(): StepDraft {
     pathsText: "",
     reads: [],
     review: false,
+    triad: false,
   };
 }
 
@@ -112,7 +110,7 @@ function splitPaths(text: string): string[] {
 /** The client-side validation mirror (the server is the real gate): a step's
  * `reads` name only earlier steps, and every step needs a goal. Returns the
  * first message, or null when the draft is valid. */
-function draftError(steps: StepDraft[]): string | null {
+export function draftError(steps: StepDraft[]): string | null {
   if (steps.length === 0) return "Add at least one step.";
   if (steps.length > MAX_STEPS) return `A plan has at most ${MAX_STEPS} steps.`;
   for (let i = 0; i < steps.length; i++) {
@@ -125,9 +123,9 @@ function draftError(steps: StepDraft[]): string | null {
   return null;
 }
 
-/** Convert the draft to the structured wire input the route accepts. Drops
- * `reads` that no longer point at an earlier step after a reorder. */
-function draftToInput(steps: StepDraft[]): SecurityPlanCellInput[] {
+/** Convert the drafts to the structured wire input the create route accepts.
+ * Drops `reads` that no longer point at an earlier step after a reorder. */
+export function draftToInput(steps: StepDraft[]): SecurityPlanCellInput[] {
   return steps.map((step, i) => {
     const paths = splitPaths(step.pathsText);
     // reads are 0-based draft indexes; the server wants 1-based ordinals, and
@@ -142,66 +140,45 @@ function draftToInput(steps: StepDraft[]): SecurityPlanCellInput[] {
     if (step.playbook !== "") input.playbook = step.playbook;
     if (paths.length > 0) input.paths = paths;
     if (step.review) input.review = true;
+    if (step.triad) input.triad = true;
     return input;
   });
 }
 
-export function PlanEditor({
-  sessionId,
-  planCells,
+/** The controlled step-list editor. The parent owns `value` and applies every
+ * `onChange`; this component holds no state and fetches nothing. */
+export function PlanStepsEditor({
+  value,
+  onChange,
 }: {
-  sessionId: string;
-  planCells: SecurityPlanCellWire[];
+  value: StepDraft[];
+  onChange: (next: StepDraft[]) => void;
 }) {
-  const [steps, setSteps] = useState<StepDraft[]>(() => planCells.map(wireToDraft));
-  // Mount-time-state rule: the draft seeds from `planCells` and resyncs when
-  // `planCells` changes, UNLESS the admin has already edited the draft — a
-  // manual edit must win over a background poll.
-  const userTouched = useRef(false);
-  const lastSignature = useRef(planSignature(planCells));
-
-  useEffect(() => {
-    const signature = planSignature(planCells);
-    if (signature === lastSignature.current) return;
-    lastSignature.current = signature;
-    if (userTouched.current) return;
-    setSteps(planCells.map(wireToDraft));
-  }, [planCells]);
-
-  const setPlan = useSetPlanCells(sessionId);
-
-  function touch(next: StepDraft[]) {
-    userTouched.current = true;
-    setSteps(next);
-  }
-
   function updateStep(index: number, patch: Partial<StepDraft>) {
-    touch(steps.map((step, i) => (i === index ? { ...step, ...patch } : step)));
+    onChange(value.map((step, i) => (i === index ? { ...step, ...patch } : step)));
   }
 
   function addStep() {
-    touch([...steps, emptyDraft()]);
+    onChange([...value, emptyDraft()]);
   }
 
   function removeStep(index: number) {
     // Drop the step, then renumber every read that pointed past it: a read
     // index above the removed one shifts down by one, and a read OF the
     // removed step is dropped.
-    const next = steps
+    const next = value
       .filter((_, i) => i !== index)
       .map((step) => ({
         ...step,
-        reads: step.reads
-          .filter((r) => r !== index)
-          .map((r) => (r > index ? r - 1 : r)),
+        reads: step.reads.filter((r) => r !== index).map((r) => (r > index ? r - 1 : r)),
       }));
-    touch(next);
+    onChange(next);
   }
 
   function move(index: number, delta: -1 | 1) {
     const target = index + delta;
-    if (target < 0 || target >= steps.length) return;
-    const next = [...steps];
+    if (target < 0 || target >= value.length) return;
+    const next = [...value];
     [next[index], next[target]] = [next[target], next[index]];
     // A reorder can invalidate reads (a read must name an earlier step). Drop
     // any read that no longer points at an earlier index; the server would
@@ -210,37 +187,30 @@ export function PlanEditor({
       ...step,
       reads: step.reads.filter((r) => r < i),
     }));
-    touch(cleaned);
+    onChange(cleaned);
   }
 
-  const error = draftError(steps);
-
-  function save() {
-    if (error) return;
-    userTouched.current = false;
-    setPlan.mutate(draftToInput(steps));
-  }
+  const error = draftError(value);
 
   return (
-    <div className="border-b border-line px-4 py-3" data-testid="plan-editor">
+    <div data-testid="plan-steps-editor">
       <div className="flex items-center justify-between">
         <h3 className="text-xs font-semibold text-ink">Plan</h3>
         <span className="text-[11px] text-muted">
-          {steps.length} step{steps.length === 1 ? "" : "s"}
+          {value.length} step{value.length === 1 ? "" : "s"}
         </span>
       </div>
       <p className="mt-1 text-[11px] text-muted">
-        Edit the review steps before it starts. The plan freezes once the review
-        runs.
+        Edit the review steps. The plan freezes when the review starts.
       </p>
 
       <div className="mt-3 flex flex-col gap-3">
-        {steps.map((step, index) => (
+        {value.map((step, index) => (
           <StepRow
             key={step.key}
             index={index}
             step={step}
-            stepCount={steps.length}
+            stepCount={value.length}
             onChange={(patch) => updateStep(index, patch)}
             onRemove={() => removeStep(index)}
             onMoveUp={() => move(index, -1)}
@@ -249,29 +219,16 @@ export function PlanEditor({
         ))}
       </div>
 
-      <div className="mt-3 flex items-center gap-2">
+      <div className="mt-3">
         <Button
           type="button"
           variant="ghost"
           size="sm"
           onClick={addStep}
-          disabled={steps.length >= MAX_STEPS}
+          disabled={value.length >= MAX_STEPS}
         >
           Add step
         </Button>
-        <Button
-          type="button"
-          size="sm"
-          onClick={save}
-          disabled={error !== null || setPlan.isPending}
-        >
-          {setPlan.isPending ? "Saving…" : "Save plan"}
-        </Button>
-        {setPlan.isSuccess && !setPlan.isPending && !userTouched.current && (
-          <span className="text-[11px] text-moss" data-testid="plan-saved">
-            Saved
-          </span>
-        )}
       </div>
 
       {error && (
@@ -279,20 +236,7 @@ export function PlanEditor({
           {error}
         </p>
       )}
-      {setPlan.isError && (
-        <p className="mt-2 text-[11px] text-danger-600" data-testid="plan-save-error">
-          {apiErrorText(setPlan.error)}
-        </p>
-      )}
     </div>
-  );
-}
-
-/** A stable signature of the server plan, so the resync effect fires only on a
- * real change, not on every poll's fresh array identity. */
-function planSignature(planCells: SecurityPlanCellWire[]): string {
-  return JSON.stringify(
-    planCells.map((c) => [c.persona, c.name ?? "", c.goal, c.playbook ?? "", c.paths ?? [], c.reads, c.review]),
   );
 }
 
@@ -429,12 +373,7 @@ function StepRow({
             <span className="text-xs text-muted">Reads earlier steps</span>
             <div className="flex flex-wrap gap-2">
               {Array.from({ length: index }, (_, earlier) => (
-                <label
-                  key={earlier}
-                  className={cn(
-                    "inline-flex items-center gap-1 text-[11px] text-ink",
-                  )}
-                >
+                <label key={earlier} className="inline-flex items-center gap-1 text-[11px] text-ink">
                   <input
                     type="checkbox"
                     checked={step.reads.includes(earlier)}
@@ -451,6 +390,15 @@ function StepRow({
             </div>
           </div>
         )}
+
+        <label className="inline-flex items-center gap-2 text-xs text-ink">
+          <input
+            type="checkbox"
+            checked={step.triad}
+            onChange={(e) => onChange({ triad: e.target.checked })}
+          />
+          Run as architect → worker → verifier triad
+        </label>
 
         <label className="inline-flex items-center gap-2 text-xs text-ink">
           <input

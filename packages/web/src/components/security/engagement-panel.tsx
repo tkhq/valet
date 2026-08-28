@@ -17,13 +17,12 @@ import { Button, ConfirmDialog, Spinner } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { useResizablePane } from "~/lib/use-resizable-pane";
 import { CellRail } from "./cell-rail";
-import { ConfigEditor } from "./config-editor";
+import { ReviewSummary } from "./review-summary";
 import { CoverageSection } from "./coverage-section";
 import { NeedsSection } from "./needs-section";
 import { CostChip } from "./cost-chip";
 import { FindingsReview } from "./findings-review";
 import { ManifestCard } from "./manifest-card";
-import { PlanEditor } from "./plan-editor";
 import { ReportSection } from "./report-section";
 import { RescanDiffBanner } from "./rescan-diff";
 
@@ -108,10 +107,8 @@ export function EngagementPanel({
   const { engagement, cells, cost, diff, planCells, report, needs } = engagementQ.data;
   // The report is generating while a report-persona cell is running (M-P3).
   const reportGenerating = cells.some((c) => c.persona === "report" && c.status === "running");
-  // The step editor is a planning-phase tool: it edits the plan before cells
-  // materialize at sec_start. Once the engagement runs, the plan freezes and
-  // the read-only cell rail takes over. Admin-only — the route enforces it.
-  const showPlanEditor = engagement.status === "planning" && canAdminister;
+  // The config + plan are finalized pre-creation on `/security/new`; the session
+  // page shows a compact READ-ONLY summary, never the editor (spec Deviations).
   // The cancel action is a human-only stop for an in-flight review. Show it
   // only while the engagement can still be cancelled AND the caller can
   // administer — the route enforces both; this only hides a button that 403s.
@@ -201,11 +198,9 @@ export function EngagementPanel({
           cancelMutation.mutate(undefined, { onSuccess: () => setConfirmCancel(false) });
         }}
       />
-      {/* Focus + invariants (dynamic-config M-F3): editable during planning for
-          an admin, read-only once running/closed so the user sees what the
-          review was told. */}
-      <ConfigEditor sessionId={sessionId} engagement={engagement} editable={showPlanEditor} />
-      {showPlanEditor && <PlanEditor sessionId={sessionId} planCells={planCells} />}
+      {/* The finalized config + plan, at-a-glance and read-only. The user
+          configured this pre-creation on `/security/new`. */}
+      <ReviewSummary engagement={engagement} planCells={planCells} />
       {coverageQ.data && <CoverageSection rollup={coverageQ.data.rollup} />}
       {needs && needs.length > 0 && (
         <NeedsSection sessionId={sessionId} needs={needs} canAdminister={canAdminister} />

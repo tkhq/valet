@@ -24,6 +24,8 @@ import type {
   SecurityFileIssueResponse,
   SecurityFindingWire,
   SecurityPlanCellInput,
+  SecurityPreviewRequest,
+  SecurityPreviewResponse,
   SecurityResolveNeedsResponse,
   SecurityReviewFindingResponse,
   SecuritySetConfigResponse,
@@ -140,6 +142,19 @@ export function flattenFindings(
   pages: ListSecurityFindingsResponse[] | undefined,
 ): SecurityFindingWire[] {
   return pages?.flatMap((p) => p.findings) ?? [];
+}
+
+/**
+ * POST /sessions/security/preview — the setup page's read-only preview of the
+ * config + plan a review would seed from a repo's `.valet/security.yml` (or the
+ * preset fallback). A mutation, not a query: the `/security/new` page fires it
+ * once on mount with the repo + preset + paths from its search params. Creates
+ * nothing on the server.
+ */
+export function useSecurityPreview() {
+  return useMutation<SecurityPreviewResponse, Error, SecurityPreviewRequest>({
+    mutationFn: (body) => api.securityPreview(body),
+  });
 }
 
 /**

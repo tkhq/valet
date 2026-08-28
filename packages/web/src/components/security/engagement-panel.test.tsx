@@ -283,6 +283,44 @@ describe("SecuritySessionLayout", () => {
     expect(screen.queryByRole("button", { name: "Cancel review" })).toBeNull();
   });
 
+  it("renders the config + plan as a compact read-only summary, not an editor", async () => {
+    getSecurityMock.mockResolvedValue({
+      ...security,
+      engagement: {
+        ...security.engagement,
+        focus: "the multi-tenant data path",
+        invariants: ["every admin route sits behind requireAdmin"],
+        categories: ["authz"],
+      },
+      planCells: [
+        { ordinal: 1, persona: "code-review", name: "recon", goal: "Map the tree", reads: [], review: false },
+        {
+          ordinal: 2,
+          persona: "code-review",
+          name: "authz-sweep",
+          goal: "Sweep authz",
+          playbook: "authz",
+          reads: [1],
+          review: false,
+          triad: true,
+        },
+      ],
+    });
+    renderPanel();
+    const summary = await screen.findByTestId("review-summary");
+    // Focus + a category chip + the compact plan render read-only.
+    expect(summary.textContent).toContain("the multi-tenant data path");
+    expect(summary.textContent).toContain("Authorization");
+    expect(summary.textContent).toContain("recon");
+    expect(summary.textContent).toContain("authz-sweep");
+    // The plan shows the triad flag inline.
+    expect(summary.textContent).toContain("triad");
+    // No editable editor renders on the session page.
+    expect(screen.queryByTestId("config-form")).toBeNull();
+    expect(screen.queryByTestId("plan-steps-editor")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Save plan" })).toBeNull();
+  });
+
   it("renders the token + cost chip in the panel header", async () => {
     renderPanel();
     const chip = await screen.findByTestId("engagement-cost");

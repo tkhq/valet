@@ -11,7 +11,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import type {
-  CreateSessionRequest,
   GetReposResponse,
   GetSessionSecurityResponse,
   SessionSummary,
@@ -237,71 +236,54 @@ describe("SecurityIndexPage", () => {
     delete engagementsBySession.s_done;
   });
 
-  it("keeps Start disabled until a repo is picked", () => {
+  it("keeps Configure disabled until a repo is picked", () => {
     renderPage();
-    const start = screen.getByRole("button", { name: "Start review" }) as HTMLButtonElement;
-    expect(start.disabled).toBe(true);
+    const configure = screen.getByRole("button", { name: "Configure review" }) as HTMLButtonElement;
+    expect(configure.disabled).toBe(true);
 
     pickRepo();
-    expect(start.disabled).toBe(false);
+    expect(configure.disabled).toBe(false);
   });
 
-  it("starts a review with kind security, the repo binding, and the prompt, then navigates", async () => {
+  it("Configure navigates to /security/new with the repo, preset, and model", () => {
     renderPage();
     pickRepo();
-    fireEvent.change(screen.getByLabelText("Prompt (optional)"), {
-      target: { value: "focus on the token minting paths" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Start review" }));
+    fireEvent.click(screen.getByRole("button", { name: "Configure review" }));
 
-    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
-    const body = createMutateAsync.mock.calls[0]![0] as CreateSessionRequest;
-    expect(body.kind).toBe("security");
-    // Host working directory, not the in-sandbox `/workspace` mount — the
-    // api mkdir's this path, and `/workspace/<name>` fails on the host.
-    expect(body.workspace).toBe("/tmp/valet/workspace/site");
-    expect(body.repo).toEqual({
-      host: "github",
-      fullName: "acme/site",
+    // The hub no longer creates the session — it hands off to the setup page.
+    expect(createMutateAsync).not.toHaveBeenCalled();
+    expect(navigate).toHaveBeenCalledTimes(1);
+    const call = navigate.mock.calls[0][0] as { to: string; search: Record<string, unknown> };
+    expect(call.to).toBe("/security/new");
+    expect(call.search).toMatchObject({
+      repo: "acme/site",
       cloneUrl: "https://github.com/acme/site.git",
       ref: "main",
-      auth: "auto",
+      preset: "code-review",
+      model: "claude-sonnet-4-6",
     });
-    expect(body.initialPrompt).toBe("focus on the token minting paths");
-    // The hub always sends a model, defaulting to the capable security model.
-    expect(body.model).toBe("claude-sonnet-4-6");
-
-    await waitFor(() =>
-      expect(navigate).toHaveBeenCalledWith({
-        to: "/sessions/$sessionId",
-        params: { sessionId: "s_new" },
-      }),
-    );
   });
 
-  it("sends no initialPrompt when the prompt is blank", async () => {
+  it("passes the picked model and preset in the setup-page search", () => {
     renderPage();
     pickRepo();
-    fireEvent.click(screen.getByRole("button", { name: "Start review" }));
+    fireEvent.change(screen.getByLabelText("Model"), { target: { value: "claude-opus-4-7" } });
+    fireEvent.change(screen.getByLabelText("Preset"), { target: { value: "secrets-config" } });
+    fireEvent.click(screen.getByRole("button", { name: "Configure review" }));
 
-    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
-    const body = createMutateAsync.mock.calls[0]![0] as CreateSessionRequest;
-    expect(body.initialPrompt).toBeUndefined();
+    const call = navigate.mock.calls[0][0] as { search: Record<string, unknown> };
+    expect(call.search).toMatchObject({ model: "claude-opus-4-7", preset: "secrets-config" });
   });
 
-  it("defaults the model to claude-sonnet-4-6 and sends the picked model", async () => {
+  it("passes the paths scope as a comma-joined param and omits it when blank", () => {
     renderPage();
     pickRepo();
-
-    const select = screen.getByLabelText("Model") as HTMLSelectElement;
-    expect(select.value).toBe("claude-sonnet-4-6");
-
-    fireEvent.change(select, { target: { value: "claude-opus-4-7" } });
-    fireEvent.click(screen.getByRole("button", { name: "Start review" }));
-
-    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
-    const body = createMutateAsync.mock.calls[0]![0] as CreateSessionRequest;
-    expect(body.model).toBe("claude-opus-4-7");
+    fireEvent.change(screen.getByLabelText("Scope to paths (optional)"), {
+      target: { value: "packages/api, src/auth" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Configure review" }));
+    const call = navigate.mock.calls[0][0] as { search: Record<string, unknown> };
+    expect(call.search.paths).toBe("packages/api,src/auth");
   });
 
   it("offers the three sweep presets, defaulting to full code review", () => {
@@ -313,62 +295,23 @@ describe("SecurityIndexPage", () => {
     expect(select.value).toBe("code-review");
   });
 
-  it("sends the picked preset", async () => {
-    renderPage();
-    pickRepo();
-    fireEvent.change(screen.getByLabelText("Preset"), { target: { value: "secrets-config" } });
-    fireEvent.click(screen.getByRole("button", { name: "Start review" }));
-
-    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
-    const body = createMutateAsync.mock.calls[0]![0] as CreateSessionRequest;
-    expect(body.preset).toBe("secrets-config");
-  });
-
-  it("splits the paths input into globs and omits the field when blank", async () => {
-    renderPage();
-    pickRepo();
-    fireEvent.change(screen.getByLabelText("Scope to paths (optional)"), {
-      target: { value: "packages/api, src/auth" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Start review" }));
-
-    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
-    const body = createMutateAsync.mock.calls[0]![0] as CreateSessionRequest;
-    expect(body.paths).toEqual(["packages/api", "src/auth"]);
-  });
-
-  it("omits paths when the scope input is blank", async () => {
-    renderPage();
-    pickRepo();
-    fireEvent.click(screen.getByRole("button", { name: "Start review" }));
-
-    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
-    const body = createMutateAsync.mock.calls[0]![0] as CreateSessionRequest;
-    expect(body.paths).toBeUndefined();
-  });
-
-  it("starts a review against a pasted public repo with no ref (default branch)", async () => {
+  it("configures against a pasted public repo with no ref (default branch)", () => {
     renderPage();
     fireEvent.change(screen.getByLabelText("Public repository"), {
       target: { value: "https://github.com/openai/gpt-4" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Add" }));
 
-    // The repo is now selected; Start is enabled.
-    const start = screen.getByRole("button", { name: "Start review" }) as HTMLButtonElement;
-    expect(start.disabled).toBe(false);
-    fireEvent.click(start);
+    const configure = screen.getByRole("button", { name: "Configure review" }) as HTMLButtonElement;
+    expect(configure.disabled).toBe(false);
+    fireEvent.click(configure);
 
-    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
-    const body = createMutateAsync.mock.calls[0]![0] as CreateSessionRequest;
-    expect(body.repo).toEqual({
-      host: "github",
-      fullName: "openai/gpt-4",
+    const call = navigate.mock.calls[0][0] as { search: Record<string, unknown> };
+    expect(call.search).toMatchObject({
+      repo: "openai/gpt-4",
       cloneUrl: "https://github.com/openai/gpt-4.git",
-      auth: "auto",
     });
-    // No ref — the server resolves the default branch HEAD.
-    expect((body.repo as { ref?: string }).ref).toBeUndefined();
-    expect(body.workspace).toBe("/tmp/valet/workspace/gpt-4");
+    // No ref — the setup page and server resolve the default branch HEAD.
+    expect(call.search.ref).toBeUndefined();
   });
 });

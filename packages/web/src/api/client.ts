@@ -75,6 +75,8 @@ import type {
   SecurityFindingSeverity,
   SecurityFindingStatus,
   SecurityPlanCellInput,
+  SecurityPreviewRequest,
+  SecurityPreviewResponse,
   SecurityResolveNeedsResponse,
   SecurityReviewFindingResponse,
   SecuritySetConfigResponse,
@@ -551,6 +553,10 @@ export const api = {
       `/sessions/${encodeURIComponent(id)}/security/needs/resolve`,
       { answers },
     ),
+  /** POST /sessions/security/preview — the setup page's read-only preview of
+   * the config + plan a review would seed. Creates nothing. */
+  securityPreview: (body: SecurityPreviewRequest) =>
+    request<SecurityPreviewResponse>("POST", "/sessions/security/preview", body),
   createSession: (body: CreateSessionRequest) =>
     request<CreateSessionResponse>("POST", "/sessions", body),
   deleteSession: (id: string) =>

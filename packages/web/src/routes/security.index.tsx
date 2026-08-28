@@ -1,16 +1,12 @@
 import { useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import type {
-  CreateSessionRequest,
-  SecurityEngagementWire,
-  SessionSummary,
-} from "@valet/api/wire";
-import { useCreateSession } from "~/api/queries";
+import type { SecurityEngagementWire, SessionSummary } from "@valet/api/wire";
 import { useEngagement, useRescanReview, useSecurityReviews } from "~/api/security";
 import { useModels } from "~/api/settings";
 import { useRepos } from "~/api/repos";
 import { curatedForCatalogId, MODEL_CATALOG } from "~/lib/models";
-import { Badge, Button, Input, Label, Spinner, Textarea } from "~/components/primitives";
+import { Badge, Button, Input, Label, Spinner } from "~/components/primitives";
+import type { SecurityNewSearch } from "./security.new";
 import {
   RepoCombobox,
   parsePublicRepo,
@@ -24,10 +20,9 @@ import { useWorkspaceScope } from "~/lib/workspace-scope";
 /**
  * `/security` — the security review hub (valet-security design, §Web
  * Surfaces). Top: a "New review" card — repo picker (the same combobox the
- * new-session dialog uses), the sweep preset, an optional path scope, and an
- * optional focus prompt. Start POSTs `kind: "security"` with the repo binding,
- * the chosen preset, and any path globs; the server seeds the engagement plan
- * in the same transaction and this page navigates to the session. Below: past
+ * new-session dialog uses), the sweep preset, an optional path scope, and the
+ * model. Configure navigates to `/security/new`, where the user reviews the
+ * seeded config + plan, edits them, then starts the review. Below: past
  * engagements from `GET /api/sessions?kind=security`, each row badged with
  * its engagement status from `GET /api/sessions/:id/security`.
  */
@@ -108,7 +103,6 @@ function splitPaths(input: string): string[] {
 
 function NewReviewCard() {
   const navigate = useNavigate();
-  const create = useCreateSession();
   const reposQ = useRepos();
   // The nav's switcher answers "whose review is this" — same pass-through
   // the new-session dialog uses (`CreateScopeLine` states it).
@@ -116,7 +110,6 @@ function NewReviewCard() {
   const modelsQ = useModels();
   const [repo, setRepo] = useState<SelectedRepo | null>(null);
   const [pasteInput, setPasteInput] = useState("");
-  const [prompt, setPrompt] = useState("");
   // The hub always submits a model; sonnet-4-6 is the capable default. This is
   // a fixed default, not derived from a prop, so no mount-time-state sync is
   // needed — the value only changes when the user picks another model.
@@ -160,37 +153,21 @@ function NewReviewCard() {
     setPasteInput("");
   }
 
-  async function start() {
-    if (!repo || create.isPending) return;
-    const body: CreateSessionRequest = {
-      // Host working directory the api creates for the clone (docker
-      // bind-mount source in dev), NOT the in-sandbox `/workspace` mount —
-      // the hub has no editable path field, so it must send a real host path.
-      workspace: workspaceForRepo(repo.fullName),
-      kind: "security",
-      model,
-      preset,
-      repo: {
-        host: "github",
-        fullName: repo.fullName,
-        cloneUrl: repo.cloneUrl,
-        // Omit an empty ref (a pasted public repo) so the server resolves the
-        // repo's default branch HEAD at sec_start.
-        ...(repo.ref.trim() ? { ref: repo.ref.trim() } : {}),
-        auth: "auto",
-      },
-    };
-    if (scope.teamId !== undefined) body.teamId = scope.teamId;
+  function configure() {
+    if (!repo) return;
+    // Navigate to the setup page with the selection. The setup page fetches the
+    // preview, lets the user edit the config + plan, then creates the review.
     const paths = splitPaths(pathsInput);
-    if (paths.length > 0) body.paths = paths;
-    const focus = prompt.trim();
-    if (focus) body.initialPrompt = focus;
-    try {
-      const created = await create.mutateAsync(body);
-      void navigate({ to: "/sessions/$sessionId", params: { sessionId: created.id } });
-    } catch {
-      // useMutation surfaces the error in `create.error`; the card stays put.
-    }
+    const search: SecurityNewSearch = {
+      repo: repo.fullName,
+      cloneUrl: repo.cloneUrl,
+      preset,
+      model,
+      ...(repo.ref.trim() ? { ref: repo.ref.trim() } : {}),
+      ...(paths.length > 0 ? { paths: paths.join(",") } : {}),
+      ...(scope.teamId !== undefined ? { teamId: scope.teamId } : {}),
+    };
+    void navigate({ to: "/security/new", search });
   }
 
   return (
@@ -335,26 +312,9 @@ function NewReviewCard() {
         <p className="text-xs text-muted">The runner and its review personas use this model.</p>
       </div>
 
-      <div className="grid gap-1">
-        <Label htmlFor="review-prompt">Prompt (optional)</Label>
-        <Textarea
-          id="review-prompt"
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          placeholder="Focus areas, constraints…"
-          rows={3}
-        />
-      </div>
-
-      {create.error && (
-        <div className="rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-xs text-danger-600">
-          {create.error.message}
-        </div>
-      )}
-
       <div className="flex justify-end">
-        <Button onClick={() => void start()} disabled={repo === null || create.isPending}>
-          {create.isPending ? "Starting…" : "Start review"}
+        <Button onClick={configure} disabled={repo === null}>
+          Configure review
         </Button>
       </div>
     </section>
