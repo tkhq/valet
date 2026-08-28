@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { Bot, ChevronRight, MoreHorizontal, UserPlus, X } from "lucide-react";
-import type { OrgMemberWire, TeamSummary } from "@valet/api/wire";
+import type { OrgDirectoryUserWire, TeamSummary } from "@valet/api/wire";
 import {
   Avatar,
   AvatarFallback,
@@ -93,8 +93,8 @@ const DELETE_DORMANT_MIRROR_NOTE =
  * existing `/api/teams` router. List with inline create, per-team expand
  * revealing the member roster + add/remove/role-toggle, and delete-via-
  * confirm. All member display data (name/email/avatar) is cross-referenced
- * against `useOrgMembers()` since `TeamMemberSummary` on the wire is only
- * `{userId, role}`.
+ * against the org directory (`useOrgDirectory()`, member-visible) since
+ * `TeamMemberSummary` on the wire is only `{userId, role}`.
  *
  * A team with `origin === "idp"` mirrors an identity-provider group, and the
  * API refuses every mutation on it. This panel therefore renders none of
@@ -117,7 +117,7 @@ const DELETE_DORMANT_MIRROR_NOTE =
  * `CONFIG_MANAGED_NOTE` states the half a reader cannot see — that a restart
  * puts the declared members back.
  */
-export function TeamsPanel({ orgMembers }: { orgMembers: OrgMemberWire[] }) {
+export function TeamsPanel({ orgMembers }: { orgMembers: OrgDirectoryUserWire[] }) {
   const teamsQ = useTeams();
   const meQ = useMe();
   const orgQ = useOrg();
@@ -220,7 +220,7 @@ function TeamRow({
   onToggle,
 }: {
   team: TeamSummary;
-  orgMembers: OrgMemberWire[];
+  orgMembers: OrgDirectoryUserWire[];
   canMutate: boolean;
   mirroring: boolean;
   open: boolean;
@@ -362,7 +362,7 @@ function TeamMembers({
   mirroring,
 }: {
   team: TeamSummary;
-  orgMembers: OrgMemberWire[];
+  orgMembers: OrgDirectoryUserWire[];
   canMutate: boolean;
   mirroring: boolean;
 }) {
@@ -506,7 +506,7 @@ function AddMemberPicker({
   onAdd,
 }: {
   teamName: string;
-  addable: OrgMemberWire[];
+  addable: OrgDirectoryUserWire[];
   pending: boolean;
   onAdd: (userId: string) => void;
 }) {
@@ -522,7 +522,7 @@ function AddMemberPicker({
     if (!needle) return filtered;
     // Prefix matches outrank substring matches: typing "dana" must put
     // "Dana A" above "adana@…", or Enter adds the wrong person.
-    const rank = (m: OrgMemberWire) =>
+    const rank = (m: OrgDirectoryUserWire) =>
       m.name.toLowerCase().startsWith(needle) || m.email.toLowerCase().startsWith(needle) ? 0 : 1;
     return filtered.sort((a, b) => rank(a) - rank(b));
   }, [addable, query]);

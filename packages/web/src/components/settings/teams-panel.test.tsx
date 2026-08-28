@@ -8,7 +8,7 @@
 import type { ReactNode } from "react";
 import { describe, expect, it, vi, afterEach, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
-import type { OrgMemberWire } from "@valet/api/wire";
+import type { OrgDirectoryUserWire } from "@valet/api/wire";
 
 /** Renders a real anchor so `getByRole("link")` and href assertions work
  * without mounting a router. */
@@ -119,15 +119,15 @@ vi.mock("~/api/settings", () => ({
 
 import { TeamsPanel } from "./teams-panel";
 
-const orgMembers: OrgMemberWire[] = [
-  { userId: "u1", name: "One", email: "one@dev", role: "member", avatarUrl: null, joinedAt: 1 },
-  { userId: "u2", name: "Two", email: "two@dev", role: "member", avatarUrl: null, joinedAt: 1 },
-  { userId: "u3", name: "Three", email: "three@dev", role: "member", avatarUrl: null, joinedAt: 1 },
-  { userId: "u4", name: "Four", email: "four@dev", role: "member", avatarUrl: null, joinedAt: 1 },
+const orgMembers: OrgDirectoryUserWire[] = [
+  { userId: "u1", name: "One", email: "one@dev", avatarUrl: null },
+  { userId: "u2", name: "Two", email: "two@dev", avatarUrl: null },
+  { userId: "u3", name: "Three", email: "three@dev", avatarUrl: null },
+  { userId: "u4", name: "Four", email: "four@dev", avatarUrl: null },
   // u6 sits BEFORE u5 so the prefix-ranking test proves ordering: "ada" is a
   // mid-string match for Zed Prada and a prefix match for Ada Lovelace.
-  { userId: "u6", name: "Zed Prada", email: "zprada@dev", role: "member", avatarUrl: null, joinedAt: 1 },
-  { userId: "u5", name: "Ada Lovelace", email: "ada@dev", role: "member", avatarUrl: null, joinedAt: 1 },
+  { userId: "u6", name: "Zed Prada", email: "zprada@dev", avatarUrl: null },
+  { userId: "u5", name: "Ada Lovelace", email: "ada@dev", avatarUrl: null },
 ];
 
 function openTeam() {
@@ -303,13 +303,11 @@ describe("TeamsPanel — add-member picker", () => {
   });
 
   it("caps the rendered rows and says how many are hidden", () => {
-    const many: OrgMemberWire[] = Array.from({ length: 60 }, (_, i) => ({
+    const many: OrgDirectoryUserWire[] = Array.from({ length: 60 }, (_, i) => ({
       userId: `x${i}`,
       name: `User ${String(i).padStart(2, "0")}`,
       email: `x${i}@dev`,
-      role: "member",
       avatarUrl: null,
-      joinedAt: 1,
     }));
     render(<TeamsPanel orgMembers={[...orgMembers.slice(0, 2), ...many]} />);
     fireEvent.click(screen.getByRole("button", { name: "Expand Platform" }));

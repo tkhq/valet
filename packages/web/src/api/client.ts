@@ -116,6 +116,7 @@ import type {
   InstallWorkflowTemplateRequest,
   InstallWorkflowTemplateResponse,
   MeResponse,
+  OrgDirectoryResponse,
   OrgMembersResponse,
   OrgResponse,
   PatchLlmProviderRequest,
@@ -810,6 +811,7 @@ export const api = {
     request<{ date: string; summary: string | null }>("GET", "/memory/journal-summary"),
   getOrg: () => request<OrgResponse>("GET", "/org"),
   patchOrg: (body: PatchOrgRequest) => request<PatchOrgResponse>("PATCH", "/org", body),
+  getOrgDirectory: () => request<OrgDirectoryResponse>("GET", "/org/directory"),
   getOrgMembers: () => request<OrgMembersResponse>("GET", "/org/members"),
   patchOrgMember: (userId: string, body: PatchOrgMemberRequest) =>
     request<PatchOrgMemberResponse>(

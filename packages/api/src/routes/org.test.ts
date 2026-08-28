@@ -4,13 +4,16 @@
  *   - GET /api/org: any org member.
  *   - PATCH /api/org: org admin only. Always reachable regardless of the
  *     `organizations` feature gate — it's the gate's own toggle.
+ *   - GET /api/org/directory: any org member, gate on; display identity
+ *     only (no role, no joinedAt).
  *   - GET/PATCH /api/org/members/*: org admin AND the gate must be on;
  *     off => 404 `{error:"organizations not enabled"}` even for admins.
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { users } from "../schema/index.js";
 import { LAST_ADMIN_ERROR, SSO_TEAM_GROUP_SHAPE_ERROR } from "../services/org.js";
-import type { OrgMembersResponse, OrgResponse } from "../wire/types.js";
+import type { OrgDirectoryResponse, OrgMembersResponse, OrgResponse } from "../wire/types.js";
 
 const HEADERS = { "Content-Type": "application/json" };
 const MEMBER_HEADERS = { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" };
@@ -194,6 +197,76 @@ describe("PATCH /api/org", () => {
         headers: HEADERS,
         body: JSON.stringify({ name: "x" }),
       });
+      expect(res.status).toBe(401);
+    } finally {
+      process.env.VALET_LOCAL_AUTH = prev;
+    }
+  });
+});
+
+describe("GET /api/org/directory", () => {
+  it("404s with gate off", async () => {
+    api = await bootTestApi();
+
+    const res = await fetch(`${api.baseUrl}/api/org/directory`, { headers: MEMBER_HEADERS });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("organizations not enabled");
+  });
+
+  it("returns display identity to a non-admin member, gate on — no role, no joinedAt", async () => {
+    api = await bootTestApi();
+    await enableGate(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/org/directory`, { headers: MEMBER_HEADERS });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as OrgDirectoryResponse;
+    const ids = body.users.map((u) => u.userId);
+    expect(ids).toContain("local-user");
+    expect(ids).toContain("test-member");
+    const localUser = body.users.find((u) => u.userId === "local-user");
+    expect(localUser).toMatchObject({ email: "local@dev" });
+    // The directory must not leak the admin-only roster fields.
+    expect(localUser).not.toHaveProperty("role");
+    expect(localUser).not.toHaveProperty("joinedAt");
+  });
+
+  it("returns the same rows to an admin", async () => {
+    api = await bootTestApi();
+    await enableGate(api.baseUrl);
+
+    const res = await fetch(`${api.baseUrl}/api/org/directory`, { headers: HEADERS });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as OrgDirectoryResponse;
+    expect(body.users.map((u) => u.userId)).toContain("test-admin");
+  });
+
+  it("403s for an authenticated user with no org_members row", async () => {
+    // `AuthUser.orgId` resolves for every session without requiring a
+    // membership row, so the route's own check is what stops a removed or
+    // never-admitted user from enumerating member emails.
+    api = await bootTestApi();
+    await enableGate(api.baseUrl);
+    await api.providers.db
+      .insert(users)
+      .values({ id: "test-outsider", email: "outsider@dev", name: "Outsider", role: "member" })
+      .onConflictDoNothing();
+
+    const res = await fetch(`${api.baseUrl}/api/org/directory`, {
+      headers: { "Content-Type": "application/json", "x-valet-test-user-id": "test-outsider" },
+    });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("org membership required");
+  });
+
+  it("401s without auth configured", async () => {
+    api = await bootTestApi();
+    await enableGate(api.baseUrl);
+    const prev = process.env.VALET_LOCAL_AUTH;
+    process.env.VALET_LOCAL_AUTH = "0";
+    try {
+      const res = await fetch(`${api.baseUrl}/api/org/directory`);
       expect(res.status).toBe(401);
     } finally {
       process.env.VALET_LOCAL_AUTH = prev;

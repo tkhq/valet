@@ -28,6 +28,7 @@ import type {
   ListTeamsResponse,
   MeResponse,
   OpenrouterRegistryResponse,
+  OrgDirectoryResponse,
   OrgMembersResponse,
   OrgResponse,
   OrgSettingsResponse,
@@ -61,6 +62,7 @@ export const qkSettings = {
   me: () => ["settings", "me"] as const,
   org: () => ["settings", "org"] as const,
   orgMembers: () => ["settings", "org", "members"] as const,
+  orgDirectory: () => ["settings", "org", "directory"] as const,
   models: () => ["settings", "models"] as const,
   llmProviders: () => ["settings", "llmProviders"] as const,
   openrouterRegistry: () => ["settings", "openrouterRegistry"] as const,
@@ -101,6 +103,21 @@ export function useOrgMembers(opts?: UseQueryOptions<OrgMembersResponse>) {
   return useQuery<OrgMembersResponse>({
     queryKey: qkSettings.orgMembers(),
     queryFn: () => api.getOrgMembers(),
+    ...opts,
+  });
+}
+
+/** Member-visible display identity of every org member — what the teams
+ * page uses for roster names and the add-member picker. Reachable by any
+ * org member, unlike `useOrgMembers()` (org-admin roster). */
+export function useOrgDirectory(opts?: UseQueryOptions<OrgDirectoryResponse>) {
+  return useQuery<OrgDirectoryResponse>({
+    queryKey: qkSettings.orgDirectory(),
+    queryFn: () => api.getOrgDirectory(),
+    // Same reasoning as `useOrg` above: membership changes rarely, nothing
+    // here depends on it being fresh, and the app default (5s) would refetch
+    // the whole directory on every remount of the Teams page.
+    staleTime: 60_000,
     ...opts,
   });
 }

@@ -93,6 +93,19 @@ let orgMembersData: {
   ],
 };
 
+// The member-visible directory the Teams page reads (`useOrgDirectory`),
+// mirroring the roster fixture above minus the admin-only fields.
+let orgDirectoryData: {
+  users: Array<{ userId: string; email: string; name: string; avatarUrl: string | null }>;
+} = {
+  users: [
+    { userId: "u1", email: "ada@x.test", name: "Ada", avatarUrl: null },
+    { userId: "u2", email: "grace@x.test", name: "Grace", avatarUrl: null },
+  ],
+};
+
+let meData: { orgRole: "admin" | "member" } = { orgRole: "admin" };
+
 // Typed as the real wire shape, not a local literal: a field added to
 // `TeamSummary` then breaks this fixture at compile time instead of letting
 // the panel render against a shape the API no longer sends.
@@ -167,9 +180,10 @@ vi.mock("~/api/settings", async (importOriginal) => {
     }),
     usePatchOrgSettings: () => ({ mutate: patchOrgSettingsMutate, isPending: false, error: null }),
     useOrgMembers: () => ({ data: orgMembersData, isLoading: false, error: null }),
+    useOrgDirectory: () => ({ data: orgDirectoryData, isLoading: false, error: null }),
     useSetOrgMemberRole: () => ({ mutate: setOrgMemberRoleMutate, isPending: false, error: null }),
     useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
-    useMe: () => ({ data: { orgRole: "admin" }, isLoading: false, error: null }),
+    useMe: () => ({ data: meData, isLoading: false, error: null }),
     useTeamMembers: () => ({ data: teamMembersData, isLoading: false, error: null }),
     useCreateTeam: () => ({ mutate: createTeamMutate, isPending: false, error: null }),
     useDeleteTeam: () => ({ mutate: deleteTeamMutate, isPending: false, error: null }),
@@ -272,6 +286,13 @@ beforeEach(() => {
     ],
   };
   teamMembersData = { members: [{ userId: "u1", role: "admin" }] };
+  orgDirectoryData = {
+    users: [
+      { userId: "u1", email: "ada@x.test", name: "Ada", avatarUrl: null },
+      { userId: "u2", email: "grace@x.test", name: "Grace", avatarUrl: null },
+    ],
+  };
+  meData = { orgRole: "admin" };
   invitesData = { invites: [] };
   orgSourcesData = { sources: [] };
 });
@@ -494,6 +515,47 @@ describe("OrganizationTeamsPage", () => {
     expect(deleteTeamMutate).toHaveBeenCalledWith("team_1", expect.objectContaining({
       onSuccess: expect.any(Function),
     }));
+  });
+
+  describe("as a plain org member", () => {
+    beforeEach(() => {
+      orgData = { ...orgData, callerRole: "member" };
+      meData = { orgRole: "member" };
+    });
+
+    it("still offers Create — any member can create a team", () => {
+      render(<OrganizationTeamsPage />);
+      fireEvent.change(screen.getByLabelText("New team name"), { target: { value: "Design" } });
+      fireEvent.click(screen.getByRole("button", { name: "Create" }));
+      expect(createTeamMutate).toHaveBeenCalledWith(
+        { name: "Design" },
+        expect.objectContaining({ onSuccess: expect.any(Function), onError: expect.any(Function) }),
+      );
+    });
+
+    it("keeps the admin controls on a team the caller administers", async () => {
+      // `callerRole: "admin"` on the team, not the org — the creator's role.
+      const user = userEvent.setup();
+      render(<OrganizationTeamsPage />);
+      expect(screen.getByRole("button", { name: "Platform actions" })).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Expand Platform" }));
+      await user.click(screen.getByRole("button", { name: "Add member" }));
+      await user.click(await screen.findByText("Grace"));
+      expect(addTeamMemberMutate).toHaveBeenCalledWith({
+        teamId: "team_1",
+        body: { userId: "u2", role: "member" },
+      });
+    });
+
+    it("offers no mutation controls on a team where the caller is only a member", () => {
+      teamsData = {
+        teams: [{ ...teamsData.teams[0], callerRole: "member" }],
+      };
+      render(<OrganizationTeamsPage />);
+      expect(screen.queryByRole("button", { name: "Platform actions" })).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Expand Platform" }));
+      expect(screen.queryByRole("button", { name: "Add member" })).toBeNull();
+    });
   });
 
   describe("identity-provider-managed teams", () => {

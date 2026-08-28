@@ -38,6 +38,10 @@ export interface OrgMemberSummary {
   joinedAt: number;
 }
 
+/** The member-visible slice of a roster row: display identity, no org role,
+ * no join date. `Pick` keeps the subset relationship compiler-checked. */
+export type OrgDirectoryUser = Pick<OrgMemberSummary, "userId" | "email" | "name" | "avatarUrl">;
+
 export type SetOrgMemberRoleResult =
   | { ok: true }
   | { ok: false; reason: "not_found" | "last_admin"; error: string };
@@ -330,6 +334,18 @@ export async function listOrgMembers(db: AppDb, orgId: string): Promise<OrgMembe
     // collapse to a ms-epoch number here.
     joinedAt: r.memberCreatedAt ?? r.userCreatedAt.getTime(),
   }));
+}
+
+/**
+ * Lists every member of `orgId` as a directory row. This backs the
+ * member-visible `GET /api/org/directory`, so it deliberately returns no
+ * org role and no join date — those stay on the admin-only roster. Derived
+ * from `listOrgMembers` so the two lists can never disagree on join,
+ * filter, or order.
+ */
+export async function listOrgDirectory(db: AppDb, orgId: string): Promise<OrgDirectoryUser[]> {
+  const members = await listOrgMembers(db, orgId);
+  return members.map(({ userId, email, name, avatarUrl }) => ({ userId, email, name, avatarUrl }));
 }
 
 async function countOrgAdmins(db: AppQueryable, orgId: string): Promise<number> {
