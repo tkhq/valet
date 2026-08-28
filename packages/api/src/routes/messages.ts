@@ -14,7 +14,7 @@
 import { Hono, type Context } from "hono";
 import { eq, inArray } from "drizzle-orm";
 import { dispatchCommand, NotFoundError, ValidationError } from "@valet/engine";
-import type { SessionEntry, Session as EngineSession } from "@valet/engine";
+import type { PromptAuthor, SessionEntry, Session as EngineSession } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { agentSessions, sessionThreads } from "../schema/index.js";
 import { makeCommandContext } from "../engine/command-providers.js";
@@ -28,6 +28,7 @@ import type {
   ListThreadsResponse,
   Message,
   MessagePart,
+  MessageAuthor,
   MessageRole,
   MessageSkillInvocation,
   PatchThreadRequest,
@@ -86,6 +87,7 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
   // `data:` URL string. Skip entries missing both (nothing to render).
   const wireAttachments = projectAttachments(e.attachments);
   const skill = skillInvocationFromMetadata(e.metadata, role);
+  const author = authorFromEntry(e.author, role);
   return {
     id: e.id,
     sessionId,
@@ -98,7 +100,26 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
     signal: engineSignalToWire(e.signal),
     model: e.model,
     ...(skill ? { skill } : {}),
+    ...(author ? { author } : {}),
     ...(wireAttachments.length > 0 ? { attachments: wireAttachments } : {}),
+  };
+}
+
+/**
+ * Wire projection of the engine's `PromptAuthor`. Only user entries carry a
+ * human sender; `externalId` is a channel-plugin detail and stays off the
+ * wire.
+ */
+function authorFromEntry(
+  author: PromptAuthor | undefined,
+  role: MessageRole,
+): MessageAuthor | undefined {
+  if (role !== "user" || !author) return undefined;
+  return {
+    id: author.id,
+    ...(author.name ? { name: author.name } : {}),
+    ...(author.email ? { email: author.email } : {}),
+    ...(author.avatarUrl ? { avatarUrl: author.avatarUrl } : {}),
   };
 }
 
@@ -448,11 +469,18 @@ export async function submitSessionPrompt(
   providers: Pick<Providers, "db" | "engineHost">,
   row: typeof agentSessions.$inferSelect,
   text: string,
-  threadId?: string,
-  attachments?: SendPromptRequest["attachments"],
-  fileRefs?: SendPromptRequest["fileRefs"],
-  admission?: { queueMode?: "followup" | "steer"; promoteItemId?: string },
+  opts?: {
+    threadId?: string;
+    attachments?: SendPromptRequest["attachments"];
+    fileRefs?: SendPromptRequest["fileRefs"];
+    queueMode?: "followup" | "steer";
+    promoteItemId?: string;
+    /** The authenticated sender, persisted on the user entry as `MessageEntry.author`. */
+    author?: PromptAuthor;
+  },
 ): Promise<SendPromptResponse | null> {
+  const { threadId, attachments, fileRefs, author } = opts ?? {};
+  const admission = { queueMode: opts?.queueMode, promoteItemId: opts?.promoteItemId };
   const { db, engineHost } = providers;
   const engineSession = await engineHost.sessionFor(row.id, await loadSessionMeta(db, row));
   // A prompt is USE: a hibernated row flips back to active here even when
@@ -464,7 +492,7 @@ export async function submitSessionPrompt(
   const thread = resolveThread(engineSession, threadId);
   if (!thread) return null;
 
-  if (admission?.promoteItemId) {
+  if (admission.promoteItemId) {
     const receipt = await thread.promoteQueuedItem(admission.promoteItemId);
     await db
       .update(agentSessions)
@@ -565,11 +593,13 @@ export async function submitSessionPrompt(
       outcome && outcome.kind === "execute"
         ? await engineSession.prompt(withAttachments(promptText), {
             threadId: thread.id,
-            ...(admission?.queueMode ? { queueMode: admission.queueMode } : {}),
+            ...(admission.queueMode ? { queueMode: admission.queueMode } : {}),
+            ...(author ? { author } : {}),
           })
         : await thread.submitPrompt(withAttachments(promptText), {
-            ...(admission?.queueMode ? { queueMode: admission.queueMode } : {}),
+            ...(admission.queueMode ? { queueMode: admission.queueMode } : {}),
             ...(skillMetadata ? { metadata: skillMetadata } : {}),
+            ...(author ? { author } : {}),
           });
   } catch (err) {
     attachmentRefStore.restore(resolvedFileAttachments);
@@ -637,18 +667,19 @@ messagesRouter.post("/:id/messages", async (c) => {
   }
 
   try {
-    const resp = await submitSessionPrompt(
-      c.var.providers,
-      row,
-      body.text ?? "",
-      body.threadId,
-      body.attachments,
-      body.fileRefs,
-      {
-        ...(body.queueMode ? { queueMode: body.queueMode } : {}),
-        ...(promoteItemId ? { promoteItemId } : {}),
-      },
-    );
+    // Stamp the sender on the submission. The engine persists it on the
+    // user entry (`MessageEntry.author`); on team-owned sessions several
+    // members share one thread, and both the UI and the model need to tell
+    // their messages apart.
+    const { id, email, name } = c.var.user;
+    const resp = await submitSessionPrompt(c.var.providers, row, body.text ?? "", {
+      threadId: body.threadId,
+      attachments: body.attachments,
+      fileRefs: body.fileRefs,
+      ...(body.queueMode ? { queueMode: body.queueMode } : {}),
+      ...(promoteItemId ? { promoteItemId } : {}),
+      author: { id, email, ...(name ? { name } : {}) },
+    });
     if (!resp) return c.json({ error: "thread not found" }, 404);
     return c.json(resp, 202);
   } catch (err) {

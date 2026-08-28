@@ -1,13 +1,19 @@
 /**
  * Pure-logic tests for `message-item` helpers: `isEmptyAssistantMessage`
- * (the predicate behind the "(no response)" placeholder) and
+ * (the predicate behind the "(no response)" placeholder),
  * `messageCopyText` (the clipboard payload behind the per-message copy
- * button).
+ * button), and `senderLabel`/`senderInitials` (user-message attribution on
+ * shared sessions).
  */
 import { describe, expect, it } from "vitest";
 import { buildSkillBlock } from "@valet/shared";
 import type { StreamMessage } from "~/stores/stream";
-import { isEmptyAssistantMessage, messageCopyText } from "./message-item";
+import {
+  isEmptyAssistantMessage,
+  messageCopyText,
+  senderInitials,
+  senderLabel,
+} from "./message-item";
 
 function msg(over: Partial<StreamMessage>): StreamMessage {
   return {
@@ -92,5 +98,36 @@ describe("messageCopyText", () => {
   it("never rewrites assistant text, even when it looks like a skill block", () => {
     const echoed = buildSkillBlock("review", "body");
     expect(messageCopyText(msg({ role: "assistant", content: echoed }))).toBe(echoed);
+  });
+});
+
+describe("senderLabel", () => {
+  it("shows 'You' for the viewer's own messages", () => {
+    expect(senderLabel({ id: "u1", name: "Alice" }, "u1")).toBe("You");
+  });
+
+  it("shows a teammate's name, falling back to email", () => {
+    expect(senderLabel({ id: "u2", name: "Bob" }, "u1")).toBe("Bob");
+    expect(senderLabel({ id: "u2", email: "bob@example.com" }, "u1")).toBe("bob@example.com");
+    expect(senderLabel({ id: "u2" }, "u1")).toBe("Teammate");
+  });
+
+  it("shows 'You' for authorless messages (optimistic rows, personal sessions, pre-stamp entries)", () => {
+    expect(senderLabel(undefined, "u1")).toBe("You");
+  });
+
+  it("shows the sender by name while the viewer identity is still loading", () => {
+    expect(senderLabel({ id: "u2", name: "Bob" }, undefined)).toBe("Bob");
+  });
+});
+
+describe("senderInitials", () => {
+  it("takes up to two initials from a name", () => {
+    expect(senderInitials("Bob Smith")).toBe("BS");
+    expect(senderInitials("Alice")).toBe("A");
+  });
+
+  it("splits emails on @ and dots", () => {
+    expect(senderInitials("bob.smith@example.com")).toBe("BS");
   });
 });

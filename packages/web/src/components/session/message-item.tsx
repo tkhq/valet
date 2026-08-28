@@ -21,6 +21,7 @@ export function MessageItem({
   message,
   suppressEmptyPlaceholder = false,
   queued = false,
+  viewerId,
 }: {
   message: StreamMessage;
   /** True for the last message while the agent is mid-turn — an empty
@@ -28,9 +29,12 @@ export function MessageItem({
   suppressEmptyPlaceholder?: boolean;
   /** True while this user message is still waiting in the queue. */
   queued?: boolean;
+  /** The signed-in user's id — see `MessageList`'s prop doc. */
+  viewerId?: string;
 }) {
   const isUser = message.role === "user";
   const copyText = messageCopyText(message);
+  const sender = isUser ? senderLabel(message.author, viewerId) : undefined;
   return (
     <article className={cn("group px-4 py-3", isUser && "bg-neutral-100/50 dark:bg-neutral-900/40")}>
       {/* Row background spans full width; the content column is capped at a
@@ -38,13 +42,21 @@ export function MessageItem({
       <div className="mx-auto flex w-full max-w-4xl gap-3">
         <Avatar size="sm">
           <AvatarFallback>
-            {isUser ? <UserIcon className="h-3.5 w-3.5" /> : <Bot className="h-3.5 w-3.5" />}
+            {isUser ? (
+              sender && sender !== "You" ? (
+                senderInitials(sender)
+              ) : (
+                <UserIcon className="h-3.5 w-3.5" />
+              )
+            ) : (
+              <Bot className="h-3.5 w-3.5" />
+            )}
           </AvatarFallback>
         </Avatar>
         <div className="flex-1 min-w-0 space-y-2">
           <div className="text-xs text-muted flex items-center gap-2">
             <span className="font-medium text-[--fg]/80">
-              {isUser ? "You" : message.role === "assistant" ? "Assistant" : message.role}
+              {isUser ? sender : message.role === "assistant" ? "Assistant" : message.role}
             </span>
             <span>•</span>
             <span>{formatTime(message.createdAt)}</span>
@@ -142,6 +154,27 @@ export function messageCopyText(message: StreamMessage): string {
     if (block) return `/skill:${block.name}${block.rest ? ` ${block.rest}` : ""}`;
   }
   return raw;
+}
+
+/**
+ * The header label for a user message. A teammate's message on a shared
+ * (team-owned) session shows the sender's name; the viewer's own messages —
+ * and messages with no author (personal sessions, optimistic rows, entries
+ * from before authors were stamped) — show "You". Exported for tests.
+ */
+export function senderLabel(
+  author: StreamMessage["author"],
+  viewerId: string | undefined,
+): string {
+  if (!author || author.id === viewerId) return "You";
+  return author.name ?? author.email ?? "Teammate";
+}
+
+/** Up to two initials for the avatar of a named (non-viewer) sender. */
+export function senderInitials(label: string): string {
+  const words = label.split(/[\s@._-]+/).filter(Boolean);
+  const initials = words.slice(0, 2).map((w) => w.charAt(0).toUpperCase());
+  return initials.join("") || "?";
 }
 
 function PartView({

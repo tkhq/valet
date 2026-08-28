@@ -29,6 +29,7 @@ export function MessageList({
   onOpenChild,
   agentBusy = false,
   pendingIds,
+  viewerId,
 }: {
   messages: StreamMessage[];
   threadId?: string;
@@ -46,6 +47,13 @@ export function MessageList({
   agentBusy?: boolean;
   /** Engine queue item ids still waiting. Marks those user bubbles Queued. */
   pendingIds?: string[];
+  /**
+   * The signed-in user's id. A user message from someone else (a teammate
+   * on a shared session) renders under the sender's name; the viewer's own
+   * messages keep "You". Undefined while `/me` loads — senders then show
+   * by name, which is accurate, just not "You"-ified.
+   */
+  viewerId?: string;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -125,6 +133,7 @@ export function MessageList({
               message={m}
               suppressEmptyPlaceholder={agentBusy && i === visible.length - 1}
               queued={!!m.queueItemId && (pendingIds?.includes(m.queueItemId) ?? false)}
+              viewerId={viewerId}
             />
           ),
         )}
