@@ -109,7 +109,7 @@ describe("TopNav", () => {
     expect(labels.indexOf("Skills")).toBeLessThan(labels.indexOf("Integrations"));
   });
 
-  // The six labelled links do not fit beside the logo and the icons on a
+  // The labelled links do not fit beside the logo and the icons on a
   // phone. They live in one scrollable landmark so the row can slide
   // sideways instead of pushing the settings icon off-screen; jsdom has no
   // layout, so this guards the STRUCTURE that makes the CSS fix possible.
@@ -125,11 +125,21 @@ describe("TopNav", () => {
       "Memory",
       "Sessions",
       "Workflows",
+      "Security",
       "Events",
       "Usage",
       "Skills",
       "Integrations",
     ]);
+  });
+
+  it("renders a Security link beside Workflows", async () => {
+    renderNav();
+    const link = await screen.findByRole("link", { name: "Security" });
+    expect(link.getAttribute("href")).toBe("/security");
+
+    const labels = screen.getAllByRole("link").map((el) => el.textContent);
+    expect(labels.indexOf("Security")).toBe(labels.indexOf("Workflows") + 1);
   });
 
   // The logo and the two icons sit OUTSIDE that scroller, so they stay put

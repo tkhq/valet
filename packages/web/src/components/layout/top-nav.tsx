@@ -196,7 +196,7 @@ export function TopNav() {
       )}
 
       {/*
-       * Six labelled links do not fit beside the logo and the icons on a
+       * The labelled links do not fit beside the logo and the icons on a
        * phone. The row scrolls sideways instead of overflowing the header,
        * so every destination stays reachable at any width. `min-w-0` is
        * what lets it shrink at all — a flex child defaults to `min-width:
@@ -212,6 +212,7 @@ export function TopNav() {
         <NavLink to="/memory">Memory</NavLink>
         <NavLink to="/sessions">Sessions</NavLink>
         <NavLink to="/workflows">Workflows</NavLink>
+        <NavLink to="/security">Security</NavLink>
         <NavLink to="/events">Events</NavLink>
         <NavLink to="/usage">Usage</NavLink>
         <NavLink to="/skills">Skills</NavLink>

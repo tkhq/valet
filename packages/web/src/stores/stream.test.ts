@@ -1020,6 +1020,7 @@ describe("per-thread status scoping", () => {
         id: SESSION,
         workspace: "/workspace",
         status: "active",
+        kind: "code",
         runState: "idle",
         createdAt: 0,
         updatedAt: 0,

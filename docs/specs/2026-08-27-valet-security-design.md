@@ -477,7 +477,7 @@ Web-level tests beside the panel components; API-level tests for the routes.
 5. **State doc writes are validated at write time** (YAML parse + protocol version). The note defers all validation to trust; a parse check at the write boundary is nearly free and converts threat #1 from "state becomes unreadable" to a tool error the persona fixes immediately. Field-level schema validation remains excluded, as in the note.
 6. **The plan gains a human gate.** `sec_start` puts an approval in front of the spawn plan — Valet's cost and audit posture, absent from the note's CLI framing.
 
-## Deviations from this spec (implementation, M4–M6)
+## Deviations from this spec (implementation, M4–M7)
 
 1. **`sec_dispatch` stamps `child_session_id` BEFORE the spawn**, not after. The Tools section's "in one transaction: spawns ..., stamps ..." ordering is impossible in practice: the host builds the child's engine session inside the spawn, and that build resolves the cell claim to attach the persona tool set and role — the claim must already exist. The claim UPDATE (status `running`, `attempts` + 1, pre-minted `child_session_id`, `dispatched_at`) runs first; a spawn failure restores the row's prior values.
 2. **The write claim expires with the attempt.** The persona routes resolve the claim only while the cell is `running`. A settled cell's child gets the corrective 403 ("This session is not a dispatched persona cell."); a yielded cell's replacement child holds the next claim.
@@ -488,6 +488,7 @@ Web-level tests beside the panel components; API-level tests for the routes.
 7. **SARIF ships as `application/sarif+json`,** the media type the SARIF tooling ecosystem and GitHub code scanning use, with a `.sarif` filename extension. Markdown ships as `text/markdown`, JSON as `application/json`; all three set a `Content-Disposition` attachment named `valet-security-<engagementId>.<ext>`.
 8. **Triage authz answers 403 only to viewers.** A caller who cannot view the session keeps the existence-hiding 404. A viewer without the admin right gets the named 403 ("Only a session admin can verify or refute findings (canAdministerSession)…"). All four triage routes refuse a valid internal token with 403 before any lookup (Decision 10 — the runner must not review, export, or file).
 9. **The digest is deliberately not idempotent.** It writes no `security_finding_links` rows (it is not per-finding linkage), so a repeated digest call files a new issue. The per-finding route stays idempotent through the unique index.
+10. **The hub list shows engagement status, not finding counts.** `GET /api/sessions?kind=security` returns session summaries, and `GET /api/sessions/:id/security` (the hub's per-row read) returns the engagement and cells; the per-severity counts live only on `GET /api/sessions/:id/security/status`, which also performs a child-status read per call. Rather than widen the list API or make the hub pay that read per row, counts stay on M8's engagement panel. There is also no preset field on `POST /api/sessions` — the server always seeds the `code-review` preset — so the hub's preset picker is a single disabled option.
 
 ## Revisions from the Adversarial Review (2026-08-27)
 

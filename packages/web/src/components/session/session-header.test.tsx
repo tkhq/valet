@@ -78,6 +78,7 @@ function baseSession(): SessionDetail {
     id: "sess-1",
     workspace: "acme/repo",
     status: "active",
+    kind: "code",
     runState: "idle",
     owner: { type: "user", id: "u1" },
     title: "Fix the bug",

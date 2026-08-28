@@ -7,6 +7,7 @@ const session: SessionDetail = {
   title: "Debug demo",
   workspace: "my-repo",
   status: "active",
+  kind: "code",
   runState: "idle",
   owner: { type: "user", id: "u1" },
   createdAt: 1_700_000_000_000,

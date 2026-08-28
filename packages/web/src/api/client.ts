@@ -65,6 +65,7 @@ import type {
   GetSlackAppResponse,
   GetWorkflowImportFileResponse,
   GetSessionResponse,
+  GetSessionSecurityResponse,
   GetSkillResponse,
   GetWorkflowResponse,
   GetWorkflowRunResponse,
@@ -133,6 +134,7 @@ import type {
   PatchSessionRequest,
   PatchSessionResponse,
   PauseSessionResponse,
+  SessionKind,
   PatchThreadRequest,
   PatchThreadResponse,
   PostGithubAppCredentialRequest,
@@ -406,11 +408,19 @@ export const api = {
 
   // sessions
   /** Unscoped lists the caller's own sessions plus every team's they can
-   * reach. `owner` narrows it to one workspace. */
-  listSessions: (owner?: OwnerFilter) =>
-    request<ListSessionsResponse>("GET", `/sessions${ownerQuery(owner)}`),
+   * reach. `owner` narrows it to one workspace; `kind` to one session kind
+   * (the security hub sends `kind=security`). */
+  listSessions: (owner?: OwnerFilter, kind?: SessionKind) =>
+    request<ListSessionsResponse>(
+      "GET",
+      kind ? `/sessions?kind=${kind}${ownerSuffix(owner)}` : `/sessions${ownerQuery(owner)}`,
+    ),
   getSession: (id: string) =>
     request<GetSessionResponse>("GET", `/sessions/${encodeURIComponent(id)}`),
+  /** GET /sessions/:id/security — the session's engagement + cells
+   * (valet-security design §Web Surfaces). 404s for a non-security session. */
+  getSessionSecurity: (id: string) =>
+    request<GetSessionSecurityResponse>("GET", `/sessions/${encodeURIComponent(id)}/security`),
   createSession: (body: CreateSessionRequest) =>
     request<CreateSessionResponse>("POST", "/sessions", body),
   deleteSession: (id: string) =>
