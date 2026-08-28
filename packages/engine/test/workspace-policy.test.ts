@@ -4,7 +4,6 @@ import { decide, type PolicyConfig, type PolicyInput } from "../src/sandbox/work
 const config: PolicyConfig = {
   minCheckpointIntervalMs: 5 * 60_000,
   checkpointOnReap: true,
-  onRestoreFailure: "fallback",
 };
 
 function input(overrides: Partial<PolicyInput>): PolicyInput {
@@ -55,7 +54,9 @@ describe("workspace policy kernel decision table", () => {
     });
   });
 
-  it("suspend + inside interval → skip (rate limited)", () => {
+  it("suspend + inside interval → checkpoint (suspend is never rate limited)", () => {
+    // The pod and its emptyDir workspace go away at suspend; skipping this
+    // checkpoint would permanently lose the writes since the last commit.
     expect(
       decide(
         input({
@@ -63,7 +64,7 @@ describe("workspace policy kernel decision table", () => {
           lastCheckpointAtMs: 1_000_000 - config.minCheckpointIntervalMs + 1,
         }),
       ),
-    ).toEqual({ action: "skip", reason: "rate limited" });
+    ).toEqual({ action: "checkpoint" });
   });
 
   it("reap + checkpointOnReap → checkpoint", () => {

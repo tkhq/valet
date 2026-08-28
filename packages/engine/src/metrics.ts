@@ -37,11 +37,8 @@ interface Instruments {
   sandboxFlagged: Counter;
   sandboxCapacityWait: Histogram;
   workspaceCheckpoints: Counter;
-  workspaceCheckpointsFailed: Counter;
   workspaceCheckpointBytes: Counter;
   workspaceRestores: Counter;
-  workspaceRestoresFailed: Counter;
-  workspaceRestoreColdStarts: Counter;
 }
 
 let instruments: Instruments | null = null;
@@ -104,24 +101,20 @@ function inst(): Instruments {
       description:
         "Time a sandbox create spent waiting at the per-org capacity gate, by outcome (admitted/timeout). Non-zero rates mean an org is contending for its sandbox ceiling.",
     }),
-    workspaceCheckpoints: meter.createCounter("valet.workspace.checkpoint_total", {
+    // No `_total` in these names — the Prometheus OTLP ingestion appends
+    // the counter suffix itself (see the file-header naming note), and the
+    // sibling counters above all rely on that. `outcome` carries the
+    // failed/skipped split; a `failed` outcome is the INV-7 visibility for
+    // best-effort checkpoints and restores.
+    workspaceCheckpoints: meter.createCounter("valet.workspace.checkpoints", {
       description: "Workspace checkpoint attempts, by backend and outcome",
-    }),
-    workspaceCheckpointsFailed: meter.createCounter("valet.workspace.checkpoint_failed", {
-      description:
-        "Workspace checkpoints that failed. Best-effort by default (INV-7): a failure never blocks the lifecycle, so this counter is the visibility.",
     }),
     workspaceCheckpointBytes: meter.createCounter("valet.workspace.checkpoint_bytes", {
       description: "Bytes committed by successful workspace checkpoints, by backend",
     }),
-    workspaceRestores: meter.createCounter("valet.workspace.restore_total", {
-      description: "Workspace restore attempts, by backend and outcome",
-    }),
-    workspaceRestoresFailed: meter.createCounter("valet.workspace.restore_failed", {
-      description: "Workspace restores that failed (fell back to a cold start under the default policy)",
-    }),
-    workspaceRestoreColdStarts: meter.createCounter("valet.workspace.restore_cold_start_total", {
-      description: "Workspace opens that started cold from the image (no committed checkpoint)",
+    workspaceRestores: meter.createCounter("valet.workspace.restores", {
+      description:
+        "Workspace restore attempts, by backend and outcome (restored/cold_start/failed). cold_start = no committed checkpoint existed; failed = the restore itself failed (INV-7 visibility).",
     }),
   };
   return instruments;
@@ -220,29 +213,38 @@ export function recordGateUnownedExpired(gateType: string): void {
   inst().gatesUnownedExpired.add(1, { type: gateType });
 }
 
+/** A checkpoint outcome (closed union so a typo'd outcome cannot fragment
+ * the series): `skipped` = policy said no (rate limit, no pod);
+ * `unchanged` = nothing changed since the last commit from this pod;
+ * `blocked_cold_start` = the cold-start clobber guard refused to commit
+ * over the last good checkpoint after a failed restore. */
+export type WorkspaceCheckpointOutcome =
+  | "committed"
+  | "skipped"
+  | "unchanged"
+  | "blocked_cold_start"
+  | "failed";
+
 /** A workspace checkpoint attempt (workspace-persistence spec, Part 07.2).
  * Successful commits also record their size. */
 export function recordWorkspaceCheckpoint(
   backend: string,
-  outcome: "committed" | "skipped" | "failed",
+  outcome: WorkspaceCheckpointOutcome,
   sizeBytes?: number,
 ): void {
   const i = inst();
   i.workspaceCheckpoints.add(1, { backend, outcome });
-  if (outcome === "failed") i.workspaceCheckpointsFailed.add(1, { backend });
   if (outcome === "committed" && sizeBytes !== undefined && sizeBytes > 0) {
     i.workspaceCheckpointBytes.add(sizeBytes, { backend });
   }
 }
 
 /** A workspace restore attempt. `cold_start` means no committed checkpoint
- * existed and the sandbox started from the baked image. */
+ * existed and the sandbox started from the baked image; `failed` means the
+ * restore itself failed (and, under the default policy, fell back cold). */
 export function recordWorkspaceRestore(
   backend: string,
   outcome: "restored" | "cold_start" | "failed",
 ): void {
-  const i = inst();
-  i.workspaceRestores.add(1, { backend, outcome });
-  if (outcome === "failed") i.workspaceRestoresFailed.add(1, { backend });
-  if (outcome === "cold_start") i.workspaceRestoreColdStarts.add(1, { backend });
+  inst().workspaceRestores.add(1, { backend, outcome });
 }

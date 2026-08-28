@@ -12,10 +12,11 @@ export type LifecycleEvent =
   | { kind: "periodic" };
 
 export interface PolicyConfig {
-  /** Rate limit for the `periodic` and `suspend` events. */
+  /** Rate limit for the `periodic` event only. `suspend` and `reap` are
+   * durability moments (the pod — and with it the emptyDir workspace —
+   * goes away) and are never rate limited. */
   minCheckpointIntervalMs: number;
   checkpointOnReap: boolean;
-  onRestoreFailure: "fallback" | "block";
 }
 
 export interface PolicyInput {
@@ -42,7 +43,11 @@ export function decide(input: PolicyInput): PolicyDecision {
       return { action: "skip", reason: "cold start from image" };
     }
     case "suspend":
-      return rateLimited(input) ? { action: "skip", reason: "rate limited" } : { action: "checkpoint" };
+      // Suspend scales the pod to zero and destroys the emptyDir-backed
+      // workspace; the suspend-time checkpoint is the only copy of writes
+      // since the last commit. Rate-limiting it would silently discard up
+      // to one interval of work on every hibernation.
+      return { action: "checkpoint" };
     case "reap":
       return config.checkpointOnReap
         ? { action: "checkpoint" }
