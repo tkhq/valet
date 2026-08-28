@@ -14,16 +14,14 @@ import {
   createSecurityEngagementService,
   STATE_DOC_STALE_MS,
 } from "../services/security-engagements.js";
-import { recordSecurityCompactionStale } from "../observability/security-metrics.js";
 import { securityCompactionHook } from "./security-compaction.js";
 
-// The service (same module graph) also imports the created/settled
-// recorders, so the mock must supply all three.
-vi.mock("../observability/security-metrics.js", () => ({
-  recordSecurityCellsCreated: vi.fn(),
-  recordSecurityCellSettled: vi.fn(),
-  recordSecurityCompactionStale: vi.fn(),
-}));
+// The staleness recorder is INJECTED, not module-mocked: the api's vitest
+// runs with `isolate: false`, so a vi.mock of the metrics module is
+// order-dependent — a worker that already loaded security-compaction.js
+// against the real module leaves the hook bound to it and the mocked
+// reference records zero calls.
+const recordStale = vi.fn();
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 
@@ -76,14 +74,14 @@ describe("securityCompactionHook", () => {
 
   it("stamps compactedAt; the staleness metric fires only past the stride", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const hook = securityCompactionHook(db, () => clock);
+    const hook = securityCompactionHook(db, () => clock, recordStale);
 
     // Fresh state doc: stamped, no alert.
     clock += 60_000;
     await hook({ sessionId: "child_hook", threadId: "t1", mode: "proactive", summary: "s" });
     let row = await cellRow();
     expect(row.compactedAt).toBe(clock);
-    expect(recordSecurityCompactionStale).not.toHaveBeenCalled();
+    expect(recordStale).not.toHaveBeenCalled();
     expect(warn).not.toHaveBeenCalled();
 
     // Past the stride: stamped again, metric + warning naming the cell.
@@ -91,7 +89,7 @@ describe("securityCompactionHook", () => {
     await hook({ sessionId: "child_hook", threadId: "t1", mode: "reactive", summary: "s" });
     row = await cellRow();
     expect(row.compactedAt).toBe(clock);
-    expect(recordSecurityCompactionStale).toHaveBeenCalledTimes(1);
+    expect(recordStale).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledTimes(1);
     const message = String(warn.mock.calls[0][0]);
     expect(message).toContain(cell.dir);
@@ -106,13 +104,13 @@ describe("securityCompactionHook", () => {
   });
 
   it("no-ops for a session no running cell claims", async () => {
-    const hook = securityCompactionHook(db, () => clock);
+    const hook = securityCompactionHook(db, () => clock, recordStale);
     clock += STATE_DOC_STALE_MS * 2;
     await expect(
       hook({ sessionId: "s_unclaimed", threadId: "t1", mode: "manual", summary: "s" }),
     ).resolves.toBeUndefined();
     const row = await cellRow();
     expect(row.compactedAt).toBeNull();
-    expect(recordSecurityCompactionStale).not.toHaveBeenCalled();
+    expect(recordStale).not.toHaveBeenCalled();
   });
 });

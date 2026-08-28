@@ -24,8 +24,14 @@ import {
 } from "../services/security-engagements.js";
 import { recordSecurityCompactionStale } from "../observability/security-metrics.js";
 
-/** Builds the hook. `nowFn` is injectable for tests; the host passes none. */
-export function securityCompactionHook(db: AppDb, nowFn: () => number = Date.now): CompactionHook {
+/** Builds the hook. `nowFn` and `recordStale` are injectable for tests (the
+ * api's vitest runs with `isolate: false`, so module-mocking the metrics
+ * import is order-dependent across files; injection is deterministic). */
+export function securityCompactionHook(
+  db: AppDb,
+  nowFn: () => number = Date.now,
+  recordStale: () => void = recordSecurityCompactionStale,
+): CompactionHook {
   const service = createSecurityEngagementService({ db, now: nowFn });
   return async ({ sessionId, mode }) => {
     const stamp = await service.stampCellCompaction(sessionId);
@@ -33,7 +39,7 @@ export function securityCompactionHook(db: AppDb, nowFn: () => number = Date.now
     // session stayed cached, or this is not a persona child) → no-op.
     if (!stamp) return;
     if (stamp.stale) {
-      recordSecurityCompactionStale();
+      recordStale();
       console.warn(
         `security: cell ${stamp.cell.dir} (${stamp.cell.id}) compacted (${mode}) with its state doc ` +
           `${stamp.stateDocAgeMs}ms stale (stride ${STATE_DOC_STALE_MS}ms). ` +
