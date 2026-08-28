@@ -14,9 +14,15 @@ import { useRepoPrebuild, useRepos } from "~/api/repos";
 import { relativeTime } from "~/lib/relative-time";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { CreateScopeLine } from "~/components/workspace-clause";
-import { RepoCombobox, repoBaseName, type RepoOption } from "~/components/repo-combobox";
+import {
+  RepoCombobox,
+  repoBaseName,
+  workspaceForRepo,
+  DEFAULT_WORKSPACE_BASE,
+  type RepoOption,
+} from "~/components/repo-combobox";
 
-const DEFAULT_WORKSPACE = "/tmp/valet/workspace";
+const DEFAULT_WORKSPACE = DEFAULT_WORKSPACE_BASE;
 const MAX_REPOS = 5;
 
 interface RepoRow {
@@ -71,7 +77,7 @@ export function NewSessionDialog({
     // hasn't typed their own path (editable per the brief: autofill is a
     // convenience, not a lock).
     if (!workspaceTouched) {
-      setWorkspace(`/workspace/${repoBaseName(repo.fullName)}`);
+      setWorkspace(workspaceForRepo(repo.fullName));
     }
   }
 

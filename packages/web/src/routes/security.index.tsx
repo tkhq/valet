@@ -9,7 +9,7 @@ import { useCreateSession } from "~/api/queries";
 import { useEngagement, useSecurityReviews } from "~/api/security";
 import { useRepos } from "~/api/repos";
 import { Badge, Button, Input, Label, Spinner, Textarea } from "~/components/primitives";
-import { RepoCombobox, repoBaseName, type RepoOption } from "~/components/repo-combobox";
+import { RepoCombobox, workspaceForRepo, type RepoOption } from "~/components/repo-combobox";
 import { CreateScopeLine, WorkspaceClause } from "~/components/workspace-clause";
 import { useListOwner } from "~/lib/use-list-owner";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
@@ -81,9 +81,10 @@ function NewReviewCard() {
   async function start() {
     if (!repo || create.isPending) return;
     const body: CreateSessionRequest = {
-      // Same convention the new-session dialog autofills: the clone's
-      // in-sandbox working directory, derived from the repo name.
-      workspace: `/workspace/${repoBaseName(repo.fullName)}`,
+      // Host working directory the api creates for the clone (docker
+      // bind-mount source in dev), NOT the in-sandbox `/workspace` mount —
+      // the hub has no editable path field, so it must send a real host path.
+      workspace: workspaceForRepo(repo.fullName),
       kind: "security",
       repo: {
         host: "github",

@@ -177,7 +177,9 @@ describe("SecurityIndexPage", () => {
     await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
     const body = createMutateAsync.mock.calls[0]![0] as CreateSessionRequest;
     expect(body.kind).toBe("security");
-    expect(body.workspace).toBe("/workspace/site");
+    // Host working directory, not the in-sandbox `/workspace` mount — the
+    // api mkdir's this path, and `/workspace/<name>` fails on the host.
+    expect(body.workspace).toBe("/tmp/valet/workspace/site");
     expect(body.repo).toEqual({
       host: "github",
       fullName: "acme/site",

@@ -11,10 +11,23 @@ import { matchesNeedle } from "~/lib/text-match";
 
 export type RepoOption = GetReposResponse["repos"][number];
 
+/**
+ * Host-side base for a new session's working directory. This is a real path
+ * the api creates on the host (docker bind-mount source in dev), NOT the
+ * in-sandbox `/workspace` mount — creating `/workspace/<name>` on the host
+ * fails (`mkdir /workspace` ENOENT). Callers append the repo base name.
+ */
+export const DEFAULT_WORKSPACE_BASE = "/tmp/valet/workspace";
+
 /** `owner/repo` -> `repo`; falls back to the whole string if it has no slash. */
 export function repoBaseName(fullName: string): string {
   const parts = fullName.split("/");
   return parts[parts.length - 1] || fullName;
+}
+
+/** The host working directory for a session bound to `fullName`. */
+export function workspaceForRepo(fullName: string): string {
+  return `${DEFAULT_WORKSPACE_BASE}/${repoBaseName(fullName)}`;
 }
 
 export function RepoCombobox({

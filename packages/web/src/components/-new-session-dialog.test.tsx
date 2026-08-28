@@ -214,7 +214,7 @@ describe("NewSessionDialog", () => {
 
     expect(screen.getByText("acme/api")).toBeTruthy();
     const workspaceInput = screen.getByLabelText("Working directory") as HTMLInputElement;
-    expect(workspaceInput.value).toBe("/workspace/api");
+    expect(workspaceInput.value).toBe("/tmp/valet/workspace/api");
     const refInput = screen.getByLabelText("Branch for acme/api") as HTMLInputElement;
     expect(refInput.value).toBe("develop");
   });
