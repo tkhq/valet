@@ -118,6 +118,8 @@ export function EngagementPanel({
           status={engagement.status}
           cost={cost}
           diff={diff}
+          baseRef={engagement.baseRef}
+          changedPaths={engagement.changedPaths}
           onRescan={canAdminister ? startRescan : undefined}
           rescanPending={rescan.isPending}
         />
@@ -125,7 +127,15 @@ export function EngagementPanel({
       {/* While the re-scan still runs, the diff banner lives above the header
           (the manifest card only renders once terminal). fixedCount is null
           until then. */}
-      {diff && !terminal && <RescanDiffBanner diff={diff} terminal={false} className="mx-4 mt-3" />}
+      {diff && !terminal && (
+        <RescanDiffBanner
+          diff={diff}
+          terminal={false}
+          baseRef={engagement.baseRef}
+          changedPaths={engagement.changedPaths}
+          className="mx-4 mt-3"
+        />
+      )}
       {rescan.isError && (
         <div className="mx-4 mt-2 rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-xs text-danger-600">
           {apiErrorText(rescan.error)}

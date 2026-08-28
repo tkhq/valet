@@ -15,17 +15,32 @@ import { cn } from "~/lib/cn";
 export function RescanDiffBanner({
   diff,
   terminal,
+  baseRef,
+  changedPaths,
   className,
 }: {
   diff: SecurityDiffWire;
   /** True once the engagement is completed/failed — `fixedCount` is a number. */
   terminal: boolean;
+  /** Diff-scoped re-scan: the prior review's SHA the sweeps diffed against.
+   * Null on a full-scan fallback. */
+  baseRef?: string | null;
+  /** Diff-scoped re-scan: the changed file paths the sweeps scoped to. Null on
+   * a full-scan fallback. */
+  changedPaths?: string[] | null;
   className?: string;
 }) {
   const parts = [`${diff.newCount} new`, `${diff.recurringCount} recurring`];
   if (terminal && diff.fixedCount !== null) {
     parts.push(`${diff.fixedCount} fixed`);
   }
+  // Diff-scope line (re-scan / iterate): "Scoped to N changed files since
+  // <short base sha>", or "Full re-scan (prior commit unavailable)" on the
+  // fallback where no diff was captured.
+  const scoped = baseRef != null && changedPaths != null;
+  const scopeText = scoped
+    ? `Scoped to ${changedPaths.length} changed file${changedPaths.length === 1 ? "" : "s"} since ${baseRef.slice(0, 12)}`
+    : "Full re-scan (prior commit unavailable)";
   return (
     <div
       className={cn(
@@ -56,6 +71,7 @@ export function RescanDiffBanner({
           {diff.carriedRefutedCount} dismissal{diff.carriedRefutedCount === 1 ? "" : "s"} carried
         </span>
       )}
+      <div className="mt-1 text-muted">{scopeText}</div>
     </div>
   );
 }

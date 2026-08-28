@@ -74,6 +74,8 @@ export function ManifestCard({
   status,
   cost,
   diff,
+  baseRef,
+  changedPaths,
   onRescan,
   rescanPending,
 }: {
@@ -85,6 +87,10 @@ export function ManifestCard({
   cost: SecurityCostWire;
   /** The re-scan diff, when this engagement re-scanned a prior one. */
   diff?: SecurityDiffWire;
+  /** Diff-scoped re-scan: the prior review's SHA the sweeps diffed against. */
+  baseRef?: string | null;
+  /** Diff-scoped re-scan: the changed file paths the sweeps scoped to. */
+  changedPaths?: string[] | null;
   /** Start a re-scan of this engagement (re-scan / iterate). Absent hides the
    * button (e.g. the caller cannot administer). */
   onRescan?: () => void;
@@ -114,7 +120,15 @@ export function ManifestCard({
           </Button>
         )}
       </div>
-      {diff && <RescanDiffBanner diff={diff} terminal className="mt-2" />}
+      {diff && (
+        <RescanDiffBanner
+          diff={diff}
+          terminal
+          baseRef={baseRef}
+          changedPaths={changedPaths}
+          className="mt-2"
+        />
+      )}
       <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
         {SEVERITY_ORDER.map((severity) =>
           summary.distinctBySeverity[severity] > 0 ? (

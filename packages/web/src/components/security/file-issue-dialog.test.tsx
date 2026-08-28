@@ -52,6 +52,8 @@ const engagement: SecurityEngagementWire = {
   repoFullName: "acme/site",
   repoRef: "a".repeat(40),
   plan: "cells: []",
+  baseRef: null,
+  changedPaths: null,
   createdAt: 1,
   updatedAt: 2,
 };

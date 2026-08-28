@@ -84,6 +84,8 @@ const security: GetSessionSecurityResponse = {
     repoFullName: "acme/site",
     repoRef: "a".repeat(40),
     plan: "cells: []",
+    baseRef: null,
+    changedPaths: null,
     createdAt: 1,
     updatedAt: 2,
   },
@@ -292,6 +294,46 @@ describe("SecuritySessionLayout", () => {
     // Links back to the parent session (the mocked Link renders the text).
     const link = banner.querySelector("a");
     expect(link?.textContent).toBe("the prior review");
+  });
+
+  it("shows the diff-scoped changed-file line from the engagement", async () => {
+    getSecurityMock.mockResolvedValue({
+      ...security,
+      engagement: {
+        ...security.engagement,
+        baseRef: "b".repeat(40),
+        changedPaths: ["src/routes/sessions.ts", "src/auth/login.ts"],
+      },
+      diff: {
+        parentEngagementId: "eng-parent",
+        parentSessionId: "s-parent",
+        newCount: 1,
+        recurringCount: 0,
+        fixedCount: null,
+        carriedRefutedCount: 0,
+      },
+    });
+    renderPanel();
+    const banner = await screen.findByLabelText("Re-scan diff");
+    expect(banner.textContent).toContain("Scoped to 2 changed files since bbbbbbbbbbbb");
+  });
+
+  it("shows the full-re-scan line when no diff was captured", async () => {
+    getSecurityMock.mockResolvedValue({
+      ...security,
+      engagement: { ...security.engagement, baseRef: null, changedPaths: null },
+      diff: {
+        parentEngagementId: "eng-parent",
+        parentSessionId: "s-parent",
+        newCount: 1,
+        recurringCount: 0,
+        fixedCount: null,
+        carriedRefutedCount: 0,
+      },
+    });
+    renderPanel();
+    const banner = await screen.findByLabelText("Re-scan diff");
+    expect(banner.textContent).toContain("Full re-scan (prior commit unavailable)");
   });
 
   it("shows the fixed count in the diff once the engagement is terminal", async () => {
