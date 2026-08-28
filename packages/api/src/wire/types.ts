@@ -272,11 +272,41 @@ export interface SecurityDiffWire {
   carriedRefutedCount: number;
 }
 
+/** One plan step, parsed from the engagement's `plan` YAML for the step editor
+ * (dynamic-config M-F2). Meaningful during planning, before cells materialize.
+ * The `mode` is fixed `fresh` for the editor's steps; it is not surfaced. */
+export interface SecurityPlanCellWire {
+  ordinal: number;
+  persona: string;
+  name?: string;
+  goal: string;
+  playbook?: string;
+  paths?: string[];
+  reads: number[];
+  review: boolean;
+}
+
+/** One step the structured plan-edit route accepts (dynamic-config M-F2). No
+ * ordinal — the server assigns dense ordinals 1..N in array order. */
+export interface SecurityPlanCellInput {
+  persona: string;
+  name?: string;
+  goal: string;
+  playbook?: string;
+  paths?: string[];
+  reads: number[];
+  review?: boolean;
+}
+
 /** GET /api/sessions/:id/security */
 export interface GetSessionSecurityResponse {
   engagement: SecurityEngagementWire;
   cells: SecurityCellWire[];
   cost: SecurityCostWire;
+  /** The engagement's `plan` YAML parsed into structured steps (dynamic-config
+   * M-F2). The step editor reads this during planning; empty on a malformed
+   * plan. Independent of `cells`, which materialize only at sec_start. */
+  planCells: SecurityPlanCellWire[];
   /** The re-scan diff, when this engagement re-scans a prior one. Absent on a
    * first review. */
   diff?: SecurityDiffWire;
@@ -369,7 +399,8 @@ export interface GetSecurityStatusResponse {
   } | null;
 }
 
-/** POST /api/sessions/:id/security/plan */
+/** POST /api/sessions/:id/security/plan (YAML) and
+ * POST /api/sessions/:id/security/plan/cells (structured, dynamic-config M-F2). */
 export interface SecuritySetPlanResponse {
   cellCount: number;
 }

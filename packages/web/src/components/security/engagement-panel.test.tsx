@@ -95,6 +95,7 @@ const security: GetSessionSecurityResponse = {
     createdAt: 1,
     updatedAt: 2,
   },
+  planCells: [],
   cells: [
     {
       id: "cell-1",

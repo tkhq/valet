@@ -440,13 +440,22 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     return { engagement, cells: await loadCells(engagement.id) };
   }
 
-  /** Replace the plan while the engagement is still planning. */
-  async function setPlan(engagementId: string, planYaml: string): Promise<SecurityEngagementRow> {
+  /**
+   * Replace the plan while the engagement is still planning. `knownPersonas`
+   * defaults to the bundled registry; the structured plan-edit route passes the
+   * bundled ids ∪ the engagement's repo-declared persona keys (dynamic-config
+   * M-F2), so a config persona stays valid.
+   */
+  async function setPlan(
+    engagementId: string,
+    planYaml: string,
+    knownPersonas: readonly string[] = KNOWN_PERSONAS,
+  ): Promise<SecurityEngagementRow> {
     const engagement = await loadEngagement(engagementId);
     if (engagement.status !== "planning") {
       throw new Error("The plan is immutable once the engagement is running.");
     }
-    parsePlan(planYaml, KNOWN_PERSONAS);
+    parsePlan(planYaml, knownPersonas);
     const updated = await db
       .update(securityEngagements)
       .set({ plan: planYaml, updatedAt: now() })

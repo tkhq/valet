@@ -21,7 +21,9 @@ import type {
   SecurityDigestIssueResponse,
   SecurityFileIssueResponse,
   SecurityFindingWire,
+  SecurityPlanCellInput,
   SecurityReviewFindingResponse,
+  SecuritySetPlanResponse,
 } from "@valet/api/wire";
 import { api, ApiError, type OwnerFilter, type SecurityFindingsQuery } from "./client";
 import { qk } from "./queries";
@@ -133,6 +135,22 @@ export function useRescanReview() {
       api.createSession({ workspace, kind: "security", rescanOf }),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: qk.sessions() });
+    },
+  });
+}
+
+/**
+ * POST .../security/plan/cells — replace the plan from the step editor's
+ * structured steps during planning (dynamic-config M-F2). The server assigns
+ * dense ordinals in array order and validates against the persona registry.
+ * Invalidates the engagement query so the panel re-reads the saved plan.
+ */
+export function useSetPlanCells(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<SecuritySetPlanResponse, Error, SecurityPlanCellInput[]>({
+    mutationFn: (cells) => api.setSecurityPlanCells(sessionId, cells),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qkSecurity.engagement(sessionId) });
     },
   });
 }

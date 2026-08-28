@@ -19,6 +19,7 @@ import { CellRail } from "./cell-rail";
 import { CostChip } from "./cost-chip";
 import { FindingsReview } from "./findings-review";
 import { ManifestCard } from "./manifest-card";
+import { PlanEditor } from "./plan-editor";
 import { RescanDiffBanner } from "./rescan-diff";
 
 /**
@@ -92,7 +93,11 @@ export function EngagementPanel({
     );
   }
 
-  const { engagement, cells, cost, diff } = engagementQ.data;
+  const { engagement, cells, cost, diff, planCells } = engagementQ.data;
+  // The step editor is a planning-phase tool: it edits the plan before cells
+  // materialize at sec_start. Once the engagement runs, the plan freezes and
+  // the read-only cell rail takes over. Admin-only — the route enforces it.
+  const showPlanEditor = engagement.status === "planning" && canAdminister;
   // The cancel action is a human-only stop for an in-flight review. Show it
   // only while the engagement can still be cancelled AND the caller can
   // administer — the route enforces both; this only hides a button that 403s.
@@ -182,6 +187,7 @@ export function EngagementPanel({
           cancelMutation.mutate(undefined, { onSuccess: () => setConfirmCancel(false) });
         }}
       />
+      {showPlanEditor && <PlanEditor sessionId={sessionId} planCells={planCells} />}
       <CellRail cells={cells} onOpenChild={onOpenChild} />
       <div className="border-t border-line" />
       <FindingsReview

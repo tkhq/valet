@@ -56,7 +56,8 @@
 import { randomUUID } from "node:crypto";
 import { Hono, type Context } from "hono";
 import { and, count, desc, eq, inArray } from "drizzle-orm";
-import { cellDir, KNOWN_PERSONAS, parsePlan } from "@valet/plugin-security";
+import { cellDir, KNOWN_PERSONAS, parsePlan, serializePlan } from "@valet/plugin-security";
+import type { PlanCell } from "@valet/plugin-security";
 import type { Principal } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
@@ -125,6 +126,7 @@ import type {
   SecurityHandoffResponse,
   SecurityHandoffWire,
   SecurityReportFindingResponse,
+  SecurityPlanCellWire,
   SecurityReviewFindingResponse,
   SecuritySetPlanResponse,
   SecurityStartPreviewResponse,
@@ -221,6 +223,43 @@ function parseJsonStringRecord(raw: string | null): Record<string, string> | nul
   return null;
 }
 
+/**
+ * The persona set a plan may name for this engagement: the bundled registry
+ * plus any repo-declared persona keys stored on the engagement
+ * (`config_personas`, dynamic-config M-F1). The step editor and the structured
+ * plan-edit route validate against this union, so a repo-defined persona stays
+ * valid after the config seeded it.
+ */
+function engagementPersonas(e: SecurityEngagementRow): string[] {
+  const configKeys = Object.keys(parseJsonStringRecord(e.configPersonas) ?? {});
+  return [...KNOWN_PERSONAS, ...configKeys];
+}
+
+/**
+ * Parse the engagement's `plan` YAML into the wire step shape (dynamic-config
+ * M-F2), the editor's read model. A malformed plan yields [] rather than a
+ * throw — the plan is validated on every write, so this only guards a legacy
+ * or hand-broken row. `mode` is dropped: the editor writes `fresh` steps.
+ */
+function planCellsToWire(e: SecurityEngagementRow): SecurityPlanCellWire[] {
+  let cells: PlanCell[];
+  try {
+    cells = parsePlan(e.plan, engagementPersonas(e)).cells;
+  } catch {
+    return [];
+  }
+  return cells.map((cell) => ({
+    ordinal: cell.ordinal,
+    persona: cell.persona,
+    ...(cell.name !== undefined ? { name: cell.name } : {}),
+    goal: cell.goal,
+    ...(cell.playbook !== undefined ? { playbook: cell.playbook } : {}),
+    ...(cell.paths !== undefined ? { paths: cell.paths } : {}),
+    reads: cell.reads,
+    review: cell.review === true,
+  }));
+}
+
 function cellToWire(cell: SecurityCellRow, progress: CellProgress | null): SecurityCellWire {
   let reads: number[] = [];
   try {
@@ -311,6 +350,7 @@ securityRouter.get("/:id/security", async (c) => {
     engagement: engagementToWire(result.engagement),
     cells: result.cells.map((cell) => cellToWire(cell, progress)),
     cost,
+    planCells: planCellsToWire(result.engagement),
     ...(diff ? { diff } : {}),
   };
   return c.json(body);
@@ -856,6 +896,130 @@ securityRouter.post("/:id/security/plan", async (c) => {
 });
 
 /**
+ * A route-level error for a malformed structured plan cell. Carries a
+ * corrective message the step editor shows inline.
+ */
+class PlanCellInputError extends Error {}
+
+/**
+ * Convert one structured plan-cell input (dynamic-config M-F2) to a PlanCell,
+ * assigning `ordinal`. Shape-only validation with corrective messages; the
+ * plan-level rules (dense ordinals, earlier-only reads, known personas and
+ * playbooks) run later in `serializePlan` → `parsePlan`. `mode` is always
+ * `fresh`: the editor writes fresh steps.
+ */
+function planCellInputToCell(raw: unknown, ordinal: number): PlanCell {
+  const at = `Step ${ordinal}`;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new PlanCellInputError(`${at} must be an object with persona and goal.`);
+  }
+  const input = raw as Record<string, unknown>;
+
+  if (typeof input.persona !== "string" || input.persona.trim() === "") {
+    throw new PlanCellInputError(`${at} needs a persona. Pick one from the persona list.`);
+  }
+  if (typeof input.goal !== "string" || input.goal.trim() === "") {
+    throw new PlanCellInputError(`${at} needs a goal. Write what the step must accomplish.`);
+  }
+
+  const cell: PlanCell = {
+    ordinal,
+    persona: input.persona,
+    mode: "fresh",
+    goal: input.goal,
+    reads: [],
+  };
+
+  if (input.name !== undefined) {
+    if (typeof input.name !== "string") {
+      throw new PlanCellInputError(`${at} has a non-text name. Write a short label, or omit it.`);
+    }
+    if (input.name.trim() !== "") cell.name = input.name;
+  }
+
+  if (input.playbook !== undefined && input.playbook !== null) {
+    if (typeof input.playbook !== "string") {
+      throw new PlanCellInputError(`${at} has a non-text playbook. Pick one from the playbook list.`);
+    }
+    if (input.playbook.trim() !== "") cell.playbook = input.playbook;
+  }
+
+  if (input.paths !== undefined) {
+    if (!Array.isArray(input.paths) || input.paths.some((p) => typeof p !== "string")) {
+      throw new PlanCellInputError(`${at} has a non-text paths list. List include globs as text.`);
+    }
+    const paths = input.paths.filter((p): p is string => typeof p === "string" && p.trim() !== "");
+    if (paths.length > 0) cell.paths = paths;
+  }
+
+  if (input.reads !== undefined) {
+    if (!Array.isArray(input.reads) || input.reads.some((r) => typeof r !== "number")) {
+      throw new PlanCellInputError(`${at} has a non-numeric reads list. List earlier step numbers.`);
+    }
+    cell.reads = input.reads.filter((r): r is number => typeof r === "number");
+  }
+
+  if (input.review !== undefined) {
+    if (typeof input.review !== "boolean") {
+      throw new PlanCellInputError(`${at} has a non-boolean review flag. Use true or false.`);
+    }
+    if (input.review) cell.review = true;
+  }
+
+  return cell;
+}
+
+/**
+ * Structured plan-edit route (dynamic-config M-F2, spec §Dynamic configuration).
+ * Accepts `{ cells: SecurityPlanCellInput[] }` — the step editor's write path,
+ * so the web never has to build plan YAML. The server assigns dense ordinals
+ * 1..N in array order, serializes the cells, and validates the plan against the
+ * bundled personas ∪ the engagement's repo-declared personas. Human-admin auth
+ * rides the same `resolveToolSession` "mutate" ladder as the YAML route. The
+ * plan stays immutable once the engagement runs — `setPlan` surfaces that.
+ */
+securityRouter.post("/:id/security/plan/cells", async (c) => {
+  const sessionId = c.req.param("id");
+  const resolved = await resolveToolSession(c, sessionId, "mutate");
+  if ("failure" in resolved) return resolved.failure;
+
+  const loaded = await loadEngagementOr404(c, sessionId);
+  if ("failure" in loaded) return loaded.failure;
+  const { security, result } = loaded;
+
+  const body = await readJsonBody(c);
+  if (!Array.isArray(body.cells) || body.cells.length === 0) {
+    return c.json({ error: "Send { cells } with at least one plan step." }, 400);
+  }
+
+  let planYaml: string;
+  try {
+    // Dense ordinals 1..N follow array order; the editor never sends ordinals.
+    const cells = body.cells.map((raw, i) => planCellInputToCell(raw, i + 1));
+    planYaml = serializePlan(cells);
+  } catch (err) {
+    if (err instanceof PlanCellInputError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
+
+  try {
+    // Validate + persist against the union so a repo-declared persona stays
+    // valid. setPlan re-parses the YAML with this same set and refuses a
+    // running engagement with a corrective message.
+    const updated = await security.setPlan(
+      result.engagement.id,
+      planYaml,
+      engagementPersonas(result.engagement),
+    );
+    const plan = parsePlan(updated.plan, engagementPersonas(updated));
+    const response: SecuritySetPlanResponse = { cellCount: plan.cells.length };
+    return c.json(response);
+  } catch (err) {
+    return serviceError(c, err);
+  }
+});
+
+/**
  * Diff-scoped re-scan (re-scan / iterate): resolve the changed files between
  * the parent engagement's pinned SHA (base) and the new HEAD, so the start
  * route can scope the sweeps to the delta. Returns `{ baseRef, changedFiles }`:
@@ -940,6 +1104,7 @@ securityRouter.post("/:id/security/start", async (c) => {
       cells: started.cells.map((cell) => cellToWire(cell, null)),
       // Just started: the runner may have spent tokens, cell children none yet.
       cost: await security.getEngagementCost(started.engagement.id),
+      planCells: planCellsToWire(started.engagement),
     };
     return c.json(response);
   } catch (err) {
@@ -1498,6 +1663,7 @@ securityRouter.post("/:id/security/cancel", async (c) => {
     cells: (after?.cells ?? []).map((cell) => cellToWire(cell, null)),
     // The review's spend to the point of cancel — the panel keeps showing it.
     cost: await security.getEngagementCost(cancelled.engagement.id),
+    planCells: planCellsToWire(cancelled.engagement),
   };
   return c.json(response);
 });

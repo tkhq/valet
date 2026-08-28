@@ -72,7 +72,9 @@ import type {
   SecurityFileIssueResponse,
   SecurityFindingSeverity,
   SecurityFindingStatus,
+  SecurityPlanCellInput,
   SecurityReviewFindingResponse,
+  SecuritySetPlanResponse,
   GetWorkflowResponse,
   GetWorkflowRunResponse,
   GetWorkflowTriggerCatalogResponse,
@@ -454,6 +456,15 @@ export const api = {
       `/sessions/${encodeURIComponent(id)}/security/findings${suffix}`,
     );
   },
+  /** POST /sessions/:id/security/plan/cells — replace the plan from structured
+   * steps during planning (dynamic-config M-F2; session admin). The server
+   * assigns dense ordinals in array order. Returns the new cell count. */
+  setSecurityPlanCells: (id: string, cells: SecurityPlanCellInput[]) =>
+    request<SecuritySetPlanResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/security/plan/cells`,
+      { cells },
+    ),
   /** POST /sessions/:id/security/findings/:findingId/status — human
    * verify/refute (forward-only; session admin). */
   reviewSecurityFinding: (

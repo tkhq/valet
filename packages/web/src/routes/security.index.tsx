@@ -295,6 +295,10 @@ function NewReviewCard() {
         <p className="text-xs text-muted">
           {SECURITY_PRESETS.find((p) => p.id === preset)?.description}
         </p>
+        <p className="text-xs text-muted">
+          If the repo has a .valet/security.yml, it configures the review and
+          this preset is ignored.
+        </p>
       </div>
 
       <div className="grid gap-1">
