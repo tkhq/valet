@@ -23,9 +23,16 @@ export function EngagementPanel({
   /** From the `?finding=` permalink param. */
   initialFindingId?: string;
 }) {
+  // Poll until the engagement is terminal — NOT only while "running". Cells
+  // are materialized at sec_start, when the status flips planning → running;
+  // gating the poll on status === "running" deadlocks, because the query
+  // that would observe that flip is the one told not to refetch during
+  // planning. A missing status (first load) polls too.
   const engagementQ = useEngagement(sessionId, {
-    refetchInterval: (query) =>
-      query.state.data?.engagement.status === "running" ? 5_000 : false,
+    refetchInterval: (query) => {
+      const status = query.state.data?.engagement.status;
+      return status === "completed" || status === "failed" ? false : 5_000;
+    },
   });
 
   // Admin gating mirrors the session header's rule: personal sessions are
