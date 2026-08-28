@@ -5,7 +5,7 @@
  * 30 minutes, and the child session link.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import type { ReactNode } from "react";
 import type { SecurityCellWire } from "@valet/api/wire";
 import { TooltipProvider } from "~/components/primitives";
@@ -38,16 +38,33 @@ function cell(over: Partial<SecurityCellWire> & { id: string }): SecurityCellWir
   };
 }
 
-function renderRail(cells: SecurityCellWire[]) {
+function renderRail(cells: SecurityCellWire[], onOpenChild?: (id: string) => void) {
   return render(
     <TooltipProvider>
-      <CellRail cells={cells} />
+      <CellRail cells={cells} onOpenChild={onOpenChild} />
     </TooltipProvider>,
   );
 }
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe("CellRail child link", () => {
+  it("opens the child in the slide-over via onOpenChild, not a navigation", () => {
+    const onOpenChild = vi.fn();
+    renderRail([cell({ id: "c1", status: "running", childSessionId: "child_abc" })], onOpenChild);
+    const btn = screen.getByRole("button", { name: "Open 01-recon child session" });
+    fireEvent.click(btn);
+    expect(onOpenChild).toHaveBeenCalledWith("child_abc");
+  });
+
+  it("falls back to a standalone link when no handler is given", () => {
+    renderRail([cell({ id: "c1", status: "running", childSessionId: "child_abc" })]);
+    // The mocked Link renders an <a> (no button); the label still resolves.
+    expect(screen.getByLabelText("Open 01-recon child session").tagName).toBe("A");
+    expect(screen.queryByRole("button", { name: "Open 01-recon child session" })).toBeNull();
+  });
 });
 
 describe("CellRail", () => {

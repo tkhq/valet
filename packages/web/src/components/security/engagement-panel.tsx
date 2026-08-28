@@ -18,10 +18,14 @@ import { ManifestCard } from "./manifest-card";
 export function EngagementPanel({
   sessionId,
   initialFindingId,
+  onOpenChild,
 }: {
   sessionId: string;
   /** From the `?finding=` permalink param. */
   initialFindingId?: string;
+  /** Open a cell's persona child as the `?child=` slide-over instead of
+   * navigating to its standalone page. */
+  onOpenChild?: (childId: string) => void;
 }) {
   // Poll until the engagement is terminal — NOT only while "running". Cells
   // are materialized at sec_start, when the status flips planning → running;
@@ -88,7 +92,7 @@ export function EngagementPanel({
         )}
         <span> · {engagement.status}</span>
       </div>
-      <CellRail cells={cells} />
+      <CellRail cells={cells} onOpenChild={onOpenChild} />
       <div className="border-t border-line" />
       <FindingsReview
         sessionId={sessionId}
@@ -116,11 +120,14 @@ export function SecuritySessionLayout({
   sessionId,
   initialFindingId,
   chat,
+  onOpenChild,
 }: {
   sessionId: string;
   initialFindingId?: string;
   /** The session view element — rendered once, shown/hidden responsively. */
   chat: ReactNode;
+  /** Open a persona child as the `?child=` slide-over (threaded to the rail). */
+  onOpenChild?: (childId: string) => void;
 }) {
   const [pane, setPane] = useState<MobilePane>("chat");
   const gatePending = useStreamStore(
@@ -155,7 +162,11 @@ export function SecuritySessionLayout({
             pane === "panel" ? "flex flex-1 md:flex-none" : "hidden md:flex",
           )}
         >
-          <EngagementPanel sessionId={sessionId} initialFindingId={initialFindingId} />
+          <EngagementPanel
+            sessionId={sessionId}
+            initialFindingId={initialFindingId}
+            onOpenChild={onOpenChild}
+          />
         </aside>
       </div>
     </div>

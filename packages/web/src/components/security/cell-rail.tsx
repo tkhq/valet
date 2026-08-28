@@ -50,7 +50,13 @@ function useNow(): number {
   return now;
 }
 
-export function CellRail({ cells }: { cells: SecurityCellWire[] }) {
+export function CellRail({
+  cells,
+  onOpenChild,
+}: {
+  cells: SecurityCellWire[];
+  onOpenChild?: (childId: string) => void;
+}) {
   const now = useNow();
   if (cells.length === 0) {
     return (
@@ -63,13 +69,21 @@ export function CellRail({ cells }: { cells: SecurityCellWire[] }) {
   return (
     <ol className="divide-y divide-line" aria-label="Engagement cells">
       {ordered.map((cell) => (
-        <CellRow key={cell.id} cell={cell} now={now} />
+        <CellRow key={cell.id} cell={cell} now={now} onOpenChild={onOpenChild} />
       ))}
     </ol>
   );
 }
 
-function CellRow({ cell, now }: { cell: SecurityCellWire; now: number }) {
+function CellRow({
+  cell,
+  now,
+  onOpenChild,
+}: {
+  cell: SecurityCellWire;
+  now: number;
+  onOpenChild?: (childId: string) => void;
+}) {
   const running = cell.status === "running";
   const elapsedMs = running && cell.dispatchedAt !== null ? now - cell.dispatchedAt : null;
   // Over-age: still running, no settled child, 30+ minutes in. `settledAt`
@@ -105,17 +119,31 @@ function CellRow({ cell, now }: { cell: SecurityCellWire; now: number }) {
           </Tooltip>
         )}
         <span className="flex-1" />
-        {cell.childSessionId !== null && (
-          <Link
-            to="/sessions/$sessionId"
-            params={{ sessionId: cell.childSessionId }}
-            className="inline-flex items-center gap-1 text-muted hover:text-moss shrink-0"
-            aria-label={`Open ${cell.dir} child session`}
-          >
-            <ExternalLink className="h-3 w-3" aria-hidden />
-            session
-          </Link>
-        )}
+        {cell.childSessionId !== null &&
+          (onOpenChild ? (
+            // Open the persona child as the in-page `?child=` slide-over (the
+            // same ChildPanel the chat UI uses), not its standalone page.
+            <button
+              type="button"
+              onClick={() => onOpenChild(cell.childSessionId!)}
+              className="inline-flex items-center gap-1 text-muted hover:text-moss shrink-0"
+              aria-label={`Open ${cell.dir} child session`}
+            >
+              <ExternalLink className="h-3 w-3" aria-hidden />
+              session
+            </button>
+          ) : (
+            // No handler (e.g. standalone rendering) — fall back to the page.
+            <Link
+              to="/sessions/$sessionId"
+              params={{ sessionId: cell.childSessionId }}
+              className="inline-flex items-center gap-1 text-muted hover:text-moss shrink-0"
+              aria-label={`Open ${cell.dir} child session`}
+            >
+              <ExternalLink className="h-3 w-3" aria-hidden />
+              session
+            </Link>
+          ))}
       </div>
       <div className="mt-0.5 text-muted truncate">{cell.goal}</div>
       {running && cell.progress && (

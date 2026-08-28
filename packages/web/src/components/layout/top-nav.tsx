@@ -4,6 +4,7 @@ import { Menu, PanelLeftClose, PanelLeftOpen, Settings } from "lucide-react";
 import { useSidebarControls } from "./app-shell";
 import { useOrchestratorInfo } from "~/api/orchestrator";
 import { useAssistants, useCreateAssistant } from "~/api/assistants";
+import { useSession } from "~/api/queries";
 import { useOrg, useTeams } from "~/api/settings";
 import { eligibleTeams } from "~/components/session/assistant-rail";
 import {
@@ -34,16 +35,38 @@ import { NotificationsBell } from "./notifications-bell";
  * which was added last (the old `text-muted` base + `text-ink` active pair
  * rendered no visible active state at all).
  */
-function NavLink({ to, children }: { to: string; children: React.ReactNode }) {
+const NAV_ACTIVE = "text-ink font-medium bg-ink-wash";
+const NAV_INACTIVE = "text-muted hover:text-ink";
+
+function NavLink({
+  to,
+  children,
+  active,
+}: {
+  to: string;
+  children: React.ReactNode;
+  /** Force the active state instead of the URL-match default. Used so a
+   * `/sessions/:id` security session lights "Security", not "Sessions" —
+   * the URL alone cannot tell the two apart (both live under /sessions). */
+  active?: boolean;
+}) {
+  // `shrink-0` + `whitespace-nowrap`: the row scrolls when it does not fit,
+  // so a link must keep its own width instead of being squeezed into a
+  // wrapped two-line label.
+  const base = "shrink-0 whitespace-nowrap rounded px-2 py-1 text-sm hover:bg-ink-wash";
+  if (active !== undefined) {
+    return (
+      <Link to={to} className={`${base} ${active ? NAV_ACTIVE : NAV_INACTIVE}`}>
+        {children}
+      </Link>
+    );
+  }
   return (
     <Link
       to={to}
-      // `shrink-0` + `whitespace-nowrap`: the row scrolls when it does not
-      // fit, so a link must keep its own width instead of being squeezed
-      // into a wrapped two-line label.
-      className="shrink-0 whitespace-nowrap rounded px-2 py-1 text-sm hover:bg-ink-wash"
-      activeProps={{ className: "text-ink font-medium bg-ink-wash" }}
-      inactiveProps={{ className: "text-muted hover:text-ink" }}
+      className={base}
+      activeProps={{ className: NAV_ACTIVE }}
+      inactiveProps={{ className: NAV_INACTIVE }}
     >
       {children}
     </Link>
@@ -118,6 +141,18 @@ export function TopNav() {
   // still lets the open assistant win — see `workspace-scope.tsx`.
   const scope = useWorkspaceScope();
   const onChat = useRouterState({ select: (st) => st.location.pathname === "/chat" });
+  // A security session lives at /sessions/:id like any other, so the URL
+  // cannot distinguish it — read the id off the path and check its kind so
+  // the nav lights "Security" instead of "Sessions". The query is shared
+  // with the session page's own read, so it costs no extra request.
+  const sessionRouteId = useRouterState({
+    select: (st) => {
+      const m = /^\/sessions\/([^/]+)$/.exec(st.location.pathname);
+      return m ? m[1] : undefined;
+    },
+  });
+  const routeSession = useSession(sessionRouteId ?? "");
+  const onSecuritySession = routeSession.data?.kind === "security";
   const navigate = useNavigate();
   const createAssistant = useCreateAssistant();
 
@@ -210,9 +245,13 @@ export function TopNav() {
       >
         <NavLink to="/chat">Chat</NavLink>
         <NavLink to="/memory">Memory</NavLink>
-        <NavLink to="/sessions">Sessions</NavLink>
+        <NavLink to="/sessions" active={onSecuritySession ? false : undefined}>
+          Sessions
+        </NavLink>
         <NavLink to="/workflows">Workflows</NavLink>
-        <NavLink to="/security">Security</NavLink>
+        <NavLink to="/security" active={onSecuritySession ? true : undefined}>
+          Security
+        </NavLink>
         <NavLink to="/events">Events</NavLink>
         <NavLink to="/usage">Usage</NavLink>
         <NavLink to="/skills">Skills</NavLink>
