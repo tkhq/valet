@@ -45,7 +45,7 @@ export function CoverageSection({
   }
 
   return (
-    <section className="border-b border-line px-4 py-3" aria-label="Coverage">
+    <section className="border-y border-line px-4 py-3" aria-label="Coverage">
       <div className="flex items-center gap-2 text-xs">
         <span className="font-semibold text-ink">Coverage</span>
         <CoverageBar assessed={assessed.length} notAssessed={gaps.length} />
@@ -165,7 +165,7 @@ function GapRow({ row, cellDir }: { row: SecurityCoverageWire; cellDir?: string 
           </span>
         )}
       </div>
-      {row.reason && <div className="mt-0.5 text-muted">{row.reason}</div>}
+      {row.reason && <div className="mt-0.5 line-clamp-2 text-muted">{row.reason}</div>}
     </li>
   );
 }

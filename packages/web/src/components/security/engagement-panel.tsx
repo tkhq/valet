@@ -217,15 +217,9 @@ export function EngagementPanel({
           readable; expand for the full rail. */}
       <StepsPanel cells={cells} onOpenChild={onOpenChild} />
 
-      {coverageQ.data && <CoverageSection coverage={coverageQ.data.coverage} cells={cells} />}
-
-      {/* The report artifact (M-P3): shown once the engagement has started — a
-          report exists, is generating, or is pending the report cell. Hidden
-          while planning, where no report is possible yet. */}
-      {engagement.status !== "planning" && (
-        <ReportSection sessionId={sessionId} report={report} generating={reportGenerating} />
-      )}
-
+      {/* Findings — the primary triage surface, kept high so it is always in
+          view; it fills the panel. Coverage and the report sit below it as
+          secondary reference the user scrolls to. */}
       <div className="border-t border-line" />
       <FindingsReview
         sessionId={sessionId}
@@ -236,6 +230,15 @@ export function EngagementPanel({
         polling={engagement.status === "running"}
         onOpenChild={onOpenChild}
       />
+
+      {coverageQ.data && <CoverageSection coverage={coverageQ.data.coverage} cells={cells} />}
+
+      {/* The report artifact (M-P3): shown once the engagement has started — a
+          report exists, is generating, or is pending the report cell. Hidden
+          while planning, where no report is possible yet. */}
+      {engagement.status !== "planning" && (
+        <ReportSection sessionId={sessionId} report={report} generating={reportGenerating} />
+      )}
     </div>
   );
 }

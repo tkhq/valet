@@ -319,7 +319,7 @@ export function FindingsReview({
   );
 
   return (
-    <section className="flex flex-1 flex-col min-h-0" aria-label="Findings review">
+    <section className="flex flex-1 flex-col min-h-[26rem]" aria-label="Findings review">
       {/* Filters + export header */}
       <div className="flex flex-wrap items-center gap-1.5 px-3 py-2 border-b border-line">
         <SelectMenu
