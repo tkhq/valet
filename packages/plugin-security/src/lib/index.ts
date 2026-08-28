@@ -8,7 +8,12 @@ export {
   KNOWN_PERSONAS,
   codeReviewPresetPlan,
   securityKickoffPrompt,
+  SECURITY_PRESETS,
+  isKnownPreset,
+  presetPlan,
+  serializePlan,
 } from "./presets.js";
+export type { SecurityPreset } from "./presets.js";
 export { protocolMarkdown } from "./protocol.js";
 export { KNOWN_PLAYBOOKS, isKnownPlaybook, playbookMarkdown } from "./playbooks.js";
 export type { PlaybookName } from "./playbooks.js";

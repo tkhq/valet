@@ -149,6 +149,14 @@ export interface CreateSessionRequest {
   repos?: RepoBinding[];
   /** Sugar for a single repo binding — equivalent to `repos: [repo]`. */
   repo?: RepoBinding;
+  /** Security sweep preset id (a value from `SECURITY_PRESETS`). Chooses which
+   * cells the seeded engagement plan runs. Defaults to "code-review". Only a
+   * security session reads it. */
+  preset?: string;
+  /** Optional include globs that scope the security review's sweeps (authz,
+   * injection, secrets-config) to part of the repo. Recon and verify stay
+   * repo-wide. Only a security session reads it. */
+  paths?: string[];
 }
 
 export interface ListSessionsResponse {

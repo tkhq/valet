@@ -5,6 +5,7 @@
  * ANTHROPIC_API_KEY — nothing here prompts.
  */
 import { describe, expect, it } from "vitest";
+import { KNOWN_PERSONAS, parsePlan } from "@valet/plugin-security";
 import { bootTestApi } from "./_setup.js";
 import { internalToken } from "../lib/internal-auth.js";
 import { securityFindings, users } from "../schema/index.js";
@@ -53,6 +54,102 @@ describe("api integration: security session minting + read routes", () => {
       const detail = await fetch(`${api.baseUrl}/api/sessions/${created.id}`);
       const detailBody = (await detail.json()) as CreateSessionResponse;
       expect(detailBody.kind).toBe("security");
+    } finally {
+      await api.cleanup();
+    }
+  });
+
+  it("defaults to the five-cell code-review plan when no preset is sent", async () => {
+    const api = await bootTestApi();
+    try {
+      const created = await createSecuritySession(api.baseUrl);
+      const res = await fetch(`${api.baseUrl}/api/sessions/${created.id}/security`);
+      const body = (await res.json()) as GetSessionSecurityResponse;
+      const plan = parsePlan(body.engagement.plan, KNOWN_PERSONAS);
+      expect(plan.cells).toHaveLength(5);
+      expect(plan.cells.map((c) => c.name)).toEqual([
+        "recon",
+        "authz-sweep",
+        "injection-sweep",
+        "secrets-config",
+        "verify",
+      ]);
+    } finally {
+      await api.cleanup();
+    }
+  });
+
+  it("seeds a three-cell plan for the secrets-config preset", async () => {
+    const api = await bootTestApi();
+    try {
+      const res = await fetch(`${api.baseUrl}/api/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspace: "/tmp/valet-security-routes-test",
+          kind: "security",
+          preset: "secrets-config",
+          repo: REPO,
+        }),
+      });
+      expect(res.status).toBe(201);
+      const created = (await res.json()) as CreateSessionResponse;
+      const detail = await fetch(`${api.baseUrl}/api/sessions/${created.id}/security`);
+      const body = (await detail.json()) as GetSessionSecurityResponse;
+      const plan = parsePlan(body.engagement.plan, KNOWN_PERSONAS);
+      expect(plan.cells.map((c) => c.name)).toEqual(["recon", "secrets-config", "verify"]);
+    } finally {
+      await api.cleanup();
+    }
+  });
+
+  it("scopes the sweep cells to paths, leaving recon and verify repo-wide", async () => {
+    const api = await bootTestApi();
+    try {
+      const res = await fetch(`${api.baseUrl}/api/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspace: "/tmp/valet-security-routes-test",
+          kind: "security",
+          preset: "access-injection",
+          paths: ["packages/api", "src/auth"],
+          repo: REPO,
+        }),
+      });
+      expect(res.status).toBe(201);
+      const created = (await res.json()) as CreateSessionResponse;
+      const detail = await fetch(`${api.baseUrl}/api/sessions/${created.id}/security`);
+      const body = (await detail.json()) as GetSessionSecurityResponse;
+      const plan = parsePlan(body.engagement.plan, KNOWN_PERSONAS);
+      // recon (first) + verify (last) stay repo-wide; the sweeps carry paths.
+      expect(plan.cells[0].paths).toBeUndefined();
+      expect(plan.cells[plan.cells.length - 1].paths).toBeUndefined();
+      for (let i = 1; i < plan.cells.length - 1; i++) {
+        expect(plan.cells[i].paths).toEqual(["packages/api", "src/auth"]);
+      }
+    } finally {
+      await api.cleanup();
+    }
+  });
+
+  it("400s on an unknown preset, naming the known ids", async () => {
+    const api = await bootTestApi();
+    try {
+      const res = await fetch(`${api.baseUrl}/api/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspace: "/tmp/valet-security-routes-test",
+          kind: "security",
+          preset: "nope",
+          repo: REPO,
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain("code-review");
+      expect(body.error).toContain("secrets-config");
     } finally {
       await api.cleanup();
     }

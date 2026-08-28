@@ -24,10 +24,10 @@ import { useWorkspaceScope } from "~/lib/workspace-scope";
 /**
  * `/security` — the security review hub (valet-security design, §Web
  * Surfaces). Top: a "New review" card — repo picker (the same combobox the
- * new-session dialog uses), the preset (v1 ships only Code review), an
- * optional focus prompt. Start POSTs `kind: "security"` with the repo
- * binding; the server seeds the engagement with the code-review preset in
- * the same transaction and this page navigates to the session. Below: past
+ * new-session dialog uses), the sweep preset, an optional path scope, and an
+ * optional focus prompt. Start POSTs `kind: "security"` with the repo binding,
+ * the chosen preset, and any path globs; the server seeds the engagement plan
+ * in the same transaction and this page navigates to the session. Below: past
  * engagements from `GET /api/sessions?kind=security`, each row badged with
  * its engagement status from `GET /api/sessions/:id/security`.
  */
@@ -74,6 +74,38 @@ interface ModelChoice {
   label: string;
 }
 
+/** The sweep presets the hub offers. Mirrored from `SECURITY_PRESETS` in
+ * `@valet/plugin-security`: that package's barrel pulls node builtins (fs/url
+ * through the playbooks module), so the web cannot import it. The server-side
+ * `isKnownPreset` check is the real gate — this list only populates the
+ * picker. Keep the two in sync. */
+const SECURITY_PRESETS: readonly { id: string; label: string; description: string }[] = [
+  {
+    id: "code-review",
+    label: "Full code review",
+    description: "Recon, access control, injection, secrets/config, verify (5 cells).",
+  },
+  {
+    id: "secrets-config",
+    label: "Secrets & config",
+    description: "Recon, secrets/config scanner sweep, verify (3 cells). Fast.",
+  },
+  {
+    id: "access-injection",
+    label: "Access control & injection",
+    description: "Recon, authz, injection, verify (4 cells).",
+  },
+];
+
+/** Split a "Scope to paths" input into include globs. Commas and whitespace
+ * both separate; empty segments drop out. */
+function splitPaths(input: string): string[] {
+  return input
+    .split(/[\s,]+/)
+    .map((p) => p.trim())
+    .filter((p) => p !== "");
+}
+
 function NewReviewCard() {
   const navigate = useNavigate();
   const create = useCreateSession();
@@ -89,6 +121,10 @@ function NewReviewCard() {
   // a fixed default, not derived from a prop, so no mount-time-state sync is
   // needed — the value only changes when the user picks another model.
   const [model, setModel] = useState(SECURITY_DEFAULT_MODEL);
+  // Preset and path scope are fixed local defaults, not derived from a prop,
+  // so no mount-time-state sync is needed — each only changes on user input.
+  const [preset, setPreset] = useState(SECURITY_PRESETS[0].id);
+  const [pathsInput, setPathsInput] = useState("");
 
   // Model options: the org catalog when it loads (curated label when the id
   // maps to a known tier, else the catalog name), else the curated
@@ -133,6 +169,7 @@ function NewReviewCard() {
       workspace: workspaceForRepo(repo.fullName),
       kind: "security",
       model,
+      preset,
       repo: {
         host: "github",
         fullName: repo.fullName,
@@ -144,6 +181,8 @@ function NewReviewCard() {
       },
     };
     if (scope.teamId !== undefined) body.teamId = scope.teamId;
+    const paths = splitPaths(pathsInput);
+    if (paths.length > 0) body.paths = paths;
     const focus = prompt.trim();
     if (focus) body.initialPrompt = focus;
     try {
@@ -238,21 +277,37 @@ function NewReviewCard() {
 
       <div className="grid gap-1">
         <Label htmlFor="review-preset">Preset</Label>
-        {/* v1 ships one preset. The select is disabled, not hidden, so the
-            choice this card will grow is visible where it will appear. The
-            server seeds the code-review plan on create; there is no preset
-            field on the wire yet. */}
+        {/* The preset chooses which cells the seeded plan runs. The server
+            gates the id with `isKnownPreset`; this list only populates the
+            picker. */}
         <select
           id="review-preset"
-          disabled
-          value="code-review"
-          onChange={() => {}}
-          className="h-8 w-48 rounded border border-line bg-paper px-2 text-xs text-ink disabled:opacity-70"
+          value={preset}
+          onChange={(e) => setPreset(e.target.value)}
+          className="h-8 w-64 rounded border border-line bg-paper px-2 text-xs text-ink"
         >
-          <option value="code-review">Code review</option>
+          {SECURITY_PRESETS.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.label}
+            </option>
+          ))}
         </select>
         <p className="text-xs text-muted">
-          Five cells: recon, authz sweep, injection sweep, secrets and config, verify.
+          {SECURITY_PRESETS.find((p) => p.id === preset)?.description}
+        </p>
+      </div>
+
+      <div className="grid gap-1">
+        <Label htmlFor="review-paths">Scope to paths (optional)</Label>
+        <Input
+          id="review-paths"
+          value={pathsInput}
+          onChange={(e) => setPathsInput(e.target.value)}
+          placeholder="e.g. packages/api, src/auth — optional"
+          className="h-8 text-xs"
+        />
+        <p className="text-xs text-muted">
+          Limits the injection, authz, and secrets sweeps to these paths.
         </p>
       </div>
 

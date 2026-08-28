@@ -4,8 +4,12 @@ import { parsePlan } from "./plan.js";
 import {
   CODE_REVIEW_PERSONA,
   codeReviewPresetPlan,
+  isKnownPreset,
   KNOWN_PERSONAS,
+  presetPlan,
+  SECURITY_PRESETS,
   securityKickoffPrompt,
+  serializePlan,
 } from "./presets.js";
 
 describe("codeReviewPresetPlan", () => {
@@ -72,6 +76,111 @@ describe("codeReviewPresetPlan", () => {
     // Dirs are unique and filesystem-safe.
     expect(new Set(dirs).size).toBe(dirs.length);
     for (const dir of dirs) expect(dir).toMatch(/^\d{2}-[a-z0-9-]+$/);
+  });
+});
+
+describe("SECURITY_PRESETS + isKnownPreset", () => {
+  it("lists the three presets and gates ids", () => {
+    expect(SECURITY_PRESETS.map((p) => p.id)).toEqual([
+      "code-review",
+      "secrets-config",
+      "access-injection",
+    ]);
+    for (const p of SECURITY_PRESETS) expect(isKnownPreset(p.id)).toBe(true);
+    expect(isKnownPreset("nope")).toBe(false);
+    expect(isKnownPreset("")).toBe(false);
+  });
+});
+
+describe("presetPlan", () => {
+  // Expected cell shapes: ordinals dense, names in order, review only on verify.
+  const shapes: Record<string, { count: number; names: string[] }> = {
+    "code-review": {
+      count: 5,
+      names: ["recon", "authz-sweep", "injection-sweep", "secrets-config", "verify"],
+    },
+    "secrets-config": { count: 3, names: ["recon", "secrets-config", "verify"] },
+    "access-injection": {
+      count: 4,
+      names: ["recon", "authz-sweep", "injection-sweep", "verify"],
+    },
+  };
+
+  for (const [id, shape] of Object.entries(shapes)) {
+    it(`${id} round-trips through parsePlan with dense ordinals and the right cells`, () => {
+      const plan = parsePlan(presetPlan(id), KNOWN_PERSONAS);
+      expect(plan.cells).toHaveLength(shape.count);
+      expect(plan.cells.map((c) => c.ordinal)).toEqual(
+        Array.from({ length: shape.count }, (_, i) => i + 1),
+      );
+      expect(plan.cells.map((c) => c.name)).toEqual(shape.names);
+      expect(plan.cells.every((c) => c.persona === CODE_REVIEW_PERSONA)).toBe(true);
+      // recon reads nothing; verify reads every prior ordinal and has review.
+      expect(plan.cells[0].reads).toEqual([]);
+      const verify = plan.cells[plan.cells.length - 1];
+      expect(verify.name).toBe("verify");
+      expect(verify.review).toBe(true);
+      expect(verify.reads).toEqual(
+        Array.from({ length: shape.count - 1 }, (_, i) => i + 1),
+      );
+      // Every middle sweep reads recon [1].
+      for (let i = 1; i < plan.cells.length - 1; i++) {
+        expect(plan.cells[i].reads).toEqual([1]);
+      }
+    });
+  }
+
+  it("keeps preset playbooks aligned to their sweeps", () => {
+    expect(parsePlan(presetPlan("secrets-config"), KNOWN_PERSONAS).cells.map((c) => c.playbook)).toEqual([
+      "recon",
+      "secrets-config",
+      "verify",
+    ]);
+    expect(parsePlan(presetPlan("access-injection"), KNOWN_PERSONAS).cells.map((c) => c.playbook)).toEqual([
+      "recon",
+      "authz",
+      "injection",
+      "verify",
+    ]);
+  });
+
+  it("code-review with no paths is byte-identical to codeReviewPresetPlan", () => {
+    expect(presetPlan("code-review")).toBe(codeReviewPresetPlan());
+  });
+
+  it("injects paths onto the sweep cells only, not recon or verify", () => {
+    const paths = ["packages/api"];
+    for (const id of ["code-review", "secrets-config", "access-injection"]) {
+      const plan = parsePlan(presetPlan(id, { paths }), KNOWN_PERSONAS);
+      // Recon (first) and verify (last) stay repo-wide.
+      expect(plan.cells[0].paths).toBeUndefined();
+      expect(plan.cells[plan.cells.length - 1].paths).toBeUndefined();
+      // Every middle sweep carries the paths.
+      for (let i = 1; i < plan.cells.length - 1; i++) {
+        expect(plan.cells[i].paths).toEqual(paths);
+      }
+    }
+  });
+
+  it("ignores an empty paths list (repo-wide, delegates to codeReviewPresetPlan)", () => {
+    expect(presetPlan("code-review", { paths: [] })).toBe(codeReviewPresetPlan());
+  });
+
+  it("throws on an unknown preset id", () => {
+    expect(() => presetPlan("nope")).toThrow(/Unknown security preset/);
+  });
+});
+
+describe("serializePlan", () => {
+  it("round-trips parsed plans stably (serialize ∘ parse is idempotent)", () => {
+    for (const id of ["code-review", "secrets-config", "access-injection"]) {
+      const once = presetPlan(id, { paths: ["src/auth"] });
+      const parsed = parsePlan(once, KNOWN_PERSONAS);
+      const twice = serializePlan(parsed.cells);
+      // The re-serialized plan parses to the same cells and is byte-stable.
+      expect(parsePlan(twice, KNOWN_PERSONAS)).toEqual(parsed);
+      expect(serializePlan(parsePlan(twice, KNOWN_PERSONAS).cells)).toBe(twice);
+    }
   });
 });
 

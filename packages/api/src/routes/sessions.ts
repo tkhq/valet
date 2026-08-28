@@ -17,7 +17,7 @@ import {
 import { canAdministerSession, canViewSession } from "../services/session-access.js";
 import { createSecurityEngagementService } from "../services/security-engagements.js";
 import { isTeamMember, listTeamsForUser } from "../services/teams.js";
-import { codeReviewPresetPlan, securityKickoffPrompt } from "@valet/plugin-security";
+import { isKnownPreset, presetPlan, SECURITY_PRESETS, securityKickoffPrompt } from "@valet/plugin-security";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import {
@@ -267,6 +267,30 @@ sessionsRouter.post("/", async (c) => {
   }
   const kind = body.kind ?? "code";
 
+  // A security session's sweep preset and path scope. Validated here, before
+  // anything is written, so a bad id or a mistyped `paths` is a bad request,
+  // not a failed seed. Both fields only matter for a security session; a code
+  // session ignores them.
+  const presetId = body.preset ?? "code-review";
+  if (kind === "security") {
+    if (typeof presetId !== "string" || !isKnownPreset(presetId)) {
+      const known = SECURITY_PRESETS.map((p) => p.id).join(", ");
+      return c.json(
+        { error: `Unknown preset "${String(presetId)}". Known presets: ${known}. Pick one when you start the review.` },
+        400,
+      );
+    }
+    if (
+      body.paths !== undefined &&
+      (!Array.isArray(body.paths) || body.paths.some((p) => typeof p !== "string"))
+    ) {
+      return c.json(
+        { error: "paths must be a list of strings. Send the include globs, or omit the field." },
+        400,
+      );
+    }
+  }
+
   // A model, when present, is a non-empty string id from the catalog. Rejected
   // here so a mistyped model is a bad request, not a silently ignored field.
   if (body.model !== undefined && (typeof body.model !== "string" || body.model.length === 0)) {
@@ -383,7 +407,11 @@ sessionsRouter.post("/", async (c) => {
     if (kind === "security") {
       const security = createSecurityEngagementService({ db });
       await security.createEngagement(
-        { sessionId: id, repoFullName: repos[0].fullName, plan: codeReviewPresetPlan() },
+        {
+          sessionId: id,
+          repoFullName: repos[0].fullName,
+          plan: presetPlan(presetId, { paths: body.paths }),
+        },
         tx,
       );
     }

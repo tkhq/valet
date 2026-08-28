@@ -227,6 +227,49 @@ describe("SecurityIndexPage", () => {
     expect(body.model).toBe("claude-opus-4-7");
   });
 
+  it("offers the three sweep presets, defaulting to full code review", () => {
+    renderPage();
+    const select = screen.getByLabelText("Preset") as HTMLSelectElement;
+    expect(select.disabled).toBe(false);
+    const options = Array.from(select.options).map((o) => o.value);
+    expect(options).toEqual(["code-review", "secrets-config", "access-injection"]);
+    expect(select.value).toBe("code-review");
+  });
+
+  it("sends the picked preset", async () => {
+    renderPage();
+    pickRepo();
+    fireEvent.change(screen.getByLabelText("Preset"), { target: { value: "secrets-config" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start review" }));
+
+    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
+    const body = createMutateAsync.mock.calls[0]![0] as CreateSessionRequest;
+    expect(body.preset).toBe("secrets-config");
+  });
+
+  it("splits the paths input into globs and omits the field when blank", async () => {
+    renderPage();
+    pickRepo();
+    fireEvent.change(screen.getByLabelText("Scope to paths (optional)"), {
+      target: { value: "packages/api, src/auth" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Start review" }));
+
+    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
+    const body = createMutateAsync.mock.calls[0]![0] as CreateSessionRequest;
+    expect(body.paths).toEqual(["packages/api", "src/auth"]);
+  });
+
+  it("omits paths when the scope input is blank", async () => {
+    renderPage();
+    pickRepo();
+    fireEvent.click(screen.getByRole("button", { name: "Start review" }));
+
+    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
+    const body = createMutateAsync.mock.calls[0]![0] as CreateSessionRequest;
+    expect(body.paths).toBeUndefined();
+  });
+
   it("starts a review against a pasted public repo with no ref (default branch)", async () => {
     renderPage();
     fireEvent.change(screen.getByLabelText("Public repository"), {
