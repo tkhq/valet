@@ -16,11 +16,15 @@ import {
   ErrorRow,
   Input,
   LoadingRow,
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
 } from "~/components/primitives";
 import { ApiError } from "~/api/client";
 import { defaultAssistantFor, useAssistants } from "~/api/assistants";
 import { errorText } from "~/lib/error-text";
 import { formatDate } from "~/lib/format-when";
+import { matchesNeedle } from "~/lib/text-match";
 import {
   useAddTeamMember,
   useCreateTeam,
@@ -455,27 +459,96 @@ function TeamMembers({
       })}
 
       {canMutate && !managed && addable.length > 0 && (
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button type="button" variant="ghost" size="sm" className="gap-1.5">
-              <UserPlus className="h-3.5 w-3.5" aria-hidden />
-              Add member
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start">
-            {addable.map((m) => (
-              <DropdownMenuItem
-                key={m.userId}
-                onSelect={() =>
-                  addMember.mutate({ teamId, body: { userId: m.userId, role: "member" } })
-                }
-              >
-                {m.name ?? m.email}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
+        <AddMemberPicker
+          teamName={teamName}
+          addable={addable}
+          onAdd={(userId) => addMember.mutate({ teamId, body: { userId, role: "member" } })}
+        />
       )}
     </div>
+  );
+}
+
+/**
+ * "Add member" — a popover typeahead over the addable org members. The
+ * previous control was a plain dropdown menu that listed every member with
+ * no filter and no height cap, so on a real org it ran past the bottom of
+ * the screen. This one filters as you type (the shared `matchesNeedle`
+ * substring match, over name and email) and caps the list behind a scroll.
+ * Enter adds the first match; Escape and outside-click close (Radix).
+ */
+function AddMemberPicker({
+  teamName,
+  addable,
+  onAdd,
+}: {
+  teamName: string;
+  addable: OrgMemberWire[];
+  onAdd: (userId: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const matches = addable.filter((m) => matchesNeedle(query, [m.name, m.email]));
+
+  function add(userId: string) {
+    onAdd(userId);
+    setQuery("");
+    setOpen(false);
+  }
+
+  return (
+    <Popover
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        // A reopened picker starts from the full list, not last time's filter.
+        if (!next) setQuery("");
+      }}
+    >
+      <PopoverTrigger asChild>
+        <Button type="button" variant="ghost" size="sm" className="gap-1.5">
+          <UserPlus className="h-3.5 w-3.5" aria-hidden />
+          Add member
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-72 p-0">
+        <div className="border-b border-line p-2">
+          <Input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              const first = matches[0];
+              if (e.key === "Enter" && first) add(first.userId);
+            }}
+            placeholder="Search members…"
+            aria-label={`Search members to add to ${teamName}`}
+            role="combobox"
+            aria-expanded={open}
+          />
+        </div>
+        <div
+          role="listbox"
+          aria-label={`Members to add to ${teamName}`}
+          className="max-h-64 overflow-y-auto py-1"
+        >
+          {matches.map((m) => (
+            <button
+              key={m.userId}
+              type="button"
+              role="option"
+              aria-selected={false}
+              onClick={() => add(m.userId)}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-ink-wash"
+            >
+              <span className="min-w-0 flex-1 truncate text-ink">{m.name || m.email}</span>
+              <span className="shrink-0 text-xs text-muted">{m.email}</span>
+            </button>
+          ))}
+          {matches.length === 0 && (
+            <div className="px-3 py-1.5 text-sm text-muted">No matching members.</div>
+          )}
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }
