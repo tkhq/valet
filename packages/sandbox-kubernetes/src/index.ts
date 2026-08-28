@@ -32,6 +32,8 @@ export {
   DOCKER_STATE_MOUNT_PATH,
   DOCKER_STATE_VOLUME_NAME,
   DOCKER_WORKLOAD_FS_GROUP,
+  ORG_ANNOTATION_KEY,
+  OWNER_ANNOTATION_KEY,
   SANDBOX_CONTAINER_NAME,
   SESSION_ANNOTATION_KEY,
   SESSION_LABEL_KEY,
@@ -41,6 +43,36 @@ export {
   credsSecretName,
   sandboxCrName,
 } from "./manifest.js";
+
+export {
+  DEFAULT_WORKSPACE_POLICY,
+  objectStoreBaseUrl,
+  type ObjectStoreConfig,
+  type RwxVolumeConfig,
+  type WorkspacePersistenceConfig,
+  type WorkspacePolicySettings,
+} from "./workspace-persistence.js";
+
+export {
+  ObjectStoreWorkspaceStore,
+  TarEntryCounter,
+  makeCheckpointId,
+  parseManifest,
+  type WorkspaceCheckpointStore,
+} from "./workspace-object-store.js";
+
+export {
+  RESTORE_ENV,
+  WORKSPACE_RESTORE_INIT_CONTAINER_NAME,
+  WORKSPACE_STORE_CREDS_MOUNT_PATH,
+  WORKSPACE_STORE_VOLUME_NAME,
+  buildCheckpointScript,
+  buildRestoreScript,
+  checkpointScriptEnv,
+  parseCheckpointResult,
+  type CheckpointScriptInput,
+  type CheckpointUploadUrls,
+} from "./workspace-scripts.js";
 
 export {
   RANCHER_DESKTOP_CONTEXT,

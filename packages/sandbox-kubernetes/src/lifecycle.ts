@@ -343,9 +343,15 @@ export function parseSandboxCRRead(value: unknown): SandboxCRRead {
     throw new Error("Sandbox CR response is missing metadata.name");
   }
   const specValue = value.spec;
-  if (!isRecord(specValue) || !isRecord(specValue.podTemplate) || !Array.isArray(specValue.volumeClaimTemplates)) {
-    throw new Error("Sandbox CR response is missing spec.podTemplate or spec.volumeClaimTemplates");
+  if (!isRecord(specValue) || !isRecord(specValue.podTemplate)) {
+    throw new Error("Sandbox CR response is missing spec.podTemplate");
   }
+  // Absent volumeClaimTemplates normalizes to [] — emptyDir-backed
+  // workspaces (workspace-persistence object-store/none backends) write an
+  // empty array, and an apiserver that prunes it must not fail every GET.
+  const volumeClaimTemplates = Array.isArray(specValue.volumeClaimTemplates)
+    ? specValue.volumeClaimTemplates
+    : [];
 
   const metadata: SandboxCRRead["metadata"] = { name: metadataValue.name };
   if (typeof metadataValue.namespace === "string") metadata.namespace = metadataValue.namespace;
@@ -375,7 +381,7 @@ export function parseSandboxCRRead(value: unknown): SandboxCRRead {
   // podTemplate.spec.
   const spec: SandboxCRRead["spec"] = {
     podTemplate: specValue.podTemplate,
-    volumeClaimTemplates: specValue.volumeClaimTemplates,
+    volumeClaimTemplates,
   };
   if (specValue.shutdownPolicy === "Delete" || specValue.shutdownPolicy === "Retain") {
     spec.shutdownPolicy = specValue.shutdownPolicy;

@@ -65,7 +65,14 @@
  */
 import type * as k8s from "@kubernetes/client-node";
 import { setHeaderOptions } from "@kubernetes/client-node";
-import { CONTAINER_DEATH_PATTERN, SandboxStartupError } from "@valet/engine";
+import {
+  CONTAINER_DEATH_PATTERN,
+  SandboxStartupError,
+  decideWorkspacePolicy,
+  recordWorkspaceCheckpoint,
+  type WorkspaceLifecycleEvent,
+  type WorkspaceRef,
+} from "@valet/engine";
 import type {
   ExecJobHandle,
   ExecOpts,
@@ -113,11 +120,19 @@ import {
   buildSandboxManifest,
   credsSecretName,
   DOCKER_LABEL_KEY,
+  ORG_ANNOTATION_KEY,
+  OWNER_ANNOTATION_KEY,
   SANDBOX_CONTAINER_NAME,
   sandboxCrName,
   SESSION_ANNOTATION_KEY,
 } from "./manifest.js";
 import type { K8sProviderConfig } from "./types.js";
+import { makeCheckpointId, type WorkspaceCheckpointStore } from "./workspace-object-store.js";
+import {
+  buildCheckpointScript,
+  checkpointScriptEnv,
+  parseCheckpointResult,
+} from "./workspace-scripts.js";
 
 /** How long `create()`/`restore()` polls for the CR to reach `Ready` before
  * giving up. Generous relative to Task 3's empirical ~15s pod-recreate
@@ -141,6 +156,11 @@ const PENDING_TERMINAL_GRACE_MS = 5 * 60_000;
 
 /** Port the in-sandbox auth gateway daemon listens on (Task 2 default). */
 const GATEWAY_PORT = 9000;
+
+/** Deadline for one in-pod checkpoint (tar + three uploads). Generous — a
+ * multi-hundred-MB workspace over a same-region link fits comfortably; the
+ * exec default (60s) does not. */
+const WORKSPACE_CHECKPOINT_TIMEOUT_MS = 10 * 60_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -636,6 +656,11 @@ export interface KubernetesSandboxProviderDeps {
   /** Optional: enables credsMount — create/patch/delete the per-sandbox
    * creds Secret. When absent, credsFiles in SandboxCreateOpts is ignored. */
   secretsApi?: SandboxSecretsApi;
+  /** Optional: the object-store workspace backend's checkpoint surface
+   * (workspace-persistence spec). Required for checkpoints to fire when
+   * `cfg.workspacePersistence.backend === "object-store"`; production
+   * wiring (sandbox-backend.ts) supplies an `ObjectStoreWorkspaceStore`. */
+  workspaceStore?: WorkspaceCheckpointStore;
 }
 
 export class KubernetesSandboxProvider implements SandboxProvider {
@@ -648,15 +673,18 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     this.cfg = cfg;
   }
 
-  /** Spec decision 5's capabilities constant. `persistentWorkspace: true`
-   * is honest under these semantics because recovery/re-provision always
-   * rides `applySandbox`/pod-recreate under the retained CR — never
-   * destroy+create — so the workspace PVC survives every non-terminal
-   * failure path. */
+  /** Spec decision 5's capabilities constant. `persistentWorkspace` is
+   * honest per backend: under the legacy/rwx PVC the volume survives
+   * pod-recreate under the retained CR; under `object-store` durability
+   * comes from checkpoint/restore instead (workspace-persistence spec,
+   * Part 05.4). Only the `none` backend reports false — its emptyDir dies
+   * with the pod and nothing restores it. The `snapshot` capability stays
+   * `"none"`: checkpoint/restore is a workspace-store concern and does not
+   * use the sandbox snapshot seam. */
   capabilities(): SandboxCapabilities {
     return {
       snapshot: "none",
-      persistentWorkspace: true,
+      persistentWorkspace: this.cfg.workspacePersistence?.backend !== "none",
       tunnels: false,
       warmPool: false,
       hibernation: true,
@@ -829,6 +857,11 @@ export class KubernetesSandboxProvider implements SandboxProvider {
    * `id` must be the Sandbox CR name (i.e. `sandbox.id` / the value returned
    * by `create()`), not the raw workspace key. */
   async destroy(id: string): Promise<void> {
+    // Workspace-persistence reap checkpoint (spec 05.3): before the pod is
+    // removed, offer the policy kernel a final `reap` checkpoint. Best
+    // effort (INV-7) — a hibernated sandbox has no pod (its data was
+    // checkpointed at suspend) and skips inside.
+    await this.maybeCheckpointWorkspace(id, { kind: "reap" });
     // Best-effort: delete the creds Secret before the CR (or concurrently).
     // A missing Secret is fine — the sandbox may never have had one.
     if (this.deps.secretsApi) {
@@ -876,6 +909,12 @@ export class KubernetesSandboxProvider implements SandboxProvider {
    * controller takes to tear the pod down.
    */
   async suspend(id: string): Promise<void> {
+    // Workspace-persistence suspend checkpoint (spec 05.3): the pod is
+    // still live here — under the object-store backend this is THE
+    // durability moment, because suspending scales the pod (and its
+    // workspace emptyDir) to zero. Best effort (INV-7): a checkpoint
+    // failure logs + counts but never blocks hibernation.
+    await this.maybeCheckpointWorkspace(id, { kind: "suspend" });
     await setOperatingMode(this.deps.objectsApi, this.cfg, id, "Suspended");
   }
 
@@ -944,6 +983,115 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       });
     } catch (err) {
       console.error(`k8s sandbox ${crName}: creds Secret ownerReference patch failed (non-fatal)`, err);
+    }
+  }
+
+  /**
+   * One pass of the periodic workspace checkpoint (workspace-persistence
+   * spec, 07.3; the optional `SandboxProvider.sweepWorkspaceCheckpoints`
+   * seam). Fires the `periodic` policy event for every CR; sandboxes
+   * without a live pod (suspended, reconciling) skip inside. Sequential on
+   * purpose — a parallel pass would stack N concurrent in-pod tar+upload
+   * execs on the apiserver.
+   */
+  async sweepWorkspaceCheckpoints(): Promise<void> {
+    const wp = this.cfg.workspacePersistence;
+    if (wp?.backend !== "object-store" || !wp.policy.periodicCheckpoint) return;
+    const listings = await listSandboxMetadata(this.deps.objectsApi, this.cfg);
+    for (const item of listings) {
+      await this.maybeCheckpointWorkspace(item.name, { kind: "periodic" });
+    }
+  }
+
+  /**
+   * Offer the policy kernel a checkpoint for `id` and act on its decision
+   * (workspace-persistence spec, 05.3). The whole path is best-effort
+   * (INV-7): every failure logs, emits `valet.workspace.checkpoint_failed`,
+   * and returns — a checkpoint must never block suspend, reap, or the
+   * periodic sweep.
+   *
+   * Data path: the store presigns one PUT URL per object (data, manifest,
+   * latest — INV-2's commit order lives in the script) and the tar streams
+   * pod → object store directly over the in-pod exec seam. The sandbox
+   * never holds bucket credentials (INV-3/INV-6).
+   */
+  private async maybeCheckpointWorkspace(id: string, event: WorkspaceLifecycleEvent): Promise<void> {
+    const wp = this.cfg.workspacePersistence;
+    const store = this.deps.workspaceStore;
+    if (wp?.backend !== "object-store" || !store) return;
+    try {
+      const cr = await getSandbox(this.deps.objectsApi, this.cfg, id);
+      if (cr === null) return;
+      const orgId = cr.metadata.annotations?.[ORG_ANNOTATION_KEY];
+      const ownerId = cr.metadata.annotations?.[OWNER_ANNOTATION_KEY];
+      if (!orgId || !ownerId) {
+        // A CR created before org/owner stamping existed — no tenant key
+        // to checkpoint under (INV-3). The sandbox recreates with
+        // annotations on its next cold provision.
+        console.warn(`k8s sandbox ${id}: no org/owner annotations; skipping workspace checkpoint`);
+        return;
+      }
+      const ref: WorkspaceRef = { orgId, ownerId, workspaceId: id };
+      const nowMs = Date.now();
+      const latest = await store.latest(ref);
+      const decision = decideWorkspacePolicy({
+        event,
+        hasCommittedCheckpoint: latest !== null,
+        lastCheckpointAtMs: latest?.createdAtMs ?? null,
+        nowMs,
+        config: {
+          minCheckpointIntervalMs: wp.policy.minCheckpointIntervalMs,
+          checkpointOnReap: wp.policy.checkpointOnReap,
+          onRestoreFailure: wp.policy.onRestoreFailure,
+        },
+      });
+      if (decision.action !== "checkpoint") {
+        recordWorkspaceCheckpoint("object-store", "skipped");
+        return;
+      }
+      const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, id);
+      if (podName === null) {
+        // No live pod (suspended/reaping a hibernated sandbox): the
+        // workspace cannot have changed since the suspend-time checkpoint.
+        recordWorkspaceCheckpoint("object-store", "skipped");
+        return;
+      }
+      const checkpointId = makeCheckpointId(nowMs);
+      const urls = await store.presignCheckpointPuts(ref, checkpointId);
+      const script = buildCheckpointScript({ checkpointId, createdAtMs: nowMs });
+      const result = await execInPod(
+        {
+          api: this.deps.execApi,
+          namespace: this.cfg.namespace,
+          containerName: SANDBOX_CONTAINER_NAME,
+          // Privileged (container root), never the workload user: tar must
+          // read every file in /workspace regardless of in-sandbox chowns.
+          docker: false,
+        },
+        podName,
+        script,
+        { env: checkpointScriptEnv(urls), timeout: WORKSPACE_CHECKPOINT_TIMEOUT_MS, maxOutputBytes: 64 * 1024 },
+      );
+      const committed = result.exitCode === 0 ? parseCheckpointResult(result.stdout) : null;
+      if (committed === null) {
+        recordWorkspaceCheckpoint("object-store", "failed");
+        console.error(
+          `k8s sandbox ${id}: workspace checkpoint failed on ${event.kind} (exit ${result.exitCode}${result.timedOut ? ", timed out" : ""}): ${result.stderr.slice(-500)}`,
+        );
+        return;
+      }
+      recordWorkspaceCheckpoint("object-store", "committed", committed.sizeBytes);
+      console.log(
+        `k8s sandbox ${id}: workspace checkpoint ${checkpointId} committed on ${event.kind} (${committed.sizeBytes} bytes, ${committed.entryCount} entries)`,
+      );
+      // Retention prune, best-effort per spec Part 04 (a deletion failure
+      // never fails the checkpoint).
+      await store.pruneCheckpoints(ref, checkpointId).catch((err) => {
+        console.error(`k8s sandbox ${id}: checkpoint prune failed (non-fatal):`, err);
+      });
+    } catch (err) {
+      recordWorkspaceCheckpoint("object-store", "failed");
+      console.error(`k8s sandbox ${id}: workspace checkpoint failed on ${event.kind}:`, err);
     }
   }
 

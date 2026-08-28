@@ -6,7 +6,7 @@
  * ./types.ts docblock for the source URL and confirmed shape).
  */
 import { createHash } from "node:crypto";
-import type { SandboxCreateOpts } from "@valet/engine";
+import { workspaceObjectPrefix, type SandboxCreateOpts, type WorkspaceRef } from "@valet/engine";
 import type {
   K8sProviderConfig,
   ResourceList,
@@ -14,6 +14,14 @@ import type {
   SandboxCR,
   Volume,
 } from "./types.js";
+import { objectStoreBaseUrl, type WorkspacePersistenceConfig } from "./workspace-persistence.js";
+import {
+  RESTORE_ENV,
+  WORKSPACE_RESTORE_INIT_CONTAINER_NAME,
+  WORKSPACE_STORE_CREDS_MOUNT_PATH,
+  WORKSPACE_STORE_VOLUME_NAME,
+  buildRestoreScript,
+} from "./workspace-scripts.js";
 
 const MAX_NAME_LENGTH = 63;
 const HASH_SUFFIX_LENGTH = 8;
@@ -43,6 +51,14 @@ export const SESSION_LABEL_KEY = "valet.dev/session-id";
  * through `SandboxProvider.list` to map a CR to its session; absent on CRs
  * created before session stamping existed. */
 export const SESSION_ANNOTATION_KEY = "valet.dev/session";
+/** CR annotations carrying the owning org and user
+ * (`SandboxCreateOpts.orgId`/`ownerId`). The CR is the only per-sandbox
+ * state that survives an api restart, and checkpoint at suspend/reap time
+ * rebuilds the tenant-scoped `WorkspaceRef` (workspace-persistence spec,
+ * INV-3) from these. Annotations, not labels, mirroring
+ * `SESSION_ANNOTATION_KEY` — id charsets are not label-value-safe. */
+export const ORG_ANNOTATION_KEY = "valet.dev/org";
+export const OWNER_ANNOTATION_KEY = "valet.dev/owner";
 export const SANDBOX_CONTAINER_NAME = "sandbox";
 
 /** Mount path for the per-sandbox credential files (see `SandboxCreateOpts.credsFiles`). */
@@ -266,6 +282,52 @@ export function buildSandboxManifest(
     ];
   }
 
+  // ── Workspace persistence (workspace-persistence spec, Part 05) ──────
+  // `object-store` and `none` back /workspace with a node-local emptyDir
+  // (durability, when on, comes from checkpoint/restore — never the
+  // volume). `rwx-volume` keeps the PVC on the operator's RWX class.
+  // Absent config keeps the legacy default-class RWO PVC.
+  const wp = cfg.workspacePersistence;
+  const emptyDirWorkspace = wp !== undefined && (wp.backend === "object-store" || wp.backend === "none");
+  if (emptyDirWorkspace) {
+    podSpec.volumes = [...(podSpec.volumes ?? []), { name: WORKSPACE_VOLUME_NAME, emptyDir: {} }];
+  }
+  if (wp?.backend === "object-store" && wp.objectStore && opts.orgId && opts.ownerId) {
+    const store = wp.objectStore;
+    const ref: WorkspaceRef = { orgId: opts.orgId, ownerId: opts.ownerId, workspaceId: name };
+    podSpec.initContainers = [
+      {
+        name: WORKSPACE_RESTORE_INIT_CONTAINER_NAME,
+        // The sandbox's own image: already pulled on the node, and its
+        // start scripts guarantee curl + tar (the only tools the restore
+        // script needs).
+        image,
+        command: ["/bin/sh", "-c", buildRestoreScript()],
+        env: [
+          { name: RESTORE_ENV.baseUrl, value: `${objectStoreBaseUrl(store)}/${store.bucket}` },
+          { name: RESTORE_ENV.region, value: store.region },
+          { name: RESTORE_ENV.workspacePrefix, value: workspaceObjectPrefix(store.prefix, ref) },
+          { name: RESTORE_ENV.onRestoreFailure, value: wp.policy.onRestoreFailure },
+          { name: RESTORE_ENV.orgId, value: ref.orgId },
+          { name: RESTORE_ENV.ownerId, value: ref.ownerId },
+          { name: RESTORE_ENV.workspaceId, value: ref.workspaceId },
+        ],
+        volumeMounts: [
+          { name: WORKSPACE_VOLUME_NAME, mountPath: WORKSPACE_MOUNT_PATH },
+          // Credentials mount on the INIT container only (INV-6): the main
+          // container — where user code runs — never sees the bucket
+          // credential, and the mount path sits outside /workspace so a
+          // checkpoint tar cannot capture it.
+          { name: WORKSPACE_STORE_VOLUME_NAME, mountPath: WORKSPACE_STORE_CREDS_MOUNT_PATH, readOnly: true },
+        ],
+      },
+    ];
+    podSpec.volumes = [
+      ...(podSpec.volumes ?? []),
+      { name: WORKSPACE_STORE_VOLUME_NAME, secret: { secretName: store.credentialsSecret } },
+    ];
+  }
+
   const spec: SandboxCR["spec"] = {
     podTemplate: {
       ...(opts.docker
@@ -279,17 +341,22 @@ export function buildSandboxManifest(
         : {}),
       spec: podSpec,
     },
-    volumeClaimTemplates: [
-      {
-        metadata: { name: WORKSPACE_VOLUME_NAME },
-        spec: {
-          accessModes: ["ReadWriteOnce"],
-          resources: {
-            requests: { storage: cfg.defaultStorage ?? DEFAULT_STORAGE },
+    volumeClaimTemplates: emptyDirWorkspace
+      ? []
+      : [
+          {
+            metadata: { name: WORKSPACE_VOLUME_NAME },
+            spec: {
+              accessModes: wp?.backend === "rwx-volume" ? ["ReadWriteMany"] : ["ReadWriteOnce"],
+              resources: {
+                requests: { storage: cfg.defaultStorage ?? DEFAULT_STORAGE },
+              },
+              ...(wp?.backend === "rwx-volume" && wp.rwxVolume
+                ? { storageClassName: wp.rwxVolume.storageClassName }
+                : {}),
+            },
           },
-        },
-      },
-    ],
+        ],
   };
   if (isFullProfile) {
     spec.service = true;
@@ -298,13 +365,18 @@ export function buildSandboxManifest(
   const labels: Record<string, string> = { [SESSION_LABEL_KEY]: name };
   if (opts.docker) labels[DOCKER_LABEL_KEY] = "true";
 
+  const annotations: Record<string, string> = {};
+  if (opts.sessionId) annotations[SESSION_ANNOTATION_KEY] = opts.sessionId;
+  if (opts.orgId) annotations[ORG_ANNOTATION_KEY] = opts.orgId;
+  if (opts.ownerId) annotations[OWNER_ANNOTATION_KEY] = opts.ownerId;
+
   return {
     apiVersion: cfg.apiVersion,
     kind: "Sandbox",
     metadata: {
       name,
       labels,
-      ...(opts.sessionId ? { annotations: { [SESSION_ANNOTATION_KEY]: opts.sessionId } } : {}),
+      ...(Object.keys(annotations).length > 0 ? { annotations } : {}),
     },
     spec,
   };

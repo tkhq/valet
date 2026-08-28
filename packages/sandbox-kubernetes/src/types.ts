@@ -31,6 +31,8 @@
  * manifest builder and intentionally omitted rather than typed as `any`.
  */
 
+import type { WorkspacePersistenceConfig } from "./workspace-persistence.js";
+
 /** Pinned CRD API version — the one constant referenced by decision 5's
  * "churn containment" clause. Change this in one place if the provider
  * moves to a newer CRD version. */
@@ -64,6 +66,11 @@ export interface K8sProviderConfig {
    * (EACCES; containerd issue #12182). Unset → field omitted (the daemon
    * still starts; running containers fails on such clusters). */
   dockerRuntimeClassName?: string;
+  /** Workspace-persistence selection (workspace-persistence spec). Absent →
+   * legacy behavior: a ReadWriteOnce workspace PVC and no checkpoint or
+   * restore, exactly the pre-spec semantics. See
+   * `./workspace-persistence.ts` for the resolved shape. */
+  workspacePersistence?: WorkspacePersistenceConfig;
 }
 
 /** `corev1.SeccompProfile` subset — only the two profile types the manifest
@@ -107,6 +114,7 @@ export interface ResourceRequirements {
 export interface VolumeMount {
   name: string;
   mountPath: string;
+  readOnly?: boolean;
 }
 
 /** `corev1.Volume` subset — only the secret-backed volume shape the
@@ -158,6 +166,10 @@ export interface PodSecurityContext {
 /** `corev1.PodSpec` subset — only the fields the manifest builder sets. */
 export interface SandboxPodSpec {
   containers: SandboxContainer[];
+  /** Init containers run to completion before the main container starts.
+   * The manifest builder adds the `workspace-restore` init container for
+   * the `object-store` workspace-persistence backend. */
+  initContainers?: SandboxContainer[];
   /** See `PodSecurityContext` — set only for docker-enabled sandboxes. */
   securityContext?: PodSecurityContext;
   /** `corev1.PodSpec.hostUsers` — false runs the pod in a user namespace.
@@ -195,6 +207,10 @@ export interface VolumeClaimTemplate {
     resources: {
       requests: { storage: string };
     };
+    /** Set for the `rwx-volume` workspace-persistence backend (the
+     * operator's ReadWriteMany StorageClass, e.g. EFS). Omitted for the
+     * legacy default-class PVC. */
+    storageClassName?: string;
   };
 }
 
