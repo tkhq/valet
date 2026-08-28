@@ -46,8 +46,9 @@ const STATUS_VARIANT: Record<SecurityCellWire["status"], "neutral" | "accent" | 
 
 /** The solid dot color that leads each cell row — a status spine down the rail.
  * Pending is a hairline; running is the accent (with a live ping); completed is
- * success; yielded amber; failed danger. */
-const STATUS_DOT: Record<SecurityCellWire["status"], string> = {
+ * success; yielded amber; failed danger. Exported so the collapsed steps strip
+ * paints the same colors. */
+export const STATUS_DOT: Record<SecurityCellWire["status"], string> = {
   pending: "bg-line",
   running: "bg-moss",
   completed: "bg-success-500",

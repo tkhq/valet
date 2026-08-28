@@ -319,7 +319,7 @@ export function FindingsReview({
   );
 
   return (
-    <section className="flex flex-col min-h-0" aria-label="Findings review">
+    <section className="flex flex-1 flex-col min-h-0" aria-label="Findings review">
       {/* Filters + export header */}
       <div className="flex flex-wrap items-center gap-1.5 px-3 py-2 border-b border-line">
         <SelectMenu
@@ -390,14 +390,14 @@ export function FindingsReview({
         <div className="px-3 py-1.5 text-xs text-muted border-b border-line">{notice}</div>
       )}
 
-      <div className="flex flex-col xl:flex-row min-h-0" style={listPane.containerStyle}>
+      <div className="flex flex-1 flex-col xl:flex-row min-h-0" style={listPane.containerStyle}>
         {/* List */}
         <div
           role="listbox"
           aria-label="Findings"
           tabIndex={0}
           onKeyDown={handleListKeyDown}
-          className="xl:w-[var(--sec-findings-list-w)] xl:max-w-[70%] xl:border-r border-b xl:border-b-0 border-line overflow-y-auto max-h-72 xl:max-h-[32rem] focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-400"
+          className="xl:w-[var(--sec-findings-list-w)] xl:max-w-[70%] xl:border-r border-b xl:border-b-0 border-line overflow-y-auto max-h-72 xl:max-h-none focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-400"
         >
           {query.isPending ? (
             <div className="px-3 py-4 text-xs text-muted">
@@ -447,7 +447,7 @@ export function FindingsReview({
         />
 
         {/* Detail */}
-        <div className="flex-1 min-w-0 overflow-y-auto xl:max-h-[32rem]">
+        <div className="flex-1 min-w-0 overflow-y-auto">
           {selected ? (
             <FindingDetail
               finding={selected}

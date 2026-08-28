@@ -16,7 +16,7 @@ import { useStreamStore } from "~/stores/stream";
 import { Button, ConfirmDialog, Spinner } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { useResizablePane } from "~/lib/use-resizable-pane";
-import { CellRail } from "./cell-rail";
+import { StepsPanel } from "./steps-panel";
 import { ReviewSummary } from "./review-summary";
 import { CoverageSection } from "./coverage-section";
 import { NeedsSection } from "./needs-section";
@@ -126,10 +126,10 @@ export function EngagementPanel({
     );
   }
   return (
-    // `[&>*]:shrink-0` keeps every section at its natural height so the panel
-    // scrolls (the aside owns the scroll) instead of the flex column squeezing
-    // the report and findings when the plan is long.
-    <div className="flex flex-col min-h-0 [&>*]:shrink-0">
+    // Fills the aside so the findings pane (flex-1 below) can grow to the bottom
+    // — no empty box under it. The overview sections above keep their natural
+    // height; findings absorbs the slack and scrolls internally.
+    <div className="flex flex-1 flex-col min-h-0">
       {closed && (engagement.status === "completed" || engagement.status === "failed") && (
         <ManifestCard
           cells={cells}
@@ -212,20 +212,10 @@ export function EngagementPanel({
         <NeedsSection sessionId={sessionId} needs={needs} canAdminister={canAdminister} />
       )}
 
-      {/* The engagement steps and their live status — the single plan view. A
-          long plan (triads multiply the cells) is bounded here and scrolls on
-          its own, so it never squeezes the report and findings below it. */}
-      {cells.length > 0 && (
-        <div className="flex shrink-0 items-baseline gap-2 border-b border-line px-4 pb-2 pt-3">
-          <h3 className="text-xs font-semibold text-ink">Steps</h3>
-          <span className="text-[11px] tabular-nums text-muted">
-            {cells.filter((c) => c.status === "completed").length}/{cells.length}
-          </span>
-        </div>
-      )}
-      <div className="max-h-80 shrink-0 overflow-y-auto">
-        <CellRail cells={cells} onOpenChild={onOpenChild} />
-      </div>
+      {/* The engagement steps — collapsible so a long plan (triads multiply the
+          cells) stays a one-line strip and the findings triage below is
+          readable; expand for the full rail. */}
+      <StepsPanel cells={cells} onOpenChild={onOpenChild} />
 
       {coverageQ.data && <CoverageSection rollup={coverageQ.data.rollup} />}
 
