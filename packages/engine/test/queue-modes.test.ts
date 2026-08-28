@@ -295,6 +295,99 @@ describe("queue mode: steer (abort + new)", () => {
 
     faux.unregister();
   });
+
+  it("promoteQueuedItem steers the running turn without a second user entry", async () => {
+    const faux = registerFauxProvider({ provider: "promote-steer", tokensPerSecond: 30 });
+    const longText = Array.from({ length: 30 }, (_, i) => `word${i}`).join(" ");
+    faux.setResponses([fauxAssistantMessage(longText), fauxAssistantMessage("promoted-done")]);
+
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+
+    const r1 = await session.prompt("original");
+    await waitFor(() => events.some((e) => e.event.type === "text_delta"));
+
+    const r2 = await session.thread().submitPrompt("followup", { queueMode: "followup" });
+    const r3 = await session.thread().promoteQueuedItem(r2.queueItemId);
+    expect(r3.queueItemId).not.toBe(r2.queueItemId);
+
+    await waitFor(async () => {
+      const items = await Promise.all([
+        store.getQueueItem(session.id, r1.queueItemId),
+        store.getQueueItem(session.id, r2.queueItemId),
+        store.getQueueItem(session.id, r3.queueItemId),
+      ]);
+      return items.every((i) => i?.status === "settled");
+    });
+
+    const a = await store.getQueueItem(session.id, r1.queueItemId);
+    expect(a?.outcome).toEqual({ outcome: "superseded" });
+    expect(a?.supersededByItemId).toBe(r3.queueItemId);
+
+    const queued = await store.getQueueItem(session.id, r2.queueItemId);
+    expect(queued?.outcome).toEqual({ outcome: "superseded" });
+    expect(queued?.supersededByItemId).toBe(r3.queueItemId);
+
+    const promoted = await store.getQueueItem(session.id, r3.queueItemId);
+    expect(promoted?.outcome).toEqual({ outcome: "completed" });
+
+    const entries = await session.readEntries("web:default");
+    const userMessages = entries.filter(
+      (e): e is MessageEntry => e.type === "message" && e.role === "user",
+    );
+    expect(userMessages.map((m) => m.content)).toEqual(["original", "followup"]);
+    expect(userMessages.map((m) => m.queueItemId)).toEqual([r1.queueItemId, r3.queueItemId]);
+
+    faux.unregister();
+  });
+
+  it("promoteQueuedItem refuses a claimed followup and does not admit another user entry", async () => {
+    const faux = registerFauxProvider({ provider: "promote-claimed", tokensPerSecond: 50 });
+    faux.setResponses([
+      fauxAssistantMessage("first-done"),
+      fauxAssistantMessage("followup-done"),
+    ]);
+
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+
+    const r1 = await session.prompt("original");
+    await waitFor(async () => {
+      const item = await store.getQueueItem(session.id, r1.queueItemId);
+      return item?.status === "settled";
+    });
+
+    const r2 = await session.thread().submitPrompt("followup", { queueMode: "followup" });
+    await waitFor(async () => {
+      const item = await store.getQueueItem(session.id, r2.queueItemId);
+      return item?.status === "running" || item?.status === "settled";
+    });
+
+    await expect(session.thread().promoteQueuedItem(r2.queueItemId)).rejects.toThrow(
+      /no longer queued/,
+    );
+
+    const entries = await session.readEntries("web:default");
+    const userMessages = entries.filter(
+      (e): e is MessageEntry => e.type === "message" && e.role === "user",
+    );
+    expect(userMessages.map((m) => m.content)).toEqual(["original", "followup"]);
+    expect(userMessages.map((m) => m.queueItemId)).toEqual([r1.queueItemId, r2.queueItemId]);
+
+    faux.unregister();
+  });
 });
 
 describe("queue: pause + resume", () => {

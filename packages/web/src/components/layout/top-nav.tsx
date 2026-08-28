@@ -213,6 +213,7 @@ export function TopNav() {
         <NavLink to="/sessions">Sessions</NavLink>
         <NavLink to="/workflows">Workflows</NavLink>
         <NavLink to="/events">Events</NavLink>
+        <NavLink to="/usage">Usage</NavLink>
         <NavLink to="/skills">Skills</NavLink>
         <NavLink to="/integrations">Integrations</NavLink>
       </nav>

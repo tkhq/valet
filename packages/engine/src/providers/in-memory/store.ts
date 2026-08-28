@@ -1,4 +1,4 @@
-import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError } from "../../errors.js";
+import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError, ValidationError } from "../../errors.js";
 import { countPendingForCap } from "../../submission.js";
 import type {
   DecisionGate,
@@ -217,6 +217,16 @@ export class InMemorySessionStore implements SessionStore {
     return this.row(sessionId).gates.get(gateId) ?? null;
   }
 
+  async listDecisionGatesForQueueItem(
+    sessionId: string,
+    threadId: string,
+    queueItemId: string,
+  ): Promise<DecisionGate[]> {
+    return [...this.row(sessionId).gates.values()]
+      .filter((g) => g.threadId === threadId && g.queueItemId === queueItemId)
+      .map((g) => ({ ...g }));
+  }
+
   async getLatestGateForResume(
     sessionId: string,
     threadId: string,
@@ -251,7 +261,7 @@ export class InMemorySessionStore implements SessionStore {
     sessionId: string,
     threadId: string,
     item: QueueItem,
-    opts?: { steer?: boolean; maxPending?: number },
+    opts?: { steer?: boolean; maxPending?: number; promoteFromItemId?: string },
   ): Promise<{ item: QueueItem; admitted: boolean; supersededItemIds: string[] }> {
     const r = this.row(sessionId);
 
@@ -287,6 +297,20 @@ export class InMemorySessionStore implements SessionStore {
       const unsettled = [...r.queueItems.values()].filter((i) => i.status !== "settled");
       if (countPendingForCap(unsettled, threadId) >= opts.maxPending) {
         throw new PendingCapError(threadId, opts.maxPending);
+      }
+    }
+
+    if (opts?.promoteFromItemId) {
+      const source = r.queueItems.get(opts.promoteFromItemId);
+      if (
+        !source ||
+        source.threadId !== threadId ||
+        source.status !== "queued" ||
+        source.supersededByItemId
+      ) {
+        throw new ValidationError(
+          "That message is no longer queued. Send a new message, or wait for the current turn to finish.",
+        );
       }
     }
 

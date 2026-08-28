@@ -121,6 +121,15 @@ const workflowsData = {
       ownerType: "user" as const,
       ownerId: "u1",
     },
+    {
+      id: "wf_team",
+      name: "Team pipeline",
+      definition: {},
+      createdAt: 1,
+      updatedAt: 1,
+      ownerType: "team" as const,
+      ownerId: "t_eng",
+    },
   ],
 };
 
@@ -128,8 +137,18 @@ const patchMutate = vi.fn();
 const createMutate = vi.fn();
 const deleteMutate = vi.fn();
 
+/** The route's search params, as a module variable the navigate stub
+ * writes. Mutating it does NOT re-render — nothing subscribes — so a case
+ * that needs the new value on screen must cause a render of its own, which
+ * is what a tab click does. Reset in `afterEach`. */
+let searchState: Record<string, unknown> = {};
+
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
+  useSearch: () => searchState,
+  useNavigate: () => (opts: { search?: Record<string, unknown> }) => {
+    searchState = opts.search ?? {};
+  },
   Link: ({
     children,
     to,
@@ -151,13 +170,13 @@ vi.mock("~/api/events", () => ({
   useEventCatalog: () => ({ data: catalogData, isLoading: false, error: null }),
   useEvents: () => ({
     data: eventsData,
-    isLoading: false,
+    isPending: false,
     isFetching: false,
     error: null,
     refetch: vi.fn(),
   }),
   useEvent: () => ({ data: eventDetailData, isLoading: false, error: null }),
-  useEventSubscriptions: () => ({ data: subscriptionsData, isLoading: false, error: null }),
+  useEventSubscriptions: () => ({ data: subscriptionsData, isPending: false, error: null }),
   usePatchEventSubscription: () => ({ mutate: patchMutate, isPending: false }),
   useCreateEventSubscription: () => ({ mutate: createMutate, isPending: false }),
   useDeleteEventSubscription: () => ({ mutate: deleteMutate, isPending: false, error: null }),
@@ -171,7 +190,14 @@ vi.mock("~/api/workflows", () => ({
 // target. Mutable so team cases can add fixtures; reset in afterEach.
 let teamsData: { teams: TeamSummary[] } = { teams: [] };
 vi.mock("~/api/settings", () => ({
-  useMe: () => ({ data: { id: "u1", orgRole: "member" }, isLoading: false, error: null }),
+  // `isError` is read by both events surfaces: it is what separates an
+  // owner that has not resolved YET from one that never will.
+  useMe: () => ({
+    data: { id: "u1", orgRole: "member" },
+    isLoading: false,
+    isError: false,
+    error: null,
+  }),
   useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
   useOrg: () => ({
     data: { features: { organizations: true } },
@@ -231,6 +257,7 @@ beforeEach(() => {
 afterEach(() => {
   teamsData = { teams: [] };
   scopeTeamId = undefined;
+  searchState = {};
 });
 
 describe("EventsPage — Activity", () => {
@@ -272,6 +299,43 @@ describe("EventsPage — Activity", () => {
     render(<EventsPage />);
     fireEvent.click(screen.getByRole("button", { name: /Expand PR #7/ }));
     expect(screen.getByText(LONG_ERROR)).toBeTruthy();
+  });
+
+  it("says how far back the workspace-scoped feed reaches", () => {
+    render(<EventsPage />);
+    expect(screen.getByText(/covers the last 30 days/)).toBeTruthy();
+  });
+
+  it("drops that note on All, which has no window", () => {
+    searchState = { scope: "all" };
+    render(<EventsPage />);
+    expect(screen.queryByText(/covers the last 30 days/)).toBeNull();
+  });
+
+  // The diagnosis this page exists for is a round trip: select All to find
+  // an event that matched nothing, open Subscriptions to read the rule,
+  // come back. The tabs unmount each other, so a local-state scope would
+  // hide the event again on the way back.
+  it("keeps an explicit All across a tab round trip", async () => {
+    render(<EventsPage />);
+    fireEvent.keyDown(screen.getByRole("button", { name: "Scope: This workspace" }), {
+      key: "Enter",
+    });
+    fireEvent.click(await screen.findByText("All"));
+    // The choice went to the URL, not into the component.
+    expect(searchState).toEqual({ scope: "all" });
+
+    fireEvent.click(screen.getByRole("tab", { name: "Subscriptions" }));
+    expect(screen.queryByRole("button", { name: /^Scope: / })).toBeNull();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Activity" }));
+    expect(screen.getByRole("button", { name: "Scope: All" })).toBeTruthy();
+  });
+
+  it("starts a fresh mount from the scope the URL carries", () => {
+    searchState = { scope: "all" };
+    render(<EventsPage />);
+    expect(screen.getByRole("button", { name: "Scope: All" })).toBeTruthy();
   });
 });
 
@@ -402,6 +466,57 @@ describe("EventsPage — Subscriptions", () => {
         expect.anything(),
       ),
     );
+  });
+
+  // Ownership follows the TARGET, not the workspace on screen, so a row can
+  // land in a list other than the one that created it. The dialog names the
+  // list it lands in, in BOTH directions.
+  it("in a team workspace, says a personally-filed subscription lands elsewhere", () => {
+    teamsData = { teams: [team("t_eng", "Engineering", "member")] };
+    scopeTeamId = "t_eng";
+    openSubscriptionsTab();
+    fireEvent.click(screen.getByRole("button", { name: /New subscription/ }));
+
+    // The team default is filed to the team, so nothing to warn about.
+    expect(screen.queryByText(/listed in your personal workspace/)).toBeNull();
+
+    fireEvent.click(screen.getByRole("radio", { name: /Notify your assistant/ }));
+    expect(screen.getByText(/not in Engineering/)).toBeTruthy();
+
+    // A workflow target follows the WORKFLOW's owner. The first option is
+    // personally owned, so this one does leave the team's list.
+    fireEvent.click(screen.getByRole("radio", { name: /Run a workflow/ }));
+    expect(screen.getByText(/not in Engineering/)).toBeTruthy();
+
+    // The org assistant files an org-owned row, which lists in every
+    // workspace — no note.
+    fireEvent.click(screen.getByRole("radio", { name: /Notify the org assistant/ }));
+    expect(screen.queryByText(/listed in your personal workspace/)).toBeNull();
+  });
+
+  it("personal workspace: a personally-filed target gets no note", () => {
+    openSubscriptionsTab();
+    fireEvent.click(screen.getByRole("button", { name: /New subscription/ }));
+    expect(screen.queryByText(/Ownership follows the target/)).toBeNull();
+  });
+
+  // The direction a workspace-gated notice cannot reach. A team workflow
+  // armed from the personal workspace is filed to that team, so it leaves
+  // the tab that created it just as completely as the reverse case — and
+  // there is no team on screen to gate the warning on.
+  it("personal workspace: names the team a team workflow's subscription lands in", () => {
+    teamsData = { teams: [team("t_eng", "Engineering", "member")] };
+    openSubscriptionsTab();
+    fireEvent.click(screen.getByRole("button", { name: /New subscription/ }));
+    fireEvent.click(screen.getByRole("radio", { name: /Run a workflow/ }));
+    expect(screen.queryByText(/Ownership follows the target/)).toBeNull();
+
+    // The workflow picker is a `SelectMenu`, driven the way its own suite
+    // drives it: open the trigger, then click the option.
+    fireEvent.keyDown(screen.getByRole("button", { name: "Deploy pipeline" }), { key: "Enter" });
+    fireEvent.click(screen.getByText("Team pipeline"));
+    expect(screen.getByText(/listed in Engineering/)).toBeTruthy();
+    expect(screen.getByText(/not in your personal workspace/)).toBeTruthy();
   });
 
   it("personal workspace: no team target is offered", () => {

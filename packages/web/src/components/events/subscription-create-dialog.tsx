@@ -3,7 +3,8 @@ import { Button, Dialog, DialogContent, DialogFooter, ErrorRow, Input, LoadingRo
 import { useCreateEventSubscription, useEventCatalog } from "~/api/events";
 import { useWorkflows } from "~/api/workflows";
 import { errorText } from "~/lib/error-text";
-import { useActiveWorkspace } from "~/components/workspace-clause";
+import { useTeams } from "~/api/settings";
+import { type ActiveWorkspace, useActiveWorkspace, workspaceName } from "~/components/workspace-clause";
 
 type TargetChoice =
   | { kind: "orchestrator"; orchestrator: "user" | "org" }
@@ -17,6 +18,41 @@ function targetFor(scopedTeamId: string | undefined): TargetChoice {
   return scopedTeamId !== undefined
     ? { kind: "orchestrator", orchestrator: "team", teamId: scopedTeamId }
     : { kind: "orchestrator", orchestrator: "user" };
+}
+
+/** The owner `POST /api/event-subscriptions` will stamp, read off the TARGET
+ * the same way the route reads it — not off the active workspace. A workflow
+ * the list has not loaded reads as the caller's, the route's own fallback, so
+ * the notice below cannot name the wrong team. */
+function filedOwner(
+  target: TargetChoice,
+  workflows: { id: string; ownerType: "user" | "team"; ownerId: string }[],
+): { type: "user" | "team" | "org"; teamId?: string } {
+  if (target.kind !== "workflow") {
+    return target.orchestrator === "team"
+      ? { type: "team", teamId: target.teamId }
+      : { type: target.orchestrator };
+  }
+  const wf = workflows.find((w) => w.id === target.workflowId);
+  return wf?.ownerType === "team" ? { type: "team", teamId: wf.ownerId } : { type: "user" };
+}
+
+/** Where the row will be listed, when that is not the workspace on screen;
+ * null when the two agree. Both directions count: a team-owned row armed
+ * from the personal workspace also lands elsewhere, so the notice cannot be
+ * gated on a team being on screen. Org-owned rows list everywhere. */
+function filedElsewhere(
+  filed: { type: "user" | "team" | "org"; teamId?: string },
+  ws: ActiveWorkspace | undefined,
+  teams: { id: string; name: string }[],
+): string | null {
+  if (filed.type === "org" || ws === undefined) return null;
+  const activeTeamId = ws.kind === "team" ? ws.team.id : undefined;
+  if (filed.type === "team") {
+    if (filed.teamId === activeTeamId) return null;
+    return teams.find((t) => t.id === filed.teamId)?.name ?? "the team that owns it";
+  }
+  return activeTeamId === undefined ? null : "your personal workspace";
 }
 
 /**
@@ -35,6 +71,7 @@ export function SubscriptionCreateDialog({
   const workflowsQ = useWorkflows();
   const create = useCreateEventSubscription();
   const ws = useActiveWorkspace();
+  const teamsQ = useTeams();
   const scopedTeam = ws?.kind === "team" ? ws.team : undefined;
   const scopedTeamId = scopedTeam?.id;
 
@@ -53,6 +90,7 @@ export function SubscriptionCreateDialog({
   const workflows = workflowsQ.data?.workflows ?? [];
   const services = catalogQ.data?.services ?? [];
   const targetReady = target.kind === "orchestrator" || target.workflowId.length > 0;
+  const elsewhere = filedElsewhere(filedOwner(target, workflows), ws, teamsQ.data?.teams ?? []);
   const canSubmit = name.trim().length > 0 && keys.size > 0 && targetReady && !create.isPending;
 
 
@@ -196,6 +234,13 @@ export function SubscriptionCreateDialog({
               )}
             </div>
           </div>
+
+          {elsewhere !== null && ws !== undefined && (
+            <p className="text-xs text-muted">
+              Ownership follows the target. This subscription will be listed in {elsewhere}, not in{" "}
+              {workspaceName(ws)}.
+            </p>
+          )}
 
           {error && <p className="text-xs text-danger-500">{error}</p>}
         </div>

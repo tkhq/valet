@@ -11,7 +11,8 @@ import { eq } from "drizzle-orm";
 import githubPlugin from "@valet/plugin-github/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
-import { eventDeliveries, events, eventSubscriptions, githubInstallations } from "../schema/index.js";
+import { eventDeliveries, events, eventSubscriptions, githubInstallations, skillSources } from "../schema/index.js";
+import { createSkillSource } from "../services/skill-sources.js";
 import type { GetGithubAppResponse, PostGithubAppManifestResponse } from "../wire/types.js";
 
 const HEADERS = { "Content-Type": "application/json" };
@@ -808,6 +809,42 @@ describe("POST /webhooks/github-app", () => {
     expect(body.installations.some((i) => i.accountLogin === "newco")).toBe(true);
   });
 
+  it("a push syncs the matching org skill source and leaves a personal one", async () => {
+    api = await bootTestApi();
+    const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
+    const orgSource = await createSkillSource(
+      api.providers.db,
+      { userId: "local-user", orgId: "local-org" },
+      { repo: "tkhq/skills", ownerType: "org" },
+    );
+    const personal = await createSkillSource(
+      api.providers.db,
+      { userId: "local-user", orgId: "local-org" },
+      { repo: "tkhq/skills" },
+    );
+    expect(orgSource.status).toBe("pending");
+    expect(personal.status).toBe("pending");
+
+    const payload = {
+      ref: "refs/heads/main",
+      repository: { full_name: "tkhq/skills", default_branch: "main" },
+    };
+    const sig = signWebhookBody(JSON.stringify(payload), webhookSecret);
+    const res = await postWebhook(api.baseUrl, "push", payload, sig);
+    expect(res.status).toBe(204);
+
+    const [orgRow] = await api.providers.db
+      .select()
+      .from(skillSources)
+      .where(eq(skillSources.id, orgSource.id));
+    const [personalRow] = await api.providers.db
+      .select()
+      .from(skillSources)
+      .where(eq(skillSources.id, personal.id));
+    expect(orgRow?.status).not.toBe("pending");
+    expect(personalRow?.status).toBe("pending");
+  });
+
   it("204s with no app configured anywhere", async () => {
     api = await bootTestApi();
     const payload = { action: "suspend", installation: { id: 1 } };
@@ -878,8 +915,15 @@ describe("POST /webhooks/github-app", () => {
       .from(eventDeliveries)
       .where(eq(eventDeliveries.eventId, eventRows[0].id));
     expect(deliveryRows).toHaveLength(1);
-    expect(deliveryRows[0].status).toBe("pending");
     expect(deliveryRows[0].subscriptionId).toBe("sub_gh");
+    // Ingest nudges the in-process dispatcher fire-and-forget
+    // (`events/ingest.ts` calls `deps.onIngest?.()` outside the transaction),
+    // so the row is "pending" only until the dispatcher wins the race. What
+    // this case pins is that ingest MATCHED the subscription and wrote one
+    // delivery for it; the terminal status is the dispatcher's own suite
+    // (`events/dispatcher.test.ts`). Asserting "pending" here made the case
+    // fail whenever delivery landed first.
+    expect(["pending", "delivered"]).toContain(deliveryRows[0].status);
   });
 
   it("ingests forwarded events with no matching subscription (event row, zero deliveries)", async () => {

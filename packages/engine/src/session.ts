@@ -9,7 +9,6 @@ import { invokeAction, type InvokeActionResult } from "./plugin-catalog.js";
 import {
   GateManager,
   fromRequest,
-  isDecisionGateExpired,
   isDecisionGateWithdrawn,
   persistTerminalGate,
 } from "./decision-gate.js";
@@ -122,6 +121,11 @@ function formatPluginOutcome(
       return {
         ok: false,
         output: "Approval was denied. Adjust action policies in Settings to allow this action.",
+      };
+    case "expired-approval":
+      return {
+        ok: false,
+        output: "Approval expired before anyone resolved it. Send the command again to retry.",
       };
     case "pending-approval":
       return {
@@ -902,12 +906,8 @@ export class Session {
       const outcome = await invokeAction(catalog, def.action, mapped, ctx, summary);
       return formatPluginOutcome(outcome, def.action);
     } catch (err) {
-      if (isDecisionGateExpired(err)) {
-        return {
-          ok: false,
-          output: "Approval expired before anyone resolved it. Send the command again to retry.",
-        };
-      }
+      // Expiry never reaches here: invokeAction converts it to the
+      // `expired-approval` outcome, which formatPluginOutcome renders.
       if (isDecisionGateWithdrawn(err)) {
         return {
           ok: false,
@@ -1159,15 +1159,27 @@ export class Session {
       { eventKey: `gate:${gate.id}:pending` },
     );
     return this.commandGates.register(gate, async (gateId) => {
-      await this.providers.store.updateDecisionGateEntry(this.id, thread.id, gateId, {
-        resolvedAt: new Date().toISOString(),
-        gate: { ...gate, status: "expired" },
+      // Terminalize the ROW as well as the DAG entry — an entry-only update
+      // leaves the row pending forever, and the thread sweep would later
+      // report it as an unowned orphan.
+      await persistTerminalGate(this.providers.store, this.id, thread.id, gate, {
+        status: "expired",
       });
       await this.emit(
         { type: "decision_gate_expired", threadId: thread.id, gateId },
         { eventKey: `gate:${gateId}:expired` },
       );
     });
+  }
+
+  /**
+   * True when a session-level command-gate waiter is armed for `gateId`.
+   * Command gates persist rows on a thread but are owned here — the thread
+   * expiry sweep consults this so it never expires a row whose waiter is
+   * live (mirrors the commandGates-first branch in resolve/withdraw).
+   */
+  isCommandGatePending(gateId: string): boolean {
+    return this.commandGates.isPending(gateId);
   }
 
   async withdrawDecision(gateId: string, reason: DecisionWithdrawReason): Promise<void> {

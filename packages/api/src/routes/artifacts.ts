@@ -32,6 +32,7 @@ import { requireUser, resolveOptionalUser, type AuthUser } from "../middleware/a
 import { publicUrlFromEnv } from "../channels/host.js";
 import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
 import { isOrgAdmin } from "../services/org.js";
+import { isTeamMember } from "../services/teams.js";
 import { handleServiceError, resolveScope } from "./memory.js";
 import type { MemoryScope } from "../services/memory.js";
 import {
@@ -40,6 +41,7 @@ import {
   getArtifactById,
   getArtifactByToken,
   listArtifacts,
+  listArtifactsForOwner,
   revokeArtifactById,
   revokeArtifactByPath,
   setArtifactVisibility,
@@ -89,6 +91,7 @@ function toListItem(c: Context<AppEnv>, row: ArtifactSummaryRow): ArtifactListIt
     id: row.id,
     path: row.sourceMemoryPath,
     title: row.title,
+    token: row.token,
     url: shareUrl(c, row.token),
     visibility: row.visibility,
     actorUserId: row.actorUserId,
@@ -261,6 +264,24 @@ artifactsRouter.get("/", async (c) => {
   const user = requireUser(c);
   if (!user) return c.json({ error: "unauthorized" }, 401);
   const { db } = c.var.providers;
+
+  // Owner filter (team dashboard design): `?ownerType=team&ownerId=<id>`
+  // lists that team's artifacts, member-gated (org admins pass, the same
+  // rule every team read applies). Non-members get 404 (existence-hiding).
+  const ownerType = c.req.query("ownerType");
+  const ownerId = c.req.query("ownerId");
+  if (ownerType !== undefined || ownerId !== undefined) {
+    if (ownerType !== "team" || !ownerId) {
+      return c.json({ error: "owner filter must be ownerType=team with an ownerId." }, 400);
+    }
+    const allowed =
+      (await isTeamMember(db, ownerId, user.id)) || (await isOrgAdmin(db, user.orgId, user.id));
+    if (!allowed) return c.json({ error: "owner not found" }, 404);
+    const rows = await listArtifactsForOwner(db, user.orgId, { type: "team", id: ownerId });
+    const body: ListArtifactsResponse = { artifacts: rows.map((row) => toListItem(c, row)) };
+    return c.json(body);
+  }
+
   const orgAdmin = await isOrgAdmin(db, user.orgId, user.id);
   const rows = await listArtifacts(db, { id: user.id, orgId: user.orgId, orgAdmin });
   const body: ListArtifactsResponse = { artifacts: rows.map((row) => toListItem(c, row)) };

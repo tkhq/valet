@@ -1,0 +1,6 @@
+name: assistants
+version: 0.0.1
+description: Assistant profile and skill management
+icon: "\U0001F3AD"
+
+v2: true

@@ -17,6 +17,8 @@ import {
   type BusEvent,
   type Credential,
   type CredentialProvider,
+  DecisionGateExpiredError,
+  type DecisionGateRequest,
   type DecisionResolution,
   type PinnedActionSpec,
   type PluginAction,
@@ -792,6 +794,69 @@ describe("pluginCatalogTools: call_tool param validation", () => {
       makeCtx(),
     );
     expect(received).toEqual({ n: 25 });
+  });
+});
+
+describe("pluginCatalogTools: approval gate terminal outcomes", () => {
+  function gatedPlugin(): ActionPlugin {
+    return {
+      service: "test",
+      actions: [
+        {
+          id: "test.dangerous",
+          name: "Dangerous",
+          description: "requires approval",
+          riskLevel: "critical",
+          parameters: Type.Object({}),
+          execute: async () => ({ success: true, data: { ran: true } }),
+        },
+      ],
+    };
+  }
+
+  it("gate expiry renders a terminal do-not-retry result, not a retryable error", async () => {
+    const [, callTool] = pluginCatalogTools({ plugins: [gatedPlugin()] });
+    const result = await callTool.execute(
+      { tool_id: "test.dangerous", params: {}, summary: "try it" },
+      makeCtx({
+        requestDecision: async (): Promise<DecisionResolution> => {
+          throw new DecisionGateExpiredError("g-x");
+        },
+      }),
+    );
+    expect(result.text).toContain("expired");
+    expect(result.text).toContain("do not call test.dangerous again");
+  });
+
+  it("passes the qualified action id as dedupeKey so args variants share terminal outcomes", async () => {
+    let seen: DecisionGateRequest | undefined;
+    const [, callTool] = pluginCatalogTools({ plugins: [gatedPlugin()] });
+    await callTool.execute(
+      { tool_id: "test.dangerous", params: {}, summary: "try it" },
+      makeCtx({
+        requestDecision: async (req): Promise<DecisionResolution> => {
+          seen = req;
+          return { actionId: "deny", resolvedBy: "u1", resolvedAt: Date.now() };
+        },
+      }),
+    );
+    expect(seen?.dedupeKey).toBe("test.dangerous");
+    expect(seen?.resumeKey?.startsWith("test.dangerous:")).toBe(true);
+  });
+
+  it("denial text tells the model the decision is final for the turn", async () => {
+    const [, callTool] = pluginCatalogTools({ plugins: [gatedPlugin()] });
+    const result = await callTool.execute(
+      { tool_id: "test.dangerous", params: {}, summary: "try it" },
+      makeCtx({
+        requestDecision: async (): Promise<DecisionResolution> => ({
+          actionId: "deny",
+          resolvedBy: "u1",
+          resolvedAt: Date.now(),
+        }),
+      }),
+    );
+    expect(result.text).toContain("final for the current turn");
   });
 });
 

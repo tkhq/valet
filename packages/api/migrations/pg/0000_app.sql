@@ -289,6 +289,8 @@ CREATE TABLE "assistants" (
 	"owner_type" text NOT NULL,
 	"owner_id" text NOT NULL,
 	"name" text,
+	"personality" text,
+	"behavior" text,
 	"session_id" text NOT NULL,
 	"is_default" boolean DEFAULT false NOT NULL,
 	"created_at" bigint NOT NULL,
@@ -930,6 +932,39 @@ CREATE TABLE "linear_installations" (
 --> statement-breakpoint
 CREATE UNIQUE INDEX "linear_installations_org_workspace" ON "linear_installations" ("org_id","workspace_id");
 --> statement-breakpoint
+CREATE TABLE "llm_proxy_requests" (
+	"id" text PRIMARY KEY NOT NULL,
+	"created_at" bigint NOT NULL,
+	"org_id" text NOT NULL,
+	"user_id" text NOT NULL,
+	"api_key_id" text NOT NULL,
+	"provider_kind" text NOT NULL,
+	"model" text,
+	"harness" text,
+	"endpoint" text NOT NULL,
+	"provider_response_id" text,
+	"previous_response_id" text,
+	"stream" boolean NOT NULL,
+	"status_code" integer NOT NULL,
+	"request_body" text NOT NULL,
+	"response_body" text,
+	"input_tokens" bigint NOT NULL DEFAULT 0,
+	"output_tokens" bigint NOT NULL DEFAULT 0,
+	"cache_read_tokens" bigint NOT NULL DEFAULT 0,
+	"cache_write_tokens" bigint NOT NULL DEFAULT 0,
+	"total_tokens" bigint NOT NULL DEFAULT 0,
+	"cost_usd" double precision,
+	"latency_ms" integer,
+	"error" text,
+	"parsed" jsonb,
+	"parse_version" integer,
+	"parse_error" text
+);
+--> statement-breakpoint
+CREATE INDEX "llm_proxy_requests_org_created" ON "llm_proxy_requests" ("org_id", "created_at");
+--> statement-breakpoint
+CREATE INDEX "llm_proxy_requests_user_created" ON "llm_proxy_requests" ("user_id", "created_at");
+--> statement-breakpoint
 -- ── cost_entries ──────────────────────────────────────────────────────────
 --
 -- One row per billable assistant turn, with the owner resolved. This is the
@@ -984,7 +1019,14 @@ SELECT
 	COALESCE((e."usage"::jsonb->>'cacheWrite')::bigint, 0)     AS "cache_write_tokens",
 	COALESCE((e."usage"::jsonb->>'total')::bigint, 0)          AS "total_tokens",
 	(e."cost"::jsonb->>'total')::float8                        AS "cost_total",
-	((e."cost"::jsonb->>'total') IS NOT NULL)                  AS "priced"
+	((e."cost"::jsonb->>'total') IS NOT NULL)                  AS "priced",
+	-- Valet use case, derived from the session id shape so the one cost
+	-- definition can be broken down by activity kind (usage dashboard).
+	CASE
+		WHEN e."session_id" LIKE 'orchestrator:%' THEN 'orchestrator'
+		WHEN e."session_id" LIKE 'wf:%'           THEN 'workflow'
+		ELSE 'session'
+	END                                                        AS "use_case"
 FROM "engine_entries" e
 LEFT JOIN "agent_sessions" s
 	ON s."id" = e."session_id"
@@ -994,4 +1036,17 @@ LEFT JOIN "workflow_runs" r
 LEFT JOIN "workflow_definitions" d
 	ON d."id" = r."workflow_id"
 WHERE e."usage" IS NOT NULL
-	AND COALESCE(s."org_id", d."org_id") IS NOT NULL;
+	AND COALESCE(s."org_id", d."org_id") IS NOT NULL
+UNION ALL
+SELECT
+	p."id" AS "entry_id", NULL AS "session_id", p."created_at" AS "created_at", p."model" AS "model",
+	p."org_id" AS "org_id", p."user_id" AS "user_id", 'user' AS "owner_type", p."user_id" AS "owner_id",
+	NULL AS "workflow_id", NULL AS "workflow_run_id",
+	p."input_tokens", p."output_tokens", p."cache_read_tokens", p."cache_write_tokens", p."total_tokens",
+	p."cost_usd" AS "cost_total", (p."cost_usd" IS NOT NULL) AS "priced", 'proxy' AS "use_case"
+FROM "llm_proxy_requests" p
+-- Only rows that carry usage count as billable turns — mirrors the engine
+-- side's `WHERE e."usage" IS NOT NULL`. Excludes failed/4xx proxy calls and
+-- non-completion passthroughs (0 tokens), which would otherwise inflate
+-- `/api/usage` turn counts.
+WHERE p."total_tokens" > 0;

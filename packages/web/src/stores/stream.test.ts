@@ -252,6 +252,54 @@ describe("stream store reducer", () => {
     expect(msgB?.settledOutcome).toBeUndefined();
   });
 
+  it("clears a superseded badge when the bubble is remapped onto a promoted item", () => {
+    const { ingest, addUserMessage, setMessageQueueItemId } = useStreamStore.getState();
+    const msgId = addUserMessage(SESSION, "follow after this turn", THREAD);
+    setMessageQueueItemId(SESSION, msgId, "q-1");
+
+    ingest(SESSION, {
+      seq: 1,
+      ts: Date.now(),
+      offset: offset(1),
+      type: "submission.settled",
+      sessionId: SESSION,
+      threadId: THREAD,
+      queueItemId: "q-1",
+      outcome: "superseded",
+    });
+    expect(useStreamStore.getState().bySession[SESSION].messages.find((m) => m.id === msgId)
+      ?.settledOutcome).toBe("superseded");
+
+    setMessageQueueItemId(SESSION, msgId, "q-2");
+    const msg = useStreamStore.getState().bySession[SESSION].messages.find((m) => m.id === msgId);
+    expect(msg?.queueItemId).toBe("q-2");
+    expect(msg?.promotedFromItemId).toBe("q-1");
+    expect(msg?.settledOutcome).toBeUndefined();
+    expect(msg?.settledError).toBeUndefined();
+  });
+
+  it("ignores a superseded settle for an id this bubble was remapped away from", () => {
+    const { ingest, addUserMessage, setMessageQueueItemId } = useStreamStore.getState();
+    const msgId = addUserMessage(SESSION, "follow after this turn", THREAD);
+    setMessageQueueItemId(SESSION, msgId, "q-1");
+    setMessageQueueItemId(SESSION, msgId, "q-2");
+
+    ingest(SESSION, {
+      seq: 1,
+      ts: Date.now(),
+      offset: offset(1),
+      type: "submission.settled",
+      sessionId: SESSION,
+      threadId: THREAD,
+      queueItemId: "q-1",
+      outcome: "superseded",
+    });
+
+    const msg = useStreamStore.getState().bySession[SESSION].messages.find((m) => m.id === msgId);
+    expect(msg?.settledOutcome).toBeUndefined();
+    expect(msg?.queueItemId).toBe("q-2");
+  });
+
   it("badges nothing when the queueItemId doesn't match any message and multiple messages are unsettled", () => {
     const { ingest, addUserMessage, setMessageQueueItemId } = useStreamStore.getState();
 

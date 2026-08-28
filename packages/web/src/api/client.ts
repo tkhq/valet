@@ -107,6 +107,7 @@ import type {
   ListTeamsResponse,
   ListThreadsResponse,
   ListWorkflowRunsResponse,
+  GetTeamChildrenResponse,
   ListWorkflowTriggersResponse,
   WorkflowRunOutcome,
   WorkflowRunStatus,
@@ -189,6 +190,16 @@ import type {
   WorkflowScheduleResponse,
   WithdrawDecisionRequest,
   ListCommandsResponse,
+  ProxyUsageSummary,
+  ProxyRequestDetail,
+  ProxyRequestListItem,
+  ProxySettingsResponse,
+  UsageBreakdownResponse,
+  UsageSessionsResponse,
+  UsageDrillResponse,
+  UsageDrillItem,
+  UsageScopeName,
+  UsageUseCase,
 } from "@valet/api/wire";
 import type {
   ExportMemoryResponse,
@@ -395,6 +406,10 @@ export interface SkillListQuery {
 export interface SkillSourceListQuery {
   ownerType?: "user" | "team" | "org";
   ownerId?: string;
+  /** Drop org rows from the unfiltered union. `/skills` sends this so org
+   * repositories stay on Organization · Library. Do not send it with an
+   * owner pin. */
+  excludeOrg?: boolean;
   limit?: number;
   cursor?: string;
 }
@@ -491,7 +506,10 @@ export const api = {
     request<GetArtifactResponse>("GET", `/artifacts/${encodeURIComponent(token)}`),
   shareArtifact: (body: ShareArtifactRequest) =>
     request<ShareArtifactResponse>("POST", "/artifacts/share", body),
-  listArtifacts: () => request<ListArtifactsResponse>("GET", "/artifacts"),
+  getTeamChildren: (teamId: string) =>
+    request<GetTeamChildrenResponse>("GET", `/teams/${encodeURIComponent(teamId)}/children`),
+  listArtifacts: (owner?: OwnerFilter) =>
+    request<ListArtifactsResponse>("GET", `/artifacts${ownerQuery(owner)}`),
   patchArtifact: (id: string, body: PatchArtifactRequest) =>
     request<PatchArtifactResponse>("PATCH", `/artifacts/${encodeURIComponent(id)}`, body),
   revokeArtifact: (id: string) =>
@@ -655,7 +673,7 @@ export const api = {
   },
   // Cross-workflow run list. `parentRunId` is how a batch parent's child
   // runs come back in one request.
-  listRuns: (opts?: WorkflowRunFilter): Promise<ListWorkflowRunsResponse> => {
+  listRuns: (opts?: WorkflowRunFilter): Promise<ListAllWorkflowRunsResponse> => {
     // An any-of filter with no values matches nothing. A query string cannot
     // carry an empty repeated field, so an unguarded request would drop the
     // filter and list every readable run — the opposite of what was asked.
@@ -671,7 +689,7 @@ export const api = {
     if (opts?.limit) qs.set("limit", String(opts.limit));
     if (opts?.cursor) qs.set("cursor", opts.cursor);
     const tail = qs.toString() ? `?${qs}` : "";
-    return request<ListWorkflowRunsResponse>("GET", `/workflows/runs${tail}`);
+    return request<ListAllWorkflowRunsResponse>("GET", `/workflows/runs${tail}`);
   },
   getWorkflowPermissions: (id: string) =>
     request<GetWorkflowPermissionsResponse>(
@@ -715,20 +733,22 @@ export const api = {
     ),
 
   // events (event-system design): org feed, per-event detail with delivery
-  // attempts, the plugin trigger catalog, and subscription CRUD
+  // attempts, the plugin trigger catalog, and subscription CRUD. Both lists
+  // take an optional workspace owner.
   getEventCatalog: () => request<GetEventCatalogResponse>("GET", "/events/catalog"),
-  listEvents: (params?: { service?: string; key?: string }) => {
+  listEvents: (params?: { service?: string; key?: string }, owner?: OwnerFilter) => {
     const qs = new URLSearchParams();
     if (params?.service) qs.set("service", params.service);
     if (params?.key) qs.set("key", params.key);
     const q = qs.toString();
-    return request<ListEventsResponse>("GET", q ? `/events?${q}` : "/events");
+    const path = q ? `/events?${q}${ownerSuffix(owner)}` : `/events${ownerQuery(owner)}`;
+    return request<ListEventsResponse>("GET", path);
   },
   getEvent: (id: string) => request<GetEventResponse>("GET", `/events/${encodeURIComponent(id)}`),
   redeliverEvent: (id: string) =>
     request<RedeliverEventResponse>("POST", `/events/${encodeURIComponent(id)}/redeliver`),
-  listEventSubscriptions: () =>
-    request<ListEventSubscriptionsResponse>("GET", "/event-subscriptions"),
+  listEventSubscriptions: (owner?: OwnerFilter) =>
+    request<ListEventSubscriptionsResponse>("GET", `/event-subscriptions${ownerQuery(owner)}`),
   createEventSubscription: (body: CreateEventSubscriptionRequest) =>
     request<CreateEventSubscriptionResponse>("POST", "/event-subscriptions", body),
   patchEventSubscription: (id: string, body: PatchEventSubscriptionRequest) =>
@@ -787,6 +807,26 @@ export const api = {
   patchMe: (body: PatchMeRequest) => request<PatchMeResponse>("PATCH", "/me", body),
   listModels: () => request<ListModelsResponse>("GET", "/models"),
   getUsageSummary: () => request<UsageSummaryResponse>("GET", "/usage/summary"),
+  usageBreakdown: (window: string = "7d", scope: UsageScopeName = "me", teamId?: string) => {
+    const qs = new URLSearchParams({ window, scope });
+    if (teamId !== undefined) qs.set("teamId", teamId);
+    return request<UsageBreakdownResponse>("GET", `/usage/breakdown?${qs}`);
+  },
+  usageItems: (window: string, scope: UsageScopeName, useCase: UsageUseCase, teamId?: string) => {
+    const qs = new URLSearchParams({ window, scope, useCase });
+    if (teamId !== undefined) qs.set("teamId", teamId);
+    return request<UsageDrillResponse>("GET", `/usage/items?${qs}`);
+  },
+  usageExportCsvUrl: (window: string, scope: UsageScopeName, teamId?: string): string => {
+    const qs = new URLSearchParams({ window, scope });
+    if (teamId !== undefined) qs.set("teamId", teamId);
+    return `/api/usage/export.csv?${qs}`;
+  },
+  usageSessions: (window: string = "7d", useCase?: "orchestrator" | "session") => {
+    const qs = new URLSearchParams({ window });
+    if (useCase) qs.set("useCase", useCase);
+    return request<UsageSessionsResponse>("GET", `/usage/sessions?${qs}`);
+  },
   getJournalSummary: () =>
     request<{ date: string; summary: string | null }>("GET", "/memory/journal-summary"),
   getOrg: () => request<OrgResponse>("GET", "/org"),
@@ -943,6 +983,7 @@ export const api = {
     const qs = new URLSearchParams();
     if (opts?.ownerType) qs.set("ownerType", opts.ownerType);
     if (opts?.ownerId) qs.set("ownerId", opts.ownerId);
+    if (opts?.excludeOrg) qs.set("excludeOrg", "1");
     if (opts?.limit) qs.set("limit", String(opts.limit));
     if (opts?.cursor) qs.set("cursor", opts.cursor);
     const tail = qs.toString() ? `?${qs}` : "";
@@ -1070,6 +1111,38 @@ export const api = {
   listMyGrants: () => request<ListGrantsResponse>("GET", "/me/grants"),
   deleteMyGrant: (body: DeleteGrantRequest) =>
     request<DeleteGrantResponse>("DELETE", "/me/grants", body),
+
+  // ── LLM proxy usage (recording-gateway dashboard) ──────────────────────
+  proxyUsageSummary: (window: string = "7d") =>
+    request<ProxyUsageSummary>("GET", `/proxy/usage/summary?window=${encodeURIComponent(window)}`),
+  proxyRequests: (opts: {
+    user?: string;
+    model?: string;
+    harness?: string;
+    from?: number;
+    to?: number;
+    cursor?: string;
+    limit?: number;
+  } = {}) => {
+    const qs = new URLSearchParams();
+    if (opts.user) qs.set("user", opts.user);
+    if (opts.model) qs.set("model", opts.model);
+    if (opts.harness) qs.set("harness", opts.harness);
+    if (opts.from !== undefined) qs.set("from", String(opts.from));
+    if (opts.to !== undefined) qs.set("to", String(opts.to));
+    if (opts.cursor) qs.set("cursor", opts.cursor);
+    if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+    const tail = qs.toString() ? `?${qs}` : "";
+    return request<{ requests: ProxyRequestListItem[]; nextCursor?: string }>("GET", `/proxy/requests${tail}`);
+  },
+  proxyRequestDetail: (id: string) =>
+    request<ProxyRequestDetail>("GET", `/proxy/requests/${encodeURIComponent(id)}`),
+  proxySettings: () =>
+    request<ProxySettingsResponse>("GET", "/proxy/settings"),
+  setProxyMode: (mode: "centralized" | "passthrough") =>
+    request<ProxySettingsResponse>("PUT", "/proxy/settings", { mode }),
+  updateProxySettings: (patch: { enabled?: boolean; mode?: "centralized" | "passthrough" }) =>
+    request<ProxySettingsResponse>("PUT", "/proxy/settings", patch),
 };
 
 export { ApiError, apiErrorMessage };

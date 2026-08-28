@@ -25,7 +25,9 @@ import { assistantSessionId, type Principal, type Session } from "@valet/engine"
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import { agentSessions, assistants, type AssistantRow } from "../schema/index.js";
 import type { EngineHost } from "../engine/host.js";
-import type { AssistantSummary } from "../wire/types.js";
+import type { AssistantBehavior, AssistantSummary } from "../wire/types.js";
+import { parseAssistantBehavior, serializeAssistantBehavior , validateAssistantBehavior } from "./behavior.js";
+import { PERSONALITY_INJECT_CAP } from "./persona.js";
 
 /** Raised when a request would leave a principal with no default assistant. */
 export class DefaultAssistantArchiveError extends Error {
@@ -55,6 +57,11 @@ export function toAssistantSummary(row: AssistantRow): AssistantSummary {
     id: row.id,
     owner: { type: row.ownerType, id: row.ownerId },
     ...(row.name !== null ? { name: row.name } : {}),
+    ...(row.personality !== null ? { personality: row.personality } : {}),
+    ...(() => {
+      const behavior = parseAssistantBehavior(row.behavior, row.id);
+      return behavior !== null ? { behavior } : {};
+    })(),
     sessionId: row.sessionId,
     isDefault: row.isDefault,
     createdAt: row.createdAt,
@@ -104,6 +111,8 @@ function newAssistantRow(args: {
   principal: Principal;
   name: string | null;
   isDefault: boolean;
+  personality?: string | null;
+  behavior?: string | null;
 }): AssistantRow {
   const id = `asst_${randomUUID()}`;
   return {
@@ -112,6 +121,8 @@ function newAssistantRow(args: {
     ownerType: args.principal.type,
     ownerId: args.principal.id,
     name: args.name,
+    personality: args.personality ?? null,
+    behavior: args.behavior ?? null,
     sessionId: assistantSessionId(id),
     isDefault: args.isDefault,
     createdAt: Date.now(),
@@ -267,15 +278,33 @@ export async function listAssistantsForOwners(
  * it strands. A concurrent creation can take the default slot between the
  * check and the insert; the partial unique index catches that, and the
  * retry re-inserts the SAME id as an ordinary assistant.
+ *
+ * `config.personality` is the raw persona text. It is trimmed and an empty
+ * result stored as null at CREATE time — a brand-new assistant with no
+ * personality is "never configured" and keeps the memory-file fallback.
+ * (`patchAssistant` differs: an explicit clear there stores `""`, the
+ * neutral persona.) `config.behavior` is the parsed
+ * `AssistantBehavior`; this function serializes it to JSON before writing so
+ * callers never touch the wire format directly.
  */
 export async function createAssistant(
   db: AppDb,
   orgId: string,
   principal: Principal,
   name: string | null,
+  config?: { personality?: string | null; behavior?: AssistantBehavior | null },
 ): Promise<AssistantRow> {
   const hasDefault = (await findDefaultAssistant(db, orgId, principal)) !== undefined;
-  const row = newAssistantRow({ orgId, principal, name, isDefault: !hasDefault });
+  const trimmedPersonality =
+    config?.personality == null ? null : config.personality.trim() || null;
+  const row = newAssistantRow({
+    orgId,
+    principal,
+    name,
+    isDefault: !hasDefault,
+    personality: trimmedPersonality,
+    behavior: serializeAssistantBehavior(config?.behavior),
+  });
 
   const inserted = await db.insert(assistants).values(row).onConflictDoNothing().returning();
   if (inserted[0]) return inserted[0];
@@ -292,7 +321,8 @@ export async function createAssistant(
 }
 
 /**
- * Rename and/or promote one assistant, atomically.
+ * Rename, promote, and/or rewrite persona/behavior for one assistant,
+ * atomically.
  *
  * Promotion demotes the previous default in the SAME transaction. Between
  * the two statements the principal briefly holds no default, and that gap
@@ -303,13 +333,100 @@ export async function createAssistant(
  *
  * Promoting the current default is a no-op by construction: the demote
  * clears it and the promote sets it again.
+ *
+ * `personality` and `behavior` are optional in the patch object. When
+ * present they overwrite the stored value; `null` clears it (`personality:
+ * null` stores `""` — the neutral persona — because a stored null means
+ * "never configured" and falls back to the memory file). Absent means
+ * "do not touch". This function serializes `AssistantBehavior` to JSON via
+ * `serializeAssistantBehavior`; the route then evicts the cached engine
+ * session so the next wake picks up the new persona and filters.
  */
+/**
+ * THE profile-patch validator, shared by every editing surface (the
+ * assistants routes, the orchestrator /info route, and the assistants.*
+ * actions) — one rule set, so a config one surface accepts is never
+ * rejected by another. Name typing stays at the edges: the surfaces
+ * disagree on whether null clears it, by contract.
+ */
+export function validateProfilePatch(patch: {
+  personality?: string | null;
+  behavior?: unknown;
+}): string | null {
+  if (patch.personality !== undefined && patch.personality !== null && typeof patch.personality !== "string") {
+    return "personality must be a string, or null to clear it.";
+  }
+  if (typeof patch.personality === "string" && patch.personality.length > PERSONALITY_INJECT_CAP) {
+    return `personality is limited to ${PERSONALITY_INJECT_CAP} characters. Shorten it.`;
+  }
+  if (patch.behavior !== undefined && patch.behavior !== null) {
+    return validateAssistantBehavior(patch.behavior);
+  }
+  return null;
+}
+
+/**
+ * `patchAssistant` plus THE eviction predicate — the single place that
+ * knows which fields a cached session bakes in (name feeds the persona
+ * prefix; personality and behavior feed prompt and filters). Every editing
+ * surface goes through here so a new persona input added to the patch can
+ * never be added to one surface's evict check and missed by another's.
+ * `evict` is cache-only (never destroy()): an in-flight turn finishes on
+ * the old config, the next wake rebuilds.
+ */
+export async function applyProfilePatch(
+  db: AppDb,
+  row: AssistantRow,
+  patch: {
+    name?: string | null;
+    isDefault?: true;
+    personality?: string | null;
+    behavior?: AssistantBehavior | null;
+  },
+  evict: (sessionId: string) => void,
+): Promise<AssistantRow> {
+  const updated = await patchAssistant(db, row, patch);
+  if (
+    row.name !== updated.name ||
+    row.personality !== updated.personality ||
+    row.behavior !== updated.behavior
+  ) {
+    evict(updated.sessionId);
+  }
+  return updated;
+}
+
 export async function patchAssistant(
   db: AppDb,
   row: AssistantRow,
-  patch: { name?: string; isDefault?: true },
+  patch: {
+    name?: string | null;
+    isDefault?: true;
+    personality?: string | null;
+    behavior?: AssistantBehavior | null;
+  },
 ): Promise<AssistantRow> {
   if (row.archivedAt !== null) throw new ArchivedAssistantError();
+
+  // All changed fields in ONE UPDATE (plus the demote when promoting): each
+  // statement is a network round trip on the prod node-postgres store, and a
+  // longer transaction widens the window where the default slot sits demoted.
+  const changes: {
+    name?: string | null;
+    personality?: string | null;
+    behavior?: string | null;
+    isDefault?: boolean;
+  } = {};
+  if (patch.name !== undefined) changes.name = patch.name;
+  if (patch.personality !== undefined) {
+    // An explicit clear stores "" (neutral persona), NOT null: null means
+    // "never configured" and falls back to the legacy
+    // assistant/personality.md memory file at wake. A clear that stored null
+    // would resurrect a file persona the editor never displayed.
+    changes.personality = patch.personality === null ? "" : patch.personality.trim();
+  }
+  if (patch.behavior !== undefined) changes.behavior = serializeAssistantBehavior(patch.behavior);
+  if (patch.isDefault === true) changes.isDefault = true;
 
   return db.transaction(async (tx) => {
     if (patch.isDefault === true) {
@@ -322,13 +439,13 @@ export async function patchAssistant(
             eq(assistants.isDefault, true),
           ),
         );
-      await tx.update(assistants).set({ isDefault: true }).where(eq(assistants.id, row.id));
     }
-    if (patch.name !== undefined) {
-      await tx.update(assistants).set({ name: patch.name }).where(eq(assistants.id, row.id));
-    }
-
-    const updated = await tx.select().from(assistants).where(eq(assistants.id, row.id)).limit(1);
+    if (Object.keys(changes).length === 0) return row;
+    const updated = await tx
+      .update(assistants)
+      .set(changes)
+      .where(eq(assistants.id, row.id))
+      .returning();
     const result = updated[0];
     if (!result) {
       throw new Error(`assistants: ${row.id} disappeared during its own update`);

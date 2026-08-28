@@ -63,6 +63,24 @@ the switcher — legible and trustworthy.
    assistant create used to silently revert the selection; the failure
    now shows below the nav.
 
+7. **The usage dashboard follows the switcher.** Amended 2026-08-27
+   (TKAI-226). A team workspace pins `/usage` to `scope=team&teamId=`,
+   which the usage endpoints (`/breakdown`, `/items`, `/export.csv`)
+   answer with the team's owned spend (`cost_entries.owner_type =
+   'team'`) after resolving the team in the caller's org
+   (`getTeamInOrg`) and a live `isTeamMember` check. An unknown team, a
+   foreign org's team, and a team the caller is not on all answer the
+   same 404 — the existence-hiding convention the sessions, teams, and
+   events routes use. The me/org toggle, the proxy request log, and
+   the key-setup callout are personal surfaces: proxy traffic is never
+   team-owned, so they render only in the personal workspace. The proxy
+   drill-down returns no rows in team scope for the same reason. Team
+   scope shows no per-member data — `byUser` stays an org-admin view,
+   and the team CSV blanks `user_id` so a member cannot reconstruct it.
+   The page holds its queries until the switcher's stored key is
+   validated against the team list, so a stale key from a team the
+   caller left cannot flash a 404 in place of the totals.
+
 ## Known limits
 
 An adversarial review (2026-08-17) confirmed four limits this pass ships
@@ -102,5 +120,22 @@ listed so the next pass starts here.
   its badges (decision 2).
 - **Moving workflows and skills between workspaces** — same shape as
   decision 5; add when asked for.
-- **Events feed scoping** — the feed lists org-level facts, not owned
-  rows. It stays unscoped on purpose.
+- **Events feed scoping** — amended 2026-08-24 (small-fixes design,
+  decision 2). The feed still lists org-level facts, not owned rows, and
+  `GET /api/events` still answers with the whole org when it gets no
+  owner. The page filters to the active workspace on first load instead:
+  its scope control starts at "This workspace" and sends the switcher's
+  owner, which narrows the feed to events delivered to that workspace's
+  subscriptions and to the org's own, and "All" drops the owner again. The
+  two owner sets match on purpose: the subscriptions list carries the same
+  union, and the tabs are read side by side. The choice lives in the
+  route's `?scope=` search param, because the two tabs unmount each other.
+  The scoped feed also looks back 30 days only, which the page states; the
+  owner filter rejects rows no index can pre-select, so without a bound one
+  empty page walks the org's whole event history. The org-wide view stays
+  one click away, and unbounded, because an event that matched nothing you
+  own is the row you open when your subscription never fired. The
+  subscriptions list, in the same change, scopes to the switcher's owner
+  plus every org-owned row: an org-owned subscription belongs to no single
+  workspace, and a row that appeared in none of them could never be
+  disabled from the page that created it.

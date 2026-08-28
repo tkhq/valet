@@ -10,6 +10,7 @@ import {
   primaryKey,
   uniqueIndex,
   check,
+  doublePrecision,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import type { ParamMatcher } from "../policies/matchers.js";
@@ -504,6 +505,13 @@ export const assistants = pgTable(
     ownerId: text("owner_id").notNull(),
     /** What the reader calls it. Was `orchestrator_identities.handle`. */
     name: text("name"),
+    /** Per-assistant persona text. Null falls back to the owner's
+     * assistant/personality.md memory file (the pre-config behavior). */
+    personality: text("personality"),
+    /** JSON `AssistantBehavior` (wire/types.ts). Null means every skill and
+     * integration. Validated on write (`validateAssistantBehavior`); parsed
+     * fail-open on read (`parseAssistantBehavior`). */
+    behavior: text("behavior"),
     sessionId: text("session_id").notNull(),
     /**
      * The one a machine picks when nobody chose. Workflow orchestrator
@@ -1326,6 +1334,42 @@ export const llmProviders = pgTable(
   (t) => [index("llm_providers_org").on(t.orgId)],
 );
 
+export const llmProxyRequests = pgTable(
+  "llm_proxy_requests",
+  {
+    id: text("id").primaryKey(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    orgId: text("org_id").notNull(),
+    userId: text("user_id").notNull(),
+    apiKeyId: text("api_key_id").notNull(),
+    providerKind: text("provider_kind", { enum: ["anthropic", "openai"] }).notNull(),
+    model: text("model"),
+    harness: text("harness"),
+    endpoint: text("endpoint").notNull(),
+    providerResponseId: text("provider_response_id"),
+    previousResponseId: text("previous_response_id"),
+    stream: boolean("stream").notNull(),
+    statusCode: integer("status_code").notNull(),
+    requestBody: text("request_body").notNull(),
+    responseBody: text("response_body"),
+    inputTokens: bigint("input_tokens", { mode: "number" }).notNull().default(0),
+    outputTokens: bigint("output_tokens", { mode: "number" }).notNull().default(0),
+    cacheReadTokens: bigint("cache_read_tokens", { mode: "number" }).notNull().default(0),
+    cacheWriteTokens: bigint("cache_write_tokens", { mode: "number" }).notNull().default(0),
+    totalTokens: bigint("total_tokens", { mode: "number" }).notNull().default(0),
+    costUsd: doublePrecision("cost_usd"),
+    latencyMs: integer("latency_ms"),
+    error: text("error"),
+    parsed: jsonb("parsed"),
+    parseVersion: integer("parse_version"),
+    parseError: text("parse_error"),
+  },
+  (t) => [index("llm_proxy_requests_org_created").on(t.orgId, t.createdAt),
+          index("llm_proxy_requests_user_created").on(t.userId, t.createdAt)],
+);
+
+export type LlmProxyRequestRow = typeof llmProxyRequests.$inferSelect;
+
 // ─── Session repo bindings (GitHub/repo integration plan, Task 2) ──────────
 //
 // One row per repo bound to a session (session-create route accepts
@@ -1502,7 +1546,6 @@ export const eventSubscriptions = pgTable(
   {
     id: text("id").primaryKey(),
     orgId: text("org_id").notNull(),
-    // "team" is intentionally excluded: subscription dispatch targets only user/org orchestrators.
     ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull(),
     ownerId: text("owner_id").notNull(),
     name: text("name").notNull(),

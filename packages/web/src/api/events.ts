@@ -21,13 +21,30 @@ import type {
   PatchEventSubscriptionResponse,
   RedeliverEventResponse,
 } from "@valet/api/wire";
-import { api } from "./client";
+import { api, type OwnerFilter } from "./client";
+
+/** Key marker for a scoped query whose owner has not resolved. Not a valid
+ * `ownerType`, so it can never collide with a real owner pair. */
+const UNRESOLVED_OWNER = "owner-unresolved";
+
+/** The workspace, as TRAILING key elements, so the bare prefix still
+ * invalidates every workspace at once. Same shape as `qkMemory`'s.
+ *
+ * A held query sends no owner but must not read the unscoped cache entry:
+ * a warm org-wide answer would render under a "This workspace" label. Hence
+ * the third state. */
+function ownerKey(owner: OwnerFilter | undefined, held: boolean): readonly string[] {
+  if (owner) return [owner.ownerType, owner.ownerId];
+  return held ? [UNRESOLVED_OWNER] : [];
+}
 
 export const qkEvents = {
   catalog: () => ["events", "catalog"] as const,
-  feed: (service?: string, key?: string) => ["events", "feed", service ?? "", key ?? ""] as const,
+  feed: (service?: string, key?: string, owner?: OwnerFilter, held = false) =>
+    ["events", "feed", service ?? "", key ?? "", ...ownerKey(owner, held)] as const,
   detail: (id: string) => ["events", "detail", id] as const,
-  subscriptions: () => ["events", "subscriptions"] as const,
+  subscriptions: (owner?: OwnerFilter, held = false) =>
+    ["events", "subscriptions", ...ownerKey(owner, held)] as const,
 };
 
 export function useEventCatalog(opts?: Partial<UseQueryOptions<GetEventCatalogResponse>>) {
@@ -40,13 +57,20 @@ export function useEventCatalog(opts?: Partial<UseQueryOptions<GetEventCatalogRe
   });
 }
 
+/** `owner` narrows the feed to events delivered to that owner's
+ * subscriptions. Undefined keeps the whole org's feed, unless the caller
+ * also disabled the query, which means "one workspace, owner still
+ * unknown". */
 export function useEvents(
   params?: { service?: string; key?: string },
+  owner?: OwnerFilter,
   opts?: Partial<UseQueryOptions<ListEventsResponse>>,
 ) {
+  // Held for a missing owner, not unscoped on purpose — see `ownerKey`.
+  const held = owner === undefined && opts?.enabled === false;
   return useQuery<ListEventsResponse>({
-    queryKey: qkEvents.feed(params?.service, params?.key),
-    queryFn: () => api.listEvents(params),
+    queryKey: qkEvents.feed(params?.service, params?.key, owner, held),
+    queryFn: () => api.listEvents(params, owner),
     // New events arrive from external webhooks at any time.
     refetchInterval: 30_000,
     ...opts,
@@ -78,12 +102,17 @@ export function useRedeliverEvent(id: string) {
   });
 }
 
+/** `owner` scopes the list to one workspace plus every org-owned
+ * subscription. Undefined lists every subscription in the org; an undefined
+ * owner on a DISABLED query is the held workspace list instead. */
 export function useEventSubscriptions(
+  owner?: OwnerFilter,
   opts?: Partial<UseQueryOptions<ListEventSubscriptionsResponse>>,
 ) {
+  const held = owner === undefined && opts?.enabled === false;
   return useQuery<ListEventSubscriptionsResponse>({
-    queryKey: qkEvents.subscriptions(),
-    queryFn: () => api.listEventSubscriptions(),
+    queryKey: qkEvents.subscriptions(owner, held),
+    queryFn: () => api.listEventSubscriptions(owner),
     ...opts,
   });
 }

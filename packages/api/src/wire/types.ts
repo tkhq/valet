@@ -190,6 +190,38 @@ export interface AssistantOwner {
   id: string;
 }
 
+/** Which skills reach the assistant's session. Absent or `mode: "all"` is
+ * today's behavior: every skill the owner can reach. Names are the merge
+ * key stored skills already shadow plugin skills by. */
+export type AssistantSkillsBehavior =
+  | { mode: "all" }
+  | { mode: "allowlist"; names: string[] };
+
+/** One attached integration. `service` is the ActionPlugin routing key
+ * (e.g. "github"). `excludeActions` holds fully-qualified action ids
+ * (e.g. "github.create_issue"), the same ids the action-policy tables use. */
+export interface AssistantIntegrationEntry {
+  service: string;
+  excludeActions?: string[];
+}
+
+export type AssistantIntegrationsBehavior =
+  | { mode: "all" }
+  | { mode: "allowlist"; entries: AssistantIntegrationEntry[] };
+
+/** Per-assistant behavior config (`docs/specs/2026-08-18-assistant-editor-design.md`).
+ * A null/absent field means "everything", which is what every pre-existing
+ * assistant has. */
+export interface AssistantBehavior {
+  skills?: AssistantSkillsBehavior;
+  integrations?: AssistantIntegrationsBehavior;
+}
+
+/** Server cap on `personality` length, shared so the editor's `maxLength`
+ * and the API's 400 agree (the API enforces it; `assistants/persona.ts`
+ * also slices at injection time). */
+export const PERSONALITY_INJECT_CAP = 500;
+
 export interface AssistantSummary {
   id: string;
   owner: AssistantOwner;
@@ -205,6 +237,12 @@ export interface AssistantSummary {
    * per owner. */
   isDefault: boolean;
   createdAt: number;
+  /** Absent until someone sets it. When absent the session falls back to the
+   * owner's assistant/personality.md memory file. `""` means explicitly
+   * cleared: the neutral persona, with no file fallback. */
+  personality?: string;
+  /** Absent means every skill and integration (the pre-config behavior). */
+  behavior?: AssistantBehavior;
 }
 
 export interface ListAssistantsResponse {
@@ -216,6 +254,8 @@ export interface ListAssistantsResponse {
 export interface CreateAssistantRequest {
   name?: string;
   owner?: AssistantOwner;
+  personality?: string;
+  behavior?: AssistantBehavior;
 }
 
 export type CreateAssistantResponse = AssistantSummary;
@@ -224,8 +264,16 @@ export type CreateAssistantResponse = AssistantSummary;
  * demotes the previous default in the same write — a principal is never
  * left with none, which would strand every automation that targets it. */
 export interface PatchAssistantRequest {
-  name?: string;
+  /** null clears the name; the session then drops the persona prefix and
+   * the UI shows its placeholder label. */
+  name?: string | null;
   isDefault?: true;
+  /** null clears the personality: the session keeps only its name ("You are
+   * {name}."). The legacy memory-file fallback applies only to assistants
+   * whose personality was never set through this API. */
+  personality?: string | null;
+  /** null clears back to "everything". */
+  behavior?: AssistantBehavior | null;
 }
 
 export type PatchAssistantResponse = AssistantSummary;
@@ -238,7 +286,9 @@ export interface EnsureAssistantSessionResponse {
 }
 
 /** GET /api/orchestrator/info — assistant identity + presence (assistant-
- * centered web UI decision 4). Never creates the engine session. */
+ * centered web UI decision 4). Never creates the engine session.
+ * `personality` is the EFFECTIVE value the next wake applies: the
+ * assistants.personality column when set, else the legacy memory file. */
 export interface GetOrchestratorInfoResponse {
   sessionId: string;
   name: string | null;
@@ -247,9 +297,11 @@ export interface GetOrchestratorInfoResponse {
   activeChildren: number;
 }
 
-/** PATCH /api/orchestrator/info — `name` sets `assistants.name` on the
- * caller's default assistant; `personality` writes the
- * `assistant/personality.md` memory file (decision 5). */
+/** PATCH /api/orchestrator/info — both fields write the caller's default
+ * `assistants` row (the same write path as PATCH /api/assistants/:id, so a
+ * personality saved here is the one the next wake applies). `personality`
+ * also refreshes the legacy `assistant/personality.md` memory file for the
+ * assistant's own self-edit surface. */
 export interface PatchOrchestratorInfoRequest {
   name?: string;
   personality?: string;
@@ -272,6 +324,21 @@ export interface OrchestratorChildSummary {
  * caller's orchestrator (decision 6). */
 export interface GetOrchestratorChildrenResponse {
   children: OrchestratorChildSummary[];
+}
+
+/** One row of `GET /api/teams/:id/children` — a child run spawned by ANY of
+ * the team's assistants (team dashboard design), with the assistant that
+ * spawned it, so the feed can attribute the run. */
+export interface TeamChildSummary extends OrchestratorChildSummary {
+  assistantId: string;
+  /** Absent when the assistant is unnamed; the UI applies its label rule. */
+  assistantName?: string;
+}
+
+/** GET /api/teams/:id/children — newest first, capped at 20. Team members
+ * and org admins only; non-members get 404. */
+export interface GetTeamChildrenResponse {
+  children: TeamChildSummary[];
 }
 
 // ── REST: threads ─────────────────────────────────────────────────────────
@@ -494,6 +561,10 @@ export interface PromptFileAttachment {
 }
 
 export interface SendPromptRequest {
+  /**
+   * Prompt text. Required unless `promoteItemId` is set — a promote
+   * reuses the queued item's content and does not admit a new user entry.
+   */
   text: string;
   /** Target thread id. If omitted, server uses the session's default thread. */
   threadId?: string;
@@ -501,6 +572,17 @@ export interface SendPromptRequest {
   attachments?: PromptImageAttachment[];
   /** File attachment refs (from POST /sessions/:id/files). Single-use. */
   fileRefs?: Array<{ ref: string }>;
+  /**
+   * Per-submit queue mode. When omitted, the thread's persisted default
+   * applies. Web mid-turn submits send `followup` so a user orchestrator
+   * (thread default `steer`) queues instead of aborting.
+   */
+  queueMode?: "followup" | "steer";
+  /**
+   * Promote this already-queued item into a steer. Same item content, no
+   * second user entry. `text` may be empty.
+   */
+  promoteItemId?: string;
 }
 
 export interface SendPromptResponse {
@@ -1761,6 +1843,16 @@ export interface PluginServiceSummary {
   actions: PluginActionSummary[];
 }
 
+/** A plugin's actions grouped by ActionPlugin routing service — the key
+ * `AssistantBehavior.integrations` entries use. `services[].actions` groups
+ * by CREDENTIAL service instead and omits credential-less plugins, so the
+ * assistant editor reads this list. */
+export interface PluginActionServiceSummary {
+  service: string;
+  dynamic?: true;
+  actions: PluginActionSummary[];
+}
+
 export interface PluginSummary {
   name: string;
   version: string;
@@ -1781,6 +1873,12 @@ export interface PluginSummary {
   dynamic?: true;
   /** Empty when the plugin declares no `credentials` (nothing to connect). */
   services: PluginServiceSummary[];
+  /** Actions grouped by ActionPlugin routing service — one entry per
+   * `ActionPlugin.service`. Includes credential-less plugins that
+   * `services[].actions` omits. The assistant editor reads this list to
+   * populate the integrations allowlist. Present on all responses from v2+
+   * servers; absent on responses from older servers or test stubs. */
+  actionServices?: PluginActionServiceSummary[];
 }
 
 export interface ListPluginsResponse {
@@ -2193,6 +2291,11 @@ export interface ArtifactListItem {
   id: string;
   path: string;
   title: string;
+  /** The capability token, for in-app navigation (`/a/$token`). The web
+   * client must link with this, not `url`: `url` is the absolute SHARE
+   * link, whose origin is the deployment's public URL — in dev that is the
+   * api origin, which does not serve the SPA. */
+  token: string;
   url: string;
   visibility: ArtifactVisibility;
   /** Who shared it. An org admin's list contains every member's artifacts,
@@ -2260,6 +2363,91 @@ export interface UsageWindow {
 export interface UsageMemberSummary extends UsageWindow {
   userId: string;
   name: string;
+}
+
+/** A Valet activity kind, derived from the session id in `cost_entries`
+ * (`use_case`): `orchestrator`, `session` (interactive chat + child sessions),
+ * `workflow`, or `proxy` (external Claude Code / Codex). */
+export type UsageUseCase = "orchestrator" | "session" | "workflow" | "proxy";
+
+/** A spend bucket with the full token-type split (input/output/cache) so cache
+ * efficiency is visible, plus `unpricedTurns` (turns on custom/dev models that
+ * burn tokens but carry no cost). */
+export interface UsageBucket {
+  costUsd: number;
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  turns: number;
+  unpricedTurns: number;
+}
+
+/** The `?scope=` a usage endpoint takes: the caller's own spend, the whole
+ * org (org-admin only), or one team (team-member only, needs `teamId=`). */
+export type UsageScopeName = "me" | "org" | "team";
+
+/** `GET /api/usage/breakdown?window=&scope=me|org|team` — spend for a window
+ * across ALL use cases (engine sessions + workflows + proxy), from the single
+ * `cost_entries` definition. `scope=org` (org-admin only) covers every member.
+ * `scope=team` covers one team's owned spend; `byUser` is present for the org
+ * scope, and for a team scope when the caller ADMINISTERS the team — a plain
+ * member reads the team's aggregate without colleagues' individual spend. */
+export interface UsageBreakdownResponse {
+  windowMs: number;
+  scope: UsageScopeName;
+  totalCostUsd: number;
+  totalTokens: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCacheReadTokens: number;
+  totalCacheWriteTokens: number;
+  totalTurns: number;
+  unpricedTurns: number;
+  byUseCase: (UsageBucket & { useCase: UsageUseCase })[];
+  byModel: (UsageBucket & { model: string | null })[];
+  /** Org scope always; team scope when the caller administers the team. */
+  byUser?: (UsageBucket & { userId: string; name: string })[];
+  byDay: { dayMs: number; costUsd: number; totalTokens: number }[];
+}
+
+/** `GET /api/usage/items?window=&scope=&useCase=` — drill-down rows for ONE use
+ * case: sessions (title, child-nested via `child_watches`), workflow runs
+ * (workflow name), or proxy (by harness). `sessionId` is set only for
+ * agent-session rows so the UI can link to `/sessions/$id`. */
+export interface UsageDrillItem {
+  id: string;
+  label: string;
+  useCase: UsageUseCase;
+  isChild: boolean;
+  parentId: string | null;
+  sessionId: string | null;
+  costUsd: number;
+  totalTokens: number;
+  turns: number;
+}
+
+export interface UsageDrillResponse {
+  items: UsageDrillItem[];
+}
+
+/** `GET /api/usage/sessions?window=&useCase=` — per-session spend for the
+ * agent-session use cases, for drill-down. Superseded by `/items` but kept for
+ * the current dashboard; `isChild`/`parentSessionId` come from `child_watches`. */
+export interface UsageSessionRow {
+  sessionId: string;
+  title: string | null;
+  useCase: UsageUseCase;
+  isChild: boolean;
+  parentSessionId: string | null;
+  costUsd: number;
+  totalTokens: number;
+  turns: number;
+}
+
+export interface UsageSessionsResponse {
+  sessions: UsageSessionRow[];
 }
 
 export interface UsageSummaryResponse {
@@ -3329,6 +3517,112 @@ export interface GetSlackAppResponse {
   /** Requested scopes the installed app did not grant, from the scope list
    * recorded at connect time. Empty when nothing is missing. */
   missingScopes: string[];
+}
+
+// ── REST: LLM proxy usage (`/api/proxy/*`) ───────────────────────────────
+//
+// Dashboard read surface for the LLM recording gateway. Gating:
+//   - org members see only their own rows.
+//   - org admins see all rows in their org.
+// A row outside the caller's org 404s (never 403 — same convention as
+// `routes/llm-providers.ts`).
+
+/** Aggregate bucket by a single dimension. */
+export interface ProxyUsageBucket {
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  costUsd: number;
+}
+
+export interface ProxyUserBucket extends ProxyUsageBucket {
+  userId: string;
+}
+
+export interface ProxyModelBucket extends ProxyUsageBucket {
+  model: string | null;
+}
+
+export interface ProxyHarnessBucket extends ProxyUsageBucket {
+  harness: string | null;
+}
+
+/** One UTC day's aggregate in a `ProxyUsageSummary`. `dayMs` is epoch ms
+ * floor-truncated to the day boundary (`created_at / 86400000 * 86400000`). */
+export interface ProxyDayBucket {
+  dayMs: number;
+  requests: number;
+  totalTokens: number;
+  costUsd: number;
+}
+
+/** `GET`/`PUT /api/proxy/settings` — org-level recording-gateway governance.
+ * `enabled`: master on/off (off → `/proxy/*` 403s). `mode`: credential strategy
+ * — `centralized` (valet's stored key bills) vs `passthrough` (each user's own
+ * forwarded key bills). `PUT` accepts either field on its own. */
+export interface ProxySettingsResponse {
+  enabled: boolean;
+  mode: "centralized" | "passthrough";
+}
+
+/**
+ * `GET /api/proxy/usage/summary` — token and cost aggregates for the
+ * requested time window. Members see only their own rows; org admins see
+ * the whole org.
+ */
+export interface ProxyUsageSummary {
+  windowMs: number;
+  totalRequests: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalTokens: number;
+  totalCostUsd: number;
+  byUser: ProxyUserBucket[];
+  byModel: ProxyModelBucket[];
+  byHarness: ProxyHarnessBucket[];
+  /** Per-UTC-day aggregates ordered by day ascending, for the spend chart. */
+  byDay: ProxyDayBucket[];
+}
+
+/**
+ * `GET /api/proxy/requests` list item — metadata only, no request or
+ * response bodies.
+ */
+export interface ProxyRequestListItem {
+  id: string;
+  createdAt: number;
+  orgId: string;
+  userId: string;
+  apiKeyId: string;
+  providerKind: "anthropic" | "openai";
+  model: string | null;
+  harness: string | null;
+  endpoint: string;
+  stream: boolean;
+  statusCode: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  totalTokens: number;
+  costUsd: number | null;
+  latencyMs: number | null;
+  error: string | null;
+}
+
+/**
+ * `GET /api/proxy/requests/:id` — full row including request and response
+ * bodies and the parsed representation.
+ */
+export interface ProxyRequestDetail extends ProxyRequestListItem {
+  requestBody: string;
+  responseBody: string | null;
+  parsed: unknown;
+  parseVersion: number | null;
+  parseError: string | null;
+  providerResponseId: string | null;
+  previousResponseId: string | null;
 }
 
 // ── Sandbox file upload ──────────────────────────────────────────────────

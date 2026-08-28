@@ -8,6 +8,8 @@ import {
   SelectMenu,
 } from "~/components/primitives";
 import { useEventCatalog, useEvents } from "~/api/events";
+import { useListOwner } from "~/lib/use-list-owner";
+import { useMe } from "~/api/settings";
 import { EventRow } from "./event-row";
 
 /** Sentinel for "no filter applied". */
@@ -17,18 +19,60 @@ const ALL = "";
  * at exactly this count may be hiding older events. */
 const FEED_PAGE_SIZE = 50;
 
+/** How far back the workspace-scoped feed reaches. Must match
+ * `OWNER_FEED_WINDOW_MS` in `packages/api/src/routes/events.ts`; "All" has
+ * no window. Exported for the case that holds the two together
+ * (`feed-window.test.ts`). */
+export const WORKSPACE_WINDOW_DAYS = 30;
+
+/** Which events the feed asks for: those delivered to the active
+ * workspace's subscriptions, or every event the org ingested. The route
+ * owns the value, in `?scope=`. */
+export type FeedScope = "workspace" | "all";
+
+const SCOPE_OPTIONS = [
+  { value: "workspace", label: "This workspace" },
+  { value: "all", label: "All" },
+] as const;
+
 /**
- * The org's event feed: every normalized event ingested from integration
- * webhooks, newest first, filterable by service and event key (both drawn
- * from the plugin trigger catalog). A row expands into the raw payload and
- * the delivery attempts made for it, so "my subscription never fired" is
+ * The event feed: normalized events ingested from integration webhooks,
+ * newest first, filterable by service and event key (both drawn from the
+ * plugin trigger catalog). A row expands into the raw payload and the
+ * delivery attempts made for it, so "my subscription never fired" is
  * answerable from this page alone.
+ *
+ * The scope control starts at "This workspace". "All" must stay available:
+ * an event that matched nothing you own is precisely the row you open when
+ * your subscription never fired.
+ *
+ * `scope` is a prop, not local state, because the Activity and
+ * Subscriptions tabs unmount each other and the round trip that needs "All"
+ * crosses them.
  */
-export function EventFeed() {
+export function EventFeed({
+  scope,
+  onScopeChange,
+}: {
+  scope: FeedScope;
+  onScopeChange: (next: FeedScope) => void;
+}) {
   const [service, setService] = useState(ALL);
   const [key, setKey] = useState(ALL);
+  const owner = useListOwner();
+  const me = useMe();
   const catalogQ = useEventCatalog();
-  const eventsQ = useEvents({ service: service || undefined, key: key || undefined });
+  // An owner-less request IS the org-wide feed, so a control reading "This
+  // workspace" must not fetch until the owner resolves.
+  const canFetch = scope === "all" || owner !== undefined;
+  // `useListOwner` answers undefined both while identity loads AND when it
+  // fails. A hold that failure caused never ends, so report it instead.
+  const ownerFailed = !canFetch && me.isError;
+  const eventsQ = useEvents(
+    { service: service || undefined, key: key || undefined },
+    scope === "workspace" ? owner : undefined,
+    { enabled: canFetch },
+  );
   const [expanded, setExpanded] = useState<string | null>(null);
 
   const services = catalogQ.data?.services ?? [];
@@ -39,6 +83,13 @@ export function EventFeed() {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2">
+        <SelectMenu
+          value={scope}
+          onChange={onScopeChange}
+          triggerLabel={`Scope: ${scope === "all" ? "All" : "This workspace"}`}
+          options={SCOPE_OPTIONS}
+        />
+
         <SelectMenu
           value={service}
           onChange={(next) => {
@@ -64,27 +115,38 @@ export function EventFeed() {
         )}
 
         <div className="flex-1" />
+        {/* `refetch()` ignores `enabled`, so a press during the hold would
+            fetch the org-wide feed under a "This workspace" control. */}
         <Button
           type="button"
           variant="ghost"
           size="sm"
           aria-label="Refresh events"
-          disabled={eventsQ.isFetching}
+          disabled={!canFetch || eventsQ.isFetching}
           onClick={() => void eventsQ.refetch()}
         >
           <RefreshCw className={`h-3.5 w-3.5 ${eventsQ.isFetching ? "animate-spin" : ""}`} aria-hidden />
         </Button>
       </div>
 
-      {eventsQ.isLoading && <LoadingRow label="Loading events…" />}
+      {/* `isPending`, not `isLoading`: a held query is not fetching, but
+          it still counts as loading. */}
+      {eventsQ.isPending && !ownerFailed && <LoadingRow label="Loading events…" />}
       {eventsQ.error != null && (
         <ErrorRow>Failed to load events. Press refresh to try again.</ErrorRow>
+      )}
+      {ownerFailed && (
+        <ErrorRow>
+          Could not load your workspace, so this feed cannot narrow to it. Select All to see every
+          event the organization received.
+        </ErrorRow>
       )}
 
       {eventsQ.data && eventsQ.data.events.length === 0 && (
         <EmptyRow>
-          No events yet. Events appear here when a connected integration sends a webhook — connect
-          one on the Integrations page.
+          {scope === "workspace"
+            ? `No events reached this workspace's subscriptions in the last ${WORKSPACE_WINDOW_DAYS} days. Select All to see every event the organization received.`
+            : "No events yet. Events appear here when a connected integration sends a webhook — connect one on the Integrations page."}
         </EmptyRow>
       )}
 
@@ -99,6 +161,13 @@ export function EventFeed() {
             />
           ))}
         </div>
+      )}
+
+      {eventsQ.data && scope === "workspace" && eventsQ.data.events.length > 0 && (
+        <p className="pt-1 text-xs text-muted">
+          This workspace's feed covers the last {WORKSPACE_WINDOW_DAYS} days. Select All for
+          every event the organization received.
+        </p>
       )}
 
       {eventsQ.data && eventsQ.data.events.length >= FEED_PAGE_SIZE && (

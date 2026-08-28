@@ -215,6 +215,25 @@ const notesNightly: WorkflowTemplate = {
 };
 
 /**
+ * The same schedule with NO tool node. A scheduled TEAM install is refused
+ * only when the definition holds tool steps (no credential to act as), so
+ * this is the shape that reaches the schedule insert with a team owner.
+ */
+const nightlyNoTools: WorkflowTemplate = {
+  ...notesNightly,
+  id: "nightly-no-tools",
+  name: "Nightly no tools",
+  apps: [],
+  definition: definition(
+    [
+      { id: "start", type: "trigger" },
+      { id: "stop", type: "stop" },
+    ],
+    [{ from: "start", to: "stop" }],
+  ),
+};
+
+/**
  * An EVENT-driven template: no schedule, one subscription install arms, and
  * a filter whose value comes from an install-time input. The trigger def
  * supplies the catalog entry `validateSubscription` checks the filter field
@@ -336,6 +355,13 @@ const linearPlugin: ValetPlugin = {
   actions: [linearActions],
   credentials: [{ type: "oauth2", service: "linear", configKeys: [] }],
   templates: [linearDigest],
+};
+
+const schedulePlugin: ValetPlugin = {
+  name: "notes-schedule",
+  version: "0.0.1",
+  actions: [localActions],
+  templates: [nightlyNoTools],
 };
 
 const notesPlugin: ValetPlugin = {
@@ -990,6 +1016,39 @@ describe("installWorkflowTemplate ownership", () => {
     expect(result.error).toContain("gmail");
     expect(result.error).toContain("Install this template into your own workspace.");
     expect(await db.select().from(workflowSchedules)).toHaveLength(0);
+  });
+
+  it("files a team install's event subscription with the team", async () => {
+    await seedTeam("team-5", [OWNER.userId]);
+    const result = await installWorkflowTemplate(deps([eventPlugin]), OWNER, "notes-on-event", {
+      teamId: "team-5",
+      inputs: { watched: "acme/platform" },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error);
+
+    // The subscription follows the workflow it starts, so the team that
+    // owns the workflow can find the automation that calls it.
+    const subs = await db.select().from(eventSubscriptions);
+    expect(subs).toHaveLength(1);
+    expect(subs[0]!.ownerType).toBe("team");
+    expect(subs[0]!.ownerId).toBe("team-5");
+    expect(subs[0]!.createdBy).toBe(OWNER.userId);
+  });
+
+  it("files a team install's schedule with the team", async () => {
+    await seedTeam("team-6", [OWNER.userId]);
+    const result = await installWorkflowTemplate(deps([schedulePlugin]), OWNER, "nightly-no-tools", {
+      teamId: "team-6",
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error);
+
+    const schedules = await db.select().from(workflowSchedules);
+    expect(schedules).toHaveLength(1);
+    expect(schedules[0]!.ownerType).toBe("team");
+    expect(schedules[0]!.ownerId).toBe("team-6");
+    expect(schedules[0]!.createdBy).toBe(OWNER.userId);
   });
 
   it("counts repeat installs per owner, not across owners", async () => {

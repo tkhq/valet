@@ -262,9 +262,10 @@ export async function triggerAccessSets(db: AppDb, owner: WorkflowOwner): Promis
  * member of the owning team, or may reach its target workflow.
  *
  * The workflow-reach arm is not redundant with the owner arms. Event
- * triggers are created with the CREATOR as row owner even on a team
- * workflow, and rows that pre-date the team owner column were widened to
- * the org — for both, the target workflow is the accurate authority. The
+ * triggers written before they followed their workflow carry the CREATOR as
+ * row owner on a team workflow, and rows that pre-date the team owner column
+ * were widened to the org — for both, the target workflow is the accurate
+ * authority. The
  * owner arms are `isAuthorizedForOwnerWith` — the same core rule the
  * workflow surfaces use, in set form so list filtering stays O(rows).
  *

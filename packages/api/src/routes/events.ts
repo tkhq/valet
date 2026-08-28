@@ -5,18 +5,21 @@
  * families — mounted at `/api` in app.ts, after every more-specific router.
  * Everything is org-scoped off `c.var.user.orgId`; cross-org rows 404, never
  * 403 (same "an owned row and a missing row are indistinguishable" rule as
- * `routes/workflows.ts`). Subscription bodies are validated against the
- * merged plugin trigger catalog before any row is written — the ingest
- * matcher (`events/ingest.ts`) trusts the `event_keys`/`filters` jsonb
- * shapes this file writes.
+ * `routes/workflows.ts`). Inside that org scope, the feed and the
+ * subscriptions list both take an optional `?ownerType=&ownerId=` pair that
+ * narrows to one workspace plus the org's own rows. Subscription bodies are
+ * validated against the merged plugin trigger catalog before any row is
+ * written — the ingest matcher (`events/ingest.ts`) trusts the
+ * `event_keys`/`filters` jsonb shapes this file writes.
  */
 import { Hono } from "hono";
 import { randomUUID } from "node:crypto";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, exists, gte, or, sql, type SQL } from "drizzle-orm";
 import type { EventCatalogEntry, ValetPlugin } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, events, eventSubscriptions } from "../schema/index.js";
+import { readOwnerFilter } from "./_owner-filter.js";
 import { catalogForService } from "../events/ingest.js";
 import { eventKeyMatches, filtersMatch, type SubscriptionFilter } from "../events/match.js";
 import { ownedDefinitionRow } from "../workflows/service.js";
@@ -40,19 +43,14 @@ import type {
 export const eventsRouter = new Hono<AppEnv>();
 
 /**
- * A subscription is mutable by whoever can act on its owner: any member for
- * an org-owned one, or only the creator for a personal (`user`-owned) one.
- * Everyone in the org can still SEE every subscription in the list (shared
- * visibility into what automations exist) — this gate is mutation-only, so
- * an org member cannot toggle or delete a colleague's personal automation
- * even though they can see it exists.
- */
-/**
  * Who may change an existing subscription. The rule is "you can change what
  * you could have created": an org one is org-wide by construction, a team
  * one belongs to its members, and a personal one to its owner. A caller who
  * fails this gets the same 404 as a missing row, so a subscription id never
  * confirms a team the caller is not on.
+ *
+ * Mutation only. Visibility is a separate, wider rule — see the list route
+ * below.
  */
 async function canMutateSubscription(
   db: AppDb,
@@ -73,6 +71,19 @@ const TARGET_KINDS = ["workflow", "orchestrator"] as const;
 
 const FEED_DEFAULT_LIMIT = 50;
 const FEED_MAX_LIMIT = 100;
+
+/**
+ * How far back the OWNER-FILTERED feed looks. No index can pre-select the
+ * owner, so without this bound a workspace that matched nothing walks the
+ * org's whole event history for one empty page. A lower bound on
+ * `received_at` joins the `(org_id, received_at)` index condition, so it is
+ * the cheapest bound available. The unfiltered feed keeps no window.
+ *
+ * `components/events/feed.tsx` prints this window to the reader and must
+ * hold the same number. `feed-window.test.ts` reads this declaration and
+ * fails when only one of them moves.
+ */
+const OWNER_FEED_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
 function allCatalogEntries(plugins: ValetPlugin[]): EventCatalogEntry[] {
   return plugins.flatMap((p) => p.triggers ?? []).flatMap((t) => t.catalog);
@@ -226,6 +237,16 @@ eventsRouter.get("/events/catalog", (c) => {
 
 // ── Feed ────────────────────────────────────────────────────────────────────
 
+/**
+ * The org's feed, with an optional owner filter. The `events` table has no
+ * owner column: ownership is read one join away, through the deliveries the
+ * dispatcher wrote. An event with no deliveries matches no owner, because
+ * no subscription acted on it.
+ *
+ * The owner predicate must stay the SAME union the subscriptions list uses
+ * — the named owner's rows, or the org's own. Drop the org branch here and
+ * a workspace lists an org-owned subscription whose events its feed hides.
+ */
 eventsRouter.get("/events", async (c) => {
   const { db } = c.var.providers;
   const user = c.var.user;
@@ -235,9 +256,40 @@ eventsRouter.get("/events", async (c) => {
   const rawLimit = Number.parseInt(c.req.query("limit") ?? "", 10);
   const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, FEED_MAX_LIMIT) : FEED_DEFAULT_LIMIT;
 
+  const filter = readOwnerFilter(c.req.query("ownerType"), c.req.query("ownerId"));
+  if (filter.error) return c.json({ error: filter.error }, 400);
+
   const conditions = [eq(events.orgId, user.orgId)];
   if (service) conditions.push(eq(events.service, service));
   if (key) conditions.push(eq(events.eventKey, key));
+  if (filter.owner) {
+    const owner = filter.owner;
+    conditions.push(gte(events.receivedAt, Date.now() - OWNER_FEED_WINDOW_MS));
+    conditions.push(
+      exists(
+        db
+          .select({ present: sql<number>`1` })
+          .from(eventDeliveries)
+          .innerJoin(eventSubscriptions, eq(eventSubscriptions.id, eventDeliveries.subscriptionId))
+          .where(
+            and(
+              eq(eventDeliveries.eventId, events.id),
+              // Repeats the outer scope, so the join cannot reach another
+              // org's subscription even if a delivery ever crossed one.
+              eq(eventSubscriptions.orgId, user.orgId),
+              or(
+                and(
+                  eq(eventSubscriptions.ownerType, owner.type),
+                  eq(eventSubscriptions.ownerId, owner.id),
+                ),
+                // Org-owned subscriptions belong to every workspace.
+                eq(eventSubscriptions.ownerType, "org"),
+              ),
+            ),
+          ),
+      ),
+    );
+  }
 
   const rows = await db
     .select()
@@ -401,33 +453,26 @@ eventsRouter.post("/event-subscriptions", async (c) => {
   const error = validateSubscription(plugins, { ...body, filters });
   if (error) return c.json({ error }, 400);
 
-  // Workflow targets must be OWNED by the caller, not just exist in their
-  // org — this is the same event_subscriptions row shape (and the same
-  // ownership requirement) createWorkflowTrigger (workflows/trigger-
-  // service.ts) enforces; this route is a second, parallel write path into
-  // the same table and previously checked only orgId, letting any org
-  // member wire event-driven automation onto a workflow they don't own. A
-  // foreign, unowned, or missing id all fail identically (never reveals
-  // whether the id exists at all).
+  // A workflow target must be OWNED by the caller, not only exist in their
+  // org: org scope alone lets any member wire automation onto another's.
+  // Foreign, unowned and missing ids fail alike, so the error never shows
+  // whether the id exists. Team membership is the bar, as it is for team
+  // workflows and team sessions.
+  let ownerType: "user" | "team" | "org" = "user";
+  let ownerId = user.id;
   if (body.target.kind === "workflow") {
     const owned = await ownedDefinitionRow(db, { userId: user.id, orgId: user.orgId }, body.target.workflowId);
     if (!owned) {
       return c.json({ error: `unknown workflow: ${body.target.workflowId}` }, 400);
     }
-  }
-
-  // Orchestrator targets choose the owning orchestrator: the caller's own
-  // (the default), a team they are on, or the org's. The owner decides which
-  // default assistant the dispatcher delivers into, so a team target is the
-  // whole reason a team can be event-driven at all.
-  //
-  // Membership, not team-admin, is the bar — the same bar team workflows and
-  // team sessions already use. A subscription is automation the team shares,
-  // and a member who can start a team workflow by hand can equally arrange
-  // for an event to start it.
-  let ownerType: "user" | "team" | "org" = "user";
-  let ownerId = user.id;
-  if (body.target.kind === "orchestrator") {
+    // The owner names the workspace; `created_by` names who armed it. Team
+    // only: `canMutateSubscription` lets any org member mutate an org-owned
+    // row, so copying `owned.ownerType` wholesale fails open.
+    if (owned.ownerType === "team") {
+      ownerType = "team";
+      ownerId = owned.ownerId;
+    }
+  } else if (body.target.kind === "orchestrator") {
     const who = body.target.orchestrator ?? "user";
     if (who === "org") {
       ownerType = "org";
@@ -470,14 +515,39 @@ eventsRouter.post("/event-subscriptions", async (c) => {
   return c.json(resp, 201);
 });
 
+/**
+ * Every subscription in the org, or one workspace's plus the org's own when
+ * the caller names an owner. Visibility is wider than the mutation gate on
+ * purpose: these rows were always org-visible, and the filter answers
+ * "whose automations am I looking at", not "what may I see".
+ */
 eventsRouter.get("/event-subscriptions", async (c) => {
   const { db } = c.var.providers;
   const user = c.var.user;
 
+  const filter = readOwnerFilter(c.req.query("ownerType"), c.req.query("ownerId"));
+  if (filter.error) return c.json({ error: filter.error }, 400);
+
+  const conditions: (SQL | undefined)[] = [eq(eventSubscriptions.orgId, user.orgId)];
+  if (filter.owner) {
+    const owner = filter.owner;
+    conditions.push(
+      or(
+        and(
+          eq(eventSubscriptions.ownerType, owner.type),
+          eq(eventSubscriptions.ownerId, owner.id),
+        ),
+        // Org-owned rows join every workspace's list, bounded to the
+        // caller's org by the outer `orgId` predicate.
+        eq(eventSubscriptions.ownerType, "org"),
+      ),
+    );
+  }
+
   const rows = await db
     .select()
     .from(eventSubscriptions)
-    .where(eq(eventSubscriptions.orgId, user.orgId))
+    .where(and(...conditions))
     .orderBy(desc(eventSubscriptions.createdAt));
 
   const resp: ListEventSubscriptionsResponse = { subscriptions: rows.map(rowToSubscription) };

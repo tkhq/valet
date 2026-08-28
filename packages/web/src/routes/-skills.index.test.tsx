@@ -400,8 +400,8 @@ describe("SkillsIndexPage — paging", () => {
 
 /**
  * The repositories panel sits on this page now, over the skills it produces.
- * It used to be a link to `/settings/library-sources`, which is retired: a
- * row's scope is a badge, so a page per scope bought nothing.
+ * It tracks personal and team repositories. Organization repositories live
+ * on Organization · Library.
  */
 describe("SkillsIndexPage — the repositories panel", () => {
   beforeEach(() => {
@@ -413,10 +413,12 @@ describe("SkillsIndexPage — the repositories panel", () => {
     addSource.mockReset();
   });
 
-  it("holds the import panel inline, and no link out to Settings", () => {
+  it("holds the import panel inline, and does not send a member to Library", () => {
     render(<SkillsIndexPage />);
 
     expect(screen.getByRole("button", { name: /import from github/i })).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "Organization Library" })).toBeNull();
+    expect(screen.getByText(/tracked by an org admin/)).toBeTruthy();
     expect(screen.queryByText(/Manage sync sources in Settings/)).toBeNull();
   });
 

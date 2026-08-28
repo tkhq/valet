@@ -56,6 +56,13 @@ export interface StreamMessage extends Message {
    */
   settledError?: string;
   queueItemId?: string;
+  /**
+   * Prior queue item id when this bubble was remapped by a promote
+   * (followup q-1 → steer q-2). `submission.settled` for the old id must
+   * not badge this bubble as superseded — the row still represents the
+   * live prompt.
+   */
+  promotedFromItemId?: string;
 }
 
 /**
@@ -548,6 +555,18 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       // thread. With two or more candidates the heuristic is ambiguous
       // (queued prompt A vs. B), so we drop the event rather than badge the
       // wrong message.
+      //
+      // Promote remaps the same bubble from the followup id to the steer
+      // successor. A superseded settle for the old id must not badge that
+      // bubble — it now represents the promoted prompt.
+      if (
+        ev.outcome === "superseded" &&
+        slice.messages.some(
+          (m) => m.threadId === ev.threadId && m.promotedFromItemId === ev.queueItemId,
+        )
+      ) {
+        return next;
+      }
       const idx = (() => {
         const direct = lastIndex(
           slice.messages,
@@ -732,7 +751,20 @@ export const useStreamStore = create<StreamStore>((set) => ({
       const slice = ensure(state, sessionId);
       const idx = slice.messages.findIndex((m) => m.id === messageId);
       if (idx < 0) return state;
-      const updated: StreamMessage = { ...slice.messages[idx], queueItemId };
+      const prev = slice.messages[idx];
+      const remapping =
+        prev.queueItemId !== undefined && prev.queueItemId !== queueItemId;
+      const updated: StreamMessage = remapping
+        ? {
+            ...prev,
+            queueItemId,
+            promotedFromItemId: prev.queueItemId,
+            // The original followup settles superseded. This bubble is the
+            // successor — drop any badge copied from that settle.
+            settledOutcome: undefined,
+            settledError: undefined,
+          }
+        : { ...prev, queueItemId };
       return {
         bySession: {
           ...state.bySession,

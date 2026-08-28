@@ -79,7 +79,8 @@ describe("ServiceIcon first-party glyphs", () => {
       "skills",
       "skills-actions",
       "browser",
-      "personas",
+      "assistants",
+      "assistants-actions",
       "sandbox-tunnels",
     ];
     for (const slug of slugs) {

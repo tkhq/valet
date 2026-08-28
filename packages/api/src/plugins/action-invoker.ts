@@ -42,6 +42,7 @@ import {
 import type { WorkflowInvokeActionRequest, WorkflowInvokeActionResult } from "@valet/workflow";
 import type { Static } from "typebox";
 import type { AppDb } from "../lib/drizzle.js";
+import { qualifiedActionId } from "./action-id.js";
 import { withSlackOwnerMetadata } from "../channels/identity-links.js";
 import { connectModeFor, findCredentialDeclaration } from "../services/integration-availability.js";
 import { actionInvocations } from "../schema/index.js";
@@ -530,13 +531,7 @@ async function enforceWorkflowPolicy(
   return { ok: false, requiresApproval: true, riskLevel, provenance: decision.provenance.source };
 }
 
-/** The canonical policy-facing action id: the fully-qualified fqid
- * (`service.action`), mirroring the plugin-catalog's list_tools convention.
- * Both invocation paths resolve to this form, so one org policy / override /
- * grant targets both (spec Deviations T6 #3). */
-export function qualifiedActionId(service: string, action: PluginAction): string {
-  return action.id.includes(".") ? action.id : `${service}.${action.id}`;
-}
+export { qualifiedActionId };
 
 /** Matches a bare or service-qualified `PluginAction.id` against `(service, action)`, mirroring `@valet/engine`'s `plugin-catalog.ts` fqid convention. */
 export function findAction(actions: PluginAction[], service: string, actionId: string): PluginAction | undefined {

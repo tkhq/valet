@@ -250,6 +250,128 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     probe: { kind: "column", table: "mcp_oauth_clients", column: "scopes_supported" },
     sql: 'ALTER TABLE "mcp_oauth_clients" ADD COLUMN IF NOT EXISTS "scopes_supported" jsonb',
   },
+  {
+    // Per-assistant personality prose (assistant editor, #325). Null on rows
+    // from before the column existed, which the persona builder reads as
+    // "no personality section" — the same answer a fresh assistant gets.
+    describe: "assistants.personality column",
+    probe: { kind: "column", table: "assistants", column: "personality" },
+    sql: 'ALTER TABLE "assistants" ADD COLUMN IF NOT EXISTS "personality" text',
+  },
+  {
+    // Per-assistant behavior config JSON (assistant editor, #325). Null reads
+    // as "no restrictions" at wake (host.ts parseAssistantBehavior), matching
+    // pre-editor behavior.
+    describe: "assistants.behavior column",
+    probe: { kind: "column", table: "assistants", column: "behavior" },
+    sql: 'ALTER TABLE "assistants" ADD COLUMN IF NOT EXISTS "behavior" text',
+  },
+  {
+    // The LLM recording gateway's request log (#432). The gateway writes a row
+    // here on every recorded call, so an already-migrated DB without it 500s
+    // at runtime. Columns are in lockstep with `llm_proxy_requests` in
+    // 0000_app.sql.
+    describe: "llm_proxy_requests table",
+    probe: { kind: "table", table: "llm_proxy_requests" },
+    sql: `CREATE TABLE IF NOT EXISTS "llm_proxy_requests" (
+      "id" text PRIMARY KEY NOT NULL,
+      "created_at" bigint NOT NULL,
+      "org_id" text NOT NULL,
+      "user_id" text NOT NULL,
+      "api_key_id" text NOT NULL,
+      "provider_kind" text NOT NULL,
+      "model" text,
+      "harness" text,
+      "endpoint" text NOT NULL,
+      "provider_response_id" text,
+      "previous_response_id" text,
+      "stream" boolean NOT NULL,
+      "status_code" integer NOT NULL,
+      "request_body" text NOT NULL,
+      "response_body" text,
+      "input_tokens" bigint NOT NULL DEFAULT 0,
+      "output_tokens" bigint NOT NULL DEFAULT 0,
+      "cache_read_tokens" bigint NOT NULL DEFAULT 0,
+      "cache_write_tokens" bigint NOT NULL DEFAULT 0,
+      "total_tokens" bigint NOT NULL DEFAULT 0,
+      "cost_usd" double precision,
+      "latency_ms" integer,
+      "error" text,
+      "parsed" jsonb,
+      "parse_version" integer,
+      "parse_error" text
+    )`,
+  },
+  {
+    describe: "llm_proxy_requests_org_created index",
+    probe: { kind: "index", index: "llm_proxy_requests_org_created" },
+    sql: 'CREATE INDEX IF NOT EXISTS "llm_proxy_requests_org_created" ON "llm_proxy_requests" ("org_id", "created_at")',
+  },
+  {
+    describe: "llm_proxy_requests_user_created index",
+    probe: { kind: "index", index: "llm_proxy_requests_user_created" },
+    sql: 'CREATE INDEX IF NOT EXISTS "llm_proxy_requests_user_created" ON "llm_proxy_requests" ("user_id", "created_at")',
+  },
+  {
+    // The cost_entries VIEW was rewritten (#432): it added a `use_case` column
+    // and a UNION ALL leg over llm_proxy_requests. A view's output columns
+    // appear in information_schema.columns, so the `column` probe on the new
+    // use_case column detects the pre-rewrite view; CREATE OR REPLACE swaps the
+    // definition in place. The replace is safe because the rewrite only appends
+    // use_case after `priced` and leaves every prior column identical, so
+    // Postgres allows it without a DROP (which would take a heavier lock and
+    // fail on any dependent). This entry MUST stay after the table entry above
+    // — the UNION leg references llm_proxy_requests. Keep the SELECT in lockstep
+    // with the cost_entries view in 0000_app.sql.
+    describe: "cost_entries.use_case (view rewrite)",
+    probe: { kind: "column", table: "cost_entries", column: "use_case" },
+    sql: `CREATE OR REPLACE VIEW "cost_entries" AS
+      SELECT
+        e."id"                                                     AS "entry_id",
+        e."session_id"                                             AS "session_id",
+        e."created_at"                                             AS "created_at",
+        e."model"                                                  AS "model",
+        COALESCE(s."org_id", d."org_id")                           AS "org_id",
+        CASE
+          WHEN s."id" IS NOT NULL THEN s."user_id"
+          WHEN r."owner_type" = 'user' THEN NULLIF(r."owner_id", '')
+        END                                                        AS "user_id",
+        COALESCE(s."owner_type", r."owner_type")                   AS "owner_type",
+        NULLIF(COALESCE(s."owner_id", r."owner_id"), '')           AS "owner_id",
+        r."workflow_id"                                            AS "workflow_id",
+        r."id"                                                     AS "workflow_run_id",
+        COALESCE((e."usage"::jsonb->>'input')::bigint, 0)          AS "input_tokens",
+        COALESCE((e."usage"::jsonb->>'output')::bigint, 0)         AS "output_tokens",
+        COALESCE((e."usage"::jsonb->>'cacheRead')::bigint, 0)      AS "cache_read_tokens",
+        COALESCE((e."usage"::jsonb->>'cacheWrite')::bigint, 0)     AS "cache_write_tokens",
+        COALESCE((e."usage"::jsonb->>'total')::bigint, 0)          AS "total_tokens",
+        (e."cost"::jsonb->>'total')::float8                        AS "cost_total",
+        ((e."cost"::jsonb->>'total') IS NOT NULL)                  AS "priced",
+        CASE
+          WHEN e."session_id" LIKE 'orchestrator:%' THEN 'orchestrator'
+          WHEN e."session_id" LIKE 'wf:%'           THEN 'workflow'
+          ELSE 'session'
+        END                                                        AS "use_case"
+      FROM "engine_entries" e
+      LEFT JOIN "agent_sessions" s
+        ON s."id" = e."session_id"
+      LEFT JOIN "workflow_runs" r
+        ON e."session_id" LIKE 'wf:%'
+        AND r."id" = split_part(e."session_id", ':', 2)
+      LEFT JOIN "workflow_definitions" d
+        ON d."id" = r."workflow_id"
+      WHERE e."usage" IS NOT NULL
+        AND COALESCE(s."org_id", d."org_id") IS NOT NULL
+      UNION ALL
+      SELECT
+        p."id" AS "entry_id", NULL AS "session_id", p."created_at" AS "created_at", p."model" AS "model",
+        p."org_id" AS "org_id", p."user_id" AS "user_id", 'user' AS "owner_type", p."user_id" AS "owner_id",
+        NULL AS "workflow_id", NULL AS "workflow_run_id",
+        p."input_tokens", p."output_tokens", p."cache_read_tokens", p."cache_write_tokens", p."total_tokens",
+        p."cost_usd" AS "cost_total", (p."cost_usd" IS NOT NULL) AS "priced", 'proxy' AS "use_case"
+      FROM "llm_proxy_requests" p
+      WHERE p."total_tokens" > 0`,
+  },
 ];
 
 /** The repairs this database still lacks, by catalog probe — one query per

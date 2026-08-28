@@ -271,6 +271,7 @@ export function SessionView({
             threadId={effectiveThreadId}
             onOpenChild={onOpenChild}
             agentBusy={agentBusy}
+            pendingIds={threadQueueState?.pendingIds}
           />
           {threadError && (
             <div className="border-t border-danger-500/30 bg-danger-500/5 px-4 py-2 text-xs text-danger-600">

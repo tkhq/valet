@@ -1,4 +1,4 @@
-import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError } from "@valet/engine";
+import { ConflictError, NotFoundError, PendingCapError, StaleAttemptError, ValidationError } from "@valet/engine";
 import type {
   DecisionGate,
   DecisionGateEntry,
@@ -489,6 +489,7 @@ export class PgSessionStore implements SessionStore {
          body = EXCLUDED.body,
          actions = EXCLUDED.actions,
          context = EXCLUDED.context,
+         resolution = EXCLUDED.resolution,
          updated_at = EXCLUDED.updated_at`,
       [
         gate.id,
@@ -504,7 +505,7 @@ export class PgSessionStore implements SessionStore {
         JSON.stringify(gate.actions),
         jsonOrNull(gate.origin),
         jsonOrNull(gate.context),
-        null,
+        jsonOrNull(gate.resolution),
         gate.expiresAt ?? null,
         gate.createdAt,
         gate.updatedAt,
@@ -670,6 +671,19 @@ export class PgSessionStore implements SessionStore {
     return raw ? rowToGate(rawToGateRow(raw)) : null;
   }
 
+  async listDecisionGatesForQueueItem(
+    sessionId: string,
+    threadId: string,
+    queueItemId: string,
+  ): Promise<DecisionGate[]> {
+    const result = await this.db.query(
+      `SELECT * FROM engine_decision_gates
+       WHERE session_id = $1 AND thread_id = $2 AND queue_item_id = $3`,
+      [sessionId, threadId, queueItemId],
+    );
+    return result.rows.map((raw) => rowToGate(rawToGateRow(raw)));
+  }
+
   async getLatestGateForResume(
     sessionId: string,
     threadId: string,
@@ -737,7 +751,7 @@ export class PgSessionStore implements SessionStore {
     sessionId: string,
     threadId: string,
     item: QueueItem,
-    opts?: { steer?: boolean; maxPending?: number },
+    opts?: { steer?: boolean; maxPending?: number; promoteFromItemId?: string },
   ): Promise<{ item: QueueItem; admitted: boolean; supersededItemIds: string[] }> {
     let deduped: QueueItem | null;
     let supersededItemIds: string[];
@@ -769,6 +783,27 @@ export class PgSessionStore implements SessionStore {
             const count = toNum(countResult.rows[0]?.count, "count");
             if (count >= opts.maxPending) {
               throw new PendingCapError(threadId, opts.maxPending);
+            }
+          }
+
+          if (opts?.promoteFromItemId) {
+            // Lock the source row so a concurrent claim waits. If the
+            // item is no longer queued, abort before the insert.
+            const source = await tx.query(
+              "SELECT * FROM engine_queue_items WHERE session_id = $1 AND id = $2 FOR UPDATE",
+              [sessionId, opts.promoteFromItemId],
+            );
+            const raw = source.rows[0];
+            const srcItem = raw ? queueItemRowToItem(rawToQueueItemRow(raw)) : null;
+            if (
+              !srcItem ||
+              srcItem.threadId !== threadId ||
+              srcItem.status !== "queued" ||
+              srcItem.supersededByItemId
+            ) {
+              throw new ValidationError(
+                "That message is no longer queued. Send a new message, or wait for the current turn to finish.",
+              );
             }
           }
 
