@@ -316,6 +316,9 @@ describe("AssistantEditorPage", () => {
           id: "asst_1",
           body: expect.objectContaining({ name: "New Name" }),
         }),
+        // The per-call options: the save's onSuccess resets the section's
+        // touched flag so the server value re-syncs the form.
+        expect.anything(),
       ),
     );
   });
@@ -354,6 +357,7 @@ describe("AssistantEditorPage", () => {
             }),
           }),
         }),
+        expect.anything(),
       ),
     );
   });
@@ -402,6 +406,35 @@ describe("AssistantEditorPage", () => {
     routeParamId = "asst_2";
     rerender(<AssistantEditorPage />);
     expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Beta");
+  });
+
+  // Mount-time state from props (CLAUDE.md): the assistant prop updates in
+  // place for the SAME id (rail rename, another admin's PATCH refetched, our
+  // own save's cache write-back). An untouched form must follow the server;
+  // a touched section must keep the user's draft.
+  it("an untouched form follows a same-id server update; a touched section keeps its draft", () => {
+    assistantsData = [makeAssistant({ id: "asst_1", name: "Alpha" })];
+    meData = { id: "u1", orgRole: "member" };
+    const { rerender } = render(<AssistantEditorPage />);
+    expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Alpha");
+
+    // A rail rename lands via the shared query: same id, new name.
+    assistantsData = [makeAssistant({ id: "asst_1", name: "Renamed" })];
+    rerender(<AssistantEditorPage />);
+    expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Renamed");
+
+    // The user edits personality (touching the identity section), then
+    // another server update arrives: the draft wins, not the server value.
+    fireEvent.change(screen.getByLabelText("Personality"), {
+      target: { value: "My unsaved edit" },
+    });
+    assistantsData = [
+      makeAssistant({ id: "asst_1", name: "Renamed", personality: "Server edit" }),
+    ];
+    rerender(<AssistantEditorPage />);
+    expect((screen.getByLabelText("Personality") as HTMLTextAreaElement).value).toBe(
+      "My unsaved edit",
+    );
   });
 
   // Finding 3: a non-identity section's mutation error renders under ITS OWN
@@ -457,6 +490,7 @@ describe("AssistantEditorPage", () => {
             },
           },
         }),
+        expect.anything(),
       ),
     );
   });

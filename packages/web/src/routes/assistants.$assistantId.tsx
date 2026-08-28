@@ -1,8 +1,11 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createFileRoute, Link, useNavigate, useParams } from "@tanstack/react-router";
+import { PERSONALITY_INJECT_CAP } from "@valet/api/wire";
 import type {
   AssistantBehavior,
   AssistantIntegrationEntry,
+  AssistantIntegrationsBehavior,
+  AssistantSkillsBehavior,
   AssistantSummary,
   PluginSummary,
   TeamSummary,
@@ -11,14 +14,16 @@ import { useAssistants, usePatchAssistant, useArchiveAssistant } from "~/api/ass
 import { usePlugins } from "~/api/integrations";
 import { useAllSkills } from "~/api/skills";
 import { useMe, useTeams } from "~/api/settings";
-import { assistantLabel } from "~/components/session/assistant-rail";
+import { assistantLabel, canAdministerOwner } from "~/components/session/assistant-rail";
 import { Section } from "~/components/settings/section";
 import { FieldRow } from "~/components/settings/field-row";
 import {
   Button,
   ConfirmDialog,
+  ErrorRow,
   Input,
-  Spinner,
+  LoadingRow,
+  Textarea,
 } from "~/components/primitives";
 import { errorText } from "~/lib/error-text";
 
@@ -44,24 +49,22 @@ export function integrationOptions(
   );
 }
 
-/** The rail's administer rule, restated for one assistant: your own; a
- * team's needs team admin or org admin. The API still 404s a non-admin
- * write — this only decides read-only rendering. */
+/** The rail's administer rule for one assistant — the SAME predicate the
+ * rail's menus use (`canAdministerOwner`), so the two surfaces cannot
+ * disagree. The API still 404s a non-admin write — this only decides
+ * read-only rendering. */
 export function canEditAssistant(
   assistant: AssistantSummary,
   teams: TeamSummary[] | undefined,
   me: { id: string; orgRole: "admin" | "member" } | undefined,
 ): boolean {
-  if (assistant.owner.type === "user") return me?.id === assistant.owner.id;
-  if (me?.orgRole === "admin") return true;
-  const team = teams?.find((t) => t.id === assistant.owner.id);
-  return team?.callerRole === "admin";
+  return canAdministerOwner(assistant.owner, me, teams);
 }
 
 // ── page component ────────────────────────────────────────────────────────
 
 export function AssistantEditorPage() {
-  const { assistantId } = useParams({ strict: false }) as { assistantId: string };
+  const { assistantId } = useParams({ strict: false });
   const assistantsQ = useAssistants();
   const pluginsQ = usePlugins();
   const meQ = useMe();
@@ -69,18 +72,36 @@ export function AssistantEditorPage() {
 
   const assistant = assistantsQ.data?.assistants.find((a) => a.id === assistantId);
 
-  // Loading gate — all four queries must resolve before rendering.
+  // A settled failure must not render as an eternal spinner: with the app's
+  // retry policy the query stops on error with `data` undefined, so a gate
+  // on data alone never resolves. Error first, then loading.
+  const loadError = assistantsQ.error ?? meQ.error ?? teamsQ.error;
+  if (loadError != null) {
+    return (
+      <div className="space-y-3 py-8">
+        <ErrorRow>Could not load this assistant: {errorText(loadError)}</ErrorRow>
+        <Button
+          type="button"
+          variant="secondary"
+          onClick={() => {
+            void assistantsQ.refetch?.();
+            void meQ.refetch?.();
+            void teamsQ.refetch?.();
+          }}
+        >
+          Retry
+        </Button>
+      </div>
+    );
+  }
+
   const resolved =
     assistantsQ.data !== undefined &&
     meQ.data !== undefined &&
     teamsQ.data !== undefined;
 
   if (!resolved) {
-    return (
-      <div className="flex items-center gap-2 py-8 text-sm text-muted">
-        <Spinner size={14} /> Loading…
-      </div>
-    );
+    return <LoadingRow className="py-8" />;
   }
 
   if (!assistant) {
@@ -106,7 +127,8 @@ export function AssistantEditorPage() {
     // key on the assistant id: the router reuses this component across a
     // param change (one editor URL to another), so without a remount the
     // form's useState would keep assistant A's edits and Save would write
-    // them onto B. The key forces a fresh form per assistant.
+    // them onto B. The key forces a fresh form per assistant. Same-id data
+    // updates do NOT remount — the form's sync effect covers those.
     <AssistantEditorForm
       key={assistant.id}
       assistant={assistant}
@@ -114,6 +136,10 @@ export function AssistantEditorPage() {
       integrationOpts={integrationOpts}
       owningTeamName={owningTeam?.name}
       pluginsResolved={pluginsQ.data !== undefined}
+      pluginsError={pluginsQ.error}
+      onRetryPlugins={() => {
+        void pluginsQ.refetch?.();
+      }}
     />
   );
 }
@@ -126,12 +152,16 @@ function AssistantEditorForm({
   integrationOpts,
   owningTeamName,
   pluginsResolved,
+  pluginsError,
+  onRetryPlugins,
 }: {
   assistant: AssistantSummary;
   canEdit: boolean;
   integrationOpts: { service: string; label: string; actions: { id: string; name: string }[] }[];
   owningTeamName: string | undefined;
   pluginsResolved: boolean;
+  pluginsError?: Error | null;
+  onRetryPlugins?: () => void;
 }) {
   // One mutation instance per section. usePatchAssistant is a thin
   // useMutation wrapper, so a separate instance per Save control is cheap —
@@ -144,41 +174,71 @@ function AssistantEditorForm({
   const archive = useArchiveAssistant();
   const navigate = useNavigate();
 
-  // One behavior object in state, initialized from the server value.
-  const [behavior, setBehavior] = useState<AssistantBehavior | null>(
-    () => assistant.behavior ?? null,
-  );
-
-  // Identity section state.
+  // Per-section drafts, initialized from the server value. Each section's
+  // Save sends only its own draft, so one section's unsaved edits can never
+  // ride along on another section's PATCH.
   const [name, setName] = useState(assistant.name ?? "");
   const [personality, setPersonality] = useState(assistant.personality ?? "");
+  const [skillsDraft, setSkillsDraft] = useState<AssistantSkillsBehavior>(
+    () => assistant.behavior?.skills ?? { mode: "all" },
+  );
+  const [integrationsDraft, setIntegrationsDraft] = useState<AssistantIntegrationsBehavior>(
+    () => assistant.behavior?.integrations ?? { mode: "all" },
+  );
 
-  // Skills section state.
-  const skillsMode = behavior?.skills?.mode ?? "all";
-  const allowedSkillNames: string[] =
-    behavior?.skills?.mode === "allowlist" ? behavior.skills.names : [];
+  // Mount-time state from props (CLAUDE.md): the `assistant` prop updates in
+  // place for the SAME id — the rail's Rename dialog, another admin's PATCH
+  // arriving via refetch, or our own save's cache write-back. Untouched
+  // sections follow the server; a section the user has edited keeps their
+  // draft (the touched ref wins) until its save resets the flag.
+  const identityTouched = useRef(false);
+  const skillsTouched = useRef(false);
+  const integrationsTouched = useRef(false);
+  useEffect(() => {
+    if (!identityTouched.current) {
+      setName(assistant.name ?? "");
+      setPersonality(assistant.personality ?? "");
+    }
+    // Functional updates that return `prev` when nothing changed, so a
+    // refetch that carries the same config does not force a render with a
+    // fresh-but-equal object.
+    if (!skillsTouched.current) {
+      setSkillsDraft((prev) => {
+        const next = assistant.behavior?.skills ?? { mode: "all" as const };
+        return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
+      });
+    }
+    if (!integrationsTouched.current) {
+      setIntegrationsDraft((prev) => {
+        const next = assistant.behavior?.integrations ?? { mode: "all" as const };
+        return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
+      });
+    }
+  }, [assistant]);
 
-  // Integrations section state.
-  const integrationsMode = behavior?.integrations?.mode ?? "all";
+  const skillsMode = skillsDraft.mode;
+  const allowedSkillNames: string[] = skillsDraft.mode === "allowlist" ? skillsDraft.names : [];
+  const integrationsMode = integrationsDraft.mode;
   const allowedEntries: AssistantIntegrationEntry[] =
-    behavior?.integrations?.mode === "allowlist" ? behavior.integrations.entries : [];
+    integrationsDraft.mode === "allowlist" ? integrationsDraft.entries : [];
 
-  // Skills catalog query — owner-scoped when the assistant has a team owner.
-  // Both queries page to exhaustion (useAllSkills): the server caps one page
+  // Skills catalog queries — owner-scoped when the assistant has a team
+  // owner. Both page to exhaustion (useAllSkills): the server caps one page
   // at 24, and an allowlisted name that lived on page 2 rendered as a
   // "(not found)" chip and could be destroyed. Reading the whole catalog is
-  // the only safe basis for calling a name dangling.
+  // the only safe basis for calling a name dangling. Fetched only when the
+  // allowlist UI can show it — in "all" mode (the common case) the paging
+  // loops never run.
   const ownerQuery =
     assistant.owner.type === "team"
       ? { ownerType: "team" as const, ownerId: assistant.owner.id }
       : {};
-  const skillsQ = useAllSkills(ownerQuery);
-  const pluginSkillsQ = useAllSkills();
+  const wantCatalog = skillsMode === "allowlist";
+  const skillsQ = useAllSkills(ownerQuery, { enabled: wantCatalog });
+  const pluginSkillsQ = useAllSkills({}, { enabled: wantCatalog });
 
-  // Section-level gates: skills and integrations wait on their own catalogs.
-  // The identity section renders immediately without waiting on slow catalogs.
-  const skillsResolved =
-    skillsQ.data !== undefined && pluginSkillsQ.data !== undefined;
+  const skillsError = skillsQ.error ?? pluginSkillsQ.error;
+  const skillsResolved = skillsQ.data !== undefined && pluginSkillsQ.data !== undefined;
 
   // The catalog is whole only when BOTH queries reached their final page. A
   // name is classified as dangling only against a whole catalog (below).
@@ -186,12 +246,12 @@ function AssistantEditorForm({
     skillsQ.data?.complete === true && pluginSkillsQ.data?.complete === true;
 
   const catalogSkillNames = useMemo(() => {
-    const all: string[] = [];
-    for (const s of skillsQ.data?.skills ?? []) all.push(s.name);
+    const names = new Set<string>();
+    for (const s of skillsQ.data?.skills ?? []) names.add(s.name);
     for (const s of pluginSkillsQ.data?.skills ?? []) {
-      if (s.origin === "plugin" && !all.includes(s.name)) all.push(s.name);
+      if (s.origin === "plugin") names.add(s.name);
     }
-    return new Set(all);
+    return names;
   }, [skillsQ.data, pluginSkillsQ.data]);
 
   // Archive dialog state.
@@ -200,57 +260,84 @@ function AssistantEditorForm({
   // ── save handlers ────────────────────────────────────────────────────
 
   function saveIdentity() {
-    identityPatch.mutate({
-      id: assistant.id,
-      body: {
-        name: name.trim() || undefined,
-        personality: personality.trim() ? personality.trim() : null,
+    const trimmedName = name.trim();
+    const trimmedPersonality = personality.trim();
+    identityPatch.mutate(
+      {
+        id: assistant.id,
+        body: {
+          // An emptied field is an explicit clear (null on the wire), never a
+          // silent omit — omitting would keep the old value while the input
+          // shows empty.
+          name: trimmedName === "" ? null : trimmedName,
+          personality: trimmedPersonality === "" ? null : trimmedPersonality,
+        },
       },
-    });
+      {
+        onSuccess: () => {
+          identityTouched.current = false;
+        },
+      },
+    );
   }
 
-  // Each section's Save builds its PATCH body from the last-fetched server
-  // value (`assistant.behavior`) plus only its OWN half from local state.
-  // Spreading the shared local `behavior` would have persisted the other
-  // section's unsaved edits. This is not a fresh server read: a concurrent
-  // PATCH from another client between fetch and save is still overwritten.
+  // Each section's Save builds its PATCH body from the cached server row
+  // (`assistant.behavior`) plus only its OWN draft. usePatchAssistant writes
+  // every PATCH response back into that cache synchronously, so a save
+  // issued right after another section's save reads the first save's result
+  // — not the pre-save fetch. A concurrent PATCH from another client between
+  // its response and this click is still last-write-wins.
   function saveSkills() {
-    const newBehavior: AssistantBehavior = {
-      ...assistant.behavior,
-      skills:
-        skillsMode === "all"
-          ? { mode: "all" }
-          : { mode: "allowlist", names: allowedSkillNames },
-    };
-    skillsPatch.mutate({ id: assistant.id, body: { behavior: newBehavior } });
+    const newBehavior: AssistantBehavior = { ...assistant.behavior, skills: skillsDraft };
+    skillsPatch.mutate(
+      { id: assistant.id, body: { behavior: newBehavior } },
+      {
+        onSuccess: () => {
+          skillsTouched.current = false;
+        },
+      },
+    );
   }
 
   function saveIntegrations() {
     const newBehavior: AssistantBehavior = {
       ...assistant.behavior,
-      integrations:
-        integrationsMode === "all"
-          ? { mode: "all" }
-          : { mode: "allowlist", entries: allowedEntries },
+      integrations: integrationsDraft,
     };
-    integrationsPatch.mutate({ id: assistant.id, body: { behavior: newBehavior } });
+    integrationsPatch.mutate(
+      { id: assistant.id, body: { behavior: newBehavior } },
+      {
+        onSuccess: () => {
+          integrationsTouched.current = false;
+        },
+      },
+    );
+  }
+
+  function editName(value: string) {
+    identityTouched.current = true;
+    setName(value);
+  }
+
+  function editPersonality(value: string) {
+    identityTouched.current = true;
+    setPersonality(value);
   }
 
   function setSkillsMode(mode: "all" | "allowlist") {
-    setBehavior((prev) => ({
-      ...prev,
-      skills: mode === "all" ? { mode: "all" } : { mode: "allowlist", names: allowedSkillNames },
-    }));
+    skillsTouched.current = true;
+    setSkillsDraft(mode === "all" ? { mode: "all" } : { mode: "allowlist", names: allowedSkillNames });
   }
 
   function toggleSkill(skillName: string, checked: boolean) {
-    const next = checked
-      ? [...allowedSkillNames, skillName]
-      : allowedSkillNames.filter((n) => n !== skillName);
-    setBehavior((prev) => ({
-      ...prev,
-      skills: { mode: "allowlist", names: next },
-    }));
+    skillsTouched.current = true;
+    setSkillsDraft((prev) => {
+      const names = prev.mode === "allowlist" ? prev.names : [];
+      return {
+        mode: "allowlist",
+        names: checked ? [...names, skillName] : names.filter((n) => n !== skillName),
+      };
+    });
   }
 
   function removeSkill(skillName: string) {
@@ -258,53 +345,38 @@ function AssistantEditorForm({
   }
 
   function setIntegrationsMode(mode: "all" | "allowlist") {
-    setBehavior((prev) => ({
-      ...prev,
-      integrations:
-        mode === "all"
-          ? { mode: "all" }
-          : { mode: "allowlist", entries: allowedEntries },
-    }));
+    integrationsTouched.current = true;
+    setIntegrationsDraft(
+      mode === "all" ? { mode: "all" } : { mode: "allowlist", entries: allowedEntries },
+    );
   }
 
   function toggleIntegration(service: string, checked: boolean) {
-    if (checked) {
-      if (!allowedEntries.find((e) => e.service === service)) {
-        setBehavior((prev) => ({
-          ...prev,
-          integrations: {
-            mode: "allowlist",
-            entries: [...allowedEntries, { service }],
-          },
-        }));
+    integrationsTouched.current = true;
+    setIntegrationsDraft((prev) => {
+      const entries = prev.mode === "allowlist" ? prev.entries : [];
+      if (checked) {
+        if (entries.find((e) => e.service === service)) return prev;
+        return { mode: "allowlist", entries: [...entries, { service }] };
       }
-    } else {
-      setBehavior((prev) => ({
-        ...prev,
-        integrations: {
-          mode: "allowlist",
-          entries: allowedEntries.filter((e) => e.service !== service),
-        },
-      }));
-    }
+      return { mode: "allowlist", entries: entries.filter((e) => e.service !== service) };
+    });
   }
 
   function toggleExcludeAction(service: string, actionId: string, exclude: boolean) {
-    const entry = allowedEntries.find((e) => e.service === service);
-    if (!entry) return;
-    const current = entry.excludeActions ?? [];
-    const next = exclude ? [...current, actionId] : current.filter((id) => id !== actionId);
-    setBehavior((prev) => ({
-      ...prev,
-      integrations: {
+    integrationsTouched.current = true;
+    setIntegrationsDraft((prev) => {
+      const entries = prev.mode === "allowlist" ? prev.entries : [];
+      return {
         mode: "allowlist",
-        entries: allowedEntries.map((e) =>
-          e.service === service
-            ? { ...e, excludeActions: next.length > 0 ? next : undefined }
-            : e,
-        ),
-      },
-    }));
+        entries: entries.map((e) => {
+          if (e.service !== service) return e;
+          const current = e.excludeActions ?? [];
+          const next = exclude ? [...current, actionId] : current.filter((id) => id !== actionId);
+          return { ...e, excludeActions: next.length > 0 ? next : undefined };
+        }),
+      };
+    });
   }
 
   // Dangling skill names (in allowlist, not in catalog). Only classified
@@ -338,23 +410,22 @@ function AssistantEditorForm({
           <Input
             aria-label="Name"
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onChange={(e) => editName(e.target.value)}
             disabled={!canEdit}
             placeholder="Assistant name"
           />
         </FieldRow>
         <FieldRow label="Personality" hint="Describes how the assistant speaks and approaches problems. Leave blank to use the default.">
-          <textarea
+          <Textarea
             aria-label="Personality"
             value={personality}
-            onChange={(e) => setPersonality(e.target.value)}
+            onChange={(e) => editPersonality(e.target.value)}
             disabled={!canEdit}
             rows={4}
-            // Matches the server cap PERSONALITY_INJECT_CAP (500): the API
-            // 400s a longer value, so the field stops the overflow up front.
-            maxLength={500}
+            // The server cap: the API 400s a longer value, so the field stops
+            // the overflow up front. One constant, imported from the wire.
+            maxLength={PERSONALITY_INJECT_CAP}
             placeholder="You are warm and direct."
-            className="w-full rounded border bg-[--bg] text-[--fg] placeholder:text-muted border-[--border] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40 focus-visible:border-accent-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed px-3 py-2 text-sm resize-y leading-relaxed"
           />
         </FieldRow>
         <div className="py-4 flex items-center gap-3">
@@ -374,11 +445,6 @@ function AssistantEditorForm({
 
       {/* 2. Skills section */}
       <Section title="Skills" description="Which skills this assistant can use. Skills extend what the assistant knows how to do.">
-        {!skillsResolved ? (
-          <div className="flex items-center gap-2 py-4 text-sm text-muted">
-            <Spinner size={14} /> Loading skills…
-          </div>
-        ) : (
         <div className="py-4 space-y-4">
           <div className="space-y-2">
             <label className="flex items-center gap-2 text-sm cursor-pointer">
@@ -405,7 +471,24 @@ function AssistantEditorForm({
             </label>
           </div>
 
-          {skillsMode === "allowlist" && (
+          {skillsMode === "allowlist" &&
+            (skillsError != null ? (
+              <div className="space-y-2 pl-2">
+                <ErrorRow>Could not load the skill catalog: {errorText(skillsError)}</ErrorRow>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={() => {
+                    void skillsQ.refetch?.();
+                    void pluginSkillsQ.refetch?.();
+                  }}
+                >
+                  Retry
+                </Button>
+              </div>
+            ) : !skillsResolved ? (
+              <LoadingRow label="Loading skills…" className="pl-2" />
+            ) : (
             <div className="space-y-3 pl-2">
               {/* Dangling names (not in catalog) */}
               {danglingNames.length > 0 && (
@@ -451,7 +534,7 @@ function AssistantEditorForm({
                 )}
               </div>
             </div>
-          )}
+            ))}
 
           <div className="flex items-center gap-3">
             <Button
@@ -467,15 +550,19 @@ function AssistantEditorForm({
             )}
           </div>
         </div>
-        )}
       </Section>
 
       {/* 3. Integrations section */}
       <Section title="Integrations" description="Which integrations this assistant can use. An integration is a connected service like GitHub.">
-        {!pluginsResolved ? (
-          <div className="flex items-center gap-2 py-4 text-sm text-muted">
-            <Spinner size={14} /> Loading integrations…
+        {pluginsError != null ? (
+          <div className="space-y-2 py-4">
+            <ErrorRow>Could not load integrations: {errorText(pluginsError)}</ErrorRow>
+            <Button type="button" variant="secondary" onClick={onRetryPlugins}>
+              Retry
+            </Button>
           </div>
+        ) : !pluginsResolved ? (
+          <LoadingRow label="Loading integrations…" className="py-4" />
         ) : (
         <div className="py-4 space-y-4">
           <div className="space-y-2">

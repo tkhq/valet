@@ -257,6 +257,22 @@ export function canAdministerGroup(group: AssistantGroup, orgAdmin: boolean): bo
   return orgAdmin || group.team.callerRole === "admin";
 }
 
+/** The same rule, keyed by an assistant's OWNER — the shape the editor page
+ * holds. One predicate for both surfaces, so the rail's menu and the
+ * editor's read-only gate can never disagree. Stricter than
+ * `canAdministerGroup` on the personal arm: the rail trusts the API to list
+ * only the caller's own personal assistants, the editor checks. */
+export function canAdministerOwner(
+  owner: AssistantOwner,
+  me: { id: string; orgRole: "admin" | "member" } | undefined,
+  teams: TeamSummary[] | undefined,
+): boolean {
+  if (owner.type === "user") return me?.id === owner.id;
+  if (me?.orgRole === "admin") return true;
+  const team = teams?.find((t) => t.id === owner.id);
+  return team?.callerRole === "admin";
+}
+
 /** Teams whose assistants the caller may open: the org feature gate is on,
  * and they are a member. An org admin sees every team in the org from
  * `GET /api/teams`, so membership alone is not the test — `callerRole` is

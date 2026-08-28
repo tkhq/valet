@@ -68,13 +68,25 @@ export function useCreateAssistant() {
   });
 }
 
-/** Rename, or promote to default. `isDefault: true` demotes the previous
- * default in the same write, so no separate demote call exists. */
+/** Rename, promote to default, or rewrite persona/behavior. `isDefault:
+ * true` demotes the previous default in the same write, so no separate
+ * demote call exists. */
 export function usePatchAssistant() {
   const qc = useQueryClient();
   return useMutation<PatchAssistantResponse, Error, { id: string; body: PatchAssistantRequest }>({
     mutationFn: ({ id, body }) => api.patchAssistant(id, body),
-    onSuccess: () => {
+    onSuccess: (updated) => {
+      // Write the response into the cache SYNCHRONOUSLY, before the refetch:
+      // the editor's section saves build each PATCH body from the cached
+      // row's `behavior`, so a save issued right after another must read the
+      // first save's result, not the pre-save fetch — or it silently reverts
+      // it. The invalidate still runs for the fields this write cannot know
+      // (a promote demotes some OTHER row's isDefault).
+      qc.setQueryData<ListAssistantsResponse>(qkAssistants.list(), (prev) =>
+        prev === undefined
+          ? prev
+          : { assistants: prev.assistants.map((a) => (a.id === updated.id ? updated : a)) },
+      );
       qc.invalidateQueries({ queryKey: qkAssistants.list() });
     },
   });
