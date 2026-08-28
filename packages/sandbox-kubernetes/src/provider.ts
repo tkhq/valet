@@ -1058,7 +1058,11 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       }
       const checkpointId = makeCheckpointId(nowMs);
       const urls = await store.presignCheckpointPuts(ref, checkpointId);
-      const script = buildCheckpointScript({ checkpointId, createdAtMs: nowMs });
+      const script = buildCheckpointScript({
+        checkpointId,
+        createdAtMs: nowMs,
+        gzip: wp.objectStore?.gzip !== false,
+      });
       const result = await execInPod(
         {
           api: this.deps.execApi,

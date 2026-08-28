@@ -75,7 +75,9 @@ export function buildRestoreScript(): string {
     // "block" exit non-zero so the pod fails to start.
     `fail() {`,
     `  echo "workspace-restore: $1. The sandbox starts from the baked image; check the object store config and credentials." >&2`,
-    `  if [ "\${${RESTORE_ENV.onRestoreFailure}}" = "block" ]; then exit 1; fi`,
+    // :-fallback, despite set -u: a missing mode env must not invert
+    // INV-7's default into an implicit "block".
+    `  if [ "\${${RESTORE_ENV.onRestoreFailure}:-fallback}" = "block" ]; then exit 1; fi`,
     `  rm -rf "$WS"/* "$WS"/.[!.]* "$WS"/..?* 2>/dev/null`,
     `  exit 0`,
     `}`,
@@ -106,6 +108,9 @@ export interface CheckpointScriptInput {
   /** Directory names excluded from the tar (defaults to
    * DEFAULT_CHECKPOINT_IGNORE). */
   ignore?: readonly string[];
+  /** Gzip the archive (default true). MUST match the store config's
+   * `gzip` — the Node-side `restore()` gunzips based on that flag. */
+  gzip?: boolean;
 }
 
 /**
@@ -123,15 +128,19 @@ export interface CheckpointScriptInput {
 export function buildCheckpointScript(input: CheckpointScriptInput): string {
   const ignore = input.ignore ?? DEFAULT_CHECKPOINT_IGNORE;
   const excludes = ignore.map((dir) => `--exclude=${shQuote(dir)}`).join(" ");
+  // The z flag must track the store config's gzip setting: the Node-side
+  // restore() gunzips only when the config says so (the k8s init container
+  // is immune — `tar -xf` auto-detects).
+  const z = input.gzip === false ? "" : "z";
   return [
     `set -u`,
     `TMP=$(mktemp -d /tmp/valet-ckpt.XXXXXX) || exit 11`,
     `trap 'rm -rf "$TMP"' EXIT`,
     // GNU tar exits 1 for "file changed as we read it" — expected on a
     // live workspace and the archive is still valid; only >1 is fatal.
-    `tar -czf "$TMP/data.tar.gz" ${excludes} -C /workspace .; rc=$?; [ "$rc" -le 1 ] || exit 12`,
+    `tar -c${z}f "$TMP/data.tar.gz" ${excludes} -C /workspace .; rc=$?; [ "$rc" -le 1 ] || exit 12`,
     `SIZE=$(wc -c < "$TMP/data.tar.gz" | tr -d ' ')`,
-    `COUNT=$(tar -tzf "$TMP/data.tar.gz" | grep -cv '^\\./$')`,
+    `COUNT=$(tar -t${z}f "$TMP/data.tar.gz" | grep -cv '^\\./$')`,
     `curl -sf -X PUT --upload-file "$TMP/data.tar.gz" "$VALET_WS_DATA_URL" || exit 13`,
     `printf '{"checkpointId":"%s","createdAtMs":%s,"sizeBytes":%s,"entryCount":%s}' ` +
       `${shQuote(input.checkpointId)} ${String(Math.floor(input.createdAtMs))} "$SIZE" "$COUNT" > "$TMP/manifest.json"`,
