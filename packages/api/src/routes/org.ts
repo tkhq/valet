@@ -3,6 +3,9 @@
  *
  *   GET   /api/org                   → org member: id/name/createdAt/features/callerRole
  *   PATCH /api/org                   → org admin: rename and/or flip features.organizations
+ *   GET   /api/org/directory         → org member + gate on: display identity of every
+ *                                      member (no role, no join date) — the teams UI's
+ *                                      roster names and add-member picker
  *   GET   /api/org/members           → org admin + gate on: member roster
  *   PATCH /api/org/members/:userId   → org admin + gate on: set a member's role
  *
@@ -21,6 +24,7 @@ import {
   getOrgFeatures,
   getSsoTeamGroups,
   isOrgAdmin,
+  listOrgDirectory,
   listOrgMembers,
   normalizeSsoTeamGroups,
   renameOrg,
@@ -31,6 +35,7 @@ import {
   type OrgRole,
 } from "../services/org.js";
 import type {
+  OrgDirectoryResponse,
   OrgMembersResponse,
   OrgResponse,
   PatchOrgMemberRequest,
@@ -175,9 +180,10 @@ orgRouter.patch("/", async (c) => {
   return c.json(resp);
 });
 
-// ── Members: gate = org admin AND organizations feature on ──────────────
+// ── Directory: gate on, any org member ──────────────────────────────────
 
-async function requireOrgAdminAndGate(c: Context<AppEnv>) {
+/** Gate-only guard for member-visible org routes. */
+async function requireGate(c: Context<AppEnv>) {
   const { db } = c.var.providers;
   const user = c.var.user;
 
@@ -185,6 +191,31 @@ async function requireOrgAdminAndGate(c: Context<AppEnv>) {
   if (!features.organizations) {
     return c.json(GATE_OFF_ERROR, 404);
   }
+  return undefined;
+}
+
+// Any org member: a team admin who is not an org admin needs names and
+// emails to run their team's roster and add-member picker. The full roster
+// (`GET /members` below) stays admin-only — it carries the org role.
+orgRouter.get("/directory", async (c) => {
+  const forbidden = await requireGate(c);
+  if (forbidden) return forbidden;
+
+  const { db } = c.var.providers;
+  const user = c.var.user;
+  const usersList = await listOrgDirectory(db, user.orgId);
+  const body: OrgDirectoryResponse = { users: usersList };
+  return c.json(body);
+});
+
+// ── Members: gate = org admin AND organizations feature on ──────────────
+
+async function requireOrgAdminAndGate(c: Context<AppEnv>) {
+  const forbidden = await requireGate(c);
+  if (forbidden) return forbidden;
+
+  const { db } = c.var.providers;
+  const user = c.var.user;
   if (!(await isOrgAdmin(db, user.orgId, user.id))) {
     return c.json({ error: "org admin required" }, 403);
   }

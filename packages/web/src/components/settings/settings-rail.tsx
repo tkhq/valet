@@ -4,11 +4,13 @@ import { cn } from "~/lib/cn";
 
 /**
  * The settings shell's left rail (split-settings design, "Visual direction"
- * + "Routes & navigation"). Two small-caps groups: **You** (always present,
- * four items) and **Organization** (three items, shown only once the
- * `useOrg()` query resolves to gate-on + caller-admin — hidden otherwise,
- * never disabled, and rendered with no flash since it appears only once
- * cached data arrives rather than defaulting open then collapsing).
+ * + "Routes & navigation"; amended 2026-08-28). Two small-caps groups:
+ * **You** (always present) and **Organization** (shown once the `useOrg()`
+ * query resolves to gate-on — hidden otherwise, never disabled, and
+ * rendered with no flash since it appears only once cached data arrives
+ * rather than defaulting open then collapsing). An org admin sees every
+ * Organization item; a plain member sees only Teams, because any member
+ * can create a team and administer the teams they created.
  *
  * Active-state styling is computed from the current pathname (via `cn`'s
  * `twMerge`) rather than TanStack's `activeProps`, which only concatenates
@@ -50,22 +52,32 @@ const ORGANIZATION_ITEMS = [
   { to: "/settings/organization/action-log", label: "Action log" },
 ] as const;
 
+/** The one Organization item a plain member can use: any member can create
+ * a team, and the creator administers it as its team admin. */
+const MEMBER_ORGANIZATION_ITEMS = [
+  { to: "/settings/organization/teams", label: "Teams" },
+] as const;
+
 export function SettingsRail() {
   const orgQ = useOrg();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const showOrganizationGroup =
-    orgQ.data?.features.organizations === true && orgQ.data.callerRole === "admin";
+  const orgAdmin = orgQ.data?.callerRole === "admin";
+  const showOrganizationGroup = orgQ.data?.features.organizations === true;
+  const organizationItems = orgAdmin ? ORGANIZATION_ITEMS : MEMBER_ORGANIZATION_ITEMS;
 
   // Wait for `useOrg()` to resolve before appending — same no-flash rule as
   // the Organization group (an org-mode admin must never see the item
-  // appear and then vanish).
-  const youItems = orgQ.data && !showOrganizationGroup ? [...YOU_ITEMS, MODELS_ITEM] : YOU_ITEMS;
+  // appear and then vanish). Keyed to the ADMIN group, not the member one:
+  // a gate-on plain member keeps You · Models, because the member-visible
+  // Organization group has no Models item.
+  const showAdminGroup = showOrganizationGroup && orgAdmin;
+  const youItems = orgQ.data && !showAdminGroup ? [...YOU_ITEMS, MODELS_ITEM] : YOU_ITEMS;
 
   return (
     <nav aria-label="Settings" className="w-full shrink-0 space-y-6 text-sm sm:w-[200px]">
       <RailGroup label="You" items={youItems} pathname={pathname} />
       {showOrganizationGroup && (
-        <RailGroup label="Organization" items={ORGANIZATION_ITEMS} pathname={pathname} />
+        <RailGroup label="Organization" items={organizationItems} pathname={pathname} />
       )}
     </nav>
   );

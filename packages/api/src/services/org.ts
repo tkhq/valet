@@ -38,6 +38,15 @@ export interface OrgMemberSummary {
   joinedAt: number;
 }
 
+/** The member-visible slice of a roster row: display identity, no org role,
+ * no join date. */
+export interface OrgDirectoryUser {
+  userId: string;
+  email: string;
+  name: string;
+  avatarUrl: string | null;
+}
+
 export type SetOrgMemberRoleResult =
   | { ok: true }
   | { ok: false; reason: "not_found" | "last_admin"; error: string };
@@ -330,6 +339,27 @@ export async function listOrgMembers(db: AppDb, orgId: string): Promise<OrgMembe
     // collapse to a ms-epoch number here.
     joinedAt: r.memberCreatedAt ?? r.userCreatedAt.getTime(),
   }));
+}
+
+/**
+ * Lists every member of `orgId` as a directory row. This backs the
+ * member-visible `GET /api/org/directory`, so it deliberately returns no
+ * org role and no join date — those stay on the admin-only roster.
+ */
+export async function listOrgDirectory(db: AppDb, orgId: string): Promise<OrgDirectoryUser[]> {
+  const rows = await db
+    .select({
+      userId: orgMembers.userId,
+      email: users.email,
+      name: users.name,
+      avatarUrl: users.image,
+    })
+    .from(orgMembers)
+    .innerJoin(users, eq(orgMembers.userId, users.id))
+    .where(eq(orgMembers.orgId, orgId))
+    .orderBy(users.createdAt);
+
+  return rows;
 }
 
 async function countOrgAdmins(db: AppQueryable, orgId: string): Promise<number> {

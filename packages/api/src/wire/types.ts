@@ -2488,6 +2488,23 @@ export interface OrgMembersResponse {
   members: OrgMemberWire[];
 }
 
+/**
+ * One row of the member-visible org directory: display identity only. The
+ * teams UI needs it to name roster entries and to fill the add-member
+ * picker for team admins who are not org admins. The org role and join
+ * date stay on the admin-only `OrgMemberWire`.
+ */
+export interface OrgDirectoryUserWire {
+  userId: string;
+  email: string;
+  name: string;
+  avatarUrl: string | null;
+}
+
+export interface OrgDirectoryResponse {
+  users: OrgDirectoryUserWire[];
+}
+
 export interface PatchOrgMemberRequest {
   role: "admin" | "member";
 }

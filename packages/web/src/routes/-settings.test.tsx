@@ -7,17 +7,22 @@
  * mocks `@tanstack/react-router`, since these tests only care what the
  * shell renders/requests, not that the router itself resolves it.
  */
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 
 const useOrgMock = vi.fn();
+const pathnameMock = vi.fn<() => string>(() => "/settings/profile");
+
+beforeEach(() => {
+  pathnameMock.mockReturnValue("/settings/profile");
+});
 
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, ...rest }: { children: ReactNode; [key: string]: unknown }) => (
     <a {...rest}>{children}</a>
   ),
-  useRouterState: () => "/settings/profile",
+  useRouterState: () => pathnameMock(),
   createFileRoute: () => (config: unknown) => config,
   redirect: (opts: { to: string }) => ({ isRedirect: true as const, ...opts }),
 }));
@@ -69,12 +74,19 @@ describe("SettingsRail", () => {
     }
   });
 
-  it("hides the Organization group when the caller is not an admin", () => {
+  it("shows a gate-on member only the Teams item in the Organization group", () => {
     mockOrg({ organizations: true, callerRole: "member" });
     render(<SettingsRail />);
-    for (const label of ORG_LABELS) {
+    expect(screen.getByText("Teams")).toBeTruthy();
+    for (const label of ORG_LABELS.filter((l) => l !== "Teams")) {
       expect(screen.queryByText(label)).toBeNull();
     }
+  });
+
+  it("keeps You·Models for a gate-on member — the member group has no Models item", () => {
+    mockOrg({ organizations: true, callerRole: "member" });
+    render(<SettingsRail />);
+    expect(screen.getAllByText("Models")).toHaveLength(1);
   });
 
   it("shows the Organization group when the gate is on and the caller is admin", () => {
@@ -149,6 +161,7 @@ describe("OrgRouteGuard", () => {
 
   it("shows the member empty state verbatim when the gate is on but the caller isn't admin", () => {
     mockOrg({ organizations: true, callerRole: "member" });
+    pathnameMock.mockReturnValue("/settings/organization/members");
     render(
       <OrgRouteGuard>
         <div data-testid="org-content" />
@@ -157,6 +170,29 @@ describe("OrgRouteGuard", () => {
     expect(
       screen.getByText("Organization settings are managed by your org admins"),
     ).toBeTruthy();
+    expect(screen.queryByTestId("org-content")).toBeNull();
+  });
+
+  it("admits a gate-on member to the Teams page — any member can create and run teams", () => {
+    mockOrg({ organizations: true, callerRole: "member" });
+    pathnameMock.mockReturnValue("/settings/organization/teams");
+    render(
+      <OrgRouteGuard>
+        <div data-testid="org-content" />
+      </OrgRouteGuard>,
+    );
+    expect(screen.getByTestId("org-content")).toBeTruthy();
+  });
+
+  it("keeps the gate-off empty state on the Teams path too", () => {
+    mockOrg({ organizations: false, callerRole: "member" });
+    pathnameMock.mockReturnValue("/settings/organization/teams");
+    render(
+      <OrgRouteGuard>
+        <div data-testid="org-content" />
+      </OrgRouteGuard>,
+    );
+    expect(screen.getByText("Organizations aren't enabled")).toBeTruthy();
     expect(screen.queryByTestId("org-content")).toBeNull();
   });
 
