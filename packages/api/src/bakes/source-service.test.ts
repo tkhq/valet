@@ -1536,12 +1536,26 @@ describe("repoDockerFlag", () => {
 describe("resolveChangedFiles", () => {
   let fixture: GithubFixture;
   let compareHandler: (owner: string, repo: string, range: string) => GithubFixtureResponse;
+  let db: AppDb;
+  let credentials: PgCredentialStore;
 
+  // A full GitHubTokenDeps (no cast) — resolveChangedFiles reads only
+  // apiUrl/githubUrl, but the type is the whole shape, so build it properly.
   function deps(): GitHubTokenDeps {
-    return { apiUrl: fixture.url, githubUrl: fixture.url } as unknown as GitHubTokenDeps;
+    return {
+      db,
+      credentials,
+      key: deriveSecretKey("cache-key"),
+      apiUrl: fixture.url,
+      githubUrl: fixture.url,
+      now: () => NOW,
+    };
   }
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    const { appDb, pgdb } = await freshTestPgDb();
+    db = appDb;
+    credentials = new PgCredentialStore(pgdb, deriveSecretKey("test-key"));
     compareHandler = () => ({ body: { files: [] } });
     fixture = startGithubFixture({ getCompare: (o, r, range) => compareHandler(o, r, range) });
   });
