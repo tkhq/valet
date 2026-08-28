@@ -1076,6 +1076,22 @@ CREATE INDEX "security_handoffs_engagement" ON "security_handoffs" ("engagement_
 --> statement-breakpoint
 CREATE INDEX "security_handoffs_finding" ON "security_handoffs" ("finding_id");
 --> statement-breakpoint
+-- One row per human note on a finding (spec §Re-scan / iterate). No unique
+-- constraint — a finding may carry a thread of many comments. author_user_id
+-- is always a user id: commenting is a human action, never the runner's.
+CREATE TABLE "security_finding_comments" (
+	"id" text PRIMARY KEY NOT NULL,
+	"finding_id" text NOT NULL,
+	"engagement_id" text NOT NULL,
+	"body" text NOT NULL,
+	"author_user_id" text NOT NULL,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "security_finding_comments_finding" ON "security_finding_comments" ("finding_id");
+--> statement-breakpoint
+CREATE INDEX "security_finding_comments_engagement" ON "security_finding_comments" ("engagement_id");
+--> statement-breakpoint
 -- ── cost_entries ──────────────────────────────────────────────────────────
 --
 -- One row per billable assistant turn, with the owner resolved. This is the

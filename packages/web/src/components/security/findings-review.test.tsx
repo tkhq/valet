@@ -12,6 +12,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactElement, ReactNode } from "react";
 import type {
   ListSecurityFindingsResponse,
+  SecurityAddFindingCommentResponse,
   SecurityCellWire,
   SecurityEngagementWire,
   SecurityFindingWire,
@@ -29,6 +30,9 @@ const reviewMock = vi.fn<
     body: { status: "verified" | "refuted"; reason: string },
   ) => Promise<SecurityReviewFindingResponse>
 >();
+const addCommentMock = vi.fn<
+  (id: string, findingId: string, body: { body: string }) => Promise<SecurityAddFindingCommentResponse>
+>();
 
 vi.mock("~/api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/client")>();
@@ -43,6 +47,8 @@ vi.mock("~/api/client", async (importOriginal) => {
         findingId: string,
         body: { status: "verified" | "refuted"; reason: string },
       ) => reviewMock(id, findingId, body),
+      addSecurityFindingComment: (id: string, findingId: string, body: { body: string }) =>
+        addCommentMock(id, findingId, body),
     },
   };
 });
@@ -138,6 +144,7 @@ function renderReview(props?: Partial<Parameters<typeof FindingsReview>[0]>): {
 beforeEach(() => {
   listFindingsMock.mockReset();
   reviewMock.mockReset();
+  addCommentMock.mockReset();
   listFindingsMock.mockResolvedValue({ findings: [], nextCursor: null });
 });
 
@@ -295,6 +302,82 @@ describe("FindingsReview fix sessions", () => {
     const link = within(detail).getByLabelText("Open fix session Fix: Needs a fix");
     expect(link.tagName).toBe("A");
     expect(within(detail).queryByRole("button", { name: "Open fix session Fix: Needs a fix" })).toBeNull();
+  });
+});
+
+describe("FindingsReview notes", () => {
+  it("shows a note-count indicator on a finding row", async () => {
+    listFindingsMock.mockResolvedValue({
+      findings: [
+        finding({
+          id: "f-noted",
+          comments: [
+            { id: "c1", body: "Intended.", authorUserId: "u-1", createdAt: 5 },
+            { id: "c2", body: "Confirm next scan.", authorUserId: "u-2", createdAt: 6 },
+          ],
+        }),
+      ],
+      nextCursor: null,
+    });
+    renderReview();
+    const [row] = await screen.findAllByRole("option");
+    expect(within(row).getByLabelText("2 notes")).toBeTruthy();
+  });
+
+  it("renders the note thread and posts a new note as any viewer", async () => {
+    listFindingsMock.mockResolvedValue({
+      findings: [
+        finding({
+          id: "f-noted",
+          title: "Has notes",
+          comments: [
+            { id: "c1", body: "This is intended by design.", authorUserId: "u-1", createdAt: 5 },
+          ],
+        }),
+      ],
+      nextCursor: null,
+    });
+    addCommentMock.mockResolvedValue({
+      comment: { id: "c2", body: "Fixed in PR 12.", authorUserId: "u-2", createdAt: 6 },
+    });
+    // A non-admin: notes are collaboration, so the input must still appear.
+    renderReview({ canAdminister: false });
+    const detail = await screen.findByRole("article");
+    expect(within(detail).getByText("This is intended by design.")).toBeTruthy();
+
+    fireEvent.change(within(detail).getByLabelText("Add a note"), {
+      target: { value: "Fixed in PR 12." },
+    });
+    fireEvent.click(within(detail).getByRole("button", { name: "Add note" }));
+    await waitFor(() =>
+      expect(addCommentMock).toHaveBeenCalledWith("s-1", "f-noted", { body: "Fixed in PR 12." }),
+    );
+  });
+
+  it("renders a hostile note body as inert text", async () => {
+    listFindingsMock.mockResolvedValue({
+      findings: [
+        finding({
+          id: "f-hostile-note",
+          title: "Hostile note",
+          comments: [
+            {
+              id: "c1",
+              body: 'See <img src=x onerror="window.alert(1)"> and <script>window.alert(2)</script>',
+              authorUserId: "u-1",
+              createdAt: 5,
+            },
+          ],
+        }),
+      ],
+      nextCursor: null,
+    });
+    const { container } = renderReview();
+    const detail = await screen.findByRole("article");
+    // The note renders as a plain text node — never parsed HTML.
+    expect(within(detail).getByText(/window\.alert/)).toBeTruthy();
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.querySelector("script")).toBeNull();
   });
 });
 

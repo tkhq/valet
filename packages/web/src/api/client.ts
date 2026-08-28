@@ -68,6 +68,7 @@ import type {
   GetSessionSecurityResponse,
   GetSkillResponse,
   ListSecurityFindingsResponse,
+  SecurityAddFindingCommentResponse,
   SecurityDigestIssueResponse,
   SecurityFileIssueResponse,
   SecurityFindingSeverity,
@@ -485,6 +486,14 @@ export const api = {
     request<SecurityReviewFindingResponse>(
       "POST",
       `/sessions/${encodeURIComponent(id)}/security/findings/${encodeURIComponent(findingId)}/status`,
+      body,
+    ),
+  /** POST /sessions/:id/security/findings/:findingId/comments — add a human
+   * note to a finding (view-gated; human-only). Returns the created comment. */
+  addSecurityFindingComment: (id: string, findingId: string, body: { body: string }) =>
+    request<SecurityAddFindingCommentResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/security/findings/${encodeURIComponent(findingId)}/comments`,
       body,
     ),
   /** POST /sessions/:id/security/findings/:findingId/issues — file one

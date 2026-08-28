@@ -18,6 +18,7 @@ import type {
   GetSessionSecurityResponse,
   ListSecurityFindingsResponse,
   ListSessionsResponse,
+  SecurityAddFindingCommentResponse,
   SecurityDigestIssueResponse,
   SecurityFileIssueResponse,
   SecurityFindingWire,
@@ -199,6 +200,24 @@ export function useReviewFinding(sessionId: string) {
   >({
     mutationFn: ({ findingId, status, reason }) =>
       api.reviewSecurityFinding(sessionId, findingId, { status, reason }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qkSecurity.findingsPrefix(sessionId) });
+    },
+  });
+}
+
+/** POST .../findings/:findingId/comments — add a human note to a finding
+ * (view-gated; any viewer may comment). Invalidates every findings page so
+ * the new note appears under the finding, whatever filter holds the row. */
+export function useAddFindingComment(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<
+    SecurityAddFindingCommentResponse,
+    Error,
+    { findingId: string; body: string }
+  >({
+    mutationFn: ({ findingId, body }) =>
+      api.addSecurityFindingComment(sessionId, findingId, { body }),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: qkSecurity.findingsPrefix(sessionId) });
     },

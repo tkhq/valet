@@ -1888,9 +1888,29 @@ export const securityHandoffs = pgTable(
   ],
 );
 
+export const securityFindingComments = pgTable(
+  "security_finding_comments",
+  {
+    id: text("id").primaryKey(),
+    findingId: text("finding_id").notNull(),
+    engagementId: text("engagement_id").notNull(),
+    body: text("body").notNull(),
+    // Always a user id — commenting is a human triage action (spec §Re-scan /
+    // iterate). The runner and personas never comment through this route.
+    authorUserId: text("author_user_id").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  // No unique constraint: a finding may carry a thread of many comments.
+  (t) => [
+    index("security_finding_comments_finding").on(t.findingId),
+    index("security_finding_comments_engagement").on(t.engagementId),
+  ],
+);
+
 export type SecurityEngagementRow = typeof securityEngagements.$inferSelect;
 export type SecurityCellRow = typeof securityCells.$inferSelect;
 export type SecurityFileRow = typeof securityFiles.$inferSelect;
 export type SecurityFindingRow = typeof securityFindings.$inferSelect;
 export type SecurityFindingLinkRow = typeof securityFindingLinks.$inferSelect;
 export type SecurityHandoffRow = typeof securityHandoffs.$inferSelect;
+export type SecurityFindingCommentRow = typeof securityFindingComments.$inferSelect;

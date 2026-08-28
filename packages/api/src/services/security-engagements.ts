@@ -39,11 +39,13 @@ import {
   securityCells,
   securityEngagements,
   securityFiles,
+  securityFindingComments,
   securityFindingLinks,
   securityFindings,
   securityHandoffs,
   type SecurityCellRow,
   type SecurityEngagementRow,
+  type SecurityFindingCommentRow,
   type SecurityFindingRow,
   type SecurityHandoffRow,
 } from "../schema/index.js";
@@ -58,6 +60,10 @@ export const MAX_FILE_BYTES = 256 * 1024;
 export const MAX_REVISIONS_PER_PATH = 512;
 export const MIN_FINDING_BODY_CHARS = 200;
 export const MAX_FINDINGS_PER_CELL = 100;
+
+/** Cap on a finding-comment body (spec §Re-scan / iterate). A note is a short
+ * human rationale, not a report. */
+export const MAX_FINDING_COMMENT_CHARS = 4000;
 
 /**
  * The checkpoint stride (spec §Context Discipline): a cell-claimed thread
@@ -1113,7 +1119,10 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
 
   /** `/prior/findings.md`: a digest of P's findings grouped by status
    * (verified / open / refuted), each with severity, title, file:line, status,
-   * and a short body excerpt. */
+   * and a short body excerpt. A finding that a human commented on during triage
+   * carries those notes under a "Notes:" line — the load-bearing carry (spec
+   * §Re-scan / iterate): the persona sees the prior human reasoning ("intended —
+   * the check is in middleware X"), not just the status. */
   async function buildPriorFindingsMd(parentId: string): Promise<string> {
     const findings = await db
       .select()
@@ -1124,6 +1133,18 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     if (findings.length === 0) {
       lines.push("The prior review produced no findings.", "");
       return lines.join("\n");
+    }
+    // One grouped query for the page's comments, oldest-first (thread order).
+    const commentRows = await db
+      .select()
+      .from(securityFindingComments)
+      .where(eq(securityFindingComments.engagementId, parentId))
+      .orderBy(asc(securityFindingComments.createdAt), asc(securityFindingComments.id));
+    const commentsByFinding = new Map<string, SecurityFindingCommentRow[]>();
+    for (const c of commentRows) {
+      const list = commentsByFinding.get(c.findingId) ?? [];
+      list.push(c);
+      commentsByFinding.set(c.findingId, list);
     }
     const groups: { status: FindingStatus; heading: string }[] = [
       { status: "verified", heading: "Verified (confirmed real)" },
@@ -1139,6 +1160,16 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
         lines.push(`- [${f.severity}] ${f.title} — ${loc}`);
         const excerpt = f.body.replace(/\s+/g, " ").trim().slice(0, 280);
         if (excerpt !== "") lines.push(`  ${excerpt}${f.body.length > 280 ? "…" : ""}`);
+        // The human triage notes: the persona reads the prior reasoning, not
+        // just the verdict. Author is not named — "team note:" is enough.
+        const comments = commentsByFinding.get(f.id) ?? [];
+        if (comments.length > 0) {
+          lines.push("  Notes:");
+          for (const c of comments) {
+            const note = c.body.replace(/\s+/g, " ").trim();
+            if (note !== "") lines.push(`  - team note: ${note}`);
+          }
+        }
       }
       lines.push("");
     }
@@ -1470,6 +1501,57 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
   }
 
   /**
+   * Add a human note to a finding (spec §Re-scan / iterate). Insert-only; no
+   * unique constraint — a finding carries a thread of many notes. The caller
+   * confirms the finding belongs to the engagement (the route does); the body
+   * is validated non-empty and capped. On a re-scan, these notes ride into
+   * `/prior/findings.md`, so the personas see the prior human reasoning.
+   */
+  async function addFindingComment(
+    engagementId: string,
+    args: { findingId: string; body: string; authorUserId: string },
+  ): Promise<SecurityFindingCommentRow> {
+    const body = args.body.trim();
+    if (body === "") {
+      throw new Error("A note needs a body. Write what you want the next scan to know.");
+    }
+    if (body.length > MAX_FINDING_COMMENT_CHARS) {
+      throw new Error(
+        `A note is at most ${MAX_FINDING_COMMENT_CHARS} characters. Trim it to the reasoning that matters.`,
+      );
+    }
+    const inserted = await db
+      .insert(securityFindingComments)
+      .values({
+        id: `cmt_${randomUUID()}`,
+        findingId: args.findingId,
+        engagementId,
+        body,
+        authorUserId: args.authorUserId,
+        createdAt: now(),
+      })
+      .returning();
+    return inserted[0];
+  }
+
+  /** Notes on the engagement's findings, oldest-first (thread order);
+   * optionally one finding. */
+  async function listFindingComments(
+    engagementId: string,
+    options: { findingId?: string } = {},
+  ): Promise<SecurityFindingCommentRow[]> {
+    const conditions = [eq(securityFindingComments.engagementId, engagementId)];
+    if (options.findingId !== undefined) {
+      conditions.push(eq(securityFindingComments.findingId, options.findingId));
+    }
+    return db
+      .select()
+      .from(securityFindingComments)
+      .where(and(...conditions))
+      .orderBy(asc(securityFindingComments.createdAt), asc(securityFindingComments.id));
+  }
+
+  /**
    * Stamp a compaction on the running cell that claims `childSessionId`
    * (M5, spec §Context Discipline). Alert, don't auto-repair: this stamps
    * `compacted_at` and measures state-doc staleness for the caller to
@@ -1671,6 +1753,8 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     listFindings,
     recordHandoff,
     listHandoffs,
+    addFindingComment,
+    listFindingComments,
     stampCellCompaction,
     getRunningCellProgress,
     getEngagementCost,

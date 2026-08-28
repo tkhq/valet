@@ -83,6 +83,7 @@ const APP_TABLES = [
   "security_findings",
   "security_finding_links",
   "security_handoffs",
+  "security_finding_comments",
 ];
 
 async function tableExists(db: PgDb, table: string): Promise<boolean> {
@@ -271,6 +272,26 @@ describe("pg app schema + migrations", () => {
     // Nullable task round-trips as null.
     expect((rows.rows[1] as { task: string | null }).task).toBeNull();
     await db.query("DELETE FROM security_handoffs WHERE engagement_id = 'eng1'");
+  });
+
+  it("records finding comments with no unique constraint per finding", async () => {
+    const now = Date.now();
+    // Two comments on one finding — a thread; both must persist, oldest first.
+    await db.query(
+      "INSERT INTO security_finding_comments (id, finding_id, engagement_id, body, author_user_id, created_at) VALUES ('cmt1', 'fnd1', 'eng1', 'Intended: the check is in middleware X.', 'user1', $1)",
+      [now],
+    );
+    await db.query(
+      "INSERT INTO security_finding_comments (id, finding_id, engagement_id, body, author_user_id, created_at) VALUES ('cmt2', 'fnd1', 'eng1', 'Confirm this is fixed next scan.', 'user2', $1)",
+      [now + 1],
+    );
+    const rows = await db.query(
+      "SELECT id, body, author_user_id FROM security_finding_comments WHERE finding_id = 'fnd1' ORDER BY created_at",
+    );
+    expect(rows.rows).toHaveLength(2);
+    expect((rows.rows[0] as { id: string }).id).toBe("cmt1");
+    expect((rows.rows[1] as { author_user_id: string }).author_user_id).toBe("user2");
+    await db.query("DELETE FROM security_finding_comments WHERE engagement_id = 'eng1'");
   });
 
   it("tracks the applied migration in __valet_app_migrations", async () => {

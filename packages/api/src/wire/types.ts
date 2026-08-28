@@ -329,6 +329,9 @@ export interface SecurityFindingWire {
   links?: SecurityFindingLinkWire[];
   /** Fix sessions spawned from this finding; findings LIST route only. */
   handoffs?: SecurityHandoffWire[];
+  /** Human triage notes on this finding, oldest-first; findings LIST route
+   * only. On a re-scan these ride into `/prior/findings.md`. */
+  comments?: SecurityFindingCommentWire[];
   /** Re-scan / iterate: true when this fingerprint existed in the parent
    * engagement. Present on the findings LIST route only, and only when the
    * engagement re-scans a prior one — absent (undefined) on a first review. */
@@ -342,6 +345,21 @@ export interface SecurityHandoffWire {
   title: string;
   task?: string;
   createdAt: number;
+}
+
+/** One human note on a finding (spec §Re-scan / iterate). A viewer may add
+ * one — commenting is collaboration, not an admin action. */
+export interface SecurityFindingCommentWire {
+  id: string;
+  body: string;
+  authorUserId: string;
+  createdAt: number;
+}
+
+/** POST /api/sessions/:id/security/findings/:findingId/comments — the created
+ * note. */
+export interface SecurityAddFindingCommentResponse {
+  comment: SecurityFindingCommentWire;
 }
 
 /** One filed external issue for one finding (spec §Filing issues). */

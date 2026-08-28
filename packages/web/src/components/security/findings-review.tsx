@@ -9,6 +9,7 @@ import {
   ExternalLink,
   FileWarning,
   Hammer,
+  MessageSquare,
   Wrench,
   X,
 } from "lucide-react";
@@ -21,6 +22,7 @@ import type { SecurityFindingsFilters } from "~/api/security";
 import {
   apiErrorText,
   flattenFindings,
+  useAddFindingComment,
   useReviewFinding,
   useSecurityFindings,
 } from "~/api/security";
@@ -40,6 +42,7 @@ import { ServiceIcon } from "~/components/service-icon";
 import { useDebouncedValue } from "~/hooks/use-debounced-value";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { cn } from "~/lib/cn";
+import { relativeTime } from "~/lib/relative-time";
 import { useResizablePane } from "~/lib/use-resizable-pane";
 import { ExportDialog } from "./export-dialog";
 import { FileIssueDialog, type FileIssueTarget } from "./file-issue-dialog";
@@ -233,6 +236,7 @@ export function FindingsReview({
     findings.find((f) => f.id === selectedId) ?? visibleFindings[0] ?? null;
 
   const review = useReviewFinding(sessionId);
+  const addComment = useAddFindingComment(sessionId);
   const [actionError, setActionError] = useState<string | null>(null);
   const [refuteTarget, setRefuteTarget] = useState<SecurityFindingWire | null>(null);
   const [issueTarget, setIssueTarget] = useState<FileIssueTarget | null>(null);
@@ -442,6 +446,14 @@ export function FindingsReview({
               )}
               canAdminister={canAdminister}
               reviewPending={review.isPending}
+              commentPending={addComment.isPending}
+              onAddComment={(finding, body) => {
+                setActionError(null);
+                addComment.mutate(
+                  { findingId: finding.id, body },
+                  { onError: (err) => setActionError(apiErrorText(err)) },
+                );
+              }}
               onVerify={() => verify(selected)}
               onRefute={() => setRefuteTarget(selected)}
               onFileIssue={() => setIssueTarget({ mode: "single", finding: selected })}
@@ -574,6 +586,7 @@ function FindingRowLine({
 }) {
   const links = finding.links ?? [];
   const fixCount = (finding.handoffs ?? []).length;
+  const noteCount = (finding.comments ?? []).length;
   return (
     <div
       role="option"
@@ -633,6 +646,12 @@ function FindingRowLine({
             {fixCount} fix
           </span>
         )}
+        {noteCount > 0 && (
+          <span className="inline-flex items-center shrink-0" aria-label={`${noteCount} notes`}>
+            <MessageSquare className="h-3 w-3 mr-0.5" aria-hidden />
+            {noteCount}
+          </span>
+        )}
       </div>
     </div>
   );
@@ -645,6 +664,8 @@ function FindingDetail({
   siblings,
   canAdminister,
   reviewPending,
+  commentPending,
+  onAddComment,
   onVerify,
   onRefute,
   onFileIssue,
@@ -659,6 +680,9 @@ function FindingDetail({
   siblings: SecurityFindingWire[];
   canAdminister: boolean;
   reviewPending: boolean;
+  commentPending: boolean;
+  /** Post a human note on the finding. Any viewer may — not admin-gated. */
+  onAddComment: (finding: SecurityFindingWire, body: string) => void;
   onVerify: () => void;
   onRefute: () => void;
   onFileIssue: () => void;
@@ -855,7 +879,84 @@ function FindingDetail({
           </ul>
         </div>
       )}
+
+      {/* Notes — human triage reasoning that carries into a re-scan's
+          /prior/findings.md. Any viewer may add one. Bodies are human but
+          keep the escape discipline: escaped text, never parsed HTML. */}
+      <FindingNotes
+        finding={finding}
+        pending={commentPending}
+        onAddComment={onAddComment}
+      />
     </article>
+  );
+}
+
+/** The finding's note thread plus an "Add a note" input. Any viewer may post
+ * (spec §Re-scan / iterate); the count and the thread render inert, escaped
+ * text. */
+function FindingNotes({
+  finding,
+  pending,
+  onAddComment,
+}: {
+  finding: SecurityFindingWire;
+  pending: boolean;
+  onAddComment: (finding: SecurityFindingWire, body: string) => void;
+}) {
+  const comments = finding.comments ?? [];
+  const [draft, setDraft] = useState("");
+  // Clear the draft when a different finding opens — a note written for one
+  // finding must not pre-fill another's (the mount-time-state rule).
+  useEffect(() => {
+    setDraft("");
+  }, [finding.id]);
+  return (
+    <div>
+      <div className="text-muted mb-1 flex items-center gap-1">
+        <MessageSquare className="h-3 w-3" aria-hidden />
+        Notes
+      </div>
+      {comments.length > 0 ? (
+        <ul className="space-y-1.5 mb-2">
+          {comments.map((comment) => (
+            <li key={comment.id} className="border border-line rounded-md px-2.5 py-1.5">
+              <div className="flex items-center gap-2 text-[11px] text-muted">
+                <span className="font-mono">{comment.authorUserId}</span>
+                <span>{relativeTime(comment.createdAt)}</span>
+              </div>
+              {/* Escaped text: a plain string node never parses HTML. */}
+              <div className="mt-0.5 whitespace-pre-wrap break-words">{comment.body}</div>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <div className="text-muted mb-2">
+          No notes yet. Add one to carry your reasoning into the next scan.
+        </div>
+      )}
+      <div className="flex items-start gap-1.5">
+        <Textarea
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          placeholder="Add a note (carries into a re-scan)…"
+          aria-label="Add a note"
+          rows={2}
+          className="flex-1"
+        />
+        <Button
+          size="sm"
+          variant="secondary"
+          disabled={draft.trim() === "" || pending}
+          onClick={() => {
+            onAddComment(finding, draft.trim());
+            setDraft("");
+          }}
+        >
+          Add note
+        </Button>
+      </div>
+    </div>
   );
 }
 

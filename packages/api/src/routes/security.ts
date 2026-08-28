@@ -55,7 +55,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { Hono, type Context } from "hono";
-import { and, count, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray } from "drizzle-orm";
 import { cellDir, KNOWN_PERSONAS, parsePlan, serializePlan } from "@valet/plugin-security";
 import type { PlanCell } from "@valet/plugin-security";
 import type { Principal } from "@valet/engine";
@@ -71,12 +71,14 @@ import {
   agentSessions,
   childWatches,
   securityCells,
+  securityFindingComments,
   securityFindingLinks,
   securityFindings,
   securityHandoffs,
   sessionRepos,
   type SecurityCellRow,
   type SecurityEngagementRow,
+  type SecurityFindingCommentRow,
   type SecurityFindingLinkRow,
   type SecurityFindingRow,
   type SecurityHandoffRow,
@@ -119,8 +121,10 @@ import type {
   SecurityDigestIssueResponse,
   SecurityDispatchResponse,
   SecurityEngagementWire,
+  SecurityAddFindingCommentResponse,
   SecurityFailCellResponse,
   SecurityFileIssueResponse,
+  SecurityFindingCommentWire,
   SecurityFindingLinkWire,
   SecurityFindingWire,
   SecurityHandoffResponse,
@@ -327,6 +331,15 @@ function handoffToWire(h: SecurityHandoffRow): SecurityHandoffWire {
   };
 }
 
+function commentToWire(c: SecurityFindingCommentRow): SecurityFindingCommentWire {
+  return {
+    id: c.id,
+    body: c.body,
+    authorUserId: c.authorUserId,
+    createdAt: c.createdAt,
+  };
+}
+
 const NO_ENGAGEMENT =
   "This session has no security engagement. Create the session with kind 'security' to start one.";
 
@@ -432,6 +445,27 @@ securityRouter.get("/:id/security/findings", async (c) => {
       list.push(handoffToWire(h));
       handoffsByFinding.set(h.findingId, list);
     }
+    // Human triage notes (M-F4): one grouped query for the page, oldest-first
+    // within each finding — a thread reads top to bottom.
+    const commentRows =
+      findingIds.length > 0
+        ? await db
+            .select()
+            .from(securityFindingComments)
+            .where(
+              and(
+                eq(securityFindingComments.engagementId, result.engagement.id),
+                inArray(securityFindingComments.findingId, findingIds),
+              ),
+            )
+            .orderBy(asc(securityFindingComments.createdAt), asc(securityFindingComments.id))
+        : [];
+    const commentsByFinding = new Map<string, SecurityFindingCommentWire[]>();
+    for (const cm of commentRows) {
+      const list = commentsByFinding.get(cm.findingId) ?? [];
+      list.push(commentToWire(cm));
+      commentsByFinding.set(cm.findingId, list);
+    }
     // Re-scan / iterate: mark a finding `recurring` when its fingerprint
     // existed in the parent engagement. Empty set (no parent) → the field
     // stays undefined, so a first review's wire shape is unchanged.
@@ -442,6 +476,7 @@ securityRouter.get("/:id/security/findings", async (c) => {
         ...findingToWire(f),
         links: linksByFinding.get(f.id) ?? [],
         handoffs: handoffsByFinding.get(f.id) ?? [],
+        comments: commentsByFinding.get(f.id) ?? [],
         ...(isRescan ? { recurring: parentFps.has(f.fingerprint) } : {}),
       })),
       nextCursor: page.nextCursor,
@@ -1647,6 +1682,59 @@ securityRouter.post("/:id/security/findings/:findingId/status", async (c) => {
     // Unknown finding → 404; forward-only refusals → 409.
     if (message.startsWith("No finding")) return c.json({ error: message }, 404);
     return c.json({ error: message }, 409);
+  }
+});
+
+/**
+ * POST /:id/security/findings/:findingId/comments { body } — add a human note
+ * to a finding (spec §Re-scan / iterate). VIEW-gated: any viewer may comment —
+ * commenting is collaboration, not an admin action. HUMAN-only: the internal
+ * token is refused (the runner and personas do not comment through this route),
+ * so `resolveHumanSession(.., "view")` holds both rules. `author_user_id` is the
+ * acting user. On a re-scan these notes ride into `/prior/findings.md`.
+ */
+securityRouter.post("/:id/security/findings/:findingId/comments", async (c) => {
+  const sessionId = c.req.param("id");
+  const findingId = c.req.param("findingId");
+  // View-gated + human-only: the named check is canViewSession, inside
+  // resolveHumanSession; the internal token is refused there.
+  const resolved = await resolveHumanSession(c, sessionId, "view");
+  if ("failure" in resolved) return resolved.failure;
+  const { user } = resolved.ok;
+
+  const loaded = await loadEngagementOr404(c, sessionId);
+  if ("failure" in loaded) return loaded.failure;
+  const { security, result } = loaded;
+  const { db } = c.var.providers;
+
+  const body = await readJsonBody(c);
+  if (typeof body.body !== "string" || body.body.trim() === "") {
+    return c.json({ error: "Send { body } with the note text." }, 400);
+  }
+
+  // Scoped to THIS engagement: a finding id from another engagement is not
+  // reachable here.
+  const findingRows = await db
+    .select()
+    .from(securityFindings)
+    .where(
+      and(eq(securityFindings.engagementId, result.engagement.id), eq(securityFindings.id, findingId)),
+    )
+    .limit(1);
+  if (!findingRows[0]) {
+    return c.json({ error: `No finding ${findingId} in this engagement.` }, 404);
+  }
+
+  try {
+    const comment = await security.addFindingComment(result.engagement.id, {
+      findingId,
+      body: body.body,
+      authorUserId: user.id,
+    });
+    const response: SecurityAddFindingCommentResponse = { comment: commentToWire(comment) };
+    return c.json(response);
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
   }
 });
 
