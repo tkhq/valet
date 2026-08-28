@@ -589,9 +589,13 @@ describe("persona tool set (M4)", () => {
       spawn: async () => ({ childSessionId: "child-ff" }),
     });
 
-    // ctx.sandbox.readFile returns the authored file's content.
-    const sandbox = { id: "sb-ff", readFile: async (p: string) => `# authored at ${p}\nprotocol_version: 1\n` };
-    const ctx = toolCtx(api, "child-ff", { sandbox: sandbox as unknown as Sandbox });
+    // ctx.sandbox.readFile returns the authored file's content. A partial
+    // Sandbox (single `as`, the makeCtx pattern) — the tool only calls readFile.
+    const sandbox: Partial<Sandbox> & { id: string } = {
+      id: "sb-ff",
+      readFile: async (p: string) => `# authored at ${p}\nprotocol_version: 1\n`,
+    };
+    const ctx = toolCtx(api, "child-ff", { sandbox: sandbox as Sandbox });
 
     const wrote = await secFsWriteTool.execute(
       { path: "/cells/01-recon/notes.md", from_file: "/tmp/state.yml" },
@@ -610,16 +614,15 @@ describe("persona tool set (M4)", () => {
     expect(both.text).toContain("Pass content OR from_file, not both");
 
     // A missing from_file names the corrective action.
+    const failingSandbox: Partial<Sandbox> & { id: string } = {
+      id: "sb-x",
+      readFile: async () => {
+        throw new Error("ENOENT");
+      },
+    };
     const missing = await secFsWriteTool.execute(
       { path: "/cells/01-recon/notes.md", from_file: "/tmp/nope.yml" },
-      toolCtx(api, "child-ff", {
-        sandbox: {
-          id: "sb-x",
-          readFile: async () => {
-            throw new Error("ENOENT");
-          },
-        } as unknown as Sandbox,
-      }),
+      toolCtx(api, "child-ff", { sandbox: failingSandbox as Sandbox }),
     );
     expect(missing.text).toContain("Could not read from_file /tmp/nope.yml");
   });
