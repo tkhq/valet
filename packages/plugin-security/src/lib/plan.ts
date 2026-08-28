@@ -7,6 +7,9 @@ export interface PlanCell {
   persona: string;
   mode: "fresh" | "resume";
   goal: string;
+  /** Optional short label for the cell's state-doc directory. Slugified;
+   * falls back to the goal when absent. See `cellDir`. */
+  name?: string;
   /** Earlier ordinals whose state docs this cell's dispatch prompt names. */
   reads: number[];
   /** Optional include globs that scope the cell to part of the repo. */
@@ -110,6 +113,24 @@ function parseCell(entry: unknown, index: number, knownPersonas: readonly string
     throw new Error(`${label} needs a non-empty "goal". Write what the cell must accomplish. ${CORRECTIVE}`);
   }
 
+  let name: string | undefined;
+  if (cell.name !== undefined) {
+    if (typeof cell.name !== "string" || cell.name.trim() === "") {
+      throw new Error(`${label} has a non-text "name". Write a short directory label, or omit it. ${CORRECTIVE}`);
+    }
+    if (cell.name.length > NAME_MAX) {
+      throw new Error(
+        `${label} has a "name" longer than ${NAME_MAX} characters. Shorten the directory label. ${CORRECTIVE}`,
+      );
+    }
+    name = slugify(cell.name);
+    if (name === "") {
+      throw new Error(
+        `${label} has a "name" with no slug characters. Use letters or digits in the label. ${CORRECTIVE}`,
+      );
+    }
+  }
+
   const readsRaw = cell.reads ?? [];
   if (!Array.isArray(readsRaw) || readsRaw.some((r) => typeof r !== "number")) {
     throw new Error(`${label} has a non-numeric "reads" list. List earlier ordinals as numbers. ${CORRECTIVE}`);
@@ -132,10 +153,23 @@ function parseCell(entry: unknown, index: number, knownPersonas: readonly string
     review = cell.review;
   }
 
-  return { ordinal, persona, mode, goal, reads, paths, review };
+  return { ordinal, persona, mode, goal, name, reads, paths, review };
 }
 
 const SLUG_MAX = 40;
+
+/** Longest raw `name` a cell may carry. Slugified names stay filesystem-safe. */
+const NAME_MAX = 24;
+
+/** Lower-case, hyphenate, trim, and cap a label to SLUG_MAX slug characters. */
+function slugify(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, SLUG_MAX)
+    .replace(/-+$/g, "");
+}
 
 /**
  * Stable cell directory name: 2-digit ordinal, hyphen, slugified goal.
@@ -144,11 +178,14 @@ const SLUG_MAX = 40;
  * sec_start so dispatch prompts can name paths literally.
  */
 export function cellDirSlug(ordinal: number, goal: string): string {
-  const slug = goal
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, SLUG_MAX)
-    .replace(/-+$/g, "");
-  return `${String(ordinal).padStart(2, "0")}-${slug}`;
+  return `${String(ordinal).padStart(2, "0")}-${slugify(goal)}`;
+}
+
+/**
+ * Cell directory name from a cell's optional short `name`, falling back to
+ * the goal. Prefer this over cellDirSlug: a name gives a short stable dir
+ * (`02-authz-sweep`) instead of a 40-char goal slug.
+ */
+export function cellDir(cell: { ordinal: number; name?: string; goal: string }): string {
+  return `${String(cell.ordinal).padStart(2, "0")}-${slugify(cell.name ?? cell.goal)}`;
 }

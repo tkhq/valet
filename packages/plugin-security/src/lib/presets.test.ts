@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cellDirSlug } from "./plan.js";
+import { cellDir } from "./plan.js";
 import { parsePlan } from "./plan.js";
 import { CODE_REVIEW_PERSONA, codeReviewPresetPlan, KNOWN_PERSONAS } from "./presets.js";
 
@@ -31,15 +31,26 @@ describe("codeReviewPresetPlan", () => {
     expect(plan.cells[3].goal).toMatch(/semgrep/);
   });
 
-  it("produces stable cell dir slugs", () => {
+  it("names every cell so the dirs stay short and stable", () => {
     const plan = parsePlan(codeReviewPresetPlan(), KNOWN_PERSONAS);
-    const dirs = plan.cells.map((c) => cellDirSlug(c.ordinal, c.goal));
+    expect(plan.cells.map((c) => c.name)).toEqual([
+      "recon",
+      "authz-sweep",
+      "injection-sweep",
+      "secrets-config",
+      "verify",
+    ]);
+  });
+
+  it("produces short stable cell dirs from the names", () => {
+    const plan = parsePlan(codeReviewPresetPlan(), KNOWN_PERSONAS);
+    const dirs = plan.cells.map((c) => cellDir(c));
     expect(dirs).toEqual([
-      "01-map-the-codebase-seed-the-checklist-from",
-      "02-sweep-authorization-on-every-route-mutat",
-      "03-sweep-injection-paths-across-sql-command",
-      "04-run-the-pre-baked-scanners-gitleaks-semg",
-      "05-attack-every-open-finding-sec-finding-re",
+      "01-recon",
+      "02-authz-sweep",
+      "03-injection-sweep",
+      "04-secrets-config",
+      "05-verify",
     ]);
     // Dirs are unique and filesystem-safe.
     expect(new Set(dirs).size).toBe(dirs.length);

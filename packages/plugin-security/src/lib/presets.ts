@@ -15,26 +15,31 @@ export function codeReviewPresetPlan(): string {
   - ordinal: 1
     persona: ${CODE_REVIEW_PERSONA}
     mode: fresh
+    name: recon
     goal: Map the codebase, seed the checklist from the file inventory, note trust boundaries
     reads: []
   - ordinal: 2
     persona: ${CODE_REVIEW_PERSONA}
     mode: fresh
+    name: authz-sweep
     goal: Sweep authorization on every route, mutation, and trust boundary from the recon map
     reads: [1]
   - ordinal: 3
     persona: ${CODE_REVIEW_PERSONA}
     mode: fresh
+    name: injection-sweep
     goal: Sweep injection paths across SQL, command, template, path, and deserialization sinks
     reads: [1]
   - ordinal: 4
     persona: ${CODE_REVIEW_PERSONA}
     mode: fresh
+    name: secrets-config
     goal: Run the pre-baked scanners (gitleaks, semgrep), triage their output, sweep secrets and config
     reads: [1]
   - ordinal: 5
     persona: ${CODE_REVIEW_PERSONA}
     mode: fresh
+    name: verify
     goal: Attack every open finding, sec_finding_review each, refute what does not survive
     reads: [1, 2, 3, 4]
     review: true

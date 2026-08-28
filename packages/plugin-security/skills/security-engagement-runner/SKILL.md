@@ -32,7 +32,8 @@ Edit the plan with `sec_plan_set` only while the engagement is planning. `sec_st
 - `ordinal` — dense, 1..N, at most 32 cells.
 - `persona` — a registered persona (v1: `code-review`).
 - `mode` — `fresh` or `resume`.
-- `goal` — what the cell must accomplish. The cell's directory name derives from it.
+- `goal` — what the cell must accomplish. The cell's directory name derives from it when no `name` is set.
+- `name` — optional short label (1..24 characters) for the cell directory, for example `authz-sweep`. It is slugified. Set it for a short stable directory like `02-authz-sweep` instead of a truncated goal slug.
 - `reads` — earlier ordinals only. These cells' state doc paths go into the dispatch prompt; keep the list minimal, it is the cell's context budget.
 - `paths` — optional include globs to scope the cell to part of the repo.
 - `review: true` — grants `sec_finding_review`. Give it only to a verify cell.

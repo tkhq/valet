@@ -1,4 +1,4 @@
-export { parsePlan, cellDirSlug, MAX_PLAN_CELLS } from "./plan.js";
+export { parsePlan, cellDirSlug, cellDir, MAX_PLAN_CELLS } from "./plan.js";
 export type { PlanCell, EngagementPlan } from "./plan.js";
 export { parseStateDoc, ruleExit, PROTOCOL_VERSION } from "./state-doc.js";
 export type { StateDoc, StateDocStatus, ExitRuling } from "./state-doc.js";

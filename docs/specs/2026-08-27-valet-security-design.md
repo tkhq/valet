@@ -36,7 +36,7 @@ The properties the note derives from the file format hold identically: if a pers
 | `orchestration.yml` (18 cells) | `security_engagements.plan` + `security_cells` rows |
 | Persona agent (fresh Claude instance) | Child session spawned per cell, persona role attached |
 | Shared filesystem of working dirs | Engagement tree: `sec_fs_*` tools over `security_files` rows |
-| `state.yml` per persona working dir | `/cells/<NN>-<goal slug>/state.yml`, append-only revisions (YAML verbatim) |
+| `state.yml` per persona working dir | `/cells/<NN>-<name slug>/state.yml`, append-only revisions (YAML verbatim) |
 | Findings list inside `state.yml` | `security_findings` rows via `sec_finding_report`; the state doc references finding ids |
 | Shared protocol file at a URL | Protocol markdown shipped in `packages/plugin-security`, mounted read-only at `/protocol.md`, injected into every dispatch prompt |
 | Dispatch prompt naming paths | Dispatch prompt naming the cell, the goal, and the tree paths of completed cells' state docs |
@@ -53,7 +53,7 @@ One name for one thing, used in code, copy, and this spec:
 - **Persona** — a specialist role (v1: `code-review`) a child session runs under.
 - **Runner** — the `kind='security'` session whose agent drives the cell loop.
 - **Engagement tree** — the engagement's virtual filesystem: paths addressed by `sec_fs_*` tools, backed by append-only `security_files` rows.
-- **State doc** — a persona's YAML working state at `/cells/<NN>-<goal slug>/state.yml`, append-only revisions.
+- **State doc** — a persona's YAML working state at `/cells/<NN>-<name slug>/state.yml`, append-only revisions.
 - **Finding** — a structured, immutable security observation tied to a cell.
 
 ## Architecture Overview
@@ -180,7 +180,7 @@ The tree's layout is conventional, not enforced beyond the write-scope rule:
 /cells/02-authz-sweep/state.yml
 ```
 
-Cell directories are named `<ordinal, 2 digits>-<goal slug>` (the persona repeats across cells in a preset; the goal is what distinguishes them) and stamped on the cell row at `sec_start`, so paths are stable and dispatch prompts can name them literally.
+Cell directories are named `<ordinal, 2 digits>-<name slug>`, where a plan cell's optional short `name` labels the directory, falling back to the goal when absent (the persona repeats across cells in a preset; the name or goal is what distinguishes them). The directory is stamped on the cell row at `sec_start`, so paths are stable and dispatch prompts can name them literally.
 
 A persona's state doc is YAML, stored verbatim. When a written path's basename is `state.yml`, the server validates two things: the content parses as YAML, and `protocol_version` is a known value. Other paths are free-form. Field-level schema enforcement stays out of v1 (the note's exclusion holds); the protocol markdown is the contract personas follow.
 
@@ -213,7 +213,7 @@ Two tool sets, both built in `packages/api/src/engine/security-tools.ts`, both c
 
 ### Runner tools (attached to `kind='security'` sessions)
 
-**sec_plan_set** — `{ plan: string }`. Replace the engagement plan (YAML: ordered cells with persona, mode, goal, optional `reads` ordinals, optional `paths` include globs to scope a cell to part of a monorepo, optional `review: true` to grant `sec_finding_review`) while status is `planning`. Validates: personas exist in the registry, ordinals are dense, `reads` reference only earlier ordinals (the DAG is acyclic by construction), cell count ≤ 32. Refused once the engagement is running — the plan is immutable after start, like the note's `orchestration.yml`.
+**sec_plan_set** — `{ plan: string }`. Replace the engagement plan (YAML: ordered cells with persona, mode, goal, optional short `name` to label the cell directory, optional `reads` ordinals, optional `paths` include globs to scope a cell to part of a monorepo, optional `review: true` to grant `sec_finding_review`) while status is `planning`. Validates: personas exist in the registry, ordinals are dense, `reads` reference only earlier ordinals (the DAG is acyclic by construction), cell count ≤ 32. Refused once the engagement is running — the plan is immutable after start, like the note's `orchestration.yml`.
 
 **sec_start** — `{}`. Requests an approval decision gate naming the repo, the resolved commit SHA, the cell count, the personas, and a rough cost estimate (a static per-persona token estimate times cell count — imprecise, but the user approves a number, not a shrug). On approval: resolves and pins `repo_ref` to a SHA, materializes `security_cells` rows from the plan (stamping each cell's `dir` and `reads`), flips status to `running`. This one gate covers every later dispatch — the cost surface is approved as a plan, not per child.
 

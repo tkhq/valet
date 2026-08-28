@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cellDirSlug, MAX_PLAN_CELLS, parsePlan } from "./plan.js";
+import { cellDir, cellDirSlug, MAX_PLAN_CELLS, parsePlan } from "./plan.js";
 
 const PERSONAS = ["code-review"] as const;
 
@@ -201,5 +201,68 @@ describe("cellDirSlug", () => {
     expect(slug.endsWith("-")).toBe(false);
     // 35 a's + hyphen + "and" is 39; the next hyphen at 40 is trimmed.
     expect(slug).toBe(`04-${"a".repeat(35)}-and`);
+  });
+});
+
+describe("plan cell name", () => {
+  it("parses and slugifies an optional name", () => {
+    const plan = parsePlan(
+      planOf(
+        [
+          "  - ordinal: 1",
+          "    persona: code-review",
+          "    name: Authz Sweep",
+          "    goal: Sweep authorization on every route",
+        ].join("\n"),
+      ),
+      PERSONAS,
+    );
+    expect(plan.cells[0].name).toBe("authz-sweep");
+  });
+
+  it("rejects a name longer than 24 characters", () => {
+    expect(() =>
+      parsePlan(
+        planOf(
+          [
+            "  - ordinal: 1",
+            "    persona: code-review",
+            `    name: ${"x".repeat(25)}`,
+            "    goal: Sweep authorization",
+          ].join("\n"),
+        ),
+        PERSONAS,
+      ),
+    ).toThrow(/longer than 24 characters/);
+  });
+
+  it("rejects a name with no slug characters", () => {
+    expect(() =>
+      parsePlan(
+        planOf(
+          [
+            "  - ordinal: 1",
+            "    persona: code-review",
+            '    name: "***"',
+            "    goal: Sweep authorization",
+          ].join("\n"),
+        ),
+        PERSONAS,
+      ),
+    ).toThrow(/no slug characters/);
+  });
+});
+
+describe("cellDir", () => {
+  it("uses the name when present", () => {
+    expect(cellDir({ ordinal: 2, name: "authz-sweep", goal: "long goal text here" })).toBe(
+      "02-authz-sweep",
+    );
+  });
+
+  it("falls back to the goal slug when the name is absent", () => {
+    expect(cellDir({ ordinal: 1, goal: "Map the codebase & seed checklist" })).toBe(
+      "01-map-the-codebase-seed-checklist",
+    );
   });
 });
