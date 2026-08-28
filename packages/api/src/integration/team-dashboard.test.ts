@@ -111,6 +111,25 @@ describe("GET /api/teams/:id/children", () => {
     });
   });
 
+  it("keeps a running child visible past the 20-newest window", async () => {
+    api = await bootTestApi();
+    await seedTeam(api);
+    const sentinel = await createTeamAssistant(api, "Sentinel");
+
+    const base = Date.now() - 60_000;
+    // The long-running child starts FIRST...
+    await seedChild(api, { childId: "child-old-running", parentSessionId: sentinel.sessionId, title: "Nightly audit", settled: false, createdAt: base });
+    // ...then 20 quick settled runs push it out of the newest-20 window.
+    for (let i = 0; i < 20; i++) {
+      await seedChild(api, { childId: `child-q${i}`, parentSessionId: sentinel.sessionId, title: `Quick ${i}`, settled: true, createdAt: base + 1000 + i });
+    }
+
+    const res = await fetch(`${api.baseUrl}/api/teams/team_1/children`);
+    const body = (await res.json()) as GetTeamChildrenResponse;
+    const running = body.children.filter((c) => c.status === "running");
+    expect(running.map((c) => c.sessionId)).toContain("child-old-running");
+  });
+
   it("404s a non-member, and answers an assistant-less team with an empty list", async () => {
     api = await bootTestApi();
     await seedTeam(api);
@@ -174,7 +193,7 @@ describe("GET /api/usage/breakdown?scope=team:<id>", () => {
     expect(memberBody.byUser).toBeUndefined();
   });
 
-  it("refuses a caller with no membership at all with 403", async () => {
+  it("refuses a caller with no membership at all with 403 that names the team rule", async () => {
     api = await bootTestApi();
     await api.providers.db
       .insert(teams)
@@ -183,6 +202,30 @@ describe("GET /api/usage/breakdown?scope=team:<id>", () => {
       headers: NON_MEMBER_HEADERS,
     });
     expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/team's members/);
+  });
+
+  it("the CSV export blanks per-member attribution for a plain member, keeps it for an admin", async () => {
+    api = await bootTestApi();
+    await seedTeam(api);
+    const now = Date.now();
+    const { db } = api.providers;
+    await db.insert(agentSessions).values({ id: "team-sess", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "team", ownerId: "team_1", createdAt: now, updatedAt: now, title: "Team work" });
+    await seedEntry(api, "e-team", "team-sess", now);
+    await db.insert(teamMembers).values({ teamId: "team_1", userId: "test-member", role: "member" });
+
+    // Admin (local-user): the user_id column carries attribution.
+    const adminCsv = await (await fetch(`${api.baseUrl}/api/usage/export.csv?window=24h&scope=team:team_1`)).text();
+    expect(adminCsv).toContain("local-user");
+
+    // Plain member: same rows, attribution blank — the breakdown hides
+    // byUser from members and the export must not hand it back.
+    const memberCsv = await (
+      await fetch(`${api.baseUrl}/api/usage/export.csv?window=24h&scope=team:team_1`, { headers: NON_MEMBER_HEADERS })
+    ).text();
+    expect(memberCsv).toContain("team-sess");
+    expect(memberCsv).not.toContain("local-user");
   });
 });
 

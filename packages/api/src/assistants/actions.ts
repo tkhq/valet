@@ -38,17 +38,16 @@ import type { AppDb } from "../lib/drizzle.js";
 import type { AssistantBehavior } from "../wire/types.js";
 import { listTeamsForUser } from "../services/teams.js";
 import { canAdministerAssistantOwner, assistantOwner } from "./access.js";
-import { validateAssistantBehavior } from "./behavior.js";
-import { PERSONALITY_INJECT_CAP } from "./persona.js";
 import {
+  applyProfilePatch,
   archiveAssistant,
   ArchivedAssistantError,
   createAssistant,
   DefaultAssistantArchiveError,
   listAssistantsForOwners,
   loadAssistant,
-  patchAssistant,
   toAssistantSummary,
+  validateProfilePatch,
 } from "./service.js";
 
 /** Curried action builder — same shape as `skills-actions.ts`. */
@@ -74,20 +73,7 @@ function callerFromContext(ctx: PluginActionContext): { userId: string; orgId: s
   return { userId, orgId };
 }
 
-/** Persona-field validation shared with the routes' rules: same cap, same
- * behavior validator, same corrective messages. */
-function personaFieldsError(args: {
-  personality?: string | null;
-  behavior?: unknown;
-}): string | null {
-  if (typeof args.personality === "string" && args.personality.length > PERSONALITY_INJECT_CAP) {
-    return `personality is limited to ${PERSONALITY_INJECT_CAP} characters. Shorten it.`;
-  }
-  if (args.behavior !== undefined && args.behavior !== null) {
-    return validateAssistantBehavior(args.behavior);
-  }
-  return null;
-}
+
 
 /** Service errors whose messages already name the corrective action pass
  * through; anything else rethrows — an unexpected failure must not read as
@@ -106,8 +92,13 @@ const NOT_FOUND = (id: string): PluginActionResult => ({
   error: `assistant not found: ${id}. Call assistants.list_assistants to see the ones you can reach.`,
 });
 
+// Type.Unknown, not a stricter schema: TypeBox rejections surface as a
+// generic "/behavior: must be object" with no shape guidance, while
+// validateProfilePatch (via validateAssistantBehavior) names the field and
+// the fix. The looser schema routes EVERY malformed value to the validator
+// with the corrective messages.
 const BEHAVIOR_PARAM = Type.Optional(
-  Type.Union([Type.Null(), Type.Record(Type.String(), Type.Unknown())], {
+  Type.Unknown({
     description:
       "Skills/integrations config: { skills?: { mode: 'all' } | { mode: 'allowlist', names: string[] }, " +
       "integrations?: { mode: 'all' } | { mode: 'allowlist', entries: [{ service, excludeActions? }] } }. " +
@@ -167,16 +158,23 @@ export function assistantsActionPlugin(db: AppDb, evict: (sessionId: string) => 
     execute: async (args, ctx) => {
       const caller = callerFromContext(ctx);
       if (!caller) return NO_OWNER;
-      const err = personaFieldsError(args);
+      const err = validateProfilePatch(args);
       if (err) return { success: false, error: err };
       const owner: Principal = args.team_id
         ? { type: "team", id: args.team_id }
         : { type: "user", id: caller.userId };
       if (!(await canAdministerAssistantOwner(db, owner, caller.userId))) {
-        return { success: false, error: "owner not found" };
+        return {
+          success: false,
+          error:
+            "owner not found. Check team_id against assistants.list_assistants; creating a team's " +
+            "assistant requires administering that team.",
+        };
       }
       const row = await createAssistant(db, caller.orgId, owner, args.name, {
         personality: args.personality ?? null,
+        // Safe cast: validateProfilePatch above rejected any shape
+        // validateAssistantBehavior does not accept.
         behavior: (args.behavior as AssistantBehavior | null | undefined) ?? null,
       });
       return { success: true, data: toAssistantSummary(row) };
@@ -227,7 +225,7 @@ export function assistantsActionPlugin(db: AppDb, evict: (sessionId: string) => 
           error: "Send a name, personality, behavior, or is_default: true.",
         };
       }
-      const err = personaFieldsError(args);
+      const err = validateProfilePatch(args);
       if (err) return { success: false, error: err };
 
       const row = await loadAssistant(db, args.assistant_id);
@@ -237,23 +235,23 @@ export function assistantsActionPlugin(db: AppDb, evict: (sessionId: string) => 
       }
 
       try {
-        const updated = await patchAssistant(db, row, {
-          ...(args.name !== undefined ? { name: args.name } : {}),
-          ...(args.personality !== undefined ? { personality: args.personality } : {}),
-          ...(args.behavior !== undefined
-            ? { behavior: args.behavior as AssistantBehavior | null }
-            : {}),
-          ...(args.is_default === true ? { isDefault: true as const } : {}),
-        });
-        // Same changed-values rule as the PATCH route: a persona input that
-        // changed must reach the next wake; a no-op write costs no rebuild.
-        if (
-          row.name !== updated.name ||
-          row.personality !== updated.personality ||
-          row.behavior !== updated.behavior
-        ) {
-          evict(updated.sessionId);
-        }
+        // applyProfilePatch owns the changed-values eviction rule
+        // (service.ts) — the same seam the PATCH route uses.
+        const updated = await applyProfilePatch(
+          db,
+          row,
+          {
+            ...(args.name !== undefined ? { name: args.name } : {}),
+            ...(args.personality !== undefined ? { personality: args.personality } : {}),
+            ...(args.behavior !== undefined
+              ? // Safe cast: validateProfilePatch above rejected any shape
+                // validateAssistantBehavior does not accept.
+                { behavior: args.behavior as AssistantBehavior | null }
+              : {}),
+            ...(args.is_default === true ? { isDefault: true as const } : {}),
+          },
+          evict,
+        );
         return { success: true, data: toAssistantSummary(updated) };
       } catch (err) {
         return failure(err);

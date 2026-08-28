@@ -26,7 +26,8 @@ import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import { agentSessions, assistants, type AssistantRow } from "../schema/index.js";
 import type { EngineHost } from "../engine/host.js";
 import type { AssistantBehavior, AssistantSummary } from "../wire/types.js";
-import { parseAssistantBehavior, serializeAssistantBehavior } from "./behavior.js";
+import { parseAssistantBehavior, serializeAssistantBehavior , validateAssistantBehavior } from "./behavior.js";
+import { PERSONALITY_INJECT_CAP } from "./persona.js";
 
 /** Raised when a request would leave a principal with no default assistant. */
 export class DefaultAssistantArchiveError extends Error {
@@ -341,6 +342,60 @@ export async function createAssistant(
  * `serializeAssistantBehavior`; the route then evicts the cached engine
  * session so the next wake picks up the new persona and filters.
  */
+/**
+ * THE profile-patch validator, shared by every editing surface (the
+ * assistants routes, the orchestrator /info route, and the assistants.*
+ * actions) — one rule set, so a config one surface accepts is never
+ * rejected by another. Name typing stays at the edges: the surfaces
+ * disagree on whether null clears it, by contract.
+ */
+export function validateProfilePatch(patch: {
+  personality?: string | null;
+  behavior?: unknown;
+}): string | null {
+  if (patch.personality !== undefined && patch.personality !== null && typeof patch.personality !== "string") {
+    return "personality must be a string, or null to clear it.";
+  }
+  if (typeof patch.personality === "string" && patch.personality.length > PERSONALITY_INJECT_CAP) {
+    return `personality is limited to ${PERSONALITY_INJECT_CAP} characters. Shorten it.`;
+  }
+  if (patch.behavior !== undefined && patch.behavior !== null) {
+    return validateAssistantBehavior(patch.behavior);
+  }
+  return null;
+}
+
+/**
+ * `patchAssistant` plus THE eviction predicate — the single place that
+ * knows which fields a cached session bakes in (name feeds the persona
+ * prefix; personality and behavior feed prompt and filters). Every editing
+ * surface goes through here so a new persona input added to the patch can
+ * never be added to one surface's evict check and missed by another's.
+ * `evict` is cache-only (never destroy()): an in-flight turn finishes on
+ * the old config, the next wake rebuilds.
+ */
+export async function applyProfilePatch(
+  db: AppDb,
+  row: AssistantRow,
+  patch: {
+    name?: string | null;
+    isDefault?: true;
+    personality?: string | null;
+    behavior?: AssistantBehavior | null;
+  },
+  evict: (sessionId: string) => void,
+): Promise<AssistantRow> {
+  const updated = await patchAssistant(db, row, patch);
+  if (
+    row.name !== updated.name ||
+    row.personality !== updated.personality ||
+    row.behavior !== updated.behavior
+  ) {
+    evict(updated.sessionId);
+  }
+  return updated;
+}
+
 export async function patchAssistant(
   db: AppDb,
   row: AssistantRow,

@@ -322,9 +322,14 @@ export async function getUsageExportCsv(db: AppDb, opts: { windowMs: number; sco
     WHERE ${scopeWhere("", since, opts.scope)}
     ORDER BY created_at DESC LIMIT 100000`)) as { rows: Row[] };
 
+  // The user_id column follows the same rule as the breakdown's byUser:
+  // per-member attribution is for scopes whose caller may see members'
+  // individual spend. A plain team member still exports the team's turns,
+  // with the attribution column blank.
   const lines = result.rows.map((r) =>
     [
-      new Date(toNum(r.created_at)).toISOString(), r.use_case, r.model, r.session_id, r.workflow_run_id, r.user_id,
+      new Date(toNum(r.created_at)).toISOString(), r.use_case, r.model, r.session_id, r.workflow_run_id,
+      opts.scope.byMember ? r.user_id : "",
       toNum(r.input_tokens), toNum(r.output_tokens), toNum(r.cache_read_tokens), toNum(r.cache_write_tokens), toNum(r.total_tokens),
       r.cost_total === null ? "" : toNum(r.cost_total), r.priced,
     ].map(csvEscape).join(","),

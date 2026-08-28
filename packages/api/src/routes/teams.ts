@@ -288,25 +288,42 @@ teamsRouter.get("/:id/children", async (c) => {
     return c.json(empty);
   }
 
-  const rows = await db
-    .select({
-      sessionId: childWatches.childSessionId,
-      parentSessionId: childWatches.parentSessionId,
-      parentThreadId: childWatches.parentThreadId,
-      settled: childWatches.settled,
-      createdAt: childWatches.createdAt,
-      title: agentSessions.title,
-    })
-    .from(childWatches)
-    .innerJoin(agentSessions, eq(agentSessions.id, childWatches.childSessionId))
-    .where(
-      and(
-        inArray(childWatches.parentSessionId, [...bySessionId.keys()]),
-        isNull(childWatches.dismissedAt),
-      ),
-    )
-    .orderBy(desc(childWatches.createdAt))
-    .limit(20);
+  const selection = {
+    sessionId: childWatches.childSessionId,
+    parentSessionId: childWatches.parentSessionId,
+    parentThreadId: childWatches.parentThreadId,
+    settled: childWatches.settled,
+    createdAt: childWatches.createdAt,
+    title: agentSessions.title,
+  };
+  const parentFilter = and(
+    inArray(childWatches.parentSessionId, [...bySessionId.keys()]),
+    isNull(childWatches.dismissedAt),
+  );
+  // Two reads, merged: the newest window feeds the dashboard, and RUNNING
+  // rows ride along unconditionally — a still-running child older than the
+  // window must not read as idle just because 20 quick runs settled after
+  // it started. Both are bounded; running rows cap at the same 20.
+  const [newest, running] = await Promise.all([
+    db
+      .select(selection)
+      .from(childWatches)
+      .innerJoin(agentSessions, eq(agentSessions.id, childWatches.childSessionId))
+      .where(parentFilter)
+      .orderBy(desc(childWatches.createdAt))
+      .limit(20),
+    db
+      .select(selection)
+      .from(childWatches)
+      .innerJoin(agentSessions, eq(agentSessions.id, childWatches.childSessionId))
+      .where(and(parentFilter, eq(childWatches.settled, false)))
+      .orderBy(desc(childWatches.createdAt))
+      .limit(20),
+  ]);
+  const seen = new Set<string>();
+  const rows = [...newest, ...running]
+    .filter((r) => (seen.has(r.sessionId) ? false : (seen.add(r.sessionId), true)))
+    .sort((a, b) => b.createdAt - a.createdAt);
 
   const children: TeamChildSummary[] = rows.map((r) => {
     const assistant = bySessionId.get(r.parentSessionId);

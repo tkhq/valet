@@ -522,6 +522,26 @@ describe("UsagePage — scope toggle", () => {
     expect(screen.getByText("Organization")).toBeTruthy();
   });
 
+  it("resets a team scope to My usage when the membership disappears", () => {
+    orgResult = {
+      data: { features: { organizations: true }, callerRole: "member" },
+      isLoading: false,
+    };
+    teamsResult = {
+      data: { teams: [{ id: "team_1", name: "Security", callerRole: "member" }] },
+      isLoading: false,
+    };
+    const { rerender } = render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "Security" }));
+    expect(screen.getByText(/Download CSV \(7d, Security\)/)).toBeTruthy();
+
+    // Membership removed: the toggle would unmount with a stale team scope
+    // and 403 forever; the reset effect flips back to the personal scope.
+    teamsResult = { data: { teams: [] }, isLoading: false };
+    rerender(<UsagePage />);
+    expect(screen.getByText(/Download CSV \(7d, me\)/)).toBeTruthy();
+  });
+
   it("selecting a team labels the CSV export with the team name", () => {
     orgResult = {
       data: { features: { organizations: true }, callerRole: "member" },

@@ -21,7 +21,14 @@ import {
 
 export const usageRouter = new Hono<AppEnv>();
 
-const FORBIDDEN = { error: "Organization usage is available to org admins only." } as const;
+/** The denial names the scope the caller asked for: a team refusal must not
+ * send them chasing an org-admin toggle. */
+function forbiddenBody(requestedScope: string | undefined): { error: string } {
+  if (requestedScope?.startsWith("team:")) {
+    return { error: "Team usage is available to that team's members. Ask a team admin to add you." };
+  }
+  return { error: "Organization usage is available to org admins only." };
+}
 
 usageRouter.get("/summary", async (c) => {
   const body = await getUsageSummary(c.var.providers.db, {
@@ -36,7 +43,7 @@ usageRouter.get("/breakdown", async (c) => {
   const { db } = c.var.providers;
   const user = c.var.user;
   const scope = await resolveUsageScope(db, { orgId: user.orgId, userId: user.id, requestedScope: c.req.query("scope") });
-  if (scope === "forbidden") return c.json(FORBIDDEN, 403);
+  if (scope === "forbidden") return c.json(forbiddenBody(c.req.query("scope")), 403);
   const body = await getUsageBreakdown(db, { windowMs: windowMsFrom(c.req.query("window")), scope });
   return c.json(body);
 });
@@ -62,7 +69,7 @@ usageRouter.get("/items", async (c) => {
     return c.json({ error: "useCase must be one of orchestrator, session, workflow, proxy." }, 400);
   }
   const scope = await resolveUsageScope(db, { orgId: user.orgId, userId: user.id, requestedScope: c.req.query("scope") });
-  if (scope === "forbidden") return c.json(FORBIDDEN, 403);
+  if (scope === "forbidden") return c.json(forbiddenBody(c.req.query("scope")), 403);
   const body: UsageDrillResponse = {
     items: await getUsageDrillItems(db, { windowMs: windowMsFrom(c.req.query("window")), scope, useCase: useCaseQ }),
   };
@@ -73,7 +80,7 @@ usageRouter.get("/export.csv", async (c) => {
   const { db } = c.var.providers;
   const user = c.var.user;
   const scope = await resolveUsageScope(db, { orgId: user.orgId, userId: user.id, requestedScope: c.req.query("scope") });
-  if (scope === "forbidden") return c.json(FORBIDDEN, 403);
+  if (scope === "forbidden") return c.json(forbiddenBody(c.req.query("scope")), 403);
   const windowLabel = windowLabelFrom(c.req.query("window"));
   const csv = await getUsageExportCsv(db, { windowMs: windowMsFrom(c.req.query("window")), scope });
   c.header("Content-Type", "text/csv; charset=utf-8");

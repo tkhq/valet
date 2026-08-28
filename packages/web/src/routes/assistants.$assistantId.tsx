@@ -286,18 +286,28 @@ function AssistantEditorForm({
 
   // ── save handlers ────────────────────────────────────────────────────
 
+  // Only fields that DIFFER from the server row go on the wire. Sending an
+  // untouched blank personality as null would EXPLICITLY CLEAR it — and for
+  // an assistant whose persona still lives in the legacy memory file (column
+  // null, textarea blank), a rename-only save would silently destroy that
+  // persona. Diffing also makes an emptied field an intentional clear (null)
+  // without turning every save into one.
+  const trimmedName = name.trim();
+  const trimmedPersonality = personality.trim();
+  const nameChanged = trimmedName !== (assistant.name ?? "");
+  const personalityChanged = trimmedPersonality !== (assistant.personality ?? "");
+  const identityDirty = nameChanged || personalityChanged;
+
   function saveIdentity() {
-    const trimmedName = name.trim();
-    const trimmedPersonality = personality.trim();
+    if (!identityDirty) return;
     identityPatch.mutate(
       {
         id: assistant.id,
         body: {
-          // An emptied field is an explicit clear (null on the wire), never a
-          // silent omit — omitting would keep the old value while the input
-          // shows empty.
-          name: trimmedName === "" ? null : trimmedName,
-          personality: trimmedPersonality === "" ? null : trimmedPersonality,
+          ...(nameChanged ? { name: trimmedName === "" ? null : trimmedName } : {}),
+          ...(personalityChanged
+            ? { personality: trimmedPersonality === "" ? null : trimmedPersonality }
+            : {}),
         },
       },
       {
@@ -311,9 +321,14 @@ function AssistantEditorForm({
   // Each section's Save builds its PATCH body from the cached server row
   // (`assistant.behavior`) plus only its OWN draft. usePatchAssistant writes
   // every PATCH response back into that cache synchronously, so a save
-  // issued right after another section's save reads the first save's result
-  // — not the pre-save fetch. A concurrent PATCH from another client between
-  // its response and this click is still last-write-wins.
+  // issued after another section's response reads that save's result. Two
+  // behavior saves IN FLIGHT at once would still last-write-wins (both
+  // spread the same pre-save row and the server replaces the whole column),
+  // so `behaviorSaving` below disables BOTH Save buttons while either
+  // mutation is pending. A concurrent PATCH from another client is still
+  // last-write-wins.
+  const behaviorSaving = skillsPatch.isPending || integrationsPatch.isPending;
+
   function saveSkills() {
     const newBehavior: AssistantBehavior = { ...assistant.behavior, skills: skillsDraft };
     skillsPatch.mutate(
@@ -508,7 +523,7 @@ function AssistantEditorForm({
           <Button
             type="button"
             onClick={saveIdentity}
-            disabled={!canEdit || identityPatch.isPending}
+            disabled={!canEdit || identityPatch.isPending || !identityDirty}
             aria-label="Save identity"
           >
             {identityPatch.isPending ? "Saving…" : "Save identity"}
@@ -626,7 +641,7 @@ function AssistantEditorForm({
             <Button
               type="button"
               onClick={saveSkills}
-              disabled={!canEdit || skillsPatch.isPending}
+              disabled={!canEdit || behaviorSaving}
               aria-label="Save skills"
             >
               {skillsPatch.isPending ? "Saving…" : "Save skills"}
@@ -734,7 +749,7 @@ function AssistantEditorForm({
               <Button
                 type="button"
                 onClick={saveIntegrations}
-                disabled={!canEdit || integrationsPatch.isPending}
+                disabled={!canEdit || behaviorSaving}
                 aria-label="Save integrations"
               >
                 {integrationsPatch.isPending ? "Saving…" : "Save integrations"}

@@ -104,8 +104,11 @@ export function TeamDashboard({ teamId }: { teamId: string }) {
   // scopes to the CALLER, so an unfiltered list would mix in personal runs.
   // The client short-circuits an empty id list to { runs: [] }.
   const workflowIds = workflowsQ.data?.workflows.map((w) => w.id);
+  // limit 200 = the server's page max: the feed only needs the 15 newest,
+  // but the Workflows card counts runs in 24h from this same page, and the
+  // 50-row default silently capped that count for busy teams.
   const runsQ = useRuns(
-    { workflowIds: workflowIds ?? [] },
+    { workflowIds: workflowIds ?? [], limit: 200 },
     { enabled: workflowIds !== undefined, refetchInterval: 30_000 },
   );
 
@@ -118,8 +121,13 @@ export function TeamDashboard({ teamId }: { teamId: string }) {
     children.filter((c) => c.status === "running").map((c) => c.assistantId),
   );
 
+  // The workflows query gates the runs query, so "still loading" includes
+  // it — otherwise a team whose activity is all workflow runs flashes the
+  // empty state before the runs arrive.
   const feedLoading =
-    childrenQ.data === undefined || (workflowIds !== undefined && runsQ.data === undefined);
+    childrenQ.data === undefined ||
+    workflowsQ.data === undefined ||
+    (workflowIds !== undefined && workflowIds.length > 0 && runsQ.data === undefined);
   const feedError = childrenQ.error ?? workflowsQ.error ?? runsQ.error;
 
   return (
@@ -280,6 +288,9 @@ function WorkflowsCard({
 }) {
   const DAY_MS = 24 * 60 * 60 * 1000;
   const runsToday = (runs ?? []).filter((r) => r.createdAt >= Date.now() - DAY_MS).length;
+  // One page (200) is the count's horizon; past it, say so instead of
+  // reporting a silently capped number.
+  const runsTodaySaturated = runs !== undefined && runsToday === runs.length && runs.length >= 200;
   return (
     <CardShell title="Workflows" link={{ to: "/workflows", label: "View workflows →" }}>
       {error != null ? (
@@ -295,7 +306,7 @@ function WorkflowsCard({
             <div className="text-xs text-muted">workflow{count === 1 ? "" : "s"}</div>
           </div>
           <div>
-            <div className="font-display text-xl">{runsToday}</div>
+            <div className="font-display text-xl">{runsTodaySaturated ? "200+" : runsToday}</div>
             <div className="text-xs text-muted">runs in 24h</div>
           </div>
         </div>

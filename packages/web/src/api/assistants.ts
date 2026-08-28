@@ -80,12 +80,27 @@ export function usePatchAssistant() {
       // the editor's section saves build each PATCH body from the cached
       // row's `behavior`, so a save issued right after another must read the
       // first save's result, not the pre-save fetch — or it silently reverts
-      // it. The invalidate still runs for the fields this write cannot know
-      // (a promote demotes some OTHER row's isDefault).
+      // it. The invalidate still runs as the authoritative re-read.
       qc.setQueryData<ListAssistantsResponse>(qkAssistants.list(), (prev) =>
         prev === undefined
           ? prev
-          : { assistants: prev.assistants.map((a) => (a.id === updated.id ? updated : a)) },
+          : {
+              assistants: prev.assistants.map((a) => {
+                if (a.id === updated.id) return updated;
+                // A promote demotes the owner's previous default server-side;
+                // mirror it, or defaultAssistantFor keeps resolving the OLD
+                // default (it sorts first) until the refetch lands.
+                if (
+                  updated.isDefault &&
+                  a.isDefault &&
+                  a.owner.type === updated.owner.type &&
+                  a.owner.id === updated.owner.id
+                ) {
+                  return { ...a, isDefault: false };
+                }
+                return a;
+              }),
+            },
       );
       qc.invalidateQueries({ queryKey: qkAssistants.list() });
     },

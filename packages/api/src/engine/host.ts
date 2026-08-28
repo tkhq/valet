@@ -1392,7 +1392,7 @@ export class EngineHost {
     if (pending) return pending;
 
     const epoch = this.buildEpoch.get(sessionId) ?? 0;
-    const promise = this.buildAssistantSession(sessionId, assistantId, meta, epoch).finally(() => {
+    const promise = this.buildAssistantSession(sessionId, assistantId, meta, epoch, 0).finally(() => {
       this.inflight.delete(sessionId);
     });
     this.inflight.set(sessionId, promise);
@@ -1404,6 +1404,7 @@ export class EngineHost {
     assistantId: string,
     meta: { actorUserId: string; orgId: string },
     epoch: number,
+    attempt: number,
   ): Promise<Session> {
     if (!this.opts.db) {
       throw new Error("EngineHost: assistantSessionFor requires opts.db");
@@ -1555,20 +1556,35 @@ export class EngineHost {
       : await engine.createSession({ id: sessionId, ...sessionOptions });
 
     const epochNow = this.buildEpoch.get(sessionId) ?? 0;
-    if (epochNow !== epoch) {
+    if (epochNow !== epoch && attempt < 2) {
       // A config PATCH evicted the cache while this build was between its
       // row read and here: the instance in hand was assembled from the
       // pre-PATCH row. Suspend its timers (they would root it forever, see
-      // evictCache) and rebuild from the current row. Bounded by eviction
-      // frequency — each retry captures the newest epoch.
+      // evictCache) and rebuild from the current row. CAPPED at two retries:
+      // each rebuild replays the session's durable history, so a caller
+      // PATCHing faster than one build must not livelock the wake. Past the
+      // cap the build in hand is served and cached, and the epoch check
+      // below drops it again if writes are still arriving — bounded
+      // staleness instead of unbounded rebuild.
       session.suspendTimers();
-      return this.buildAssistantSession(sessionId, assistantId, meta, epochNow);
+      return this.buildAssistantSession(sessionId, assistantId, meta, epochNow, attempt + 1);
     }
     builtSession = session;
 
     this.cache.set(sessionId, { engine, session });
     this.trackHibernationWake(sessionId, session);
     if (existing) this.pruneExpiredEvents(sessionId);
+
+    if (epochNow !== epoch) {
+      // Retry cap reached with the epoch still moving: serve this wake on
+      // the (at most one-PATCH-stale) build, but don't let it outlive the
+      // churn — dropping the cache entry makes the NEXT wake rebuild fresh.
+      console.warn(
+        `EngineHost: assistant ${assistantId} was patched ${attempt + 1}x during one build; ` +
+          `serving the last build uncached`,
+      );
+      this.evictCache(sessionId);
+    }
 
     return session;
   }

@@ -124,7 +124,17 @@ for your own).
   new one. `destroy()` is not used because it would kill a running turn.
   Eviction also bumps a per-session build epoch: a build that started before
   the PATCH refuses to cache its stale result and rebuilds from the current
-  row, so a wake racing a save cannot pin the old config.
+  row, so a wake racing a save cannot pin the old config. Rebuilds cap at
+  two — each replays the session's durable history, and a caller PATCHing
+  faster than one build must not livelock the wake. Past the cap the last
+  build serves the wake and its cache entry is dropped, so the next wake
+  rebuilds fresh: bounded staleness instead of unbounded rebuild.
+- The editor's identity Save sends only fields that DIFFER from the server
+  row. An untouched blank personality sent as null would explicitly clear
+  it, and for an assistant whose persona still lives in the legacy memory
+  file a rename-only save would silently destroy that persona. The two
+  behavior sections share one save lock: both write the whole behavior
+  column, so concurrent in-flight saves would last-write-wins each other.
 
 The editor needs no new catalog endpoints, but `GET /api/plugins` gains one
 field: `PluginSummary.actionServices`, the plugin's actions grouped by

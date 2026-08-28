@@ -16,7 +16,7 @@
  *   GET /api/proxy/requests   → paginated request log  (unchanged)
  *   GET /api/proxy/settings   → enabled flag           (unchanged)
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { useUsageBreakdown, useUsageItems } from "~/api/usage";
 import { useProxyRequests, useProxySettings } from "~/api/proxy-usage";
@@ -236,6 +236,15 @@ export function UsagePage() {
       : scope === "org"
         ? "org"
         : (myTeams.find((t) => `team:${t.id}` === scope)?.name ?? "team");
+
+  // A team scope must not outlive the membership: losing the selected team
+  // (removed by an admin, or the last team) would otherwise unmount the
+  // toggle while the breakdown 403s forever, with no rendered way back.
+  useEffect(() => {
+    if (!scope.startsWith("team:")) return;
+    if (teamsQ.data === undefined) return;
+    if (!myTeams.some((t) => `team:${t.id}` === scope)) setScope("me");
+  }, [scope, teamsQ.data, myTeams]);
 
   const breakdownQ = useUsageBreakdown(window, scope);
   const requestsQ = useProxyRequests({ limit: 50, cursor });

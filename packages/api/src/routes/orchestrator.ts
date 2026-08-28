@@ -22,12 +22,13 @@ import type { Principal } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { agentSessions, childWatches } from "../schema/index.js";
 import {
+  applyProfilePatch,
+  ArchivedAssistantError,
   ensureDefaultAssistantSession,
   findDefaultAssistant,
-  patchAssistant,
   resolveDefaultAssistant,
+  validateProfilePatch,
 } from "../assistants/service.js";
-import { PERSONALITY_INJECT_CAP } from "../assistants/persona.js";
 import { readOwnFile, writeFile, type MemoryScope } from "../services/memory.js";
 import type {
   EnsureOrchestratorResponse,
@@ -172,25 +173,39 @@ orchestratorRouter.patch("/info", async (c) => {
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
+  // This surface's contract is string-only (PatchOrchestratorInfoRequest):
+  // the legacy personality.md mirror write below cannot represent a clear.
   if (body.name !== undefined && typeof body.name !== "string") {
     return c.json({ error: "name must be a string." }, 400);
   }
   if (body.personality !== undefined && typeof body.personality !== "string") {
     return c.json({ error: "personality must be a string." }, 400);
   }
-  if (typeof body.personality === "string" && body.personality.length > PERSONALITY_INJECT_CAP) {
-    return c.json(
-      { error: `personality is limited to ${PERSONALITY_INJECT_CAP} characters. Shorten it.` },
-      400,
-    );
-  }
+  const personaErr = validateProfilePatch(body);
+  if (personaErr) return c.json({ error: personaErr }, 400);
 
   const assistant = await resolveDefaultAssistant(db, user.orgId, principal);
 
-  const updated = await patchAssistant(db, assistant, {
-    ...(body.name !== undefined ? { name: body.name } : {}),
-    ...(body.personality !== undefined ? { personality: body.personality } : {}),
-  });
+  try {
+    // applyProfilePatch owns the changed-values eviction rule (service.ts) —
+    // the same seam PATCH /api/assistants/:id uses.
+    await applyProfilePatch(
+      db,
+      assistant,
+      {
+        ...(body.name !== undefined ? { name: body.name } : {}),
+        ...(body.personality !== undefined ? { personality: body.personality } : {}),
+      },
+      (sid) => engineHost.evictCache(sid),
+    );
+  } catch (err) {
+    // Unreachable while archiveAssistant refuses the default, but an
+    // out-of-band edit must surface as the corrective 409, not a 500.
+    if (err instanceof ArchivedAssistantError) {
+      return c.json({ error: err.message, code: err.code }, err.statusCode);
+    }
+    throw err;
+  }
 
   if (body.personality !== undefined) {
     const scope: MemoryScope = { owner: principal, actorUserId: user.id };
@@ -201,10 +216,6 @@ orchestratorRouter.patch("/info", async (c) => {
       origin: "user-stated",
       pinned: false,
     });
-  }
-
-  if (assistant.name !== updated.name || assistant.personality !== updated.personality) {
-    engineHost.evictCache(assistant.sessionId);
   }
 
   const responseBody: PatchOrchestratorInfoResponse = { ok: true };

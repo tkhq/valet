@@ -45,7 +45,9 @@ The feed merges two reads, client-side, by `createdAt` descending, capped at
 
 1. **Assistant runs** — child sessions the team's assistants spawned
    (`GET /api/teams/:id/children`, new). Each row names the assistant that
-   ran it.
+   ran it. The response is the 20 newest watches PLUS every still-running
+   watch (each read bounded at 20): a running child older than the window
+   must not read as idle because quick runs settled after it started.
 2. **Workflow runs** — team-owned runs (`GET /api/workflows/runs`, existing
    owner filter).
 
@@ -94,7 +96,9 @@ widens to `"me" | "org" | "team"`. The CSV export accepts the same scope.
 `byUser` is admin-gated: the org scope always reports it, and a team scope
 reports it when the caller administers the team (team admin or org admin).
 A plain member reads the team's aggregate by use case, model and day —
-never colleagues' individual spend.
+never colleagues' individual spend. The CSV export follows the same rule:
+a plain member's export carries the team's turns with the user_id column
+blank.
 
 The `/usage` page exposes the scope: every team the caller is a member of
 gets a button beside "My usage", and "Organization" stays org-admin-only.

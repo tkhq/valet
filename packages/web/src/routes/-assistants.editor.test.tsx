@@ -410,6 +410,32 @@ describe("AssistantEditorPage", () => {
     expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Beta");
   });
 
+  // A rename-only save must NOT carry personality: an untouched blank field
+  // sent as null would explicitly clear it — and destroy a legacy
+  // memory-file persona (column null) the editor cannot even see.
+  it("a rename-only save omits personality from the PATCH body", async () => {
+    assistantsData = [makeAssistant({ id: "asst_1", name: "Old Name" })];
+    meData = { id: "u1", orgRole: "member" };
+    render(<AssistantEditorPage />);
+
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "New Name" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save identity" }));
+
+    await waitFor(() => expect(patchMutate).toHaveBeenCalled());
+    const body = (patchMutate.mock.calls[0]?.[0] as { body: Record<string, unknown> }).body;
+    expect(body).toEqual({ name: "New Name" });
+  });
+
+  it("Save identity is disabled until a field differs from the server row", () => {
+    assistantsData = [makeAssistant({ id: "asst_1", name: "Wren", personality: "Blunt." })];
+    meData = { id: "u1", orgRole: "member" };
+    render(<AssistantEditorPage />);
+    const btn = screen.getByRole("button", { name: "Save identity" }) as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("Personality"), { target: { value: "Warm." } });
+    expect(btn.disabled).toBe(false);
+  });
+
   // Mount-time state from props (CLAUDE.md): the assistant prop updates in
   // place for the SAME id (rail rename, another admin's PATCH refetched, our
   // own save's cache write-back). An untouched form must follow the server;
