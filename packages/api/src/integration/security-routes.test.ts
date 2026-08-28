@@ -216,3 +216,86 @@ describe("api integration: security session minting + read routes", () => {
     }
   });
 });
+
+describe("api integration: security session model selection", () => {
+  it("defaults a modelless security session to a capable model, not haiku", async () => {
+    const api = await bootTestApi();
+    try {
+      const created = await createSecuritySession(api.baseUrl);
+      // The create route sets the model before the kickoff, which materializes
+      // the session — so the detail route reports it.
+      const detail = (await (
+        await fetch(`${api.baseUrl}/api/sessions/${created.id}`)
+      ).json()) as CreateSessionResponse;
+      expect(detail.model).toBe("claude-sonnet-4-6");
+      expect(detail.model).not.toBe("claude-haiku-4-5");
+    } finally {
+      await api.cleanup();
+    }
+  });
+
+  it("uses an explicit model on a security create", async () => {
+    const api = await bootTestApi();
+    try {
+      const res = await fetch(`${api.baseUrl}/api/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspace: "/tmp/valet-security-routes-test",
+          kind: "security",
+          repo: REPO,
+          model: "claude-opus-4-7",
+        }),
+      });
+      expect(res.status).toBe(201);
+      const created = (await res.json()) as CreateSessionResponse;
+      expect(created.model).toBe("claude-opus-4-7");
+
+      const detail = (await (
+        await fetch(`${api.baseUrl}/api/sessions/${created.id}`)
+      ).json()) as CreateSessionResponse;
+      expect(detail.model).toBe("claude-opus-4-7");
+    } finally {
+      await api.cleanup();
+    }
+  });
+
+  it("rejects an empty model string, naming GET /api/models", async () => {
+    const api = await bootTestApi();
+    try {
+      const res = await fetch(`${api.baseUrl}/api/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspace: "/tmp/valet-security-routes-test",
+          kind: "security",
+          repo: REPO,
+          model: "",
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain("GET /api/models");
+    } finally {
+      await api.cleanup();
+    }
+  });
+
+  it("leaves a modelless code session on normal resolution", async () => {
+    const api = await bootTestApi();
+    try {
+      const res = await fetch(`${api.baseUrl}/api/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspace: "/tmp/valet-security-routes-test-code" }),
+      });
+      expect(res.status).toBe(201);
+      const created = (await res.json()) as CreateSessionResponse;
+      // No model set at create: the code session was never materialized, so
+      // the create response carries no session-default model.
+      expect(created.model).toBeUndefined();
+    } finally {
+      await api.cleanup();
+    }
+  });
+});

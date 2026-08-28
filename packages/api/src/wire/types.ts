@@ -134,6 +134,10 @@ export interface CreateSessionRequest {
   /** Defaults to "code". A "security" session requires a repo binding and
    * is seeded with a security engagement in the create transaction. */
   kind?: SessionKind;
+  /** Session-default model id (a value from `GET /api/models`). When omitted
+   * on a security session, the server picks a capable default rather than the
+   * account/org fallback; on a code session it falls to normal resolution. */
+  model?: string;
   /** Optional first user prompt; if set, server enqueues immediately after creation. */
   initialPrompt?: string;
   /** Defaults to "headless" server-side when omitted. */

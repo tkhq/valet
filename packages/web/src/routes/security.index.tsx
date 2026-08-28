@@ -7,7 +7,9 @@ import type {
 } from "@valet/api/wire";
 import { useCreateSession } from "~/api/queries";
 import { useEngagement, useSecurityReviews } from "~/api/security";
+import { useModels } from "~/api/settings";
 import { useRepos } from "~/api/repos";
+import { curatedForCatalogId, MODEL_CATALOG } from "~/lib/models";
 import { Badge, Button, Input, Label, Spinner, Textarea } from "~/components/primitives";
 import { RepoCombobox, workspaceForRepo, type RepoOption } from "~/components/repo-combobox";
 import { CreateScopeLine, WorkspaceClause } from "~/components/workspace-clause";
@@ -55,6 +57,18 @@ interface SelectedRepo {
   ref: string;
 }
 
+/** The hub always sends a model. This is the capable default the server also
+ * falls to for a modelless security create — the picker defaults to it, so the
+ * two agree. */
+const SECURITY_DEFAULT_MODEL = "claude-sonnet-4-6";
+
+/** One model option for the hub's picker: the id sent on the wire plus a short
+ * label. */
+interface ModelChoice {
+  id: string;
+  label: string;
+}
+
 function NewReviewCard() {
   const navigate = useNavigate();
   const create = useCreateSession();
@@ -62,8 +76,24 @@ function NewReviewCard() {
   // The nav's switcher answers "whose review is this" — same pass-through
   // the new-session dialog uses (`CreateScopeLine` states it).
   const scope = useWorkspaceScope();
+  const modelsQ = useModels();
   const [repo, setRepo] = useState<SelectedRepo | null>(null);
   const [prompt, setPrompt] = useState("");
+  // The hub always submits a model; sonnet-4-6 is the capable default. This is
+  // a fixed default, not derived from a prop, so no mount-time-state sync is
+  // needed — the value only changes when the user picks another model.
+  const [model, setModel] = useState(SECURITY_DEFAULT_MODEL);
+
+  // Model options: the org catalog when it loads (curated label when the id
+  // maps to a known tier, else the catalog name), else the curated
+  // `MODEL_CATALOG`. The default id is always present, so the select can show
+  // it even before the catalog loads.
+  const catalog = modelsQ.data?.models;
+  const modelChoices: ModelChoice[] =
+    catalog && catalog.length > 0
+      ? catalog.map((m) => ({ id: m.id, label: curatedForCatalogId(m.id)?.label ?? m.name }))
+      : MODEL_CATALOG.map((m) => ({ id: m.id, label: m.label }));
+  const hasDefault = modelChoices.some((m) => m.id === model);
 
   const repos = reposQ.data?.repos ?? [];
   const connected = reposQ.data?.connected ?? false;
@@ -86,6 +116,7 @@ function NewReviewCard() {
       // the hub has no editable path field, so it must send a real host path.
       workspace: workspaceForRepo(repo.fullName),
       kind: "security",
+      model,
       repo: {
         host: "github",
         fullName: repo.fullName,
@@ -171,6 +202,26 @@ function NewReviewCard() {
         <p className="text-xs text-muted">
           Five cells: recon, authz sweep, injection sweep, secrets and config, verify.
         </p>
+      </div>
+
+      <div className="grid gap-1">
+        <Label htmlFor="review-model">Model</Label>
+        {/* The runner and its personas run on this model. Sonnet 4.6 is the
+            default — a capable model for review, not the haiku floor. */}
+        <select
+          id="review-model"
+          value={model}
+          onChange={(e) => setModel(e.target.value)}
+          className="h-8 w-48 rounded border border-line bg-paper px-2 text-xs text-ink"
+        >
+          {!hasDefault && <option value={model}>{model}</option>}
+          {modelChoices.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.label}
+            </option>
+          ))}
+        </select>
+        <p className="text-xs text-muted">The runner and its review personas use this model.</p>
       </div>
 
       <div className="grid gap-1">

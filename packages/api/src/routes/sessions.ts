@@ -228,6 +228,12 @@ sessionsRouter.get("/", async (c) => {
 
 // ── Create ────────────────────────────────────────────────────────────────
 
+/** A security review defaults to a capable model, not the account/org
+ * fallback. `resolveModelForBuild` bottoms out at `claude-haiku-4-5`, which
+ * is too weak for security review, so a security session with no explicit
+ * model gets this instead. An explicit `model` on the request always wins. */
+const SECURITY_DEFAULT_MODEL = "claude-sonnet-4-6";
+
 sessionsRouter.post("/", async (c) => {
   const { db, engineStore, prebuildService } = c.var.providers;
   const user = c.var.user;
@@ -260,6 +266,20 @@ sessionsRouter.post("/", async (c) => {
     return c.json({ error: "kind must be 'code' or 'security'." }, 400);
   }
   const kind = body.kind ?? "code";
+
+  // A model, when present, is a non-empty string id from the catalog. Rejected
+  // here so a mistyped model is a bad request, not a silently ignored field.
+  if (body.model !== undefined && (typeof body.model !== "string" || body.model.length === 0)) {
+    return c.json(
+      { error: "model must be a non-empty string. Send a model id from GET /api/models." },
+      400,
+    );
+  }
+  // The session-default model. A security session with no explicit model uses
+  // a capable default instead of the haiku floor `resolveModelForBuild` would
+  // otherwise reach. A code session with no model keeps normal resolution
+  // (undefined → user default → org preferred → hardcoded default).
+  const effectiveModel = body.model ?? (kind === "security" ? SECURITY_DEFAULT_MODEL : undefined);
 
   // An explicit `teamId: null` from a client that always sends the field is
   // a real shape — the body is an unchecked cast — so it must fall through to
@@ -395,6 +415,23 @@ sessionsRouter.post("/", async (c) => {
   // working the moment it is created, so it always gets a kickoff turn even
   // when the user left the focus box empty. The user's optional prompt folds
   // in as focus notes. A code session only runs when the user sends a prompt.
+  // Persist the chosen model BEFORE the kickoff turn so the first turn runs on
+  // it, not the haiku floor. `setModel` is the same durable path PATCH uses:
+  // it saves `SessionData.model`, so `resolveModelForBuild` returns it on this
+  // build and every rebuild after eviction. The kickoff below reuses the cached
+  // session this materializes. Best-effort like the kickoff: a failure logs and
+  // does not fail the create — the row and engagement are already durable, and
+  // the model can be re-set through PATCH.
+  if (effectiveModel && created) {
+    const { engineHost } = c.var.providers;
+    try {
+      const engineSession = await engineHost.sessionFor(id, await loadSessionMeta(db, created));
+      await engineSession.setModel(effectiveModel);
+    } catch (err) {
+      console.error(`session ${id}: set default model ${effectiveModel} failed:`, err);
+    }
+  }
+
   const firstPrompt =
     kind === "security"
       ? securityKickoffPrompt(repos[0].fullName, body.initialPrompt)
@@ -422,6 +459,7 @@ sessionsRouter.post("/", async (c) => {
     createdAt: now,
     updatedAt: now,
     messageCount: 0,
+    ...(effectiveModel ? { model: effectiveModel } : {}),
     profile,
     docker,
     ...(repos.length > 0 ? { repos } : {}),

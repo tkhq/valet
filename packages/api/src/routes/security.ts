@@ -79,6 +79,7 @@ import {
   type SecurityFindingRow,
 } from "../schema/index.js";
 import { canAdministerSession, canViewSession } from "../services/session-access.js";
+import { loadSessionMeta } from "../engine/session-meta.js";
 import { resolveApiTokenOrNull, resolveRefSha } from "../bakes/source-service.js";
 import { buildChildStatusReader, ChildLimitError } from "../orchestrator/children.js";
 import {
@@ -379,6 +380,27 @@ async function resolveToolSession(
 function sessionOwner(row: SessionRow): Principal {
   const type = row.ownerType === "team" || row.ownerType === "org" ? row.ownerType : "user";
   return { type, id: row.ownerId !== "" ? row.ownerId : row.userId };
+}
+
+/** The runner's resolved session model, read from the live engine session so
+ * every persona child inherits it. The runner is live while it dispatches, so
+ * this reads its own model rather than re-resolving one — a security runner
+ * defaults to a capable model, and its personas do the actual review, so they
+ * must not fall to the haiku floor. Best-effort: an unmaterialized runner (no
+ * live session) yields undefined, and the child then resolves normally. Mirrors
+ * the GET /:id derivation: the canonical spec, not the wire id. */
+async function runnerModel(
+  c: Context<AppEnv>,
+  row: SessionRow,
+): Promise<string | undefined> {
+  const { db, engineHost } = c.var.providers;
+  if (!engineHost.isLive(row.id)) return undefined;
+  try {
+    const session = await engineHost.sessionFor(row.id, await loadSessionMeta(db, row));
+    return session.options.modelSpec ?? session.options.model.id;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Service-thrown transition refusals become corrective route errors: 429
@@ -769,6 +791,9 @@ securityRouter.post("/:id/security/dispatch", async (c) => {
   // limits, agent_sessions row, child_watches row, armed watcher — so the
   // child's settlement signals the runner thread. Never bypass it.
   const { childSpawner } = c.var.providers;
+  // Personas inherit the runner's model, so a capable security default reaches
+  // the sessions that do the actual review.
+  const model = await runnerModel(c, row);
   const spawn: SpawnCellChild = async (req) => {
     const spawned = await childSpawner(
       {
@@ -784,6 +809,7 @@ securityRouter.post("/:id/security/dispatch", async (c) => {
         sessionId: req.childSessionId,
         // Per-turn role overlay for the dispatch prompt.
         role: req.role,
+        ...(model ? { model } : {}),
       },
       {
         parentSessionId: sessionId,
@@ -947,6 +973,9 @@ securityRouter.post("/:id/security/handoff", async (c) => {
     ...(task ? ["", `Task: ${task}`] : []),
   ].join("\n");
 
+  // The fix session inherits the runner's model, same as a dispatched persona.
+  const model = await runnerModel(c, row);
+
   try {
     // Same children.ts seam as dispatch: the fix session is an ordinary
     // coding child, bound to the engagement repo at the pinned SHA.
@@ -957,6 +986,7 @@ securityRouter.post("/:id/security/handoff", async (c) => {
         repo: result.engagement.repoFullName,
         ...(result.engagement.repoRef !== "" ? { branch: result.engagement.repoRef } : {}),
         profile: "headless",
+        ...(model ? { model } : {}),
       },
       {
         parentSessionId: sessionId,

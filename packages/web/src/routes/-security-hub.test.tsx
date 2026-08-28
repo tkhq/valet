@@ -97,6 +97,8 @@ vi.mock("~/api/settings", () => ({
   useMe: () => ({ data: { id: "u-1" }, isLoading: false, error: null }),
   useTeams: () => ({ data: { teams: [] }, isLoading: false, error: null }),
   useOrg: () => ({ data: { features: { organizations: false } }, isLoading: false, error: null }),
+  // No org catalog here, so the hub falls back to the curated MODEL_CATALOG.
+  useModels: () => ({ data: undefined, isLoading: false, error: null }),
 }));
 
 import { SecurityIndexPage } from "./security.index";
@@ -188,6 +190,8 @@ describe("SecurityIndexPage", () => {
       auth: "auto",
     });
     expect(body.initialPrompt).toBe("focus on the token minting paths");
+    // The hub always sends a model, defaulting to the capable security model.
+    expect(body.model).toBe("claude-sonnet-4-6");
 
     await waitFor(() =>
       expect(navigate).toHaveBeenCalledWith({
@@ -205,5 +209,20 @@ describe("SecurityIndexPage", () => {
     await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
     const body = createMutateAsync.mock.calls[0]![0] as CreateSessionRequest;
     expect(body.initialPrompt).toBeUndefined();
+  });
+
+  it("defaults the model to claude-sonnet-4-6 and sends the picked model", async () => {
+    renderPage();
+    pickRepo();
+
+    const select = screen.getByLabelText("Model") as HTMLSelectElement;
+    expect(select.value).toBe("claude-sonnet-4-6");
+
+    fireEvent.change(select, { target: { value: "claude-opus-4-7" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start review" }));
+
+    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
+    const body = createMutateAsync.mock.calls[0]![0] as CreateSessionRequest;
+    expect(body.model).toBe("claude-opus-4-7");
   });
 });
