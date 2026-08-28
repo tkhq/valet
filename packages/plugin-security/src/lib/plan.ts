@@ -1,4 +1,5 @@
 import { parse } from "yaml";
+import { KNOWN_PLAYBOOKS, isKnownPlaybook } from "./playbooks.js";
 
 /** One unit of dispatch: a persona, a mode, a goal. See the design spec
  * (docs/specs/2026-08-27-valet-security-design.md §Vocabulary). */
@@ -16,6 +17,9 @@ export interface PlanCell {
   paths?: string[];
   /** Grants `sec_finding_review` to the cell's child session. */
   review?: boolean;
+  /** Optional methodology playbook (a KNOWN_PLAYBOOKS name). Its markdown is
+   * served at /playbooks/<name>.md and named in the dispatch prompt. */
+  playbook?: string;
 }
 
 export interface EngagementPlan {
@@ -153,7 +157,17 @@ function parseCell(entry: unknown, index: number, knownPersonas: readonly string
     review = cell.review;
   }
 
-  return { ordinal, persona, mode, goal, name, reads, paths, review };
+  let playbook: string | undefined;
+  if (cell.playbook !== undefined) {
+    if (typeof cell.playbook !== "string" || !isKnownPlaybook(cell.playbook)) {
+      throw new Error(
+        `${label} names unknown playbook "${String(cell.playbook)}". Known playbooks: ${KNOWN_PLAYBOOKS.join(", ")}. ${CORRECTIVE}`,
+      );
+    }
+    playbook = cell.playbook;
+  }
+
+  return { ordinal, persona, mode, goal, name, reads, paths, review, playbook };
 }
 
 const SLUG_MAX = 40;

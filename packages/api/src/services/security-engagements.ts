@@ -22,9 +22,11 @@ import { and, asc, count, desc, eq, gt, ilike, or, sql } from "drizzle-orm";
 import {
   cellDir,
   findingFingerprint,
+  isKnownPlaybook,
   KNOWN_PERSONAS,
   parsePlan,
   parseStateDoc,
+  playbookMarkdown,
   protocolMarkdown,
   ruleExit,
   type EngagementPlan,
@@ -192,6 +194,13 @@ export function buildDispatchPrompt(
   if (planCell?.paths && planCell.paths.length > 0) {
     lines.push(`Scope: limit the sweep to these path globs: ${planCell.paths.join(", ")}`);
   }
+  if (planCell?.playbook) {
+    lines.push(
+      "",
+      `Methodology: read /playbooks/${planCell.playbook}.md with sec_fs_read before you start. ` +
+        "It is your framework-grounded checklist for this cell (OWASP, ASVS, WSTG, CWE). Work from it.",
+    );
+  }
   lines.push(
     "",
     `Your cell directory in the engagement tree is /cells/${cell.dir}/.`,
@@ -212,6 +221,24 @@ export function buildDispatchPrompt(
     protocol,
   );
   return lines.join("\n");
+}
+
+/** The distinct playbook names a plan's cells reference, in listing order.
+ * Tolerant of an unparseable plan (returns none) — listing must not throw. */
+function playbooksInPlan(planYaml: string): string[] {
+  let plan: EngagementPlan;
+  try {
+    plan = parsePlan(planYaml, KNOWN_PERSONAS);
+  } catch {
+    return [];
+  }
+  const names: string[] = [];
+  for (const cell of plan.cells) {
+    if (cell.playbook && isKnownPlaybook(cell.playbook) && !names.includes(cell.playbook)) {
+      names.push(cell.playbook);
+    }
+  }
+  return names;
 }
 
 // ── Service ────────────────────────────────────────────────────────────────
@@ -748,6 +775,11 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     const engagement = await loadEngagement(engagementId);
     if (path === "/protocol.md") return { path, revision: null, content: protocolMarkdown() };
     if (path === "/plan.yml") return { path, revision: null, content: engagement.plan };
+    if (path.startsWith("/playbooks/") && path.endsWith(".md")) {
+      const name = path.slice("/playbooks/".length, -".md".length);
+      if (isKnownPlaybook(name)) return { path, revision: null, content: playbookMarkdown(name) };
+      throw new Error(`No playbook at ${path}. Use sec_fs_list to see the tree.`);
+    }
     const conditions = [eq(securityFiles.engagementId, engagementId), eq(securityFiles.path, path)];
     if (revision !== undefined) conditions.push(eq(securityFiles.revision, revision));
     const rows = await db
@@ -795,6 +827,15 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
       { path: "/plan.yml", revisions: 1, size: Buffer.byteLength(engagement.plan, "utf8") },
       { path: "/protocol.md", revisions: 1, size: Buffer.byteLength(protocolMarkdown(), "utf8") },
     ];
+    // Only the playbooks this plan references appear in the tree, so the
+    // listing reflects the engagement rather than every bundled playbook.
+    for (const name of playbooksInPlan(engagement.plan)) {
+      mounts.push({
+        path: `/playbooks/${name}.md`,
+        revisions: 1,
+        size: Buffer.byteLength(playbookMarkdown(name), "utf8"),
+      });
+    }
     for (const mount of mounts) {
       if (prefix === undefined || mount.path.startsWith(prefix)) byPath.set(mount.path, mount);
     }

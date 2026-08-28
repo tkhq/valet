@@ -35,6 +35,7 @@ describe("parsePlan", () => {
       reads: [],
       paths: undefined,
       review: undefined,
+      playbook: undefined,
     });
     expect(plan.cells[1]).toEqual({
       ordinal: 2,
@@ -44,7 +45,37 @@ describe("parsePlan", () => {
       reads: [1],
       paths: ["packages/api/**"],
       review: true,
+      playbook: undefined,
     });
+  });
+
+  it("accepts a known playbook and rejects an unknown one", () => {
+    const withPlaybook = parsePlan(
+      planOf(
+        [
+          "  - ordinal: 1",
+          "    persona: code-review",
+          "    goal: Sweep authorization",
+          "    playbook: authz",
+        ].join("\n"),
+      ),
+      PERSONAS,
+    );
+    expect(withPlaybook.cells[0].playbook).toBe("authz");
+
+    expect(() =>
+      parsePlan(
+        planOf(
+          [
+            "  - ordinal: 1",
+            "    persona: code-review",
+            "    goal: Sweep authorization",
+            "    playbook: made-up",
+          ].join("\n"),
+        ),
+        PERSONAS,
+      ),
+    ).toThrow(/unknown playbook "made-up".*authz/);
   });
 
   it("sorts cells by ordinal", () => {

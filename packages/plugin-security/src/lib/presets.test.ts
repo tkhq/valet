@@ -30,10 +30,22 @@ describe("codeReviewPresetPlan", () => {
     expect(plan.cells.map((c) => c.review === true)).toEqual([false, false, false, false, true]);
   });
 
-  it("mentions the pre-baked scanners in the triage cell's goal", () => {
+  it("mentions the pre-baked scanner in the triage cell's goal", () => {
     const plan = parsePlan(codeReviewPresetPlan(), KNOWN_PERSONAS);
+    // gitleaks-only in the stock image (M9); semgrep needs a Python
+    // toolchain the base image does not carry.
     expect(plan.cells[3].goal).toMatch(/gitleaks/);
-    expect(plan.cells[3].goal).toMatch(/semgrep/);
+  });
+
+  it("assigns a methodology playbook to every preset cell", () => {
+    const plan = parsePlan(codeReviewPresetPlan(), KNOWN_PERSONAS);
+    expect(plan.cells.map((c) => c.playbook)).toEqual([
+      "recon",
+      "authz",
+      "injection",
+      "secrets-config",
+      "verify",
+    ]);
   });
 
   it("names every cell so the dirs stay short and stable", () => {

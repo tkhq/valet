@@ -10,3 +10,5 @@ export {
   securityKickoffPrompt,
 } from "./presets.js";
 export { protocolMarkdown } from "./protocol.js";
+export { KNOWN_PLAYBOOKS, isKnownPlaybook, playbookMarkdown } from "./playbooks.js";
+export type { PlaybookName } from "./playbooks.js";

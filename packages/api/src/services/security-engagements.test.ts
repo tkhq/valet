@@ -324,6 +324,12 @@ describe("security engagement service", () => {
     expect(protocol.content).toContain("State Doc Protocol");
     const plan = await svc.readFile(engagement.id, "/plan.yml");
     expect(plan.content).toBe(engagement.plan);
+    const playbook = await svc.readFile(engagement.id, "/playbooks/authz.md");
+    expect(playbook.revision).toBeNull();
+    expect(playbook.content).toContain("Broken Access Control");
+    await expect(svc.readFile(engagement.id, "/playbooks/nope.md")).rejects.toThrow(
+      "No playbook at /playbooks/nope.md. Use sec_fs_list to see the tree.",
+    );
     await expect(svc.readFile(engagement.id, "/cells/01-recon/missing.md")).rejects.toThrow(
       "No file at /cells/01-recon/missing.md. Use sec_fs_list to see the tree.",
     );
@@ -335,11 +341,30 @@ describe("security engagement service", () => {
     await svc.writeFile(engagement.id, { actorCellId: cells[0].id, path, content: "one" });
     await svc.writeFile(engagement.id, { actorCellId: cells[0].id, path, content: "three" });
     const all = await svc.listFiles(engagement.id);
-    expect(all.map((e) => e.path)).toEqual(["/cells/01-recon/notes.md", "/plan.yml", "/protocol.md"]);
+    // The preset's five cells reference five playbooks; each is a read-only
+    // mount alongside /plan.yml and /protocol.md.
+    expect(all.map((e) => e.path)).toEqual([
+      "/cells/01-recon/notes.md",
+      "/plan.yml",
+      "/playbooks/authz.md",
+      "/playbooks/injection.md",
+      "/playbooks/recon.md",
+      "/playbooks/secrets-config.md",
+      "/playbooks/verify.md",
+      "/protocol.md",
+    ]);
     const notes = all.find((e) => e.path === path);
     expect(notes).toEqual({ path, revisions: 2, size: 5 });
     const scoped = await svc.listFiles(engagement.id, "/cells/");
     expect(scoped.map((e) => e.path)).toEqual([path]);
+    const playbooks = await svc.listFiles(engagement.id, "/playbooks/");
+    expect(playbooks.map((e) => e.path)).toEqual([
+      "/playbooks/authz.md",
+      "/playbooks/injection.md",
+      "/playbooks/recon.md",
+      "/playbooks/secrets-config.md",
+      "/playbooks/verify.md",
+    ]);
   });
 
   // ── Findings ─────────────────────────────────────────────────────────────
@@ -698,6 +723,8 @@ describe("security engagement service", () => {
     expect(prompt).toContain("- /cells/01-recon/state.yml");
     expect(prompt).not.toContain("/cells/02-authz-sweep/state.yml");
     expect(prompt).not.toContain("/cells/04-secrets-config/state.yml");
+    // The cell's methodology playbook is named for the persona to read first.
+    expect(prompt).toContain("Methodology: read /playbooks/injection.md with sec_fs_read");
     expect(prompt).toContain("PROTOCOL BODY");
   });
 
