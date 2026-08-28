@@ -145,6 +145,34 @@ describe("pg app schema + migrations", () => {
     await db.query("DELETE FROM security_files WHERE engagement_id = 'eng1'");
   });
 
+  it("links a re-scan engagement to its parent via parent_engagement_id", async () => {
+    const now = Date.now();
+    // A first review: parent_engagement_id null.
+    await db.query(
+      "INSERT INTO security_engagements (id, session_id, status, repo_full_name, plan, created_at, updated_at) VALUES ('eng_parent', 's_parent', 'completed', 'acme/api', '', $1, $1)",
+      [now],
+    );
+    // A re-scan: parent_engagement_id names the first review.
+    await db.query(
+      "INSERT INTO security_engagements (id, session_id, status, repo_full_name, plan, parent_engagement_id, created_at, updated_at) VALUES ('eng_child', 's_child', 'planning', 'acme/api', '', 'eng_parent', $1, $1)",
+      [now],
+    );
+    const rows = await db.query(
+      "SELECT id, parent_engagement_id FROM security_engagements WHERE id IN ('eng_parent', 'eng_child') ORDER BY id",
+    );
+    expect(rows.rows).toEqual([
+      { id: "eng_child", parent_engagement_id: "eng_parent" },
+      { id: "eng_parent", parent_engagement_id: null },
+    ]);
+    // No unique constraint on the parent: a second re-scan of the same parent
+    // is allowed.
+    await db.query(
+      "INSERT INTO security_engagements (id, session_id, status, repo_full_name, plan, parent_engagement_id, created_at, updated_at) VALUES ('eng_child2', 's_child2', 'planning', 'acme/api', '', 'eng_parent', $1, $1)",
+      [now],
+    );
+    await db.query("DELETE FROM security_engagements WHERE id IN ('eng_parent', 'eng_child', 'eng_child2')");
+  });
+
   it("enforces one issue link per finding per provider", async () => {
     const now = Date.now();
     await db.query(

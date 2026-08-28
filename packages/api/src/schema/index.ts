@@ -1730,10 +1730,17 @@ export const securityEngagements = pgTable(
     // Engagement plan YAML — the note's orchestration.yml. Immutable once
     // the engagement is running.
     plan: text("plan").notNull().default(""),
+    // The prior engagement this one re-scans (re-scan / iterate). Null on a
+    // first review; set to the parent engagement id on a re-scan. No unique
+    // constraint — a parent may be re-scanned any number of times.
+    parentEngagementId: text("parent_engagement_id"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
-  (t) => [uniqueIndex("security_engagements_session_unique").on(t.sessionId)],
+  (t) => [
+    uniqueIndex("security_engagements_session_unique").on(t.sessionId),
+    index("security_engagements_parent").on(t.parentEngagementId),
+  ],
 );
 
 export const securityCells = pgTable(

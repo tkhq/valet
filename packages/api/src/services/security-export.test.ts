@@ -26,6 +26,7 @@ const ENGAGEMENT: SecurityEngagementRow = {
   repoFullName: "acme/api",
   repoRef: SHA,
   plan: "",
+  parentEngagementId: null,
   createdAt: 1_000,
   updatedAt: 2_000,
 };

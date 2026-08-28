@@ -239,6 +239,9 @@ securityRouter.get("/:id/security", async (c) => {
   // One extra query per poll: the runner + cell-children spend (spec
   // §engagement cost). Kept live during the run and after close.
   const cost = await security.getEngagementCost(result.engagement.id);
+  // The re-scan diff (re-scan / iterate) — null unless this engagement
+  // re-scans a prior one. `fixedCount` stays null until the scan is terminal.
+  const diff = await security.diffEngagement(result.engagement.id);
   const body: GetSessionSecurityResponse = {
     engagement: {
       id: result.engagement.id,
@@ -252,6 +255,7 @@ securityRouter.get("/:id/security", async (c) => {
     },
     cells: result.cells.map((cell) => cellToWire(cell, progress)),
     cost,
+    ...(diff ? { diff } : {}),
   };
   return c.json(body);
 });
@@ -331,11 +335,17 @@ securityRouter.get("/:id/security/findings", async (c) => {
       list.push(handoffToWire(h));
       handoffsByFinding.set(h.findingId, list);
     }
+    // Re-scan / iterate: mark a finding `recurring` when its fingerprint
+    // existed in the parent engagement. Empty set (no parent) → the field
+    // stays undefined, so a first review's wire shape is unchanged.
+    const parentFps = await security.parentFingerprints(result.engagement.id);
+    const isRescan = parentFps.size > 0 || result.engagement.parentEngagementId !== null;
     const body: ListSecurityFindingsResponse = {
       findings: page.findings.map((f) => ({
         ...findingToWire(f),
         links: linksByFinding.get(f.id) ?? [],
         handoffs: handoffsByFinding.get(f.id) ?? [],
+        ...(isRescan ? { recurring: parentFps.has(f.fingerprint) } : {}),
       })),
       nextCursor: page.nextCursor,
     };
@@ -1182,6 +1192,7 @@ securityRouter.post("/:id/security/findings", async (c) => {
     const response: SecurityReportFindingResponse = {
       finding: findingToWire(reported.finding),
       siblings: reported.siblings.map(findingToWire),
+      ...(reported.carriedFrom ? { carriedFrom: reported.carriedFrom } : {}),
     };
     return c.json(response);
   } catch (err) {

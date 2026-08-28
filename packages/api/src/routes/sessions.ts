@@ -324,7 +324,49 @@ sessionsRouter.post("/", async (c) => {
   if ("error" in parsedRepos) {
     return c.json({ error: parsedRepos.error }, 400);
   }
-  const { repos } = parsedRepos;
+  let { repos } = parsedRepos;
+
+  // Re-scan / iterate: `rescanOf` names a prior security SESSION this review
+  // re-scans. Resolve its engagement, reuse the repo binding and the plan, and
+  // link the new engagement to it. The request wins on any explicit override
+  // (repo, preset, paths, model). Validated here, before anything is written.
+  let rescanParentEngagementId: string | undefined;
+  let rescanPlan: string | undefined;
+  if (body.rescanOf !== undefined) {
+    if (kind !== "security") {
+      return c.json({ error: "rescanOf only applies to a security session. Send kind 'security'." }, 400);
+    }
+    if (typeof body.rescanOf !== "string" || body.rescanOf === "") {
+      return c.json({ error: "rescanOf must be a prior security session id." }, 400);
+    }
+    const priorRows = await db
+      .select()
+      .from(agentSessions)
+      .where(eq(agentSessions.id, body.rescanOf))
+      .limit(1);
+    const prior = priorRows[0];
+    // Existence-hiding: an unknown id, a session the caller cannot view, or a
+    // non-security session all answer the same 404.
+    if (!prior || prior.kind !== "security" || !(await canViewSession(db, prior, user.id))) {
+      return c.json({ error: "The prior review was not found, or you cannot view it." }, 404);
+    }
+    const priorSecurity = createSecurityEngagementService({ db });
+    const priorEngagement = await priorSecurity.getEngagementBySession(body.rescanOf);
+    if (!priorEngagement) {
+      return c.json({ error: "The prior session has no security engagement to re-scan." }, 404);
+    }
+    rescanParentEngagementId = priorEngagement.engagement.id;
+    // Reuse the prior plan unless the request overrides the preset or paths.
+    // The re-scan naturally picks up new commits: sec_start resolves the
+    // LATEST default-branch SHA, so the same plan sweeps the newer tree.
+    if (body.preset === undefined && body.paths === undefined) {
+      rescanPlan = priorEngagement.engagement.plan;
+    }
+    // Reuse the prior repo binding unless the request supplies its own.
+    if (repos.length === 0) {
+      repos = await getSessionRepos(db, body.rescanOf);
+    }
+  }
 
   // An engagement reviews one repo at one pinned SHA (spec §Vocabulary), so
   // a security session must arrive with a binding — there is nothing to
@@ -410,7 +452,10 @@ sessionsRouter.post("/", async (c) => {
         {
           sessionId: id,
           repoFullName: repos[0].fullName,
-          plan: presetPlan(presetId, { paths: body.paths }),
+          // A re-scan without a preset/paths override reuses the prior plan;
+          // otherwise the request's preset + paths build a fresh plan.
+          plan: rescanPlan ?? presetPlan(presetId, { paths: body.paths }),
+          ...(rescanParentEngagementId ? { parentEngagementId: rescanParentEngagementId } : {}),
         },
         tx,
       );

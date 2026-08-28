@@ -315,6 +315,145 @@ describe("api integration: security session minting + read routes", () => {
       await api.cleanup();
     }
   });
+
+  // ── Re-scan / iterate ─────────────────────────────────────────────────────
+
+  it("re-scan links the parent, reuses repo+plan, and a preset override wins", async () => {
+    const api = await bootTestApi();
+    try {
+      const parent = await createSecuritySession(api.baseUrl);
+      const parentSec = (await (
+        await fetch(`${api.baseUrl}/api/sessions/${parent.id}/security`)
+      ).json()) as GetSessionSecurityResponse;
+
+      // A re-scan with no overrides: reuse repo + plan, link the parent.
+      const rescanRes = await fetch(`${api.baseUrl}/api/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspace: "/tmp/valet-security-rescan-test", kind: "security", rescanOf: parent.id }),
+      });
+      expect(rescanRes.status).toBe(201);
+      const rescan = (await rescanRes.json()) as CreateSessionResponse;
+      const rescanSec = (await (
+        await fetch(`${api.baseUrl}/api/sessions/${rescan.id}/security`)
+      ).json()) as GetSessionSecurityResponse;
+      // Same repo, same plan as the parent.
+      expect(rescanSec.engagement.repoFullName).toBe(parentSec.engagement.repoFullName);
+      expect(rescanSec.engagement.plan).toBe(parentSec.engagement.plan);
+      // The diff names the parent (fixedCount null while planning).
+      expect(rescanSec.diff).toBeDefined();
+      expect(rescanSec.diff?.parentEngagementId).toBe(parentSec.engagement.id);
+      expect(rescanSec.diff?.parentSessionId).toBe(parent.id);
+      expect(rescanSec.diff?.fixedCount).toBeNull();
+
+      // A re-scan that overrides the preset: the request wins, so the plan is
+      // the smaller secrets-config plan, not the parent's five-cell plan.
+      const overrideRes = await fetch(`${api.baseUrl}/api/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workspace: "/tmp/valet-security-rescan-override",
+          kind: "security",
+          rescanOf: parent.id,
+          preset: "secrets-config",
+        }),
+      });
+      expect(overrideRes.status).toBe(201);
+      const override = (await overrideRes.json()) as CreateSessionResponse;
+      const overrideSec = (await (
+        await fetch(`${api.baseUrl}/api/sessions/${override.id}/security`)
+      ).json()) as GetSessionSecurityResponse;
+      const overridePlan = parsePlan(overrideSec.engagement.plan, KNOWN_PERSONAS);
+      expect(overridePlan.cells).toHaveLength(3);
+      expect(overrideSec.diff?.parentEngagementId).toBe(parentSec.engagement.id);
+    } finally {
+      await api.cleanup();
+    }
+  });
+
+  it("re-scan diff + recurring badge read against the parent's findings", async () => {
+    const api = await bootTestApi();
+    try {
+      const parent = await createSecuritySession(api.baseUrl);
+      const { db } = api.providers;
+      const parentSec = (await (
+        await fetch(`${api.baseUrl}/api/sessions/${parent.id}/security`)
+      ).json()) as GetSessionSecurityResponse;
+
+      // Seed a parent finding directly (persona path is M4). Fingerprint fp_a.
+      const now = Date.now();
+      await db.insert(securityFindings).values({
+        id: "fnd_parent_a",
+        engagementId: parentSec.engagement.id,
+        cellId: "cell_x",
+        fingerprint: "fp_a",
+        severity: "high" as const,
+        title: "IDOR on sessions",
+        file: "src/routes/sessions.ts",
+        line: 42,
+        body: EVIDENCE,
+        status: "open" as const,
+        createdAt: now,
+      });
+
+      // A re-scan, then seed one recurring (fp_a) + one new (fp_new) child
+      // finding directly.
+      const rescanRes = await fetch(`${api.baseUrl}/api/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspace: "/tmp/valet-security-rescan-findings", kind: "security", rescanOf: parent.id }),
+      });
+      const rescan = (await rescanRes.json()) as CreateSessionResponse;
+      const rescanSec = (await (
+        await fetch(`${api.baseUrl}/api/sessions/${rescan.id}/security`)
+      ).json()) as GetSessionSecurityResponse;
+      await db.insert(securityFindings).values([
+        {
+          id: "fnd_child_a",
+          engagementId: rescanSec.engagement.id,
+          cellId: "cell_x",
+          fingerprint: "fp_a",
+          severity: "high" as const,
+          title: "IDOR on sessions",
+          file: "src/routes/sessions.ts",
+          line: 42,
+          body: EVIDENCE,
+          status: "open" as const,
+          createdAt: now + 1,
+        },
+        {
+          id: "fnd_child_new",
+          engagementId: rescanSec.engagement.id,
+          cellId: "cell_y",
+          fingerprint: "fp_new",
+          severity: "medium" as const,
+          title: "new issue",
+          file: "src/new.ts",
+          line: 5,
+          body: EVIDENCE,
+          status: "open" as const,
+          createdAt: now + 2,
+        },
+      ]);
+
+      // The findings route marks recurring per finding.
+      const findings = (await (
+        await fetch(`${api.baseUrl}/api/sessions/${rescan.id}/security/findings`)
+      ).json()) as ListSecurityFindingsResponse;
+      const byId = new Map(findings.findings.map((f) => [f.id, f]));
+      expect(byId.get("fnd_child_a")?.recurring).toBe(true);
+      expect(byId.get("fnd_child_new")?.recurring).toBe(false);
+
+      // The /security diff: 1 recurring (fp_a), 1 new (fp_new).
+      const diffSec = (await (
+        await fetch(`${api.baseUrl}/api/sessions/${rescan.id}/security`)
+      ).json()) as GetSessionSecurityResponse;
+      expect(diffSec.diff?.recurringCount).toBe(1);
+      expect(diffSec.diff?.newCount).toBe(1);
+    } finally {
+      await api.cleanup();
+    }
+  });
 });
 
 describe("api integration: security session model selection", () => {

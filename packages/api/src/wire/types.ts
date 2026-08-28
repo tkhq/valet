@@ -157,6 +157,12 @@ export interface CreateSessionRequest {
    * injection, secrets-config) to part of the repo. Recon and verify stay
    * repo-wide. Only a security session reads it. */
   paths?: string[];
+  /** Re-scan / iterate: a prior security SESSION id this review re-scans. The
+   * new engagement reuses the prior repo binding and plan (unless preset/paths
+   * /model override) and links to the prior engagement, so refutations carry
+   * forward and the diff reads against it. Only a security session reads it;
+   * the caller must be able to view the prior session. */
+  rescanOf?: string;
 }
 
 export interface ListSessionsResponse {
@@ -227,11 +233,34 @@ export interface SecurityCostWire {
   priced: boolean;
 }
 
+/** The re-scan diff against the parent engagement (re-scan / iterate).
+ * Present on the GET /:id/security response only when this engagement has a
+ * parent. `fixedCount` is null while this engagement runs (a scan that has
+ * not finished has not looked everywhere) and a number once it is terminal. */
+export interface SecurityDiffWire {
+  parentEngagementId: string;
+  /** The parent engagement's session id, for a link back to the prior review.
+   * Null when the parent row is gone. */
+  parentSessionId: string | null;
+  /** Distinct fingerprints new in this engagement (absent from the parent). */
+  newCount: number;
+  /** Distinct fingerprints present in both engagements. */
+  recurringCount: number;
+  /** Parent fingerprints (open or verified) absent here — a fix. Null while
+   * running, a number once terminal. */
+  fixedCount: number | null;
+  /** Findings this engagement auto-refuted by carry-forward. */
+  carriedRefutedCount: number;
+}
+
 /** GET /api/sessions/:id/security */
 export interface GetSessionSecurityResponse {
   engagement: SecurityEngagementWire;
   cells: SecurityCellWire[];
   cost: SecurityCostWire;
+  /** The re-scan diff, when this engagement re-scans a prior one. Absent on a
+   * first review. */
+  diff?: SecurityDiffWire;
 }
 
 export interface SecurityFindingWire {
@@ -251,6 +280,10 @@ export interface SecurityFindingWire {
   links?: SecurityFindingLinkWire[];
   /** Fix sessions spawned from this finding; findings LIST route only. */
   handoffs?: SecurityHandoffWire[];
+  /** Re-scan / iterate: true when this fingerprint existed in the parent
+   * engagement. Present on the findings LIST route only, and only when the
+   * engagement re-scans a prior one — absent (undefined) on a first review. */
+  recurring?: boolean;
 }
 
 /** One fix session spawned from a finding (sec_handoff). Opened through the
@@ -399,6 +432,10 @@ export interface SecurityReportFindingResponse {
   finding: SecurityFindingWire;
   /** Existing findings sharing the fingerprint — advisory dedup. */
   siblings: SecurityFindingWire[];
+  /** Re-scan / iterate: set when the parent engagement had refuted this
+   * fingerprint, so the finding was inserted already refuted (carry-forward).
+   * Null on a first-seen fingerprint or a non-re-scan engagement. */
+  carriedFrom?: { parentEngagementId: string; reason: string };
 }
 
 /** POST /api/sessions/:id/security/findings/:findingId/review — persona

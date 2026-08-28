@@ -768,6 +768,16 @@ export const secFindingReportTool = defineTool({
               ". If yours adds no new evidence, consolidate instead of re-filing.",
           );
         }
+        // Re-scan / iterate: the parent review refuted this fingerprint, so
+        // this finding was recorded already refuted. Note it — no re-triage
+        // of a dismissal the previous review already ruled on.
+        const carriedFrom = isRecord(body) && isRecord(body.carriedFrom) ? body.carriedFrom : null;
+        if (carriedFrom) {
+          lines.push(
+            "Carried forward as refuted: the previous review dismissed this fingerprint. " +
+              `Prior reason: ${String(carriedFrom.reason)}`,
+          );
+        }
         return { text: lines.join("\n") };
       },
     );

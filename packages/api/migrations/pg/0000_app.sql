@@ -976,11 +976,14 @@ CREATE TABLE "security_engagements" (
 	"repo_full_name" text NOT NULL,
 	"repo_ref" text DEFAULT '' NOT NULL,
 	"plan" text DEFAULT '' NOT NULL,
+	"parent_engagement_id" text,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "security_engagements_session_unique" ON "security_engagements" ("session_id");
+--> statement-breakpoint
+CREATE INDEX "security_engagements_parent" ON "security_engagements" ("parent_engagement_id");
 --> statement-breakpoint
 CREATE TABLE "security_cells" (
 	"id" text PRIMARY KEY NOT NULL,

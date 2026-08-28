@@ -892,6 +892,204 @@ describe("security engagement service", () => {
     expect(prompt).toContain("read your own latest state doc at /cells/03-injection-sweep/state.yml");
     expect(prompt).toContain("packages/api/**");
   });
+
+  // ── Re-scan / iterate: carry-forward + diff ────────────────────────────────
+
+  /** A started child engagement whose parent is the given engagement id. */
+  async function startedChildOf(parentEngagementId: string) {
+    const child = await svc.createEngagement({
+      sessionId: `s_${Math.random().toString(36).slice(2)}`,
+      repoFullName: "acme/api",
+      plan: codeReviewPresetPlan(),
+      parentEngagementId,
+    });
+    return svc.startEngagement(child.id, { resolvedSha: SHA });
+  }
+
+  it("createEngagement stamps parent_engagement_id on a re-scan", async () => {
+    const parent = await makeStarted();
+    const child = await svc.createEngagement({
+      sessionId: `s_${Math.random().toString(36).slice(2)}`,
+      repoFullName: "acme/api",
+      plan: codeReviewPresetPlan(),
+      parentEngagementId: parent.engagement.id,
+    });
+    expect(child.parentEngagementId).toBe(parent.engagement.id);
+    // A first review carries no parent.
+    const first = await makePlanning();
+    expect(first.parentEngagementId).toBeNull();
+  });
+
+  it("reportFinding carries a parent's refuted verdict forward as refuted", async () => {
+    const parent = await makeStarted();
+    const shape = { file: "src/routes/sessions.ts", line: 42, title: "IDOR on sessions" };
+    const parentFinding = await svc.reportFinding(parent.engagement.id, {
+      cellId: parent.cells[0].id,
+      severity: "high",
+      ...shape,
+      body: EVIDENCE,
+    });
+    // The parent's review cell refutes it.
+    await svc.reviewFinding(parent.engagement.id, {
+      findingId: parentFinding.finding.id,
+      status: "refuted",
+      reason: "middleware enforces ownership before the route runs",
+      actor: parent.cells[4].id,
+    });
+
+    const child = await startedChildOf(parent.engagement.id);
+    // The child reports the SAME fingerprint — carried forward as refuted.
+    const carried = await svc.reportFinding(child.engagement.id, {
+      cellId: child.cells[0].id,
+      severity: "high",
+      ...shape,
+      body: EVIDENCE,
+    });
+    expect(carried.finding.status).toBe("refuted");
+    expect(carried.finding.statusActor).toBe("carry-forward");
+    expect(carried.finding.statusReason).toBe(
+      "Carried from the previous review: middleware enforces ownership before the route runs",
+    );
+    expect(carried.carriedFrom).toEqual({
+      parentEngagementId: parent.engagement.id,
+      reason: "middleware enforces ownership before the route runs",
+    });
+  });
+
+  it("reportFinding does NOT carry a parent's open or verified verdict", async () => {
+    const parent = await makeStarted();
+    const openShape = { file: "src/a.ts", line: 10, title: "open in parent" };
+    const verifiedShape = { file: "src/b.ts", line: 20, title: "verified in parent" };
+    await svc.reportFinding(parent.engagement.id, {
+      cellId: parent.cells[0].id,
+      severity: "high",
+      ...openShape,
+      body: EVIDENCE,
+    });
+    const verified = await svc.reportFinding(parent.engagement.id, {
+      cellId: parent.cells[0].id,
+      severity: "high",
+      ...verifiedShape,
+      body: EVIDENCE,
+    });
+    await svc.reviewFinding(parent.engagement.id, {
+      findingId: verified.finding.id,
+      status: "verified",
+      reason: "reproduced against the pinned SHA",
+      actor: parent.cells[4].id,
+    });
+
+    const child = await startedChildOf(parent.engagement.id);
+    const carriedOpen = await svc.reportFinding(child.engagement.id, {
+      cellId: child.cells[0].id,
+      severity: "high",
+      ...openShape,
+      body: EVIDENCE,
+    });
+    const carriedVerified = await svc.reportFinding(child.engagement.id, {
+      cellId: child.cells[0].id,
+      severity: "high",
+      ...verifiedShape,
+      body: EVIDENCE,
+    });
+    // A parent open/verified fingerprint resurfaces open for confirmation.
+    expect(carriedOpen.finding.status).toBe("open");
+    expect(carriedOpen.carriedFrom).toBeNull();
+    expect(carriedVerified.finding.status).toBe("open");
+    expect(carriedVerified.carriedFrom).toBeNull();
+  });
+
+  it("reportFinding opens a first-seen fingerprint in a re-scan", async () => {
+    const parent = await makeStarted();
+    const child = await startedChildOf(parent.engagement.id);
+    const fresh = await svc.reportFinding(child.engagement.id, {
+      cellId: child.cells[0].id,
+      severity: "medium",
+      file: "src/new.ts",
+      line: 5,
+      title: "new in the re-scan",
+      body: EVIDENCE,
+    });
+    expect(fresh.finding.status).toBe("open");
+    expect(fresh.carriedFrom).toBeNull();
+  });
+
+  it("diffEngagement is null for a first review", async () => {
+    const parent = await makeStarted();
+    expect(await svc.diffEngagement(parent.engagement.id)).toBeNull();
+  });
+
+  it("diffEngagement counts new/recurring/carried, and fixedCount only once terminal", async () => {
+    // Parent findings: A refuted, B open, C verified.
+    const parent = await makeStarted();
+    const A = { file: "src/a.ts", line: 10, title: "finding A" };
+    const B = { file: "src/b.ts", line: 20, title: "finding B" };
+    const C = { file: "src/c.ts", line: 30, title: "finding C" };
+    const pa = await svc.reportFinding(parent.engagement.id, { cellId: parent.cells[0].id, severity: "high", ...A, body: EVIDENCE });
+    await svc.reportFinding(parent.engagement.id, { cellId: parent.cells[0].id, severity: "high", ...B, body: EVIDENCE });
+    const pc = await svc.reportFinding(parent.engagement.id, { cellId: parent.cells[0].id, severity: "high", ...C, body: EVIDENCE });
+    await svc.reviewFinding(parent.engagement.id, {
+      findingId: pa.finding.id,
+      status: "refuted",
+      reason: "false positive",
+      actor: parent.cells[4].id,
+    });
+    await svc.reviewFinding(parent.engagement.id, {
+      findingId: pc.finding.id,
+      status: "verified",
+      reason: "confirmed",
+      actor: parent.cells[4].id,
+    });
+
+    // Child reports: A (→ carried refuted), B (recurring, open), D (new).
+    // C is absent from the child.
+    const child = await startedChildOf(parent.engagement.id);
+    const D = { file: "src/d.ts", line: 40, title: "finding D" };
+    const carriedA = await svc.reportFinding(child.engagement.id, { cellId: child.cells[0].id, severity: "high", ...A, body: EVIDENCE });
+    await svc.reportFinding(child.engagement.id, { cellId: child.cells[0].id, severity: "high", ...B, body: EVIDENCE });
+    await svc.reportFinding(child.engagement.id, { cellId: child.cells[0].id, severity: "medium", ...D, body: EVIDENCE });
+    expect(carriedA.finding.status).toBe("refuted");
+
+    // While running: recurring = A and B (both in parent), new = D, carried = 1,
+    // fixedCount null (the scan has not finished).
+    const running = await svc.diffEngagement(child.engagement.id);
+    expect(running).not.toBeNull();
+    expect(running!.parentEngagementId).toBe(parent.engagement.id);
+    expect(running!.parentSessionId).toBe(parent.engagement.sessionId);
+    expect(running!.recurringCount).toBe(2);
+    expect(running!.newCount).toBe(1);
+    expect(running!.carriedRefutedCount).toBe(1);
+    expect(running!.fixedCount).toBeNull();
+
+    // Close the child so the diff becomes terminal.
+    for (const cell of child.cells) await runCellToCompletion(child.engagement.id, cell);
+    await svc.closeEngagement(child.engagement.id);
+
+    const terminal = await svc.diffEngagement(child.engagement.id);
+    // fixedCount: parent had C verified and B open; C absent from the child →
+    // fixed. B present → not fixed. A was refuted in the parent, so it is not
+    // a "live" parent fingerprint and never counts toward fixed. → 1.
+    expect(terminal!.fixedCount).toBe(1);
+    expect(terminal!.recurringCount).toBe(2);
+    expect(terminal!.newCount).toBe(1);
+    expect(terminal!.carriedRefutedCount).toBe(1);
+  });
+
+  it("parentFingerprints returns the parent's fingerprint set, empty without a parent", async () => {
+    const parent = await makeStarted();
+    const shape = { file: "src/x.ts", line: 1, title: "X" };
+    const pf = await svc.reportFinding(parent.engagement.id, {
+      cellId: parent.cells[0].id,
+      severity: "low",
+      ...shape,
+      body: EVIDENCE,
+    });
+    // No parent → empty set.
+    expect((await svc.parentFingerprints(parent.engagement.id)).size).toBe(0);
+    const child = await startedChildOf(parent.engagement.id);
+    const fps = await svc.parentFingerprints(child.engagement.id);
+    expect(fps.has(pf.finding.fingerprint)).toBe(true);
+  });
 });
 
 // ── Engagement cost (spec §engagement cost) ──────────────────────────────────

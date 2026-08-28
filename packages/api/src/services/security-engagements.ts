@@ -156,6 +156,25 @@ export interface CellProgress {
   queue: { pending: number; done: number };
 }
 
+/** The re-scan diff against the parent engagement (re-scan / iterate). See
+ * `diffEngagement` for the exact semantics; `fixedCount` is null while this
+ * engagement runs and a number once it is terminal. */
+export interface SecurityDiff {
+  parentEngagementId: string;
+  /** The parent engagement's session id, so the UI links back to it. Null
+   * when the parent row is gone. */
+  parentSessionId: string | null;
+  /** Distinct fingerprints in this engagement, absent from the parent. */
+  newCount: number;
+  /** Distinct fingerprints present in both engagements. */
+  recurringCount: number;
+  /** Parent fingerprints (open or verified) absent here — a fix. Null while
+   * running (a scan that has not finished has not looked everywhere). */
+  fixedCount: number | null;
+  /** Findings this engagement auto-refuted by carry-forward. */
+  carriedRefutedCount: number;
+}
+
 export interface ListFindingsOptions {
   cellId?: string;
   severity?: FindingSeverity;
@@ -309,7 +328,15 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
    * and the engagement land atomically.
    */
   async function createEngagement(
-    args: { sessionId: string; repoFullName: string; plan: string },
+    args: {
+      sessionId: string;
+      repoFullName: string;
+      plan: string;
+      /** The prior engagement this run re-scans (re-scan / iterate). Sets the
+       * new engagement's `parent_engagement_id`, which drives carry-forward
+       * refutations in reportFinding and the diff summary. */
+      parentEngagementId?: string;
+    },
     dbh: AppDb = db,
   ): Promise<SecurityEngagementRow> {
     // Fail fast on a malformed plan — a planning-status engagement whose
@@ -324,6 +351,7 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
         status: "planning",
         repoFullName: args.repoFullName,
         plan: args.plan,
+        parentEngagementId: args.parentEngagementId ?? null,
         createdAt: ts,
         updatedAt: ts,
       })
@@ -894,7 +922,15 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
   }
 
   /** Insert a finding; the server computes the fingerprint and returns any
-   * siblings sharing it (advisory dedup — the persona decides). */
+   * siblings sharing it (advisory dedup — the persona decides).
+   *
+   * Re-scan / iterate: when the engagement has a `parent_engagement_id` and
+   * the reported fingerprint matched a REFUTED finding in the parent, the new
+   * finding is inserted already `refuted` (carry-forward). Only a dismissal
+   * carries — so the reviewer never re-triages a false positive it already
+   * dismissed. A prior open or verified fingerprint stays open here, so a real
+   * issue resurfaces for confirmation. `carriedFrom` names the source when it
+   * carried, else null. */
   async function reportFinding(
     engagementId: string,
     args: {
@@ -905,8 +941,12 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
       line?: number;
       body: string;
     },
-  ): Promise<{ finding: SecurityFindingRow; siblings: SecurityFindingRow[] }> {
-    await loadEngagement(engagementId);
+  ): Promise<{
+    finding: SecurityFindingRow;
+    siblings: SecurityFindingRow[];
+    carriedFrom: { parentEngagementId: string; reason: string } | null;
+  }> {
+    const engagement = await loadEngagement(engagementId);
     const cell = await loadCell(engagementId, args.cellId);
     if (args.body.length < MIN_FINDING_BODY_CHARS) {
       throw new Error(
@@ -932,6 +972,32 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
           eq(securityFindings.fingerprint, fingerprint),
         ),
       );
+
+    // Carry-forward: only a parent's REFUTED verdict on the same fingerprint
+    // pre-dismisses this finding. A parent open/verified fingerprint does not
+    // carry — it must resurface open for confirmation.
+    let carriedFrom: { parentEngagementId: string; reason: string } | null = null;
+    if (engagement.parentEngagementId) {
+      const priorRefuted = await db
+        .select()
+        .from(securityFindings)
+        .where(
+          and(
+            eq(securityFindings.engagementId, engagement.parentEngagementId),
+            eq(securityFindings.fingerprint, fingerprint),
+            eq(securityFindings.status, "refuted"),
+          ),
+        )
+        .limit(1);
+      const source = priorRefuted[0];
+      if (source) {
+        carriedFrom = {
+          parentEngagementId: engagement.parentEngagementId,
+          reason: source.statusReason ?? "",
+        };
+      }
+    }
+
     const inserted = await db
       .insert(securityFindings)
       .values({
@@ -944,11 +1010,17 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
         file: args.file ?? null,
         line: args.line ?? null,
         body: args.body,
-        status: "open",
+        ...(carriedFrom
+          ? {
+              status: "refuted" as const,
+              statusReason: `Carried from the previous review: ${carriedFrom.reason}`,
+              statusActor: "carry-forward",
+            }
+          : { status: "open" as const }),
         createdAt: now(),
       })
       .returning();
-    return { finding: inserted[0], siblings };
+    return { finding: inserted[0], siblings, carriedFrom };
   }
 
   /**
@@ -1156,6 +1228,99 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     };
   }
 
+  /**
+   * The re-scan diff against the parent engagement (re-scan / iterate). Null
+   * when this engagement has no `parent_engagement_id` (a first review). The
+   * comparison is by distinct fingerprint:
+   *   - newCount: fingerprints in this engagement, not in the parent.
+   *   - recurringCount: fingerprints in BOTH.
+   *   - carriedRefutedCount: this engagement's findings auto-refuted by
+   *     carry-forward (`status_actor = 'carry-forward'`).
+   *   - fixedCount: fingerprints the parent had OPEN or VERIFIED that are
+   *     ABSENT from this engagement. Meaningful ONLY once this engagement is
+   *     terminal (completed/failed) — a still-running scan has not looked
+   *     everywhere yet, so an absent fingerprint is not yet a fix. Returned
+   *     null while running, a number once terminal.
+   */
+  async function diffEngagement(engagementId: string): Promise<SecurityDiff | null> {
+    const engagement = await loadEngagement(engagementId);
+    if (!engagement.parentEngagementId) return null;
+
+    const parent = await db
+      .select()
+      .from(securityEngagements)
+      .where(eq(securityEngagements.id, engagement.parentEngagementId))
+      .limit(1);
+    const parentRow = parent[0];
+    // The parent row is gone (deleted). The lineage id is still on this row,
+    // but nothing to compare against — report a lineage with zero deltas.
+    const parentSessionId = parentRow?.sessionId ?? null;
+
+    const childFindings = await db
+      .select()
+      .from(securityFindings)
+      .where(eq(securityFindings.engagementId, engagementId));
+    const parentFindings = parentRow
+      ? await db
+          .select()
+          .from(securityFindings)
+          .where(eq(securityFindings.engagementId, engagement.parentEngagementId))
+      : [];
+
+    const childFingerprints = new Set(childFindings.map((f) => f.fingerprint));
+    const parentFingerprints = new Set(parentFindings.map((f) => f.fingerprint));
+
+    let newCount = 0;
+    let recurringCount = 0;
+    for (const fp of childFingerprints) {
+      if (parentFingerprints.has(fp)) recurringCount += 1;
+      else newCount += 1;
+    }
+
+    const carriedRefutedCount = childFindings.filter(
+      (f) => f.statusActor === "carry-forward",
+    ).length;
+
+    // fixedCount only once terminal. A fingerprint the parent had open or
+    // verified that no longer appears is a fix — but only if this scan
+    // finished. While running, absence is "not looked yet", so null.
+    const terminal = engagement.status === "completed" || engagement.status === "failed";
+    let fixedCount: number | null = null;
+    if (terminal) {
+      const parentLive = new Set(
+        parentFindings
+          .filter((f) => f.status === "open" || f.status === "verified")
+          .map((f) => f.fingerprint),
+      );
+      fixedCount = 0;
+      for (const fp of parentLive) {
+        if (!childFingerprints.has(fp)) fixedCount += 1;
+      }
+    }
+
+    return {
+      parentEngagementId: engagement.parentEngagementId,
+      parentSessionId,
+      newCount,
+      recurringCount,
+      fixedCount,
+      carriedRefutedCount,
+    };
+  }
+
+  /** The distinct fingerprints present in the parent engagement (re-scan /
+   * iterate). Empty when this engagement has no parent. The findings route
+   * marks a finding `recurring` when its fingerprint is in this set. */
+  async function parentFingerprints(engagementId: string): Promise<Set<string>> {
+    const engagement = await loadEngagement(engagementId);
+    if (!engagement.parentEngagementId) return new Set();
+    const rows = await db
+      .select({ fingerprint: securityFindings.fingerprint })
+      .from(securityFindings)
+      .where(eq(securityFindings.engagementId, engagement.parentEngagementId));
+    return new Set(rows.map((r) => r.fingerprint));
+  }
+
   /** Tolerant progress read for the cell rail: null when nothing useful. */
   async function getRunningCellProgress(engagementId: string): Promise<CellProgress | null> {
     const cells = await loadCells(engagementId);
@@ -1195,6 +1360,8 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     stampCellCompaction,
     getRunningCellProgress,
     getEngagementCost,
+    diffEngagement,
+    parentFingerprints,
   };
 }
 

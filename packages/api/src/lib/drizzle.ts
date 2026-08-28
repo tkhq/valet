@@ -377,6 +377,7 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
       "repo_full_name" text NOT NULL,
       "repo_ref" text DEFAULT '' NOT NULL,
       "plan" text DEFAULT '' NOT NULL,
+      "parent_engagement_id" text,
       "created_at" bigint NOT NULL,
       "updated_at" bigint NOT NULL
     )`,
@@ -385,6 +386,20 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     describe: "security_engagements_session_unique index",
     probe: { kind: "index", index: "security_engagements_session_unique" },
     sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "security_engagements_session_unique" ON "security_engagements" ("session_id")',
+  },
+  {
+    // The re-scan lineage link (re-scan / iterate). Null on every engagement
+    // written before the column existed — read as "not a re-scan", the same
+    // answer a first review gets. The whole-table CREATE above does not add a
+    // column to an already-created table, so this column repair is separate.
+    describe: "security_engagements.parent_engagement_id column",
+    probe: { kind: "column", table: "security_engagements", column: "parent_engagement_id" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "parent_engagement_id" text',
+  },
+  {
+    describe: "security_engagements_parent index",
+    probe: { kind: "index", index: "security_engagements_parent" },
+    sql: 'CREATE INDEX IF NOT EXISTS "security_engagements_parent" ON "security_engagements" ("parent_engagement_id")',
   },
   {
     describe: "security_cells table",
