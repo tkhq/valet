@@ -101,6 +101,7 @@ export function EngagementPanel({
         canAdminister={canAdminister}
         initialFindingId={initialFindingId}
         polling={engagement.status === "running"}
+        onOpenChild={onOpenChild}
       />
     </div>
   );

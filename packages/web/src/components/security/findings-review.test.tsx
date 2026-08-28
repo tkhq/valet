@@ -218,6 +218,56 @@ describe("FindingsReview list", () => {
     const chip = await screen.findByLabelText("Open github issue acme/site#12");
     expect(chip.getAttribute("href")).toBe("https://github.com/acme/site/issues/12");
   });
+
+  it("shows a fix-session count badge on a finding with handoffs", async () => {
+    listFindingsMock.mockResolvedValue({
+      findings: [
+        finding({
+          id: "f-fixed",
+          handoffs: [
+            { childSessionId: "child-a", title: "Fix: f-fixed", createdAt: 5 },
+            { childSessionId: "child-b", title: "Fix: f-fixed again", createdAt: 6 },
+          ],
+        }),
+      ],
+      nextCursor: null,
+    });
+    renderReview();
+    const [row] = await screen.findAllByRole("option");
+    expect(within(row).getByText("2 fix")).toBeTruthy();
+  });
+});
+
+describe("FindingsReview fix sessions", () => {
+  const withHandoff = () =>
+    finding({
+      id: "f-fixed",
+      title: "Needs a fix",
+      handoffs: [{ childSessionId: "child-fix-1", title: "Fix: Needs a fix", createdAt: 5 }],
+    });
+
+  it("lists each handoff and opens the child via onOpenChild", async () => {
+    listFindingsMock.mockResolvedValue({ findings: [withHandoff()], nextCursor: null });
+    const onOpenChild = vi.fn<(id: string) => void>();
+    renderReview({ onOpenChild });
+    // The only finding auto-selects; its detail pane carries the section.
+    const detail = await screen.findByRole("article");
+    expect(within(detail).getByText("Fix sessions")).toBeTruthy();
+    expect(within(detail).getByText("Fix: Needs a fix")).toBeTruthy();
+
+    fireEvent.click(within(detail).getByRole("button", { name: "Open fix session Fix: Needs a fix" }));
+    expect(onOpenChild).toHaveBeenCalledWith("child-fix-1");
+  });
+
+  it("falls back to a session link when onOpenChild is absent", async () => {
+    listFindingsMock.mockResolvedValue({ findings: [withHandoff()], nextCursor: null });
+    renderReview();
+    const detail = await screen.findByRole("article");
+    // The mocked Link renders an <a> (no button); the label still resolves.
+    const link = within(detail).getByLabelText("Open fix session Fix: Needs a fix");
+    expect(link.tagName).toBe("A");
+    expect(within(detail).queryByRole("button", { name: "Open fix session Fix: Needs a fix" })).toBeNull();
+  });
 });
 
 describe("FindingsReview keyboard triage", () => {

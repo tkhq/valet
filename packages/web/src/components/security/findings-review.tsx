@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "@tanstack/react-router";
 import {
   Check,
   ChevronDown,
@@ -8,6 +9,7 @@ import {
   ExternalLink,
   FileWarning,
   Hammer,
+  Wrench,
   X,
 } from "lucide-react";
 import type {
@@ -138,6 +140,7 @@ export function FindingsReview({
   canAdminister,
   initialFindingId,
   polling,
+  onOpenChild,
 }: {
   sessionId: string;
   engagement: SecurityEngagementWire;
@@ -149,6 +152,9 @@ export function FindingsReview({
   initialFindingId?: string;
   /** True while the engagement runs — findings refetch on the poll cadence. */
   polling: boolean;
+  /** Open a fix session as the in-page `?child=` slide-over. Absent (e.g.
+   * standalone rendering) falls back to the child's standalone page. */
+  onOpenChild?: (childId: string) => void;
 }) {
   const [severity, setSeverity] = useState<string>("");
   const [status, setStatus] = useState<string>("");
@@ -430,6 +436,7 @@ export function FindingsReview({
               }}
               onSelectSibling={select}
               onNotice={setNotice}
+              onOpenChild={onOpenChild}
             />
           ) : (
             <div className="px-4 py-6 text-xs text-muted">Select a finding to review it.</div>
@@ -581,6 +588,12 @@ function FindingRowLine({
           <ServiceIcon slug={link.provider} label={link.provider} size="sm" />
         </a>
       ))}
+      {(finding.handoffs ?? []).length > 0 && (
+        <Badge variant="neutral" className="shrink-0">
+          <Wrench className="h-3 w-3 mr-0.5" aria-hidden />
+          {(finding.handoffs ?? []).length} fix
+        </Badge>
+      )}
       {trailing}
     </div>
   );
@@ -599,6 +612,7 @@ function FindingDetail({
   onFix,
   onSelectSibling,
   onNotice,
+  onOpenChild,
 }: {
   finding: SecurityFindingWire;
   engagement: SecurityEngagementWire;
@@ -612,6 +626,8 @@ function FindingDetail({
   onFix: () => void;
   onSelectSibling: (id: string) => void;
   onNotice: (text: string) => void;
+  /** Open a fix session as the in-page `?child=` slide-over. */
+  onOpenChild?: (childId: string) => void;
 }) {
   const url = blobUrl(engagement, finding.file, finding.line);
   return (
@@ -735,6 +751,48 @@ function FindingDetail({
               {link.externalId}
             </a>
           ))}
+        </div>
+      )}
+
+      {/* Fix sessions — the sec_handoff children spawned from this finding.
+          Open each as the in-page child slide-over. */}
+      {(finding.handoffs ?? []).length > 0 && (
+        <div>
+          <div className="text-muted mb-1 flex items-center gap-1">
+            <Wrench className="h-3 w-3" aria-hidden />
+            Fix sessions
+          </div>
+          <ul className="space-y-1">
+            {(finding.handoffs ?? []).map((handoff) => (
+              <li
+                key={handoff.childSessionId}
+                className="flex items-center gap-2 min-w-0"
+              >
+                <span className="truncate min-w-0 flex-1">{handoff.title}</span>
+                {onOpenChild ? (
+                  <button
+                    type="button"
+                    onClick={() => onOpenChild(handoff.childSessionId)}
+                    className="inline-flex items-center gap-1 text-accent-600 dark:text-accent-100 hover:underline shrink-0"
+                    aria-label={`Open fix session ${handoff.title}`}
+                  >
+                    <ExternalLink className="h-3 w-3" aria-hidden />
+                    Open
+                  </button>
+                ) : (
+                  <Link
+                    to="/sessions/$sessionId"
+                    params={{ sessionId: handoff.childSessionId }}
+                    className="inline-flex items-center gap-1 text-accent-600 dark:text-accent-100 hover:underline shrink-0"
+                    aria-label={`Open fix session ${handoff.title}`}
+                  >
+                    <ExternalLink className="h-3 w-3" aria-hidden />
+                    Open
+                  </Link>
+                )}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 
