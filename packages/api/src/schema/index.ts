@@ -1761,6 +1761,14 @@ export const securityEngagements = pgTable(
     configPersonaMarkdown: text("config_persona_markdown"),
     configTools: text("config_tools"),
     hasRepoConfig: boolean("has_repo_config").notNull().default(false),
+    // The report artifact (M-P3): the report cell writes both with
+    // `sec_report_write`, and the panel/export surface them. `reportMarkdown`
+    // is the multi-audience markdown report; `reportJson` is a machine-readable
+    // JSON snapshot (stored as a JSON string). `reportGeneratedAt` is the
+    // write time. All null until the report cell runs.
+    reportMarkdown: text("report_markdown"),
+    reportJson: text("report_json"),
+    reportGeneratedAt: bigint("report_generated_at", { mode: "number" }),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },

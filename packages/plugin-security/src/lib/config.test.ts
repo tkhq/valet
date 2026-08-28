@@ -149,7 +149,8 @@ describe("BUNDLED_PERSONAS", () => {
 
   it("includes the architect and verifier triad personas (M-P2b)", () => {
     const ids = BUNDLED_PERSONAS.map((p) => p.id);
-    // The triad personas sit after code-review; the M-P2c model personas follow.
+    // The triad personas sit after code-review; the M-P2c model personas follow,
+    // then the M-P3 report persona.
     expect(ids).toEqual([
       "code-review",
       "architect",
@@ -157,6 +158,7 @@ describe("BUNDLED_PERSONAS", () => {
       "threat-model",
       "attack-tree",
       "sast",
+      "report",
     ]);
     expect(bundledPersonaIds()).toEqual(ids);
 

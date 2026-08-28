@@ -986,6 +986,9 @@ CREATE TABLE "security_engagements" (
 	"config_persona_markdown" text,
 	"config_tools" text,
 	"has_repo_config" boolean DEFAULT false NOT NULL,
+	"report_markdown" text,
+	"report_json" text,
+	"report_generated_at" bigint,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
 );

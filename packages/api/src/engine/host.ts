@@ -747,7 +747,7 @@ export class EngineHost {
     const sessionTools = isSecurityRunner
       ? [...buildSecurityRunnerTools(), ...extras.tools]
       : personaCell
-        ? [...buildSecurityPersonaTools({ review: personaCell.review }), ...extras.tools]
+        ? [...buildSecurityPersonaTools({ review: personaCell.review, persona: personaCell.persona }), ...extras.tools]
         : extras.tools;
     const securityToolConfig = isSecurityRunner
       ? {
@@ -2281,7 +2281,7 @@ export class EngineHost {
     // One indexed query; ordinary task children pay a single miss.
     const personaCell = await this.claimedSecurityCell(childSessionId);
     const childTools = personaCell
-      ? [...buildSecurityPersonaTools({ review: personaCell.review }), ...extras.tools]
+      ? [...buildSecurityPersonaTools({ review: personaCell.review, persona: personaCell.persona }), ...extras.tools]
       : extras.tools;
     // The persona role registers on the session (roles registry) so the
     // dispatch prompt's per-turn `role` overlay resolves. Attach ONLY the role

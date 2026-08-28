@@ -43,6 +43,7 @@ const engagementsBySession: Record<string, GetSessionSecurityResponse> = {
     cells: [],
     cost: { costUsd: 0, totalTokens: 0, priced: true },
     planCells: [],
+    report: null,
   },
 };
 
@@ -204,6 +205,7 @@ describe("SecurityIndexPage", () => {
       cells: [],
       cost: { costUsd: 0, totalTokens: 0, priced: true },
       planCells: [],
+      report: null,
     };
     reviewsData.sessions = [
       {

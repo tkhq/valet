@@ -872,6 +872,52 @@ export const secCoverageReportTool = defineTool({
   },
 });
 
+// ── sec_report_write (persona, report cell only) ───────────────────────────
+
+/**
+ * The report-artifact tool (M-P3). The report cell composes the engagement
+ * report and writes it here once: `markdown` is the multi-audience report body,
+ * `json` is a machine-readable snapshot object. The route validates the acting
+ * session is the report cell and that `json` is an object; the server stores
+ * both on the engagement and stamps `report_generated_at`. Attached only to a
+ * report-persona cell — a sweep persona must not write the engagement report.
+ */
+export const secReportWriteTool = defineTool({
+  name: "sec_report_write",
+  description:
+    "Write the engagement report once. `markdown` is the full multi-audience report (exec summary, scope, findings " +
+    "by severity, coverage gaps, appendices); `json` is a machine-readable snapshot object of the same content. " +
+    "The server stores both on the engagement and stamps the generation time. Compose from the prior cells; report nothing new.",
+  parameters: Type.Object({
+    markdown: Type.String({ description: "The full markdown report body." }),
+    json: Type.Record(Type.String(), Type.Unknown(), {
+      description: "A machine-readable JSON snapshot object of the report (an object, not an array or scalar).",
+    }),
+  }),
+  execute: async (args, ctx) => {
+    const cfg = resolveSecurityConfig(ctx);
+    if (!cfg) return { text: UNAVAILABLE_TEXT };
+    return securityRequest(
+      securityUrl(cfg, ctx, "/report"),
+      {
+        method: "POST",
+        headers: securityHeaders(cfg, ctx, true),
+        body: JSON.stringify({ markdown: args.markdown, json: args.json }),
+      },
+      async (res) => {
+        const body = await parseJsonBody(res);
+        const report = isRecord(body) && isRecord(body.report) ? body.report : null;
+        if (!report) return { text: "[security_error] the report route returned an unexpected shape." };
+        const generatedAt =
+          typeof report.generatedAt === "number" ? report.generatedAt : undefined;
+        return {
+          text: `report written${generatedAt !== undefined ? ` at ${generatedAt}` : ""}. Now write state.yml with status: done and settle.`,
+        };
+      },
+    );
+  },
+});
+
 /** All eleven runner `sec_*` ToolDefs, in registration order. */
 export function buildSecurityRunnerTools(): ToolDef[] {
   return [
@@ -893,9 +939,11 @@ export function buildSecurityRunnerTools(): ToolDef[] {
  * The persona `sec_*` ToolDefs for a cell-claimed child session (spec
  * §Tools "Persona tools"). `sec_finding_review` attaches only when the
  * claiming cell has `review: true` — a prompt-injected sweep persona must
- * not refute its peers' findings (spec threat 8).
+ * not refute its peers' findings (spec threat 8). `sec_report_write` attaches
+ * only to a `report`-persona cell (M-P3) — only the report cell writes the
+ * engagement report.
  */
-export function buildSecurityPersonaTools(opts: { review: boolean }): ToolDef[] {
+export function buildSecurityPersonaTools(opts: { review: boolean; persona?: string }): ToolDef[] {
   return [
     secFsWriteTool,
     secFsReadTool,
@@ -904,5 +952,6 @@ export function buildSecurityPersonaTools(opts: { review: boolean }): ToolDef[] 
     secFindingReportTool,
     secCoverageReportTool,
     ...(opts.review ? [secFindingReviewTool] : []),
+    ...(opts.persona === "report" ? [secReportWriteTool] : []),
   ];
 }

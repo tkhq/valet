@@ -52,6 +52,14 @@ export const ATTACK_TREE_PERSONA = "attack-tree";
  * reading. Source/config-only. */
 export const SAST_PERSONA = "sast";
 
+/** The report persona id: runs as the FINAL cell of an engagement (M-P3). It
+ * reads the whole engagement — recon, the confirmed findings with their review
+ * verdicts, the coverage ledger, the handoffs — and writes one audience-graded
+ * markdown report plus a machine-readable JSON snapshot with `sec_report_write`.
+ * It reports no new findings and flips no statuses; it composes what the earlier
+ * cells already ruled on. `review: false`. */
+export const REPORT_PERSONA = "report";
+
 // The api bundle's inline-assets step only inlines a `readFileSync(new
 // URL("<literal>", import.meta.url), "utf8")` whose literal is AT the call
 // site — a URL held in a const/variable is silently NOT inlined (a runtime
@@ -88,6 +96,11 @@ export const BUNDLED_PERSONAS: readonly SecurityPersona[] = [
     id: SAST_PERSONA,
     label: "SAST",
     roleMarkdown: readFileSync(new URL("../../personas/sast.md", import.meta.url), "utf8"),
+  },
+  {
+    id: REPORT_PERSONA,
+    label: "Report",
+    roleMarkdown: readFileSync(new URL("../../personas/report.md", import.meta.url), "utf8"),
   },
 ];
 

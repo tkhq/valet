@@ -240,6 +240,42 @@ describe("pg app schema + migrations", () => {
     await db.query("DELETE FROM security_engagements WHERE id IN ('eng_preset', 'eng_cfg')");
   });
 
+  it("stores the report artifact columns, defaulting null (M-P3)", async () => {
+    const now = Date.now();
+    // A fresh engagement: the report columns are null until the report cell runs.
+    await db.query(
+      "INSERT INTO security_engagements (id, session_id, status, repo_full_name, plan, created_at, updated_at) VALUES ('eng_norep', 's_norep', 'running', 'acme/api', '', $1, $1)",
+      [now],
+    );
+    // An engagement whose report cell ran: markdown + JSON snapshot + generated time.
+    const reportJson = JSON.stringify({ executiveSummary: "one high finding", findings: [] });
+    await db.query(
+      "INSERT INTO security_engagements (id, session_id, status, repo_full_name, plan, report_markdown, report_json, report_generated_at, created_at, updated_at) VALUES ('eng_rep', 's_rep', 'completed', 'acme/api', '', $2, $3, $4, $1, $1)",
+      [now, "# Report\n\nExec summary.", reportJson, now + 5],
+    );
+    // Cast the bigint to text so the assertion does not depend on the driver's
+    // bigint representation (string vs number) — the same reason the other
+    // security_engagements schema tests SELECT only text columns.
+    const rows = await db.query(
+      "SELECT id, report_markdown, report_json, report_generated_at::text AS report_generated_at FROM security_engagements WHERE id IN ('eng_norep', 'eng_rep') ORDER BY id",
+    );
+    expect(rows.rows).toEqual([
+      {
+        id: "eng_norep",
+        report_markdown: null,
+        report_json: null,
+        report_generated_at: null,
+      },
+      {
+        id: "eng_rep",
+        report_markdown: "# Report\n\nExec summary.",
+        report_json: reportJson,
+        report_generated_at: String(now + 5),
+      },
+    ]);
+    await db.query("DELETE FROM security_engagements WHERE id IN ('eng_norep', 'eng_rep')");
+  });
+
   it("enforces one issue link per finding per provider", async () => {
     const now = Date.now();
     await db.query(

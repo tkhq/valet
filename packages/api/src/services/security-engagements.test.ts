@@ -200,8 +200,9 @@ describe("security engagement service", () => {
       plan: presetPlan("full-pentest"),
     });
     const { cells } = await svc.startEngagement(engagement.id, { resolvedSha: SHA });
-    // 1 recon + 1 threat-model + 4 triads (3 each) + 1 attack-tree + 1 verify.
-    expect(cells).toHaveLength(16);
+    // 1 recon + 1 threat-model + 4 triads (3 each) + 1 attack-tree + 1 verify +
+    // 1 report (M-P3, the final cell after verify).
+    expect(cells).toHaveLength(17);
     // The model personas run as single cells; the code-heavy sweeps expanded.
     const byDir = new Map(cells.map((c) => [c.dir, c]));
     expect(byDir.get("02-threat-model")?.persona).toBe("threat-model");
@@ -212,6 +213,12 @@ describe("security engagement service", () => {
     // The SAST plan/verify cells are the architect/verifier.
     expect(byDir.get("06-sast-plan")?.persona).toBe("architect");
     expect(byDir.get("08-sast-verify")?.persona).toBe("verifier");
+    // The report cell is last (ordinal 17), runs the report persona, and is not
+    // a review cell — it composes over the engagement (M-P3).
+    const report = cells.find((c) => c.dir === "17-report");
+    expect(report?.persona).toBe("report");
+    expect(report?.ordinal).toBe(17);
+    expect(report?.review).toBe(false);
   });
 
   it("full-pentest dispatch prompts name each cell's own playbook (M-P2c)", async () => {
@@ -221,8 +228,8 @@ describe("security engagement service", () => {
       plan: presetPlan("full-pentest"),
     });
     const { cells } = await svc.startEngagement(engagement.id, { resolvedSha: SHA });
-    // The dispatch prompt reads the EXPANDED plan (the materialized 16 cells),
-    // not the compact 8-cell preset — a materialized cell's ordinal only exists
+    // The dispatch prompt reads the EXPANDED plan (the materialized 17 cells),
+    // not the compact 9-cell preset — a materialized cell's ordinal only exists
     // in /plan.yml.
     const planFile = await svc.readFile(engagement.id, "/plan.yml");
     const plan = parsePlan(planFile.content, KNOWN_PERSONAS);
@@ -975,6 +982,59 @@ describe("security engagement service", () => {
     for (const cell of cells) await runCellToCompletion(engagement.id, cell);
     const manifest = await svc.closeEngagement(engagement.id);
     expect(manifest.coverage).toEqual({ assessed: 0, notAssessed: 0, gaps: [] });
+  });
+
+  // ── Report artifact (M-P3) ───────────────────────────────────────────────
+
+  it("getReport returns null until writeReport stores the artifact", async () => {
+    const { engagement } = await makeStarted();
+    // No report cell has run — the columns are null.
+    expect(await svc.getReport(engagement.id)).toBeNull();
+
+    const md = "# Report\n\nExec summary: one confirmed high finding.";
+    const json = { executiveSummary: "one high", findings: [{ severity: "high", title: "IDOR" }] };
+    const written = await svc.writeReport(engagement.id, { markdown: md, json });
+    expect(written.markdown).toBe(md);
+    expect(written.json).toEqual(json);
+    expect(written.generatedAt).toBeGreaterThan(0);
+
+    // getReport now returns the stored content, round-tripping the JSON snapshot.
+    const read = await svc.getReport(engagement.id);
+    expect(read).not.toBeNull();
+    expect(read!.markdown).toBe(md);
+    expect(read!.json).toEqual(json);
+    expect(read!.generatedAt).toBe(written.generatedAt);
+  });
+
+  it("writeReport overwrites a prior report (a re-run replaces the stale artifact)", async () => {
+    const { engagement } = await makeStarted();
+    await svc.writeReport(engagement.id, { markdown: "# First", json: { v: 1 } });
+    await svc.writeReport(engagement.id, { markdown: "# Second", json: { v: 2 } });
+    const read = await svc.getReport(engagement.id);
+    expect(read!.markdown).toBe("# Second");
+    expect(read!.json).toEqual({ v: 2 });
+  });
+
+  it("closeEngagement manifest includes the report the report cell wrote", async () => {
+    const { engagement, cells } = await makeStarted();
+    // The report cell writes the artifact before the runner closes.
+    await svc.writeReport(engagement.id, {
+      markdown: "# Valet Security report\n\nOne confirmed finding.",
+      json: { executiveSummary: "one finding" },
+    });
+    for (const cell of cells) await runCellToCompletion(engagement.id, cell);
+
+    const manifest = await svc.closeEngagement(engagement.id);
+    expect(manifest.report).not.toBeNull();
+    expect(manifest.report!.markdown).toContain("Valet Security report");
+    expect(manifest.report!.json).toEqual({ executiveSummary: "one finding" });
+  });
+
+  it("closeEngagement manifest report is null when no report was written", async () => {
+    const { engagement, cells } = await makeStarted();
+    for (const cell of cells) await runCellToCompletion(engagement.id, cell);
+    const manifest = await svc.closeEngagement(engagement.id);
+    expect(manifest.report).toBeNull();
   });
 
   it("closeEngagement marks the engagement failed when a cell failed", async () => {

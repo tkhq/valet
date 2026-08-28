@@ -5,12 +5,13 @@ import {
   BUNDLED_PERSONAS,
   bundledPersonaIds,
   CODE_REVIEW_PERSONA,
+  REPORT_PERSONA,
   SAST_PERSONA,
   THREAT_MODEL_PERSONA,
 } from "./personas.js";
 
 describe("BUNDLED_PERSONAS", () => {
-  it("registers the code-review, triad, and M-P2c model personas", () => {
+  it("registers the code-review, triad, M-P2c model, and report personas", () => {
     expect(bundledPersonaIds()).toEqual([
       "code-review",
       "architect",
@@ -18,6 +19,7 @@ describe("BUNDLED_PERSONAS", () => {
       "threat-model",
       "attack-tree",
       "sast",
+      "report",
     ]);
   });
 
@@ -36,9 +38,13 @@ describe("BUNDLED_PERSONAS", () => {
   });
 
   it("gives every model persona a display label", () => {
-    for (const id of [THREAT_MODEL_PERSONA, ATTACK_TREE_PERSONA, SAST_PERSONA]) {
+    for (const id of [THREAT_MODEL_PERSONA, ATTACK_TREE_PERSONA, SAST_PERSONA, REPORT_PERSONA]) {
       expect(bundledPersona(id)?.label).toBeTruthy();
     }
+  });
+
+  it("grounds the report persona in the report artifact tool", () => {
+    expect(bundledPersona(REPORT_PERSONA)?.roleMarkdown).toContain("sec_report_write");
   });
 
   it("returns null for an unknown persona id", () => {

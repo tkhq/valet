@@ -121,6 +121,7 @@ const security: GetSessionSecurityResponse = {
     },
   ],
   cost: { costUsd: 0.42, totalTokens: 1_200_000, priced: true },
+  report: null,
 };
 
 const session: GetSessionResponse = {

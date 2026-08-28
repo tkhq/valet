@@ -183,6 +183,16 @@ export interface CoverageRollup {
   gaps: CoverageGap[];
 }
 
+/** The report artifact stored on the engagement (M-P3). The report cell writes
+ * both with `sec_report_write`; the panel renders `markdown` and the export
+ * route serves either. `json` is the parsed JSON snapshot object; `generatedAt`
+ * is the write time. Null on `getReport` when the report cell never ran. */
+export interface SecurityReport {
+  markdown: string;
+  json: unknown;
+  generatedAt: number;
+}
+
 export interface EngagementManifest {
   engagementId: string;
   status: "completed" | "failed";
@@ -191,6 +201,9 @@ export interface EngagementManifest {
   cells: ManifestCell[];
   /** Coverage honesty (M-P2d): the assessed/not_assessed rollup + gap list. */
   coverage: CoverageRollup;
+  /** The report artifact (M-P3): present when the report cell wrote one, null
+   * otherwise. The runner presents it after close. */
+  report: SecurityReport | null;
   findings: {
     /** All finding rows, near-duplicates included. */
     total: number;
@@ -1111,6 +1124,9 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
       repoRef: engagement.repoRef,
       cells: manifestCells,
       coverage,
+      // The report artifact (M-P3): included when the report cell wrote one. The
+      // engagement row already holds it (the report cell runs before close).
+      report: reportFromRow(engagement),
       findings: {
         total: findings.length,
         distinctBySeverity: bySeverity,
@@ -1740,6 +1756,41 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     return inserted[0];
   }
 
+  /**
+   * Store the report artifact on the engagement (M-P3). The report cell writes
+   * both the markdown report and its JSON snapshot with `sec_report_write`; this
+   * stamps them plus `report_generated_at`. `json` is serialized to a JSON
+   * string column. The caller (the report route) confirms the acting cell is
+   * the report cell — the service only stores. Overwrites a prior report, so a
+   * re-dispatched report cell replaces the stale artifact rather than appending.
+   */
+  async function writeReport(
+    engagementId: string,
+    args: { markdown: string; json: unknown },
+  ): Promise<SecurityReport> {
+    await loadEngagement(engagementId);
+    const ts = now();
+    await db
+      .update(securityEngagements)
+      .set({
+        reportMarkdown: args.markdown,
+        reportJson: JSON.stringify(args.json),
+        reportGeneratedAt: ts,
+        updatedAt: ts,
+      })
+      .where(eq(securityEngagements.id, engagementId));
+    return { markdown: args.markdown, json: args.json, generatedAt: ts };
+  }
+
+  /** The engagement's report artifact (M-P3), or null when the report cell
+   * never ran (all three columns null). A stored `report_json` that fails to
+   * parse yields `json: null` rather than a throw — the markdown is still the
+   * primary artifact. */
+  async function getReport(engagementId: string): Promise<SecurityReport | null> {
+    const engagement = await loadEngagement(engagementId);
+    return reportFromRow(engagement);
+  }
+
   /** The engagement's coverage rows, oldest-first; optionally one cell. */
   async function listCoverage(
     engagementId: string,
@@ -1977,6 +2028,8 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     listFindingComments,
     reportCoverage,
     listCoverage,
+    writeReport,
+    getReport,
     stampCellCompaction,
     getRunningCellProgress,
     getEngagementCost,
@@ -1991,6 +2044,24 @@ export type SecurityEngagementService = ReturnType<typeof createSecurityEngageme
 
 function ordinalLabel(cell: { ordinal: number }): string {
   return String(cell.ordinal).padStart(2, "0");
+}
+
+/** Build the report artifact from an engagement row (M-P3), or null when the
+ * report cell never wrote one. A `report_json` that fails to parse yields
+ * `json: null` — the markdown stays the primary artifact and a bad JSON column
+ * must not throw. */
+function reportFromRow(row: SecurityEngagementRow): SecurityReport | null {
+  if (row.reportMarkdown === null || row.reportGeneratedAt === null) return null;
+  let json: unknown = null;
+  if (row.reportJson !== null) {
+    try {
+      json = JSON.parse(row.reportJson);
+    } catch {
+      // A malformed stored JSON snapshot renders as null; the markdown report
+      // is the primary artifact.
+    }
+  }
+  return { markdown: row.reportMarkdown, json, generatedAt: row.reportGeneratedAt };
 }
 
 /** Cap on the number of changed-dir globs a diff-scoped sweep carries. Past

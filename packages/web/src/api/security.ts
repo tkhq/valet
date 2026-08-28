@@ -340,3 +340,51 @@ export async function downloadSecurityExport(
   setTimeout(() => URL.revokeObjectURL(url), 0);
   return filename;
 }
+
+/** The report-artifact format (M-P3): the markdown report or the JSON
+ * snapshot. Distinct from the findings export — the report is one document the
+ * report cell wrote, not a per-row export. */
+export type SecurityReportFormat = "md" | "json";
+
+/** The report export route URL for one format (M-P3). */
+export function reportExportUrl(sessionId: string, format: SecurityReportFormat): string {
+  return `/api/sessions/${encodeURIComponent(sessionId)}/security/report/export?format=${format}`;
+}
+
+/**
+ * Download the report artifact (M-P3): fetch → Blob → object-URL anchor click,
+ * the same authenticated path as the findings export. Never a bare `<a href>` —
+ * a 4xx there would navigate the tab to raw JSON. Returns the saved filename.
+ */
+export async function downloadSecurityReport(
+  sessionId: string,
+  format: SecurityReportFormat,
+): Promise<string> {
+  const res = await fetch(reportExportUrl(sessionId, format));
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const body: unknown = await res.json();
+      if (typeof body === "object" && body !== null) {
+        const e = (body as { error?: unknown }).error;
+        if (typeof e === "string") detail = e;
+      }
+    } catch {
+      // Non-JSON error body — the status alone has to do.
+    }
+    throw new Error(detail || `Report download failed (${res.status}). Try again.`);
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get("content-disposition") ?? "";
+  const match = /filename="([^"]+)"/.exec(disposition);
+  const filename = match?.[1] ?? `valet-security-report-${sessionId}.${format}`;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+  return filename;
+}

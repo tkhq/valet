@@ -23,6 +23,7 @@ import { CostChip } from "./cost-chip";
 import { FindingsReview } from "./findings-review";
 import { ManifestCard } from "./manifest-card";
 import { PlanEditor } from "./plan-editor";
+import { ReportSection } from "./report-section";
 import { RescanDiffBanner } from "./rescan-diff";
 
 /**
@@ -103,7 +104,9 @@ export function EngagementPanel({
     );
   }
 
-  const { engagement, cells, cost, diff, planCells } = engagementQ.data;
+  const { engagement, cells, cost, diff, planCells, report } = engagementQ.data;
+  // The report is generating while a report-persona cell is running (M-P3).
+  const reportGenerating = cells.some((c) => c.persona === "report" && c.status === "running");
   // The step editor is a planning-phase tool: it edits the plan before cells
   // materialize at sec_start. Once the engagement runs, the plan freezes and
   // the read-only cell rail takes over. Admin-only — the route enforces it.
@@ -203,6 +206,12 @@ export function EngagementPanel({
       <ConfigEditor sessionId={sessionId} engagement={engagement} editable={showPlanEditor} />
       {showPlanEditor && <PlanEditor sessionId={sessionId} planCells={planCells} />}
       {coverageQ.data && <CoverageSection rollup={coverageQ.data.rollup} />}
+      {/* The report section (M-P3): shown once the engagement has started — a
+          report exists, is generating, or is pending the report cell. Hidden
+          while planning, where no report is possible yet. */}
+      {engagement.status !== "planning" && (
+        <ReportSection sessionId={sessionId} report={report} generating={reportGenerating} />
+      )}
       <CellRail cells={cells} onOpenChild={onOpenChild} />
       <div className="border-t border-line" />
       <FindingsReview
