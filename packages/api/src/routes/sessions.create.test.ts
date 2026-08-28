@@ -650,6 +650,131 @@ describe("POST /api/sessions: zero-config repo sources", () => {
   });
 });
 
+describe("POST /api/sessions: security .valet/security.yml config (M-F1)", () => {
+  let api: TestApi | undefined;
+  let fixture: Awaited<ReturnType<typeof startGithubFixture>> | undefined;
+  const REPO = { fullName: "acme/api", cloneUrl: "https://github.com/acme/api.git" };
+
+  const CONFIG_YAML = `version: 1
+focus: Check the auth boundary
+invariants:
+  - tenant id is always checked in the repository layer
+categories:
+  - authz
+steps:
+  - ordinal: 1
+    persona: code-review
+    mode: fresh
+    name: recon
+    playbook: recon
+    goal: Map the codebase and seed the checklist from the file inventory
+    reads: []
+  - ordinal: 2
+    persona: code-review
+    mode: fresh
+    name: authz
+    playbook: authz
+    goal: Sweep authorization on every route from the recon map
+    reads: [1]
+`;
+
+  const prevGithubApiUrl = process.env.GITHUB_API_URL;
+
+  afterEach(async () => {
+    await api?.cleanup();
+    api = undefined;
+    await fixture?.close();
+    fixture = undefined;
+    if (prevGithubApiUrl === undefined) delete process.env.GITHUB_API_URL;
+    else process.env.GITHUB_API_URL = prevGithubApiUrl;
+  });
+
+  async function loadEngagement(sessionId: string) {
+    const { createSecurityEngagementService } = await import(
+      "../services/security-engagements.js"
+    );
+    const service = createSecurityEngagementService({ db: api!.providers.db });
+    const result = await service.getEngagementBySession(sessionId);
+    if (!result) throw new Error("no engagement");
+    return result.engagement;
+  }
+
+  async function createSecuritySession(): Promise<string> {
+    const workspace = await mkdtemp(join(tmpdir(), "valet-session-secconfig-"));
+    const res = await fetch(`${api!.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace, repo: REPO, kind: "security" }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateSessionResponse;
+    return body.id;
+  }
+
+  it("seeds the plan from the repo config's steps and stores the config context", async () => {
+    fixture = startGithubFixture({
+      getRepo: () => ({ body: { default_branch: "main" } }),
+      getContents: (_owner, _repo, path) =>
+        path === ".valet/security.yml"
+          ? { body: { content: Buffer.from(CONFIG_YAML, "utf8").toString("base64"), encoding: "base64" } }
+          : { status: 404, body: { message: "Not Found" } },
+    });
+    process.env.GITHUB_API_URL = fixture.url;
+    api = await bootTestApi({ githubApiUrl: fixture.url });
+
+    const sessionId = await createSecuritySession();
+    const engagement = await loadEngagement(sessionId);
+
+    expect(engagement.hasRepoConfig).toBe(true);
+    expect(engagement.focus).toBe("Check the auth boundary");
+    expect(engagement.invariants).toBe(
+      JSON.stringify(["tenant id is always checked in the repository layer"]),
+    );
+    expect(engagement.categories).toBe(JSON.stringify(["authz"]));
+    // The plan came from the config's two steps, not the five-cell preset.
+    expect(engagement.plan).toContain("name: recon");
+    expect(engagement.plan).toContain("name: authz");
+    expect(engagement.plan).not.toContain("secrets-config");
+  });
+
+  it("falls back to the preset plan with has_repo_config false when no config is present", async () => {
+    fixture = startGithubFixture({
+      getRepo: () => ({ body: { default_branch: "main" } }),
+      getContents: () => ({ status: 404, body: { message: "Not Found" } }),
+    });
+    process.env.GITHUB_API_URL = fixture.url;
+    api = await bootTestApi({ githubApiUrl: fixture.url });
+
+    const sessionId = await createSecuritySession();
+    const engagement = await loadEngagement(sessionId);
+
+    expect(engagement.hasRepoConfig).toBe(false);
+    expect(engagement.focus).toBeNull();
+    // The five-cell code-review preset seeded the plan.
+    expect(engagement.plan).toContain("name: secrets-config");
+    expect(engagement.plan).toContain("name: verify");
+  });
+
+  it("falls back to the preset when the config is invalid, with has_repo_config false", async () => {
+    fixture = startGithubFixture({
+      getRepo: () => ({ body: { default_branch: "main" } }),
+      getContents: (_owner, _repo, path) =>
+        path === ".valet/security.yml"
+          ? { body: { content: Buffer.from("version: 2\n", "utf8").toString("base64"), encoding: "base64" } }
+          : { status: 404, body: { message: "Not Found" } },
+    });
+    process.env.GITHUB_API_URL = fixture.url;
+    api = await bootTestApi({ githubApiUrl: fixture.url });
+
+    const sessionId = await createSecuritySession();
+    const engagement = await loadEngagement(sessionId);
+
+    expect(engagement.hasRepoConfig).toBe(false);
+    // The preset seeded the plan despite the present-but-invalid config.
+    expect(engagement.plan).toContain("name: verify");
+  });
+});
+
 /**
  * A standalone session could only ever be personal: create hardcoded
  * `ownerType: "user"`, so nothing else could own one. Scoping the Sessions

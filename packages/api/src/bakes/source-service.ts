@@ -293,6 +293,37 @@ async function readGithubFile(
   return Buffer.from(payload.content.replace(/\n/g, ""), "base64").toString("utf8");
 }
 
+/**
+ * Read one repo file's decoded content through the GitHub Contents API. Returns
+ * null when the file is missing (404) OR any fetch/parse/auth failure — the
+ * caller treats a null as "no file", never an error. `ref` defaults to the
+ * repository's default branch (one extra `GET /repos/{owner}/{repo}` to resolve
+ * it). Used by the security create route to read `.valet/security.yml` before
+ * the sandbox exists (dynamic-config M-F1).
+ */
+export async function fetchRepoFile(
+  deps: GitHubTokenDeps,
+  token: string | null,
+  owner: string,
+  repo: string,
+  path: string,
+  ref?: string,
+): Promise<string | null> {
+  let resolvedRef = ref;
+  if (resolvedRef === undefined) {
+    try {
+      const repoInfo = await fetchGithubJson(deps, token, `/repos/${owner}/${repo}`);
+      resolvedRef =
+        isRecord(repoInfo) && typeof repoInfo.default_branch === "string"
+          ? repoInfo.default_branch
+          : "main";
+    } catch {
+      return null;
+    }
+  }
+  return readGithubFile(deps, token, owner, repo, resolvedRef, path);
+}
+
 /** Resolves the recipe for `owner/repo@sha` entirely via the GitHub Contents
  * API (no clone). */
 export async function resolveRecipeFromGitHub(

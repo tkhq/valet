@@ -89,6 +89,28 @@ import { PINNED_ACTIONS } from "../plugins/pinned-actions.js";
  * decision 5), independent of any cap the memory service itself applies. */
 const PERSONALITY_INJECT_CAP = 500;
 
+/**
+ * The security roles to attach for a claimed cell's persona (dynamic-config
+ * M-F1). Returns the ONE bundled role whose name matches the cell's persona,
+ * so a `code-review` cell gets only the code-review role, not every security
+ * role. A repo-defined persona (named in `.valet/security.yml`, not a bundled
+ * id) has no bundled role; this milestone falls back to the code-review role
+ * with a logged note. TODO (M-F1 follow-up): load a repo persona's markdown
+ * from the clone at attach time and build its RoleSpec, so a repo-defined
+ * persona runs under its own role instead of code-review.
+ */
+export function securityRolesForCell(persona: string): NonNullable<typeof securityPlugin.roles> {
+  const roles = securityPlugin.roles ?? [];
+  const match = roles.find((r) => r.name === persona);
+  if (match) return [match];
+  const fallback = roles.find((r) => r.name === "code-review");
+  console.warn(
+    `security: persona "${persona}" has no bundled role; attaching the code-review role. ` +
+      "Repo-defined persona role loading is not implemented yet (M-F1 follow-up).",
+  );
+  return fallback ? [fallback] : [];
+}
+
 export interface EngineHostOpts {
   engineStore: SessionStore;
   sandboxProvider: SandboxProvider;
@@ -713,9 +735,12 @@ export class EngineHost {
           }
         : {};
     // The persona role registers on the session (roles registry) so the
-    // dispatch prompt's per-turn `role` overlay resolves. Roles only — the
+    // dispatch prompt's per-turn `role` overlay resolves. Attach ONLY the role
+    // matching the claimed cell's persona (not every security role) — the
     // engagement-runner SKILL stays off persona children.
-    const sessionRoles = personaCell ? [...extras.roles, ...(securityPlugin.roles ?? [])] : extras.roles;
+    const sessionRoles = personaCell
+      ? [...extras.roles, ...securityRolesForCell(personaCell.persona)]
+      : extras.roles;
     const session = existing
       ? await engine.restoreSession({
           sessionId,
@@ -2186,9 +2211,12 @@ export class EngineHost {
       ? [...buildSecurityPersonaTools({ review: personaCell.review }), ...extras.tools]
       : extras.tools;
     // The persona role registers on the session (roles registry) so the
-    // dispatch prompt's per-turn `role` overlay resolves. Roles only — the
-    // engagement-runner SKILL stays off persona children.
-    const childRoles = personaCell ? [...extras.roles, ...(securityPlugin.roles ?? [])] : extras.roles;
+    // dispatch prompt's per-turn `role` overlay resolves. Attach ONLY the role
+    // matching the claimed cell's persona — the engagement-runner SKILL stays
+    // off persona children.
+    const childRoles = personaCell
+      ? [...extras.roles, ...securityRolesForCell(personaCell.persona)]
+      : extras.roles;
 
     const existing = await this.opts.engineStore.getSession(childSessionId);
     const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, opts.actorUserId, opts.orgId, opts.modelId);

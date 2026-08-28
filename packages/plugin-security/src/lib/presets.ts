@@ -1,9 +1,11 @@
+import { bundledPersonaIds, CODE_REVIEW_PERSONA } from "./personas.js";
 import type { PlanCell } from "./plan.js";
 
-/** The v1 persona. Registered personas gate parsePlan's persona check. */
-export const CODE_REVIEW_PERSONA = "code-review";
+export { CODE_REVIEW_PERSONA };
 
-export const KNOWN_PERSONAS = [CODE_REVIEW_PERSONA] as const;
+/** The bundled persona ids gate parsePlan's persona check. Sourced from the
+ * persona registry so a new bundled persona lands here for free. */
+export const KNOWN_PERSONAS: readonly string[] = bundledPersonaIds();
 
 /** A create-time sweep preset: which cells run for one review. The hub lists
  * these; the create route validates the chosen id with `isKnownPreset` and

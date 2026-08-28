@@ -25,6 +25,7 @@ import {
   repoDockerFlag,
   clearRepoDockerCache,
   resolveChangedFiles,
+  fetchRepoFile,
 } from "./source-service.js";
 
 const orgId = "org1";
@@ -1329,6 +1330,52 @@ describe("SourceService", () => {
       expect(remaining.has("sized")).toBe(false);
       expect(remaining.has("data_newest")).toBe(true);
       expect(retentionCalls.flatMap((c) => c.imageRefs)).toEqual(["ref/null", "ref/sized"]);
+    });
+  });
+
+  describe("fetchRepoFile (dynamic-config M-F1)", () => {
+    // Replace the beforeEach fixture with one that serves the contents API and
+    // the repo default-branch lookup; afterEach closes whatever `fixture` holds.
+    async function withContents(
+      getContents: (owner: string, repo: string, path: string, ref: string | undefined) => GithubFixtureResponse,
+    ): Promise<void> {
+      await fixture.close();
+      fixture = startGithubFixture({
+        getRepo: () => ({ body: { default_branch: "main" } }),
+        getContents,
+      });
+    }
+
+    it("decodes a repo file's base64 content at the default branch", async () => {
+      let seenRef: string | undefined;
+      await withContents((_owner, _repo, path, ref) => {
+        seenRef = ref;
+        if (path === ".valet/security.yml") {
+          return { body: { content: b64("version: 1\n"), encoding: "base64" } };
+        }
+        return { status: 404, body: { message: "Not Found" } };
+      });
+      const content = await fetchRepoFile(githubTokenDeps(), "tok", "acme", "api", ".valet/security.yml");
+      expect(content).toBe("version: 1\n");
+      // No ref passed → resolved to the repo's default branch.
+      expect(seenRef).toBe("main");
+    });
+
+    it("returns null on a 404 (missing file)", async () => {
+      await withContents(() => ({ status: 404, body: { message: "Not Found" } }));
+      const content = await fetchRepoFile(githubTokenDeps(), "tok", "acme", "api", ".valet/security.yml");
+      expect(content).toBeNull();
+    });
+
+    it("honors an explicit ref without the default-branch lookup", async () => {
+      let seenRef: string | undefined;
+      await withContents((_owner, _repo, _path, ref) => {
+        seenRef = ref;
+        return { body: { content: b64("version: 1\n"), encoding: "base64" } };
+      });
+      const content = await fetchRepoFile(githubTokenDeps(), "tok", "acme", "api", ".valet/security.yml", "abc123");
+      expect(content).toBe("version: 1\n");
+      expect(seenRef).toBe("abc123");
     });
   });
 });

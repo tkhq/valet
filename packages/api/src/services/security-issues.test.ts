@@ -41,6 +41,12 @@ const ENGAGEMENT: SecurityEngagementRow = {
   parentEngagementId: null,
   baseRef: null,
   changedPaths: null,
+  focus: null,
+  invariants: null,
+  categories: null,
+  configPersonas: null,
+  configTools: null,
+  hasRepoConfig: false,
   createdAt: 1_000,
   updatedAt: 2_000,
 };

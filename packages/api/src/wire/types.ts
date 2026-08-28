@@ -201,6 +201,18 @@ export interface SecurityEngagementWire {
    * parsed from `changed_paths`). Null on a first review or a full-scan
    * fallback (the panel then shows "Full re-scan"). */
   changedPaths: string[] | null;
+  /** True when a valid `.valet/security.yml` seeded this engagement
+   * (dynamic-config M-F1). The panel shows the review source: the repo config
+   * vs a bundled preset. */
+  hasRepoConfig: boolean;
+  /** Repo config context (dynamic-config M-F1), parsed from the repo config at
+   * create. Null when the engagement used a preset, or the field was absent.
+   * Stored for later milestones; not yet wired into prompts. */
+  focus: string | null;
+  invariants: string[] | null;
+  categories: string[] | null;
+  configPersonas: Record<string, string> | null;
+  configTools: string[] | null;
   createdAt: number;
   updatedAt: number;
 }

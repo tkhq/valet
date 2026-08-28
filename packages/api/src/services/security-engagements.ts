@@ -95,6 +95,17 @@ export interface EngagementWithCells {
   cells: SecurityCellRow[];
 }
 
+/** The repo config context stored on an engagement (dynamic-config M-F1). The
+ * subset of `SecurityConfig` persisted for later milestones — the plan is
+ * seeded separately from the config's steps. */
+export interface SecurityConfigContext {
+  focus?: string;
+  invariants?: string[];
+  categories?: string[];
+  personas?: Record<string, string>;
+  tools?: string[];
+}
+
 export type CompleteCellResult =
   | { outcome: "completed"; cell: SecurityCellRow }
   | { outcome: "yielded"; cell: SecurityCellRow }
@@ -370,6 +381,13 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
        * new engagement's `parent_engagement_id`, which drives carry-forward
        * refutations in reportFinding and the diff summary. */
       parentEngagementId?: string;
+      /** Repo config context (dynamic-config M-F1), parsed from
+       * `.valet/security.yml` at create. Present only when a valid repo config
+       * seeded this engagement; a preset-seeded engagement omits it and the
+       * columns stay null with `has_repo_config` false. Stored for later
+       * milestones (M-F3 invariants, M-P2a categories, M-P4 tools); not wired
+       * into prompts this milestone. */
+      config?: SecurityConfigContext;
     },
     dbh: AppDb = db,
   ): Promise<SecurityEngagementRow> {
@@ -377,6 +395,7 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     // plan cannot parse would strand the runner at sec_start.
     parsePlan(args.plan, KNOWN_PERSONAS);
     const ts = now();
+    const config = args.config;
     const inserted = await dbh
       .insert(securityEngagements)
       .values({
@@ -386,6 +405,12 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
         repoFullName: args.repoFullName,
         plan: args.plan,
         parentEngagementId: args.parentEngagementId ?? null,
+        focus: config?.focus ?? null,
+        invariants: config?.invariants ? JSON.stringify(config.invariants) : null,
+        categories: config?.categories ? JSON.stringify(config.categories) : null,
+        configPersonas: config?.personas ? JSON.stringify(config.personas) : null,
+        configTools: config?.tools ? JSON.stringify(config.tools) : null,
+        hasRepoConfig: config !== undefined,
         createdAt: ts,
         updatedAt: ts,
       })

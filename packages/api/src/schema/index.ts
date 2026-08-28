@@ -1742,6 +1742,18 @@ export const securityEngagements = pgTable(
     // or the parent had no pinned SHA).
     baseRef: text("base_ref"),
     changedPaths: text("changed_paths"),
+    // Repo config context (dynamic-config M-F1): parsed from `.valet/security.yml`
+    // at create, stored for later milestones. `hasRepoConfig` records whether a
+    // valid repo config seeded this engagement (the panel shows the source); the
+    // other columns hold the config's context. `focus` is free text; the rest are
+    // JSON. Null on an engagement seeded from a preset (no repo config, or the
+    // config was absent/invalid).
+    focus: text("focus"),
+    invariants: text("invariants"),
+    categories: text("categories"),
+    configPersonas: text("config_personas"),
+    configTools: text("config_tools"),
+    hasRepoConfig: boolean("has_repo_config").notNull().default(false),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },

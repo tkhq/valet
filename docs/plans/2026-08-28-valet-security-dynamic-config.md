@@ -1,7 +1,7 @@
 # Valet Security — Next Features (dynamic configuration and beyond)
 
 **Date:** 2026-08-28
-**Status:** proposal — for scoping
+**Status:** accepted — all phases are MVP (2026-08-28); no phase is deferred.
 **Source:** Akshar's pentest harness `tkhq/test-security-reviewer`, plus the Conner/Akshar Slack thread. This plan folds that reference into the shipped Valet Security feature (`docs/specs/2026-08-27-valet-security-design.md`).
 
 ## What the reference harness is
@@ -72,8 +72,14 @@ Build **Phase 1** as the next milestone. It is what the thread explicitly asks f
 
 Phase 2 (model personas + architect/verifier + threat-category library) is the natural follow-up and the largest single quality jump. Phase 3 (report) is small and independent. Phase 4 (live testing) is a separate infrastructure track to plan on its own.
 
-## Open questions for scoping
+## Scoping decisions (2026-08-28)
 
-- **Config format:** adopt Akshar's `.claude/`-style layout so his repo drops in unchanged, or a single `.valet/security.yml`? A single file is simpler for our UI to read and edit; a `.claude/`-compatible reader lets his existing harness run as-is. Likely: a `.valet/security.yml` that can *reference* `.claude/` personas and categories.
-- **Persona authorship:** are custom personas repo-committed markdown (portable, versioned) or org-level records in Valet (managed, shared across repos)? Probably both, with the repo file winning.
-- **Verifier as a cell vs a mode:** does the architect/verifier triad become three cells per phase, or one cell with three sub-phases? Three cells reuses the dispatch machinery; one cell keeps the rail shorter.
+Every phase above ships as MVP; nothing is deferred to a follow-up. The three open questions are ruled:
+
+- **Config format — a single `.valet/security.yml` that can reference `.claude/` personas and categories.** The file is the entry point our UI reads and edits; it may name personas and category files under `.claude/` so Akshar's harness repo drops in unchanged. Valet fetches it from the repo through the GitHub contents API at create time (before the sandbox exists), and falls back to the bundled presets when absent.
+- **Persona authorship — both, repo wins.** Bundled personas ship in `plugin-security`; a repo commits its own persona markdown; a persona named in `.valet/security.yml` resolves to the repo file first, then the bundled registry.
+- **Architect / worker / verifier — three cells per phase.** The triad reuses the existing dispatch machinery: an architect cell plans and seeds a falsifiable checklist, the worker cell executes it, and an independent verifier cell gates PASS/CONDITIONAL/FAIL. The cell rail already renders many cells.
+
+## Build order
+
+The twelve milestones execute in dependency order, each committed and green before the next: M-F1 persona registry + config loader, M-F2 step editor, M-F3 invariants, M-F4 finding comments, M-P2a threat-category library, M-P2b architect/verifier triad, M-P2c model personas, M-P2d NOT_ASSESSED preflight, M-P3 report, M-P4a tool provisioning, M-P4b live personas, M-P4c pivot-coordinator.

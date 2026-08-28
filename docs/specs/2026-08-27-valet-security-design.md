@@ -313,6 +313,47 @@ The same edges are the concurrency seam: cells with disjoint `reads` have no ord
 
 The pure library (plan YAML parse/validate, state doc parse, exit-condition check, fingerprint computation) lives in the plugin as importable code with unit tests, and the API imports it — the `plugin-design` lib precedent.
 
+## Dynamic configuration
+
+A scanned repo configures its own review. It commits `.valet/security.yml`; Valet reads that file at create time and seeds the review from it. A repo without the file falls back to the bundled presets. This makes a review self-describing and versioned with the code it reviews. See `docs/plans/2026-08-28-valet-security-dynamic-config.md` for the phased plan; M-F1 ships the persona registry, the config loader, and the stored config context.
+
+### The persona registry
+
+A persona is the role a cell-claimed child session runs under. The registry is extensible:
+
+- **Bundled personas** ship in `plugin-security` (`personas/<id>.md` + `BUNDLED_PERSONAS`). v1 bundles one: `code-review`. `KNOWN_PERSONAS` equals the bundled ids, so `parsePlan`'s persona check gates against the registry. The plugin manifest builds one `RoleSpec` per bundled persona.
+- **Repo-defined personas** come from `.valet/security.yml`'s `personas` map (id → the persona markdown path in the clone). A step may name a repo persona; a repo persona wins over a bundled id of the same name.
+- **Host attach** — the host attaches ONLY the role matching a claimed cell's `persona`, read from `security_cells.persona`, not every security role. A repo-defined persona has no bundled role yet; M-F1 falls back to the `code-review` role with a logged note. Loading a repo persona's markdown from the clone at attach time is a noted M-F1 follow-up.
+
+### The `.valet/security.yml` schema
+
+```yaml
+version: 1                 # required; must be 1
+focus: string              # optional free-text focus note (M-F3)
+invariants: [string]       # optional known invariants (M-F3)
+categories: [string]       # optional threat-category names to load (M-P2a)
+personas: { id: path }     # optional repo-defined personas: id → markdown path in the clone
+tools: [string]            # optional declared tools a step needs (M-P4)
+steps:                     # optional ordered review steps (each a plan cell)
+  - ordinal: 1
+    persona: code-review   # a bundled id OR a key in `personas`
+    mode: fresh
+    name: recon
+    playbook: recon
+    goal: string
+    reads: []
+```
+
+`parseSecurityConfig(yaml, knownPersonas)` validates the file: `version === 1`, `invariants`/`categories`/`tools` are string lists, `personas` maps ids to non-empty paths, and `steps` (if present) parse as a plan through `parsePlan`'s cell rules against the union of bundled ids and the config's persona keys. It throws a corrective error naming `.valet/security.yml` on the first violation. `configToPlanYaml(config)` serializes the config's steps to plan YAML (through `serializePlan`); it throws when the config declares no steps.
+
+### Load and fall back
+
+The security create route reads the config through the GitHub contents API BEFORE the sandbox exists — `fetchRepoFile(deps, token, owner, repo, ".valet/security.yml")` (default branch, 404 → null). When the file is present and its `steps` parse, the plan is seeded from `configToPlanYaml(config)` and the config context is stored on the engagement. When the file is absent, unreadable, or invalid, the route falls back to `presetPlan(preset, { paths })` and logs the reason; `has_repo_config` stays false so the panel shows the preset source. A re-scan (`rescanOf`) inherits the parent's plan as today; re-fetching the config on re-scan is a later concern.
+
+### Stored config context
+
+The engagement row carries the parsed config for later milestones: `focus` (text), `invariants`/`categories`/`config_personas`/`config_tools` (JSON), and `has_repo_config` (boolean). M-F1 stores and exposes these on the `GET /security` response; it does NOT wire invariants into prompts yet (that is M-F3). The hub/panel shows the review source: `Configured by .valet/security.yml` vs `Preset: Code review`.
+
 ## Web Surfaces
 
 ### `/security` — hub
@@ -543,6 +584,7 @@ Web-level tests beside the panel components; API-level tests for the routes. [M1
 28. **The engagement carries its spend, runner plus cell children.** `getEngagementCost` (the service) sums `cost_entries` over the runner session (`engagement.session_id`) and every cell's `child_session_id`. Fix-session handoffs (`security_handoffs.child_session_id`) are separate follow-up work and are NOT counted — the review cost is the runner and its cells. The sum reads `cost_total` and `total_tokens`; `priced` is false when any counted turn is unpriced (`cost_total IS NULL`, an unpriced provider), never treated as zero. An empty id list (planning, no runner turn) returns zeros without a malformed `IN ()`. `GET /api/sessions/:id/security` adds `cost { costUsd, totalTokens, priced }` — one extra query per poll, kept live during the run and after close. The panel header shows a compact chip ("1.2M tokens · ~$0.42") next to the status, and the closed-engagement manifest card shows a final "Review cost" line; both reuse the usage dashboard's `formatTokens`/`formatUsd`. When `priced` is false the surface shows tokens plus a muted "cost n/a"; a zero total renders nothing.
 29. **Re-scan lineage is `parent_engagement_id`, and carry-forward runs at report time.** `security_engagements.parent_engagement_id` (nullable, indexed, no unique constraint) links a re-scan to the engagement it re-scans; a parent may be re-scanned any number of times. It is an in-place `0000_app.sql` edit with a matching `SCHEMA_REPAIRS` column-and-index pair — the whole-table `CREATE TABLE IF NOT EXISTS` does not add a column to an existing table. `POST /api/sessions` takes `rescanOf` (a prior SESSION id): the route loads the prior engagement (existence-hiding 404 on a non-viewable session, a non-security session, or one with no engagement), reuses its repo binding and plan unless the request overrides `preset`/`paths`/`model`/repo, and passes `parentEngagementId` to `createEngagement`. Carry-forward is a `reportFinding` responsibility, not a separate sweep: on a child engagement, a reported fingerprint that the parent `refuted` inserts already `refuted` (`status_actor` `carry-forward`), and the result carries `carriedFrom` so the persona-report tool text notes it. Only a refuted verdict carries; an open/verified parent fingerprint resurfaces `open`. The diff (`diffEngagement`) and the per-finding `recurring` flag are computed by distinct fingerprint against the parent; `fixedCount` returns `null` until the engagement is terminal, because a running scan's absent fingerprint is "not looked yet", not "fixed". The "Re-scan latest" button (`useRescanReview`) lives on the hub row and the manifest card of a terminal engagement; the diff banner (`RescanDiffBanner`) renders in the panel — above the header while running, inside the manifest card once closed.
 30. **A re-scan carries the prior reasoning and scopes to the git diff, injected by rewriting the plan.** The re-scan re-derived every checklist and recon map from scratch and re-scanned the whole repo — the reasoning is the expensive part. Now `POST /security/start` computes the changed files between the parent's pinned SHA (`base_ref`) and the new HEAD through the GitHub compare API (`resolveChangedFiles`, `source-service.ts`), captured on the child as `base_ref` + `changed_paths` (two in-place `0000_app.sql` columns with matching `SCHEMA_REPAIRS` entries). The diff is computed in the ROUTE because the new SHA arrives only there; a compare failure logs and falls back to a full scan, never failing the start. `startEngagement` derives changed-directory globs (top-level and one-level `<dir>/**`, deduped, capped at 24) and REWRITES `engagement.plan` — the globs land on the sweep cells' `paths` (not recon (ordinal 1), not `review` cells). Rewriting the plan (rather than adding a `security_cells.paths` column) makes `/plan.yml`, the materialized cells, and the dispatch-prompt Scope line all carry the scope for free, because `buildDispatchPrompt` already reads `planCell.paths`. Three read-only `/prior/` mounts seed C's tree from the parent P: `/prior/diff.md` (SHA range + changed files, or a full-re-scan note), `/prior/recon.md` (P's ordinal-1 recon state doc), `/prior/findings.md` (P's findings grouped by status). The mounts list only on a re-scan; `/prior/*` on a first review errors. `buildDispatchPrompt` takes a `rescan` flag (parent present) that adds recon-inherit, sweep-scoped, and verify-reconcile language naming the `/prior/` files. The panel shows "Scoped to N changed files since `<short base sha>`" or "Full re-scan (prior commit unavailable)" from `base_ref`/`changed_paths` on the engagement GET.
+31. **Dynamic config is loaded at create, and the persona role attaches per cell (M-F1).** The persona registry moved to `plugin-security`'s `BUNDLED_PERSONAS` (`src/lib/personas.ts`), keyed by id; `KNOWN_PERSONAS` now equals the bundled ids, so a new bundled persona gates `parsePlan` for free. The plugin manifest builds one `RoleSpec` per bundled persona, and the host attaches ONLY the role matching a claimed cell's `security_cells.persona` (`securityRolesForCell` in `packages/api/src/engine/host.ts`), not every security role — a repo-defined persona with no bundled role falls back to `code-review` with a logged note (loading a repo persona's markdown from the clone is a noted follow-up). `POST /api/sessions` reads `.valet/security.yml` through the GitHub contents API before the sandbox exists (`fetchRepoFile`, `source-service.ts`, 404 → null, default branch); a present-and-valid config with `steps` seeds the plan from `configToPlanYaml(config)` and stores the config context, while an absent, unreadable, or invalid config falls back to `presetPlan(preset, { paths })` and logs the reason. `parseSecurityConfig` validates `version === 1`, the string-list fields, the `personas` map, and the `steps` (through `parsePlan` against bundled ids ∪ repo persona keys). Six in-place `0000_app.sql` columns hold the context — `focus` (text), `invariants`/`categories`/`config_personas`/`config_tools` (JSON), `has_repo_config` (boolean, default false) — each with a matching `SCHEMA_REPAIRS` entry. `GET /api/sessions/:id/security` exposes them; the panel header shows `Configured by .valet/security.yml` vs `Preset: Code review`. A `rescanOf` re-scan inherits the parent's plan (config re-fetch on re-scan is deferred). M-F1 stores and exposes the context but does NOT wire invariants into prompts (that is M-F3).
 
 ## Revisions from the Adversarial Review (2026-08-27)
 

@@ -14,6 +14,14 @@ export {
   serializePlan,
 } from "./presets.js";
 export type { SecurityPreset } from "./presets.js";
+export {
+  BUNDLED_PERSONAS,
+  bundledPersonaIds,
+  bundledPersona,
+} from "./personas.js";
+export type { SecurityPersona } from "./personas.js";
+export { parseSecurityConfig, configToPlanYaml } from "./config.js";
+export type { SecurityConfig } from "./config.js";
 export { protocolMarkdown } from "./protocol.js";
 export { KNOWN_PLAYBOOKS, isKnownPlaybook, playbookMarkdown } from "./playbooks.js";
 export type { PlaybookName } from "./playbooks.js";

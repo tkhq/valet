@@ -979,6 +979,12 @@ CREATE TABLE "security_engagements" (
 	"parent_engagement_id" text,
 	"base_ref" text,
 	"changed_paths" text,
+	"focus" text,
+	"invariants" text,
+	"categories" text,
+	"config_personas" text,
+	"config_tools" text,
+	"has_repo_config" boolean DEFAULT false NOT NULL,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
 );

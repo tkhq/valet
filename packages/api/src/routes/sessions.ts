@@ -17,7 +17,18 @@ import {
 import { canAdministerSession, canViewSession } from "../services/session-access.js";
 import { createSecurityEngagementService } from "../services/security-engagements.js";
 import { isTeamMember, listTeamsForUser } from "../services/teams.js";
-import { isKnownPreset, presetPlan, SECURITY_PRESETS, securityKickoffPrompt } from "@valet/plugin-security";
+import {
+  bundledPersonaIds,
+  configToPlanYaml,
+  isKnownPreset,
+  parseSecurityConfig,
+  presetPlan,
+  SECURITY_PRESETS,
+  securityKickoffPrompt,
+  type SecurityConfig,
+} from "@valet/plugin-security";
+import { fetchRepoFile, resolveApiTokenOrNull } from "../bakes/source-service.js";
+import { deriveSecretKey } from "../lib/secret-crypto.js";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import {
@@ -235,7 +246,7 @@ sessionsRouter.get("/", async (c) => {
 const SECURITY_DEFAULT_MODEL = "claude-sonnet-4-6";
 
 sessionsRouter.post("/", async (c) => {
-  const { db, engineStore, prebuildService } = c.var.providers;
+  const { db, engineStore, prebuildService, engineCredentials, encryptionKey } = c.var.providers;
   const user = c.var.user;
   let body: CreateSessionRequest;
   try {
@@ -393,6 +404,44 @@ sessionsRouter.post("/", async (c) => {
     }
   }
 
+  // Dynamic config (M-F1): a security review reads the repo's `.valet/security.yml`
+  // through the GitHub contents API BEFORE the sandbox exists, and seeds its plan
+  // from the config's steps. A re-scan that reuses the prior plan skips this (the
+  // config re-fetch on re-scan is a later milestone). Absent or invalid config
+  // falls back to the preset plan; `repoConfig` stays undefined so the engagement
+  // records `has_repo_config = false`.
+  let securityPlan = kind === "security" ? presetPlan(presetId, { paths: body.paths }) : "";
+  let repoConfig: SecurityConfig | undefined;
+  if (kind === "security" && rescanPlan === undefined) {
+    const [owner, repo] = repos[0].fullName.split("/");
+    if (owner && repo) {
+      const tokenDeps = { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) };
+      try {
+        const token = await resolveApiTokenOrNull(tokenDeps, user.orgId, owner, repo);
+        const raw = await fetchRepoFile(tokenDeps, token, owner, repo, ".valet/security.yml");
+        if (raw !== null) {
+          const config = parseSecurityConfig(raw, bundledPersonaIds());
+          if (config.steps && config.steps.length > 0) {
+            securityPlan = configToPlanYaml(config);
+            repoConfig = config;
+          } else {
+            // A config with no steps still carries focus/invariants/etc.; keep
+            // the preset plan but store the config context.
+            repoConfig = config;
+          }
+        }
+      } catch (err) {
+        // A missing, malformed, or unreadable config is not a create failure —
+        // fall back to the preset plan and record why. The panel shows the
+        // engagement used a preset (has_repo_config = false).
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(`security create: .valet/security.yml ignored for ${repos[0].fullName}: ${message}`);
+      }
+    }
+  } else if (kind === "security" && rescanPlan !== undefined) {
+    securityPlan = rescanPlan;
+  }
+
   const now = Date.now();
   const id = newId("s");
   // Session row + repo bindings must land atomically — a failure between
@@ -452,10 +501,22 @@ sessionsRouter.post("/", async (c) => {
         {
           sessionId: id,
           repoFullName: repos[0].fullName,
-          // A re-scan without a preset/paths override reuses the prior plan;
-          // otherwise the request's preset + paths build a fresh plan.
-          plan: rescanPlan ?? presetPlan(presetId, { paths: body.paths }),
+          // The plan comes from (in order): the prior plan on a re-scan, the
+          // repo's `.valet/security.yml` steps, or the request's preset + paths.
+          // `securityPlan` resolved all three above.
+          plan: securityPlan,
           ...(rescanParentEngagementId ? { parentEngagementId: rescanParentEngagementId } : {}),
+          ...(repoConfig
+            ? {
+                config: {
+                  ...(repoConfig.focus !== undefined ? { focus: repoConfig.focus } : {}),
+                  ...(repoConfig.invariants !== undefined ? { invariants: repoConfig.invariants } : {}),
+                  ...(repoConfig.categories !== undefined ? { categories: repoConfig.categories } : {}),
+                  ...(repoConfig.personas !== undefined ? { personas: repoConfig.personas } : {}),
+                  ...(repoConfig.tools !== undefined ? { tools: repoConfig.tools } : {}),
+                },
+              }
+            : {}),
         },
         tx,
       );

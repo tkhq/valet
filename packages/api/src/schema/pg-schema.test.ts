@@ -195,6 +195,49 @@ describe("pg app schema + migrations", () => {
     await db.query("DELETE FROM security_engagements WHERE id IN ('eng_full', 'eng_diff')");
   });
 
+  it("stores the repo-config context columns, defaulting null / has_repo_config false", async () => {
+    const now = Date.now();
+    // A preset-seeded engagement: config columns null, has_repo_config false.
+    await db.query(
+      "INSERT INTO security_engagements (id, session_id, status, repo_full_name, plan, created_at, updated_at) VALUES ('eng_preset', 's_preset', 'planning', 'acme/api', '', $1, $1)",
+      [now],
+    );
+    // A config-seeded engagement: focus text + JSON invariants/categories/
+    // personas/tools + has_repo_config true.
+    const invariants = JSON.stringify(["tenant id is always checked"]);
+    const categories = JSON.stringify(["authz", "multi-tenancy"]);
+    const personas = JSON.stringify({ "threat-model": ".claude/agents/threat-model.md" });
+    const tools = JSON.stringify(["gitleaks"]);
+    await db.query(
+      "INSERT INTO security_engagements (id, session_id, status, repo_full_name, plan, focus, invariants, categories, config_personas, config_tools, has_repo_config, created_at, updated_at) VALUES ('eng_cfg', 's_cfg', 'planning', 'acme/api', '', $2, $3, $4, $5, $6, true, $1, $1)",
+      [now, "Check the auth boundary", invariants, categories, personas, tools],
+    );
+    const rows = await db.query(
+      "SELECT id, focus, invariants, categories, config_personas, config_tools, has_repo_config FROM security_engagements WHERE id IN ('eng_preset', 'eng_cfg') ORDER BY id",
+    );
+    expect(rows.rows).toEqual([
+      {
+        id: "eng_cfg",
+        focus: "Check the auth boundary",
+        invariants,
+        categories,
+        config_personas: personas,
+        config_tools: tools,
+        has_repo_config: true,
+      },
+      {
+        id: "eng_preset",
+        focus: null,
+        invariants: null,
+        categories: null,
+        config_personas: null,
+        config_tools: null,
+        has_repo_config: false,
+      },
+    ]);
+    await db.query("DELETE FROM security_engagements WHERE id IN ('eng_preset', 'eng_cfg')");
+  });
+
   it("enforces one issue link per finding per provider", async () => {
     const now = Date.now();
     await db.query(
@@ -692,6 +735,12 @@ describe("pg app schema + migrations", () => {
       { table: "mcp_oauth_clients", column: "scopes_supported" },
       { table: "security_engagements", column: "base_ref" },
       { table: "security_engagements", column: "changed_paths" },
+      { table: "security_engagements", column: "focus" },
+      { table: "security_engagements", column: "invariants" },
+      { table: "security_engagements", column: "categories" },
+      { table: "security_engagements", column: "config_personas" },
+      { table: "security_engagements", column: "config_tools" },
+      { table: "security_engagements", column: "has_repo_config" },
     ];
 
     async function columnExists(table: string, column: string): Promise<boolean> {

@@ -180,9 +180,45 @@ function engagementToWire(e: SecurityEngagementRow): SecurityEngagementWire {
     plan: e.plan,
     baseRef: e.baseRef,
     changedPaths,
+    hasRepoConfig: e.hasRepoConfig,
+    focus: e.focus,
+    invariants: parseJsonStringArray(e.invariants),
+    categories: parseJsonStringArray(e.categories),
+    configPersonas: parseJsonStringRecord(e.configPersonas),
+    configTools: parseJsonStringArray(e.configTools),
     createdAt: e.createdAt,
     updatedAt: e.updatedAt,
   };
+}
+
+/** Parse a stored JSON string[] column; null on absent or malformed. */
+function parseJsonStringArray(raw: string | null): string[] | null {
+  if (raw === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed.filter((v): v is string => typeof v === "string");
+  } catch {
+    // A malformed value renders as null.
+  }
+  return null;
+}
+
+/** Parse a stored JSON Record<string,string> column; null on absent/malformed. */
+function parseJsonStringRecord(raw: string | null): Record<string, string> | null {
+  if (raw === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      const out: Record<string, string> = {};
+      for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+        if (typeof v === "string") out[k] = v;
+      }
+      return out;
+    }
+  } catch {
+    // A malformed value renders as null.
+  }
+  return null;
 }
 
 function cellToWire(cell: SecurityCellRow, progress: CellProgress | null): SecurityCellWire {

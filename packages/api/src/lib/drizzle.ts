@@ -380,6 +380,12 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
       "parent_engagement_id" text,
       "base_ref" text,
       "changed_paths" text,
+      "focus" text,
+      "invariants" text,
+      "categories" text,
+      "config_personas" text,
+      "config_tools" text,
+      "has_repo_config" boolean DEFAULT false NOT NULL,
       "created_at" bigint NOT NULL,
       "updated_at" bigint NOT NULL
     )`,
@@ -414,6 +420,39 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     describe: "security_engagements.changed_paths column",
     probe: { kind: "column", table: "security_engagements", column: "changed_paths" },
     sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "changed_paths" text',
+  },
+  {
+    // Repo config context (dynamic-config M-F1): parsed from `.valet/security.yml`
+    // at create. Null on a preset-seeded engagement. Separate column repairs
+    // because the whole-table CREATE does not add a column to an existing table.
+    describe: "security_engagements.focus column",
+    probe: { kind: "column", table: "security_engagements", column: "focus" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "focus" text',
+  },
+  {
+    describe: "security_engagements.invariants column",
+    probe: { kind: "column", table: "security_engagements", column: "invariants" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "invariants" text',
+  },
+  {
+    describe: "security_engagements.categories column",
+    probe: { kind: "column", table: "security_engagements", column: "categories" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "categories" text',
+  },
+  {
+    describe: "security_engagements.config_personas column",
+    probe: { kind: "column", table: "security_engagements", column: "config_personas" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "config_personas" text',
+  },
+  {
+    describe: "security_engagements.config_tools column",
+    probe: { kind: "column", table: "security_engagements", column: "config_tools" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "config_tools" text',
+  },
+  {
+    describe: "security_engagements.has_repo_config column",
+    probe: { kind: "column", table: "security_engagements", column: "has_repo_config" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "has_repo_config" boolean DEFAULT false NOT NULL',
   },
   {
     describe: "security_engagements_parent index",
