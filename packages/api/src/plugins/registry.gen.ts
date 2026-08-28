@@ -13,15 +13,16 @@ import plugin8 from "@valet/plugin-memory/plugin";
 import plugin9 from "@valet/plugin-notion/plugin";
 import plugin10 from "@valet/plugin-openai/plugin";
 import plugin11 from "@valet/plugin-personas/plugin";
-import plugin12 from "@valet/plugin-sentry/plugin";
-import plugin13 from "@valet/plugin-slack/plugin";
-import plugin14 from "@valet/plugin-slack-user/plugin";
-import plugin15 from "@valet/plugin-stripe/plugin";
-import plugin16 from "@valet/plugin-telegram/plugin";
-import plugin17 from "@valet/plugin-typefully/plugin";
-import plugin18 from "@valet/plugin-workflows/plugin";
+import plugin12 from "@valet/plugin-security/plugin";
+import plugin13 from "@valet/plugin-sentry/plugin";
+import plugin14 from "@valet/plugin-slack/plugin";
+import plugin15 from "@valet/plugin-slack-user/plugin";
+import plugin16 from "@valet/plugin-stripe/plugin";
+import plugin17 from "@valet/plugin-telegram/plugin";
+import plugin18 from "@valet/plugin-typefully/plugin";
+import plugin19 from "@valet/plugin-workflows/plugin";
 
-export const bundledPlugins: ValetPlugin[] = [plugin0, plugin1, plugin2, plugin3, plugin4, plugin5, plugin6, plugin7, plugin8, plugin9, plugin10, plugin11, plugin12, plugin13, plugin14, plugin15, plugin16, plugin17, plugin18];
+export const bundledPlugins: ValetPlugin[] = [plugin0, plugin1, plugin2, plugin3, plugin4, plugin5, plugin6, plugin7, plugin8, plugin9, plugin10, plugin11, plugin12, plugin13, plugin14, plugin15, plugin16, plugin17, plugin18, plugin19];
 
 /** Brand slug per plugin, from each manifest's `iconSlug`. The connect UI
  * maps a slug to a brand mark; a plugin with no entry keeps the fallback

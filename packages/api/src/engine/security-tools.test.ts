@@ -24,6 +24,7 @@ import type {
   SessionEntry,
   ToolContext,
 } from "@valet/engine";
+import securityPlugin from "@valet/plugin-security/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { internalToken } from "../lib/internal-auth.js";
 import { loadSessionMeta } from "./session-meta.js";
@@ -186,6 +187,49 @@ describe("host wiring for kind='security' sessions", () => {
     );
     expect((session.options.tools ?? []).map((t) => t.name)).not.toContain("sec_plan_set");
     expect((session.options.skills ?? []).map((s) => s.name)).not.toContain("security-engagement-runner");
+  });
+
+  // plugin-security is registry-enabled since M9, and plugin skills attach
+  // globally — the host's `basePlugins` filter (spec implementation
+  // deviation 20) is what keeps the runner skill scoped. Boot with the
+  // manifest in the registry set to pin both halves: no leak into
+  // kind='code' sessions, and exactly one copy on the runner (the filtered
+  // registry entry plus the direct import must not double-attach).
+  it("with plugin-security in the registry: the skill stays off code sessions and attaches once to runners", async () => {
+    api = await bootTestApi({ plugins: [securityPlugin] });
+
+    const code = await fetch(`${api.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace: `/tmp/valet-sec-tools-${randomUUID()}` }),
+    });
+    const codeCreated = (await code.json()) as CreateSessionResponse;
+    const codeRows = await api.providers.db
+      .select()
+      .from(agentSessions)
+      .where(eq(agentSessions.id, codeCreated.id))
+      .limit(1);
+    const codeSession = await api.providers.engineHost.sessionFor(
+      codeCreated.id,
+      await loadSessionMeta(api.providers.db, codeRows[0]),
+    );
+    expect((codeSession.options.skills ?? []).map((s) => s.name)).not.toContain(
+      "security-engagement-runner",
+    );
+    expect((codeSession.options.roles ?? []).map((r) => r.name)).not.toContain("code-review");
+
+    const created = await createSecuritySession(api.baseUrl);
+    const rows = await api.providers.db
+      .select()
+      .from(agentSessions)
+      .where(eq(agentSessions.id, created.id))
+      .limit(1);
+    const runner = await api.providers.engineHost.sessionFor(
+      created.id,
+      await loadSessionMeta(api.providers.db, rows[0]),
+    );
+    const skillNames = (runner.options.skills ?? []).map((s) => s.name);
+    expect(skillNames.filter((n) => n === "security-engagement-runner")).toHaveLength(1);
   });
 });
 

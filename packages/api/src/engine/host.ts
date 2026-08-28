@@ -576,9 +576,12 @@ export class EngineHost {
     // engagement-runner skill, and the child read/send/status seams —
     // deliberately NOT the childSpawner, so the generic `task` tool answers
     // unavailable and every dispatch goes through sec_dispatch (Decision 3).
-    // plugin-security ships `enabled: false` until M9, so the registry
-    // excludes it from `this.opts.plugins`; the manifest is imported
-    // directly and threaded as an extra plugin for this build only.
+    // plugin-security is registry-enabled (M9), but `sessionExtras`/
+    // `skillsProviderFor` filter it out of the base plugin set — plugin
+    // skills attach globally, and the engagement-runner skill must reach
+    // ONLY runner builds (spec implementation deviation 20). The directly
+    // imported manifest, threaded as an extra plugin for this build only,
+    // is the single attach path, so the skill lands exactly once.
     const isSecurityRunner = (await this.storedKind(sessionId)) === "security";
     // Persona child wiring (M4): a session a running security cell claims
     // gets the persona tool set, the persona role, and the tool endpoint
@@ -802,6 +805,22 @@ export class EngineHost {
    * a workflow run's prompt must not meet that. Only the caller knows whether
    * a human is watching, so only the caller passes pins.
    */
+  /**
+   * The registry plugin set every session build starts from, with
+   * plugin-security filtered OUT (spec implementation deviation 20).
+   * Plugin skills have no scoping mechanism — `pluginSessionExtras`
+   * attaches every plugin's skills to every session — and the
+   * engagement-runner skill instructs a loop only `kind='security'`
+   * runners have the sec_* tools for. The plugin stays registry-enabled
+   * for discovery; the kind-gated build paths re-add the directly
+   * imported manifest (`extraPlugins` for the runner skill, the
+   * persona-cell `roles` concat for the code-review role), each exactly
+   * once.
+   */
+  private basePlugins(): ValetPlugin[] {
+    return (this.opts.plugins ?? []).filter((p) => p.name !== securityPlugin.name);
+  }
+
   private async sessionExtras(
     owner: Principal,
     orgId: string,
@@ -811,7 +830,7 @@ export class EngineHost {
     // plugins keep shadow priority.
     extraPlugins: readonly ValetPlugin[] = [],
   ): Promise<PluginSessionExtras> {
-    const allPlugins = [...(this.opts.plugins ?? []), ...extraPlugins];
+    const allPlugins = [...this.basePlugins(), ...extraPlugins];
     // Availability gate (integration-availability design): a service whose
     // deployment/org prerequisite is missing never reaches the catalog, so
     // `list_tools` has nothing to hide. Per-build, not process-static: the
@@ -858,7 +877,7 @@ export class EngineHost {
   ): (() => Promise<SkillSource[]>) | undefined {
     const db = this.opts.db;
     if (!db) return undefined;
-    const plugins = [...(this.opts.plugins ?? []), ...extraPlugins];
+    const plugins = [...this.basePlugins(), ...extraPlugins];
     return async () =>
       mergedSkillSources(plugins, await listSkillSourcesFor(db, owner, orgId)).skills;
   }
