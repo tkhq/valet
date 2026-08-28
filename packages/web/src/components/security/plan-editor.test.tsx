@@ -41,7 +41,11 @@ vi.mock("~/api/client", async (importOriginal) => {
 });
 
 const meMock = vi.fn(() => ({ data: { id: "u-1", orgRole: "member" }, isLoading: false, error: null }));
-const teamsMock = vi.fn(() => ({ data: { teams: [] }, isLoading: false, error: null }));
+// Type teams explicitly so an override can supply a team; a bare `[]` infers
+// `never[]` and rejects `{ id, callerRole }`.
+const teamsMock = vi.fn<
+  () => { data: { teams: Array<{ id: string; callerRole: string }> }; isLoading: boolean; error: null }
+>(() => ({ data: { teams: [] }, isLoading: false, error: null }));
 vi.mock("~/api/settings", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/settings")>();
   return { ...actual, useMe: () => meMock(), useTeams: () => teamsMock() };

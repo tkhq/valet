@@ -29,7 +29,9 @@ async function createSecuritySession(baseUrl: string): Promise<CreateSessionResp
 function postConfig(
   baseUrl: string,
   id: string,
-  body: { focus?: string | null; invariants?: string[]; categories?: string[] },
+  // `Record<string, unknown>` so a validation test can send an ill-typed
+  // field (numeric invariants) without a double-cast.
+  body: Record<string, unknown>,
   headers?: Record<string, string>,
 ) {
   return fetch(`${baseUrl}/api/sessions/${id}/security/config`, {
@@ -118,7 +120,7 @@ describe("api integration: focus + invariants config edit", () => {
       const created = await createSecuritySession(api.baseUrl);
       // invariants must be a string list.
       const res = await postConfig(api.baseUrl, created.id, {
-        invariants: [1, 2] as unknown as string[],
+        invariants: [1, 2],
       });
       expect(res.status).toBe(400);
       const body = (await res.json()) as { error: string };

@@ -1,5 +1,4 @@
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 
 /**
  * The extensible persona registry (dynamic-config M-F1, spec §Dynamic
@@ -26,23 +25,17 @@ export interface SecurityPersona {
  * directly (presets build every cell with this persona). */
 export const CODE_REVIEW_PERSONA = "code-review";
 
-// Static `new URL(<literal>, import.meta.url)` per persona — the api bundle's
-// inline-assets step can only inline a STATIC string literal, not a
-// `../../personas/${id}.md` template (that read is dynamic and breaks the
-// bundle). One literal per bundled persona keeps every read inlinable. The
-// path resolves from dist/lib/personas.js back to the package's personas/ dir.
-const CODE_REVIEW_URL = new URL("../../personas/code-review.md", import.meta.url);
-
-function readPersonaMarkdown(url: URL): string {
-  return readFileSync(fileURLToPath(url), "utf8");
-}
-
-/** Every bundled persona. Repo-defined personas are NOT in this list. */
+// The api bundle's inline-assets step only inlines a `readFileSync(new
+// URL("<literal>", import.meta.url), "utf8")` whose literal is AT the call
+// site — a URL held in a const/variable is silently NOT inlined (a runtime
+// read that fails in the single-file bundle). So each bundled persona reads
+// its markdown by its own literal call. Path resolves from dist/lib/ back to
+// the package's personas/ dir.
 export const BUNDLED_PERSONAS: readonly SecurityPersona[] = [
   {
     id: CODE_REVIEW_PERSONA,
     label: "Code review",
-    roleMarkdown: readPersonaMarkdown(CODE_REVIEW_URL),
+    roleMarkdown: readFileSync(new URL("../../personas/code-review.md", import.meta.url), "utf8"),
   },
 ];
 

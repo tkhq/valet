@@ -28,17 +28,25 @@ export function isKnownPlaybook(name: string): name is PlaybookName {
 
 const cache = new Map<string, string>();
 
-// Static `new URL(<literal>, import.meta.url)` per playbook — the api bundle's
-// inline-assets step can only inline a STATIC string literal, not a
-// `../../playbooks/${name}.md` template (that read is dynamic and breaks the
-// bundle). One literal per known playbook keeps every read inlinable.
-const PLAYBOOK_URLS: Record<PlaybookName, URL> = {
-  recon: new URL("../../playbooks/recon.md", import.meta.url),
-  authz: new URL("../../playbooks/authz.md", import.meta.url),
-  injection: new URL("../../playbooks/injection.md", import.meta.url),
-  "secrets-config": new URL("../../playbooks/secrets-config.md", import.meta.url),
-  verify: new URL("../../playbooks/verify.md", import.meta.url),
-};
+// The api bundle's inline-assets step only inlines a `readFileSync(new
+// URL("<literal>", import.meta.url), "utf8")` whose literal sits AT the call
+// site — a `${name}` template errors, and a Record-indexed URL is silently
+// NOT inlined (a runtime read that fails in the single-file bundle). So each
+// playbook is read by its own literal call in a switch.
+function readPlaybook(name: PlaybookName): string {
+  switch (name) {
+    case "recon":
+      return readFileSync(new URL("../../playbooks/recon.md", import.meta.url), "utf8");
+    case "authz":
+      return readFileSync(new URL("../../playbooks/authz.md", import.meta.url), "utf8");
+    case "injection":
+      return readFileSync(new URL("../../playbooks/injection.md", import.meta.url), "utf8");
+    case "secrets-config":
+      return readFileSync(new URL("../../playbooks/secrets-config.md", import.meta.url), "utf8");
+    case "verify":
+      return readFileSync(new URL("../../playbooks/verify.md", import.meta.url), "utf8");
+  }
+}
 
 /** The markdown for a known playbook. Throws on an unknown name. */
 export function playbookMarkdown(name: string): string {
@@ -47,7 +55,7 @@ export function playbookMarkdown(name: string): string {
   }
   const hit = cache.get(name);
   if (hit !== undefined) return hit;
-  const text = readFileSync(fileURLToPath(PLAYBOOK_URLS[name]), "utf8");
+  const text = readPlaybook(name);
   cache.set(name, text);
   return text;
 }
