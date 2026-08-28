@@ -59,20 +59,21 @@ describe("api integration: security session minting + read routes", () => {
     }
   });
 
-  it("defaults to the five-cell code-review plan when no preset is sent", async () => {
+  it("defaults to the code-review plan (recon → sweeps → verify → report) when no preset is sent", async () => {
     const api = await bootTestApi();
     try {
       const created = await createSecuritySession(api.baseUrl);
       const res = await fetch(`${api.baseUrl}/api/sessions/${created.id}/security`);
       const body = (await res.json()) as GetSessionSecurityResponse;
       const plan = parsePlan(body.engagement.plan, KNOWN_PERSONAS);
-      expect(plan.cells).toHaveLength(5);
+      expect(plan.cells).toHaveLength(6);
       expect(plan.cells.map((c) => c.name)).toEqual([
         "recon",
         "authz-sweep",
         "injection-sweep",
         "secrets-config",
         "verify",
+        "report",
       ]);
     } finally {
       await api.cleanup();

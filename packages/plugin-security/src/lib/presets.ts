@@ -133,47 +133,9 @@ export function securityKickoffPrompt(
 }
 
 export function codeReviewPresetPlan(): string {
-  return `cells:
-  - ordinal: 1
-    persona: ${CODE_REVIEW_PERSONA}
-    mode: fresh
-    name: recon
-    playbook: recon
-    goal: Map the codebase, seed the checklist from the file inventory, note trust boundaries
-    reads: []
-  - ordinal: 2
-    persona: ${CODE_REVIEW_PERSONA}
-    mode: fresh
-    name: authz-sweep
-    playbook: authz
-    goal: Sweep authorization on every route, mutation, and trust boundary from the recon map
-    reads: [1]
-    triad: true
-  - ordinal: 3
-    persona: ${CODE_REVIEW_PERSONA}
-    mode: fresh
-    name: injection-sweep
-    playbook: injection
-    goal: Sweep injection paths across SQL, command, template, path, and deserialization sinks
-    reads: [1]
-    triad: true
-  - ordinal: 4
-    persona: ${CODE_REVIEW_PERSONA}
-    mode: fresh
-    name: secrets-config
-    playbook: secrets-config
-    goal: Run the pre-baked scanners (gitleaks) and any repo-local scanners, triage their output, sweep secrets and config
-    reads: [1]
-    triad: true
-  - ordinal: 5
-    persona: ${CODE_REVIEW_PERSONA}
-    mode: fresh
-    name: verify
-    playbook: verify
-    goal: Attack every open finding, sec_finding_review each, refute what does not survive
-    reads: [1, 2, 3, 4]
-    review: true
-`;
+  // recon → authz / injection / secrets-config (triads) → verify → report. The
+  // report cell is the review's deliverable; every preset ends in one.
+  return serializePlan(buildPresetCells(PRESET_SWEEPS["code-review"], { report: true }));
 }
 
 /** One sweep the presets compose from: a stable name, playbook, and goal.
@@ -283,11 +245,11 @@ const PRESET_SWEEPS: Record<string, SweepDef[]> = {
   "full-pentest": [THREAT_MODEL, CODE_REVIEW_SWEEP, SAST_SWEEP, AUTHZ, INJECTION, ATTACK_TREE],
 };
 
-/** Presets whose plan ends in a report cell (M-P3). The report cell runs AFTER
- * verify and reads every prior ordinal, so it composes over the whole
- * engagement. Only `full-pentest` ends in a report today; the narrower presets
- * skip it to stay fast. */
-const PRESET_HAS_REPORT: ReadonlySet<string> = new Set(["full-pentest"]);
+/** Presets that end in a report cell (M-P3) — a written deliverable over the
+ * whole engagement (recon, confirmed findings, coverage ledger, verify verdict).
+ * The full-code-review and full-pentest presets produce one; the narrow, fast
+ * presets (secrets-config, access-injection) stay report-less to stay quick. */
+const PRESET_HAS_REPORT: ReadonlySet<string> = new Set(["code-review", "full-pentest"]);
 
 /**
  * Escape a scalar for a YAML double-quoted string. Escape the backslash FIRST,

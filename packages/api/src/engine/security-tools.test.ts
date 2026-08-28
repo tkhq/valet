@@ -254,11 +254,11 @@ describe("sec_start approval gate", () => {
     expect(captured?.type).toBe("approval");
     expect(captured?.title).toContain("acme/api");
     expect(captured?.body).toContain(`Pinned commit: ${SHA}`);
-    expect(captured?.body).toContain("Cells (5):");
+    expect(captured?.body).toContain("Cells (6):");
     expect(captured?.body).toContain("01 01-recon [code-review]");
     expect(captured?.body).toContain("Personas: code-review");
-    expect(captured?.body).toContain("Rough estimate: 5 cells × ~500k tokens");
-    expect(captured?.body).toContain((5 * ESTIMATED_TOKENS_PER_CELL).toLocaleString("en-US"));
+    expect(captured?.body).toContain("Rough estimate: 6 cells × ~500k tokens");
+    expect(captured?.body).toContain((6 * ESTIMATED_TOKENS_PER_CELL).toLocaleString("en-US"));
 
     // Denied means NOTHING started: still planning, no cells.
     const engagement = await engagementOf(api, created.id);
@@ -283,12 +283,12 @@ describe("sec_start approval gate", () => {
 
     // The default code-review preset marks its three sweeps triad: true, so
     // sec_start expands them to architect → worker → verifier (M-P2b):
-    // 1 recon + 3*3 + 1 verify = 11 cells.
-    expect(result.text).toContain(`engagement started on acme/api at ${SHA} (11 cells)`);
+    // 1 recon + 3*3 + 1 verify + 1 report = 12 cells.
+    expect(result.text).toContain(`engagement started on acme/api at ${SHA} (12 cells)`);
     const engagement = await engagementOf(api, created.id);
     expect(engagement.engagement.status).toBe("running");
     expect(engagement.engagement.repoRef).toBe(SHA);
-    expect(engagement.cells).toHaveLength(11);
+    expect(engagement.cells).toHaveLength(12);
     expect(engagement.cells[0].dir).toBe("01-recon");
     expect(engagement.cells[1].dir).toBe("02-authz-sweep-plan");
     expect(engagement.cells[1].persona).toBe("architect");
@@ -499,8 +499,9 @@ describe("sec_close", () => {
       repoFullName: "acme/api",
       repoRef: SHA,
     });
-    // The default preset expands its three sweeps into triads (M-P2b): 11 cells.
-    expect((manifest as { cells: unknown[] }).cells).toHaveLength(11);
+    // The default preset expands its three sweeps into triads (M-P2b) and ends
+    // in a report cell: 12 cells.
+    expect((manifest as { cells: unknown[] }).cells).toHaveLength(12);
   });
 });
 

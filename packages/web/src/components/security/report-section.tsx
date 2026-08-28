@@ -22,12 +22,16 @@ export function ReportSection({
   sessionId,
   report,
   generating,
+  hasReportStep = true,
 }: {
   sessionId: string;
   /** The report artifact, or null before the report cell writes one. */
   report: SecurityReportWire | null;
   /** True while a report cell is running — the report is on its way. */
   generating: boolean;
+  /** Whether the plan has a report step at all. When false, no report will ever
+   * be written, so the copy says so instead of promising one. */
+  hasReportStep?: boolean;
 }) {
   const [error, setError] = useState<string | null>(null);
   const [downloading, setDownloading] = useState<SecurityReportFormat | null>(null);
@@ -60,10 +64,16 @@ export function ReportSection({
           Generating the report…
         </p>
       )}
-      {!report && !generating && (
+      {!report && !generating && hasReportStep && (
         <p className="mt-2 text-[11px] text-muted">
           The report is not yet generated. It is written by the report cell at the end of the
           engagement.
+        </p>
+      )}
+      {!report && !generating && !hasReportStep && (
+        <p className="mt-2 text-[11px] text-muted">
+          This review has no report step, so no report is written. Use the Full code review or Full
+          pentest preset, or add a report step, to generate one.
         </p>
       )}
 

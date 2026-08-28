@@ -48,6 +48,7 @@ describe("api integration: security setup flow", () => {
         "injection-sweep",
         "secrets-config",
         "verify",
+        "report",
       ]);
       // The preview created nothing.
       const after = await api.providers.db.select().from(securityEngagements);
@@ -169,6 +170,7 @@ describe("api integration: security setup flow", () => {
         "injection-sweep",
         "secrets-config",
         "verify",
+        "report",
       ]);
     } finally {
       await api.cleanup();

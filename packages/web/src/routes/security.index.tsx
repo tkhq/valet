@@ -80,8 +80,8 @@ const SECURITY_PRESETS: readonly PresetChoice[] = [
   {
     id: "code-review",
     label: "Full code review",
-    blurb: "The deep default. Every sweep is double-checked.",
-    phases: ["Recon", "Access control", "Injection", "Secrets & config", "Verify"],
+    blurb: "The deep default. Every sweep is double-checked, then a written report.",
+    phases: ["Recon", "Access control", "Injection", "Secrets & config", "Verify", "Report"],
   },
   {
     id: "access-injection",

@@ -44,20 +44,27 @@ describe("api integration: structured plan edit", () => {
       const created = await createSecuritySession(api.baseUrl);
       const res = await fetch(`${api.baseUrl}/api/sessions/${created.id}/security`);
       const body = (await res.json()) as GetSessionSecurityResponse;
-      // The default five-cell code-review plan parses back into planCells.
+      // The default code-review plan parses back into planCells, ending in the
+      // report cell (M-P3).
       expect(body.planCells.map((c) => c.name)).toEqual([
         "recon",
         "authz-sweep",
         "injection-sweep",
         "secrets-config",
         "verify",
+        "report",
       ]);
       expect(body.planCells[0].ordinal).toBe(1);
       expect(body.planCells[0].reads).toEqual([]);
-      // The last cell is the verify/review cell that reads all earlier steps.
+      // Verify (second-to-last) reviews and reads the four earlier sweeps.
+      const verify = body.planCells[body.planCells.length - 2];
+      expect(verify.name).toBe("verify");
+      expect(verify.review).toBe(true);
+      expect(verify.reads).toEqual([1, 2, 3, 4]);
+      // The report cell is last and reads every prior ordinal.
       const last = body.planCells[body.planCells.length - 1];
-      expect(last.review).toBe(true);
-      expect(last.reads).toEqual([1, 2, 3, 4]);
+      expect(last.name).toBe("report");
+      expect(last.reads).toEqual([1, 2, 3, 4, 5]);
     } finally {
       await api.cleanup();
     }

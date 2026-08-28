@@ -17,9 +17,11 @@ import {
 describe("codeReviewPresetPlan", () => {
   it("round-trips through parsePlan without error", () => {
     const plan = parsePlan(codeReviewPresetPlan(), KNOWN_PERSONAS);
-    expect(plan.cells).toHaveLength(5);
-    expect(plan.cells.every((c) => c.persona === CODE_REVIEW_PERSONA)).toBe(true);
-    expect(plan.cells.map((c) => c.ordinal)).toEqual([1, 2, 3, 4, 5]);
+    expect(plan.cells).toHaveLength(6);
+    // The five review cells are the code-review persona; the sixth is the report.
+    expect(plan.cells.slice(0, 5).every((c) => c.persona === CODE_REVIEW_PERSONA)).toBe(true);
+    expect(plan.cells[5].persona).toBe("report");
+    expect(plan.cells.map((c) => c.ordinal)).toEqual([1, 2, 3, 4, 5, 6]);
   });
 
   it("wires the reads DAG: recon feeds the sweeps, verify reads everything", () => {
@@ -33,7 +35,7 @@ describe("codeReviewPresetPlan", () => {
 
   it("marks only the verify cell review: true", () => {
     const plan = parsePlan(codeReviewPresetPlan(), KNOWN_PERSONAS);
-    expect(plan.cells.map((c) => c.review === true)).toEqual([false, false, false, false, true]);
+    expect(plan.cells.map((c) => c.review === true)).toEqual([false, false, false, false, true, false]);
   });
 
   it("mentions the pre-baked scanner in the triage cell's goal", () => {
@@ -51,6 +53,7 @@ describe("codeReviewPresetPlan", () => {
       "injection",
       "secrets-config",
       "verify",
+      "report",
     ]);
   });
 
@@ -62,6 +65,7 @@ describe("codeReviewPresetPlan", () => {
       "injection-sweep",
       "secrets-config",
       "verify",
+      "report",
     ]);
   });
 
@@ -74,6 +78,7 @@ describe("codeReviewPresetPlan", () => {
       "03-injection-sweep",
       "04-secrets-config",
       "05-verify",
+      "06-report",
     ]);
     // Dirs are unique and filesystem-safe.
     expect(new Set(dirs).size).toBe(dirs.length);
@@ -96,39 +101,47 @@ describe("SECURITY_PRESETS + isKnownPreset", () => {
 });
 
 describe("presetPlan", () => {
-  // Expected cell shapes: ordinals dense, names in order, review only on verify.
-  const shapes: Record<string, { count: number; names: string[] }> = {
+  // Expected cell shapes. `code-review` ends in a report cell; the narrow
+  // presets do not (they stay fast).
+  const shapes: Record<string, { names: string[]; report?: boolean }> = {
     "code-review": {
-      count: 5,
-      names: ["recon", "authz-sweep", "injection-sweep", "secrets-config", "verify"],
+      names: ["recon", "authz-sweep", "injection-sweep", "secrets-config", "verify", "report"],
+      report: true,
     },
-    "secrets-config": { count: 3, names: ["recon", "secrets-config", "verify"] },
-    "access-injection": {
-      count: 4,
-      names: ["recon", "authz-sweep", "injection-sweep", "verify"],
-    },
+    "secrets-config": { names: ["recon", "secrets-config", "verify"] },
+    "access-injection": { names: ["recon", "authz-sweep", "injection-sweep", "verify"] },
   };
 
   for (const [id, shape] of Object.entries(shapes)) {
     it(`${id} round-trips through parsePlan with dense ordinals and the right cells`, () => {
       const plan = parsePlan(presetPlan(id), KNOWN_PERSONAS);
-      expect(plan.cells).toHaveLength(shape.count);
+      const count = shape.names.length;
+      expect(plan.cells).toHaveLength(count);
       expect(plan.cells.map((c) => c.ordinal)).toEqual(
-        Array.from({ length: shape.count }, (_, i) => i + 1),
+        Array.from({ length: count }, (_, i) => i + 1),
       );
       expect(plan.cells.map((c) => c.name)).toEqual(shape.names);
-      expect(plan.cells.every((c) => c.persona === CODE_REVIEW_PERSONA)).toBe(true);
-      // recon reads nothing; verify reads every prior ordinal and has review.
+      // recon reads nothing.
       expect(plan.cells[0].reads).toEqual([]);
-      const verify = plan.cells[plan.cells.length - 1];
-      expect(verify.name).toBe("verify");
+      // The verify cell has review:true and reads every prior sweep.
+      const verifyIdx = shape.names.indexOf("verify");
+      const verify = plan.cells[verifyIdx];
       expect(verify.review).toBe(true);
-      expect(verify.reads).toEqual(
-        Array.from({ length: shape.count - 1 }, (_, i) => i + 1),
-      );
-      // Every middle sweep reads recon [1].
-      for (let i = 1; i < plan.cells.length - 1; i++) {
+      expect(verify.reads).toEqual(Array.from({ length: verifyIdx }, (_, i) => i + 1));
+      // Every middle sweep (between recon and verify) reads recon [1].
+      for (let i = 1; i < verifyIdx; i++) {
         expect(plan.cells[i].reads).toEqual([1]);
+      }
+      if (shape.report) {
+        // The report cell is last, the report persona, no review, reads all prior.
+        const report = plan.cells[count - 1];
+        expect(report.name).toBe("report");
+        expect(report.persona).toBe("report");
+        expect(report.review).not.toBe(true);
+        expect(report.reads).toEqual(Array.from({ length: count - 1 }, (_, i) => i + 1));
+        expect(plan.cells.slice(0, -1).every((c) => c.persona === CODE_REVIEW_PERSONA)).toBe(true);
+      } else {
+        expect(plan.cells.every((c) => c.persona === CODE_REVIEW_PERSONA)).toBe(true);
       }
     });
   }
@@ -151,16 +164,17 @@ describe("presetPlan", () => {
     expect(presetPlan("code-review")).toBe(codeReviewPresetPlan());
   });
 
-  it("injects paths onto the sweep cells only, not recon or verify", () => {
+  it("injects paths onto the sweep cells only, not recon/verify/report", () => {
     const paths = ["packages/api"];
     for (const id of ["code-review", "secrets-config", "access-injection"]) {
       const plan = parsePlan(presetPlan(id, { paths }), KNOWN_PERSONAS);
-      // Recon (first) and verify (last) stay repo-wide.
-      expect(plan.cells[0].paths).toBeUndefined();
-      expect(plan.cells[plan.cells.length - 1].paths).toBeUndefined();
-      // Every middle sweep carries the paths.
-      for (let i = 1; i < plan.cells.length - 1; i++) {
-        expect(plan.cells[i].paths).toEqual(paths);
+      for (const cell of plan.cells) {
+        // recon, verify, and the report cell stay repo-wide; the sweeps carry
+        // the include globs.
+        const bookend =
+          cell.name === "recon" || cell.name === "verify" || cell.name === "report";
+        if (bookend) expect(cell.paths).toBeUndefined();
+        else expect(cell.paths).toEqual(paths);
       }
     }
   });

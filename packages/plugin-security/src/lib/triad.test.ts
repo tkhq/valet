@@ -193,20 +193,22 @@ describe("hasTriad", () => {
 
 describe("preset triad expansion", () => {
   // The code-review preset's three sweeps (authz, injection, secrets-config)
-  // are triads; recon and verify stay single. So the 5-cell plan materializes
-  // to 1 + 3*3 + 1 = 11 cells.
-  it("expands the code-review preset's sweeps to eleven cells", () => {
+  // are triads; recon, verify, and the report cell stay single. So the 6-cell
+  // plan materializes to 1 + 3*3 + 1 + 1 = 12 cells.
+  it("expands the code-review preset's sweeps to twelve cells", () => {
     const plan = parsePlan(presetPlan("code-review"), KNOWN_PERSONAS);
     expect(hasTriad(plan.cells)).toBe(true);
     const expanded = expandTriads(plan.cells);
-    expect(expanded).toHaveLength(11);
+    expect(expanded).toHaveLength(12);
     expect(expanded.filter((c) => c.persona === "architect")).toHaveLength(3);
     expect(expanded.filter((c) => c.persona === "verifier")).toHaveLength(3);
     // review is set on the three verifier cells + the final engagement verify.
     expect(expanded.filter((c) => c.review === true)).toHaveLength(4);
+    // The report cell is last, a single cell.
+    expect(expanded[expanded.length - 1].name).toBe("report");
     // Dense ordinals, no triad flags.
     expect(expanded.map((c) => c.ordinal)).toEqual(
-      Array.from({ length: 11 }, (_, i) => i + 1),
+      Array.from({ length: 12 }, (_, i) => i + 1),
     );
   });
 

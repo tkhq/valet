@@ -31,10 +31,14 @@ const SHA = "0123456789abcdef0123456789abcdef01234567";
  * unit suite; this fixture keeps the rest of the suite on the flat shape.
  */
 const FLAT_PLAN = serializePlan(
-  parsePlan(codeReviewPresetPlan(), KNOWN_PERSONAS).cells.map((c) => {
-    const { triad: _triad, ...rest } = c;
-    return rest;
-  }),
+  parsePlan(codeReviewPresetPlan(), KNOWN_PERSONAS)
+    .cells // Drop the report cell and the triad flags so this suite stays on the
+    // flat five-cell shape it predates (recon + 3 sweeps + verify).
+    .filter((c) => c.persona !== "report")
+    .map((c) => {
+      const { triad: _triad, ...rest } = c;
+      return rest;
+    }),
 );
 
 const DONE_DOC = [
@@ -153,8 +157,8 @@ describe("security engagement service", () => {
       plan: codeReviewPresetPlan(),
     });
     const { cells } = await svc.startEngagement(engagement.id, { resolvedSha: SHA });
-    // 1 recon + 3 triads (3 cells each) + 1 verify = 11.
-    expect(cells).toHaveLength(11);
+    // 1 recon + 3 triads (3 cells each) + 1 verify + 1 report = 12.
+    expect(cells).toHaveLength(12);
     expect(cells.map((c) => c.dir)).toEqual([
       "01-recon",
       "02-authz-sweep-plan",
@@ -167,6 +171,7 @@ describe("security engagement service", () => {
       "09-secrets-config",
       "10-secrets-config-verify",
       "11-verify",
+      "12-report",
     ]);
     expect(cells.map((c) => c.persona)).toEqual([
       "code-review",
@@ -180,6 +185,7 @@ describe("security engagement service", () => {
       "code-review",
       "verifier",
       "code-review",
+      "report",
     ]);
     // The authz worker (ordinal 3) reads recon (1) + its architect (2). Its
     // verifier (ordinal 4) reads the worker (3). review only on verifiers +
@@ -190,7 +196,7 @@ describe("security engagement service", () => {
     // /plan.yml reflects the expanded plan.
     const planFile = await svc.readFile(engagement.id, "/plan.yml");
     const reparsed = parsePlan(planFile.content, KNOWN_PERSONAS);
-    expect(reparsed.cells).toHaveLength(11);
+    expect(reparsed.cells).toHaveLength(12);
   });
 
   it("materializes the full-pentest preset with the model personas (M-P2c)", async () => {

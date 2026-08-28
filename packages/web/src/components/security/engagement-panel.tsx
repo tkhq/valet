@@ -237,7 +237,12 @@ export function EngagementPanel({
           report exists, is generating, or is pending the report cell. Hidden
           while planning, where no report is possible yet. */}
       {engagement.status !== "planning" && (
-        <ReportSection sessionId={sessionId} report={report} generating={reportGenerating} />
+        <ReportSection
+          sessionId={sessionId}
+          report={report}
+          generating={reportGenerating}
+          hasReportStep={cells.some((c) => c.persona === "report")}
+        />
       )}
     </div>
   );
