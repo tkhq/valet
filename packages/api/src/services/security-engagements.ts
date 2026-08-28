@@ -1985,7 +1985,7 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
 
     // The engagement's authorized surface, computed once.
     const declaredTools = new Set(
-      parseJsonStringArrayColumn(engagement.configTools).map((t) => t.trim().toLowerCase()),
+      parseDeclaredToolIds(engagement.configTools).map((t) => t.trim().toLowerCase()),
     );
     const authorizedGlobs = authorizedScopeGlobs(engagement);
     const plannedPersonas = plannedPersonaSet(engagement);
@@ -2484,6 +2484,28 @@ function parseJsonStringArrayColumn(raw: string | null): string[] {
     // A malformed value is treated as an empty list.
   }
   return [];
+}
+
+/** The declared-tool ids on `config_tools` (M-P4c coordinator). Since M-P4a the
+ * column holds `ToolDecl[]` (objects with an `id`); a legacy string entry is
+ * still read as its own id. A malformed value yields []. */
+function parseDeclaredToolIds(raw: string | null): string[] {
+  if (raw === null) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const ids: string[] = [];
+    for (const entry of parsed) {
+      if (typeof entry === "string") ids.push(entry);
+      else if (typeof entry === "object" && entry !== null) {
+        const id = (entry as Record<string, unknown>).id;
+        if (typeof id === "string") ids.push(id);
+      }
+    }
+    return ids;
+  } catch {
+    return [];
+  }
 }
 
 /** Parse the engagement's `authorized_scope` JSON (`{ hosts: string[] }` or
