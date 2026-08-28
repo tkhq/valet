@@ -398,24 +398,24 @@ The note's threat list, plus what running inside Valet adds:
 
 ## Acceptance Scenarios
 
-Integration tests at the API level, `packages/api/src/integration/security-acceptance.test.ts`, virtual sandbox provider.
+Integration tests at the API level, `packages/api/src/integration/security-acceptance.test.ts`, virtual sandbox provider. [M10: the suite runs with no ANTHROPIC_API_KEY — runner threads stay paused, children settle by abort (a real settlement), and `sec_*` tool calls are emulated as the tools perform them: internal token + acting session header against the same routes. Shared moves live in `security-harness.ts`.]
 
 ### Scenario A: code-review engagement end to end
 
 1. Hub creates a session with `kind='security'` and a repo binding; engagement seeded with the code-review preset, status `planning`.
 2. Runner refines the plan via `sec_plan_set` (chat: "skip the secrets sweep"); plan validates; `reads` edges re-validate.
-3. `sec_start` opens an approval gate naming repo, SHA, 4 cells, persona, cost estimate. User approves; cells materialize with `dir` and `reads` stamped; status `running`.
+3. `sec_start` opens an approval gate naming repo, SHA, 4 cells, persona, cost estimate. User approves; cells materialize with `dir` and `reads` stamped; status `running`. [M10: the gate payload is asserted in `engine/security-tools.test.ts`; the acceptance test drives the post-approval start route with a fake 40-hex SHA, which resolves offline.]
 4. `sec_dispatch` spawns cell 1's child with the repo pinned to the SHA; cell 1 is `running` with a `child_session_id`.
 5. The recon persona writes state doc revisions; the cell rail's progress counts update from them.
 6. Child settles with `status: done` and pending counts zero; `sec_cell_complete` passes; cell 1 `completed`.
 7. Cell 2 (authz, reads: 01) dispatches; its prompt names only `/cells/01-recon/state.yml`; the persona reads it verbatim via `sec_fs_read` and reports two findings with evidence bodies.
 8. Cell 3 (injection) repeats. The verify cell dispatches, reads all prior state docs, and `sec_finding_review`s one finding to `refuted` with a reason.
 9. `sec_close` returns a manifest: 4 completed cells, distinct-fingerprint counts by severity, 1 refuted. Engagement `completed`.
-10. The findings table and cell rail reflect every transition (REST assertions); a finding row carries the GitHub blob link at the pinned SHA.
+10. The findings table and cell rail reflect every transition (REST assertions); a finding row carries the GitHub blob link at the pinned SHA. [M10: the wire carries rows, not rendered links (deviation 12's precedent) — the test asserts the pinned `repoRef` the client derives the blob link from.]
 
 ### Scenario B: api restart is a non-event
 
-1. Run Scenario A through step 4, then simulate an api restart mid-cell-2 (engine reload).
+1. Run Scenario A through step 4, then simulate an api restart mid-cell-2 (engine reload). [M10: emulated in-process — `engineHost.evictAll()` drops all in-memory session state, then the test mirrors main.ts's boot over the same PGlite db (`sessionFor` every unsettled session, `rearm()` on a FRESH `ChildWatcher`). The process boundary itself (fresh WASM handle) is held by `orchestrator-restart.test.ts` for the same spawn/watch/rearm machinery; repeating it here would gate the suite on a real model key.]
 2. On boot, `ChildWatcher` re-arms the unsettled watch; cell 2's child resumes and settles with no user action.
 3. The settle signal wakes the runner; the loop continues through `sec_cell_complete` and the next dispatch.
 4. Assert: no re-dispatch happened (cell 2 `attempts` is 1), cell 1 never re-ran, and cell 1's finding and state doc row ids are unchanged.
@@ -424,7 +424,7 @@ Integration tests at the API level, `packages/api/src/integration/security-accep
 
 1. A persona settles while its latest state doc shows `status: done` but `queue.pending: 2`.
 2. `sec_cell_complete` refuses, naming the violation.
-3. Runner `child_send`s the persona to continue; the persona drains the queue, writes a final state doc, settles.
+3. Runner `child_send`s the persona to continue; the persona drains the queue, writes a final state doc, settles. [M10: the steer's EFFECT is asserted — the same claimed child writes the corrected doc while the durable watch stays settled; `child_send` itself is generic children.ts plumbing with its own suite.]
 4. `sec_cell_complete` passes. Assert the cell never showed `completed` before the pass.
 
 ### Scenario D: yield and child death
@@ -432,11 +432,11 @@ Integration tests at the API level, `packages/api/src/integration/security-accep
 1. A persona checkpoints and settles with `status: yielding`, `queue.pending: 31`.
 2. `sec_cell_complete` marks the cell `yielded`; the runner calls `sec_dispatch { cell_id, mode: 'resume' }`; `attempts` becomes 2.
 3. The fresh child reads its own latest state doc, continues from the queue, and completes; assert findings reported before the yield survive with stable ids.
-4. Separately: a running cell's child is destroyed (sandbox reclaimed, no settle). `sec_status` shows the child gone; the runner calls `sec_cell_fail` then re-dispatches with `mode: resume`; the cell completes on attempt 2.
+4. Separately: a running cell's child is destroyed (sandbox reclaimed, no settle). `sec_status` shows the child gone; the runner calls `sec_cell_fail` then re-dispatches with `mode: resume`; the cell completes on attempt 2. [M10: steps 1–3 are held by `security-yield.test.ts`; step 4's destruction rides the session DELETE route — the "gone" signal the child status reader reports.]
 
 ### Scenario E: triage, export, file issues
 
-Web-level tests beside the panel components; API-level tests for the routes.
+Web-level tests beside the panel components; API-level tests for the routes. [M10: split across suites — steps 1 (admin flip + actor stamp), 2 (audit row), and 3's link chip live in `security-triage.test.ts`; the acceptance suite adds SARIF provenance from a started engagement, route-level filing through a faked `github.create_issue` with a provider call count, the digest body, the Linear corrective 400, and the non-admin 403.]
 
 1. From Scenario A's completed engagement, a session admin refutes one open finding with a reason; the row's status chip updates; `status_actor` is `user:<id>`; a non-admin gets a 403 naming the required right.
 2. The user filters to `severity: high, status: open` and exports SARIF; the download contains only the filtered set, `result.ruleId`s equal fingerprints, the pinned SHA is in `versionControlProvenance`, and the refuted finding appears in `suppressions` when exported unfiltered. An audit event records actor, format, and row count.
