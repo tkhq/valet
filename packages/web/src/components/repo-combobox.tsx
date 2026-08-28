@@ -60,14 +60,26 @@ export function RepoCombobox({
   repos,
   label,
   onSelect,
+  onSelectPublic,
 }: {
   repos: RepoOption[];
   label: string;
   onSelect: (repo: RepoOption) => void;
+  /** When set, the picker offers the typed value as a public repo (anonymous
+   * clone) once it parses as owner/repo or a GitHub URL and is not already an
+   * org match. This folds the public-repo path into the one picker, so a repo
+   * outside your connected GitHub org is never a dead-end "No matching repos". */
+  onSelectPublic?: (parsed: { fullName: string; cloneUrl: string }) => void;
 }) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const matches = repos.filter((r) => matchesNeedle(query, [r.fullName]));
+  // Offer the typed value as a public repo when it parses and is not already an
+  // org match — the escape hatch for any public repo the GitHub app can't see.
+  const parsedPublic = onSelectPublic ? parsePublicRepo(query) : null;
+  const showPublic =
+    parsedPublic !== null &&
+    !matches.some((m) => m.fullName.toLowerCase() === parsedPublic.fullName.toLowerCase());
 
   // The close-on-blur timer below outlives the component if the dialog is
   // dismissed within its window: it then sets state on an unmounted tree,
@@ -109,8 +121,12 @@ export function RepoCombobox({
           aria-label="Repository results"
           className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto rounded border border-line bg-paper py-1 shadow-lg"
         >
-          {matches.length === 0 && (
-            <div className="px-3 py-1.5 text-sm text-muted">No matching repos.</div>
+          {matches.length === 0 && !showPublic && (
+            <div className="px-3 py-1.5 text-sm text-muted">
+              {onSelectPublic
+                ? "No matching repos. Type owner/repo or a GitHub URL to scan a public one."
+                : "No matching repos."}
+            </div>
           )}
           {matches.map((r) => (
             <button
@@ -129,6 +145,28 @@ export function RepoCombobox({
               {r.installed && <Badge variant="accent">Installed</Badge>}
             </button>
           ))}
+          {showPublic && parsedPublic && (
+            <button
+              type="button"
+              role="option"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                onSelectPublic?.(parsedPublic);
+                setQuery("");
+                setOpen(false);
+              }}
+              className={`flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-sm hover:bg-ink-wash ${
+                matches.length > 0 ? "border-t border-line" : ""
+              }`}
+            >
+              <span className="truncate text-ink">
+                Scan <span className="font-medium">{parsedPublic.fullName}</span> as a public repo
+              </span>
+              <span className="shrink-0 rounded bg-ink-wash px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted">
+                Public
+              </span>
+            </button>
+          )}
         </div>
       )}
     </div>

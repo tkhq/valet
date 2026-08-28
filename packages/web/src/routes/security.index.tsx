@@ -9,7 +9,6 @@ import { Badge, Button, Input, Label, Spinner } from "~/components/primitives";
 import type { SecurityNewSearch } from "./security.new";
 import {
   RepoCombobox,
-  parsePublicRepo,
   workspaceForRepo,
   type RepoOption,
 } from "~/components/repo-combobox";
@@ -78,17 +77,17 @@ const SECURITY_PRESETS: readonly { id: string; label: string; description: strin
   {
     id: "code-review",
     label: "Full code review",
-    description: "Recon, access control, injection, secrets/config, verify (5 cells).",
+    description: "Recon, access control, injection, secrets/config, verify (5 steps).",
   },
   {
     id: "secrets-config",
     label: "Secrets & config",
-    description: "Recon, secrets/config scanner sweep, verify (3 cells). Fast.",
+    description: "Recon, secrets/config scanner sweep, verify (3 steps). Fast.",
   },
   {
     id: "access-injection",
     label: "Access control & injection",
-    description: "Recon, authz, injection, verify (4 cells).",
+    description: "Recon, authz, injection, verify (4 steps).",
   },
 ];
 
@@ -109,7 +108,6 @@ function NewReviewCard() {
   const scope = useWorkspaceScope();
   const modelsQ = useModels();
   const [repo, setRepo] = useState<SelectedRepo | null>(null);
-  const [pasteInput, setPasteInput] = useState("");
   // The hub always submits a model; sonnet-4-6 is the capable default. This is
   // a fixed default, not derived from a prop, so no mount-time-state sync is
   // needed — the value only changes when the user picks another model.
@@ -143,14 +141,12 @@ function NewReviewCard() {
     });
   }
 
-  // Any public repo — no GitHub connection needed. A parsed binding carries
-  // an empty ref; the server resolves the default branch HEAD, and the clone
-  // runs anonymously (public repos need no token).
-  const parsedPaste = parsePublicRepo(pasteInput);
-  function addPublicRepo() {
-    if (!parsedPaste) return;
-    setRepo({ fullName: parsedPaste.fullName, cloneUrl: parsedPaste.cloneUrl, ref: "" });
-    setPasteInput("");
+  // A public repo the connected GitHub app cannot see — the picker offers it
+  // inline once the typed value parses. The binding carries an empty ref; the
+  // server resolves the default branch HEAD and clones anonymously (a public
+  // repo needs no token).
+  function addPublicRepo(parsed: { fullName: string; cloneUrl: string }) {
+    setRepo({ fullName: parsed.fullName, cloneUrl: parsed.cloneUrl, ref: "" });
   }
 
   function configure() {
@@ -175,7 +171,7 @@ function NewReviewCard() {
       <div>
         <h2 className="text-sm font-semibold text-ink">New review</h2>
         <p className="text-xs text-muted">
-          The engagement runner scans one repository and reports findings for triage.
+          Scan a repository for security issues and triage the findings.
         </p>
       </div>
       <CreateScopeLine what="review" />
@@ -208,46 +204,26 @@ function NewReviewCard() {
             </div>
           </div>
         ) : (
-          <div className="space-y-2">
-            {showConnectHint ? (
-              <p className="text-xs text-muted">
-                Connect GitHub to list your repositories, or paste a public repo below.{" "}
-                <a href="/settings/connected-accounts" className="text-moss underline">
-                  Go to settings
-                </a>
-              </p>
-            ) : (
-              <RepoCombobox repos={repos} label="Search repositories" onSelect={pickRepo} />
-            )}
-            <div className="flex items-center gap-2">
-              <Input
-                aria-label="Public repository"
-                placeholder="Or paste a public repo — owner/repo or a GitHub URL"
-                value={pasteInput}
-                onChange={(e) => setPasteInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    addPublicRepo();
-                  }
-                }}
-                className="h-8 flex-1 text-xs"
-              />
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                disabled={parsedPaste === null}
-                onClick={addPublicRepo}
-              >
-                Add
-              </Button>
-            </div>
-            {pasteInput.trim() !== "" && parsedPaste === null && (
-              <p className="text-xs text-danger-600">
-                Enter a public repo as owner/repo or a GitHub URL.
-              </p>
-            )}
+          <div className="space-y-1.5">
+            <RepoCombobox
+              repos={repos}
+              label="Search repositories"
+              onSelect={pickRepo}
+              onSelectPublic={addPublicRepo}
+            />
+            <p className="text-[11px] text-muted">
+              {showConnectHint ? (
+                <>
+                  Type any public repo as owner/repo or a GitHub URL.{" "}
+                  <a href="/settings/connected-accounts" className="text-moss underline">
+                    Connect GitHub
+                  </a>{" "}
+                  to list your organization&apos;s repositories.
+                </>
+              ) : (
+                "Not in your organization? Type any public repo as owner/repo or a GitHub URL."
+              )}
+            </p>
           </div>
         )}
       </div>
@@ -309,7 +285,7 @@ function NewReviewCard() {
             </option>
           ))}
         </select>
-        <p className="text-xs text-muted">The runner and its review personas use this model.</p>
+        <p className="text-xs text-muted">The review and its sub-agents use this model.</p>
       </div>
 
       <div className="flex justify-end">

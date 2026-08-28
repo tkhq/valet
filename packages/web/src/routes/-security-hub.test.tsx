@@ -295,12 +295,14 @@ describe("SecurityIndexPage", () => {
     expect(select.value).toBe("code-review");
   });
 
-  it("configures against a pasted public repo with no ref (default branch)", () => {
+  it("offers a typed public repo inline in the picker and configures it (default branch)", () => {
     renderPage();
-    fireEvent.change(screen.getByLabelText("Public repository"), {
+    // Type a repo the connected org does not have; the picker offers it as a
+    // public repo instead of dead-ending on "No matching repos".
+    fireEvent.change(screen.getByLabelText("Search repositories"), {
       target: { value: "https://github.com/openai/gpt-4" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    fireEvent.click(screen.getByRole("option", { name: /Scan openai\/gpt-4 as a public repo/i }));
 
     const configure = screen.getByRole("button", { name: "Configure review" }) as HTMLButtonElement;
     expect(configure.disabled).toBe(false);
