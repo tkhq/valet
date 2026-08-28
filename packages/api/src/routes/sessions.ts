@@ -17,7 +17,7 @@ import {
 import { canAdministerSession, canViewSession } from "../services/session-access.js";
 import { createSecurityEngagementService } from "../services/security-engagements.js";
 import { isTeamMember, listTeamsForUser } from "../services/teams.js";
-import { codeReviewPresetPlan } from "@valet/plugin-security";
+import { codeReviewPresetPlan, securityKickoffPrompt } from "@valet/plugin-security";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import {
@@ -391,10 +391,18 @@ sessionsRouter.post("/", async (c) => {
   // believing nothing was created while an orphan row stayed behind. The
   // caller sees `runState: "idle"` instead of "working" and can send the
   // prompt again through the messages route; the server logs the cause.
+  // A security session is an engagement runner, not a chat: it must start
+  // working the moment it is created, so it always gets a kickoff turn even
+  // when the user left the focus box empty. The user's optional prompt folds
+  // in as focus notes. A code session only runs when the user sends a prompt.
+  const firstPrompt =
+    kind === "security"
+      ? securityKickoffPrompt(repos[0].fullName, body.initialPrompt)
+      : body.initialPrompt;
   let queuedPrompt = false;
-  if (body.initialPrompt && created) {
+  if (firstPrompt && created) {
     try {
-      queuedPrompt = (await submitSessionPrompt(c.var.providers, created, body.initialPrompt)) !== null;
+      queuedPrompt = (await submitSessionPrompt(c.var.providers, created, firstPrompt)) !== null;
     } catch (err) {
       console.error(`session ${id}: initialPrompt enqueue failed:`, err);
     }

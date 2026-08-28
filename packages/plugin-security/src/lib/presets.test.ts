@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { cellDir } from "./plan.js";
 import { parsePlan } from "./plan.js";
-import { CODE_REVIEW_PERSONA, codeReviewPresetPlan, KNOWN_PERSONAS } from "./presets.js";
+import {
+  CODE_REVIEW_PERSONA,
+  codeReviewPresetPlan,
+  KNOWN_PERSONAS,
+  securityKickoffPrompt,
+} from "./presets.js";
 
 describe("codeReviewPresetPlan", () => {
   it("round-trips through parsePlan without error", () => {
@@ -55,5 +60,25 @@ describe("codeReviewPresetPlan", () => {
     // Dirs are unique and filesystem-safe.
     expect(new Set(dirs).size).toBe(dirs.length);
     for (const dir of dirs) expect(dir).toMatch(/^\d{2}-[a-z0-9-]+$/);
+  });
+});
+
+describe("securityKickoffPrompt", () => {
+  it("names the repo and points the runner at sec_status then sec_start", () => {
+    const p = securityKickoffPrompt("acme/api");
+    expect(p).toContain("acme/api");
+    expect(p).toContain("sec_status");
+    expect(p).toContain("sec_start");
+    expect(p).not.toContain("Focus notes");
+  });
+
+  it("folds the user's focus notes in when present", () => {
+    const p = securityKickoffPrompt("acme/api", "skip the secrets sweep");
+    expect(p).toContain("Focus notes");
+    expect(p).toContain("skip the secrets sweep");
+  });
+
+  it("omits the focus block for blank notes", () => {
+    expect(securityKickoffPrompt("acme/api", "   ")).not.toContain("Focus notes");
   });
 });
