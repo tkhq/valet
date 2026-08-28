@@ -71,8 +71,10 @@ import {
   mintSandboxJwt,
   revokeSandboxTokens,
 } from "../auth/sandbox-tokens.js";
+import securityPlugin from "@valet/plugin-security/plugin";
 import { orchestratorPersona } from "../orchestrator/persona.js";
 import { buildMemoryTools } from "../orchestrator/memory-tools.js";
+import { buildSecurityRunnerTools } from "./security-tools.js";
 import { assembleMemorySnapshot } from "../orchestrator/snapshot.js";
 import { ensureTodayJournal } from "../orchestrator/bootstrap.js";
 import { journalCompactionHook } from "../orchestrator/compaction.js";
@@ -568,13 +570,23 @@ export class EngineHost {
   }
 
   private async buildSession(sessionId: string, meta: SessionMeta): Promise<Session> {
+    // Security runner wiring (Valet Security spec §Tools): a session whose
+    // app row carries kind='security' gets the sec_* runner tools, the
+    // engagement-runner skill, and the child read/send/status seams —
+    // deliberately NOT the childSpawner, so the generic `task` tool answers
+    // unavailable and every dispatch goes through sec_dispatch (Decision 3).
+    // plugin-security ships `enabled: false` until M9, so the registry
+    // excludes it from `this.opts.plugins`; the manifest is imported
+    // directly and threaded as an extra plugin for this build only.
+    const isSecurityRunner = (await this.storedKind(sessionId)) === "security";
+    const extraPlugins = isSecurityRunner ? [securityPlugin] : [];
     // `SessionMeta` carries no principal, and this builder passes no `owner`
     // to the engine either — `Session`'s constructor then defaults the
     // principal to `{ type: "user", id: options.userId }`. So the acting
     // user IS this session's owner, and the same `{ user, meta.userId }`
     // scope the session's credentials already use is the honest one here.
-    const extras = await this.sessionExtras({ type: "user", id: meta.userId }, meta.orgId);
-    const skillsProvider = this.skillsProviderFor({ type: "user", id: meta.userId }, meta.orgId);
+    const extras = await this.sessionExtras({ type: "user", id: meta.userId }, meta.orgId, [], extraPlugins);
+    const skillsProvider = this.skillsProviderFor({ type: "user", id: meta.userId }, meta.orgId, extraPlugins);
 
     const engine = new Engine({
       providers: {
@@ -656,6 +668,23 @@ export class EngineHost {
       ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
     };
     const policyResolver = this.getPolicyResolver();
+    // Runner tools sit before the plugin tools so the loop surface reads
+    // first in the tool list. The toolConfig mirrors the orchestrator's
+    // (apiBaseUrl + internal token for the sec_* HTTP seam; child
+    // read/send/status seams for steering dispatched personas) minus the
+    // childSpawner — see the isSecurityRunner comment above.
+    const sessionTools = isSecurityRunner ? [...buildSecurityRunnerTools(), ...extras.tools] : extras.tools;
+    const securityToolConfig = isSecurityRunner
+      ? {
+          toolConfig: {
+            ...(this.opts.apiBaseUrl ? { apiBaseUrl: this.opts.apiBaseUrl } : {}),
+            internalToken: internalToken(),
+            ...(this.opts.childReader ? { childReader: this.opts.childReader } : {}),
+            ...(this.opts.childSender ? { childSender: this.opts.childSender } : {}),
+            ...(this.opts.childStatusReader ? { childStatusReader: this.opts.childStatusReader } : {}),
+          },
+        }
+      : {};
     const session = existing
       ? await engine.restoreSession({
           sessionId,
@@ -668,9 +697,10 @@ export class EngineHost {
             modelSpec,
             resolveModel,
             systemPrompt: SYSTEM_PROMPT,
-            tools: extras.tools.length ? extras.tools : undefined,
+            tools: sessionTools.length ? sessionTools : undefined,
             skills: extras.skills.length ? extras.skills : undefined,
             roles: extras.roles.length ? extras.roles : undefined,
+            ...securityToolConfig,
             ...(skillsProvider ? { skillsProvider } : {}),
             ...(specProvider ? { specProvider } : {}),
             ...(credentialResolver ? { credentialResolver } : {}),
@@ -689,9 +719,10 @@ export class EngineHost {
           modelSpec,
           resolveModel,
           systemPrompt: SYSTEM_PROMPT,
-          tools: extras.tools.length ? extras.tools : undefined,
+          tools: sessionTools.length ? sessionTools : undefined,
           skills: extras.skills.length ? extras.skills : undefined,
           roles: extras.roles.length ? extras.roles : undefined,
+          ...securityToolConfig,
           ...(skillsProvider ? { skillsProvider } : {}),
           ...(specProvider ? { specProvider } : {}),
           ...(credentialResolver ? { credentialResolver } : {}),
@@ -747,16 +778,21 @@ export class EngineHost {
     owner: Principal,
     orgId: string,
     pins: readonly PinnedActionSpec[] = [],
+    // Build-scoped plugin additions (the security runner's disabled-in-
+    // registry manifest) — appended after the registry set so registry
+    // plugins keep shadow priority.
+    extraPlugins: readonly ValetPlugin[] = [],
   ): Promise<PluginSessionExtras> {
+    const allPlugins = [...(this.opts.plugins ?? []), ...extraPlugins];
     // Availability gate (integration-availability design): a service whose
     // deployment/org prerequisite is missing never reaches the catalog, so
     // `list_tools` has nothing to hide. Per-build, not process-static: the
     // org-credential half of availability changes when an admin connects or
     // removes the org app.
     const plugins = gateUnavailableActions(
-      this.opts.plugins ?? [],
+      allPlugins,
       await unavailableServiceSet({
-        plugins: this.opts.plugins ?? [],
+        plugins: allPlugins,
         orgId,
         credentials: this.opts.engineCredentials,
         env: process.env,
@@ -787,10 +823,14 @@ export class EngineHost {
   private skillsProviderFor(
     owner: Principal,
     orgId: string,
+    // Must match the `extraPlugins` the build's `sessionExtras` got, or a
+    // registry refresh silently DROPS the extras' skills (the refresh
+    // replaces the session's whole skill map from this provider).
+    extraPlugins: readonly ValetPlugin[] = [],
   ): (() => Promise<SkillSource[]>) | undefined {
     const db = this.opts.db;
     if (!db) return undefined;
-    const plugins = this.opts.plugins ?? [];
+    const plugins = [...(this.opts.plugins ?? []), ...extraPlugins];
     return async () =>
       mergedSkillSources(plugins, await listSkillSourcesFor(db, owner, orgId)).skills;
   }
@@ -1285,6 +1325,22 @@ export class EngineHost {
    */
   mintSandboxJwtFor(sessionId: string, userId: string, ttlMs?: number): { token: string; expiresAt: number } {
     return mintSandboxJwt(this.resolveSandboxJwtMaster(), { sessionId, userId, ttlMs });
+  }
+
+  /**
+   * The session kind stored on the app session row. Answers `"code"` (the
+   * column default) when the host has no db handle or no row exists —
+   * db-less builds never get the security wiring.
+   */
+  private async storedKind(sessionId: string): Promise<string> {
+    const db = this.opts.db;
+    if (!db) return "code";
+    const rows = await db
+      .select({ kind: agentSessions.kind })
+      .from(agentSessions)
+      .where(eq(agentSessions.id, sessionId))
+      .limit(1);
+    return rows[0]?.kind ?? "code";
   }
 
   /**

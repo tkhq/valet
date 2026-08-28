@@ -357,9 +357,35 @@ export async function repoDockerFlag(
   return value;
 }
 
+/**
+ * Resolves an arbitrary ref (branch, tag, or SHA prefix) to its commit SHA
+ * via `GET /repos/{owner}/{repo}/commits/{ref}`; no ref resolves the default
+ * branch head (`resolveHeadSha`). The security engagement start flow pins
+ * `security_engagements.repo_ref` through this seam.
+ */
+export async function resolveRefSha(
+  deps: GitHubTokenDeps,
+  token: string | null,
+  owner: string,
+  repo: string,
+  ref?: string,
+): Promise<string> {
+  if (ref === undefined || ref === "") {
+    return (await resolveHeadSha(deps, token, owner, repo)).sha;
+  }
+  const commit = await fetchGithubJson(
+    deps,
+    token,
+    `/repos/${owner}/${repo}/commits/${encodeURIComponent(ref)}`,
+  );
+  const sha = isRecord(commit) && typeof commit.sha === "string" ? commit.sha : undefined;
+  if (!sha) throw new Error(`GitHub API returned no sha for ${owner}/${repo}@${ref}`);
+  return sha;
+}
+
 /** Resolves an `api`-purpose GitHub token for `owner/repo`, falling back to
  * `null` (unauthenticated) when NO credential is configured at all. */
-async function resolveApiTokenOrNull(
+export async function resolveApiTokenOrNull(
   deps: GitHubTokenDeps,
   orgId: string,
   owner: string,

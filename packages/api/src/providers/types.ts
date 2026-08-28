@@ -1,6 +1,7 @@
 import type {
   ActionPlugin,
   BlobStore,
+  ChildSpawner,
   CredentialStore,
   EventStream,
   SandboxProvider,
@@ -56,6 +57,13 @@ export interface Providers {
   engineHost: EngineHost;
   /** Durable child-settlement watcher (Phase 4 decision 11); `rearm()` is called at boot. */
   childWatcher: ChildWatcher;
+  /**
+   * The SAME `ChildSpawner` instance wired into orchestrator sessions'
+   * `toolConfig` (children.ts machinery: limits, watch row, armed watcher).
+   * Route-level dispatchers — the security `sec_dispatch`/`sec_handoff`
+   * routes — spawn through this so bookkeeping and spawn never drift apart.
+   */
+  childSpawner: ChildSpawner;
   /** Destroys sandboxes hibernated past the retention window; `start()`/`stop()` called from main.ts. */
   hibernationReaper: HibernationReaper;
   /** Destroys settled workflow runs' session sandboxes; `start()`/`stop()` called from main.ts. */

@@ -232,6 +232,101 @@ export interface ListSecurityFindingsResponse {
   nextCursor: string | null;
 }
 
+/** GET /api/sessions/:id/security/start-preview — everything the `sec_start`
+ * approval gate names before anything spawns. */
+export interface SecurityStartPreviewResponse {
+  repoFullName: string;
+  resolvedSha: string;
+  cells: Array<{ ordinal: number; persona: string; name: string; goal: string }>;
+}
+
+/** GET /api/sessions/:id/security/status — the `sec_status` resume primitive. */
+export interface GetSecurityStatusResponse {
+  engagement: SecurityEngagementWire;
+  cells: SecurityCellWire[];
+  findingCounts: Record<SecurityFindingSeverity, number>;
+  /** The running cell's child, when one is running and dispatched. */
+  runningChild: {
+    cellId: string;
+    childSessionId: string;
+    settled: boolean;
+    lastActivityAt: number | null;
+    /** True when the child session is gone (deleted/missing) without settling. */
+    childGone: boolean;
+  } | null;
+}
+
+/** POST /api/sessions/:id/security/plan */
+export interface SecuritySetPlanResponse {
+  cellCount: number;
+}
+
+/** POST /api/sessions/:id/security/dispatch */
+export interface SecurityDispatchResponse {
+  cell: SecurityCellWire;
+}
+
+/** POST /api/sessions/:id/security/cells/:cellId/complete */
+export interface SecurityCompleteCellResponse {
+  outcome: "completed" | "yielded" | "violation";
+  /** The server's exit-condition ruling, verbatim, on a violation. */
+  violation?: string;
+  cell?: SecurityCellWire;
+}
+
+/** POST /api/sessions/:id/security/cells/:cellId/fail */
+export interface SecurityFailCellResponse {
+  cell: SecurityCellWire;
+  reason: string;
+}
+
+/** The `sec_close` manifest (service `EngagementManifest`, wire copy). */
+export interface SecurityManifestWire {
+  engagementId: string;
+  status: "completed" | "failed";
+  repoFullName: string;
+  repoRef: string;
+  cells: Array<{
+    ordinal: number;
+    dir: string;
+    persona: string;
+    status: string;
+    attempts: number;
+    stateDocRevisions: number;
+    findings: number;
+  }>;
+  findings: {
+    total: number;
+    distinctBySeverity: Record<SecurityFindingSeverity, number>;
+    statusBreakdown: { open: number; verified: number; refuted: number };
+    filedLinks: number;
+  };
+}
+
+/** POST /api/sessions/:id/security/close */
+export interface SecurityCloseResponse {
+  manifest: SecurityManifestWire;
+}
+
+/** POST /api/sessions/:id/security/handoff */
+export interface SecurityHandoffResponse {
+  childSessionId: string;
+  title: string;
+}
+
+/** GET /api/sessions/:id/security/files?path=&revision= */
+export interface SecurityTreeFileResponse {
+  path: string;
+  /** Revision served; null for the virtual mounts (/protocol.md, /plan.yml). */
+  revision: number | null;
+  content: string;
+}
+
+/** GET /api/sessions/:id/security/files/list?prefix= */
+export interface ListSecurityFilesResponse {
+  files: Array<{ path: string; revisions: number; size: number }>;
+}
+
 /** POST /api/sessions/:id/pause — manual hibernation (sandbox hibernation
  * plan, Task 4). Suspends the session's sandbox and marks the row
  * `"hibernated"`; the next touch (submission, gateway-touch, or a future

@@ -19,6 +19,7 @@ import {
   type ChildReader,
   type ChildSender,
   type ChildSpawner,
+  type ChildStatusReader,
   type SandboxProvider,
   type ValetPlugin,
 } from "@valet/engine";
@@ -27,7 +28,13 @@ import { createDefaultNodeExecutors, LocalRunHost, type OnApprovalGrant, type Ru
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost, type EngineHostOpts } from "../engine/host.js";
 import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
-import { buildChildReader, buildChildSender, buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
+import {
+  buildChildReader,
+  buildChildSender,
+  buildChildSpawner,
+  buildChildStatusReader,
+  ChildWatcher,
+} from "../orchestrator/children.js";
 import { HibernationReaper } from "../engine/hibernation-reaper.js";
 import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
 import { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
@@ -284,6 +291,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   let spawnerRef: ChildSpawner | undefined;
   let readerRef: ChildReader | undefined;
   let senderRef: ChildSender | undefined;
+  let statusRef: ChildStatusReader | undefined;
   // Default hibernation hooks are the SAME db-backed implementation real
   // boot uses (`providers/node.ts`) — matches production behavior for tests
   // that don't need to observe the hooks directly. `opts.on*` overrides
@@ -320,6 +328,10 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
       if (!senderRef) throw new Error("childSender invoked before provider wiring completed");
       return senderRef(req, ctx);
     },
+    childStatusReader: (req, ctx) => {
+      if (!statusRef) throw new Error("childStatusReader invoked before provider wiring completed");
+      return statusRef(req, ctx);
+    },
   });
   // Prebuilds are out of scope for the integration harness (no real
   // docker/kubernetes builder wired here unless a test injects one); routes
@@ -349,6 +361,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
   readerRef = buildChildReader(childrenDeps);
   senderRef = buildChildSender(childrenDeps, childWatcher);
+  statusRef = buildChildStatusReader(childrenDeps);
 
   // retentionMs 0 disables the sweep; behavior is tested in engine/hibernation-reaper.test.ts.
   const hibernationReaper = new HibernationReaper({ db, engineHost, engineStore, retentionMs: 0 });
@@ -488,6 +501,10 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     engineCredentials,
     engineHost,
     childWatcher,
+    childSpawner: (req, ctx) => {
+      if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
+      return spawnerRef(req, ctx);
+    },
     hibernationReaper,
     workflowSandboxReclaimer,
     sandboxReconcileSweep,

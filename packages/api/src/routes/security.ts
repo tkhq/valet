@@ -1,37 +1,76 @@
 /**
- * Valet Security read routes (docs/specs/2026-08-27-valet-security-design.md,
+ * Valet Security routes (docs/specs/2026-08-27-valet-security-design.md,
  * threat 10: every route resolves session → engagement → owner and applies
  * the session's existing access checks).
  *
- *   GET /api/sessions/:id/security           → engagement + cells (+ running
- *                                              cell progress)
- *   GET /api/sessions/:id/security/findings  → filtered, cursor-paginated
+ * Reads (M2):
+ *   GET /api/sessions/:id/security               → engagement + cells (+ running
+ *                                                  cell progress)
+ *   GET /api/sessions/:id/security/findings      → filtered, cursor-paginated
+ *
+ * Runner tool backends (M3):
+ *   GET  /api/sessions/:id/security/status        → the sec_status resume primitive
+ *   GET  /api/sessions/:id/security/start-preview → repo + resolved SHA + plan cells
+ *   GET  /api/sessions/:id/security/files         → one engagement-tree path
+ *   GET  /api/sessions/:id/security/files/list    → tree listing
+ *   POST /api/sessions/:id/security/plan          → replace the plan (planning only)
+ *   POST /api/sessions/:id/security/start         → materialize cells, pin the SHA
+ *   POST /api/sessions/:id/security/dispatch      → claim + spawn one cell's child
+ *   POST /api/sessions/:id/security/cells/:cellId/complete
+ *   POST /api/sessions/:id/security/cells/:cellId/fail
+ *   POST /api/sessions/:id/security/close         → manifest
+ *   POST /api/sessions/:id/security/handoff       → spawn a fix session from a finding
  *
  * Dual auth, the memory-routes ladder: a valid `x-valet-internal` token is
- * the `sec_*` engine tools' path and bypasses the session check; otherwise
- * the caller is the session user and must pass `canViewSession`. Refusals
- * answer 404, the existence-hiding convention every session route follows.
- *
- * Mutations (plan/start/dispatch/complete/fail/close, human review, export,
- * issue filing) land in later milestones — reads only here.
+ * the `sec_*` engine tools' path; otherwise the caller is the session user.
+ * The M2 reads keep the plain internal bypass. The M3 tool routes bind the
+ * internal path to an ACTING session (`x-valet-session-id`): mutations
+ * require the acting session to BE the engagement's session — one runner
+ * cannot drive another engagement — and tool reads additionally admit a
+ * session a cell of this engagement claims (`child_session_id`, the M4
+ * persona seam). User-path mutations require `canAdministerSession`.
+ * Unknown/unreachable sessions answer 404, the existence-hiding convention.
  */
 import { Hono, type Context } from "hono";
-import { eq } from "drizzle-orm";
+import { and, count, eq } from "drizzle-orm";
+import { cellDir, KNOWN_PERSONAS, parsePlan } from "@valet/plugin-security";
+import type { Principal } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { isValidInternalToken } from "../lib/internal-auth.js";
-import { agentSessions, type SecurityCellRow, type SecurityFindingRow } from "../schema/index.js";
-import { canViewSession } from "../services/session-access.js";
+import { deriveSecretKey } from "../lib/secret-crypto.js";
+import {
+  agentSessions,
+  childWatches,
+  securityFindings,
+  sessionRepos,
+  type SecurityCellRow,
+  type SecurityFindingRow,
+} from "../schema/index.js";
+import { canAdministerSession, canViewSession } from "../services/session-access.js";
+import { resolveApiTokenOrNull, resolveRefSha } from "../bakes/source-service.js";
+import { buildChildStatusReader, ChildLimitError } from "../orchestrator/children.js";
 import {
   createSecurityEngagementService,
   type CellProgress,
   type FindingSeverity,
   type FindingStatus,
+  type SpawnCellChild,
 } from "../services/security-engagements.js";
 import type {
+  GetSecurityStatusResponse,
   GetSessionSecurityResponse,
+  ListSecurityFilesResponse,
   ListSecurityFindingsResponse,
   SecurityCellWire,
+  SecurityCloseResponse,
+  SecurityCompleteCellResponse,
+  SecurityDispatchResponse,
+  SecurityFailCellResponse,
   SecurityFindingWire,
+  SecurityHandoffResponse,
+  SecuritySetPlanResponse,
+  SecurityStartPreviewResponse,
+  SecurityTreeFileResponse,
 } from "../wire/types.js";
 
 export const securityRouter = new Hono<AppEnv>();
@@ -177,5 +216,580 @@ securityRouter.get("/:id/security/findings", async (c) => {
     // The service's only thrown shape reachable from a read is the bad
     // cursor; its message names the fix.
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+// ── M3: runner tool backends ───────────────────────────────────────────────
+
+type SessionRow = typeof agentSessions.$inferSelect;
+
+type ToolAccess = "read" | "mutate";
+
+type ResolveToolSessionResult = { ok: SessionRow } | { failure: Response };
+
+/**
+ * Resolve the session for a `sec_*` tool route and authorize the caller.
+ *
+ * Internal-token path: the ACTING session rides in `x-valet-session-id`
+ * (the tools stamp `ctx.sessionId`). A mutation requires the acting session
+ * to BE `:id` — one runner cannot drive another engagement. A read also
+ * admits a session a cell of this engagement claims (`child_session_id`),
+ * the M4 persona seam. Anything else answers 403 naming the rule.
+ *
+ * User path: `canViewSession` for reads, `canAdministerSession` for
+ * mutations; refusals answer the existence-hiding 404.
+ */
+async function resolveToolSession(
+  c: Context<AppEnv>,
+  sessionId: string,
+  access: ToolAccess,
+): Promise<ResolveToolSessionResult> {
+  const { db } = c.var.providers;
+  const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1);
+  const row = rows[0];
+  if (!row) return { failure: c.json({ error: "session not found" }, 404) };
+
+  if (isValidInternalToken(c.req.header("x-valet-internal"))) {
+    const acting = c.req.header("x-valet-session-id");
+    if (!acting) {
+      return {
+        failure: c.json(
+          { error: "Missing acting session. Send the x-valet-session-id header with the calling session id." },
+          401,
+        ),
+      };
+    }
+    if (acting === sessionId) return { ok: row };
+    if (access === "read") {
+      // A cell-claimed child may read its engagement's tool routes (M4
+      // persona seam): the claim is the `child_session_id` stamp, the same
+      // shape as the sandbox gateway's `sid` check.
+      const security = createSecurityEngagementService({ db });
+      const engagement = await security.getEngagementBySession(sessionId);
+      const claimed = engagement?.cells.some((cell) => cell.childSessionId === acting) ?? false;
+      if (claimed) return { ok: row };
+    }
+    return {
+      failure: c.json(
+        { error: "The acting session does not own this engagement. A runner drives only its own engagement." },
+        403,
+      ),
+    };
+  }
+
+  const user = c.var.user;
+  if (!user) return { failure: c.json({ error: "session not found" }, 404) };
+  const allowed =
+    access === "mutate"
+      ? await canAdministerSession(db, row, user.id)
+      : await canViewSession(db, row, user.id);
+  if (!allowed) return { failure: c.json({ error: "session not found" }, 404) };
+  return { ok: row };
+}
+
+/** The engagement session's owner principal, from the app row. Legacy rows
+ * default `owner_id` to "" — fall back to the creating user. */
+function sessionOwner(row: SessionRow): Principal {
+  const type = row.ownerType === "team" || row.ownerType === "org" ? row.ownerType : "user";
+  return { type, id: row.ownerId !== "" ? row.ownerId : row.userId };
+}
+
+/** Service-thrown transition refusals become corrective route errors: 429
+ * for spawn-limit hits (the `task` tool convention), 409 otherwise. */
+function serviceError(c: Context<AppEnv>, err: unknown): Response {
+  const message = err instanceof Error ? err.message : String(err);
+  if (err instanceof ChildLimitError) return c.json({ error: message }, 429);
+  return c.json({ error: message }, 409);
+}
+
+async function readJsonBody(c: Context<AppEnv>): Promise<Record<string, unknown>> {
+  try {
+    const body: unknown = await c.req.json();
+    return typeof body === "object" && body !== null && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+async function loadEngagementOr404(c: Context<AppEnv>, sessionId: string) {
+  const { db } = c.var.providers;
+  const security = createSecurityEngagementService({ db });
+  const result = await security.getEngagementBySession(sessionId);
+  if (!result) return { security, failure: c.json({ error: NO_ENGAGEMENT }, 404) };
+  return { security, result };
+}
+
+const HEX_SHA_RE = /^[0-9a-f]{40}$/i;
+
+securityRouter.get("/:id/security/status", async (c) => {
+  const sessionId = c.req.param("id");
+  const resolved = await resolveToolSession(c, sessionId, "read");
+  if ("failure" in resolved) return resolved.failure;
+
+  const loaded = await loadEngagementOr404(c, sessionId);
+  if ("failure" in loaded) return loaded.failure;
+  const { security, result } = loaded;
+  const { db, engineHost, engineStore, prebuildService } = c.var.providers;
+
+  const progress = await security.getRunningCellProgress(result.engagement.id);
+
+  const countRows = await db
+    .select({ severity: securityFindings.severity, n: count() })
+    .from(securityFindings)
+    .where(eq(securityFindings.engagementId, result.engagement.id))
+    .groupBy(securityFindings.severity);
+  const findingCounts: Record<FindingSeverity, number> = {
+    critical: 0,
+    high: 0,
+    medium: 0,
+    low: 0,
+    info: 0,
+  };
+  for (const row of countRows) {
+    if (row.severity in findingCounts) {
+      findingCounts[row.severity as FindingSeverity] = Number(row.n ?? 0);
+    }
+  }
+
+  // Child settled/liveness through the same seam the child_status built-in
+  // uses — never a session wake, never a sandbox touch.
+  let runningChild: GetSecurityStatusResponse["runningChild"] = null;
+  const running = result.cells.find((cell) => cell.status === "running");
+  if (running?.childSessionId) {
+    const statusReader = buildChildStatusReader({ db, engineHost, engineStore, prebuildService });
+    const status = await statusReader(
+      { childSessionId: running.childSessionId },
+      { parentSessionId: sessionId },
+    );
+    runningChild = {
+      cellId: running.id,
+      childSessionId: running.childSessionId,
+      settled: status?.settled ?? false,
+      lastActivityAt: status?.lastActivityAt ?? null,
+      // `null` from the reader means the child session is gone (deleted or
+      // missing) — the runner should sec_cell_fail and re-dispatch.
+      childGone: status === null,
+    };
+  }
+
+  const body: GetSecurityStatusResponse = {
+    engagement: {
+      id: result.engagement.id,
+      sessionId: result.engagement.sessionId,
+      status: result.engagement.status,
+      repoFullName: result.engagement.repoFullName,
+      repoRef: result.engagement.repoRef,
+      plan: result.engagement.plan,
+      createdAt: result.engagement.createdAt,
+      updatedAt: result.engagement.updatedAt,
+    },
+    cells: result.cells.map((cell) => cellToWire(cell, progress)),
+    findingCounts,
+    runningChild,
+  };
+  return c.json(body);
+});
+
+securityRouter.get("/:id/security/start-preview", async (c) => {
+  const sessionId = c.req.param("id");
+  const resolved = await resolveToolSession(c, sessionId, "read");
+  if ("failure" in resolved) return resolved.failure;
+  const row = resolved.ok;
+
+  const loaded = await loadEngagementOr404(c, sessionId);
+  if ("failure" in loaded) return loaded.failure;
+  const { result } = loaded;
+
+  let plan;
+  try {
+    plan = parsePlan(result.engagement.plan, KNOWN_PERSONAS);
+  } catch (err) {
+    return serviceError(c, err);
+  }
+
+  const { db, engineCredentials, encryptionKey } = c.var.providers;
+  const bindingRows = await db
+    .select()
+    .from(sessionRepos)
+    .where(eq(sessionRepos.sessionId, sessionId))
+    .orderBy(sessionRepos.position)
+    .limit(1);
+  const binding = bindingRows[0];
+  if (!binding) {
+    return c.json(
+      { error: "This session has no repository binding. Create the security session with a repository." },
+      409,
+    );
+  }
+
+  // Resolve the binding's ref to a commit SHA. An already-pinned 40-hex ref
+  // needs no lookup — the engagement is deterministic offline.
+  let resolvedSha: string;
+  const ref = binding.ref ?? undefined;
+  if (ref !== undefined && HEX_SHA_RE.test(ref)) {
+    resolvedSha = ref.toLowerCase();
+  } else {
+    const [owner, repo] = binding.fullName.split("/");
+    if (!owner || !repo) {
+      return c.json({ error: `Repository name "${binding.fullName}" is not owner/repo shaped.` }, 409);
+    }
+    const tokenDeps = { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) };
+    try {
+      const token = await resolveApiTokenOrNull(tokenDeps, row.orgId, owner, repo);
+      resolvedSha = await resolveRefSha(tokenDeps, token, owner, repo, ref);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json(
+        {
+          error:
+            `Could not resolve ${binding.fullName}@${ref ?? "default branch"} to a commit: ${message}. ` +
+            "Check the repository name and the GitHub connection in Settings.",
+        },
+        502,
+      );
+    }
+  }
+
+  const body: SecurityStartPreviewResponse = {
+    repoFullName: result.engagement.repoFullName,
+    resolvedSha,
+    cells: plan.cells.map((cell) => ({
+      ordinal: cell.ordinal,
+      persona: cell.persona,
+      name: cellDir(cell),
+      goal: cell.goal,
+    })),
+  };
+  return c.json(body);
+});
+
+securityRouter.get("/:id/security/files", async (c) => {
+  const sessionId = c.req.param("id");
+  const resolved = await resolveToolSession(c, sessionId, "read");
+  if ("failure" in resolved) return resolved.failure;
+
+  const loaded = await loadEngagementOr404(c, sessionId);
+  if ("failure" in loaded) return loaded.failure;
+  const { security, result } = loaded;
+
+  const path = c.req.query("path");
+  if (!path) return c.json({ error: "Pass ?path= with the tree path to read." }, 400);
+  const revisionParam = c.req.query("revision");
+  const revision = revisionParam !== undefined ? Number(revisionParam) : undefined;
+  if (revision !== undefined && (!Number.isInteger(revision) || revision < 1)) {
+    return c.json({ error: "revision must be a positive integer." }, 400);
+  }
+
+  try {
+    const file = await security.readFile(result.engagement.id, path, revision);
+    const body: SecurityTreeFileResponse = file;
+    return c.json(body);
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 404);
+  }
+});
+
+securityRouter.get("/:id/security/files/list", async (c) => {
+  const sessionId = c.req.param("id");
+  const resolved = await resolveToolSession(c, sessionId, "read");
+  if ("failure" in resolved) return resolved.failure;
+
+  const loaded = await loadEngagementOr404(c, sessionId);
+  if ("failure" in loaded) return loaded.failure;
+  const { security, result } = loaded;
+
+  const files = await security.listFiles(result.engagement.id, c.req.query("prefix"));
+  const body: ListSecurityFilesResponse = { files };
+  return c.json(body);
+});
+
+securityRouter.post("/:id/security/plan", async (c) => {
+  const sessionId = c.req.param("id");
+  const resolved = await resolveToolSession(c, sessionId, "mutate");
+  if ("failure" in resolved) return resolved.failure;
+
+  const loaded = await loadEngagementOr404(c, sessionId);
+  if ("failure" in loaded) return loaded.failure;
+  const { security, result } = loaded;
+
+  const body = await readJsonBody(c);
+  if (typeof body.plan !== "string" || body.plan.trim() === "") {
+    return c.json({ error: "Send { plan } with the engagement plan YAML." }, 400);
+  }
+
+  try {
+    const updated = await security.setPlan(result.engagement.id, body.plan);
+    const plan = parsePlan(updated.plan, KNOWN_PERSONAS);
+    const response: SecuritySetPlanResponse = { cellCount: plan.cells.length };
+    return c.json(response);
+  } catch (err) {
+    return serviceError(c, err);
+  }
+});
+
+securityRouter.post("/:id/security/start", async (c) => {
+  const sessionId = c.req.param("id");
+  const resolved = await resolveToolSession(c, sessionId, "mutate");
+  if ("failure" in resolved) return resolved.failure;
+
+  const loaded = await loadEngagementOr404(c, sessionId);
+  if ("failure" in loaded) return loaded.failure;
+  const { security, result } = loaded;
+
+  const body = await readJsonBody(c);
+  if (typeof body.resolvedSha !== "string" || !HEX_SHA_RE.test(body.resolvedSha)) {
+    return c.json(
+      { error: "Send { resolvedSha } with the 40-hex commit SHA from GET .../security/start-preview." },
+      400,
+    );
+  }
+
+  try {
+    const started = await security.startEngagement(result.engagement.id, {
+      resolvedSha: body.resolvedSha.toLowerCase(),
+    });
+    const response: GetSessionSecurityResponse = {
+      engagement: {
+        id: started.engagement.id,
+        sessionId: started.engagement.sessionId,
+        status: started.engagement.status,
+        repoFullName: started.engagement.repoFullName,
+        repoRef: started.engagement.repoRef,
+        plan: started.engagement.plan,
+        createdAt: started.engagement.createdAt,
+        updatedAt: started.engagement.updatedAt,
+      },
+      cells: started.cells.map((cell) => cellToWire(cell, null)),
+    };
+    return c.json(response);
+  } catch (err) {
+    return serviceError(c, err);
+  }
+});
+
+securityRouter.post("/:id/security/dispatch", async (c) => {
+  const sessionId = c.req.param("id");
+  const resolved = await resolveToolSession(c, sessionId, "mutate");
+  if ("failure" in resolved) return resolved.failure;
+  const row = resolved.ok;
+
+  const loaded = await loadEngagementOr404(c, sessionId);
+  if ("failure" in loaded) return loaded.failure;
+  const { security, result } = loaded;
+
+  const body = await readJsonBody(c);
+  const cellId = typeof body.cellId === "string" ? body.cellId : undefined;
+  const mode = body.mode;
+  if (mode !== undefined && mode !== "fresh" && mode !== "resume") {
+    return c.json({ error: "mode must be 'fresh' or 'resume'." }, 400);
+  }
+  // The acting thread: settlement signals land here. The sec_dispatch tool
+  // passes ctx.threadId; a direct caller must name a thread the same way.
+  const threadId = body.threadId;
+  if (typeof threadId !== "string" || threadId === "") {
+    return c.json({ error: "Send { threadId } with the dispatching thread's id." }, 400);
+  }
+
+  // The spawn seam: the SAME children.ts machinery the task tool uses —
+  // limits, agent_sessions row, child_watches row, armed watcher — so the
+  // child's settlement signals the runner thread. Never bypass it.
+  const { childSpawner } = c.var.providers;
+  const spawn: SpawnCellChild = async (req) => {
+    const spawned = await childSpawner(
+      {
+        prompt: req.message,
+        title: req.title,
+        repo: req.repo,
+        // The engagement's pinned commit SHA — every persona reads an
+        // identical tree.
+        branch: req.ref,
+        profile: "headless",
+      },
+      {
+        parentSessionId: sessionId,
+        parentThreadId: threadId,
+        actorUserId: row.userId,
+        owner: sessionOwner(row),
+      },
+    );
+    return { childSessionId: spawned.childSessionId };
+  };
+
+  try {
+    const { cell } = await security.dispatchCell(result.engagement.id, { cellId, mode, spawn });
+    const response: SecurityDispatchResponse = { cell: cellToWire(cell, null) };
+    return c.json(response);
+  } catch (err) {
+    return serviceError(c, err);
+  }
+});
+
+securityRouter.post("/:id/security/cells/:cellId/complete", async (c) => {
+  const sessionId = c.req.param("id");
+  const cellId = c.req.param("cellId");
+  const resolved = await resolveToolSession(c, sessionId, "mutate");
+  if ("failure" in resolved) return resolved.failure;
+
+  const loaded = await loadEngagementOr404(c, sessionId);
+  if ("failure" in loaded) return loaded.failure;
+  const { security, result } = loaded;
+  const { db } = c.var.providers;
+
+  // `settled` comes from the durable child watch, not from the agent's
+  // narration: the watch row is the same signal the settlement watcher
+  // marks after admitting child.settled.
+  const cell = result.cells.find((candidate) => candidate.id === cellId);
+  if (!cell) {
+    return c.json({ error: `No cell ${cellId} in this engagement. Check the id with sec_status.` }, 404);
+  }
+  let settled = false;
+  if (cell.childSessionId) {
+    const watchRows = await db
+      .select({ settled: childWatches.settled })
+      .from(childWatches)
+      .where(
+        and(
+          eq(childWatches.childSessionId, cell.childSessionId),
+          eq(childWatches.parentSessionId, sessionId),
+        ),
+      )
+      .limit(1);
+    settled = watchRows[0]?.settled === true;
+  }
+
+  try {
+    const ruling = await security.completeCell(result.engagement.id, cellId, { settled });
+    const response: SecurityCompleteCellResponse =
+      ruling.outcome === "violation"
+        ? { outcome: "violation", violation: ruling.violation }
+        : { outcome: ruling.outcome, cell: cellToWire(ruling.cell, null) };
+    return c.json(response);
+  } catch (err) {
+    return serviceError(c, err);
+  }
+});
+
+securityRouter.post("/:id/security/cells/:cellId/fail", async (c) => {
+  const sessionId = c.req.param("id");
+  const cellId = c.req.param("cellId");
+  const resolved = await resolveToolSession(c, sessionId, "mutate");
+  if ("failure" in resolved) return resolved.failure;
+
+  const loaded = await loadEngagementOr404(c, sessionId);
+  if ("failure" in loaded) return loaded.failure;
+  const { security, result } = loaded;
+
+  const body = await readJsonBody(c);
+  if (typeof body.reason !== "string" || body.reason.trim() === "") {
+    return c.json({ error: "Send { reason } naming why the cell failed." }, 400);
+  }
+
+  try {
+    const failed = await security.failCell(result.engagement.id, cellId, body.reason);
+    const response: SecurityFailCellResponse = {
+      cell: cellToWire(failed.cell, null),
+      reason: failed.reason,
+    };
+    return c.json(response);
+  } catch (err) {
+    return serviceError(c, err);
+  }
+});
+
+securityRouter.post("/:id/security/close", async (c) => {
+  const sessionId = c.req.param("id");
+  const resolved = await resolveToolSession(c, sessionId, "mutate");
+  if ("failure" in resolved) return resolved.failure;
+
+  const loaded = await loadEngagementOr404(c, sessionId);
+  if ("failure" in loaded) return loaded.failure;
+  const { security, result } = loaded;
+
+  try {
+    const manifest = await security.closeEngagement(result.engagement.id);
+    const response: SecurityCloseResponse = { manifest };
+    return c.json(response);
+  } catch (err) {
+    return serviceError(c, err);
+  }
+});
+
+securityRouter.post("/:id/security/handoff", async (c) => {
+  const sessionId = c.req.param("id");
+  const resolved = await resolveToolSession(c, sessionId, "mutate");
+  if ("failure" in resolved) return resolved.failure;
+  const row = resolved.ok;
+
+  const loaded = await loadEngagementOr404(c, sessionId);
+  if ("failure" in loaded) return loaded.failure;
+  const { result } = loaded;
+  const { db, childSpawner } = c.var.providers;
+
+  const body = await readJsonBody(c);
+  if (typeof body.findingId !== "string" || body.findingId === "") {
+    return c.json({ error: "Send { findingId } with the finding to hand off." }, 400);
+  }
+  const task = typeof body.task === "string" && body.task.trim() !== "" ? body.task : undefined;
+  const threadId = body.threadId;
+  if (typeof threadId !== "string" || threadId === "") {
+    return c.json({ error: "Send { threadId } with the requesting thread's id." }, 400);
+  }
+
+  const findingRows = await db
+    .select()
+    .from(securityFindings)
+    .where(
+      and(
+        eq(securityFindings.engagementId, result.engagement.id),
+        eq(securityFindings.id, body.findingId),
+      ),
+    )
+    .limit(1);
+  const finding = findingRows[0];
+  if (!finding) {
+    return c.json(
+      { error: `No finding ${body.findingId} in this engagement. List findings with sec_findings_list.` },
+      404,
+    );
+  }
+
+  const title = `Fix: ${finding.title}`;
+  const location = finding.file ? `${finding.file}${finding.line != null ? `:${finding.line}` : ""}` : "(no file)";
+  const brief = [
+    `Fix this security finding in ${result.engagement.repoFullName}.`,
+    "",
+    `Severity: ${finding.severity}`,
+    `Title: ${finding.title}`,
+    `Location: ${location}`,
+    "",
+    "Evidence:",
+    finding.body,
+    ...(task ? ["", `Task: ${task}`] : []),
+  ].join("\n");
+
+  try {
+    // Same children.ts seam as dispatch: the fix session is an ordinary
+    // coding child, bound to the engagement repo at the pinned SHA.
+    const spawned = await childSpawner(
+      {
+        prompt: brief,
+        title,
+        repo: result.engagement.repoFullName,
+        ...(result.engagement.repoRef !== "" ? { branch: result.engagement.repoRef } : {}),
+        profile: "headless",
+      },
+      {
+        parentSessionId: sessionId,
+        parentThreadId: threadId,
+        actorUserId: row.userId,
+        owner: sessionOwner(row),
+      },
+    );
+    const response: SecurityHandoffResponse = { childSessionId: spawned.childSessionId, title };
+    return c.json(response);
+  } catch (err) {
+    return serviceError(c, err);
   }
 });

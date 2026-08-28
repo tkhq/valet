@@ -697,6 +697,12 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineCredentials,
     engineHost,
     childWatcher,
+    childSpawner: (req, ctx) => {
+      // Same one-slot indirection as the EngineHost wiring above; by the
+      // time any route runs, `spawnerRef` is long assigned.
+      if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
+      return spawnerRef(req, ctx);
+    },
     hibernationReaper,
     workflowSandboxReclaimer,
     sandboxReconcileSweep,
