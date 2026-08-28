@@ -20,11 +20,11 @@ import { useState } from "react";
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { useUsageBreakdown, useUsageItems } from "~/api/usage";
 import { useProxyRequests, useProxySettings } from "~/api/proxy-usage";
-import { useOrg } from "~/api/settings";
+import { useOrg, useTeams } from "~/api/settings";
 import { SpendChart } from "~/components/usage/SpendChart";
 import { RequestLog } from "~/components/usage/RequestLog";
 import { SampleView } from "~/components/usage/SampleView";
-import type { UsageUseCase, UsageDrillItem } from "@valet/api/wire";
+import type { UsageScopeRequest, UsageUseCase, UsageDrillItem } from "@valet/api/wire";
 import { api } from "~/api/client";
 
 export const Route = createFileRoute("/usage")({
@@ -103,7 +103,7 @@ function ItemList({
   useCase,
 }: {
   window: string;
-  scope: "me" | "org";
+  scope: UsageScopeRequest;
   useCase: UsageUseCase;
 }) {
   const q = useUsageItems(window, scope, useCase);
@@ -176,7 +176,7 @@ function UseCaseRow({
   totalTokens: number;
   turns: number;
   window: string;
-  scope: "me" | "org";
+  scope: UsageScopeRequest;
 }) {
   const [expanded, setExpanded] = useState(false);
 
@@ -215,7 +215,7 @@ function UseCaseRow({
 
 export function UsagePage() {
   const [window, setWindow] = useState<Window>("7d");
-  const [scope, setScope] = useState<"me" | "org">("me");
+  const [scope, setScope] = useState<UsageScopeRequest>("me");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [cursor, setCursor] = useState<string | undefined>(undefined);
   const [items, setItems] = useState<Parameters<typeof RequestLog>[0]["items"]>([]);
@@ -224,6 +224,18 @@ export function UsagePage() {
   const isOrgAdmin =
     orgQ.data?.features.organizations === true &&
     orgQ.data?.callerRole === "admin";
+  // Per-team spend (team dashboard design): every team the caller is a
+  // member of gets a scope button — team spend is member-visible, like team
+  // memory and workflows. `callerRole` is null for teams an org admin only
+  // administers; those are covered by the Organization scope.
+  const teamsQ = useTeams();
+  const myTeams = (teamsQ.data?.teams ?? []).filter((t) => t.callerRole !== null);
+  const scopeLabel =
+    scope === "me"
+      ? "me"
+      : scope === "org"
+        ? "org"
+        : (myTeams.find((t) => `team:${t.id}` === scope)?.name ?? "team");
 
   const breakdownQ = useUsageBreakdown(window, scope);
   const requestsQ = useProxyRequests({ limit: 50, cursor });
@@ -310,7 +322,7 @@ export function UsagePage() {
               {w}
             </button>
           ))}
-          {isOrgAdmin && (
+          {(isOrgAdmin || myTeams.length > 0) && (
             <div className="flex items-center gap-1 ml-4 rounded border border-line overflow-hidden text-sm">
               <button
                 type="button"
@@ -324,27 +336,44 @@ export function UsagePage() {
               >
                 My usage
               </button>
-              <button
-                type="button"
-                onClick={() => setScope("org")}
-                className={`px-3 py-1 ${
-                  scope === "org"
-                    ? "bg-moss/10 text-moss font-medium"
-                    : "text-muted hover:text-ink"
-                }`}
-                aria-pressed={scope === "org"}
-              >
-                Organization
-              </button>
+              {myTeams.map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => setScope(`team:${t.id}`)}
+                  className={`px-3 py-1 ${
+                    scope === `team:${t.id}`
+                      ? "bg-moss/10 text-moss font-medium"
+                      : "text-muted hover:text-ink"
+                  }`}
+                  aria-pressed={scope === `team:${t.id}`}
+                >
+                  {t.name}
+                </button>
+              ))}
+              {isOrgAdmin && (
+                <button
+                  type="button"
+                  onClick={() => setScope("org")}
+                  className={`px-3 py-1 ${
+                    scope === "org"
+                      ? "bg-moss/10 text-moss font-medium"
+                      : "text-muted hover:text-ink"
+                  }`}
+                  aria-pressed={scope === "org"}
+                >
+                  Organization
+                </button>
+              )}
             </div>
           )}
           <a
             href={csvHref}
             download
             className="ml-auto rounded px-3 py-1 text-sm border border-line text-muted hover:text-ink hover:border-ink"
-            aria-label={`Download CSV (${window}, ${scope})`}
+            aria-label={`Download CSV (${window}, ${scopeLabel})`}
           >
-            Download CSV ({window}, {scope})
+            Download CSV ({window}, {scopeLabel})
           </a>
         </div>
 

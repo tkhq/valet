@@ -356,8 +356,15 @@ let orgResult: {
   isLoading: false,
 };
 
+// Mock useTeams — mutable so team-scope tests can add memberships.
+let teamsResult: {
+  data: { teams: { id: string; name: string; callerRole: "admin" | "member" | null }[] } | undefined;
+  isLoading: boolean;
+} = { data: { teams: [] }, isLoading: false };
+
 vi.mock("~/api/settings", () => ({
   useOrg: () => orgResult,
+  useTeams: () => teamsResult,
 }));
 
 // Mock api client — usageExportCsvUrl is a pure URL builder.
@@ -474,14 +481,59 @@ describe("UsagePage — unpriced indicator", () => {
 });
 
 describe("UsagePage — scope toggle", () => {
-  it("does not show the scope toggle for non-admin users", () => {
+  it("does not show the scope toggle for non-admin users with no teams", () => {
     orgResult = {
       data: { features: { organizations: false }, callerRole: "member" },
       isLoading: false,
     };
+    teamsResult = { data: { teams: [] }, isLoading: false };
     render(<UsagePage />);
     expect(screen.queryByText("My usage")).toBeNull();
     expect(screen.queryByText("Organization")).toBeNull();
+  });
+
+  it("a team member gets a per-team scope button without the org one", () => {
+    orgResult = {
+      data: { features: { organizations: true }, callerRole: "member" },
+      isLoading: false,
+    };
+    teamsResult = {
+      data: { teams: [{ id: "team_1", name: "Security", callerRole: "member" }] },
+      isLoading: false,
+    };
+    render(<UsagePage />);
+    expect(screen.getByText("My usage")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Security" })).toBeTruthy();
+    expect(screen.queryByText("Organization")).toBeNull();
+  });
+
+  it("teams the caller only administers (callerRole null) get no button", () => {
+    orgResult = {
+      data: { features: { organizations: true }, callerRole: "admin" },
+      isLoading: false,
+    };
+    teamsResult = {
+      data: { teams: [{ id: "team_2", name: "Platform", callerRole: null }] },
+      isLoading: false,
+    };
+    render(<UsagePage />);
+    // Org admins read those teams through the Organization scope instead.
+    expect(screen.queryByRole("button", { name: "Platform" })).toBeNull();
+    expect(screen.getByText("Organization")).toBeTruthy();
+  });
+
+  it("selecting a team labels the CSV export with the team name", () => {
+    orgResult = {
+      data: { features: { organizations: true }, callerRole: "member" },
+      isLoading: false,
+    };
+    teamsResult = {
+      data: { teams: [{ id: "team_1", name: "Security", callerRole: "member" }] },
+      isLoading: false,
+    };
+    render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: "Security" }));
+    expect(screen.getByText(/Download CSV \(7d, Security\)/)).toBeTruthy();
   });
 
   it("does not show scope toggle when organizations feature is off even for admin", () => {
@@ -489,6 +541,7 @@ describe("UsagePage — scope toggle", () => {
       data: { features: { organizations: false }, callerRole: "admin" },
       isLoading: false,
     };
+    teamsResult = { data: { teams: [] }, isLoading: false };
     render(<UsagePage />);
     expect(screen.queryByText("My usage")).toBeNull();
   });

@@ -94,6 +94,12 @@ widens to `"me" | "org" | "team"`. The CSV export accepts the same scope.
 `byUser` stays org-only: the team breakdown reports by use case, model and
 day, not by member.
 
+The `/usage` page exposes the scope: every team the caller is a member of
+gets a button beside "My usage", and "Organization" stays org-admin-only.
+Teams an org admin only administers (`callerRole` null) get no button —
+the Organization scope covers them. The CSV export follows the selected
+scope and labels the file with the team name.
+
 ### 3. Artifacts owner filter
 
 `GET /api/artifacts?ownerType=team&ownerId=<id>` lists the team's artifacts
