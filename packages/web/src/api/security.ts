@@ -14,6 +14,7 @@ import {
   type UseQueryOptions,
 } from "@tanstack/react-query";
 import type {
+  CreateSessionResponse,
   GetSessionSecurityResponse,
   ListSecurityFindingsResponse,
   ListSessionsResponse,
@@ -23,6 +24,7 @@ import type {
   SecurityReviewFindingResponse,
 } from "@valet/api/wire";
 import { api, ApiError, type OwnerFilter, type SecurityFindingsQuery } from "./client";
+import { qk } from "./queries";
 
 /** Filters the findings surface holds; the cursor stays inside the
  * infinite query, never in this shape. */
@@ -113,6 +115,26 @@ export function flattenFindings(
   pages: ListSecurityFindingsResponse[] | undefined,
 ): SecurityFindingWire[] {
   return pages?.flatMap((p) => p.findings) ?? [];
+}
+
+/**
+ * Re-scan / iterate: create a NEW security review that re-scans a prior one
+ * (POST /api/sessions with `rescanOf`). The server reuses the prior repo
+ * binding and plan, resolves the LATEST default-branch SHA at sec_start, links
+ * the new engagement to the prior one, and carries refutations forward. The
+ * caller passes the prior session id and its repo full name (for the workspace
+ * path); the workspace is derived the same way the hub's New review card does.
+ * Invalidates the sessions list so the new review appears in the hub.
+ */
+export function useRescanReview() {
+  const qc = useQueryClient();
+  return useMutation<CreateSessionResponse, Error, { rescanOf: string; workspace: string }>({
+    mutationFn: ({ rescanOf, workspace }) =>
+      api.createSession({ workspace, kind: "security", rescanOf }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qk.sessions() });
+    },
+  });
 }
 
 /** POST .../security/cancel — stop a planning or running engagement (spec

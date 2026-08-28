@@ -71,6 +71,7 @@ vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, ...rest }: { children: ReactNode; [key: string]: unknown }) => (
     <a {...rest}>{children}</a>
   ),
+  useNavigate: () => () => undefined,
 }));
 
 import { EngagementPanel, SecuritySessionLayout } from "./engagement-panel";
@@ -267,6 +268,106 @@ describe("SecuritySessionLayout", () => {
     expect(chip.textContent).toContain("900k tokens");
     expect(chip.textContent).toContain("cost n/a");
     expect(chip.textContent).not.toContain("$");
+  });
+
+  it("renders the re-scan diff banner while running, fixed count deferred", async () => {
+    getSecurityMock.mockResolvedValue({
+      ...security,
+      diff: {
+        parentEngagementId: "eng-parent",
+        parentSessionId: "s-parent",
+        newCount: 3,
+        recurringCount: 5,
+        fixedCount: null,
+        carriedRefutedCount: 2,
+      },
+    });
+    renderPanel();
+    const banner = await screen.findByLabelText("Re-scan diff");
+    expect(banner.textContent).toContain("3 new");
+    expect(banner.textContent).toContain("5 recurring");
+    // fixedCount is null while running — the banner defers it.
+    expect(banner.textContent).toContain("fixed count after it finishes");
+    expect(banner.textContent).not.toMatch(/\bfixed\b(?!\s*count)/);
+    // Links back to the parent session (the mocked Link renders the text).
+    const link = banner.querySelector("a");
+    expect(link?.textContent).toBe("the prior review");
+  });
+
+  it("shows the fixed count in the diff once the engagement is terminal", async () => {
+    getSecurityMock.mockResolvedValue({
+      ...security,
+      engagement: { ...security.engagement, status: "completed" },
+      diff: {
+        parentEngagementId: "eng-parent",
+        parentSessionId: "s-parent",
+        newCount: 3,
+        recurringCount: 5,
+        fixedCount: 2,
+        carriedRefutedCount: 0,
+      },
+    });
+    renderPanel();
+    const banner = await screen.findByLabelText("Re-scan diff");
+    expect(banner.textContent).toContain("2 fixed");
+    expect(banner.textContent).not.toContain("fixed count after it finishes");
+  });
+
+  it("badges a recurring vs new finding in a re-scan", async () => {
+    getSecurityMock.mockResolvedValue({
+      ...security,
+      diff: {
+        parentEngagementId: "eng-parent",
+        parentSessionId: "s-parent",
+        newCount: 1,
+        recurringCount: 1,
+        fixedCount: null,
+        carriedRefutedCount: 0,
+      },
+    });
+    listFindingsMock.mockResolvedValue({
+      findings: [
+        {
+          id: "fnd-rec",
+          cellId: "cell-1",
+          fingerprint: "fp-rec",
+          severity: "high",
+          title: "recurring issue",
+          file: "src/a.ts",
+          line: 1,
+          body: "x".repeat(200),
+          status: "open",
+          statusReason: null,
+          statusActor: null,
+          createdAt: 1,
+          links: [],
+          handoffs: [],
+          recurring: true,
+        },
+        {
+          id: "fnd-new",
+          cellId: "cell-1",
+          fingerprint: "fp-new",
+          severity: "medium",
+          title: "brand new issue",
+          file: "src/b.ts",
+          line: 2,
+          body: "x".repeat(200),
+          status: "open",
+          statusReason: null,
+          statusActor: null,
+          createdAt: 2,
+          links: [],
+          handoffs: [],
+          recurring: false,
+        },
+      ],
+      nextCursor: null,
+    });
+    renderPanel();
+    // Both badges render in the findings list.
+    expect(await screen.findByText("recurring")).toBeTruthy();
+    expect(await screen.findByText("new")).toBeTruthy();
   });
 
   it("shows the review cost line in the manifest card once closed", async () => {

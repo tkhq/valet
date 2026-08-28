@@ -1,10 +1,13 @@
 import type {
-  SecurityCellWire,
   SecurityCostWire,
+  SecurityCellWire,
+  SecurityDiffWire,
   SecurityFindingSeverity,
   SecurityFindingWire,
 } from "@valet/api/wire";
+import { Button } from "~/components/primitives";
 import { ReviewCostLine } from "./cost-chip";
+import { RescanDiffBanner } from "./rescan-diff";
 import { SEVERITY_ORDER, SeverityBadge } from "./severity";
 
 /**
@@ -70,6 +73,9 @@ export function ManifestCard({
   findings,
   status,
   cost,
+  diff,
+  onRescan,
+  rescanPending,
 }: {
   cells: SecurityCellWire[];
   findings: SecurityFindingWire[];
@@ -77,6 +83,13 @@ export function ManifestCard({
   status: "completed" | "failed";
   /** The engagement's final spend (runner + cell children). */
   cost: SecurityCostWire;
+  /** The re-scan diff, when this engagement re-scanned a prior one. */
+  diff?: SecurityDiffWire;
+  /** Start a re-scan of this engagement (re-scan / iterate). Absent hides the
+   * button (e.g. the caller cannot administer). */
+  onRescan?: () => void;
+  /** True while the re-scan create is in flight. */
+  rescanPending?: boolean;
 }) {
   const summary = summarizeManifest(cells, findings);
   return (
@@ -88,7 +101,20 @@ export function ManifestCard({
         <span className="text-muted">
           {summary.cellsCompleted}/{summary.cellsTotal} cells completed
         </span>
+        {onRescan && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="ml-auto"
+            disabled={rescanPending}
+            onClick={onRescan}
+          >
+            {rescanPending ? "Starting re-scan…" : "Re-scan latest"}
+          </Button>
+        )}
       </div>
+      {diff && <RescanDiffBanner diff={diff} terminal className="mt-2" />}
       <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
         {SEVERITY_ORDER.map((severity) =>
           summary.distinctBySeverity[severity] > 0 ? (

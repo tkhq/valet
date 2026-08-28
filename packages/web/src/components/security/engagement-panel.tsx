@@ -1,13 +1,16 @@
 import { useState, type ReactNode } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import {
   useEngagement,
   useSecurityFindings,
   useCancelEngagement,
+  useRescanReview,
   flattenFindings,
   apiErrorText,
 } from "~/api/security";
 import { useMe, useTeams } from "~/api/settings";
 import { useSession } from "~/api/queries";
+import { workspaceForRepo } from "~/components/repo-combobox";
 import { useStreamStore } from "~/stores/stream";
 import { Button, ConfirmDialog, Spinner } from "~/components/primitives";
 import { cn } from "~/lib/cn";
@@ -16,6 +19,7 @@ import { CellRail } from "./cell-rail";
 import { CostChip } from "./cost-chip";
 import { FindingsReview } from "./findings-review";
 import { ManifestCard } from "./manifest-card";
+import { RescanDiffBanner } from "./rescan-diff";
 
 /**
  * The security engagement panel (valet-security design §engagement panel):
@@ -70,6 +74,8 @@ export function EngagementPanel({
 
   const cancelMutation = useCancelEngagement(sessionId);
   const [confirmCancel, setConfirmCancel] = useState(false);
+  const navigate = useNavigate();
+  const rescan = useRescanReview();
 
   if (engagementQ.isPending) {
     return (
@@ -86,12 +92,23 @@ export function EngagementPanel({
     );
   }
 
-  const { engagement, cells, cost } = engagementQ.data;
+  const { engagement, cells, cost, diff } = engagementQ.data;
   // The cancel action is a human-only stop for an in-flight review. Show it
   // only while the engagement can still be cancelled AND the caller can
   // administer — the route enforces both; this only hides a button that 403s.
   const cancellable =
     canAdminister && (engagement.status === "planning" || engagement.status === "running");
+  const terminal = engagement.status === "completed" || engagement.status === "failed";
+  // Re-scan is a create, gated the same way as cancel — the route's create
+  // path is view-gated, but only an admin should re-run a team review, so hide
+  // it from non-admins. A re-scan re-uses the prior repo binding, so the
+  // workspace only needs a valid host path; derive it the same way the hub does.
+  function startRescan() {
+    rescan.mutate(
+      { rescanOf: sessionId, workspace: workspaceForRepo(engagement.repoFullName) },
+      { onSuccess: (created) => void navigate({ to: "/sessions/$sessionId", params: { sessionId: created.id } }) },
+    );
+  }
   return (
     <div className="flex flex-col min-h-0">
       {closed && (engagement.status === "completed" || engagement.status === "failed") && (
@@ -100,7 +117,19 @@ export function EngagementPanel({
           findings={flattenFindings(allFindingsQ.data?.pages)}
           status={engagement.status}
           cost={cost}
+          diff={diff}
+          onRescan={canAdminister ? startRescan : undefined}
+          rescanPending={rescan.isPending}
         />
+      )}
+      {/* While the re-scan still runs, the diff banner lives above the header
+          (the manifest card only renders once terminal). fixedCount is null
+          until then. */}
+      {diff && !terminal && <RescanDiffBanner diff={diff} terminal={false} className="mx-4 mt-3" />}
+      {rescan.isError && (
+        <div className="mx-4 mt-2 rounded border border-danger-500/30 bg-danger-500/10 px-3 py-2 text-xs text-danger-600">
+          {apiErrorText(rescan.error)}
+        </div>
       )}
       <div className="border-b border-line px-4 py-2 text-xs text-muted flex items-center gap-2">
         <div className="min-w-0 flex-1">

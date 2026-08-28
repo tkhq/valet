@@ -1,0 +1,61 @@
+import { Link } from "@tanstack/react-router";
+import type { SecurityDiffWire } from "@valet/api/wire";
+import { cn } from "~/lib/cn";
+
+/**
+ * Re-scan / iterate: the diff summary banner (valet-security design §Re-scan /
+ * iterate). Reads "Re-scan of the prior review — N new, N recurring, N fixed"
+ * with a link back to the parent session.
+ *
+ * `fixedCount` is null while the scan runs (a scan that has not finished has
+ * not looked everywhere yet), so the banner says the fixed count arrives once
+ * it finishes. `terminal` mirrors the engagement's terminal status — the same
+ * gate the server uses to fill `fixedCount`.
+ */
+export function RescanDiffBanner({
+  diff,
+  terminal,
+  className,
+}: {
+  diff: SecurityDiffWire;
+  /** True once the engagement is completed/failed — `fixedCount` is a number. */
+  terminal: boolean;
+  className?: string;
+}) {
+  const parts = [`${diff.newCount} new`, `${diff.recurringCount} recurring`];
+  if (terminal && diff.fixedCount !== null) {
+    parts.push(`${diff.fixedCount} fixed`);
+  }
+  return (
+    <div
+      className={cn(
+        "rounded border border-line bg-moss-wash px-3 py-2 text-xs text-ink",
+        className,
+      )}
+      aria-label="Re-scan diff"
+    >
+      <span className="font-medium">Re-scan of </span>
+      {diff.parentSessionId ? (
+        <Link
+          to="/sessions/$sessionId"
+          params={{ sessionId: diff.parentSessionId }}
+          className="text-accent-600 dark:text-accent-100 hover:underline"
+        >
+          the prior review
+        </Link>
+      ) : (
+        <span className="text-muted">the prior review</span>
+      )}
+      <span> — {parts.join(", ")}</span>
+      {(!terminal || diff.fixedCount === null) && (
+        <span className="text-muted"> (fixed count after it finishes)</span>
+      )}
+      {diff.carriedRefutedCount > 0 && (
+        <span className="text-muted">
+          {" · "}
+          {diff.carriedRefutedCount} dismissal{diff.carriedRefutedCount === 1 ? "" : "s"} carried
+        </span>
+      )}
+    </div>
+  );
+}

@@ -6,7 +6,7 @@ import type {
   SessionSummary,
 } from "@valet/api/wire";
 import { useCreateSession } from "~/api/queries";
-import { useEngagement, useSecurityReviews } from "~/api/security";
+import { useEngagement, useRescanReview, useSecurityReviews } from "~/api/security";
 import { useModels } from "~/api/settings";
 import { useRepos } from "~/api/repos";
 import { curatedForCatalogId, MODEL_CATALOG } from "~/lib/models";
@@ -403,12 +403,17 @@ const STATUS_VARIANT: Record<
 };
 
 function ReviewRow({ session }: { session: SessionSummary }) {
+  const navigate = useNavigate();
   // One extra read per row: the list endpoint carries the session, not the
   // engagement, and the status badge belongs to the engagement. The hub's
   // list is short and view-gated; finding counts stay on M8's panel.
   const engagementQ = useEngagement(session.id);
   const engagement = engagementQ.data?.engagement;
   const title = session.title ?? engagement?.repoFullName ?? session.workspace;
+  const rescan = useRescanReview();
+  // Re-scan / iterate: offer a re-scan only on a terminal engagement — a
+  // running scan has nothing to iterate on yet.
+  const terminal = engagement?.status === "completed" || engagement?.status === "failed";
 
   return (
     // `relative` anchors the stretched link below: the whole row opens the
@@ -432,6 +437,28 @@ function ReviewRow({ session }: { session: SessionSummary }) {
         </span>
         {engagement && (
           <Badge variant={STATUS_VARIANT[engagement.status]}>{engagement.status}</Badge>
+        )}
+        {terminal && engagement && (
+          // `relative z-10` lifts the button above the row's stretched link so
+          // the click starts a re-scan instead of opening the session.
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="relative z-10"
+            disabled={rescan.isPending}
+            onClick={() => {
+              rescan.mutate(
+                { rescanOf: session.id, workspace: workspaceForRepo(engagement.repoFullName) },
+                {
+                  onSuccess: (created) =>
+                    void navigate({ to: "/sessions/$sessionId", params: { sessionId: created.id } }),
+                },
+              );
+            }}
+          >
+            {rescan.isPending ? "Starting…" : "Re-scan latest"}
+          </Button>
         )}
       </div>
     </li>

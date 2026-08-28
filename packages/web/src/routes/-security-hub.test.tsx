@@ -53,6 +53,13 @@ const reposData: GetReposResponse = {
 
 const navigate = vi.fn();
 const createMutateAsync = vi.fn().mockResolvedValue({ id: "s_new" });
+// The re-scan mutation: calls onSuccess with the created session, mirroring
+// useMutation's `mutate(vars, { onSuccess })` contract.
+const rescanMutate = vi.fn(
+  (_vars: unknown, opts?: { onSuccess?: (data: { id: string }) => void }) => {
+    opts?.onSuccess?.({ id: "s_rescan" });
+  },
+);
 
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, ...rest }: { children: ReactNode; [key: string]: unknown }) => (
@@ -76,6 +83,7 @@ vi.mock("~/api/security", () => ({
     isLoading: false,
     error: null,
   }),
+  useRescanReview: () => ({ mutate: rescanMutate, isPending: false, error: null }),
 }));
 
 vi.mock("~/api/repos", () => ({
@@ -126,6 +134,7 @@ beforeEach(() => {
   reviewsData.sessions = [];
   navigate.mockClear();
   createMutateAsync.mockClear();
+  rescanMutate.mockClear();
 });
 
 describe("SecurityIndexPage", () => {
@@ -158,6 +167,52 @@ describe("SecurityIndexPage", () => {
     expect(screen.getByText("acme/site")).toBeTruthy();
     expect(screen.getByText("running")).toBeTruthy();
     expect(screen.queryByText(/No security reviews yet/)).toBeNull();
+    // A running engagement offers no re-scan — there is nothing to iterate on.
+    expect(screen.queryByRole("button", { name: "Re-scan latest" })).toBeNull();
+  });
+
+  it("offers Re-scan latest only on a terminal engagement and starts a re-scan", () => {
+    // A completed engagement for the row.
+    engagementsBySession.s_done = {
+      engagement: {
+        id: "seng_done",
+        sessionId: "s_done",
+        status: "completed",
+        repoFullName: "acme/site",
+        repoRef: "b".repeat(40),
+        plan: "cells: []",
+        createdAt: 1,
+        updatedAt: 2,
+      },
+      cells: [],
+      cost: { costUsd: 0, totalTokens: 0, priced: true },
+    };
+    reviewsData.sessions = [
+      {
+        id: "s_done",
+        workspace: "/workspace/site",
+        status: "active",
+        kind: "security",
+        runState: "idle",
+        title: "Prior review",
+        createdAt: 1700000000000,
+        updatedAt: 1700000000000,
+        lastActivityAt: 1700000000000,
+        owner: { type: "user", id: "u-1" },
+      },
+    ];
+    renderPage();
+
+    const button = screen.getByRole("button", { name: "Re-scan latest" });
+    fireEvent.click(button);
+    expect(rescanMutate).toHaveBeenCalledTimes(1);
+    expect(rescanMutate.mock.calls[0][0]).toMatchObject({ rescanOf: "s_done" });
+    // onSuccess navigated to the new session.
+    expect(navigate).toHaveBeenCalledWith({
+      to: "/sessions/$sessionId",
+      params: { sessionId: "s_rescan" },
+    });
+    delete engagementsBySession.s_done;
   });
 
   it("keeps Start disabled until a repo is picked", () => {

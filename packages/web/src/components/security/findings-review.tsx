@@ -591,6 +591,16 @@ function FindingRowLine({
         <span className="mt-px shrink-0">
           <SeverityBadge severity={finding.severity} />
         </span>
+        {/* Re-scan / iterate: `recurring` is present only on a re-scan's
+            findings (undefined on a first review). A new-vs-recurring badge
+            tells triage which findings the prior review had not seen. */}
+        {finding.recurring !== undefined && (
+          <span className="mt-px shrink-0">
+            <Badge variant={finding.recurring ? "neutral" : "accent"}>
+              {finding.recurring ? "recurring" : "new"}
+            </Badge>
+          </span>
+        )}
         <span className="font-medium text-ink min-w-0 flex-1 line-clamp-2">{finding.title}</span>
         {trailing && <span className="shrink-0">{trailing}</span>}
       </div>
