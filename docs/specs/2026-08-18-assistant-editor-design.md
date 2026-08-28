@@ -166,6 +166,22 @@ which already loads the assistant row.
   Action policies and approval gates stay the enforcement layer, so failing
   open here cannot bypass security.
 
+## Agent tool surface (added 2026-08-27)
+
+The editor's tool mirror: `assistants.list_assistants`,
+`assistants.create_assistant`, `assistants.update_assistant`, and
+`assistants.archive_assistant` (`packages/api/src/assistants/actions.ts`,
+assembled host-side in `providers/node.ts`). Both surfaces call the same
+service and the same `canAdministerAssistantOwner` check; authorization
+follows the session's acting user, the `workflows.patch_workflow` model.
+Every write is `riskLevel: high`, so the catalog's default policy asks a
+human first — a persona is standing instruction text, the same reasoning
+that gates skill writes. A persona-changing write evicts the cached session
+through a deferred host getter. The `assistants` content plugin
+(`packages/plugin-assistants`, renamed from `plugin-personas`) ships the
+skill that documents this surface; the old personas skill described v1
+tools that do not exist in v2.
+
 ## Editor page
 
 Route: `/assistants/$assistantId`

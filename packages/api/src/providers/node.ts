@@ -35,6 +35,7 @@ import { resolveOrgSessionCeiling } from "../orchestrator/limits.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { workflowsActionPlugin } from "../workflows/actions.js";
 import { skillsActionPlugin } from "../services/skills-actions.js";
+import { assistantsActionPlugin } from "../assistants/actions.js";
 import { SkillSyncService } from "../services/skill-sync.js";
 import { GitHubSkillRepoReader } from "../services/skill-repo-reader.js";
 import { skillRepoReaderFactory } from "../services/skill-source-credential.js";
@@ -326,6 +327,23 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     description: "Agent-facing skill authoring actions.",
     actions: [skillsActionPlugin(db)],
   };
+  // Assistant-profile actions (the tool mirror of routes/assistants.ts).
+  // A persona write must evict the cached session, and the EngineHost does
+  // not exist yet — same one-slot indirection as the workflows deps above.
+  const evictRef: { current: ((sessionId: string) => void) | null } = { current: null };
+  const assistantsActions: ValetPlugin = {
+    name: "assistants-actions",
+    version: "0.1.0",
+    description: "Agent-facing assistant profile management actions.",
+    actions: [
+      assistantsActionPlugin(db, (sessionId) => {
+        if (!evictRef.current) {
+          throw new Error("assistants actions invoked before provider wiring completed");
+        }
+        evictRef.current(sessionId);
+      }),
+    ],
+  };
   // Plugin filter: config file `plugins` block takes precedence over
   // VALET_PLUGINS env var. Both set simultaneously is a configuration error —
   // the operator must remove one to avoid ambiguity.
@@ -353,7 +371,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         // Config-declared MCP servers (instance config `mcpServers`). A
         // service collision with a bundled plugin throws in assemblePlugins.
         configMcpPlugins(opts.instanceConfig?.mcpServers, process.env),
-        [workflowsActions, skillsActions],
+        [workflowsActions, skillsActions, assistantsActions],
       ]);
 
   // Refresh-on-read decorator (integration-OAuth design): wraps the raw
@@ -422,6 +440,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // Arm the capacity gate now that the host exists — creates admitted
   // before this line (none happen during construction) pass ungated.
   gateHostRef.current = engineHost;
+  evictRef.current = (sessionId) => engineHost.evictCache(sessionId);
 
   // Prebuild orchestration (sandbox images v2 plan, Task 3). Same
   // `resolveGitHubToken`-shaped deps every other GitHub-credential consumer

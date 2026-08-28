@@ -25,7 +25,7 @@ const DISPLAY_NAMES: Record<string, string> = {
   browser: "Browser",
   workflows: "Workflows",
   "sandbox-tunnels": "Sandbox tunnels",
-  personas: "Personas",
+  assistants: "Assistants",
   telegram: "Telegram",
 };
 
