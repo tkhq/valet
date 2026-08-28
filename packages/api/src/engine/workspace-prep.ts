@@ -353,16 +353,42 @@ async function refreshStagedPrebuild(sandbox: Sandbox, dir: string, binding: Rep
 
 /** Fresh clone into `dir` (workspace-relative). Failure THROWS — this is
  * the "prep fails → startup-failure" path (engine seam, Task 1). */
+/** A full 40-char hex commit SHA. `git clone --branch` rejects such a ref
+ * ("Remote branch <sha> not found in upstream origin") — the flag takes a
+ * branch or tag name only. Security engagements pin the ref to a resolved
+ * SHA for determinism (every persona reads an identical tree), so a SHA ref
+ * clones the default branch and checks the commit out of fetched history. */
+function isCommitSha(ref: string): boolean {
+  return /^[0-9a-f]{40}$/i.test(ref);
+}
+
 async function cloneFresh(sandbox: Sandbox, dir: string, binding: RepoBinding): Promise<void> {
   await assertCloneTargetEmpty(sandbox, dir);
 
+  const refIsSha = binding.ref !== undefined && isCommitSha(binding.ref);
   const parts = [`git clone ${shQuote(binding.cloneUrl)} ${shQuote(dir)}`];
-  if (binding.ref) parts.push(`--branch ${shQuote(binding.ref)}`);
+  // A branch/tag ref selects the checkout at clone time; a SHA ref cannot
+  // (see isCommitSha) and is checked out below from the full clone.
+  if (binding.ref && !refIsSha) parts.push(`--branch ${shQuote(binding.ref)}`);
   const command = parts.join(" ");
 
   const result = await safeExec(sandbox, command);
   if (result.exitCode !== 0) {
     throw new Error(execFailureMessage(`workspace prep: git clone failed for ${binding.fullName}`, result));
+  }
+
+  if (refIsSha) {
+    // The SHA is reachable from the fetched branches (a full clone fetches
+    // every branch's objects), so a detached checkout lands the exact commit.
+    const checkout = await safeExec(sandbox, `git checkout ${shQuote(binding.ref!)}`, { cwd: dir });
+    if (checkout.exitCode !== 0) {
+      throw new Error(
+        execFailureMessage(
+          `workspace prep: git checkout ${binding.ref} failed for ${binding.fullName}`,
+          checkout,
+        ),
+      );
+    }
   }
 }
 

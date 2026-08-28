@@ -233,6 +233,28 @@ describe("prepBinding", () => {
     expect(commands).toContain("git clone 'https://github.com/acme/widgets.git' '.' --branch 'release/1.0'");
   });
 
+  it("clones then checks out a SHA ref — NOT --branch (git rejects a SHA there)", async () => {
+    const sandbox = new RecordingSandbox();
+    const sha = "f8f79e535477998412a6d16f139f94f8cd37cb9f";
+    await prepBinding(sandbox, ".", binding({ ref: sha }));
+    const commands = sandbox.execCalls.map((c) => c.command);
+    // Plain clone (no --branch), then a detached checkout of the commit.
+    expect(commands).toContain("git clone 'https://github.com/acme/widgets.git' '.'");
+    expect(commands.some((c) => c.includes("--branch"))).toBe(false);
+    expect(commands).toContain(`git checkout '${sha}'`);
+  });
+
+  it("fails prep when the SHA checkout fails (unreachable commit)", async () => {
+    const sandbox = new RecordingSandbox();
+    const sha = "f8f79e535477998412a6d16f139f94f8cd37cb9f";
+    sandbox.setResult(`git checkout '${sha}'`, {
+      stdout: "",
+      stderr: "error: pathspec did not match",
+      exitCode: 1,
+    });
+    await expect(prepBinding(sandbox, ".", binding({ ref: sha }))).rejects.toThrow(/git checkout/);
+  });
+
   it("clones into an existing-but-empty workspace root (single-binding subtlety)", async () => {
     const sandbox = new RecordingSandbox();
     sandbox.setDirEntries(".", []); // root pre-created empty by session create
