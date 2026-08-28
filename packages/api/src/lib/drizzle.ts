@@ -356,6 +356,129 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
       FROM "llm_proxy_requests" p
       WHERE p."total_tokens" > 0`,
   },
+  {
+    // Which authoring surface a session drives (Valet Security spec; shared
+    // shape with the Valet Design PR #396). DEFAULT backfills every
+    // pre-existing row to 'code' — the answer a fresh database gives.
+    describe: "agent_sessions.kind column",
+    probe: { kind: "column", table: "agent_sessions", column: "kind" },
+    sql: 'ALTER TABLE "agent_sessions" ADD COLUMN IF NOT EXISTS "kind" text NOT NULL DEFAULT \'code\'',
+  },
+  {
+    // Valet Security tables (docs/specs/2026-08-27-valet-security-design.md).
+    // Whole-table siblings of the column repairs; keep each in lockstep with
+    // 0000_app.sql.
+    describe: "security_engagements table",
+    probe: { kind: "table", table: "security_engagements" },
+    sql: `CREATE TABLE IF NOT EXISTS "security_engagements" (
+      "id" text PRIMARY KEY NOT NULL,
+      "session_id" text NOT NULL,
+      "status" text DEFAULT 'planning' NOT NULL,
+      "repo_full_name" text NOT NULL,
+      "repo_ref" text DEFAULT '' NOT NULL,
+      "plan" text DEFAULT '' NOT NULL,
+      "created_at" bigint NOT NULL,
+      "updated_at" bigint NOT NULL
+    )`,
+  },
+  {
+    describe: "security_engagements_session_unique index",
+    probe: { kind: "index", index: "security_engagements_session_unique" },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "security_engagements_session_unique" ON "security_engagements" ("session_id")',
+  },
+  {
+    describe: "security_cells table",
+    probe: { kind: "table", table: "security_cells" },
+    sql: `CREATE TABLE IF NOT EXISTS "security_cells" (
+      "id" text PRIMARY KEY NOT NULL,
+      "engagement_id" text NOT NULL,
+      "ordinal" integer NOT NULL,
+      "persona" text NOT NULL,
+      "mode" text DEFAULT 'fresh' NOT NULL,
+      "goal" text NOT NULL,
+      "dir" text NOT NULL,
+      "reads" text DEFAULT '[]' NOT NULL,
+      "review" boolean DEFAULT false NOT NULL,
+      "status" text DEFAULT 'pending' NOT NULL,
+      "attempts" integer DEFAULT 0 NOT NULL,
+      "compacted_at" bigint,
+      "child_session_id" text,
+      "dispatched_at" bigint,
+      "settled_at" bigint,
+      "created_at" bigint NOT NULL
+    )`,
+  },
+  {
+    describe: "security_cells_engagement_ordinal_unique index",
+    probe: { kind: "index", index: "security_cells_engagement_ordinal_unique" },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "security_cells_engagement_ordinal_unique" ON "security_cells" ("engagement_id", "ordinal")',
+  },
+  {
+    describe: "security_cells_child_session index",
+    probe: { kind: "index", index: "security_cells_child_session" },
+    sql: 'CREATE INDEX IF NOT EXISTS "security_cells_child_session" ON "security_cells" ("child_session_id")',
+  },
+  {
+    describe: "security_files table",
+    probe: { kind: "table", table: "security_files" },
+    sql: `CREATE TABLE IF NOT EXISTS "security_files" (
+      "id" text PRIMARY KEY NOT NULL,
+      "engagement_id" text NOT NULL,
+      "cell_id" text NOT NULL,
+      "path" text NOT NULL,
+      "revision" integer NOT NULL,
+      "content" text NOT NULL,
+      "created_at" bigint NOT NULL
+    )`,
+  },
+  {
+    describe: "security_files_path_revision_unique index",
+    probe: { kind: "index", index: "security_files_path_revision_unique" },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "security_files_path_revision_unique" ON "security_files" ("engagement_id", "path", "revision")',
+  },
+  {
+    describe: "security_findings table",
+    probe: { kind: "table", table: "security_findings" },
+    sql: `CREATE TABLE IF NOT EXISTS "security_findings" (
+      "id" text PRIMARY KEY NOT NULL,
+      "engagement_id" text NOT NULL,
+      "cell_id" text NOT NULL,
+      "fingerprint" text NOT NULL,
+      "severity" text NOT NULL,
+      "title" text NOT NULL,
+      "file" text,
+      "line" integer,
+      "body" text DEFAULT '' NOT NULL,
+      "status" text DEFAULT 'open' NOT NULL,
+      "status_reason" text,
+      "status_actor" text,
+      "created_at" bigint NOT NULL
+    )`,
+  },
+  {
+    describe: "security_findings_engagement index",
+    probe: { kind: "index", index: "security_findings_engagement" },
+    sql: 'CREATE INDEX IF NOT EXISTS "security_findings_engagement" ON "security_findings" ("engagement_id")',
+  },
+  {
+    describe: "security_finding_links table",
+    probe: { kind: "table", table: "security_finding_links" },
+    sql: `CREATE TABLE IF NOT EXISTS "security_finding_links" (
+      "id" text PRIMARY KEY NOT NULL,
+      "finding_id" text NOT NULL,
+      "engagement_id" text NOT NULL,
+      "provider" text NOT NULL,
+      "external_id" text NOT NULL,
+      "url" text NOT NULL,
+      "created_by" text NOT NULL,
+      "created_at" bigint NOT NULL
+    )`,
+  },
+  {
+    describe: "security_finding_links_provider_unique index",
+    probe: { kind: "index", index: "security_finding_links_provider_unique" },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "security_finding_links_provider_unique" ON "security_finding_links" ("finding_id", "provider")',
+  },
 ];
 
 /** The repairs this database still lacks, by catalog probe — one query per

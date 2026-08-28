@@ -223,6 +223,7 @@ CREATE TABLE "agent_sessions" (
 	"owner_id" text DEFAULT '' NOT NULL,
 	"profile" text DEFAULT 'headless' NOT NULL,
 	"docker" boolean DEFAULT false NOT NULL,
+	"kind" text DEFAULT 'code' NOT NULL,
 	"bake_id" text,
 	"hibernated_sandbox_id" text,
 	"sandbox_reclaimed_at" bigint,
@@ -962,6 +963,90 @@ CREATE TABLE "llm_proxy_requests" (
 CREATE INDEX "llm_proxy_requests_org_created" ON "llm_proxy_requests" ("org_id", "created_at");
 --> statement-breakpoint
 CREATE INDEX "llm_proxy_requests_user_created" ON "llm_proxy_requests" ("user_id", "created_at");
+--> statement-breakpoint
+-- ── Valet Security (docs/specs/2026-08-27-valet-security-design.md) ───────
+--
+-- One security engagement per kind='security' session. Cells dispatch
+-- persona child sessions; the engagement tree (security_files) is the
+-- personas' shared virtual filesystem, append-only by (path, revision).
+CREATE TABLE "security_engagements" (
+	"id" text PRIMARY KEY NOT NULL,
+	"session_id" text NOT NULL,
+	"status" text DEFAULT 'planning' NOT NULL,
+	"repo_full_name" text NOT NULL,
+	"repo_ref" text DEFAULT '' NOT NULL,
+	"plan" text DEFAULT '' NOT NULL,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "security_engagements_session_unique" ON "security_engagements" ("session_id");
+--> statement-breakpoint
+CREATE TABLE "security_cells" (
+	"id" text PRIMARY KEY NOT NULL,
+	"engagement_id" text NOT NULL,
+	"ordinal" integer NOT NULL,
+	"persona" text NOT NULL,
+	"mode" text DEFAULT 'fresh' NOT NULL,
+	"goal" text NOT NULL,
+	"dir" text NOT NULL,
+	"reads" text DEFAULT '[]' NOT NULL,
+	"review" boolean DEFAULT false NOT NULL,
+	"status" text DEFAULT 'pending' NOT NULL,
+	"attempts" integer DEFAULT 0 NOT NULL,
+	"compacted_at" bigint,
+	"child_session_id" text,
+	"dispatched_at" bigint,
+	"settled_at" bigint,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "security_cells_engagement_ordinal_unique" ON "security_cells" ("engagement_id", "ordinal");
+--> statement-breakpoint
+CREATE INDEX "security_cells_child_session" ON "security_cells" ("child_session_id");
+--> statement-breakpoint
+CREATE TABLE "security_files" (
+	"id" text PRIMARY KEY NOT NULL,
+	"engagement_id" text NOT NULL,
+	"cell_id" text NOT NULL,
+	"path" text NOT NULL,
+	"revision" integer NOT NULL,
+	"content" text NOT NULL,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "security_files_path_revision_unique" ON "security_files" ("engagement_id", "path", "revision");
+--> statement-breakpoint
+CREATE TABLE "security_findings" (
+	"id" text PRIMARY KEY NOT NULL,
+	"engagement_id" text NOT NULL,
+	"cell_id" text NOT NULL,
+	"fingerprint" text NOT NULL,
+	"severity" text NOT NULL,
+	"title" text NOT NULL,
+	"file" text,
+	"line" integer,
+	"body" text DEFAULT '' NOT NULL,
+	"status" text DEFAULT 'open' NOT NULL,
+	"status_reason" text,
+	"status_actor" text,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "security_findings_engagement" ON "security_findings" ("engagement_id");
+--> statement-breakpoint
+CREATE TABLE "security_finding_links" (
+	"id" text PRIMARY KEY NOT NULL,
+	"finding_id" text NOT NULL,
+	"engagement_id" text NOT NULL,
+	"provider" text NOT NULL,
+	"external_id" text NOT NULL,
+	"url" text NOT NULL,
+	"created_by" text NOT NULL,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "security_finding_links_provider_unique" ON "security_finding_links" ("finding_id", "provider");
 --> statement-breakpoint
 -- ── cost_entries ──────────────────────────────────────────────────────────
 --

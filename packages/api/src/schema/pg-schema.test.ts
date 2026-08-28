@@ -77,6 +77,11 @@ const APP_TABLES = [
   "event_subscriptions",
   "event_deliveries",
   "linear_installations",
+  "security_engagements",
+  "security_cells",
+  "security_files",
+  "security_findings",
+  "security_finding_links",
 ];
 
 async function tableExists(db: PgDb, table: string): Promise<boolean> {
@@ -107,6 +112,51 @@ describe("pg app schema + migrations", () => {
     for (const table of APP_TABLES) {
       expect(await tableExists(db, table), `expected table ${table} to exist`).toBe(true);
     }
+  });
+
+  it("defaults agent_sessions.kind to 'code'", async () => {
+    const result = await db.query(
+      "SELECT column_default, is_nullable FROM information_schema.columns WHERE table_name = 'agent_sessions' AND column_name = 'kind'",
+    );
+    expect(result.rows).toHaveLength(1);
+    const row = result.rows[0] as { column_default: string; is_nullable: string };
+    expect(row.column_default).toContain("'code'");
+    expect(row.is_nullable).toBe("NO");
+  });
+
+  it("enforces append-only revisions on security_files (engagement, path, revision) unique", async () => {
+    const now = Date.now();
+    await db.query(
+      "INSERT INTO security_files (id, engagement_id, cell_id, path, revision, content, created_at) VALUES ('sf1', 'eng1', 'cell1', '/cells/01-recon/state.yml', 1, 'a', $1)",
+      [now],
+    );
+    await expect(
+      db.query(
+        "INSERT INTO security_files (id, engagement_id, cell_id, path, revision, content, created_at) VALUES ('sf2', 'eng1', 'cell1', '/cells/01-recon/state.yml', 1, 'b', $1)",
+        [now],
+      ),
+    ).rejects.toThrow(/security_files_path_revision_unique|duplicate key/);
+    // Same path, next revision: allowed — that is the append.
+    await db.query(
+      "INSERT INTO security_files (id, engagement_id, cell_id, path, revision, content, created_at) VALUES ('sf3', 'eng1', 'cell1', '/cells/01-recon/state.yml', 2, 'b', $1)",
+      [now],
+    );
+    await db.query("DELETE FROM security_files WHERE engagement_id = 'eng1'");
+  });
+
+  it("enforces one issue link per finding per provider", async () => {
+    const now = Date.now();
+    await db.query(
+      "INSERT INTO security_finding_links (id, finding_id, engagement_id, provider, external_id, url, created_by, created_at) VALUES ('sl1', 'fnd1', 'eng1', 'github', '7', 'https://github.com/o/r/issues/7', 'user1', $1)",
+      [now],
+    );
+    await expect(
+      db.query(
+        "INSERT INTO security_finding_links (id, finding_id, engagement_id, provider, external_id, url, created_by, created_at) VALUES ('sl2', 'fnd1', 'eng1', 'github', '8', 'https://github.com/o/r/issues/8', 'user1', $1)",
+        [now],
+      ),
+    ).rejects.toThrow(/security_finding_links_provider_unique|duplicate key/);
+    await db.query("DELETE FROM security_finding_links WHERE engagement_id = 'eng1'");
   });
 
   it("tracks the applied migration in __valet_app_migrations", async () => {

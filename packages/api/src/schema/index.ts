@@ -348,6 +348,11 @@ export const agentSessions = pgTable(
     // Request a rootless docker daemon inside this session's sandbox
     // (docker-in-sandbox). See docs/specs/2026-08-15-sandbox-docker-design.md.
     docker: boolean("docker").notNull().default(false),
+    // Which authoring surface the session drives ('code' default,
+    // 'security' = engagement runner). Distinct from the engine's
+    // lifecycle `purpose`. Shared shape with the Valet Design PR (#396),
+    // which adds 'design' — second-lander rebases to a no-op.
+    kind: text("kind").notNull().default("code"),
     // The `bakes.id` this session's sandbox booted from, when session
     // create resolved the primary repo binding to a `pushed` bake image
     // (sandbox images v2 plan, Task 4). Null for cold-start sessions (no
@@ -1702,3 +1707,141 @@ export type EventRow = typeof events.$inferSelect;
 export type EventSubscriptionRow = typeof eventSubscriptions.$inferSelect;
 export type EventDeliveryRow = typeof eventDeliveries.$inferSelect;
 export type LinearInstallationRow = typeof linearInstallations.$inferSelect;
+
+// ── Valet Security (docs/specs/2026-08-27-valet-security-design.md) ───────
+//
+// One engagement per kind='security' session; cells dispatch persona child
+// sessions; security_files is the append-only engagement tree.
+
+export const securityEngagements = pgTable(
+  "security_engagements",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id").notNull(),
+    status: text("status", {
+      enum: ["planning", "running", "completed", "failed"],
+    })
+      .notNull()
+      .default("planning"),
+    repoFullName: text("repo_full_name").notNull(),
+    // Pinned at sec_start to a resolved commit SHA so every persona reads
+    // an identical tree. Empty while planning.
+    repoRef: text("repo_ref").notNull().default(""),
+    // Engagement plan YAML — the note's orchestration.yml. Immutable once
+    // the engagement is running.
+    plan: text("plan").notNull().default(""),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [uniqueIndex("security_engagements_session_unique").on(t.sessionId)],
+);
+
+export const securityCells = pgTable(
+  "security_cells",
+  {
+    id: text("id").primaryKey(),
+    engagementId: text("engagement_id").notNull(),
+    ordinal: integer("ordinal").notNull(),
+    persona: text("persona").notNull(),
+    mode: text("mode", { enum: ["fresh", "resume"] }).notNull().default("fresh"),
+    goal: text("goal").notNull(),
+    // Stable engagement-tree directory slug ("01-recon"), stamped at
+    // sec_start so dispatch prompts can name literal paths.
+    dir: text("dir").notNull(),
+    // JSON array of earlier ordinals whose state docs this cell's dispatch
+    // prompt names (the plan's DAG edges — selective context).
+    reads: text("reads").notNull().default("[]"),
+    // Grants sec_finding_review to this cell's persona. Only review cells
+    // may flip finding statuses.
+    review: boolean("review").notNull().default(false),
+    status: text("status", {
+      enum: ["pending", "running", "completed", "yielded", "failed"],
+    })
+      .notNull()
+      .default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    // Stamped by the compaction hook when the claiming child's thread
+    // compacts — surfaced as a badge on the cell rail, never auto-repaired.
+    compactedAt: bigint("compacted_at", { mode: "number" }),
+    childSessionId: text("child_session_id"),
+    dispatchedAt: bigint("dispatched_at", { mode: "number" }),
+    settledAt: bigint("settled_at", { mode: "number" }),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    uniqueIndex("security_cells_engagement_ordinal_unique").on(t.engagementId, t.ordinal),
+    index("security_cells_child_session").on(t.childSessionId),
+  ],
+);
+
+export const securityFiles = pgTable(
+  "security_files",
+  {
+    id: text("id").primaryKey(),
+    engagementId: text("engagement_id").notNull(),
+    // Owning cell — the path-prefix write claim resolves through it.
+    cellId: text("cell_id").notNull(),
+    path: text("path").notNull(),
+    // Append-only: a write to an existing path inserts revision + 1.
+    revision: integer("revision").notNull(),
+    content: text("content").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    uniqueIndex("security_files_path_revision_unique").on(t.engagementId, t.path, t.revision),
+  ],
+);
+
+export const securityFindings = pgTable(
+  "security_findings",
+  {
+    id: text("id").primaryKey(),
+    engagementId: text("engagement_id").notNull(),
+    cellId: text("cell_id").notNull(),
+    // sha256(file, line bucket, normalized title) first 16 hex — advisory
+    // dedup and the manifest's distinct counts.
+    fingerprint: text("fingerprint").notNull(),
+    severity: text("severity", {
+      enum: ["critical", "high", "medium", "low", "info"],
+    }).notNull(),
+    title: text("title").notNull(),
+    file: text("file"),
+    line: integer("line"),
+    body: text("body").notNull().default(""),
+    // Forward-only: open → verified | refuted. No route mutates the other
+    // columns after insert ("verifier flips bits, never rewrites").
+    status: text("status", { enum: ["open", "verified", "refuted"] })
+      .notNull()
+      .default("open"),
+    statusReason: text("status_reason"),
+    // Cell id or `user:<id>` — who flipped the status.
+    statusActor: text("status_actor"),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [index("security_findings_engagement").on(t.engagementId)],
+);
+
+export const securityFindingLinks = pgTable(
+  "security_finding_links",
+  {
+    id: text("id").primaryKey(),
+    findingId: text("finding_id").notNull(),
+    engagementId: text("engagement_id").notNull(),
+    provider: text("provider", { enum: ["github", "linear"] }).notNull(),
+    externalId: text("external_id").notNull(),
+    url: text("url").notNull(),
+    // Always a user id — only humans file issues (spec Decision 10).
+    createdBy: text("created_by").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    // The idempotency guard: one issue per finding per provider.
+    uniqueIndex("security_finding_links_provider_unique").on(t.findingId, t.provider),
+  ],
+);
+
+export type SecurityEngagementRow = typeof securityEngagements.$inferSelect;
+export type SecurityCellRow = typeof securityCells.$inferSelect;
+export type SecurityFileRow = typeof securityFiles.$inferSelect;
+export type SecurityFindingRow = typeof securityFindings.$inferSelect;
+export type SecurityFindingLinkRow = typeof securityFindingLinks.$inferSelect;
