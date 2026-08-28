@@ -11,7 +11,12 @@ import { useModels } from "~/api/settings";
 import { useRepos } from "~/api/repos";
 import { curatedForCatalogId, MODEL_CATALOG } from "~/lib/models";
 import { Badge, Button, Input, Label, Spinner, Textarea } from "~/components/primitives";
-import { RepoCombobox, workspaceForRepo, type RepoOption } from "~/components/repo-combobox";
+import {
+  RepoCombobox,
+  parsePublicRepo,
+  workspaceForRepo,
+  type RepoOption,
+} from "~/components/repo-combobox";
 import { CreateScopeLine, WorkspaceClause } from "~/components/workspace-clause";
 import { useListOwner } from "~/lib/use-list-owner";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
@@ -78,6 +83,7 @@ function NewReviewCard() {
   const scope = useWorkspaceScope();
   const modelsQ = useModels();
   const [repo, setRepo] = useState<SelectedRepo | null>(null);
+  const [pasteInput, setPasteInput] = useState("");
   const [prompt, setPrompt] = useState("");
   // The hub always submits a model; sonnet-4-6 is the capable default. This is
   // a fixed default, not derived from a prop, so no mount-time-state sync is
@@ -108,6 +114,16 @@ function NewReviewCard() {
     });
   }
 
+  // Any public repo — no GitHub connection needed. A parsed binding carries
+  // an empty ref; the server resolves the default branch HEAD, and the clone
+  // runs anonymously (public repos need no token).
+  const parsedPaste = parsePublicRepo(pasteInput);
+  function addPublicRepo() {
+    if (!parsedPaste) return;
+    setRepo({ fullName: parsedPaste.fullName, cloneUrl: parsedPaste.cloneUrl, ref: "" });
+    setPasteInput("");
+  }
+
   async function start() {
     if (!repo || create.isPending) return;
     const body: CreateSessionRequest = {
@@ -121,7 +137,9 @@ function NewReviewCard() {
         host: "github",
         fullName: repo.fullName,
         cloneUrl: repo.cloneUrl,
-        ref: repo.ref,
+        // Omit an empty ref (a pasted public repo) so the server resolves the
+        // repo's default branch HEAD at sec_start.
+        ...(repo.ref.trim() ? { ref: repo.ref.trim() } : {}),
         auth: "auto",
       },
     };
@@ -159,6 +177,7 @@ function NewReviewCard() {
                 id="review-ref"
                 aria-label={`Branch for ${repo.fullName}`}
                 value={repo.ref}
+                placeholder="default branch"
                 onChange={(e) => setRepo({ ...repo, ref: e.target.value })}
                 className="h-8 w-36 text-xs"
               />
@@ -172,15 +191,48 @@ function NewReviewCard() {
               </button>
             </div>
           </div>
-        ) : showConnectHint ? (
-          <p className="text-xs text-muted">
-            Connect GitHub or install the App to pick a repository.{" "}
-            <a href="/settings/connected-accounts" className="text-moss underline">
-              Go to settings
-            </a>
-          </p>
         ) : (
-          <RepoCombobox repos={repos} label="Search repositories" onSelect={pickRepo} />
+          <div className="space-y-2">
+            {showConnectHint ? (
+              <p className="text-xs text-muted">
+                Connect GitHub to list your repositories, or paste a public repo below.{" "}
+                <a href="/settings/connected-accounts" className="text-moss underline">
+                  Go to settings
+                </a>
+              </p>
+            ) : (
+              <RepoCombobox repos={repos} label="Search repositories" onSelect={pickRepo} />
+            )}
+            <div className="flex items-center gap-2">
+              <Input
+                aria-label="Public repository"
+                placeholder="Or paste a public repo — owner/repo or a GitHub URL"
+                value={pasteInput}
+                onChange={(e) => setPasteInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    addPublicRepo();
+                  }
+                }}
+                className="h-8 flex-1 text-xs"
+              />
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={parsedPaste === null}
+                onClick={addPublicRepo}
+              >
+                Add
+              </Button>
+            </div>
+            {pasteInput.trim() !== "" && parsedPaste === null && (
+              <p className="text-xs text-danger-600">
+                Enter a public repo as owner/repo or a GitHub URL.
+              </p>
+            )}
+          </div>
         )}
       </div>
 

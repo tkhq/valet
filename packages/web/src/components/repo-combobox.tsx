@@ -30,6 +30,32 @@ export function workspaceForRepo(fullName: string): string {
   return `${DEFAULT_WORKSPACE_BASE}/${repoBaseName(fullName)}`;
 }
 
+/**
+ * Parse a free-text public-repo reference into a GitHub binding. Accepts
+ * `owner/repo`, `github.com/owner/repo`, `https://github.com/owner/repo`
+ * (with optional `.git`, trailing slash, or `/tree/<branch>` suffix), and
+ * `git@github.com:owner/repo.git`. Returns null when it does not parse.
+ * The binding carries no ref — the server resolves the default branch HEAD.
+ */
+export function parsePublicRepo(input: string): { fullName: string; cloneUrl: string } | null {
+  const s = input.trim();
+  if (!s) return null;
+  let owner: string | undefined;
+  let repo: string | undefined;
+  const ssh = /^git@github\.com:([^/\s]+)\/(.+?)(?:\.git)?\/?$/.exec(s);
+  const url = /^(?:https?:\/\/)?(?:www\.)?github\.com\/([^/\s]+)\/([^/\s]+?)(?:\.git)?(?:\/.*)?$/.exec(s);
+  const bare = /^([^/\s]+)\/([^/\s]+?)(?:\.git)?$/.exec(s);
+  if (ssh) {
+    [, owner, repo] = ssh;
+  } else if (url) {
+    [, owner, repo] = url;
+  } else if (bare) {
+    [, owner, repo] = bare;
+  }
+  if (!owner || !repo) return null;
+  return { fullName: `${owner}/${repo}`, cloneUrl: `https://github.com/${owner}/${repo}.git` };
+}
+
 export function RepoCombobox({
   repos,
   label,

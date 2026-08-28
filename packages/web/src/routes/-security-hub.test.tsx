@@ -225,4 +225,29 @@ describe("SecurityIndexPage", () => {
     const body = createMutateAsync.mock.calls[0]![0] as CreateSessionRequest;
     expect(body.model).toBe("claude-opus-4-7");
   });
+
+  it("starts a review against a pasted public repo with no ref (default branch)", async () => {
+    renderPage();
+    fireEvent.change(screen.getByLabelText("Public repository"), {
+      target: { value: "https://github.com/openai/gpt-4" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+
+    // The repo is now selected; Start is enabled.
+    const start = screen.getByRole("button", { name: "Start review" }) as HTMLButtonElement;
+    expect(start.disabled).toBe(false);
+    fireEvent.click(start);
+
+    await waitFor(() => expect(createMutateAsync).toHaveBeenCalledTimes(1));
+    const body = createMutateAsync.mock.calls[0]![0] as CreateSessionRequest;
+    expect(body.repo).toEqual({
+      host: "github",
+      fullName: "openai/gpt-4",
+      cloneUrl: "https://github.com/openai/gpt-4.git",
+      auth: "auto",
+    });
+    // No ref — the server resolves the default branch HEAD.
+    expect((body.repo as { ref?: string }).ref).toBeUndefined();
+    expect(body.workspace).toBe("/tmp/valet/workspace/gpt-4");
+  });
 });
