@@ -23,6 +23,7 @@ import { DockerSandboxProvider } from "@valet/sandbox-docker";
 import { LocalSandboxProvider } from "@valet/sandbox-local";
 import {
   KubernetesSandboxProvider,
+  ObjectStoreWorkspaceStore,
   SANDBOX_CR_API_VERSION,
   customObjectsApiAdapter,
   podDeleteApiAdapter,
@@ -32,6 +33,7 @@ import {
   podsApiAdapter,
   sandboxSecretsApiAdapter,
   type K8sProviderConfig,
+  type WorkspacePersistenceConfig,
 } from "@valet/sandbox-kubernetes";
 
 export const SANDBOX_BACKENDS = ["docker", "local", "kubernetes"] as const;
@@ -209,6 +211,27 @@ export interface BuildSandboxProviderDeps {
    * backends. Defaults to `resolveKubeConfig(env)`.
    */
   kubeConfig?: k8s.KubeConfig;
+  /**
+   * The instance config's resolved `workspacePersistence` block
+   * (workspace-persistence spec). Only the kubernetes backend consumes it.
+   * Absent → legacy behavior (RWO workspace PVC, no checkpoint/restore).
+   */
+  workspacePersistence?: WorkspacePersistenceConfig;
+}
+
+/**
+ * Static credentials for the api-side S3 client (`latest`, presign, prune,
+ * purge). Absent → the SDK default chain (env vars, shared config, IRSA on
+ * EKS). The in-cluster restore init container always uses the operator's
+ * Kubernetes Secret instead — see the manifest builder.
+ */
+export function resolveWorkspaceStoreCredentials(
+  env: NodeJS.ProcessEnv,
+): { accessKeyId: string; secretAccessKey: string } | undefined {
+  const accessKeyId = env.VALET_WORKSPACE_STORE_ACCESS_KEY_ID;
+  const secretAccessKey = env.VALET_WORKSPACE_STORE_SECRET_ACCESS_KEY;
+  if (!accessKeyId || !secretAccessKey) return undefined;
+  return { accessKeyId, secretAccessKey };
 }
 
 /**
@@ -259,9 +282,22 @@ export function buildSandboxProvider(
         ...(env.VALET_SANDBOX_DOCKER_RUNTIME_CLASS
           ? { dockerRuntimeClassName: env.VALET_SANDBOX_DOCKER_RUNTIME_CLASS }
           : {}),
+        ...(deps.workspacePersistence ? { workspacePersistence: deps.workspacePersistence } : {}),
       };
       const secretsApi = sandboxSecretsApiAdapter(coreApi);
-      return new KubernetesSandboxProvider({ objectsApi, podsApi, execApi, livenessApi, podStatusApi, podDeleteApi, secretsApi }, cfg);
+      // Object-store backend: the api-side store handles `latest`, presign,
+      // prune, and purge; the tar bytes themselves flow pod → object store
+      // (workspace-persistence spec, 05.3).
+      const workspaceStore =
+        deps.workspacePersistence?.backend === "object-store" && deps.workspacePersistence.objectStore
+          ? new ObjectStoreWorkspaceStore(deps.workspacePersistence.objectStore, {
+              credentials: resolveWorkspaceStoreCredentials(env),
+            })
+          : undefined;
+      return new KubernetesSandboxProvider(
+        { objectsApi, podsApi, execApi, livenessApi, podStatusApi, podDeleteApi, secretsApi, workspaceStore },
+        cfg,
+      );
     }
   }
 }
