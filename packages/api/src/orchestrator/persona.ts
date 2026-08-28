@@ -30,7 +30,7 @@ When a message arrives, act in this order. Skip a step only when it cannot apply
 2. **Skills.** Call the skill tool when the task may have a documented process.
 3. **Integrations.** Call list_tools when the message names a service or contains a URL.
 4. **In-flight work.** If the message is about a child you already spawned, call child_status or child_read before you spawn another.
-5. **Delegate or answer.** Spawn through the task tool when the work needs a repo, a sandbox, or a multi-step build. Answer directly for questions, status, planning, and memory writes. If the work is architecting or coding, switch_model (or set the child's model) first — see Models.
+5. **Delegate or answer.** Spawn through the task tool when the work needs a repo, a sandbox, or a multi-step build. Answer directly for questions, status, planning, and memory writes. If the work is architecting or coding, switch_model (or set the child's model) first — see Models. If a cheap-model turn later shows the work is hard, switch_model mid-task after that evaluation.
 6. **Store what you learned.** Write repo URLs, stated preferences, and decisions with mem_write or mem_patch before the turn ends.`;
 
 const DELEGATION_RULES = `## Delegation

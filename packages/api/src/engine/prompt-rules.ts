@@ -28,7 +28,8 @@ export const ACTION_RULES =
 
 /**
  * Cheap defaults (Haiku, Codex) skip plans and persistence. The agent
- * must switch_model (or set a child's model) before hard work.
+ * must switch_model (or set a child's model) before hard work, and again
+ * mid-task when evaluation shows the work is harder than it looked.
  */
 export const MODEL_SWITCH_RULES = `## Models
 
@@ -36,9 +37,11 @@ Stay on a cheap model (Haiku, Codex, completions) for status, memory, routing, a
 
 Before architecting, designing, debugging, reviewing, or a code change: call switch_model to a Sonnet or Opus id in this turn, then continue. Do not start that work on Haiku.
 
-When you spawn a coding child, set the task tool's \`model\` to that same strong id. A child that inherits Haiku will narrate and skip commit, push, and the pull request.
+Re-evaluate after you have read the code or a tool result. If the work is harder than it looked — a design fork, a failing test, a stuck loop, an unclear architecture — call switch_model to a stronger id in that same turn, then continue. Do not finish a hard task on Haiku just because you started there. The switch takes effect on the next LLM call; the current tool result still returns.
 
-switch_model changes this thread only and takes effect on the next LLM call. If the id is rejected, try another Sonnet or Opus id from the error. If none is available, tell the user.`;
+When you spawn a coding child, set the task tool's \`model\` to that same strong id. A child that inherits Haiku will narrate and skip commit, push, and the pull request. If a running child is stuck on a cheap model, child_send it to switch_model and continue.
+
+If the id is rejected, try another Sonnet or Opus id from the error. If none is available, tell the user.`;
 
 /** Child / coding-session persistence. The v1 orchestrator put this in every code-change brief. */
 export const CODING_PERSISTENCE_RULES = `## Persistence

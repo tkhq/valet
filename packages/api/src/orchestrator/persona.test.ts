@@ -51,6 +51,9 @@ describe("orchestratorPersona", () => {
     expect(persona).toContain("call switch_model to a Sonnet or Opus id");
     expect(persona).toContain("set the task tool's `model`");
     expect(persona).toContain("switch_model (or set the child's model) first");
+    expect(persona).toContain("Re-evaluate after you have read the code or a tool result");
+    expect(persona).toContain("switch_model mid-task after that evaluation");
+    expect(persona).toContain("Do not finish a hard task on Haiku just because you started there");
   });
 
   it("names the push boundary and the child_status check", () => {

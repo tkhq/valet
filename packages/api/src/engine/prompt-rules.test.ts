@@ -36,5 +36,7 @@ describe("coding system prompt (TKAI-239 v1 port)", () => {
   it("tells a cheap coding session to switch_model before hard work", () => {
     expect(flat(CODING_SYSTEM_PROMPT)).toContain(flat(MODEL_SWITCH_RULES));
     expect(CODING_SYSTEM_PROMPT).toContain("call switch_model to a Sonnet or Opus id");
+    expect(CODING_SYSTEM_PROMPT).toContain("Re-evaluate after you have read the code or a tool result");
+    expect(CODING_SYSTEM_PROMPT).toContain("Do not finish a hard task on Haiku just because you started there");
   });
 });
