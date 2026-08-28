@@ -913,11 +913,11 @@ export const skillSources = pgTable(
     orgId: text("org_id").notNull(),
     ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull(),
     ownerId: text("owner_id").notNull(),
-    /** The user who added the source. This is the only user identity a team
-     * source or an org source carries, and the sweep runs with no request
-     * context, so it is what `services/skill-source-credential.ts` reads to
-     * pick a team source's GitHub credential. NULL means the row predates
-     * this column, and a NULL row syncs with no credential. */
+    /** The user who added the source. A UI team source uses this person's
+     * GitHub credential. NULL means nobody is named: a pre-column row, or a
+     * config-managed `skillsrc_cfg_*` insert (the reconciler has no adding
+     * user). A NULL UI team row syncs with no credential. A NULL
+     * config-managed team row uses the org App. */
     createdBy: text("created_by"),
     /** `owner/repo`. */
     repoFullName: text("repo_full_name").notNull(),

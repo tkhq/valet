@@ -105,7 +105,7 @@ export interface InstanceConfig {
     enabled?: boolean;
     models?: { id: string; name?: string }[];
   }[];
-  skillSources?: { repo: string; ref?: string; subpath?: string }[];
+  skillSources?: { repo: string; ref?: string; subpath?: string; team?: string }[];
   mcpServers?: McpServerDecl[];
 }
 
@@ -475,7 +475,7 @@ function validateTeams(
     let members: InstanceMemberDecl[] | undefined;
     for (const [key, v] of Object.entries(obj)) {
       if (key === "name") {
-        name = assertString(v, `teams[${i}].name`, path);
+        name = assertNonEmptyString(v, `teams[${i}].name`, path);
       } else if (key === "members") {
         members = validateMembers(v, `teams[${i}].members`, path);
       } else {
@@ -565,6 +565,7 @@ function validateSkillSources(
     let repo: string | undefined;
     let ref: string | undefined;
     let subpath: string | undefined;
+    let team: string | undefined;
     for (const [key, v] of Object.entries(obj)) {
       if (key === "repo") {
         repo = assertString(v, `skillSources[${i}].repo`, path);
@@ -572,6 +573,8 @@ function validateSkillSources(
         ref = assertString(v, `skillSources[${i}].ref`, path);
       } else if (key === "subpath") {
         subpath = assertString(v, `skillSources[${i}].subpath`, path);
+      } else if (key === "team") {
+        team = assertNonEmptyString(v, `skillSources[${i}].team`, path);
       } else {
         err(
           `${path}: unknown key "skillSources[${i}].${key}". Remove it or check for a typo.`,
@@ -579,22 +582,24 @@ function validateSkillSources(
       }
     }
     if (repo === undefined) err(`${path}: skillSources[${i}].repo is required.`);
-    const entry: { repo: string; ref?: string; subpath?: string } = { repo };
+    const entry: { repo: string; ref?: string; subpath?: string; team?: string } = { repo };
     if (ref !== undefined) entry.ref = ref;
     if (subpath !== undefined) entry.subpath = subpath;
+    if (team !== undefined) entry.team = team;
     return entry;
   });
 
-  // Reject configs with duplicate (repo, subpath) pairs — they would collide on
-  // the DB unique index (orgId, ownerType, ownerId, repoFullName, subpath) at
-  // boot. We compare the raw repo string lowercased + subpath so the check is
+  // Reject configs with duplicate (owner, repo, subpath) pairs — they would
+  // collide on the DB unique index (orgId, ownerType, ownerId, repoFullName,
+  // subpath) at boot. Two teams may track the same folder. We compare the
+  // raw repo string lowercased + subpath + team so the check is
   // dependency-light and avoids importing parseRepoInput here; note that two
   // entries differing only in URL scheme or trailing ".git" will NOT be caught
   // by this check — the reconciler's unmanaged-row guard will warn at runtime.
   const seen = new Map<string, number>();
   for (let i = 0; i < entries.length; i++) {
     const e = entries[i]!;
-    const key = `${e.repo.toLowerCase()}|${e.subpath ?? ""}`;
+    const key = `${e.team ?? ""}|${e.repo.toLowerCase()}|${e.subpath ?? ""}`;
     const prior = seen.get(key);
     if (prior !== undefined) {
       err(

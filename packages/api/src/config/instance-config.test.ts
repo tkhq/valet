@@ -294,6 +294,53 @@ skillSources:
     );
   });
 
+  it("allows skillSources with the same repo when they name different teams", () => {
+    const yaml = `
+version: 1
+skillSources:
+  - repo: owner/skills
+    subpath: skills
+    team: Platform
+  - repo: owner/skills
+    subpath: skills
+    team: Design
+`.trim();
+    const cfg = parseInstanceConfig(yaml, path);
+    expect(cfg.skillSources).toHaveLength(2);
+    expect(cfg.skillSources?.[0]?.team).toBe("Platform");
+    expect(cfg.skillSources?.[1]?.team).toBe("Design");
+  });
+
+  it("trims teams[].name to match skillSources.team", () => {
+    const yaml = `
+version: 1
+teams:
+  - name: " Platform "
+skillSources:
+  - repo: owner/skills
+    team: " Platform "
+`.trim();
+    const cfg = parseInstanceConfig(yaml, path);
+    expect(cfg.teams?.[0]?.name).toBe("Platform");
+    expect(cfg.skillSources?.[0]?.team).toBe("Platform");
+  });
+
+  it("throws when teams[].name is only whitespace", () => {
+    expect(() =>
+      parseInstanceConfig("version: 1\nteams:\n  - name: \"  \"", path),
+    ).toThrow("teams[0].name");
+  });
+
+  it("throws when skillSources names a team with an empty string", () => {
+    const yaml = `
+version: 1
+skillSources:
+  - repo: owner/skills
+    team: ""
+`.trim();
+    expect(() => parseInstanceConfig(yaml, path)).toThrow("skillSources[0].team");
+  });
+
   it("allows skillSources with same repo but different subpaths", () => {
     const yaml = `
 version: 1
