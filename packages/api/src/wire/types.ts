@@ -224,6 +224,33 @@ export interface SecurityFindingWire {
   statusReason: string | null;
   statusActor: string | null;
   createdAt: number;
+  /** Filed external issues; populated on the findings LIST route only. */
+  links?: SecurityFindingLinkWire[];
+}
+
+/** One filed external issue for one finding (spec §Filing issues). */
+export interface SecurityFindingLinkWire {
+  id: string;
+  findingId: string;
+  provider: "github" | "linear";
+  externalId: string;
+  url: string;
+  createdBy: string;
+  createdAt: number;
+}
+
+/** POST /api/sessions/:id/security/findings/:findingId/issues. `created`
+ * is false when the unique-index idempotency guard returned the existing
+ * link instead of filing again. */
+export interface SecurityFileIssueResponse {
+  link: SecurityFindingLinkWire;
+  created: boolean;
+}
+
+/** POST /api/sessions/:id/security/issues/digest — one digest issue, no
+ * per-finding link rows. */
+export interface SecurityDigestIssueResponse {
+  url: string;
 }
 
 /** GET /api/sessions/:id/security/findings */

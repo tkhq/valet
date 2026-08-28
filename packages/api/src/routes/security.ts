@@ -27,6 +27,15 @@
  *   POST /api/sessions/:id/security/findings/:findingId/review
  *                                                 → verified/refuted (review cells only)
  *
+ * Human triage routes (M6 — Decision 10: human-only, the internal token is
+ * REFUSED on all four):
+ *   POST /api/sessions/:id/security/findings/:findingId/status
+ *                                                 → human verify/refute (canAdministerSession)
+ *   GET  /api/sessions/:id/security/export        → md | sarif | json (canViewSession)
+ *   POST /api/sessions/:id/security/findings/:findingId/issues
+ *                                                 → file one GitHub/Linear issue (canViewSession)
+ *   POST /api/sessions/:id/security/issues/digest → one digest issue (canViewSession)
+ *
  * Dual auth, the memory-routes ladder: a valid `x-valet-internal` token is
  * the `sec_*` engine tools' path; otherwise the caller is the session user.
  * The M2 reads keep the plain internal bypass. The M3 tool routes bind the
@@ -44,22 +53,29 @@
  * The persona routes never take the user path; M6 adds the human review
  * surface separately.
  */
+import { randomUUID } from "node:crypto";
 import { Hono, type Context } from "hono";
-import { and, count, eq } from "drizzle-orm";
+import { and, count, eq, inArray } from "drizzle-orm";
 import { cellDir, KNOWN_PERSONAS, parsePlan } from "@valet/plugin-security";
 import type { Principal } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { isValidInternalToken } from "../lib/internal-auth.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
+import { requireUser, type AuthUser } from "../middleware/auth.js";
+import { publicUrlFromEnv } from "../channels/host.js";
+import { buildActionInvoker } from "../plugins/action-invoker.js";
+import { persistInvocationAudit } from "../policies/service.js";
 import {
   agentSessions,
   childWatches,
   securityCells,
+  securityFindingLinks,
   securityFindings,
   sessionRepos,
   type SecurityCellRow,
   type SecurityEngagementRow,
+  type SecurityFindingLinkRow,
   type SecurityFindingRow,
 } from "../schema/index.js";
 import { canAdministerSession, canViewSession } from "../services/session-access.js";
@@ -72,6 +88,20 @@ import {
   type FindingStatus,
   type SpawnCellChild,
 } from "../services/security-engagements.js";
+import {
+  buildJsonExport,
+  buildMarkdownReport,
+  buildSarif,
+  type SecurityExportInput,
+} from "../services/security-export.js";
+import {
+  fileDigestIssue,
+  fileFindingIssue,
+  IssueRequestError,
+  MissingIntegrationError,
+  type IssueProvider,
+  type SecurityIssuesDeps,
+} from "../services/security-issues.js";
 import type {
   GetSecurityStatusResponse,
   GetSessionSecurityResponse,
@@ -80,8 +110,11 @@ import type {
   SecurityCellWire,
   SecurityCloseResponse,
   SecurityCompleteCellResponse,
+  SecurityDigestIssueResponse,
   SecurityDispatchResponse,
   SecurityFailCellResponse,
+  SecurityFileIssueResponse,
+  SecurityFindingLinkWire,
   SecurityFindingWire,
   SecurityHandoffResponse,
   SecurityReportFindingResponse,
@@ -162,6 +195,18 @@ function findingToWire(f: SecurityFindingRow): SecurityFindingWire {
   };
 }
 
+function linkToWire(link: SecurityFindingLinkRow): SecurityFindingLinkWire {
+  return {
+    id: link.id,
+    findingId: link.findingId,
+    provider: link.provider,
+    externalId: link.externalId,
+    url: link.url,
+    createdBy: link.createdBy,
+    createdAt: link.createdAt,
+  };
+}
+
 const NO_ENGAGEMENT =
   "This session has no security engagement. Create the session with kind 'security' to start one.";
 
@@ -226,8 +271,31 @@ securityRouter.get("/:id/security/findings", async (c) => {
       cursor: c.req.query("cursor"),
       limit,
     });
+    // Filed-issue link chips (M6): one grouped query for the page.
+    const findingIds = page.findings.map((f) => f.id);
+    const linkRows =
+      findingIds.length > 0
+        ? await db
+            .select()
+            .from(securityFindingLinks)
+            .where(
+              and(
+                eq(securityFindingLinks.engagementId, result.engagement.id),
+                inArray(securityFindingLinks.findingId, findingIds),
+              ),
+            )
+        : [];
+    const linksByFinding = new Map<string, SecurityFindingLinkWire[]>();
+    for (const link of linkRows) {
+      const list = linksByFinding.get(link.findingId) ?? [];
+      list.push(linkToWire(link));
+      linksByFinding.set(link.findingId, list);
+    }
     const body: ListSecurityFindingsResponse = {
-      findings: page.findings.map(findingToWire),
+      findings: page.findings.map((f) => ({
+        ...findingToWire(f),
+        links: linksByFinding.get(f.id) ?? [],
+      })),
       nextCursor: page.nextCursor,
     };
     return c.json(body);
@@ -1008,5 +1076,362 @@ securityRouter.post("/:id/security/findings/:findingId/review", async (c) => {
     return c.json(response);
   } catch (err) {
     return serviceError(c, err);
+  }
+});
+
+// ── M6: human triage routes ────────────────────────────────────────────────
+//
+// Decision 10 (spec §Filing issues, threat 11): review, export, and issue
+// filing are HUMAN actions. A valid internal token — the runner's and the
+// personas' path — is refused outright on all four routes, so content
+// derived from hostile code leaves Valet only on a person's click.
+
+const HUMAN_ONLY =
+  "This is a human action. Sign in and call it as a user — the internal token is refused here.";
+
+type HumanAccess = "view" | "administer";
+
+interface HumanCaller {
+  row: SessionRow;
+  user: AuthUser;
+}
+
+type ResolveHumanSessionResult = { ok: HumanCaller } | { failure: Response };
+
+/**
+ * Resolve + authorize a triage route. Named checks per the explicit-authz
+ * rule: `canViewSession` for export and filing (view-gated, spec §Export /
+ * §Filing issues), `canAdministerSession` for verify/refute — never
+ * inherited from view access. A viewer without the admin right gets a 403
+ * that names the required right; a non-viewer gets the existence-hiding 404.
+ */
+async function resolveHumanSession(
+  c: Context<AppEnv>,
+  sessionId: string,
+  access: HumanAccess,
+): Promise<ResolveHumanSessionResult> {
+  if (isValidInternalToken(c.req.header("x-valet-internal"))) {
+    return { failure: c.json({ error: HUMAN_ONLY }, 403) };
+  }
+  // The internal-token rung sets no user; every other rung does. Read the
+  // variable through its true runtime type.
+  const user = requireUser(c);
+  if (!user) return { failure: c.json({ error: "session not found" }, 404) };
+
+  const { db } = c.var.providers;
+  const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, sessionId)).limit(1);
+  const row = rows[0];
+  if (!row) return { failure: c.json({ error: "session not found" }, 404) };
+
+  // Named check: canViewSession — the view gate every triage route holds.
+  if (!(await canViewSession(db, row, user.id))) {
+    return { failure: c.json({ error: "session not found" }, 404) };
+  }
+  if (access === "administer" && !(await canAdministerSession(db, row, user.id))) {
+    return {
+      failure: c.json(
+        {
+          error:
+            "Only a session admin can verify or refute findings (canAdministerSession). " +
+            "Ask the session owner or a team admin to review.",
+        },
+        403,
+      ),
+    };
+  }
+  return { ok: { row, user } };
+}
+
+/**
+ * POST /:id/security/findings/:findingId/status — the human review action
+ * (spec §Findings review). Forward-only; the service stamps
+ * `status_actor: user:<id>`.
+ */
+securityRouter.post("/:id/security/findings/:findingId/status", async (c) => {
+  const sessionId = c.req.param("id");
+  const findingId = c.req.param("findingId");
+  const resolved = await resolveHumanSession(c, sessionId, "administer");
+  if ("failure" in resolved) return resolved.failure;
+  const { user } = resolved.ok;
+
+  const loaded = await loadEngagementOr404(c, sessionId);
+  if ("failure" in loaded) return loaded.failure;
+  const { security, result } = loaded;
+
+  const body = await readJsonBody(c);
+  if (body.status !== "verified" && body.status !== "refuted") {
+    return c.json({ error: "status must be 'verified' or 'refuted'." }, 400);
+  }
+  if (typeof body.reason !== "string" || body.reason.trim() === "") {
+    return c.json({ error: "Send { reason } naming what the evidence shows or what it missed." }, 400);
+  }
+
+  try {
+    const finding = await security.reviewFinding(result.engagement.id, {
+      findingId,
+      status: body.status,
+      reason: body.reason,
+      actor: `user:${user.id}`,
+    });
+    const response: SecurityReviewFindingResponse = { finding: findingToWire(finding) };
+    return c.json(response);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    // Unknown finding → 404; forward-only refusals → 409.
+    if (message.startsWith("No finding")) return c.json({ error: message }, 404);
+    return c.json({ error: message }, 409);
+  }
+});
+
+const EXPORT_FORMATS = {
+  md: { contentType: "text/markdown; charset=utf-8", ext: "md" },
+  // The convention GitHub code scanning and the SARIF tooling ecosystem
+  // use for SARIF payloads.
+  sarif: { contentType: "application/sarif+json", ext: "sarif" },
+  json: { contentType: "application/json", ext: "json" },
+} as const;
+
+/**
+ * GET /:id/security/export?format=md|sarif|json&severity=&status=&cellId=
+ * (spec §Export). View-gated, human-only, generated from rows — no sandbox
+ * involvement. Every export writes an audit row with actor, format, and
+ * row count.
+ */
+securityRouter.get("/:id/security/export", async (c) => {
+  const sessionId = c.req.param("id");
+  const resolved = await resolveHumanSession(c, sessionId, "view");
+  if ("failure" in resolved) return resolved.failure;
+  const { user } = resolved.ok;
+
+  const format = c.req.query("format");
+  if (format !== "md" && format !== "sarif" && format !== "json") {
+    return c.json({ error: "format must be md, sarif, or json." }, 400);
+  }
+  const severity = c.req.query("severity");
+  if (severity !== undefined && !SEVERITIES.has(severity)) {
+    return c.json({ error: "severity must be critical, high, medium, low, or info." }, 400);
+  }
+  const status = c.req.query("status");
+  if (status !== undefined && !STATUSES.has(status)) {
+    return c.json({ error: "status must be open, verified, or refuted." }, 400);
+  }
+
+  const loaded = await loadEngagementOr404(c, sessionId);
+  if ("failure" in loaded) return loaded.failure;
+  const { security, result } = loaded;
+  const { db } = c.var.providers;
+
+  // Page through EVERY matching row — export scope is the full filtered
+  // set, not one cursor page.
+  const findings: SecurityFindingRow[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await security.listFindings(result.engagement.id, {
+      cellId: c.req.query("cellId"),
+      // Set membership just proved these; the service takes the narrow type.
+      severity: severity as FindingSeverity | undefined,
+      status: status as FindingStatus | undefined,
+      cursor,
+      limit: 500,
+    });
+    findings.push(...page.findings);
+    cursor = page.nextCursor ?? undefined;
+  } while (cursor !== undefined);
+
+  const input: SecurityExportInput = {
+    engagement: result.engagement,
+    cells: result.cells,
+    findings,
+    repoFullName: result.engagement.repoFullName,
+    repoRef: result.engagement.repoRef,
+  };
+  const payload =
+    format === "md"
+      ? buildMarkdownReport(input)
+      : JSON.stringify(format === "sarif" ? buildSarif(input) : buildJsonExport(input), null, 2);
+
+  // Audit event (spec §Export): actor, format, row count. There is no
+  // dedicated user-audit table today; the `action_invocations` audit sink
+  // (the same fire-and-forget writer the policy audit uses) is the durable
+  // audit surface, so the export event lands there.
+  await persistInvocationAudit(db, {
+    invocationId: `sec:export:${randomUUID()}`,
+    service: "valet-security",
+    actionId: "security.export",
+    status: "completed",
+    sessionId,
+    userId: user.id,
+    orgId: user.orgId,
+    params: { format, rowCount: findings.length, engagementId: result.engagement.id },
+  });
+
+  const meta = EXPORT_FORMATS[format];
+  c.header("Content-Type", meta.contentType);
+  c.header(
+    "Content-Disposition",
+    `attachment; filename="valet-security-${result.engagement.id}.${meta.ext}"`,
+  );
+  return c.body(payload);
+});
+
+/** The invoker seam issue filing rides (Decision 11): the SAME
+ * `buildActionInvoker` a workflow tool node dispatches through, scoped to
+ * the acting user's credentials. `webBaseUrl` prefers the configured public
+ * URL (the channels' rule); dev and tests fall back to the request origin. */
+function buildIssuesDeps(c: Context<AppEnv>): SecurityIssuesDeps {
+  const { db, engineCredentials, actionPluginByService, plugins, encryptionKey } = c.var.providers;
+  const invokeAction = buildActionInvoker({
+    db,
+    credentials: engineCredentials,
+    actionPluginByService,
+    plugins,
+    githubTokenDeps: { key: deriveSecretKey(encryptionKey) },
+  });
+  const webBaseUrl = publicUrlFromEnv(process.env) ?? new URL(c.req.url).origin;
+  return { db, invokeAction, webBaseUrl };
+}
+
+/** Filing failures → HTTP: corrective 400s for a missing integration or a
+ * bad request shape; 502 for a provider-side failure. */
+function issueError(c: Context<AppEnv>, err: unknown): Response {
+  if (err instanceof MissingIntegrationError || err instanceof IssueRequestError) {
+    return c.json({ error: err.message }, 400);
+  }
+  return c.json({ error: err instanceof Error ? err.message : String(err) }, 502);
+}
+
+function parseIssueProvider(value: unknown): IssueProvider | null {
+  return value === "github" || value === "linear" ? value : null;
+}
+
+/**
+ * POST /:id/security/findings/:findingId/issues { provider, repo?, teamId? }
+ * — file ONE issue for ONE finding (spec §Filing issues). Idempotent by the
+ * `(finding, provider)` unique index: a repeat answers 200 with the
+ * existing link and `created: false`.
+ */
+securityRouter.post("/:id/security/findings/:findingId/issues", async (c) => {
+  const sessionId = c.req.param("id");
+  const findingId = c.req.param("findingId");
+  // View-gated (spec §Filing issues): the named check is canViewSession,
+  // inside resolveHumanSession.
+  const resolved = await resolveHumanSession(c, sessionId, "view");
+  if ("failure" in resolved) return resolved.failure;
+  const { user } = resolved.ok;
+
+  const loaded = await loadEngagementOr404(c, sessionId);
+  if ("failure" in loaded) return loaded.failure;
+  const { result } = loaded;
+  const { db } = c.var.providers;
+
+  const body = await readJsonBody(c);
+  const provider = parseIssueProvider(body.provider);
+  if (!provider) return c.json({ error: "provider must be 'github' or 'linear'." }, 400);
+  if (body.repo !== undefined && typeof body.repo !== "string") {
+    return c.json({ error: "repo must be an owner/name string." }, 400);
+  }
+  if (body.teamId !== undefined && typeof body.teamId !== "string") {
+    return c.json({ error: "teamId must be a Linear team id string." }, 400);
+  }
+
+  // Scoped to THIS engagement: a finding id from another engagement is not
+  // reachable here.
+  const findingRows = await db
+    .select()
+    .from(securityFindings)
+    .where(
+      and(eq(securityFindings.engagementId, result.engagement.id), eq(securityFindings.id, findingId)),
+    )
+    .limit(1);
+  const finding = findingRows[0];
+  if (!finding) {
+    return c.json({ error: `No finding ${findingId} in this engagement.` }, 404);
+  }
+
+  try {
+    const filed = await fileFindingIssue(buildIssuesDeps(c), {
+      engagement: result.engagement,
+      finding,
+      provider,
+      actor: { userId: user.id, orgId: user.orgId },
+      repo: typeof body.repo === "string" ? body.repo : undefined,
+      teamId: typeof body.teamId === "string" ? body.teamId : undefined,
+    });
+    const response: SecurityFileIssueResponse = {
+      link: linkToWire(filed.link),
+      created: filed.created,
+    };
+    return c.json(response);
+  } catch (err) {
+    return issueError(c, err);
+  }
+});
+
+/**
+ * POST /:id/security/issues/digest { provider, findingIds, repo?, teamId? }
+ * — ONE digest issue from many findings (spec §Filing issues: a tracker
+ * flooded with forty auto-filed tickets is worse than no integration).
+ * Writes no link rows.
+ */
+securityRouter.post("/:id/security/issues/digest", async (c) => {
+  const sessionId = c.req.param("id");
+  // View-gated (spec §Filing issues): the named check is canViewSession,
+  // inside resolveHumanSession.
+  const resolved = await resolveHumanSession(c, sessionId, "view");
+  if ("failure" in resolved) return resolved.failure;
+  const { user } = resolved.ok;
+
+  const loaded = await loadEngagementOr404(c, sessionId);
+  if ("failure" in loaded) return loaded.failure;
+  const { result } = loaded;
+  const { db } = c.var.providers;
+
+  const body = await readJsonBody(c);
+  const provider = parseIssueProvider(body.provider);
+  if (!provider) return c.json({ error: "provider must be 'github' or 'linear'." }, 400);
+  if (
+    !Array.isArray(body.findingIds) ||
+    body.findingIds.length === 0 ||
+    !body.findingIds.every((id): id is string => typeof id === "string")
+  ) {
+    return c.json({ error: "Send { findingIds } with at least one finding id." }, 400);
+  }
+  if (body.repo !== undefined && typeof body.repo !== "string") {
+    return c.json({ error: "repo must be an owner/name string." }, 400);
+  }
+  if (body.teamId !== undefined && typeof body.teamId !== "string") {
+    return c.json({ error: "teamId must be a Linear team id string." }, 400);
+  }
+
+  const requestedIds = [...new Set(body.findingIds)];
+  const findings = await db
+    .select()
+    .from(securityFindings)
+    .where(
+      and(
+        eq(securityFindings.engagementId, result.engagement.id),
+        inArray(securityFindings.id, requestedIds),
+      ),
+    );
+  if (findings.length !== requestedIds.length) {
+    return c.json(
+      { error: "Every finding in { findingIds } must belong to this engagement." },
+      400,
+    );
+  }
+
+  try {
+    const digest = await fileDigestIssue(buildIssuesDeps(c), {
+      engagement: result.engagement,
+      findings,
+      provider,
+      actor: { userId: user.id, orgId: user.orgId },
+      repo: typeof body.repo === "string" ? body.repo : undefined,
+      teamId: typeof body.teamId === "string" ? body.teamId : undefined,
+    });
+    const response: SecurityDigestIssueResponse = { url: digest.url };
+    return c.json(response);
+  } catch (err) {
+    return issueError(c, err);
   }
 });
