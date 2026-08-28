@@ -54,9 +54,9 @@ delegate pushes, branches, and PRs to a child session.
    pull request). The spawned \`branch\` is the base. The child creates or reuses a working
    branch and opens the pull request into that base. If the user asked to update an existing
    pull request, push to that branch — do not open a second one. Require the child's final
-   report to include branch name, commit SHA, push result, and pull-request URL or the exact
-   blocker. If push or pull-request creation fails, the child is not done — send a follow-up
-   with child_send.
+   report to include the check it ran and pass/fail, what changed, branch name, commit SHA,
+   push result, and pull-request URL or the exact blocker. If the check, push, or pull-request
+   creation fails, the child is not done — send a follow-up with child_send.
 4. **Tell the child to work in chat and not to spawn.** End analysis briefs with: report findings
    in chat, do not write them to a file. Include: do not spawn child sessions; do the work
    yourself. Only you manage delegation.

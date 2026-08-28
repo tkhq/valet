@@ -27,11 +27,11 @@ export const ACTION_RULES =
   "Be concise. Use tools; do not explain them.";
 
 /**
- * Cheap defaults (Haiku, Codex) skip plans and persistence. The agent
- * must switch_model (or set a child's model) before hard work, and again
- * mid-task when evaluation shows the work is harder than it looked.
+ * Cheap defaults skip plans and persistence. Switch before hard work,
+ * and again mid-task when evaluation shows the work is harder than it
+ * looked. Shared by coding sessions and the orchestrator.
  */
-export const MODEL_SWITCH_RULES = `## Models
+export const MODEL_SWITCH_CORE = `## Models
 
 Stay on a cheap model (Haiku, Codex, completions) for status, memory, routing, and short answers.
 
@@ -39,22 +39,37 @@ Before architecting, designing, debugging, reviewing, or a code change: call swi
 
 Re-evaluate after you have read the code or a tool result. If the work is harder than it looked — a design fork, a failing test, a stuck loop, an unclear architecture — call switch_model to a stronger id in that same turn, then continue. Do not finish a hard task on Haiku just because you started there. The switch takes effect on the next LLM call; the current tool result still returns.
 
-When you spawn a coding child, set the task tool's \`model\` to that same strong id. A child that inherits Haiku will narrate and skip commit, push, and the pull request. If a running child is stuck on a cheap model, child_send it to switch_model and continue.
-
 If the id is rejected, try another Sonnet or Opus id from the error. If none is available, tell the user.`;
+
+/** Orchestrator-only: pick the child's model, and upgrade a stuck child. */
+export const MODEL_SWITCH_RULES = `${MODEL_SWITCH_CORE}
+
+When you spawn a coding child, set the task tool's \`model\` to that same strong id. A child that inherits Haiku will narrate and skip commit, push, and the pull request. If a running child is stuck on a cheap model, child_send it to switch_model and continue.`;
+
+/**
+ * Explore → small diff → verify. Stuck loops upgrade via switch_model.
+ * This is the coding-session craft loop, not a leaked third-party prompt.
+ */
+export const CODING_CRAFT_RULES = `## How you work
+
+1. **Search first.** Grep or read before you write. If you did not open the file, you do not know what is in it. Do not invent APIs or paths.
+2. **Small diff.** Change only what the brief asked. Match the file's style. Do not drive-by refactor.
+3. **Verify.** After edits, run the check this repo already names (AGENTS.md, package scripts, Makefile). If it fails, fix it. A commit is not evidence the change works.
+4. **Stuck.** The same error three times: call switch_model to a Sonnet or Opus id, then try a different approach. Do not repeat the same bash.`;
 
 /** Child / coding-session persistence. The v1 orchestrator put this in every code-change brief. */
 export const CODING_PERSISTENCE_RULES = `## Persistence
 
 When the task is a code change, you are not done until:
 
-1. Changes are committed to git.
-2. The branch is pushed to the remote.
-3. A pull request is created or updated, unless the parent asked you not to.
+1. The named check passed (test, typecheck, or lint).
+2. Changes are committed to git.
+3. The branch is pushed to the remote.
+4. A pull request is created or updated, unless the parent asked you not to.
 
 Treat the spawned branch as the base. Create or reuse a working branch. Open the pull request into that base. If the parent asked you to update an existing pull request, push to that branch.
 
-Report the branch name, the commit SHA, whether the push succeeded, and the pull-request number or URL. If push or pull-request creation fails, report the blocker and keep working. Do not claim completion.
+Report what changed, the command you ran and whether it passed, then the branch name, the commit SHA, whether the push succeeded, and the pull-request number or URL. If the check, push, or pull-request creation fails, report the blocker and keep working. Do not claim completion.
 
 ## Reporting
 
@@ -70,6 +85,8 @@ ${TOOL_USE_RULES}
 
 ${ACTION_RULES}
 
-${MODEL_SWITCH_RULES}
+${CODING_CRAFT_RULES}
+
+${MODEL_SWITCH_CORE}
 
 ${CODING_PERSISTENCE_RULES}`;

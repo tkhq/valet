@@ -68,6 +68,7 @@ describe("orchestratorPersona", () => {
     expect(persona).toContain("Call mem_search");
     expect(persona).toContain("Wait for child.settled");
     expect(persona).toContain("A turn that does work must contain a tool call");
+    expect(persona).toContain("the check it ran and pass/fail");
     expect(persona).toContain("the branch is pushed");
     expect(persona).toContain("do not spawn child sessions");
     expect(persona).toContain("The spawned `branch` is the base");
