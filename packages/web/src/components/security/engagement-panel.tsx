@@ -149,6 +149,11 @@ export function EngagementPanel({
           )}
           <span> · {engagement.status}</span>
           <CostChip cost={cost} className="ml-1" />
+          <span className="block text-[11px] text-muted">
+            {engagement.hasRepoConfig
+              ? "Configured by .valet/security.yml"
+              : "Preset: Code review"}
+          </span>
         </div>
         {cancellable && (
           <Button

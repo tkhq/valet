@@ -66,6 +66,12 @@ const engagement: SecurityEngagementWire = {
   plan: "cells: []",
   baseRef: null,
   changedPaths: null,
+  hasRepoConfig: false,
+  focus: null,
+  invariants: null,
+  categories: null,
+  configPersonas: null,
+  configTools: null,
   createdAt: 1,
   updatedAt: 2,
 };

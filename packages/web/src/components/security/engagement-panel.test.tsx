@@ -86,6 +86,12 @@ const security: GetSessionSecurityResponse = {
     plan: "cells: []",
     baseRef: null,
     changedPaths: null,
+    hasRepoConfig: false,
+    focus: null,
+    invariants: null,
+    categories: null,
+    configPersonas: null,
+    configTools: null,
     createdAt: 1,
     updatedAt: 2,
   },
@@ -236,6 +242,22 @@ describe("SecuritySessionLayout", () => {
     // Wait for the panel to settle (the repo line renders once loaded).
     await screen.findByText("acme/site");
     expect(screen.queryByRole("button", { name: "Cancel review" })).toBeNull();
+  });
+
+  it("shows the preset source line when the engagement used no repo config", async () => {
+    renderPanel();
+    expect(await screen.findByText("Preset: Code review")).toBeTruthy();
+    expect(screen.queryByText("Configured by .valet/security.yml")).toBeNull();
+  });
+
+  it("shows the repo-config source line when has_repo_config is true", async () => {
+    getSecurityMock.mockResolvedValue({
+      ...security,
+      engagement: { ...security.engagement, hasRepoConfig: true },
+    });
+    renderPanel();
+    expect(await screen.findByText("Configured by .valet/security.yml")).toBeTruthy();
+    expect(screen.queryByText("Preset: Code review")).toBeNull();
   });
 
   it("hides Cancel review for a non-admin on a team-owned engagement", async () => {
