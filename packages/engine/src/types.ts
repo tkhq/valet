@@ -2063,6 +2063,16 @@ export interface SpawnChildRequest {
   /** Request a rootless docker daemon inside the child's sandbox
    * (docker-in-sandbox, `SandboxCreateOpts.docker`). */
   docker?: boolean;
+  /**
+   * Pre-assigned child session id. A host seam that must durably record the
+   * id BEFORE the child session is built sets it (the security dispatch
+   * stamps its cell claim first, so the host's session build sees the claim
+   * and attaches the persona toolset). The `task` built-in never sets it.
+   */
+  sessionId?: string;
+  /** Role name applied to the spawn prompt's turn (`PromptOptions.role`
+   * — the session must register the role in its `roles` option). */
+  role?: string;
 }
 
 export interface SpawnChildResult {

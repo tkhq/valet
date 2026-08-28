@@ -327,6 +327,25 @@ export interface ListSecurityFilesResponse {
   files: Array<{ path: string; revisions: number; size: number }>;
 }
 
+/** POST /api/sessions/:id/security/files — persona write (M4). */
+export interface SecurityWriteFileResponse {
+  path: string;
+  revision: number;
+}
+
+/** POST /api/sessions/:id/security/findings — persona report (M4). */
+export interface SecurityReportFindingResponse {
+  finding: SecurityFindingWire;
+  /** Existing findings sharing the fingerprint — advisory dedup. */
+  siblings: SecurityFindingWire[];
+}
+
+/** POST /api/sessions/:id/security/findings/:findingId/review — persona
+ * review-cell path (M4). */
+export interface SecurityReviewFindingResponse {
+  finding: SecurityFindingWire;
+}
+
 /** POST /api/sessions/:id/pause — manual hibernation (sandbox hibernation
  * plan, Task 4). Suspends the session's sandbox and marks the row
  * `"hibernated"`; the next touch (submission, gateway-touch, or a future

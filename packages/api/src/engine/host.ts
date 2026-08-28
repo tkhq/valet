@@ -1,5 +1,5 @@
 import type { Model } from "@earendil-works/pi-ai/compat";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -62,7 +62,7 @@ import { resolveOpenAiCredential } from "../services/openai-key.js";
 import { hasOrgKey } from "../services/model-catalog.js";
 import { listLlmProviders, parseModelId, providerNamespace } from "../services/llm-providers.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { agentSessions, orgs, users } from "../schema/index.js";
+import { agentSessions, orgs, securityCells, users, type SecurityCellRow } from "../schema/index.js";
 import { loadAssistant } from "../assistants/service.js";
 import { internalToken } from "../lib/internal-auth.js";
 import {
@@ -74,7 +74,7 @@ import {
 import securityPlugin from "@valet/plugin-security/plugin";
 import { orchestratorPersona } from "../orchestrator/persona.js";
 import { buildMemoryTools } from "../orchestrator/memory-tools.js";
-import { buildSecurityRunnerTools } from "./security-tools.js";
+import { buildSecurityPersonaTools, buildSecurityRunnerTools } from "./security-tools.js";
 import { assembleMemorySnapshot } from "../orchestrator/snapshot.js";
 import { ensureTodayJournal } from "../orchestrator/bootstrap.js";
 import { journalCompactionHook } from "../orchestrator/compaction.js";
@@ -579,6 +579,11 @@ export class EngineHost {
     // excludes it from `this.opts.plugins`; the manifest is imported
     // directly and threaded as an extra plugin for this build only.
     const isSecurityRunner = (await this.storedKind(sessionId)) === "security";
+    // Persona child wiring (M4): a session a running security cell claims
+    // gets the persona tool set, the persona role, and the tool endpoint
+    // config — the post-restart rebuild path for dispatched cell children
+    // (the first build goes through `buildChildSession`, same wiring).
+    const personaCell = isSecurityRunner ? null : await this.claimedSecurityCell(sessionId);
     const extraPlugins = isSecurityRunner ? [securityPlugin] : [];
     // `SessionMeta` carries no principal, and this builder passes no `owner`
     // to the engine either — `Session`'s constructor then defaults the
@@ -673,7 +678,11 @@ export class EngineHost {
     // (apiBaseUrl + internal token for the sec_* HTTP seam; child
     // read/send/status seams for steering dispatched personas) minus the
     // childSpawner — see the isSecurityRunner comment above.
-    const sessionTools = isSecurityRunner ? [...buildSecurityRunnerTools(), ...extras.tools] : extras.tools;
+    const sessionTools = isSecurityRunner
+      ? [...buildSecurityRunnerTools(), ...extras.tools]
+      : personaCell
+        ? [...buildSecurityPersonaTools({ review: personaCell.review }), ...extras.tools]
+        : extras.tools;
     const securityToolConfig = isSecurityRunner
       ? {
           toolConfig: {
@@ -684,7 +693,20 @@ export class EngineHost {
             ...(this.opts.childStatusReader ? { childStatusReader: this.opts.childStatusReader } : {}),
           },
         }
-      : {};
+      : personaCell
+        ? {
+            // The persona tools' HTTP seam only — no child seams and no
+            // spawner (a persona child steers nothing and spawns nothing).
+            toolConfig: {
+              ...(this.opts.apiBaseUrl ? { apiBaseUrl: this.opts.apiBaseUrl } : {}),
+              internalToken: internalToken(),
+            },
+          }
+        : {};
+    // The persona role registers on the session (roles registry) so the
+    // dispatch prompt's per-turn `role` overlay resolves. Roles only — the
+    // engagement-runner SKILL stays off persona children.
+    const sessionRoles = personaCell ? [...extras.roles, ...(securityPlugin.roles ?? [])] : extras.roles;
     const session = existing
       ? await engine.restoreSession({
           sessionId,
@@ -699,7 +721,7 @@ export class EngineHost {
             systemPrompt: SYSTEM_PROMPT,
             tools: sessionTools.length ? sessionTools : undefined,
             skills: extras.skills.length ? extras.skills : undefined,
-            roles: extras.roles.length ? extras.roles : undefined,
+            roles: sessionRoles.length ? sessionRoles : undefined,
             ...securityToolConfig,
             ...(skillsProvider ? { skillsProvider } : {}),
             ...(specProvider ? { specProvider } : {}),
@@ -721,7 +743,7 @@ export class EngineHost {
           systemPrompt: SYSTEM_PROMPT,
           tools: sessionTools.length ? sessionTools : undefined,
           skills: extras.skills.length ? extras.skills : undefined,
-          roles: extras.roles.length ? extras.roles : undefined,
+          roles: sessionRoles.length ? sessionRoles : undefined,
           ...securityToolConfig,
           ...(skillsProvider ? { skillsProvider } : {}),
           ...(specProvider ? { specProvider } : {}),
@@ -1341,6 +1363,25 @@ export class EngineHost {
       .where(eq(agentSessions.id, sessionId))
       .limit(1);
     return rows[0]?.kind ?? "code";
+  }
+
+  /**
+   * The running security cell (if any) that claims this session id as its
+   * dispatched child (Valet Security M4). The claim exists BEFORE the child
+   * session is built — `dispatchCell` stamps `child_session_id` pre-spawn —
+   * so both first builds and post-restart rebuilds see it. One indexed
+   * query (`security_cells_child_session`); non-security sessions pay a
+   * single miss. `null` without a db, the usual graceful degradation.
+   */
+  private async claimedSecurityCell(sessionId: string): Promise<SecurityCellRow | null> {
+    const db = this.opts.db;
+    if (!db) return null;
+    const rows = await db
+      .select()
+      .from(securityCells)
+      .where(and(eq(securityCells.childSessionId, sessionId), eq(securityCells.status, "running")))
+      .limit(1);
+    return rows[0] ?? null;
   }
 
   /**
@@ -2110,6 +2151,19 @@ export class EngineHost {
     // session gets that team's skills, not the spawning user's.
     const extras = await this.sessionExtras(opts.owner, opts.orgId);
     const skillsProvider = this.skillsProviderFor(opts.owner, opts.orgId);
+    // Persona child wiring (Valet Security M4): the security dispatch
+    // stamps its cell claim (`child_session_id`) BEFORE the spawn builds
+    // this session, so this first build already sees it and attaches the
+    // persona tool set, the persona role, and the tool endpoint config.
+    // One indexed query; ordinary task children pay a single miss.
+    const personaCell = await this.claimedSecurityCell(childSessionId);
+    const childTools = personaCell
+      ? [...buildSecurityPersonaTools({ review: personaCell.review }), ...extras.tools]
+      : extras.tools;
+    // The persona role registers on the session (roles registry) so the
+    // dispatch prompt's per-turn `role` overlay resolves. Roles only — the
+    // engagement-runner SKILL stays off persona children.
+    const childRoles = personaCell ? [...extras.roles, ...(securityPlugin.roles ?? [])] : extras.roles;
 
     const existing = await this.opts.engineStore.getSession(childSessionId);
     const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, opts.actorUserId, opts.orgId, opts.modelId);
@@ -2181,9 +2235,19 @@ export class EngineHost {
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
       systemPrompt: SYSTEM_PROMPT,
-      tools: extras.tools.length ? extras.tools : undefined,
+      tools: childTools.length ? childTools : undefined,
       skills: extras.skills.length ? extras.skills : undefined,
-      roles: extras.roles.length ? extras.roles : undefined,
+      roles: childRoles.length ? childRoles : undefined,
+      // The persona tools' HTTP seam only — still NO childSpawner (the
+      // depth-limit contract) and no child seams.
+      ...(personaCell
+        ? {
+            toolConfig: {
+              ...(this.opts.apiBaseUrl ? { apiBaseUrl: this.opts.apiBaseUrl } : {}),
+              internalToken: internalToken(),
+            },
+          }
+        : {}),
       ...(skillsProvider ? { skillsProvider } : {}),
       ...(specProvider ? { specProvider } : {}),
       ...(repoInstructionsProvider ? { repoInstructionsProvider } : {}),

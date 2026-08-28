@@ -475,6 +475,12 @@ Web-level tests beside the panel components; API-level tests for the routes.
 5. **State doc writes are validated at write time** (YAML parse + protocol version). The note defers all validation to trust; a parse check at the write boundary is nearly free and converts threat #1 from "state becomes unreadable" to a tool error the persona fixes immediately. Field-level schema validation remains excluded, as in the note.
 6. **The plan gains a human gate.** `sec_start` puts an approval in front of the spawn plan — Valet's cost and audit posture, absent from the note's CLI framing.
 
+## Deviations from this spec (implementation, M4)
+
+1. **`sec_dispatch` stamps `child_session_id` BEFORE the spawn**, not after. The Tools section's "in one transaction: spawns ..., stamps ..." ordering is impossible in practice: the host builds the child's engine session inside the spawn, and that build resolves the cell claim to attach the persona tool set and role — the claim must already exist. The claim UPDATE (status `running`, `attempts` + 1, pre-minted `child_session_id`, `dispatched_at`) runs first; a spawn failure restores the row's prior values.
+2. **The write claim expires with the attempt.** The persona routes resolve the claim only while the cell is `running`. A settled cell's child gets the corrective 403 ("This session is not a dispatched persona cell."); a yielded cell's replacement child holds the next claim.
+3. **The persona role rides the engine's per-turn role mechanism.** The claimed child's build registers plugin-security's `code-review` `RoleSpec` in its `roles` option, and the dispatch prompt is submitted with `role: <persona>` — the engine overlays the role's markdown on the system prompt for that turn (`Thread.applyRoleForTurn`). Steered turns (`child_send`) run without the overlay; the protocol mount and the persona's own state doc carry the contract across them.
+
 ## Revisions from the Adversarial Review (2026-08-27)
 
 A review pass against UX, agent experience, and result quality forced eight corrections, folded into the sections above:

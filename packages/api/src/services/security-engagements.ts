@@ -64,6 +64,16 @@ export type SpawnCellChild = (req: {
   message: string;
   repo: string;
   ref: string;
+  /**
+   * The child session id `dispatchCell` pre-minted and stamped on the cell
+   * BEFORE this spawn runs, so the host's session build sees the claim and
+   * attaches the persona toolset + role (M4). The real seam passes it to
+   * the ChildSpawner as `sessionId`; a fake may ignore it and return its
+   * own id — `dispatchCell` re-stamps whatever the spawn returns.
+   */
+  childSessionId: string;
+  /** The persona role name for the dispatch prompt's turn. */
+  role: string;
 }) => Promise<{ childSessionId: string }>;
 
 export interface EngagementWithCells {
@@ -407,14 +417,33 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     }
 
     const effectiveMode = args.mode ?? target.mode;
-    const prior = { status: target.status, attempts: target.attempts, mode: target.mode };
+    const prior = {
+      status: target.status,
+      attempts: target.attempts,
+      mode: target.mode,
+      childSessionId: target.childSessionId,
+      dispatchedAt: target.dispatchedAt,
+    };
+
+    // Pre-mint the child session id (the same `child_` shape children.ts
+    // mints — this IS the session id the spawn builds) and stamp it in the
+    // claim, BEFORE the spawn: the host's child-session build resolves the
+    // cell claim by `child_session_id` to attach the persona toolset + role,
+    // so the claim must exist when the build runs (M4).
+    const plannedChildSessionId = `child_${randomUUID()}`;
 
     // Claim first (one atomic UPDATE): a second dispatch racing in sees the
     // running status and refuses. The spawn happens outside a transaction —
     // the real spawner writes its own rows through the same connection.
     const claimed = await db
       .update(securityCells)
-      .set({ status: "running", attempts: target.attempts + 1, mode: effectiveMode })
+      .set({
+        status: "running",
+        attempts: target.attempts + 1,
+        mode: effectiveMode,
+        childSessionId: plannedChildSessionId,
+        dispatchedAt: now(),
+      })
       .where(eq(securityCells.id, target.id))
       .returning();
     const cell = claimed[0];
@@ -431,6 +460,8 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
         message: prompt,
         repo: engagement.repoFullName,
         ref: engagement.repoRef,
+        childSessionId: plannedChildSessionId,
+        role: cell.persona,
       });
       childSessionId = spawned.childSessionId;
     } catch (err) {
@@ -439,7 +470,13 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
       // count one. The error propagates to the caller unchanged.
       await db
         .update(securityCells)
-        .set({ status: prior.status, attempts: prior.attempts, mode: prior.mode })
+        .set({
+          status: prior.status,
+          attempts: prior.attempts,
+          mode: prior.mode,
+          childSessionId: prior.childSessionId,
+          dispatchedAt: prior.dispatchedAt,
+        })
         .where(eq(securityCells.id, cell.id));
       throw err;
     }

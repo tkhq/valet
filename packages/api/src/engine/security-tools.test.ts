@@ -31,12 +31,15 @@ import { agentSessions, childWatches, securityCells, securityFiles } from "../sc
 import { createSecurityEngagementService } from "../services/security-engagements.js";
 import type { CreateSessionResponse, GetSessionSecurityResponse } from "../wire/types.js";
 import {
+  buildSecurityPersonaTools,
   buildSecurityRunnerTools,
   secCellCompleteTool,
   secCloseTool,
   secDispatchTool,
+  secFindingReviewTool,
   secFsListTool,
   secFsReadTool,
+  secFsWriteTool,
   secStartTool,
   secStatusTool,
   ESTIMATED_TOKENS_PER_CELL,
@@ -446,6 +449,76 @@ describe("sec_close", () => {
       repoRef: SHA,
     });
     expect((manifest as { cells: unknown[] }).cells).toHaveLength(5);
+  });
+});
+
+describe("persona tool set (M4)", () => {
+  it("gates sec_finding_review on the claiming cell's review flag", () => {
+    expect(buildSecurityPersonaTools({ review: false }).map((t) => t.name)).toEqual([
+      "sec_fs_write",
+      "sec_fs_read",
+      "sec_fs_list",
+      "sec_finding_report",
+    ]);
+    expect(buildSecurityPersonaTools({ review: true }).map((t) => t.name)).toEqual([
+      "sec_fs_write",
+      "sec_fs_read",
+      "sec_fs_list",
+      "sec_finding_report",
+      "sec_finding_review",
+    ]);
+  });
+
+  it("403s a claimless acting session with the corrective persona message", async () => {
+    api = await bootTestApi();
+    // An ordinary kind='code' session: no security cell claims it.
+    const res = await fetch(`${api.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace: `/tmp/valet-sec-tools-${randomUUID()}` }),
+    });
+    const created = (await res.json()) as CreateSessionResponse;
+
+    const write = await secFsWriteTool.execute(
+      { path: "/cells/01-recon/state.yml", content: "x" },
+      toolCtx(api, created.id),
+    );
+    expect(write.text).toBe("[security_error] This session is not a dispatched persona cell.");
+
+    const review = await secFindingReviewTool.execute(
+      { finding_id: "fnd_x", status: "verified", reason: "solid evidence" },
+      toolCtx(api, created.id),
+    );
+    expect(review.text).toBe("[security_error] This session is not a dispatched persona cell.");
+  });
+
+  it("relays the service's write-claim refusal verbatim", async () => {
+    api = await bootTestApi();
+    const created = await createSecuritySession(api.baseUrl);
+    const { db } = api.providers;
+    const service = createSecurityEngagementService({ db });
+    const found = await service.getEngagementBySession(created.id);
+    await service.startEngagement(found!.engagement.id, { resolvedSha: SHA });
+    // Claim cell 1 (01-recon) with a fake spawn; the returned id is the
+    // claim the routes resolve.
+    await service.dispatchCell(found!.engagement.id, {
+      spawn: async () => ({ childSessionId: "child-claim" }),
+    });
+
+    const result = await secFsWriteTool.execute(
+      { path: "/cells/02-authz-sweep/x.md", content: "peer write" },
+      toolCtx(api, "child-claim"),
+    );
+    expect(result.text).toBe(
+      "[security_error] Write refused: /cells/02-authz-sweep/x.md is outside your cell directory /cells/01-recon/.",
+    );
+
+    // The claim's own directory takes the write.
+    const ok = await secFsWriteTool.execute(
+      { path: "/cells/01-recon/notes.md", content: "mine" },
+      toolCtx(api, "child-claim"),
+    );
+    expect(ok.text).toBe("wrote /cells/01-recon/notes.md (revision 1)");
   });
 });
 

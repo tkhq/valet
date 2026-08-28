@@ -1,16 +1,21 @@
 /**
- * `sec_*` runner ToolDefs (Valet Security spec §Tools) — the tool surface a
- * `kind='security'` session drives its engagement with. Follows the `mem_*`
- * pattern (`../orchestrator/memory-tools.ts`) exactly: each `execute` calls
- * the internal security routes over `fetch` against `ctx.config.apiBaseUrl`,
- * authenticating with `x-valet-internal` plus the ACTING session id in
- * `x-valet-session-id` (`ctx.sessionId` — the route refuses an acting
- * session that does not own the engagement). Never the service module
- * directly: the HTTP seam is the portability contract.
+ * `sec_*` ToolDefs (Valet Security spec §Tools) — both tool sets: the
+ * runner set a `kind='security'` session drives its engagement with, and
+ * the persona set a cell-claimed child session works under. Follows the
+ * `mem_*` pattern (`../orchestrator/memory-tools.ts`) exactly: each
+ * `execute` calls the internal security routes over `fetch` against
+ * `ctx.config.apiBaseUrl`, authenticating with `x-valet-internal` plus the
+ * ACTING session id in `x-valet-session-id` (`ctx.sessionId`). Never the
+ * service module directly: the HTTP seam is the portability contract.
+ *
+ * Persona tools name the CHILD's own session id in both the URL and the
+ * acting header; the routes resolve the cell claim
+ * (`security_cells.child_session_id` = acting session) and find the
+ * engagement from it — a child never learns the engagement or runner id.
  *
  * The tools narrate; the routes decide. Every transition error the service
  * throws comes back as a corrective `[security_error]` result, never a
- * throw — a refused transition must not kill the runner's turn.
+ * throw — a refused transition must not kill the turn.
  *
  * `sec_start` is the one human gate (spec threat 9): the tool fetches the
  * start preview (repo, resolved SHA, plan cells), opens an approval decision
@@ -614,6 +619,132 @@ export const secFindingsListTool = defineTool({
   },
 });
 
+// ── sec_fs_write (persona) ─────────────────────────────────────────────────
+
+export const secFsWriteTool = defineTool({
+  name: "sec_fs_write",
+  description:
+    "Write one file into YOUR cell directory (/cells/<your dir>/...) in the engagement tree. Writes append " +
+    "revisions — nothing updates in place. state.yml writes are validated against the protocol.",
+  parameters: Type.Object({
+    path: Type.String({ description: "Tree path under your cell directory, e.g. '/cells/01-recon/state.yml'." }),
+    content: Type.String({ description: "The full file content (the tree stores whole revisions)." }),
+  }),
+  execute: async (args, ctx) => {
+    const cfg = resolveSecurityConfig(ctx);
+    if (!cfg) return { text: UNAVAILABLE_TEXT };
+    return securityRequest(
+      securityUrl(cfg, ctx, "/files"),
+      {
+        method: "POST",
+        headers: securityHeaders(cfg, ctx, true),
+        body: JSON.stringify({ path: args.path, content: args.content }),
+      },
+      async (res) => {
+        const body = await parseJsonBody(res);
+        const revision = isRecord(body) && typeof body.revision === "number" ? body.revision : undefined;
+        return { text: `wrote ${args.path}${revision !== undefined ? ` (revision ${revision})` : ""}` };
+      },
+    );
+  },
+});
+
+// ── sec_finding_report (persona) ───────────────────────────────────────────
+
+export const secFindingReportTool = defineTool({
+  name: "sec_finding_report",
+  description:
+    "Report one security finding for your cell. The body must carry evidence: a code excerpt and the " +
+    "reasoning from source to impact (at least 200 characters). The server computes the fingerprint and " +
+    "returns any existing findings that share it — consolidate near-duplicates instead of re-filing.",
+  parameters: Type.Object({
+    severity: Type.Union([
+      Type.Literal("critical"),
+      Type.Literal("high"),
+      Type.Literal("medium"),
+      Type.Literal("low"),
+      Type.Literal("info"),
+    ]),
+    title: Type.String({ description: "One line naming the vulnerability." }),
+    file: Type.Optional(Type.String({ description: "Repo path of the affected file." })),
+    line: Type.Optional(Type.Integer({ minimum: 1 })),
+    body: Type.String({
+      description: "Evidence: a code excerpt plus the reasoning from source to impact (≥ 200 characters).",
+    }),
+  }),
+  execute: async (args, ctx) => {
+    const cfg = resolveSecurityConfig(ctx);
+    if (!cfg) return { text: UNAVAILABLE_TEXT };
+    return securityRequest(
+      securityUrl(cfg, ctx, "/findings"),
+      {
+        method: "POST",
+        headers: securityHeaders(cfg, ctx, true),
+        body: JSON.stringify({
+          severity: args.severity,
+          title: args.title,
+          file: args.file,
+          line: args.line,
+          body: args.body,
+        }),
+      },
+      async (res) => {
+        const body = await parseJsonBody(res);
+        const finding = isRecord(body) && isRecord(body.finding) ? body.finding : null;
+        if (!finding) return { text: "[security_error] the finding route returned an unexpected shape." };
+        const siblings = isRecord(body) && Array.isArray(body.siblings) ? body.siblings : [];
+        const lines = [
+          `finding ${String(finding.id)} recorded [${String(finding.severity)}] fingerprint ${String(finding.fingerprint)}`,
+        ];
+        if (siblings.length > 0) {
+          lines.push(
+            `${siblings.length} existing finding(s) share this fingerprint: ` +
+              siblings
+                .filter(isRecord)
+                .map((s) => String(s.id))
+                .join(", ") +
+              ". If yours adds no new evidence, consolidate instead of re-filing.",
+          );
+        }
+        return { text: lines.join("\n") };
+      },
+    );
+  },
+});
+
+// ── sec_finding_review (persona, review cells only) ────────────────────────
+
+export const secFindingReviewTool = defineTool({
+  name: "sec_finding_review",
+  description:
+    "Rule on one open finding: 'verified' when the evidence survives your attack, 'refuted' when it does not. " +
+    "Forward-only; the reason must name what the evidence shows or what it missed.",
+  parameters: Type.Object({
+    finding_id: Type.String(),
+    status: Type.Union([Type.Literal("verified"), Type.Literal("refuted")]),
+    reason: Type.String({ description: "What the evidence shows (verified) or what it missed (refuted)." }),
+  }),
+  execute: async (args, ctx) => {
+    const cfg = resolveSecurityConfig(ctx);
+    if (!cfg) return { text: UNAVAILABLE_TEXT };
+    return securityRequest(
+      securityUrl(cfg, ctx, `/findings/${encodeURIComponent(args.finding_id)}/review`),
+      {
+        method: "POST",
+        headers: securityHeaders(cfg, ctx, true),
+        body: JSON.stringify({ status: args.status, reason: args.reason }),
+      },
+      async (res) => {
+        const body = await parseJsonBody(res);
+        const finding = isRecord(body) && isRecord(body.finding) ? body.finding : null;
+        return {
+          text: `finding ${finding ? String(finding.id) : args.finding_id} ${args.status}: ${args.reason}`,
+        };
+      },
+    );
+  },
+});
+
 /** All eleven runner `sec_*` ToolDefs, in registration order. */
 export function buildSecurityRunnerTools(): ToolDef[] {
   return [
@@ -628,5 +759,21 @@ export function buildSecurityRunnerTools(): ToolDef[] {
     secFsReadTool,
     secFsListTool,
     secFindingsListTool,
+  ];
+}
+
+/**
+ * The persona `sec_*` ToolDefs for a cell-claimed child session (spec
+ * §Tools "Persona tools"). `sec_finding_review` attaches only when the
+ * claiming cell has `review: true` — a prompt-injected sweep persona must
+ * not refute its peers' findings (spec threat 8).
+ */
+export function buildSecurityPersonaTools(opts: { review: boolean }): ToolDef[] {
+  return [
+    secFsWriteTool,
+    secFsReadTool,
+    secFsListTool,
+    secFindingReportTool,
+    ...(opts.review ? [secFindingReviewTool] : []),
   ];
 }

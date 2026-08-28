@@ -238,7 +238,9 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
 
     await enforceLimits(deps.db, ctx.parentSessionId, orgId, deps.orgSessionCeiling);
 
-    const childSessionId = newChildSessionId();
+    // A pre-assigned id (the security dispatch's cell-claim seam) wins so
+    // the caller's durable claim row names the session this spawn builds.
+    const childSessionId = req.sessionId ?? newChildSessionId();
     const workspace = join(deps.workspaceRoot ?? join(homedir(), ".valet", "children"), childSessionId);
     await mkdir(workspace, { recursive: true });
 
@@ -301,6 +303,9 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
 
     const receipt = await childSession.prompt(req.prompt, {
       author: { id: ctx.actorUserId },
+      // Per-turn role overlay (the security dispatch names the persona
+      // role; the claimed child's build registered it in options.roles).
+      ...(req.role !== undefined ? { role: req.role } : {}),
     });
 
     await deps.db

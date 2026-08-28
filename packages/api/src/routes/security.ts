@@ -21,6 +21,12 @@
  *   POST /api/sessions/:id/security/close         → manifest
  *   POST /api/sessions/:id/security/handoff       → spawn a fix session from a finding
  *
+ * Persona tool backends (M4 — the acting session is a cell-claimed child):
+ *   POST /api/sessions/:id/security/files         → append one revision (write claim)
+ *   POST /api/sessions/:id/security/findings      → report a finding for the cell
+ *   POST /api/sessions/:id/security/findings/:findingId/review
+ *                                                 → verified/refuted (review cells only)
+ *
  * Dual auth, the memory-routes ladder: a valid `x-valet-internal` token is
  * the `sec_*` engine tools' path; otherwise the caller is the session user.
  * The M2 reads keep the plain internal bypass. The M3 tool routes bind the
@@ -30,20 +36,30 @@
  * session a cell of this engagement claims (`child_session_id`, the M4
  * persona seam). User-path mutations require `canAdministerSession`.
  * Unknown/unreachable sessions answer 404, the existence-hiding convention.
+ *
+ * The persona routes and tool reads resolve the engagement FROM the claim
+ * (`security_cells.child_session_id` = the acting session, one indexed
+ * query): a dispatched child names only its OWN session id — it never
+ * learns the runner's. A claimless acting session gets a corrective 403.
+ * The persona routes never take the user path; M6 adds the human review
+ * surface separately.
  */
 import { Hono, type Context } from "hono";
 import { and, count, eq } from "drizzle-orm";
 import { cellDir, KNOWN_PERSONAS, parsePlan } from "@valet/plugin-security";
 import type { Principal } from "@valet/engine";
 import type { AppEnv } from "../env.js";
+import type { AppDb } from "../lib/drizzle.js";
 import { isValidInternalToken } from "../lib/internal-auth.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import {
   agentSessions,
   childWatches,
+  securityCells,
   securityFindings,
   sessionRepos,
   type SecurityCellRow,
+  type SecurityEngagementRow,
   type SecurityFindingRow,
 } from "../schema/index.js";
 import { canAdministerSession, canViewSession } from "../services/session-access.js";
@@ -68,9 +84,12 @@ import type {
   SecurityFailCellResponse,
   SecurityFindingWire,
   SecurityHandoffResponse,
+  SecurityReportFindingResponse,
+  SecurityReviewFindingResponse,
   SecuritySetPlanResponse,
   SecurityStartPreviewResponse,
   SecurityTreeFileResponse,
+  SecurityWriteFileResponse,
 } from "../wire/types.js";
 
 export const securityRouter = new Hono<AppEnv>();
@@ -321,6 +340,92 @@ async function loadEngagementOr404(c: Context<AppEnv>, sessionId: string) {
   return { security, result };
 }
 
+/** The RUNNING cell (if any) whose dispatch claims `sessionId` as its child
+ * — one indexed query (`security_cells_child_session`). Running only: the
+ * write claim lives exactly as long as the attempt — a settled cell's child
+ * must not keep writing, and a yielded cell's replacement child holds the
+ * next claim. */
+async function claimedCellOf(db: AppDb, sessionId: string): Promise<SecurityCellRow | null> {
+  const rows = await db
+    .select()
+    .from(securityCells)
+    .where(and(eq(securityCells.childSessionId, sessionId), eq(securityCells.status, "running")))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+/**
+ * Engagement resolution for tool READS: the session's own engagement first
+ * (the runner path), else the engagement of the cell that claims `:id` (the
+ * persona path — `sec_fs_read`/`sec_fs_list` name the child's own session
+ * id; the child never learns the engagement id). NEVER use this for the
+ * runner mutation routes: the claim must not let a persona child drive
+ * `plan`/`start`/`dispatch`/`close` (spec threat 8).
+ */
+async function loadEngagementForRead(c: Context<AppEnv>, sessionId: string) {
+  const { db } = c.var.providers;
+  const security = createSecurityEngagementService({ db });
+  let result = await security.getEngagementBySession(sessionId);
+  if (!result) {
+    const cell = await claimedCellOf(db, sessionId);
+    if (cell) result = await security.getEngagement(cell.engagementId);
+  }
+  if (!result) return { security, failure: c.json({ error: NO_ENGAGEMENT }, 404) };
+  return { security, result };
+}
+
+interface PersonaActor {
+  security: ReturnType<typeof createSecurityEngagementService>;
+  engagement: SecurityEngagementRow;
+  cell: SecurityCellRow;
+}
+
+type ResolvePersonaActorResult = { ok: PersonaActor } | { failure: Response };
+
+/**
+ * Resolve + authorize a persona tool route (M4). Internal-token only —
+ * personas exist only behind the engine tool seam, and the human triage
+ * surface (M6) is a separate route family. The ACTING session's cell claim
+ * is the authority: no claim → corrective 403; the claim names the cell
+ * (the service's actor) and the engagement. `:id` must be the acting
+ * session itself (the persona tools name their own id) or the engagement's
+ * runner session.
+ */
+async function resolvePersonaActor(
+  c: Context<AppEnv>,
+  sessionId: string,
+): Promise<ResolvePersonaActorResult> {
+  if (!isValidInternalToken(c.req.header("x-valet-internal"))) {
+    return { failure: c.json({ error: "session not found" }, 404) };
+  }
+  const acting = c.req.header("x-valet-session-id");
+  if (!acting) {
+    return {
+      failure: c.json(
+        { error: "Missing acting session. Send the x-valet-session-id header with the calling session id." },
+        401,
+      ),
+    };
+  }
+  const { db } = c.var.providers;
+  const cell = await claimedCellOf(db, acting);
+  if (!cell) {
+    return { failure: c.json({ error: "This session is not a dispatched persona cell." }, 403) };
+  }
+  const security = createSecurityEngagementService({ db });
+  const result = await security.getEngagement(cell.engagementId);
+  if (!result) return { failure: c.json({ error: NO_ENGAGEMENT }, 404) };
+  if (sessionId !== acting && sessionId !== result.engagement.sessionId) {
+    return {
+      failure: c.json(
+        { error: "The acting session does not own this engagement. A persona acts only on its own cell." },
+        403,
+      ),
+    };
+  }
+  return { ok: { security, engagement: result.engagement, cell } };
+}
+
 const HEX_SHA_RE = /^[0-9a-f]{40}$/i;
 
 securityRouter.get("/:id/security/status", async (c) => {
@@ -470,7 +575,7 @@ securityRouter.get("/:id/security/files", async (c) => {
   const resolved = await resolveToolSession(c, sessionId, "read");
   if ("failure" in resolved) return resolved.failure;
 
-  const loaded = await loadEngagementOr404(c, sessionId);
+  const loaded = await loadEngagementForRead(c, sessionId);
   if ("failure" in loaded) return loaded.failure;
   const { security, result } = loaded;
 
@@ -496,7 +601,7 @@ securityRouter.get("/:id/security/files/list", async (c) => {
   const resolved = await resolveToolSession(c, sessionId, "read");
   if ("failure" in resolved) return resolved.failure;
 
-  const loaded = await loadEngagementOr404(c, sessionId);
+  const loaded = await loadEngagementForRead(c, sessionId);
   if ("failure" in loaded) return loaded.failure;
   const { security, result } = loaded;
 
@@ -606,6 +711,11 @@ securityRouter.post("/:id/security/dispatch", async (c) => {
         // identical tree.
         branch: req.ref,
         profile: "headless",
+        // The pre-stamped cell claim names this id, so the child-session
+        // build attaches the persona toolset + role (M4).
+        sessionId: req.childSessionId,
+        // Per-turn role overlay for the dispatch prompt.
+        role: req.role,
       },
       {
         parentSessionId: sessionId,
@@ -788,6 +898,113 @@ securityRouter.post("/:id/security/handoff", async (c) => {
       },
     );
     const response: SecurityHandoffResponse = { childSessionId: spawned.childSessionId, title };
+    return c.json(response);
+  } catch (err) {
+    return serviceError(c, err);
+  }
+});
+
+// ── M4: persona tool backends ──────────────────────────────────────────────
+
+securityRouter.post("/:id/security/files", async (c) => {
+  const sessionId = c.req.param("id");
+  const resolved = await resolvePersonaActor(c, sessionId);
+  if ("failure" in resolved) return resolved.failure;
+  const { security, engagement, cell } = resolved.ok;
+
+  const body = await readJsonBody(c);
+  if (typeof body.path !== "string" || body.path === "") {
+    return c.json({ error: "Send { path } with the tree path to write." }, 400);
+  }
+  if (typeof body.content !== "string") {
+    return c.json({ error: "Send { content } with the file content." }, 400);
+  }
+
+  try {
+    // The service enforces the write claim (the path prefix IS the claim)
+    // and the state.yml validation; its messages are corrective — relay
+    // them verbatim.
+    const written = await security.writeFile(engagement.id, {
+      actorCellId: cell.id,
+      path: body.path,
+      content: body.content,
+    });
+    const response: SecurityWriteFileResponse = written;
+    return c.json(response);
+  } catch (err) {
+    return serviceError(c, err);
+  }
+});
+
+securityRouter.post("/:id/security/findings", async (c) => {
+  const sessionId = c.req.param("id");
+  const resolved = await resolvePersonaActor(c, sessionId);
+  if ("failure" in resolved) return resolved.failure;
+  const { security, engagement, cell } = resolved.ok;
+
+  const body = await readJsonBody(c);
+  const severity = body.severity;
+  if (typeof severity !== "string" || !SEVERITIES.has(severity)) {
+    return c.json({ error: "severity must be critical, high, medium, low, or info." }, 400);
+  }
+  if (typeof body.title !== "string" || body.title.trim() === "") {
+    return c.json({ error: "Send { title } naming the finding." }, 400);
+  }
+  if (typeof body.body !== "string") {
+    return c.json({ error: "Send { body } with the finding's evidence." }, 400);
+  }
+  if (body.file !== undefined && typeof body.file !== "string") {
+    return c.json({ error: "file must be a repo path string." }, 400);
+  }
+  if (body.line !== undefined && (typeof body.line !== "number" || !Number.isInteger(body.line) || body.line < 1)) {
+    return c.json({ error: "line must be a positive integer." }, 400);
+  }
+
+  try {
+    const reported = await security.reportFinding(engagement.id, {
+      cellId: cell.id,
+      // The set membership above proved the narrow type.
+      severity: severity as FindingSeverity,
+      title: body.title,
+      file: typeof body.file === "string" ? body.file : undefined,
+      line: typeof body.line === "number" ? body.line : undefined,
+      body: body.body,
+    });
+    const response: SecurityReportFindingResponse = {
+      finding: findingToWire(reported.finding),
+      siblings: reported.siblings.map(findingToWire),
+    };
+    return c.json(response);
+  } catch (err) {
+    return serviceError(c, err);
+  }
+});
+
+securityRouter.post("/:id/security/findings/:findingId/review", async (c) => {
+  const sessionId = c.req.param("id");
+  const findingId = c.req.param("findingId");
+  const resolved = await resolvePersonaActor(c, sessionId);
+  if ("failure" in resolved) return resolved.failure;
+  const { security, engagement, cell } = resolved.ok;
+
+  const body = await readJsonBody(c);
+  if (body.status !== "verified" && body.status !== "refuted") {
+    return c.json({ error: "status must be 'verified' or 'refuted'." }, 400);
+  }
+  if (typeof body.reason !== "string" || body.reason.trim() === "") {
+    return c.json({ error: "Send { reason } naming what the evidence shows or what it missed." }, 400);
+  }
+
+  try {
+    // Actor = the claiming CELL id: the service enforces review-cell gating
+    // (only review cells flip statuses) and forward-only transitions.
+    const finding = await security.reviewFinding(engagement.id, {
+      findingId,
+      status: body.status,
+      reason: body.reason,
+      actor: cell.id,
+    });
+    const response: SecurityReviewFindingResponse = { finding: findingToWire(finding) };
     return c.json(response);
   } catch (err) {
     return serviceError(c, err);
