@@ -479,6 +479,30 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     probe: { kind: "index", index: "security_finding_links_provider_unique" },
     sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "security_finding_links_provider_unique" ON "security_finding_links" ("finding_id", "provider")',
   },
+  {
+    describe: "security_handoffs table",
+    probe: { kind: "table", table: "security_handoffs" },
+    sql: `CREATE TABLE IF NOT EXISTS "security_handoffs" (
+      "id" text PRIMARY KEY NOT NULL,
+      "engagement_id" text NOT NULL,
+      "finding_id" text NOT NULL,
+      "child_session_id" text NOT NULL,
+      "title" text NOT NULL,
+      "task" text,
+      "created_by" text NOT NULL,
+      "created_at" bigint NOT NULL
+    )`,
+  },
+  {
+    describe: "security_handoffs_engagement index",
+    probe: { kind: "index", index: "security_handoffs_engagement" },
+    sql: 'CREATE INDEX IF NOT EXISTS "security_handoffs_engagement" ON "security_handoffs" ("engagement_id")',
+  },
+  {
+    describe: "security_handoffs_finding index",
+    probe: { kind: "index", index: "security_handoffs_finding" },
+    sql: 'CREATE INDEX IF NOT EXISTS "security_handoffs_finding" ON "security_handoffs" ("finding_id")',
+  },
 ];
 
 /** The repairs this database still lacks, by catalog probe — one query per

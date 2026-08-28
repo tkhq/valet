@@ -1048,6 +1048,23 @@ CREATE TABLE "security_finding_links" (
 --> statement-breakpoint
 CREATE UNIQUE INDEX "security_finding_links_provider_unique" ON "security_finding_links" ("finding_id", "provider");
 --> statement-breakpoint
+-- One row per sec_handoff spawn: the fix session opened from a finding.
+-- No unique constraint — a finding may spawn several fix sessions.
+CREATE TABLE "security_handoffs" (
+	"id" text PRIMARY KEY NOT NULL,
+	"engagement_id" text NOT NULL,
+	"finding_id" text NOT NULL,
+	"child_session_id" text NOT NULL,
+	"title" text NOT NULL,
+	"task" text,
+	"created_by" text NOT NULL,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "security_handoffs_engagement" ON "security_handoffs" ("engagement_id");
+--> statement-breakpoint
+CREATE INDEX "security_handoffs_finding" ON "security_handoffs" ("finding_id");
+--> statement-breakpoint
 -- ── cost_entries ──────────────────────────────────────────────────────────
 --
 -- One row per billable assistant turn, with the owner resolved. This is the

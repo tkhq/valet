@@ -39,9 +39,11 @@ import {
   securityFiles,
   securityFindingLinks,
   securityFindings,
+  securityHandoffs,
   type SecurityCellRow,
   type SecurityEngagementRow,
   type SecurityFindingRow,
+  type SecurityHandoffRow,
 } from "../schema/index.js";
 import {
   recordSecurityCellsCreated,
@@ -988,6 +990,52 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
   }
 
   /**
+   * Record a fix session spawned from a finding (sec_handoff). Insert-only;
+   * no unique constraint — a finding may spawn several fix sessions. The
+   * findings-list route surfaces these per finding and the child slide-over
+   * opens each one.
+   */
+  async function recordHandoff(args: {
+    engagementId: string;
+    findingId: string;
+    childSessionId: string;
+    title: string;
+    task?: string;
+    createdBy: string;
+  }): Promise<SecurityHandoffRow> {
+    const inserted = await db
+      .insert(securityHandoffs)
+      .values({
+        id: `hnd_${randomUUID()}`,
+        engagementId: args.engagementId,
+        findingId: args.findingId,
+        childSessionId: args.childSessionId,
+        title: args.title,
+        task: args.task ?? null,
+        createdBy: args.createdBy,
+        createdAt: now(),
+      })
+      .returning();
+    return inserted[0];
+  }
+
+  /** Fix sessions for the engagement, newest first; optionally one finding. */
+  async function listHandoffs(
+    engagementId: string,
+    options: { findingId?: string } = {},
+  ): Promise<SecurityHandoffRow[]> {
+    const conditions = [eq(securityHandoffs.engagementId, engagementId)];
+    if (options.findingId !== undefined) {
+      conditions.push(eq(securityHandoffs.findingId, options.findingId));
+    }
+    return db
+      .select()
+      .from(securityHandoffs)
+      .where(and(...conditions))
+      .orderBy(desc(securityHandoffs.createdAt), desc(securityHandoffs.id));
+  }
+
+  /**
    * Stamp a compaction on the running cell that claims `childSessionId`
    * (M5, spec §Context Discipline). Alert, don't auto-repair: this stamps
    * `compacted_at` and measures state-doc staleness for the caller to
@@ -1053,6 +1101,8 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     reportFinding,
     reviewFinding,
     listFindings,
+    recordHandoff,
+    listHandoffs,
     stampCellCompaction,
     getRunningCellProgress,
   };

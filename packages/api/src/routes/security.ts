@@ -55,7 +55,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { Hono, type Context } from "hono";
-import { and, count, eq, inArray } from "drizzle-orm";
+import { and, count, desc, eq, inArray } from "drizzle-orm";
 import { cellDir, KNOWN_PERSONAS, parsePlan } from "@valet/plugin-security";
 import type { Principal } from "@valet/engine";
 import type { AppEnv } from "../env.js";
@@ -72,11 +72,13 @@ import {
   securityCells,
   securityFindingLinks,
   securityFindings,
+  securityHandoffs,
   sessionRepos,
   type SecurityCellRow,
   type SecurityEngagementRow,
   type SecurityFindingLinkRow,
   type SecurityFindingRow,
+  type SecurityHandoffRow,
 } from "../schema/index.js";
 import { canAdministerSession, canViewSession } from "../services/session-access.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
@@ -118,6 +120,7 @@ import type {
   SecurityFindingLinkWire,
   SecurityFindingWire,
   SecurityHandoffResponse,
+  SecurityHandoffWire,
   SecurityReportFindingResponse,
   SecurityReviewFindingResponse,
   SecuritySetPlanResponse,
@@ -208,6 +211,15 @@ function linkToWire(link: SecurityFindingLinkRow): SecurityFindingLinkWire {
   };
 }
 
+function handoffToWire(h: SecurityHandoffRow): SecurityHandoffWire {
+  return {
+    childSessionId: h.childSessionId,
+    title: h.title,
+    ...(h.task != null ? { task: h.task } : {}),
+    createdAt: h.createdAt,
+  };
+}
+
 const NO_ENGAGEMENT =
   "This session has no security engagement. Create the session with kind 'security' to start one.";
 
@@ -292,10 +304,32 @@ securityRouter.get("/:id/security/findings", async (c) => {
       list.push(linkToWire(link));
       linksByFinding.set(link.findingId, list);
     }
+    // Fix sessions (sec_handoff): one grouped query for the page, mirroring
+    // the link-chip block. Newest first within each finding.
+    const handoffRows =
+      findingIds.length > 0
+        ? await db
+            .select()
+            .from(securityHandoffs)
+            .where(
+              and(
+                eq(securityHandoffs.engagementId, result.engagement.id),
+                inArray(securityHandoffs.findingId, findingIds),
+              ),
+            )
+            .orderBy(desc(securityHandoffs.createdAt), desc(securityHandoffs.id))
+        : [];
+    const handoffsByFinding = new Map<string, SecurityHandoffWire[]>();
+    for (const h of handoffRows) {
+      const list = handoffsByFinding.get(h.findingId) ?? [];
+      list.push(handoffToWire(h));
+      handoffsByFinding.set(h.findingId, list);
+    }
     const body: ListSecurityFindingsResponse = {
       findings: page.findings.map((f) => ({
         ...findingToWire(f),
         links: linksByFinding.get(f.id) ?? [],
+        handoffs: handoffsByFinding.get(f.id) ?? [],
       })),
       nextCursor: page.nextCursor,
     };
@@ -928,7 +962,7 @@ securityRouter.post("/:id/security/handoff", async (c) => {
 
   const loaded = await loadEngagementOr404(c, sessionId);
   if ("failure" in loaded) return loaded.failure;
-  const { result } = loaded;
+  const { security, result } = loaded;
   const { db, childSpawner } = c.var.providers;
 
   const body = await readJsonBody(c);
@@ -995,6 +1029,24 @@ securityRouter.post("/:id/security/handoff", async (c) => {
         owner: sessionOwner(row),
       },
     );
+    // Record the link so the finding can surface and open its fix session.
+    // The child already exists; a lost link row must not 500 the tool, so a
+    // failed insert logs and still returns the child id.
+    try {
+      await security.recordHandoff({
+        engagementId: result.engagement.id,
+        findingId: body.findingId,
+        childSessionId: spawned.childSessionId,
+        title,
+        task,
+        createdBy: row.userId,
+      });
+    } catch (recordErr) {
+      console.error(
+        `security handoff: spawned ${spawned.childSessionId} for finding ${body.findingId} but link insert failed:`,
+        recordErr,
+      );
+    }
     const response: SecurityHandoffResponse = { childSessionId: spawned.childSessionId, title };
     return c.json(response);
   } catch (err) {

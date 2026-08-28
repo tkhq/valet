@@ -536,6 +536,83 @@ describe("security engagement service", () => {
     expect(open.nextCursor).toBeNull();
   });
 
+  // ── Handoffs (fix sessions) ──────────────────────────────────────────────
+
+  it("recordHandoff inserts a row and listHandoffs returns it", async () => {
+    const { engagement, cells } = await makeStarted();
+    const { finding } = await svc.reportFinding(engagement.id, {
+      cellId: cells[0].id,
+      severity: "high",
+      title: "IDOR on sessions",
+      body: EVIDENCE,
+    });
+    const row = await svc.recordHandoff({
+      engagementId: engagement.id,
+      findingId: finding.id,
+      childSessionId: "child_fix_1",
+      title: "Fix: IDOR on sessions",
+      task: "patch the ownership check",
+      createdBy: "user1",
+    });
+    expect(row.childSessionId).toBe("child_fix_1");
+    expect(row.task).toBe("patch the ownership check");
+    const all = await svc.listHandoffs(engagement.id);
+    expect(all).toHaveLength(1);
+    expect(all[0].id).toBe(row.id);
+  });
+
+  it("listHandoffs returns newest first and filters by findingId", async () => {
+    const { engagement, cells } = await makeStarted();
+    const a = await svc.reportFinding(engagement.id, {
+      cellId: cells[0].id,
+      severity: "high",
+      title: "finding A",
+      body: EVIDENCE,
+    });
+    const b = await svc.reportFinding(engagement.id, {
+      cellId: cells[1].id,
+      severity: "low",
+      title: "finding B",
+      body: EVIDENCE,
+    });
+    // Two fix sessions for finding A (no unique constraint) plus one for B.
+    const first = await svc.recordHandoff({
+      engagementId: engagement.id,
+      findingId: a.finding.id,
+      childSessionId: "child_a1",
+      title: "Fix A first",
+      createdBy: "user1",
+    });
+    const second = await svc.recordHandoff({
+      engagementId: engagement.id,
+      findingId: a.finding.id,
+      childSessionId: "child_a2",
+      title: "Fix A second",
+      createdBy: "user1",
+    });
+    await svc.recordHandoff({
+      engagementId: engagement.id,
+      findingId: b.finding.id,
+      childSessionId: "child_b1",
+      title: "Fix B",
+      createdBy: "user1",
+    });
+    const forA = await svc.listHandoffs(engagement.id, { findingId: a.finding.id });
+    expect(forA).toHaveLength(2);
+    // Only finding A's handoffs, no unique constraint blocked the second.
+    expect(new Set(forA.map((h) => h.id))).toEqual(new Set([first.id, second.id]));
+    // Newest first: ordered by (createdAt desc, id desc). Same-ms inserts fall
+    // to the id tiebreak, so assert the returned order matches that sort.
+    const sorted = [...forA].sort((x, y) =>
+      y.createdAt - x.createdAt || (y.id < x.id ? -1 : y.id > x.id ? 1 : 0),
+    );
+    expect(forA.map((h) => h.id)).toEqual(sorted.map((h) => h.id));
+    // A nullable task round-trips as null.
+    expect(forA[0].task).toBeNull();
+    const all = await svc.listHandoffs(engagement.id);
+    expect(all).toHaveLength(3);
+  });
+
   // ── Close + manifest ─────────────────────────────────────────────────────
 
   it("closeEngagement refuses while a cell is pending", async () => {

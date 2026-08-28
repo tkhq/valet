@@ -82,6 +82,7 @@ const APP_TABLES = [
   "security_files",
   "security_findings",
   "security_finding_links",
+  "security_handoffs",
 ];
 
 async function tableExists(db: PgDb, table: string): Promise<boolean> {
@@ -157,6 +158,26 @@ describe("pg app schema + migrations", () => {
       ),
     ).rejects.toThrow(/security_finding_links_provider_unique|duplicate key/);
     await db.query("DELETE FROM security_finding_links WHERE engagement_id = 'eng1'");
+  });
+
+  it("records fix-session handoffs with no unique constraint per finding", async () => {
+    const now = Date.now();
+    // Two fix sessions for the same finding — both must persist.
+    await db.query(
+      "INSERT INTO security_handoffs (id, engagement_id, finding_id, child_session_id, title, task, created_by, created_at) VALUES ('hnd1', 'eng1', 'fnd1', 'child1', 'Fix: A', 'do it', 'user1', $1)",
+      [now],
+    );
+    await db.query(
+      "INSERT INTO security_handoffs (id, engagement_id, finding_id, child_session_id, title, task, created_by, created_at) VALUES ('hnd2', 'eng1', 'fnd1', 'child2', 'Fix: A again', NULL, 'user1', $1)",
+      [now + 1],
+    );
+    const rows = await db.query(
+      "SELECT id, child_session_id, task FROM security_handoffs WHERE finding_id = 'fnd1' ORDER BY created_at",
+    );
+    expect(rows.rows).toHaveLength(2);
+    // Nullable task round-trips as null.
+    expect((rows.rows[1] as { task: string | null }).task).toBeNull();
+    await db.query("DELETE FROM security_handoffs WHERE engagement_id = 'eng1'");
   });
 
   it("tracks the applied migration in __valet_app_migrations", async () => {

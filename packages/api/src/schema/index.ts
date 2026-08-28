@@ -1840,8 +1840,30 @@ export const securityFindingLinks = pgTable(
   ],
 );
 
+export const securityHandoffs = pgTable(
+  "security_handoffs",
+  {
+    id: text("id").primaryKey(),
+    engagementId: text("engagement_id").notNull(),
+    findingId: text("finding_id").notNull(),
+    // The spawned fix session — opened through the child slide-over.
+    childSessionId: text("child_session_id").notNull(),
+    title: text("title").notNull(),
+    // The optional extra instruction the runner passed to sec_handoff.
+    task: text("task"),
+    createdBy: text("created_by").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  // No unique constraint: a finding may spawn several fix sessions.
+  (t) => [
+    index("security_handoffs_engagement").on(t.engagementId),
+    index("security_handoffs_finding").on(t.findingId),
+  ],
+);
+
 export type SecurityEngagementRow = typeof securityEngagements.$inferSelect;
 export type SecurityCellRow = typeof securityCells.$inferSelect;
 export type SecurityFileRow = typeof securityFiles.$inferSelect;
 export type SecurityFindingRow = typeof securityFindings.$inferSelect;
 export type SecurityFindingLinkRow = typeof securityFindingLinks.$inferSelect;
+export type SecurityHandoffRow = typeof securityHandoffs.$inferSelect;

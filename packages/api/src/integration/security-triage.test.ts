@@ -14,6 +14,7 @@ import {
   actionInvocations,
   securityFindingLinks,
   securityFindings,
+  securityHandoffs,
   teamMembers,
   teams,
 } from "../schema/index.js";
@@ -24,6 +25,7 @@ import type {
   GetSessionSecurityResponse,
   ListSecurityFindingsResponse,
   SecurityFileIssueResponse,
+  SecurityHandoffResponse,
   SecurityReviewFindingResponse,
 } from "../wire/types.js";
 
@@ -347,6 +349,59 @@ describe("api integration: security triage routes (M6)", () => {
       expect(linked?.links).toHaveLength(1);
       expect(linked?.links?.[0].provider).toBe("github");
       expect(linked?.links?.[0].url).toBe("https://github.com/acme/api/issues/9");
+    } finally {
+      await api.cleanup();
+    }
+  });
+
+  it("handoff route records a security_handoffs row and the finding surfaces it", async () => {
+    const api = await bootTestApi();
+    try {
+      const { session, engagementId } = await createSecuritySession(api.baseUrl);
+      await seedFinding(api, engagementId, { id: "fnd_h" });
+
+      // Fake the spawner: the fix session is not the unit under test, only the
+      // link row is. Return a fixed child id, count the calls.
+      let spawnCalls = 0;
+      api.providers.childSpawner = async () => {
+        spawnCalls += 1;
+        return { childSessionId: "child_fix_h", queueItemId: "q1" };
+      };
+
+      const headers = {
+        "x-valet-internal": internalToken(),
+        "x-valet-session-id": session.id,
+        "Content-Type": "application/json",
+      };
+      const res = await postJson(
+        `${api.baseUrl}/api/sessions/${session.id}/security/handoff`,
+        { findingId: "fnd_h", task: "patch the ownership check", threadId: "thread_1" },
+        headers,
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as SecurityHandoffResponse;
+      expect(body.childSessionId).toBe("child_fix_h");
+      expect(spawnCalls).toBe(1);
+
+      // The link row landed.
+      const rows = await api.providers.db
+        .select()
+        .from(securityHandoffs)
+        .where(eq(securityHandoffs.findingId, "fnd_h"));
+      expect(rows).toHaveLength(1);
+      expect(rows[0].childSessionId).toBe("child_fix_h");
+      expect(rows[0].title).toBe("Fix: IDOR on sessions");
+      expect(rows[0].task).toBe("patch the ownership check");
+
+      // The findings list surfaces the handoff per finding.
+      const list = await fetch(
+        `${api.baseUrl}/api/sessions/${session.id}/security/findings`,
+      );
+      const listBody = (await list.json()) as ListSecurityFindingsResponse;
+      const finding = listBody.findings.find((f) => f.id === "fnd_h");
+      expect(finding?.handoffs).toHaveLength(1);
+      expect(finding?.handoffs?.[0].childSessionId).toBe("child_fix_h");
+      expect(finding?.handoffs?.[0].task).toBe("patch the ownership check");
     } finally {
       await api.cleanup();
     }

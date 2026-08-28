@@ -230,6 +230,17 @@ export interface SecurityFindingWire {
   createdAt: number;
   /** Filed external issues; populated on the findings LIST route only. */
   links?: SecurityFindingLinkWire[];
+  /** Fix sessions spawned from this finding; findings LIST route only. */
+  handoffs?: SecurityHandoffWire[];
+}
+
+/** One fix session spawned from a finding (sec_handoff). Opened through the
+ * child slide-over. */
+export interface SecurityHandoffWire {
+  childSessionId: string;
+  title: string;
+  task?: string;
+  createdAt: number;
 }
 
 /** One filed external issue for one finding (spec §Filing issues). */
