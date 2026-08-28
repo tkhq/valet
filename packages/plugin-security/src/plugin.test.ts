@@ -25,4 +25,11 @@ describe("plugin manifest", () => {
     expect(role?.content).toContain("Editing files");
     expect(role?.content).toContain("gitleaks");
   });
+
+  it("tells the persona to verify known invariants (M-F3)", () => {
+    const role = plugin.roles?.[0];
+    expect(role?.content).toContain("known invariants");
+    expect(role?.content).toContain("A confirmed violation is a finding; cite the invariant.");
+    expect(role?.content).toContain("Do not assume an invariant holds just because it is asserted.");
+  });
 });

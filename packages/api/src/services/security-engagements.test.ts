@@ -924,6 +924,92 @@ describe("security engagement service", () => {
     expect(plain).not.toContain("RE-SCAN");
   });
 
+  it("buildDispatchPrompt injects focus + invariants before the protocol (M-F3)", async () => {
+    const { engagement, cells } = await makeStarted();
+    const plan = parsePlan(engagement.plan, KNOWN_PERSONAS);
+    const prompt = buildDispatchPrompt(cells[2], plan, [], "PROTOCOL BODY", false, {
+      focus: "the multi-tenant data path",
+      invariants: [
+        "every admin route sits behind requireAdmin",
+        "tenant id is always checked in the repository layer",
+      ],
+    });
+    expect(prompt).toContain(
+      "Focus of this review (from the engagement): the multi-tenant data path. Weight your checklist toward this",
+    );
+    expect(prompt).toContain("Treat a VIOLATION of any as a high-signal finding");
+    expect(prompt).toContain("- every admin route sits behind requireAdmin");
+    expect(prompt).toContain("- tenant id is always checked in the repository layer");
+    // The block rides BEFORE the protocol body.
+    expect(prompt.indexOf("Focus of this review")).toBeLessThan(prompt.indexOf("PROTOCOL BODY"));
+    expect(prompt.indexOf("high-signal finding")).toBeLessThan(prompt.indexOf("PROTOCOL BODY"));
+  });
+
+  it("buildDispatchPrompt adds no config block when focus + invariants are absent", async () => {
+    const { engagement, cells } = await makeStarted();
+    const plan = parsePlan(engagement.plan, KNOWN_PERSONAS);
+    const bare = buildDispatchPrompt(cells[2], plan, [], "PROTOCOL BODY");
+    const withEmpty = buildDispatchPrompt(cells[2], plan, [], "PROTOCOL BODY", false, {
+      focus: "   ",
+      invariants: ["  ", ""],
+    });
+    // Empty/whitespace values add nothing — byte-identical to the no-config call.
+    expect(withEmpty).toBe(bare);
+    expect(bare).not.toContain("Engagement configuration");
+    expect(bare).not.toContain("Focus of this review");
+    expect(bare).not.toContain("high-signal finding");
+  });
+
+  // ── Focus + invariants config (M-F3) ───────────────────────────────────────
+
+  it("setEngagementConfig updates focus + invariants while planning and refuses once running", async () => {
+    const engagement = await makePlanning();
+    const updated = await svc.setEngagementConfig(engagement.id, {
+      focus: "auth and tenancy",
+      invariants: ["tenant id is always checked in the repository layer", "  ", ""],
+    });
+    expect(updated.focus).toBe("auth and tenancy");
+    // Blank invariants are dropped; the column stores a JSON string[].
+    expect(JSON.parse(updated.invariants ?? "[]")).toEqual([
+      "tenant id is always checked in the repository layer",
+    ]);
+
+    // A focus of "" clears the note; [] clears the list.
+    const cleared = await svc.setEngagementConfig(engagement.id, { focus: "", invariants: [] });
+    expect(cleared.focus).toBeNull();
+    expect(cleared.invariants).toBeNull();
+
+    // Once running, the config is immutable.
+    await svc.startEngagement(engagement.id, { resolvedSha: SHA });
+    await expect(
+      svc.setEngagementConfig(engagement.id, { focus: "too late" }),
+    ).rejects.toThrow(/immutable once the engagement is running/);
+  });
+
+  it("setEngagementConfig leaves an omitted field untouched", async () => {
+    const engagement = await makePlanning();
+    await svc.setEngagementConfig(engagement.id, {
+      focus: "keep me",
+      invariants: ["inv one"],
+    });
+    // Edit only invariants — focus must survive.
+    const after = await svc.setEngagementConfig(engagement.id, { invariants: ["inv two"] });
+    expect(after.focus).toBe("keep me");
+    expect(JSON.parse(after.invariants ?? "[]")).toEqual(["inv two"]);
+  });
+
+  it("dispatchCell carries the engagement's focus + invariants into the prompt (M-F3)", async () => {
+    const engagement = await makePlanning();
+    await svc.setEngagementConfig(engagement.id, {
+      focus: "the webhook verifier",
+      invariants: ["all webhooks verify an HMAC signature"],
+    });
+    const { cells } = await svc.startEngagement(engagement.id, { resolvedSha: SHA });
+    const { prompt } = await svc.dispatchCell(engagement.id, { cellId: cells[0].id, spawn });
+    expect(prompt).toContain("Focus of this review (from the engagement): the webhook verifier");
+    expect(prompt).toContain("- all webhooks verify an HMAC signature");
+  });
+
   // ── Re-scan / iterate: carry-forward + diff ────────────────────────────────
 
   /** A started child engagement whose parent is the given engagement id. */

@@ -23,6 +23,7 @@ import type {
   SecurityFindingWire,
   SecurityPlanCellInput,
   SecurityReviewFindingResponse,
+  SecuritySetConfigResponse,
   SecuritySetPlanResponse,
 } from "@valet/api/wire";
 import { api, ApiError, type OwnerFilter, type SecurityFindingsQuery } from "./client";
@@ -149,6 +150,25 @@ export function useSetPlanCells(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<SecuritySetPlanResponse, Error, SecurityPlanCellInput[]>({
     mutationFn: (cells) => api.setSecurityPlanCells(sessionId, cells),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qkSecurity.engagement(sessionId) });
+    },
+  });
+}
+
+/**
+ * POST .../security/config — edit the engagement's focus + known invariants
+ * during planning (dynamic-config M-F3; session admin). Invalidates the
+ * engagement query so the panel re-reads the saved values.
+ */
+export function useSetEngagementConfig(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<
+    SecuritySetConfigResponse,
+    Error,
+    { focus?: string | null; invariants?: string[] }
+  >({
+    mutationFn: (body) => api.setSecurityConfig(sessionId, body),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: qkSecurity.engagement(sessionId) });
     },

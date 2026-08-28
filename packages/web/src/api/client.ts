@@ -74,6 +74,7 @@ import type {
   SecurityFindingStatus,
   SecurityPlanCellInput,
   SecurityReviewFindingResponse,
+  SecuritySetConfigResponse,
   SecuritySetPlanResponse,
   GetWorkflowResponse,
   GetWorkflowRunResponse,
@@ -464,6 +465,15 @@ export const api = {
       "POST",
       `/sessions/${encodeURIComponent(id)}/security/plan/cells`,
       { cells },
+    ),
+  /** POST /sessions/:id/security/config — edit the engagement's focus + known
+   * invariants during planning (dynamic-config M-F3; session admin). Returns
+   * the saved values. */
+  setSecurityConfig: (id: string, body: { focus?: string | null; invariants?: string[] }) =>
+    request<SecuritySetConfigResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/security/config`,
+      body,
     ),
   /** POST /sessions/:id/security/findings/:findingId/status — human
    * verify/refute (forward-only; session admin). */

@@ -105,6 +105,7 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/security-cancel.test.ts",
   "src/integration/security-rescan-diff.test.ts",
   "src/integration/security-plan-edit.test.ts",
+  "src/integration/security-config-edit.test.ts",
 ];
 
 const INTEGRATION_AGENT_FILES = [

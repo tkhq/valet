@@ -405,6 +405,14 @@ export interface SecuritySetPlanResponse {
   cellCount: number;
 }
 
+/** POST /api/sessions/:id/security/config — edit the engagement's focus +
+ * known invariants during planning (dynamic-config M-F3). Returns the saved
+ * values; both null/empty when cleared. */
+export interface SecuritySetConfigResponse {
+  focus: string | null;
+  invariants: string[];
+}
+
 /** POST /api/sessions/:id/security/dispatch */
 export interface SecurityDispatchResponse {
   cell: SecurityCellWire;

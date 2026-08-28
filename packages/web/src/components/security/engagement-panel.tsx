@@ -16,6 +16,7 @@ import { Button, ConfirmDialog, Spinner } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { useResizablePane } from "~/lib/use-resizable-pane";
 import { CellRail } from "./cell-rail";
+import { ConfigEditor } from "./config-editor";
 import { CostChip } from "./cost-chip";
 import { FindingsReview } from "./findings-review";
 import { ManifestCard } from "./manifest-card";
@@ -187,6 +188,10 @@ export function EngagementPanel({
           cancelMutation.mutate(undefined, { onSuccess: () => setConfirmCancel(false) });
         }}
       />
+      {/* Focus + invariants (dynamic-config M-F3): editable during planning for
+          an admin, read-only once running/closed so the user sees what the
+          review was told. */}
+      <ConfigEditor sessionId={sessionId} engagement={engagement} editable={showPlanEditor} />
       {showPlanEditor && <PlanEditor sessionId={sessionId} planCells={planCells} />}
       <CellRail cells={cells} onOpenChild={onOpenChild} />
       <div className="border-t border-line" />

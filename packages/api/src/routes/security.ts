@@ -128,6 +128,7 @@ import type {
   SecurityReportFindingResponse,
   SecurityPlanCellWire,
   SecurityReviewFindingResponse,
+  SecuritySetConfigResponse,
   SecuritySetPlanResponse,
   SecurityStartPreviewResponse,
   SecurityTreeFileResponse,
@@ -1013,6 +1014,58 @@ securityRouter.post("/:id/security/plan/cells", async (c) => {
     );
     const plan = parsePlan(updated.plan, engagementPersonas(updated));
     const response: SecuritySetPlanResponse = { cellCount: plan.cells.length };
+    return c.json(response);
+  } catch (err) {
+    return serviceError(c, err);
+  }
+});
+
+/**
+ * Structured focus + invariants edit route (dynamic-config M-F3, spec §Dynamic
+ * configuration). Accepts `{ focus?, invariants? }` — the panel's config editor
+ * write path. Repo config seeds these at create; this lets an admin add or edit
+ * them before start. `focus` of `null` or `""` clears the note; `invariants`
+ * of `[]` clears the list; an omitted field leaves it. Human-admin auth rides
+ * the same `resolveToolSession` "mutate" ladder as the plan routes, and the
+ * service refuses a running engagement with the immutable-config error. Returns
+ * the saved values so the editor reflects the server's cleaned form.
+ */
+securityRouter.post("/:id/security/config", async (c) => {
+  const sessionId = c.req.param("id");
+  const resolved = await resolveToolSession(c, sessionId, "mutate");
+  if ("failure" in resolved) return resolved.failure;
+
+  const loaded = await loadEngagementOr404(c, sessionId);
+  if ("failure" in loaded) return loaded.failure;
+  const { security, result } = loaded;
+
+  const body = await readJsonBody(c);
+  const args: { focus?: string | null; invariants?: string[] } = {};
+  if ("focus" in body) {
+    if (body.focus !== null && typeof body.focus !== "string") {
+      return c.json({ error: "focus must be a text note or null." }, 400);
+    }
+    args.focus = body.focus;
+  }
+  if ("invariants" in body) {
+    if (
+      !Array.isArray(body.invariants) ||
+      !body.invariants.every((v): v is string => typeof v === "string")
+    ) {
+      return c.json({ error: "invariants must be a list of strings." }, 400);
+    }
+    args.invariants = body.invariants;
+  }
+  if (args.focus === undefined && args.invariants === undefined) {
+    return c.json({ error: "Send { focus } or { invariants } to edit." }, 400);
+  }
+
+  try {
+    const updated = await security.setEngagementConfig(result.engagement.id, args);
+    const response: SecuritySetConfigResponse = {
+      focus: updated.focus,
+      invariants: parseJsonStringArray(updated.invariants) ?? [],
+    };
     return c.json(response);
   } catch (err) {
     return serviceError(c, err);
