@@ -90,10 +90,13 @@ export function TriggerDialog({
   const workflowsQ = useWorkflows();
   const catalogQ = useTriggerCatalog();
 
-  // Flatten catalog entries to a single list for the event key select.
+  // Flatten catalog entries to a single list for the event key select. Keep
+  // each entry's filter fields so the Filters box can show which fields the
+  // selected event actually declares.
   const catalogEntries = (catalogQ.data?.catalog ?? []).flatMap((svc) =>
-    svc.entries.map((e) => ({ key: e.key, label: `${e.key} — ${e.description}` })),
+    svc.entries.map((e) => ({ key: e.key, label: `${e.key} — ${e.description}`, filters: e.filters })),
   );
+  const selectedEntry = catalogEntries.find((e) => e.key === eventKey);
 
   // Populate fields when editing.
   useEffect(() => {
@@ -497,9 +500,15 @@ export function TriggerDialog({
                   value={filtersJson}
                   onChange={(e) => setFiltersJson(e.target.value)}
                   rows={8}
-                  placeholder='[{"field": "branch", "value": "main"}]'
+                  placeholder='[{"field": "channel", "op": "eq", "value": "C0123"}]'
                   className="font-mono"
                 />
+                {selectedEntry && selectedEntry.filters.length > 0 && (
+                  <div className="text-xs text-muted">
+                    Fields for {selectedEntry.key}: {selectedEntry.filters.map((f) => f.field).join(", ")}.
+                    {" "}Each filter needs field, op (eq, in, prefix, or contains), and value. Omit filters to match every event of this type.
+                  </div>
+                )}
                 {filtersJsonError && (
                   <div className="text-xs text-danger-500">{filtersJsonError}</div>
                 )}

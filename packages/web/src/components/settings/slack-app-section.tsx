@@ -293,6 +293,20 @@ function SetupCards({
 
 function ConnectedCard({ data }: { data: GetSlackAppResponse }) {
   const deleteApp = useDeleteSlackApp();
+  const manifestJson = JSON.stringify(data.manifest, null, 2);
+  const manifestRef = useRef<HTMLTextAreaElement>(null);
+  const [copied, setCopied] = useState(false);
+  const copyManifest = async () => {
+    try {
+      await navigator.clipboard.writeText(manifestJson);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard blocked (insecure context, permissions) — select the text
+      // so the operator can copy it by hand.
+      manifestRef.current?.select();
+    }
+  };
 
   return (
     <div className="max-w-2xl space-y-4">
@@ -347,6 +361,32 @@ function ConnectedCard({ data }: { data: GetSlackAppResponse }) {
           </Button>
         </div>
       </div>
+
+      <details className="rounded-md border border-line p-4">
+        <summary className="cursor-pointer text-sm font-medium text-ink">
+          Update event subscriptions
+        </summary>
+        <p className="mt-2 text-xs leading-relaxed text-muted">
+          Slack delivers only the events your installed app subscribes to. When Valet adds new
+          workflow-trigger events (mentions, reactions, channel messages), open your app's App
+          Manifest page on Slack, replace the manifest with the one below, and save. No reinstall
+          is needed, because the manifest asks for no new scopes.
+        </p>
+        <div className="mt-3 flex items-center justify-between gap-3">
+          <span className="text-sm font-medium text-ink">App manifest</span>
+          <Button type="button" variant="secondary" size="sm" onClick={() => void copyManifest()}>
+            {copied ? "Copied" : "Copy manifest"}
+          </Button>
+        </div>
+        <Textarea
+          ref={manifestRef}
+          readOnly
+          rows={10}
+          value={manifestJson}
+          aria-label="App manifest"
+          className="mt-1.5 font-mono text-xs"
+        />
+      </details>
 
       {data.missingScopes.length > 0 && (
         <div className="rounded-lg border border-amber-300 bg-amber-50/70 px-5 py-4 dark:border-amber-700/60 dark:bg-amber-950/40">
