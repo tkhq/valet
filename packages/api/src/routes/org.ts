@@ -24,6 +24,7 @@ import {
   getOrgFeatures,
   getSsoTeamGroups,
   isOrgAdmin,
+  isOrgMember,
   listOrgDirectory,
   listOrgMembers,
   normalizeSsoTeamGroups,
@@ -197,12 +198,20 @@ async function requireGate(c: Context<AppEnv>) {
 // Any org member: a team admin who is not an org admin needs names and
 // emails to run their team's roster and add-member picker. The full roster
 // (`GET /members` below) stays admin-only — it carries the org role.
+//
+// The membership check is load-bearing, not ceremony: `AuthUser.orgId` is
+// resolved for every authenticated session (`resolveOrgId`), with no
+// `org_members` row required, so without this check any session could
+// enumerate every member's email.
 orgRouter.get("/directory", async (c) => {
   const forbidden = await requireGate(c);
   if (forbidden) return forbidden;
 
   const { db } = c.var.providers;
   const user = c.var.user;
+  if (!(await isOrgMember(db, user.orgId, user.id))) {
+    return c.json({ error: "org membership required" }, 403);
+  }
   const usersList = await listOrgDirectory(db, user.orgId);
   const body: OrgDirectoryResponse = { users: usersList };
   return c.json(body);

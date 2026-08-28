@@ -2475,24 +2475,12 @@ export interface PatchOrgRequest {
 
 export type PatchOrgResponse = OrgResponse;
 
-export interface OrgMemberWire {
-  userId: string;
-  email: string;
-  name: string;
-  avatarUrl: string | null;
-  role: "admin" | "member";
-  joinedAt: number;
-}
-
-export interface OrgMembersResponse {
-  members: OrgMemberWire[];
-}
-
 /**
  * One row of the member-visible org directory: display identity only. The
  * teams UI needs it to name roster entries and to fill the add-member
  * picker for team admins who are not org admins. The org role and join
- * date stay on the admin-only `OrgMemberWire`.
+ * date stay on the admin-only `OrgMemberWire`, which extends this shape so
+ * a display field added here reaches both surfaces.
  */
 export interface OrgDirectoryUserWire {
   userId: string;
@@ -2503,6 +2491,15 @@ export interface OrgDirectoryUserWire {
 
 export interface OrgDirectoryResponse {
   users: OrgDirectoryUserWire[];
+}
+
+export interface OrgMemberWire extends OrgDirectoryUserWire {
+  role: "admin" | "member";
+  joinedAt: number;
+}
+
+export interface OrgMembersResponse {
+  members: OrgMemberWire[];
 }
 
 export interface PatchOrgMemberRequest {

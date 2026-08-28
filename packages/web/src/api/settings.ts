@@ -114,6 +114,10 @@ export function useOrgDirectory(opts?: UseQueryOptions<OrgDirectoryResponse>) {
   return useQuery<OrgDirectoryResponse>({
     queryKey: qkSettings.orgDirectory(),
     queryFn: () => api.getOrgDirectory(),
+    // Same reasoning as `useOrg` above: membership changes rarely, nothing
+    // here depends on it being fresh, and the app default (5s) would refetch
+    // the whole directory on every remount of the Teams page.
+    staleTime: 60_000,
     ...opts,
   });
 }

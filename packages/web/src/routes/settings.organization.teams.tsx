@@ -1,4 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { ApiError } from "~/api/client";
 import { Section } from "~/components/settings/section";
 import { Spinner } from "~/components/primitives";
 import { TeamsPanel } from "~/components/settings/teams-panel";
@@ -18,6 +19,10 @@ import { useOrgDirectory } from "~/api/settings";
  * on this page: it is the gate that decides whether an `origin: "idp"` row
  * below reads "Identity provider" (locked) or "(paused)" (editable). It
  * self-gates to org admins.
+ *
+ * Because members reach this page, `OrgRouteGuard` no longer guarantees an
+ * admin here. Every admin-only section added to this page must self-gate;
+ * `TeamSyncSection` is the model.
  */
 export const Route = createFileRoute("/settings/organization/teams")({
   component: OrganizationTeamsPage,
@@ -34,9 +39,18 @@ export function OrganizationTeamsPage() {
           <Spinner size={14} /> Loading…
         </div>
       )}
-      {directoryQ.error && (
-        <p className="py-4 text-sm text-danger-500">Failed to load organization members.</p>
-      )}
+      {directoryQ.error != null &&
+        (directoryQ.error instanceof ApiError && directoryQ.error.status === 404 ? (
+          // The directory 404s when an admin turns the organizations gate
+          // off while this page is open (the guard's cached org read keeps
+          // it mounted for up to a minute). Same words as the guard's own
+          // gate-off state.
+          <p className="py-4 text-sm text-muted">Organizations aren't enabled</p>
+        ) : (
+          <p className="py-4 text-sm text-danger-500">
+            Failed to load the member directory. Reload the page to try again.
+          </p>
+        ))}
       {directoryQ.data && <TeamsPanel orgMembers={directoryQ.data.users} />}
     </Section>
   );

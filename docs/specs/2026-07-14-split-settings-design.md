@@ -1,6 +1,6 @@
 # Split Settings — Design Spec
 
-> A settings shell for the v2 web app (`packages/web` + `packages/api`) that splits the surface into **You** (per-user) and **Organization** (org-admin-gated, feature-gated) halves, replaces the current single flat `/settings` page, wires the dormant `org_members.role` column into real authz, and ships the first teams management UI over the existing teams API.
+> A settings shell for the v2 web app (`packages/web` + `packages/api`) that splits the surface into **You** (per-user) and **Organization** (feature-gated; admin-only except Teams — amended 2026-08-28) halves, replaces the current single flat `/settings` page, wires the dormant `org_members.role` column into real authz, and ships the first teams management UI over the existing teams API.
 
 ## Scope
 
@@ -38,12 +38,12 @@ Does NOT cover: real login / identity providers (auth design pass, separate); in
 /settings/notifications      YOU · Notifications
 /settings/organization       ORGANIZATION · General      (admin + gate)
 /settings/organization/members   ORGANIZATION · Members  (admin + gate)
-/settings/organization/teams    ORGANIZATION · Teams     (admin + gate)
+/settings/organization/teams    ORGANIZATION · Teams     (any org member + gate; amended 2026-08-28)
 ```
 
-- The rail shows two small-caps groups: **You** (always) and **Organization** (only when the feature gate is ON **and** the caller is an org admin). Members never see the group — hidden, not disabled.
+- The rail shows two small-caps groups: **You** (always) and **Organization** (only when the feature gate is ON). Amended 2026-08-28: an org admin sees every Organization item; a plain member sees a one-item group (Teams). With the gate off, nobody sees the group — hidden, not disabled.
 - With the gate OFF and the caller an org admin, the rail bottom shows the **enable card** ("Working with a team? Enable organizations") in place of the group.
-- Direct navigation to an org route without gate+admin renders a quiet empty state ("Organization settings are managed by your org admins" / "Organizations aren't enabled" respectively) — never a crash, never a redirect loop.
+- Direct navigation to an org route the caller may not open renders a quiet empty state ("Organization settings are managed by your org admins" for a gate-on non-admin outside Teams; "Organizations aren't enabled" for gate-off) — never a crash, never a redirect loop. A failed org fetch with nothing cached renders a retry state instead of either message (the client must not claim the gate is off when it does not know).
 - `/integrations` is unchanged and stays in the top nav. The top-nav gear keeps linking to `/settings`.
 
 ## Feature gate
@@ -93,7 +93,7 @@ Every control enumerated (surfaces alone are not a spec).
 ### Organization · Teams
 - Team list: name, member count, created date — `GET /api/teams` (existing).
 - New team: name input + Create button (existing `POST /api/teams`); inline validation on duplicate name (409 from api).
-- Per-team expandable panel: member rows (name, role badge), role toggle (existing `PATCH /api/teams/:id/members/:userId`), Remove member (existing `DELETE`), Add member (select from org members not yet in team → existing `POST /api/teams/:id/members`).
+- Per-team expandable panel: member rows (name, role badge), role toggle (existing `PATCH /api/teams/:id/members/:userId`), Remove member (existing `DELETE`), Add member (select from the org directory, `GET /api/org/directory`, filtered to people not yet on the team → existing `POST /api/teams/:id/members`).
 - Delete team: per-team overflow menu → confirm dialog → existing `DELETE /api/teams/:id`.
 
 ## API additions (`packages/api`)
@@ -105,6 +105,7 @@ Every control enumerated (surfaces alone are not a spec).
 | `/api/models` | GET | user | pi-ai `getModels("anthropic")` mapped to `{id, name, contextWindow, reasoning}[]` — static registry, no provider API call |
 | `/api/org` | GET | org member | `{id, name, createdAt, features, callerRole}` |
 | `/api/org` | PATCH | **org admin** | update `name` and/or `features.organizations` |
+| `/api/org/directory` | GET | org member + gate | display identity rows `{userId, name, email, avatarUrl}` — no role, no join date (added 2026-08-28) |
 | `/api/org/members` | GET | org admin + gate | member rows joined `users` × `org_members` |
 | `/api/org/members/:userId` | PATCH | org admin + gate | set `org_members.role`; last-admin guard |
 
@@ -133,7 +134,7 @@ Calm-companion, extended: page title and section headings in Newsreader; rail wi
 ## Testing
 
 - API: route tests for every new route (authz matrix: member vs admin; gate on/off; last-admin guard; me PATCH field whitelist). `teams.ts` authz-swap regression: a non-admin org member with team-admin rights can still mutate their team; a plain member cannot.
-- Web: route-adjacent component tests — rail renders gate-aware groups; each section renders and submits its mutation (msw/fetch-mock per existing patterns); org empty states for member/gate-off.
+- Web: route-adjacent component tests — rail renders gate-aware groups; each section renders and submits its mutation (msw/fetch-mock per existing patterns); org empty states for gate-off and for a member outside Teams; a member reaches Teams (rail item + guard admission).
 - Manual dogfood: enable gate → rename org → flip a member role (via test-header second user) → create team → add member → set default model via typeahead → new chat thread starts on it while an existing thread's header override survives → theme + notification toggles still work → disable gate.
 
 ## Provisioning rule (for the auth phase, stated now)

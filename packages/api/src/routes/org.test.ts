@@ -11,6 +11,7 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { users } from "../schema/index.js";
 import { LAST_ADMIN_ERROR, SSO_TEAM_GROUP_SHAPE_ERROR } from "../services/org.js";
 import type { OrgDirectoryResponse, OrgMembersResponse, OrgResponse } from "../wire/types.js";
 
@@ -238,6 +239,25 @@ describe("GET /api/org/directory", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as OrgDirectoryResponse;
     expect(body.users.map((u) => u.userId)).toContain("test-admin");
+  });
+
+  it("403s for an authenticated user with no org_members row", async () => {
+    // `AuthUser.orgId` resolves for every session without requiring a
+    // membership row, so the route's own check is what stops a removed or
+    // never-admitted user from enumerating member emails.
+    api = await bootTestApi();
+    await enableGate(api.baseUrl);
+    await api.providers.db
+      .insert(users)
+      .values({ id: "test-outsider", email: "outsider@dev", name: "Outsider", role: "member" })
+      .onConflictDoNothing();
+
+    const res = await fetch(`${api.baseUrl}/api/org/directory`, {
+      headers: { "Content-Type": "application/json", "x-valet-test-user-id": "test-outsider" },
+    });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("org membership required");
   });
 
   it("401s without auth configured", async () => {

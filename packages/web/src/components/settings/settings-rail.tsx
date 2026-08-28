@@ -34,14 +34,20 @@ const YOU_ITEMS = [
 ] as const;
 
 /** Single-user-mode stand-in for Organization · Models — shown under "You"
- * only while the Organization group is hidden (`/settings/models` renders
- * the same sections; the org-admin API authorizes the seeded local user). */
+ * only while the org gate is OFF (`/settings/models` renders the same
+ * sections; the org-admin API authorizes the seeded local user). A gate-on
+ * plain member gets no Models item at all: every section on that page reads
+ * org-admin-only APIs, so the link would lead to a page of error banners. */
 const MODELS_ITEM = { to: "/settings/models", label: "Models" } as const;
+
+/** One source of truth for the Teams path — the rail's two item lists and
+ * the `/settings/organization` route guard must never disagree on it. */
+export const ORG_TEAMS_PATH = "/settings/organization/teams";
 
 const ORGANIZATION_ITEMS = [
   { to: "/settings/organization", label: "General" },
   { to: "/settings/organization/members", label: "Members" },
-  { to: "/settings/organization/teams", label: "Teams" },
+  { to: ORG_TEAMS_PATH, label: "Teams" },
   { to: "/settings/organization/models", label: "Models" },
   { to: "/settings/organization/proxy", label: "Proxy" },
   { to: "/settings/organization/library", label: "Library" },
@@ -54,9 +60,7 @@ const ORGANIZATION_ITEMS = [
 
 /** The one Organization item a plain member can use: any member can create
  * a team, and the creator administers it as its team admin. */
-const MEMBER_ORGANIZATION_ITEMS = [
-  { to: "/settings/organization/teams", label: "Teams" },
-] as const;
+const MEMBER_ORGANIZATION_ITEMS = [{ to: ORG_TEAMS_PATH, label: "Teams" }] as const;
 
 export function SettingsRail() {
   const orgQ = useOrg();
@@ -67,11 +71,10 @@ export function SettingsRail() {
 
   // Wait for `useOrg()` to resolve before appending — same no-flash rule as
   // the Organization group (an org-mode admin must never see the item
-  // appear and then vanish). Keyed to the ADMIN group, not the member one:
-  // a gate-on plain member keeps You · Models, because the member-visible
-  // Organization group has no Models item.
-  const showAdminGroup = showOrganizationGroup && orgAdmin;
-  const youItems = orgQ.data && !showAdminGroup ? [...YOU_ITEMS, MODELS_ITEM] : YOU_ITEMS;
+  // appear and then vanish). Keyed to the gate, not the caller's role: with
+  // the gate on, an admin finds Models in the Organization group, and a
+  // plain member gets no Models link at all (see MODELS_ITEM's comment).
+  const youItems = orgQ.data && !showOrganizationGroup ? [...YOU_ITEMS, MODELS_ITEM] : YOU_ITEMS;
 
   return (
     <nav aria-label="Settings" className="w-full shrink-0 space-y-6 text-sm sm:w-[200px]">

@@ -12,7 +12,7 @@ import { render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 
 const useOrgMock = vi.fn();
-const pathnameMock = vi.fn<() => string>(() => "/settings/profile");
+const pathnameMock = vi.fn<() => string>();
 
 beforeEach(() => {
   pathnameMock.mockReturnValue("/settings/profile");
@@ -54,6 +54,18 @@ function mockOrg(data: { organizations: boolean; callerRole: "admin" | "member" 
       callerRole: data.callerRole,
     },
     isLoading,
+    isError: false,
+    refetch: vi.fn(),
+  });
+}
+
+/** A settled /api/org failure with nothing cached — the guard's error state. */
+function mockOrgError() {
+  useOrgMock.mockReturnValue({
+    data: undefined,
+    isLoading: false,
+    isError: true,
+    refetch: vi.fn(),
   });
 }
 
@@ -83,10 +95,10 @@ describe("SettingsRail", () => {
     }
   });
 
-  it("keeps You·Models for a gate-on member — the member group has no Models item", () => {
+  it("shows NO Models item to a gate-on member — every section of that page is admin-only", () => {
     mockOrg({ organizations: true, callerRole: "member" });
     render(<SettingsRail />);
-    expect(screen.getAllByText("Models")).toHaveLength(1);
+    expect(screen.queryByText("Models")).toBeNull();
   });
 
   it("shows the Organization group when the gate is on and the caller is admin", () => {
@@ -182,6 +194,30 @@ describe("OrgRouteGuard", () => {
       </OrgRouteGuard>,
     );
     expect(screen.getByTestId("org-content")).toBeTruthy();
+  });
+
+  it("admits a member on a trailing-slash Teams URL — the router matches it, so the guard must too", () => {
+    mockOrg({ organizations: true, callerRole: "member" });
+    pathnameMock.mockReturnValue("/settings/organization/teams/");
+    render(
+      <OrgRouteGuard>
+        <div data-testid="org-content" />
+      </OrgRouteGuard>,
+    );
+    expect(screen.getByTestId("org-content")).toBeTruthy();
+  });
+
+  it("shows a retry state when the org query fails with nothing cached — never the gate-off message", () => {
+    mockOrgError();
+    render(
+      <OrgRouteGuard>
+        <div data-testid="org-content" />
+      </OrgRouteGuard>,
+    );
+    expect(screen.getByText("Failed to load organization settings.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+    expect(screen.queryByText("Organizations aren't enabled")).toBeNull();
+    expect(screen.queryByTestId("org-content")).toBeNull();
   });
 
   it("keeps the gate-off empty state on the Teams path too", () => {
