@@ -106,6 +106,21 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
 }
 
 /**
+ * The engine `PromptAuthor` for a prompt the authenticated user typed.
+ * One projection for every human-submit route (POST /messages,
+ * `initialPrompt` on create) so the stamp cannot drift between them.
+ * `name` is optional on the auth user; an absent or empty name is dropped
+ * so downstream label fallbacks (email) engage.
+ */
+export function promptAuthorFromUser(user: {
+  id: string;
+  email: string;
+  name?: string;
+}): PromptAuthor {
+  return { id: user.id, email: user.email, ...(user.name ? { name: user.name } : {}) };
+}
+
+/**
  * Wire projection of the engine's `PromptAuthor`. Only user entries carry a
  * human sender; `externalId` is a channel-plugin detail and stays off the
  * wire.
@@ -671,14 +686,13 @@ messagesRouter.post("/:id/messages", async (c) => {
     // user entry (`MessageEntry.author`); on team-owned sessions several
     // members share one thread, and both the UI and the model need to tell
     // their messages apart.
-    const { id, email, name } = c.var.user;
     const resp = await submitSessionPrompt(c.var.providers, row, body.text ?? "", {
       threadId: body.threadId,
       attachments: body.attachments,
       fileRefs: body.fileRefs,
       ...(body.queueMode ? { queueMode: body.queueMode } : {}),
       ...(promoteItemId ? { promoteItemId } : {}),
-      author: { id, email, ...(name ? { name } : {}) },
+      author: promptAuthorFromUser(c.var.user),
     });
     if (!resp) return c.json({ error: "thread not found" }, 404);
     return c.json(resp, 202);

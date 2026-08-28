@@ -22,6 +22,7 @@ import {
 import { renderTemplate } from "./roles-skills/index.js";
 import {
   deriveQueueState,
+  formatSenderLine,
   MAX_PENDING_PER_THREAD,
   namespaceInternalDispatchId,
   renderSignalEnvelope,
@@ -597,6 +598,10 @@ export class Thread {
         .map((it, i) => `[${i + 1}] ${promptText(it.content)}`)
         .join("\n\n");
       const merged = this.buildQueueItem(mergedContent, {
+        // Collect mode has no v2 producer today (REST rejects it; no
+        // session sets it). If one lands, a multi-author window needs
+        // per-constituent authors — this first-item stamp would credit
+        // every constituent's text to one sender in the transcript and UI.
         author: collecting[0].author,
         channel: collecting[0].channel,
         replyTarget: collecting[0].replyTarget,
@@ -3032,6 +3037,7 @@ export class Thread {
         headEntries: head,
         model,
         toolOutputMaxChars: cfg?.toolOutputMaxChars,
+        attributeAuthors: this.attributeAuthors,
         previousSummary,
         // Reactive compaction fires WITHIN a claimed turn (and proactive
         // just after runAgent, still before the turn's finally clears it),
@@ -4066,19 +4072,6 @@ export function userContentBlocks(
   ];
 }
 
-/**
- * The transcript line that attributes a user message to a person. One
- * render function, two call sites (`entriesToAgentMessages` for persisted
- * history, `runAgent` for the current turn) — hot and cold transcripts must
- * agree byte-for-byte or a reload changes what the model has already seen.
- */
-export function formatSenderLine(sender: PromptAuthor | undefined): string | undefined {
-  if (!sender) return undefined;
-  const label = sender.name ?? sender.email ?? sender.id;
-  if (!label) return undefined;
-  const detail = sender.name && sender.email ? ` (${sender.email})` : "";
-  return `[from: ${label}${detail}]`;
-}
 
 export function attachmentsToImageBlocks(
   attachments: MessageEntry["attachments"] | undefined,

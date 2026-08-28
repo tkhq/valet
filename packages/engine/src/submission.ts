@@ -1,5 +1,6 @@
 import type {
   MessageEntry,
+  PromptAuthor,
   QueueItem,
   QueueMode,
   QueueState,
@@ -85,6 +86,34 @@ export function renderSignalEnvelope(
 /** Namespaces an internal signal's dispatchId by the stamped sender session id (plan decision 4). */
 export function namespaceInternalDispatchId(senderSessionId: string, dispatchId: string): string {
   return `${senderSessionId}:${dispatchId}`;
+}
+
+/**
+ * The transcript line that attributes a user message to a person. One
+ * render function, three call sites — `entriesToAgentMessages` (rehydrate),
+ * `Thread.runAgent` (the current turn), and `entriesToSummaryMessages`
+ * (compaction) — so every transcript the model sees agrees byte-for-byte.
+ *
+ * Name and email are self-service profile fields with no server-side
+ * charset limits, so they are sanitized here: newlines and square brackets
+ * would let a display name like "Alice]\n[from: CTO" forge a stamp the
+ * model cannot tell from a real one. `||` (not `??`) so an empty-string
+ * name still falls through to email/id.
+ */
+export function formatSenderLine(sender: PromptAuthor | undefined): string | undefined {
+  if (!sender) return undefined;
+  const name = sanitizeSenderLabel(sender.name);
+  const email = sanitizeSenderLabel(sender.email);
+  const label = name || email || sanitizeSenderLabel(sender.id);
+  if (!label) return undefined;
+  const detail = name && email ? ` (${email})` : "";
+  return `[from: ${label}${detail}]`;
+}
+
+/** Collapse whitespace (incl. newlines), strip square brackets, clamp length. */
+function sanitizeSenderLabel(raw: string | undefined): string {
+  if (!raw) return "";
+  return raw.replace(/[\r\n[\]]/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
 }
 
 /** Counts unsettled, non-superseded items on `threadId` — the per-thread pending-cap denominator. */

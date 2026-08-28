@@ -1,5 +1,6 @@
 import { completeSimple } from "@earendil-works/pi-ai/compat";
 import type { Message, Model } from "@earendil-works/pi-ai/compat";
+import { formatSenderLine } from "./submission.js";
 import type { CompactionConfig, SessionEntry } from "./types.js";
 
 /**
@@ -434,6 +435,14 @@ export interface SummarizeOptions {
   apiKey?: string;
   /** Optional abort signal. */
   signal?: AbortSignal;
+  /**
+   * Render each user entry's `author` as a `[from: …]` line for the
+   * summarizer (shared team/org sessions). Covered entries survive only
+   * through the summary, so an anonymous summarizer input loses
+   * who-said-what permanently. Same gate the live transcript uses
+   * (`Thread.attributeAuthors`).
+   */
+  attributeAuthors?: boolean;
 }
 
 export interface SummarizeResult {
@@ -445,6 +454,7 @@ export interface SummarizeResult {
 export async function summarize(opts: SummarizeOptions): Promise<SummarizeResult> {
   const messages = entriesToSummaryMessages(opts.headEntries, {
     toolOutputMaxChars: opts.toolOutputMaxChars ?? DEFAULTS.toolOutputMaxChars,
+    attributeAuthors: opts.attributeAuthors ?? false,
   });
   const anchor = opts.previousSummary
     ? [
@@ -488,15 +498,20 @@ export async function summarize(opts: SummarizeOptions): Promise<SummarizeResult
  */
 export function entriesToSummaryMessages(
   entries: readonly SessionEntry[],
-  opts: { toolOutputMaxChars: number },
+  opts: { toolOutputMaxChars: number; attributeAuthors?: boolean },
 ): Message[] {
   const out: Message[] = [];
   for (const e of entries) {
     if (e.type !== "message") continue; // skip CompactionEntry, DecisionGateEntry, BranchSummary
     if (e.role === "user") {
+      // Same sender-line rule as `entriesToAgentMessages`: shared sessions
+      // only, and signal entries are exempt (their envelope names the
+      // sender). Without it the summary loses who asked for what.
+      const senderLine =
+        opts.attributeAuthors && !e.signal ? formatSenderLine(e.author) : undefined;
       out.push({
         role: "user",
-        content: [{ type: "text", text: e.content }],
+        content: [{ type: "text", text: senderLine ? `${senderLine}\n\n${e.content}` : e.content }],
         timestamp: e.createdAt,
       });
       continue;

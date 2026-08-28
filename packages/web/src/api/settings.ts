@@ -82,6 +82,11 @@ export function useMe(opts?: Partial<UseQueryOptions<MeResponse>>) {
   return useQuery<MeResponse>({
     queryKey: qkSettings.me(),
     queryFn: () => api.getMe(),
+    // Viewer identity is static for the app session and its mutations
+    // invalidate the key; without this, every fresh mount past the 5s app
+    // default (e.g. each chat slide-over open) refetches it. Same
+    // reasoning as `useOrg` below.
+    staleTime: 60_000,
     ...opts,
   });
 }
