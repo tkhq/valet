@@ -40,6 +40,7 @@ import { ServiceIcon } from "~/components/service-icon";
 import { useDebouncedValue } from "~/hooks/use-debounced-value";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { cn } from "~/lib/cn";
+import { useResizablePane } from "~/lib/use-resizable-pane";
 import { ExportDialog } from "./export-dialog";
 import { FileIssueDialog, type FileIssueTarget } from "./file-issue-dialog";
 import { FindingStatusChip, SeverityBadge, severityRank } from "./severity";
@@ -187,6 +188,17 @@ export function FindingsReview({
   // the mount-time-state rule. A j/k or click wins over a later URL sync.
   const [selectedId, setSelectedId] = useState<string | null>(initialFindingId ?? null);
   const userTouchedSelection = useRef(false);
+  // The list is the sized (left) pane; the detail fills the rest. Side-by-side
+  // only at `xl`, so the handle and width are `xl:`-gated below.
+  const listPane = useResizablePane({
+    storageKey: "valet:sec-findings-list-width",
+    cssVar: "--sec-findings-list-w",
+    defaultWidth: 300,
+    min: 200,
+    max: 560,
+    side: "left",
+    ariaLabel: "Resize findings list",
+  });
   useEffect(() => {
     if (userTouchedSelection.current) return;
     if (initialFindingId) setSelectedId(initialFindingId);
@@ -362,14 +374,14 @@ export function FindingsReview({
         <div className="px-3 py-1.5 text-xs text-muted border-b border-line">{notice}</div>
       )}
 
-      <div className="flex flex-col xl:flex-row min-h-0">
+      <div className="flex flex-col xl:flex-row min-h-0" style={listPane.containerStyle}>
         {/* List */}
         <div
           role="listbox"
           aria-label="Findings"
           tabIndex={0}
           onKeyDown={handleListKeyDown}
-          className="xl:w-2/5 xl:border-r border-b xl:border-b-0 border-line overflow-y-auto max-h-72 xl:max-h-none focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-400"
+          className="xl:w-[var(--sec-findings-list-w)] xl:max-w-[70%] xl:border-r border-b xl:border-b-0 border-line overflow-y-auto max-h-72 xl:max-h-none focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-400"
         >
           {query.isPending ? (
             <div className="px-3 py-4 text-xs text-muted">
@@ -411,6 +423,12 @@ export function FindingsReview({
             </div>
           )}
         </div>
+
+        {/* Resize handle between list and detail, side-by-side layout only. */}
+        <div
+          {...listPane.handleProps}
+          className="hidden xl:block w-1 shrink-0 cursor-col-resize bg-line hover:bg-moss/50 focus:bg-moss focus:outline-none"
+        />
 
         {/* Detail */}
         <div className="flex-1 min-w-0 overflow-y-auto">

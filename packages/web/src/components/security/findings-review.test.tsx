@@ -150,6 +150,26 @@ describe("FindingsReview list", () => {
     expect(rows[1].textContent).toContain("Low issue");
   });
 
+  it("resizes the findings list pane via the keyboard and persists it", async () => {
+    window.localStorage.removeItem("valet:sec-findings-list-width");
+    listFindingsMock.mockResolvedValue({
+      findings: [finding({ id: "f1", title: "A finding" })],
+      nextCursor: null,
+    });
+    renderReview();
+    await screen.findAllByRole("option");
+
+    const handle = screen.getByRole("separator", { name: "Resize findings list" });
+    const container = handle.parentElement as HTMLElement;
+    expect(container.style.getPropertyValue("--sec-findings-list-w")).toBe("300px");
+
+    // The list is the LEFT pane, so ArrowRight widens it (300 → 324); persisted.
+    fireEvent.keyDown(handle, { key: "ArrowRight" });
+    expect(container.style.getPropertyValue("--sec-findings-list-w")).toBe("324px");
+    expect(handle.getAttribute("aria-valuenow")).toBe("324");
+    expect(window.localStorage.getItem("valet:sec-findings-list-width")).toBe("324");
+  });
+
   it("narrows the fetch params from the filter bar", async () => {
     renderReview();
     await waitFor(() => expect(listFindingsMock).toHaveBeenCalled());
