@@ -91,6 +91,7 @@ function toListItem(c: Context<AppEnv>, row: ArtifactSummaryRow): ArtifactListIt
     id: row.id,
     path: row.sourceMemoryPath,
     title: row.title,
+    token: row.token,
     url: shareUrl(c, row.token),
     visibility: row.visibility,
     actorUserId: row.actorUserId,

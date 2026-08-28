@@ -333,14 +333,16 @@ function TeamArtifactsCard({ teamId }: { teamId: string }) {
         <ul className="space-y-1.5">
           {items.map((a) => (
             <li key={a.id} className="flex items-baseline gap-2 text-sm">
-              <a
-                href={a.url}
-                target="_blank"
-                rel="noreferrer"
+              {/* In-app route by token, NOT `a.url`: url's origin is the
+                  deployment's public URL, which in dev is the api origin —
+                  a dead link for the SPA page. */}
+              <Link
+                to="/a/$token"
+                params={{ token: a.token }}
                 className="min-w-0 flex-1 truncate text-ink underline-offset-2 hover:underline"
               >
                 {a.title || a.path}
-              </a>
+              </Link>
               <span className="shrink-0 text-xs text-muted">{relativeTime(a.updatedAt)}</span>
             </li>
           ))}

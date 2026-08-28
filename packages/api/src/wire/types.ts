@@ -2256,6 +2256,11 @@ export interface ArtifactListItem {
   id: string;
   path: string;
   title: string;
+  /** The capability token, for in-app navigation (`/a/$token`). The web
+   * client must link with this, not `url`: `url` is the absolute SHARE
+   * link, whose origin is the deployment's public URL — in dev that is the
+   * api origin, which does not serve the SPA. */
+  token: string;
   url: string;
   visibility: ArtifactVisibility;
   /** Who shared it. An org admin's list contains every member's artifacts,
