@@ -38,10 +38,10 @@ function cell(over: Partial<SecurityCellWire> & { id: string }): SecurityCellWir
   };
 }
 
-function renderPanel(cells: SecurityCellWire[]) {
+function renderPanel(cells: SecurityCellWire[], onOpenChild?: (id: string) => void) {
   return render(
     <TooltipProvider>
-      <StepsPanel cells={cells} />
+      <StepsPanel cells={cells} onOpenChild={onOpenChild} />
     </TooltipProvider>,
   );
 }
@@ -70,6 +70,16 @@ describe("StepsPanel", () => {
     // The rail renders the per-step goal once expanded.
     expect(screen.getByText("map the tree")).toBeTruthy();
     expect(window.localStorage.getItem("valet:sec-steps-expanded")).toBe("1");
+  });
+
+  it("opens a step's child session when its collapsed dot is clicked", () => {
+    const onOpenChild = vi.fn();
+    renderPanel(
+      [cell({ id: "a", dir: "01-recon", status: "running", childSessionId: "child_1" })],
+      onOpenChild,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /01-recon.*open child session/i }));
+    expect(onOpenChild).toHaveBeenCalledWith("child_1");
   });
 
   it("starts expanded when the persisted choice says so", () => {
