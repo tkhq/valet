@@ -20,6 +20,13 @@ export interface PlanCell {
   /** Optional methodology playbook (a KNOWN_PLAYBOOKS name). Its markdown is
    * served at /playbooks/<name>.md and named in the dispatch prompt. */
   playbook?: string;
+  /** When true, this phase runs as an architect → worker → verifier triad
+   * (M-P2b). `expandTriads` replaces the cell with three ordered cells at
+   * `startEngagement` materialization: `<name>-plan` (architect), `<name>`
+   * (this persona, the worker), `<name>-verify` (verifier, review). A plan
+   * carries `triad: true` on the phase cell; the materialized cells never do
+   * (they are already expanded). */
+  triad?: boolean;
 }
 
 export interface EngagementPlan {
@@ -167,7 +174,15 @@ function parseCell(entry: unknown, index: number, knownPersonas: readonly string
     playbook = cell.playbook;
   }
 
-  return { ordinal, persona, mode, goal, name, reads, paths, review, playbook };
+  let triad: boolean | undefined;
+  if (cell.triad !== undefined) {
+    if (typeof cell.triad !== "boolean") {
+      throw new Error(`${label} has a non-boolean "triad". Use true or false. ${CORRECTIVE}`);
+    }
+    triad = cell.triad;
+  }
+
+  return { ordinal, persona, mode, goal, name, reads, paths, review, playbook, triad };
 }
 
 const SLUG_MAX = 40;

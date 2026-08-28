@@ -145,6 +145,22 @@ describe("BUNDLED_PERSONAS", () => {
     const codeReview = BUNDLED_PERSONAS.find((p) => p.id === "code-review");
     expect(codeReview?.label).toBe("Code review");
     expect(codeReview?.roleMarkdown).toContain("security code reviewer");
-    expect(bundledPersonaIds()).toEqual(["code-review"]);
+  });
+
+  it("includes the architect and verifier triad personas (M-P2b)", () => {
+    const ids = BUNDLED_PERSONAS.map((p) => p.id);
+    expect(ids).toEqual(["code-review", "architect", "verifier"]);
+    expect(bundledPersonaIds()).toEqual(["code-review", "architect", "verifier"]);
+
+    const architect = BUNDLED_PERSONAS.find((p) => p.id === "architect");
+    expect(architect?.label).toBe("Architect");
+    // The role markdown is inlined at the call site, so it loaded from disk.
+    expect(architect?.roleMarkdown).toContain("You are the ARCHITECT");
+    expect(architect?.roleMarkdown).toContain("falsifiable");
+
+    const verifier = BUNDLED_PERSONAS.find((p) => p.id === "verifier");
+    expect(verifier?.label).toBe("Verifier");
+    expect(verifier?.roleMarkdown).toContain("You are the VERIFIER");
+    expect(verifier?.roleMarkdown).toContain("PASS");
   });
 });

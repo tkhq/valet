@@ -18,8 +18,11 @@ export {
   BUNDLED_PERSONAS,
   bundledPersonaIds,
   bundledPersona,
+  ARCHITECT_PERSONA,
+  VERIFIER_PERSONA,
 } from "./personas.js";
 export type { SecurityPersona } from "./personas.js";
+export { expandTriads, hasTriad } from "./triad.js";
 export { parseSecurityConfig, configToPlanYaml } from "./config.js";
 export type { SecurityConfig } from "./config.js";
 export { protocolMarkdown } from "./protocol.js";

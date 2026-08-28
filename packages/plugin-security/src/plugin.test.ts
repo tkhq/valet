@@ -5,10 +5,21 @@ import plugin from "./plugin.js";
 // validation (it throws on a spec violation), so this test fails loudly
 // when the markdown drifts from the skill spec.
 describe("plugin manifest", () => {
-  it("exposes the runner skill and the code-review role", () => {
+  it("exposes the runner skill and one role per bundled persona", () => {
     expect(plugin.name).toBe("security");
     expect(plugin.skills?.map((s) => s.name)).toEqual(["security-engagement-runner"]);
-    expect(plugin.roles?.map((r) => r.name)).toEqual(["code-review"]);
+    // One RoleSpec per bundled persona: code-review, plus the M-P2b triad roles.
+    expect(plugin.roles?.map((r) => r.name)).toEqual(["code-review", "architect", "verifier"]);
+  });
+
+  it("loads the architect and verifier role contracts (M-P2b)", () => {
+    const architect = plugin.roles?.find((r) => r.name === "architect");
+    expect(architect?.content).toContain("You are the ARCHITECT");
+    expect(architect?.content).toContain("do not report findings");
+    const verifier = plugin.roles?.find((r) => r.name === "verifier");
+    expect(verifier?.content).toContain("You are the VERIFIER");
+    expect(verifier?.content).toContain("do not trust prior artifacts");
+    expect(verifier?.content).toContain("PASS");
   });
 
   it("carries the runner's first rule and the loop", () => {

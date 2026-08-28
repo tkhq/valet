@@ -1,7 +1,13 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import type { PgDb } from "@valet/store-postgres";
-import { codeReviewPresetPlan, findingFingerprint, parsePlan, KNOWN_PERSONAS } from "@valet/plugin-security";
+import {
+  codeReviewPresetPlan,
+  findingFingerprint,
+  parsePlan,
+  serializePlan,
+  KNOWN_PERSONAS,
+} from "@valet/plugin-security";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { securityCells, securityFiles, securityFindings, type SecurityCellRow } from "../schema/index.js";
@@ -14,6 +20,21 @@ import {
 } from "./security-engagements.js";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
+
+/**
+ * The five-cell code-review plan with the sweeps' `triad` flags stripped, so
+ * `makeStarted` materializes exactly five cells. Most of this suite predates
+ * the M-P2b triad expansion and asserts a five-cell shape (dispatch order,
+ * verify at ordinal 5, findings per cell). The triad expansion has its own
+ * `startEngagement expands triad phases` test below and the plugin-security
+ * unit suite; this fixture keeps the rest of the suite on the flat shape.
+ */
+const FLAT_PLAN = serializePlan(
+  parsePlan(codeReviewPresetPlan(), KNOWN_PERSONAS).cells.map((c) => {
+    const { triad: _triad, ...rest } = c;
+    return rest;
+  }),
+);
 
 const DONE_DOC = [
   "protocol_version: 1",
@@ -53,7 +74,7 @@ describe("security engagement service", () => {
     return svc.createEngagement({
       sessionId: `s_${Math.random().toString(36).slice(2)}`,
       repoFullName: "acme/api",
-      plan: codeReviewPresetPlan(),
+      plan: FLAT_PLAN,
     });
   }
 
@@ -121,6 +142,54 @@ describe("security engagement service", () => {
     await expect(svc.startEngagement(engagement.id, { resolvedSha: SHA })).rejects.toThrow(
       "already running",
     );
+  });
+
+  it("startEngagement expands triad phases into architect → worker → verifier (M-P2b)", async () => {
+    // The real code-review preset marks its three sweeps triad: true.
+    const engagement = await svc.createEngagement({
+      sessionId: `s_${Math.random().toString(36).slice(2)}`,
+      repoFullName: "acme/api",
+      plan: codeReviewPresetPlan(),
+    });
+    const { cells } = await svc.startEngagement(engagement.id, { resolvedSha: SHA });
+    // 1 recon + 3 triads (3 cells each) + 1 verify = 11.
+    expect(cells).toHaveLength(11);
+    expect(cells.map((c) => c.dir)).toEqual([
+      "01-recon",
+      "02-authz-sweep-plan",
+      "03-authz-sweep",
+      "04-authz-sweep-verify",
+      "05-injection-sweep-plan",
+      "06-injection-sweep",
+      "07-injection-sweep-verify",
+      "08-secrets-config-plan",
+      "09-secrets-config",
+      "10-secrets-config-verify",
+      "11-verify",
+    ]);
+    expect(cells.map((c) => c.persona)).toEqual([
+      "code-review",
+      "architect",
+      "code-review",
+      "verifier",
+      "architect",
+      "code-review",
+      "verifier",
+      "architect",
+      "code-review",
+      "verifier",
+      "code-review",
+    ]);
+    // The authz worker (ordinal 3) reads recon (1) + its architect (2). Its
+    // verifier (ordinal 4) reads the worker (3). review only on verifiers +
+    // the final engagement verify.
+    expect(JSON.parse(cells[2].reads)).toEqual([1, 2]);
+    expect(JSON.parse(cells[3].reads)).toEqual([3]);
+    expect(cells.filter((c) => c.review).map((c) => c.ordinal)).toEqual([4, 7, 10, 11]);
+    // /plan.yml reflects the expanded plan.
+    const planFile = await svc.readFile(engagement.id, "/plan.yml");
+    const reparsed = parsePlan(planFile.content, KNOWN_PERSONAS);
+    expect(reparsed.cells).toHaveLength(11);
   });
 
   // ── Dispatch ─────────────────────────────────────────────────────────────
@@ -483,6 +552,93 @@ describe("security engagement service", () => {
         actor: "user:u1",
       }),
     ).rejects.toThrow(`Finding ${finding.id} is already refuted. Status flips are forward-only.`);
+  });
+
+  it("only the triad verifier cell may flip a finding, not the architect or worker (M-P2b)", async () => {
+    const engagement = await svc.createEngagement({
+      sessionId: `s_${Math.random().toString(36).slice(2)}`,
+      repoFullName: "acme/api",
+      plan: codeReviewPresetPlan(),
+    });
+    const { cells } = await svc.startEngagement(engagement.id, { resolvedSha: SHA });
+    // The authz triad: [1]=recon, [2]=authz-plan (architect), [3]=authz-sweep
+    // (worker), [4]=authz-verify (verifier).
+    const architect = cells[1];
+    const worker = cells[2];
+    const verifier = cells[3];
+    expect(architect.persona).toBe("architect");
+    expect(worker.persona).toBe("code-review");
+    expect(verifier.persona).toBe("verifier");
+
+    const { finding } = await svc.reportFinding(engagement.id, {
+      cellId: worker.id,
+      severity: "high",
+      title: "IDOR on sessions",
+      file: "src/routes/sessions.ts",
+      line: 42,
+      body: EVIDENCE,
+    });
+
+    // The architect (persona architect, review false) cannot flip.
+    await expect(
+      svc.reviewFinding(engagement.id, {
+        findingId: finding.id,
+        status: "refuted",
+        reason: "the plan says so",
+        actor: architect.id,
+      }),
+    ).rejects.toThrow("Only review cells may flip finding statuses.");
+    // The worker cannot flip its own finding.
+    await expect(
+      svc.reviewFinding(engagement.id, {
+        findingId: finding.id,
+        status: "refuted",
+        reason: "I take it back",
+        actor: worker.id,
+      }),
+    ).rejects.toThrow("Only review cells may flip finding statuses.");
+    // The verifier (review: true) refutes it.
+    const refuted = await svc.reviewFinding(engagement.id, {
+      findingId: finding.id,
+      status: "refuted",
+      reason: "the taint never reaches the sink: ownership is checked in middleware",
+      actor: verifier.id,
+    });
+    expect(refuted.status).toBe("refuted");
+    expect(refuted.statusActor).toBe(verifier.id);
+  });
+
+  it("buildDispatchPrompt frames the architect and verifier by role (M-P2b)", async () => {
+    const engagement = await svc.createEngagement({
+      sessionId: `s_${Math.random().toString(36).slice(2)}`,
+      repoFullName: "acme/api",
+      plan: codeReviewPresetPlan(),
+    });
+    const { cells } = await svc.startEngagement(engagement.id, { resolvedSha: SHA });
+    // /plan.yml carries the expanded plan (startEngagement wrote it back).
+    const expandedPlan = parsePlan(
+      (await svc.readFile(engagement.id, "/plan.yml")).content,
+      KNOWN_PERSONAS,
+    );
+    const architect = cells[1];
+    const worker = cells[2];
+    const verifier = cells[3];
+
+    const architectPrompt = buildDispatchPrompt(architect, expandedPlan, [], "PROTOCOL");
+    expect(architectPrompt).toContain("You are the ARCHITECT of this phase");
+    expect(architectPrompt).toContain("falsifiable checklist");
+    expect(architectPrompt).toContain("do NOT report findings");
+
+    const verifierPrompt = buildDispatchPrompt(verifier, expandedPlan, [], "PROTOCOL");
+    expect(verifierPrompt).toContain("You are the VERIFIER of this phase");
+    expect(verifierPrompt).toContain("re-derive every finding's dataflow");
+    expect(verifierPrompt).toContain("PASS / CONDITIONAL / FAIL");
+    expect(verifierPrompt).toContain("Refute a finding you disprove");
+
+    // The worker (code-review persona) gets neither framing.
+    const workerPrompt = buildDispatchPrompt(worker, expandedPlan, [], "PROTOCOL");
+    expect(workerPrompt).not.toContain("You are the ARCHITECT");
+    expect(workerPrompt).not.toContain("You are the VERIFIER");
   });
 
   it("reviewFinding accepts a user actor on an open finding", async () => {

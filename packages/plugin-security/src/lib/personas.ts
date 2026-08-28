@@ -25,6 +25,17 @@ export interface SecurityPersona {
  * directly (presets build every cell with this persona). */
 export const CODE_REVIEW_PERSONA = "code-review";
 
+/** The architect persona id: plans a phase, seeds a falsifiable checklist,
+ * declares coverage, and does NOT report findings (M-P2b). The plan-cell of a
+ * triad runs under this persona. */
+export const ARCHITECT_PERSONA = "architect";
+
+/** The verifier persona id: audits a phase's worker, re-derives each finding's
+ * dataflow, audits coverage, and emits a PASS/CONDITIONAL/FAIL verdict (M-P2b).
+ * The verify-cell of a triad runs under this persona with `review: true`, so it
+ * can refute a finding it disproves. */
+export const VERIFIER_PERSONA = "verifier";
+
 // The api bundle's inline-assets step only inlines a `readFileSync(new
 // URL("<literal>", import.meta.url), "utf8")` whose literal is AT the call
 // site — a URL held in a const/variable is silently NOT inlined (a runtime
@@ -36,6 +47,16 @@ export const BUNDLED_PERSONAS: readonly SecurityPersona[] = [
     id: CODE_REVIEW_PERSONA,
     label: "Code review",
     roleMarkdown: readFileSync(new URL("../../personas/code-review.md", import.meta.url), "utf8"),
+  },
+  {
+    id: ARCHITECT_PERSONA,
+    label: "Architect",
+    roleMarkdown: readFileSync(new URL("../../personas/architect.md", import.meta.url), "utf8"),
+  },
+  {
+    id: VERIFIER_PERSONA,
+    label: "Verifier",
+    roleMarkdown: readFileSync(new URL("../../personas/verifier.md", import.meta.url), "utf8"),
   },
 ];
 

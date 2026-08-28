@@ -16,7 +16,14 @@ vi.mock("@tanstack/react-router", () => ({
   ),
 }));
 
-import { CellRail, elapsedLabel, OVER_AGE_MS, progressLine } from "./cell-rail";
+import {
+  CellRail,
+  elapsedLabel,
+  OVER_AGE_MS,
+  phaseKey,
+  progressLine,
+  triadRole,
+} from "./cell-rail";
 
 function cell(over: Partial<SecurityCellWire> & { id: string }): SecurityCellWire {
   return {
@@ -125,7 +132,50 @@ describe("CellRail", () => {
   });
 });
 
+describe("CellRail triad grouping (M-P2b)", () => {
+  // The three rows of an expanded authz triad, plus recon and verify.
+  const triadCells = [
+    cell({ id: "recon", ordinal: 1, dir: "01-recon", persona: "code-review", goal: "map" }),
+    cell({ id: "ap", ordinal: 2, dir: "02-authz-sweep-plan", persona: "architect", goal: "plan authz" }),
+    cell({ id: "aw", ordinal: 3, dir: "03-authz-sweep", persona: "code-review", goal: "sweep authz" }),
+    cell({ id: "av", ordinal: 4, dir: "04-authz-sweep-verify", persona: "verifier", goal: "verify authz", review: true }),
+    cell({ id: "verify", ordinal: 5, dir: "05-verify", persona: "code-review", goal: "attack", review: true }),
+  ];
+
+  it("badges the architect and verifier cells by role", () => {
+    renderRail(triadCells);
+    // The architect and verifier rows show a role badge instead of the persona.
+    expect(screen.getByLabelText("architect cell")).toBeTruthy();
+    expect(screen.getByLabelText("verifier cell")).toBeTruthy();
+  });
+
+  it("draws a shared left rail on a triad phase's rows, not on single cells", () => {
+    const { container } = renderRail(triadCells);
+    const rows = container.querySelectorAll("li");
+    // The three authz rows (indices 1-3) group; recon (0) and verify (4) do not.
+    expect(rows[1].className).toContain("border-l-line");
+    expect(rows[2].className).toContain("border-l-line");
+    expect(rows[3].className).toContain("border-l-line");
+    expect(rows[0].className).not.toContain("border-l-line");
+    expect(rows[4].className).not.toContain("border-l-line");
+  });
+});
+
 describe("pure helpers", () => {
+  it("triadRole maps architect/verifier personas, null otherwise", () => {
+    expect(triadRole("architect")).toBe("architect");
+    expect(triadRole("verifier")).toBe("verifier");
+    expect(triadRole("code-review")).toBeNull();
+  });
+
+  it("phaseKey strips the ordinal prefix and the -plan/-verify suffix", () => {
+    expect(phaseKey("02-authz-sweep-plan")).toBe("authz-sweep");
+    expect(phaseKey("03-authz-sweep")).toBe("authz-sweep");
+    expect(phaseKey("04-authz-sweep-verify")).toBe("authz-sweep");
+    expect(phaseKey("01-recon")).toBe("recon");
+    expect(phaseKey("05-verify")).toBe("verify");
+  });
+
   it("progressLine formats done/total and pending queue", () => {
     expect(
       progressLine({

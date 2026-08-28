@@ -17,6 +17,25 @@ import { cn } from "~/lib/cn";
 /** Running past this with no settled child renders the warning state. */
 export const OVER_AGE_MS = 30 * 60 * 1000;
 
+/** The triad role a cell plays in its phase (M-P2b). `architect` and `verifier`
+ * cells carry the matching persona; the worker keeps the phase persona. Returns
+ * null for a single (non-triad) cell — recon, the engagement verify, a plain
+ * step — so no badge renders. */
+export function triadRole(persona: string): "architect" | "verifier" | null {
+  if (persona === "architect") return "architect";
+  if (persona === "verifier") return "verifier";
+  return null;
+}
+
+/** The phase a cell belongs to, so a triad's three rows group visually. A
+ * `<base>-plan` architect and a `<base>-verify` verifier group with the `<base>`
+ * worker; the dir carries the ordinal prefix (`02-authz-plan`), so strip it
+ * first, then the role suffix. A single cell returns its own bare name. */
+export function phaseKey(dir: string): string {
+  const bare = dir.replace(/^\d+-/, "");
+  return bare.replace(/-(plan|verify)$/, "");
+}
+
 const STATUS_VARIANT: Record<SecurityCellWire["status"], "neutral" | "accent" | "success" | "warning" | "danger"> = {
   pending: "neutral",
   running: "accent",
@@ -66,10 +85,25 @@ export function CellRail({
     );
   }
   const ordered = [...cells].sort((a, b) => a.ordinal - b.ordinal);
+  // Group the three rows of a triad phase (M-P2b) so a phase reads as one unit.
+  // A phase is a triad when more than one adjacent cell shares its `phaseKey`;
+  // the shared left rail on those rows draws the group. A single cell (recon,
+  // the engagement verify) has a unique key, so it renders ungrouped.
+  const phaseCounts = new Map<string, number>();
+  for (const cell of ordered) {
+    const key = phaseKey(cell.dir);
+    phaseCounts.set(key, (phaseCounts.get(key) ?? 0) + 1);
+  }
   return (
     <ol className="divide-y divide-line" aria-label="Engagement cells">
       {ordered.map((cell) => (
-        <CellRow key={cell.id} cell={cell} now={now} onOpenChild={onOpenChild} />
+        <CellRow
+          key={cell.id}
+          cell={cell}
+          now={now}
+          grouped={(phaseCounts.get(phaseKey(cell.dir)) ?? 0) > 1}
+          onOpenChild={onOpenChild}
+        />
       ))}
     </ol>
   );
@@ -78,10 +112,14 @@ export function CellRail({
 function CellRow({
   cell,
   now,
+  grouped,
   onOpenChild,
 }: {
   cell: SecurityCellWire;
   now: number;
+  /** True when this cell is one row of a multi-cell triad phase (M-P2b). Draws
+   * a shared left rail so the phase's three rows read as one unit. */
+  grouped: boolean;
   onOpenChild?: (childId: string) => void;
 }) {
   const running = cell.status === "running";
@@ -89,17 +127,27 @@ function CellRow({
   // Over-age: still running, no settled child, 30+ minutes in. `settledAt`
   // is null for the life of the attempt, so elapsed alone is the signal.
   const overAge = running && elapsedMs !== null && elapsedMs > OVER_AGE_MS;
+  const role = triadRole(cell.persona);
 
   return (
     <li
       className={cn(
         "px-4 py-2.5 text-xs",
+        // A triad phase's rows share a subtle left rail; the over-age warning
+        // rail wins when both apply.
+        grouped && !overAge && "border-l-2 border-l-line",
         overAge && "bg-warning-wash/60 border-l-2 border-l-amber-500",
       )}
     >
       <div className="flex items-center gap-2 min-w-0">
         <span className="font-mono font-medium text-ink truncate">{cell.dir}</span>
-        <span className="text-muted">{cell.persona}</span>
+        {role ? (
+          <Badge variant="neutral" aria-label={`${role} cell`}>
+            {role}
+          </Badge>
+        ) : (
+          <span className="text-muted">{cell.persona}</span>
+        )}
         <Badge variant={STATUS_VARIANT[cell.status]}>{cell.status}</Badge>
         {cell.attempts > 1 && <span className="text-muted">attempt {cell.attempts}</span>}
         {elapsedMs !== null && (

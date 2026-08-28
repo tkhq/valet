@@ -280,12 +280,17 @@ describe("sec_start approval gate", () => {
       }),
     );
 
-    expect(result.text).toContain(`engagement started on acme/api at ${SHA} (5 cells)`);
+    // The default code-review preset marks its three sweeps triad: true, so
+    // sec_start expands them to architect → worker → verifier (M-P2b):
+    // 1 recon + 3*3 + 1 verify = 11 cells.
+    expect(result.text).toContain(`engagement started on acme/api at ${SHA} (11 cells)`);
     const engagement = await engagementOf(api, created.id);
     expect(engagement.engagement.status).toBe("running");
     expect(engagement.engagement.repoRef).toBe(SHA);
-    expect(engagement.cells).toHaveLength(5);
+    expect(engagement.cells).toHaveLength(11);
     expect(engagement.cells[0].dir).toBe("01-recon");
+    expect(engagement.cells[1].dir).toBe("02-authz-sweep-plan");
+    expect(engagement.cells[1].persona).toBe("architect");
   });
 });
 
@@ -493,7 +498,8 @@ describe("sec_close", () => {
       repoFullName: "acme/api",
       repoRef: SHA,
     });
-    expect((manifest as { cells: unknown[] }).cells).toHaveLength(5);
+    // The default preset expands its three sweeps into triads (M-P2b): 11 cells.
+    expect((manifest as { cells: unknown[] }).cells).toHaveLength(11);
   });
 });
 

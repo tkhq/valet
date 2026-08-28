@@ -90,6 +90,7 @@ export function codeReviewPresetPlan(): string {
     playbook: authz
     goal: Sweep authorization on every route, mutation, and trust boundary from the recon map
     reads: [1]
+    triad: true
   - ordinal: 3
     persona: ${CODE_REVIEW_PERSONA}
     mode: fresh
@@ -97,6 +98,7 @@ export function codeReviewPresetPlan(): string {
     playbook: injection
     goal: Sweep injection paths across SQL, command, template, path, and deserialization sinks
     reads: [1]
+    triad: true
   - ordinal: 4
     persona: ${CODE_REVIEW_PERSONA}
     mode: fresh
@@ -104,6 +106,7 @@ export function codeReviewPresetPlan(): string {
     playbook: secrets-config
     goal: Run the pre-baked scanners (gitleaks) and any repo-local scanners, triage their output, sweep secrets and config
     reads: [1]
+    triad: true
   - ordinal: 5
     persona: ${CODE_REVIEW_PERSONA}
     mode: fresh
@@ -188,6 +191,7 @@ export function serializePlan(cells: PlanCell[]): string {
       lines.push(`    paths: [${cell.paths.map(yamlQuote).join(", ")}]`);
     }
     if (cell.review === true) lines.push(`    review: true`);
+    if (cell.triad === true) lines.push(`    triad: true`);
   }
   return lines.join("\n") + "\n";
 }
@@ -197,6 +201,11 @@ export function serializePlan(cells: PlanCell[]): string {
  * each middle sweep reads recon [1], and verify is the last cell (reads every
  * prior ordinal, `review: true`). When `opts.paths` is set, the include globs
  * scope only the middle sweeps — recon and verify stay repo-wide.
+ *
+ * Each middle sweep carries `triad: true`: at `startEngagement` `expandTriads`
+ * replaces it with three cells (architect → worker → verifier). The preset
+ * plan itself stays compact (one cell per phase); the expansion is the
+ * materialization step. Recon and the final verify stay single cells.
  */
 function buildPresetCells(sweeps: SweepDef[], opts?: { paths?: string[] }): PlanCell[] {
   const paths = opts?.paths && opts.paths.length > 0 ? opts.paths : undefined;
@@ -212,6 +221,10 @@ function buildPresetCells(sweeps: SweepDef[], opts?: { paths?: string[] }): Plan
       ...sweep,
       reads: [1],
       ...(paths ? { paths } : {}),
+      // Each middle sweep runs as an architect → worker → verifier triad
+      // (M-P2b). `startEngagement` expands a triad cell into three cells at
+      // materialization; recon (cell 1) and verify (the last cell) stay single.
+      triad: true,
     });
   });
 

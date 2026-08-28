@@ -20,12 +20,16 @@
 import { randomUUID } from "node:crypto";
 import { and, asc, count, desc, eq, gt, ilike, inArray, or, sql } from "drizzle-orm";
 import {
+  ARCHITECT_PERSONA,
   categoryDigest,
   cellDir,
+  expandTriads,
   findingFingerprint,
+  hasTriad,
   isKnownPlaybook,
   KNOWN_PERSONAS,
   parsePlan,
+  VERIFIER_PERSONA,
   parseStateDoc,
   playbookMarkdown,
   protocolMarkdown,
@@ -249,6 +253,25 @@ export function buildDispatchPrompt(
     `Goal: ${cell.goal}`,
     `Mode: ${cell.mode}`,
   ];
+  // Triad role framing (M-P2b). The architect plans the phase and declares
+  // coverage; it reports NO findings. The verifier audits the worker: it
+  // re-derives each finding's dataflow, audits coverage, and refutes what does
+  // not hold. Every other persona (the worker, recon, the engagement verify)
+  // keeps the default framing. The reads-paths mechanism already points the
+  // worker at the architect's plan and the verifier at the worker's state doc.
+  if (cell.persona === ARCHITECT_PERSONA) {
+    lines.push(
+      "",
+      "You are the ARCHITECT of this phase. Plan it: detect the surface, write a falsifiable checklist (one row per area, each row naming what to look for and the evidence that proves it), and declare coverage (every area covered or a justified skip).",
+      "Write architect_plan.md and seed state.yml to your cell directory. Do NOT run scanners and do NOT report findings — the worker executes your checklist.",
+    );
+  } else if (cell.persona === VERIFIER_PERSONA) {
+    lines.push(
+      "",
+      "You are the VERIFIER of this phase. Audit the worker cell you read: re-derive every finding's dataflow from the cited source (do not trust the prior artifact), confirm severity, and audit that every checklist item was covered or justifiably skipped.",
+      "Write verification.md with per-finding and per-checklist audit rows and a PASS / CONDITIONAL / FAIL verdict. Refute a finding you disprove with sec_finding_review (name what the evidence missed); do NOT verify a finding you merely agree with unless you independently re-derived it.",
+    );
+  }
   if (cell.mode === "resume") {
     lines.push(
       `Resume: read your own latest state doc at /cells/${cell.dir}/state.yml with sec_fs_read before any other work, and continue from its queue.`,
@@ -593,7 +616,12 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     if (!args.resolvedSha || args.resolvedSha.trim() === "") {
       throw new Error("Pin the repository to a commit SHA before starting.");
     }
-    const plan = parsePlan(engagement.plan, KNOWN_PERSONAS);
+    const parsed = parsePlan(engagement.plan, KNOWN_PERSONAS);
+    // Expand every `triad: true` phase into an architect → worker → verifier
+    // triad (M-P2b). Ordinals renumber densely and reads edges remap onto the
+    // expanded cells. A plan with no triad cells passes through unchanged, so a
+    // preset that declares no triads (or a repo config) materializes as before.
+    const plan: EngagementPlan = { cells: expandTriads(parsed.cells) };
 
     // Diff-scope only a re-scan with a non-empty changed-file list. Derive the
     // changed directories once; a diff too wide to scope usefully falls back to
@@ -603,14 +631,21 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     const globs = changedFiles ? changedDirGlobs(changedFiles) : null;
 
     // Inject the globs onto the sweep cells (not recon, not review) and serialize
-    // the adjusted plan back. When there are no globs (full scan) the plan is
-    // unchanged, so `/plan.yml` for a first review is byte-identical to before.
+    // the adjusted plan back. When there are no globs (full scan) the plan is the
+    // expanded plan; a first-review preset with no triads is byte-identical to
+    // before, and a triad preset materializes the expanded cells.
     const scopedCells: PlanCell[] = plan.cells.map((planCell) => {
       const isSweep = planCell.ordinal !== 1 && planCell.review !== true;
       if (!globs || !isSweep) return planCell;
       return { ...planCell, paths: mergePaths(planCell.paths, globs) };
     });
-    const planYaml = globs ? serializePlan(scopedCells) : engagement.plan;
+    // Serialize the expanded (and, on a re-scan, scoped) plan back so /plan.yml
+    // and the materialized cells agree. A plan with no triads and no globs keeps
+    // the stored plan byte-for-byte; a triad plan re-serializes the expanded
+    // cells. `hasTriad(parsed.cells)` is the "did expansion change anything"
+    // signal — expandTriads is identity on a plan with no triad cells.
+    const planYaml =
+      hasTriad(parsed.cells) || globs ? serializePlan(scopedCells) : engagement.plan;
 
     const ts = now();
     const cellValues = scopedCells.map((planCell) => ({
