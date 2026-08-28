@@ -632,6 +632,12 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
        * milestones (M-F3 invariants, M-P2a categories, M-P4 tools); not wired
        * into prompts this milestone. */
       config?: SecurityConfigContext;
+      /** Overrides the `has_repo_config` column. Defaults to `config !==
+       * undefined`. The setup page's create path passes the real flag: a
+       * preset review with a user-edited focus carries a config context but
+       * `has_repo_config` stays false, because no `.valet/security.yml` seeded
+       * it. */
+      hasRepoConfig?: boolean;
     },
     dbh: AppDb = db,
   ): Promise<SecurityEngagementRow> {
@@ -663,7 +669,7 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
         configTools: config?.tools ? JSON.stringify(config.tools) : null,
         authorizedScope:
           config?.scope && config.scope.hosts.length > 0 ? JSON.stringify(config.scope) : null,
-        hasRepoConfig: config !== undefined,
+        hasRepoConfig: args.hasRepoConfig ?? config !== undefined,
         createdAt: ts,
         updatedAt: ts,
       })

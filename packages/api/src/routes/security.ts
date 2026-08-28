@@ -57,14 +57,18 @@ import { randomUUID } from "node:crypto";
 import { Hono, type Context } from "hono";
 import { and, asc, count, desc, eq, inArray } from "drizzle-orm";
 import {
+  bundledPersonaIds,
   cellDir,
   isKnownCategory,
+  isKnownPreset,
   KNOWN_CATEGORIES,
   KNOWN_PERSONAS,
   parsePlan,
+  SECURITY_PRESETS,
   serializePlan,
 } from "@valet/plugin-security";
 import type { PlanCell } from "@valet/plugin-security";
+import { seedSecurityReview } from "../services/security-seed.js";
 import type { Principal } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
@@ -152,6 +156,7 @@ import type {
   GetSecurityReportResponse,
   SecurityWriteReportResponse,
   SecurityPlanCellWire,
+  SecurityPreviewResponse,
   SecurityReviewFindingResponse,
   SecuritySetConfigResponse,
   SecuritySetPlanResponse,
@@ -343,6 +348,7 @@ function planCellsToWire(e: SecurityEngagementRow): SecurityPlanCellWire[] {
     ...(cell.paths !== undefined ? { paths: cell.paths } : {}),
     reads: cell.reads,
     review: cell.review === true,
+    ...(cell.triad === true ? { triad: true } : {}),
   }));
 }
 
@@ -650,6 +656,111 @@ securityRouter.get("/:id/security/coverage", async (c) => {
   const body: ListSecurityCoverageResponse = { coverage: rows.map(coverageToWire), rollup };
   return c.json(body);
 });
+
+/** Parse a plan YAML into the wire step shape, validated against `personas`.
+ * A malformed plan yields [] (guards a hand-broken config), mirroring
+ * `planCellsToWire`. Used by the preview route, which has no engagement row. */
+function planYamlToWire(planYaml: string, personas: readonly string[]): SecurityPlanCellWire[] {
+  let cells: PlanCell[];
+  try {
+    cells = parsePlan(planYaml, personas).cells;
+  } catch {
+    return [];
+  }
+  return cells.map((cell) => ({
+    ordinal: cell.ordinal,
+    persona: cell.persona,
+    ...(cell.name !== undefined ? { name: cell.name } : {}),
+    goal: cell.goal,
+    ...(cell.playbook !== undefined ? { playbook: cell.playbook } : {}),
+    ...(cell.paths !== undefined ? { paths: cell.paths } : {}),
+    reads: cell.reads,
+    review: cell.review === true,
+    ...(cell.triad === true ? { triad: true } : {}),
+  }));
+}
+
+/**
+ * POST /api/sessions/security/preview — the setup page's read-only preview
+ * (spec §Web Surfaces, Deviations). Resolves the config + plan a security
+ * review WOULD seed from a repo's `.valet/security.yml` (or the preset
+ * fallback), before any session exists. Creates nothing and writes nothing.
+ * An authenticated user is required; the GitHub token resolves the same way
+ * create does (a public repo needs none).
+ */
+securityRouter.post("/security/preview", async (c) => {
+  const user = requireUser(c);
+  if (!user) return c.json({ error: "authentication required" }, 401);
+
+  const body = await readJsonBody(c);
+  const repoRaw = typeof body.repo === "string" ? body.repo.trim() : "";
+  if (repoRaw === "") {
+    return c.json({ error: "Send { repo } with the repository full name or a GitHub URL." }, 400);
+  }
+  const parsed = parseRepoFullName(repoRaw);
+  if (!parsed) {
+    return c.json({ error: `"${repoRaw}" is not owner/repo shaped. Send owner/repo or a GitHub URL.` }, 400);
+  }
+  const presetId = typeof body.preset === "string" && body.preset !== "" ? body.preset : "code-review";
+  if (!isKnownPreset(presetId)) {
+    const known = SECURITY_PRESETS.map((p) => p.id).join(", ");
+    return c.json({ error: `Unknown preset "${presetId}". Known presets: ${known}.` }, 400);
+  }
+  let paths: string[] | undefined;
+  if (body.paths !== undefined) {
+    if (!Array.isArray(body.paths) || body.paths.some((p) => typeof p !== "string")) {
+      return c.json({ error: "paths must be a list of strings, or omit the field." }, 400);
+    }
+    paths = body.paths.filter((p): p is string => typeof p === "string");
+  }
+  const ref = typeof body.ref === "string" && body.ref.trim() !== "" ? body.ref.trim() : undefined;
+
+  const { db, engineCredentials, encryptionKey } = c.var.providers;
+  const tokenDeps = { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) };
+  const seeded = await seedSecurityReview({
+    owner: parsed.owner,
+    repo: parsed.repo,
+    ...(ref ? { ref } : {}),
+    presetId,
+    ...(paths ? { paths } : {}),
+    tokenDeps,
+    orgId: user.orgId,
+  });
+
+  const personaKeys = seeded.personas ? Object.keys(seeded.personas) : [];
+  const response: SecurityPreviewResponse = {
+    config: {
+      focus: seeded.focus,
+      invariants: seeded.invariants,
+      categories: seeded.categories,
+      authorizedScope: seeded.scope && seeded.scope.hosts.length > 0 ? { hosts: seeded.scope.hosts } : null,
+      configTools: seeded.tools && seeded.tools.length > 0 ? seeded.tools : null,
+      hasRepoConfig: seeded.hasRepoConfig,
+    },
+    planCells: planYamlToWire(seeded.planYaml, [...bundledPersonaIds(), ...personaKeys]),
+  };
+  return c.json(response);
+});
+
+/** Parse `owner/repo` from a repo full name or a GitHub URL. Returns null when
+ * the value is not owner/repo shaped. Strips a trailing `.git` and any URL
+ * scheme / host. */
+function parseRepoFullName(raw: string): { owner: string; repo: string } | null {
+  let value = raw.trim();
+  const scheme = value.indexOf("://");
+  if (scheme !== -1) {
+    value = value.slice(scheme + 3);
+    const slash = value.indexOf("/");
+    value = slash === -1 ? "" : value.slice(slash + 1);
+  }
+  value = value.replace(/\.git$/i, "").replace(/^\/+|\/+$/g, "");
+  const parts = value.split("/").filter((p) => p !== "");
+  if (parts.length < 2) return null;
+  const owner = parts[0];
+  const repo = parts[1];
+  if (!owner || !repo) return null;
+  return { owner, repo };
+}
 
 // ── M3: runner tool backends ───────────────────────────────────────────────
 
@@ -1097,7 +1208,7 @@ securityRouter.post("/:id/security/plan", async (c) => {
  * A route-level error for a malformed structured plan cell. Carries a
  * corrective message the step editor shows inline.
  */
-class PlanCellInputError extends Error {}
+export class PlanCellInputError extends Error {}
 
 /**
  * Convert one structured plan-cell input (dynamic-config M-F2) to a PlanCell,
@@ -1106,7 +1217,7 @@ class PlanCellInputError extends Error {}
  * playbooks) run later in `serializePlan` → `parsePlan`. `mode` is always
  * `fresh`: the editor writes fresh steps.
  */
-function planCellInputToCell(raw: unknown, ordinal: number): PlanCell {
+export function planCellInputToCell(raw: unknown, ordinal: number): PlanCell {
   const at = `Step ${ordinal}`;
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw new PlanCellInputError(`${at} must be an object with persona and goal.`);
@@ -1162,6 +1273,13 @@ function planCellInputToCell(raw: unknown, ordinal: number): PlanCell {
       throw new PlanCellInputError(`${at} has a non-boolean review flag. Use true or false.`);
     }
     if (input.review) cell.review = true;
+  }
+
+  if (input.triad !== undefined) {
+    if (typeof input.triad !== "boolean") {
+      throw new PlanCellInputError(`${at} has a non-boolean triad flag. Use true or false.`);
+    }
+    if (input.triad) cell.triad = true;
   }
 
   return cell;

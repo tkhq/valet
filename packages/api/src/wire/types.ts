@@ -163,6 +163,21 @@ export interface CreateSessionRequest {
    * forward and the diff reads against it. Only a security session reads it;
    * the caller must be able to view the prior session. */
   rescanOf?: string;
+  /** Final focus / invariants / categories from the `/security/new` setup page.
+   * When present on a security create, these override the repo-seeded config
+   * columns. Repo-committed tools, scope, and personas still come from the
+   * repo's `.valet/security.yml`. Only a security session reads it. */
+  securityConfig?: {
+    focus?: string | null;
+    invariants?: string[];
+    categories?: string[];
+  };
+  /** Final plan steps from the `/security/new` setup page (dynamic-config
+   * M-F2). When present on a security create, the server uses these verbatim
+   * instead of re-seeding the plan from the repo config or preset. The server
+   * assigns dense ordinals 1..N in array order. Only a security session reads
+   * it. */
+  planCells?: SecurityPlanCellInput[];
 }
 
 export interface ListSessionsResponse {
@@ -300,6 +315,10 @@ export interface SecurityPlanCellWire {
   paths?: string[];
   reads: number[];
   review: boolean;
+  /** When true, this phase runs as an architect → worker → verifier triad
+   * (M-P2b). `expandTriads` materializes it into three cells at start. The
+   * step editor toggles it per step. */
+  triad?: boolean;
 }
 
 /** One step the structured plan-edit route accepts (dynamic-config M-F2). No
@@ -312,6 +331,8 @@ export interface SecurityPlanCellInput {
   paths?: string[];
   reads: number[];
   review?: boolean;
+  /** Run this phase as an architect → worker → verifier triad (M-P2b). */
+  triad?: boolean;
 }
 
 /** GET /api/sessions/:id/security */
@@ -333,6 +354,41 @@ export interface GetSessionSecurityResponse {
    * auto-resolved ones for the panel's informational list (M-P4c). Absent when
    * the engagement recorded no needs. */
   needs?: SecurityNeedWire[];
+}
+
+/** POST /api/sessions/security/preview — request body. A read-only preview of
+ * the config + plan a security review would seed from a repo's
+ * `.valet/security.yml` (or the preset fallback), before any session exists.
+ * The setup page (`/security/new`) prefills its editors from the response. */
+export interface SecurityPreviewRequest {
+  /** The repo full name (`owner/repo`) or a GitHub URL. */
+  repo: string;
+  /** Optional branch / tag / SHA to read the config at. Omit for the default
+   * branch HEAD. */
+  ref?: string;
+  /** The sweep preset id, used when the repo has no `.valet/security.yml`
+   * steps. Defaults to "code-review". */
+  preset: string;
+  /** Optional include globs that scope the preset sweeps. */
+  paths?: string[];
+}
+
+/** POST /api/sessions/security/preview — response. The seeded config plus the
+ * plan parsed into structured steps. No session is created. */
+export interface SecurityPreviewResponse {
+  config: {
+    focus: string | null;
+    invariants: string[];
+    categories: string[];
+    /** Repo-committed live-testing scope + declared tools (read-only, not
+     * editable in the setup page). Null when the config declares none. */
+    authorizedScope: { hosts: string[] } | null;
+    configTools: SecurityToolDeclWire[] | null;
+    /** True when a valid `.valet/security.yml` seeded this preview. */
+    hasRepoConfig: boolean;
+  };
+  /** The seeded plan parsed into structured steps for the plan editor. */
+  planCells: SecurityPlanCellWire[];
 }
 
 /** The engagement report artifact (M-P3). The report cell writes `markdown`

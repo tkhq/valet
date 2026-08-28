@@ -15,19 +15,23 @@ import {
   type SessionRunFields,
 } from "../sessions/run-state.js";
 import { canAdministerSession, canViewSession } from "../services/session-access.js";
-import { createSecurityEngagementService } from "../services/security-engagements.js";
+import {
+  createSecurityEngagementService,
+  type SecurityConfigContext,
+} from "../services/security-engagements.js";
+import { seedSecurityReview, seededConfigContext } from "../services/security-seed.js";
+import { planCellInputToCell, PlanCellInputError } from "./security.js";
+import { resolveApiTokenOrNull, resolveRefSha } from "../bakes/source-service.js";
 import { isTeamMember, listTeamsForUser } from "../services/teams.js";
 import {
   bundledPersonaIds,
-  configToPlanYaml,
   isKnownPreset,
-  parseSecurityConfig,
+  parsePlan,
   presetPlan,
   SECURITY_PRESETS,
   securityKickoffPrompt,
-  type SecurityConfig,
+  serializePlan,
 } from "@valet/plugin-security";
-import { fetchRepoFile, resolveApiTokenOrNull } from "../bakes/source-service.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
@@ -300,6 +304,32 @@ sessionsRouter.post("/", async (c) => {
         400,
       );
     }
+    // Setup-page overrides (`/security/new`): the final config + plan the user
+    // edited before create. Validated here, before anything is written.
+    if (body.securityConfig !== undefined) {
+      const sc = body.securityConfig;
+      if (typeof sc !== "object" || sc === null || Array.isArray(sc)) {
+        return c.json({ error: "securityConfig must be an object with focus, invariants, or categories." }, 400);
+      }
+      if (sc.focus !== undefined && sc.focus !== null && typeof sc.focus !== "string") {
+        return c.json({ error: "securityConfig.focus must be a text note or null." }, 400);
+      }
+      if (
+        sc.invariants !== undefined &&
+        (!Array.isArray(sc.invariants) || sc.invariants.some((v) => typeof v !== "string"))
+      ) {
+        return c.json({ error: "securityConfig.invariants must be a list of strings." }, 400);
+      }
+      if (
+        sc.categories !== undefined &&
+        (!Array.isArray(sc.categories) || sc.categories.some((v) => typeof v !== "string"))
+      ) {
+        return c.json({ error: "securityConfig.categories must be a list of strings." }, 400);
+      }
+    }
+    if (body.planCells !== undefined && (!Array.isArray(body.planCells) || body.planCells.length === 0)) {
+      return c.json({ error: "planCells must be a non-empty list of plan steps, or omit the field." }, 400);
+    }
   }
 
   // A model, when present, is a non-empty string id from the catalog. Rejected
@@ -404,79 +434,58 @@ sessionsRouter.post("/", async (c) => {
     }
   }
 
-  // Dynamic config (M-F1): a security review reads the repo's `.valet/security.yml`
-  // through the GitHub contents API BEFORE the sandbox exists, and seeds its plan
-  // from the config's steps. A re-scan that reuses the prior plan skips this (the
-  // config re-fetch on re-scan is a later milestone). Absent or invalid config
-  // falls back to the preset plan; `repoConfig` stays undefined so the engagement
-  // records `has_repo_config = false`.
+  // Dynamic config (M-F1) + setup-page overrides (`/security/new`): a security
+  // review reads the repo's `.valet/security.yml` through the GitHub contents
+  // API BEFORE the sandbox exists, and seeds its config + plan from it (or the
+  // preset fallback). `seedSecurityReview` owns that seeding — the same function
+  // the preview endpoint calls, so a preview shows exactly what create seeds.
+  //
+  // When the setup page sends `planCells`, that edited plan wins over the seed;
+  // when it sends `securityConfig`, those focus / invariants / categories
+  // override the seed. The repo-committed tools / scope / personas always come
+  // from the seed — the user does not edit those. A re-scan that reuses the
+  // prior plan skips the plan seed but still resolves the repo config context.
   let securityPlan = kind === "security" ? presetPlan(presetId, { paths: body.paths }) : "";
-  // The parsed config plus the resolved repo-persona markdown (M-P2c). The
-  // markdown is not a file field; it is fetched from the clone at create and
-  // stashed for the host's `securityRolesForCell`.
-  let repoConfig: (SecurityConfig & { personaMarkdown?: Record<string, string> }) | undefined;
-  if (kind === "security" && rescanPlan === undefined) {
+  let engagementConfig: SecurityConfigContext | undefined;
+  let engagementHasRepoConfig = false;
+  if (kind === "security") {
     const [owner, repo] = repos[0].fullName.split("/");
     if (owner && repo) {
       const tokenDeps = { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) };
-      try {
-        const token = await resolveApiTokenOrNull(tokenDeps, user.orgId, owner, repo);
-        const raw = await fetchRepoFile(tokenDeps, token, owner, repo, ".valet/security.yml");
-        if (raw !== null) {
-          const config = parseSecurityConfig(raw, bundledPersonaIds());
-          if (config.steps && config.steps.length > 0) {
-            securityPlan = configToPlanYaml(config);
-            repoConfig = config;
-          } else {
-            // A config with no steps still carries focus/invariants/etc.; keep
-            // the preset plan but store the config context.
-            repoConfig = config;
-          }
-          // Repo-defined persona roles (M-P2c): a `personas` map names id → the
-          // markdown path in the clone. The sandbox does not exist yet, so fetch
-          // each file through the same contents API and stash the resolved
-          // markdown on the engagement. `securityRolesForCell` loads a repo
-          // persona's role from this stash at persona-child build (repo wins).
-          // Only the personas an actual step names need a role, but resolving
-          // the whole map is cheap and keeps the stash complete. A missing or
-          // unreadable file is skipped with a note; the host then falls back to
-          // code-review for that persona.
-          if (config.personas && Object.keys(config.personas).length > 0) {
-            const resolved: Record<string, string> = {};
-            for (const [personaId, personaPath] of Object.entries(config.personas)) {
-              try {
-                const md = await fetchRepoFile(tokenDeps, token, owner, repo, personaPath);
-                if (md !== null && md.trim() !== "") {
-                  resolved[personaId] = md;
-                } else {
-                  console.warn(
-                    `security create: repo persona "${personaId}" file "${personaPath}" is empty or missing; ` +
-                      "the host will fall back to the code-review role for it.",
-                  );
-                }
-              } catch (fetchErr) {
-                const m = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
-                console.warn(
-                  `security create: repo persona "${personaId}" file "${personaPath}" is unreadable (${m}); ` +
-                    "the host will fall back to the code-review role for it.",
-                );
-              }
-            }
-            if (Object.keys(resolved).length > 0) {
-              repoConfig = { ...(repoConfig ?? config), personaMarkdown: resolved };
-            }
-          }
+      const seeded = await seedSecurityReview({
+        owner,
+        repo,
+        ...(repos[0].ref ? { ref: repos[0].ref } : {}),
+        presetId,
+        ...(body.paths ? { paths: body.paths } : {}),
+        tokenDeps,
+        orgId: user.orgId,
+      });
+      engagementHasRepoConfig = seeded.hasRepoConfig;
+
+      // The plan: the prior plan on a re-scan, the setup page's edited plan, or
+      // the seeded plan (config steps / preset). The edited plan is validated
+      // through the same path `/plan/cells` uses.
+      if (rescanPlan !== undefined) {
+        securityPlan = rescanPlan;
+      } else if (body.planCells !== undefined) {
+        try {
+          const cells = body.planCells.map((raw, i) => planCellInputToCell(raw, i + 1));
+          const personaKeys = seeded.personas ? Object.keys(seeded.personas) : [];
+          // Validate against the bundled ids ∪ the repo-declared personas, so a
+          // config persona in an edited step stays valid.
+          parsePlan(serializePlan(cells), [...bundledPersonaIds(), ...personaKeys]);
+          securityPlan = serializePlan(cells);
+        } catch (err) {
+          if (err instanceof PlanCellInputError) return c.json({ error: err.message }, 400);
+          return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
         }
-      } catch (err) {
-        // A missing, malformed, or unreadable config is not a create failure —
-        // fall back to the preset plan and record why. The panel shows the
-        // engagement used a preset (has_repo_config = false).
-        const message = err instanceof Error ? err.message : String(err);
-        console.warn(`security create: .valet/security.yml ignored for ${repos[0].fullName}: ${message}`);
+      } else {
+        securityPlan = seeded.planYaml;
       }
+
+      engagementConfig = seededConfigContext(seeded, body.securityConfig);
     }
-  } else if (kind === "security" && rescanPlan !== undefined) {
-    securityPlan = rescanPlan;
   }
 
   const now = Date.now();
@@ -485,6 +494,9 @@ sessionsRouter.post("/", async (c) => {
   // the two statements would otherwise leave an orphaned agentSessions row
   // with no bindings (review finding on commit d0de1af3).
   let created: typeof agentSessions.$inferSelect | undefined;
+  // The seeded engagement id, captured from the create transaction so the
+  // setup-page path can materialize its cells right after commit.
+  let securityEngagementId: string | undefined;
   await db.transaction(async (tx) => {
     const inserted = await tx
       .insert(agentSessions)
@@ -530,37 +542,30 @@ sessionsRouter.post("/", async (c) => {
 
     // A security session is an engagement runner: seed its engagement in
     // the SAME transaction, so no security session ever exists without one
-    // (the security routes and tools resolve session → engagement). The
-    // preset plan is the starting point; chat edits it before sec_start.
+    // (the security routes and tools resolve session → engagement). The final
+    // config + plan arrive from the setup page (`/security/new`); `seedSecurityReview`
+    // resolved the repo-committed context above.
     if (kind === "security") {
       const security = createSecurityEngagementService({ db });
-      await security.createEngagement(
+      const engagement = await security.createEngagement(
         {
           sessionId: id,
           repoFullName: repos[0].fullName,
           // The plan comes from (in order): the prior plan on a re-scan, the
-          // repo's `.valet/security.yml` steps, or the request's preset + paths.
-          // `securityPlan` resolved all three above.
+          // setup page's edited `planCells`, the repo's `.valet/security.yml`
+          // steps, or the request's preset + paths. `securityPlan` resolved all
+          // four above.
           plan: securityPlan,
           ...(rescanParentEngagementId ? { parentEngagementId: rescanParentEngagementId } : {}),
-          ...(repoConfig
-            ? {
-                config: {
-                  ...(repoConfig.focus !== undefined ? { focus: repoConfig.focus } : {}),
-                  ...(repoConfig.invariants !== undefined ? { invariants: repoConfig.invariants } : {}),
-                  ...(repoConfig.categories !== undefined ? { categories: repoConfig.categories } : {}),
-                  ...(repoConfig.personas !== undefined ? { personas: repoConfig.personas } : {}),
-                  ...(repoConfig.personaMarkdown !== undefined
-                    ? { personaMarkdown: repoConfig.personaMarkdown }
-                    : {}),
-                  ...(repoConfig.tools !== undefined ? { tools: repoConfig.tools } : {}),
-                  ...(repoConfig.scope !== undefined ? { scope: repoConfig.scope } : {}),
-                },
-              }
-            : {}),
+          ...(engagementConfig ? { config: engagementConfig } : {}),
+          // `has_repo_config` is the seed's flag, not "did a config context
+          // exist": a preset review with a user-edited focus carries a config
+          // context but no repo config seeded it.
+          hasRepoConfig: engagementHasRepoConfig,
         },
         tx,
       );
+      securityEngagementId = engagement.id;
     }
   });
 
@@ -574,6 +579,46 @@ sessionsRouter.post("/", async (c) => {
       fullName: repo.fullName,
       cloneUrl: repo.cloneUrl,
     });
+  }
+
+  // Setup-page start (`/security/new`): when the request carries the final
+  // edited plan, the user already reviewed the config + plan and clicked "Start
+  // review" — that click IS the spend approval the old on-session sec_start gate
+  // asked for. So materialize the cells now instead of leaving the engagement in
+  // an editable planning state waiting on the runner. Resolve the binding's ref
+  // to a commit SHA the same way the sec_start tool does, then `startEngagement`.
+  // Best-effort: a SHA-resolution failure logs and leaves the engagement
+  // planning — the runner's kickoff below can still start it. A re-scan keeps
+  // the runner-driven start (it diffs against the parent at sec_start).
+  if (
+    kind === "security" &&
+    body.planCells !== undefined &&
+    rescanParentEngagementId === undefined &&
+    securityEngagementId
+  ) {
+    const [owner, repo] = repos[0].fullName.split("/");
+    if (owner && repo) {
+      try {
+        // An already-pinned 40-hex ref needs no GitHub lookup — the engagement
+        // is deterministic offline (mirrors the start-preview route).
+        const ref = repos[0].ref;
+        let resolvedSha: string;
+        if (ref && /^[0-9a-f]{40}$/i.test(ref)) {
+          resolvedSha = ref.toLowerCase();
+        } else {
+          const tokenDeps = { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) };
+          const token = await resolveApiTokenOrNull(tokenDeps, user.orgId, owner, repo);
+          resolvedSha = (await resolveRefSha(tokenDeps, token, owner, repo, ref)).toLowerCase();
+        }
+        const security = createSecurityEngagementService({ db });
+        await security.startEngagement(securityEngagementId, { resolvedSha });
+      } catch (err) {
+        console.warn(
+          `security create: could not start engagement ${securityEngagementId} for ${repos[0].fullName} at create; ` +
+            `the runner can start it. Cause: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
   }
 
   // `initialPrompt` (wire `CreateSessionRequest`): queue the first turn once
