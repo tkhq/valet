@@ -35,6 +35,8 @@ When the task is a code change, you are not done until:
 2. The branch is pushed to the remote.
 3. A pull request is created or updated, unless the parent asked you not to.
 
+Treat the spawned branch as the base. Create or reuse a working branch. Open the pull request into that base. If the parent asked you to update an existing pull request, push to that branch.
+
 Report the branch name, the commit SHA, whether the push succeeded, and the pull-request number or URL. If push or pull-request creation fails, report the blocker and keep working. Do not claim completion.
 
 ## Reporting

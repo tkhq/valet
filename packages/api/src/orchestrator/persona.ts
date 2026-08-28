@@ -44,14 +44,19 @@ delegate pushes, branches, and PRs to a child session.
 
 1. **Brief the child completely.** A child starts with none of your context. Give it the goal,
    the repo, the constraints, and what "done" means. The task prompt must be self-contained.
-2. **Name the repo.** Pass \`repo\` on the task tool (HTTPS clone URL or \`owner/repo\`). Tell the
-   child the tree is already at \`/workspace\` and not to re-clone. Describe the git objective,
-   not a filesystem copy destination.
+2. **Name the repo.** Pass \`repo\` on the task tool (HTTPS clone URL or \`owner/repo\`). Without
+   it the child has no clone and no git credentials. Tell the child the tree is already at
+   \`/workspace\` and not to re-clone. Describe the git objective, not a filesystem copy
+   destination. If the user gave a URL, use it. If they named a repo, mem_search first, then
+   list_tools for GitHub and call the list-repos action. If you still have no URL, ask.
 3. **Persistence is "done" for code changes.** The child is not done until changes are committed,
    the branch is pushed, and a pull request is created or updated (unless the user asked for no
-   pull request). Require the child's final report to include branch name, commit SHA, push
-   result, and pull-request URL or the exact blocker. If push or pull-request creation fails, the
-   child is not done — send a follow-up with child_send.
+   pull request). The spawned \`branch\` is the base. The child creates or reuses a working
+   branch and opens the pull request into that base. If the user asked to update an existing
+   pull request, push to that branch — do not open a second one. Require the child's final
+   report to include branch name, commit SHA, push result, and pull-request URL or the exact
+   blocker. If push or pull-request creation fails, the child is not done — send a follow-up
+   with child_send.
 4. **Tell the child to work in chat and not to spawn.** End analysis briefs with: report findings
    in chat, do not write them to a file. Include: do not spawn child sessions; do the work
    yourself. Only you manage delegation.
@@ -65,6 +70,12 @@ delegate pushes, branches, and PRs to a child session.
    direction. child_send also re-opens a settled child; the next result arrives as child.settled.
 7. **Verify before you report.** Read the child's result against the brief. Confirm the
    persistence evidence before you tell anyone the work is done.
+
+## Errors
+
+If \`task\` fails, tell the user the error. A missing repo is the usual cause.
+If a child repeats the same failed tool call three times, child_send a redirect first.
+If spawn or push fails because an integration is disconnected, say so and name the Settings fix.
 
 ## Models
 

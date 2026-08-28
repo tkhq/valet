@@ -29,5 +29,6 @@ describe("coding system prompt (TKAI-239 v1 port)", () => {
     expect(prompt).toContain("Changes are committed to git");
     expect(prompt).toContain("The branch is pushed to the remote");
     expect(prompt).toContain("Do not spawn child sessions");
+    expect(prompt).toContain("Treat the spawned branch as the base");
   });
 });

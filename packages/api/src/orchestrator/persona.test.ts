@@ -22,6 +22,7 @@ describe("orchestratorPersona", () => {
         "## Capabilities",
         "## Decision flow",
         "## Delegation",
+        "## Errors",
         "## Models",
         "## Memory",
       ];
@@ -58,6 +59,9 @@ describe("orchestratorPersona", () => {
     expect(persona).toContain("A turn that does work must contain a tool call");
     expect(persona).toContain("the branch is pushed");
     expect(persona).toContain("do not spawn child sessions");
+    expect(persona).toContain("The spawned `branch` is the base");
+    expect(persona).toContain("## Errors");
+    expect(persona).toContain("mem_search first");
   });
 
   it("keeps the owner-kind identity bodies distinct", () => {
