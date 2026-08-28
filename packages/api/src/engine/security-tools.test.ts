@@ -41,6 +41,7 @@ import {
   secFsListTool,
   secFsReadTool,
   secFsWriteTool,
+  secNeedReportTool,
   secProtocolReadTool,
   secStartTool,
   secStatusTool,
@@ -512,6 +513,7 @@ describe("persona tool set (M4)", () => {
       "sec_protocol_read",
       "sec_finding_report",
       "sec_coverage_report",
+      "sec_need_report",
     ]);
     expect(buildSecurityPersonaTools({ review: true }).map((t) => t.name)).toEqual([
       "sec_fs_write",
@@ -520,6 +522,7 @@ describe("persona tool set (M4)", () => {
       "sec_protocol_read",
       "sec_finding_report",
       "sec_coverage_report",
+      "sec_need_report",
       "sec_finding_review",
     ]);
   });
@@ -633,6 +636,79 @@ describe("persona tool set (M4)", () => {
       toolCtx(api, "child-ff", { sandbox: failingSandbox as Sandbox }),
     );
     expect(missing.text).toContain("Could not read from_file /tmp/nope.yml");
+  });
+});
+
+describe("sec_need_report (pivot-coordinator, M-P4c)", () => {
+  it("posts a persona need and reports the coordinator's ruling", async () => {
+    api = await bootTestApi();
+    const created = await createSecuritySession(api.baseUrl);
+    const { db } = api.providers;
+    const service = createSecurityEngagementService({ db });
+    const found = await service.getEngagementBySession(created.id);
+    await service.startEngagement(found!.engagement.id, { resolvedSha: SHA });
+    await service.dispatchCell(found!.engagement.id, {
+      spawn: async () => ({ childSessionId: "child-need" }),
+    });
+
+    // A credential need needs a human — the coordinator never grants one.
+    const cred = await secNeedReportTool.execute(
+      { kind: "credential", description: "A staging admin token to reach /admin routes." },
+      toolCtx(api, "child-need"),
+    );
+    expect(cred.text).toContain("recorded [credential]");
+    expect(cred.text).toContain("waits on a human answer");
+
+    const needs = await service.listNeeds(found!.engagement.id);
+    expect(needs).toHaveLength(1);
+    expect(needs[0].status).toBe("needs_human");
+  });
+
+  it("refuses a non-persona (claimless) session for the report tool", async () => {
+    api = await bootTestApi();
+    const res = await fetch(`${api.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace: `/tmp/valet-sec-tools-${randomUUID()}` }),
+    });
+    const created = (await res.json()) as CreateSessionResponse;
+    const result = await secNeedReportTool.execute(
+      { kind: "scope", description: "expand scope" },
+      toolCtx(api, created.id),
+    );
+    expect(result.text).toBe("[security_error] This session is not a dispatched persona cell.");
+  });
+
+  it("the resolve route requires the human answer and refuses the internal token", async () => {
+    api = await bootTestApi();
+    const created = await createSecuritySession(api.baseUrl);
+    const { db } = api.providers;
+    const service = createSecurityEngagementService({ db });
+    const found = await service.getEngagementBySession(created.id);
+    await service.startEngagement(found!.engagement.id, { resolvedSha: SHA });
+    await service.dispatchCell(found!.engagement.id, {
+      spawn: async () => ({ childSessionId: "child-need2" }),
+    });
+    await secNeedReportTool.execute(
+      { kind: "credential", description: "A staging admin token." },
+      toolCtx(api, "child-need2"),
+    );
+
+    // The internal token is refused on the human resolve route.
+    const internal = await fetch(`${api.baseUrl}/api/sessions/${created.id}/security/needs/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-valet-internal": internalToken() },
+      body: JSON.stringify({ answers: [{ needId: "need_x", resolution: "x" }] }),
+    });
+    expect(internal.status).toBe(403);
+
+    // A user call with no answers is a 400.
+    const empty = await fetch(`${api.baseUrl}/api/sessions/${created.id}/security/needs/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ answers: [] }),
+    });
+    expect(empty.status).toBe(400);
   });
 });
 

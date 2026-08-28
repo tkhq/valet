@@ -1115,6 +1115,28 @@ CREATE INDEX "security_coverage_engagement" ON "security_coverage" ("engagement_
 --> statement-breakpoint
 CREATE INDEX "security_coverage_cell" ON "security_coverage" ("cell_id");
 --> statement-breakpoint
+-- One row per need a persona records (pivot-coordinator + needs loop, M-P4c).
+-- kind classes what is blocked; status tracks it through the loop
+-- (open -> auto_resolved | needs_human -> answered | dismissed); resolution
+-- records the auto-resolution note or the human answer. No unique constraint —
+-- a cell may record several needs. The coordinator auto-resolves only
+-- already-authorized items; the rest surface to the human, then re-run.
+CREATE TABLE "security_needs" (
+	"id" text PRIMARY KEY NOT NULL,
+	"engagement_id" text NOT NULL,
+	"cell_id" text NOT NULL,
+	"kind" text NOT NULL,
+	"description" text NOT NULL,
+	"status" text DEFAULT 'open' NOT NULL,
+	"resolution" text,
+	"created_at" bigint NOT NULL,
+	"resolved_at" bigint
+);
+--> statement-breakpoint
+CREATE INDEX "security_needs_engagement" ON "security_needs" ("engagement_id");
+--> statement-breakpoint
+CREATE INDEX "security_needs_cell" ON "security_needs" ("cell_id");
+--> statement-breakpoint
 -- ── cost_entries ──────────────────────────────────────────────────────────
 --
 -- One row per billable assistant turn, with the owner resolved. This is the

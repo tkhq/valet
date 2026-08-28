@@ -313,6 +313,10 @@ export interface GetSessionSecurityResponse {
   /** The report artifact (M-P3): the markdown report, its JSON snapshot, and
    * the generation time. Null until the report cell runs. */
   report: SecurityReportWire | null;
+  /** The pivot-coordinator needs still open or waiting on a human, plus the
+   * auto-resolved ones for the panel's informational list (M-P4c). Absent when
+   * the engagement recorded no needs. */
+  needs?: SecurityNeedWire[];
 }
 
 /** The engagement report artifact (M-P3). The report cell writes `markdown`
@@ -590,6 +594,51 @@ export interface SecurityReviewFindingResponse {
  * (NOT_ASSESSED ledger, M-P2d). */
 export interface SecurityReportCoverageResponse {
   coverage: SecurityCoverageWire;
+}
+
+/** The class of thing a persona is blocked on (pivot-coordinator, M-P4c). */
+export type SecurityNeedKind = "credential" | "dependency" | "scope" | "decision" | "tool";
+
+/** One need a persona recorded (pivot-coordinator, M-P4c). `status` tracks it
+ * through the loop: 'open' when recorded, 'auto_resolved' when the coordinator
+ * ruled it already-authorized (with a resolution note), 'needs_human' when it
+ * waits on the consolidated human ask, 'answered' when the human resolved it,
+ * 'dismissed' when the human ruled it not worth pursuing. `resolution` is the
+ * auto-resolution note or the human answer; null while open/needs_human. */
+export interface SecurityNeedWire {
+  id: string;
+  cellId: string;
+  kind: SecurityNeedKind;
+  description: string;
+  status: "open" | "auto_resolved" | "needs_human" | "answered" | "dismissed";
+  resolution: string | null;
+  createdAt: number;
+  resolvedAt: number | null;
+}
+
+/** POST /api/sessions/:id/security/needs — persona need report (M-P4c). The
+ * created need, and the coordinator's sweep result: the needs it auto-resolved
+ * and the ones now waiting on the human. */
+export interface SecurityReportNeedResponse {
+  need: SecurityNeedWire;
+  /** Needs the coordinator auto-resolved this sweep (already-authorized). */
+  autoResolved: SecurityNeedWire[];
+  /** Every need now waiting on the consolidated human ask. */
+  needsHuman: SecurityNeedWire[];
+}
+
+/** GET /api/sessions/:id/security/needs — the engagement's needs (M-P4c). The
+ * panel lists auto-resolved (informational) and needs-human items. */
+export interface ListSecurityNeedsResponse {
+  needs: SecurityNeedWire[];
+}
+
+/** POST /api/sessions/:id/security/needs/resolve — the human answer +
+ * delta re-run (M-P4c). The needs the human answered and the cells the delta
+ * re-run reset to pending — only the cells whose needs were answered. */
+export interface SecurityResolveNeedsResponse {
+  answered: SecurityNeedWire[];
+  resetCellIds: string[];
 }
 
 /** POST /api/sessions/:id/pause — manual hibernation (sandbox hibernation

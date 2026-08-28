@@ -49,12 +49,14 @@ import {
   securityFindingLinks,
   securityFindings,
   securityHandoffs,
+  securityNeeds,
   type SecurityCellRow,
   type SecurityCoverageRow,
   type SecurityEngagementRow,
   type SecurityFindingCommentRow,
   type SecurityFindingRow,
   type SecurityHandoffRow,
+  type SecurityNeedRow,
 } from "../schema/index.js";
 import {
   recordSecurityCellsCreated,
@@ -83,6 +85,20 @@ export const STATE_DOC_STALE_MS = 10 * 60_000;
 export type FindingSeverity = "critical" | "high" | "medium" | "low" | "info";
 export type FindingStatus = "open" | "verified" | "refuted";
 export type CoverageStatus = "assessed" | "not_assessed";
+
+/** The class of thing a persona is blocked on (pivot-coordinator, M-P4c). A
+ * 'credential' or a 'decision' always needs a human. A 'tool' or a 'scope' may
+ * be auto-resolvable when it is already-declared / already-authorized. A
+ * 'dependency' the plan can spawn is auto-resolvable; otherwise it needs a
+ * human. */
+export type NeedKind = "credential" | "dependency" | "scope" | "decision" | "tool";
+export type NeedStatus = "open" | "auto_resolved" | "needs_human" | "answered" | "dismissed";
+
+/** Cap on a need description and a resolution note (pivot-coordinator, M-P4c).
+ * A need names one blocked item in a sentence; a resolution is the
+ * auto-resolution note or the human answer, not a report. */
+export const MAX_NEED_DESCRIPTION_CHARS = 2000;
+export const MAX_NEED_RESOLUTION_CHARS = 4000;
 
 /** Cap on a coverage area label and its reason (NOT_ASSESSED ledger, M-P2d).
  * An area is a short scope label ("secrets scan"); a reason is one sentence
@@ -193,6 +209,26 @@ export interface SecurityReport {
   generatedAt: number;
 }
 
+/** The outcome of one `resolveNeeds` sweep (pivot-coordinator, M-P4c). The
+ * coordinator auto-resolved `autoResolved` open needs (already-authorized
+ * items, each with a visible resolution row) and surfaced `needsHuman` to the
+ * consolidated human ask. `pendingHuman` is every need now waiting on a human
+ * (this sweep's new ones plus any earlier unanswered), so the caller opens ONE
+ * ask, not one per need. */
+export interface ResolveNeedsResult {
+  autoResolved: SecurityNeedRow[];
+  needsHuman: SecurityNeedRow[];
+  pendingHuman: SecurityNeedRow[];
+}
+
+/** The outcome of `resolveEngagementNeeds` (the human answer path, M-P4c). The
+ * needs the human answered, and the cells the delta re-run reset to pending —
+ * only the cells whose needs were answered, never the whole engagement. */
+export interface AnswerNeedsResult {
+  answered: SecurityNeedRow[];
+  resetCells: SecurityCellRow[];
+}
+
 export interface EngagementManifest {
   engagementId: string;
   status: "completed" | "failed";
@@ -299,6 +335,12 @@ export interface ListFindingsOptions {
  * finding, and the loaded categories put the domain's known attack surface in
  * front of the persona. An absent focus, empty invariants, and empty categories
  * add nothing — the prompt is byte-identical to before.
+ *
+ * `needsResolutions` carries the answers to this cell's earlier needs
+ * (pivot-coordinator, M-P4c). On a DELTA re-run — a cell reset to pending after
+ * a human answered its need — each answer rides on the dispatch as a delimited
+ * block, so the persona continues with the credential, decision, or scope it
+ * was blocked on. An empty list adds nothing.
  */
 export function buildDispatchPrompt(
   cell: SecurityCellRow,
@@ -311,6 +353,7 @@ export function buildDispatchPrompt(
     invariants?: string[] | null;
     categories?: string[] | null;
   } = {},
+  needsResolutions: { kind: NeedKind; description: string; resolution: string }[] = [],
 ): string {
   const planCell = plan.cells.find((p) => p.ordinal === cell.ordinal);
   const lines: string[] = [
@@ -420,6 +463,24 @@ export function buildDispatchPrompt(
         "",
         digest,
       );
+    }
+  }
+  // Needs resolutions (pivot-coordinator, M-P4c). On a delta re-run the human
+  // (or the coordinator) answered a need this cell recorded — carry the answer
+  // so the persona continues from where it was blocked. Only emitted when a
+  // resolution is present, so a normal dispatch is byte-identical.
+  const resolutions = needsResolutions.filter(
+    (r) => r.description.trim() !== "" && r.resolution.trim() !== "",
+  );
+  if (resolutions.length > 0) {
+    lines.push(
+      "",
+      "--- Resolved needs (continue the blocked work) ---",
+      "",
+      "You earlier reported that you were blocked. The block is now resolved. Use each answer and continue your checklist — do not re-report the same need:",
+    );
+    for (const r of resolutions) {
+      lines.push(`- [${r.kind}] ${r.description.trim()} → ${r.resolution.trim()}`);
     }
   }
   lines.push(
@@ -841,6 +902,20 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     const plan = parsePlan(engagement.plan, knownPersonasForEngagement(engagement));
     const readOrdinals = parseReads(cell.reads);
     const readsCells = cells.filter((c) => readOrdinals.includes(c.ordinal));
+    // Delta re-run (pivot-coordinator, M-P4c): an answered need on THIS cell
+    // rides on the dispatch as a resolution block, so the persona continues
+    // from where it was blocked. A cell with no answered need adds nothing.
+    const answeredNeeds = await db
+      .select()
+      .from(securityNeeds)
+      .where(
+        and(
+          eq(securityNeeds.engagementId, engagementId),
+          eq(securityNeeds.cellId, cell.id),
+          eq(securityNeeds.status, "answered"),
+        ),
+      )
+      .orderBy(asc(securityNeeds.createdAt), asc(securityNeeds.id));
     const prompt = buildDispatchPrompt(
       cell,
       plan,
@@ -855,6 +930,11 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
         invariants: parseJsonStringArrayColumn(engagement.invariants),
         categories: parseJsonStringArrayColumn(engagement.categories),
       },
+      answeredNeeds.map((need) => ({
+        kind: narrowNeedKind(need.kind),
+        description: need.description,
+        resolution: need.resolution ?? "",
+      })),
     );
 
     let childSessionId: string;
@@ -1791,6 +1871,222 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     return reportFromRow(engagement);
   }
 
+  /**
+   * Record one need a persona is blocked on (pivot-coordinator, M-P4c, spec
+   * §Pivot-coordinator). A persona that cannot go deeper — it lacks a
+   * credential, a running dependency, a scope expansion, an out-of-band
+   * decision, or a declared tool — records a structured need instead of
+   * stopping (a silent coverage gap). Insert-only; status starts 'open'. The
+   * caller confirms the cell belongs to the engagement (the persona route
+   * does). The coordinator (`resolveNeeds`) rules on the open needs later.
+   */
+  async function reportNeed(
+    engagementId: string,
+    args: { cellId: string; kind: NeedKind; description: string },
+  ): Promise<SecurityNeedRow> {
+    await loadEngagement(engagementId);
+    const cell = await loadCell(engagementId, args.cellId);
+    const description = args.description.trim();
+    if (description === "") {
+      throw new Error(
+        "A need must name what is blocked. Describe the credential, dependency, scope, decision, or tool you cannot proceed without.",
+      );
+    }
+    if (description.length > MAX_NEED_DESCRIPTION_CHARS) {
+      throw new Error(
+        `A need description is at most ${MAX_NEED_DESCRIPTION_CHARS} characters. Name the one blocked item in a sentence.`,
+      );
+    }
+    const inserted = await db
+      .insert(securityNeeds)
+      .values({
+        id: `need_${randomUUID()}`,
+        engagementId,
+        cellId: cell.id,
+        kind: args.kind,
+        description,
+        status: "open",
+        createdAt: now(),
+      })
+      .returning();
+    return inserted[0];
+  }
+
+  /**
+   * The pivot-coordinator sweep (M-P4c, spec §Pivot-coordinator). The ONE owner
+   * of the needs-resolution flow — not a silent repair. For every OPEN need:
+   *   - Auto-resolve only what is UNAMBIGUOUSLY already-authorized:
+   *       * a 'tool' the engagement's config declared (config_tools) — mark it
+   *         to provision, auto_resolved with a note;
+   *       * a 'scope' item already inside the engagement's authorized scope
+   *         (the plan cells' path globs) — auto_resolved;
+   *       * a 'dependency' the plan can spawn (a persona already in the plan) —
+   *         auto_resolved.
+   *     Each auto-resolution writes an EXPLICIT resolution row (visible), never
+   *     a silent skip.
+   *   - Everything else → needs_human. A 'credential' and a 'decision' never
+   *     auto-resolve: the coordinator never grants a credential or expands
+   *     scope beyond what the human declared.
+   * The remainder BLOCKS its cell's deeper progress and surfaces to the human;
+   * it does not disappear. The caller opens ONE consolidated ask over
+   * `needsHuman` (or `pendingHuman` for the full backlog), never one per need.
+   */
+  async function resolveNeeds(engagementId: string): Promise<ResolveNeedsResult> {
+    const engagement = await loadEngagement(engagementId);
+    const openNeeds = await db
+      .select()
+      .from(securityNeeds)
+      .where(and(eq(securityNeeds.engagementId, engagementId), eq(securityNeeds.status, "open")))
+      .orderBy(asc(securityNeeds.createdAt), asc(securityNeeds.id));
+
+    // The engagement's authorized surface, computed once.
+    const declaredTools = new Set(
+      parseJsonStringArrayColumn(engagement.configTools).map((t) => t.trim().toLowerCase()),
+    );
+    const authorizedGlobs = authorizedScopeGlobs(engagement);
+    const plannedPersonas = plannedPersonaSet(engagement);
+
+    const autoResolved: SecurityNeedRow[] = [];
+    const needsHuman: SecurityNeedRow[] = [];
+    const ts = now();
+    for (const need of openNeeds) {
+      const auto = autoResolutionFor(need, {
+        declaredTools,
+        authorizedGlobs,
+        plannedPersonas,
+      });
+      if (auto !== null) {
+        const updated = await db
+          .update(securityNeeds)
+          .set({ status: "auto_resolved", resolution: auto, resolvedAt: ts })
+          .where(eq(securityNeeds.id, need.id))
+          .returning();
+        autoResolved.push(updated[0]);
+      } else {
+        const updated = await db
+          .update(securityNeeds)
+          .set({ status: "needs_human" })
+          .where(eq(securityNeeds.id, need.id))
+          .returning();
+        needsHuman.push(updated[0]);
+      }
+    }
+
+    // The full human backlog: this sweep's new needs_human plus any earlier
+    // unanswered ones — so the caller opens ONE consolidated ask, not one per
+    // sweep and not one per need.
+    const pendingHuman = await db
+      .select()
+      .from(securityNeeds)
+      .where(
+        and(eq(securityNeeds.engagementId, engagementId), eq(securityNeeds.status, "needs_human")),
+      )
+      .orderBy(asc(securityNeeds.createdAt), asc(securityNeeds.id));
+
+    return { autoResolved, needsHuman, pendingHuman };
+  }
+
+  /**
+   * The human answer + delta re-run (pivot-coordinator, M-P4c). For each
+   * answered need: mark it 'answered' with the human's resolution, then reset
+   * ONLY the cell that recorded it back to 'pending' so the runner re-dispatches
+   * it — the answer rides into that cell's next dispatch prompt
+   * (`buildDispatchPrompt`). A cell is reset once even when several of its needs
+   * were answered. Never touches a cell with no answered need — this is a delta
+   * re-run, not a whole-engagement re-run. A `dismiss` answer marks the need
+   * 'dismissed' and does NOT reset its cell (the human ruled the block is not
+   * worth pursuing). Refuses a need id not in this engagement, or one that is
+   * not needs_human. Runs in one transaction.
+   */
+  async function resolveEngagementNeeds(
+    engagementId: string,
+    answers: { needId: string; resolution: string; dismiss?: boolean }[],
+  ): Promise<AnswerNeedsResult> {
+    await loadEngagement(engagementId);
+    if (answers.length === 0) {
+      throw new Error("Send at least one answer. Name the need id and its resolution.");
+    }
+    return db.transaction(async (tx) => {
+      const answered: SecurityNeedRow[] = [];
+      const cellsToReset = new Set<string>();
+      const ts = now();
+      for (const answer of answers) {
+        const rows = await tx
+          .select()
+          .from(securityNeeds)
+          .where(
+            and(eq(securityNeeds.engagementId, engagementId), eq(securityNeeds.id, answer.needId)),
+          )
+          .limit(1);
+        const need = rows[0];
+        if (!need) {
+          throw new Error(`No need ${answer.needId} in this engagement. List needs with the needs route.`);
+        }
+        if (need.status !== "needs_human") {
+          throw new Error(
+            `Need ${need.id} is ${need.status}, not needs_human. Only a need waiting on a human can be answered.`,
+          );
+        }
+        const dismiss = answer.dismiss === true;
+        const resolution = answer.resolution.trim();
+        if (!dismiss && resolution === "") {
+          throw new Error(
+            `Need ${need.id} needs an answer. Give the credential, decision, or scope, or dismiss it.`,
+          );
+        }
+        if (resolution.length > MAX_NEED_RESOLUTION_CHARS) {
+          throw new Error(
+            `A need resolution is at most ${MAX_NEED_RESOLUTION_CHARS} characters. Give the answer, not a report.`,
+          );
+        }
+        const updated = await tx
+          .update(securityNeeds)
+          .set({
+            status: dismiss ? "dismissed" : "answered",
+            resolution: dismiss ? (resolution !== "" ? resolution : "Dismissed by the reviewer.") : resolution,
+            resolvedAt: ts,
+          })
+          .where(eq(securityNeeds.id, need.id))
+          .returning();
+        answered.push(updated[0]);
+        // A delta re-run resets only an ANSWERED need's cell; a dismissal does
+        // not — the human ruled the block is not worth pursuing.
+        if (!dismiss) cellsToReset.add(need.cellId);
+      }
+
+      const resetCells: SecurityCellRow[] = [];
+      for (const cellId of cellsToReset) {
+        // Reset the cell to pending for the delta re-dispatch. A completed cell
+        // stays completed only if it was never blocked — but a cell that
+        // reported a need is settled/yielded/failed; reset it so the runner
+        // picks it up. `mode: resume` lets the persona continue from its own
+        // state doc; the answered-need block rides on the next dispatch.
+        const updated = await tx
+          .update(securityCells)
+          .set({ status: "pending", mode: "resume", settledAt: null })
+          .where(and(eq(securityCells.engagementId, engagementId), eq(securityCells.id, cellId)))
+          .returning();
+        if (updated[0]) resetCells.push(updated[0]);
+      }
+      return { answered, resetCells };
+    });
+  }
+
+  /** The engagement's needs, oldest-first; optionally one status or cell. */
+  async function listNeeds(
+    engagementId: string,
+    options: { status?: NeedStatus; cellId?: string } = {},
+  ): Promise<SecurityNeedRow[]> {
+    const conditions = [eq(securityNeeds.engagementId, engagementId)];
+    if (options.status !== undefined) conditions.push(eq(securityNeeds.status, options.status));
+    if (options.cellId !== undefined) conditions.push(eq(securityNeeds.cellId, options.cellId));
+    return db
+      .select()
+      .from(securityNeeds)
+      .where(and(...conditions))
+      .orderBy(asc(securityNeeds.createdAt), asc(securityNeeds.id));
+  }
+
   /** The engagement's coverage rows, oldest-first; optionally one cell. */
   async function listCoverage(
     engagementId: string,
@@ -2030,6 +2326,10 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     listCoverage,
     writeReport,
     getReport,
+    reportNeed,
+    resolveNeeds,
+    resolveEngagementNeeds,
+    listNeeds,
     stampCellCompaction,
     getRunningCellProgress,
     getEngagementCost,
@@ -2154,6 +2454,107 @@ function parseReads(reads: string): number[] {
 
 function narrowSeverity(value: string): FindingSeverity {
   return (SEVERITIES as readonly string[]).includes(value) ? (value as FindingSeverity) : "info";
+}
+
+const NEED_KINDS: readonly NeedKind[] = ["credential", "dependency", "scope", "decision", "tool"];
+
+/** Narrow a stored need kind; defaults to 'decision' (always human) for an
+ * unexpected value, so a bad column never auto-resolves. */
+function narrowNeedKind(value: string): NeedKind {
+  return (NEED_KINDS as readonly string[]).includes(value) ? (value as NeedKind) : "decision";
+}
+
+/** The engagement's authorized scope globs (pivot-coordinator, M-P4c): every
+ * path glob any plan cell declares. This is the boundary the coordinator will
+ * NOT expand past — a scope need auto-resolves only when it names a path
+ * already inside this set. A plan whose cells declare no paths yields an empty
+ * set, so no scope need auto-resolves. */
+function authorizedScopeGlobs(engagement: SecurityEngagementRow): string[] {
+  let plan: EngagementPlan;
+  try {
+    plan = parsePlan(engagement.plan, knownPersonasForEngagement(engagement));
+  } catch {
+    return [];
+  }
+  const globs = new Set<string>();
+  for (const cell of plan.cells) {
+    for (const p of cell.paths ?? []) {
+      const trimmed = p.trim();
+      if (trimmed !== "") globs.add(trimmed);
+    }
+  }
+  return [...globs];
+}
+
+/** The personas the plan already declares (pivot-coordinator, M-P4c). A
+ * 'dependency' need auto-resolves only when it names a persona already in the
+ * plan — a dependency the plan can spawn, not a new one the human must
+ * authorize. */
+function plannedPersonaSet(engagement: SecurityEngagementRow): Set<string> {
+  let plan: EngagementPlan;
+  try {
+    plan = parsePlan(engagement.plan, knownPersonasForEngagement(engagement));
+  } catch {
+    return new Set();
+  }
+  return new Set(plan.cells.map((c) => c.persona.trim().toLowerCase()));
+}
+
+/**
+ * Rule whether one open need is unambiguously already-authorized
+ * (pivot-coordinator, M-P4c). Returns the resolution note when it is, or null
+ * when a human must answer. CONSERVATIVE by contract:
+ *   - 'credential' and 'decision' ALWAYS return null. The coordinator never
+ *     grants a credential or makes an out-of-band decision.
+ *   - 'tool' auto-resolves only when the engagement declared it (config_tools).
+ *   - 'scope' auto-resolves only when its description names a glob already in
+ *     the authorized scope (a substring match against a declared glob).
+ *   - 'dependency' auto-resolves only when its description names a persona
+ *     already in the plan.
+ * Anything not matched returns null and surfaces to the human — the need does
+ * not disappear.
+ */
+function autoResolutionFor(
+  need: SecurityNeedRow,
+  ctx: { declaredTools: Set<string>; authorizedGlobs: string[]; plannedPersonas: Set<string> },
+): string | null {
+  const kind = narrowNeedKind(need.kind);
+  const text = need.description.toLowerCase();
+  if (kind === "credential" || kind === "decision") return null;
+  if (kind === "tool") {
+    // A declared-but-not-yet-provisioned tool: the human already authorized it
+    // in the config, so mark it to provision.
+    for (const tool of ctx.declaredTools) {
+      if (tool !== "" && text.includes(tool)) {
+        return `Auto-resolved: '${tool}' is declared in the engagement config (config_tools). Marked for provisioning.`;
+      }
+    }
+    return null;
+  }
+  if (kind === "scope") {
+    // A path already inside the authorized scope — the coordinator expands
+    // within, never past, what the human declared.
+    for (const glob of ctx.authorizedGlobs) {
+      // Strip glob wildcards and trailing path separators, so a glob like
+      // 'packages/payments/**' matches a description naming 'packages/payments'.
+      const needle = glob
+        .replace(/\*+/g, "")
+        .replace(/\/+$/, "")
+        .trim()
+        .toLowerCase();
+      if (needle !== "" && text.includes(needle)) {
+        return `Auto-resolved: the requested scope is already inside the authorized scope glob '${glob}'.`;
+      }
+    }
+    return null;
+  }
+  // dependency
+  for (const persona of ctx.plannedPersonas) {
+    if (persona !== "" && text.includes(persona)) {
+      return `Auto-resolved: the '${persona}' persona is already in the plan and can be spawned as a dependency.`;
+    }
+  }
+  return null;
 }
 
 function parseCursor(cursor: string): { createdAt: number; id: string } {

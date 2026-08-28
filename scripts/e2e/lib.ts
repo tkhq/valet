@@ -109,6 +109,7 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/security-comments.test.ts",
   "src/integration/security-coverage.test.ts",
   "src/integration/security-report.test.ts",
+  "src/integration/security-needs.test.ts",
 ];
 
 const INTEGRATION_AGENT_FILES = [

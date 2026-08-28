@@ -19,6 +19,7 @@ import { useResizablePane } from "~/lib/use-resizable-pane";
 import { CellRail } from "./cell-rail";
 import { ConfigEditor } from "./config-editor";
 import { CoverageSection } from "./coverage-section";
+import { NeedsSection } from "./needs-section";
 import { CostChip } from "./cost-chip";
 import { FindingsReview } from "./findings-review";
 import { ManifestCard } from "./manifest-card";
@@ -104,7 +105,7 @@ export function EngagementPanel({
     );
   }
 
-  const { engagement, cells, cost, diff, planCells, report } = engagementQ.data;
+  const { engagement, cells, cost, diff, planCells, report, needs } = engagementQ.data;
   // The report is generating while a report-persona cell is running (M-P3).
   const reportGenerating = cells.some((c) => c.persona === "report" && c.status === "running");
   // The step editor is a planning-phase tool: it edits the plan before cells
@@ -206,6 +207,9 @@ export function EngagementPanel({
       <ConfigEditor sessionId={sessionId} engagement={engagement} editable={showPlanEditor} />
       {showPlanEditor && <PlanEditor sessionId={sessionId} planCells={planCells} />}
       {coverageQ.data && <CoverageSection rollup={coverageQ.data.rollup} />}
+      {needs && needs.length > 0 && (
+        <NeedsSection sessionId={sessionId} needs={needs} canAdminister={canAdminister} />
+      )}
       {/* The report section (M-P3): shown once the engagement has started — a
           report exists, is generating, or is pending the report cell. Hidden
           while planning, where no report is possible yet. */}

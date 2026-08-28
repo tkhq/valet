@@ -75,6 +75,7 @@ import type {
   SecurityFindingSeverity,
   SecurityFindingStatus,
   SecurityPlanCellInput,
+  SecurityResolveNeedsResponse,
   SecurityReviewFindingResponse,
   SecuritySetConfigResponse,
   SecuritySetPlanResponse,
@@ -537,6 +538,18 @@ export const api = {
     request<GetSessionSecurityResponse>(
       "POST",
       `/sessions/${encodeURIComponent(id)}/security/cancel`,
+    ),
+  /** POST /sessions/:id/security/needs/resolve — the consolidated human answer
+   * + delta re-run (pivot-coordinator, M-P4c; session admin). Marks each need
+   * answered and resets only the affected cells to pending. */
+  resolveSecurityNeeds: (
+    id: string,
+    answers: { needId: string; resolution: string; dismiss?: boolean }[],
+  ) =>
+    request<SecurityResolveNeedsResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/security/needs/resolve`,
+      { answers },
     ),
   createSession: (body: CreateSessionRequest) =>
     request<CreateSessionResponse>("POST", "/sessions", body),
