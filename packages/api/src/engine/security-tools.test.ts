@@ -577,6 +577,52 @@ describe("persona tool set (M4)", () => {
     );
     expect(ok.text).toBe("wrote /cells/01-recon/notes.md (revision 1)");
   });
+
+  it("reads from_file so the persona commits a file without re-pasting content", async () => {
+    api = await bootTestApi();
+    const created = await createSecuritySession(api.baseUrl);
+    const { db } = api.providers;
+    const service = createSecurityEngagementService({ db });
+    const found = await service.getEngagementBySession(created.id);
+    await service.startEngagement(found!.engagement.id, { resolvedSha: SHA });
+    await service.dispatchCell(found!.engagement.id, {
+      spawn: async () => ({ childSessionId: "child-ff" }),
+    });
+
+    // ctx.sandbox.readFile returns the authored file's content.
+    const sandbox = { id: "sb-ff", readFile: async (p: string) => `# authored at ${p}\nprotocol_version: 1\n` };
+    const ctx = toolCtx(api, "child-ff", { sandbox: sandbox as unknown as Sandbox });
+
+    const wrote = await secFsWriteTool.execute(
+      { path: "/cells/01-recon/notes.md", from_file: "/tmp/state.yml" },
+      ctx,
+    );
+    expect(wrote.text).toBe("wrote /cells/01-recon/notes.md (revision 1)");
+    // The tree stored the file's content, not the tool args.
+    const back = await service.readFile(found!.engagement.id, "/cells/01-recon/notes.md");
+    expect(back.content).toBe("# authored at /tmp/state.yml\nprotocol_version: 1\n");
+
+    // content + from_file together is refused.
+    const both = await secFsWriteTool.execute(
+      { path: "/cells/01-recon/notes.md", content: "x", from_file: "/tmp/state.yml" },
+      ctx,
+    );
+    expect(both.text).toContain("Pass content OR from_file, not both");
+
+    // A missing from_file names the corrective action.
+    const missing = await secFsWriteTool.execute(
+      { path: "/cells/01-recon/notes.md", from_file: "/tmp/nope.yml" },
+      toolCtx(api, "child-ff", {
+        sandbox: {
+          id: "sb-x",
+          readFile: async () => {
+            throw new Error("ENOENT");
+          },
+        } as unknown as Sandbox,
+      }),
+    );
+    expect(missing.text).toContain("Could not read from_file /tmp/nope.yml");
+  });
 });
 
 describe("sec_fs_read / sec_fs_list", () => {

@@ -13,7 +13,7 @@ Your dispatch prompt also names a methodology playbook at `/playbooks/<name>.md`
    - Recon cell: seed it from the clone's file inventory. Walk the tree, list what must be reviewed, note trust boundaries.
    - Any other cell: seed it from your `reads` cells' state docs. You inherit a map you did not invent; scope it to your goal and `paths`.
 2. Work the checklist item by item. Queue follow-ups you discover instead of chasing them mid-item.
-3. Write a state doc revision to your own cell's `state.yml` after every 10 checklist items, and before any long analysis. The tree is your durable state; your context is a cache.
+3. Keep your state doc at a scratch path (`/tmp/state.yml`): Edit it as you go, and commit a revision with `sec_fs_write path=/cells/<your dir>/state.yml from_file=/tmp/state.yml` after every 10 checklist items and before any long analysis. Do not re-type the whole document into the tool, and do not try to Edit the `/cells/...` tree path directly — it is not a real file (see the protocol's "Two filesystems"). The tree is your durable state; your context is a cache.
 4. Repeat until `checklist.pending` and `queue.pending` are both 0, then settle with `status: done`.
 
 ## Yield deliberately

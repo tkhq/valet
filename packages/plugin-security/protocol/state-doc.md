@@ -4,7 +4,11 @@ This is the contract between a persona and the engagement. It is mounted read-on
 
 ## Two filesystems
 
-Engagement state exists only behind the `sec_fs_*` tools. `/workspace` is the scan target, never state storage. Do not write notes, checklists, or state docs into the clone; they die with the sandbox.
+The engagement tree (`/cells/...`, `/protocol.md`, `/playbooks/...`) exists ONLY behind the `sec_fs_*` tools. It is NOT a real filesystem: the generic Read, Write, and Edit tools operate on the sandbox filesystem and will fail on a `/cells/...` path ("no such file or directory"). Read the tree with `sec_fs_read`/`sec_fs_list`; write it with `sec_fs_write`.
+
+The sandbox filesystem is a separate disk. `/workspace` is the scan target — read-only, never state storage. `/tmp` is scratch you may write.
+
+`sec_fs_write` takes the content two ways. Inline `content` is fine for a small write. For anything you revise often — the state doc especially — author it once at a real scratch path (for example `/tmp/state.yml`) with the Write/Edit tools, then commit each revision with `sec_fs_write path=/cells/<your dir>/state.yml from_file=/tmp/state.yml`. The server reads the file, so you never re-paste or re-escape the whole document into a tool call.
 
 ## The state doc
 
@@ -46,7 +50,7 @@ Write a state doc revision after every 10 checklist items, and before any long a
 
 ## Immutability
 
-Every `sec_fs_write` appends a new revision. Nothing rewrites history. Write the full document each time; do not try to patch.
+Every `sec_fs_write` appends a new revision. Nothing rewrites history. Each revision is the whole document — but you do not have to re-type it: keep the working copy at your scratch path (for example `/tmp/state.yml`), Edit it in place, and commit with `from_file`. The tree stores the full file; the Edit tool does the incremental work.
 
 ## Rehydration
 

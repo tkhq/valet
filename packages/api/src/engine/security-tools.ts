@@ -655,20 +655,52 @@ export const secFsWriteTool = defineTool({
   name: "sec_fs_write",
   description:
     "Write one file into YOUR cell directory (/cells/<your dir>/...) in the engagement tree. Writes append " +
-    "revisions — nothing updates in place. state.yml writes are validated against the protocol.",
+    "revisions — nothing updates in place. state.yml writes are validated against the protocol. " +
+    "Pass `content` inline, OR author the file at a real sandbox path (e.g. /tmp/state.yml) with the Write/Edit " +
+    "tools and pass `from_file` — the server reads that path, so you never re-paste or re-escape the whole document.",
   parameters: Type.Object({
     path: Type.String({ description: "Tree path under your cell directory, e.g. '/cells/01-recon/state.yml'." }),
-    content: Type.String({ description: "The full file content (the tree stores whole revisions)." }),
+    content: Type.Optional(
+      Type.String({ description: "The full file content (the tree stores whole revisions). Provide this OR from_file." }),
+    ),
+    from_file: Type.Optional(
+      Type.String({
+        description:
+          "A real sandbox path (e.g. '/tmp/state.yml') whose content the server reads for this revision. " +
+          "Author it with Write/Edit and commit it here without re-pasting. Provide this OR content.",
+      }),
+    ),
   }),
   execute: async (args, ctx) => {
     const cfg = resolveSecurityConfig(ctx);
     if (!cfg) return { text: UNAVAILABLE_TEXT };
+    // Resolve the content from `from_file` (read the real sandbox path) or the
+    // inline `content`. Exactly one — `from_file` is the escape hatch from
+    // re-pasting a whole document into the tool call every revision.
+    let content: string;
+    if (args.from_file !== undefined && args.from_file !== "") {
+      if (args.content !== undefined) {
+        return { text: "[security_error] Pass content OR from_file, not both. Use from_file to commit a file you authored." };
+      }
+      try {
+        content = await ctx.sandbox.readFile(args.from_file);
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        return {
+          text: `[security_error] Could not read from_file ${args.from_file}: ${detail}. Write the file first with the Write tool, or pass content inline.`,
+        };
+      }
+    } else if (args.content !== undefined) {
+      content = args.content;
+    } else {
+      return { text: "[security_error] Pass content (inline) or from_file (a sandbox path to read)." };
+    }
     return securityRequest(
       securityUrl(cfg, ctx, "/files"),
       {
         method: "POST",
         headers: securityHeaders(cfg, ctx, true),
-        body: JSON.stringify({ path: args.path, content: args.content }),
+        body: JSON.stringify({ path: args.path, content }),
       },
       async (res) => {
         const body = await parseJsonBody(res);
