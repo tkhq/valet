@@ -307,8 +307,15 @@ let itemsResults: Record<
   proxy: { data: mockProxyItems, isLoading: false, error: null },
 };
 
+// Captures the args of the last useUsageBreakdown call so tests can assert
+// the scope/teamId/enabled the page requests.
+let breakdownCalls: unknown[][] = [];
+
 vi.mock("~/api/usage", () => ({
-  useUsageBreakdown: () => breakdownResult,
+  useUsageBreakdown: (...args: unknown[]) => {
+    breakdownCalls.push(args);
+    return breakdownResult;
+  },
   useUsageItems: (_window: string, _scope: string, useCase: string) =>
     itemsResults[useCase] ?? { data: undefined, isLoading: false, error: null },
   qkUsage: {
@@ -324,6 +331,10 @@ let requestsResult: {
   error: null | Error;
 } = { data: mockRequests, isLoading: false, error: null };
 
+// Captures the opts of the last proxy-hook calls (enabled gating).
+let lastProxyRequestsOpts: { enabled?: boolean } | undefined;
+let lastProxySettingsOpts: { enabled?: boolean } | undefined;
+
 let detailResult: {
   data: ProxyRequestDetail | undefined;
   isLoading: boolean;
@@ -336,9 +347,15 @@ let settingsResult: {
 } = { data: { enabled: true, mode: "centralized" }, isLoading: false };
 
 vi.mock("~/api/proxy-usage", () => ({
-  useProxyRequests: () => requestsResult,
+  useProxyRequests: (_filters: unknown, opts?: { enabled?: boolean }) => {
+    lastProxyRequestsOpts = opts;
+    return requestsResult;
+  },
   useProxyRequestDetail: () => detailResult,
-  useProxySettings: () => settingsResult,
+  useProxySettings: (opts?: { enabled?: boolean }) => {
+    lastProxySettingsOpts = opts;
+    return settingsResult;
+  },
   qkProxy: {
     summary: () => [],
     requests: () => [],
@@ -360,11 +377,25 @@ vi.mock("~/api/settings", () => ({
   useOrg: () => orgResult,
 }));
 
+// Mock the workspace resolution — mutable so tests can enter a team
+// workspace or the still-resolving window (useActiveWorkspace → undefined).
+let workspaceTeamId: string | undefined = undefined;
+let workspaceResolved = true;
+vi.mock("~/components/workspace-clause", () => ({
+  WorkspaceClause: () => null,
+  useActiveWorkspace: () =>
+    !workspaceResolved
+      ? undefined
+      : workspaceTeamId === undefined
+        ? { kind: "personal", hasTeams: false }
+        : { kind: "team", team: { id: workspaceTeamId, name: "Team X", memberCount: 2 } },
+}));
+
 // Mock api client — usageExportCsvUrl is a pure URL builder.
 vi.mock("~/api/client", () => ({
   api: {
-    usageExportCsvUrl: (window: string, scope: string) =>
-      `/api/usage/export.csv?window=${window}&scope=${scope}`,
+    usageExportCsvUrl: (window: string, scope: string, teamId?: string) =>
+      `/api/usage/export.csv?window=${window}&scope=${scope}${teamId !== undefined ? `&teamId=${teamId}` : ""}`,
   },
 }));
 
@@ -386,6 +417,11 @@ beforeEach(() => {
     data: { features: { organizations: false }, callerRole: "member" },
     isLoading: false,
   };
+  workspaceTeamId = undefined;
+  workspaceResolved = true;
+  breakdownCalls = [];
+  lastProxyRequestsOpts = undefined;
+  lastProxySettingsOpts = undefined;
 });
 
 describe("UsagePage — spend summary", () => {
@@ -740,6 +776,92 @@ describe("UsagePage — request log drill-down", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Close detail" }));
     expect(screen.queryByText("Request detail")).toBeNull();
+  });
+});
+
+describe("UsagePage — team workspace scope", () => {
+  beforeEach(() => {
+    workspaceTeamId = "team-x";
+    breakdownResult = {
+      data: { ...mockBreakdown, scope: "team" },
+      isLoading: false,
+      error: null,
+    };
+  });
+
+  it("pins the CSV export to scope=team with the team id", () => {
+    render(<UsagePage />);
+    const csvLink = document.querySelector("a[download]") as HTMLAnchorElement | null;
+    expect(csvLink!.href).toContain("scope=team");
+    expect(csvLink!.href).toContain("teamId=team-x");
+  });
+
+  it("hides the me/org toggle even for org admins", () => {
+    orgResult = {
+      data: { features: { organizations: true }, callerRole: "admin" },
+      isLoading: false,
+    };
+    render(<UsagePage />);
+    expect(screen.queryByText("My usage")).toBeNull();
+    expect(screen.queryByText("Organization")).toBeNull();
+  });
+
+  it("hides the personal-only proxy surfaces (request log, key setup)", () => {
+    render(<UsagePage />);
+    expect(screen.queryByText(/request log/)).toBeNull();
+    expect(document.querySelector("a[href='/settings/proxy']")).toBeNull();
+  });
+
+  it("names the team in the subtitle", () => {
+    render(<UsagePage />);
+    expect(screen.getByText(/for this team/)).toBeTruthy();
+  });
+
+  it("still renders the breakdown totals", () => {
+    render(<UsagePage />);
+    expect(screen.getByText("$0.1234")).toBeTruthy();
+  });
+
+  it("disables the proxy queries (their surfaces render only in the personal workspace)", () => {
+    render(<UsagePage />);
+    expect(lastProxyRequestsOpts?.enabled).toBe(false);
+    expect(lastProxySettingsOpts?.enabled).toBe(false);
+  });
+});
+
+describe("UsagePage — workspace still resolving", () => {
+  beforeEach(() => {
+    workspaceResolved = false;
+  });
+
+  it("holds the breakdown query (enabled=false) so a stale stored team key cannot fire a 404", () => {
+    render(<UsagePage />);
+    const lastCall = breakdownCalls[breakdownCalls.length - 1];
+    expect(lastCall?.[3]).toEqual({ enabled: false });
+  });
+
+  it("shows Loading and no CSV link while unresolved", () => {
+    breakdownResult = { data: undefined, isLoading: false, error: null };
+    render(<UsagePage />);
+    expect(screen.getByText("Loading…")).toBeTruthy();
+    expect(document.querySelector("a[download]")).toBeNull();
+  });
+});
+
+describe("UsagePage — expanded drill rows across the me/org toggle", () => {
+  it("keeps a row expanded when an org admin flips me → org", async () => {
+    orgResult = {
+      data: { features: { organizations: true }, callerRole: "admin" },
+      isLoading: false,
+    };
+    render(<UsagePage />);
+    fireEvent.click(screen.getByRole("button", { name: /Sessions — expand items/ }));
+    await waitFor(() => {
+      expect(screen.getByText("Parent session")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByText("Organization"));
+    // The container is keyed by workspace, not scope — the row stays open.
+    expect(screen.getByText("Parent session")).toBeTruthy();
   });
 });
 

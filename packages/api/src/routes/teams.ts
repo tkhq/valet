@@ -54,6 +54,7 @@ import {
   ConfigManagedTeamError,
   createTeam,
   deleteTeam,
+  getTeamInOrg,
   IdpManagedTeamError,
   type IdpManagedMutation,
   isLiveIdpMirror,
@@ -176,10 +177,7 @@ function handleServiceError(err: unknown): { body: { error: string; code?: strin
 }
 
 async function loadTeamInOrg(db: AppEnv["Variables"]["providers"]["db"], teamId: string, orgId: string) {
-  const rows = await db.select().from(teams).where(eq(teams.id, teamId)).limit(1);
-  const row = rows[0];
-  if (!row || row.orgId !== orgId) return undefined;
-  return row;
+  return getTeamInOrg(db, orgId, teamId);
 }
 
 /**
