@@ -100,6 +100,20 @@ personas:
     );
   });
 
+  it("rejects an unknown threat category with a corrective message", () => {
+    expect(() =>
+      parseSecurityConfig("version: 1\ncategories:\n  - authz\n  - made-up\n", KNOWN),
+    ).toThrow(/unknown threat categor.*"made-up".*Known categories:/s);
+  });
+
+  it("accepts a config naming only known categories", () => {
+    const config = parseSecurityConfig(
+      "version: 1\ncategories:\n  - authz\n  - webhooks\n",
+      KNOWN,
+    );
+    expect(config.categories).toEqual(["authz", "webhooks"]);
+  });
+
   it("rejects malformed YAML with a corrective message", () => {
     expect(() => parseSecurityConfig("version: 1\n  bad: : :\n", KNOWN)).toThrow(
       /Fix .valet\/security.yml/,

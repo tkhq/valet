@@ -1,4 +1,4 @@
-// esbuild plugin: inline text assets (.md / .sql) that are read at module
+// esbuild plugin: inline text assets (.md / .sql / .yml) that are read at module
 // load time via `readFileSync(new URL("<lit>", import.meta.url), "utf8")` or
 // `readFileSync(fileURLToPath(new URL("<lit>", import.meta.url)), "utf8")`.
 //
@@ -8,10 +8,9 @@
 // read a no-op string literal that needs no filesystem lookup.
 //
 // Scope: only the two exact call shapes above, and only when the literal ends
-// in `.md` or `.sql`. Every other `readFileSync` / `new URL` is left
+// in `.md`, `.sql`, or `.yml`. Every other `readFileSync` / `new URL` is left
 // untouched. If a matching call's literal cannot be statically resolved to an
-// existing `.md`/`.sql` file, the build THROWS — we never silently ship a
-// broken read.
+// existing asset file, the build THROWS — we never silently ship a broken read.
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, resolve, extname } from "node:path";
 
@@ -31,7 +30,7 @@ const READ_CALL =
 const DYNAMIC_READ =
   /readFileSync\(\s*(?:fileURLToPath\(\s*)?new URL\(\s*`[^`]*`\s*,\s*import\.meta\.url/g;
 
-const ASSET_EXTS = new Set([".md", ".sql"]);
+const ASSET_EXTS = new Set([".md", ".sql", ".yml"]);
 
 /**
  * Pure helper (exported for the parity unit test): given the absolute path of

@@ -158,16 +158,17 @@ export function useSetPlanCells(sessionId: string) {
 }
 
 /**
- * POST .../security/config — edit the engagement's focus + known invariants
- * during planning (dynamic-config M-F3; session admin). Invalidates the
- * engagement query so the panel re-reads the saved values.
+ * POST .../security/config — edit the engagement's focus, known invariants, and
+ * loaded threat categories during planning (dynamic-config M-F3, M-P2a; session
+ * admin). Invalidates the engagement query so the panel re-reads the saved
+ * values.
  */
 export function useSetEngagementConfig(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<
     SecuritySetConfigResponse,
     Error,
-    { focus?: string | null; invariants?: string[] }
+    { focus?: string | null; invariants?: string[]; categories?: string[] }
   >({
     mutationFn: (body) => api.setSecurityConfig(sessionId, body),
     onSuccess: () => {

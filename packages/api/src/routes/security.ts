@@ -56,7 +56,14 @@
 import { randomUUID } from "node:crypto";
 import { Hono, type Context } from "hono";
 import { and, asc, count, desc, eq, inArray } from "drizzle-orm";
-import { cellDir, KNOWN_PERSONAS, parsePlan, serializePlan } from "@valet/plugin-security";
+import {
+  cellDir,
+  isKnownCategory,
+  KNOWN_CATEGORIES,
+  KNOWN_PERSONAS,
+  parsePlan,
+  serializePlan,
+} from "@valet/plugin-security";
 import type { PlanCell } from "@valet/plugin-security";
 import type { Principal } from "@valet/engine";
 import type { AppEnv } from "../env.js";
@@ -1075,7 +1082,7 @@ securityRouter.post("/:id/security/config", async (c) => {
   const { security, result } = loaded;
 
   const body = await readJsonBody(c);
-  const args: { focus?: string | null; invariants?: string[] } = {};
+  const args: { focus?: string | null; invariants?: string[]; categories?: string[] } = {};
   if ("focus" in body) {
     if (body.focus !== null && typeof body.focus !== "string") {
       return c.json({ error: "focus must be a text note or null." }, 400);
@@ -1091,8 +1098,29 @@ securityRouter.post("/:id/security/config", async (c) => {
     }
     args.invariants = body.invariants;
   }
-  if (args.focus === undefined && args.invariants === undefined) {
-    return c.json({ error: "Send { focus } or { invariants } to edit." }, 400);
+  if ("categories" in body) {
+    if (
+      !Array.isArray(body.categories) ||
+      !body.categories.every((v): v is string => typeof v === "string")
+    ) {
+      return c.json({ error: "categories must be a list of strings." }, 400);
+    }
+    // Reject an unknown category with a corrective error naming the known set.
+    const unknown = body.categories.filter((id) => !isKnownCategory(id));
+    if (unknown.length > 0) {
+      return c.json(
+        {
+          error:
+            `Unknown threat categor${unknown.length === 1 ? "y" : "ies"} ` +
+            `${unknown.map((id) => `"${id}"`).join(", ")}. Known categories: ${KNOWN_CATEGORIES.join(", ")}.`,
+        },
+        400,
+      );
+    }
+    args.categories = body.categories;
+  }
+  if (args.focus === undefined && args.invariants === undefined && args.categories === undefined) {
+    return c.json({ error: "Send { focus }, { invariants }, or { categories } to edit." }, 400);
   }
 
   try {
@@ -1100,6 +1128,7 @@ securityRouter.post("/:id/security/config", async (c) => {
     const response: SecuritySetConfigResponse = {
       focus: updated.focus,
       invariants: parseJsonStringArray(updated.invariants) ?? [],
+      categories: parseJsonStringArray(updated.categories) ?? [],
     };
     return c.json(response);
   } catch (err) {

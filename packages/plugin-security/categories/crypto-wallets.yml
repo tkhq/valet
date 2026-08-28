@@ -1,0 +1,103 @@
+name: Blockchain Wallet Management
+detect_when:
+  - "API paths contain wallet, transaction, signing, or address"
+  - "The code references blockchain, ethereum, bitcoin, HD wallet, BIP-32, or BIP-39"
+  - "The team asserts a cryptographic-integrity invariant on signing or wallet operations"
+
+threat_patterns:
+  wallet_theft:
+    description: Extracting wallet private keys or seed phrases
+    cwe: CWE-312
+    capec: null
+    mitre_attack: T1552
+    skill: medium
+    likelihood: medium
+    prereqs:
+      - Wallet creation or import functionality exists
+      - The application handles a private key or seed phrase
+    look_for:
+      - a seed phrase shown in cleartext after creation
+      - private key export without re-authentication
+      - a wallet backup transmitted over an insecure channel
+      - key material in browser localStorage or sessionStorage
+      - a seed phrase in server logs
+
+  unauthorized_signing:
+    description: Triggering transaction signing without proper authorization
+    cwe: CWE-862
+    capec: null
+    mitre_attack: null
+    skill: medium
+    likelihood: medium
+    prereqs:
+      - A transaction signing endpoint exists
+      - A policy or authorization layer governs signing
+    look_for:
+      - a signing endpoint with insufficient auth checks
+      - a policy bypass allowing unauthorized transactions
+      - batch signing without per-transaction approval
+      - signing with the wrong key (key confusion)
+
+  address_substitution:
+    description: An attacker substitutes the destination address in a transaction
+    cwe: CWE-345
+    capec: CAPEC-148
+    mitre_attack: null
+    skill: medium
+    likelihood: medium
+    prereqs:
+      - The destination address is supplied by a user or API
+      - The address is shown before transaction confirmation
+    look_for:
+      - address validation only on the client side
+      - the address shown to the user differs from the signed address
+      - clipboard injection in address copy
+      - an address allowlist bypass
+
+  hd_wallet_path_manipulation:
+    description: Manipulating the derivation path to reach other keys
+    cwe: CWE-22
+    capec: null
+    mitre_attack: null
+    skill: high
+    likelihood: low
+    prereqs:
+      - HD wallet derivation is in use
+      - The derivation path is accepted from user input
+    look_for:
+      - a user-controlled derivation path without validation
+      - path traversal in HD wallet derivation
+      - hardened vs non-hardened derivation inconsistency
+      - cross-account key derivation
+
+  transaction_replay:
+    description: Replaying a signed transaction on the same or a different chain
+    cwe: CWE-294
+    capec: null
+    mitre_attack: null
+    skill: medium
+    likelihood: medium
+    prereqs:
+      - A transaction submission endpoint exists
+      - A nonce or replay protection mechanism is in use
+    look_for:
+      - nonce management for transactions
+      - chain ID binding in signatures
+      - duplicate transaction detection
+      - idempotency of transaction submission
+
+  key_recovery_abuse:
+    description: Exploiting recovery mechanisms to take over wallets
+    cwe: CWE-640
+    capec: null
+    mitre_attack: null
+    skill: medium
+    likelihood: low
+    prereqs:
+      - A key or wallet recovery mechanism exists
+      - The recovery flow has social or threshold components
+    look_for:
+      - social recovery with an insufficient threshold
+      - recovery that bypasses MFA requirements
+      - a recovery key stored alongside the primary key
+      - a recovery process that does not invalidate old keys

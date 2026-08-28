@@ -1,0 +1,103 @@
+name: Policy Engines
+detect_when:
+  - "API paths contain policy, permission, rule, or access-control"
+  - "The code references Rego, Cedar, Casbin, OPA, or a policy engine"
+  - "The team asserts an authorization-completeness invariant on policy operations"
+dedup: "If authz is also loaded, this file owns policy-specific threats (degenerate policy, precedence abuse, self-issuance, policy injection, stale enforcement, scope escape) and authz owns direct authorization bypass, IDOR, and privilege escalation."
+
+threat_patterns:
+  degenerate_policy:
+    description: A policy with empty or trivially satisfiable conditions
+    cwe: CWE-276
+    capec: null
+    mitre_attack: null
+    skill: medium
+    likelihood: medium
+    prereqs:
+      - A policy creation or modification endpoint exists
+      - The engine evaluates user-defined rules
+    look_for:
+      - an empty condition list treated as allow-all
+      - wildcard resource matching without restriction
+      - a missing effect field defaulting to allow
+      - a policy with no subjects applying to everyone
+
+  policy_precedence_abuse:
+    description: Exploiting rule ordering to override denials
+    cwe: CWE-863
+    capec: null
+    mitre_attack: null
+    skill: high
+    likelihood: low
+    prereqs:
+      - Multiple policies can exist for the same resource
+      - The evaluation order affects the outcome
+    look_for:
+      - first-match vs most-specific evaluation semantics
+      - an allow rule overriding an explicit deny
+      - user-created policies taking precedence over system policies
+      - conflict resolution favoring the permissive outcome
+
+  self_issuance:
+    description: A user creating a policy that grants themselves elevated privileges
+    cwe: CWE-269
+    capec: null
+    mitre_attack: T1078
+    skill: medium
+    likelihood: medium
+    prereqs:
+      - Users can create or modify policies
+      - A policy grants permissions to subjects
+    look_for:
+      - a policy creation endpoint allowing arbitrary subjects
+      - a user setting themselves as admin through a policy
+      - no check that the policy creator holds the permissions they grant
+      - delegation without scope restriction
+
+  policy_injection:
+    description: Injecting malicious rules through user input
+    cwe: CWE-94
+    capec: null
+    mitre_attack: null
+    skill: high
+    likelihood: low
+    prereqs:
+      - User input is included in policy evaluation
+      - The policy language supports expressions or conditions
+    look_for:
+      - user input interpolated into policy evaluation
+      - DSL injection in condition fields
+      - regex denial of service in pattern matching conditions
+      - template injection in policy rendering
+
+  stale_policy_enforcement:
+    description: Policy changes not taking effect immediately
+    cwe: CWE-613
+    capec: null
+    mitre_attack: null
+    skill: medium
+    likelihood: medium
+    prereqs:
+      - Policy caching or session-level permission caching is in use
+      - Policy changes are expected to take effect immediately
+    look_for:
+      - policy caching without invalidation
+      - session-level permission caching surviving a policy change
+      - an eventual-consistency window allowing stale access
+      - policy evaluated at token issuance, not at resource access
+
+  policy_scope_escape:
+    description: A policy evaluated in the wrong scope or context
+    cwe: CWE-863
+    capec: null
+    mitre_attack: null
+    skill: high
+    likelihood: low
+    prereqs:
+      - A multi-tenant or multi-scope policy system
+      - Policies scoped to specific tenants or contexts
+    look_for:
+      - cross-tenant policy evaluation
+      - a policy from org A applied to org B's resources
+      - a resource-level policy overridden by a global policy
+      - policy inheritance across trust boundaries

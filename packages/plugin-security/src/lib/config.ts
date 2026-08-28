@@ -1,4 +1,5 @@
 import { parse } from "yaml";
+import { isKnownCategory, KNOWN_CATEGORIES } from "./categories.js";
 import { parsePlan, type PlanCell } from "./plan.js";
 import { serializePlan } from "./presets.js";
 
@@ -86,6 +87,13 @@ export function parseSecurityConfig(yaml: string, knownPersonas: readonly string
   if (map.categories !== undefined) {
     if (!isStringArray(map.categories)) {
       throw new Error(`.valet/security.yml "categories" must be a list of strings. ${CORRECTIVE}`);
+    }
+    const unknown = map.categories.filter((id) => !isKnownCategory(id));
+    if (unknown.length > 0) {
+      throw new Error(
+        `.valet/security.yml names unknown threat categor${unknown.length === 1 ? "y" : "ies"} ` +
+          `${unknown.map((id) => `"${id}"`).join(", ")}. Known categories: ${KNOWN_CATEGORIES.join(", ")}. ${CORRECTIVE}`,
+      );
     }
     config.categories = map.categories;
   }

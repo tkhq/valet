@@ -467,10 +467,13 @@ export const api = {
       `/sessions/${encodeURIComponent(id)}/security/plan/cells`,
       { cells },
     ),
-  /** POST /sessions/:id/security/config — edit the engagement's focus + known
-   * invariants during planning (dynamic-config M-F3; session admin). Returns
-   * the saved values. */
-  setSecurityConfig: (id: string, body: { focus?: string | null; invariants?: string[] }) =>
+  /** POST /sessions/:id/security/config — edit the engagement's focus, known
+   * invariants, and loaded threat categories during planning (dynamic-config
+   * M-F3, M-P2a; session admin). Returns the saved values. */
+  setSecurityConfig: (
+    id: string,
+    body: { focus?: string | null; invariants?: string[]; categories?: string[] },
+  ) =>
     request<SecuritySetConfigResponse>(
       "POST",
       `/sessions/${encodeURIComponent(id)}/security/config`,

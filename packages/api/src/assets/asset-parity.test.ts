@@ -32,6 +32,12 @@ const CASES = [
     literal: "../../migrations/pg/0000_app.sql",
     assetFile: resolve(repoRoot, "packages/api/migrations/pg/0000_app.sql"),
   },
+  {
+    name: "plugin-security authz threat category (.yml)",
+    sourceFile: resolve(repoRoot, "packages/plugin-security/src/lib/categories.ts"),
+    literal: "../../categories/authz.yml",
+    assetFile: resolve(repoRoot, "packages/plugin-security/categories/authz.yml"),
+  },
 ];
 
 describe("inline-assets parity", () => {

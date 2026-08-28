@@ -29,7 +29,7 @@ async function createSecuritySession(baseUrl: string): Promise<CreateSessionResp
 function postConfig(
   baseUrl: string,
   id: string,
-  body: { focus?: string | null; invariants?: string[] },
+  body: { focus?: string | null; invariants?: string[]; categories?: string[] },
   headers?: Record<string, string>,
 ) {
   return fetch(`${baseUrl}/api/sessions/${id}/security/config`, {
@@ -154,6 +154,59 @@ describe("api integration: focus + invariants config edit", () => {
       expect(res.status).toBe(200);
       const body = (await res.json()) as SecuritySetConfigResponse;
       expect(body.focus).toBe("owner edit");
+    } finally {
+      await api.cleanup();
+    }
+  });
+
+  it("sets threat categories and the GET reflects them (M-P2a)", async () => {
+    const api = await bootTestApi();
+    try {
+      const created = await createSecuritySession(api.baseUrl);
+      const res = await postConfig(api.baseUrl, created.id, {
+        categories: ["authz", "webhooks"],
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as SecuritySetConfigResponse;
+      expect(body.categories).toEqual(["authz", "webhooks"]);
+
+      const sec = await getSecurity(api.baseUrl, created.id);
+      expect(sec.engagement.categories).toEqual(["authz", "webhooks"]);
+    } finally {
+      await api.cleanup();
+    }
+  });
+
+  it("rejects an unknown threat category naming the corrective action (M-P2a)", async () => {
+    const api = await bootTestApi();
+    try {
+      const created = await createSecuritySession(api.baseUrl);
+      const res = await postConfig(api.baseUrl, created.id, {
+        categories: ["authz", "made-up"],
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain('"made-up"');
+      expect(body.error).toContain("Known categories:");
+    } finally {
+      await api.cleanup();
+    }
+  });
+
+  it("refuses a categories edit on a running engagement (M-P2a)", async () => {
+    const api = await bootTestApi();
+    try {
+      const created = await createSecuritySession(api.baseUrl);
+      const sec = await getSecurity(api.baseUrl, created.id);
+      await api.providers.db
+        .update(securityEngagements)
+        .set({ status: "running" })
+        .where(eq(securityEngagements.id, sec.engagement.id));
+
+      const res = await postConfig(api.baseUrl, created.id, { categories: ["authz"] });
+      expect(res.status).toBe(409);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain("immutable");
     } finally {
       await api.cleanup();
     }

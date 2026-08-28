@@ -1,0 +1,112 @@
+name: Authentication
+detect_when:
+  - "The repo has login or authentication gate code"
+  - "The code has forms or fields of type password"
+dedup: "If mfa is also loaded, skip mfa_bypass from this file - mfa owns all MFA-specific threats."
+
+threat_patterns:
+  credential_stuffing:
+    description: Reuse of breached credentials against the login endpoint
+    cwe: CWE-307
+    capec: CAPEC-600
+    mitre_attack: T1110
+    skill: low
+    likelihood: high
+    prereqs:
+      - A login endpoint is reachable
+      - No account lockout or rate limit is observed
+    look_for:
+      - rate limiting on login
+      - an account lockout policy
+      - credential breach detection
+
+  session_fixation:
+    description: An attacker sets the session ID before the victim authenticates
+    cwe: CWE-384
+    capec: CAPEC-61
+    mitre_attack: null
+    skill: medium
+    likelihood: low
+    prereqs:
+      - The application uses session cookies
+      - A session ID is accepted from a URL or a pre-set cookie
+    look_for:
+      - session regeneration after login
+      - a session ID in URL parameters
+      - pre-authentication session binding
+
+  session_hijacking:
+    description: Stealing or predicting session tokens
+    cwe: CWE-614
+    capec: CAPEC-60
+    mitre_attack: T1539
+    skill: low
+    likelihood: medium
+    prereqs:
+      - The application uses session tokens
+      - Tokens are transmitted or stored insecurely
+    look_for:
+      - cookie flags (Secure, HttpOnly, SameSite)
+      - session token entropy
+      - a session transmitted over non-TLS
+
+  password_reset_poisoning:
+    description: Manipulating the password reset flow to redirect tokens
+    cwe: CWE-640
+    capec: CAPEC-50
+    mitre_attack: null
+    skill: medium
+    likelihood: medium
+    prereqs:
+      - Password reset functionality exists
+      - Reset emails contain clickable links
+    look_for:
+      - Host header injection in reset emails
+      - reset token entropy and expiry
+      - reset token single-use enforcement
+
+  authentication_logic_flaws:
+    description: Logical errors in the auth flow allowing bypass
+    cwe: CWE-287
+    capec: null
+    mitre_attack: null
+    skill: medium
+    likelihood: medium
+    prereqs:
+      - Authentication endpoints exist
+      - Multiple auth paths or fallback mechanisms are present
+    look_for:
+      - response manipulation (changing 401 to 200)
+      - parameter manipulation (adding admin=true)
+      - auth state stored client-side
+      - fallback auth paths with weaker controls
+
+  credential_registration_without_proof:
+    description: Binding a credential to an identity without proof the registrant holds the secret
+    cwe: CWE-287
+    capec: CAPEC-196
+    mitre_attack: null
+    skill: high
+    likelihood: medium
+    prereqs:
+      - A credential registration or binding endpoint exists
+      - A public key or credential is accepted as input
+    look_for:
+      - a public key accepted without a signature challenge (WebAuthn, blockchain keys, API keys)
+      - a credential registered with only an email match as proof of ownership
+      - an attacker can register a credential obtained from a public source
+      - credential binding on the registration path differs from the login path
+
+  credential_storage:
+    description: Insecure storage of passwords or secrets
+    cwe: CWE-916
+    capec: null
+    mitre_attack: null
+    skill: low
+    likelihood: low
+    prereqs:
+      - The application stores credentials server-side
+    look_for:
+      - the hashing algorithm (bcrypt/argon2 vs MD5/SHA1)
+      - salt usage and uniqueness
+      - plaintext credentials in logs or errors

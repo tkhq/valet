@@ -20,7 +20,12 @@ const getSessionMock = vi.fn<(id: string) => Promise<GetSessionResponse>>();
 const getSecurityMock = vi.fn<(id: string) => Promise<GetSessionSecurityResponse>>();
 const listFindingsMock = vi.fn<() => Promise<ListSecurityFindingsResponse>>();
 const setConfigMock =
-  vi.fn<(id: string, body: { focus?: string | null; invariants?: string[] }) => Promise<SecuritySetConfigResponse>>();
+  vi.fn<
+    (
+      id: string,
+      body: { focus?: string | null; invariants?: string[]; categories?: string[] },
+    ) => Promise<SecuritySetConfigResponse>
+  >();
 
 vi.mock("~/api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/client")>();
@@ -31,8 +36,10 @@ vi.mock("~/api/client", async (importOriginal) => {
       getSession: (id: string) => getSessionMock(id),
       getSessionSecurity: (id: string) => getSecurityMock(id),
       listSecurityFindings: () => listFindingsMock(),
-      setSecurityConfig: (id: string, body: { focus?: string | null; invariants?: string[] }) =>
-        setConfigMock(id, body),
+      setSecurityConfig: (
+        id: string,
+        body: { focus?: string | null; invariants?: string[]; categories?: string[] },
+      ) => setConfigMock(id, body),
     },
   };
 });
@@ -100,6 +107,7 @@ beforeEach(() => {
   setConfigMock.mockResolvedValue({
     focus: "the multi-tenant data path",
     invariants: ["every admin route sits behind requireAdmin"],
+    categories: [],
   });
   meMock.mockReturnValue({ data: { id: "u-1", orgRole: "member" }, isLoading: false, error: null });
   teamsMock.mockReturnValue({ data: { teams: [] }, isLoading: false, error: null });
@@ -146,6 +154,53 @@ describe("ConfigEditor", () => {
       "every admin route sits behind requireAdmin",
       "tenant id is always checked in the repository layer",
     ]);
+  });
+
+  it("renders the threat-category checkboxes and posts the selected ids on Save (M-P2a)", async () => {
+    renderPanel();
+    const editor = await screen.findByTestId("config-editor");
+    const categories = within(editor).getByTestId("config-categories");
+    // Toggle two categories, then Save.
+    fireEvent.click(within(categories).getByLabelText("Authorization"));
+    fireEvent.click(within(categories).getByLabelText("Webhooks"));
+    fireEvent.click(within(editor).getByRole("button", { name: "Save focus" }));
+
+    await vi.waitFor(() => expect(setConfigMock).toHaveBeenCalledTimes(1));
+    const [, body] = setConfigMock.mock.calls[0];
+    // Saved in KNOWN_CATEGORIES order, not toggle order.
+    expect(body.categories).toEqual(["authz", "webhooks"]);
+  });
+
+  it("seeds the category checkboxes from the engagement (M-P2a)", async () => {
+    getSecurityMock.mockResolvedValue({
+      ...planningSecurity,
+      engagement: { ...planningSecurity.engagement, categories: ["authz"] },
+    });
+    renderPanel();
+    const editor = await screen.findByTestId("config-editor");
+    const categories = within(editor).getByTestId("config-categories");
+    expect((within(categories).getByLabelText("Authorization") as HTMLInputElement).checked).toBe(
+      true,
+    );
+    expect((within(categories).getByLabelText("Webhooks") as HTMLInputElement).checked).toBe(false);
+  });
+
+  it("shows loaded categories read-only once running (M-P2a)", async () => {
+    getSecurityMock.mockResolvedValue({
+      ...planningSecurity,
+      engagement: {
+        ...planningSecurity.engagement,
+        status: "running",
+        focus: null,
+        invariants: null,
+        categories: ["authz", "webhooks"],
+      },
+    });
+    renderPanel();
+    const view = await screen.findByTestId("config-readonly-categories");
+    expect(within(view).getByText("Authorization")).toBeTruthy();
+    expect(within(view).getByText("Webhooks")).toBeTruthy();
+    expect(screen.queryByTestId("config-editor")).toBeNull();
   });
 
   it("shows focus + invariants read-only once running", async () => {

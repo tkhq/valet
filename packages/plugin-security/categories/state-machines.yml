@@ -1,0 +1,86 @@
+name: State Machines and Workflows
+detect_when:
+  - "API paths contain approve, reject, cancel, activate, or status"
+  - "The code has requests that change entity state"
+  - "The team asserts a state-machine-integrity invariant"
+
+threat_patterns:
+  state_skip:
+    description: Transitioning an entity past required intermediate states
+    cwe: CWE-841
+    capec: null
+    mitre_attack: null
+    skill: medium
+    likelihood: medium
+    prereqs:
+      - A multi-step process or workflow exists
+      - State transition endpoints are reachable through the API
+    look_for:
+      - a direct API call to the final state, bypassing steps
+      - a state field settable through mass assignment
+      - no server-side state transition validation
+      - a client-side wizard with skippable steps
+
+  terminal_state_reversal:
+    description: Moving an entity out of a terminal state
+    cwe: CWE-841
+    capec: null
+    mitre_attack: null
+    skill: medium
+    likelihood: low
+    prereqs:
+      - Entities have terminal states (deleted, cancelled, revoked)
+      - Entity modification endpoints exist
+    look_for:
+      - deleted entities that can be re-activated
+      - cancelled orders that can be fulfilled
+      - revoked credentials that can be un-revoked
+      - closed accounts that can be reopened
+
+  concurrent_state_mutation:
+    description: A race condition on state transitions
+    cwe: CWE-362
+    capec: null
+    mitre_attack: null
+    skill: high
+    likelihood: medium
+    prereqs:
+      - State change operations exist
+      - No optimistic locking or version header is observed
+    look_for:
+      - no locking on state change operations
+      - a check-then-act pattern without atomicity
+      - optimistic concurrency without a version check
+      - parallel requests both succeeding for mutually exclusive transitions
+
+  workflow_bypass:
+    description: Completing a workflow without required approvals
+    cwe: CWE-841
+    capec: null
+    mitre_attack: null
+    skill: medium
+    likelihood: medium
+    prereqs:
+      - An approval or review workflow exists
+      - The workflow completion endpoint is reachable
+    look_for:
+      - an approval endpoint callable by the requester
+      - workflow steps not enforced server-side
+      - a direct API call to the completion endpoint
+      - a timeout that auto-approves pending requests
+
+  timer_manipulation:
+    description: Exploiting time-based state transitions
+    cwe: CWE-367
+    capec: null
+    mitre_attack: null
+    skill: medium
+    likelihood: low
+    prereqs:
+      - Time-based state transitions exist (expiry, timeout, scheduling)
+      - Client-supplied timestamps are accepted
+    look_for:
+      - client-supplied timestamps trusted for state changes
+      - expiry checked at creation but not at use
+      - timezone confusion causing premature or delayed transitions
+      - clock skew between services affecting state logic

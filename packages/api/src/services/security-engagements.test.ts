@@ -1010,6 +1010,63 @@ describe("security engagement service", () => {
     expect(prompt).toContain("- all webhooks verify an HMAC signature");
   });
 
+  // ── Threat-category library (M-P2a) ────────────────────────────────────────
+
+  it("buildDispatchPrompt injects the loaded categories' digest before the protocol (M-P2a)", async () => {
+    const { engagement, cells } = await makeStarted();
+    const plan = parsePlan(engagement.plan, KNOWN_PERSONAS);
+    const prompt = buildDispatchPrompt(cells[2], plan, [], "PROTOCOL BODY", false, {
+      categories: ["authz", "webhooks"],
+    });
+    expect(prompt).toContain("Threat categories loaded (domain attack surface to check against)");
+    // The digest names a category, a pattern, and a CWE.
+    expect(prompt).toContain("### Authorization");
+    expect(prompt).toContain("idor");
+    expect(prompt).toContain("CWE-639");
+    expect(prompt).toContain("### Webhooks and Callbacks");
+    // The block rides BEFORE the protocol body.
+    expect(prompt.indexOf("Threat categories loaded")).toBeLessThan(prompt.indexOf("PROTOCOL BODY"));
+  });
+
+  it("buildDispatchPrompt adds no category block when categories are absent or unknown", async () => {
+    const { engagement, cells } = await makeStarted();
+    const plan = parsePlan(engagement.plan, KNOWN_PERSONAS);
+    const bare = buildDispatchPrompt(cells[2], plan, [], "PROTOCOL BODY");
+    const withEmpty = buildDispatchPrompt(cells[2], plan, [], "PROTOCOL BODY", false, {
+      categories: ["", "  ", "not-a-category"],
+    });
+    // No known category loads — byte-identical to the no-config call.
+    expect(withEmpty).toBe(bare);
+    expect(bare).not.toContain("Threat categories loaded");
+  });
+
+  it("setEngagementConfig updates categories while planning and refuses once running (M-P2a)", async () => {
+    const engagement = await makePlanning();
+    const updated = await svc.setEngagementConfig(engagement.id, {
+      categories: ["authz", "  ", "webhooks"],
+    });
+    // Blank entries dropped; the column stores a JSON string[].
+    expect(JSON.parse(updated.categories ?? "[]")).toEqual(["authz", "webhooks"]);
+
+    const cleared = await svc.setEngagementConfig(engagement.id, { categories: [] });
+    expect(cleared.categories).toBeNull();
+
+    await svc.startEngagement(engagement.id, { resolvedSha: SHA });
+    await expect(
+      svc.setEngagementConfig(engagement.id, { categories: ["authz"] }),
+    ).rejects.toThrow(/immutable once the engagement is running/);
+  });
+
+  it("dispatchCell carries the engagement's categories into the prompt (M-P2a)", async () => {
+    const engagement = await makePlanning();
+    await svc.setEngagementConfig(engagement.id, { categories: ["authz"] });
+    const { cells } = await svc.startEngagement(engagement.id, { resolvedSha: SHA });
+    const { prompt } = await svc.dispatchCell(engagement.id, { cellId: cells[0].id, spawn });
+    expect(prompt).toContain("Threat categories loaded");
+    expect(prompt).toContain("### Authorization");
+    expect(prompt).toContain("CWE-639");
+  });
+
   // ── Re-scan / iterate: carry-forward + diff ────────────────────────────────
 
   /** A started child engagement whose parent is the given engagement id. */

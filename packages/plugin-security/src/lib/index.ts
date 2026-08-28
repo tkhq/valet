@@ -25,3 +25,11 @@ export type { SecurityConfig } from "./config.js";
 export { protocolMarkdown } from "./protocol.js";
 export { KNOWN_PLAYBOOKS, isKnownPlaybook, playbookMarkdown } from "./playbooks.js";
 export type { PlaybookName } from "./playbooks.js";
+export {
+  KNOWN_CATEGORIES,
+  isKnownCategory,
+  categoryYaml,
+  parseCategory,
+  categoryDigest,
+} from "./categories.js";
+export type { CategoryId, ThreatCategory, ThreatPattern } from "./categories.js";

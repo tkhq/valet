@@ -1,0 +1,103 @@
+name: Parsers and Input Processing
+detect_when:
+  - "Forms have file upload fields"
+  - "Endpoints accept content-type xml, multipart, or custom formats"
+  - "The code references an XML parser, YAML parser, protobuf, or a deserialization library"
+
+threat_patterns:
+  format_confusion:
+    description: Sending content in an unexpected format to bypass validation
+    cwe: CWE-436
+    capec: CAPEC-153
+    mitre_attack: null
+    skill: medium
+    likelihood: medium
+    prereqs:
+      - The endpoint accepts multiple content types
+      - Content-type negotiation is in use
+    look_for:
+      - a content-type header ignored, format auto-detected
+      - a JSON endpoint accepting XML (XXE through a content-type switch)
+      - a multipart form accepting nested content types
+      - a protocol downgrade in format negotiation
+
+  xml_external_entity:
+    description: XXE through XML parsing with external entity resolution
+    cwe: CWE-611
+    capec: CAPEC-201
+    mitre_attack: null
+    skill: medium
+    likelihood: medium
+    prereqs:
+      - The application parses XML input
+      - The parser configuration is available for testing
+    look_for:
+      - XML parsing without disabling external entities
+      - XSLT processing with user-supplied stylesheets
+      - an SVG upload parsed as XML
+      - SOAP endpoints accepting arbitrary XML
+
+  deserialization:
+    description: Arbitrary code execution through insecure deserialization
+    cwe: CWE-502
+    capec: CAPEC-586
+    mitre_attack: T1190
+    skill: high
+    likelihood: low
+    prereqs:
+      - The application deserializes user-supplied data
+      - The serialization format is identifiable
+    look_for:
+      - Java ObjectInputStream, Python pickle, PHP unserialize, .NET BinaryFormatter
+      - Ruby Marshal.load, Node.js node-serialize
+      - custom binary formats with type indicators
+      - magic bytes in uploaded files triggering deserialization
+
+  polyglot_attacks:
+    description: Files valid in multiple formats to bypass validation
+    cwe: CWE-434
+    capec: null
+    mitre_attack: null
+    skill: high
+    likelihood: low
+    prereqs:
+      - File upload functionality exists
+      - File type validation is in use
+    look_for:
+      - an image upload that is also valid JavaScript
+      - a PDF upload containing embedded scripts
+      - ZIP files with path traversal (zip slip)
+      - files passing an extension check but having different content
+
+  resource_exhaustion:
+    description: Crafted input causing excessive resource consumption
+    cwe: CWE-400
+    capec: CAPEC-130
+    mitre_attack: null
+    skill: low
+    likelihood: high
+    prereqs:
+      - The application parses structured input (XML, JSON, YAML)
+      - No input size or depth limit is observed
+    look_for:
+      - billion laughs or an XML bomb
+      - regex denial of service (ReDoS)
+      - deeply nested JSON or YAML
+      - a zip bomb through file upload
+      - hash collision attacks on hash maps
+
+  prototype_pollution:
+    description: Modifying JavaScript object prototypes through parsed input
+    cwe: CWE-1321
+    capec: null
+    mitre_attack: null
+    skill: medium
+    likelihood: medium
+    prereqs:
+      - A Node.js or JavaScript backend
+      - A deep merge or object spread of user input
+    look_for:
+      - a deep merge of user input into objects
+      - __proto__ or constructor.prototype in JSON
+      - lodash.merge or jQuery.extend with user data
+      - Object.assign with an untrusted source

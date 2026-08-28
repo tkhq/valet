@@ -20,6 +20,7 @@
 import { randomUUID } from "node:crypto";
 import { and, asc, count, desc, eq, gt, ilike, inArray, or, sql } from "drizzle-orm";
 import {
+  categoryDigest,
   cellDir,
   findingFingerprint,
   isKnownPlaybook,
@@ -220,12 +221,14 @@ export interface ListFindingsOptions {
  * A cell is the recon cell when it is the ordinal-1 cell; a review cell is a
  * `review: true` cell (verify); every other cell is a scoped sweep.
  *
- * `config` carries the engagement's focus + invariants (dynamic-config M-F3),
- * seeded from `.valet/security.yml` or edited in the UI. When present, a
- * clearly delimited block rides on EVERY persona dispatch just before the
- * protocol: the focus weights the persona's checklist, and a stated invariant
- * turns a confirmed violation into a high-signal finding. An absent focus and
- * empty invariants add nothing — the prompt is byte-identical to before.
+ * `config` carries the engagement's focus + invariants (dynamic-config M-F3)
+ * and loaded threat categories (M-P2a), seeded from `.valet/security.yml` or
+ * edited in the UI. When present, a clearly delimited block rides on EVERY
+ * persona dispatch just before the protocol: the focus weights the persona's
+ * checklist, a stated invariant turns a confirmed violation into a high-signal
+ * finding, and the loaded categories put the domain's known attack surface in
+ * front of the persona. An absent focus, empty invariants, and empty categories
+ * add nothing — the prompt is byte-identical to before.
  */
 export function buildDispatchPrompt(
   cell: SecurityCellRow,
@@ -233,7 +236,11 @@ export function buildDispatchPrompt(
   readsCells: SecurityCellRow[],
   protocol: string,
   rescan = false,
-  config: { focus?: string | null; invariants?: string[] | null } = {},
+  config: {
+    focus?: string | null;
+    invariants?: string[] | null;
+    categories?: string[] | null;
+  } = {},
 ): string {
   const planCell = plan.cells.find((p) => p.ordinal === cell.ordinal);
   const lines: string[] = [
@@ -297,7 +304,12 @@ export function buildDispatchPrompt(
   // per-cell instruction. Only emitted when a value is present.
   const focus = config.focus?.trim();
   const invariants = (config.invariants ?? []).map((inv) => inv.trim()).filter((inv) => inv !== "");
-  if (focus || invariants.length > 0) {
+  // Loaded threat categories (M-P2a): the digest of the named categories'
+  // threat patterns. `categoryDigest` skips unknown ids and returns "" when
+  // none load, so a byte-identical prompt when categories are absent.
+  const categories = (config.categories ?? []).filter((id) => id.trim() !== "");
+  const digest = categories.length > 0 ? categoryDigest(categories) : "";
+  if (focus || invariants.length > 0 || digest !== "") {
     lines.push("", "--- Engagement configuration ---");
     if (focus) {
       lines.push(
@@ -311,6 +323,14 @@ export function buildDispatchPrompt(
         "Known invariants the team asserts hold. Treat a VIOLATION of any as a high-signal finding — a broken invariant is exactly what the team wants to know:",
       );
       for (const inv of invariants) lines.push(`- ${inv}`);
+    }
+    if (digest !== "") {
+      lines.push(
+        "",
+        "Threat categories loaded (domain attack surface to check against). Each pattern names its CWE/CAPEC and what to look for in the code — work through them for your cell's scope:",
+        "",
+        digest,
+      );
     }
   }
   lines.push(
@@ -500,20 +520,24 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
   }
 
   /**
-   * Edit the engagement's focus + known invariants while it is still planning
-   * (dynamic-config M-F3). Repo config seeds these at create; this lets a user
-   * add or change them in the UI before start. Only the passed fields change: a
-   * `focus` of `null` clears it, an omitted `focus` leaves it. `invariants` is
-   * stored as a JSON string[]; an omitted list leaves it, and `[]` clears it.
-   * Refuses once the engagement runs, matching setPlan's immutability rule.
+   * Edit the engagement's focus, known invariants, and loaded threat categories
+   * while it is still planning (dynamic-config M-F3, M-P2a). Repo config seeds
+   * these at create; this lets a user add or change them in the UI before start.
+   * Only the passed fields change: a `focus` of `null` clears it, an omitted
+   * `focus` leaves it. `invariants` and `categories` are stored as a JSON
+   * string[]; an omitted list leaves it, and `[]` clears it. The caller
+   * validates category ids against `isKnownCategory` before this runs. Refuses
+   * once the engagement runs, matching setPlan's immutability rule.
    */
   async function setEngagementConfig(
     engagementId: string,
-    args: { focus?: string | null; invariants?: string[] },
+    args: { focus?: string | null; invariants?: string[]; categories?: string[] },
   ): Promise<SecurityEngagementRow> {
     const engagement = await loadEngagement(engagementId);
     if (engagement.status !== "planning") {
-      throw new Error("The focus and invariants are immutable once the engagement is running.");
+      throw new Error(
+        "The focus, invariants, and categories are immutable once the engagement is running.",
+      );
     }
     const patch: Partial<typeof securityEngagements.$inferInsert> = { updatedAt: now() };
     if (args.focus !== undefined) {
@@ -523,6 +547,10 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     if (args.invariants !== undefined) {
       const cleaned = args.invariants.map((inv) => inv.trim()).filter((inv) => inv !== "");
       patch.invariants = cleaned.length > 0 ? JSON.stringify(cleaned) : null;
+    }
+    if (args.categories !== undefined) {
+      const cleaned = args.categories.map((id) => id.trim()).filter((id) => id !== "");
+      patch.categories = cleaned.length > 0 ? JSON.stringify(cleaned) : null;
     }
     const updated = await db
       .update(securityEngagements)
@@ -711,9 +739,14 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
       readsCells,
       protocolMarkdown(),
       engagement.parentEngagementId !== null,
-      // Focus + invariants ride on every dispatch (dynamic-config M-F3). The
-      // invariants column is a JSON string[]; a malformed value adds nothing.
-      { focus: engagement.focus, invariants: parseInvariants(engagement.invariants) },
+      // Focus + invariants + loaded threat categories ride on every dispatch
+      // (dynamic-config M-F3, M-P2a). The invariants and categories columns are
+      // JSON string[]; a malformed value adds nothing.
+      {
+        focus: engagement.focus,
+        invariants: parseJsonStringArrayColumn(engagement.invariants),
+        categories: parseJsonStringArrayColumn(engagement.categories),
+      },
     );
 
     let childSessionId: string;
@@ -1836,13 +1869,15 @@ function parsePathList(raw: string | null): string[] | null {
 /** Parse the engagement's `invariants` JSON (a string[] or null), for the
  * dispatch prompt (dynamic-config M-F3). Returns [] for a null/absent/malformed
  * value — a bad column must not throw a dispatch. */
-function parseInvariants(raw: string | null): string[] {
+/** Parse a stored JSON string[] column (invariants, categories). A null or
+ * malformed value yields [], so a bad column adds nothing to the prompt. */
+function parseJsonStringArrayColumn(raw: string | null): string[] {
   if (raw === null) return [];
   try {
     const parsed: unknown = JSON.parse(raw);
     if (Array.isArray(parsed)) return parsed.filter((v): v is string => typeof v === "string");
   } catch {
-    // A malformed value is treated as no invariants.
+    // A malformed value is treated as an empty list.
   }
   return [];
 }
