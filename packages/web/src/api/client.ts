@@ -104,7 +104,6 @@ import type {
   ListTeamMembersResponse,
   ListTeamsResponse,
   ListThreadsResponse,
-  ListAllWorkflowRunsResponse,
   ListWorkflowRunsResponse,
   GetTeamChildrenResponse,
   ListWorkflowTriggersResponse,
