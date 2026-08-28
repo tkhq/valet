@@ -194,6 +194,13 @@ export interface SecurityEngagementWire {
   /** Pinned commit SHA once started; empty while planning. */
   repoRef: string;
   plan: string;
+  /** Diff-scoped re-scan (re-scan / iterate): the prior review's pinned SHA the
+   * sweeps diffed against. Null on a first review or a full-scan fallback. */
+  baseRef: string | null;
+  /** Diff-scoped re-scan: the changed file paths the sweeps scoped to (JSON
+   * parsed from `changed_paths`). Null on a first review or a full-scan
+   * fallback (the panel then shows "Full re-scan"). */
+  changedPaths: string[] | null;
   createdAt: number;
   updatedAt: number;
 }

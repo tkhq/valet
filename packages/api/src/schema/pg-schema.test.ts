@@ -173,6 +173,28 @@ describe("pg app schema + migrations", () => {
     await db.query("DELETE FROM security_engagements WHERE id IN ('eng_parent', 'eng_child', 'eng_child2')");
   });
 
+  it("stores the diff-scoped re-scan base_ref and changed_paths, defaulting null", async () => {
+    const now = Date.now();
+    // A full-scan engagement: both diff columns null.
+    await db.query(
+      "INSERT INTO security_engagements (id, session_id, status, repo_full_name, plan, created_at, updated_at) VALUES ('eng_full', 's_full', 'running', 'acme/api', '', $1, $1)",
+      [now],
+    );
+    // A diff-scoped re-scan: base_ref + a JSON changed-path array.
+    await db.query(
+      "INSERT INTO security_engagements (id, session_id, status, repo_full_name, plan, base_ref, changed_paths, created_at, updated_at) VALUES ('eng_diff', 's_diff', 'running', 'acme/api', '', 'abc123', $2, $1, $1)",
+      [now, JSON.stringify(["src/a.ts", "src/b.ts"])],
+    );
+    const rows = await db.query(
+      "SELECT id, base_ref, changed_paths FROM security_engagements WHERE id IN ('eng_full', 'eng_diff') ORDER BY id",
+    );
+    expect(rows.rows).toEqual([
+      { id: "eng_diff", base_ref: "abc123", changed_paths: JSON.stringify(["src/a.ts", "src/b.ts"]) },
+      { id: "eng_full", base_ref: null, changed_paths: null },
+    ]);
+    await db.query("DELETE FROM security_engagements WHERE id IN ('eng_full', 'eng_diff')");
+  });
+
   it("enforces one issue link per finding per provider", async () => {
     const now = Date.now();
     await db.query(
@@ -668,6 +690,8 @@ describe("pg app schema + migrations", () => {
       { table: "agent_sessions", column: "sandbox_reclaimed_at" },
       { table: "mcp_oauth_clients", column: "registered_scopes" },
       { table: "mcp_oauth_clients", column: "scopes_supported" },
+      { table: "security_engagements", column: "base_ref" },
+      { table: "security_engagements", column: "changed_paths" },
     ];
 
     async function columnExists(table: string, column: string): Promise<boolean> {

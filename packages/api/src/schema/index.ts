@@ -1734,6 +1734,14 @@ export const securityEngagements = pgTable(
     // first review; set to the parent engagement id on a re-scan. No unique
     // constraint — a parent may be re-scanned any number of times.
     parentEngagementId: text("parent_engagement_id"),
+    // Diff-scoped re-scan (re-scan / iterate). Set only on a re-scan whose
+    // parent had a pinned SHA. `base_ref` is the parent's pinned SHA the diff
+    // ran against (base); `changed_paths` is the JSON array of changed file
+    // paths from the GitHub compare (base..new HEAD). Both null on a first
+    // review, or on a re-scan that fell back to a full scan (compare failed,
+    // or the parent had no pinned SHA).
+    baseRef: text("base_ref"),
+    changedPaths: text("changed_paths"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },

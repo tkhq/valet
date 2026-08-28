@@ -893,6 +893,37 @@ describe("security engagement service", () => {
     expect(prompt).toContain("packages/api/**");
   });
 
+  it("buildDispatchPrompt in rescan mode adds recon-inherit / sweep-scoped / verify-reconcile language", async () => {
+    const { engagement, cells } = await makeStarted();
+    const plan = parsePlan(engagement.plan, KNOWN_PERSONAS);
+
+    // Recon cell (ordinal 1): inherit the prior map, update only the delta.
+    const recon = buildDispatchPrompt(cells[0], plan, [], "P", true);
+    expect(recon).toContain("This is a RE-SCAN.");
+    expect(recon).toContain("/prior/recon.md");
+    expect(recon).toContain("/prior/diff.md");
+    expect(recon).toContain("/prior/findings.md");
+    expect(recon).toContain("UPDATE it only for the changed files");
+
+    // Sweep cell (ordinal 3): scoped to the changed code.
+    const sweep = buildDispatchPrompt(cells[2], plan, [], "P", true);
+    expect(sweep).toContain("RE-SCAN scoped to the changed code");
+    expect(sweep).toContain("/prior/diff.md");
+    expect(sweep).toContain("/prior/findings.md");
+    expect(sweep).toContain("Do not re-review unchanged code.");
+
+    // Verify cell (review: true): reconcile the prior findings.
+    const verify = buildDispatchPrompt(cells[4], plan, [], "P", true);
+    expect(verify).toContain("Reconcile /prior/findings.md");
+    expect(verify).toContain("noted as fixed");
+    expect(verify).toContain("Attack every open finding");
+
+    // A non-rescan dispatch never mentions /prior/.
+    const plain = buildDispatchPrompt(cells[2], plan, [], "P", false);
+    expect(plain).not.toContain("/prior/");
+    expect(plain).not.toContain("RE-SCAN");
+  });
+
   // ── Re-scan / iterate: carry-forward + diff ────────────────────────────────
 
   /** A started child engagement whose parent is the given engagement id. */
@@ -1089,6 +1120,200 @@ describe("security engagement service", () => {
     const child = await startedChildOf(parent.engagement.id);
     const fps = await svc.parentFingerprints(child.engagement.id);
     expect(fps.has(pf.finding.fingerprint)).toBe(true);
+  });
+
+  // ── Re-scan / iterate: diff-scoped sweeps + /prior/ mounts ─────────────────
+
+  const NEW_SHA = "fedcba9876543210fedcba9876543210fedcba98";
+
+  /** A planning child engagement whose parent is the given engagement id. */
+  async function planningChildOf(parentEngagementId: string) {
+    return svc.createEngagement({
+      sessionId: `s_${Math.random().toString(36).slice(2)}`,
+      repoFullName: "acme/api",
+      plan: codeReviewPresetPlan(),
+      parentEngagementId,
+    });
+  }
+
+  it("startEngagement with changedFiles scopes sweep cells only, not recon or verify", async () => {
+    const parent = await makeStarted();
+    const child = await planningChildOf(parent.engagement.id);
+    const started = await svc.startEngagement(child.id, {
+      resolvedSha: NEW_SHA,
+      baseRef: SHA,
+      changedFiles: ["src/routes/sessions.ts", "src/auth/login.ts"],
+    });
+    // The stored diff context.
+    expect(started.engagement.baseRef).toBe(SHA);
+    expect(JSON.parse(started.engagement.changedPaths ?? "null")).toEqual([
+      "src/routes/sessions.ts",
+      "src/auth/login.ts",
+    ]);
+    // The scoped plan carries the changed-dir globs on the sweeps.
+    const plan = parsePlan(started.engagement.plan, KNOWN_PERSONAS);
+    const recon = plan.cells.find((c) => c.ordinal === 1);
+    const verify = plan.cells.find((c) => c.review === true);
+    const sweeps = plan.cells.filter((c) => c.ordinal !== 1 && c.review !== true);
+    expect(recon?.paths).toBeUndefined();
+    expect(verify?.paths).toBeUndefined();
+    expect(sweeps.length).toBeGreaterThan(0);
+    for (const sweep of sweeps) {
+      expect(sweep.paths).toEqual(["src/auth/**", "src/routes/**"]);
+    }
+  });
+
+  it("startEngagement with changedFiles=null runs a full scan and stores nulls", async () => {
+    const parent = await makeStarted();
+    const child = await planningChildOf(parent.engagement.id);
+    const started = await svc.startEngagement(child.id, {
+      resolvedSha: NEW_SHA,
+      baseRef: SHA,
+      changedFiles: null,
+    });
+    expect(started.engagement.changedPaths).toBeNull();
+    // No scoping: the plan matches the first-review preset (no injected paths).
+    const plan = parsePlan(started.engagement.plan, KNOWN_PERSONAS);
+    expect(plan.cells.every((c) => c.paths === undefined)).toBe(true);
+  });
+
+  it("a first review ignores changedFiles (no parent) and stays a full scan", async () => {
+    const engagement = await makePlanning();
+    const started = await svc.startEngagement(engagement.id, {
+      resolvedSha: SHA,
+      baseRef: "some-base",
+      changedFiles: ["src/routes/x.ts"],
+    });
+    expect(started.engagement.baseRef).toBeNull();
+    expect(started.engagement.changedPaths).toBeNull();
+    const plan = parsePlan(started.engagement.plan, KNOWN_PERSONAS);
+    expect(plan.cells.every((c) => c.paths === undefined)).toBe(true);
+  });
+
+  /** Seed the parent with a recon state doc and two findings for the mounts. */
+  async function seedParentReasoning() {
+    const parent = await makeStarted();
+    // Recon (cell 1) writes its map.
+    await svc.dispatchCell(parent.engagement.id, { cellId: parent.cells[0].id, spawn });
+    await svc.writeFile(parent.engagement.id, {
+      actorCellId: parent.cells[0].id,
+      path: `/cells/${parent.cells[0].dir}/state.yml`,
+      content: [
+        "protocol_version: 1",
+        "status: done",
+        "checklist:",
+        "  pending: 0",
+        "  done: 5",
+        "queue:",
+        "  pending: 0",
+        "  done: 3",
+        "# recon: 12 routes mapped, auth boundary at middleware/auth.ts",
+      ].join("\n"),
+    });
+    await svc.completeCell(parent.engagement.id, parent.cells[0].id, { settled: true });
+    // A verified finding and a refuted finding.
+    const verified = await svc.reportFinding(parent.engagement.id, {
+      cellId: parent.cells[1].id,
+      severity: "high",
+      file: "src/routes/sessions.ts",
+      line: 42,
+      title: "IDOR on sessions",
+      body: EVIDENCE,
+    });
+    await svc.reviewFinding(parent.engagement.id, {
+      findingId: verified.finding.id,
+      status: "verified",
+      reason: "reproduced against the pinned SHA",
+      actor: parent.cells[4].id,
+    });
+    const refuted = await svc.reportFinding(parent.engagement.id, {
+      cellId: parent.cells[1].id,
+      severity: "low",
+      file: "src/util/log.ts",
+      line: 7,
+      title: "log injection",
+      body: EVIDENCE,
+    });
+    await svc.reviewFinding(parent.engagement.id, {
+      findingId: refuted.finding.id,
+      status: "refuted",
+      reason: "the sink escapes newlines",
+      actor: parent.cells[4].id,
+    });
+    return parent;
+  }
+
+  it("/prior/diff.md names the SHA range and changed files", async () => {
+    const parent = await makeStarted();
+    const child = await planningChildOf(parent.engagement.id);
+    const started = await svc.startEngagement(child.id, {
+      resolvedSha: NEW_SHA,
+      baseRef: SHA,
+      changedFiles: ["src/routes/sessions.ts"],
+    });
+    const diff = await svc.readFile(started.engagement.id, "/prior/diff.md");
+    expect(diff.content).toContain(SHA);
+    expect(diff.content).toContain(NEW_SHA);
+    expect(diff.content).toContain("src/routes/sessions.ts");
+    expect(diff.content).toContain("1 changed file");
+  });
+
+  it("/prior/diff.md notes a full re-scan when no diff was captured", async () => {
+    const parent = await makeStarted();
+    const child = await planningChildOf(parent.engagement.id);
+    const started = await svc.startEngagement(child.id, { resolvedSha: NEW_SHA, changedFiles: null });
+    const diff = await svc.readFile(started.engagement.id, "/prior/diff.md");
+    expect(diff.content).toContain("Full re-scan: prior commit unavailable, scanning everything.");
+  });
+
+  it("/prior/recon.md returns the parent's recon state doc", async () => {
+    const parent = await seedParentReasoning();
+    const child = await startedChildOf(parent.engagement.id);
+    const recon = await svc.readFile(child.engagement.id, "/prior/recon.md");
+    expect(recon.content).toContain("12 routes mapped");
+    expect(recon.content).toContain("01-recon");
+  });
+
+  it("/prior/recon.md notes no prior map when the parent's recon wrote none", async () => {
+    const parent = await makeStarted(); // recon never ran
+    const child = await startedChildOf(parent.engagement.id);
+    const recon = await svc.readFile(child.engagement.id, "/prior/recon.md");
+    expect(recon.content).toContain("No prior recon map");
+  });
+
+  it("/prior/findings.md digests the parent findings grouped by status", async () => {
+    const parent = await seedParentReasoning();
+    const child = await startedChildOf(parent.engagement.id);
+    const findings = await svc.readFile(child.engagement.id, "/prior/findings.md");
+    expect(findings.content).toContain("Verified");
+    expect(findings.content).toContain("IDOR on sessions");
+    expect(findings.content).toContain("src/routes/sessions.ts:42");
+    expect(findings.content).toContain("Refuted");
+    expect(findings.content).toContain("log injection");
+  });
+
+  it("/prior/* errors on a non-re-scan engagement", async () => {
+    const { engagement } = await makeStarted(); // no parent
+    await expect(svc.readFile(engagement.id, "/prior/diff.md")).rejects.toThrow(
+      "This is not a re-scan; there is no prior engagement.",
+    );
+    await expect(svc.readFile(engagement.id, "/prior/recon.md")).rejects.toThrow(
+      "This is not a re-scan",
+    );
+    await expect(svc.readFile(engagement.id, "/prior/findings.md")).rejects.toThrow(
+      "This is not a re-scan",
+    );
+  });
+
+  it("listFiles includes /prior/* mounts only on a re-scan", async () => {
+    const parent = await makeStarted();
+    const first = await svc.listFiles(parent.engagement.id);
+    expect(first.some((f) => f.path.startsWith("/prior/"))).toBe(false);
+
+    const child = await startedChildOf(parent.engagement.id);
+    const rescan = await svc.listFiles(child.engagement.id);
+    const priorPaths = rescan.filter((f) => f.path.startsWith("/prior/")).map((f) => f.path);
+    expect(priorPaths.sort()).toEqual(["/prior/diff.md", "/prior/findings.md", "/prior/recon.md"]);
   });
 });
 

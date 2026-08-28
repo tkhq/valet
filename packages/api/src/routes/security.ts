@@ -84,7 +84,7 @@ import { canAdministerSession, canViewSession } from "../services/session-access
 import { routeAttention, type AttentionDeps } from "../orchestrator/attention.js";
 import { parseAssistantSessionId } from "@valet/engine";
 import { loadSessionMeta } from "../engine/session-meta.js";
-import { resolveApiTokenOrNull, resolveRefSha } from "../bakes/source-service.js";
+import { resolveApiTokenOrNull, resolveChangedFiles, resolveRefSha } from "../bakes/source-service.js";
 import { buildChildStatusReader, ChildLimitError } from "../orchestrator/children.js";
 import {
   createSecurityEngagementService,
@@ -117,6 +117,7 @@ import type {
   SecurityCompleteCellResponse,
   SecurityDigestIssueResponse,
   SecurityDispatchResponse,
+  SecurityEngagementWire,
   SecurityFailCellResponse,
   SecurityFileIssueResponse,
   SecurityFindingLinkWire,
@@ -154,6 +155,34 @@ async function resolveViewableSession(
   const user = c.var.user;
   if (!user || !(await canViewSession(db, row, user.id))) return null;
   return row;
+}
+
+/** The engagement wire shape, shared by every route that returns it. Parses
+ * `changed_paths` (the diff-scoped re-scan changed-file list) to a string[] |
+ * null; both `baseRef` and `changedPaths` are null on a first review or a
+ * full-scan fallback. */
+function engagementToWire(e: SecurityEngagementRow): SecurityEngagementWire {
+  let changedPaths: string[] | null = null;
+  if (e.changedPaths !== null) {
+    try {
+      const parsed: unknown = JSON.parse(e.changedPaths);
+      if (Array.isArray(parsed)) changedPaths = parsed.filter((p): p is string => typeof p === "string");
+    } catch {
+      // A malformed value renders as null — the panel shows "Full re-scan".
+    }
+  }
+  return {
+    id: e.id,
+    sessionId: e.sessionId,
+    status: e.status,
+    repoFullName: e.repoFullName,
+    repoRef: e.repoRef,
+    plan: e.plan,
+    baseRef: e.baseRef,
+    changedPaths,
+    createdAt: e.createdAt,
+    updatedAt: e.updatedAt,
+  };
 }
 
 function cellToWire(cell: SecurityCellRow, progress: CellProgress | null): SecurityCellWire {
@@ -243,16 +272,7 @@ securityRouter.get("/:id/security", async (c) => {
   // re-scans a prior one. `fixedCount` stays null until the scan is terminal.
   const diff = await security.diffEngagement(result.engagement.id);
   const body: GetSessionSecurityResponse = {
-    engagement: {
-      id: result.engagement.id,
-      sessionId: result.engagement.sessionId,
-      status: result.engagement.status,
-      repoFullName: result.engagement.repoFullName,
-      repoRef: result.engagement.repoRef,
-      plan: result.engagement.plan,
-      createdAt: result.engagement.createdAt,
-      updatedAt: result.engagement.updatedAt,
-    },
+    engagement: engagementToWire(result.engagement),
     cells: result.cells.map((cell) => cellToWire(cell, progress)),
     cost,
     ...(diff ? { diff } : {}),
@@ -654,16 +674,7 @@ securityRouter.get("/:id/security/status", async (c) => {
   }
 
   const body: GetSecurityStatusResponse = {
-    engagement: {
-      id: result.engagement.id,
-      sessionId: result.engagement.sessionId,
-      status: result.engagement.status,
-      repoFullName: result.engagement.repoFullName,
-      repoRef: result.engagement.repoRef,
-      plan: result.engagement.plan,
-      createdAt: result.engagement.createdAt,
-      updatedAt: result.engagement.updatedAt,
-    },
+    engagement: engagementToWire(result.engagement),
     cells: result.cells.map((cell) => cellToWire(cell, progress)),
     findingCounts,
     runningChild,
@@ -808,6 +819,53 @@ securityRouter.post("/:id/security/plan", async (c) => {
   }
 });
 
+/**
+ * Diff-scoped re-scan (re-scan / iterate): resolve the changed files between
+ * the parent engagement's pinned SHA (base) and the new HEAD, so the start
+ * route can scope the sweeps to the delta. Returns `{ baseRef, changedFiles }`:
+ *   - Not a re-scan (no parent) → both null; a full scan.
+ *   - A parent with no pinned SHA → both null; a full scan.
+ *   - A compare failure → `baseRef` set (for the record), `changedFiles` null;
+ *     a full scan. Never throws — a diff error must not fail the start.
+ * The GitHub token resolves the same way `start-preview` does.
+ */
+async function resolveRescanDiff(
+  c: Context<AppEnv>,
+  engagement: SecurityEngagementRow,
+  headSha: string,
+): Promise<{ baseRef: string | null; changedFiles: string[] | null }> {
+  if (!engagement.parentEngagementId) return { baseRef: null, changedFiles: null };
+
+  const { db, engineCredentials, encryptionKey } = c.var.providers;
+  const security = createSecurityEngagementService({ db });
+  const parent = await security.getEngagement(engagement.parentEngagementId);
+  const baseRef = parent?.engagement.repoRef ?? "";
+  if (baseRef === "") {
+    // The prior review never pinned a commit — nothing to diff against.
+    console.log(`security start: re-scan of ${engagement.parentEngagementId} has no base SHA; full scan`);
+    return { baseRef: null, changedFiles: null };
+  }
+
+  const [owner, repo] = engagement.repoFullName.split("/");
+  if (!owner || !repo) return { baseRef, changedFiles: null };
+
+  // The owning session's org scopes the GitHub token, mirroring start-preview.
+  const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, engagement.sessionId)).limit(1);
+  const orgId = rows[0]?.orgId ?? "";
+  const tokenDeps = { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) };
+  try {
+    const token = await resolveApiTokenOrNull(tokenDeps, orgId, owner, repo);
+    const changedFiles = await resolveChangedFiles(tokenDeps, token, owner, repo, baseRef, headSha);
+    return { baseRef, changedFiles };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.log(
+      `security start: compare ${baseRef}...${headSha} for ${engagement.repoFullName} failed (${message}); full scan`,
+    );
+    return { baseRef, changedFiles: null };
+  }
+}
+
 securityRouter.post("/:id/security/start", async (c) => {
   const sessionId = c.req.param("id");
   const resolved = await resolveToolSession(c, sessionId, "mutate");
@@ -824,22 +882,25 @@ securityRouter.post("/:id/security/start", async (c) => {
       400,
     );
   }
+  const resolvedSha = body.resolvedSha.toLowerCase();
+
+  // Diff-scoped re-scan (re-scan / iterate): when this engagement re-scans a
+  // prior one, compute the changed files between the parent's pinned SHA (base)
+  // and the new HEAD (resolvedSha), so `startEngagement` scopes the sweeps to
+  // the delta. The diff is known only here — the new SHA arrives in this
+  // request. Graceful fallback: a compare failure (a force-pushed base, an API
+  // error, or an empty base) leaves `changedFiles` null and the re-scan runs a
+  // full scan. The start never fails on a diff error.
+  const rescan = await resolveRescanDiff(c, result.engagement, resolvedSha);
 
   try {
     const started = await security.startEngagement(result.engagement.id, {
-      resolvedSha: body.resolvedSha.toLowerCase(),
+      resolvedSha,
+      baseRef: rescan.baseRef,
+      changedFiles: rescan.changedFiles,
     });
     const response: GetSessionSecurityResponse = {
-      engagement: {
-        id: started.engagement.id,
-        sessionId: started.engagement.sessionId,
-        status: started.engagement.status,
-        repoFullName: started.engagement.repoFullName,
-        repoRef: started.engagement.repoRef,
-        plan: started.engagement.plan,
-        createdAt: started.engagement.createdAt,
-        updatedAt: started.engagement.updatedAt,
-      },
+      engagement: engagementToWire(started.engagement),
       cells: started.cells.map((cell) => cellToWire(cell, null)),
       // Just started: the runner may have spent tokens, cell children none yet.
       cost: await security.getEngagementCost(started.engagement.id),
@@ -1397,16 +1458,7 @@ securityRouter.post("/:id/security/cancel", async (c) => {
   // Re-read cells so the response reflects the cancel's failed-cell writes.
   const after = await security.getEngagement(cancelled.engagement.id);
   const response: GetSessionSecurityResponse = {
-    engagement: {
-      id: cancelled.engagement.id,
-      sessionId: cancelled.engagement.sessionId,
-      status: cancelled.engagement.status,
-      repoFullName: cancelled.engagement.repoFullName,
-      repoRef: cancelled.engagement.repoRef,
-      plan: cancelled.engagement.plan,
-      createdAt: cancelled.engagement.createdAt,
-      updatedAt: cancelled.engagement.updatedAt,
-    },
+    engagement: engagementToWire(cancelled.engagement),
     cells: (after?.cells ?? []).map((cell) => cellToWire(cell, null)),
     // The review's spend to the point of cancel — the panel keeps showing it.
     cost: await security.getEngagementCost(cancelled.engagement.id),

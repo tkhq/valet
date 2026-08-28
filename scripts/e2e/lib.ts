@@ -103,6 +103,7 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/security-triage.test.ts",
   "src/integration/security-acceptance.test.ts",
   "src/integration/security-cancel.test.ts",
+  "src/integration/security-rescan-diff.test.ts",
 ];
 
 const INTEGRATION_AGENT_FILES = [

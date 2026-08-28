@@ -378,6 +378,8 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
       "repo_ref" text DEFAULT '' NOT NULL,
       "plan" text DEFAULT '' NOT NULL,
       "parent_engagement_id" text,
+      "base_ref" text,
+      "changed_paths" text,
       "created_at" bigint NOT NULL,
       "updated_at" bigint NOT NULL
     )`,
@@ -395,6 +397,23 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     describe: "security_engagements.parent_engagement_id column",
     probe: { kind: "column", table: "security_engagements", column: "parent_engagement_id" },
     sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "parent_engagement_id" text',
+  },
+  {
+    // Diff-scoped re-scan (re-scan / iterate): the parent SHA the diff ran
+    // against. Null on a first review, or a full-scan fallback. Separate
+    // column repair because the whole-table CREATE does not add a column to an
+    // already-created table.
+    describe: "security_engagements.base_ref column",
+    probe: { kind: "column", table: "security_engagements", column: "base_ref" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "base_ref" text',
+  },
+  {
+    // Diff-scoped re-scan (re-scan / iterate): the JSON array of changed file
+    // paths the sweeps scoped to. Null on a first review or a full-scan
+    // fallback.
+    describe: "security_engagements.changed_paths column",
+    probe: { kind: "column", table: "security_engagements", column: "changed_paths" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "changed_paths" text',
   },
   {
     describe: "security_engagements_parent index",

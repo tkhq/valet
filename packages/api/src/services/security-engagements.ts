@@ -29,7 +29,9 @@ import {
   playbookMarkdown,
   protocolMarkdown,
   ruleExit,
+  serializePlan,
   type EngagementPlan,
+  type PlanCell,
   type StateDoc,
 } from "@valet/plugin-security";
 import type { AppDb } from "../lib/drizzle.js";
@@ -193,12 +195,20 @@ export interface ListFindingsOptions {
  * `reads`-declared cells' state doc paths, and the protocol verbatim. The
  * rest of the tree stays discoverable through sec_fs_list; the prompt does
  * not spend context on it.
+ *
+ * `rescan` is set when the engagement re-scans a prior one (re-scan / iterate).
+ * It adds cell-role-specific language that points the persona at the read-only
+ * `/prior/` mounts (the prior recon map, the git diff, and the prior findings
+ * digest) so the persona re-reasons about the delta instead of the whole repo.
+ * A cell is the recon cell when it is the ordinal-1 cell; a review cell is a
+ * `review: true` cell (verify); every other cell is a scoped sweep.
  */
 export function buildDispatchPrompt(
   cell: SecurityCellRow,
   plan: EngagementPlan,
   readsCells: SecurityCellRow[],
   protocol: string,
+  rescan = false,
 ): string {
   const planCell = plan.cells.find((p) => p.ordinal === cell.ordinal);
   const lines: string[] = [
@@ -211,6 +221,30 @@ export function buildDispatchPrompt(
     lines.push(
       `Resume: read your own latest state doc at /cells/${cell.dir}/state.yml with sec_fs_read before any other work, and continue from its queue.`,
     );
+  }
+  if (rescan) {
+    const isRecon = cell.ordinal === 1;
+    const isReview = cell.review === true;
+    lines.push("");
+    if (isRecon) {
+      lines.push(
+        "This is a RE-SCAN. Read /prior/recon.md (the prior map) and /prior/diff.md (what changed since the last review) with sec_fs_read before anything.",
+        "Inherit the prior map; UPDATE it only for the changed files — do not re-map unchanged code.",
+        "Read /prior/findings.md to know what was already found.",
+      );
+    } else if (isReview) {
+      lines.push(
+        "This is a RE-SCAN. Reconcile /prior/findings.md against the current code with sec_fs_read.",
+        "A prior verified or open finding whose file changed and no longer applies should be reported here or noted as fixed; carry the rest.",
+        "Attack every open finding as usual.",
+      );
+    } else {
+      lines.push(
+        "This is a RE-SCAN scoped to the changed code (see /prior/diff.md, read it with sec_fs_read).",
+        "The prior findings are in /prior/findings.md — confirm which still apply to the changed files and find issues the diff introduced.",
+        "Do not re-review unchanged code.",
+      );
+    }
   }
   if (planCell?.paths && planCell.paths.length > 0) {
     lines.push(`Scope: limit the sweep to these path globs: ${planCell.paths.join(", ")}`);
@@ -400,10 +434,25 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
    * Materialize cells from the plan and pin the repo ref. SHA resolution
    * happens in the caller (the sec_start tool); this function only refuses
    * an empty pin.
+   *
+   * Diff-scoped re-scan (re-scan / iterate): when the engagement has a parent
+   * and the caller passes a non-null `changedFiles` list (the GitHub compare
+   * of the parent's pinned SHA → the new HEAD), the sweep cells are scoped to
+   * the changed directories. Recon (ordinal 1) and review cells stay repo-wide.
+   *
+   * Scoping REWRITES `engagement.plan`: the changed-dir globs land on the sweep
+   * cells' `paths`, and both the materialized `security_cells` and the plan
+   * mount (`/plan.yml`) then show the diff plan. `buildDispatchPrompt` already
+   * reads `planCell.paths`, so the persona's Scope line follows for free. The
+   * base SHA and the changed-path list persist on the engagement row
+   * (`base_ref`/`changed_paths`) for the `/prior/diff.md` mount and the UI
+   * banner. `changedFiles = null` (a first review, or a re-scan whose compare
+   * failed / whose parent had no pinned SHA) runs a FULL scan with no scoping,
+   * and the plan is materialized unchanged.
    */
   async function startEngagement(
     engagementId: string,
-    args: { resolvedSha: string },
+    args: { resolvedSha: string; baseRef?: string | null; changedFiles?: string[] | null },
   ): Promise<EngagementWithCells> {
     const engagement = await loadEngagement(engagementId);
     if (engagement.status !== "planning") {
@@ -415,8 +464,26 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
       throw new Error("Pin the repository to a commit SHA before starting.");
     }
     const plan = parsePlan(engagement.plan, KNOWN_PERSONAS);
+
+    // Diff-scope only a re-scan with a non-empty changed-file list. Derive the
+    // changed directories once; a diff too wide to scope usefully falls back to
+    // a full scan (globs = null) but still records base_ref + changed_paths.
+    const changedFiles =
+      engagement.parentEngagementId && args.changedFiles ? args.changedFiles : null;
+    const globs = changedFiles ? changedDirGlobs(changedFiles) : null;
+
+    // Inject the globs onto the sweep cells (not recon, not review) and serialize
+    // the adjusted plan back. When there are no globs (full scan) the plan is
+    // unchanged, so `/plan.yml` for a first review is byte-identical to before.
+    const scopedCells: PlanCell[] = plan.cells.map((planCell) => {
+      const isSweep = planCell.ordinal !== 1 && planCell.review !== true;
+      if (!globs || !isSweep) return planCell;
+      return { ...planCell, paths: mergePaths(planCell.paths, globs) };
+    });
+    const planYaml = globs ? serializePlan(scopedCells) : engagement.plan;
+
     const ts = now();
-    const cellValues = plan.cells.map((planCell) => ({
+    const cellValues = scopedCells.map((planCell) => ({
       id: `cell_${randomUUID()}`,
       engagementId,
       ordinal: planCell.ordinal,
@@ -434,7 +501,18 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
       await tx.insert(securityCells).values(cellValues);
       await tx
         .update(securityEngagements)
-        .set({ status: "running", repoRef: args.resolvedSha, updatedAt: ts })
+        .set({
+          status: "running",
+          repoRef: args.resolvedSha,
+          plan: planYaml,
+          // Persist the diff context for the /prior/diff.md mount and the UI
+          // banner. Only a re-scan (has a parent) records a base_ref; a first
+          // review never diffs. Both null on a full scan (no parent, or a
+          // re-scan whose compare failed / whose parent had no pinned SHA).
+          baseRef: engagement.parentEngagementId ? args.baseRef ?? null : null,
+          changedPaths: changedFiles ? JSON.stringify(changedFiles) : null,
+          updatedAt: ts,
+        })
         .where(eq(securityEngagements.id, engagementId));
     });
     recordSecurityCellsCreated(cellValues.length);
@@ -525,7 +603,13 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     const plan = parsePlan(engagement.plan, KNOWN_PERSONAS);
     const readOrdinals = parseReads(cell.reads);
     const readsCells = cells.filter((c) => readOrdinals.includes(c.ordinal));
-    const prompt = buildDispatchPrompt(cell, plan, readsCells, protocolMarkdown());
+    const prompt = buildDispatchPrompt(
+      cell,
+      plan,
+      readsCells,
+      protocolMarkdown(),
+      engagement.parentEngagementId !== null,
+    );
 
     let childSessionId: string;
     try {
@@ -845,6 +929,123 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     }
   }
 
+  /** The three read-only `/prior/` mounts a re-scan seeds C's tree with (re-scan
+   * / iterate): the prior recon map, the git diff, and the prior findings
+   * digest. All resolve against the PARENT engagement P. Returns null for a path
+   * that is not a `/prior/` mount, so `readFile` falls through to stored rows.
+   * Throws a corrective error when the engagement has no parent — `/prior/*` is
+   * meaningless on a first review. */
+  async function priorMount(
+    engagement: SecurityEngagementRow,
+    path: string,
+  ): Promise<string | null> {
+    if (path !== "/prior/diff.md" && path !== "/prior/recon.md" && path !== "/prior/findings.md") {
+      return null;
+    }
+    if (!engagement.parentEngagementId) {
+      throw new Error(
+        "This is not a re-scan; there is no prior engagement. The /prior/ mounts exist only on a re-scan (a review created with rescanOf).",
+      );
+    }
+    const parentId = engagement.parentEngagementId;
+    if (path === "/prior/diff.md") return buildPriorDiffMd(engagement);
+    if (path === "/prior/recon.md") return buildPriorReconMd(parentId);
+    return buildPriorFindingsMd(parentId);
+  }
+
+  /** `/prior/diff.md`: the base→head SHA range and the changed-file list, or a
+   * full-re-scan note when no diff was captured (compare failed, or the parent
+   * had no pinned SHA). */
+  function buildPriorDiffMd(engagement: SecurityEngagementRow): string {
+    const changed = parsePathList(engagement.changedPaths);
+    if (!engagement.baseRef || changed === null) {
+      return [
+        "# Prior diff",
+        "",
+        "Full re-scan: prior commit unavailable, scanning everything.",
+        "The changed-file diff could not be captured (the prior review had no pinned commit, or the compare failed), so this re-scan reviews the whole repository. Use /prior/recon.md and /prior/findings.md as your starting point.",
+        "",
+      ].join("\n");
+    }
+    const lines = [
+      "# Prior diff",
+      "",
+      `Base (prior review commit): ${engagement.baseRef}`,
+      `Head (this review commit): ${engagement.repoRef || "(pinned at start)"}`,
+      "",
+      `${changed.length} changed file${changed.length === 1 ? "" : "s"} since the prior review:`,
+      "",
+    ];
+    for (const file of changed) lines.push(`- ${file}`);
+    lines.push("");
+    return lines.join("\n");
+  }
+
+  /** `/prior/recon.md`: P's latest recon state doc (P's ordinal-1 cell dir), or
+   * a short note when P produced no recon map. */
+  async function buildPriorReconMd(parentId: string): Promise<string> {
+    const reconCell = (
+      await db
+        .select({ dir: securityCells.dir })
+        .from(securityCells)
+        .where(and(eq(securityCells.engagementId, parentId), eq(securityCells.ordinal, 1)))
+        .limit(1)
+    )[0];
+    if (reconCell) {
+      const docRow = await latestStateDocRow(parentId, reconCell.dir);
+      if (docRow) {
+        return [
+          "# Prior recon map",
+          "",
+          `Inherited from the prior review's recon cell (/cells/${reconCell.dir}/state.yml). Update it only for the changed files.`,
+          "",
+          docRow.content,
+          "",
+        ].join("\n");
+      }
+    }
+    return [
+      "# Prior recon map",
+      "",
+      "No prior recon map: the prior review's recon cell wrote no state doc. Map the codebase fresh, then focus the sweeps on the changed files in /prior/diff.md.",
+      "",
+    ].join("\n");
+  }
+
+  /** `/prior/findings.md`: a digest of P's findings grouped by status
+   * (verified / open / refuted), each with severity, title, file:line, status,
+   * and a short body excerpt. */
+  async function buildPriorFindingsMd(parentId: string): Promise<string> {
+    const findings = await db
+      .select()
+      .from(securityFindings)
+      .where(eq(securityFindings.engagementId, parentId))
+      .orderBy(asc(securityFindings.createdAt), asc(securityFindings.id));
+    const lines = ["# Prior findings", ""];
+    if (findings.length === 0) {
+      lines.push("The prior review produced no findings.", "");
+      return lines.join("\n");
+    }
+    const groups: { status: FindingStatus; heading: string }[] = [
+      { status: "verified", heading: "Verified (confirmed real)" },
+      { status: "open", heading: "Open (not yet triaged)" },
+      { status: "refuted", heading: "Refuted (dismissed — carried forward, do not re-triage)" },
+    ];
+    for (const { status, heading } of groups) {
+      const group = findings.filter((f) => f.status === status);
+      if (group.length === 0) continue;
+      lines.push(`## ${heading} — ${group.length}`, "");
+      for (const f of group) {
+        const loc = f.file ? `${f.file}${f.line != null ? `:${f.line}` : ""}` : "(no file)";
+        lines.push(`- [${f.severity}] ${f.title} — ${loc}`);
+        const excerpt = f.body.replace(/\s+/g, " ").trim().slice(0, 280);
+        if (excerpt !== "") lines.push(`  ${excerpt}${f.body.length > 280 ? "…" : ""}`);
+      }
+      lines.push("");
+    }
+    return lines.join("\n");
+  }
+
   /** Read a tree path: the virtual mounts first, then stored revisions. */
   async function readFile(
     engagementId: string,
@@ -858,6 +1059,11 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
       const name = path.slice("/playbooks/".length, -".md".length);
       if (isKnownPlaybook(name)) return { path, revision: null, content: playbookMarkdown(name) };
       throw new Error(`No playbook at ${path}. Use sec_fs_list to see the tree.`);
+    }
+    if (path.startsWith("/prior/")) {
+      const content = await priorMount(engagement, path);
+      if (content !== null) return { path, revision: null, content };
+      throw new Error(`No file at ${path}. Use sec_fs_list to see the tree.`);
     }
     const conditions = [eq(securityFiles.engagementId, engagementId), eq(securityFiles.path, path)];
     if (revision !== undefined) conditions.push(eq(securityFiles.revision, revision));
@@ -914,6 +1120,14 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
         revisions: 1,
         size: Buffer.byteLength(playbookMarkdown(name), "utf8"),
       });
+    }
+    // The read-only /prior/ reasoning mounts appear only on a re-scan (re-scan /
+    // iterate) — a first review has no prior engagement to seed from. The size
+    // is generated content; report 0 rather than build every digest for a list.
+    if (engagement.parentEngagementId) {
+      for (const name of ["diff", "recon", "findings"]) {
+        mounts.push({ path: `/prior/${name}.md`, revisions: 1, size: 0 });
+      }
     }
     for (const mount of mounts) {
       if (prefix === undefined || mount.path.startsWith(prefix)) byPath.set(mount.path, mount);
@@ -1373,9 +1587,66 @@ function ordinalLabel(cell: { ordinal: number }): string {
   return String(cell.ordinal).padStart(2, "0");
 }
 
+/** Cap on the number of changed-dir globs a diff-scoped sweep carries. Past
+ * this the diff is too wide to scope usefully — the caller falls back to a full
+ * scan (globs = null) so a sweeping refactor still gets a whole-repo review. */
+export const MAX_CHANGED_DIR_GLOBS = 24;
+
+/**
+ * Derive changed-directory include globs from a list of changed file paths
+ * (re-scan / iterate diff scoping). Keeps up to two path segments: a top-level
+ * dir becomes `<dir>/**`, and a one-level-deep dir becomes `<a>/<b>/**`. A
+ * changed root-level file (no slash) yields the repo-wide `**` glob, which
+ * un-scopes the sweep — a changed root file must still be reviewed. Returns
+ * null when the distinct glob count exceeds `MAX_CHANGED_DIR_GLOBS` (fall back
+ * to a full scan) or when the list is empty.
+ */
+export function changedDirGlobs(changedFiles: string[]): string[] | null {
+  const globs = new Set<string>();
+  for (const raw of changedFiles) {
+    const file = raw.trim();
+    if (file === "") continue;
+    const segments = file.split("/").filter((s) => s !== "");
+    if (segments.length <= 1) {
+      // A root-level file — its parent is the repo root. Scope to everything.
+      globs.add("**");
+      continue;
+    }
+    const depth = Math.min(segments.length - 1, 2);
+    globs.add(`${segments.slice(0, depth).join("/")}/**`);
+  }
+  if (globs.size === 0) return null;
+  if (globs.has("**")) return ["**"];
+  if (globs.size > MAX_CHANGED_DIR_GLOBS) return null;
+  return [...globs].sort();
+}
+
+/** Merge a plan cell's existing include globs with the diff globs, deduped.
+ * A cell that already scopes to part of the repo keeps that scope AND gains the
+ * diff globs (a union — the persona sweeps either). */
+function mergePaths(existing: string[] | undefined, globs: string[]): string[] {
+  if (!existing || existing.length === 0) return globs;
+  const merged = new Set([...existing, ...globs]);
+  return [...merged];
+}
+
 function basename(path: string): string {
   const idx = path.lastIndexOf("/");
   return idx === -1 ? path : path.slice(idx + 1);
+}
+
+/** Parse the engagement's `changed_paths` JSON (a string[] or null). Returns
+ * null for a null/absent/unparseable value — the /prior/diff.md mount reads
+ * that as "no diff captured, full re-scan". */
+function parsePathList(raw: string | null): string[] | null {
+  if (raw === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed.filter((p): p is string => typeof p === "string");
+  } catch {
+    // A malformed value is treated as no diff — the mount falls back to full.
+  }
+  return null;
 }
 
 function parseReads(reads: string): number[] {

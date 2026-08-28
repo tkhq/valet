@@ -383,6 +383,42 @@ export async function resolveRefSha(
   return sha;
 }
 
+/**
+ * Resolves the changed file paths between two commits via the GitHub compare
+ * API (`GET /repos/{owner}/{repo}/compare/{base}...{head}`). Reads
+ * `files[].filename` from the response. Used by the diff-scoped re-scan flow
+ * (valet-security design §Re-scan / iterate) to scope the sweeps to the delta.
+ *
+ * The caller handles the empty/failure case: an empty `base` returns [] (no
+ * diff possible), and any API error propagates so the start route can fall
+ * back to a full scan. GitHub caps a compare at 300 files — a diff wider than
+ * that returns a truncated list, which the caller treats as "too many changes,
+ * scan everything".
+ */
+export async function resolveChangedFiles(
+  deps: GitHubTokenDeps,
+  token: string | null,
+  owner: string,
+  repo: string,
+  base: string,
+  head: string,
+): Promise<string[]> {
+  if (base === "" || head === "") return [];
+  const payload = await fetchGithubJson(
+    deps,
+    token,
+    `/repos/${owner}/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`,
+  );
+  if (!isRecord(payload) || !Array.isArray(payload.files)) {
+    throw new Error(`GitHub compare returned no files list for ${owner}/${repo} ${base}...${head}`);
+  }
+  const paths: string[] = [];
+  for (const entry of payload.files) {
+    if (isRecord(entry) && typeof entry.filename === "string") paths.push(entry.filename);
+  }
+  return paths;
+}
+
 /** Resolves an `api`-purpose GitHub token for `owner/repo`, falling back to
  * `null` (unauthenticated) when NO credential is configured at all. */
 export async function resolveApiTokenOrNull(

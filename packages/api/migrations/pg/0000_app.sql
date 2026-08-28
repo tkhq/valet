@@ -977,6 +977,8 @@ CREATE TABLE "security_engagements" (
 	"repo_ref" text DEFAULT '' NOT NULL,
 	"plan" text DEFAULT '' NOT NULL,
 	"parent_engagement_id" text,
+	"base_ref" text,
+	"changed_paths" text,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
 );

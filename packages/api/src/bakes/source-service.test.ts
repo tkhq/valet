@@ -24,6 +24,7 @@ import {
   slugify,
   repoDockerFlag,
   clearRepoDockerCache,
+  resolveChangedFiles,
 } from "./source-service.js";
 
 const orgId = "org1";
@@ -1529,5 +1530,68 @@ describe("repoDockerFlag", () => {
     // The map was cleared at entry 1000. This call re-fetches cleanly.
     const result = await repoDockerFlag(deps(), "tok", "o", "cap-check", "main");
     expect(result).toBe(false);
+  });
+});
+
+describe("resolveChangedFiles", () => {
+  let fixture: GithubFixture;
+  let compareHandler: (owner: string, repo: string, range: string) => GithubFixtureResponse;
+
+  function deps(): GitHubTokenDeps {
+    return { apiUrl: fixture.url, githubUrl: fixture.url } as unknown as GitHubTokenDeps;
+  }
+
+  beforeEach(() => {
+    compareHandler = () => ({ body: { files: [] } });
+    fixture = startGithubFixture({ getCompare: (o, r, range) => compareHandler(o, r, range) });
+  });
+
+  afterEach(async () => {
+    await fixture.close();
+  });
+
+  it("parses files[].filename from the compare response", async () => {
+    compareHandler = () => ({
+      body: {
+        status: "ahead",
+        files: [
+          { filename: "packages/api/src/routes/security.ts", status: "modified" },
+          { filename: "packages/web/src/panel.tsx", status: "added" },
+          { filename: "README.md", status: "modified" },
+        ],
+      },
+    });
+    const changed = await resolveChangedFiles(deps(), "tok", "acme", "api", "base_sha", "head_sha");
+    expect(changed).toEqual([
+      "packages/api/src/routes/security.ts",
+      "packages/web/src/panel.tsx",
+      "README.md",
+    ]);
+  });
+
+  it("hits the compare endpoint with the base...head range", async () => {
+    await resolveChangedFiles(deps(), "tok", "acme", "api", "aaa", "bbb");
+    const call = fixture.calls.find((c) => c.path.includes("/compare/"));
+    expect(call?.params.range).toBe("aaa...bbb");
+  });
+
+  it("returns [] when base is empty without calling the API", async () => {
+    const changed = await resolveChangedFiles(deps(), "tok", "acme", "api", "", "head_sha");
+    expect(changed).toEqual([]);
+    expect(fixture.calls.some((c) => c.path.includes("/compare/"))).toBe(false);
+  });
+
+  it("throws on an error response so the caller can fall back to a full scan", async () => {
+    compareHandler = () => ({ status: 404, body: { message: "Not Found" } });
+    await expect(
+      resolveChangedFiles(deps(), "tok", "acme", "api", "base_sha", "head_sha"),
+    ).rejects.toThrow();
+  });
+
+  it("throws when the response has no files list", async () => {
+    compareHandler = () => ({ body: { status: "ahead" } });
+    await expect(
+      resolveChangedFiles(deps(), "tok", "acme", "api", "base_sha", "head_sha"),
+    ).rejects.toThrow(/no files list/);
   });
 });

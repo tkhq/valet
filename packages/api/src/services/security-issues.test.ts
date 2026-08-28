@@ -39,6 +39,8 @@ const ENGAGEMENT: SecurityEngagementRow = {
   repoRef: SHA,
   plan: "",
   parentEngagementId: null,
+  baseRef: null,
+  changedPaths: null,
   createdAt: 1_000,
   updatedAt: 2_000,
 };
