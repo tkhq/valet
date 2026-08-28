@@ -165,4 +165,35 @@ describe("SecuritySessionLayout", () => {
     });
     expect(screen.queryByTestId("pending-gate-dot")).toBeNull();
   });
+
+  it("resizes the security panel via the keyboard and persists the width", async () => {
+    window.localStorage.removeItem("valet:sec-panel-width");
+    renderLayout();
+    await screen.findByText("01-recon");
+
+    const handle = screen.getByRole("separator", { name: "Resize security panel" });
+    // The container carries the width as a CSS variable (a `md:` class applies
+    // it only in the side-by-side layout). Default is 480px.
+    const row = handle.parentElement as HTMLElement;
+    expect(row.style.getPropertyValue("--sec-panel-w")).toBe("480px");
+
+    // ArrowLeft widens the right panel by one step (480 → 504); persisted.
+    fireEvent.keyDown(handle, { key: "ArrowLeft" });
+    expect(row.style.getPropertyValue("--sec-panel-w")).toBe("504px");
+    expect(handle.getAttribute("aria-valuenow")).toBe("504");
+    expect(window.localStorage.getItem("valet:sec-panel-width")).toBe("504");
+  });
+
+  it("clamps the panel width to its minimum", async () => {
+    window.localStorage.setItem("valet:sec-panel-width", "330");
+    renderLayout();
+    await screen.findByText("01-recon");
+    const handle = screen.getByRole("separator", { name: "Resize security panel" });
+    const row = handle.parentElement as HTMLElement;
+    expect(row.style.getPropertyValue("--sec-panel-w")).toBe("330px");
+    // Two ArrowRight steps (−48) would reach 282, below the 320 floor.
+    fireEvent.keyDown(handle, { key: "ArrowRight" });
+    fireEvent.keyDown(handle, { key: "ArrowRight" });
+    expect(row.style.getPropertyValue("--sec-panel-w")).toBe("320px");
+  });
 });

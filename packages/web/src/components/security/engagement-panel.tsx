@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useCallback, useState, type CSSProperties, type ReactNode } from "react";
 import { useEngagement, useSecurityFindings, flattenFindings } from "~/api/security";
 import { useMe, useTeams } from "~/api/settings";
 import { useSession } from "~/api/queries";
@@ -109,6 +109,40 @@ export function EngagementPanel({
 
 type MobilePane = "chat" | "panel";
 
+// The security panel's resizable width (desktop only; below `md` it is a
+// full-width tab). Applied through a CSS variable so a `md:` Tailwind class
+// gates it to the side-by-side layout — no JS media query needed.
+const PANEL_WIDTH_KEY = "valet:sec-panel-width";
+const PANEL_MIN = 320;
+const PANEL_MAX = 900;
+const PANEL_DEFAULT = 480; // 30rem, the previous fixed width
+const PANEL_STEP = 24; // keyboard nudge
+
+const clampPanelWidth = (n: number) => Math.min(PANEL_MAX, Math.max(PANEL_MIN, Math.round(n)));
+
+/** Panel width in px, persisted to localStorage and clamped. */
+function usePanelWidth(): readonly [number, (n: number) => void] {
+  const [width, setWidth] = useState<number>(() => {
+    try {
+      const raw = window.localStorage.getItem(PANEL_WIDTH_KEY);
+      const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
+      return Number.isFinite(n) ? clampPanelWidth(n) : PANEL_DEFAULT;
+    } catch {
+      return PANEL_DEFAULT;
+    }
+  });
+  const set = useCallback((n: number) => {
+    const c = clampPanelWidth(n);
+    setWidth(c);
+    try {
+      window.localStorage.setItem(PANEL_WIDTH_KEY, String(c));
+    } catch {
+      // A storage failure (private mode) just loses persistence, not the resize.
+    }
+  }, []);
+  return [width, set] as const;
+}
+
 /**
  * Layout for `kind='security'` sessions: chat and panel side by side from
  * `md` up; below `md`, a Chat | Panel toggle — the chat pane holds the
@@ -131,9 +165,40 @@ export function SecuritySessionLayout({
   onOpenChild?: (childId: string) => void;
 }) {
   const [pane, setPane] = useState<MobilePane>("chat");
+  const [panelWidth, setPanelWidth] = usePanelWidth();
   const gatePending = useStreamStore(
     (s) => Object.keys(s.bySession[sessionId]?.pendingGates ?? {}).length > 0,
   );
+
+  // Drag the divider: moving LEFT widens the (right) panel, so the delta is
+  // start − current. Listeners live on window so a fast drag off the 4px
+  // handle keeps tracking; the cursor/select overrides make the whole page
+  // feel like a resize until pointerup.
+  const startDrag = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = panelWidth;
+    const onMove = (ev: PointerEvent) => setPanelWidth(startWidth + (startX - ev.clientX));
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.style.removeProperty("cursor");
+      document.body.style.removeProperty("user-select");
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  };
+  const onHandleKey = (e: React.KeyboardEvent) => {
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      setPanelWidth(panelWidth + PANEL_STEP);
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      setPanelWidth(panelWidth - PANEL_STEP);
+    }
+  };
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
@@ -146,7 +211,10 @@ export function SecuritySessionLayout({
         />
         <MobileTab label="Panel" active={pane === "panel"} onSelect={() => setPane("panel")} />
       </div>
-      <div className="flex-1 flex min-h-0">
+      <div
+        className="flex-1 flex min-h-0"
+        style={{ "--sec-panel-w": `${panelWidth}px` } as CSSProperties}
+      >
         <div
           className={cn(
             "flex-1 min-w-0 flex-col min-h-0",
@@ -155,11 +223,24 @@ export function SecuritySessionLayout({
         >
           {chat}
         </div>
+        {/* Resize handle: a 4px hit area between the panes, desktop only. */}
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize security panel"
+          aria-valuenow={panelWidth}
+          aria-valuemin={PANEL_MIN}
+          aria-valuemax={PANEL_MAX}
+          tabIndex={0}
+          onPointerDown={startDrag}
+          onKeyDown={onHandleKey}
+          className="hidden md:block w-1 shrink-0 cursor-col-resize bg-line hover:bg-moss/50 focus:bg-moss focus:outline-none"
+        />
         <aside
           aria-label="Security panel"
           className={cn(
             "flex-col min-h-0 overflow-y-auto border-line",
-            "md:w-[30rem] xl:w-[42rem] md:border-l",
+            "md:w-[var(--sec-panel-w)] md:max-w-[70vw]",
             pane === "panel" ? "flex flex-1 md:flex-none" : "hidden md:flex",
           )}
         >
