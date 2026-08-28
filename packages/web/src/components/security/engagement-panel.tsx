@@ -217,7 +217,7 @@ export function EngagementPanel({
           readable; expand for the full rail. */}
       <StepsPanel cells={cells} onOpenChild={onOpenChild} />
 
-      {coverageQ.data && <CoverageSection rollup={coverageQ.data.rollup} />}
+      {coverageQ.data && <CoverageSection coverage={coverageQ.data.coverage} cells={cells} />}
 
       {/* The report artifact (M-P3): shown once the engagement has started — a
           report exists, is generating, or is pending the report cell. Hidden
