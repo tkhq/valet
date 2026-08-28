@@ -9,7 +9,7 @@ import { eq, inArray, sql, type SQL } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { orgs, users } from "../schema/index.js";
 import { isOrgAdmin } from "./org.js";
-import { canAdministerTeam, isTeamMember } from "./teams.js";
+import { canAdministerTeam, getTeamInOrg, isTeamMember } from "./teams.js";
 import type {
   UsageBreakdownResponse,
   UsageBucket,
@@ -48,50 +48,59 @@ function toNum(v: unknown): number {
 
 // ── Scope ──────────────────────────────────────────────────────────────────
 
-export interface UsageScope {
-  scope: "me" | "org" | "team";
-  isOrg: boolean;
-  orgId: string;
-  userId: string | null;
-  /** Set for the team scope only: filters `cost_entries` by owner. */
-  teamId: string | null;
-  /** Whether the breakdown may report per-member rows (`byUser`): true for
-   * the org scope, and for a team scope when the caller ADMINISTERS the
-   * team — a plain member sees the team's aggregate, not colleagues'
-   * individual spend. */
-  byMember: boolean;
-}
+/**
+ * The resolved read scope for a usage query — a discriminated union so an
+ * illegal pairing (a team scope without its team id, a personal scope
+ * without its user) cannot be represented.
+ */
+export type UsageScope =
+  | { scope: "me"; orgId: string; userId: string }
+  | { scope: "org"; orgId: string }
+  | {
+      scope: "team";
+      orgId: string;
+      teamId: string;
+      /** Whether the caller may see per-member rows (`byUser`, CSV
+       * attribution): true when they ADMINISTER the team. A plain member
+       * reads the team's aggregate, never colleagues' individual spend. */
+      byMember: boolean;
+    };
 
 /**
  * Resolves the scope for a usage query. `scope=org` covers every member of the
- * org and is org-admin-only (the org feature must be on). `scope=team:<id>`
- * covers the team's owned spend and is member-gated (org admins pass too —
- * the same rule every team read applies). A caller who lacks permission gets
- * `"forbidden"`, which the handler maps to a 403. Anything else is the
- * caller's own spend.
+ * org and is org-admin-only (the org feature must be on) — `"forbidden"` (→
+ * 403) otherwise. `scope=team` covers one team's owned spend and is
+ * team-member-only; an unknown team, a foreign org's team, and a team the
+ * caller is not on all resolve to `"team-not-found"` (→ 404), indistinguishable
+ * by design — the same existence hiding every other team surface uses.
+ * `scope=team` without a `teamId` gets `"missing-team"` (→ 400). Anything else
+ * is the caller's own spend.
  */
 export async function resolveUsageScope(
   db: AppDb,
-  opts: { orgId: string; userId: string; requestedScope: string | undefined },
-): Promise<UsageScope | "forbidden"> {
+  opts: { orgId: string; userId: string; requestedScope: string | undefined; requestedTeamId?: string | undefined },
+): Promise<UsageScope | "forbidden" | "missing-team" | "team-not-found"> {
   if (opts.requestedScope === "org") {
     const rows = await db.select({ features: orgs.features }).from(orgs).where(eq(orgs.id, opts.orgId)).limit(1);
     const features = (rows[0]?.features ?? {}) as { organizations?: boolean };
     const admin = await isOrgAdmin(db, opts.orgId, opts.userId);
     if (!features.organizations || !admin) return "forbidden";
-    return { scope: "org", isOrg: true, orgId: opts.orgId, userId: null, teamId: null, byMember: true };
+    return { scope: "org", orgId: opts.orgId };
   }
-  if (opts.requestedScope?.startsWith("team:")) {
-    const teamId = opts.requestedScope.slice("team:".length);
-    if (teamId.length === 0) return "forbidden";
-    // canAdministerTeam = team admin or org admin. Admins also get the
-    // per-member rows; a plain member gets the aggregate view only.
-    const admin = await canAdministerTeam(db, teamId, opts.userId);
-    const allowed = admin || (await isTeamMember(db, teamId, opts.userId));
-    if (!allowed) return "forbidden";
-    return { scope: "team", isOrg: false, orgId: opts.orgId, userId: null, teamId, byMember: admin };
+  if (opts.requestedScope === "team") {
+    if (!opts.requestedTeamId) return "missing-team";
+    // The membership table alone does not tie a team to an org, so resolve
+    // the team row first: a teamId from another org (or none) is refused
+    // here, not answered as an empty 200 by the downstream org_id filter.
+    const team = await getTeamInOrg(db, opts.orgId, opts.requestedTeamId);
+    if (!team) return "team-not-found";
+    const member = await isTeamMember(db, opts.requestedTeamId, opts.userId);
+    if (!member) return "team-not-found";
+    // Team admins (and org admins who are members) also read per-member rows.
+    const byMember = await canAdministerTeam(db, opts.requestedTeamId, opts.userId);
+    return { scope: "team", orgId: opts.orgId, teamId: opts.requestedTeamId, byMember };
   }
-  return { scope: "me", isOrg: false, orgId: opts.orgId, userId: opts.userId, teamId: null, byMember: false };
+  return { scope: "me", orgId: opts.orgId, userId: opts.userId };
 }
 
 /**
@@ -99,15 +108,22 @@ export async function resolveUsageScope(
  * alias (`prefix`, e.g. `"ce."`) so joined queries (where `workflow_definitions`
  * / `agent_sessions` share `org_id`/`created_at`) are unambiguous. `prefix` is a
  * hardcoded literal, never user input.
+ *
+ * The team clause reads `owner_type`/`owner_id`, which only the `cost_entries`
+ * view carries — do not apply a team scope to `llm_proxy_requests` directly
+ * (see the proxy branch of `getUsageDrillItems`).
  */
 function scopeWhere(prefix: "" | "ce.", since: number, s: UsageScope): SQL {
   const col = (name: string): SQL => sql.raw(`${prefix}${name}`);
-  const userClause = s.userId !== null ? sql` AND ${col("user_id")} = ${s.userId}` : sql``;
-  const teamClause =
-    s.teamId !== null
-      ? sql` AND ${col("owner_type")} = 'team' AND ${col("owner_id")} = ${s.teamId}`
-      : sql``;
-  return sql`${col("created_at")} >= ${since} AND ${col("org_id")} = ${s.orgId}${userClause}${teamClause}`;
+  const base = sql`${col("created_at")} >= ${since} AND ${col("org_id")} = ${s.orgId}`;
+  switch (s.scope) {
+    case "team":
+      return sql`${base} AND ${col("owner_type")} = 'team' AND ${col("owner_id")} = ${s.teamId}`;
+    case "me":
+      return sql`${base} AND ${col("user_id")} = ${s.userId}`;
+    case "org":
+      return base;
+  }
 }
 
 // ── Buckets (token-type split + unpriced, shared by every aggregate) ─────────
@@ -158,7 +174,7 @@ export async function getUsageBreakdown(
     // could do float division on real Postgres → one bucket per row).
     db.execute(sql`SELECT (floor(created_at / ${DAY_MS}) * ${DAY_MS})::bigint AS day_ms, COALESCE(SUM(cost_total),0) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens FROM cost_entries WHERE ${where} GROUP BY 1 ORDER BY 1 ASC`) as Promise<{ rows: { day_ms: unknown; cost_usd: unknown; total_tokens: unknown }[] }>,
     db.execute(sql`SELECT ${BUCKET_COLS} FROM cost_entries WHERE ${where}`) as Promise<{ rows: BucketRow[] }>,
-    opts.scope.byMember
+    opts.scope.scope === "org" || (opts.scope.scope === "team" && opts.scope.byMember)
       ? // Keep the NULL user_id group (team-/org-owned turns, e.g. team-owned
         // workflow runs) so the per-member sum reconciles with the total —
         // dropping it made Σ byUser < totalCostUsd.
@@ -168,7 +184,7 @@ export async function getUsageBreakdown(
 
   const total = toBucket(totals.rows[0]);
   let byUserOut: (UsageBucket & { userId: string; name: string })[] | undefined;
-  if (opts.scope.byMember) {
+  if (opts.scope.scope === "org" || (opts.scope.scope === "team" && opts.scope.byMember)) {
     const ids = byUser.rows.map((r) => r.user_id).filter((id): id is string => id !== null);
     const userRows = ids.length === 0 ? [] : await db.select({ id: users.id, name: users.name, email: users.email }).from(users).where(inArray(users.id, ids));
     const nameById = new Map(userRows.map((u) => [u.id, u.name || u.email] as const));
@@ -242,11 +258,10 @@ export async function getUsageDrillItems(
     }));
   }
   // proxy — group the raw proxy rows by harness (cost_entries has no harness).
-  // `llm_proxy_requests` has no owner columns and every proxy row is
-  // user-owned by construction (the cost_entries view maps proxy rows to
-  // owner_type 'user'), so the team scope can only ever match nothing —
-  // answer without a query the table cannot express.
-  if (scope.teamId !== null) return [];
+  // Proxy rows are always user-owned (the view stamps owner_type='user'), so a
+  // team scope matches none — and `llm_proxy_requests` has no owner columns,
+  // so the team WHERE clause would not even parse against it.
+  if (scope.scope === "team") return [];
   const whereProxy = scopeWhere("", since, scope);
   interface Row { harness: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
   const r = (await db.execute(sql`
@@ -307,9 +322,14 @@ function csvEscape(v: unknown): string {
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-/** One CSV row per billable turn for the window/scope, capped at 100k rows. */
+/** One CSV row per billable turn for the window/scope, capped at 100k rows.
+ * A plain member's team export blanks `user_id`: per-member attribution
+ * follows the breakdown's byUser rule (org scope, or a team scope whose
+ * caller administers the team), and the CSV must not let a plain team
+ * member reconstruct it with one GROUP BY. */
 export async function getUsageExportCsv(db: AppDb, opts: { windowMs: number; scope: UsageScope }): Promise<string> {
   const since = Date.now() - opts.windowMs;
+  const withholdUserId = opts.scope.scope === "team" && !opts.scope.byMember;
   interface Row {
     created_at: unknown; use_case: string; model: string | null; session_id: string | null; workflow_run_id: string | null;
     user_id: string | null; input_tokens: unknown; output_tokens: unknown; cache_read_tokens: unknown; cache_write_tokens: unknown;
@@ -322,14 +342,9 @@ export async function getUsageExportCsv(db: AppDb, opts: { windowMs: number; sco
     WHERE ${scopeWhere("", since, opts.scope)}
     ORDER BY created_at DESC LIMIT 100000`)) as { rows: Row[] };
 
-  // The user_id column follows the same rule as the breakdown's byUser:
-  // per-member attribution is for scopes whose caller may see members'
-  // individual spend. A plain team member still exports the team's turns,
-  // with the attribution column blank.
   const lines = result.rows.map((r) =>
     [
-      new Date(toNum(r.created_at)).toISOString(), r.use_case, r.model, r.session_id, r.workflow_run_id,
-      opts.scope.byMember ? r.user_id : "",
+      new Date(toNum(r.created_at)).toISOString(), r.use_case, r.model, r.session_id, r.workflow_run_id, withholdUserId ? "" : r.user_id,
       toNum(r.input_tokens), toNum(r.output_tokens), toNum(r.cache_read_tokens), toNum(r.cache_write_tokens), toNum(r.total_tokens),
       r.cost_total === null ? "" : toNum(r.cost_total), r.priced,
     ].map(csvEscape).join(","),

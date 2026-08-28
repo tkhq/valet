@@ -83,15 +83,14 @@ spawned it.
 Authorization: team membership, the same rule that gates
 `GET /api/teams/:id/members`. Non-members get 404 (existence-hiding).
 
-### 2. Usage scope `team:<id>`
+### 2. Usage scope `team`
 
-`resolveUsageScope` gains a third arm: `scope=team:<teamId>` resolves when
-the caller is a member of that team; otherwise `"forbidden"` (403). The
+Landed twice: PR #435 (TKAI-226) built `scope=team&teamId=` concurrently —
+structured params, a discriminated-union `UsageScope`, member-only access
+with 404 existence-hiding, and a `/usage` page pinned to the workspace
+switcher. That design is the base; this PR adds `byMember` on top. The
 WHERE clause filters `cost_entries` by `owner_type = 'team' AND owner_id =
-<id>` — the view already carries both columns. Every team member may read
-their team's spend: spend is a team resource like team memory and team
-workflows, and those are member-visible. `UsageBreakdownResponse.scope`
-widens to `"me" | "org" | "team"`. The CSV export accepts the same scope.
+<id>`. Every team member reads their team's aggregate spend.
 
 `byUser` is admin-gated: the org scope always reports it, and a team scope
 reports it when the caller administers the team (team admin or org admin).
@@ -100,11 +99,9 @@ never colleagues' individual spend. The CSV export follows the same rule:
 a plain member's export carries the team's turns with the user_id column
 blank.
 
-The `/usage` page exposes the scope: every team the caller is a member of
-gets a button beside "My usage", and "Organization" stays org-admin-only.
-Teams an org admin only administers (`callerRole` null) get no button —
-the Organization scope covers them. The CSV export follows the selected
-scope and labels the file with the team name.
+The `/usage` page follows the workspace switcher (PR #435): a team
+workspace pins the page to that team's scope, and the me/org toggle
+renders only in the personal workspace.
 
 ### 3. Artifacts owner filter
 

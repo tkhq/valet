@@ -146,7 +146,7 @@ describe("GET /api/teams/:id/children", () => {
   });
 });
 
-describe("GET /api/usage/breakdown?scope=team:<id>", () => {
+describe("GET /api/usage/breakdown?scope=team&teamId=", () => {
   const USAGE = JSON.stringify({ input: 100, output: 20, cacheRead: 0, cacheWrite: 0, total: 120 });
   const COST = JSON.stringify({ input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 });
 
@@ -157,7 +157,7 @@ describe("GET /api/usage/breakdown?scope=team:<id>", () => {
     `);
   }
 
-  it("covers team-owned spend only, and refuses a non-member with 403", async () => {
+  it("covers team-owned spend only; admins get byUser, members do not", async () => {
     api = await bootTestApi();
     await seedTeam(api);
     const now = Date.now();
@@ -170,7 +170,7 @@ describe("GET /api/usage/breakdown?scope=team:<id>", () => {
     await seedEntry(api, "e-team", "team-sess", now);
     await seedEntry(api, "e-mine", "personal-sess", now);
 
-    const res = await fetch(`${api.baseUrl}/api/usage/breakdown?window=24h&scope=team:team_1`);
+    const res = await fetch(`${api.baseUrl}/api/usage/breakdown?window=24h&scope=team&teamId=team_1`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as UsageBreakdownResponse;
     expect(body.scope).toBe("team");
@@ -184,7 +184,7 @@ describe("GET /api/usage/breakdown?scope=team:<id>", () => {
 
     // A PLAIN member reads the aggregate, never colleagues' individual spend.
     await db.insert(teamMembers).values({ teamId: "team_1", userId: "test-member", role: "member" });
-    const asMember = await fetch(`${api.baseUrl}/api/usage/breakdown?window=24h&scope=team:team_1`, {
+    const asMember = await fetch(`${api.baseUrl}/api/usage/breakdown?window=24h&scope=team&teamId=team_1`, {
       headers: NON_MEMBER_HEADERS,
     });
     expect(asMember.status).toBe(200);
@@ -193,17 +193,15 @@ describe("GET /api/usage/breakdown?scope=team:<id>", () => {
     expect(memberBody.byUser).toBeUndefined();
   });
 
-  it("refuses a caller with no membership at all with 403 that names the team rule", async () => {
+  it("answers a caller with no membership 404 (existence-hiding)", async () => {
     api = await bootTestApi();
     await api.providers.db
       .insert(teams)
       .values({ id: "team_1", orgId: "local-org", name: "Security", createdAt: Date.now() });
-    const res = await fetch(`${api.baseUrl}/api/usage/breakdown?window=24h&scope=team:team_1`, {
+    const res = await fetch(`${api.baseUrl}/api/usage/breakdown?window=24h&scope=team&teamId=team_1`, {
       headers: NON_MEMBER_HEADERS,
     });
-    expect(res.status).toBe(403);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toMatch(/team's members/);
+    expect(res.status).toBe(404);
   });
 
   it("the CSV export blanks per-member attribution for a plain member, keeps it for an admin", async () => {
@@ -216,13 +214,13 @@ describe("GET /api/usage/breakdown?scope=team:<id>", () => {
     await db.insert(teamMembers).values({ teamId: "team_1", userId: "test-member", role: "member" });
 
     // Admin (local-user): the user_id column carries attribution.
-    const adminCsv = await (await fetch(`${api.baseUrl}/api/usage/export.csv?window=24h&scope=team:team_1`)).text();
+    const adminCsv = await (await fetch(`${api.baseUrl}/api/usage/export.csv?window=24h&scope=team&teamId=team_1`)).text();
     expect(adminCsv).toContain("local-user");
 
     // Plain member: same rows, attribution blank — the breakdown hides
     // byUser from members and the export must not hand it back.
     const memberCsv = await (
-      await fetch(`${api.baseUrl}/api/usage/export.csv?window=24h&scope=team:team_1`, { headers: NON_MEMBER_HEADERS })
+      await fetch(`${api.baseUrl}/api/usage/export.csv?window=24h&scope=team&teamId=team_1`, { headers: NON_MEMBER_HEADERS })
     ).text();
     expect(memberCsv).toContain("team-sess");
     expect(memberCsv).not.toContain("local-user");

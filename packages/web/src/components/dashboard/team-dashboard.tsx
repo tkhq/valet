@@ -316,7 +316,7 @@ function WorkflowsCard({
 }
 
 function TeamUsageCard({ teamId }: { teamId: string }) {
-  const usageQ = useUsageBreakdown("7d", `team:${teamId}`);
+  const usageQ = useUsageBreakdown("7d", "team", teamId);
   const data = usageQ.data;
   return (
     <CardShell title="Usage" link={{ to: "/usage", label: "View all usage →" }}>

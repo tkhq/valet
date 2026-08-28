@@ -2349,20 +2349,19 @@ export interface UsageBucket {
   unpricedTurns: number;
 }
 
-/** `?scope=` values the usage routes accept. `team:<id>` (team dashboard
- * design) is gated on membership in that team (org admins pass too). */
-export type UsageScopeRequest = "me" | "org" | `team:${string}`;
+/** The `?scope=` a usage endpoint takes: the caller's own spend, the whole
+ * org (org-admin only), or one team (team-member only, needs `teamId=`). */
+export type UsageScopeName = "me" | "org" | "team";
 
-/** `GET /api/usage/breakdown?window=&scope=me|org|team:<id>` — spend for a
- * window across ALL use cases (engine sessions + workflows + proxy), from
- * the single `cost_entries` definition. `scope=org` (org-admin only) covers
- * every member. `scope=team:<id>` covers the team's owned spend. `byUser`
- * is present for the org scope, and for a team scope when the caller
- * administers the team (team admin or org admin) — a plain member reads
- * the team's aggregate without colleagues' individual spend. */
+/** `GET /api/usage/breakdown?window=&scope=me|org|team` — spend for a window
+ * across ALL use cases (engine sessions + workflows + proxy), from the single
+ * `cost_entries` definition. `scope=org` (org-admin only) covers every member.
+ * `scope=team` covers one team's owned spend; `byUser` is present for the org
+ * scope, and for a team scope when the caller ADMINISTERS the team — a plain
+ * member reads the team's aggregate without colleagues' individual spend. */
 export interface UsageBreakdownResponse {
   windowMs: number;
-  scope: "me" | "org" | "team";
+  scope: UsageScopeName;
   totalCostUsd: number;
   totalTokens: number;
   totalInputTokens: number;
@@ -2373,7 +2372,7 @@ export interface UsageBreakdownResponse {
   unpricedTurns: number;
   byUseCase: (UsageBucket & { useCase: UsageUseCase })[];
   byModel: (UsageBucket & { model: string | null })[];
-  /** Present only for `scope=org`. */
+  /** Org scope always; team scope when the caller administers the team. */
   byUser?: (UsageBucket & { userId: string; name: string })[];
   byDay: { dayMs: number; costUsd: number; totalTokens: number }[];
 }

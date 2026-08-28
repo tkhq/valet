@@ -5,7 +5,9 @@
  * sessions, orchestrator, workflows, proxy). Token-type breakdown (input /
  * output / cache-read / cache-write) and cache-hit-rate stat visible in the
  * header and By-model table. Org admins can switch to org scope; the byUser
- * table appears in org scope. All four use-case rows are expandable via
+ * table appears in org scope. A team workspace (nav switcher) pins the scope
+ * to that team and hides the personal-only surfaces (me/org toggle, proxy
+ * request log, key setup). All four use-case rows are expandable via
  * /api/usage/items (symmetric drill-down). CSV export button respects the
  * current window and scope.
  *
@@ -20,11 +22,12 @@ import { useEffect, useState } from "react";
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { useUsageBreakdown, useUsageItems } from "~/api/usage";
 import { useProxyRequests, useProxySettings } from "~/api/proxy-usage";
-import { useOrg, useTeams } from "~/api/settings";
+import { useOrg } from "~/api/settings";
 import { SpendChart } from "~/components/usage/SpendChart";
 import { RequestLog } from "~/components/usage/RequestLog";
 import { SampleView } from "~/components/usage/SampleView";
-import type { UsageScopeRequest, UsageUseCase, UsageDrillItem } from "@valet/api/wire";
+import { WorkspaceClause, useActiveWorkspace } from "~/components/workspace-clause";
+import type { UsageUseCase, UsageDrillItem, UsageScopeName } from "@valet/api/wire";
 import { api } from "~/api/client";
 
 export const Route = createFileRoute("/usage")({
@@ -100,13 +103,15 @@ function nestItems(items: UsageDrillItem[]): UsageDrillItem[] {
 function ItemList({
   window,
   scope,
+  teamId,
   useCase,
 }: {
   window: string;
-  scope: UsageScopeRequest;
+  scope: UsageScopeName;
+  teamId: string | undefined;
   useCase: UsageUseCase;
 }) {
-  const q = useUsageItems(window, scope, useCase);
+  const q = useUsageItems(window, scope, useCase, teamId);
 
   if (q.isLoading) {
     return <p className="text-xs text-muted px-4 py-2">Loading…</p>;
@@ -170,13 +175,15 @@ function UseCaseRow({
   turns,
   window,
   scope,
+  teamId,
 }: {
   useCase: UsageUseCase;
   costUsd: number;
   totalTokens: number;
   turns: number;
   window: string;
-  scope: UsageScopeRequest;
+  scope: UsageScopeName;
+  teamId: string | undefined;
 }) {
   const [expanded, setExpanded] = useState(false);
 
@@ -207,7 +214,7 @@ function UseCaseRow({
         <span className="tabular-nums text-muted w-16 text-right">{turns} turns</span>
       </div>
       {expanded && (
-        <ItemList window={window} scope={scope} useCase={useCase} />
+        <ItemList window={window} scope={scope} teamId={teamId} useCase={useCase} />
       )}
     </div>
   );
@@ -215,7 +222,7 @@ function UseCaseRow({
 
 export function UsagePage() {
   const [window, setWindow] = useState<Window>("7d");
-  const [scope, setScope] = useState<UsageScopeRequest>("me");
+  const [personalScope, setPersonalScope] = useState<"me" | "org">("me");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [cursor, setCursor] = useState<string | undefined>(undefined);
   const [items, setItems] = useState<Parameters<typeof RequestLog>[0]["items"]>([]);
@@ -224,34 +231,40 @@ export function UsagePage() {
   const isOrgAdmin =
     orgQ.data?.features.organizations === true &&
     orgQ.data?.callerRole === "admin";
-  // Per-team spend (team dashboard design): every team the caller is a
-  // member of gets a scope button — team spend is member-visible, like team
-  // memory and workflows. `callerRole` is null for teams an org admin only
-  // administers; those are covered by the Organization scope.
-  const teamsQ = useTeams();
-  const myTeams = (teamsQ.data?.teams ?? []).filter((t) => t.callerRole !== null);
-  const scopeLabel =
-    scope === "me"
-      ? "me"
-      : scope === "org"
-        ? "org"
-        : (myTeams.find((t) => `team:${t.id}` === scope)?.name ?? "team");
 
-  // A team scope must not outlive the membership: losing the selected team
-  // (removed by an admin, or the last team) would otherwise unmount the
-  // toggle while the breakdown 403s forever, with no rendered way back.
-  useEffect(() => {
-    if (!scope.startsWith("team:")) return;
-    if (teamsQ.data === undefined) return;
-    if (!myTeams.some((t) => `team:${t.id}` === scope)) setScope("me");
-  }, [scope, teamsQ.data, myTeams]);
+  // A team workspace pins the scope to that team; the me/org toggle only
+  // exists in the personal workspace. The toggle's state survives a visit to
+  // a team workspace, so switching back restores the view you had.
+  //
+  // The switcher's stored key can name a team the caller has left until the
+  // team list loads; useActiveWorkspace resolves to undefined in that window.
+  // Firing a team query on the raw key would 404 and flash an error in place
+  // of the totals — hold the queries until the workspace can be named.
+  const ws = useActiveWorkspace();
+  const scopeKnown = ws !== undefined;
+  const personalWorkspace = ws?.kind === "personal";
+  const teamId = ws?.kind === "team" ? ws.team.id : undefined;
+  const scope: UsageScopeName = teamId !== undefined ? "team" : personalScope;
 
-  const breakdownQ = useUsageBreakdown(window, scope);
-  const requestsQ = useProxyRequests({ limit: 50, cursor });
-  const settingsQ = useProxySettings();
+  const breakdownQ = useUsageBreakdown(window, scope, teamId, { enabled: scopeKnown });
+  // Proxy traffic is personal; every consumer of these two queries renders
+  // only in the personal workspace, so do not fetch outside it.
+  const requestsQ = useProxyRequests({ limit: 50, cursor }, { enabled: personalWorkspace });
+  const settingsQ = useProxySettings({ enabled: personalWorkspace });
 
   // Accumulate proxy request items across page loads.
   const [seenCursors] = useState(() => new Set<string | undefined>());
+
+  // A workspace switch hides and reshapes the page; drop the proxy log's
+  // accumulated pages and any open detail so a return to the personal
+  // workspace starts from page one, not a mid-list cursor.
+  useEffect(() => {
+    setCursor(undefined);
+    setItems((prev) => (prev.length === 0 ? prev : []));
+    seenCursors.clear();
+    setSelectedId(null);
+  }, [teamId, seenCursors]);
+
   if (!seenCursors.has(cursor) && requestsQ.data) {
     seenCursors.add(cursor);
     const newItems = requestsQ.data.items ?? [];
@@ -281,7 +294,7 @@ export function UsagePage() {
         (breakdown.totalInputTokens + breakdown.totalCacheReadTokens)
       : null;
 
-  const csvHref = api.usageExportCsvUrl(window, scope);
+  const csvHref = api.usageExportCsvUrl(window, scope, teamId);
 
   function handleWindowChange(w: Window) {
     setWindow(w);
@@ -293,16 +306,22 @@ export function UsagePage() {
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto max-w-5xl px-6 py-10 space-y-10">
-        {/* Header */}
+        {/* Header — the workspace clause names the active scope, same as the
+            other scoped list pages. */}
         <div>
-          <h1 className="font-display text-2xl text-ink">Usage</h1>
+          <h1 className="font-display text-2xl text-ink flex items-baseline gap-3">
+            Usage
+            <WorkspaceClause />
+          </h1>
           <p className="mt-1 text-sm text-muted">
-            Spend across all Valet use cases for your account.
+            {scope === "team"
+              ? "Spend across all Valet use cases for this team."
+              : "Spend across all Valet use cases for your account."}
           </p>
         </div>
 
         {/* Disabled-gateway notice */}
-        {settingsQ.data?.enabled === false && (
+        {personalWorkspace && settingsQ.data?.enabled === false && (
           <div className="rounded border border-line bg-paper px-4 py-3 text-sm text-muted">
             The recording gateway is disabled — enable it in{" "}
             <Link
@@ -331,11 +350,11 @@ export function UsagePage() {
               {w}
             </button>
           ))}
-          {(isOrgAdmin || myTeams.length > 0) && (
+          {personalWorkspace && isOrgAdmin && (
             <div className="flex items-center gap-1 ml-4 rounded border border-line overflow-hidden text-sm">
               <button
                 type="button"
-                onClick={() => setScope("me")}
+                onClick={() => setPersonalScope("me")}
                 className={`px-3 py-1 ${
                   scope === "me"
                     ? "bg-moss/10 text-moss font-medium"
@@ -345,49 +364,35 @@ export function UsagePage() {
               >
                 My usage
               </button>
-              {myTeams.map((t) => (
-                <button
-                  key={t.id}
-                  type="button"
-                  onClick={() => setScope(`team:${t.id}`)}
-                  className={`px-3 py-1 ${
-                    scope === `team:${t.id}`
-                      ? "bg-moss/10 text-moss font-medium"
-                      : "text-muted hover:text-ink"
-                  }`}
-                  aria-pressed={scope === `team:${t.id}`}
-                >
-                  {t.name}
-                </button>
-              ))}
-              {isOrgAdmin && (
-                <button
-                  type="button"
-                  onClick={() => setScope("org")}
-                  className={`px-3 py-1 ${
-                    scope === "org"
-                      ? "bg-moss/10 text-moss font-medium"
-                      : "text-muted hover:text-ink"
-                  }`}
-                  aria-pressed={scope === "org"}
-                >
-                  Organization
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={() => setPersonalScope("org")}
+                className={`px-3 py-1 ${
+                  scope === "org"
+                    ? "bg-moss/10 text-moss font-medium"
+                    : "text-muted hover:text-ink"
+                }`}
+                aria-pressed={scope === "org"}
+              >
+                Organization
+              </button>
             </div>
           )}
-          <a
-            href={csvHref}
-            download
-            className="ml-auto rounded px-3 py-1 text-sm border border-line text-muted hover:text-ink hover:border-ink"
-            aria-label={`Download CSV (${window}, ${scopeLabel})`}
-          >
-            Download CSV ({window}, {scopeLabel})
-          </a>
+          {scopeKnown && (
+            <a
+              href={csvHref}
+              download
+              className="ml-auto rounded px-3 py-1 text-sm border border-line text-muted hover:text-ink hover:border-ink"
+              aria-label={`Download CSV (${window}, ${scope})`}
+            >
+              Download CSV ({window}, {scope})
+            </a>
+          )}
         </div>
 
-        {/* Totals + chart + by-use-case + by-model */}
-        {breakdownQ.isLoading ? (
+        {/* Totals + chart + by-use-case + by-model. A disabled query (scope
+            still resolving) reports isLoading=false, so gate on both. */}
+        {!scopeKnown || breakdownQ.isLoading ? (
           <p className="text-sm text-muted">Loading…</p>
         ) : breakdownQ.error ? (
           <p className="text-sm text-danger-600">{String(breakdownQ.error)}</p>
@@ -426,10 +431,17 @@ export function UsagePage() {
               <SpendChart buckets={chartBuckets} />
             </div>
 
-            {/* By use case — all four rows expandable */}
+            {/* By use case — all four rows expandable. Keyed by the WORKSPACE
+                so a workspace switch remounts the rows: an expanded drill
+                list must not carry over into a different workspace's view.
+                The me/org toggle deliberately does not remount — an admin
+                comparing scopes keeps their expanded rows. */}
             <div>
               <h2 className="text-sm font-medium text-ink mb-3">By use case</h2>
-              <div className="rounded border border-line overflow-hidden">
+              <div
+                key={teamId ?? "personal"}
+                className="rounded border border-line overflow-hidden"
+              >
                 {/* Header row */}
                 <div className="flex items-center gap-3 px-4 py-2 bg-paper-muted border-b border-line text-xs font-medium text-muted">
                   <span className="w-3" />
@@ -450,6 +462,7 @@ export function UsagePage() {
                       turns={bucket.turns}
                       window={window}
                       scope={scope}
+                      teamId={teamId}
                     />
                   );
                 })}
@@ -522,7 +535,7 @@ export function UsagePage() {
 
             {/* By member — whenever the server sent rows: org scope, or a
                 team scope where the caller administers the team. The SERVER
-                decides who may see per-member spend, not this render. */}
+                decides who may see per-member spend. */}
             {byUserRows.length > 0 && (
               <div>
                 <h2 className="text-sm font-medium text-ink mb-3">By member</h2>
@@ -564,7 +577,10 @@ export function UsagePage() {
           </>
         ) : null}
 
-        {/* Proxy (external tools) — request log + drill-down */}
+        {/* Proxy (external tools) — request log + drill-down. Proxy traffic is
+            always personal (never team-owned), so the log and the key-setup
+            callout stay out of a team workspace's view. */}
+        {personalWorkspace && (
         <div>
           <h2 className="text-sm font-medium text-ink mb-1">
             Proxy (external tools) — request log
@@ -593,8 +609,10 @@ export function UsagePage() {
             </div>
           )}
         </div>
+        )}
 
         {/* Key setup callout */}
+        {personalWorkspace && (
         <div className="rounded border border-line bg-paper px-4 py-3 text-sm text-muted">
           Generate a key and set up your tools in{" "}
           <Link
@@ -605,6 +623,7 @@ export function UsagePage() {
           </Link>
           .
         </div>
+        )}
       </div>
     </div>
   );

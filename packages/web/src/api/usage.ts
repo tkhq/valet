@@ -7,29 +7,30 @@ import { useQuery, type UseQueryOptions } from "@tanstack/react-query";
 import type {
   UsageDrillResponse,
   UsageBreakdownResponse,
-  UsageScopeRequest,
   UsageSessionsResponse,
+  UsageScopeName,
   UsageUseCase,
 } from "@valet/api/wire";
 import { api } from "~/api/client";
 
 export const qkUsage = {
-  breakdown: (window: string, scope: UsageScopeRequest = "me") =>
-    ["usage", "breakdown", window, scope] as const,
+  breakdown: (window: string, scope: UsageScopeName = "me", teamId?: string) =>
+    ["usage", "breakdown", window, scope, teamId] as const,
   sessions: (window: string, useCase?: "orchestrator" | "session") =>
     ["usage", "sessions", window, useCase] as const,
-  items: (window: string, scope: UsageScopeRequest, useCase: UsageUseCase) =>
-    ["usage", "items", window, scope, useCase] as const,
+  items: (window: string, scope: UsageScopeName, useCase: UsageUseCase, teamId?: string) =>
+    ["usage", "items", window, scope, useCase, teamId] as const,
 };
 
 export function useUsageBreakdown(
   window: string = "7d",
-  scope: UsageScopeRequest = "me",
+  scope: UsageScopeName = "me",
+  teamId?: string,
   opts?: Partial<UseQueryOptions<UsageBreakdownResponse>>,
 ) {
   return useQuery<UsageBreakdownResponse>({
-    queryKey: qkUsage.breakdown(window, scope),
-    queryFn: () => api.usageBreakdown(window, scope),
+    queryKey: qkUsage.breakdown(window, scope, teamId),
+    queryFn: () => api.usageBreakdown(window, scope, teamId),
     staleTime: 60_000,
     ...opts,
   });
@@ -37,13 +38,14 @@ export function useUsageBreakdown(
 
 export function useUsageItems(
   window: string,
-  scope: UsageScopeRequest,
+  scope: UsageScopeName,
   useCase: UsageUseCase,
+  teamId?: string,
   opts?: Partial<UseQueryOptions<UsageDrillResponse>>,
 ) {
   return useQuery<UsageDrillResponse>({
-    queryKey: qkUsage.items(window, scope, useCase),
-    queryFn: () => api.usageItems(window, scope, useCase),
+    queryKey: qkUsage.items(window, scope, useCase, teamId),
+    queryFn: () => api.usageItems(window, scope, useCase, teamId),
     staleTime: 60_000,
     ...opts,
   });
