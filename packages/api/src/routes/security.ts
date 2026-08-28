@@ -146,6 +146,7 @@ import type {
   SecuritySetConfigResponse,
   SecuritySetPlanResponse,
   SecurityStartPreviewResponse,
+  SecurityToolDeclWire,
   SecurityTreeFileResponse,
   SecurityWriteFileResponse,
 } from "../wire/types.js";
@@ -203,10 +204,69 @@ function engagementToWire(e: SecurityEngagementRow): SecurityEngagementWire {
     invariants: parseJsonStringArray(e.invariants),
     categories: parseJsonStringArray(e.categories),
     configPersonas: parseJsonStringRecord(e.configPersonas),
-    configTools: parseJsonStringArray(e.configTools),
+    configTools: parseConfigTools(e.configTools),
+    authorizedScope: parseAuthorizedScope(e.authorizedScope),
     createdAt: e.createdAt,
     updatedAt: e.updatedAt,
   };
+}
+
+/** Parse the engagement's `config_tools` JSON (`ToolDecl[]`) into the wire tool
+ * decls (M-P4a). Null on absent or malformed. Each item keeps only the known
+ * fields; a bare-string legacy value normalizes to `{ id }`. */
+function parseConfigTools(raw: string | null): SecurityToolDeclWire[] | null {
+  if (raw === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  const decls: SecurityToolDeclWire[] = [];
+  for (const item of parsed) {
+    if (typeof item === "string" && item.trim() !== "") {
+      decls.push({ id: item });
+      continue;
+    }
+    if (typeof item !== "object" || item === null || Array.isArray(item)) continue;
+    const map = item as Record<string, unknown>;
+    if (typeof map.id !== "string" || map.id.trim() === "") continue;
+    const decl: SecurityToolDeclWire = { id: map.id };
+    if (typeof map.install === "string") decl.install = map.install;
+    if (typeof map.image === "string") decl.image = map.image;
+    if (typeof map.mcp === "object" && map.mcp !== null && !Array.isArray(map.mcp)) {
+      const mcp = map.mcp as Record<string, unknown>;
+      if (typeof mcp.url === "string") {
+        decl.mcp = { url: mcp.url, ...(typeof mcp.prefix === "string" ? { prefix: mcp.prefix } : {}) };
+      }
+    }
+    if (Array.isArray(map.egress)) {
+      const egress = map.egress.filter((h): h is string => typeof h === "string");
+      if (egress.length > 0) decl.egress = egress;
+    }
+    decls.push(decl);
+  }
+  return decls;
+}
+
+/** Parse the engagement's `authorized_scope` JSON (`{ hosts: string[] }`) for
+ * the wire (M-P4b). Null on absent, malformed, or an empty host list. */
+function parseAuthorizedScope(raw: string | null): { hosts: string[] } | null {
+  if (raw === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      const hosts = (parsed as Record<string, unknown>).hosts;
+      if (Array.isArray(hosts)) {
+        const clean = hosts.filter((h): h is string => typeof h === "string");
+        if (clean.length > 0) return { hosts: clean };
+      }
+    }
+  } catch {
+    // A malformed value renders as null.
+  }
+  return null;
 }
 
 /** Parse a stored JSON string[] column; null on absent or malformed. */

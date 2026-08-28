@@ -1759,7 +1759,17 @@ export const securityEngagements = pgTable(
     // runs under its OWN role, not the code-review fallback. Null when the
     // config declares no personas, or none of the declared files were readable.
     configPersonaMarkdown: text("config_persona_markdown"),
+    // Declared tools (M-P4a): the config's `tools` list as a JSON `ToolDecl[]`
+    // (id + optional install/image/mcp/egress). The host provisions a persona
+    // child's declared tools from this at build. Null when the config declares
+    // no tools.
     configTools: text("config_tools"),
+    // Authorized live-testing scope (M-P4b): the config's `scope` as a JSON
+    // `{ hosts: string[] }`. The live personas (dast/fuzz/exploit) may reach
+    // ONLY these hosts; the dispatch prompt names them, and the child sandbox's
+    // egress allowlist is derived from them. Null when the config declares no
+    // scope (no live testing is authorized).
+    authorizedScope: text("authorized_scope"),
     hasRepoConfig: boolean("has_repo_config").notNull().default(false),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),

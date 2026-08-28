@@ -212,9 +212,25 @@ export interface SecurityEngagementWire {
   invariants: string[] | null;
   categories: string[] | null;
   configPersonas: Record<string, string> | null;
-  configTools: string[] | null;
+  /** Declared tools the config named (M-P4a). Each is a `{ id, install?, image?,
+   * mcp?, egress? }` decl; the panel shows the id list. Null when the config
+   * declared no tools. */
+  configTools: SecurityToolDeclWire[] | null;
+  /** The authorized live-testing scope (M-P4b): the hosts the live personas may
+   * reach. Null when no live testing is authorized. The panel surfaces this
+   * prominently — it is authorization-sensitive. */
+  authorizedScope: { hosts: string[] } | null;
   createdAt: number;
   updatedAt: number;
+}
+
+/** One declared tool on the wire (M-P4a). Mirrors the plugin's `ToolDecl`. */
+export interface SecurityToolDeclWire {
+  id: string;
+  install?: string;
+  image?: string;
+  mcp?: { url: string; prefix?: string };
+  egress?: string[];
 }
 
 export interface SecurityCellWire {

@@ -240,6 +240,33 @@ describe("pg app schema + migrations", () => {
     await db.query("DELETE FROM security_engagements WHERE id IN ('eng_preset', 'eng_cfg')");
   });
 
+  it("stores declared tools + authorized_scope, defaulting null (M-P4a/M-P4b)", async () => {
+    const now = Date.now();
+    // Structured tool decls (M-P4a) + an authorized scope (M-P4b).
+    const tools = JSON.stringify([
+      { id: "nuclei", install: "apt-get install -y nuclei", egress: ["staging.example.com"] },
+      { id: "zap", mcp: { url: "http://127.0.0.1:8090", prefix: "mcp__zap__" } },
+    ]);
+    const scope = JSON.stringify({ hosts: ["staging.example.com"] });
+    await db.query(
+      "INSERT INTO security_engagements (id, session_id, status, repo_full_name, plan, config_tools, authorized_scope, has_repo_config, created_at, updated_at) VALUES ('eng_live', 's_live', 'planning', 'acme/api', '', $2, $3, true, $1, $1)",
+      [now, tools, scope],
+    );
+    // A non-live engagement: authorized_scope null.
+    await db.query(
+      "INSERT INTO security_engagements (id, session_id, status, repo_full_name, plan, created_at, updated_at) VALUES ('eng_nolive', 's_nolive', 'planning', 'acme/api', '', $1, $1)",
+      [now],
+    );
+    const rows = await db.query(
+      "SELECT id, config_tools, authorized_scope FROM security_engagements WHERE id IN ('eng_live', 'eng_nolive') ORDER BY id",
+    );
+    expect(rows.rows).toEqual([
+      { id: "eng_live", config_tools: tools, authorized_scope: scope },
+      { id: "eng_nolive", config_tools: null, authorized_scope: null },
+    ]);
+    await db.query("DELETE FROM security_engagements WHERE id IN ('eng_live', 'eng_nolive')");
+  });
+
   it("enforces one issue link per finding per provider", async () => {
     const now = Date.now();
     await db.query(
@@ -783,6 +810,7 @@ describe("pg app schema + migrations", () => {
       { table: "security_engagements", column: "categories" },
       { table: "security_engagements", column: "config_personas" },
       { table: "security_engagements", column: "config_tools" },
+      { table: "security_engagements", column: "authorized_scope" },
       { table: "security_engagements", column: "has_repo_config" },
     ];
 

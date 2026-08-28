@@ -84,6 +84,14 @@ import { orchestratorPersona } from "../orchestrator/persona.js";
 import { buildMemoryTools } from "../orchestrator/memory-tools.js";
 import { buildSecurityPersonaTools, buildSecurityRunnerTools } from "./security-tools.js";
 import { securityCompactionHook } from "./security-compaction.js";
+import {
+  authorizedScopeEnv,
+  egressViolations,
+  parseAuthorizedScopeHosts,
+  parseConfigToolDecls,
+  securityDeclaredMcpPlugins,
+} from "./security-provisioning.js";
+import { egressHostInScope } from "@valet/plugin-security";
 import { assembleMemorySnapshot } from "../orchestrator/snapshot.js";
 import { ensureTodayJournal } from "../orchestrator/bootstrap.js";
 import { journalCompactionHook } from "../orchestrator/compaction.js";
@@ -650,7 +658,17 @@ export class EngineHost {
     // config — the post-restart rebuild path for dispatched cell children
     // (the first build goes through `buildChildSession`, same wiring).
     const personaCell = isSecurityRunner ? null : await this.claimedSecurityCell(sessionId);
-    const extraPlugins = isSecurityRunner ? [securityPlugin] : [];
+    // Declared-tool provisioning (M-P4a/M-P4b): a persona child gets its
+    // engagement's declared MCP servers as extra plugins and the authorized-
+    // scope egress allowlist env. Empty for the runner and non-security builds.
+    const securityProvisioning = personaCell
+      ? await this.securityProvisioningForCell(personaCell)
+      : { mcpPlugins: [], scopeEnv: {} };
+    const extraPlugins = isSecurityRunner
+      ? [securityPlugin]
+      : personaCell
+        ? securityProvisioning.mcpPlugins
+        : [];
     // `SessionMeta` carries no principal, and this builder passes no `owner`
     // to the engine either — `Session`'s constructor then defaults the
     // principal to `{ type: "user", id: options.userId }`. So the acting
@@ -730,10 +748,19 @@ export class EngineHost {
     // override at provision time — the engine applies
     // DesiredSandboxSpec.image when the specProvider returns one.
     const image = this.opts.defaultImages?.full ?? this.opts.defaultImage;
+    // Authorized-scope egress allowlist env (M-P4b): a live persona child
+    // carries VALET_SECURITY_AUTHORIZED_SCOPE so its live tools bound egress to
+    // the human-declared scope. Merged over the mint env; empty otherwise, so a
+    // non-live build's env is byte-identical to before. See
+    // security-provisioning.ts for the enforcement-seam note.
+    const sandboxEnv =
+      Object.keys(securityProvisioning.scopeEnv).length > 0
+        ? { ...(sandboxMint?.env ?? {}), ...securityProvisioning.scopeEnv }
+        : sandboxMint?.env;
     const sandboxOpts = {
       workspace: meta.workspace,
       image,
-      env: sandboxMint?.env,
+      env: sandboxEnv,
       profile,
       ...(dockerFlag ? { docker: true } : {}),
       ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
@@ -1505,6 +1532,63 @@ export class EngineHost {
     if (typeof map !== "object" || map === null || Array.isArray(map)) return undefined;
     const value = (map as Record<string, unknown>)[cell.persona];
     return typeof value === "string" ? value : undefined;
+  }
+
+  /**
+   * The declared-tool provisioning for a claimed persona cell (Valet Security
+   * M-P4a + M-P4b). Reads the cell's engagement `config_tools` and
+   * `authorized_scope`, then returns:
+   *
+   *   - `mcpPlugins`: a `ValetPlugin` per declared MCP server, added to the
+   *     persona child's extra plugins so the child's tool set carries the
+   *     server's tools (M-P4a). Reuses the config-connector MCP seam.
+   *   - `scopeEnv`: the authorized-scope egress allowlist env
+   *     (`VALET_SECURITY_AUTHORIZED_SCOPE`), merged into the child sandbox env.
+   *     A live tool reads it to bound egress to the human-declared scope
+   *     (M-P4b). Empty when no scope is declared.
+   *
+   * Egress gate: every declared egress host is re-validated against the
+   * authorized scope here (the config parser already refused an out-of-scope
+   * egress at create; this guards a stored/hand-edited row). An out-of-scope
+   * egress is dropped with a warning — a live tool is never provisioned with
+   * egress the human did not authorize.
+   *
+   * No db, or a non-security cell, yields empty provisioning.
+   */
+  private async securityProvisioningForCell(
+    cell: SecurityCellRow,
+  ): Promise<{ mcpPlugins: ValetPlugin[]; scopeEnv: Record<string, string> }> {
+    const db = this.opts.db;
+    if (!db) return { mcpPlugins: [], scopeEnv: {} };
+    const rows = await db
+      .select({
+        tools: securityEngagements.configTools,
+        scope: securityEngagements.authorizedScope,
+      })
+      .from(securityEngagements)
+      .where(eq(securityEngagements.id, cell.engagementId))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return { mcpPlugins: [], scopeEnv: {} };
+    const scopeHosts = parseAuthorizedScopeHosts(row.scope);
+    const declared = parseConfigToolDecls(row.tools);
+    // Egress gate (M-P4b): drop a decl's out-of-scope egress before provisioning.
+    const violations = egressViolations(declared, scopeHosts);
+    for (const v of violations) {
+      console.warn(
+        `security: declared tool "${v.toolId}" egress host "${v.host}" is outside the authorized scope ` +
+          `for engagement ${cell.engagementId}; not provisioning that egress. Fix .valet/security.yml.`,
+      );
+    }
+    const inScope = declared.map((decl) => {
+      if (!decl.egress || decl.egress.length === 0) return decl;
+      const kept = decl.egress.filter((host) => egressHostInScope(host, scopeHosts));
+      return kept.length === decl.egress.length ? decl : { ...decl, egress: kept };
+    });
+    return {
+      mcpPlugins: securityDeclaredMcpPlugins(inScope),
+      scopeEnv: authorizedScopeEnv(scopeHosts),
+    };
   }
 
   /**
@@ -2280,9 +2364,20 @@ export class EngineHost {
     // persona tool set, the persona role, and the tool endpoint config.
     // One indexed query; ordinary task children pay a single miss.
     const personaCell = await this.claimedSecurityCell(childSessionId);
+    // Declared-tool provisioning (M-P4a/M-P4b): the persona child's declared MCP
+    // servers and authorized-scope egress env. `sessionExtras` above ran with no
+    // extra plugins; re-run it with the declared MCP plugins so the child's tool
+    // set carries them. Empty (byte-identical to before) for a non-persona child.
+    const securityProvisioning = personaCell
+      ? await this.securityProvisioningForCell(personaCell)
+      : { mcpPlugins: [], scopeEnv: {} };
+    const provisionedExtras =
+      personaCell && securityProvisioning.mcpPlugins.length > 0
+        ? await this.sessionExtras(opts.owner, opts.orgId, [], securityProvisioning.mcpPlugins)
+        : extras;
     const childTools = personaCell
-      ? [...buildSecurityPersonaTools({ review: personaCell.review }), ...extras.tools]
-      : extras.tools;
+      ? [...buildSecurityPersonaTools({ review: personaCell.review }), ...provisionedExtras.tools]
+      : provisionedExtras.tools;
     // The persona role registers on the session (roles registry) so the
     // dispatch prompt's per-turn `role` overlay resolves. Attach ONLY the role
     // matching the claimed cell's persona — the engagement-runner SKILL stays
@@ -2292,8 +2387,8 @@ export class EngineHost {
       ? await this.repoRoleMarkdownForCell(personaCell)
       : undefined;
     const childRoles = personaCell
-      ? [...extras.roles, ...securityRolesForCell(personaCell.persona, childRepoRoleMarkdown)]
-      : extras.roles;
+      ? [...provisionedExtras.roles, ...securityRolesForCell(personaCell.persona, childRepoRoleMarkdown)]
+      : provisionedExtras.roles;
 
     const existing = await this.opts.engineStore.getSession(childSessionId);
     const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, opts.actorUserId, opts.orgId, opts.modelId);
@@ -2356,7 +2451,18 @@ export class EngineHost {
         // Single-lineage stock default, same fall-through as a REST-created
         // session (`sessionFor`).
         image: this.opts.defaultImages?.full ?? this.opts.defaultImage,
-        env: sandboxMint?.env,
+        // Authorized-scope egress allowlist env (M-P4b): a live persona child
+        // carries VALET_SECURITY_AUTHORIZED_SCOPE. Empty for a non-live child,
+        // so the env stays byte-identical.
+        // TODO(M-P4b egress): SandboxCreateOpts has no network-policy field, so
+        // this env is the enforcement seam the live tools honor. Full network-
+        // level egress lockdown (a k8s NetworkPolicy / egress firewall keyed on
+        // this allowlist) is a sandbox-infra follow-up — add it here on the
+        // child sandbox spec once SandboxProvider supports an egress policy.
+        env:
+          Object.keys(securityProvisioning.scopeEnv).length > 0
+            ? { ...(sandboxMint?.env ?? {}), ...securityProvisioning.scopeEnv }
+            : sandboxMint?.env,
         profile,
         ...(opts.docker ? { docker: true } : {}),
         ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
@@ -2366,7 +2472,7 @@ export class EngineHost {
       resolveModel: this.makeResolveModel(opts.orgId),
       systemPrompt: SYSTEM_PROMPT,
       tools: childTools.length ? childTools : undefined,
-      skills: extras.skills.length ? extras.skills : undefined,
+      skills: provisionedExtras.skills.length ? provisionedExtras.skills : undefined,
       roles: childRoles.length ? childRoles : undefined,
       // The persona tools' HTTP seam only — still NO childSpawner (the
       // depth-limit contract) and no child seams.

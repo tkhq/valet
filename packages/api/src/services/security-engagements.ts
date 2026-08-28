@@ -27,6 +27,7 @@ import {
   findingFingerprint,
   hasTriad,
   isKnownPlaybook,
+  isLivePersona,
   KNOWN_PERSONAS,
   parsePlan,
   VERIFIER_PERSONA,
@@ -37,7 +38,9 @@ import {
   serializePlan,
   type EngagementPlan,
   type PlanCell,
+  type SecurityScope,
   type StateDoc,
+  type ToolDecl,
 } from "@valet/plugin-security";
 import type { AppDb } from "../lib/drizzle.js";
 import {
@@ -147,7 +150,13 @@ export interface SecurityConfigContext {
    * (M-P2c). Keyed by the same ids as `personas` (which holds id → path). The
    * host attaches a repo persona's role from this map. */
   personaMarkdown?: Record<string, string>;
-  tools?: string[];
+  /** Declared tools the config named (M-P4a). Structured `ToolDecl`s. Stored as
+   * JSON on `config_tools`; the host provisions a persona child's tools from it. */
+  tools?: ToolDecl[];
+  /** The authorized live-testing scope (M-P4b). Stored as JSON on
+   * `authorized_scope`; the live-persona dispatch prompt names its hosts and the
+   * child sandbox egress allowlist derives from them. */
+  scope?: SecurityScope;
 }
 
 export type CompleteCellResult =
@@ -297,6 +306,10 @@ export function buildDispatchPrompt(
     focus?: string | null;
     invariants?: string[] | null;
     categories?: string[] | null;
+    /** The authorized live-testing scope hosts (M-P4b). A live persona's
+     * dispatch prompt names these explicitly and forbids acting outside them.
+     * A non-live persona ignores the scope. */
+    scopeHosts?: string[] | null;
   } = {},
 ): string {
   const planCell = plan.cells.find((p) => p.ordinal === cell.ordinal);
@@ -356,6 +369,32 @@ export function buildDispatchPrompt(
   }
   if (planCell?.paths && planCell.paths.length > 0) {
     lines.push(`Scope: limit the sweep to these path globs: ${planCell.paths.join(", ")}`);
+  }
+  // Authorized live-testing scope (M-P4b). A live persona (dast/fuzz/exploit)
+  // operates against a RUNNING target, so its dispatch prompt names the exact
+  // hosts it may reach and forbids acting outside them. This is
+  // authorization-sensitive: it is the ONLY authorization the persona has. A
+  // live persona with no declared scope is told to stop, not to guess a target.
+  // A non-live persona ignores the scope entirely (byte-identical prompt).
+  if (isLivePersona(cell.persona)) {
+    const scopeHosts = (config.scopeHosts ?? []).map((h) => h.trim()).filter((h) => h !== "");
+    lines.push("", "--- Authorized scope (live testing) ---");
+    if (scopeHosts.length > 0) {
+      lines.push(
+        "",
+        "You are a LIVE persona: you test a RUNNING target. You are authorized to reach ONLY these hosts:",
+      );
+      for (const host of scopeHosts) lines.push(`- ${host}`);
+      lines.push(
+        "",
+        "Never send a request to any other host. A finding or action outside this scope is forbidden. Respect the declared rate limits, and never run a destructive payload.",
+      );
+    } else {
+      lines.push(
+        "",
+        "No authorized scope is declared for this engagement. You have NO target and NO authorization to reach any host. Do not guess a target. Record a not_assessed coverage row naming the missing scope, and settle.",
+      );
+    }
   }
   if (planCell?.playbook) {
     lines.push(
@@ -548,6 +587,8 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
             ? JSON.stringify(config.personaMarkdown)
             : null,
         configTools: config?.tools ? JSON.stringify(config.tools) : null,
+        authorizedScope:
+          config?.scope && config.scope.hosts.length > 0 ? JSON.stringify(config.scope) : null,
         hasRepoConfig: config !== undefined,
         createdAt: ts,
         updatedAt: ts,
@@ -841,6 +882,9 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
         focus: engagement.focus,
         invariants: parseJsonStringArrayColumn(engagement.invariants),
         categories: parseJsonStringArrayColumn(engagement.categories),
+        // Authorized scope (M-P4b): only a live persona reads it, but pass it
+        // always — buildDispatchPrompt gates on the persona.
+        scopeHosts: parseAuthorizedScopeHosts(engagement.authorizedScope),
       },
     );
 
@@ -2067,6 +2111,23 @@ function parseJsonStringArrayColumn(raw: string | null): string[] {
     if (Array.isArray(parsed)) return parsed.filter((v): v is string => typeof v === "string");
   } catch {
     // A malformed value is treated as an empty list.
+  }
+  return [];
+}
+
+/** Parse the engagement's `authorized_scope` JSON (`{ hosts: string[] }` or
+ * null) into the host list (M-P4b). Returns [] for a null/absent/malformed
+ * value — a live persona with no scope is told to stop, not to guess. */
+export function parseAuthorizedScopeHosts(raw: string | null): string[] {
+  if (raw === null) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      const hosts = (parsed as Record<string, unknown>).hosts;
+      if (Array.isArray(hosts)) return hosts.filter((h): h is string => typeof h === "string");
+    }
+  } catch {
+    // A malformed value is treated as no scope.
   }
   return [];
 }

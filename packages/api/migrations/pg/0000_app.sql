@@ -985,6 +985,7 @@ CREATE TABLE "security_engagements" (
 	"config_personas" text,
 	"config_persona_markdown" text,
 	"config_tools" text,
+	"authorized_scope" text,
 	"has_repo_config" boolean DEFAULT false NOT NULL,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL

@@ -554,6 +554,7 @@ sessionsRouter.post("/", async (c) => {
                     ? { personaMarkdown: repoConfig.personaMarkdown }
                     : {}),
                   ...(repoConfig.tools !== undefined ? { tools: repoConfig.tools } : {}),
+                  ...(repoConfig.scope !== undefined ? { scope: repoConfig.scope } : {}),
                 },
               }
             : {}),

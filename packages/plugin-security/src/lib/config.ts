@@ -11,10 +11,11 @@ import { serializePlan } from "./presets.js";
  * through the GitHub contents API at create time and seeds the plan from it,
  * with the bundled presets as the fallback.
  *
- * M-F1 parses, stores, and exposes every field. Only `steps` feed the plan
- * this milestone; `focus`, `invariants`, `categories`, `personas`, and `tools`
- * are stored on the engagement for later milestones (M-F3 invariants, M-P2a
- * categories, M-P4 tools). Nothing here wires them into prompts yet.
+ * M-F1 parses `focus`, `invariants`, `categories`, `personas`, `steps`.
+ * M-P4a firms up `tools` into structured `ToolDecl`s and adds `scope` (the
+ * authorized live-testing hosts). `steps` seed the plan; the rest are stored on
+ * the engagement for the milestone that consumes them (M-F3 invariants, M-P2a
+ * categories, M-P4a tools + provisioning, M-P4b live personas + scope).
  */
 export interface SecurityConfig {
   /** Schema version. Must be 1. */
@@ -31,14 +32,97 @@ export interface SecurityConfig {
   personas?: Record<string, string>;
   /** The ordered review steps. Seed the plan from these when present. */
   steps?: PlanCell[];
-  /** Declared tools a step needs (M-P4). */
-  tools?: string[];
+  /** Declared tools a step needs (M-P4a). Each item normalizes to a `ToolDecl`,
+   * so a bare string `gitleaks` becomes `{ id: "gitleaks" }`. */
+  tools?: ToolDecl[];
+  /** The authorized live-testing scope (M-P4b): the hosts the live personas
+   * (dast/fuzz/exploit) may reach. A live persona must NEVER act outside this
+   * scope, and a declared tool's egress must fall inside it. Absent means no
+   * live testing is authorized — the dispatch prompt says so, and a live
+   * persona has no target. */
+  scope?: SecurityScope;
+}
+
+/**
+ * One declared tool a step needs (M-P4a). The mechanism accepts the decl; the
+ * host provisions it. `id` is the only required field.
+ *
+ *   - `install` — a shell command the sandbox prep runs to install the tool
+ *     (a per-repo install path; a common tool is baked into the image instead).
+ *   - `image` — a container image the tool runs from (provisioning DATA the
+ *     mechanism records; wiring a specific scanner container is deferred).
+ *   - `mcp` — an MCP server the host wires into the persona child's tool set
+ *     (a URL, plus the tool-name prefix the server's tools carry).
+ *   - `egress` — the hosts the tool needs to reach. Every egress host MUST be
+ *     within the engagement's authorized `scope`; `parseSecurityConfig` refuses
+ *     a decl whose egress escapes scope.
+ */
+export interface ToolDecl {
+  /** The tool id (a short name: `gitleaks`, `nuclei`, `zap`). */
+  id: string;
+  /** A shell command that installs the tool at sandbox prep (optional). */
+  install?: string;
+  /** A container image the tool runs from (optional; recorded, not yet run). */
+  image?: string;
+  /** An MCP server to wire into the persona child (optional). */
+  mcp?: McpToolDecl;
+  /** Hosts the tool reaches. Must be within the authorized scope (optional). */
+  egress?: string[];
+}
+
+/** An MCP server a declared tool attaches (M-P4a). The host wires it into the
+ * persona child's tool set through the same MCP client other plugins use. */
+export interface McpToolDecl {
+  /** The MCP server URL the client connects to. */
+  url: string;
+  /** The prefix the server's tools carry in the child's tool list (for example
+   * `mcp__nuclei__`). Defaults to the tool id when absent. */
+  prefix?: string;
+}
+
+/** The authorized live-testing scope (M-P4b): the hosts the live personas may
+ * hit, human-declared in `.valet/security.yml`. A live finding or action
+ * outside these hosts is forbidden by the persona role and by the egress gate. */
+export interface SecurityScope {
+  /** The authorized hosts (bare host or host:port; no scheme). A live persona
+   * probes ONLY these. At least one host when `scope` is present. */
+  hosts: string[];
 }
 
 const CORRECTIVE = "Fix .valet/security.yml and commit it, or remove it to use a preset.";
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((v) => typeof v === "string");
+}
+
+/** Normalize an authorized-scope host to a bare host for the egress check: drop
+ * a scheme, a path, and surrounding whitespace, keep an explicit port. So
+ * `https://api.example.com/v1` and `api.example.com` both compare as
+ * `api.example.com`. Returns "" for an empty or malformed value. */
+export function normalizeScopeHost(raw: string): string {
+  let host = raw.trim();
+  if (host === "") return "";
+  const scheme = host.indexOf("://");
+  if (scheme !== -1) host = host.slice(scheme + 3);
+  const slash = host.indexOf("/");
+  if (slash !== -1) host = host.slice(0, slash);
+  return host.toLowerCase();
+}
+
+/** True when `egressHost` is inside the authorized scope: its normalized host
+ * equals an authorized host, OR is a subdomain of one (so `scope: example.com`
+ * covers `api.example.com`). An empty scope host list authorizes nothing. */
+export function egressHostInScope(egressHost: string, scopeHosts: readonly string[]): boolean {
+  const host = normalizeScopeHost(egressHost);
+  if (host === "") return false;
+  return scopeHosts.some((s) => {
+    const authorized = normalizeScopeHost(s);
+    if (authorized === "") return false;
+    if (host === authorized) return true;
+    // Subdomain match: strip an authorized port before the suffix check.
+    const bare = authorized.split(":")[0];
+    return bare !== "" && host.endsWith(`.${bare}`);
+  });
 }
 
 /**
@@ -98,11 +182,32 @@ export function parseSecurityConfig(yaml: string, knownPersonas: readonly string
     config.categories = map.categories;
   }
 
-  if (map.tools !== undefined) {
-    if (!isStringArray(map.tools)) {
-      throw new Error(`.valet/security.yml "tools" must be a list of strings. ${CORRECTIVE}`);
+  // Authorized live-testing scope (M-P4b). Parse it before tools so a declared
+  // tool's egress can validate against it.
+  let scopeHosts: string[] = [];
+  if (map.scope !== undefined) {
+    if (typeof map.scope !== "object" || map.scope === null || Array.isArray(map.scope)) {
+      throw new Error(
+        `.valet/security.yml "scope" must be a map with a "hosts" list. ${CORRECTIVE}`,
+      );
     }
-    config.tools = map.tools;
+    const rawHosts = (map.scope as Record<string, unknown>).hosts;
+    if (!isStringArray(rawHosts) || rawHosts.length === 0) {
+      throw new Error(
+        `.valet/security.yml "scope.hosts" must be a non-empty list of authorized hosts. ${CORRECTIVE}`,
+      );
+    }
+    scopeHosts = rawHosts.map((h) => h.trim()).filter((h) => h !== "");
+    if (scopeHosts.length === 0) {
+      throw new Error(
+        `.valet/security.yml "scope.hosts" must name at least one authorized host. ${CORRECTIVE}`,
+      );
+    }
+    config.scope = { hosts: scopeHosts };
+  }
+
+  if (map.tools !== undefined) {
+    config.tools = parseToolDecls(map.tools, scopeHosts);
   }
 
   let personaKeys: string[] = [];
@@ -148,6 +253,88 @@ export function parseSecurityConfig(yaml: string, knownPersonas: readonly string
   }
 
   return config;
+}
+
+/**
+ * Parse and validate the `tools` list into `ToolDecl`s (M-P4a). Each item is a
+ * bare string (a tool id, no install/mcp/egress) OR a map with `id` and the
+ * optional `install`/`image`/`mcp`/`egress` fields. Every declared egress host
+ * MUST be within the authorized `scope.hosts`; a decl whose egress escapes
+ * scope is a config error, so live tooling can never be told to reach a host
+ * the human never authorized.
+ */
+export function parseToolDecls(value: unknown, scopeHosts: readonly string[]): ToolDecl[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`.valet/security.yml "tools" must be a list. ${CORRECTIVE}`);
+  }
+  return value.map((raw, i) => parseToolDecl(raw, i, scopeHosts));
+}
+
+function parseToolDecl(raw: unknown, index: number, scopeHosts: readonly string[]): ToolDecl {
+  const where = `.valet/security.yml tools[${index}]`;
+  if (typeof raw === "string") {
+    const id = raw.trim();
+    if (id === "") throw new Error(`${where} must be a non-empty tool id. ${CORRECTIVE}`);
+    return { id };
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error(`${where} must be a tool id or a map with an "id". ${CORRECTIVE}`);
+  }
+  const map = raw as Record<string, unknown>;
+  if (typeof map.id !== "string" || map.id.trim() === "") {
+    throw new Error(`${where} must have a non-empty "id". ${CORRECTIVE}`);
+  }
+  const decl: ToolDecl = { id: map.id.trim() };
+  if (map.install !== undefined) {
+    if (typeof map.install !== "string" || map.install.trim() === "") {
+      throw new Error(`${where} "install" must be a non-empty command. ${CORRECTIVE}`);
+    }
+    decl.install = map.install;
+  }
+  if (map.image !== undefined) {
+    if (typeof map.image !== "string" || map.image.trim() === "") {
+      throw new Error(`${where} "image" must be a non-empty image ref. ${CORRECTIVE}`);
+    }
+    decl.image = map.image.trim();
+  }
+  if (map.mcp !== undefined) {
+    if (typeof map.mcp !== "object" || map.mcp === null || Array.isArray(map.mcp)) {
+      throw new Error(`${where} "mcp" must be a map with a "url". ${CORRECTIVE}`);
+    }
+    const mcp = map.mcp as Record<string, unknown>;
+    if (typeof mcp.url !== "string" || mcp.url.trim() === "") {
+      throw new Error(`${where} "mcp.url" must be a non-empty URL. ${CORRECTIVE}`);
+    }
+    const mcpDecl: McpToolDecl = { url: mcp.url.trim() };
+    if (mcp.prefix !== undefined) {
+      if (typeof mcp.prefix !== "string" || mcp.prefix.trim() === "") {
+        throw new Error(`${where} "mcp.prefix" must be a non-empty string. ${CORRECTIVE}`);
+      }
+      mcpDecl.prefix = mcp.prefix.trim();
+    }
+    decl.mcp = mcpDecl;
+  }
+  if (map.egress !== undefined) {
+    if (!isStringArray(map.egress)) {
+      throw new Error(`${where} "egress" must be a list of hosts. ${CORRECTIVE}`);
+    }
+    const egress = map.egress.map((h) => h.trim()).filter((h) => h !== "");
+    // Scoped-egress gate (M-P4b): a declared egress host must sit within the
+    // authorized scope. Refuse a tool that would reach outside it, so live
+    // tooling is never told to hit a host the human never authorized.
+    for (const host of egress) {
+      if (!egressHostInScope(host, scopeHosts)) {
+        const authorized = scopeHosts.length > 0 ? scopeHosts.join(", ") : "(none declared)";
+        throw new Error(
+          `${where} egress host "${host}" is outside the authorized scope [${authorized}]. ` +
+            "Add the host to scope.hosts, or remove it from the tool's egress. " +
+            CORRECTIVE,
+        );
+      }
+    }
+    if (egress.length > 0) decl.egress = egress;
+  }
+  return decl;
 }
 
 /** Serialize a raw `steps` list back to plan YAML so `parsePlan` can validate
