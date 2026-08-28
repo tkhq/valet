@@ -92,20 +92,26 @@ describe("SecurityNewPage", () => {
     expect(enabled).toBe(true);
   });
 
-  it("prefills the config form and plan editor from the preview", async () => {
+  it("prefills the config form (Focus step) and the plan editor (Plan step)", async () => {
     render(<SecurityNewPage />);
+    // Step 1 (Focus): the config form is prefilled from the preview.
     await waitFor(() =>
       expect((screen.getByLabelText("Focus (optional)") as HTMLTextAreaElement).value).toBe(
         "the multi-tenant data path",
       ),
     );
+    // Advance to the Plan step; the editor shows the 2 seeded steps.
+    fireEvent.click(screen.getByRole("button", { name: /Next: Plan/ }));
     const steps = screen.getAllByTestId("plan-step");
     expect(steps).toHaveLength(2);
   });
 
-  it("Start review creates the session with the final config + plan and navigates", async () => {
+  it("walks the wizard and Start creates the session with the final config + plan", async () => {
     render(<SecurityNewPage />);
     await screen.findByTestId("config-form");
+    // Focus → Plan → Review, then Start.
+    fireEvent.click(screen.getByRole("button", { name: /Next: Plan/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Next: Review/ }));
     fireEvent.click(screen.getByRole("button", { name: "Start review" }));
 
     expect(createMutate).toHaveBeenCalledTimes(1);
