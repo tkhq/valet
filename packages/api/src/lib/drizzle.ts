@@ -387,6 +387,9 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
       "config_persona_markdown" text,
       "config_tools" text,
       "has_repo_config" boolean DEFAULT false NOT NULL,
+      "report_markdown" text,
+      "report_json" text,
+      "report_generated_at" bigint,
       "created_at" bigint NOT NULL,
       "updated_at" bigint NOT NULL
     )`,
@@ -459,6 +462,24 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     describe: "security_engagements.has_repo_config column",
     probe: { kind: "column", table: "security_engagements", column: "has_repo_config" },
     sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "has_repo_config" boolean DEFAULT false NOT NULL',
+  },
+  {
+    // The report artifact (M-P3): the report cell writes the markdown report and
+    // its JSON snapshot; both stay null until it runs. Separate column repairs
+    // because the whole-table CREATE does not add a column to an existing table.
+    describe: "security_engagements.report_markdown column",
+    probe: { kind: "column", table: "security_engagements", column: "report_markdown" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "report_markdown" text',
+  },
+  {
+    describe: "security_engagements.report_json column",
+    probe: { kind: "column", table: "security_engagements", column: "report_json" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "report_json" text',
+  },
+  {
+    describe: "security_engagements.report_generated_at column",
+    probe: { kind: "column", table: "security_engagements", column: "report_generated_at" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "report_generated_at" bigint',
   },
   {
     describe: "security_engagements_parent index",

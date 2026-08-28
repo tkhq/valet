@@ -102,6 +102,7 @@ import {
   type CellProgress,
   type FindingSeverity,
   type FindingStatus,
+  type SecurityReport,
   type SpawnCellChild,
 } from "../services/security-engagements.js";
 import {
@@ -141,6 +142,9 @@ import type {
   SecurityHandoffResponse,
   SecurityHandoffWire,
   SecurityReportFindingResponse,
+  SecurityReportWire,
+  GetSecurityReportResponse,
+  SecurityWriteReportResponse,
   SecurityPlanCellWire,
   SecurityReviewFindingResponse,
   SecuritySetConfigResponse,
@@ -363,6 +367,16 @@ function coverageToWire(row: SecurityCoverageRow): SecurityCoverageWire {
   };
 }
 
+/** The report artifact (M-P3) → wire. `json` is already the parsed snapshot
+ * (or null on a parse failure); the wire ships it verbatim. */
+function reportToWire(report: SecurityReport): SecurityReportWire {
+  return {
+    markdown: report.markdown,
+    json: report.json,
+    generatedAt: report.generatedAt,
+  };
+}
+
 const NO_ENGAGEMENT =
   "This session has no security engagement. Create the session with kind 'security' to start one.";
 
@@ -383,12 +397,15 @@ securityRouter.get("/:id/security", async (c) => {
   // The re-scan diff (re-scan / iterate) — null unless this engagement
   // re-scans a prior one. `fixedCount` stays null until the scan is terminal.
   const diff = await security.diffEngagement(result.engagement.id);
+  // The report artifact (M-P3): null until the report cell runs.
+  const report = await security.getReport(result.engagement.id);
   const body: GetSessionSecurityResponse = {
     engagement: engagementToWire(result.engagement),
     cells: result.cells.map((cell) => cellToWire(cell, progress)),
     cost,
     planCells: planCellsToWire(result.engagement),
     ...(diff ? { diff } : {}),
+    report: report ? reportToWire(report) : null,
   };
   return c.json(body);
 });
@@ -1268,6 +1285,8 @@ securityRouter.post("/:id/security/start", async (c) => {
       // Just started: the runner may have spent tokens, cell children none yet.
       cost: await security.getEngagementCost(started.engagement.id),
       planCells: planCellsToWire(started.engagement),
+      // Just started: the report cell has not run.
+      report: null,
     };
     return c.json(response);
   } catch (err) {
@@ -1699,6 +1718,131 @@ securityRouter.post("/:id/security/coverage", async (c) => {
   }
 });
 
+/**
+ * POST /:id/security/report — the report artifact write (M-P3). A persona seam
+ * resolved from the cell claim, restricted to the REPORT cell: only the report
+ * persona writes the engagement report. Body: { markdown, json } where json is
+ * validated as an object (never an array or scalar — the snapshot is a record).
+ * A non-report persona cell, or a non-persona (runner) session, is refused.
+ */
+securityRouter.post("/:id/security/report", async (c) => {
+  const sessionId = c.req.param("id");
+  const resolved = await resolvePersonaActor(c, sessionId);
+  if ("failure" in resolved) return resolved.failure;
+  const { security, engagement, cell } = resolved.ok;
+
+  // Only the report cell writes the report. A sweep persona (or a
+  // prompt-injected one) must not overwrite the engagement report.
+  if (cell.persona !== "report") {
+    return c.json(
+      { error: "Only the report cell may write the engagement report. This is not a report cell." },
+      403,
+    );
+  }
+
+  const body = await readJsonBody(c);
+  if (typeof body.markdown !== "string" || body.markdown.trim() === "") {
+    return c.json({ error: "Send { markdown } — the report body. It must be non-empty." }, 400);
+  }
+  if (typeof body.json !== "object" || body.json === null || Array.isArray(body.json)) {
+    return c.json(
+      { error: "json must be an object (the machine-readable snapshot), not an array or scalar." },
+      400,
+    );
+  }
+
+  try {
+    const report = await security.writeReport(engagement.id, {
+      markdown: body.markdown,
+      json: body.json,
+    });
+    const response: SecurityWriteReportResponse = { report: reportToWire(report) };
+    return c.json(response);
+  } catch (err) {
+    return serviceError(c, err);
+  }
+});
+
+/**
+ * GET /:id/security/report — the report artifact (M-P3), or null. View-gated
+ * for the panel. A viewer reads the report; the internal-token (runner/persona)
+ * path is not accepted here — this is the human read surface. `report` is null
+ * until the report cell runs.
+ */
+securityRouter.get("/:id/security/report", async (c) => {
+  const sessionId = c.req.param("id");
+  const row = await resolveViewableSession(c, sessionId);
+  if (!row) return c.json({ error: "session not found" }, 404);
+
+  const { db } = c.var.providers;
+  const security = createSecurityEngagementService({ db });
+  const result = await security.getEngagementBySession(sessionId);
+  if (!result) return c.json({ error: NO_ENGAGEMENT }, 404);
+
+  const report = await security.getReport(result.engagement.id);
+  const body: GetSecurityReportResponse = { report: report ? reportToWire(report) : null };
+  return c.json(body);
+});
+
+/**
+ * GET /:id/security/report/export?format=md|json — download the report
+ * artifact (M-P3). View-gated, human-only (Decision 10 keeps the export
+ * surface human), audit-logged. `md` serves the markdown report; `json` serves
+ * the machine-readable snapshot. A 404 when the report cell never ran.
+ */
+securityRouter.get("/:id/security/report/export", async (c) => {
+  const sessionId = c.req.param("id");
+  const resolved = await resolveHumanSession(c, sessionId, "view");
+  if ("failure" in resolved) return resolved.failure;
+  const { user } = resolved.ok;
+
+  const format = c.req.query("format");
+  if (format !== "md" && format !== "json") {
+    return c.json({ error: "format must be md or json." }, 400);
+  }
+
+  const loaded = await loadEngagementOr404(c, sessionId);
+  if ("failure" in loaded) return loaded.failure;
+  const { security, result } = loaded;
+  const { db } = c.var.providers;
+
+  const report = await security.getReport(result.engagement.id);
+  if (!report) {
+    return c.json(
+      { error: "No report yet. The report cell must run before you can export the report." },
+      404,
+    );
+  }
+
+  const payload =
+    format === "md" ? report.markdown : JSON.stringify(report.json, null, 2);
+
+  // Audit event, same sink as the findings export (spec §Export).
+  await persistInvocationAudit(db, {
+    invocationId: `sec:report-export:${randomUUID()}`,
+    service: "valet-security",
+    actionId: "security.report.export",
+    status: "completed",
+    sessionId,
+    userId: user.id,
+    orgId: user.orgId,
+    params: { format, engagementId: result.engagement.id },
+  });
+
+  const meta = REPORT_EXPORT_FORMATS[format];
+  c.header("Content-Type", meta.contentType);
+  c.header(
+    "Content-Disposition",
+    `attachment; filename="valet-security-report-${result.engagement.id}.${meta.ext}"`,
+  );
+  return c.body(payload);
+});
+
+const REPORT_EXPORT_FORMATS = {
+  md: { contentType: "text/markdown; charset=utf-8", ext: "md" },
+  json: { contentType: "application/json", ext: "json" },
+} as const;
+
 // ── M6: human triage routes ────────────────────────────────────────────────
 //
 // Decision 10 (spec §Filing issues, threat 11): review, export, and issue
@@ -1917,12 +2061,15 @@ securityRouter.post("/:id/security/cancel", async (c) => {
 
   // Re-read cells so the response reflects the cancel's failed-cell writes.
   const after = await security.getEngagement(cancelled.engagement.id);
+  const report = await security.getReport(cancelled.engagement.id);
   const response: GetSessionSecurityResponse = {
     engagement: engagementToWire(cancelled.engagement),
     cells: (after?.cells ?? []).map((cell) => cellToWire(cell, null)),
     // The review's spend to the point of cancel — the panel keeps showing it.
     cost: await security.getEngagementCost(cancelled.engagement.id),
     planCells: planCellsToWire(cancelled.engagement),
+    // A report is present only if the report cell ran before the cancel.
+    report: report ? reportToWire(report) : null,
   };
   return c.json(response);
 });

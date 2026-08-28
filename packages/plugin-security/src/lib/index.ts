@@ -20,6 +20,7 @@ export {
   bundledPersona,
   ARCHITECT_PERSONA,
   VERIFIER_PERSONA,
+  REPORT_PERSONA,
 } from "./personas.js";
 export type { SecurityPersona } from "./personas.js";
 export { expandTriads, hasTriad } from "./triad.js";

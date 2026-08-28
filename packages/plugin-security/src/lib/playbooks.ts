@@ -21,6 +21,7 @@ export const KNOWN_PLAYBOOKS = [
   "threat-model",
   "attack-tree",
   "sast",
+  "report",
 ] as const;
 
 export type PlaybookName = (typeof KNOWN_PLAYBOOKS)[number];
@@ -54,6 +55,8 @@ function readPlaybook(name: PlaybookName): string {
       return readFileSync(new URL("../../playbooks/attack-tree.md", import.meta.url), "utf8");
     case "sast":
       return readFileSync(new URL("../../playbooks/sast.md", import.meta.url), "utf8");
+    case "report":
+      return readFileSync(new URL("../../playbooks/report.md", import.meta.url), "utf8");
   }
 }
 

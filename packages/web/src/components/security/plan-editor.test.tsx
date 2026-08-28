@@ -95,6 +95,7 @@ const planningSecurity: GetSessionSecurityResponse = {
   planCells: PLAN_CELLS,
   cells: [],
   cost: { costUsd: 0, totalTokens: 0, priced: true },
+  report: null,
 };
 
 const session: GetSessionResponse = {

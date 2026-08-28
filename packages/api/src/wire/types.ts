@@ -310,6 +310,31 @@ export interface GetSessionSecurityResponse {
   /** The re-scan diff, when this engagement re-scans a prior one. Absent on a
    * first review. */
   diff?: SecurityDiffWire;
+  /** The report artifact (M-P3): the markdown report, its JSON snapshot, and
+   * the generation time. Null until the report cell runs. */
+  report: SecurityReportWire | null;
+}
+
+/** The engagement report artifact (M-P3). The report cell writes `markdown`
+ * (the multi-audience report) and `json` (a machine-readable snapshot) with
+ * `sec_report_write`. `generatedAt` is the write time. */
+export interface SecurityReportWire {
+  markdown: string;
+  /** The machine-readable JSON snapshot object (parsed). Null when the stored
+   * snapshot failed to parse — the markdown stays the primary artifact. */
+  json: unknown;
+  generatedAt: number;
+}
+
+/** GET /api/sessions/:id/security/report — the report artifact or null. */
+export interface GetSecurityReportResponse {
+  report: SecurityReportWire | null;
+}
+
+/** POST /api/sessions/:id/security/report — the stored report (persona,
+ * report cell only). */
+export interface SecurityWriteReportResponse {
+  report: SecurityReportWire;
 }
 
 export interface SecurityFindingWire {
@@ -504,6 +529,8 @@ export interface SecurityManifestWire {
   }>;
   /** Coverage honesty (M-P2d): assessed/not_assessed counts + the gap list. */
   coverage: SecurityCoverageRollupWire;
+  /** The report artifact (M-P3): present when the report cell wrote one. */
+  report: SecurityReportWire | null;
   findings: {
     total: number;
     distinctBySeverity: Record<SecurityFindingSeverity, number>;

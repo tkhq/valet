@@ -209,7 +209,8 @@ describe("securityKickoffPrompt", () => {
 describe("full-pentest preset (M-P2c)", () => {
   it("round-trips through parsePlan with the model personas in order", () => {
     const plan = parsePlan(presetPlan("full-pentest"), KNOWN_PERSONAS);
-    // Recon, threat-model, four sweeps, attack-tree, verify — 8 pre-expansion.
+    // Recon, threat-model, four sweeps, attack-tree, verify, report — 9
+    // pre-expansion. The report cell (M-P3) is the final cell after verify.
     expect(plan.cells.map((c) => c.name)).toEqual([
       "recon",
       "threat-model",
@@ -219,6 +220,7 @@ describe("full-pentest preset (M-P2c)", () => {
       "injection-sweep",
       "attack-tree",
       "verify",
+      "report",
     ]);
     expect(plan.cells.map((c) => c.persona)).toEqual([
       "code-review",
@@ -229,6 +231,7 @@ describe("full-pentest preset (M-P2c)", () => {
       "code-review",
       "attack-tree",
       "code-review",
+      "report",
     ]);
     // Each cell names its own playbook.
     expect(plan.cells.map((c) => c.playbook)).toEqual([
@@ -240,7 +243,17 @@ describe("full-pentest preset (M-P2c)", () => {
       "injection",
       "attack-tree",
       "verify",
+      "report",
     ]);
+    // The report cell is last, reads every prior ordinal, and is NOT a review
+    // cell — it composes over the whole engagement, it does not flip statuses.
+    const report = plan.cells[plan.cells.length - 1];
+    expect(report.name).toBe("report");
+    // A non-review cell — the report composes, it does not flip statuses. The
+    // parser leaves `review` unset (never `true`) for a cell that omits it.
+    expect(report.review).not.toBe(true);
+    expect(report.triad).toBeUndefined();
+    expect(report.reads).toEqual(Array.from({ length: plan.cells.length - 1 }, (_, i) => i + 1));
   });
 
   it("marks the code-heavy sweeps as triads and the model cells as single", () => {
@@ -251,6 +264,7 @@ describe("full-pentest preset (M-P2c)", () => {
     expect(byName.get("attack-tree")?.triad).toBeUndefined();
     expect(byName.get("recon")?.triad).toBeUndefined();
     expect(byName.get("verify")?.triad).toBeUndefined();
+    expect(byName.get("report")?.triad).toBeUndefined();
     for (const name of ["code-review", "sast", "authz-sweep", "injection-sweep"]) {
       expect(byName.get(name)?.triad).toBe(true);
     }
@@ -259,19 +273,20 @@ describe("full-pentest preset (M-P2c)", () => {
   it("expands the four triads within MAX_PLAN_CELLS with the right persona ordering", () => {
     const plan = parsePlan(presetPlan("full-pentest"), KNOWN_PERSONAS);
     const expanded = expandTriads(plan.cells);
-    // 1 recon + 1 threat-model + 4*3 triad cells + 1 attack-tree + 1 verify.
-    expect(expanded).toHaveLength(16);
+    // 1 recon + 1 threat-model + 4*3 triad cells + 1 attack-tree + 1 verify +
+    // 1 report (M-P3, the final cell).
+    expect(expanded).toHaveLength(17);
     expect(expanded.length).toBeLessThanOrEqual(MAX_PLAN_CELLS);
     // Dense ordinals, no triad flags survive, earlier-only reads (re-parses).
     expect(expanded.map((c) => c.ordinal)).toEqual(
-      Array.from({ length: 16 }, (_, i) => i + 1),
+      Array.from({ length: 17 }, (_, i) => i + 1),
     );
     expect(expanded.every((c) => c.triad === undefined)).toBe(true);
     // The expanded plan is itself a valid plan.
     const reparsed = parsePlan(serializePlan(expanded), KNOWN_PERSONAS);
-    expect(reparsed.cells).toHaveLength(16);
+    expect(reparsed.cells).toHaveLength(17);
     // Persona ordering after expansion: recon, threat-model, then each triad as
-    // architect → worker → verifier, then attack-tree, then verify.
+    // architect → worker → verifier, then attack-tree, then verify, then report.
     expect(expanded.map((c) => c.persona)).toEqual([
       "code-review", // recon
       "threat-model", // model cell
@@ -289,6 +304,7 @@ describe("full-pentest preset (M-P2c)", () => {
       "verifier",
       "attack-tree", // model cell
       "code-review", // verify
+      "report", // the report cell
     ]);
   });
 });

@@ -17,6 +17,7 @@ describe("plugin manifest", () => {
       "threat-model",
       "attack-tree",
       "sast",
+      "report",
     ]);
   });
 

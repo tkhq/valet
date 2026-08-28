@@ -2,6 +2,7 @@ import {
   ATTACK_TREE_PERSONA,
   bundledPersonaIds,
   CODE_REVIEW_PERSONA,
+  REPORT_PERSONA,
   SAST_PERSONA,
   THREAT_MODEL_PERSONA,
 } from "./personas.js";
@@ -48,7 +49,7 @@ export const SECURITY_PRESETS: readonly SecurityPreset[] = [
     id: "full-pentest",
     label: "Full pentest",
     description:
-      "Recon, threat model, code review, SAST, access control, injection (triads), attack tree, verify. The model half of a full pentest.",
+      "Recon, threat model, code review, SAST, access control, injection (triads), attack tree, verify, report. The model half of a full pentest.",
   },
 ] as const;
 
@@ -210,6 +211,20 @@ const ATTACK_TREE: SweepDef = {
   goal: "Compose attack chains from the confirmed findings and the threat model; surface multi-step paths",
 };
 
+/** The report cell (M-P3). Runs as the FINAL cell, AFTER verify: it reads the
+ * whole engagement (recon, the findings with their verdicts, the coverage
+ * ledger, handoffs) and writes the markdown report + JSON snapshot with
+ * `sec_report_write`. `review: false` — it composes, it does not flip statuses.
+ * A single cell, never a triad. Appended by `buildPresetCells` when `opts.report`
+ * is set, so it reads every prior ordinal including verify. */
+const REPORT: SweepDef = {
+  name: "report",
+  playbook: "report",
+  persona: REPORT_PERSONA,
+  triad: false,
+  goal: "Read the whole engagement — recon, confirmed findings, coverage ledger, verify verdict — and write the report artifact",
+};
+
 /** The middle sweeps of each preset, in order. Recon (cell 1) and verify (last
  * cell) bookend every preset and are added by `buildPresetCells`. */
 const PRESET_SWEEPS: Record<string, SweepDef[]> = {
@@ -218,11 +233,17 @@ const PRESET_SWEEPS: Record<string, SweepDef[]> = {
   "access-injection": [AUTHZ, INJECTION],
   // The full pentest: threat model early (single cell), then the code-heavy
   // triads (code review, SAST, access control, injection), then attack tree
-  // (single cell) composing the chains, then the engagement verify. Recon and
-  // verify bookend as always. Post-triad expansion the plan stays under
-  // MAX_PLAN_CELLS (asserted in presets.test.ts).
+  // (single cell) composing the chains, then the engagement verify, then the
+  // report cell. Recon and verify bookend as always. Post-triad expansion the
+  // plan stays under MAX_PLAN_CELLS (asserted in presets.test.ts).
   "full-pentest": [THREAT_MODEL, CODE_REVIEW_SWEEP, SAST_SWEEP, AUTHZ, INJECTION, ATTACK_TREE],
 };
+
+/** Presets whose plan ends in a report cell (M-P3). The report cell runs AFTER
+ * verify and reads every prior ordinal, so it composes over the whole
+ * engagement. Only `full-pentest` ends in a report today; the narrower presets
+ * skip it to stay fast. */
+const PRESET_HAS_REPORT: ReadonlySet<string> = new Set(["full-pentest"]);
 
 /**
  * Escape a scalar for a YAML double-quoted string. Goals and paths are plain
@@ -267,7 +288,7 @@ export function serializePlan(cells: PlanCell[]): string {
  * plan itself stays compact (one cell per phase); the expansion is the
  * materialization step. Recon and the final verify stay single cells.
  */
-function buildPresetCells(sweeps: SweepDef[], opts?: { paths?: string[] }): PlanCell[] {
+function buildPresetCells(sweeps: SweepDef[], opts?: { paths?: string[]; report?: boolean }): PlanCell[] {
   const paths = opts?.paths && opts.paths.length > 0 ? opts.paths : undefined;
   const cells: PlanCell[] = [];
 
@@ -301,6 +322,23 @@ function buildPresetCells(sweeps: SweepDef[], opts?: { paths?: string[] }): Plan
     review: true,
   });
 
+  // The report cell (M-P3) runs as the FINAL cell, after verify. It reads every
+  // prior ordinal (including verify) so it composes over the whole engagement.
+  // `review: false` and never a triad — it writes the report artifact, it does
+  // not flip finding statuses. The middle-sweep path globs never reach it:
+  // report reads the tree, not the clone.
+  if (opts?.report) {
+    const reportOrdinal = verifyOrdinal + 1;
+    const { persona: reportPersona, triad: _reportTriad, ...reportFields } = REPORT;
+    cells.push({
+      ordinal: reportOrdinal,
+      persona: reportPersona ?? REPORT_PERSONA,
+      mode: "fresh",
+      ...reportFields,
+      reads: Array.from({ length: reportOrdinal - 1 }, (_, i) => i + 1),
+    });
+  }
+
   return cells;
 }
 
@@ -319,5 +357,5 @@ export function presetPlan(id: string, opts?: { paths?: string[] }): string {
   }
   const hasPaths = opts?.paths && opts.paths.length > 0;
   if (id === "code-review" && !hasPaths) return codeReviewPresetPlan();
-  return serializePlan(buildPresetCells(sweeps, opts));
+  return serializePlan(buildPresetCells(sweeps, { ...opts, report: PRESET_HAS_REPORT.has(id) }));
 }

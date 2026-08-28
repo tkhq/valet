@@ -12,6 +12,7 @@ describe("playbooks", () => {
       "threat-model",
       "attack-tree",
       "sast",
+      "report",
     ]);
   });
 

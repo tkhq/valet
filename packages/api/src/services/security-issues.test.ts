@@ -48,6 +48,9 @@ const ENGAGEMENT: SecurityEngagementRow = {
   configPersonaMarkdown: null,
   configTools: null,
   hasRepoConfig: false,
+  reportMarkdown: null,
+  reportJson: null,
+  reportGeneratedAt: null,
   createdAt: 1_000,
   updatedAt: 2_000,
 };
