@@ -12,10 +12,11 @@ import type {
   PatchArtifactRequest,
   ShareArtifactResponse,
 } from "@valet/api/wire";
-import { api, ApiError } from "./client";
+import { api, ApiError, type OwnerFilter } from "./client";
 
 export const qkArtifacts = {
-  list: () => ["artifacts", "list"] as const,
+  list: (owner?: OwnerFilter) =>
+    ["artifacts", "list", ...(owner ? [owner.ownerType, owner.ownerId] : [])] as const,
   byToken: (token: string) => ["artifacts", "token", token] as const,
 };
 
@@ -33,10 +34,13 @@ export function useArtifact(token: string, opts?: Partial<UseQueryOptions<GetArt
   });
 }
 
-export function useArtifacts(opts?: Partial<UseQueryOptions<ListArtifactsResponse>>) {
+export function useArtifacts(
+  owner?: OwnerFilter,
+  opts?: Partial<UseQueryOptions<ListArtifactsResponse>>,
+) {
   return useQuery<ListArtifactsResponse>({
-    queryKey: qkArtifacts.list(),
-    queryFn: () => api.listArtifacts(),
+    queryKey: qkArtifacts.list(owner),
+    queryFn: () => api.listArtifacts(owner),
     ...opts,
   });
 }

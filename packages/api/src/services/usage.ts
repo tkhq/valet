@@ -9,6 +9,7 @@ import { eq, inArray, sql, type SQL } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { orgs, users } from "../schema/index.js";
 import { isOrgAdmin } from "./org.js";
+import { isTeamMember } from "./teams.js";
 import type {
   UsageBreakdownResponse,
   UsageBucket,
@@ -48,17 +49,21 @@ function toNum(v: unknown): number {
 // ── Scope ──────────────────────────────────────────────────────────────────
 
 export interface UsageScope {
-  scope: "me" | "org";
+  scope: "me" | "org" | "team";
   isOrg: boolean;
   orgId: string;
   userId: string | null;
+  /** Set for the team scope only: filters `cost_entries` by owner. */
+  teamId: string | null;
 }
 
 /**
  * Resolves the scope for a usage query. `scope=org` covers every member of the
- * org and is org-admin-only (the org feature must be on) — a caller who lacks
- * permission gets `"forbidden"`, which the handler maps to a 403. Anything else
- * is the caller's own spend.
+ * org and is org-admin-only (the org feature must be on). `scope=team:<id>`
+ * covers the team's owned spend and is member-gated (org admins pass too —
+ * the same rule every team read applies). A caller who lacks permission gets
+ * `"forbidden"`, which the handler maps to a 403. Anything else is the
+ * caller's own spend.
  */
 export async function resolveUsageScope(
   db: AppDb,
@@ -69,9 +74,17 @@ export async function resolveUsageScope(
     const features = (rows[0]?.features ?? {}) as { organizations?: boolean };
     const admin = await isOrgAdmin(db, opts.orgId, opts.userId);
     if (!features.organizations || !admin) return "forbidden";
-    return { scope: "org", isOrg: true, orgId: opts.orgId, userId: null };
+    return { scope: "org", isOrg: true, orgId: opts.orgId, userId: null, teamId: null };
   }
-  return { scope: "me", isOrg: false, orgId: opts.orgId, userId: opts.userId };
+  if (opts.requestedScope?.startsWith("team:")) {
+    const teamId = opts.requestedScope.slice("team:".length);
+    if (teamId.length === 0) return "forbidden";
+    const allowed =
+      (await isTeamMember(db, teamId, opts.userId)) || (await isOrgAdmin(db, opts.orgId, opts.userId));
+    if (!allowed) return "forbidden";
+    return { scope: "team", isOrg: false, orgId: opts.orgId, userId: null, teamId };
+  }
+  return { scope: "me", isOrg: false, orgId: opts.orgId, userId: opts.userId, teamId: null };
 }
 
 /**
@@ -83,7 +96,11 @@ export async function resolveUsageScope(
 function scopeWhere(prefix: "" | "ce.", since: number, s: UsageScope): SQL {
   const col = (name: string): SQL => sql.raw(`${prefix}${name}`);
   const userClause = s.userId !== null ? sql` AND ${col("user_id")} = ${s.userId}` : sql``;
-  return sql`${col("created_at")} >= ${since} AND ${col("org_id")} = ${s.orgId}${userClause}`;
+  const teamClause =
+    s.teamId !== null
+      ? sql` AND ${col("owner_type")} = 'team' AND ${col("owner_id")} = ${s.teamId}`
+      : sql``;
+  return sql`${col("created_at")} >= ${since} AND ${col("org_id")} = ${s.orgId}${userClause}${teamClause}`;
 }
 
 // ── Buckets (token-type split + unpriced, shared by every aggregate) ─────────
@@ -218,6 +235,11 @@ export async function getUsageDrillItems(
     }));
   }
   // proxy — group the raw proxy rows by harness (cost_entries has no harness).
+  // `llm_proxy_requests` has no owner columns and every proxy row is
+  // user-owned by construction (the cost_entries view maps proxy rows to
+  // owner_type 'user'), so the team scope can only ever match nothing —
+  // answer without a query the table cannot express.
+  if (scope.teamId !== null) return [];
   const whereProxy = scopeWhere("", since, scope);
   interface Row { harness: string | null; cost_usd: unknown; total_tokens: unknown; turns: unknown }
   const r = (await db.execute(sql`

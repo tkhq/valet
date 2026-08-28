@@ -326,6 +326,21 @@ export interface GetOrchestratorChildrenResponse {
   children: OrchestratorChildSummary[];
 }
 
+/** One row of `GET /api/teams/:id/children` — a child run spawned by ANY of
+ * the team's assistants (team dashboard design), with the assistant that
+ * spawned it, so the feed can attribute the run. */
+export interface TeamChildSummary extends OrchestratorChildSummary {
+  assistantId: string;
+  /** Absent when the assistant is unnamed; the UI applies its label rule. */
+  assistantName?: string;
+}
+
+/** GET /api/teams/:id/children — newest first, capped at 20. Team members
+ * and org admins only; non-members get 404. */
+export interface GetTeamChildrenResponse {
+  children: TeamChildSummary[];
+}
+
 // ── REST: threads ─────────────────────────────────────────────────────────
 
 export interface ThreadSummary {
@@ -2329,13 +2344,18 @@ export interface UsageBucket {
   unpricedTurns: number;
 }
 
-/** `GET /api/usage/breakdown?window=&scope=me|org` — spend for a window across
- * ALL use cases (engine sessions + workflows + proxy), from the single
- * `cost_entries` definition. `scope=org` (org-admin only) covers every member;
- * `byUser` is present only then. */
+/** `?scope=` values the usage routes accept. `team:<id>` (team dashboard
+ * design) is gated on membership in that team (org admins pass too). */
+export type UsageScopeRequest = "me" | "org" | `team:${string}`;
+
+/** `GET /api/usage/breakdown?window=&scope=me|org|team:<id>` — spend for a
+ * window across ALL use cases (engine sessions + workflows + proxy), from
+ * the single `cost_entries` definition. `scope=org` (org-admin only) covers
+ * every member; `byUser` is present only then. `scope=team:<id>` covers the
+ * team's owned spend and reports by use case/model/day, never by member. */
 export interface UsageBreakdownResponse {
   windowMs: number;
-  scope: "me" | "org";
+  scope: "me" | "org" | "team";
   totalCostUsd: number;
   totalTokens: number;
   totalInputTokens: number;

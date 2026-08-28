@@ -9,19 +9,32 @@ import { IdentityFields } from "~/components/assistant/identity-fields";
 import { MemoryCard } from "~/components/assistant/memory-card";
 import { UsageCard } from "~/components/assistant/usage-card";
 import { TeamsCard } from "~/components/assistant/teams-card";
+import { TeamDashboard } from "~/components/dashboard/team-dashboard";
 import { Spinner } from "~/components/primitives";
+import { useWorkspaceScope } from "~/lib/workspace-scope";
 
 /**
- * `/` — the assistant dashboard (assistant-centered web UI, decision 1).
- * Replaces the old flat session-list home (now at `/sessions`, decision 8).
+ * `/` — the dashboard. Follows the workspace switcher, exactly like every
+ * list page (team dashboard design, 2026-08-27): the personal workspace
+ * renders the assistant dashboard (assistant-centered web UI, decision 1);
+ * a team workspace renders the team's activity dashboard.
  *
- * Branches on `GET /api/orchestrator/info`: `name === null` means first
- * visit — an inline, full-page-centered identity step (decision 11); once
- * named, the identity header + card grid + activity strip.
+ * The personal branch works as before: `GET /api/orchestrator/info` with
+ * `name === null` means first visit — an inline, full-page-centered
+ * identity step (decision 11); once named, the identity header + card grid
+ * + activity strip.
  */
 export const Route = createFileRoute("/")({
-  component: Dashboard,
+  component: Home,
 });
+
+export function Home() {
+  const scope = useWorkspaceScope();
+  if (scope.teamId !== undefined) {
+    return <TeamDashboard teamId={scope.teamId} />;
+  }
+  return <Dashboard />;
+}
 
 export function Dashboard() {
   const info = useOrchestratorInfo();

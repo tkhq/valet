@@ -7,23 +7,24 @@ import { useQuery, type UseQueryOptions } from "@tanstack/react-query";
 import type {
   UsageDrillResponse,
   UsageBreakdownResponse,
+  UsageScopeRequest,
   UsageSessionsResponse,
   UsageUseCase,
 } from "@valet/api/wire";
 import { api } from "~/api/client";
 
 export const qkUsage = {
-  breakdown: (window: string, scope: "me" | "org" = "me") =>
+  breakdown: (window: string, scope: UsageScopeRequest = "me") =>
     ["usage", "breakdown", window, scope] as const,
   sessions: (window: string, useCase?: "orchestrator" | "session") =>
     ["usage", "sessions", window, useCase] as const,
-  items: (window: string, scope: "me" | "org", useCase: UsageUseCase) =>
+  items: (window: string, scope: UsageScopeRequest, useCase: UsageUseCase) =>
     ["usage", "items", window, scope, useCase] as const,
 };
 
 export function useUsageBreakdown(
   window: string = "7d",
-  scope: "me" | "org" = "me",
+  scope: UsageScopeRequest = "me",
   opts?: Partial<UseQueryOptions<UsageBreakdownResponse>>,
 ) {
   return useQuery<UsageBreakdownResponse>({
@@ -36,7 +37,7 @@ export function useUsageBreakdown(
 
 export function useUsageItems(
   window: string,
-  scope: "me" | "org",
+  scope: UsageScopeRequest,
   useCase: UsageUseCase,
   opts?: Partial<UseQueryOptions<UsageDrillResponse>>,
 ) {

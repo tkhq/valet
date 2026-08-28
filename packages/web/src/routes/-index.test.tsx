@@ -48,8 +48,27 @@ vi.mock("~/components/assistant/memory-card", () => ({
 vi.mock("~/components/assistant/usage-card", () => ({
   UsageCard: () => <div data-testid="usage-card" />,
 }));
+vi.mock("~/components/dashboard/team-dashboard", () => ({
+  TeamDashboard: ({ teamId }: { teamId: string }) => (
+    <div data-testid="team-dashboard" data-team={teamId} />
+  ),
+}));
 
-import { Dashboard } from "./index";
+// The workspace branch (team dashboard design): `Home` reads the scope and
+// picks a dashboard. Personal is the context default, so only the team
+// arm needs the mock to steer.
+const scopeMock = vi.fn((): { key: string; teamId: string | undefined; available: string[]; setKey: (next: string) => void } => ({
+  key: "user",
+  teamId: undefined,
+  available: ["user"],
+  setKey: vi.fn(),
+}));
+vi.mock("~/lib/workspace-scope", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/lib/workspace-scope")>();
+  return { ...actual, useWorkspaceScope: () => scopeMock() };
+});
+
+import { Dashboard, Home } from "./index";
 
 function renderDashboard() {
   const queryClient = new QueryClient();
@@ -110,5 +129,36 @@ describe("Dashboard", () => {
     renderDashboard();
     expect(screen.queryByTestId("threads-card")).toBeNull();
     expect(screen.queryByText("Meet your assistant")).toBeNull();
+  });
+});
+
+describe("Home (workspace branch)", () => {
+  it("renders the personal dashboard when the scope is personal", () => {
+    scopeMock.mockReturnValue({ key: "user", teamId: undefined, available: ["user"], setKey: vi.fn() });
+    infoMock.mockReturnValue({
+      data: { sessionId: "orchestrator:user-1", name: null, personality: null, presence: "idle", activeChildren: 0 },
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    const queryClient = new QueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Home />
+      </QueryClientProvider>,
+    );
+    expect(screen.queryByTestId("team-dashboard")).toBeNull();
+  });
+
+  it("renders the team dashboard when the scope names a team", () => {
+    scopeMock.mockReturnValue({ key: "team_1", teamId: "team_1", available: ["user", "team_1"], setKey: vi.fn() });
+    const queryClient = new QueryClient();
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Home />
+      </QueryClientProvider>,
+    );
+    const dash = screen.getByTestId("team-dashboard");
+    expect(dash.getAttribute("data-team")).toBe("team_1");
   });
 });

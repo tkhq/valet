@@ -104,7 +104,10 @@ import type {
   ListTeamMembersResponse,
   ListTeamsResponse,
   ListThreadsResponse,
+  ListAllWorkflowRunsResponse,
   ListWorkflowRunsResponse,
+  GetTeamChildrenResponse,
+  UsageScopeRequest,
   ListWorkflowTriggersResponse,
   WorkflowRunOutcome,
   WorkflowRunStatus,
@@ -483,7 +486,10 @@ export const api = {
     request<GetArtifactResponse>("GET", `/artifacts/${encodeURIComponent(token)}`),
   shareArtifact: (body: ShareArtifactRequest) =>
     request<ShareArtifactResponse>("POST", "/artifacts/share", body),
-  listArtifacts: () => request<ListArtifactsResponse>("GET", "/artifacts"),
+  getTeamChildren: (teamId: string) =>
+    request<GetTeamChildrenResponse>("GET", `/teams/${encodeURIComponent(teamId)}/children`),
+  listArtifacts: (owner?: OwnerFilter) =>
+    request<ListArtifactsResponse>("GET", `/artifacts${ownerQuery(owner)}`),
   patchArtifact: (id: string, body: PatchArtifactRequest) =>
     request<PatchArtifactResponse>("PATCH", `/artifacts/${encodeURIComponent(id)}`, body),
   revokeArtifact: (id: string) =>
@@ -647,7 +653,7 @@ export const api = {
   },
   // Cross-workflow run list. `parentRunId` is how a batch parent's child
   // runs come back in one request.
-  listRuns: (opts?: WorkflowRunFilter): Promise<ListWorkflowRunsResponse> => {
+  listRuns: (opts?: WorkflowRunFilter): Promise<ListAllWorkflowRunsResponse> => {
     // An any-of filter with no values matches nothing. A query string cannot
     // carry an empty repeated field, so an unguarded request would drop the
     // filter and list every readable run — the opposite of what was asked.
@@ -663,7 +669,7 @@ export const api = {
     if (opts?.limit) qs.set("limit", String(opts.limit));
     if (opts?.cursor) qs.set("cursor", opts.cursor);
     const tail = qs.toString() ? `?${qs}` : "";
-    return request<ListWorkflowRunsResponse>("GET", `/workflows/runs${tail}`);
+    return request<ListAllWorkflowRunsResponse>("GET", `/workflows/runs${tail}`);
   },
   getWorkflowPermissions: (id: string) =>
     request<GetWorkflowPermissionsResponse>(
@@ -781,15 +787,15 @@ export const api = {
   patchMe: (body: PatchMeRequest) => request<PatchMeResponse>("PATCH", "/me", body),
   listModels: () => request<ListModelsResponse>("GET", "/models"),
   getUsageSummary: () => request<UsageSummaryResponse>("GET", "/usage/summary"),
-  usageBreakdown: (window: string = "7d", scope: "me" | "org" = "me") => {
+  usageBreakdown: (window: string = "7d", scope: UsageScopeRequest = "me") => {
     const qs = new URLSearchParams({ window, scope });
     return request<UsageBreakdownResponse>("GET", `/usage/breakdown?${qs}`);
   },
-  usageItems: (window: string, scope: "me" | "org", useCase: UsageUseCase) => {
+  usageItems: (window: string, scope: UsageScopeRequest, useCase: UsageUseCase) => {
     const qs = new URLSearchParams({ window, scope, useCase });
     return request<UsageDrillResponse>("GET", `/usage/items?${qs}`);
   },
-  usageExportCsvUrl: (window: string, scope: "me" | "org"): string => {
+  usageExportCsvUrl: (window: string, scope: UsageScopeRequest): string => {
     const qs = new URLSearchParams({ window, scope });
     return `/api/usage/export.csv?${qs}`;
   },
