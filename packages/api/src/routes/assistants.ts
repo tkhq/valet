@@ -55,6 +55,24 @@ function isOwnerType(value: string): value is AssistantOwner["type"] {
   return OWNER_TYPES.has(value);
 }
 
+/** The personality/behavior validation POST and PATCH share — one rule set,
+ * so a body the create accepts is never 400'd by the edit (or vice versa). */
+function validatePersonaFields(body: {
+  personality?: string | null;
+  behavior?: unknown;
+}): string | null {
+  if (body.personality !== undefined && body.personality !== null && typeof body.personality !== "string") {
+    return "personality must be a string, or null to clear it.";
+  }
+  if (typeof body.personality === "string" && body.personality.length > PERSONALITY_INJECT_CAP) {
+    return `personality is limited to ${PERSONALITY_INJECT_CAP} characters. Shorten it.`;
+  }
+  if (body.behavior !== undefined && body.behavior !== null) {
+    return validateAssistantBehavior(body.behavior);
+  }
+  return null;
+}
+
 // ── List ──────────────────────────────────────────────────────────────────
 
 /**
@@ -112,19 +130,8 @@ assistantsRouter.post("/", async (c) => {
   if (body.name !== undefined && typeof body.name !== "string") {
     return c.json({ error: "name must be a string." }, 400);
   }
-  if (body.personality !== undefined && body.personality !== null && typeof body.personality !== "string") {
-    return c.json({ error: "personality must be a string." }, 400);
-  }
-  if (typeof body.personality === "string" && body.personality.length > PERSONALITY_INJECT_CAP) {
-    return c.json(
-      { error: `personality is limited to ${PERSONALITY_INJECT_CAP} characters. Shorten it.` },
-      400,
-    );
-  }
-  if (body.behavior !== undefined && body.behavior !== null) {
-    const err = validateAssistantBehavior(body.behavior);
-    if (err) return c.json({ error: err }, 400);
-  }
+  const personaErr = validatePersonaFields(body);
+  if (personaErr) return c.json({ error: personaErr }, 400);
 
   if (!(await canAdministerAssistantOwner(db, owner, user.id))) {
     return c.json({ error: "owner not found" }, 404);
@@ -150,8 +157,8 @@ assistantsRouter.patch("/:id", async (c) => {
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
-  if (body.name !== undefined && typeof body.name !== "string") {
-    return c.json({ error: "name must be a string." }, 400);
+  if (body.name !== undefined && body.name !== null && typeof body.name !== "string") {
+    return c.json({ error: "name must be a string, or null to clear it." }, 400);
   }
   if (body.isDefault !== undefined && body.isDefault !== true) {
     return c.json(
@@ -159,19 +166,8 @@ assistantsRouter.patch("/:id", async (c) => {
       400,
     );
   }
-  if (body.personality !== undefined && body.personality !== null && typeof body.personality !== "string") {
-    return c.json({ error: "personality must be a string, or null to clear it." }, 400);
-  }
-  if (typeof body.personality === "string" && body.personality.length > PERSONALITY_INJECT_CAP) {
-    return c.json(
-      { error: `personality is limited to ${PERSONALITY_INJECT_CAP} characters. Shorten it.` },
-      400,
-    );
-  }
-  if (body.behavior !== undefined && body.behavior !== null) {
-    const err = validateAssistantBehavior(body.behavior);
-    if (err) return c.json({ error: err }, 400);
-  }
+  const personaErr = validatePersonaFields(body);
+  if (personaErr) return c.json({ error: personaErr }, 400);
   if (
     body.name === undefined &&
     body.isDefault === undefined &&
@@ -190,10 +186,17 @@ assistantsRouter.patch("/:id", async (c) => {
   try {
     const updated = await patchAssistant(db, row, body);
     const response: PatchAssistantResponse = toAssistantSummary(updated);
-    if (body.personality !== undefined || body.behavior !== undefined) {
-      // Cache-only eviction (never destroy(): that would kill a running
-      // turn). The next wake rebuilds with the new persona and filters —
-      // the same seam PATCH /api/orchestrator/info uses.
+    // Evict when a value the cached session bakes in actually CHANGED — the
+    // name feeds the persona prefix too, so a rename must reach the next
+    // wake (the rail's Rename dialog sends name alone). A no-op save skips
+    // the eviction, so it does not pay a full session rebuild. Cache-only
+    // eviction (never destroy(): that would kill a running turn) — the same
+    // seam PATCH /api/orchestrator/info uses.
+    if (
+      row.name !== updated.name ||
+      row.personality !== updated.personality ||
+      row.behavior !== updated.behavior
+    ) {
       engineHost.evictCache(updated.sessionId);
     }
     return c.json(response);

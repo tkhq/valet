@@ -279,9 +279,10 @@ export async function listAssistantsForOwners(
  * retry re-inserts the SAME id as an ordinary assistant.
  *
  * `config.personality` is the raw persona text. It is trimmed and an empty
- * result stored as null — the same normalization `patchAssistant` applies, so
- * `POST { personality: "" }` and a later clear both leave the memory-file
- * fallback in play at wake. `config.behavior` is the parsed
+ * result stored as null at CREATE time — a brand-new assistant with no
+ * personality is "never configured" and keeps the memory-file fallback.
+ * (`patchAssistant` differs: an explicit clear there stores `""`, the
+ * neutral persona.) `config.behavior` is the parsed
  * `AssistantBehavior`; this function serializes it to JSON before writing so
  * callers never touch the wire format directly.
  */
@@ -333,7 +334,9 @@ export async function createAssistant(
  * clears it and the promote sets it again.
  *
  * `personality` and `behavior` are optional in the patch object. When
- * present they overwrite the stored value; `null` clears it. Absent means
+ * present they overwrite the stored value; `null` clears it (`personality:
+ * null` stores `""` — the neutral persona — because a stored null means
+ * "never configured" and falls back to the memory file). Absent means
  * "do not touch". This function serializes `AssistantBehavior` to JSON via
  * `serializeAssistantBehavior`; the route then evicts the cached engine
  * session so the next wake picks up the new persona and filters.
@@ -341,9 +344,34 @@ export async function createAssistant(
 export async function patchAssistant(
   db: AppDb,
   row: AssistantRow,
-  patch: { name?: string; isDefault?: true; personality?: string | null; behavior?: AssistantBehavior | null },
+  patch: {
+    name?: string | null;
+    isDefault?: true;
+    personality?: string | null;
+    behavior?: AssistantBehavior | null;
+  },
 ): Promise<AssistantRow> {
   if (row.archivedAt !== null) throw new ArchivedAssistantError();
+
+  // All changed fields in ONE UPDATE (plus the demote when promoting): each
+  // statement is a network round trip on the prod node-postgres store, and a
+  // longer transaction widens the window where the default slot sits demoted.
+  const changes: {
+    name?: string | null;
+    personality?: string | null;
+    behavior?: string | null;
+    isDefault?: boolean;
+  } = {};
+  if (patch.name !== undefined) changes.name = patch.name;
+  if (patch.personality !== undefined) {
+    // An explicit clear stores "" (neutral persona), NOT null: null means
+    // "never configured" and falls back to the legacy
+    // assistant/personality.md memory file at wake. A clear that stored null
+    // would resurrect a file persona the editor never displayed.
+    changes.personality = patch.personality === null ? "" : patch.personality.trim();
+  }
+  if (patch.behavior !== undefined) changes.behavior = serializeAssistantBehavior(patch.behavior);
+  if (patch.isDefault === true) changes.isDefault = true;
 
   return db.transaction(async (tx) => {
     if (patch.isDefault === true) {
@@ -356,26 +384,13 @@ export async function patchAssistant(
             eq(assistants.isDefault, true),
           ),
         );
-      await tx.update(assistants).set({ isDefault: true }).where(eq(assistants.id, row.id));
     }
-    if (patch.name !== undefined) {
-      await tx.update(assistants).set({ name: patch.name }).where(eq(assistants.id, row.id));
-    }
-    if (patch.personality !== undefined) {
-      const trimmed = patch.personality === null ? null : patch.personality.trim();
-      await tx
-        .update(assistants)
-        .set({ personality: trimmed === "" ? null : trimmed })
-        .where(eq(assistants.id, row.id));
-    }
-    if (patch.behavior !== undefined) {
-      await tx
-        .update(assistants)
-        .set({ behavior: serializeAssistantBehavior(patch.behavior) })
-        .where(eq(assistants.id, row.id));
-    }
-
-    const updated = await tx.select().from(assistants).where(eq(assistants.id, row.id)).limit(1);
+    if (Object.keys(changes).length === 0) return row;
+    const updated = await tx
+      .update(assistants)
+      .set(changes)
+      .where(eq(assistants.id, row.id))
+      .returning();
     const result = updated[0];
     if (!result) {
       throw new Error(`assistants: ${row.id} disappeared during its own update`);

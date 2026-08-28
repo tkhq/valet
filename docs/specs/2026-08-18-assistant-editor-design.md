@@ -84,10 +84,13 @@ today. The cap (`PERSONALITY_INJECT_CAP`) and the "no name, no prefix" rule
 are unchanged.
 
 The personal-default identity flow (`PATCH /api/orchestrator/info`,
-`/settings/assistant`, the dashboard identity fields) keeps writing the
-memory file. The file stays the fallback, so that flow keeps working
-untouched. The editor writes the row column. When both exist, the row wins;
-the editor shows the row value.
+`/settings/assistant`, the dashboard identity fields) writes the row column
+through the same `patchAssistant` path as the editor, and also refreshes the
+memory file for the assistant's own self-edit surface. `GET
+/api/orchestrator/info` reports the EFFECTIVE personality (row when set,
+file otherwise), so the settings page can never show a persona that is not
+in effect. The file stays the fallback for rows whose personality was never
+set through the API.
 
 ## API
 
@@ -95,22 +98,33 @@ No new routes and no new auth code. Both mutating routes already gate on
 `canAdministerAssistantOwner` (team admin for a team's assistant, yourself
 for your own).
 
-- `PATCH /api/assistants/:id` accepts `personality?: string | null` and
-  `behavior?: AssistantBehavior | null`. Null clears a field back to the
-  fall-through (memory file / everything). Validation rejects malformed
-  modes and entries with corrective messages ("skills.mode must be 'all' or
-  'allowlist'.").
+- `PATCH /api/assistants/:id` accepts `name?: string | null`,
+  `personality?: string | null` and `behavior?: AssistantBehavior | null`.
+  Null clears a field. A personality clear stores `""` (the neutral
+  persona), NOT null: null means "never configured" and falls back to the
+  memory file, and a clear that restored the fallback would resurrect a
+  file persona the editor never displayed. `behavior: null` clears back to
+  "everything". Validation rejects malformed modes, unknown keys at every
+  level, and oversized allowlists, each with a corrective message
+  ("skills.mode must be 'all' or 'allowlist'."). The stored value is
+  normalized (known fields only, stable key order) before it is written.
 - `POST /api/assistants` accepts the same optional fields, so
   create-with-config is one call.
 - `AssistantSummary` gains `personality` and `behavior`. The editor loads
   from the list query the client already holds; no per-assistant GET is
   added. Personality is capped text and behavior is a small object, so the
   summary stays small.
-- A PATCH that changes `personality` or `behavior` calls
+- A PATCH that CHANGES `name`, `personality` or `behavior` (the three
+  inputs baked into a cached session) calls
   `engineHost.evictCache(row.sessionId)`: cache-only eviction, the same seam
-  the identity PATCH uses (`routes/orchestrator.ts`). An in-flight turn
-  finishes on the old config; the next wake rebuilds with the new one.
-  `destroy()` is not used because it would kill a running turn.
+  the identity PATCH uses (`routes/orchestrator.ts`). Name is included
+  because it feeds the persona prefix and the rail's Rename dialog sends it
+  alone; a no-op save skips the eviction and the rebuild it would cost. An
+  in-flight turn finishes on the old config; the next wake rebuilds with the
+  new one. `destroy()` is not used because it would kill a running turn.
+  Eviction also bumps a per-session build epoch: a build that started before
+  the PATCH refuses to cache its stale result and rebuilds from the current
+  row, so a wake racing a save cannot pin the old config.
 
 The editor needs no new catalog endpoints, but `GET /api/plugins` gains one
 field: `PluginSummary.actionServices`, the plugin's actions grouped by
@@ -130,15 +144,22 @@ which already loads the assistant row.
   when its service is listed, then drops excluded action ids inside kept
   services. The filter touches actions only. Plugin-provided skills are
   governed by the skills config, never by the integrations config.
+  `buildCommandOptions` applies the SAME filter for this builder, so the
+  plugin slash-command catalog and the `call_tool` catalog agree — a
+  command cannot reach an action the allowlist gated out of `list_tools`.
 - **Skills.** The merged skill sources (plugin + stored) are filtered by the
   name allowlist, in both the build-time seed and the `skillsProvider`
   re-read. The provider closure captures the build-time behavior. That is
   safe because every behavior PATCH evicts the cache, so a stale closure
   never outlives its config.
 - **Never gated:** memory tools, pinned actions, and the child-session tools.
-  These are the assistant's substrate, not integrations.
+  These are the assistant's substrate, not integrations. The behavior filter
+  enforces this mechanically: the pin set rides into
+  `applyBehaviorToPlugins`, which keeps a pinned action even when its
+  service is not allowlisted and refuses to let `excludeActions` name one
+  away.
 - **Dangling entries** (a renamed skill, a removed plugin) are skipped at
-  wake. The assistant simply does not get that entry.
+  wake. The assistant does not get that entry.
 - **Failure posture:** `behavior` JSON that does not parse (only possible
   through a bug, since PATCH validates) is logged and treated as
   "everything". Attachment is capability shaping, not a security boundary.

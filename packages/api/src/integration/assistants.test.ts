@@ -525,7 +525,10 @@ describe("personality and behavior config", () => {
     });
     expect(cleared.status).toBe(200);
     const clearedBody = (await cleared.json()) as PatchAssistantResponse;
-    expect(clearedBody.personality).toBeUndefined();
+    // An explicit personality clear stores "" (the neutral persona), not
+    // null — null would fall back to the legacy memory file at wake and
+    // resurrect a persona the editor never displayed.
+    expect(clearedBody.personality).toBe("");
     expect(clearedBody.behavior).toBeUndefined();
   });
 
@@ -542,7 +545,7 @@ describe("personality and behavior config", () => {
     expect(body.error).toMatch(/skills\.mode must be 'all' or 'allowlist'/);
   });
 
-  it("a behavior PATCH evicts the cached engine session", async () => {
+  it("a PATCH that changes persona inputs evicts the cached engine session; a no-op does not", async () => {
     api = await bootTestApi();
     const created = await create(api, {});
     const evict = vi.spyOn(api.providers.engineHost, "evictCache");
@@ -554,11 +557,24 @@ describe("personality and behavior config", () => {
     });
     expect(evict).toHaveBeenCalledWith(created.sessionId);
 
+    // A rename evicts too: the name is baked into the cached session's
+    // "You are {name}." persona prefix, and the rail's Rename dialog sends
+    // name alone.
     evict.mockClear();
     await fetch(`${api.baseUrl}/api/assistants/${created.id}`, {
       method: "PATCH",
       headers: JSON_HEADERS,
       body: JSON.stringify({ name: "Renamed only" }),
+    });
+    expect(evict).toHaveBeenCalledWith(created.sessionId);
+
+    // Re-sending the stored values changes nothing, so the cached session
+    // (and the full rebuild the next wake would pay) survives.
+    evict.mockClear();
+    await fetch(`${api.baseUrl}/api/assistants/${created.id}`, {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ name: "Renamed only", personality: "Blunt." }),
     });
     expect(evict).not.toHaveBeenCalled();
   });
@@ -595,7 +611,23 @@ describe("personality and behavior config", () => {
     expect(created.personality).toBeUndefined();
   });
 
-  it("PATCH clears a personality set to whitespace only", async () => {
+  it("PATCH name null clears the name", async () => {
+    api = await bootTestApi();
+    const created = await create(api, { name: "Triage" });
+
+    const res = await fetch(`${api.baseUrl}/api/assistants/${created.id}`, {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ name: null }),
+    });
+    expect(res.status).toBe(200);
+    const patched = (await res.json()) as PatchAssistantResponse;
+    // Absent on the wire: the UI falls back to its placeholder label, the
+    // session to the neutral persona.
+    expect(patched.name).toBeUndefined();
+  });
+
+  it("PATCH treats a whitespace-only personality as an explicit clear", async () => {
     api = await bootTestApi();
     const created = await create(api, { name: "Triage", personality: "Blunt." });
 
@@ -606,7 +638,8 @@ describe("personality and behavior config", () => {
     });
     expect(res.status).toBe(200);
     const patched = (await res.json()) as PatchAssistantResponse;
-    expect(patched.personality).toBeUndefined();
+    // "" = explicitly cleared (neutral persona, no memory-file fallback).
+    expect(patched.personality).toBe("");
   });
 
   it("POST rejects a personality over the injection cap and names the limit", async () => {

@@ -217,6 +217,11 @@ export interface AssistantBehavior {
   integrations?: AssistantIntegrationsBehavior;
 }
 
+/** Server cap on `personality` length, shared so the editor's `maxLength`
+ * and the API's 400 agree (the API enforces it; `assistants/persona.ts`
+ * also slices at injection time). */
+export const PERSONALITY_INJECT_CAP = 500;
+
 export interface AssistantSummary {
   id: string;
   owner: AssistantOwner;
@@ -233,7 +238,8 @@ export interface AssistantSummary {
   isDefault: boolean;
   createdAt: number;
   /** Absent until someone sets it. When absent the session falls back to the
-   * owner's assistant/personality.md memory file. */
+   * owner's assistant/personality.md memory file. `""` means explicitly
+   * cleared: the neutral persona, with no file fallback. */
   personality?: string;
   /** Absent means every skill and integration (the pre-config behavior). */
   behavior?: AssistantBehavior;
@@ -258,9 +264,13 @@ export type CreateAssistantResponse = AssistantSummary;
  * demotes the previous default in the same write — a principal is never
  * left with none, which would strand every automation that targets it. */
 export interface PatchAssistantRequest {
-  name?: string;
+  /** null clears the name; the session then drops the persona prefix and
+   * the UI shows its placeholder label. */
+  name?: string | null;
   isDefault?: true;
-  /** null clears back to the memory-file fallback. */
+  /** null clears the personality: the session keeps only its name ("You are
+   * {name}."). The legacy memory-file fallback applies only to assistants
+   * whose personality was never set through this API. */
   personality?: string | null;
   /** null clears back to "everything". */
   behavior?: AssistantBehavior | null;
@@ -276,7 +286,9 @@ export interface EnsureAssistantSessionResponse {
 }
 
 /** GET /api/orchestrator/info — assistant identity + presence (assistant-
- * centered web UI decision 4). Never creates the engine session. */
+ * centered web UI decision 4). Never creates the engine session.
+ * `personality` is the EFFECTIVE value the next wake applies: the
+ * assistants.personality column when set, else the legacy memory file. */
 export interface GetOrchestratorInfoResponse {
   sessionId: string;
   name: string | null;
@@ -285,9 +297,11 @@ export interface GetOrchestratorInfoResponse {
   activeChildren: number;
 }
 
-/** PATCH /api/orchestrator/info — `name` sets `assistants.name` on the
- * caller's default assistant; `personality` writes the
- * `assistant/personality.md` memory file (decision 5). */
+/** PATCH /api/orchestrator/info — both fields write the caller's default
+ * `assistants` row (the same write path as PATCH /api/assistants/:id, so a
+ * personality saved here is the one the next wake applies). `personality`
+ * also refreshes the legacy `assistant/personality.md` memory file for the
+ * assistant's own self-edit surface. */
 export interface PatchOrchestratorInfoRequest {
   name?: string;
   personality?: string;

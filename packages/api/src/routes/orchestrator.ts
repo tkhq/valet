@@ -20,12 +20,14 @@ import { Hono } from "hono";
 import { and, count, desc, eq, isNull } from "drizzle-orm";
 import type { Principal } from "@valet/engine";
 import type { AppEnv } from "../env.js";
-import { agentSessions, assistants, childWatches } from "../schema/index.js";
+import { agentSessions, childWatches } from "../schema/index.js";
 import {
   ensureDefaultAssistantSession,
   findDefaultAssistant,
+  patchAssistant,
   resolveDefaultAssistant,
 } from "../assistants/service.js";
+import { PERSONALITY_INJECT_CAP } from "../assistants/persona.js";
 import { readOwnFile, writeFile, type MemoryScope } from "../services/memory.js";
 import type {
   EnsureOrchestratorResponse,
@@ -112,13 +114,19 @@ orchestratorRouter.get("/info", async (c) => {
   const sessionId = assistant.sessionId;
   const name = assistant.name;
 
-  // Own-scope only — a team member's `assistant/personality.md` must never
-  // leak into this user's persona/info response (`readOwnFile` bypasses
-  // `readFile`'s team read-union entirely; consistent with `EngineHost`'s
-  // `resolvePersonaPrefix`, the other personality-read call site).
-  const scope: MemoryScope = { owner: principal, actorUserId: user.id };
-  const personalityRow = await readOwnFile(db, scope, "assistant/personality.md");
-  const personality = personalityRow ? personalityRow.content : null;
+  // The EFFECTIVE personality — the same precedence the wake path applies
+  // (`resolvePersonaPrefix`): the assistants.personality column when set,
+  // else the legacy assistant/personality.md memory file. Reporting only the
+  // file here showed a persona that was not in effect once the assistant
+  // editor wrote the column. Own-scope only — a team member's file must
+  // never leak into this user's persona/info response (`readOwnFile`
+  // bypasses `readFile`'s team read-union entirely).
+  let personality: string | null = assistant.personality;
+  if (personality === null) {
+    const scope: MemoryScope = { owner: principal, actorUserId: user.id };
+    const personalityRow = await readOwnFile(db, scope, "assistant/personality.md");
+    personality = personalityRow ? personalityRow.content : null;
+  }
 
   const unsettledRows = await db
     .select({ n: count() })
@@ -143,13 +151,15 @@ orchestratorRouter.get("/info", async (c) => {
 
 /**
  * PATCH /api/orchestrator/info — decision 4/5/20. Works before the engine
- * session exists: `name` sets `assistants.name` on the caller's default
- * assistant (resolving that row if this is the first touch); `personality`
- * writes the `assistant/personality.md` memory file, which never touches
- * the engine either. Either write evicts the cached engine session
- * (cache-only — `EngineHost.evictCache`, NOT `destroy()`, which would
- * delete the engine session row) so the next wake rebuilds the persona from
- * the new name.
+ * session exists: both fields write the caller's default `assistants` row
+ * through `patchAssistant`, the same write path the assistant editor uses —
+ * a personality saved here is a personality the next wake actually applies
+ * (the column wins over the memory file at `resolvePersonaPrefix`).
+ * `personality` ALSO refreshes the legacy `assistant/personality.md` memory
+ * file, so the assistant's own self-edit surface keeps showing the latest
+ * human edit. A changed value evicts the cached engine session (cache-only —
+ * `EngineHost.evictCache`, NOT `destroy()`, which would delete the engine
+ * session row) so the next wake rebuilds the persona.
  */
 orchestratorRouter.patch("/info", async (c) => {
   const { db, engineHost } = c.var.providers;
@@ -162,12 +172,25 @@ orchestratorRouter.patch("/info", async (c) => {
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
+  if (body.name !== undefined && typeof body.name !== "string") {
+    return c.json({ error: "name must be a string." }, 400);
+  }
+  if (body.personality !== undefined && typeof body.personality !== "string") {
+    return c.json({ error: "personality must be a string." }, 400);
+  }
+  if (typeof body.personality === "string" && body.personality.length > PERSONALITY_INJECT_CAP) {
+    return c.json(
+      { error: `personality is limited to ${PERSONALITY_INJECT_CAP} characters. Shorten it.` },
+      400,
+    );
+  }
 
   const assistant = await resolveDefaultAssistant(db, user.orgId, principal);
 
-  if (body.name !== undefined) {
-    await db.update(assistants).set({ name: body.name }).where(eq(assistants.id, assistant.id));
-  }
+  const updated = await patchAssistant(db, assistant, {
+    ...(body.name !== undefined ? { name: body.name } : {}),
+    ...(body.personality !== undefined ? { personality: body.personality } : {}),
+  });
 
   if (body.personality !== undefined) {
     const scope: MemoryScope = { owner: principal, actorUserId: user.id };
@@ -180,7 +203,9 @@ orchestratorRouter.patch("/info", async (c) => {
     });
   }
 
-  engineHost.evictCache(assistant.sessionId);
+  if (assistant.name !== updated.name || assistant.personality !== updated.personality) {
+    engineHost.evictCache(assistant.sessionId);
+  }
 
   const responseBody: PatchOrchestratorInfoResponse = { ok: true };
   return c.json(responseBody);
