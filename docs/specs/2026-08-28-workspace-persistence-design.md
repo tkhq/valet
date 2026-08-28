@@ -134,9 +134,8 @@ export type LifecycleEvent =
   | { kind: "periodic" };
 
 export interface PolicyConfig {
-  minCheckpointIntervalMs: number; // rate limit for periodic + suspend
+  minCheckpointIntervalMs: number; // rate limit for periodic only
   checkpointOnReap: boolean;
-  onRestoreFailure: "fallback" | "block";
 }
 
 export interface PolicyInput {
@@ -162,8 +161,7 @@ Decision table (normative). The kernel MUST return exactly these results:
 | create | `workspaceEmpty` and `hasCommittedCheckpoint` | restore |
 | create | `workspaceEmpty` and not `hasCommittedCheckpoint` | skip ("cold start from image") |
 | create | not `workspaceEmpty` | skip ("INV-1 non empty") |
-| suspend | `nowMs - lastCheckpointAtMs >= minCheckpointIntervalMs` or `lastCheckpointAtMs` null | checkpoint |
-| suspend | otherwise | skip ("rate limited") |
+| suspend | always | checkpoint |
 | reap | `checkpointOnReap` | checkpoint |
 | reap | not `checkpointOnReap` | skip ("reap checkpoint disabled") |
 | periodic | `nowMs - lastCheckpointAtMs >= minCheckpointIntervalMs` or `lastCheckpointAtMs` null | checkpoint |
@@ -206,7 +204,7 @@ Reference file: `packages/sandbox-kubernetes/src/manifest.ts`.
 
 ### 05.1 Volume change
 
-- For `object-store` and `none`: the `workspace` volume MUST be `emptyDir: {}`. Remove the `volumeClaimTemplate` for these backends. Keep `WORKSPACE_MOUNT_PATH = /workspace`, `workingDir`, and `fsGroup = 1500` unchanged.
+- For `object-store` and `none`: the `workspace` volume MUST be an `emptyDir` with `sizeLimit` set from `defaultStorage` (default 2Gi) — the cap the PVC path enforces through its storage request. Remove the `volumeClaimTemplate` for these backends. Keep `WORKSPACE_MOUNT_PATH = /workspace`, `workingDir`, and `fsGroup = 1500` unchanged.
 - For `rwx-volume`: keep the PVC, and set its `storageClassName` from config.
 
 ### 05.2 Restore (init container)
@@ -216,13 +214,19 @@ Reference file: `packages/sandbox-kubernetes/src/manifest.ts`.
 - It receives the `WorkspaceRef` fields and the object store config as env, and the object store credentials through a mounted secret.
 - It MUST implement the create branch of the kernel: if `/workspace` is empty and a committed checkpoint exists, download and extract it; otherwise exit 0 without action (INV-1).
 - A restore failure under `onRestoreFailure: fallback` MUST exit 0 and leave `/workspace` empty, so the main container cold starts from the image. Under `onRestoreFailure: block` it MUST exit non zero, and the pod fails to start.
+- The script MUST write its outcome (`restored`, `cold-start reason=no-checkpoint`, `cold-start reason=restore-failed`, `failed`) to the container termination message. The provider reads it from `initContainerStatuses` to record restore metrics and to drive the cold-start clobber guard (05.3).
+- The restore credential MUST carry `s3:ListBucket` on the bucket in addition to `s3:GetObject`. Without it, S3 answers 403 (not 404) for a GET of the missing `latest` key, and every new workspace reads as a restore failure — under `block` the pod can never start. The script names this corrective action in its 403 error.
 
 ### 05.3 Checkpoint (lifecycle triggered)
 
-- The provider MUST checkpoint on `suspend(id)` and on reap, before it removes the pod. Reference methods: `KubernetesSandboxProvider.suspend` and the destroy path invoked by the hibernation reaper.
+- The provider MUST checkpoint on `suspend(id)` and on reap, before it removes the pod. Reference methods: `KubernetesSandboxProvider.suspend` and the destroy path invoked by the hibernation reaper. `create()` MUST also flush a reap checkpoint before it deletes a live pod on image drift.
 - The checkpoint step runs `tar` over `/workspace` inside the pod and streams the archive to the backend. Use the existing in pod exec path (`exec.ts`) so the data path stays node to object store and never transits the api.
 - The provider MUST call the kernel with the matching `LifecycleEvent` and act on the decision. A `skip` decision performs no upload.
-- A checkpoint failure MUST log, emit `valet.workspace.checkpoint_failed`, and allow the lifecycle to proceed (INV-7).
+- The script MUST skip the upload when nothing under `/workspace` (minus the ignore list) changed since the last commit from the same pod, and report the skip (`checkpoint-unchanged`). The last committed state already covers the workspace, so the skip is safe and avoids re-uploading idle workspaces on every suspend.
+- Cold-start clobber guard: when the pod's restore termination message reads `cold-start reason=restore-failed`, the provider MUST refuse the checkpoint (outcome `blocked_cold_start`) and log the corrective action. Committing an emptied workspace would advance `latest` past the last good checkpoint, and retention prune would then delete the good data — a transient store outage would become permanent loss.
+- The provider MUST serialize checkpoint work per sandbox. Suspend, reap, the drift roll, and the periodic sweep fire from independent timers; interleaved commits race the `latest` PUT against prune, and a suspend could scale the pod away under another caller's upload.
+- Retention prune MUST protect both the caller's checkpoint id and the checkpoint the live `latest` pointer names at prune time.
+- A checkpoint failure MUST log, record a `failed` outcome on `valet.workspace.checkpoints`, and allow the lifecycle to proceed (INV-7).
 
 ### 05.4 Capabilities
 
@@ -263,14 +267,16 @@ The config parser MUST validate `backend` against the closed enum and fail boot 
 
 ### 07.2 Metrics
 
-Emit, labeled by `backend` and `outcome`:
+Emit, labeled by `backend` and `outcome` (no `_total` suffix — the Prometheus OTLP ingestion appends the counter suffix, matching every other engine counter):
 
-- `valet.workspace.checkpoint_total`, `valet.workspace.checkpoint_failed`, `valet.workspace.checkpoint_bytes`
-- `valet.workspace.restore_total`, `valet.workspace.restore_failed`, `valet.workspace.restore_cold_start_total`
+- `valet.workspace.checkpoints` (outcome: `committed` | `skipped` | `unchanged` | `blocked_cold_start` | `failed`), `valet.workspace.checkpoint_bytes`
+- `valet.workspace.restores` (outcome: `restored` | `cold_start` | `failed`)
+
+The `failed` outcomes are the INV-7 visibility: durability is best effort, so a failure never blocks the lifecycle and the counter is the alert signal.
 
 ### 07.3 Periodic checkpoint
 
-When `periodicCheckpoint` is true, a per sandbox timer fires the `periodic` event on the kernel every `minCheckpointIntervalMinutes`. This bounds data loss on node death to one interval. The timer MUST use the shared sweep timer helper so it is overlap guarded and unref'd.
+When `periodicCheckpoint` is true, one api-side sweep fires the `periodic` event on the kernel every `minCheckpointIntervalMinutes`. This bounds data loss on node death to one interval. The timer MUST use the shared sweep timer helper so it is overlap guarded and unref'd. The pass runs sandboxes through a small worker pool (bounded concurrency), so the pass duration tracks the slowest checkpoint, not the sum. When a pass still exceeds the interval, the sweep MUST log a warning — the overlap guard drops ticks silently, and the stretched bound must be visible (alert, don't auto-repair).
 
 ### 07.4 The rwx-volume backend
 
@@ -284,7 +290,7 @@ When `periodicCheckpoint` is true, a per sandbox timer fires the `periodic` even
 | Multi writer workspaces (two pods, one workspace) | Sandboxes are single writer per workspace id today. | A future RWX aware backend and a locking protocol. |
 | DinD state durability | Docker layers rebuild from images and hold no user state (Part 06). | None. This exclusion is permanent. |
 | Cloud native object clients beyond S3 API (native GCS, native Azure Blob) | S3 compatibility covers AWS, MinIO, R2, and GCS interop, which meets the portability goal. | Add a backend implementing `WorkspaceStore` for the native API. |
-| Per workspace size quotas | The object store is elastic and the 2Gi PVC cap disappears with the emptyDir change. | A backend enforced byte ceiling on `checkpoint`. |
+| Per workspace size quotas beyond the emptyDir cap | The workspace emptyDir carries a `sizeLimit` (`defaultStorage`, default 2Gi) so a runaway workspace cannot exhaust node ephemeral storage; the object store side stays unquotaed. | A backend enforced byte ceiling on `checkpoint`. |
 | Encryption of checkpoints beyond bucket level encryption | Bucket side encryption (SSE) covers the threat model for a single tenant dev deployment. | Client side envelope encryption in the `object-store` backend. |
 
 A v1 implementation MUST NOT ship the excluded items under the v1 label.
@@ -299,7 +305,7 @@ A v1 implementation MUST NOT ship the excluded items under the v1 label.
 
 ## Appendix B. Infra companion tasks (informative, test-agents-infra)
 
-- Provide an object store for agents-dev: an S3 bucket `valet-workspaces-dev` with SSE, plus an IAM policy scoped to the bucket prefix, delivered to sandboxes through a secret (ESO), matching the existing secret pattern.
+- Provide an object store for agents-dev: an S3 bucket `valet-workspaces-dev` with SSE, plus an IAM policy scoped to the bucket prefix, delivered to sandboxes through a secret (ESO), matching the existing secret pattern. Required actions: `s3:GetObject` AND `s3:ListBucket` for the restore credential (see 05.2 — without ListBucket a missing key answers 403, not 404); the api-side credential additionally needs `s3:PutObject` (presigning) and `s3:DeleteObject` (retention prune, purge).
 - For local development, MinIO in the dev stack gives the same S3 API, so dev and prod share one code path.
 - No CSI driver, no StorageClass, and no per AZ mount targets are required for the default `object-store` backend. This is the portability win: an operator supplies one bucket and one credential.
 
@@ -308,7 +314,7 @@ A v1 implementation MUST NOT ship the excluded items under the v1 label.
 - Before this spec the workspace was an EBS PVC (`manifest.ts`, `DEFAULT_STORAGE = "2Gi"`), and the provider advertised `persistentWorkspace: true` because it preserved that PVC across pod recreation under a retained CR. This spec moves durability from the EBS attach model to checkpoint and restore, which removes AZ pinning and the force detach delay on node death.
 - DinD already uses an `emptyDir` (`DOCKER_STATE_VOLUME_NAME`), so the object store path never has to represent overlay filesystems.
 - The hibernation reaper destroys the pod, the workspace volume, and the creds secret after the retention window. Under this spec the reaper MUST trigger a final checkpoint before it destroys, when `checkpointOnReap` is true, so a returning user finds the prior workspace.
-- Keep derived directories (`node_modules`, build caches) out of the checkpoint through a default ignore list, so checkpoints stay small and restores stay fast.
+- Keep derived directories (`node_modules`, `.venv`, `.pnpm-store`, `.cache`, `__pycache__`) out of the checkpoint through a default ignore list, so checkpoints stay small and restores stay fast. The excludes are unanchored (they match at every depth — the right call for JS monorepos with nested `node_modules`). Accepted costs: a resumed workspace must reinstall dependencies (`pnpm install`, `pip install`) before builds run, and a repo that vendors a committed `node_modules` loses it from checkpoints. The list is not operator-configurable yet.
 
 ## Deviations (implementation, 2026-08-28)
 
@@ -320,5 +326,6 @@ The implementation follows this spec with these recorded deviations. Each names 
 4. **Identity mapping.** `ownerId` is the session's `userId` (`SessionData.userId`). The object-key `workspaceId` is the sandbox CR name — the sanitized `sandboxCrName(opts.workspace)` output — because raw workspace strings can contain `/`, which would break prefix containment (one workspace's purge could reach another's objects). The engine stamps `orgId`/`ownerId` on `SandboxCreateOpts`; the provider records them as CR annotations (`valet.dev/org`, `valet.dev/owner`) so suspend/reap-time checkpoints survive an api restart.
 5. **`manifest.json` carries `entryCount`, not a file list.** The Part 01 interface has no entries field; the acceptance test asserts `entryCount >= 1` and a byte-exact restore of `NOTES.md` instead of a listed name.
 6. **`purge` is implemented but not wired to a deletion path.** Session deletion keeps checkpoints (a recreated session with the same workspace id restores them). Storage stays bounded by `keepCheckpoints` and bucket lifecycle rules. Wiring purge to an explicit workspace-deletion surface is future work.
-7. **Restore metrics are partial.** The init container has no OTel exporter, so pod-level restores report through pod logs; `valet.workspace.restore_*` fires only on the Node-side store path. Checkpoint metrics are fully wired.
-8. **The periodic checkpoint is one api-side sweep**, not a per-sandbox timer: a single `startSweepTimer` pass fires the `periodic` kernel event across `provider.list()`. The kernel's rate limit yields the same per-workspace bound with one timer.
+7. **Restore metrics flow through the termination message.** The init container has no OTel exporter, so it writes its outcome to the container termination message; the provider reads `initContainerStatuses` after `create()`/`resume()` reach Ready and records `valet.workspace.restores` api-side. Pods that never reach the read (a `block`-mode start failure) report through pod status and logs only.
+8. **The periodic checkpoint is one api-side sweep**, not a per-sandbox timer: a single `startSweepTimer` pass fires the `periodic` kernel event across `provider.list()` through a bounded worker pool. The kernel's rate limit yields the same per-workspace bound with one timer.
+9. **Restore and presign endpoints resolve independently.** The restore init container GETs from `objectStoreBaseUrl` (the configured endpoint, or the hand-built AWS regional endpoint when none is set), while checkpoint PUT URLs come from the AWS SDK presigner's own endpoint resolution. With an explicit `endpoint` configured both agree; in the default-AWS case, FIPS/dualstack env or non-`aws` partitions could make them diverge. Set `objectStore.endpoint` explicitly in such deployments.

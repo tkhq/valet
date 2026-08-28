@@ -129,7 +129,9 @@ export interface SecretVolumeSource {
 export interface Volume {
   name: string;
   secret?: SecretVolumeSource;
-  emptyDir?: Record<string, never>;
+  /** `corev1.EmptyDirVolumeSource` subset — `sizeLimit` caps node
+   * ephemeral-storage use (the kubelet evicts the pod past it). */
+  emptyDir?: { sizeLimit?: string };
   /** `corev1.HostPathVolumeSource` subset — only the /dev/fuse char device. */
   hostPath?: { path: string; type: "CharDevice" };
 }

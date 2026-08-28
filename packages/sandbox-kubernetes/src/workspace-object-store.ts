@@ -14,7 +14,7 @@
  * helpers in `@valet/engine`.
  */
 import { randomBytes } from "node:crypto";
-import { Readable, Transform } from "node:stream";
+import { pipeline, Readable, Transform } from "node:stream";
 import { createGzip, createGunzip } from "node:zlib";
 import {
   DeleteObjectsCommand,
@@ -161,10 +161,18 @@ export class ObjectStoreWorkspaceStore implements WorkspaceStore, WorkspaceCheck
     const checkpointId = makeCheckpointId(meta.createdAtMs);
     const counter = new TarEntryCounter();
     const bytes = new ByteCounter();
+    // The engine contract types the stream as NodeJS.ReadableStream to keep
+    // the @valet/engine barrel browser-safe; every runtime caller passes a
+    // node Readable.
     const source = tar as Readable;
+    // stream.pipeline, not .pipe: .pipe does not forward "error" events, so
+    // an errored source would crash the process (no listener) or hang
+    // `upload.done()` forever. pipeline destroys the whole chain on error,
+    // which rejects `upload.done()`. The no-op callback is deliberate —
+    // the error surfaces through the Upload, not the pipeline callback.
     const body = this.cfg.gzip
-      ? source.pipe(counter).pipe(createGzip()).pipe(bytes)
-      : source.pipe(counter).pipe(bytes);
+      ? pipeline(source, counter, createGzip(), bytes, () => {})
+      : pipeline(source, counter, bytes, () => {});
 
     // INV-2 commit order: data first, manifest second, latest pointer last.
     const upload = new Upload({
@@ -275,8 +283,22 @@ export class ObjectStoreWorkspaceStore implements WorkspaceStore, WorkspaceCheck
       token = page.IsTruncated ? page.NextContinuationToken : undefined;
     } while (token);
 
+    // A concurrent commit can move `latest` past the id this caller
+    // committed between its own `latest` PUT and this prune. Re-read the
+    // live pointer and protect its target too, so a raced prune can never
+    // delete the checkpoint `latest` names and leave the pointer dangling
+    // (which reads as "no checkpoint" and silently cold-starts the next
+    // open). The read-then-delete window that remains is closed by the
+    // provider's per-sandbox checkpoint serialization.
+    const protectedIds = new Set([latestCheckpointId]);
+    const pointer = await this.getBody(latestPointerKey(this.cfg.prefix, ref));
+    const pointerId = pointer?.trim();
+    if (pointerId && CHECKPOINT_ID_PATTERN.test(pointerId)) protectedIds.add(pointerId);
+
     const ordered = [...ids].sort().reverse(); // ids are time-prefixed → newest first
-    const excess = ordered.filter((id) => id !== latestCheckpointId).slice(keep - 1);
+    const excess = ordered
+      .filter((id) => !protectedIds.has(id))
+      .slice(Math.max(0, keep - protectedIds.size));
     for (const id of excess) {
       await this.deleteByPrefix(`${checkpointsPrefix}${id}/`);
     }

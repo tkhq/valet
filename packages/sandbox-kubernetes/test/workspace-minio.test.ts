@@ -129,9 +129,6 @@ function restoreEnvFor(target: WorkspaceRef, onFailure: "fallback" | "block"): R
     [RESTORE_ENV.region]: "us-east-1",
     [RESTORE_ENV.workspacePrefix]: `${target.orgId}/${target.ownerId}/${target.workspaceId}/`,
     [RESTORE_ENV.onRestoreFailure]: onFailure,
-    [RESTORE_ENV.orgId]: target.orgId,
-    [RESTORE_ENV.ownerId]: target.ownerId,
-    [RESTORE_ENV.workspaceId]: target.workspaceId,
   };
 }
 
@@ -330,6 +327,29 @@ describe.skipIf(!dockerReady)("object-store backend against MinIO", () => {
     // purge removes everything for the workspace.
     await hostStore.purge(target);
     expect(await hostStore.latest(target)).toBeNull();
+  });
+
+  it("prune never deletes the checkpoint the live latest pointer names", async () => {
+    const target: WorkspaceRef = { ...ref, workspaceId: "prune-race" };
+    const keepOne = new ObjectStoreWorkspaceStore(
+      { ...storeCfg(`http://127.0.0.1:${hostPort}`), keepCheckpoints: 1 },
+      { credentials: { accessKeyId: ACCESS_KEY, secretAccessKey: SECRET_KEY } },
+    );
+    const a = await keepOne.checkpoint(target, tarStream({ "a.txt": "a" }), {
+      createdAtMs: Date.now() - 2000,
+    });
+    const b = await keepOne.checkpoint(target, tarStream({ "b.txt": "b" }), {
+      createdAtMs: Date.now() - 1000,
+    });
+    // Simulate the raced interleaving: commit A's post-commit prune runs
+    // AFTER commit B's latest PUT. The caller protects only its own id —
+    // the prune must also protect whatever `latest` names now, or it
+    // deletes B's objects and leaves the pointer dangling.
+    await keepOne.pruneCheckpoints(target, a.checkpointId);
+
+    const latest = await keepOne.latest(target);
+    expect(latest?.checkpointId).toBe(b.checkpointId);
+    expect(await restoreSpecific(target, b.checkpointId)).toBe(true);
   });
 
   /** True when the checkpoint's data object still exists. */

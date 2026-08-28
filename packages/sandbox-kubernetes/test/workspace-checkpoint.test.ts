@@ -23,6 +23,7 @@ import type {
   ReplaceSandboxParams,
   SandboxCustomObjectsApi,
   SandboxPodsApi,
+  SandboxPodStatusApi,
 } from "../src/lifecycle.js";
 import type { PodLivenessApi } from "../src/provider.js";
 import type { ExecStatus, PodExecApi } from "../src/exec.js";
@@ -68,6 +69,8 @@ class FakeObjectsApi implements SandboxCustomObjectsApi {
   hasPod = true;
   /** When false, the CR carries no org/owner annotations. */
   hasTenantAnnotations = true;
+  /** CR names returned by list (drives the periodic sweep). */
+  listedNames: string[] = [];
 
   async createNamespacedCustomObject(_params: CreateSandboxParams): Promise<unknown> {
     throw new Error("not used");
@@ -100,7 +103,19 @@ class FakeObjectsApi implements SandboxCustomObjectsApi {
   }
 
   async listNamespacedCustomObject(_params: ListSandboxParams): Promise<unknown> {
-    return { items: [] };
+    return {
+      items: this.listedNames.map((name) => ({
+        apiVersion: SANDBOX_CR_API_VERSION,
+        kind: "Sandbox",
+        metadata: {
+          name,
+          annotations: {
+            ...(this.hasTenantAnnotations ? { "valet.dev/org": ORG, "valet.dev/owner": OWNER } : {}),
+            ...(this.hasPod ? { [POD_NAME_ANNOTATION]: `${name}-pod` } : {}),
+          },
+        },
+      })),
+    };
   }
 
   async patchNamespacedCustomObject(params: PatchSandboxParams): Promise<unknown> {
@@ -176,7 +191,13 @@ class FakeStore implements WorkspaceCheckpointStore {
   }
 }
 
-function makeProvider(args: { objectStore: boolean; objectsApi?: FakeObjectsApi; execApi?: FakeExecApi; store?: FakeStore }) {
+function makeProvider(args: {
+  objectStore: boolean;
+  objectsApi?: FakeObjectsApi;
+  execApi?: FakeExecApi;
+  store?: FakeStore;
+  podStatusApi?: SandboxPodStatusApi;
+}) {
   const objectsApi = args.objectsApi ?? new FakeObjectsApi();
   const execApi = args.execApi ?? new FakeExecApi();
   const store = args.store ?? new FakeStore();
@@ -187,6 +208,7 @@ function makeProvider(args: { objectStore: boolean; objectsApi?: FakeObjectsApi;
       execApi,
       livenessApi: fakeLiveness,
       workspaceStore: store,
+      ...(args.podStatusApi ? { podStatusApi: args.podStatusApi } : {}),
     },
     providerCfg(args.objectStore),
   );
@@ -236,7 +258,9 @@ describe("workspace checkpoint on suspend", () => {
     expect(objectsApi.patches).toHaveLength(1);
   });
 
-  it("rate-limits via the kernel: a fresh checkpoint skips the upload", async () => {
+  it("suspend is never rate-limited: a fresh checkpoint still uploads", async () => {
+    // The pod (and its emptyDir workspace) goes away at suspend; skipping
+    // this checkpoint would permanently lose the writes since ck-fresh.
     const store = new FakeStore();
     store.latestResult = {
       checkpointId: "ck-fresh",
@@ -247,8 +271,91 @@ describe("workspace checkpoint on suspend", () => {
     const { provider, execApi } = makeProvider({ objectStore: true, store });
     await provider.suspend("ws-1");
 
+    expect(store.calls).toEqual(["latest", "presign", "prune"]);
+    expect(execApi.commands).toHaveLength(1);
+  });
+
+  it("rate-limits the periodic sweep via the kernel: a fresh checkpoint skips the upload", async () => {
+    const objectsApi = new FakeObjectsApi();
+    objectsApi.listedNames = ["ws-1"];
+    const store = new FakeStore();
+    store.latestResult = {
+      checkpointId: "ck-fresh",
+      createdAtMs: Date.now() - 1000, // inside the 5-minute interval
+      sizeBytes: 1,
+      entryCount: 1,
+    };
+    const { provider, execApi } = makeProvider({ objectStore: true, objectsApi, store });
+    await provider.sweepWorkspaceCheckpoints();
+
     expect(store.calls).toEqual(["latest"]);
     expect(execApi.commands).toHaveLength(0);
+  });
+
+  it("refuses a checkpoint when the pod cold-started after a restore failure", async () => {
+    // Cold-start clobber guard: committing an emptied workspace would
+    // advance `latest` past the last good checkpoint and retention prune
+    // would then delete the good data.
+    const podStatusApi: SandboxPodStatusApi = {
+      async getPodStatus() {
+        return {
+          phase: "Running",
+          initContainerStatuses: [
+            {
+              name: "workspace-restore",
+              terminated: { exitCode: 0, message: "cold-start reason=restore-failed" },
+            },
+          ],
+        };
+      },
+    };
+    const { provider, store, execApi, objectsApi } = makeProvider({ objectStore: true, podStatusApi });
+    await provider.suspend("ws-1");
+
+    expect(store.calls).toEqual(["latest"]); // kernel said checkpoint; the guard refused before presign
+    expect(execApi.commands).toHaveLength(0);
+    expect(objectsApi.patches).toHaveLength(1); // the suspend still proceeded (INV-7)
+  });
+
+  it("skips the commit when the in-pod script reports an unchanged workspace", async () => {
+    const execApi = new FakeExecApi();
+    execApi.stdout = "checkpoint-unchanged\n";
+    const { provider, store, objectsApi } = makeProvider({ objectStore: true, execApi });
+    await provider.suspend("ws-1");
+
+    expect(store.calls).toEqual(["latest", "presign"]); // no prune — nothing committed
+    expect(objectsApi.patches).toHaveLength(1);
+  });
+
+  it("serializes concurrent checkpoint paths for the same sandbox", async () => {
+    // Suspend and destroy fire from independent timers; interleaved in-pod
+    // execs would race the latest-pointer commit and prune.
+    let inFlight = 0;
+    let maxInFlight = 0;
+    class TrackingExecApi extends FakeExecApi {
+      override async exec(
+        ns: string,
+        pod: string,
+        container: string,
+        command: string[],
+        stdout: PassThrough | null,
+        stderr: PassThrough | null,
+        stdin: unknown,
+        tty: boolean,
+        statusCallback?: (status: ExecStatus) => void,
+      ): Promise<{ close(): void }> {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        return super.exec(ns, pod, container, command, stdout, stderr, stdin, tty, (s) => {
+          inFlight -= 1;
+          statusCallback?.(s);
+        });
+      }
+    }
+    const { provider } = makeProvider({ objectStore: true, execApi: new TrackingExecApi() });
+    await Promise.all([provider.suspend("ws-1"), provider.destroy("ws-1")]);
+
+    expect(maxInFlight).toBe(1);
   });
 
   it("legacy config (no workspacePersistence) never touches the store", async () => {
@@ -258,6 +365,19 @@ describe("workspace checkpoint on suspend", () => {
     expect(store.calls).toEqual([]);
     expect(execApi.commands).toHaveLength(0);
     expect(objectsApi.patches).toHaveLength(1);
+  });
+});
+
+describe("create() identity guard (object-store)", () => {
+  it("fails closed when object-store is configured without orgId/ownerId", async () => {
+    // Without the guard the manifest silently emits a bare emptyDir (no
+    // restore init container, no checkpoint annotations) while
+    // capabilities() still advertises a persistent workspace.
+    const { provider } = makeProvider({ objectStore: true });
+    await expect(provider.create({ workspace: "ws-1" })).rejects.toThrow(/orgId/);
+    await expect(provider.create({ workspace: "ws-1", orgId: ORG, ownerId: "" })).rejects.toThrow(
+      /ownerId/,
+    );
   });
 });
 

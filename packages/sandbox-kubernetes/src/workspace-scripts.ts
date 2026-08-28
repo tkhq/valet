@@ -43,12 +43,10 @@ export const RESTORE_ENV = {
   baseUrl: "VALET_WS_BASE_URL",
   region: "VALET_WS_REGION",
   /** Full object-key prefix for this workspace, ending with "/" —
-   * `workspaceObjectPrefix(prefix, ref)`. */
+   * `workspaceObjectPrefix(prefix, ref)`. All per-workspace identity the
+   * script needs is already encoded in this prefix. */
   workspacePrefix: "VALET_WS_PREFIX",
   onRestoreFailure: "VALET_WS_ON_RESTORE_FAILURE",
-  orgId: "VALET_WS_ORG_ID",
-  ownerId: "VALET_WS_OWNER_ID",
-  workspaceId: "VALET_WS_WORKSPACE_ID",
 } as const;
 
 /**
@@ -66,10 +64,16 @@ export function buildRestoreScript(): string {
   return [
     `set -u`,
     `WS=/workspace`,
+    // Termination message: the provider reads it from the pod's
+    // initContainerStatuses to record restore metrics and to refuse
+    // checkpoints after a failed restore (the cold-start clobber guard in
+    // maybeCheckpointWorkspace). Best-effort — the path is absent outside
+    // kubernetes (the MinIO suite runs this script in a plain container).
+    `note() { printf '%s' "$1" > /dev/termination-log 2>/dev/null || true; }`,
     // INV-1: restore only into an empty workspace.
-    `if [ -n "$(ls -A "$WS" 2>/dev/null)" ]; then echo "workspace-restore: /workspace not empty; skipping restore (INV-1)"; exit 0; fi`,
-    `AK=$(cat ${shQuote(`${WORKSPACE_STORE_CREDS_MOUNT_PATH}/AWS_ACCESS_KEY_ID`)}) || exit 1`,
-    `SK=$(cat ${shQuote(`${WORKSPACE_STORE_CREDS_MOUNT_PATH}/AWS_SECRET_ACCESS_KEY`)}) || exit 1`,
+    `if [ -n "$(ls -A "$WS" 2>/dev/null)" ]; then note "skipped reason=non-empty"; echo "workspace-restore: /workspace not empty; skipping restore (INV-1)"; exit 0; fi`,
+    `AK=$(cat ${shQuote(`${WORKSPACE_STORE_CREDS_MOUNT_PATH}/AWS_ACCESS_KEY_ID`)}) || { note "failed reason=creds"; exit 1; }`,
+    `SK=$(cat ${shQuote(`${WORKSPACE_STORE_CREDS_MOUNT_PATH}/AWS_SECRET_ACCESS_KEY`)}) || { note "failed reason=creds"; exit 1; }`,
     // Failure handling (INV-7): under "fallback" leave /workspace empty and
     // exit 0 so the main container cold-starts from the image; under
     // "block" exit non-zero so the pod fails to start.
@@ -77,13 +81,17 @@ export function buildRestoreScript(): string {
     `  echo "workspace-restore: $1. The sandbox starts from the baked image; check the object store config and credentials." >&2`,
     // :-fallback, despite set -u: a missing mode env must not invert
     // INV-7's default into an implicit "block".
-    `  if [ "\${${RESTORE_ENV.onRestoreFailure}:-fallback}" = "block" ]; then exit 1; fi`,
+    `  if [ "\${${RESTORE_ENV.onRestoreFailure}:-fallback}" = "block" ]; then note "failed"; exit 1; fi`,
     `  rm -rf "$WS"/* "$WS"/.[!.]* "$WS"/..?* 2>/dev/null`,
+    `  note "cold-start reason=restore-failed"`,
     `  exit 0`,
     `}`,
     `BASE="\${${RESTORE_ENV.baseUrl}}/\${${RESTORE_ENV.workspacePrefix}}"`,
     `code=$(curl -s -o /tmp/ws-latest -w '%{http_code}' ${sigv4} "\${BASE}latest") || fail "latest pointer read failed (curl exit $?)"`,
-    `if [ "$code" = "404" ]; then echo "workspace-restore: no committed checkpoint; cold start from image"; exit 0; fi`,
+    `if [ "$code" = "404" ]; then note "cold-start reason=no-checkpoint"; echo "workspace-restore: no committed checkpoint; cold start from image"; exit 0; fi`,
+    // 403 hint: without s3:ListBucket, S3 answers 403 (not 404) for a GET
+    // of a missing key — a new workspace then looks like a restore failure.
+    `if [ "$code" = "403" ]; then fail "latest pointer read failed (http 403); if this workspace is new, grant the credential s3:ListBucket on the bucket (S3 returns 403, not 404, for a missing key without it)"; fi`,
     `[ "$code" = "200" ] || fail "latest pointer read failed (http $code)"`,
     `CKPT=$(cat /tmp/ws-latest)`,
     // Never interpolate untrusted bucket content into a URL unvalidated.
@@ -91,9 +99,45 @@ export function buildRestoreScript(): string {
     `curl -sf -o /tmp/ws-data.tar.gz ${sigv4} "\${BASE}checkpoints/\${CKPT}/data.tar.gz" || fail "checkpoint download failed (curl exit $?)"`,
     `tar -xf /tmp/ws-data.tar.gz -C "$WS" || fail "checkpoint extract failed"`,
     `rm -f /tmp/ws-data.tar.gz /tmp/ws-latest`,
+    `note "restored checkpoint=$CKPT"`,
     `echo "workspace-restore: restored checkpoint $CKPT into /workspace"`,
   ].join("\n");
 }
+
+/** Restore outcome parsed from the init container's termination message. */
+export type WorkspaceRestoreOutcome =
+  | { kind: "restored"; checkpointId?: string }
+  | { kind: "cold_start"; reason: "no-checkpoint" | "restore-failed" }
+  | { kind: "failed" }
+  | { kind: "skipped" };
+
+/** Parses a `workspace-restore` termination message written by `note` in
+ * `buildRestoreScript`. Null for an empty or unrecognized message (pods
+ * predating this script, or a container that died before writing one). */
+export function parseRestoreTerminationMessage(message: string): WorkspaceRestoreOutcome | null {
+  const m = message.trim();
+  if (m.startsWith("restored")) {
+    const ck = /checkpoint=(\S+)/.exec(m)?.[1];
+    return ck ? { kind: "restored", checkpointId: ck } : { kind: "restored" };
+  }
+  if (m.startsWith("cold-start")) {
+    return {
+      kind: "cold_start",
+      reason: m.includes("reason=restore-failed") ? "restore-failed" : "no-checkpoint",
+    };
+  }
+  if (m.startsWith("failed")) return { kind: "failed" };
+  if (m.startsWith("skipped")) return { kind: "skipped" };
+  return null;
+}
+
+/** In-pod marker whose mtime is the last committed checkpoint's tar-scan
+ * start. Pod-local (/tmp): dies with the pod, so a fresh pod never skips. */
+export const CHECKPOINT_MARKER_PATH = "/tmp/.valet-checkpoint-marker";
+
+/** Stdout sentinel: the workspace has not changed since the last committed
+ * checkpoint from this pod, so the script skipped the upload (exit 0). */
+export const CHECKPOINT_UNCHANGED_SENTINEL = "checkpoint-unchanged";
 
 /** Presigned PUT URLs for one checkpoint commit, in INV-2 order. */
 export interface CheckpointUploadUrls {
@@ -128,14 +172,28 @@ export interface CheckpointScriptInput {
 export function buildCheckpointScript(input: CheckpointScriptInput): string {
   const ignore = input.ignore ?? DEFAULT_CHECKPOINT_IGNORE;
   const excludes = ignore.map((dir) => `--exclude=${shQuote(dir)}`).join(" ");
+  // The same ignore list feeds the change scan below — cache/dependency
+  // writes alone must not force a full re-upload.
+  const prunes = ignore.length
+    ? `\\( ${ignore.map((dir) => `-name ${shQuote(dir)}`).join(" -o ")} \\) -prune -o `
+    : "";
   // The z flag must track the store config's gzip setting: the Node-side
   // restore() gunzips only when the config says so (the k8s init container
   // is immune — `tar -xf` auto-detects).
   const z = input.gzip === false ? "" : "z";
   return [
     `set -u`,
+    `MARKER=${shQuote(CHECKPOINT_MARKER_PATH)}`,
     `TMP=$(mktemp -d /tmp/valet-ckpt.XXXXXX) || exit 11`,
     `trap 'rm -rf "$TMP"' EXIT`,
+    // Change detection: the marker's mtime is the scan-start time of the
+    // last checkpoint this pod committed (see the `touch -r` below). If
+    // nothing under /workspace is newer — deletes count too, they bump the
+    // parent directory's mtime — the committed checkpoint already covers
+    // the current state and the upload is skipped. The marker lives in
+    // /tmp, so a fresh pod always takes a full checkpoint.
+    `if [ -e "$MARKER" ] && [ -z "$(find /workspace ${prunes}-newer "$MARKER" -print 2>/dev/null | head -n 1)" ]; then echo "${CHECKPOINT_UNCHANGED_SENTINEL}"; exit 0; fi`,
+    `touch "$TMP/started"`,
     // GNU tar exits 1 for "file changed as we read it" — expected on a
     // live workspace and the archive is still valid; only >1 is fatal.
     `tar -c${z}f "$TMP/data.tar.gz" ${excludes} -C /workspace .; rc=$?; [ "$rc" -le 1 ] || exit 12`,
@@ -147,6 +205,9 @@ export function buildCheckpointScript(input: CheckpointScriptInput): string {
     `curl -sf -X PUT --upload-file "$TMP/manifest.json" "$VALET_WS_MANIFEST_URL" || exit 14`,
     `printf '%s' ${shQuote(input.checkpointId)} > "$TMP/latest"`,
     `curl -sf -X PUT --upload-file "$TMP/latest" "$VALET_WS_LATEST_URL" || exit 15`,
+    // Marker mtime = tar scan start, not commit time: files written while
+    // the upload ran stay newer than the marker and force the next pass.
+    `touch -r "$TMP/started" "$MARKER"`,
     `echo "checkpoint-committed size=$SIZE entries=$COUNT"`,
   ].join("\n");
 }

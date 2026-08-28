@@ -69,7 +69,7 @@ describe("manifest workspace volume per backend (spec 05.1)", () => {
       opts,
     );
     expect(m.spec.volumeClaimTemplates).toEqual([]);
-    expect(m.spec.podTemplate.spec.volumes).toEqual([{ name: WORKSPACE_VOLUME_NAME, emptyDir: {} }]);
+    expect(m.spec.podTemplate.spec.volumes).toEqual([{ name: WORKSPACE_VOLUME_NAME, emptyDir: { sizeLimit: "2Gi" } }]);
     expect(m.spec.podTemplate.spec.initContainers).toBeUndefined();
   });
 
@@ -77,7 +77,7 @@ describe("manifest workspace volume per backend (spec 05.1)", () => {
     const m = buildSandboxManifest(cfgWith(objectStoreWp), "s1", opts);
     expect(m.spec.volumeClaimTemplates).toEqual([]);
     const volumes = m.spec.podTemplate.spec.volumes ?? [];
-    expect(volumes).toContainEqual({ name: WORKSPACE_VOLUME_NAME, emptyDir: {} });
+    expect(volumes).toContainEqual({ name: WORKSPACE_VOLUME_NAME, emptyDir: { sizeLimit: "2Gi" } });
     expect(volumes).toContainEqual({
       name: WORKSPACE_STORE_VOLUME_NAME,
       secret: { secretName: "valet-workspace-store" },
@@ -102,9 +102,6 @@ describe("manifest workspace volume per backend (spec 05.1)", () => {
     expect(env[RESTORE_ENV.baseUrl]).toBe("http://minio.valet-dev.svc:9000/valet-workspaces-dev");
     expect(env[RESTORE_ENV.workspacePrefix]).toBe(`${ORG}/${OWNER}/s1/`);
     expect(env[RESTORE_ENV.onRestoreFailure]).toBe("fallback");
-    expect(env[RESTORE_ENV.orgId]).toBe(ORG);
-    expect(env[RESTORE_ENV.ownerId]).toBe(OWNER);
-    expect(env[RESTORE_ENV.workspaceId]).toBe("s1");
   });
 
   it("INV-6: the main container never mounts the workspace-store credentials", () => {
@@ -117,7 +114,7 @@ describe("manifest workspace volume per backend (spec 05.1)", () => {
   it("object-store without org/owner ids gets the emptyDir but no restore init container", () => {
     const m = buildSandboxManifest(cfgWith(objectStoreWp), "s1", { workspace: "ws-1" });
     expect(m.spec.podTemplate.spec.initContainers).toBeUndefined();
-    expect(m.spec.podTemplate.spec.volumes).toContainEqual({ name: WORKSPACE_VOLUME_NAME, emptyDir: {} });
+    expect(m.spec.podTemplate.spec.volumes).toContainEqual({ name: WORKSPACE_VOLUME_NAME, emptyDir: { sizeLimit: "2Gi" } });
   });
 
   it("rwx-volume backend keeps a PVC on the operator's RWX class", () => {
@@ -141,7 +138,7 @@ describe("manifest workspace volume per backend (spec 05.1)", () => {
     const m = buildSandboxManifest(cfgWith(objectStoreWp), "s1", { ...opts, docker: true });
     const volumes = m.spec.podTemplate.spec.volumes ?? [];
     expect(volumes).toContainEqual({ name: "docker-state", emptyDir: {} });
-    expect(volumes).toContainEqual({ name: WORKSPACE_VOLUME_NAME, emptyDir: {} });
+    expect(volumes).toContainEqual({ name: WORKSPACE_VOLUME_NAME, emptyDir: { sizeLimit: "2Gi" } });
   });
 
   it("stamps org/owner annotations for the suspend/reap-time WorkspaceRef", () => {

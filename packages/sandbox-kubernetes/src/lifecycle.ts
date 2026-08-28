@@ -712,11 +712,19 @@ export interface PodStatusCondition {
   message?: string;
 }
 
+/** Terminated state of a finished init container — enough to read the
+ * `workspace-restore` container's termination message (restore outcome). */
+export interface PodInitContainerStatus {
+  name: string;
+  terminated?: { exitCode?: number; message?: string };
+}
+
 /** The subset of a `V1Pod`'s `.status` (plus per-container `image`, sourced
  * from `.spec.containers`) this module needs to classify a startup failure. */
 export interface PodStatusInfo {
   phase?: string;
   containerStatuses?: PodContainerStatus[];
+  initContainerStatuses?: PodInitContainerStatus[];
   conditions?: PodStatusCondition[];
 }
 
@@ -763,7 +771,20 @@ export function podStatusApiAdapter(api: k8s.CoreV1Api): SandboxPodStatusApi {
             typeof c.type === "string" && (c.status === "True" || c.status === "False" || c.status === "Unknown"),
         )
         .map((c) => ({ type: c.type, status: c.status, reason: c.reason, message: c.message }));
-      return { phase: pod.status?.phase, containerStatuses, conditions };
+      const initContainerStatuses: PodInitContainerStatus[] = (pod.status?.initContainerStatuses ?? []).map(
+        (cs) => ({
+          name: cs.name,
+          ...(cs.state?.terminated
+            ? {
+                terminated: {
+                  exitCode: cs.state.terminated.exitCode,
+                  message: cs.state.terminated.message,
+                },
+              }
+            : {}),
+        }),
+      );
+      return { phase: pod.status?.phase, containerStatuses, initContainerStatuses, conditions };
     },
   };
 }

@@ -70,6 +70,7 @@ import {
   SandboxStartupError,
   decideWorkspacePolicy,
   recordWorkspaceCheckpoint,
+  recordWorkspaceRestore,
   type WorkspaceLifecycleEvent,
   type WorkspaceRef,
 } from "@valet/engine";
@@ -130,8 +131,12 @@ import type { K8sProviderConfig } from "./types.js";
 import { makeCheckpointId, type WorkspaceCheckpointStore } from "./workspace-object-store.js";
 import {
   buildCheckpointScript,
+  CHECKPOINT_UNCHANGED_SENTINEL,
   checkpointScriptEnv,
   parseCheckpointResult,
+  parseRestoreTerminationMessage,
+  WORKSPACE_RESTORE_INIT_CONTAINER_NAME,
+  type WorkspaceRestoreOutcome,
 } from "./workspace-scripts.js";
 
 /** How long `create()`/`restore()` polls for the CR to reach `Ready` before
@@ -161,6 +166,11 @@ const GATEWAY_PORT = 9000;
  * multi-hundred-MB workspace over a same-region link fits comfortably; the
  * exec default (60s) does not. */
 const WORKSPACE_CHECKPOINT_TIMEOUT_MS = 10 * 60_000;
+
+/** Concurrent in-pod checkpoint execs per sweep pass. A serial pass sums
+ * every tar+upload and can stretch far past the sweep interval; unbounded
+ * would stack N execs on the apiserver. */
+const WORKSPACE_SWEEP_CONCURRENCY = 4;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -742,6 +752,16 @@ export class KubernetesSandboxProvider implements SandboxProvider {
           "(used as the session-identity input to the deterministic CR name — see provider.ts's module docblock).",
       );
     }
+    // Fail closed (INV-5 spirit): without a tenant key the manifest would
+    // silently emit a bare emptyDir — no restore init container, no
+    // checkpoint annotations — while capabilities() still advertises a
+    // persistent workspace. The engine stamps both on every session path.
+    if (this.cfg.workspacePersistence?.backend === "object-store" && (!opts.orgId || !opts.ownerId)) {
+      throw new Error(
+        "KubernetesSandboxProvider.create: workspace persistence (object-store) requires opts.orgId and " +
+          'opts.ownerId (the tenant key for checkpoint objects, INV-3). Pass both, or set workspacePersistence.backend to "none".',
+      );
+    }
     const name = sandboxCrName(opts.workspace);
     const manifest = buildSandboxManifest(this.cfg, name, opts);
 
@@ -784,6 +804,10 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       );
       if (check.differs) {
         console.log(`k8s sandbox ${name}: rolling pod (image ${check.liveImage} → ${manifestImage})`);
+        // The live pod (and, under object-store, its emptyDir workspace) is
+        // about to be deleted on purpose — flush a best-effort reap
+        // checkpoint first so the roll loses nothing since the last commit.
+        await this.maybeCheckpointWorkspace(name, { kind: "reap" });
         // Capture the old pod UID before deletion so the wait-for-fresh loop
         // below can detect when the controller has reconciled a NEW pod object
         // (same name, new UID) — rather than racing against a stale
@@ -828,6 +852,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       }
       throw err;
     }
+    await this.recordRestoreOutcome(name);
     return this.makeSandbox(name, Boolean(opts.docker));
   }
 
@@ -871,13 +896,17 @@ export class KubernetesSandboxProvider implements SandboxProvider {
   }
 
   /** NON-terminal (decision 5, NON-NEGOTIABLE): a no-op that leaves the CR
-   * (and its owner-referenced pod + workspace PVC) standing. This is the
+   * (and its owner-referenced pod + workspace volume) standing. This is the
    * seam `SandboxAttachment.reportFailure` calls in preference to `destroy`
    * (see `packages/engine/src/types.ts`'s `SandboxProvider.release` and
    * `packages/engine/src/sandbox/attachment.ts`'s `reportFailure`) — the
    * subsequent `create()` call (upsert-shaped, same CR name) re-adopts the
-   * retained CR and the controller heals a fresh pod onto the retained PVC,
-   * so the workspace survives a liveness-triggered re-provision instead of
+   * retained CR. Under the legacy/rwx PVC backends the controller heals a
+   * fresh pod onto the retained PVC; under `object-store` a replacement
+   * pod's emptyDir is repopulated by the workspace-restore init container
+   * from the last committed checkpoint (and `create()` flushes a reap
+   * checkpoint before it deletes a live pod on image drift), so the
+   * workspace survives a liveness-triggered re-provision instead of
    * being cascade-deleted the way an unconditional `destroy` would. Verifies
    * (does not create) the CR still exists and logs when it's unexpectedly
    * already gone — that's a legitimate race (e.g. a concurrent `destroy`)
@@ -936,6 +965,9 @@ export class KubernetesSandboxProvider implements SandboxProvider {
   async resume(id: string): Promise<void> {
     await setOperatingMode(this.deps.objectsApi, this.cfg, id, "Running");
     await this.waitReady(id);
+    // The wake reconciled a fresh pod, so the restore init container ran
+    // again — record its outcome.
+    await this.recordRestoreOutcome(id);
   }
 
   /** Writes updated credential files into a running sandbox. Replaces the
@@ -990,32 +1022,61 @@ export class KubernetesSandboxProvider implements SandboxProvider {
    * One pass of the periodic workspace checkpoint (workspace-persistence
    * spec, 07.3; the optional `SandboxProvider.sweepWorkspaceCheckpoints`
    * seam). Fires the `periodic` policy event for every CR; sandboxes
-   * without a live pod (suspended, reconciling) skip inside. Sequential on
-   * purpose — a parallel pass would stack N concurrent in-pod tar+upload
-   * execs on the apiserver.
+   * without a live pod (suspended, reconciling) skip inside. A small
+   * worker pool (WORKSPACE_SWEEP_CONCURRENCY) keeps the pass duration near
+   * the slowest checkpoint instead of the sum, with a fixed ceiling on
+   * concurrent apiserver execs.
    */
   async sweepWorkspaceCheckpoints(): Promise<void> {
     const wp = this.cfg.workspacePersistence;
     if (wp?.backend !== "object-store" || !wp.policy.periodicCheckpoint) return;
-    const listings = await listSandboxMetadata(this.deps.objectsApi, this.cfg);
-    for (const item of listings) {
-      await this.maybeCheckpointWorkspace(item.name, { kind: "periodic" });
+    const queue = await listSandboxMetadata(this.deps.objectsApi, this.cfg);
+    const workers = Array.from(
+      { length: Math.min(WORKSPACE_SWEEP_CONCURRENCY, queue.length) },
+      async () => {
+        for (let item = queue.shift(); item !== undefined; item = queue.shift()) {
+          await this.maybeCheckpointWorkspace(item.name, { kind: "periodic" });
+        }
+      },
+    );
+    await Promise.all(workers);
+  }
+
+  /** Per-sandbox checkpoint chains: suspend, reap (destroy), the drift
+   * roll, and the periodic sweep fire from independent timers. Interleaved
+   * commits race the latest-pointer PUT against pruneCheckpoints, and a
+   * suspend could scale the pod away under another caller's in-pod upload
+   * — so all checkpoint work for one sandbox is serialized here. */
+  private readonly checkpointChain = new Map<string, Promise<void>>();
+
+  /**
+   * Serialized entry point for `checkpointWorkspaceNow` — see
+   * `checkpointChain`. Never rejects (the inner path catches everything).
+   */
+  private async maybeCheckpointWorkspace(id: string, event: WorkspaceLifecycleEvent): Promise<void> {
+    const prev = this.checkpointChain.get(id) ?? Promise.resolve();
+    const run = prev.then(() => this.checkpointWorkspaceNow(id, event));
+    this.checkpointChain.set(id, run);
+    try {
+      await run;
+    } finally {
+      if (this.checkpointChain.get(id) === run) this.checkpointChain.delete(id);
     }
   }
 
   /**
    * Offer the policy kernel a checkpoint for `id` and act on its decision
    * (workspace-persistence spec, 05.3). The whole path is best-effort
-   * (INV-7): every failure logs, emits `valet.workspace.checkpoint_failed`,
-   * and returns — a checkpoint must never block suspend, reap, or the
-   * periodic sweep.
+   * (INV-7): every failure logs, counts a `failed` outcome on
+   * `valet.workspace.checkpoints`, and returns — a checkpoint must never
+   * block suspend, reap, or the periodic sweep.
    *
    * Data path: the store presigns one PUT URL per object (data, manifest,
    * latest — INV-2's commit order lives in the script) and the tar streams
    * pod → object store directly over the in-pod exec seam. The sandbox
    * never holds bucket credentials (INV-3/INV-6).
    */
-  private async maybeCheckpointWorkspace(id: string, event: WorkspaceLifecycleEvent): Promise<void> {
+  private async checkpointWorkspaceNow(id: string, event: WorkspaceLifecycleEvent): Promise<void> {
     const wp = this.cfg.workspacePersistence;
     const store = this.deps.workspaceStore;
     if (wp?.backend !== "object-store" || !store) return;
@@ -1042,7 +1103,6 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         config: {
           minCheckpointIntervalMs: wp.policy.minCheckpointIntervalMs,
           checkpointOnReap: wp.policy.checkpointOnReap,
-          onRestoreFailure: wp.policy.onRestoreFailure,
         },
       });
       if (decision.action !== "checkpoint") {
@@ -1052,8 +1112,24 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, id);
       if (podName === null) {
         // No live pod (suspended/reaping a hibernated sandbox): the
-        // workspace cannot have changed since the suspend-time checkpoint.
+        // workspace cannot have changed since the suspend-time checkpoint
+        // (suspend checkpoints unconditionally — see the policy kernel).
         recordWorkspaceCheckpoint("object-store", "skipped");
+        return;
+      }
+      // Cold-start clobber guard: a pod whose restore FAILED (fallback)
+      // runs on an emptied workspace. Committing it would advance `latest`
+      // past the last good checkpoint, and retention prune would then
+      // delete the good data — a transient store outage would become
+      // permanent loss. Refuse, loudly; the good checkpoint restores when
+      // the pod is recreated (resume or roll retries the init container).
+      const restoreOutcome = await this.readRestoreOutcome(podName).catch(() => null);
+      if (restoreOutcome?.kind === "cold_start" && restoreOutcome.reason === "restore-failed") {
+        recordWorkspaceCheckpoint("object-store", "blocked_cold_start");
+        console.warn(
+          `k8s sandbox ${id}: refusing workspace checkpoint on ${event.kind} — this pod cold-started after a ` +
+            "restore failure, and a commit would clobber the last good checkpoint. Recreate or resume the sandbox to retry the restore.",
+        );
         return;
       }
       const checkpointId = makeCheckpointId(nowMs);
@@ -1076,6 +1152,12 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         script,
         { env: checkpointScriptEnv(urls), timeout: WORKSPACE_CHECKPOINT_TIMEOUT_MS, maxOutputBytes: 64 * 1024 },
       );
+      if (result.exitCode === 0 && result.stdout.includes(CHECKPOINT_UNCHANGED_SENTINEL)) {
+        // Nothing changed since the last commit from this pod — the
+        // committed checkpoint already covers the current state.
+        recordWorkspaceCheckpoint("object-store", "unchanged");
+        return;
+      }
       const committed = result.exitCode === 0 ? parseCheckpointResult(result.stdout) : null;
       if (committed === null) {
         recordWorkspaceCheckpoint("object-store", "failed");
@@ -1097,6 +1179,55 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       recordWorkspaceCheckpoint("object-store", "failed");
       console.error(`k8s sandbox ${id}: workspace checkpoint failed on ${event.kind}:`, err);
     }
+  }
+
+  /**
+   * Reads the workspace-restore init container's outcome for `id`'s live
+   * pod and records the restore metric (spec 07.2 — the shell script
+   * cannot emit Node metrics, so the provider reads the termination
+   * message the kubelet captured). Best-effort: an absent pod, status, or
+   * message records nothing (none/rwx backends, pods predating the init
+   * container).
+   */
+  private async recordRestoreOutcome(id: string): Promise<void> {
+    if (this.cfg.workspacePersistence?.backend !== "object-store" || !this.deps.podStatusApi) return;
+    try {
+      const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, id);
+      if (podName === null) return;
+      const outcome = await this.readRestoreOutcome(podName);
+      if (outcome === null || outcome.kind === "skipped") return; // INV-1 skip is not a restore attempt
+      if (outcome.kind === "restored") {
+        recordWorkspaceRestore("object-store", "restored");
+        return;
+      }
+      if (outcome.kind === "cold_start" && outcome.reason === "no-checkpoint") {
+        recordWorkspaceRestore("object-store", "cold_start");
+        return;
+      }
+      // "failed" (block) or a fallback after a restore failure — the
+      // INV-7 visibility signal.
+      recordWorkspaceRestore("object-store", "failed");
+      console.warn(
+        `k8s sandbox ${id}: workspace restore failed` +
+          (outcome.kind === "cold_start"
+            ? " and fell back to a cold start; checkpoints are blocked for this pod (cold-start clobber guard)."
+            : "."),
+      );
+    } catch (err) {
+      console.warn(`k8s sandbox ${id}: could not read workspace restore outcome (non-fatal):`, err);
+    }
+  }
+
+  /** The parsed workspace-restore termination message of `podName`'s init
+   * container, or null when absent/unreadable. */
+  private async readRestoreOutcome(podName: string): Promise<WorkspaceRestoreOutcome | null> {
+    if (!this.deps.podStatusApi) return null;
+    const status = await this.deps.podStatusApi.getPodStatus(this.cfg.namespace, podName);
+    const message = status?.initContainerStatuses?.find(
+      (c) => c.name === WORKSPACE_RESTORE_INIT_CONTAINER_NAME,
+    )?.terminated?.message;
+    if (!message) return null;
+    return parseRestoreTerminationMessage(message);
   }
 
   private makeSandbox(id: string, docker: boolean): KubernetesSandbox {

@@ -290,7 +290,14 @@ export function buildSandboxManifest(
   const wp = cfg.workspacePersistence;
   const emptyDirWorkspace = wp !== undefined && (wp.backend === "object-store" || wp.backend === "none");
   if (emptyDirWorkspace) {
-    podSpec.volumes = [...(podSpec.volumes ?? []), { name: WORKSPACE_VOLUME_NAME, emptyDir: {} }];
+    podSpec.volumes = [
+      ...(podSpec.volumes ?? []),
+      // sizeLimit keeps the storage cap the PVC path enforces via its
+      // storage request — without it a runaway workspace consumes node
+      // ephemeral storage until the kubelet hits disk pressure and evicts
+      // neighboring sandboxes.
+      { name: WORKSPACE_VOLUME_NAME, emptyDir: { sizeLimit: cfg.defaultStorage ?? DEFAULT_STORAGE } },
+    ];
   }
   if (wp?.backend === "object-store" && wp.objectStore && opts.orgId && opts.ownerId) {
     const store = wp.objectStore;
@@ -308,9 +315,6 @@ export function buildSandboxManifest(
           { name: RESTORE_ENV.region, value: store.region },
           { name: RESTORE_ENV.workspacePrefix, value: workspaceObjectPrefix(store.prefix, ref) },
           { name: RESTORE_ENV.onRestoreFailure, value: wp.policy.onRestoreFailure },
-          { name: RESTORE_ENV.orgId, value: ref.orgId },
-          { name: RESTORE_ENV.ownerId, value: ref.ownerId },
-          { name: RESTORE_ENV.workspaceId, value: ref.workspaceId },
         ],
         volumeMounts: [
           { name: WORKSPACE_VOLUME_NAME, mountPath: WORKSPACE_MOUNT_PATH },
