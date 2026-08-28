@@ -989,6 +989,216 @@ describe("security engagement service", () => {
     expect(manifest.cells[4].status).toBe("failed");
   });
 
+  // ── Needs loop / pivot-coordinator (M-P4c) ───────────────────────────────
+
+  /** A two-cell plan whose ordinal-2 sweep declares a payments path glob, so a
+   * scope need naming that path auto-resolves. `configTools` declares gitleaks,
+   * so a tool need naming it auto-resolves. */
+  const SCOPED_PLAN = [
+    "cells:",
+    "  - ordinal: 1",
+    "    persona: code-review",
+    "    goal: Map the codebase",
+    "  - ordinal: 2",
+    "    persona: code-review",
+    "    goal: Sweep payments",
+    "    paths:",
+    "      - packages/payments/**",
+    "    reads: [1]",
+    "",
+  ].join("\n");
+
+  async function makeScopedStarted() {
+    const engagement = await svc.createEngagement({
+      sessionId: `s_${Math.random().toString(36).slice(2)}`,
+      repoFullName: "acme/api",
+      plan: SCOPED_PLAN,
+      config: { tools: ["gitleaks"] },
+    });
+    return svc.startEngagement(engagement.id, { resolvedSha: SHA });
+  }
+
+  it("reportNeed inserts an open need and listNeeds returns it", async () => {
+    const { engagement, cells } = await makeScopedStarted();
+    const need = await svc.reportNeed(engagement.id, {
+      cellId: cells[1].id,
+      kind: "credential",
+      description: "A staging admin token to reach /admin routes.",
+    });
+    expect(need.status).toBe("open");
+    expect(need.resolution).toBeNull();
+    const all = await svc.listNeeds(engagement.id);
+    expect(all).toHaveLength(1);
+    expect(all[0].id).toBe(need.id);
+    const scoped = await svc.listNeeds(engagement.id, { cellId: cells[1].id });
+    expect(scoped).toHaveLength(1);
+    const other = await svc.listNeeds(engagement.id, { cellId: cells[0].id });
+    expect(other).toHaveLength(0);
+  });
+
+  it("reportNeed rejects an empty description", async () => {
+    const { engagement, cells } = await makeScopedStarted();
+    await expect(
+      svc.reportNeed(engagement.id, { cellId: cells[1].id, kind: "scope", description: "  " }),
+    ).rejects.toThrow(/must name what is blocked/);
+  });
+
+  it("resolveNeeds auto-resolves an in-scope path and a declared tool, leaves a credential for the human", async () => {
+    const { engagement, cells } = await makeScopedStarted();
+    const scope = await svc.reportNeed(engagement.id, {
+      cellId: cells[1].id,
+      kind: "scope",
+      description: "Sweep packages/payments too — it is in scope.",
+    });
+    const tool = await svc.reportNeed(engagement.id, {
+      cellId: cells[1].id,
+      kind: "tool",
+      description: "Run gitleaks for secrets.",
+    });
+    const cred = await svc.reportNeed(engagement.id, {
+      cellId: cells[1].id,
+      kind: "credential",
+      description: "A staging admin token to reach /admin routes.",
+    });
+
+    const result = await svc.resolveNeeds(engagement.id);
+    expect(result.autoResolved.map((n) => n.id).sort()).toEqual([scope.id, tool.id].sort());
+    expect(result.needsHuman.map((n) => n.id)).toEqual([cred.id]);
+    expect(result.pendingHuman.map((n) => n.id)).toEqual([cred.id]);
+
+    const rows = await svc.listNeeds(engagement.id);
+    const byId = new Map(rows.map((n) => [n.id, n]));
+    expect(byId.get(scope.id)?.status).toBe("auto_resolved");
+    expect(byId.get(scope.id)?.resolution).toContain("packages/payments");
+    expect(byId.get(scope.id)?.resolvedAt).not.toBeNull();
+    expect(byId.get(tool.id)?.status).toBe("auto_resolved");
+    expect(byId.get(tool.id)?.resolution).toContain("gitleaks");
+    // A credential NEVER auto-resolves — the coordinator never grants one.
+    expect(byId.get(cred.id)?.status).toBe("needs_human");
+    expect(byId.get(cred.id)?.resolution).toBeNull();
+  });
+
+  it("resolveNeeds never auto-resolves a decision", async () => {
+    const { engagement, cells } = await makeScopedStarted();
+    await svc.reportNeed(engagement.id, {
+      cellId: cells[1].id,
+      kind: "decision",
+      description: "May I run a destructive test against staging?",
+    });
+    const result = await svc.resolveNeeds(engagement.id);
+    expect(result.autoResolved).toHaveLength(0);
+    expect(result.needsHuman).toHaveLength(1);
+  });
+
+  it("resolveEngagementNeeds marks answered and resets ONLY the affected cell to pending (delta re-run)", async () => {
+    const { engagement, cells } = await makeScopedStarted();
+    // Run cell 1 to completion; cell 2 records a credential need and yields.
+    await runCellToCompletion(engagement.id, cells[0]);
+    await svc.dispatchCell(engagement.id, { cellId: cells[1].id, spawn });
+    const need = await svc.reportNeed(engagement.id, {
+      cellId: cells[1].id,
+      kind: "credential",
+      description: "A staging admin token.",
+    });
+    await svc.writeFile(engagement.id, {
+      actorCellId: cells[1].id,
+      path: `/cells/${cells[1].dir}/state.yml`,
+      content: YIELD_DOC,
+    });
+    await svc.completeCell(engagement.id, cells[1].id, { settled: true });
+    await svc.resolveNeeds(engagement.id);
+
+    const outcome = await svc.resolveEngagementNeeds(engagement.id, [
+      { needId: need.id, resolution: "Token: stg_admin_abc123." },
+    ]);
+    expect(outcome.answered).toHaveLength(1);
+    expect(outcome.answered[0].status).toBe("answered");
+    expect(outcome.answered[0].resolution).toContain("stg_admin_abc123");
+    // Only cell 2 (the one that recorded the need) reset; cell 1 stays completed.
+    expect(outcome.resetCells.map((c) => c.id)).toEqual([cells[1].id]);
+    const rows = await db
+      .select()
+      .from(securityCells)
+      .where(eq(securityCells.engagementId, engagement.id));
+    const byOrdinal = new Map(rows.map((c) => [c.ordinal, c]));
+    expect(byOrdinal.get(1)?.status).toBe("completed");
+    expect(byOrdinal.get(2)?.status).toBe("pending");
+    expect(byOrdinal.get(2)?.mode).toBe("resume");
+    expect(byOrdinal.get(2)?.settledAt).toBeNull();
+  });
+
+  it("resolveEngagementNeeds dismiss marks dismissed and does NOT reset the cell", async () => {
+    const { engagement, cells } = await makeScopedStarted();
+    const need = await svc.reportNeed(engagement.id, {
+      cellId: cells[1].id,
+      kind: "decision",
+      description: "May I run a destructive test?",
+    });
+    await svc.resolveNeeds(engagement.id);
+    const outcome = await svc.resolveEngagementNeeds(engagement.id, [
+      { needId: need.id, resolution: "Not worth it.", dismiss: true },
+    ]);
+    expect(outcome.answered[0].status).toBe("dismissed");
+    expect(outcome.resetCells).toHaveLength(0);
+    const rows = await db
+      .select()
+      .from(securityCells)
+      .where(and(eq(securityCells.engagementId, engagement.id), eq(securityCells.id, cells[1].id)));
+    expect(rows[0].status).toBe("pending"); // never dispatched, still pending
+  });
+
+  it("resolveEngagementNeeds refuses a need not waiting on a human, and an unknown need", async () => {
+    const { engagement, cells } = await makeScopedStarted();
+    const need = await svc.reportNeed(engagement.id, {
+      cellId: cells[1].id,
+      kind: "credential",
+      description: "A token.",
+    });
+    // Still 'open' — resolveNeeds not yet run.
+    await expect(
+      svc.resolveEngagementNeeds(engagement.id, [{ needId: need.id, resolution: "x" }]),
+    ).rejects.toThrow(/not needs_human/);
+    await expect(
+      svc.resolveEngagementNeeds(engagement.id, [{ needId: "need_missing", resolution: "x" }]),
+    ).rejects.toThrow(/No need need_missing/);
+  });
+
+  it("the delta re-dispatch carries the answered need's resolution into the prompt", async () => {
+    const { engagement, cells } = await makeScopedStarted();
+    await runCellToCompletion(engagement.id, cells[0]);
+    await svc.dispatchCell(engagement.id, { cellId: cells[1].id, spawn });
+    const need = await svc.reportNeed(engagement.id, {
+      cellId: cells[1].id,
+      kind: "credential",
+      description: "A staging admin token.",
+    });
+    await svc.writeFile(engagement.id, {
+      actorCellId: cells[1].id,
+      path: `/cells/${cells[1].dir}/state.yml`,
+      content: YIELD_DOC,
+    });
+    await svc.completeCell(engagement.id, cells[1].id, { settled: true });
+    await svc.resolveNeeds(engagement.id);
+    await svc.resolveEngagementNeeds(engagement.id, [
+      { needId: need.id, resolution: "Token: stg_admin_abc123." },
+    ]);
+    // Re-dispatch the reset cell; the prompt carries the resolution block.
+    const { prompt } = await svc.dispatchCell(engagement.id, { cellId: cells[1].id, spawn });
+    expect(prompt).toContain("Resolved needs (continue the blocked work)");
+    expect(prompt).toContain("stg_admin_abc123");
+    expect(prompt).toContain("A staging admin token.");
+  });
+
+  it("buildDispatchPrompt is byte-identical when no needs are resolved", async () => {
+    const { engagement, cells } = await makeScopedStarted();
+    const planFile = await svc.readFile(engagement.id, "/plan.yml");
+    const plan = parsePlan(planFile.content, KNOWN_PERSONAS);
+    const withEmpty = buildDispatchPrompt(cells[1], plan, [], "P", false, {}, []);
+    const withNone = buildDispatchPrompt(cells[1], plan, [], "P", false, {});
+    expect(withEmpty).toBe(withNone);
+    expect(withEmpty).not.toContain("Resolved needs");
+  });
+
   // ── Cancel ───────────────────────────────────────────────────────────────
 
   it("cancelEngagement from planning sets cancelled and fails pending cells", async () => {

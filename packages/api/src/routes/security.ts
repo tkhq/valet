@@ -90,6 +90,7 @@ import {
   type SecurityFindingLinkRow,
   type SecurityFindingRow,
   type SecurityHandoffRow,
+  type SecurityNeedRow,
 } from "../schema/index.js";
 import { canAdministerSession, canViewSession } from "../services/session-access.js";
 import { routeAttention, type AttentionDeps } from "../orchestrator/attention.js";
@@ -102,6 +103,7 @@ import {
   type CellProgress,
   type FindingSeverity,
   type FindingStatus,
+  type NeedKind,
   type SpawnCellChild,
 } from "../services/security-engagements.js";
 import {
@@ -127,6 +129,10 @@ import type {
   SecurityCellWire,
   SecurityCoverageWire,
   SecurityReportCoverageResponse,
+  SecurityNeedWire,
+  SecurityReportNeedResponse,
+  ListSecurityNeedsResponse,
+  SecurityResolveNeedsResponse,
   SecurityCloseResponse,
   SecurityCompleteCellResponse,
   SecurityDigestIssueResponse,
@@ -363,6 +369,27 @@ function coverageToWire(row: SecurityCoverageRow): SecurityCoverageWire {
   };
 }
 
+function needToWire(row: SecurityNeedRow): SecurityNeedWire {
+  return {
+    id: row.id,
+    cellId: row.cellId,
+    kind: row.kind,
+    description: row.description,
+    status: row.status,
+    resolution: row.resolution,
+    createdAt: row.createdAt,
+    resolvedAt: row.resolvedAt,
+  };
+}
+
+const NEED_KINDS: ReadonlySet<string> = new Set([
+  "credential",
+  "dependency",
+  "scope",
+  "decision",
+  "tool",
+]);
+
 const NO_ENGAGEMENT =
   "This session has no security engagement. Create the session with kind 'security' to start one.";
 
@@ -383,12 +410,17 @@ securityRouter.get("/:id/security", async (c) => {
   // The re-scan diff (re-scan / iterate) — null unless this engagement
   // re-scans a prior one. `fixedCount` stays null until the scan is terminal.
   const diff = await security.diffEngagement(result.engagement.id);
+  // The pivot-coordinator needs (M-P4c): every need on the engagement, so the
+  // panel lists auto-resolved (informational) and needs-human items. Absent
+  // when the engagement recorded no needs.
+  const needs = await security.listNeeds(result.engagement.id);
   const body: GetSessionSecurityResponse = {
     engagement: engagementToWire(result.engagement),
     cells: result.cells.map((cell) => cellToWire(cell, progress)),
     cost,
     planCells: planCellsToWire(result.engagement),
     ...(diff ? { diff } : {}),
+    ...(needs.length > 0 ? { needs: needs.map(needToWire) } : {}),
   };
   return c.json(body);
 });
@@ -1699,6 +1731,73 @@ securityRouter.post("/:id/security/coverage", async (c) => {
   }
 });
 
+/**
+ * POST /:id/security/needs — a persona records a need it is blocked on
+ * (pivot-coordinator + needs loop, M-P4c, spec §Pivot-coordinator).
+ * Internal-token persona seam, same as the finding/coverage routes: the acting
+ * session's cell claim is the authority (`resolvePersonaActor`). The route
+ * records the need, then runs the coordinator sweep once
+ * (`resolveNeeds`) — it auto-resolves the already-authorized needs (visible
+ * resolution rows) and marks the rest needs_human for the consolidated human
+ * ask. The response tells the persona whether its own need auto-resolved.
+ */
+securityRouter.post("/:id/security/needs", async (c) => {
+  const sessionId = c.req.param("id");
+  const resolved = await resolvePersonaActor(c, sessionId);
+  if ("failure" in resolved) return resolved.failure;
+  const { security, engagement, cell } = resolved.ok;
+
+  const body = await readJsonBody(c);
+  if (typeof body.kind !== "string" || !NEED_KINDS.has(body.kind)) {
+    return c.json({ error: "kind must be credential, dependency, scope, decision, or tool." }, 400);
+  }
+  if (typeof body.description !== "string" || body.description.trim() === "") {
+    return c.json({ error: "Send { description } naming the blocked item." }, 400);
+  }
+
+  try {
+    const need = await security.reportNeed(engagement.id, {
+      cellId: cell.id,
+      // The set membership above proved the narrow type.
+      kind: body.kind as NeedKind,
+      description: body.description,
+    });
+    // Run the coordinator sweep: auto-resolve the already-authorized needs and
+    // mark the rest needs_human (the consolidated ask). One owner, visible rows.
+    const swept = await security.resolveNeeds(engagement.id);
+    // Re-read this need's post-sweep row so the response reflects its ruling.
+    const settled = [...swept.autoResolved, ...swept.needsHuman].find((n) => n.id === need.id) ?? need;
+    const response: SecurityReportNeedResponse = {
+      need: needToWire(settled),
+      autoResolved: swept.autoResolved.map(needToWire),
+      needsHuman: swept.pendingHuman.map(needToWire),
+    };
+    return c.json(response);
+  } catch (err) {
+    return serviceError(c, err);
+  }
+});
+
+/**
+ * GET /:id/security/needs — the engagement's needs (M-P4c). View-gated, same
+ * ladder as the findings GET. The panel lists auto-resolved (informational) and
+ * needs-human items.
+ */
+securityRouter.get("/:id/security/needs", async (c) => {
+  const sessionId = c.req.param("id");
+  const row = await resolveViewableSession(c, sessionId);
+  if (!row) return c.json({ error: "session not found" }, 404);
+
+  const { db } = c.var.providers;
+  const security = createSecurityEngagementService({ db });
+  const result = await security.getEngagementBySession(sessionId);
+  if (!result) return c.json({ error: NO_ENGAGEMENT }, 404);
+
+  const needs = await security.listNeeds(result.engagement.id);
+  const body: ListSecurityNeedsResponse = { needs: needs.map(needToWire) };
+  return c.json(body);
+});
+
 // ── M6: human triage routes ────────────────────────────────────────────────
 //
 // Decision 10 (spec §Filing issues, threat 11): review, export, and issue
@@ -1853,6 +1952,63 @@ securityRouter.post("/:id/security/findings/:findingId/comments", async (c) => {
     return c.json(response);
   } catch (err) {
     return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+  }
+});
+
+/**
+ * POST /:id/security/needs/resolve — the consolidated human answer + delta
+ * re-run (pivot-coordinator + needs loop, M-P4c, spec §Pivot-coordinator).
+ * HUMAN action: `resolveHumanSession(.., "administer")` refuses the internal
+ * token (the runner and personas never answer their own needs) and gates on
+ * `canAdministerSession`. Takes `{ answers: [{ needId, resolution, dismiss? }] }`.
+ * The service marks each answered and resets ONLY the cell that recorded it to
+ * pending — a delta re-run, not a whole-engagement re-run. The runner picks the
+ * reset cell up and re-dispatches it; the answer rides into its dispatch prompt.
+ */
+securityRouter.post("/:id/security/needs/resolve", async (c) => {
+  const sessionId = c.req.param("id");
+  const resolved = await resolveHumanSession(c, sessionId, "administer");
+  if ("failure" in resolved) return resolved.failure;
+
+  const loaded = await loadEngagementOr404(c, sessionId);
+  if ("failure" in loaded) return loaded.failure;
+  const { security, result } = loaded;
+
+  const body = await readJsonBody(c);
+  if (!Array.isArray(body.answers) || body.answers.length === 0) {
+    return c.json({ error: "Send { answers: [{ needId, resolution }] } with at least one answer." }, 400);
+  }
+  const answers: { needId: string; resolution: string; dismiss?: boolean }[] = [];
+  for (const raw of body.answers) {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      return c.json({ error: "Each answer is { needId, resolution, dismiss? }." }, 400);
+    }
+    const rec = raw as Record<string, unknown>;
+    if (typeof rec.needId !== "string" || rec.needId === "") {
+      return c.json({ error: "Each answer needs a needId." }, 400);
+    }
+    const dismiss = rec.dismiss === true;
+    if (!dismiss && (typeof rec.resolution !== "string" || rec.resolution.trim() === "")) {
+      return c.json({ error: `Answer for ${rec.needId} needs a resolution, or set dismiss: true.` }, 400);
+    }
+    answers.push({
+      needId: rec.needId,
+      resolution: typeof rec.resolution === "string" ? rec.resolution : "",
+      dismiss,
+    });
+  }
+
+  try {
+    const outcome = await security.resolveEngagementNeeds(result.engagement.id, answers);
+    const response: SecurityResolveNeedsResponse = {
+      answered: outcome.answered.map(needToWire),
+      resetCellIds: outcome.resetCells.map((cell) => cell.id),
+    };
+    return c.json(response);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.startsWith("No need")) return c.json({ error: message }, 404);
+    return c.json({ error: message }, 409);
   }
 });
 

@@ -24,6 +24,7 @@ import type {
   SecurityFileIssueResponse,
   SecurityFindingWire,
   SecurityPlanCellInput,
+  SecurityResolveNeedsResponse,
   SecurityReviewFindingResponse,
   SecuritySetConfigResponse,
   SecuritySetPlanResponse,
@@ -204,6 +205,26 @@ export function useCancelEngagement(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<GetSessionSecurityResponse, Error, void>({
     mutationFn: () => api.cancelSecurityReview(sessionId),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qkSecurity.engagement(sessionId) });
+    },
+  });
+}
+
+/**
+ * POST .../security/needs/resolve — the consolidated human answer + delta
+ * re-run (pivot-coordinator, M-P4c; session admin). Marks each need answered and
+ * resets only the affected cells to pending. Invalidates the engagement query so
+ * the panel re-reads the needs list and the reset cells.
+ */
+export function useResolveNeeds(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<
+    SecurityResolveNeedsResponse,
+    Error,
+    { needId: string; resolution: string; dismiss?: boolean }[]
+  >({
+    mutationFn: (answers) => api.resolveSecurityNeeds(sessionId, answers),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: qkSecurity.engagement(sessionId) });
     },

@@ -872,6 +872,69 @@ export const secCoverageReportTool = defineTool({
   },
 });
 
+// ── sec_need_report (persona) ──────────────────────────────────────────────
+
+/**
+ * The pivot tool (pivot-coordinator + needs loop, M-P4c, spec
+ * §Pivot-coordinator). A persona that cannot go deeper — it lacks a credential,
+ * a running dependency, a scope expansion, an out-of-band decision, or a
+ * declared tool — records a structured need instead of stopping (a silent
+ * coverage gap) or blocking a human per item. The coordinator auto-resolves
+ * what is already-authorized and batches the rest into ONE consolidated human
+ * ask; after the human answers, the affected cell re-runs with the answer.
+ */
+export const secNeedReportTool = defineTool({
+  name: "sec_need_report",
+  description:
+    "Report a need that blocks you from going deeper: a credential you lack, a running dependency you need, a scope " +
+    "expansion, an out-of-band decision, or a declared tool to provision. Record it instead of stopping — a silent gap " +
+    "is a coverage hole. The coordinator auto-resolves what is already authorized (a declared tool, an in-scope item) " +
+    "and batches the rest into ONE human ask; after the human answers, your cell re-runs with the answer. State the " +
+    "need precisely: name the credential, the dependency, the path, the decision, or the tool.",
+  parameters: Type.Object({
+    kind: Type.Union([
+      Type.Literal("credential"),
+      Type.Literal("dependency"),
+      Type.Literal("scope"),
+      Type.Literal("decision"),
+      Type.Literal("tool"),
+    ]),
+    description: Type.String({
+      description: "One sentence naming the blocked item, e.g. 'a staging admin token to reach /admin routes'.",
+    }),
+  }),
+  execute: async (args, ctx) => {
+    const cfg = resolveSecurityConfig(ctx);
+    if (!cfg) return { text: UNAVAILABLE_TEXT };
+    return securityRequest(
+      securityUrl(cfg, ctx, "/needs"),
+      {
+        method: "POST",
+        headers: securityHeaders(cfg, ctx, true),
+        body: JSON.stringify({ kind: args.kind, description: args.description }),
+      },
+      async (res) => {
+        const body = await parseJsonBody(res);
+        const need = isRecord(body) && isRecord(body.need) ? body.need : null;
+        if (!need) return { text: "[security_error] the needs route returned an unexpected shape." };
+        const lines = [`need ${String(need.id)} recorded [${String(need.kind)}] — ${String(need.status)}`];
+        const autoResolved = isRecord(body) && Array.isArray(body.autoResolved) ? body.autoResolved : [];
+        const auto = autoResolved.filter(isRecord).find((n) => n.id === need.id);
+        if (auto && typeof auto.resolution === "string") {
+          lines.push(`Auto-resolved: ${auto.resolution} Continue.`);
+        } else {
+          const needsHuman = isRecord(body) && Array.isArray(body.needsHuman) ? body.needsHuman : [];
+          lines.push(
+            `This need waits on a human answer (${needsHuman.length} pending). Move to other work you can still cover; ` +
+              "your cell re-runs with the answer once resolved.",
+          );
+        }
+        return { text: lines.join("\n") };
+      },
+    );
+  },
+});
+
 /** All eleven runner `sec_*` ToolDefs, in registration order. */
 export function buildSecurityRunnerTools(): ToolDef[] {
   return [
@@ -903,6 +966,7 @@ export function buildSecurityPersonaTools(opts: { review: boolean }): ToolDef[] 
     secProtocolReadTool,
     secFindingReportTool,
     secCoverageReportTool,
+    secNeedReportTool,
     ...(opts.review ? [secFindingReviewTool] : []),
   ];
 }

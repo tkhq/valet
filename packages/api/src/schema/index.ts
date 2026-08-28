@@ -1945,6 +1945,50 @@ export const securityCoverage = pgTable(
   ],
 );
 
+// One row per need a persona records (pivot-coordinator + needs loop, M-P4c,
+// spec §Pivot-coordinator). During a sweep a persona that cannot go deeper —
+// it lacks a credential, a running dependency, a scope expansion, or an
+// out-of-band decision — records a structured need instead of stopping (a
+// silent gap) or blocking a human per item. The coordinator auto-resolves
+// what is unambiguously already-authorized (a declared tool, an in-scope
+// item), batches the rest into ONE consolidated human ask, then re-runs only
+// the affected cells. `kind` classes the need; `status` tracks it through the
+// loop; `resolution` records the auto-resolution note or the human answer.
+// Insert-only rows, forward status. No unique constraint — a cell may record
+// several needs.
+export const securityNeeds = pgTable(
+  "security_needs",
+  {
+    id: text("id").primaryKey(),
+    engagementId: text("engagement_id").notNull(),
+    // The cell that recorded the need — the persona's claim. The delta re-run
+    // resets this cell to pending once its need is answered.
+    cellId: text("cell_id").notNull(),
+    // What class of thing is blocked: a 'credential', a running 'dependency',
+    // a 'scope' expansion, an out-of-band 'decision', or a 'tool' to provision.
+    kind: text("kind", {
+      enum: ["credential", "dependency", "scope", "decision", "tool"],
+    }).notNull(),
+    description: text("description").notNull(),
+    // 'open' when recorded; the coordinator flips it to 'auto_resolved' (an
+    // already-authorized item), 'needs_human' (the consolidated ask), then
+    // 'answered' (the human resolved it). 'dismissed' is a human no-op.
+    status: text("status", {
+      enum: ["open", "auto_resolved", "needs_human", "answered", "dismissed"],
+    })
+      .notNull()
+      .default("open"),
+    // The auto-resolution note or the human answer. Null while open/needs_human.
+    resolution: text("resolution"),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    resolvedAt: bigint("resolved_at", { mode: "number" }),
+  },
+  (t) => [
+    index("security_needs_engagement").on(t.engagementId),
+    index("security_needs_cell").on(t.cellId),
+  ],
+);
+
 export type SecurityEngagementRow = typeof securityEngagements.$inferSelect;
 export type SecurityCellRow = typeof securityCells.$inferSelect;
 export type SecurityFileRow = typeof securityFiles.$inferSelect;
@@ -1953,3 +1997,4 @@ export type SecurityFindingLinkRow = typeof securityFindingLinks.$inferSelect;
 export type SecurityHandoffRow = typeof securityHandoffs.$inferSelect;
 export type SecurityFindingCommentRow = typeof securityFindingComments.$inferSelect;
 export type SecurityCoverageRow = typeof securityCoverage.$inferSelect;
+export type SecurityNeedRow = typeof securityNeeds.$inferSelect;

@@ -85,6 +85,7 @@ const APP_TABLES = [
   "security_handoffs",
   "security_finding_comments",
   "security_coverage",
+  "security_needs",
 ];
 
 async function tableExists(db: PgDb, table: string): Promise<boolean> {
@@ -314,6 +315,38 @@ describe("pg app schema + migrations", () => {
     expect((rows.rows[0] as { status: string }).status).toBe("assessed");
     expect((rows.rows[1] as { reason: string }).reason).toContain("semgrep is missing");
     await db.query("DELETE FROM security_coverage WHERE engagement_id = 'eng1'");
+  });
+
+  it("round-trips needs rows with no unique constraint per cell", async () => {
+    const now = Date.now();
+    // An open credential need (needs a human) and an auto_resolved scope need
+    // (the coordinator ruled it already-authorized, with a resolution note).
+    await db.query(
+      "INSERT INTO security_needs (id, engagement_id, cell_id, kind, description, status, resolution, created_at, resolved_at) VALUES ('need1', 'eng1', 'cell1', 'credential', 'A staging API token to reach the admin route.', 'needs_human', NULL, $1, NULL)",
+      [now],
+    );
+    await db.query(
+      "INSERT INTO security_needs (id, engagement_id, cell_id, kind, description, status, resolution, created_at, resolved_at) VALUES ('need2', 'eng1', 'cell1', 'scope', 'Sweep the payments dir already in scope.', 'auto_resolved', 'Already inside the authorized scope.', $1, $2)",
+      [now + 1, now + 2],
+    );
+    const rows = await db.query(
+      "SELECT id, kind, status, resolution FROM security_needs WHERE engagement_id = 'eng1' ORDER BY created_at",
+    );
+    expect(rows.rows).toHaveLength(2);
+    expect((rows.rows[0] as { status: string }).status).toBe("needs_human");
+    expect((rows.rows[1] as { resolution: string }).resolution).toContain("authorized scope");
+    await db.query("DELETE FROM security_needs WHERE engagement_id = 'eng1'");
+  });
+
+  it("defaults security_needs.status to 'open'", async () => {
+    const now = Date.now();
+    await db.query(
+      "INSERT INTO security_needs (id, engagement_id, cell_id, kind, description, created_at) VALUES ('need3', 'eng1', 'cell1', 'decision', 'Approve a destructive test against staging?', $1)",
+      [now],
+    );
+    const rows = await db.query("SELECT status FROM security_needs WHERE id = 'need3'");
+    expect((rows.rows[0] as { status: string }).status).toBe("open");
+    await db.query("DELETE FROM security_needs WHERE id = 'need3'");
   });
 
   it("tracks the applied migration in __valet_app_migrations", async () => {
