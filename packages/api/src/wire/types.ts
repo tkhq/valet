@@ -484,6 +484,21 @@ export interface MessageSkillInvocation {
   args?: string;
 }
 
+/**
+ * The person who sent a user message. Projected from the engine entry's
+ * `PromptAuthor` (stamped at `POST /messages` from the authenticated user).
+ * Present only on user messages, and only on those submitted after this
+ * field shipped. The client renders it on shared (team-owned) sessions so
+ * members can tell each other's messages apart; absent means "the viewer or
+ * unknown" and renders as "You".
+ */
+export interface MessageAuthor {
+  id: string;
+  name?: string;
+  email?: string;
+  avatarUrl?: string;
+}
+
 export interface Message {
   id: string;
   sessionId: string;
@@ -519,6 +534,11 @@ export interface Message {
    * `metadata.skill` / `metadata.skillArgs`.
    */
   skill?: MessageSkillInvocation;
+  /**
+   * Who sent this user message (see `MessageAuthor`). Never set on
+   * assistant/tool/system entries.
+   */
+  author?: MessageAuthor;
   /**
    * Model that produced this entry (assistant messages). Gives the reply
    * visible attribution so a model switch is verifiable in the transcript,

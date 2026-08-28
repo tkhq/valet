@@ -81,6 +81,33 @@ describe("Session.prompt command interception", () => {
     expect(events.some((e) => e.event.type === "command_result")).toBe(true);
   });
 
+  it("the echo carries the submitting author — an authorless echo renders as 'You' to every member of a shared session", async () => {
+    const faux = registerFauxProvider({ provider: "s-echo-author" });
+    cleanups.push(() => faux.unregister());
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/workspace",
+      sandbox: {},
+      model: faux.getModel(),
+      commandContext: ctx,
+    });
+    const threadId = session.thread().id;
+
+    await session.prompt("/status", {
+      author: { id: "u2", name: "Bob", email: "bob@example.com" },
+    });
+
+    const entries = await store.getEntries(session.id, threadId);
+    const echo = entries.find((e) => e.type === "message" && e.role === "user");
+    expect(echo?.type === "message" && echo.author).toEqual({
+      id: "u2",
+      name: "Bob",
+      email: "bob@example.com",
+    });
+  });
+
   it("a builtin runs against the target thread, not the session default", async () => {
     const faux = registerFauxProvider({ provider: "s-builtin-thread" });
     cleanups.push(() => faux.unregister());

@@ -37,6 +37,7 @@ import type {
   EngineEvent,
   MessageQuery,
   Principal,
+  PromptAuthor,
   PromptContent,
   PromptOptions,
   PromptReceipt,
@@ -735,7 +736,7 @@ export class Session {
         return thread.submitPrompt(withText(content, outcome.text), opts2);
       }
       if (outcome.kind === "execute") {
-        return this.executeCommand(thread, outcome.resolved, outcome.args, text);
+        return this.executeCommand(thread, outcome.resolved, outcome.args, text, opts.author);
       }
       if (outcome.kind === "pass" && outcome.nearMiss !== undefined) {
         const receipt = await thread.submitPrompt(content, opts);
@@ -759,17 +760,20 @@ export class Session {
    * command-shaped receipt. Never touches queue admission — a command runs
    * even while a turn streams.
    *
-   * `PromptOptions` other than `threadId` (resolved by the caller) are
-   * intentionally not forwarded: they shape queue submissions (author,
-   * channel, queueMode, model, ...) and a command takes no queue item. If a
-   * future option must reach the command path, add a parameter here so the
-   * dependency is explicit.
+   * `PromptOptions` other than `threadId` (resolved by the caller) and
+   * `author` are intentionally not forwarded: they shape queue submissions
+   * (channel, queueMode, model, ...) and a command takes no queue item.
+   * `author` IS forwarded, onto the echo entry — the echo is a persisted
+   * user message, and on a shared session an authorless echo renders as
+   * "You" in every member's view. If another option must reach the command
+   * path, add a parameter here so the dependency is explicit.
    */
   private async executeCommand(
     thread: Thread,
     resolved: ResolvedCommand,
     args: string[],
     raw: string,
+    author?: PromptAuthor,
   ): Promise<PromptReceipt> {
     // Echo the typed command as a persisted user message BEFORE the result.
     // A command takes no queue item, so nothing else persists the user's
@@ -786,6 +790,7 @@ export class Session {
       type: "message",
       role: "user",
       content: raw,
+      author,
       createdAt: echoAt,
     };
     await this.providers.store.appendEntries(this.id, thread.id, [echo]);

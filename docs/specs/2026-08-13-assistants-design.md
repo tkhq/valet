@@ -108,6 +108,38 @@ adds no new authorization surface.
 Creating and archiving an assistant follows the same rule as administering
 one: your own for a user assistant, team admin for a team's.
 
+## Message attribution
+
+Several members prompt one team assistant session, so every prompt must say
+who sent it. `POST /api/sessions/:id/messages` (and `initialPrompt` on
+create) stamps the authenticated user as `PromptOptions.author`
+(`promptAuthorFromUser`); the engine persists it on the user entry
+(`MessageEntry.author`). Slash-command echoes carry the author too
+(`executeCommand` forwards it). Orchestrator-spawned child prompts carry
+NO author: the parent agent composed that text, and `author` means "the
+person who wrote this".
+
+Two consumers read it:
+
+- **The wire.** `entryToMessage` projects the entry's author as
+  `Message.author` (id, name, email, avatarUrl — never the channel-plugin
+  `externalId`). The client renders another member's messages under the
+  sender's name; the viewer's own messages, and entries from before the
+  stamp shipped, render as "You".
+- **The model.** On shared (team/org-owned) sessions the engine renders a
+  `[from: …]` line above each user message's text — `formatSenderLine`
+  (`submission.ts`), one render function for three call sites: the hot
+  path, rehydrate, and the compaction summarizer, so every transcript the
+  model sees agrees byte-for-byte and summaries keep who-said-what.
+  Personal sessions skip the line: one author, no information. Signal
+  entries skip it too — their envelope already names the sender.
+
+`formatSenderLine` sanitizes the label (newlines and square brackets
+collapse to spaces; 120-char clamp), so a self-service display name cannot
+forge a stamp. The line remains context for the model, not an
+authorization boundary: a member who types "[from: someone-else]" into a
+prompt forges only prose, because access still rides `canViewSession`.
+
 ## What this unblocks
 
 Channel bindings already carry `owner_type`/`owner_id`/`session_id`

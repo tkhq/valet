@@ -30,6 +30,7 @@ import { MessageList } from "~/components/session/message-list";
 import { PageDropTarget } from "~/components/session/page-drop-target";
 import { SandboxTabs, type SandboxTabId } from "~/components/session/sandbox-tabs";
 import { SessionHeader } from "~/components/session/session-header";
+import { useMe } from "~/api/settings";
 import { useInvalidateSessionOnModelSwitch } from "~/hooks/use-invalidate-session-on-model-switch";
 import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
 import { Button, Spinner } from "~/components/primitives";
@@ -116,6 +117,9 @@ export function SessionView({
   // stream store. Background refetches are disabled (see `useMessages`) so
   // this never wipes live state mid-session.
   const messagesQ = useMessages(sessionId, effectiveThreadId);
+  // Viewer identity, for message attribution: the list renders another
+  // member's user messages under their name instead of "You".
+  const me = useMe();
   const setThreadMessages = useStreamStore((s) => s.setThreadMessages);
   useEffect(() => {
     if (!effectiveThreadId || !messagesQ.data) return;
@@ -272,6 +276,7 @@ export function SessionView({
             onOpenChild={onOpenChild}
             agentBusy={agentBusy}
             pendingIds={threadQueueState?.pendingIds}
+            viewerId={me.data?.id}
           />
           {threadError && (
             <div className="border-t border-danger-500/30 bg-danger-500/5 px-4 py-2 text-xs text-danger-600">

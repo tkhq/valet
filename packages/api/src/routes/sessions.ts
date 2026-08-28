@@ -6,7 +6,7 @@ import { parseAssistantSessionId, type Principal } from "@valet/engine";
 import { writeHibernated } from "../engine/hibernation-hooks.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { computeTargetDirs } from "../engine/workspace-prep.js";
-import { submitSessionPrompt } from "./messages.js";
+import { promptAuthorFromUser, submitSessionPrompt } from "./messages.js";
 import { autoTitle } from "../sessions/auto-title.js";
 import {
   deriveRunFields,
@@ -353,7 +353,10 @@ sessionsRouter.post("/", async (c) => {
   let queuedPrompt = false;
   if (body.initialPrompt && created) {
     try {
-      queuedPrompt = (await submitSessionPrompt(c.var.providers, created, body.initialPrompt)) !== null;
+      queuedPrompt =
+        (await submitSessionPrompt(c.var.providers, created, body.initialPrompt, {
+          author: promptAuthorFromUser(c.var.user),
+        })) !== null;
     } catch (err) {
       console.error(`session ${id}: initialPrompt enqueue failed:`, err);
     }

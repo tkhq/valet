@@ -1,13 +1,14 @@
 /**
  * Pure-logic tests for `message-item` helpers: `isEmptyAssistantMessage`
- * (the predicate behind the "(no response)" placeholder) and
+ * (the predicate behind the "(no response)" placeholder),
  * `messageCopyText` (the clipboard payload behind the per-message copy
- * button).
+ * button), and `senderLabel`/`senderInitials` (user-message attribution on
+ * shared sessions).
  */
 import { describe, expect, it } from "vitest";
 import { buildSkillBlock } from "@valet/shared";
 import type { StreamMessage } from "~/stores/stream";
-import { isEmptyAssistantMessage, messageCopyText } from "./message-item";
+import { isEmptyAssistantMessage, messageCopyText, senderLabel } from "./message-item";
 
 function msg(over: Partial<StreamMessage>): StreamMessage {
   return {
@@ -92,5 +93,31 @@ describe("messageCopyText", () => {
   it("never rewrites assistant text, even when it looks like a skill block", () => {
     const echoed = buildSkillBlock("review", "body");
     expect(messageCopyText(msg({ role: "assistant", content: echoed }))).toBe(echoed);
+  });
+});
+
+describe("senderLabel", () => {
+  it("is undefined for the viewer's own messages (renders as 'You')", () => {
+    expect(senderLabel({ id: "u1", name: "Alice" }, "u1")).toBeUndefined();
+  });
+
+  it("labels a teammate by name, falling back to email", () => {
+    expect(senderLabel({ id: "u2", name: "Bob" }, "u1")).toBe("Bob");
+    expect(senderLabel({ id: "u2", email: "bob@example.com" }, "u1")).toBe("bob@example.com");
+    expect(senderLabel({ id: "u2" }, "u1")).toBe("Teammate");
+  });
+
+  it("falls through an empty-string name to the email", () => {
+    expect(senderLabel({ id: "u2", name: "", email: "bob@example.com" }, "u1")).toBe(
+      "bob@example.com",
+    );
+  });
+
+  it("is undefined for authorless messages (optimistic rows, personal sessions, pre-stamp entries)", () => {
+    expect(senderLabel(undefined, "u1")).toBeUndefined();
+  });
+
+  it("labels the sender by name while the viewer identity is still loading", () => {
+    expect(senderLabel({ id: "u2", name: "Bob" }, undefined)).toBe("Bob");
   });
 });
