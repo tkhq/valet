@@ -29,6 +29,7 @@ import {
 import type { ValetPlugin } from "@valet/engine";
 import {
   buildPluginCatalog,
+  loadRoleFromMarkdown,
   type ActionPlugin,
   type CommandContext,
   type CommandDef,
@@ -62,7 +63,14 @@ import { resolveOpenAiCredential } from "../services/openai-key.js";
 import { hasOrgKey } from "../services/model-catalog.js";
 import { listLlmProviders, parseModelId, providerNamespace } from "../services/llm-providers.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { agentSessions, orgs, securityCells, users, type SecurityCellRow } from "../schema/index.js";
+import {
+  agentSessions,
+  orgs,
+  securityCells,
+  securityEngagements,
+  users,
+  type SecurityCellRow,
+} from "../schema/index.js";
 import { loadAssistant } from "../assistants/service.js";
 import { internalToken } from "../lib/internal-auth.js";
 import {
@@ -91,22 +99,54 @@ const PERSONALITY_INJECT_CAP = 500;
 
 /**
  * The security roles to attach for a claimed cell's persona (dynamic-config
- * M-F1). Returns the ONE bundled role whose name matches the cell's persona,
- * so a `code-review` cell gets only the code-review role, not every security
- * role. A repo-defined persona (named in `.valet/security.yml`, not a bundled
- * id) has no bundled role; this milestone falls back to the code-review role
- * with a logged note. TODO (M-F1 follow-up): load a repo persona's markdown
- * from the clone at attach time and build its RoleSpec, so a repo-defined
- * persona runs under its own role instead of code-review.
+ * M-F1, repo-persona roles M-P2c). Returns the ONE role that matches the cell's
+ * persona, so a `code-review` cell gets only the code-review role, not every
+ * security role.
+ *
+ * Resolution order (repo wins):
+ *   1. A bundled persona id (`code-review`, `architect`, `verifier`,
+ *      `threat-model`, `attack-tree`, `sast`) → its bundled role.
+ *   2. A repo-defined persona (a key in `.valet/security.yml`'s `personas` map)
+ *      → a RoleSpec built from `repoRoleMarkdown`, the markdown fetched from the
+ *      clone at create and stashed on the engagement. The RoleSpec's `name` is
+ *      forced to the cell's persona id so the dispatch prompt's `role` overlay
+ *      resolves, regardless of the markdown's own frontmatter name.
+ *   3. No bundled role and no repo markdown → the code-review role, with a
+ *      logged corrective note.
+ *
+ * `repoRoleMarkdown` is the resolved markdown for THIS persona (the caller looks
+ * it up in the engagement's `config_persona_markdown` map). Absent means no repo
+ * role was stashed for this persona; the function then falls back.
  */
-export function securityRolesForCell(persona: string): NonNullable<typeof securityPlugin.roles> {
+export function securityRolesForCell(
+  persona: string,
+  repoRoleMarkdown?: string,
+): NonNullable<typeof securityPlugin.roles> {
   const roles = securityPlugin.roles ?? [];
   const match = roles.find((r) => r.name === persona);
   if (match) return [match];
+
+  if (repoRoleMarkdown && repoRoleMarkdown.trim() !== "") {
+    try {
+      const role = loadRoleFromMarkdown(repoRoleMarkdown, "session", persona);
+      // Force the role name to the persona id: the dispatch prompt sets
+      // `role: cell.persona`, so the overlay resolves by the config key, not by
+      // whatever frontmatter name the repo file carries.
+      return [{ ...role, name: persona }];
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `security: repo persona "${persona}" role markdown failed to load (${detail}); ` +
+          "attaching the code-review role. Fix the persona markdown in the repo.",
+      );
+    }
+  }
+
   const fallback = roles.find((r) => r.name === "code-review");
   console.warn(
-    `security: persona "${persona}" has no bundled role; attaching the code-review role. ` +
-      "Repo-defined persona role loading is not implemented yet (M-F1 follow-up).",
+    `security: persona "${persona}" has no bundled role and no readable repo role; ` +
+      "attaching the code-review role. Define the persona in .valet/security.yml's " +
+      "personas map with a readable markdown path to run it under its own role.",
   );
   return fallback ? [fallback] : [];
 }
@@ -737,9 +777,13 @@ export class EngineHost {
     // The persona role registers on the session (roles registry) so the
     // dispatch prompt's per-turn `role` overlay resolves. Attach ONLY the role
     // matching the claimed cell's persona (not every security role) — the
-    // engagement-runner SKILL stays off persona children.
+    // engagement-runner SKILL stays off persona children. A repo-defined
+    // persona loads its role from the engagement's stashed markdown (M-P2c).
+    const personaRepoRoleMarkdown = personaCell
+      ? await this.repoRoleMarkdownForCell(personaCell)
+      : undefined;
     const sessionRoles = personaCell
-      ? [...extras.roles, ...securityRolesForCell(personaCell.persona)]
+      ? [...extras.roles, ...securityRolesForCell(personaCell.persona, personaRepoRoleMarkdown)]
       : extras.roles;
     const session = existing
       ? await engine.restoreSession({
@@ -1432,6 +1476,35 @@ export class EngineHost {
       .where(and(eq(securityCells.childSessionId, sessionId), eq(securityCells.status, "running")))
       .limit(1);
     return rows[0] ?? null;
+  }
+
+  /**
+   * The repo-defined role markdown for a claimed cell's persona (M-P2c). Reads
+   * the cell's engagement `config_persona_markdown` map (id → markdown, stashed
+   * at create from the clone) and returns the entry for the cell's persona.
+   * Returns undefined for a bundled persona (no repo markdown), a preset-seeded
+   * engagement (no map), or a persona the map does not name. `securityRolesForCell`
+   * uses the result to attach a repo persona's own role, repo wins.
+   */
+  private async repoRoleMarkdownForCell(cell: SecurityCellRow): Promise<string | undefined> {
+    const db = this.opts.db;
+    if (!db) return undefined;
+    const rows = await db
+      .select({ md: securityEngagements.configPersonaMarkdown })
+      .from(securityEngagements)
+      .where(eq(securityEngagements.id, cell.engagementId))
+      .limit(1);
+    const raw = rows[0]?.md;
+    if (!raw) return undefined;
+    let map: unknown;
+    try {
+      map = JSON.parse(raw);
+    } catch {
+      return undefined;
+    }
+    if (typeof map !== "object" || map === null || Array.isArray(map)) return undefined;
+    const value = (map as Record<string, unknown>)[cell.persona];
+    return typeof value === "string" ? value : undefined;
   }
 
   /**
@@ -2213,9 +2286,13 @@ export class EngineHost {
     // The persona role registers on the session (roles registry) so the
     // dispatch prompt's per-turn `role` overlay resolves. Attach ONLY the role
     // matching the claimed cell's persona — the engagement-runner SKILL stays
-    // off persona children.
+    // off persona children. A repo-defined persona loads its role from the
+    // engagement's stashed markdown (M-P2c).
+    const childRepoRoleMarkdown = personaCell
+      ? await this.repoRoleMarkdownForCell(personaCell)
+      : undefined;
     const childRoles = personaCell
-      ? [...extras.roles, ...securityRolesForCell(personaCell.persona)]
+      ? [...extras.roles, ...securityRolesForCell(personaCell.persona, childRepoRoleMarkdown)]
       : extras.roles;
 
     const existing = await this.opts.engineStore.getSession(childSessionId);

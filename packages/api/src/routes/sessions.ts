@@ -411,7 +411,10 @@ sessionsRouter.post("/", async (c) => {
   // falls back to the preset plan; `repoConfig` stays undefined so the engagement
   // records `has_repo_config = false`.
   let securityPlan = kind === "security" ? presetPlan(presetId, { paths: body.paths }) : "";
-  let repoConfig: SecurityConfig | undefined;
+  // The parsed config plus the resolved repo-persona markdown (M-P2c). The
+  // markdown is not a file field; it is fetched from the clone at create and
+  // stashed for the host's `securityRolesForCell`.
+  let repoConfig: (SecurityConfig & { personaMarkdown?: Record<string, string> }) | undefined;
   if (kind === "security" && rescanPlan === undefined) {
     const [owner, repo] = repos[0].fullName.split("/");
     if (owner && repo) {
@@ -428,6 +431,40 @@ sessionsRouter.post("/", async (c) => {
             // A config with no steps still carries focus/invariants/etc.; keep
             // the preset plan but store the config context.
             repoConfig = config;
+          }
+          // Repo-defined persona roles (M-P2c): a `personas` map names id → the
+          // markdown path in the clone. The sandbox does not exist yet, so fetch
+          // each file through the same contents API and stash the resolved
+          // markdown on the engagement. `securityRolesForCell` loads a repo
+          // persona's role from this stash at persona-child build (repo wins).
+          // Only the personas an actual step names need a role, but resolving
+          // the whole map is cheap and keeps the stash complete. A missing or
+          // unreadable file is skipped with a note; the host then falls back to
+          // code-review for that persona.
+          if (config.personas && Object.keys(config.personas).length > 0) {
+            const resolved: Record<string, string> = {};
+            for (const [personaId, personaPath] of Object.entries(config.personas)) {
+              try {
+                const md = await fetchRepoFile(tokenDeps, token, owner, repo, personaPath);
+                if (md !== null && md.trim() !== "") {
+                  resolved[personaId] = md;
+                } else {
+                  console.warn(
+                    `security create: repo persona "${personaId}" file "${personaPath}" is empty or missing; ` +
+                      "the host will fall back to the code-review role for it.",
+                  );
+                }
+              } catch (fetchErr) {
+                const m = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
+                console.warn(
+                  `security create: repo persona "${personaId}" file "${personaPath}" is unreadable (${m}); ` +
+                    "the host will fall back to the code-review role for it.",
+                );
+              }
+            }
+            if (Object.keys(resolved).length > 0) {
+              repoConfig = { ...(repoConfig ?? config), personaMarkdown: resolved };
+            }
           }
         }
       } catch (err) {
@@ -513,6 +550,9 @@ sessionsRouter.post("/", async (c) => {
                   ...(repoConfig.invariants !== undefined ? { invariants: repoConfig.invariants } : {}),
                   ...(repoConfig.categories !== undefined ? { categories: repoConfig.categories } : {}),
                   ...(repoConfig.personas !== undefined ? { personas: repoConfig.personas } : {}),
+                  ...(repoConfig.personaMarkdown !== undefined
+                    ? { personaMarkdown: repoConfig.personaMarkdown }
+                    : {}),
                   ...(repoConfig.tools !== undefined ? { tools: repoConfig.tools } : {}),
                 },
               }

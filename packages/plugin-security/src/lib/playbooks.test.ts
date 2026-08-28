@@ -9,6 +9,9 @@ describe("playbooks", () => {
       "injection",
       "secrets-config",
       "verify",
+      "threat-model",
+      "attack-tree",
+      "sast",
     ]);
   });
 
@@ -25,6 +28,12 @@ describe("playbooks", () => {
     expect(playbookMarkdown("injection")).toContain("CWE-89");
     expect(playbookMarkdown("secrets-config")).toContain("gitleaks");
     expect(playbookMarkdown("verify")).toContain("CVSS");
+    // The M-P2c model playbooks cite their frameworks.
+    expect(playbookMarkdown("threat-model")).toContain("STRIDE");
+    expect(playbookMarkdown("threat-model")).toContain("LINDDUN");
+    expect(playbookMarkdown("attack-tree")).toMatch(/attack tree|ATT&CK|kill chain/i);
+    expect(playbookMarkdown("sast")).toContain("CWE-89");
+    expect(playbookMarkdown("sast")).toContain("gitleaks");
   });
 
   it("isKnownPlaybook gates names", () => {

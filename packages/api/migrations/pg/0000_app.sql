@@ -983,6 +983,7 @@ CREATE TABLE "security_engagements" (
 	"invariants" text,
 	"categories" text,
 	"config_personas" text,
+	"config_persona_markdown" text,
 	"config_tools" text,
 	"has_repo_config" boolean DEFAULT false NOT NULL,
 	"created_at" bigint NOT NULL,

@@ -8,8 +8,16 @@ describe("plugin manifest", () => {
   it("exposes the runner skill and one role per bundled persona", () => {
     expect(plugin.name).toBe("security");
     expect(plugin.skills?.map((s) => s.name)).toEqual(["security-engagement-runner"]);
-    // One RoleSpec per bundled persona: code-review, plus the M-P2b triad roles.
-    expect(plugin.roles?.map((r) => r.name)).toEqual(["code-review", "architect", "verifier"]);
+    // One RoleSpec per bundled persona: code-review, the M-P2b triad roles, and
+    // the M-P2c model personas.
+    expect(plugin.roles?.map((r) => r.name)).toEqual([
+      "code-review",
+      "architect",
+      "verifier",
+      "threat-model",
+      "attack-tree",
+      "sast",
+    ]);
   });
 
   it("loads the architect and verifier role contracts (M-P2b)", () => {

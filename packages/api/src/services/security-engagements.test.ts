@@ -5,6 +5,7 @@ import {
   codeReviewPresetPlan,
   findingFingerprint,
   parsePlan,
+  presetPlan,
   serializePlan,
   KNOWN_PERSONAS,
 } from "@valet/plugin-security";
@@ -190,6 +191,59 @@ describe("security engagement service", () => {
     const planFile = await svc.readFile(engagement.id, "/plan.yml");
     const reparsed = parsePlan(planFile.content, KNOWN_PERSONAS);
     expect(reparsed.cells).toHaveLength(11);
+  });
+
+  it("materializes the full-pentest preset with the model personas (M-P2c)", async () => {
+    const engagement = await svc.createEngagement({
+      sessionId: `s_${Math.random().toString(36).slice(2)}`,
+      repoFullName: "acme/api",
+      plan: presetPlan("full-pentest"),
+    });
+    const { cells } = await svc.startEngagement(engagement.id, { resolvedSha: SHA });
+    // 1 recon + 1 threat-model + 4 triads (3 each) + 1 attack-tree + 1 verify.
+    expect(cells).toHaveLength(16);
+    // The model personas run as single cells; the code-heavy sweeps expanded.
+    const byDir = new Map(cells.map((c) => [c.dir, c]));
+    expect(byDir.get("02-threat-model")?.persona).toBe("threat-model");
+    expect(byDir.get("15-attack-tree")?.persona).toBe("attack-tree");
+    // The SAST triad's worker runs under the sast persona.
+    const sastWorker = cells.find((c) => c.dir === "07-sast");
+    expect(sastWorker?.persona).toBe("sast");
+    // The SAST plan/verify cells are the architect/verifier.
+    expect(byDir.get("06-sast-plan")?.persona).toBe("architect");
+    expect(byDir.get("08-sast-verify")?.persona).toBe("verifier");
+  });
+
+  it("full-pentest dispatch prompts name each cell's own playbook (M-P2c)", async () => {
+    const engagement = await svc.createEngagement({
+      sessionId: `s_${Math.random().toString(36).slice(2)}`,
+      repoFullName: "acme/api",
+      plan: presetPlan("full-pentest"),
+    });
+    const { cells } = await svc.startEngagement(engagement.id, { resolvedSha: SHA });
+    // The dispatch prompt reads the EXPANDED plan (the materialized 16 cells),
+    // not the compact 8-cell preset — a materialized cell's ordinal only exists
+    // in /plan.yml.
+    const planFile = await svc.readFile(engagement.id, "/plan.yml");
+    const plan = parsePlan(planFile.content, KNOWN_PERSONAS);
+    const threatModel = cells.find((c) => c.dir === "02-threat-model");
+    const attackTree = cells.find((c) => c.dir === "15-attack-tree");
+    const sastWorker = cells.find((c) => c.dir === "07-sast");
+    if (!threatModel || !attackTree || !sastWorker) throw new Error("expected the model cells");
+    expect(buildDispatchPrompt(threatModel, plan, [], "P")).toContain(
+      "Methodology: read /playbooks/threat-model.md with sec_fs_read",
+    );
+    expect(buildDispatchPrompt(attackTree, plan, [], "P")).toContain(
+      "Methodology: read /playbooks/attack-tree.md with sec_fs_read",
+    );
+    expect(buildDispatchPrompt(sastWorker, plan, [], "P")).toContain(
+      "Methodology: read /playbooks/sast.md with sec_fs_read",
+    );
+    // The new playbooks are served in the engagement tree, readable and non-empty.
+    for (const name of ["threat-model", "attack-tree", "sast"]) {
+      const file = await svc.readFile(engagement.id, `/playbooks/${name}.md`);
+      expect(file.content.length).toBeGreaterThan(400);
+    }
   });
 
   // ── Dispatch ─────────────────────────────────────────────────────────────

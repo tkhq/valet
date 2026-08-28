@@ -150,6 +150,24 @@ describe("PlanEditor", () => {
     );
   });
 
+  it("lists the bundled model personas in the persona dropdown (M-P2c)", async () => {
+    renderPanel();
+    const editor = await screen.findByTestId("plan-editor");
+    const persona = within(within(editor).getAllByTestId("plan-step")[0]).getByLabelText(
+      "Persona",
+    ) as HTMLSelectElement;
+    const values = Array.from(persona.options).map((o) => o.value);
+    // The M-P2c model personas are selectable alongside code-review and the triad.
+    for (const id of ["code-review", "architect", "verifier", "threat-model", "attack-tree", "sast"]) {
+      expect(values).toContain(id);
+    }
+    // Their friendly labels render as the option text.
+    const labels = Array.from(persona.options).map((o) => o.textContent);
+    expect(labels).toContain("Threat model");
+    expect(labels).toContain("Attack tree");
+    expect(labels).toContain("SAST");
+  });
+
   it("adds and removes a step in local state", async () => {
     renderPanel();
     const editor = await screen.findByTestId("plan-editor");

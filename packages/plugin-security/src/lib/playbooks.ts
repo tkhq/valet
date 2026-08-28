@@ -18,6 +18,9 @@ export const KNOWN_PLAYBOOKS = [
   "injection",
   "secrets-config",
   "verify",
+  "threat-model",
+  "attack-tree",
+  "sast",
 ] as const;
 
 export type PlaybookName = (typeof KNOWN_PLAYBOOKS)[number];
@@ -45,6 +48,12 @@ function readPlaybook(name: PlaybookName): string {
       return readFileSync(new URL("../../playbooks/secrets-config.md", import.meta.url), "utf8");
     case "verify":
       return readFileSync(new URL("../../playbooks/verify.md", import.meta.url), "utf8");
+    case "threat-model":
+      return readFileSync(new URL("../../playbooks/threat-model.md", import.meta.url), "utf8");
+    case "attack-tree":
+      return readFileSync(new URL("../../playbooks/attack-tree.md", import.meta.url), "utf8");
+    case "sast":
+      return readFileSync(new URL("../../playbooks/sast.md", import.meta.url), "utf8");
   }
 }
 

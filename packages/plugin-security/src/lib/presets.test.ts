@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { cellDir } from "./plan.js";
+import { cellDir, MAX_PLAN_CELLS } from "./plan.js";
 import { parsePlan } from "./plan.js";
+import { expandTriads } from "./triad.js";
 import {
   CODE_REVIEW_PERSONA,
   codeReviewPresetPlan,
@@ -80,11 +81,12 @@ describe("codeReviewPresetPlan", () => {
 });
 
 describe("SECURITY_PRESETS + isKnownPreset", () => {
-  it("lists the three presets and gates ids", () => {
+  it("lists the presets and gates ids", () => {
     expect(SECURITY_PRESETS.map((p) => p.id)).toEqual([
       "code-review",
       "secrets-config",
       "access-injection",
+      "full-pentest",
     ]);
     for (const p of SECURITY_PRESETS) expect(isKnownPreset(p.id)).toBe(true);
     expect(isKnownPreset("nope")).toBe(false);
@@ -201,5 +203,92 @@ describe("securityKickoffPrompt", () => {
 
   it("omits the focus block for blank notes", () => {
     expect(securityKickoffPrompt("acme/api", "   ")).not.toContain("Focus notes");
+  });
+});
+
+describe("full-pentest preset (M-P2c)", () => {
+  it("round-trips through parsePlan with the model personas in order", () => {
+    const plan = parsePlan(presetPlan("full-pentest"), KNOWN_PERSONAS);
+    // Recon, threat-model, four sweeps, attack-tree, verify — 8 pre-expansion.
+    expect(plan.cells.map((c) => c.name)).toEqual([
+      "recon",
+      "threat-model",
+      "code-review",
+      "sast",
+      "authz-sweep",
+      "injection-sweep",
+      "attack-tree",
+      "verify",
+    ]);
+    expect(plan.cells.map((c) => c.persona)).toEqual([
+      "code-review",
+      "threat-model",
+      "code-review",
+      "sast",
+      "code-review",
+      "code-review",
+      "attack-tree",
+      "code-review",
+    ]);
+    // Each cell names its own playbook.
+    expect(plan.cells.map((c) => c.playbook)).toEqual([
+      "recon",
+      "threat-model",
+      "authz",
+      "sast",
+      "authz",
+      "injection",
+      "attack-tree",
+      "verify",
+    ]);
+  });
+
+  it("marks the code-heavy sweeps as triads and the model cells as single", () => {
+    const plan = parsePlan(presetPlan("full-pentest"), KNOWN_PERSONAS);
+    const byName = new Map(plan.cells.map((c) => [c.name, c]));
+    // Model-only cells run single (no triad); code sweeps expand.
+    expect(byName.get("threat-model")?.triad).toBeUndefined();
+    expect(byName.get("attack-tree")?.triad).toBeUndefined();
+    expect(byName.get("recon")?.triad).toBeUndefined();
+    expect(byName.get("verify")?.triad).toBeUndefined();
+    for (const name of ["code-review", "sast", "authz-sweep", "injection-sweep"]) {
+      expect(byName.get(name)?.triad).toBe(true);
+    }
+  });
+
+  it("expands the four triads within MAX_PLAN_CELLS with the right persona ordering", () => {
+    const plan = parsePlan(presetPlan("full-pentest"), KNOWN_PERSONAS);
+    const expanded = expandTriads(plan.cells);
+    // 1 recon + 1 threat-model + 4*3 triad cells + 1 attack-tree + 1 verify.
+    expect(expanded).toHaveLength(16);
+    expect(expanded.length).toBeLessThanOrEqual(MAX_PLAN_CELLS);
+    // Dense ordinals, no triad flags survive, earlier-only reads (re-parses).
+    expect(expanded.map((c) => c.ordinal)).toEqual(
+      Array.from({ length: 16 }, (_, i) => i + 1),
+    );
+    expect(expanded.every((c) => c.triad === undefined)).toBe(true);
+    // The expanded plan is itself a valid plan.
+    const reparsed = parsePlan(serializePlan(expanded), KNOWN_PERSONAS);
+    expect(reparsed.cells).toHaveLength(16);
+    // Persona ordering after expansion: recon, threat-model, then each triad as
+    // architect → worker → verifier, then attack-tree, then verify.
+    expect(expanded.map((c) => c.persona)).toEqual([
+      "code-review", // recon
+      "threat-model", // model cell
+      "architect", // code-review triad
+      "code-review",
+      "verifier",
+      "architect", // sast triad
+      "sast",
+      "verifier",
+      "architect", // authz triad
+      "code-review",
+      "verifier",
+      "architect", // injection triad
+      "code-review",
+      "verifier",
+      "attack-tree", // model cell
+      "code-review", // verify
+    ]);
   });
 });

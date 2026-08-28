@@ -384,6 +384,7 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
       "invariants" text,
       "categories" text,
       "config_personas" text,
+      "config_persona_markdown" text,
       "config_tools" text,
       "has_repo_config" boolean DEFAULT false NOT NULL,
       "created_at" bigint NOT NULL,
@@ -443,6 +444,11 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     describe: "security_engagements.config_personas column",
     probe: { kind: "column", table: "security_engagements", column: "config_personas" },
     sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "config_personas" text',
+  },
+  {
+    describe: "security_engagements.config_persona_markdown column",
+    probe: { kind: "column", table: "security_engagements", column: "config_persona_markdown" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "config_persona_markdown" text',
   },
   {
     describe: "security_engagements.config_tools column",

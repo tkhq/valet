@@ -737,6 +737,111 @@ steps:
     expect(engagement.plan).not.toContain("secrets-config");
   });
 
+  it("fetches a repo-defined persona's markdown and stashes it on the engagement (M-P2c)", async () => {
+    const PERSONA_PATH = ".claude/agents/my-persona.md";
+    const PERSONA_MD = [
+      "---",
+      "name: my-persona",
+      "description: A repo-defined persona.",
+      "---",
+      "",
+      "You are the CUSTOM repo persona. Do the special sweep.",
+    ].join("\n");
+    const CONFIG_WITH_PERSONA = `version: 1
+personas:
+  my-persona: ${PERSONA_PATH}
+steps:
+  - ordinal: 1
+    persona: code-review
+    mode: fresh
+    name: recon
+    playbook: recon
+    goal: Map the codebase and seed the checklist
+    reads: []
+  - ordinal: 2
+    persona: my-persona
+    mode: fresh
+    name: custom
+    goal: Run the repo-defined persona sweep
+    reads: [1]
+`;
+    fixture = startGithubFixture({
+      getRepo: () => ({ body: { default_branch: "main" } }),
+      getContents: (_owner, _repo, path) => {
+        if (path === ".valet/security.yml") {
+          return {
+            body: {
+              content: Buffer.from(CONFIG_WITH_PERSONA, "utf8").toString("base64"),
+              encoding: "base64",
+            },
+          };
+        }
+        if (path === PERSONA_PATH) {
+          return { body: { content: Buffer.from(PERSONA_MD, "utf8").toString("base64"), encoding: "base64" } };
+        }
+        return { status: 404, body: { message: "Not Found" } };
+      },
+    });
+    process.env.GITHUB_API_URL = fixture.url;
+    api = await bootTestApi({ githubApiUrl: fixture.url });
+
+    const sessionId = await createSecuritySession();
+    const engagement = await loadEngagement(sessionId);
+
+    expect(engagement.hasRepoConfig).toBe(true);
+    // The id → path map is stored.
+    expect(engagement.configPersonas).toBe(JSON.stringify({ "my-persona": PERSONA_PATH }));
+    // The resolved markdown is stashed so the host attaches the repo role.
+    const stashed = JSON.parse(engagement.configPersonaMarkdown ?? "null") as Record<string, string>;
+    expect(stashed["my-persona"]).toContain("CUSTOM repo persona");
+    // The plan uses the repo persona on the second step.
+    expect(engagement.plan).toContain("persona: my-persona");
+  });
+
+  it("stashes no persona markdown when the repo persona file is missing (M-P2c fallback)", async () => {
+    const CONFIG_MISSING_PERSONA = `version: 1
+personas:
+  ghost: .claude/agents/ghost.md
+steps:
+  - ordinal: 1
+    persona: code-review
+    mode: fresh
+    name: recon
+    playbook: recon
+    goal: Map the codebase and seed the checklist
+    reads: []
+  - ordinal: 2
+    persona: ghost
+    mode: fresh
+    name: ghost-step
+    goal: Run the ghost persona
+    reads: [1]
+`;
+    fixture = startGithubFixture({
+      getRepo: () => ({ body: { default_branch: "main" } }),
+      getContents: (_owner, _repo, path) =>
+        path === ".valet/security.yml"
+          ? {
+              body: {
+                content: Buffer.from(CONFIG_MISSING_PERSONA, "utf8").toString("base64"),
+                encoding: "base64",
+              },
+            }
+          : { status: 404, body: { message: "Not Found" } },
+    });
+    process.env.GITHUB_API_URL = fixture.url;
+    api = await bootTestApi({ githubApiUrl: fixture.url });
+
+    const sessionId = await createSecuritySession();
+    const engagement = await loadEngagement(sessionId);
+
+    // The config still applies (the map is stored), but no markdown resolved —
+    // the host will fall back to code-review for the ghost persona.
+    expect(engagement.hasRepoConfig).toBe(true);
+    expect(engagement.configPersonas).toBe(JSON.stringify({ ghost: ".claude/agents/ghost.md" }));
+    expect(engagement.configPersonaMarkdown).toBeNull();
+  });
+
   it("falls back to the preset plan with has_repo_config false when no config is present", async () => {
     fixture = startGithubFixture({
       getRepo: () => ({ body: { default_branch: "main" } }),

@@ -1,5 +1,12 @@
-import { bundledPersonaIds, CODE_REVIEW_PERSONA } from "./personas.js";
-import type { PlanCell } from "./plan.js";
+import {
+  ATTACK_TREE_PERSONA,
+  bundledPersonaIds,
+  CODE_REVIEW_PERSONA,
+  SAST_PERSONA,
+  THREAT_MODEL_PERSONA,
+} from "./personas.js";
+import { MAX_PLAN_CELLS, type PlanCell } from "./plan.js";
+import { expandTriads } from "./triad.js";
 
 export { CODE_REVIEW_PERSONA };
 
@@ -36,6 +43,12 @@ export const SECURITY_PRESETS: readonly SecurityPreset[] = [
     id: "access-injection",
     label: "Access control & injection",
     description: "Recon, authz, injection, verify (4 cells).",
+  },
+  {
+    id: "full-pentest",
+    label: "Full pentest",
+    description:
+      "Recon, threat model, code review, SAST, access control, injection (triads), attack tree, verify. The model half of a full pentest.",
   },
 ] as const;
 
@@ -119,11 +132,19 @@ export function codeReviewPresetPlan(): string {
 }
 
 /** One sweep the presets compose from: a stable name, playbook, and goal.
- * Recon and verify bookend every preset; the middle sweeps vary. */
+ * Recon and verify bookend every preset; the middle sweeps vary. A sweep may
+ * name its own `persona` (default `code-review`) and whether it expands as a
+ * triad (default true for a middle sweep). Model-only sweeps (threat-model,
+ * attack-tree) run as single cells. */
 interface SweepDef {
   name: string;
   playbook: string;
   goal: string;
+  /** The persona the sweep's worker cell runs under. Defaults to code-review. */
+  persona?: string;
+  /** Whether the sweep expands into an architect → worker → verifier triad.
+   * Defaults to true for a middle sweep; a model-only sweep sets it false. */
+  triad?: boolean;
 }
 
 const RECON: SweepDef = {
@@ -156,12 +177,51 @@ const VERIFY: SweepDef = {
   goal: "Attack every open finding, sec_finding_review each, refute what does not survive",
 };
 
+const CODE_REVIEW_SWEEP: SweepDef = {
+  name: "code-review",
+  playbook: "authz",
+  goal: "Read the code by hand for access-control, injection, and logic flaws the scanners miss",
+};
+
+const SAST_SWEEP: SweepDef = {
+  name: "sast",
+  playbook: "sast",
+  persona: SAST_PERSONA,
+  goal: "Run the pre-baked scanners plus per-language grep packs, triage hits, record coverage per rule pack",
+};
+
+/** A model-only sweep: enumerate threats over STRIDE and the loaded categories.
+ * Runs early (right after recon) as a single cell, not a triad. */
+const THREAT_MODEL: SweepDef = {
+  name: "threat-model",
+  playbook: "threat-model",
+  persona: THREAT_MODEL_PERSONA,
+  triad: false,
+  goal: "Enumerate threats over STRIDE and the loaded categories, map each to a recon entry point or trust boundary",
+};
+
+/** A model-only sweep: compose attack chains from the confirmed findings.
+ * Runs late (just before verify) as a single cell, not a triad. */
+const ATTACK_TREE: SweepDef = {
+  name: "attack-tree",
+  playbook: "attack-tree",
+  persona: ATTACK_TREE_PERSONA,
+  triad: false,
+  goal: "Compose attack chains from the confirmed findings and the threat model; surface multi-step paths",
+};
+
 /** The middle sweeps of each preset, in order. Recon (cell 1) and verify (last
  * cell) bookend every preset and are added by `buildPresetCells`. */
 const PRESET_SWEEPS: Record<string, SweepDef[]> = {
   "code-review": [AUTHZ, INJECTION, SECRETS_CONFIG],
   "secrets-config": [SECRETS_CONFIG],
   "access-injection": [AUTHZ, INJECTION],
+  // The full pentest: threat model early (single cell), then the code-heavy
+  // triads (code review, SAST, access control, injection), then attack tree
+  // (single cell) composing the chains, then the engagement verify. Recon and
+  // verify bookend as always. Post-triad expansion the plan stays under
+  // MAX_PLAN_CELLS (asserted in presets.test.ts).
+  "full-pentest": [THREAT_MODEL, CODE_REVIEW_SWEEP, SAST_SWEEP, AUTHZ, INJECTION, ATTACK_TREE],
 };
 
 /**
@@ -214,17 +274,20 @@ function buildPresetCells(sweeps: SweepDef[], opts?: { paths?: string[] }): Plan
   cells.push({ ordinal: 1, persona: CODE_REVIEW_PERSONA, mode: "fresh", ...RECON, reads: [] });
 
   sweeps.forEach((sweep, i) => {
+    const { persona: sweepPersona, triad: sweepTriad, ...sweepFields } = sweep;
+    // A middle sweep expands as an architect → worker → verifier triad (M-P2b)
+    // unless it opts out (a model-only sweep — threat-model, attack-tree — runs
+    // as a single cell). `startEngagement` expands a triad cell into three cells
+    // at materialization; recon (cell 1) and verify (the last cell) stay single.
+    const isTriad = sweepTriad ?? true;
     cells.push({
       ordinal: i + 2,
-      persona: CODE_REVIEW_PERSONA,
+      persona: sweepPersona ?? CODE_REVIEW_PERSONA,
       mode: "fresh",
-      ...sweep,
+      ...sweepFields,
       reads: [1],
       ...(paths ? { paths } : {}),
-      // Each middle sweep runs as an architect → worker → verifier triad
-      // (M-P2b). `startEngagement` expands a triad cell into three cells at
-      // materialization; recon (cell 1) and verify (the last cell) stay single.
-      triad: true,
+      ...(isTriad ? { triad: true } : {}),
     });
   });
 

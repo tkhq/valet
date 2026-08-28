@@ -36,6 +36,22 @@ export const ARCHITECT_PERSONA = "architect";
  * can refute a finding it disproves. */
 export const VERIFIER_PERSONA = "verifier";
 
+/** The threat-model persona id: enumerates threats over STRIDE and the loaded
+ * threat categories, maps each to a recon entry point or trust boundary, and
+ * reports a confirmed weakness as a finding (M-P2c). Source/config-only. */
+export const THREAT_MODEL_PERSONA = "threat-model";
+
+/** The attack-tree persona id: composes attack chains from confirmed findings
+ * and the threat model, surfacing multi-step paths a single-finding view misses
+ * (M-P2c). Runs late, over the other phases. Source/config-only. */
+export const ATTACK_TREE_PERSONA = "attack-tree";
+
+/** The sast persona id: a scanner-heavy static-analysis sweep — the pre-baked
+ * scanners plus per-language grep packs, triaged into evidence-backed findings
+ * with coverage per rule pack (M-P2c). Distinct from code-review's human-style
+ * reading. Source/config-only. */
+export const SAST_PERSONA = "sast";
+
 // The api bundle's inline-assets step only inlines a `readFileSync(new
 // URL("<literal>", import.meta.url), "utf8")` whose literal is AT the call
 // site — a URL held in a const/variable is silently NOT inlined (a runtime
@@ -57,6 +73,21 @@ export const BUNDLED_PERSONAS: readonly SecurityPersona[] = [
     id: VERIFIER_PERSONA,
     label: "Verifier",
     roleMarkdown: readFileSync(new URL("../../personas/verifier.md", import.meta.url), "utf8"),
+  },
+  {
+    id: THREAT_MODEL_PERSONA,
+    label: "Threat model",
+    roleMarkdown: readFileSync(new URL("../../personas/threat-model.md", import.meta.url), "utf8"),
+  },
+  {
+    id: ATTACK_TREE_PERSONA,
+    label: "Attack tree",
+    roleMarkdown: readFileSync(new URL("../../personas/attack-tree.md", import.meta.url), "utf8"),
+  },
+  {
+    id: SAST_PERSONA,
+    label: "SAST",
+    roleMarkdown: readFileSync(new URL("../../personas/sast.md", import.meta.url), "utf8"),
   },
 ];
 

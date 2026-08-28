@@ -33,6 +33,7 @@ const ENGAGEMENT: SecurityEngagementRow = {
   invariants: null,
   categories: null,
   configPersonas: null,
+  configPersonaMarkdown: null,
   configTools: null,
   hasRepoConfig: false,
   createdAt: 1_000,

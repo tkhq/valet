@@ -19,10 +19,21 @@ import { apiErrorText } from "~/api/security";
  * that the config added still round-trips, because it arrives in `planCells`.
  */
 
-/** Bundled persona ids, mirrored from plugin-security's `bundledPersonaIds()`.
- * The server validates against the real registry ∪ the repo's config personas;
- * this list only seeds the picker. Keep the two in sync. */
-const BUNDLED_PERSONA_IDS: readonly string[] = ["code-review"];
+/** Bundled personas, mirrored from plugin-security's `BUNDLED_PERSONAS`. The id
+ * feeds the plan; the label shows in the picker. The server validates against
+ * the real registry ∪ the repo's config personas; this list only seeds the
+ * picker. Keep the two in sync. */
+const BUNDLED_PERSONAS: readonly { id: string; label: string }[] = [
+  { id: "code-review", label: "Code review" },
+  { id: "architect", label: "Architect" },
+  { id: "verifier", label: "Verifier" },
+  { id: "threat-model", label: "Threat model" },
+  { id: "attack-tree", label: "Attack tree" },
+  { id: "sast", label: "SAST" },
+];
+
+/** The bundled persona ids, for membership checks. */
+const BUNDLED_PERSONA_IDS: readonly string[] = BUNDLED_PERSONAS.map((p) => p.id);
 
 /** Known playbook ids, mirrored from plugin-security's `KNOWN_PLAYBOOKS`. The
  * server is the real gate; this only populates the optional picker. */
@@ -32,6 +43,9 @@ const KNOWN_PLAYBOOKS: readonly string[] = [
   "injection",
   "secrets-config",
   "verify",
+  "threat-model",
+  "attack-tree",
+  "sast",
 ];
 
 /** The at-most step count the plan allows (mirrors `MAX_PLAN_CELLS`). */
@@ -352,9 +366,9 @@ function StepRow({
               {!BUNDLED_PERSONA_IDS.includes(step.persona) && (
                 <option value={step.persona}>{step.persona}</option>
               )}
-              {BUNDLED_PERSONA_IDS.map((id) => (
-                <option key={id} value={id}>
-                  {id}
+              {BUNDLED_PERSONAS.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label}
                 </option>
               ))}
             </select>

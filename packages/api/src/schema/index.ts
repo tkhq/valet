@@ -1752,6 +1752,13 @@ export const securityEngagements = pgTable(
     invariants: text("invariants"),
     categories: text("categories"),
     configPersonas: text("config_personas"),
+    // Repo-defined persona role markdown, fetched from the clone through the
+    // GitHub contents API at create (M-P2c). JSON Record id → markdown. Keyed
+    // by the same ids as `configPersonas` (which holds id → path). The host's
+    // `securityRolesForCell` reads this at persona-child build so a repo persona
+    // runs under its OWN role, not the code-review fallback. Null when the
+    // config declares no personas, or none of the declared files were readable.
+    configPersonaMarkdown: text("config_persona_markdown"),
     configTools: text("config_tools"),
     hasRepoConfig: boolean("has_repo_config").notNull().default(false),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),

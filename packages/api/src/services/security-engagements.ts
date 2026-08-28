@@ -83,6 +83,26 @@ export type FindingStatus = "open" | "verified" | "refuted";
 
 const SEVERITIES: readonly FindingSeverity[] = ["critical", "high", "medium", "low", "info"];
 
+/**
+ * The persona set a stored plan validates against: the bundled ids ∪ the
+ * engagement's repo-declared persona keys (M-P2c, repo wins). A repo config may
+ * name its own personas in the plan; validating a stored plan against the
+ * bundled set alone would reject it at start/dispatch. Reads the engagement's
+ * `configPersonas` column (JSON Record id → path); an absent/invalid value
+ * contributes no extra keys.
+ */
+function knownPersonasForEngagement(engagement: { configPersonas: string | null }): string[] {
+  if (!engagement.configPersonas) return [...KNOWN_PERSONAS];
+  let map: unknown;
+  try {
+    map = JSON.parse(engagement.configPersonas);
+  } catch {
+    return [...KNOWN_PERSONAS];
+  }
+  if (typeof map !== "object" || map === null || Array.isArray(map)) return [...KNOWN_PERSONAS];
+  return [...KNOWN_PERSONAS, ...Object.keys(map as Record<string, unknown>)];
+}
+
 /** Spawn seam: the M3 tool layer backs this with the host ChildSpawner. */
 export type SpawnCellChild = (req: {
   title: string;
@@ -114,6 +134,10 @@ export interface SecurityConfigContext {
   invariants?: string[];
   categories?: string[];
   personas?: Record<string, string>;
+  /** Repo-defined persona role markdown, resolved from the clone at create
+   * (M-P2c). Keyed by the same ids as `personas` (which holds id → path). The
+   * host attaches a repo persona's role from this map. */
+  personaMarkdown?: Record<string, string>;
   tools?: string[];
 }
 
@@ -470,8 +494,11 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     dbh: AppDb = db,
   ): Promise<SecurityEngagementRow> {
     // Fail fast on a malformed plan — a planning-status engagement whose
-    // plan cannot parse would strand the runner at sec_start.
-    parsePlan(args.plan, KNOWN_PERSONAS);
+    // plan cannot parse would strand the runner at sec_start. A repo config may
+    // name its own personas in the plan (M-P2c, repo wins); the known set is the
+    // bundled ids ∪ the config's persona keys, matching parseSecurityConfig.
+    const configPersonaKeys = args.config?.personas ? Object.keys(args.config.personas) : [];
+    parsePlan(args.plan, [...KNOWN_PERSONAS, ...configPersonaKeys]);
     const ts = now();
     const config = args.config;
     const inserted = await dbh
@@ -487,6 +514,10 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
         invariants: config?.invariants ? JSON.stringify(config.invariants) : null,
         categories: config?.categories ? JSON.stringify(config.categories) : null,
         configPersonas: config?.personas ? JSON.stringify(config.personas) : null,
+        configPersonaMarkdown:
+          config?.personaMarkdown && Object.keys(config.personaMarkdown).length > 0
+            ? JSON.stringify(config.personaMarkdown)
+            : null,
         configTools: config?.tools ? JSON.stringify(config.tools) : null,
         hasRepoConfig: config !== undefined,
         createdAt: ts,
@@ -616,7 +647,7 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     if (!args.resolvedSha || args.resolvedSha.trim() === "") {
       throw new Error("Pin the repository to a commit SHA before starting.");
     }
-    const parsed = parsePlan(engagement.plan, KNOWN_PERSONAS);
+    const parsed = parsePlan(engagement.plan, knownPersonasForEngagement(engagement));
     // Expand every `triad: true` phase into an architect → worker → verifier
     // triad (M-P2b). Ordinals renumber densely and reads edges remap onto the
     // expanded cells. A plan with no triad cells passes through unchanged, so a
@@ -765,7 +796,7 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
       .returning();
     const cell = claimed[0];
 
-    const plan = parsePlan(engagement.plan, KNOWN_PERSONAS);
+    const plan = parsePlan(engagement.plan, knownPersonasForEngagement(engagement));
     const readOrdinals = parseReads(cell.reads);
     const readsCells = cells.filter((c) => readOrdinals.includes(c.ordinal));
     const prompt = buildDispatchPrompt(
