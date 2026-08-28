@@ -477,7 +477,7 @@ Web-level tests beside the panel components; API-level tests for the routes.
 5. **State doc writes are validated at write time** (YAML parse + protocol version). The note defers all validation to trust; a parse check at the write boundary is nearly free and converts threat #1 from "state becomes unreadable" to a tool error the persona fixes immediately. Field-level schema validation remains excluded, as in the note.
 6. **The plan gains a human gate.** `sec_start` puts an approval in front of the spawn plan — Valet's cost and audit posture, absent from the note's CLI framing.
 
-## Deviations from this spec (implementation, M4–M8)
+## Deviations from this spec (implementation, M4–M9)
 
 1. **`sec_dispatch` stamps `child_session_id` BEFORE the spawn**, not after. The Tools section's "in one transaction: spawns ..., stamps ..." ordering is impossible in practice: the host builds the child's engine session inside the spawn, and that build resolves the cell claim to attach the persona tool set and role — the claim must already exist. The claim UPDATE (status `running`, `attempts` + 1, pre-minted `child_session_id`, `dispatched_at`) runs first; a spawn failure restores the row's prior values.
 2. **The write claim expires with the attempt.** The persona routes resolve the claim only while the cell is `running`. A settled cell's child gets the corrective 403 ("This session is not a dispatched persona cell."); a yielded cell's replacement child holds the next claim.
@@ -497,7 +497,7 @@ Web-level tests beside the panel components; API-level tests for the routes.
 16. **The export scope carries severity/status/cell, not the path filter.** The export route does not accept `path`; the dialog says so when a path filter is active instead of silently narrowing or silently widening the scope.
 17. **The panel's GitHub availability reads two signals.** GitHub filing is available when the repos read reports a usable GitHub connection (`GET /api/me/repos` `connected`) or the `github` credential service is connected — the same pair the server-side token resolver draws from. Linear reads only its credential service.
 18. **Severity colors map to the theme's tokens.** The theme ships no orange or standalone yellow scale, so: critical → danger (red), high → amber, medium → the warning wash, low → accent (the brand blue), info → neutral. One spelling in `components/security/severity.tsx`, shared by the review list and the `sec_*` tool cards.
-
+19. **The stock image bakes gitleaks only; semgrep is deferred.** The image base (`node:22-bookworm-slim`) carries no Python runtime, and semgrep is a Python package — baking it would add a whole toolchain for one scanner (plan risk 6 pre-authorizes gitleaks-only). gitleaks 8.30.1 is pinned in `docker/Dockerfile.sandbox-k8s` with a per-arch sha256 check, and its default ruleset is compiled into the binary, so it scans offline. The persona role names gitleaks plus any repo-local scanners the clone carries instead of promising semgrep. Semgrep returns if the image ever gains a Python runtime for another reason.
 ## Revisions from the Adversarial Review (2026-08-27)
 
 A review pass against UX, agent experience, and result quality forced eight corrections, folded into the sections above:

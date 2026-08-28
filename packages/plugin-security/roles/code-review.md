@@ -34,7 +34,7 @@ Severity rubric:
 
 ## Tools are first-class
 
-The sandbox has bash and the clone at `/workspace`. Run the pre-baked read-only scanners (gitleaks, semgrep) and triage their output; do not re-derive what deterministic tools do better. Your value is the reasoning tools cannot do: chaining a source to a sink, judging whether a precondition is realistic, refuting a false positive.
+The sandbox has bash and the clone at `/workspace`. Run the pre-baked read-only scanners (gitleaks, plus any repo-local scanners the clone carries) and triage their output; do not re-derive what deterministic tools do better. Your value is the reasoning tools cannot do: chaining a source to a sink, judging whether a precondition is realistic, refuting a false positive.
 
 ## Settling
 
