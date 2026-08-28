@@ -70,15 +70,59 @@ export function isKnownPreset(id: string): boolean {
  * working the moment it is created instead of waiting on the user to type
  * (the hub queues this whether or not the user added focus notes). The
  * runner has the security-engagement-runner skill, so the message only
- * needs to start it: read the plan, fold in any focus notes, then open the
- * `sec_start` approval gate — that gate is the human checkpoint before any
- * spend, so kicking straight to it is safe.
+ * needs to start it.
+ *
+ * Two create paths land here. When `alreadyStarted` is false (the legacy
+ * planning path), the engagement waits in planning: the runner reads the
+ * plan, folds in any focus notes, then opens the `sec_start` approval gate —
+ * that gate is the human checkpoint before any spend.
+ *
+ * When `alreadyStarted` is true (the `/security/new` setup page), the user
+ * already approved the plan by clicking "Start review", so the create route
+ * called `startEngagement`. The engagement is running and its cells are
+ * materialized. The runner must NOT call `sec_start` — that route rejects a
+ * running engagement (409) and the approval gate is redundant. The runner
+ * reads `sec_status` and drives the dispatch loop straight away.
  */
-export function securityKickoffPrompt(repoFullName: string, focusNotes?: string): string {
-  const notes = focusNotes?.trim();
+/** The longest a derived security title may run before the ref is dropped.
+ * Keeps the title inside the session-title column and readable in a list. */
+const MAX_SECURITY_TITLE_CHARS = 60;
+
+/**
+ * The auto-title for a security session (#7): "Security review · owner/repo"
+ * plus "@ref" when the review pins a non-default ref. Drop "@ref" for the
+ * default branch (a null/empty ref). Shorten a 40-hex SHA to 7 chars. If the
+ * "@ref" suffix would push the title past MAX_SECURITY_TITLE_CHARS, drop the
+ * suffix rather than truncate mid-ref.
+ */
+export function securitySessionTitle(repoFullName: string, ref?: string | null): string {
+  const base = `Security review · ${repoFullName}`;
+  const trimmed = ref?.trim();
+  if (!trimmed) return base;
+  const short = /^[0-9a-f]{40}$/i.test(trimmed) ? trimmed.slice(0, 7) : trimmed;
+  const withRef = `${base}@${short}`;
+  return withRef.length <= MAX_SECURITY_TITLE_CHARS ? withRef : base;
+}
+
+export function securityKickoffPrompt(
+  repoFullName: string,
+  opts?: { focusNotes?: string; alreadyStarted?: boolean },
+): string {
+  const notes = opts?.focusNotes?.trim();
   const focusLine = notes
-    ? `\n\nFocus notes from the user (fold these into the plan before you start):\n${notes}`
+    ? `\n\nFocus notes from the user${
+        opts?.alreadyStarted ? " (weigh these as you dispatch cells)" : " (fold these into the plan before you start)"
+      }:\n${notes}`
     : "";
+  if (opts?.alreadyStarted) {
+    return (
+      `Begin the security review of ${repoFullName}. ` +
+      `The engagement is already running and its cells are materialized — do NOT call sec_start. ` +
+      `Call sec_status to read the plan and cell states, then drive the dispatch loop: ` +
+      `dispatch each pending cell with sec_dispatch, rule on its state doc, and continue until sec_close.` +
+      focusLine
+    );
+  }
   return (
     `Begin the security review of ${repoFullName}. ` +
     `Call sec_status to read the engagement plan, summarize the cells for me, ` +

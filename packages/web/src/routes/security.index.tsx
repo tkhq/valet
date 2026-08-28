@@ -2,10 +2,9 @@ import { useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import type { SecurityEngagementWire, SessionSummary } from "@valet/api/wire";
 import { useEngagement, useRescanReview, useSecurityReviews } from "~/api/security";
-import { useModels } from "~/api/settings";
 import { useRepos } from "~/api/repos";
-import { curatedForCatalogId, MODEL_CATALOG } from "~/lib/models";
 import { Badge, Button, Input, Label, Spinner } from "~/components/primitives";
+import { cn } from "~/lib/cn";
 import type { SecurityNewSearch } from "./security.new";
 import {
   RepoCombobox,
@@ -40,9 +39,11 @@ export function SecurityIndexPage() {
           <WorkspaceClause />
         </div>
       </div>
-      <div className="flex-1 overflow-y-auto p-6 space-y-6">
-        <NewReviewCard />
-        <ReviewList />
+      <div className="flex-1 overflow-y-auto p-6">
+        <div className="mx-auto max-w-4xl space-y-8">
+          <NewReviewCard />
+          <ReviewList />
+        </div>
       </div>
     </div>
   );
@@ -59,36 +60,56 @@ interface SelectedRepo {
 /** The hub always sends a model. This is the capable default the server also
  * falls to for a modelless security create — the picker defaults to it, so the
  * two agree. */
-const SECURITY_DEFAULT_MODEL = "claude-sonnet-4-6";
-
-/** One model option for the hub's picker: the id sent on the wire plus a short
- * label. */
-interface ModelChoice {
-  id: string;
-  label: string;
-}
+const SECURITY_DEFAULT_MODEL = "anthropic/claude-sonnet-5";
 
 /** The sweep presets the hub offers. Mirrored from `SECURITY_PRESETS` in
  * `@valet/plugin-security`: that package's barrel pulls node builtins (fs/url
  * through the playbooks module), so the web cannot import it. The server-side
  * `isKnownPreset` check is the real gate — this list only populates the
  * picker. Keep the two in sync. */
-const SECURITY_PRESETS: readonly { id: string; label: string; description: string }[] = [
+interface PresetChoice {
+  id: string;
+  label: string;
+  blurb: string;
+  /** The review's logical passes. The setup page shows the exact step count
+   * after triad review expands each sweep into plan → work → verify. */
+  phases: string[];
+}
+
+const SECURITY_PRESETS: readonly PresetChoice[] = [
   {
     id: "code-review",
     label: "Full code review",
-    description: "Recon, access control, injection, secrets/config, verify (5 steps).",
+    blurb: "The deep default. Every sweep is double-checked.",
+    phases: ["Recon", "Access control", "Injection", "Secrets & config", "Verify"],
+  },
+  {
+    id: "access-injection",
+    label: "Access & injection",
+    blurb: "Authorization and injection, nothing else.",
+    phases: ["Recon", "Access control", "Injection", "Verify"],
   },
   {
     id: "secrets-config",
     label: "Secrets & config",
-    description: "Recon, secrets/config scanner sweep, verify (3 steps). Fast.",
+    blurb: "Fast, scanner-led secrets and config pass.",
+    phases: ["Recon", "Secrets & config", "Verify"],
   },
   {
-    id: "access-injection",
-    label: "Access control & injection",
-    description: "Recon, authz, injection, verify (4 steps).",
+    id: "full-pentest",
+    label: "Full pentest",
+    blurb: "Threat model, SAST, attack tree, and a written report.",
+    phases: ["Recon", "Threat model", "Code review", "SAST", "Access", "Injection", "Attack tree", "Verify", "Report"],
   },
+];
+
+/** Security runs drive a tool loop over many turns, so the picker offers the
+ * current-generation Claude 5 models only — the tiers that hold up across a
+ * long agentic review — instead of the whole provider catalog. Sonnet is the
+ * recommended balance; Opus goes deeper on hard reasoning. */
+const SECURITY_MODELS: readonly { id: string; label: string; note: string }[] = [
+  { id: "anthropic/claude-sonnet-5", label: "Claude Sonnet 5", note: "Recommended" },
+  { id: "anthropic/claude-opus-5", label: "Claude Opus 5", note: "Deepest" },
 ];
 
 /** Split a "Scope to paths" input into include globs. Commas and whitespace
@@ -106,7 +127,6 @@ function NewReviewCard() {
   // The nav's switcher answers "whose review is this" — same pass-through
   // the new-session dialog uses (`CreateScopeLine` states it).
   const scope = useWorkspaceScope();
-  const modelsQ = useModels();
   const [repo, setRepo] = useState<SelectedRepo | null>(null);
   // The hub always submits a model; sonnet-4-6 is the capable default. This is
   // a fixed default, not derived from a prop, so no mount-time-state sync is
@@ -116,17 +136,6 @@ function NewReviewCard() {
   // so no mount-time-state sync is needed — each only changes on user input.
   const [preset, setPreset] = useState(SECURITY_PRESETS[0].id);
   const [pathsInput, setPathsInput] = useState("");
-
-  // Model options: the org catalog when it loads (curated label when the id
-  // maps to a known tier, else the catalog name), else the curated
-  // `MODEL_CATALOG`. The default id is always present, so the select can show
-  // it even before the catalog loads.
-  const catalog = modelsQ.data?.models;
-  const modelChoices: ModelChoice[] =
-    catalog && catalog.length > 0
-      ? catalog.map((m) => ({ id: m.id, label: curatedForCatalogId(m.id)?.label ?? m.name }))
-      : MODEL_CATALOG.map((m) => ({ id: m.id, label: m.label }));
-  const hasDefault = modelChoices.some((m) => m.id === model);
 
   const repos = reposQ.data?.repos ?? [];
   const connected = reposQ.data?.connected ?? false;
@@ -167,22 +176,35 @@ function NewReviewCard() {
   }
 
   return (
-    <section className="rounded border border-line bg-paper p-4 space-y-4">
-      <div>
-        <h2 className="text-sm font-semibold text-ink">New review</h2>
-        <p className="text-xs text-muted">
-          Scan a repository for security issues and triage the findings.
-        </p>
+    <section className="rounded-lg border border-line bg-paper p-5 space-y-5">
+      <div className="flex items-baseline justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold text-ink">Start a review</h2>
+          <p className="mt-0.5 text-xs text-muted">
+            Scan a repository for security issues and triage the findings.
+          </p>
+        </div>
+        <CreateScopeLine what="review" />
       </div>
-      <CreateScopeLine what="review" />
 
-      <div className="grid gap-1">
+      {/* 1 · Repository — the one required input, so it leads. */}
+      <div className="grid gap-1.5">
         <Label>Repository</Label>
         {repo ? (
-          <div className="flex items-center justify-between gap-2 rounded border border-line p-2.5">
-            <span className="min-w-0 truncate text-sm font-medium text-ink">{repo.fullName}</span>
-            <div className="flex shrink-0 items-center gap-2">
-              <Label htmlFor="review-ref" className="text-xs text-muted">
+          <div className="rounded-md border border-line bg-ink-wash/40 p-3">
+            <div className="flex items-center justify-between gap-2">
+              <span className="min-w-0 truncate font-mono text-sm text-ink">{repo.fullName}</span>
+              <button
+                type="button"
+                aria-label={`Remove ${repo.fullName}`}
+                onClick={() => setRepo(null)}
+                className="shrink-0 text-xs text-muted hover:text-danger-500"
+              >
+                Remove
+              </button>
+            </div>
+            <div className="mt-2.5 flex items-center gap-2">
+              <Label htmlFor="review-ref" className="shrink-0 text-[11px] uppercase tracking-wide text-muted">
                 Branch
               </Label>
               <Input
@@ -191,16 +213,9 @@ function NewReviewCard() {
                 value={repo.ref}
                 placeholder="default branch"
                 onChange={(e) => setRepo({ ...repo, ref: e.target.value })}
-                className="h-8 w-36 text-xs"
+                className="h-8 w-52 text-xs"
               />
-              <button
-                type="button"
-                aria-label={`Remove ${repo.fullName}`}
-                onClick={() => setRepo(null)}
-                className="text-xs text-muted hover:text-danger-500"
-              >
-                Remove
-              </button>
+              <span className="text-[11px] text-muted">Leave blank to scan the default branch.</span>
             </div>
           </div>
         ) : (
@@ -228,69 +243,103 @@ function NewReviewCard() {
         )}
       </div>
 
-      <div className="grid gap-1">
-        <Label htmlFor="review-preset">Preset</Label>
-        {/* The preset chooses which cells the seeded plan runs. The server
-            gates the id with `isKnownPreset`; this list only populates the
-            picker. */}
-        <select
-          id="review-preset"
-          value={preset}
-          onChange={(e) => setPreset(e.target.value)}
-          className="h-8 w-64 rounded border border-line bg-paper px-2 text-xs text-ink"
-        >
-          {SECURITY_PRESETS.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.label}
-            </option>
-          ))}
-        </select>
-        <p className="text-xs text-muted">
-          {SECURITY_PRESETS.find((p) => p.id === preset)?.description}
-        </p>
-        <p className="text-xs text-muted">
-          If the repo has a .valet/security.yml, it configures the review and
-          this preset is ignored.
-        </p>
+      {/* 2 · Method — selectable preset cards, each showing its passes. */}
+      <div className="grid gap-1.5">
+        <div className="flex items-baseline justify-between">
+          <Label>Method</Label>
+          <span className="text-[11px] text-muted">
+            A <span className="font-mono">.valet/security.yml</span> in the repo overrides this.
+          </span>
+        </div>
+        <div role="radiogroup" aria-label="Review method" className="grid grid-cols-2 gap-2">
+          {SECURITY_PRESETS.map((p) => {
+            const selected = p.id === preset;
+            return (
+              <button
+                key={p.id}
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                aria-label={p.label}
+                onClick={() => setPreset(p.id)}
+                className={cn(
+                  "flex flex-col gap-2 rounded-md border p-3 text-left transition-colors",
+                  selected
+                    ? "border-moss bg-moss-wash ring-1 ring-moss"
+                    : "border-line hover:border-ink-wash-strong",
+                )}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[13px] font-medium text-ink">{p.label}</span>
+                  <span
+                    className={cn(
+                      "grid h-4 w-4 shrink-0 place-items-center rounded-full border",
+                      selected ? "border-moss bg-moss text-paper" : "border-line",
+                    )}
+                    aria-hidden
+                  >
+                    {selected && (
+                      <svg viewBox="0 0 12 12" className="h-2.5 w-2.5" fill="none">
+                        <path d="M2.5 6.5l2.5 2.5 4.5-5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    )}
+                  </span>
+                </div>
+                <span className="text-[11px] leading-snug text-muted">{p.blurb}</span>
+                <div className="flex flex-wrap gap-1">
+                  {p.phases.map((ph, i) => (
+                    <span
+                      key={ph}
+                      className="rounded bg-ink-wash px-1.5 py-0.5 text-[10px] text-muted"
+                    >
+                      {i + 1}. {ph}
+                    </span>
+                  ))}
+                </div>
+              </button>
+            );
+          })}
+        </div>
       </div>
 
-      <div className="grid gap-1">
-        <Label htmlFor="review-paths">Scope to paths (optional)</Label>
-        <Input
-          id="review-paths"
-          value={pathsInput}
-          onChange={(e) => setPathsInput(e.target.value)}
-          placeholder="e.g. packages/api, src/auth — optional"
-          className="h-8 text-xs"
-        />
-        <p className="text-xs text-muted">
-          Limits the injection, authz, and secrets sweeps to these paths.
-        </p>
+      {/* 3 · Model + scope — secondary controls, side by side. */}
+      <div className="grid grid-cols-2 gap-4">
+        <div className="grid gap-1.5">
+          <Label htmlFor="review-model">Model</Label>
+          <select
+            id="review-model"
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            className="h-9 rounded-md border border-line bg-paper px-2 text-xs text-ink"
+          >
+            {SECURITY_MODELS.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label}
+                {m.note ? ` · ${m.note}` : ""}
+              </option>
+            ))}
+          </select>
+          <p className="text-[11px] text-muted">Drives the review and every sub-agent.</p>
+        </div>
+        <div className="grid gap-1.5">
+          <Label htmlFor="review-paths">Scope to paths</Label>
+          <Input
+            id="review-paths"
+            value={pathsInput}
+            onChange={(e) => setPathsInput(e.target.value)}
+            placeholder="packages/api, src/auth"
+            className="h-9 text-xs"
+          />
+          <p className="text-[11px] text-muted">Optional. Narrows the sweeps to these paths.</p>
+        </div>
       </div>
 
-      <div className="grid gap-1">
-        <Label htmlFor="review-model">Model</Label>
-        {/* The runner and its personas run on this model. Sonnet 4.6 is the
-            default — a capable model for review, not the haiku floor. */}
-        <select
-          id="review-model"
-          value={model}
-          onChange={(e) => setModel(e.target.value)}
-          className="h-8 w-48 rounded border border-line bg-paper px-2 text-xs text-ink"
-        >
-          {!hasDefault && <option value={model}>{model}</option>}
-          {modelChoices.map((m) => (
-            <option key={m.id} value={m.id}>
-              {m.label}
-            </option>
-          ))}
-        </select>
-        <p className="text-xs text-muted">The review and its sub-agents use this model.</p>
-      </div>
-
-      <div className="flex justify-end">
+      <div className="flex items-center justify-end gap-3 border-t border-line pt-4">
+        {repo === null && (
+          <span className="text-[11px] text-muted">Pick a repository to continue.</span>
+        )}
         <Button onClick={configure} disabled={repo === null}>
-          Configure review
+          Configure review →
         </Button>
       </div>
     </section>
@@ -304,88 +353,126 @@ function ReviewList() {
   const { data, isLoading, error } = useSecurityReviews(owner);
   const reviews = data?.sessions ?? [];
 
-  if (isLoading) {
-    return (
-      <div className="flex items-center gap-2 text-sm text-muted">
-        <Spinner size={14} /> Loading security reviews…
-      </div>
-    );
-  }
-  if (error) {
-    return <div className="text-sm text-danger-500">Failed to load security reviews.</div>;
-  }
-  if (reviews.length === 0) {
-    return (
-      <p className="text-sm text-muted">
-        No security reviews yet. Point one at a repository to start.
-      </p>
-    );
-  }
-
   return (
-    <ul className="space-y-2">
-      {reviews.map((session) => (
-        <ReviewRow key={session.id} session={session} />
-      ))}
-    </ul>
+    <div className="space-y-2.5">
+      <div className="flex items-baseline gap-2">
+        <h2 className="text-sm font-semibold text-ink">Reviews</h2>
+        {reviews.length > 0 && (
+          <span className="text-xs text-muted">{reviews.length}</span>
+        )}
+      </div>
+      {isLoading ? (
+        <div className="flex items-center gap-2 text-sm text-muted">
+          <Spinner size={14} /> Loading reviews…
+        </div>
+      ) : error ? (
+        <div className="rounded-md border border-danger-500/30 bg-danger-wash px-3 py-2 text-sm text-danger-600">
+          Could not load reviews. Reload the page to retry.
+        </div>
+      ) : reviews.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-line px-4 py-10 text-center">
+          <p className="text-sm text-ink">No reviews yet</p>
+          <p className="mx-auto mt-1 max-w-xs text-xs text-muted">
+            Start a review above. Findings, coverage, and a report appear here as it runs.
+          </p>
+        </div>
+      ) : (
+        <ul className="space-y-2">
+          {reviews.map((session) => (
+            <ReviewRow key={session.id} session={session} />
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
-const STATUS_VARIANT: Record<
+const STATUS_META: Record<
   SecurityEngagementWire["status"],
-  "neutral" | "accent" | "success" | "danger"
+  { label: string; dot: string; variant: "neutral" | "accent" | "success" | "danger" }
 > = {
-  planning: "neutral",
-  running: "accent",
-  completed: "success",
-  failed: "danger",
-  cancelled: "neutral",
+  planning: { label: "Planning", dot: "bg-muted", variant: "neutral" },
+  running: { label: "Running", dot: "bg-moss", variant: "accent" },
+  completed: { label: "Completed", dot: "bg-success-500", variant: "success" },
+  failed: { label: "Failed", dot: "bg-danger-500", variant: "danger" },
+  cancelled: { label: "Cancelled", dot: "bg-muted", variant: "neutral" },
 };
+
+/** A 40-hex SHA shows its first 7; a branch/tag name shows whole. */
+function shortRef(ref: string): string {
+  return /^[0-9a-f]{40}$/i.test(ref) ? ref.slice(0, 7) : ref;
+}
 
 function ReviewRow({ session }: { session: SessionSummary }) {
   const navigate = useNavigate();
   // One extra read per row: the list endpoint carries the session, not the
-  // engagement, and the status badge belongs to the engagement. The hub's
-  // list is short and view-gated; finding counts stay on M8's panel.
+  // engagement, and the status + progress belong to the engagement. The hub's
+  // list is short and view-gated.
   const engagementQ = useEngagement(session.id);
   const engagement = engagementQ.data?.engagement;
-  const title = session.title ?? engagement?.repoFullName ?? session.workspace;
+  const cells = engagementQ.data?.cells ?? [];
+  const costUsd = engagementQ.data?.cost?.costUsd ?? 0;
   const rescan = useRescanReview();
-  // Re-scan / iterate: offer a re-scan only on a terminal engagement — a
-  // running scan has nothing to iterate on yet.
-  const terminal = engagement?.status === "completed" || engagement?.status === "failed";
+
+  const status = engagement?.status;
+  const meta = status ? STATUS_META[status] : null;
+  const done = cells.filter((c) => c.status === "settled").length;
+  const total = cells.length;
+  const terminal = status === "completed" || status === "failed";
+  const repoName = engagement?.repoFullName ?? session.title ?? session.workspace;
+  const ref = engagement?.repoRef ?? "";
 
   return (
-    // `relative` anchors the stretched link below: the whole row opens the
-    // session (the workflows hub row precedent).
-    <li className="group relative flex items-center justify-between gap-3 rounded border border-line bg-paper px-4 py-3 hover:border-ink-wash-strong">
-      <div className="flex min-w-0 items-center gap-2">
+    // `relative` anchors the stretched link: the whole row opens the session.
+    <li className="group relative flex items-center gap-4 rounded-md border border-line bg-paper px-4 py-3 hover:border-ink-wash-strong">
+      <span
+        className={cn(
+          "relative mt-1.5 h-2 w-2 shrink-0 rounded-full",
+          meta?.dot ?? "bg-line",
+        )}
+        aria-hidden
+      >
+        {status === "running" && (
+          <span className="absolute inset-0 animate-ping rounded-full bg-moss opacity-60" />
+        )}
+      </span>
+
+      <div className="min-w-0 flex-1">
         <Link
           to="/sessions/$sessionId"
           params={{ sessionId: session.id }}
-          className="min-w-0 truncate text-sm font-medium text-ink after:absolute after:inset-0 after:content-[''] group-hover:underline"
+          className="min-w-0 font-mono text-sm text-ink after:absolute after:inset-0 after:content-[''] group-hover:underline"
         >
-          {title}
+          {repoName}
+          {ref !== "" && <span className="text-muted"> @ {shortRef(ref)}</span>}
         </Link>
-        {engagement && session.title != null && (
-          <span className="shrink-0 truncate text-xs text-muted">{engagement.repoFullName}</span>
-        )}
+        <div className="mt-0.5 flex items-center gap-2 text-[11px] text-muted">
+          <span>{new Date(session.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span>
+          {status === "running" && total > 0 && (
+            <>
+              <span aria-hidden>·</span>
+              <span>
+                {done}/{total} steps
+              </span>
+            </>
+          )}
+          {costUsd > 0 && (
+            <>
+              <span aria-hidden>·</span>
+              <span className="font-mono">${costUsd < 0.01 ? costUsd.toFixed(4) : costUsd.toFixed(2)}</span>
+            </>
+          )}
+        </div>
       </div>
+
       <div className="flex shrink-0 items-center gap-3">
-        <span className="text-xs text-muted">
-          {new Date(session.createdAt).toLocaleDateString()}
-        </span>
-        {engagement && (
-          <Badge variant={STATUS_VARIANT[engagement.status]}>{engagement.status}</Badge>
-        )}
         {terminal && engagement && (
-          // `relative z-10` lifts the button above the row's stretched link so
-          // the click starts a re-scan instead of opening the session.
+          // `relative z-10` lifts the button above the row's stretched link.
           <Button
             type="button"
             variant="ghost"
             size="sm"
-            className="relative z-10"
+            className="relative z-10 opacity-0 transition-opacity group-hover:opacity-100"
             disabled={rescan.isPending}
             onClick={() => {
               rescan.mutate(
@@ -397,8 +484,13 @@ function ReviewRow({ session }: { session: SessionSummary }) {
               );
             }}
           >
-            {rescan.isPending ? "Starting…" : "Re-scan latest"}
+            {rescan.isPending ? "Starting…" : "Re-scan"}
           </Button>
+        )}
+        {meta && (
+          <Badge variant={meta.variant} className="shrink-0">
+            {meta.label}
+          </Badge>
         )}
       </div>
     </li>

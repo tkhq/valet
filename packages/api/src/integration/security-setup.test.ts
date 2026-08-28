@@ -111,6 +111,9 @@ describe("api integration: security setup flow", () => {
       expect(res.status).toBe(201);
       const created = (await res.json()) as CreateSessionResponse;
 
+      // The auto-title names the repo and the pinned ref, shortened to 7 chars.
+      expect(created.title).toBe(`Security review · acme/api@${FAKE_SHA.slice(0, 7)}`);
+
       const security = (await (
         await fetch(`${api.baseUrl}/api/sessions/${created.id}/security`)
       ).json()) as GetSessionSecurityResponse;

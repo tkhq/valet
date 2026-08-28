@@ -150,12 +150,10 @@ beforeEach(() => {
 describe("SecurityIndexPage", () => {
   it("shows the empty state when no security reviews exist", () => {
     renderPage();
-    expect(
-      screen.getByText("No security reviews yet. Point one at a repository to start."),
-    ).toBeTruthy();
+    expect(screen.getByText("No reviews yet")).toBeTruthy();
   });
 
-  it("renders a review row with its title, repo, and engagement status badge", () => {
+  it("renders a review row with its repo, ref, and engagement status", () => {
     reviewsData.sessions = [
       {
         id: "s_1",
@@ -172,16 +170,17 @@ describe("SecurityIndexPage", () => {
     ];
     renderPage();
 
-    const link = screen.getByText("Token audit").closest("a");
+    // The row leads with the repo (mono), links to the session, and shows the
+    // engagement status label.
+    const link = screen.getByText("acme/site").closest("a");
     expect(link).toBeTruthy();
-    expect(screen.getByText("acme/site")).toBeTruthy();
-    expect(screen.getByText("running")).toBeTruthy();
-    expect(screen.queryByText(/No security reviews yet/)).toBeNull();
+    expect(screen.getByText("Running")).toBeTruthy();
+    expect(screen.queryByText("No reviews yet")).toBeNull();
     // A running engagement offers no re-scan — there is nothing to iterate on.
-    expect(screen.queryByRole("button", { name: "Re-scan latest" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Re-scan" })).toBeNull();
   });
 
-  it("offers Re-scan latest only on a terminal engagement and starts a re-scan", () => {
+  it("offers Re-scan only on a terminal engagement and starts a re-scan", () => {
     // A completed engagement for the row.
     engagementsBySession.s_done = {
       engagement: {
@@ -224,7 +223,7 @@ describe("SecurityIndexPage", () => {
     ];
     renderPage();
 
-    const button = screen.getByRole("button", { name: "Re-scan latest" });
+    const button = screen.getByRole("button", { name: "Re-scan" });
     fireEvent.click(button);
     expect(rescanMutate).toHaveBeenCalledTimes(1);
     expect(rescanMutate.mock.calls[0][0]).toMatchObject({ rescanOf: "s_done" });
@@ -238,7 +237,7 @@ describe("SecurityIndexPage", () => {
 
   it("keeps Configure disabled until a repo is picked", () => {
     renderPage();
-    const configure = screen.getByRole("button", { name: "Configure review" }) as HTMLButtonElement;
+    const configure = screen.getByRole("button", { name: "Configure review →" }) as HTMLButtonElement;
     expect(configure.disabled).toBe(true);
 
     pickRepo();
@@ -248,7 +247,7 @@ describe("SecurityIndexPage", () => {
   it("Configure navigates to /security/new with the repo, preset, and model", () => {
     renderPage();
     pickRepo();
-    fireEvent.click(screen.getByRole("button", { name: "Configure review" }));
+    fireEvent.click(screen.getByRole("button", { name: "Configure review →" }));
 
     // The hub no longer creates the session — it hands off to the setup page.
     expect(createMutateAsync).not.toHaveBeenCalled();
@@ -260,39 +259,47 @@ describe("SecurityIndexPage", () => {
       cloneUrl: "https://github.com/acme/site.git",
       ref: "main",
       preset: "code-review",
-      model: "claude-sonnet-4-6",
+      model: "anthropic/claude-sonnet-5",
     });
   });
 
   it("passes the picked model and preset in the setup-page search", () => {
     renderPage();
     pickRepo();
-    fireEvent.change(screen.getByLabelText("Model"), { target: { value: "claude-opus-4-7" } });
-    fireEvent.change(screen.getByLabelText("Preset"), { target: { value: "secrets-config" } });
-    fireEvent.click(screen.getByRole("button", { name: "Configure review" }));
+    fireEvent.change(screen.getByLabelText("Model"), { target: { value: "anthropic/claude-opus-5" } });
+    // The method is a card radiogroup now, not a select.
+    fireEvent.click(screen.getByRole("radio", { name: "Secrets & config" }));
+    fireEvent.click(screen.getByRole("button", { name: "Configure review →" }));
 
     const call = navigate.mock.calls[0][0] as { search: Record<string, unknown> };
-    expect(call.search).toMatchObject({ model: "claude-opus-4-7", preset: "secrets-config" });
+    expect(call.search).toMatchObject({ model: "anthropic/claude-opus-5", preset: "secrets-config" });
   });
 
   it("passes the paths scope as a comma-joined param and omits it when blank", () => {
     renderPage();
     pickRepo();
-    fireEvent.change(screen.getByLabelText("Scope to paths (optional)"), {
+    fireEvent.change(screen.getByLabelText("Scope to paths"), {
       target: { value: "packages/api, src/auth" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Configure review" }));
+    fireEvent.click(screen.getByRole("button", { name: "Configure review →" }));
     const call = navigate.mock.calls[0][0] as { search: Record<string, unknown> };
     expect(call.search.paths).toBe("packages/api,src/auth");
   });
 
-  it("offers the three sweep presets, defaulting to full code review", () => {
+  it("offers the sweep presets as cards, defaulting to full code review", () => {
     renderPage();
-    const select = screen.getByLabelText("Preset") as HTMLSelectElement;
-    expect(select.disabled).toBe(false);
-    const options = Array.from(select.options).map((o) => o.value);
-    expect(options).toEqual(["code-review", "secrets-config", "access-injection"]);
-    expect(select.value).toBe("code-review");
+    const radios = screen.getAllByRole("radio");
+    const labels = radios.map((r) => r.getAttribute("aria-label"));
+    expect(labels).toEqual([
+      "Full code review",
+      "Access & injection",
+      "Secrets & config",
+      "Full pentest",
+    ]);
+    // Full code review is selected by default.
+    expect(screen.getByRole("radio", { name: "Full code review" }).getAttribute("aria-checked")).toBe(
+      "true",
+    );
   });
 
   it("offers a typed public repo inline in the picker and configures it (default branch)", () => {
@@ -304,7 +311,7 @@ describe("SecurityIndexPage", () => {
     });
     fireEvent.click(screen.getByRole("option", { name: /Scan openai\/gpt-4 as a public repo/i }));
 
-    const configure = screen.getByRole("button", { name: "Configure review" }) as HTMLButtonElement;
+    const configure = screen.getByRole("button", { name: "Configure review →" }) as HTMLButtonElement;
     expect(configure.disabled).toBe(false);
     fireEvent.click(configure);
 

@@ -8,6 +8,7 @@ export {
   KNOWN_PERSONAS,
   codeReviewPresetPlan,
   securityKickoffPrompt,
+  securitySessionTitle,
   SECURITY_PRESETS,
   isKnownPreset,
   presetPlan,

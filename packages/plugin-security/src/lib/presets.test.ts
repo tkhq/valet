@@ -10,6 +10,7 @@ import {
   presetPlan,
   SECURITY_PRESETS,
   securityKickoffPrompt,
+  securitySessionTitle,
   serializePlan,
 } from "./presets.js";
 
@@ -215,13 +216,55 @@ describe("securityKickoffPrompt", () => {
   });
 
   it("folds the user's focus notes in when present", () => {
-    const p = securityKickoffPrompt("acme/api", "skip the secrets sweep");
+    const p = securityKickoffPrompt("acme/api", { focusNotes: "skip the secrets sweep" });
     expect(p).toContain("Focus notes");
     expect(p).toContain("skip the secrets sweep");
   });
 
   it("omits the focus block for blank notes", () => {
-    expect(securityKickoffPrompt("acme/api", "   ")).not.toContain("Focus notes");
+    expect(securityKickoffPrompt("acme/api", { focusNotes: "   " })).not.toContain("Focus notes");
+  });
+
+  it("tells the runner NOT to call sec_start on the already-started path", () => {
+    const p = securityKickoffPrompt("acme/api", { alreadyStarted: true });
+    expect(p).toContain("acme/api");
+    expect(p).toContain("sec_status");
+    expect(p).toContain("sec_dispatch");
+    // The copy names sec_start only to forbid it; it never instructs a call.
+    expect(p).toContain("do NOT call sec_start");
+    expect(p).not.toContain("call sec_start to request approval");
+  });
+
+  it("folds focus notes in on the already-started path", () => {
+    const p = securityKickoffPrompt("acme/api", {
+      focusNotes: "watch the auth routes",
+      alreadyStarted: true,
+    });
+    expect(p).toContain("Focus notes");
+    expect(p).toContain("watch the auth routes");
+    expect(p).not.toContain("call sec_start to request approval");
+  });
+});
+
+describe("securitySessionTitle", () => {
+  it("names the repo without a ref for the default branch", () => {
+    expect(securitySessionTitle("acme/api")).toBe("Security review · acme/api");
+    expect(securitySessionTitle("acme/api", null)).toBe("Security review · acme/api");
+    expect(securitySessionTitle("acme/api", "  ")).toBe("Security review · acme/api");
+  });
+
+  it("appends a non-default ref", () => {
+    expect(securitySessionTitle("acme/api", "release")).toBe("Security review · acme/api@release");
+  });
+
+  it("shortens a 40-hex SHA to 7 chars", () => {
+    const sha = "abcdef0123456789abcdef0123456789abcdef01";
+    expect(securitySessionTitle("acme/api", sha)).toBe("Security review · acme/api@abcdef0");
+  });
+
+  it("drops the ref suffix when it would overrun the length cap", () => {
+    const longRef = "feature/a-very-long-branch-name-that-blows-the-cap";
+    expect(securitySessionTitle("acme/api", longRef)).toBe("Security review · acme/api");
   });
 });
 

@@ -30,6 +30,7 @@ import {
   presetPlan,
   SECURITY_PRESETS,
   securityKickoffPrompt,
+  securitySessionTitle,
   serializePlan,
 } from "@valet/plugin-security";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
@@ -488,6 +489,15 @@ sessionsRouter.post("/", async (c) => {
     }
   }
 
+  // A security session names its target so the list reads at a glance (#7).
+  // The user's explicit title always wins; otherwise derive one from the repo
+  // and ref: "Security review · owner/repo@ref". Omit "@ref" for the default
+  // branch (null/empty ref). A 40-hex SHA shortens to 7 chars. The whole title
+  // stays within the 80-char column and reads well in a narrow list.
+  const sessionTitle =
+    body.title ??
+    (kind === "security" ? securitySessionTitle(repos[0].fullName, repos[0].ref) : null);
+
   const now = Date.now();
   const id = newId("s");
   // Session row + repo bindings must land atomically — a failure between
@@ -505,7 +515,7 @@ sessionsRouter.post("/", async (c) => {
         userId: user.id,
         orgId: user.orgId,
         workspace: body.workspace,
-        title: body.title ?? null,
+        title: sessionTitle,
         status: "active",
         ownerType: owner.type,
         ownerId: owner.id,
@@ -590,6 +600,12 @@ sessionsRouter.post("/", async (c) => {
   // Best-effort: a SHA-resolution failure logs and leaves the engagement
   // planning — the runner's kickoff below can still start it. A re-scan keeps
   // the runner-driven start (it diffs against the parent at sec_start).
+  // Whether the engagement is already running when the kickoff turn queues.
+  // On the setup-page path the create route starts it here, so the runner must
+  // not call sec_start (that route 409s a running engagement and the approval
+  // gate is redundant). A start failure leaves this false and the runner starts
+  // the engagement itself through sec_start.
+  let securityAlreadyStarted = false;
   if (
     kind === "security" &&
     body.planCells !== undefined &&
@@ -612,6 +628,7 @@ sessionsRouter.post("/", async (c) => {
         }
         const security = createSecurityEngagementService({ db });
         await security.startEngagement(securityEngagementId, { resolvedSha });
+        securityAlreadyStarted = true;
       } catch (err) {
         console.warn(
           `security create: could not start engagement ${securityEngagementId} for ${repos[0].fullName} at create; ` +
@@ -654,7 +671,10 @@ sessionsRouter.post("/", async (c) => {
 
   const firstPrompt =
     kind === "security"
-      ? securityKickoffPrompt(repos[0].fullName, body.initialPrompt)
+      ? securityKickoffPrompt(repos[0].fullName, {
+          ...(body.initialPrompt ? { focusNotes: body.initialPrompt } : {}),
+          alreadyStarted: securityAlreadyStarted,
+        })
       : body.initialPrompt;
   let queuedPrompt = false;
   if (firstPrompt && created) {
@@ -674,7 +694,7 @@ sessionsRouter.post("/", async (c) => {
     status: "active",
     kind,
     ...deriveRunFields({ status: "active", updatedAt: now }, unsettled),
-    title: body.title,
+    ...(sessionTitle !== null ? { title: sessionTitle } : {}),
     owner,
     createdAt: now,
     updatedAt: now,
