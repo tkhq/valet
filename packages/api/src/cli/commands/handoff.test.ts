@@ -53,6 +53,7 @@ function stubDeps(opts: StubOpts = {}): {
       return Promise.resolve({
         id: "new_1",
         status: "active",
+        kind: "code",
         runState: "idle",
         owner: { type: "user" as const, id: "u1" },
         workspace: body.workspace,

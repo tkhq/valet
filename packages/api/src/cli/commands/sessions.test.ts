@@ -8,6 +8,7 @@ const SUMMARY: SessionSummary = {
   id: "sess_1",
   workspace: "/work/one",
   status: "active",
+  kind: "code",
   runState: "idle",
   title: "First",
   createdAt: 1,

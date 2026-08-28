@@ -15,7 +15,9 @@ import {
   type SessionRunFields,
 } from "../sessions/run-state.js";
 import { canAdministerSession, canViewSession } from "../services/session-access.js";
+import { createSecurityEngagementService } from "../services/security-engagements.js";
 import { isTeamMember, listTeamsForUser } from "../services/teams.js";
+import { codeReviewPresetPlan } from "@valet/plugin-security";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import {
@@ -111,6 +113,9 @@ function rowToSummary(row: typeof agentSessions.$inferSelect, run: SessionRunFie
     id: row.id,
     workspace: row.workspace,
     status: row.status as SessionStatus,
+    // The column is free text (shared shape with #396's 'design'); the wire
+    // narrows to the kinds this API mints.
+    kind: row.kind === "security" ? "security" : "code",
     runState: run.runState,
     title: row.title ?? undefined,
     createdAt: row.createdAt,
@@ -190,6 +195,13 @@ sessionsRouter.get("/", async (c) => {
     owner = { type: ownerType, id: ownerId };
   }
 
+  // Optional kind filter, the shape the security hub reads
+  // (`GET /api/sessions?kind=security`).
+  const kindFilter = c.req.query("kind");
+  if (kindFilter !== undefined && kindFilter !== "code" && kindFilter !== "security") {
+    return c.json({ error: "kind must be 'code' or 'security'." }, 400);
+  }
+
   // Three round trips, whatever the number of sessions: the two
   // `listStandaloneSessions` makes, plus ONE cross-session read of every
   // unsettled submission (the same call the admin submissions route uses).
@@ -201,8 +213,13 @@ sessionsRouter.get("/", async (c) => {
   ]);
   const bySession = groupSubmissionsBySession(unsettled);
 
+  const filtered =
+    kindFilter === undefined
+      ? standalone
+      : standalone.filter((row) => (row.kind === "security" ? "security" : "code") === kindFilter);
+
   const body: ListSessionsResponse = {
-    sessions: standalone.map((row) =>
+    sessions: filtered.map((row) =>
       rowToSummary(row, deriveRunFields(runStateRow(row), bySession.get(row.id) ?? [])),
     ),
   };
@@ -239,6 +256,10 @@ sessionsRouter.post("/", async (c) => {
     return c.json({ error: "docker must be a boolean. Send true or false, or omit the field." }, 400);
   }
   const docker = body.docker === true;
+  if (body.kind !== undefined && body.kind !== "code" && body.kind !== "security") {
+    return c.json({ error: "kind must be 'code' or 'security'." }, 400);
+  }
+  const kind = body.kind ?? "code";
 
   // An explicit `teamId: null` from a client that always sends the field is
   // a real shape — the body is an unchecked cast — so it must fall through to
@@ -260,6 +281,13 @@ sessionsRouter.post("/", async (c) => {
     return c.json({ error: parsedRepos.error }, 400);
   }
   const { repos } = parsedRepos;
+
+  // An engagement reviews one repo at one pinned SHA (spec §Vocabulary), so
+  // a security session must arrive with a binding — there is nothing to
+  // review without one.
+  if (kind === "security" && repos.length === 0) {
+    return c.json({ error: "A security review needs a repository. Pick one when you start the review." }, 400);
+  }
 
   // Auto-create the workspace dir if it doesn't exist; reject if the path
   // exists but is a file (Docker bind-mount needs a directory).
@@ -299,6 +327,7 @@ sessionsRouter.post("/", async (c) => {
         ownerId: owner.id,
         profile,
         docker,
+        kind,
         createdAt: now,
         updatedAt: now,
       })
@@ -324,6 +353,18 @@ sessionsRouter.post("/", async (c) => {
           position,
           targetDir: targetDirs[position] ?? null,
         })),
+      );
+    }
+
+    // A security session is an engagement runner: seed its engagement in
+    // the SAME transaction, so no security session ever exists without one
+    // (the security routes and tools resolve session → engagement). The
+    // preset plan is the starting point; chat edits it before sec_start.
+    if (kind === "security") {
+      const security = createSecurityEngagementService({ db });
+      await security.createEngagement(
+        { sessionId: id, repoFullName: repos[0].fullName, plan: codeReviewPresetPlan() },
+        tx,
       );
     }
   });
@@ -366,6 +407,7 @@ sessionsRouter.post("/", async (c) => {
     id,
     workspace: body.workspace,
     status: "active",
+    kind,
     ...deriveRunFields({ status: "active", updatedAt: now }, unsettled),
     title: body.title,
     owner,

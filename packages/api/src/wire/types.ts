@@ -52,6 +52,11 @@ export type SessionStatus = "active" | "hibernated" | "archived" | "deleted";
  * interactive sessions may request "full". */
 export type SandboxProfile = "headless" | "full";
 
+/** Which authoring surface the session drives. 'security' sessions carry a
+ * security engagement (docs/specs/2026-08-27-valet-security-design.md);
+ * everything else is 'code'. Distinct from the engine's lifecycle purpose. */
+export type SessionKind = "code" | "security";
+
 /**
  * What a session is DOING right now. `SessionStatus` is the lifecycle of the
  * row; this is the run state the Sessions surface reads at a glance.
@@ -75,6 +80,7 @@ export interface SessionSummary {
   id: string;
   workspace: string;
   status: SessionStatus;
+  kind: SessionKind;
   /** What the session is doing. See `SessionRunState` for the precedence. */
   runState: SessionRunState;
   title?: string;
@@ -125,6 +131,9 @@ export interface CreateSessionRequest {
    * any other cross-owner access. Mirrors `CreateWorkflowRequest.teamId` —
    * one spelling for "make this the team's, not mine". */
   teamId?: string;
+  /** Defaults to "code". A "security" session requires a repo binding and
+   * is seeded with a security engagement in the create transaction. */
+  kind?: SessionKind;
   /** Optional first user prompt; if set, server enqueues immediately after creation. */
   initialPrompt?: string;
   /** Defaults to "headless" server-side when omitted. */
@@ -150,6 +159,77 @@ export type GetSessionResponse = SessionDetail;
 export interface SandboxJwtResponse {
   token: string;
   expiresAt: number;
+}
+
+// ── REST: security engagements ───────────────────────────────────────────
+// docs/specs/2026-08-27-valet-security-design.md. Read routes only this
+// milestone; mutations arrive with the runner tools and the triage surface.
+
+export type SecurityFindingSeverity = "critical" | "high" | "medium" | "low" | "info";
+export type SecurityFindingStatus = "open" | "verified" | "refuted";
+
+export interface SecurityEngagementWire {
+  id: string;
+  sessionId: string;
+  status: "planning" | "running" | "completed" | "failed";
+  repoFullName: string;
+  /** Pinned commit SHA once started; empty while planning. */
+  repoRef: string;
+  plan: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface SecurityCellWire {
+  id: string;
+  ordinal: number;
+  persona: string;
+  mode: "fresh" | "resume";
+  goal: string;
+  dir: string;
+  /** Earlier ordinals whose state docs this cell's dispatch prompt names. */
+  reads: number[];
+  review: boolean;
+  status: "pending" | "running" | "completed" | "yielded" | "failed";
+  attempts: number;
+  compactedAt: number | null;
+  childSessionId: string | null;
+  dispatchedAt: number | null;
+  settledAt: number | null;
+  createdAt: number;
+  /** Live progress parsed from the latest state doc; running cell only. */
+  progress?: {
+    status: "working" | "yielding" | "done";
+    checklist: { pending: number; done: number };
+    queue: { pending: number; done: number };
+  };
+}
+
+/** GET /api/sessions/:id/security */
+export interface GetSessionSecurityResponse {
+  engagement: SecurityEngagementWire;
+  cells: SecurityCellWire[];
+}
+
+export interface SecurityFindingWire {
+  id: string;
+  cellId: string;
+  fingerprint: string;
+  severity: SecurityFindingSeverity;
+  title: string;
+  file: string | null;
+  line: number | null;
+  body: string;
+  status: SecurityFindingStatus;
+  statusReason: string | null;
+  statusActor: string | null;
+  createdAt: number;
+}
+
+/** GET /api/sessions/:id/security/findings */
+export interface ListSecurityFindingsResponse {
+  findings: SecurityFindingWire[];
+  nextCursor: string | null;
 }
 
 /** POST /api/sessions/:id/pause — manual hibernation (sandbox hibernation
