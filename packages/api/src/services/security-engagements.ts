@@ -1117,6 +1117,45 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     return { cell, stateDocAgeMs, stale: stateDocAgeMs > STATE_DOC_STALE_MS };
   }
 
+  /**
+   * Engagement spend: the runner session PLUS every cell's child session,
+   * summed from `cost_entries` (spec §engagement cost). Fix-session handoffs
+   * (`security_handoffs.child_session_id`) are separate follow-up work and are
+   * NOT counted — the review cost is the runner + its cells. `priced` is false
+   * when any counted turn is unpriced (`cost_total IS NULL`, an unpriced
+   * provider), so the panel shows tokens without a wrong dollar amount. Returns
+   * zeros while the engagement has no runner turn or cell children yet.
+   */
+  async function getEngagementCost(
+    engagementId: string,
+  ): Promise<{ costUsd: number; totalTokens: number; priced: boolean }> {
+    const engagement = await loadEngagement(engagementId);
+    const cells = await loadCells(engagementId);
+    const ids = [
+      engagement.sessionId,
+      ...cells
+        .map((c) => c.childSessionId)
+        .filter((id): id is string => id !== null),
+    ];
+    // No session ids yet (planning, no runner turn) → zeros. Also guards the
+    // empty-list case: `IN ()` is malformed SQL.
+    if (ids.length === 0) return { costUsd: 0, totalTokens: 0, priced: true };
+    const result = (await db.execute(sql`
+      SELECT COALESCE(SUM(cost_total),0) AS cost_usd,
+             COALESCE(SUM(total_tokens),0) AS total_tokens,
+             COALESCE(bool_or(cost_total IS NULL), false) AS has_unpriced
+      FROM cost_entries
+      WHERE session_id IN (${sql.join(ids, sql`, `)})`)) as {
+      rows: { cost_usd: unknown; total_tokens: unknown; has_unpriced: unknown }[];
+    };
+    const row = result.rows[0];
+    return {
+      costUsd: Number(row?.cost_usd ?? 0),
+      totalTokens: Number(row?.total_tokens ?? 0),
+      priced: row?.has_unpriced !== true,
+    };
+  }
+
   /** Tolerant progress read for the cell rail: null when nothing useful. */
   async function getRunningCellProgress(engagementId: string): Promise<CellProgress | null> {
     const cells = await loadCells(engagementId);
@@ -1155,6 +1194,7 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     listHandoffs,
     stampCellCompaction,
     getRunningCellProgress,
+    getEngagementCost,
   };
 }
 

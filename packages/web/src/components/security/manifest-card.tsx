@@ -1,8 +1,10 @@
 import type {
   SecurityCellWire,
+  SecurityCostWire,
   SecurityFindingSeverity,
   SecurityFindingWire,
 } from "@valet/api/wire";
+import { ReviewCostLine } from "./cost-chip";
 import { SEVERITY_ORDER, SeverityBadge } from "./severity";
 
 /**
@@ -67,11 +69,14 @@ export function ManifestCard({
   cells,
   findings,
   status,
+  cost,
 }: {
   cells: SecurityCellWire[];
   findings: SecurityFindingWire[];
   /** The closed engagement's terminal status. */
   status: "completed" | "failed";
+  /** The engagement's final spend (runner + cell children). */
+  cost: SecurityCostWire;
 }) {
   const summary = summarizeManifest(cells, findings);
   return (
@@ -100,6 +105,7 @@ export function ManifestCard({
         {summary.statusBreakdown.refuted} refuted · {summary.issuesFiled} filed as issues ·{" "}
         {summary.humanReviewed} human-reviewed
       </div>
+      <ReviewCostLine cost={cost} />
     </section>
   );
 }

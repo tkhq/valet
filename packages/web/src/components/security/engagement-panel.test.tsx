@@ -105,6 +105,7 @@ const security: GetSessionSecurityResponse = {
       createdAt: 1,
     },
   ],
+  cost: { costUsd: 0.42, totalTokens: 1_200_000, priced: true },
 };
 
 const session: GetSessionResponse = {
@@ -247,6 +248,38 @@ describe("SecuritySessionLayout", () => {
     renderPanel();
     await screen.findByText("acme/site");
     expect(screen.queryByRole("button", { name: "Cancel review" })).toBeNull();
+  });
+
+  it("renders the token + cost chip in the panel header", async () => {
+    renderPanel();
+    const chip = await screen.findByTestId("engagement-cost");
+    expect(chip.textContent).toContain("1.2M tokens");
+    expect(chip.textContent).toContain("$0.42");
+  });
+
+  it("shows 'cost n/a' when the spend is unpriced", async () => {
+    getSecurityMock.mockResolvedValue({
+      ...security,
+      cost: { costUsd: 0, totalTokens: 900_000, priced: false },
+    });
+    renderPanel();
+    const chip = await screen.findByTestId("engagement-cost");
+    expect(chip.textContent).toContain("900k tokens");
+    expect(chip.textContent).toContain("cost n/a");
+    expect(chip.textContent).not.toContain("$");
+  });
+
+  it("shows the review cost line in the manifest card once closed", async () => {
+    getSecurityMock.mockResolvedValue({
+      ...security,
+      engagement: { ...security.engagement, status: "completed" },
+      cost: { costUsd: 0.42, totalTokens: 1_200_000, priced: true },
+    });
+    renderPanel();
+    const line = await screen.findByTestId("review-cost");
+    expect(line.textContent).toContain("Review cost:");
+    expect(line.textContent).toContain("1.2M tokens");
+    expect(line.textContent).toContain("$0.42");
   });
 
   it("resizes the security panel via the keyboard and persists the width", async () => {

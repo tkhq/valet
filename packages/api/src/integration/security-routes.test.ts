@@ -45,6 +45,9 @@ describe("api integration: security session minting + read routes", () => {
       expect(body.engagement.plan).toContain("code-review");
       // Cells materialize at sec_start, not at create.
       expect(body.cells).toEqual([]);
+      // The engagement carries its spend (spec §engagement cost); a planning
+      // review with no turns reports zeros.
+      expect(body.cost).toEqual({ costUsd: 0, totalTokens: 0, priced: true });
 
       // The detail route reports the kind too.
       const detail = await fetch(`${api.baseUrl}/api/sessions/${created.id}`);

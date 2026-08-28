@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
+import type { PgDb } from "@valet/store-postgres";
 import { codeReviewPresetPlan, findingFingerprint, parsePlan, KNOWN_PERSONAS } from "@valet/plugin-security";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
@@ -890,5 +891,113 @@ describe("security engagement service", () => {
     expect(prompt).toContain("Mode: resume");
     expect(prompt).toContain("read your own latest state doc at /cells/03-injection-sweep/state.yml");
     expect(prompt).toContain("packages/api/**");
+  });
+});
+
+// ── Engagement cost (spec §engagement cost) ──────────────────────────────────
+
+describe("getEngagementCost", () => {
+  const NOW = 1_700_000_000_000;
+  let db: AppDb;
+  let pgdb: PgDb;
+  let svc: SecurityEngagementService;
+
+  beforeEach(async () => {
+    ({ appDb: db, pgdb } = await freshTestPgDb());
+    svc = createSecurityEngagementService({ db });
+    await pgdb.query("INSERT INTO orgs (id, name, created_at) VALUES ('org-a', 'Org A', $1)", [NOW]);
+  });
+
+  /** Seed an agent_sessions row so cost_entries resolves the session to org-a. */
+  async function seedSession(id: string): Promise<void> {
+    await pgdb.query(
+      `INSERT INTO agent_sessions
+         (id, user_id, org_id, workspace, status, owner_type, owner_id, created_at, updated_at)
+       VALUES ($2, 'u-alice', 'org-a', '/tmp/w', 'active', 'user', 'u-alice', $1, $1)`,
+      [NOW, id],
+    );
+  }
+
+  /** Seed one priced (or unpriced) assistant turn for a session. */
+  async function seedTurn(
+    entryId: string,
+    sessionId: string,
+    opts: { total: number; cost: number | null },
+  ): Promise<void> {
+    const usage = JSON.stringify({ input: opts.total, output: 0, cacheRead: 0, cacheWrite: 0, total: opts.total });
+    const cost = opts.cost === null ? null : JSON.stringify({ total: opts.cost });
+    await pgdb.query(
+      `INSERT INTO engine_entries
+         (id, session_id, thread_id, entry_type, role, model, usage, cost, created_at)
+       VALUES ($1, $2, 'th', 'message', 'assistant', 'claude', $3, $4, $5)`,
+      [entryId, sessionId, usage, cost, NOW],
+    );
+  }
+
+  /** A started engagement whose runner session id is known and seeded. */
+  async function startedWithRunner(runnerSessionId: string) {
+    await seedSession(runnerSessionId);
+    const engagement = await svc.createEngagement({
+      sessionId: runnerSessionId,
+      repoFullName: "acme/api",
+      plan: codeReviewPresetPlan(),
+    });
+    return svc.startEngagement(engagement.id, { resolvedSha: SHA });
+  }
+
+  it("sums the runner session and a cell child, excluding handoffs and unrelated sessions", async () => {
+    const runnerId = "s-runner";
+    const { engagement, cells } = await startedWithRunner(runnerId);
+    // Dispatch cell 1 with a controlled child session id.
+    const childId = "child-cell-1";
+    await svc.dispatchCell(engagement.id, {
+      cellId: cells[0].id,
+      spawn: async () => ({ childSessionId: childId }),
+    });
+
+    await seedSession(childId);
+    await seedTurn("e-runner", runnerId, { total: 1000, cost: 0.10 });
+    await seedTurn("e-cell", childId, { total: 500, cost: 0.05 });
+
+    // A handoff (fix session) child — its cost must NOT count.
+    const handoffChild = "child-handoff";
+    await seedSession(handoffChild);
+    await seedTurn("e-handoff", handoffChild, { total: 9999, cost: 9.99 });
+    await svc.recordHandoff({
+      engagementId: engagement.id,
+      findingId: "fnd-x",
+      childSessionId: handoffChild,
+      title: "Fix",
+      createdBy: "u-alice",
+    });
+
+    // An unrelated session — never referenced by this engagement.
+    const otherId = "s-other";
+    await seedSession(otherId);
+    await seedTurn("e-other", otherId, { total: 7777, cost: 7.77 });
+
+    const cost = await svc.getEngagementCost(engagement.id);
+    expect(cost.totalTokens).toBe(1500);
+    expect(cost.costUsd).toBeCloseTo(0.15, 6);
+    expect(cost.priced).toBe(true);
+  });
+
+  it("reports priced=false when a counted turn is unpriced", async () => {
+    const runnerId = "s-runner-unpriced";
+    const { engagement } = await startedWithRunner(runnerId);
+    await seedTurn("e-runner-priced", runnerId, { total: 1000, cost: 0.10 });
+    await seedTurn("e-runner-unpriced", runnerId, { total: 200, cost: null });
+
+    const cost = await svc.getEngagementCost(engagement.id);
+    expect(cost.totalTokens).toBe(1200);
+    expect(cost.priced).toBe(false);
+  });
+
+  it("returns zeros when no session has spent anything yet", async () => {
+    const runnerId = "s-runner-idle";
+    const { engagement } = await startedWithRunner(runnerId);
+    // Runner + cells exist but no engine_entries → cost_entries has no rows.
+    const cost = await svc.getEngagementCost(engagement.id);
+    expect(cost).toEqual({ costUsd: 0, totalTokens: 0, priced: true });
   });
 });

@@ -236,6 +236,9 @@ securityRouter.get("/:id/security", async (c) => {
   if (!result) return c.json({ error: NO_ENGAGEMENT }, 404);
 
   const progress = await security.getRunningCellProgress(result.engagement.id);
+  // One extra query per poll: the runner + cell-children spend (spec
+  // §engagement cost). Kept live during the run and after close.
+  const cost = await security.getEngagementCost(result.engagement.id);
   const body: GetSessionSecurityResponse = {
     engagement: {
       id: result.engagement.id,
@@ -248,6 +251,7 @@ securityRouter.get("/:id/security", async (c) => {
       updatedAt: result.engagement.updatedAt,
     },
     cells: result.cells.map((cell) => cellToWire(cell, progress)),
+    cost,
   };
   return c.json(body);
 });
@@ -827,6 +831,8 @@ securityRouter.post("/:id/security/start", async (c) => {
         updatedAt: started.engagement.updatedAt,
       },
       cells: started.cells.map((cell) => cellToWire(cell, null)),
+      // Just started: the runner may have spent tokens, cell children none yet.
+      cost: await security.getEngagementCost(started.engagement.id),
     };
     return c.json(response);
   } catch (err) {
@@ -1391,6 +1397,8 @@ securityRouter.post("/:id/security/cancel", async (c) => {
       updatedAt: cancelled.engagement.updatedAt,
     },
     cells: (after?.cells ?? []).map((cell) => cellToWire(cell, null)),
+    // The review's spend to the point of cancel — the panel keeps showing it.
+    cost: await security.getEngagementCost(cancelled.engagement.id),
   };
   return c.json(response);
 });

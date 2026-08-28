@@ -209,10 +209,21 @@ export interface SecurityCellWire {
   };
 }
 
+/** Engagement spend: the runner session plus its cell children, summed from
+ * `cost_entries` (fix-session handoffs are not counted). `priced` is false
+ * when any counted turn is unpriced (an unpriced provider) — show tokens, not
+ * a wrong dollar amount. Zeros mean nothing spent yet. */
+export interface SecurityCostWire {
+  costUsd: number;
+  totalTokens: number;
+  priced: boolean;
+}
+
 /** GET /api/sessions/:id/security */
 export interface GetSessionSecurityResponse {
   engagement: SecurityEngagementWire;
   cells: SecurityCellWire[];
+  cost: SecurityCostWire;
 }
 
 export interface SecurityFindingWire {

@@ -33,6 +33,7 @@ const engagementsBySession: Record<string, GetSessionSecurityResponse> = {
       updatedAt: 2,
     },
     cells: [],
+    cost: { costUsd: 0, totalTokens: 0, priced: true },
   },
 };
 

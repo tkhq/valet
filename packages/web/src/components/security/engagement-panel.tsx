@@ -13,6 +13,7 @@ import { Button, ConfirmDialog, Spinner } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { useResizablePane } from "~/lib/use-resizable-pane";
 import { CellRail } from "./cell-rail";
+import { CostChip } from "./cost-chip";
 import { FindingsReview } from "./findings-review";
 import { ManifestCard } from "./manifest-card";
 
@@ -85,7 +86,7 @@ export function EngagementPanel({
     );
   }
 
-  const { engagement, cells } = engagementQ.data;
+  const { engagement, cells, cost } = engagementQ.data;
   // The cancel action is a human-only stop for an in-flight review. Show it
   // only while the engagement can still be cancelled AND the caller can
   // administer — the route enforces both; this only hides a button that 403s.
@@ -98,6 +99,7 @@ export function EngagementPanel({
           cells={cells}
           findings={flattenFindings(allFindingsQ.data?.pages)}
           status={engagement.status}
+          cost={cost}
         />
       )}
       <div className="border-b border-line px-4 py-2 text-xs text-muted flex items-center gap-2">
@@ -107,6 +109,7 @@ export function EngagementPanel({
             <span className="font-mono"> @ {engagement.repoRef.slice(0, 12)}</span>
           )}
           <span> · {engagement.status}</span>
+          <CostChip cost={cost} className="ml-1" />
         </div>
         {cancellable && (
           <Button
