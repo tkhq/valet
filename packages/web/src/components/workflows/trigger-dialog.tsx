@@ -35,6 +35,12 @@ import {
   Label,
   Textarea,
 } from "~/components/primitives";
+import {
+  FilterEditor,
+  fromWireFilters,
+  toWireFilters,
+  type UiFilterRow,
+} from "~/components/events/filter-editor";
 
 type TriggerKind = "schedule" | "event";
 type TargetKind = "workflow" | "orchestrator";
@@ -74,8 +80,7 @@ export function TriggerDialog({
 
   // ── event fields ───────────────────────────────────────────────────────
   const [eventKey, setEventKey] = useState("");
-  const [filtersJson, setFiltersJson] = useState("");
-  const [filtersJsonError, setFiltersJsonError] = useState<string | null>(null);
+  const [filterRows, setFilterRows] = useState<UiFilterRow[]>([]);
 
   // ── form error (client-side validation) ────────────────────────────────
   const [formError, setFormError] = useState<string | null>(null);
@@ -117,11 +122,7 @@ export function TriggerDialog({
         );
       } else {
         setEventKey(editing.detail.eventKeys[0] ?? "");
-        setFiltersJson(
-          editing.detail.filters.length > 0
-            ? JSON.stringify(editing.detail.filters, null, 2)
-            : "",
-        );
+        setFilterRows(fromWireFilters(editing.detail.filters));
         setSelectedWorkflowId(editing.workflowId ?? workflowId ?? "");
       }
     } else {
@@ -136,8 +137,7 @@ export function TriggerDialog({
       setInputJson("");
       setInputJsonError(null);
       setEventKey("");
-      setFiltersJson("");
-      setFiltersJsonError(null);
+      setFilterRows([]);
       setFormError(null);
       setServerError(null);
     }
@@ -172,7 +172,6 @@ export function TriggerDialog({
     setServerError(null);
     setFormError(null);
     setInputJsonError(null);
-    setFiltersJsonError(null);
 
     // Client-side: require a workflow selection on create when the workflowId
     // prop is absent and a workflow target is needed.
@@ -242,17 +241,7 @@ export function TriggerDialog({
         }
       } else {
         // Event trigger.
-        const filtersResult = parseJson(
-          filtersJson,
-          setFiltersJsonError,
-          "Filters must be valid JSON, for example []",
-        );
-        if (filtersResult === null) return;
-        const filters = filtersResult === undefined ? [] : filtersResult;
-        if (!Array.isArray(filters)) {
-          setFiltersJsonError("Filters must be a JSON array, for example []");
-          return;
-        }
+        const filters = toWireFilters(filterRows);
 
         if (isEditing) {
           // editing.kind matches `kind` (set in the open-reset effect); TS can't narrow through useState
@@ -267,11 +256,10 @@ export function TriggerDialog({
           if (eventKey !== (orig.detail.eventKeys[0] ?? "")) {
             body.eventKeys = [eventKey];
           }
-          if (filtersJson.trim()) {
+          // Filters are what the rows say now. Send them only when they differ
+          // from what was stored, including an empty set that clears them.
+          if (JSON.stringify(filters) !== JSON.stringify(orig.detail.filters)) {
             body.filters = filters;
-          } else if (orig.detail.filters.length > 0) {
-            // Emptied the textarea on edit — clear the stored filters.
-            body.filters = [];
           }
           await updateEvent.mutateAsync({ id: orig.id, body });
         } else {
@@ -492,26 +480,17 @@ export function TriggerDialog({
                 </select>
               </div>
 
-              {/* Filters as raw JSON textarea */}
-              <div className="grid gap-1">
-                <Label htmlFor="trigger-filters">Filters (JSON)</Label>
-                <Textarea
-                  id="trigger-filters"
-                  value={filtersJson}
-                  onChange={(e) => setFiltersJson(e.target.value)}
-                  rows={8}
-                  placeholder='[{"field": "channel", "op": "eq", "value": "C0123"}]'
-                  className="font-mono"
+              {/* Filters — field/op/value rows from the event catalog */}
+              <div className="grid gap-1.5">
+                <Label>Filters</Label>
+                <FilterEditor
+                  fields={selectedEntry?.filters ?? []}
+                  rows={filterRows}
+                  onChange={setFilterRows}
                 />
-                {selectedEntry && selectedEntry.filters.length > 0 && (
-                  <div className="text-xs text-muted">
-                    Fields for {selectedEntry.key}: {selectedEntry.filters.map((f) => f.field).join(", ")}.
-                    {" "}Each filter needs field, op (eq, in, prefix, or contains), and value. Omit filters to match every event of this type.
-                  </div>
-                )}
-                {filtersJsonError && (
-                  <div className="text-xs text-danger-500">{filtersJsonError}</div>
-                )}
+                <p className="text-xs text-muted">
+                  A trigger fires only when every filter matches. Add none to match every event of this type.
+                </p>
               </div>
             </>
           )}
