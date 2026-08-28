@@ -315,6 +315,12 @@ interface CacheEntry {
 /** Durable events for submissions settled longer ago than this are pruned on restore. */
 const EVENT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
+/** The action ids a pin list protects from the behavior filter — pins are
+ * substrate the host injects, never gated (assistant-editor design). */
+function pinnedIdSet(pins: readonly PinnedActionSpec[]): ReadonlySet<string> {
+  return new Set(pins.map((p) => p.actionId));
+}
+
 const SYSTEM_PROMPT =
   "You are a helpful coding assistant running inside a Docker sandbox. " +
   "Your workspace is /workspace (the only mounted directory). " +
@@ -345,6 +351,12 @@ export class EngineHost {
    * same key). De-duping in-flight calls collapses the race.
    */
   private inflight = new Map<string, Promise<Session>>();
+  /** Bumped by `evictCache`. A build captures the epoch when it starts and
+   * refuses to cache (rebuilds instead) when it changed mid-build — without
+   * this, a PATCH that lands while `buildAssistantSession` is between its
+   * row read and its `cache.set` evicts an empty slot, and the stale build
+   * then re-populates the cache and serves indefinitely. */
+  private buildEpoch = new Map<string, number>();
 
   /**
    * Idle-sweep interval handle (sandbox hibernation plan, Task 3), or
@@ -764,8 +776,10 @@ export class EngineHost {
     );
     // Behavior filter AFTER availability gating: both subtract, order only
     // matters for the wrapper identity, and gating first keeps its
-    // unavailable-service messages accurate.
-    const plugins = applyBehaviorToPlugins(gated, behavior);
+    // unavailable-service messages accurate. The pin set rides along so the
+    // filter never gates a pinned action (assistant-editor design, "Never
+    // gated") — pins resolve from this same filtered catalog below.
+    const plugins = applyBehaviorToPlugins(gated, behavior, pinnedIdSet(pins));
     if (!this.opts.db) return pluginSessionExtras(plugins, [], pins);
     return pluginSessionExtras(
       plugins,
@@ -795,13 +809,14 @@ export class EngineHost {
   ): (() => Promise<SkillSource[]>) | undefined {
     const db = this.opts.db;
     if (!db) return undefined;
-    const plugins = this.opts.plugins ?? [];
-    // Closure captures build-time behavior on purpose: every behavior PATCH
-    // evicts the cached session (assistant-editor design, Task 2), so a stale
-    // closure never outlives its config.
+    // Filtered once, outside the closure: both inputs are fixed for the
+    // closure's lifetime — every behavior PATCH evicts the cached session
+    // (assistant-editor design, Task 2), so a stale result never outlives
+    // its config. Only the stored-skill read is per-call.
+    const filtered = applyBehaviorToPlugins(this.opts.plugins ?? [], behavior);
     return async () =>
       mergedSkillSources(
-        applyBehaviorToPlugins(plugins, behavior),
+        filtered,
         filterSkillSources(await listSkillSourcesFor(db, owner, orgId), behavior),
       ).skills;
   }
@@ -1207,12 +1222,19 @@ export class EngineHost {
   /**
    * `hasPrep` gates the workspace-skills provider — see the doc block above.
    * Pass `true` only when the caller wired a `specProvider` for this build.
+   *
+   * `behavior` applies the same filter `sessionExtras` applies, so the
+   * command catalog and the `call_tool` catalog agree — a plugin slash
+   * command must not reach an action the integrations allowlist gated out
+   * of `list_tools`. Same pin exemption, for the same reason.
    */
   private async buildCommandOptions(
     orgId: string,
     sessionId: string,
     getSession: () => Session | undefined,
     hasPrep: boolean,
+    behavior: AssistantBehavior | null = null,
+    pinnedActionIds: ReadonlySet<string> = new Set(),
   ): Promise<
     | {
         workspaceSkillsProvider?: () => Promise<SkillSource[]>;
@@ -1249,7 +1271,7 @@ export class EngineHost {
       : undefined;
     const commandContext = makeCommandContext(db, this.opts.engineCredentials, orgId, sessionId);
 
-    const plugins = this.opts.plugins ?? [];
+    const plugins = applyBehaviorToPlugins(this.opts.plugins ?? [], behavior, pinnedActionIds);
     const pluginCommands = plugins.flatMap((p) =>
       (p.commands ?? []).map((def) => ({ pluginName: p.name, def })),
     );
@@ -1369,7 +1391,8 @@ export class EngineHost {
     const pending = this.inflight.get(sessionId);
     if (pending) return pending;
 
-    const promise = this.buildAssistantSession(sessionId, assistantId, meta).finally(() => {
+    const epoch = this.buildEpoch.get(sessionId) ?? 0;
+    const promise = this.buildAssistantSession(sessionId, assistantId, meta, epoch).finally(() => {
       this.inflight.delete(sessionId);
     });
     this.inflight.set(sessionId, promise);
@@ -1380,6 +1403,7 @@ export class EngineHost {
     sessionId: string,
     assistantId: string,
     meta: { actorUserId: string; orgId: string },
+    epoch: number,
   ): Promise<Session> {
     if (!this.opts.db) {
       throw new Error("EngineHost: assistantSessionFor requires opts.db");
@@ -1429,6 +1453,7 @@ export class EngineHost {
     // workflow editor panel always opens the caller's OWN default assistant
     // (`use-workflow-assistant.ts`), so this scope costs the panel nothing.
     const pins = principal.type === "user" ? PINNED_ACTIONS : [];
+    const pinnedIds = pinnedIdSet(pins);
     const extras = await this.sessionExtras(principal, meta.orgId, pins, behavior);
 
     // The profile comes from the app row, not from the caller's meta. An
@@ -1455,6 +1480,8 @@ export class EngineHost {
       sessionId,
       () => builtSession,
       false,
+      behavior,
+      pinnedIds,
     );
     const policyResolver = this.getPolicyResolver();
     const skillsProvider = this.skillsProviderFor(principal, meta.orgId, behavior);
@@ -1526,6 +1553,17 @@ export class EngineHost {
     const session = existing
       ? await engine.restoreSession({ sessionId, options: sessionOptions })
       : await engine.createSession({ id: sessionId, ...sessionOptions });
+
+    const epochNow = this.buildEpoch.get(sessionId) ?? 0;
+    if (epochNow !== epoch) {
+      // A config PATCH evicted the cache while this build was between its
+      // row read and here: the instance in hand was assembled from the
+      // pre-PATCH row. Suspend its timers (they would root it forever, see
+      // evictCache) and rebuild from the current row. Bounded by eviction
+      // frequency — each retry captures the newest epoch.
+      session.suspendTimers();
+      return this.buildAssistantSession(sessionId, assistantId, meta, epochNow);
+    }
     builtSession = session;
 
     this.cache.set(sessionId, { engine, session });
@@ -1580,6 +1618,7 @@ export class EngineHost {
       await entry.session.destroy();
     } finally {
       this.cache.delete(sessionId);
+      this.buildEpoch.delete(sessionId);
       if (this.opts.db) {
         await revokeSandboxTokens(this.opts.db, sessionId);
         // Grant expiry (action-policies plan, Task 3): a stopped session's
@@ -1619,6 +1658,11 @@ export class EngineHost {
    * once its last reference (this method's local `entry`) goes away.
    */
   evictCache(sessionId: string): void {
+    // Invalidate any in-flight build too: it read the row before this
+    // eviction's cause committed, and would otherwise re-populate the cache
+    // with the stale config (`buildAssistantSession` checks the epoch before
+    // its `cache.set`).
+    this.buildEpoch.set(sessionId, (this.buildEpoch.get(sessionId) ?? 0) + 1);
     this.cache.get(sessionId)?.session.suspendTimers();
     this.cache.delete(sessionId);
     this.tokenMintedAt.delete(sessionId);

@@ -162,6 +162,49 @@ describe("assistant behavior on a built session", () => {
     expect(providedNames).toEqual(["gh-triage"]);
   });
 
+  it("never gates pinned workflow actions: an allowlist without 'workflows' keeps the pins", async () => {
+    // The workflow editor panel depends on the pinned
+    // workflows.get_workflow/patch_workflow pair (plugins/pinned-actions.ts);
+    // the spec lists pins under "Never gated". A user who allowlists their
+    // default assistant to github-only must not lose workflow saves.
+    const workflowsPlugin: ValetPlugin = {
+      name: "workflows-fixture",
+      version: "0.0.1",
+      actions: [
+        {
+          service: "workflows",
+          actions: [
+            makeAction("workflows.get_workflow"),
+            makeAction("workflows.patch_workflow"),
+            makeAction("workflows.save_workflow"),
+          ],
+        } satisfies ActionPlugin,
+      ],
+    };
+    api = await bootTestApi({ plugins: [fixturePlugin, workflowsPlugin] });
+    const { db, engineHost } = api.providers;
+
+    const row = await createAssistant(db, ORG, { type: "user", id: USER }, "Gated", {
+      behavior: {
+        integrations: { mode: "allowlist", entries: [{ service: "github" }] },
+      },
+    });
+    const { session } = await ensureAssistantSession({ db, engineHost }, row, {
+      actorUserId: USER,
+      orgId: ORG,
+    });
+
+    // The pins survive as direct tools (`service__action`)...
+    const toolNames = (session.options.tools ?? []).map((t) => t.name);
+    expect(toolNames).toContain("workflows__get_workflow");
+    expect(toolNames).toContain("workflows__patch_workflow");
+    // ...while the rest of the non-allowlisted service stays gated.
+    const listed = await listToolIds(session.options.tools);
+    expect(listed).not.toContain("workflows.save_workflow");
+    expect(listed).not.toContain("slack.post_message");
+    expect(listed).toContain("github.create_issue");
+  });
+
   it("prefixes the persona with the row personality, not the memory file", async () => {
     api = await bootTestApi({ plugins: [] });
     const { db, engineHost } = api.providers;

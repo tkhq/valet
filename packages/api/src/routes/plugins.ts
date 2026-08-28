@@ -20,7 +20,14 @@
  * credential row already knows — this route calls no vendor.
  */
 import { Hono } from "hono";
-import { approvalModeForAction, type CredentialOwner, type StoredCredential } from "@valet/engine";
+import {
+  approvalModeForAction,
+  type ActionPlugin,
+  type CredentialOwner,
+  type PluginAction,
+  type StoredCredential,
+} from "@valet/engine";
+import { qualifiedActionId } from "../plugins/action-id.js";
 import type { AppEnv } from "../env.js";
 import type {
   ListPluginsResponse,
@@ -34,6 +41,28 @@ import { isOrgAdmin } from "../services/org.js";
 import { pluginIconSlugs } from "../plugins/registry.gen.js";
 
 export const pluginsRouter = new Hono<AppEnv>();
+
+/**
+ * One action's wire summary — the ONE place the fqid and requiresApproval
+ * derivations live. Both response blocks (`services[].actions`, grouped by
+ * credential key, and `actionServices[].actions`, grouped by routing
+ * service) map through this, so the Policies UI and the assistant editor
+ * can never disagree on an action's id or approval flag.
+ */
+function toActionSummary(actionPlugin: ActionPlugin, action: PluginAction): PluginActionSummary {
+  return {
+    // `id` is the fully-qualified fqid (`{plugin service}.{action}`, the
+    // plugin-catalog convention) — the canonical policy-facing id both
+    // invocation paths resolve to, so the Policies UI creates action-scope
+    // rows that actually match at resolution time.
+    id: qualifiedActionId(actionPlugin.service, action),
+    name: action.name,
+    riskLevel: action.riskLevel,
+    requiresApproval:
+      approvalModeForAction(action.riskLevel, actionPlugin.defaultApprovalMode) ===
+      "require_approval",
+  };
+}
 
 /**
  * What the stored credential says about itself. Mirrors
@@ -106,18 +135,7 @@ pluginsRouter.get("/", async (c) => {
       const key = actionPlugin.credentialService ?? actionPlugin.service;
       const unlocked = actionsByCredentialKey.get(key) ?? [];
       for (const action of actionPlugin.actions) {
-        unlocked.push({
-          // `id` is the fully-qualified fqid (`{plugin service}.{action}`, the
-          // plugin-catalog convention) — the canonical policy-facing id both
-          // invocation paths resolve to, so the Policies UI creates
-          // action-scope rows that actually match at resolution time.
-          id: action.id.includes(".") ? action.id : `${actionPlugin.service}.${action.id}`,
-          name: action.name,
-          riskLevel: action.riskLevel,
-          requiresApproval:
-            approvalModeForAction(action.riskLevel, actionPlugin.defaultApprovalMode) ===
-            "require_approval",
-        });
+        unlocked.push(toActionSummary(actionPlugin, action));
       }
       actionsByCredentialKey.set(key, unlocked);
     }
@@ -185,14 +203,7 @@ pluginsRouter.get("/", async (c) => {
     const actionServices: PluginActionServiceSummary[] = actionPlugins.map((actionPlugin) => ({
       service: actionPlugin.service,
       ...(actionPlugin.resolveActions !== undefined ? { dynamic: true as const } : {}),
-      actions: actionPlugin.actions.map((action) => ({
-        id: action.id.includes(".") ? action.id : `${actionPlugin.service}.${action.id}`,
-        name: action.name,
-        riskLevel: action.riskLevel,
-        requiresApproval:
-          approvalModeForAction(action.riskLevel, actionPlugin.defaultApprovalMode) ===
-          "require_approval",
-      })),
+      actions: actionPlugin.actions.map((action) => toActionSummary(actionPlugin, action)),
     }));
 
     return {

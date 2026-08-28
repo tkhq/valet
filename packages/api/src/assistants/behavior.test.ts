@@ -146,6 +146,121 @@ describe("applyBehaviorToPlugins", () => {
   });
 });
 
+describe("pin exemption", () => {
+  const WORKFLOW_PLUGIN = makePlugin({
+    name: "workflows",
+    actions: [
+      {
+        service: "workflows",
+        actions: [
+          action("workflows.get_workflow", "Read workflow"),
+          action("workflows.patch_workflow", "Patch workflow"),
+          action("workflows.save_workflow", "Save workflow"),
+        ],
+      },
+    ],
+    skills: [],
+  });
+  const PINNED = new Set(["workflows.get_workflow", "workflows.patch_workflow"]);
+
+  it("keeps pinned actions when their service is not allowlisted, and drops the rest of the plugin", () => {
+    const out = applyBehaviorToPlugins(
+      [WORKFLOW_PLUGIN, makePlugin()],
+      { integrations: { mode: "allowlist", entries: [{ service: "github" }] } },
+      PINNED,
+    );
+    const workflows = out.find((p) => p.name === "workflows");
+    expect(workflows?.actions?.[0]?.actions.map((a) => a.id)).toEqual([
+      "workflows.get_workflow",
+      "workflows.patch_workflow",
+    ]);
+  });
+
+  it("drops a non-allowlisted plugin entirely when it carries no pinned action", () => {
+    const out = applyBehaviorToPlugins(
+      [
+        makePlugin({
+          name: "slack",
+          actions: [{ service: "slack", actions: [action("slack.send_message", "Send")] }],
+          skills: [],
+        }),
+      ],
+      { integrations: { mode: "allowlist", entries: [{ service: "github" }] } },
+      PINNED,
+    );
+    expect(out[0]?.actions).toEqual([]);
+  });
+
+  it("excludeActions cannot name a pinned action away", () => {
+    const out = applyBehaviorToPlugins(
+      [WORKFLOW_PLUGIN],
+      {
+        integrations: {
+          mode: "allowlist",
+          entries: [
+            {
+              service: "workflows",
+              excludeActions: ["workflows.patch_workflow", "workflows.save_workflow"],
+            },
+          ],
+        },
+      },
+      PINNED,
+    );
+    expect(out[0]?.actions?.[0]?.actions.map((a) => a.id)).toEqual([
+      "workflows.get_workflow",
+      "workflows.patch_workflow",
+    ]);
+  });
+});
+
+describe("validation caps and unknown keys", () => {
+  it("rejects unknown keys nested under skills, integrations, and entries", () => {
+    expect(validateAssistantBehavior({ skills: { mode: "all", junk: "x" } })).toMatch(
+      /skills\.junk is not a recognized field/,
+    );
+    expect(validateAssistantBehavior({ integrations: { mode: "all", extra: [1] } })).toMatch(
+      /integrations\.extra is not a recognized field/,
+    );
+    expect(
+      validateAssistantBehavior({
+        integrations: { mode: "allowlist", entries: [{ service: "github", payload: "x" }] },
+      }),
+    ).toMatch(/entries\[\]\.payload is not a recognized field/);
+  });
+
+  it("rejects oversized allowlists and names the cap", () => {
+    expect(
+      validateAssistantBehavior({
+        skills: { mode: "allowlist", names: Array.from({ length: 501 }, (_, i) => `s${i}`) },
+      }),
+    ).toMatch(/limited to 500 entries/);
+    expect(
+      validateAssistantBehavior({
+        integrations: {
+          mode: "allowlist",
+          entries: Array.from({ length: 101 }, (_, i) => ({ service: `svc${i}` })),
+        },
+      }),
+    ).toMatch(/limited to 100 entries/);
+  });
+});
+
+describe("normalization at serialize time", () => {
+  it("drops an empty excludeActions and keeps stable field order", () => {
+    const raw = serializeAssistantBehavior({
+      integrations: { mode: "allowlist", entries: [{ service: "github", excludeActions: [] }] },
+      skills: { mode: "all" },
+    });
+    expect(raw).toBe(
+      JSON.stringify({
+        skills: { mode: "all" },
+        integrations: { mode: "allowlist", entries: [{ service: "github" }] },
+      }),
+    );
+  });
+});
+
 describe("filterSkillSources", () => {
   it("filters stored skills by the allowlist and passes everything through otherwise", () => {
     const skills = [skill("a"), skill("b")];
