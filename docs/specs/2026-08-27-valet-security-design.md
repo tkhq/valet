@@ -1,7 +1,7 @@
 # Valet Security — Design Spec
 
 **Date:** 2026-08-27
-**Status:** draft — for review
+**Status:** accepted 2026-08-27 — implemented on this branch; deviations recorded below
 **Owner:** Applied AI
 **Source:** concept note "Agentic engagement runner (for Valet)" (<https://gist.github.com/arawal/ceeab400cd51b54927f4ade5ef3377ce>), adapted to Valet v2 primitives the way Valet Design adapted Claude Design (`docs/specs/2026-08-23-valet-design-design.md`).
 

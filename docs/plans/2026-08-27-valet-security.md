@@ -136,6 +136,25 @@ Create `packages/plugin-security/` (standard v2 shape, `enabled: false` until M9
 
 `pnpm typecheck`, full `make e2e` scorecard (captured in full, never piped through tail), PR description Validation section updated with the scorecard, spec §Deviations updated with anything the codebase forced.
 
+## Implementation status (2026-08-27)
+
+All milestones landed on this branch. Deltas from the plan as written:
+
+| Milestone | Status | Notes |
+|---|---|---|
+| M0 schema | done | plus `security_cells.compacted_at` (the compaction hook's stamp) |
+| M1 plugin | done | plan cells gained a short `name` for stable tree dirs (`01-recon`); `yaml` lib reused, not js-yaml |
+| M2 service | done | engagement insert rides the session-create transaction; OTel counters; spawn failure releases its own claim |
+| M3 runner tools | done | settlement seam proven: `admitSignal` already admits child→interactive-parent, no ACL change needed |
+| M4 persona tools | done | claim is stamped before spawn (the child's engine build resolves it); roles attach per turn via `PromptOptions.role` |
+| M5 context discipline | done | dedicated `sec_protocol_read` (pruning protection is per tool, not per args); staleness measured from dispatch when no state doc exists |
+| M6 triage routes | done | audit rides `action_invocations`; Linear tools resolve at runtime over MCP |
+| M7 hub | done | repo picker extracted from the new-session dialog; no preset wire field (server seeds the plan) |
+| M8 panel | done | manifest card derives from rows (no manifest GET); Fix seeds the composer, does not auto-send |
+| M9 scanners | done | gitleaks only (no Python in the image; plan risk 6); registry enablement needed a skill-scoping fix — plugin skills would have attached to every session |
+| M10 acceptance | done | Scenario B restart emulated in-process (evict + rearm); cross-process half held by orchestrator-restart.test.ts |
+| M11 sweep | done | scorecard in the PR; e2e runner lists gained plugin-security + the security integration files |
+
 ## Cross-cutting risks
 
 1. **#396 collision:** both PRs add `agent_sessions.kind`. Identical shape by design; second-lander rebases to a no-op. Watch `template` — security does not add it.
