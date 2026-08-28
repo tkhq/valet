@@ -8,15 +8,10 @@
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import type {
   CredentialSummary,
   GetGithubAppResponse,
   IdentityLinkStatus,
-  ListOpItemsResponse,
-  ListOpVaultsResponse,
-  OnePasswordSettingsResponse,
-  OpItemDetailResponse,
 } from "@valet/api/wire";
 import { ApiError } from "~/api/client";
 
@@ -28,8 +23,6 @@ const unlinkMutate = vi.fn();
 const connectGithubMutateAsync = vi.fn();
 const disconnectGithubMutate = vi.fn();
 const disconnectCredentialMutate = vi.fn();
-const connectCredentialMutateAsync = vi.fn().mockResolvedValue({ ok: true });
-const connectCredentialMutate = vi.fn();
 
 let linksData: { links: IdentityLinkStatus[] } | undefined;
 let isLoading = false;
@@ -38,18 +31,6 @@ let credentialsData: { credentials: CredentialSummary[] } | undefined = { creden
 let credentialsLoading = false;
 let credentialsError = false;
 let githubAppData: GetGithubAppResponse | undefined;
-let onePasswordSettingsData: OnePasswordSettingsResponse | undefined = {
-  allowPersonal: false,
-  orgTokenConnected: false,
-  personalTokenConnected: false,
-};
-let opVaultsData: ListOpVaultsResponse = { vaults: [{ id: "v1", title: "Vault One" }] };
-let opItemsData: ListOpItemsResponse = { items: [{ id: "i1", title: "Item One", vaultId: "v1" }] };
-let opItemDetailData: OpItemDetailResponse = {
-  id: "i1",
-  title: "Item One",
-  fields: [{ id: "f1", title: "credential", fieldType: "CONCEALED" }],
-};
 
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (config: unknown) => config,
@@ -81,12 +62,6 @@ vi.mock("~/api/integrations", () => ({
     error: credentialsError ? new Error("boom") : null,
   }),
   useDisconnectCredential: () => ({ mutate: disconnectCredentialMutate, isPending: false }),
-  useConnectCredential: () => ({
-    mutate: connectCredentialMutate,
-    mutateAsync: connectCredentialMutateAsync,
-    isPending: false,
-    error: null,
-  }),
 }));
 
 // importOriginal: see -new-session-dialog.test.tsx (packages/web root) for
@@ -98,25 +73,6 @@ vi.mock("~/api/settings", async (importOriginal) => {
     useGithubApp: () => ({ data: githubAppData, isLoading: false, error: null }),
   };
 });
-
-vi.mock("~/api/onepassword", () => ({
-  useOnePasswordSettings: () => ({
-    data: onePasswordSettingsData,
-    isLoading: false,
-    error: null,
-  }),
-  useOpVaults: () => ({ data: opVaultsData, isLoading: false, error: null }),
-  useOpItems: (_scope: string, vaultId: string | undefined) => ({
-    data: vaultId ? opItemsData : undefined,
-    isLoading: false,
-    error: null,
-  }),
-  useOpItemDetail: (_scope: string, vaultId: string | undefined, itemId: string | undefined) => ({
-    data: vaultId && itemId ? opItemDetailData : undefined,
-    isLoading: false,
-    error: null,
-  }),
-}));
 
 import { ConnectedAccountsPage } from "./settings.connected-accounts";
 
@@ -130,15 +86,6 @@ describe("ConnectedAccountsPage", () => {
     credentialsLoading = false;
     credentialsError = false;
     githubAppData = undefined;
-    onePasswordSettingsData = { allowPersonal: false, orgTokenConnected: false, personalTokenConnected: false };
-    opVaultsData = { vaults: [{ id: "v1", title: "Vault One" }] };
-    opItemsData = { items: [{ id: "i1", title: "Item One", vaultId: "v1" }] };
-    opItemDetailData = {
-      id: "i1",
-      title: "Item One",
-      fields: [{ id: "f1", title: "credential", fieldType: "CONCEALED" }],
-    };
-    connectCredentialMutateAsync.mockResolvedValue({ ok: true });
     vi.stubGlobal("confirm", vi.fn(() => true));
     // jsdom logs "Not implemented: navigation" when a real redirect happens;
     // route it through a plain assignable stub instead.
@@ -420,115 +367,6 @@ describe("ConnectedAccountsPage", () => {
       // Deletion still works via the normal Revoke control — no separate
       // "edit"/"paste new token" affordance for a reference-backed row.
       expect(screen.getByRole("button", { name: "Revoke linear" })).toBeTruthy();
-    });
-  });
-
-  describe("1Password", () => {
-    it("hides the personal token card entirely when allowPersonal is false", () => {
-      onePasswordSettingsData = { allowPersonal: false, orgTokenConnected: false, personalTokenConnected: false };
-      render(<ConnectedAccountsPage />);
-      expect(screen.queryByLabelText("1Password personal token")).toBeNull();
-    });
-
-    it("shows the personal token card when allowPersonal is true", () => {
-      onePasswordSettingsData = { allowPersonal: true, orgTokenConnected: false, personalTokenConnected: false };
-      render(<ConnectedAccountsPage />);
-      expect(screen.getByLabelText("1Password personal token")).toBeTruthy();
-    });
-
-    it("shows Connected on the personal token card when personalTokenConnected", () => {
-      onePasswordSettingsData = { allowPersonal: true, orgTokenConnected: false, personalTokenConnected: true };
-      render(<ConnectedAccountsPage />);
-      expect(screen.getByText("Connected")).toBeTruthy();
-      expect(screen.getByRole("button", { name: "Rotate" })).toBeTruthy();
-    });
-
-    it("saving the personal token fires the connect mutation with no scope field", async () => {
-      onePasswordSettingsData = { allowPersonal: true, orgTokenConnected: false, personalTokenConnected: false };
-      const user = userEvent.setup();
-      render(<ConnectedAccountsPage />);
-      await user.type(screen.getByLabelText("1Password personal token"), "op-personal-token");
-      await user.click(screen.getByRole("button", { name: "Save" }));
-
-      await waitFor(() =>
-        expect(connectCredentialMutateAsync).toHaveBeenCalledWith({
-          service: "onepassword",
-          body: { type: "service_account", apiKey: "op-personal-token" },
-        }),
-      );
-    });
-
-    it("the tokenScope selector offers only Personal when the org token isn't connected", async () => {
-      onePasswordSettingsData = { allowPersonal: true, orgTokenConnected: false, personalTokenConnected: false };
-      const user = userEvent.setup();
-      render(<ConnectedAccountsPage />);
-      await user.click(screen.getByRole("button", { name: "Add from 1Password" }));
-      const scopeSelect = screen.getByLabelText("1Password token") as HTMLSelectElement;
-      const optionLabels = Array.from(scopeSelect.options).map((o) => o.textContent);
-      expect(optionLabels).toEqual(["Personal"]);
-    });
-
-    it("the tokenScope selector offers Organization once the org token is connected", async () => {
-      onePasswordSettingsData = { allowPersonal: true, orgTokenConnected: true, personalTokenConnected: false };
-      const user = userEvent.setup();
-      render(<ConnectedAccountsPage />);
-      await user.click(screen.getByRole("button", { name: "Add from 1Password" }));
-      const scopeSelect = screen.getByLabelText("1Password token") as HTMLSelectElement;
-      const optionLabels = Array.from(scopeSelect.options).map((o) => o.textContent);
-      expect(optionLabels).toEqual(["Personal", "Organization"]);
-    });
-
-    it("picker cascade — selecting vault loads items, selecting item loads fields, selecting field composes the reference and creating fires the PUT", async () => {
-      onePasswordSettingsData = { allowPersonal: false, orgTokenConnected: false, personalTokenConnected: false };
-      const user = userEvent.setup();
-      render(<ConnectedAccountsPage />);
-
-      await user.click(screen.getByRole("button", { name: "Add from 1Password" }));
-      await user.type(screen.getByLabelText("Service name"), "linear");
-
-      const vaultSelect = screen.getByLabelText("Vault") as HTMLSelectElement;
-      const itemSelect = screen.getByLabelText("Item") as HTMLSelectElement;
-      const fieldSelect = screen.getByLabelText("Field") as HTMLSelectElement;
-      expect(itemSelect.disabled).toBe(true);
-      expect(fieldSelect.disabled).toBe(true);
-
-      await user.selectOptions(vaultSelect, "v1");
-      expect(itemSelect.disabled).toBe(false);
-
-      await user.selectOptions(itemSelect, "i1");
-      expect(fieldSelect.disabled).toBe(false);
-
-      await user.selectOptions(fieldSelect, "f1");
-      expect(screen.getByText("op://Vault One/Item One/credential")).toBeTruthy();
-
-      await user.click(screen.getByRole("button", { name: "Add" }));
-      expect(connectCredentialMutate).toHaveBeenCalledWith(
-        {
-          service: "linear",
-          body: {
-            type: "api_key",
-            onepassword: { reference: "op://Vault One/Item One/credential", tokenScope: "personal" },
-          },
-        },
-        expect.objectContaining({ onSuccess: expect.any(Function), onError: expect.any(Function) }),
-      );
-    });
-
-    it("surfaces an inline error (not a toast) when saving the personal token fails", async () => {
-      onePasswordSettingsData = { allowPersonal: true, orgTokenConnected: false, personalTokenConnected: false };
-      connectCredentialMutateAsync.mockRejectedValueOnce(
-        new ApiError(400, "PUT /credentials/onepassword → 400", {
-          error: "personal 1Password tokens are disabled by your organization",
-        }),
-      );
-      const user = userEvent.setup();
-      render(<ConnectedAccountsPage />);
-      await user.type(screen.getByLabelText("1Password personal token"), "bad-token");
-      await user.click(screen.getByRole("button", { name: "Save" }));
-
-      expect(
-        await screen.findByText("personal 1Password tokens are disabled by your organization"),
-      ).toBeTruthy();
     });
   });
 

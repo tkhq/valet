@@ -22,9 +22,7 @@ export const qkIntegrations = {
   plugins: () => ["plugins"] as const,
   /** `scope` defaults to "user" — the caller's own credentials. "org"
    * (admin-only server-side) is a distinct cache entry, not a filter over
-   * the same list (1Password credential provider plan, Task 4: the org
-   * settings page reads the org-scoped list independently of the personal
-   * connected-accounts page). */
+   * the same list. `/integrations` reads both when the caller is an admin. */
   credentials: (scope: "user" | "org" = "user") => ["credentials", scope] as const,
 };
 

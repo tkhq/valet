@@ -18,7 +18,7 @@ service-account token. Secrets are never persisted in Valet's database.
   (`packages/api/src/engine/host.ts`) — **no engine changes**.
 - Org-level and personal service-account tokens.
 - Browse-and-pick selection UX (vault → item → field) backed by listing routes.
-- Web UI: org settings page + You/Credentials additions.
+- Web UI: one 1Password section on `/integrations`.
 
 **Non-goals:** sandbox-side `op://` env injection (legacy runner feature),
 per-workflow token scoping, 1Password Connect server support (service-account
@@ -73,8 +73,8 @@ secret material:
   **reserved service name `onepassword`** (`type: "service_account"`,
   `apiKey: <token>`): org-owned for the org token, user-owned for personal.
   The reserved name is rejected as a target service for reference credentials.
-- The org toggle `allowPersonalOnePassword` lives in org settings
-  (default `true`).
+- The org toggle `allowPersonalOnePassword` lives on `/integrations`
+  (default `true`). An admin flips it there.
 
 ## Resolution flow
 
@@ -174,12 +174,16 @@ with the same admin/member split by owner type.
 
 ## Web UI
 
-- **Org settings → 1Password:** org token card (set/rotate/remove, health
-  badge from a live probe), org-scoped credential list with the
-  vault → item → field picker, personal-token toggle.
-- **You → Credentials:** personal token card (visible only when the org toggle
-  is on), personal credential creation with the same picker component.
-- Reference-backed rows show a 1Password badge (reference visible, no secret).
+1Password is a credential source, not a plugin. It has one home:
+`/integrations`. That page holds the org token (admin), the personal token
+(when the org toggle is on), and the vault → item → field picker.
+
+`/settings/organization/onepassword` redirects to `/integrations`. The
+Organization rail does not list 1Password. You → Connected accounts still
+shows a 1Password badge on a reference-backed credential row. It does not
+host token or picker UI.
+
+Reference-backed rows show a 1Password badge (reference visible, no secret).
 
 ## Packaging
 
@@ -239,16 +243,17 @@ code as of the implementing commits:
   in `packages/web/src/api/client.ts` (exported alongside `ApiError`) rather
   than inlined per-component. `packages/web/src/api/integrations.ts`'s
   `useCredentials`/`qkIntegrations.credentials` also gained a `scope: "user" |
-  "org"` parameter (default `"user"`) so the org settings page and the
-  personal connected-accounts page read independent cache entries; both
-  pre-existing call sites (`routes/settings.connected-accounts.tsx` and the
-  credentials list) were updated to pass it explicitly where non-default.
-- **Org settings page has a component-level admin check in addition to the
-  layout guard.** `packages/web/src/routes/settings.organization.onepassword.tsx`
-  re-checks `orgQ.data.callerRole !== "admin"` itself (showing the same "managed
-  by your org admins" copy as `OrgRouteGuard`) rather than relying solely on
-  the route-level guard, so a mid-session role change or direct navigation
-  can't render admin controls to a non-admin before the guard re-evaluates.
+  "org"` parameter (default `"user"`) so `/integrations` can read the admin
+  org-scoped list independently of the caller's own credentials.
+- **1Password UI lives on `/integrations`, not Organization settings.**
+  `packages/web/src/components/integrations/onepassword-panel.tsx` is the one
+  surface for tokens, the personal-token toggle, and reference credentials.
+  `packages/web/src/routes/settings.organization.onepassword.tsx` is a
+  redirect to `/integrations`. The Organization rail no longer lists
+  1Password. You → Connected accounts keeps the reference badge on a
+  credential row and does not host token or picker UI. A member sees the
+  panel (empty copy when no token is connected). An admin sees the org
+  token card and the toggle. `useCredentials("org")` stays admin-only.
 - **`onepassword.live.test.ts`** (Task 5) uses the real default `createClient`
   (no fake), gated on `OP_SERVICE_ACCOUNT_TOKEN` (skip-clean without it,
   verified locally). Live execution against a real 1Password service account

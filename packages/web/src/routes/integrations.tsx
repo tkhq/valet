@@ -5,6 +5,7 @@ import { Spinner } from "~/components/primitives";
 import { SearchInput } from "~/components/search-input";
 import { Section } from "~/components/settings/section";
 import { hasVisibleSurface, IntegrationRow, isService } from "~/components/integrations/integration-row";
+import { OnePasswordPanel } from "~/components/integrations/onepassword-panel";
 import { pluginDisplayName } from "~/components/integrations/display-name";
 import { matchesNeedle } from "~/lib/text-match";
 import { textParam } from "~/lib/search-params";
@@ -23,6 +24,10 @@ import { textParam } from "~/lib/search-params";
  * search on `/skills`: `usePlugins` holds the whole plugin set, so a
  * client-side match answers about everything it claims to. The settled
  * query lives in `?q=`, so a search is a link and Back clears it.
+ *
+ * 1Password is not a plugin. It is a credential source, so it sits in
+ * its own section on this page (not Organization settings). A search
+ * that does not mention 1Password hides that section.
  */
 interface IntegrationsSearch {
   q?: string;
@@ -103,6 +108,8 @@ export function IntegrationsPage() {
     .filter((plugin) => matchesNeedle(query, [pluginDisplayName(plugin), plugin.name, plugin.description]))
     .sort((a, b) => pluginDisplayName(a).localeCompare(pluginDisplayName(b)));
   const searching = query.trim().length > 0;
+  const showOnePassword =
+    !searching || matchesNeedle(query, ["1Password", "onepassword", "vault", "secret"]);
   // The box stays up through an empty match — hiding it would leave the
   // search with no box to clear it in.
   const showSearch = reachable.length > 0 || searching;
@@ -147,6 +154,8 @@ export function IntegrationsPage() {
           {!isLoading && !error && plugins.length === 0 && (
             <div className="text-sm text-muted">No plugins installed.</div>
           )}
+
+          {showOnePassword && <OnePasswordPanel />}
 
           {!isLoading && !error && showSearch && (
             <div className="space-y-4">
