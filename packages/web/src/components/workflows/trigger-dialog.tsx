@@ -38,6 +38,8 @@ import {
 import {
   FilterEditor,
   fromWireFilters,
+  incompleteFilterRow,
+  pruneFilterRows,
   toWireFilters,
   type UiFilterRow,
 } from "~/components/events/filter-editor";
@@ -241,6 +243,11 @@ export function TriggerDialog({
         }
       } else {
         // Event trigger.
+        const incomplete = incompleteFilterRow(filterRows);
+        if (incomplete) {
+          setFormError(`Enter a value for the "${incomplete}" filter, or remove the row.`);
+          return;
+        }
         const filters = toWireFilters(filterRows);
 
         if (isEditing) {
@@ -459,6 +466,11 @@ export function TriggerDialog({
                       </option>
                     ))}
                   </select>
+                  {workflows.length === 0 && (
+                    <p className="text-xs text-muted">
+                      You have no workflows yet — create one on the Workflows page to use as a target.
+                    </p>
+                  )}
                 </div>
               )}
 
@@ -468,7 +480,14 @@ export function TriggerDialog({
                 <select
                   id="trigger-event-key"
                   value={eventKey}
-                  onChange={(e) => setEventKey(e.target.value)}
+                  onChange={(e) => {
+                    const key = e.target.value;
+                    setEventKey(key);
+                    // Drop filters that the newly-selected event does not
+                    // declare, so a leftover filter cannot 400 on submit.
+                    const entry = catalogEntries.find((c) => c.key === key);
+                    setFilterRows((rows) => pruneFilterRows(rows, entry?.filters ?? []));
+                  }}
                   className="w-full min-w-0 truncate rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink"
                 >
                   <option value="">— select event —</option>
@@ -478,19 +497,25 @@ export function TriggerDialog({
                     </option>
                   ))}
                 </select>
+                {catalogQ.isLoading && <p className="text-xs text-muted">Loading events…</p>}
+                {catalogQ.error != null && (
+                  <p className="text-xs text-danger-500">Failed to load the event catalog.</p>
+                )}
               </div>
 
               {/* Filters — field/op/value rows from the event catalog */}
               <div className="grid gap-1.5">
                 <Label>Filters</Label>
-                <FilterEditor
-                  fields={selectedEntry?.filters ?? []}
-                  rows={filterRows}
-                  onChange={setFilterRows}
-                />
-                <p className="text-xs text-muted">
-                  A trigger fires only when every filter matches. Add none to match every event of this type.
-                </p>
+                {selectedEntry ? (
+                  <>
+                    <FilterEditor fields={selectedEntry.filters} rows={filterRows} onChange={setFilterRows} />
+                    <p className="text-xs text-muted">
+                      A trigger fires only when every filter matches. Add none to match every event of this type.
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-xs text-muted">Select an event to add filters.</p>
+                )}
               </div>
             </>
           )}

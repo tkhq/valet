@@ -5,7 +5,7 @@
  * end by trigger-dialog.test.tsx.
  */
 import { describe, expect, it } from "vitest";
-import { fromWireFilters, toWireFilters } from "./filter-editor";
+import { fromWireFilters, incompleteFilterRow, pruneFilterRows, toWireFilters } from "./filter-editor";
 
 describe("toWireFilters", () => {
   it("drops rows with no field or a blank value", () => {
@@ -50,6 +50,44 @@ describe("fromWireFilters", () => {
     ).toEqual([
       { field: "x", op: "eq", value: "" },
       { field: "y", op: "eq", value: "" },
+    ]);
+  });
+});
+
+describe("incompleteFilterRow", () => {
+  it("returns the field of the first row with a field but no value", () => {
+    expect(
+      incompleteFilterRow([
+        { field: "channel", op: "eq", value: "C1" },
+        { field: "user", op: "eq", value: "  " },
+      ]),
+    ).toBe("user");
+  });
+
+  it("treats an `in` row with only separators as incomplete", () => {
+    expect(incompleteFilterRow([{ field: "reaction", op: "in", value: " , " }])).toBe("reaction");
+  });
+
+  it("ignores a blank-field row and returns null when every row is complete", () => {
+    expect(
+      incompleteFilterRow([
+        { field: "", op: "eq", value: "" },
+        { field: "channel", op: "eq", value: "C1" },
+      ]),
+    ).toBeNull();
+  });
+});
+
+describe("pruneFilterRows", () => {
+  it("drops rows whose field is not among the available fields, keeping blank-field rows", () => {
+    const rows = [
+      { field: "channel", op: "eq" as const, value: "C1" },
+      { field: "branch", op: "eq" as const, value: "main" },
+      { field: "", op: "eq" as const, value: "" },
+    ];
+    expect(pruneFilterRows(rows, [{ field: "channel" }])).toEqual([
+      { field: "channel", op: "eq", value: "C1" },
+      { field: "", op: "eq", value: "" },
     ]);
   });
 });

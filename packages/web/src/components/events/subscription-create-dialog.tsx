@@ -1,6 +1,13 @@
 import { useState } from "react";
 import { Button, Dialog, DialogContent, DialogFooter, ErrorRow, Input, LoadingRow, SelectMenu } from "~/components/primitives";
-import { FilterEditor, toWireFilters, type FilterField, type UiFilterRow } from "~/components/events/filter-editor";
+import {
+  FilterEditor,
+  incompleteFilterRow,
+  pruneFilterRows,
+  toWireFilters,
+  type FilterField,
+  type UiFilterRow,
+} from "~/components/events/filter-editor";
 import { useCreateEventSubscription, useEventCatalog } from "~/api/events";
 import { useWorkflows } from "~/api/workflows";
 import { errorText } from "~/lib/error-text";
@@ -95,34 +102,44 @@ export function SubscriptionCreateDialog({
   // Filter fields the selected events declare, unioned and deduped by field —
   // a filter is valid when any selected event declares it (same rule the
   // server's validateSubscription applies).
-  const filterFields: FilterField[] = [];
-  const seenFields = new Set<string>();
-  for (const s of services) {
-    for (const entry of s.entries) {
-      if (!keys.has(entry.key)) continue;
-      for (const f of entry.filters ?? []) {
-        if (seenFields.has(f.field)) continue;
-        seenFields.add(f.field);
-        filterFields.push({ field: f.field, description: f.description });
+  function unionFilterFields(selected: Set<string>): FilterField[] {
+    const out: FilterField[] = [];
+    const seen = new Set<string>();
+    for (const s of services) {
+      for (const entry of s.entries) {
+        if (!selected.has(entry.key)) continue;
+        for (const f of entry.filters ?? []) {
+          if (seen.has(f.field)) continue;
+          seen.add(f.field);
+          out.push({ field: f.field, description: f.description });
+        }
       }
     }
+    return out;
   }
+  const filterFields = unionFilterFields(keys);
   const targetReady = target.kind === "orchestrator" || target.workflowId.length > 0;
   const elsewhere = filedElsewhere(filedOwner(target, workflows), ws, teamsQ.data?.teams ?? []);
   const canSubmit = name.trim().length > 0 && keys.size > 0 && targetReady && !create.isPending;
 
 
   function toggleKey(key: string) {
-    setKeys((cur) => {
-      const next = new Set(cur);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
+    const next = new Set(keys);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    setKeys(next);
+    // Drop filters whose field none of the now-selected events declare, so an
+    // orphaned filter cannot 400 on submit.
+    setFilterRows((rows) => pruneFilterRows(rows, unionFilterFields(next)));
   }
 
   function submit() {
     if (!canSubmit) return;
+    const incomplete = incompleteFilterRow(filterRows);
+    if (incomplete) {
+      setError(`Enter a value for the "${incomplete}" filter, or remove the row.`);
+      return;
+    }
     setError(null);
     create.mutate(
       { name: name.trim(), eventKeys: [...keys], filters: toWireFilters(filterRows), target },

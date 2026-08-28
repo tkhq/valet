@@ -79,6 +79,32 @@ export function fromWireFilters(filters: unknown[]): UiFilterRow[] {
   return rows;
 }
 
+/**
+ * The field of the first row that has a field selected but no usable value, or
+ * null when every row is complete. A dialog calls this before submit so a
+ * half-filled row is a named error, not a silently dropped filter.
+ */
+export function incompleteFilterRow(rows: UiFilterRow[]): string | null {
+  for (const row of rows) {
+    if (!row.field) continue;
+    const hasValue =
+      row.op === "in"
+        ? row.value.split(",").some((v) => v.trim().length > 0)
+        : row.value.trim().length > 0;
+    if (!hasValue) return row.field;
+  }
+  return null;
+}
+
+/**
+ * Drop rows whose field the selected event(s) no longer declare. Called when
+ * the event selection changes, so a filter left over from a previous event
+ * cannot reach the server and 400. A row with no field yet is kept.
+ */
+export function pruneFilterRows(rows: UiFilterRow[], fields: FilterField[]): UiFilterRow[] {
+  return rows.filter((r) => !r.field || fields.some((f) => f.field === r.field));
+}
+
 export function FilterEditor({
   fields,
   rows,
@@ -114,56 +140,74 @@ export function FilterEditor({
         // Keep the row's own field selectable even if the catalog no longer
         // lists it (the selected events changed), so editing never silently
         // drops a filter the user already set.
-        const options =
-          row.field && !fields.some((f) => f.field === row.field)
-            ? [{ field: row.field }, ...fields]
-            : fields;
+        const known = fields.some((f) => f.field === row.field);
+        const options = row.field && !known ? [{ field: row.field }, ...fields] : fields;
+        const description = fields.find((f) => f.field === row.field)?.description;
+        // The catalog description (e.g. "Slack channel id (C…/D…)") answers
+        // "what do I paste here?"; the `in` note explains the comma format.
+        const hint = [
+          description,
+          row.op === "in" ? "Separate values with commas." : undefined,
+          row.field && !known ? "Not declared by the selected event — remove or change it." : undefined,
+        ]
+          .filter(Boolean)
+          .join(" ");
         return (
-          <div key={i} className="flex items-center gap-2">
-            <select
-              aria-label="Filter field"
-              value={row.field}
-              onChange={(e) => update(i, { field: e.target.value })}
-              className="min-w-0 flex-1 rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink"
-            >
-              {options.map((f) => (
-                <option key={f.field} value={f.field}>
-                  {f.field}
-                </option>
-              ))}
-            </select>
-            <select
-              aria-label="Filter operator"
-              value={row.op}
-              onChange={(e) => update(i, { op: e.target.value as FilterOp })}
-              className="rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink"
-            >
-              {OP_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-            <Input
-              aria-label="Filter value"
-              value={row.value}
-              onChange={(e) => update(i, { value: e.target.value })}
-              placeholder={row.op === "in" ? "a, b, c" : "value"}
-              className="min-w-0 flex-1"
-            />
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              aria-label="Remove filter"
-              onClick={() => remove(i)}
-            >
-              ✕
-            </Button>
+          <div key={i} className="space-y-1">
+            <div className="flex items-center gap-2">
+              <select
+                aria-label="Filter field"
+                value={row.field}
+                onChange={(e) => update(i, { field: e.target.value })}
+                className="min-w-0 flex-1 rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink"
+              >
+                {options.map((f) => (
+                  <option key={f.field} value={f.field}>
+                    {f.field}
+                  </option>
+                ))}
+              </select>
+              <select
+                aria-label="Filter operator"
+                value={row.op}
+                onChange={(e) => update(i, { op: e.target.value as FilterOp })}
+                className="rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink"
+              >
+                {OP_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+              <Input
+                aria-label="Filter value"
+                value={row.value}
+                onChange={(e) => update(i, { value: e.target.value })}
+                placeholder={row.op === "in" ? "a, b, c" : "value"}
+                className="min-w-0 flex-1"
+              />
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                aria-label="Remove filter"
+                onClick={() => remove(i)}
+              >
+                ✕
+              </Button>
+            </div>
+            {hint && <p className="pl-1 text-xs text-muted">{hint}</p>}
           </div>
         );
       })}
-      <Button type="button" variant="secondary" size="sm" disabled={fields.length === 0} onClick={add}>
+      <Button
+        type="button"
+        variant="secondary"
+        size="sm"
+        disabled={fields.length === 0}
+        title={fields.length === 0 ? "This event has no filterable fields." : undefined}
+        onClick={add}
+      >
         Add filter
       </Button>
     </div>
