@@ -42,13 +42,16 @@ describe("coding system prompt (TKAI-239 v1 port)", () => {
     expect(CODING_SYSTEM_PROMPT).toContain("Change only what the brief asked");
     expect(CODING_SYSTEM_PROMPT).toContain("A commit is not evidence the change works");
     expect(CODING_SYSTEM_PROMPT).toContain("The same error three times: call switch_model");
+    expect(CODING_SYSTEM_PROMPT).toContain("stronger reasoning-model id");
   });
 
   it("tells a cheap coding session to switch_model before hard work and mid-task", () => {
     expect(flat(CODING_SYSTEM_PROMPT)).toContain(flat(MODEL_SWITCH_CORE));
-    expect(CODING_SYSTEM_PROMPT).toContain("call switch_model to a Sonnet or Opus id");
+    expect(CODING_SYSTEM_PROMPT).toContain("call switch_model to a stronger reasoning-model id");
+    expect(CODING_SYSTEM_PROMPT).toContain("do not hardcode a vendor family");
     expect(CODING_SYSTEM_PROMPT).toContain("Re-evaluate after you have read the code or a tool result");
-    expect(CODING_SYSTEM_PROMPT).toContain("Do not finish a hard task on Haiku just because you started there");
+    expect(CODING_SYSTEM_PROMPT).toContain("Do not finish a hard task on a cheap model just because you started there");
     expect(CODING_SYSTEM_PROMPT).not.toContain("child_send");
+    expect(CODING_SYSTEM_PROMPT).not.toMatch(/Haiku|Sonnet|Opus|Codex/);
   });
 });

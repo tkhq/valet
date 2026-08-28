@@ -48,12 +48,14 @@ describe("orchestratorPersona", () => {
   it("requires switch_model before architecting or coding", () => {
     const persona = flat(orchestratorPersona({ type: "user", id: "u1" }));
     expect(persona).toContain("Before architecting, designing, debugging, reviewing, or a code change");
-    expect(persona).toContain("call switch_model to a Sonnet or Opus id");
+    expect(persona).toContain("call switch_model to a stronger reasoning-model id");
+    expect(persona).toContain("do not hardcode a vendor family");
     expect(persona).toContain("set the task tool's `model`");
     expect(persona).toContain("switch_model (or set the child's model) first");
     expect(persona).toContain("Re-evaluate after you have read the code or a tool result");
     expect(persona).toContain("switch_model mid-task after that evaluation");
-    expect(persona).toContain("Do not finish a hard task on Haiku just because you started there");
+    expect(persona).toContain("Do not finish a hard task on a cheap model just because you started there");
+    expect(persona).not.toMatch(/Haiku|Sonnet|Opus|Codex/);
   });
 
   it("names the push boundary and the child_status check", () => {
