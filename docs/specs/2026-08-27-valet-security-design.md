@@ -7,7 +7,7 @@
 
 ## Summary
 
-Valet Security is an AI security-review surface inside Valet. A user points an engagement at a repository. A runner session dispatches persona agents (v1: `code-review`) as child sessions, one cell at a time. Personas coordinate through immutable state documents and report structured findings. The engagement survives crashes and restarts by construction: all coordination state lives in app tables, and resuming means reading the cell list and dispatching the first non-completed cell. The user watches cells and findings accumulate live in the session page, and gets a manifest when the engagement closes.
+Valet Security is an AI security-review surface inside Valet. A user points an engagement at a repository. A runner session dispatches persona agents (v1: `code-review`) as child sessions, one cell at a time. Personas coordinate through immutable state documents and report structured findings. The engagement survives crashes and restarts by construction: all coordination state lives in app tables, and resuming means reading the cell list and dispatching the first non-completed cell. The user watches cells and findings accumulate live in the session page, triages findings in a review surface (verify, refute, file a Linear or GitHub issue, spawn a fix session), exports the result set (Markdown, SARIF, JSON), and gets a manifest when the engagement closes.
 
 ## Motivation
 
@@ -134,6 +134,19 @@ CREATE TABLE "security_findings" (
   "created_at" bigint NOT NULL
 );
 CREATE INDEX "security_findings_engagement" ON "security_findings" ("engagement_id");
+
+CREATE TABLE "security_finding_links" (
+  "id" text PRIMARY KEY NOT NULL,
+  "finding_id" text NOT NULL,
+  "engagement_id" text NOT NULL,
+  "provider" text NOT NULL,
+  "external_id" text NOT NULL,
+  "url" text NOT NULL,
+  "created_by" text NOT NULL,
+  "created_at" bigint NOT NULL
+);
+CREATE UNIQUE INDEX "security_finding_links_provider_unique"
+  ON "security_finding_links" ("finding_id", "provider");
 ```
 
 Value sets:
@@ -144,6 +157,7 @@ Value sets:
 - `security_cells.mode`: `fresh` (ignore own prior state docs) | `resume` (read own latest state doc and continue).
 - `security_findings.severity`: `critical` | `high` | `medium` | `low` | `info`, per the rubric in the persona role.
 - `security_findings.status`: `open` → `verified` | `refuted`. Forward-only; no route mutates title, body, file, line, or severity after insert ("verifier flips bits, never rewrites"). Two actors flip bits: a persona cell via `sec_finding_review` (the preset's verify cell), and a human with session-admin rights via the review route. `status_reason` and `status_actor` (cell id or `user:<id>`) record who and why.
+- `security_finding_links.provider`: `github` | `linear`. One link per finding per provider (the unique index is the idempotency guard — a double-click files one issue, not two). `created_by` is always a user id: only humans file issues (Decision 10).
 
 `security_files.cell_id` is the owning cell — in v1 every writable path belongs to exactly one cell. The read-only mounts (`/protocol.md`, `/plan.yml`) are virtual: `sec_fs_read` serves them from the plugin package and the engagement row, not from `security_files`.
 
@@ -298,10 +312,45 @@ Mirrors the `/design` hub pattern: a repo picker (the existing new-session repo 
 The session page for `kind='security'` sessions adds a security panel beside the thread (the design-canvas layout precedent, including the mobile Chat | Panel tab toggle so approval gates never hide):
 
 - **Cell rail** — ordered cells with persona, status, attempt count, elapsed time, and a link to each cell's child session page. The running cell shows live progress parsed from its latest state doc (`checklist 14/47 · queue 3 pending`) — the tree makes progress free to render, and a scan that shows motion beats a static "running" badge for the half hour before the first finding. A compaction badge appears when the cell's thread compacted (from the compaction hook). An over-age running cell shows a warning state with the last child activity time.
-- **Findings table** — severity, title, `file:line` linking to the GitHub blob at the pinned SHA (derivable from the repo binding; a finding the user cannot jump to is dead text), status, source cell. Sortable by severity, filterable by cell and status. A session admin can flip an open finding to `verified` or `refuted` from the row (`canAdministerSession`, the forward-only review route with `status_actor: user:<id>`) — false-positive fatigue is the product's first failure mode, and a finding the user cannot dismiss is fatigue with no relief valve. A "Fix" action on a finding invokes `sec_handoff` through the runner. Finding bodies render as escaped text/markdown — findings are data from an agent that read hostile code, never HTML.
-- **Manifest** — after `sec_close`, the manifest renders at the top of the panel: distinct-fingerprint counts by severity with the verified/refuted/open breakdown.
+- **Findings review** — the triage surface, specified below.
+- **Manifest** — after `sec_close`, the manifest renders at the top of the panel: distinct-fingerprint counts by severity with the verified/refuted/open breakdown, and triage tallies (issues filed, findings dismissed by a human).
 
-Data over REST (`GET /api/sessions/:id/security` for engagement + cells, `/security/findings` for findings); live updates over `security.cell.updated` / `security.finding.added` wire events on the session WebSocket via the engine `host_event` seam, with query polling as the fallback until that seam lands.
+### Findings review
+
+Triage is the product's core loop for the human, so it gets a real surface, not a table with a scrollbar. Master-detail layout:
+
+**List (left)** — one row per finding: severity badge, title, `file:line`, status chip, source cell, link chips for filed issues (Linear/GitHub icons, opening the external issue). Groups collapse by fingerprint so five near-duplicates read as one row with a count. Filters across the top: severity, status, cell, path substring; sort by severity (default) or recency. The filter state drives export scope (below).
+
+**Detail (right)** — the selected finding in full:
+
+- Evidence body rendered as escaped markdown with the code excerpt in a block — findings are data from an agent that read hostile code, never HTML.
+- `file:line` linking to the GitHub blob at the pinned SHA (derivable from the repo binding; a finding the user cannot jump to is dead text).
+- Provenance: reporting cell and persona, state doc revision at report time, reported/reviewed timestamps, `status_actor` and `status_reason` history.
+- Fingerprint siblings: other findings sharing the fingerprint, one click away.
+- Actions: **Verify** / **Refute** (session admin; the forward-only review route with `status_actor: user:<id>` — false-positive fatigue is the product's first failure mode, and a finding the user cannot dismiss is fatigue with no relief valve), **File issue** (Linear or GitHub, below), **Fix** (invokes `sec_handoff` through the runner), **Copy permalink**.
+
+Triage is keyboard-first: `j`/`k` move, `v` verify, `r` refute (with a reason prompt), `i` opens the file-issue dialog, `enter` opens the blob link. Reviewing forty findings must not take forty mouse trips.
+
+### Export
+
+An Export button on the findings header opens a dialog: format (**Markdown report** | **SARIF 2.1.0** | **JSON**), scope (**current filter** | **all findings**), then a download via authenticated fetch (`GET /api/sessions/:id/security/export?format=...&<filters>`). Export is view-gated, generated from rows (no sandbox involvement), and every export writes an audit event naming the actor, format, and row count.
+
+SARIF mapping, normative: one `run` per engagement; `tool.driver.name = "valet-security"` with the persona as the rule source; `result.ruleId` = fingerprint; severity maps `critical`/`high` → `error`, `medium` → `warning`, `low`/`info` → `note`; `physicalLocation.artifactLocation.uri` = repo-relative file with `region.startLine`; the pinned SHA rides in `versionControlProvenance`. Refuted findings export with `suppressions` populated, not silently dropped — an auditor wants to see what was dismissed and why. The Markdown report is the manifest plus per-finding sections (evidence fenced with collision-safe fences); it is an export of the data, not a designed report (the report writer stays a non-goal).
+
+### Filing issues
+
+The file-issue dialog offers the providers whose integrations are connected; a missing one shows its corrective action ("Connect the Linear integration in Settings"). Filing goes through the existing integration actions via the server-side action invoker (`packages/api/src/plugins/action-invoker.ts`) with the acting user's credentials — no bespoke API clients:
+
+- **GitHub** — `github.create_issue` (plugin-github, `issues:write`), default target the engagement's repo, override allowed in the dialog.
+- **Linear** — the Linear MCP integration (plugin-linear); the dialog asks for the team on first use and remembers it per engagement.
+
+The issue body is generated from the finding alone: severity, title, evidence, blob permalink, and a permalink back to the finding in Valet — never state docs or other findings. On success the server writes a `security_finding_links` row (the per-provider unique index makes filing idempotent) and the list shows the link chip. Bulk filing creates one digest issue from the current filter (a checklist of findings with permalinks), not N issues — a tracker flooded with forty auto-filed tickets is worse than no integration.
+
+Issue filing and export are human-driven REST actions only. No agent tool files issues or exports findings (Decision 10): content derived from hostile code leaves Valet only on a human's click.
+
+### Data and events
+
+Data over REST (`GET /api/sessions/:id/security` for engagement + cells, `/security/findings` for findings with filters and cursor, `POST /security/findings/:findingId/status` for human review, `POST /security/findings/:findingId/issues` and `POST /security/issues/digest` for filing, `GET /security/export` for export); live updates over `security.cell.updated` / `security.finding.updated` wire events on the session WebSocket via the engine `host_event` seam, with query polling as the fallback until that seam lands.
 
 Tool renderers: `sec_dispatch` (cell card with child link), `sec_finding_report` (severity-badged finding card), `sec_cell_complete` / `sec_close` (status summaries). New renderer files listed before the fallback in the registry.
 
@@ -319,7 +368,7 @@ The note's threat list, plus what running inside Valet adds:
 8. **Prompt injection from the scanned repo.** Personas read hostile code by design. Blast radius: a compromised persona can write only under its own cell directory (path-prefix claim) and report findings for its own cell, cannot flip other cells' finding statuses unless its plan cell carries `review: true`, cannot spawn children, cannot reach other sessions' sandboxes (gateway `sid` check), and holds only repo-read credentials. Findings render escaped in the client.
 9. **Cost blowout.** The `sec_start` gate names the cell count, personas, and a rough cost estimate before anything spawns; dispatch is serial; the plan is capped at 32 cells; findings are capped at 100 per cell. Per-engagement token budgets are a re-entry seam (the Valet Design threat-7 precedent).
 10. **Cross-tenant reads.** Every `/security/*` route resolves session → engagement → owner and applies the session's existing access checks; persona tools additionally require the cell claim. Mutating routes get named `can*` checks, per the explicit-authz rule.
-11. **Findings disclosure.** v1 has no export or share surface. Findings are visible only to principals who can view the session.
+11. **Findings disclosure.** Findings are visible only to principals who can view the session. The two egress channels — export and issue filing — are human-initiated REST actions, never agent tools, so hostile-code-derived content leaves Valet only on a human's click. Exports are view-gated and audit-logged with actor, format, and row count. A filed issue carries only its own finding, never state docs or peers. There is no anonymous share link.
 
 ## Dependencies
 
@@ -338,7 +387,8 @@ The note's threat list, plus what running inside Valet adds:
 | Concurrent engagements per session | One engagement per session keeps session == engagement | Drop the unique index on `session_id`, add engagement id to tool args |
 | Field-level state doc schema validation | Note excludes; parse + version check only | TypeBox schema on `sec_fs_write` for `state.yml` behind `protocol_version` 2 |
 | Scheduled / CI-triggered engagements | v1 is chat-initiated | Workflow trigger node creating `kind='security'` sessions |
-| SARIF / GitHub code-scanning export | Disclosure surface needs its own review | Export route reading immutable findings |
+| GitHub code-scanning upload | SARIF export ships; pushing it into GitHub's code-scanning API is a separate disclosure surface | Upload action on the existing export, gated like issue filing |
+| Org-wide findings dashboard | v1 findings are engagement-scoped | Cross-engagement query over the same tables, keyed by org and fingerprint |
 | Org-authored custom personas | v1 personas ship in the plugin | Persona registry keyed by org, same dispatch path |
 | Multi-repo engagements | One repo, one pinned SHA keeps determinism | `repos` array on the engagement; cells name a target dir |
 | Cross-engagement finding memory | Dedup is per-engagement fingerprint only | Fingerprint lookup across an org's engagements |
@@ -381,6 +431,16 @@ Integration tests at the API level, `packages/api/src/integration/security-accep
 3. The fresh child reads its own latest state doc, continues from the queue, and completes; assert findings reported before the yield survive with stable ids.
 4. Separately: a running cell's child is destroyed (sandbox reclaimed, no settle). `sec_status` shows the child gone; the runner calls `sec_cell_fail` then re-dispatches with `mode: resume`; the cell completes on attempt 2.
 
+### Scenario E: triage, export, file issues
+
+Web-level tests beside the panel components; API-level tests for the routes.
+
+1. From Scenario A's completed engagement, a session admin refutes one open finding with a reason; the row's status chip updates; `status_actor` is `user:<id>`; a non-admin gets a 403 naming the required right.
+2. The user filters to `severity: high, status: open` and exports SARIF; the download contains only the filtered set, `result.ruleId`s equal fingerprints, the pinned SHA is in `versionControlProvenance`, and the refuted finding appears in `suppressions` when exported unfiltered. An audit event records actor, format, and row count.
+3. The user files a GitHub issue from a finding; `github.create_issue` is invoked with the user's credential; a `security_finding_links` row appears; the list shows the link chip. Filing again is a no-op returning the existing link.
+4. With Linear not connected, the dialog's Linear option names the corrective action ("Connect the Linear integration in Settings").
+5. Bulk-filing the current filter creates one digest issue whose body lists each finding with a permalink.
+
 ## Resolved Decisions
 
 **Decision 1: substrate is app tables; the interface stays a filesystem. RESOLVED.** Child sessions do not share a filesystem, and the gateway's `sid` check makes cross-sandbox reads impossible by design. Rows give the same recovery-by-read property plus transactionality, immutability enforcement, and a free UI read path. The tools stay path-addressed (`sec_fs_write`/`sec_fs_read`/`sec_fs_list`, the `mem_write` path-param shape) so personas keep the note's filesystem mental model, dispatch prompts name literal paths, and new artifact types need no new tools. The persona's YAML state doc survives verbatim at a conventional path.
@@ -400,6 +460,10 @@ Integration tests at the API level, `packages/api/src/integration/security-accep
 **Decision 8: the plan is a DAG and dispatch context follows its edges. RESOLVED.** Cells declare `reads: [ordinals]` (earlier ordinals only — acyclic by construction). The dispatch prompt injects only the declared cells' state doc paths; `sec_fs_list` keeps the rest discoverable. Selective context keeps persona contexts small at the source, and the same edges are the future parallel-dispatch seam.
 
 **Decision 9: verification ships in v1, inside the preset. RESOLVED.** The verify cell is the same `code-review` persona with a refute goal, using `sec_finding_review` and the status enum — no new machinery, one more cell. Evidence requirements at `sec_finding_report` (excerpt + reasoning, 200-char floor) raise the refutation target above vibes. Unverified LLM findings are the product's dominant failure mode; shipping the mechanism unused (the earlier draft) optimized for a bad first demo. Independent-model verification stays a re-entry seam.
+
+**Decision 10: findings leave Valet only on a human's click. RESOLVED.** Export and issue filing are REST actions from the review surface; no `sec_*` tool exposes them to the runner or personas. A persona reads hostile code by design, and an agent-drivable egress path is the exfiltration channel threat 8 works to contain. `sec_handoff` stays agent-reachable because its output is another Valet session, not an external write.
+
+**Decision 11: issue filing reuses integration actions, not bespoke clients. RESOLVED.** GitHub goes through `github.create_issue` (plugin-github, `issues:write`); Linear goes through the Linear MCP integration (plugin-linear); both invoked server-side via the action invoker (`packages/api/src/plugins/action-invoker.ts`) with the acting user's credentials. A second GitHub client or a raw Linear API dependency would duplicate auth, scopes, and error handling the plugins already own. The `security_finding_links` unique index, not the provider, is the idempotency guard.
 
 ## Deviations from the Concept Note
 
@@ -422,3 +486,9 @@ A review pass against UX, agent experience, and result quality forced eight corr
 6. **Context Discipline section**: compaction is a checkpoint boundary (engine `compactionHooks`, `protectedFromPruning` on protocol reads, staleness metric), and the plan's `reads` DAG scopes each dispatch prompt's context.
 7. **Exit-condition claim re-scoped**: it defeats accidental truncation, not self-certification; the mitigations that narrow the rest are named (recon-seeded checklist, verify cell), and server-seeded checklists are a listed seam.
 8. **The `interactive`-parent settlement seam** is named as an implementation checkpoint in Dependencies — the loop's self-advance depends on it.
+
+A product review pass the same day promoted triage from a table to a surface:
+
+9. **Findings review UI**: master-detail with evidence, provenance, fingerprint siblings, keyboard-first triage, and human verify/refute — a findings list the user cannot act on is a demo, not a product.
+10. **Export in v1**: Markdown, SARIF 2.1.0 (suppressions carry refutations), JSON; filter-scoped; audit-logged. The former SARIF non-goal narrowed to the GitHub code-scanning *upload*.
+11. **Issue filing in v1**: Linear and GitHub through existing integration actions (Decision 11), `security_finding_links` for idempotent linkage, digest issues for bulk — with the egress rule that only humans file or export (Decision 10).
