@@ -13,6 +13,13 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 const infoMock = vi.fn();
 
+// The dashboard renders bare Links (Manage assistants), which need a router
+// — mock them to anchors, same as every other route test.
+vi.mock("@tanstack/react-router", () => ({
+  createFileRoute: () => (config: unknown) => config,
+  Link: ({ children, to }: { children: React.ReactNode; to: string }) => <a href={to}>{children}</a>,
+}));
+
 vi.mock("~/api/orchestrator", () => ({
   useOrchestratorInfo: () => infoMock(),
   useOrchestratorChildren: () => ({

@@ -135,16 +135,28 @@ export function TeamDashboard({ teamId }: { teamId: string }) {
               </Badge>
             )}
           </div>
-          <p className="text-sm text-muted">
-            {teamAssistants.length === 0
-              ? "No assistants yet. Open the sidebar to create one."
-              : teamAssistants
-                  .map(
-                    (a) =>
-                      `${a.name ?? "Untitled assistant"}${workingAssistantIds.has(a.id) ? " (working)" : ""}`,
-                  )
-                  .join(" · ")}
-          </p>
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted">
+            {teamAssistants.length === 0 ? (
+              <span>No assistants yet.</span>
+            ) : (
+              teamAssistants.map((a, i) => (
+                <span key={a.id} className="inline-flex items-center gap-1">
+                  {i > 0 && <span aria-hidden>·</span>}
+                  <Link
+                    to="/assistants/$assistantId"
+                    params={{ assistantId: a.id }}
+                    className="underline-offset-2 hover:text-ink hover:underline"
+                  >
+                    {a.name ?? "Untitled assistant"}
+                  </Link>
+                  {workingAssistantIds.has(a.id) && <span className="text-amber">(working)</span>}
+                </span>
+              ))
+            )}
+            <Link to="/assistants" className="text-moss underline-offset-2 hover:underline">
+              Manage assistants →
+            </Link>
+          </div>
         </header>
 
         {/* Activity feed */}
