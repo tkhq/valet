@@ -30,6 +30,7 @@ export class Engine {
 
     const { attachment, sandbox, policySandbox } = await this.materializeSandbox(
       id,
+      { orgId: opts.orgId, ownerId: opts.userId },
       opts.sandbox,
       opts.sandboxReadyTimeoutMs,
       opts.specProvider,
@@ -48,6 +49,7 @@ export class Engine {
     if (!data) throw new Error(`session not found: ${args.sessionId}`);
     const { attachment, sandbox, policySandbox } = await this.materializeSandbox(
       args.sessionId,
+      { orgId: args.options.orgId, ownerId: args.options.userId },
       args.options.sandbox,
       args.options.sandboxReadyTimeoutMs,
       args.options.specProvider,
@@ -85,6 +87,7 @@ export class Engine {
    */
   private async materializeSandbox(
     sessionId: string,
+    identity: { orgId: string; ownerId: string },
     arg: Sandbox | SandboxCreateOpts | undefined,
     readyTimeoutMs: number | undefined,
     specProvider?: SpecProvider,
@@ -102,8 +105,15 @@ export class Engine {
       // reconcile sweep's orphan detection depends on it. The stamp is
       // applied AFTER the spread and unconditionally: an opts object cloned
       // from another session (or carrying an explicit `sessionId: undefined`
-      // key) must never annotate the sandbox with the wrong owner.
-      const createOpts: SandboxCreateOpts = { ...((arg ?? {}) as SandboxCreateOpts), sessionId };
+      // key) must never annotate the sandbox with the wrong owner. The
+      // org/owner stamp follows the same rule — workspace-persistence
+      // tenant isolation (INV-3) keys checkpoints off these values.
+      const createOpts: SandboxCreateOpts = {
+        ...((arg ?? {}) as SandboxCreateOpts),
+        sessionId,
+        orgId: identity.orgId,
+        ownerId: identity.ownerId,
+      };
       attachment = new SandboxAttachment(provider, createOpts, specProvider);
     }
     const policySandbox = new PolicySandbox(attachment, { readyTimeoutMs });

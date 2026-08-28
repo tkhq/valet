@@ -36,6 +36,12 @@ interface Instruments {
   sandboxDestroyed: Counter;
   sandboxFlagged: Counter;
   sandboxCapacityWait: Histogram;
+  workspaceCheckpoints: Counter;
+  workspaceCheckpointsFailed: Counter;
+  workspaceCheckpointBytes: Counter;
+  workspaceRestores: Counter;
+  workspaceRestoresFailed: Counter;
+  workspaceRestoreColdStarts: Counter;
 }
 
 let instruments: Instruments | null = null;
@@ -97,6 +103,25 @@ function inst(): Instruments {
       unit: "ms",
       description:
         "Time a sandbox create spent waiting at the per-org capacity gate, by outcome (admitted/timeout). Non-zero rates mean an org is contending for its sandbox ceiling.",
+    }),
+    workspaceCheckpoints: meter.createCounter("valet.workspace.checkpoint_total", {
+      description: "Workspace checkpoint attempts, by backend and outcome",
+    }),
+    workspaceCheckpointsFailed: meter.createCounter("valet.workspace.checkpoint_failed", {
+      description:
+        "Workspace checkpoints that failed. Best-effort by default (INV-7): a failure never blocks the lifecycle, so this counter is the visibility.",
+    }),
+    workspaceCheckpointBytes: meter.createCounter("valet.workspace.checkpoint_bytes", {
+      description: "Bytes committed by successful workspace checkpoints, by backend",
+    }),
+    workspaceRestores: meter.createCounter("valet.workspace.restore_total", {
+      description: "Workspace restore attempts, by backend and outcome",
+    }),
+    workspaceRestoresFailed: meter.createCounter("valet.workspace.restore_failed", {
+      description: "Workspace restores that failed (fell back to a cold start under the default policy)",
+    }),
+    workspaceRestoreColdStarts: meter.createCounter("valet.workspace.restore_cold_start_total", {
+      description: "Workspace opens that started cold from the image (no committed checkpoint)",
     }),
   };
   return instruments;
@@ -193,4 +218,31 @@ export function recordSandboxCapacityWait(waitedMs: number, outcome: "admitted" 
 
 export function recordGateUnownedExpired(gateType: string): void {
   inst().gatesUnownedExpired.add(1, { type: gateType });
+}
+
+/** A workspace checkpoint attempt (workspace-persistence spec, Part 07.2).
+ * Successful commits also record their size. */
+export function recordWorkspaceCheckpoint(
+  backend: string,
+  outcome: "committed" | "skipped" | "failed",
+  sizeBytes?: number,
+): void {
+  const i = inst();
+  i.workspaceCheckpoints.add(1, { backend, outcome });
+  if (outcome === "failed") i.workspaceCheckpointsFailed.add(1, { backend });
+  if (outcome === "committed" && sizeBytes !== undefined && sizeBytes > 0) {
+    i.workspaceCheckpointBytes.add(sizeBytes, { backend });
+  }
+}
+
+/** A workspace restore attempt. `cold_start` means no committed checkpoint
+ * existed and the sandbox started from the baked image. */
+export function recordWorkspaceRestore(
+  backend: string,
+  outcome: "restored" | "cold_start" | "failed",
+): void {
+  const i = inst();
+  i.workspaceRestores.add(1, { backend, outcome });
+  if (outcome === "failed") i.workspaceRestoresFailed.add(1, { backend });
+  if (outcome === "cold_start") i.workspaceRestoreColdStarts.add(1, { backend });
 }

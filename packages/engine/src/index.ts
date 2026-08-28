@@ -77,6 +77,8 @@ export {
   recordSettlement,
   recordToolExecution,
   recordTurn,
+  recordWorkspaceCheckpoint,
+  recordWorkspaceRestore,
   type SandboxDestroyReason,
   type SandboxFlagKind,
 } from "./metrics.js";
@@ -103,6 +105,28 @@ export {
   type PolicySandboxOptions,
 } from "./sandbox/policy.js";
 export { CappedOutputBuffer, omittedMarker } from "./sandbox/output-buffer.js";
+export {
+  NoneWorkspaceStore,
+  WORKSPACE_PERSISTENCE_BACKENDS,
+  DEFAULT_CHECKPOINT_IGNORE,
+  validateWorkspaceRef,
+  workspaceKey,
+  checkpointDataKey,
+  checkpointManifestKey,
+  latestPointerKey,
+  workspaceObjectPrefix,
+  type WorkspaceRef,
+  type CheckpointManifest,
+  type WorkspaceStore,
+  type WorkspacePersistenceBackend,
+} from "./sandbox/workspace-store.js";
+export {
+  decide as decideWorkspacePolicy,
+  type LifecycleEvent as WorkspaceLifecycleEvent,
+  type PolicyConfig as WorkspacePolicyConfig,
+  type PolicyInput as WorkspacePolicyInput,
+  type PolicyDecision as WorkspacePolicyDecision,
+} from "./sandbox/workspace-policy.js";
 // PgSessionStore lives in @valet/store-postgres.
 // LocalSandbox / LocalSandboxProvider live in @valet/sandbox-local.
 // DockerSandbox / DockerSandboxProvider live in @valet/sandbox-docker.
