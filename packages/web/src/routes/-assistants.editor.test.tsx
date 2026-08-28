@@ -176,11 +176,13 @@ describe("integrationOptions()", () => {
     expect(opts[0]).toEqual({
       service: "github",
       label: "GitHub",          // displayName wins
+      icon: "github",           // no services[].iconSlug -> plugin name
       actions: [{ id: "github.create_issue", name: "Create issue" }],
     });
     expect(opts[1]).toEqual({
       service: "bare",
       label: "bare-plugin",    // falls back to name
+      icon: "bare-plugin",
       actions: [{ id: "bare.ping", name: "Ping" }],
     });
   });

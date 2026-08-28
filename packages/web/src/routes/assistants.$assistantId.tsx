@@ -17,7 +17,10 @@ import { useMe, useTeams } from "~/api/settings";
 import { assistantLabel, canAdministerOwner } from "~/components/session/assistant-rail";
 import { Section } from "~/components/settings/section";
 import { FieldRow } from "~/components/settings/field-row";
+import { RadioCard } from "~/components/settings/radio-card";
+import { ServiceIcon } from "~/components/service-icon";
 import {
+  Badge,
   Button,
   ConfirmDialog,
   ErrorRow,
@@ -33,10 +36,12 @@ export const Route = createFileRoute("/assistants/$assistantId")({
 
 // ── pure helpers (exported for tests) ────────────────────────────────────
 
-/** One row per ActionPlugin routing service, across every plugin. */
+/** One row per ActionPlugin routing service, across every plugin. `icon` is
+ * the brand-mark slug `ServiceIcon` resolves (the same
+ * `services[0]?.iconSlug ?? name` fallback the integrations page uses). */
 export function integrationOptions(
   plugins: PluginSummary[] | undefined,
-): { service: string; label: string; actions: { id: string; name: string }[] }[] {
+): { service: string; label: string; icon: string; actions: { id: string; name: string }[] }[] {
   if (!plugins) return [];
   return plugins.flatMap((p) =>
     (p.actionServices ?? [])
@@ -44,6 +49,7 @@ export function integrationOptions(
       .map((s) => ({
         service: s.service,
         label: p.displayName ?? p.name,
+        icon: p.services[0]?.iconSlug ?? p.name,
         actions: s.actions.map((a) => ({ id: a.id, name: a.name })),
       })),
   );
@@ -59,6 +65,12 @@ export function canEditAssistant(
   me: { id: string; orgRole: "admin" | "member" } | undefined,
 ): boolean {
   return canAdministerOwner(assistant.owner, me, teams);
+}
+
+/** The shared page frame — the same shell every settings surface uses, so
+ * the editor never renders full-bleed. */
+function PageShell({ children }: { children: React.ReactNode }) {
+  return <div className="mx-auto max-w-3xl px-6 py-10 pb-24">{children}</div>;
 }
 
 // ── page component ────────────────────────────────────────────────────────
@@ -78,20 +90,22 @@ export function AssistantEditorPage() {
   const loadError = assistantsQ.error ?? meQ.error ?? teamsQ.error;
   if (loadError != null) {
     return (
-      <div className="space-y-3 py-8">
-        <ErrorRow>Could not load this assistant: {errorText(loadError)}</ErrorRow>
-        <Button
-          type="button"
-          variant="secondary"
-          onClick={() => {
-            void assistantsQ.refetch?.();
-            void meQ.refetch?.();
-            void teamsQ.refetch?.();
-          }}
-        >
-          Retry
-        </Button>
-      </div>
+      <PageShell>
+        <div className="space-y-3">
+          <ErrorRow>Could not load this assistant: {errorText(loadError)}</ErrorRow>
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => {
+              void assistantsQ.refetch?.();
+              void meQ.refetch?.();
+              void teamsQ.refetch?.();
+            }}
+          >
+            Retry
+          </Button>
+        </div>
+      </PageShell>
     );
   }
 
@@ -101,17 +115,23 @@ export function AssistantEditorPage() {
     teamsQ.data !== undefined;
 
   if (!resolved) {
-    return <LoadingRow className="py-8" />;
+    return (
+      <PageShell>
+        <LoadingRow />
+      </PageShell>
+    );
   }
 
   if (!assistant) {
     return (
-      <div className="py-8 text-sm text-muted">
-        This assistant does not exist or you cannot view it.{" "}
-        <Link to="/chat" className="underline hover:text-ink">
-          Open /chat and pick one from the sidebar.
-        </Link>
-      </div>
+      <PageShell>
+        <div className="text-sm text-muted">
+          This assistant does not exist or you cannot view it.{" "}
+          <Link to="/chat" className="underline hover:text-ink">
+            Open /chat and pick one from the sidebar.
+          </Link>
+        </div>
+      </PageShell>
     );
   }
 
@@ -129,18 +149,20 @@ export function AssistantEditorPage() {
     // form's useState would keep assistant A's edits and Save would write
     // them onto B. The key forces a fresh form per assistant. Same-id data
     // updates do NOT remount — the form's sync effect covers those.
-    <AssistantEditorForm
-      key={assistant.id}
-      assistant={assistant}
-      canEdit={canEdit}
-      integrationOpts={integrationOpts}
-      owningTeamName={owningTeam?.name}
-      pluginsResolved={pluginsQ.data !== undefined}
-      pluginsError={pluginsQ.error}
-      onRetryPlugins={() => {
-        void pluginsQ.refetch?.();
-      }}
-    />
+    <PageShell>
+      <AssistantEditorForm
+        key={assistant.id}
+        assistant={assistant}
+        canEdit={canEdit}
+        integrationOpts={integrationOpts}
+        owningTeamName={owningTeam?.name}
+        pluginsResolved={pluginsQ.data !== undefined}
+        pluginsError={pluginsQ.error}
+        onRetryPlugins={() => {
+          void pluginsQ.refetch?.();
+        }}
+      />
+    </PageShell>
   );
 }
 
@@ -157,7 +179,12 @@ function AssistantEditorForm({
 }: {
   assistant: AssistantSummary;
   canEdit: boolean;
-  integrationOpts: { service: string; label: string; actions: { id: string; name: string }[] }[];
+  integrationOpts: {
+    service: string;
+    label: string;
+    icon: string;
+    actions: { id: string; name: string }[];
+  }[];
   owningTeamName: string | undefined;
   pluginsResolved: boolean;
   pluginsError?: Error | null;
@@ -387,25 +414,66 @@ function AssistantEditorForm({
     : [];
 
   const label = assistantLabel(assistant);
+  const displayName = name.trim() || label;
+
+  // The wake sentence — the LITERAL persona prefix the engine injects into
+  // this assistant's systemPrompt (assistants/persona.ts), live from the
+  // unsaved fields so an edit shows its consequence before Save.
+  const previewName = name.trim();
+  const previewPersonality = personality.trim();
 
   return (
-    <div className="space-y-10 max-w-2xl">
-      {/* Ownership clause */}
-      <p className="text-sm text-muted">
-        {assistant.owner.type === "user"
-          ? "This assistant stays in your personal workspace."
-          : `This assistant belongs to ${owningTeamName ?? "this team"}. Everyone on the team can use it.`}
-      </p>
-
-      {/* Read-only notice */}
-      {!canEdit && (
-        <div className="rounded border border-line bg-ink-wash/40 px-3 py-2 text-sm text-muted">
-          Only team admins can edit this assistant.
+    <div className="space-y-12">
+      {/* ── Masthead ─────────────────────────────────────────────────── */}
+      <header className="space-y-5">
+        <div className="flex items-start gap-4">
+          <div
+            aria-hidden
+            className="grid h-12 w-12 shrink-0 place-items-center rounded-xl bg-moss-wash font-display text-xl font-semibold text-moss"
+          >
+            {displayName.charAt(0).toUpperCase()}
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="truncate font-display text-2xl text-ink">{displayName}</h1>
+              {assistant.isDefault && <Badge variant="accent">Default</Badge>}
+            </div>
+            <p className="mt-0.5 text-sm text-muted">
+              {assistant.owner.type === "user"
+                ? "This assistant stays in your personal workspace."
+                : `This assistant belongs to ${owningTeamName ?? "this team"}. Everyone on the team can use it.`}
+            </p>
+          </div>
         </div>
-      )}
 
-      {/* 1. Identity section */}
-      <Section title="Identity" description="Name and personality shown in the sidebar and at the top of each conversation.">
+        {/* The persona sentence, exactly as the next wake injects it. */}
+        <figure className="border-l-2 border-moss pl-4">
+          <figcaption className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted">
+            Wakes with
+          </figcaption>
+          {previewName ? (
+            <p className="mt-1 text-sm leading-relaxed text-ink">
+              “You are {previewName}.{previewPersonality ? ` ${previewPersonality}` : ""}”
+            </p>
+          ) : (
+            <p className="mt-1 text-sm leading-relaxed text-muted">
+              No persona yet. Name this assistant and it wakes with “You are {"{name}"}.”
+            </p>
+          )}
+        </figure>
+
+        {!canEdit && (
+          <div className="rounded border border-line bg-ink-wash px-3 py-2 text-sm text-muted">
+            Only team admins can edit this assistant.
+          </div>
+        )}
+      </header>
+
+      {/* ── 1. Identity ──────────────────────────────────────────────── */}
+      <Section
+        title="Identity"
+        description="Name and personality shown in the sidebar and at the top of each conversation."
+      >
         <FieldRow label="Name">
           <Input
             aria-label="Name"
@@ -415,7 +483,10 @@ function AssistantEditorForm({
             placeholder="Assistant name"
           />
         </FieldRow>
-        <FieldRow label="Personality" hint="Describes how the assistant speaks and approaches problems. Leave blank to use the default.">
+        <FieldRow
+          label="Personality"
+          hint="How the assistant speaks and approaches problems. Leave blank for the neutral default."
+        >
           <Textarea
             aria-label="Personality"
             value={personality}
@@ -425,10 +496,15 @@ function AssistantEditorForm({
             // The server cap: the API 400s a longer value, so the field stops
             // the overflow up front. One constant, imported from the wire.
             maxLength={PERSONALITY_INJECT_CAP}
-            placeholder="You are warm and direct."
+            placeholder="Warm and direct. Prefers checklists over prose."
           />
+          {personality.length > PERSONALITY_INJECT_CAP - 100 && (
+            <p className="mt-1 text-right text-xs text-muted">
+              {personality.length}/{PERSONALITY_INJECT_CAP}
+            </p>
+          )}
         </FieldRow>
-        <div className="py-4 flex items-center gap-3">
+        <div className="flex items-center gap-3 py-4">
           <Button
             type="button"
             onClick={saveIdentity}
@@ -443,37 +519,34 @@ function AssistantEditorForm({
         </div>
       </Section>
 
-      {/* 2. Skills section */}
-      <Section title="Skills" description="Which skills this assistant can use. Skills extend what the assistant knows how to do.">
-        <div className="py-4 space-y-4">
-          <div className="space-y-2">
-            <label className="flex items-center gap-2 text-sm cursor-pointer">
-              <input
-                type="radio"
-                name="skills-mode"
-                checked={skillsMode === "all"}
-                onChange={() => setSkillsMode("all")}
-                disabled={!canEdit}
-                aria-label="All skills"
-              />
-              All skills
-            </label>
-            <label className="flex items-center gap-2 text-sm cursor-pointer">
-              <input
-                type="radio"
-                name="skills-mode"
-                checked={skillsMode === "allowlist"}
-                onChange={() => setSkillsMode("allowlist")}
-                disabled={!canEdit}
-                aria-label="Only these skills"
-              />
-              Only these skills
-            </label>
+      {/* ── 2. Skills ────────────────────────────────────────────────── */}
+      <Section
+        title="Skills"
+        description="Which skills this assistant can use. Skills extend what the assistant knows how to do."
+      >
+        <div className="space-y-4 py-4">
+          <div role="radiogroup" aria-label="Skill access" className="grid gap-2 sm:grid-cols-2">
+            <RadioCard
+              title="All skills"
+              ariaLabel="All skills"
+              description="Everything in the catalog, including skills added later."
+              selected={skillsMode === "all"}
+              onSelect={() => setSkillsMode("all")}
+              disabled={!canEdit}
+            />
+            <RadioCard
+              title="Only these skills"
+              ariaLabel="Only these skills"
+              description="A fixed set. New skills stay off until you add them."
+              selected={skillsMode === "allowlist"}
+              onSelect={() => setSkillsMode("allowlist")}
+              disabled={!canEdit}
+            />
           </div>
 
           {skillsMode === "allowlist" &&
             (skillsError != null ? (
-              <div className="space-y-2 pl-2">
+              <div className="space-y-2">
                 <ErrorRow>Could not load the skill catalog: {errorText(skillsError)}</ErrorRow>
                 <Button
                   type="button"
@@ -487,53 +560,66 @@ function AssistantEditorForm({
                 </Button>
               </div>
             ) : !skillsResolved ? (
-              <LoadingRow label="Loading skills…" className="pl-2" />
+              <LoadingRow label="Loading skills…" />
             ) : (
-            <div className="space-y-3 pl-2">
-              {/* Dangling names (not in catalog) */}
-              {danglingNames.length > 0 && (
-                <div className="flex flex-wrap gap-2">
-                  {danglingNames.map((n) => (
-                    <span
-                      key={n}
-                      className="inline-flex items-center gap-1 rounded-full border border-warning-500/50 bg-warning-500/10 px-2.5 py-1 text-xs text-warning-700"
-                    >
-                      {n}
-                      <span className="text-[10px] opacity-70">(not found)</span>
-                      {canEdit && (
-                        <button
-                          type="button"
-                          onClick={() => removeSkill(n)}
-                          aria-label={`Remove ${n}`}
-                          className="ml-0.5 rounded text-warning-600 hover:text-warning-800"
-                        >
-                          ×
-                        </button>
-                      )}
-                    </span>
-                  ))}
-                </div>
-              )}
+              <div className="space-y-3">
+                {/* Dangling names (not in catalog) */}
+                {danglingNames.length > 0 && (
+                  <div className="flex flex-wrap gap-2">
+                    {danglingNames.map((n) => (
+                      // Wash + fg tokens, not a `warning-500/xx` slash class:
+                      // no warning scale exists, so those emit no rule at all
+                      // (the opacity-modifier trap, theme.css).
+                      <span
+                        key={n}
+                        className="inline-flex items-center gap-1 rounded-full bg-warning-wash px-2.5 py-1 text-xs text-warning-fg"
+                      >
+                        {n}
+                        <span className="text-[10px] opacity-70">(not found)</span>
+                        {canEdit && (
+                          <button
+                            type="button"
+                            onClick={() => removeSkill(n)}
+                            aria-label={`Remove ${n}`}
+                            className="ml-0.5 rounded text-warning-fg hover:opacity-70"
+                          >
+                            ×
+                          </button>
+                        )}
+                      </span>
+                    ))}
+                  </div>
+                )}
 
-              {/* Catalog skills */}
-              <div className="space-y-1.5 max-h-60 overflow-y-auto">
-                {[...catalogSkillNames].map((skillName) => (
-                  <label key={skillName} className="flex items-center gap-2 text-sm cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={allowedSkillNames.includes(skillName)}
-                      onChange={(e) => toggleSkill(skillName, e.target.checked)}
-                      disabled={!canEdit}
-                      aria-label={skillName}
-                    />
-                    {skillName}
-                  </label>
-                ))}
-                {catalogSkillNames.size === 0 && (
+                {/* Catalog skills */}
+                {catalogSkillNames.size === 0 ? (
                   <p className="text-xs text-muted">No skills available for this assistant.</p>
+                ) : (
+                  <div className="overflow-hidden rounded-lg border border-line">
+                    <div className="border-b border-line px-3 py-2 text-xs text-muted">
+                      {allowedSkillNames.length} of {catalogSkillNames.size} skills allowed
+                    </div>
+                    <div className="max-h-64 overflow-y-auto p-1">
+                      {[...catalogSkillNames].map((skillName) => (
+                        <label
+                          key={skillName}
+                          className="flex cursor-pointer items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm text-ink hover:bg-ink-wash"
+                        >
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 shrink-0 accent-moss"
+                            checked={allowedSkillNames.includes(skillName)}
+                            onChange={(e) => toggleSkill(skillName, e.target.checked)}
+                            disabled={!canEdit}
+                            aria-label={skillName}
+                          />
+                          <span className="truncate">{skillName}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
                 )}
               </div>
-            </div>
             ))}
 
           <div className="flex items-center gap-3">
@@ -552,8 +638,11 @@ function AssistantEditorForm({
         </div>
       </Section>
 
-      {/* 3. Integrations section */}
-      <Section title="Integrations" description="Which integrations this assistant can use. An integration is a connected service like GitHub.">
+      {/* ── 3. Integrations ──────────────────────────────────────────── */}
+      <Section
+        title="Integrations"
+        description="Which integrations this assistant can use. An integration is a connected service like GitHub."
+      >
         {pluginsError != null ? (
           <div className="space-y-2 py-4">
             <ErrorRow>Could not load integrations: {errorText(pluginsError)}</ErrorRow>
@@ -564,121 +653,136 @@ function AssistantEditorForm({
         ) : !pluginsResolved ? (
           <LoadingRow label="Loading integrations…" className="py-4" />
         ) : (
-        <div className="py-4 space-y-4">
-          <div className="space-y-2">
-            <label className="flex items-center gap-2 text-sm cursor-pointer">
-              <input
-                type="radio"
-                name="integrations-mode"
-                checked={integrationsMode === "all"}
-                onChange={() => setIntegrationsMode("all")}
+          <div className="space-y-4 py-4">
+            <div
+              role="radiogroup"
+              aria-label="Integration access"
+              className="grid gap-2 sm:grid-cols-2"
+            >
+              <RadioCard
+                title="All integrations"
+                ariaLabel="All integrations"
+                description="Every connected service, including ones connected later."
+                selected={integrationsMode === "all"}
+                onSelect={() => setIntegrationsMode("all")}
                 disabled={!canEdit}
-                aria-label="All integrations"
               />
-              All integrations
-            </label>
-            <label className="flex items-center gap-2 text-sm cursor-pointer">
-              <input
-                type="radio"
-                name="integrations-mode"
-                checked={integrationsMode === "allowlist"}
-                onChange={() => setIntegrationsMode("allowlist")}
+              <RadioCard
+                title="Only these integrations"
+                ariaLabel="Only these integrations"
+                description="A fixed set, with per-action excludes inside each service."
+                selected={integrationsMode === "allowlist"}
+                onSelect={() => setIntegrationsMode("allowlist")}
                 disabled={!canEdit}
-                aria-label="Only these integrations"
               />
-              Only these integrations
-            </label>
-          </div>
+            </div>
 
-          {integrationsMode === "allowlist" && (
-            <div className="space-y-3 pl-2">
-              {integrationOpts.map((opt) => {
-                const entry = allowedEntries.find((e) => e.service === opt.service);
-                const isChecked = entry !== undefined;
-                return (
-                  <div key={opt.service} className="space-y-1">
-                    <label className="flex items-center gap-2 text-sm font-medium cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={isChecked}
-                        onChange={(e) => toggleIntegration(opt.service, e.target.checked)}
-                        disabled={!canEdit}
-                        aria-label={opt.label}
-                      />
-                      {opt.label}
-                    </label>
-                    {isChecked && opt.actions.length > 0 && (
-                      <div className="pl-6 space-y-1">
-                        {opt.actions.map((action) => {
-                          const excluded = (entry?.excludeActions ?? []).includes(action.id);
-                          return (
-                            <label
-                              key={action.id}
-                              className="flex items-center gap-2 text-xs text-muted cursor-pointer"
-                            >
-                              <input
-                                type="checkbox"
-                                checked={excluded}
-                                onChange={(e) =>
-                                  toggleExcludeAction(opt.service, action.id, e.target.checked)
-                                }
-                                disabled={!canEdit}
-                                aria-label={`Exclude ${action.name}`}
-                              />
-                              Exclude: {action.name}
-                            </label>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-              {integrationOpts.length === 0 && (
+            {integrationsMode === "allowlist" &&
+              (integrationOpts.length === 0 ? (
                 <p className="text-xs text-muted">No integrations configured.</p>
+              ) : (
+                <div className="divide-y divide-line overflow-hidden rounded-lg border border-line">
+                  {integrationOpts.map((opt) => {
+                    const entry = allowedEntries.find((e) => e.service === opt.service);
+                    const isChecked = entry !== undefined;
+                    return (
+                      <div key={opt.service} className="px-3 py-2.5">
+                        <label className="flex cursor-pointer items-center gap-3">
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 shrink-0 accent-moss"
+                            checked={isChecked}
+                            onChange={(e) => toggleIntegration(opt.service, e.target.checked)}
+                            disabled={!canEdit}
+                            aria-label={opt.label}
+                          />
+                          <ServiceIcon slug={opt.icon} label={opt.label} size="sm" tone="quiet" />
+                          <span className="text-sm font-medium text-ink">{opt.label}</span>
+                        </label>
+                        {isChecked && opt.actions.length > 0 && (
+                          <div className="mt-2 space-y-0.5 pl-16">
+                            {opt.actions.map((action) => {
+                              const excluded = (entry?.excludeActions ?? []).includes(action.id);
+                              return (
+                                <label
+                                  key={action.id}
+                                  className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs text-muted hover:bg-ink-wash hover:text-ink"
+                                >
+                                  <input
+                                    type="checkbox"
+                                    className="h-3.5 w-3.5 shrink-0 accent-moss"
+                                    checked={excluded}
+                                    onChange={(e) =>
+                                      toggleExcludeAction(opt.service, action.id, e.target.checked)
+                                    }
+                                    disabled={!canEdit}
+                                    aria-label={`Exclude ${action.name}`}
+                                  />
+                                  Exclude: {action.name}
+                                </label>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+
+            <div className="flex items-center gap-3">
+              <Button
+                type="button"
+                onClick={saveIntegrations}
+                disabled={!canEdit || integrationsPatch.isPending}
+                aria-label="Save integrations"
+              >
+                {integrationsPatch.isPending ? "Saving…" : "Save integrations"}
+              </Button>
+              {integrationsPatch.error != null && (
+                <p className="text-xs text-danger-500">{errorText(integrationsPatch.error)}</p>
               )}
             </div>
-          )}
-
-          <div className="flex items-center gap-3">
-            <Button
-              type="button"
-              onClick={saveIntegrations}
-              disabled={!canEdit || integrationsPatch.isPending}
-              aria-label="Save integrations"
-            >
-              {integrationsPatch.isPending ? "Saving…" : "Save integrations"}
-            </Button>
-            {integrationsPatch.error != null && (
-              <p className="text-xs text-danger-500">{errorText(integrationsPatch.error)}</p>
-            )}
           </div>
-        </div>
         )}
       </Section>
 
-      {/* 4. Manage section */}
+      {/* ── 4. Manage ────────────────────────────────────────────────── */}
       <Section title="Manage" description="Promote or remove this assistant.">
-        <div className="py-4 flex flex-wrap items-center gap-3">
-          {!assistant.isDefault && (
-            <Button
-              type="button"
-              variant="secondary"
-              onClick={() => managePatch.mutate({ id: assistant.id, body: { isDefault: true } })}
-              disabled={!canEdit || managePatch.isPending}
-            >
-              Make default
-            </Button>
-          )}
-          {managePatch.error != null && (
-            <p className="text-xs text-danger-500">{errorText(managePatch.error)}</p>
-          )}
-
+        <div className="flex flex-col gap-2 py-4 sm:flex-row sm:items-start sm:justify-between sm:gap-6">
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-ink">Default assistant</div>
+            <p className="mt-0.5 text-xs text-muted">
+              Automations that target this workspace open the default.
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            {assistant.isDefault ? (
+              <Badge variant="accent">This is the default</Badge>
+            ) : (
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => managePatch.mutate({ id: assistant.id, body: { isDefault: true } })}
+                disabled={!canEdit || managePatch.isPending}
+              >
+                Make default
+              </Button>
+            )}
+            {managePatch.error != null && (
+              <p className="text-xs text-danger-500">{errorText(managePatch.error)}</p>
+            )}
+          </div>
+        </div>
+        <div className="flex flex-col gap-2 py-4 sm:flex-row sm:items-start sm:justify-between sm:gap-6">
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-ink">Archive</div>
+            <p className="mt-0.5 text-xs text-muted">
+              The assistant leaves the sidebar. The threads it holds are kept.
+            </p>
+          </div>
           {assistant.isDefault ? (
-            <div className="text-sm text-muted">
-              <span className="opacity-50">Archive</span>
-              <span className="ml-2 text-xs">Make another assistant the default first.</span>
-            </div>
+            <p className="text-xs text-muted">Make another assistant the default first.</p>
           ) : (
             <Button
               type="button"
