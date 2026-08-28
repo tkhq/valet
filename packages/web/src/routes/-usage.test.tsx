@@ -373,8 +373,15 @@ let orgResult: {
   isLoading: false,
 };
 
+// Mock useTeams — mutable so team-scope tests can add memberships.
+let teamsResult: {
+  data: { teams: { id: string; name: string; callerRole: "admin" | "member" | null }[] } | undefined;
+  isLoading: boolean;
+} = { data: { teams: [] }, isLoading: false };
+
 vi.mock("~/api/settings", () => ({
   useOrg: () => orgResult,
+  useTeams: () => teamsResult,
 }));
 
 // Mock the workspace resolution — mutable so tests can enter a team
@@ -510,21 +517,27 @@ describe("UsagePage — unpriced indicator", () => {
 });
 
 describe("UsagePage — scope toggle", () => {
-  it("does not show the scope toggle for non-admin users", () => {
+  it("does not show the scope toggle for non-admin users with no teams", () => {
     orgResult = {
       data: { features: { organizations: false }, callerRole: "member" },
       isLoading: false,
     };
+    teamsResult = { data: { teams: [] }, isLoading: false };
     render(<UsagePage />);
     expect(screen.queryByText("My usage")).toBeNull();
     expect(screen.queryByText("Organization")).toBeNull();
   });
+
+
+
+
 
   it("does not show scope toggle when organizations feature is off even for admin", () => {
     orgResult = {
       data: { features: { organizations: false }, callerRole: "admin" },
       isLoading: false,
     };
+    teamsResult = { data: { teams: [] }, isLoading: false };
     render(<UsagePage />);
     expect(screen.queryByText("My usage")).toBeNull();
   });

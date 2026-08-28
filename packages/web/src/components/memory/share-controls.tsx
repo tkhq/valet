@@ -21,7 +21,7 @@ export function ShareControls({ path }: { path: string }) {
   const { copied, copy } = useCopyToClipboard();
   const meQ = useMe({ enabled: panelOpen });
   const orgQ = useOrg({ enabled: panelOpen });
-  const artifactsQ = useArtifacts({ enabled: panelOpen });
+  const artifactsQ = useArtifacts(undefined, { enabled: panelOpen });
   const shareMutation = useShareArtifact();
   const patchMutation = usePatchArtifact();
   const revokeMutation = useRevokeArtifact();

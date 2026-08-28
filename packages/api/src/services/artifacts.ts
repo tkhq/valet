@@ -190,6 +190,26 @@ export async function listArtifacts(
   return db.select(summaryColumns).from(artifacts).where(where).orderBy(desc(artifacts.updatedAt));
 }
 
+/** One owner's artifacts, newest first (team dashboard design). The ROUTE
+ * gates access — team owners on membership — before calling this. */
+export async function listArtifactsForOwner(
+  db: AppDb,
+  orgId: string,
+  owner: { type: string; id: string },
+): Promise<ArtifactSummaryRow[]> {
+  return db
+    .select(summaryColumns)
+    .from(artifacts)
+    .where(
+      and(
+        eq(artifacts.orgId, orgId),
+        eq(artifacts.ownerType, owner.type),
+        eq(artifacts.ownerId, owner.id),
+      ),
+    )
+    .orderBy(desc(artifacts.updatedAt));
+}
+
 export async function setArtifactVisibility(
   db: AppDb,
   id: string,

@@ -41,13 +41,13 @@
  * rename orphans the row and the next boot creates a second team beside it.
  */
 import { Hono } from "hono";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { NotFoundError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import type { AuthUser } from "../middleware/auth.js";
-import { teamMembers, teams, type TeamRow } from "../schema/index.js";
+import { agentSessions, childWatches, teamMembers, teams, type TeamRow } from "../schema/index.js";
 import { isOrgAdmin } from "../services/org.js";
-import { ensureDefaultAssistantSession } from "../assistants/service.js";
+import { ensureDefaultAssistantSession, listAssistantsForOwners } from "../assistants/service.js";
 import {
   addMember,
   canAdministerTeam,
@@ -73,6 +73,8 @@ import type {
   CreateTeamRequest,
   CreateTeamResponse,
   EnsureOrchestratorResponse,
+  GetTeamChildrenResponse,
+  TeamChildSummary,
   ListTeamMembersResponse,
   ListTeamsResponse,
   SetTeamMemberRoleRequest,
@@ -255,6 +257,86 @@ teamsRouter.post("/:id/orchestrator", async (c) => {
   );
 
   const body: EnsureOrchestratorResponse = { sessionId };
+  return c.json(body);
+});
+
+// ── Children (team dashboard) ───────────────────────────────────────────
+
+/**
+ * `GET /api/teams/:id/children` — the team mirror of
+ * `GET /api/orchestrator/children`: child runs spawned by EVERY assistant
+ * the team owns, newest first, capped at 20 (a dashboard feed, not a
+ * history — /sessions is the history). Rows carry the spawning assistant
+ * so the feed can attribute a run. Same member-or-org-admin gate as the
+ * roster; non-members get 404 (existence-hiding).
+ */
+teamsRouter.get("/:id/children", async (c) => {
+  const { db } = c.var.providers;
+  const user = c.var.user;
+  const id = c.req.param("id");
+
+  const team = await loadTeamInOrg(db, id, user.orgId);
+  if (!team) return c.json({ error: "team not found" }, 404);
+  if (!(await canViewTeam(db, id, user))) return c.json({ error: "team not found" }, 404);
+
+  const assistants = await listAssistantsForOwners(db, user.orgId, [{ type: "team", id }]);
+  const bySessionId = new Map(assistants.map((a) => [a.sessionId, a]));
+  if (bySessionId.size === 0) {
+    const empty: GetTeamChildrenResponse = { children: [] };
+    return c.json(empty);
+  }
+
+  const selection = {
+    sessionId: childWatches.childSessionId,
+    parentSessionId: childWatches.parentSessionId,
+    parentThreadId: childWatches.parentThreadId,
+    settled: childWatches.settled,
+    createdAt: childWatches.createdAt,
+    title: agentSessions.title,
+  };
+  const parentFilter = and(
+    inArray(childWatches.parentSessionId, [...bySessionId.keys()]),
+    isNull(childWatches.dismissedAt),
+  );
+  // Two reads, merged: the newest window feeds the dashboard, and RUNNING
+  // rows ride along unconditionally — a still-running child older than the
+  // window must not read as idle just because 20 quick runs settled after
+  // it started. Both are bounded; running rows cap at the same 20.
+  const [newest, running] = await Promise.all([
+    db
+      .select(selection)
+      .from(childWatches)
+      .innerJoin(agentSessions, eq(agentSessions.id, childWatches.childSessionId))
+      .where(parentFilter)
+      .orderBy(desc(childWatches.createdAt))
+      .limit(20),
+    db
+      .select(selection)
+      .from(childWatches)
+      .innerJoin(agentSessions, eq(agentSessions.id, childWatches.childSessionId))
+      .where(and(parentFilter, eq(childWatches.settled, false)))
+      .orderBy(desc(childWatches.createdAt))
+      .limit(20),
+  ]);
+  const seen = new Set<string>();
+  const rows = [...newest, ...running]
+    .filter((r) => (seen.has(r.sessionId) ? false : (seen.add(r.sessionId), true)))
+    .sort((a, b) => b.createdAt - a.createdAt);
+
+  const children: TeamChildSummary[] = rows.map((r) => {
+    const assistant = bySessionId.get(r.parentSessionId);
+    return {
+      sessionId: r.sessionId,
+      title: r.title ?? r.sessionId,
+      parentThreadId: r.parentThreadId,
+      status: r.settled ? "settled" : "running",
+      createdAt: r.createdAt,
+      assistantId: assistant?.id ?? "",
+      ...(assistant?.name != null ? { assistantName: assistant.name } : {}),
+    };
+  });
+
+  const body: GetTeamChildrenResponse = { children };
   return c.json(body);
 });
 

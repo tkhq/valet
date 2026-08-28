@@ -9,7 +9,7 @@ import { eq, inArray, sql, type SQL } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { orgs, users } from "../schema/index.js";
 import { isOrgAdmin } from "./org.js";
-import { getTeamInOrg, isTeamMember } from "./teams.js";
+import { canAdministerTeam, getTeamInOrg, isTeamMember } from "./teams.js";
 import type {
   UsageBreakdownResponse,
   UsageBucket,
@@ -56,7 +56,15 @@ function toNum(v: unknown): number {
 export type UsageScope =
   | { scope: "me"; orgId: string; userId: string }
   | { scope: "org"; orgId: string }
-  | { scope: "team"; orgId: string; teamId: string };
+  | {
+      scope: "team";
+      orgId: string;
+      teamId: string;
+      /** Whether the caller may see per-member rows (`byUser`, CSV
+       * attribution): true when they ADMINISTER the team. A plain member
+       * reads the team's aggregate, never colleagues' individual spend. */
+      byMember: boolean;
+    };
 
 /**
  * Resolves the scope for a usage query. `scope=org` covers every member of the
@@ -88,7 +96,9 @@ export async function resolveUsageScope(
     if (!team) return "team-not-found";
     const member = await isTeamMember(db, opts.requestedTeamId, opts.userId);
     if (!member) return "team-not-found";
-    return { scope: "team", orgId: opts.orgId, teamId: opts.requestedTeamId };
+    // Team admins (and org admins who are members) also read per-member rows.
+    const byMember = await canAdministerTeam(db, opts.requestedTeamId, opts.userId);
+    return { scope: "team", orgId: opts.orgId, teamId: opts.requestedTeamId, byMember };
   }
   return { scope: "me", orgId: opts.orgId, userId: opts.userId };
 }
@@ -164,7 +174,7 @@ export async function getUsageBreakdown(
     // could do float division on real Postgres → one bucket per row).
     db.execute(sql`SELECT (floor(created_at / ${DAY_MS}) * ${DAY_MS})::bigint AS day_ms, COALESCE(SUM(cost_total),0) AS cost_usd, COALESCE(SUM(total_tokens),0) AS total_tokens FROM cost_entries WHERE ${where} GROUP BY 1 ORDER BY 1 ASC`) as Promise<{ rows: { day_ms: unknown; cost_usd: unknown; total_tokens: unknown }[] }>,
     db.execute(sql`SELECT ${BUCKET_COLS} FROM cost_entries WHERE ${where}`) as Promise<{ rows: BucketRow[] }>,
-    opts.scope.scope === "org"
+    opts.scope.scope === "org" || (opts.scope.scope === "team" && opts.scope.byMember)
       ? // Keep the NULL user_id group (team-/org-owned turns, e.g. team-owned
         // workflow runs) so the per-member sum reconciles with the total —
         // dropping it made Σ byUser < totalCostUsd.
@@ -174,7 +184,7 @@ export async function getUsageBreakdown(
 
   const total = toBucket(totals.rows[0]);
   let byUserOut: (UsageBucket & { userId: string; name: string })[] | undefined;
-  if (opts.scope.scope === "org") {
+  if (opts.scope.scope === "org" || (opts.scope.scope === "team" && opts.scope.byMember)) {
     const ids = byUser.rows.map((r) => r.user_id).filter((id): id is string => id !== null);
     const userRows = ids.length === 0 ? [] : await db.select({ id: users.id, name: users.name, email: users.email }).from(users).where(inArray(users.id, ids));
     const nameById = new Map(userRows.map((u) => [u.id, u.name || u.email] as const));
@@ -313,12 +323,13 @@ function csvEscape(v: unknown): string {
 }
 
 /** One CSV row per billable turn for the window/scope, capped at 100k rows.
- * Team scope blanks `user_id`: per-member attribution is an org-admin view
- * (`byUser` in the breakdown), and the CSV must not let a plain team member
- * reconstruct it with one GROUP BY. */
+ * A plain member's team export blanks `user_id`: per-member attribution
+ * follows the breakdown's byUser rule (org scope, or a team scope whose
+ * caller administers the team), and the CSV must not let a plain team
+ * member reconstruct it with one GROUP BY. */
 export async function getUsageExportCsv(db: AppDb, opts: { windowMs: number; scope: UsageScope }): Promise<string> {
   const since = Date.now() - opts.windowMs;
-  const withholdUserId = opts.scope.scope === "team";
+  const withholdUserId = opts.scope.scope === "team" && !opts.scope.byMember;
   interface Row {
     created_at: unknown; use_case: string; model: string | null; session_id: string | null; workflow_run_id: string | null;
     user_id: string | null; input_tokens: unknown; output_tokens: unknown; cache_read_tokens: unknown; cache_write_tokens: unknown;

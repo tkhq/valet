@@ -10,6 +10,7 @@ import {
   type UseQueryOptions,
 } from "@tanstack/react-query";
 import type {
+  GetTeamChildrenResponse,
   GetOrchestratorChildrenResponse,
   GetOrchestratorInfoResponse,
 } from "@valet/api/wire";
@@ -37,6 +38,21 @@ export function useOrchestratorChildren(
   return useQuery<GetOrchestratorChildrenResponse>({
     queryKey: qkOrchestrator.children(),
     queryFn: () => api.getOrchestratorChildren(),
+    ...opts,
+  });
+}
+
+/** A team's assistant runs — the team mirror of `useOrchestratorChildren`
+ * (team dashboard design). Runs move, so refetch on the same cadence the
+ * personal children query uses. */
+export function useTeamChildren(
+  teamId: string,
+  opts?: Partial<UseQueryOptions<GetTeamChildrenResponse>>,
+) {
+  return useQuery<GetTeamChildrenResponse>({
+    queryKey: ["teams", teamId, "children"],
+    queryFn: () => api.getTeamChildren(teamId),
+    refetchInterval: 30_000,
     ...opts,
   });
 }

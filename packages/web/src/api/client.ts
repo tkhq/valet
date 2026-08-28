@@ -105,6 +105,7 @@ import type {
   ListTeamsResponse,
   ListThreadsResponse,
   ListWorkflowRunsResponse,
+  GetTeamChildrenResponse,
   ListWorkflowTriggersResponse,
   WorkflowRunOutcome,
   WorkflowRunStatus,
@@ -484,7 +485,10 @@ export const api = {
     request<GetArtifactResponse>("GET", `/artifacts/${encodeURIComponent(token)}`),
   shareArtifact: (body: ShareArtifactRequest) =>
     request<ShareArtifactResponse>("POST", "/artifacts/share", body),
-  listArtifacts: () => request<ListArtifactsResponse>("GET", "/artifacts"),
+  getTeamChildren: (teamId: string) =>
+    request<GetTeamChildrenResponse>("GET", `/teams/${encodeURIComponent(teamId)}/children`),
+  listArtifacts: (owner?: OwnerFilter) =>
+    request<ListArtifactsResponse>("GET", `/artifacts${ownerQuery(owner)}`),
   patchArtifact: (id: string, body: PatchArtifactRequest) =>
     request<PatchArtifactResponse>("PATCH", `/artifacts/${encodeURIComponent(id)}`, body),
   revokeArtifact: (id: string) =>
@@ -648,7 +652,7 @@ export const api = {
   },
   // Cross-workflow run list. `parentRunId` is how a batch parent's child
   // runs come back in one request.
-  listRuns: (opts?: WorkflowRunFilter): Promise<ListWorkflowRunsResponse> => {
+  listRuns: (opts?: WorkflowRunFilter): Promise<ListAllWorkflowRunsResponse> => {
     // An any-of filter with no values matches nothing. A query string cannot
     // carry an empty repeated field, so an unguarded request would drop the
     // filter and list every readable run — the opposite of what was asked.
@@ -664,7 +668,7 @@ export const api = {
     if (opts?.limit) qs.set("limit", String(opts.limit));
     if (opts?.cursor) qs.set("cursor", opts.cursor);
     const tail = qs.toString() ? `?${qs}` : "";
-    return request<ListWorkflowRunsResponse>("GET", `/workflows/runs${tail}`);
+    return request<ListAllWorkflowRunsResponse>("GET", `/workflows/runs${tail}`);
   },
   getWorkflowPermissions: (id: string) =>
     request<GetWorkflowPermissionsResponse>(

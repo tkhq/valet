@@ -533,8 +533,10 @@ export function UsagePage() {
               )}
             </div>
 
-            {/* By member — org scope only, when byUser present */}
-            {scope === "org" && byUserRows.length > 0 && (
+            {/* By member — whenever the server sent rows: org scope, or a
+                team scope where the caller administers the team. The SERVER
+                decides who may see per-member spend. */}
+            {byUserRows.length > 0 && (
               <div>
                 <h2 className="text-sm font-medium text-ink mb-3">By member</h2>
                 <div className="overflow-x-auto rounded border border-line">

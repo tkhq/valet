@@ -172,20 +172,32 @@ describe("GET /api/usage — scope=team", () => {
     expect(px.items).toEqual([]);
   });
 
-  it("CSV export carries the team's rows only, names the team in the filename, and withholds user_id", async () => {
+  it("CSV export carries the team's rows only, names the team in the filename, and withholds user_id from a plain member", async () => {
     api = await bootTestApi();
     const now = Date.now();
     await seedTeamSpend(api, now);
+    // local-user is an org admin in the stub, so THEIR export keeps
+    // attribution (byMember). The withhold arm needs a plain member.
+    await api.providers.db
+      .insert(teamMembers)
+      .values({ teamId: "team-x", userId: "test-member", role: "member" });
 
-    const res = await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d&scope=team&teamId=team-x`);
-    expect(res.status).toBe(200);
-    expect(res.headers.get("content-disposition")).toContain("valet-usage-team-team-x-30d.csv");
-    const text = await res.text();
-    expect(text).toContain("s-team");
-    expect(text).not.toContain("s-mine");
-    // Per-member attribution stays an org-admin view (byUser); the team CSV
-    // must not carry it.
-    expect(text).not.toContain("local-user");
+    const adminRes = await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d&scope=team&teamId=team-x`);
+    expect(adminRes.status).toBe(200);
+    expect(adminRes.headers.get("content-disposition")).toContain("valet-usage-team-team-x-30d.csv");
+    const adminText = await adminRes.text();
+    expect(adminText).toContain("s-team");
+    expect(adminText).not.toContain("s-mine");
+    expect(adminText).toContain("local-user");
+
+    const memberRes = await fetch(`${api.baseUrl}/api/usage/export.csv?window=30d&scope=team&teamId=team-x`, {
+      headers: { "x-valet-test-user-id": "test-member" },
+    });
+    const memberText = await memberRes.text();
+    expect(memberText).toContain("s-team");
+    // Per-member attribution follows byUser's admin gate; a plain member's
+    // CSV must not carry it.
+    expect(memberText).not.toContain("local-user");
   });
 });
 

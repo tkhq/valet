@@ -190,6 +190,38 @@ export interface AssistantOwner {
   id: string;
 }
 
+/** Which skills reach the assistant's session. Absent or `mode: "all"` is
+ * today's behavior: every skill the owner can reach. Names are the merge
+ * key stored skills already shadow plugin skills by. */
+export type AssistantSkillsBehavior =
+  | { mode: "all" }
+  | { mode: "allowlist"; names: string[] };
+
+/** One attached integration. `service` is the ActionPlugin routing key
+ * (e.g. "github"). `excludeActions` holds fully-qualified action ids
+ * (e.g. "github.create_issue"), the same ids the action-policy tables use. */
+export interface AssistantIntegrationEntry {
+  service: string;
+  excludeActions?: string[];
+}
+
+export type AssistantIntegrationsBehavior =
+  | { mode: "all" }
+  | { mode: "allowlist"; entries: AssistantIntegrationEntry[] };
+
+/** Per-assistant behavior config (`docs/specs/2026-08-18-assistant-editor-design.md`).
+ * A null/absent field means "everything", which is what every pre-existing
+ * assistant has. */
+export interface AssistantBehavior {
+  skills?: AssistantSkillsBehavior;
+  integrations?: AssistantIntegrationsBehavior;
+}
+
+/** Server cap on `personality` length, shared so the editor's `maxLength`
+ * and the API's 400 agree (the API enforces it; `assistants/persona.ts`
+ * also slices at injection time). */
+export const PERSONALITY_INJECT_CAP = 500;
+
 export interface AssistantSummary {
   id: string;
   owner: AssistantOwner;
@@ -205,6 +237,12 @@ export interface AssistantSummary {
    * per owner. */
   isDefault: boolean;
   createdAt: number;
+  /** Absent until someone sets it. When absent the session falls back to the
+   * owner's assistant/personality.md memory file. `""` means explicitly
+   * cleared: the neutral persona, with no file fallback. */
+  personality?: string;
+  /** Absent means every skill and integration (the pre-config behavior). */
+  behavior?: AssistantBehavior;
 }
 
 export interface ListAssistantsResponse {
@@ -216,6 +254,8 @@ export interface ListAssistantsResponse {
 export interface CreateAssistantRequest {
   name?: string;
   owner?: AssistantOwner;
+  personality?: string;
+  behavior?: AssistantBehavior;
 }
 
 export type CreateAssistantResponse = AssistantSummary;
@@ -224,8 +264,16 @@ export type CreateAssistantResponse = AssistantSummary;
  * demotes the previous default in the same write — a principal is never
  * left with none, which would strand every automation that targets it. */
 export interface PatchAssistantRequest {
-  name?: string;
+  /** null clears the name; the session then drops the persona prefix and
+   * the UI shows its placeholder label. */
+  name?: string | null;
   isDefault?: true;
+  /** null clears the personality: the session keeps only its name ("You are
+   * {name}."). The legacy memory-file fallback applies only to assistants
+   * whose personality was never set through this API. */
+  personality?: string | null;
+  /** null clears back to "everything". */
+  behavior?: AssistantBehavior | null;
 }
 
 export type PatchAssistantResponse = AssistantSummary;
@@ -238,7 +286,9 @@ export interface EnsureAssistantSessionResponse {
 }
 
 /** GET /api/orchestrator/info — assistant identity + presence (assistant-
- * centered web UI decision 4). Never creates the engine session. */
+ * centered web UI decision 4). Never creates the engine session.
+ * `personality` is the EFFECTIVE value the next wake applies: the
+ * assistants.personality column when set, else the legacy memory file. */
 export interface GetOrchestratorInfoResponse {
   sessionId: string;
   name: string | null;
@@ -247,9 +297,11 @@ export interface GetOrchestratorInfoResponse {
   activeChildren: number;
 }
 
-/** PATCH /api/orchestrator/info — `name` sets `assistants.name` on the
- * caller's default assistant; `personality` writes the
- * `assistant/personality.md` memory file (decision 5). */
+/** PATCH /api/orchestrator/info — both fields write the caller's default
+ * `assistants` row (the same write path as PATCH /api/assistants/:id, so a
+ * personality saved here is the one the next wake applies). `personality`
+ * also refreshes the legacy `assistant/personality.md` memory file for the
+ * assistant's own self-edit surface. */
 export interface PatchOrchestratorInfoRequest {
   name?: string;
   personality?: string;
@@ -272,6 +324,21 @@ export interface OrchestratorChildSummary {
  * caller's orchestrator (decision 6). */
 export interface GetOrchestratorChildrenResponse {
   children: OrchestratorChildSummary[];
+}
+
+/** One row of `GET /api/teams/:id/children` — a child run spawned by ANY of
+ * the team's assistants (team dashboard design), with the assistant that
+ * spawned it, so the feed can attribute the run. */
+export interface TeamChildSummary extends OrchestratorChildSummary {
+  assistantId: string;
+  /** Absent when the assistant is unnamed; the UI applies its label rule. */
+  assistantName?: string;
+}
+
+/** GET /api/teams/:id/children — newest first, capped at 20. Team members
+ * and org admins only; non-members get 404. */
+export interface GetTeamChildrenResponse {
+  children: TeamChildSummary[];
 }
 
 // ── REST: threads ─────────────────────────────────────────────────────────
@@ -1776,6 +1843,16 @@ export interface PluginServiceSummary {
   actions: PluginActionSummary[];
 }
 
+/** A plugin's actions grouped by ActionPlugin routing service — the key
+ * `AssistantBehavior.integrations` entries use. `services[].actions` groups
+ * by CREDENTIAL service instead and omits credential-less plugins, so the
+ * assistant editor reads this list. */
+export interface PluginActionServiceSummary {
+  service: string;
+  dynamic?: true;
+  actions: PluginActionSummary[];
+}
+
 export interface PluginSummary {
   name: string;
   version: string;
@@ -1796,6 +1873,12 @@ export interface PluginSummary {
   dynamic?: true;
   /** Empty when the plugin declares no `credentials` (nothing to connect). */
   services: PluginServiceSummary[];
+  /** Actions grouped by ActionPlugin routing service — one entry per
+   * `ActionPlugin.service`. Includes credential-less plugins that
+   * `services[].actions` omits. The assistant editor reads this list to
+   * populate the integrations allowlist. Present on all responses from v2+
+   * servers; absent on responses from older servers or test stubs. */
+  actionServices?: PluginActionServiceSummary[];
 }
 
 export interface ListPluginsResponse {
@@ -2173,6 +2256,11 @@ export interface ArtifactListItem {
   id: string;
   path: string;
   title: string;
+  /** The capability token, for in-app navigation (`/a/$token`). The web
+   * client must link with this, not `url`: `url` is the absolute SHARE
+   * link, whose origin is the deployment's public URL — in dev that is the
+   * api origin, which does not serve the SPA. */
+  token: string;
   url: string;
   visibility: ArtifactVisibility;
   /** Who shared it. An org admin's list contains every member's artifacts,
@@ -2267,8 +2355,10 @@ export type UsageScopeName = "me" | "org" | "team";
 
 /** `GET /api/usage/breakdown?window=&scope=me|org|team` — spend for a window
  * across ALL use cases (engine sessions + workflows + proxy), from the single
- * `cost_entries` definition. `scope=org` (org-admin only) covers every member;
- * `byUser` is present only then. `scope=team` covers one team's owned spend. */
+ * `cost_entries` definition. `scope=org` (org-admin only) covers every member.
+ * `scope=team` covers one team's owned spend; `byUser` is present for the org
+ * scope, and for a team scope when the caller ADMINISTERS the team — a plain
+ * member reads the team's aggregate without colleagues' individual spend. */
 export interface UsageBreakdownResponse {
   windowMs: number;
   scope: UsageScopeName;
@@ -2282,7 +2372,7 @@ export interface UsageBreakdownResponse {
   unpricedTurns: number;
   byUseCase: (UsageBucket & { useCase: UsageUseCase })[];
   byModel: (UsageBucket & { model: string | null })[];
-  /** Present only for `scope=org`. */
+  /** Org scope always; team scope when the caller administers the team. */
   byUser?: (UsageBucket & { userId: string; name: string })[];
   byDay: { dayMs: number; costUsd: number; totalTokens: number }[];
 }

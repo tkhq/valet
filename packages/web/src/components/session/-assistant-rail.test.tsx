@@ -31,20 +31,26 @@ let searchParams: { assistant?: string } = {};
 function RouterLinkStub({
   to,
   search,
+  params: routeParams,
   children,
   className,
 }: {
   to: string;
   search?: Record<string, string | undefined>;
+  params?: Record<string, string>;
   children: ReactNode;
   className?: string;
 }) {
-  const params = Object.entries(search ?? {}).filter(
+  // Interpolate named segments (:segmentName or $segmentName) from routeParams.
+  const resolved = routeParams
+    ? to.replace(/[:$]([A-Za-z0-9_]+)/g, (_, key: string) => routeParams[key] ?? `:${key}`)
+    : to;
+  const qs_entries = Object.entries(search ?? {}).filter(
     (entry): entry is [string, string] => entry[1] !== undefined,
   );
-  const qs = params.length > 0 ? `?${new URLSearchParams(params).toString()}` : "";
+  const qs = qs_entries.length > 0 ? `?${new URLSearchParams(qs_entries).toString()}` : "";
   return (
-    <a href={`${to}${qs}`} className={className}>
+    <a href={`${resolved}${qs}`} className={className}>
       {children}
     </a>
   );
@@ -450,6 +456,7 @@ describe("AssistantRail", () => {
     expect(screen.queryByText("Rename")).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Scratch actions" }));
+    expect(screen.getByText("Edit assistant")).toBeTruthy();
     expect(screen.getByText("Rename")).toBeTruthy();
     expect(screen.getByText("Archive")).toBeTruthy();
     expect(screen.getByText("Make default")).toBeTruthy();
