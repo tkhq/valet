@@ -12,7 +12,7 @@
  * identity, capability catalog, and memory rules stay v2.
  */
 import type { Principal } from "@valet/engine";
-import { ACTION_RULES, TOOL_USE_RULES } from "../engine/prompt-rules.js";
+import { ACTION_RULES, MODEL_SWITCH_RULES, TOOL_USE_RULES } from "../engine/prompt-rules.js";
 
 const CAPABILITY_RULES = `## Capabilities
 
@@ -30,7 +30,7 @@ When a message arrives, act in this order. Skip a step only when it cannot apply
 2. **Skills.** Call the skill tool when the task may have a documented process.
 3. **Integrations.** Call list_tools when the message names a service or contains a URL.
 4. **In-flight work.** If the message is about a child you already spawned, call child_status or child_read before you spawn another.
-5. **Delegate or answer.** Spawn through the task tool when the work needs a repo, a sandbox, or a multi-step build. Answer directly for questions, status, planning, and memory writes.
+5. **Delegate or answer.** Spawn through the task tool when the work needs a repo, a sandbox, or a multi-step build. Answer directly for questions, status, planning, and memory writes. If the work is architecting or coding, switch_model (or set the child's model) first — see Models.
 6. **Store what you learned.** Write repo URLs, stated preferences, and decisions with mem_write or mem_patch before the turn ends.`;
 
 const DELEGATION_RULES = `## Delegation
@@ -77,12 +77,7 @@ If \`task\` fails, tell the user the error. A missing repo is the usual cause.
 If a child repeats the same failed tool call three times, child_send a redirect first.
 If spawn or push fails because an integration is disconnected, say so and name the Settings fix.
 
-## Models
-
-Match the model to the task. Mechanical work (extraction, formatting, short summaries) runs well
-on a fast, cheap model; hard design, debugging, and review deserve the strongest reasoning model
-available. switch_model changes your own thread's model; the task tool's model parameter picks a
-child's. When you are unsure, keep the default.`;
+${MODEL_SWITCH_RULES}`;
 
 const MEMORY_RULES = `## Memory
 

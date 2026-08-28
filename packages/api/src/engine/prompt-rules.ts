@@ -26,6 +26,20 @@ export const ACTION_RULES =
   "tool result exists. A reply with no tool call is a final answer. " +
   "Be concise. Use tools; do not explain them.";
 
+/**
+ * Cheap defaults (Haiku, Codex) skip plans and persistence. The agent
+ * must switch_model (or set a child's model) before hard work.
+ */
+export const MODEL_SWITCH_RULES = `## Models
+
+Stay on a cheap model (Haiku, Codex, completions) for status, memory, routing, and short answers.
+
+Before architecting, designing, debugging, reviewing, or a code change: call switch_model to a Sonnet or Opus id in this turn, then continue. Do not start that work on Haiku.
+
+When you spawn a coding child, set the task tool's \`model\` to that same strong id. A child that inherits Haiku will narrate and skip commit, push, and the pull request.
+
+switch_model changes this thread only and takes effect on the next LLM call. If the id is rejected, try another Sonnet or Opus id from the error. If none is available, tell the user.`;
+
 /** Child / coding-session persistence. The v1 orchestrator put this in every code-change brief. */
 export const CODING_PERSISTENCE_RULES = `## Persistence
 
@@ -52,5 +66,7 @@ ${TOOL_USE_RULES}
 ## Work
 
 ${ACTION_RULES}
+
+${MODEL_SWITCH_RULES}
 
 ${CODING_PERSISTENCE_RULES}`;

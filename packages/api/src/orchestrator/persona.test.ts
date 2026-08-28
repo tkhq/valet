@@ -45,6 +45,14 @@ describe("orchestratorPersona", () => {
     expect(persona).toContain("switch_model");
   });
 
+  it("requires switch_model before architecting or coding", () => {
+    const persona = flat(orchestratorPersona({ type: "user", id: "u1" }));
+    expect(persona).toContain("Before architecting, designing, debugging, reviewing, or a code change");
+    expect(persona).toContain("call switch_model to a Sonnet or Opus id");
+    expect(persona).toContain("set the task tool's `model`");
+    expect(persona).toContain("switch_model (or set the child's model) first");
+  });
+
   it("names the push boundary and the child_status check", () => {
     const persona = flat(orchestratorPersona({ type: "user", id: "u1" }));
     expect(persona).toContain("no git or GitHub credentials");

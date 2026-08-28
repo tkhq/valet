@@ -3,6 +3,7 @@ import {
   ACTION_RULES,
   CODING_PERSISTENCE_RULES,
   CODING_SYSTEM_PROMPT,
+  MODEL_SWITCH_RULES,
   TOOL_USE_RULES,
 } from "./prompt-rules.js";
 
@@ -30,5 +31,10 @@ describe("coding system prompt (TKAI-239 v1 port)", () => {
     expect(prompt).toContain("The branch is pushed to the remote");
     expect(prompt).toContain("Do not spawn child sessions");
     expect(prompt).toContain("Treat the spawned branch as the base");
+  });
+
+  it("tells a cheap coding session to switch_model before hard work", () => {
+    expect(flat(CODING_SYSTEM_PROMPT)).toContain(flat(MODEL_SWITCH_RULES));
+    expect(CODING_SYSTEM_PROMPT).toContain("call switch_model to a Sonnet or Opus id");
   });
 });
