@@ -477,11 +477,22 @@ async function runBootChain(): Promise<void> {
     providers.sandboxProvider,
   );
   if (sweepWorkspaceCheckpoints && instanceConfig?.workspacePersistence?.policy.periodicCheckpoint) {
-    workspaceCheckpointSweep = startSweepTimer(
-      "WorkspaceCheckpointSweep",
-      instanceConfig.workspacePersistence.policy.minCheckpointIntervalMs,
-      sweepWorkspaceCheckpoints,
-    );
+    const intervalMs = instanceConfig.workspacePersistence.policy.minCheckpointIntervalMs;
+    workspaceCheckpointSweep = startSweepTimer("WorkspaceCheckpointSweep", intervalMs, async () => {
+      const startedAt = Date.now();
+      await sweepWorkspaceCheckpoints();
+      const tookMs = Date.now() - startedAt;
+      // The sweep timer silently drops ticks while a pass runs, so an
+      // over-interval pass stretches the periodic data-loss bound without
+      // any other signal. Alert, don't auto-repair: make it visible.
+      if (tookMs > intervalMs) {
+        console.warn(
+          `WorkspaceCheckpointSweep: pass took ${Math.round(tookMs / 1000)}s, longer than the ` +
+            `${Math.round(intervalMs / 1000)}s interval — the periodic checkpoint bound is stretched. ` +
+            "Raise minCheckpointIntervalMinutes or reduce workspace sizes.",
+        );
+      }
+    });
   }
 
   // Instance config reconciliation: apply the declarative config to the live

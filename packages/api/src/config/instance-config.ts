@@ -10,7 +10,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { WORKSPACE_PERSISTENCE_BACKENDS, type WorkspacePersistenceBackend } from "@valet/engine";
-import type { WorkspacePersistenceConfig } from "@valet/sandbox-kubernetes";
+import { DEFAULT_WORKSPACE_POLICY, type WorkspacePersistenceConfig } from "@valet/sandbox-kubernetes";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -798,15 +798,21 @@ function validateWorkspacePersistence(value: unknown, path: string): WorkspacePe
   if (!isRecord(policyRaw)) {
     err(`${path}: workspacePersistence.policy must be an object.`);
   }
+  // Defaults come from DEFAULT_WORKSPACE_POLICY — one source of truth for
+  // the policy defaults, shared with the provider package.
   const minutes =
-    policyRaw.minCheckpointIntervalMinutes === undefined ? 5 : policyRaw.minCheckpointIntervalMinutes;
+    policyRaw.minCheckpointIntervalMinutes === undefined
+      ? DEFAULT_WORKSPACE_POLICY.minCheckpointIntervalMs / 60_000
+      : policyRaw.minCheckpointIntervalMinutes;
   if (typeof minutes !== "number" || !Number.isFinite(minutes) || minutes <= 0) {
     err(
       `${path}: workspacePersistence.policy.minCheckpointIntervalMinutes must be a positive number, got ${JSON.stringify(minutes)}.`,
     );
   }
   const onRestoreFailureRaw =
-    policyRaw.onRestoreFailure === undefined ? "fallback" : policyRaw.onRestoreFailure;
+    policyRaw.onRestoreFailure === undefined
+      ? DEFAULT_WORKSPACE_POLICY.onRestoreFailure
+      : policyRaw.onRestoreFailure;
   if (onRestoreFailureRaw !== "fallback" && onRestoreFailureRaw !== "block") {
     err(
       `${path}: workspacePersistence.policy.onRestoreFailure must be "fallback" or "block", got ${JSON.stringify(onRestoreFailureRaw)}.`,
@@ -817,11 +823,11 @@ function validateWorkspacePersistence(value: unknown, path: string): WorkspacePe
     minCheckpointIntervalMs: minutes * 60_000,
     checkpointOnReap:
       policyRaw.checkpointOnReap === undefined
-        ? true
+        ? DEFAULT_WORKSPACE_POLICY.checkpointOnReap
         : assertBoolean(policyRaw.checkpointOnReap, "workspacePersistence.policy.checkpointOnReap", path),
     periodicCheckpoint:
       policyRaw.periodicCheckpoint === undefined
-        ? true
+        ? DEFAULT_WORKSPACE_POLICY.periodicCheckpoint
         : assertBoolean(policyRaw.periodicCheckpoint, "workspacePersistence.policy.periodicCheckpoint", path),
     onRestoreFailure,
   };
@@ -886,7 +892,9 @@ function validateWorkspacePersistence(value: unknown, path: string): WorkspacePe
       path,
     );
     if (storageClassName === "") {
-      err(`${path}: workspacePersistence.rwxVolume.storageClassName must not be empty.`);
+      err(
+        `${path}: workspacePersistence.rwxVolume.storageClassName must not be empty. Set it to the operator's ReadWriteMany StorageClass.`,
+      );
     }
     result.rwxVolume = { storageClassName };
   }
