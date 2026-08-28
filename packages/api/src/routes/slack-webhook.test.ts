@@ -11,7 +11,7 @@ import { createHmac } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { eventDropLog, events, eventSubscriptions } from "../schema/index.js";
+import { eventDeliveries, eventDropLog, events, eventSubscriptions } from "../schema/index.js";
 import { __resetSlackWebhookThrottle } from "./slack-webhook.js";
 
 let api: TestApi | undefined;
@@ -83,6 +83,28 @@ function dmMessage(): Record<string, unknown> {
   };
 }
 
+function reactionAdded(): Record<string, unknown> {
+  return {
+    type: "reaction_added",
+    user: "U100",
+    reaction: "tada",
+    item_user: "U200",
+    item: { type: "message", channel: "C500", ts: "1720000002.000100" },
+    event_ts: "1720000005.000200",
+  };
+}
+
+function appMention(): Record<string, unknown> {
+  return {
+    type: "app_mention",
+    user: "U100",
+    channel: "C500",
+    text: "<@U0BOT> ship it",
+    ts: "1720000002.000100",
+    event_ts: "1720000002.000100",
+  };
+}
+
 function homeOpened(): Record<string, unknown> {
   return {
     type: "app_home_opened",
@@ -108,6 +130,18 @@ async function eventCount(a: TestApi, dedupeKey: string): Promise<number> {
   const rows = await a.providers.db
     .select()
     .from(events)
+    .where(and(eq(events.orgId, "local-org"), eq(events.dedupeKey, dedupeKey)));
+  return rows.length;
+}
+
+/** Count `event_deliveries` written for this event, joined on its dedupeKey.
+ * A delivery row is the proof the event matched a subscription and was queued
+ * for the dispatcher — the hop the ingest tests below assert reaches. */
+async function deliveryCount(a: TestApi, dedupeKey: string): Promise<number> {
+  const rows = await a.providers.db
+    .select({ id: eventDeliveries.id })
+    .from(eventDeliveries)
+    .innerJoin(events, eq(eventDeliveries.eventId, events.id))
     .where(and(eq(events.orgId, "local-org"), eq(events.dedupeKey, dedupeKey)));
   return rows.length;
 }
@@ -282,8 +316,8 @@ describe("POST /api/channels/slack/webhook", () => {
     api = await bootTestApi({ plugins: [slackPlugin] });
     await seedRunningTransport(api);
 
-    // slack.message is an ephemeral catalog key: unsubscribed, it must never
-    // reach the events table.
+    // Ingest is match-gated: an unsubscribed event must never reach the
+    // events table.
     const unsubscribed = envelope(dmMessage(), "Ev-msg-1");
     expect((await post(api.baseUrl, unsubscribed, sign(unsubscribed))).status).toBe(200);
     await new Promise((resolve) => setTimeout(resolve, 300));
@@ -293,6 +327,56 @@ describe("POST /api/channels/slack/webhook", () => {
     const subscribed = envelope(dmMessage(), "Ev-msg-2");
     expect((await post(api.baseUrl, subscribed, sign(subscribed))).status).toBe(200);
     await expect.poll(() => eventCount(api!, "Ev-msg-2"), { timeout: 5_000 }).toBe(1);
+  });
+
+  it("ingests a signed reaction_added and queues a delivery for a matching subscription", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    await seedSubscription(api, ["slack.reaction_added"]);
+
+    const body = envelope(reactionAdded(), "Ev-react");
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+
+    // The event lands (reaction is not ephemeral) and a delivery is queued
+    // against the subscription — the full ingest → match → dispatch handoff.
+    await expect.poll(() => eventCount(api!, "Ev-react"), { timeout: 5_000 }).toBe(1);
+    await expect.poll(() => deliveryCount(api!, "Ev-react"), { timeout: 5_000 }).toBe(1);
+  });
+
+  it("de-duplicates a replayed reaction_added on event_id", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    await seedSubscription(api, ["slack.reaction_added"]);
+
+    const body = envelope(reactionAdded(), "Ev-react-dup");
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+    await expect.poll(() => eventCount(api!, "Ev-react-dup"), { timeout: 5_000 }).toBe(1);
+
+    // Same event_id, so ingest's (service, dedupeKey) conflict absorbs it.
+    const replay = await post(api.baseUrl, body, {
+      ...sign(body),
+      "x-slack-retry-num": "1",
+      "x-slack-retry-reason": "http_timeout",
+    });
+    expect(replay.status).toBe(200);
+    // Poll for the retry drop-log as the signal that the replay's
+    // fire-and-forget fan-out finished. A fixed sleep could assert before a
+    // duplicate delivery landed and pass vacuously.
+    await expect.poll(() => dropReasons(api!), { timeout: 5_000 }).toContain("slack_retry");
+    expect(await eventCount(api, "Ev-react-dup")).toBe(1);
+    expect(await deliveryCount(api, "Ev-react-dup")).toBe(1);
+  });
+
+  it("ingests a signed app_mention and queues a delivery for a matching subscription", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    await seedSubscription(api, ["slack.app_mention"]);
+
+    const body = envelope(appMention(), "Ev-mention");
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+
+    await expect.poll(() => eventCount(api!, "Ev-mention"), { timeout: 5_000 }).toBe(1);
+    await expect.poll(() => deliveryCount(api!, "Ev-mention"), { timeout: 5_000 }).toBe(1);
   });
 
   it("drops an update from another workspace even though its signature is valid", async () => {

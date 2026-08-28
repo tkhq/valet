@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { TriggerDef } from "@valet/engine";
-import { slackTriggerDefs } from "./triggers.js";
+import { slackTriggerDefs, slackTriggerEventTypes } from "./triggers.js";
 
 const SECRET = "test-signing-secret";
 
@@ -124,6 +124,29 @@ describe("slackTriggerDefs verify", () => {
     const fileShare = { type: "message", subtype: "file_share", channel: "C1", user: "U1", files: [{ id: "F1" }] };
     expect(await trigger.verify(signedRequest(envelope(fileShare, "Ev-fs")), { webhookSecret: SECRET })).not.toBeNull();
   });
+
+  it("accepts an app_mention and rejects it under the message family", async () => {
+    const mention = { type: "app_mention", user: "U1", channel: "C1", text: "<@UBOT> ship it", ts: "1700000000.000100" };
+
+    const mentionTrigger = findTrigger("slack.app_mention");
+    const verified = await mentionTrigger.verify(signedRequest(envelope(mention, "Ev-am")), { webhookSecret: SECRET });
+    expect(verified?.eventType).toBe("app_mention");
+    expect(verified?.deliveryId).toBe("Ev-am");
+
+    // The message trigger must not swallow an app_mention: its family list
+    // excludes the type, so it rejects rather than double-firing.
+    const messageTrigger = findTrigger("slack.message");
+    expect(await messageTrigger.verify(signedRequest(envelope(mention, "Ev-am2")), { webhookSecret: SECRET })).toBeNull();
+  });
+
+  it("drops a bot-authored app_mention so a workflow reply cannot self-trigger", async () => {
+    const trigger = findTrigger("slack.app_mention");
+    // A post the app itself made whose text @-mentions the bot fires an
+    // app_mention carrying bot_id. Delivering it would loop a workflow that
+    // replies with a mention. The bot_id guard drops it.
+    const botMention = { type: "app_mention", user: "UBOT", bot_id: "B999", channel: "C1", text: "<@UBOT> done" };
+    expect(await trigger.verify(signedRequest(envelope(botMention, "Ev-am-bot")), { webhookSecret: SECRET })).toBeNull();
+  });
 });
 
 describe("slackTriggerDefs toEvent", () => {
@@ -137,6 +160,16 @@ describe("slackTriggerDefs toEvent", () => {
     expect(normalized.refs).toMatchObject({ channel: "C0123", user: "U0456", reaction: "tada", item_user: "U0789" });
     expect(normalized.summary).toBe("reaction :tada: added in C0123 by U0456");
     expect(normalized.payload).toEqual(REACTION_EVENT);
+  });
+
+  it("normalizes an app_mention event", () => {
+    const trigger = findTrigger("slack.app_mention");
+    const event = { type: "app_mention", user: "U1", channel: "C9", text: "<@UBOT> hi", ts: "1700.5" };
+    const normalized = trigger.toEvent({ eventType: "app_mention", deliveryId: "Ev-am1", payload: event });
+    expect(normalized.key).toBe("slack.app_mention");
+    expect(normalized.actor).toEqual({ externalId: "U1" });
+    expect(normalized.refs).toMatchObject({ channel: "C9", user: "U1" });
+    expect(normalized.summary).toBe("app mentioned in C9 by U1");
   });
 
   it("normalizes a message event under the single slack.message key", () => {
@@ -199,6 +232,7 @@ describe("slackTriggerDefs catalog", () => {
     const keys = slackTriggerDefs.flatMap((t) => t.catalog.map((c) => c.key)).sort();
     expect(keys).toEqual(
       [
+        "slack.app_mention",
         "slack.message",
         "slack.reaction_added",
         "slack.reaction_removed",
@@ -214,16 +248,23 @@ describe("slackTriggerDefs catalog", () => {
     );
   });
 
-  it("marks only slack.message as ephemeral", () => {
-    for (const trigger of slackTriggerDefs) {
-      for (const entry of trigger.catalog) {
-        if (entry.key === "slack.message") {
-          expect(entry.ephemeral).toBe(true);
-        } else {
-          expect(entry.ephemeral ?? false).toBe(false);
-        }
-      }
-    }
+  it("exports every event type its defs match, for the manifest to subscribe", () => {
+    expect([...slackTriggerEventTypes].sort()).toEqual(
+      [
+        "app_mention",
+        "message",
+        "reaction_added",
+        "reaction_removed",
+        "member_joined_channel",
+        "member_left_channel",
+        "channel_created",
+        "channel_rename",
+        "channel_archive",
+        "channel_unarchive",
+        "file_shared",
+        "team_join",
+      ].sort(),
+    );
   });
 
   it("declares the spec's filter fields for slack.message", () => {

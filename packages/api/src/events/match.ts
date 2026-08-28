@@ -34,6 +34,28 @@ function asString(v: unknown): string | undefined {
   return typeof v === "string" ? v : typeof v === "number" ? String(v) : undefined;
 }
 
+/**
+ * Whether one subscription matches an event: its key patterns match AND its
+ * filters pass. The single predicate the ingest gate, the delivery match, and
+ * the redeliver route all share, so a change to match semantics cannot make
+ * the "should we store it" and "should we deliver it" decisions diverge.
+ *
+ * The two casts narrow the `unknown` jsonb columns; their shapes are owned by
+ * the subscriptions CRUD validator (`routes/events.ts`), the only writer of
+ * these columns, which writes exactly these types.
+ */
+export function subscriptionMatchesEvent(
+  sub: { eventKeys: unknown; filters: unknown },
+  eventKey: string,
+  payload: unknown,
+  catalog: EventCatalogEntry[],
+): boolean {
+  return (
+    eventKeyMatches(eventKey, sub.eventKeys as string[]) &&
+    filtersMatch(payload, eventKey, sub.filters as SubscriptionFilter[], catalog)
+  );
+}
+
 export function filtersMatch(
   payload: unknown,
   eventKey: string,

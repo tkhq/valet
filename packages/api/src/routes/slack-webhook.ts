@@ -14,8 +14,8 @@
  *   agent surface (`app_home_opened` on the Messages tab, `message.im`,
  *   `app_context_changed`) and Block Kit approval callbacks.
  * - events: the Slack `TriggerDef`s then `ingestEvent` — workflow
- *   subscriptions, where `ephemeral` catalog keys are match-gated so a
- *   firehose key never lands in the events table unsubscribed.
+ *   subscriptions. Ingest is match-gated: an event that matches no
+ *   subscription is dropped and never lands in the events table.
  *
  * ── Ack policy ───────────────────────────────────────────────────────────
  * Slack expects a response inside three seconds and redelivers up to three

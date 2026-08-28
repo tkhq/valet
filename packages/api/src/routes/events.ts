@@ -21,7 +21,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, events, eventSubscriptions } from "../schema/index.js";
 import { readOwnerFilter } from "./_owner-filter.js";
 import { catalogForService } from "../events/ingest.js";
-import { eventKeyMatches, filtersMatch, type SubscriptionFilter } from "../events/match.js";
+import { subscriptionMatchesEvent } from "../events/match.js";
 import { ownedDefinitionRow } from "../workflows/service.js";
 import { isTeamMember } from "../services/teams.js";
 import type {
@@ -405,14 +405,8 @@ eventsRouter.post("/events/:id/redeliver", async (c) => {
     .from(eventSubscriptions)
     .where(and(eq(eventSubscriptions.orgId, user.orgId), eq(eventSubscriptions.enabled, true)));
 
-  // Both jsonb columns come back `unknown`; their shapes are owned by
-  // `validateSubscription` above, which gates every write to this table.
   const catalog = catalogForService(plugins, event.service);
-  const matched = subs.filter(
-    (sub) =>
-      eventKeyMatches(event.eventKey, sub.eventKeys as string[]) &&
-      filtersMatch(event.payload, event.eventKey, sub.filters as SubscriptionFilter[], catalog),
-  );
+  const matched = subs.filter((sub) => subscriptionMatchesEvent(sub, event.eventKey, event.payload, catalog));
 
   if (matched.length > 0) {
     const now = Date.now();

@@ -5,6 +5,10 @@ import { slackPlugin } from "./actions/actions.js";
 import { slackTransportFactory } from "./transport/transport.js";
 import { slackTriggerDefs } from "./triggers.js";
 
+// Re-exported so the api's Slack app manifest can pin its bot-event
+// subscriptions against the event types these triggers actually match.
+export { slackTriggerEventTypes } from "./triggers.js";
+
 const skillMd = readFileSync(fileURLToPath(new URL("../skills/slack-tools/SKILL.md", import.meta.url)), "utf8");
 
 const plugin: ValetPlugin = {
