@@ -12,9 +12,13 @@ import { categoryLabel, LiveTestingPanel } from "./config-form";
 export function ReviewSummary({
   engagement,
   planCells,
+  showPlan = true,
 }: {
   engagement: SecurityEngagementWire;
   planCells: SecurityPlanCellWire[];
+  /** Show the plan list. The panel passes false once cells materialize, so the
+   * live cell rail is the single plan view and this stays config-only. */
+  showPlan?: boolean;
 }) {
   const focus = engagement.focus?.trim() ?? "";
   const invariants = engagement.invariants ?? [];
@@ -22,11 +26,12 @@ export function ReviewSummary({
   const hasScopeOrTools =
     (engagement.authorizedScope?.hosts.length ?? 0) > 0 ||
     (engagement.configTools?.length ?? 0) > 0;
+  const showPlanList = showPlan && planCells.length > 0;
   const hasAny =
     focus !== "" ||
     invariants.length > 0 ||
     categories.length > 0 ||
-    planCells.length > 0 ||
+    showPlanList ||
     hasScopeOrTools;
   if (!hasAny) return null;
 
@@ -67,7 +72,7 @@ export function ReviewSummary({
         </div>
       )}
 
-      {planCells.length > 0 && (
+      {showPlanList && (
         <div className="mt-2" data-testid="review-summary-plan">
           <span className="text-[11px] font-medium text-muted">Plan</span>
           <ol className="mt-1 flex flex-col gap-0.5">

@@ -200,18 +200,35 @@ export function EngagementPanel({
       />
       {/* The finalized config + plan, at-a-glance and read-only. The user
           configured this pre-creation on `/security/new`. */}
-      <ReviewSummary engagement={engagement} planCells={planCells} />
-      {coverageQ.data && <CoverageSection rollup={coverageQ.data.rollup} />}
+      {/* Config context; the plan list shows only before cells materialize —
+          once they do, the live cell rail below is the single plan view. */}
+      <ReviewSummary engagement={engagement} planCells={planCells} showPlan={cells.length === 0} />
+      {/* Blocking asks the human must answer (pivot-coordinator) — kept near the
+          top so they are not missed. */}
       {needs && needs.length > 0 && (
         <NeedsSection sessionId={sessionId} needs={needs} canAdminister={canAdminister} />
       )}
-      {/* The report section (M-P3): shown once the engagement has started — a
+
+      {/* The engagement steps and their live status — the single plan view. */}
+      {cells.length > 0 && (
+        <div className="flex items-baseline gap-2 border-b border-line px-4 pb-2 pt-3">
+          <h3 className="text-xs font-semibold text-ink">Steps</h3>
+          <span className="text-[11px] tabular-nums text-muted">
+            {cells.filter((c) => c.status === "completed").length}/{cells.length}
+          </span>
+        </div>
+      )}
+      <CellRail cells={cells} onOpenChild={onOpenChild} />
+
+      {coverageQ.data && <CoverageSection rollup={coverageQ.data.rollup} />}
+
+      {/* The report artifact (M-P3): shown once the engagement has started — a
           report exists, is generating, or is pending the report cell. Hidden
           while planning, where no report is possible yet. */}
       {engagement.status !== "planning" && (
         <ReportSection sessionId={sessionId} report={report} generating={reportGenerating} />
       )}
-      <CellRail cells={cells} onOpenChild={onOpenChild} />
+
       <div className="border-t border-line" />
       <FindingsReview
         sessionId={sessionId}

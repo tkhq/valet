@@ -8,7 +8,7 @@ import type {
 import { Button } from "~/components/primitives";
 import { ReviewCostLine } from "./cost-chip";
 import { RescanDiffBanner } from "./rescan-diff";
-import { SEVERITY_ORDER, SeverityBadge } from "./severity";
+import { SEVERITY_ORDER, SeverityBar } from "./severity";
 
 /**
  * The closed engagement's summary, at the top of the panel (spec §engagement
@@ -129,17 +129,11 @@ export function ManifestCard({
           className="mt-2"
         />
       )}
-      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-        {SEVERITY_ORDER.map((severity) =>
-          summary.distinctBySeverity[severity] > 0 ? (
-            <span key={severity} className="inline-flex items-center gap-1">
-              <SeverityBadge severity={severity} />
-              <span className="tabular-nums text-ink">{summary.distinctBySeverity[severity]}</span>
-            </span>
-          ) : null,
-        )}
-        {findings.length === 0 && <span className="text-muted">No findings reported.</span>}
-      </div>
+      {findings.length > 0 ? (
+        <SeverityBar counts={summary.distinctBySeverity} className="mt-2.5" />
+      ) : (
+        <div className="mt-2 text-xs text-muted">No findings reported.</div>
+      )}
       <div className="mt-1.5 text-[11px] text-muted">
         {summary.statusBreakdown.open} open · {summary.statusBreakdown.verified} verified ·{" "}
         {summary.statusBreakdown.refuted} refuted · {summary.issuesFiled} filed as issues ·{" "}

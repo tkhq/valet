@@ -44,6 +44,17 @@ const STATUS_VARIANT: Record<SecurityCellWire["status"], "neutral" | "accent" | 
   failed: "danger",
 };
 
+/** The solid dot color that leads each cell row — a status spine down the rail.
+ * Pending is a hairline; running is the accent (with a live ping); completed is
+ * success; yielded amber; failed danger. */
+const STATUS_DOT: Record<SecurityCellWire["status"], string> = {
+  pending: "bg-line",
+  running: "bg-moss",
+  completed: "bg-success-500",
+  yielded: "bg-amber-500",
+  failed: "bg-danger-500",
+};
+
 /** `checklist 14/47 · queue 3 pending` — done/total from the state doc's
  * counters, per the spec's example line. */
 export function progressLine(progress: NonNullable<SecurityCellWire["progress"]>): string {
@@ -140,6 +151,12 @@ function CellRow({
       )}
     >
       <div className="flex items-center gap-2 min-w-0">
+        <span className="relative flex h-2 w-2 shrink-0" aria-hidden>
+          {running && (
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-moss opacity-60" />
+          )}
+          <span className={cn("relative inline-flex h-2 w-2 rounded-full", STATUS_DOT[cell.status])} />
+        </span>
         <span className="font-mono font-medium text-ink truncate">{cell.dir}</span>
         {role ? (
           <Badge variant="neutral" aria-label={`${role} cell`}>

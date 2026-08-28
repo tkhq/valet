@@ -54,6 +54,52 @@ export function SeverityBadge({
   );
 }
 
+/** Solid severity fills for the distribution bar and legend dots. Critical rides
+ * danger; high/medium step down the amber ramp; low is the brand accent; info is
+ * neutral. One spelling with `SEVERITY_CLASS` above. */
+export const SEVERITY_FILL: Record<SecurityFindingSeverity, string> = {
+  critical: "bg-danger-500",
+  high: "bg-amber-500",
+  medium: "bg-amber-300",
+  low: "bg-accent-400 dark:bg-accent-500",
+  info: "bg-neutral-300 dark:bg-neutral-600",
+};
+
+/** A one-line severity distribution: a segmented bar over the total plus a
+ * count-per-severity legend. Renders nothing when the total is zero, so a
+ * caller can drop it in unconditionally. */
+export function SeverityBar({
+  counts,
+  className,
+}: {
+  counts: Partial<Record<SecurityFindingSeverity, number>>;
+  className?: string;
+}) {
+  const total = SEVERITY_ORDER.reduce((sum, s) => sum + (counts[s] ?? 0), 0);
+  if (total === 0) return null;
+  return (
+    <div className={cn("space-y-1.5", className)}>
+      <div className="flex h-1.5 w-full overflow-hidden rounded-full bg-line" aria-hidden>
+        {SEVERITY_ORDER.map((s) => {
+          const c = counts[s] ?? 0;
+          if (c === 0) return null;
+          return (
+            <div key={s} className={SEVERITY_FILL[s]} style={{ width: `${(c / total) * 100}%` }} />
+          );
+        })}
+      </div>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
+        {SEVERITY_ORDER.filter((s) => (counts[s] ?? 0) > 0).map((s) => (
+          <span key={s} className="inline-flex items-center gap-1 text-muted">
+            <span className={cn("h-2 w-2 rounded-full", SEVERITY_FILL[s])} aria-hidden />
+            <span className="tabular-nums font-medium text-ink">{counts[s]}</span> {s}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 const STATUS_CLASS: Record<SecurityFindingStatus, string> = {
   open: "bg-neutral-100 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300",
   verified: "bg-success-wash text-success-600 dark:text-success-500",

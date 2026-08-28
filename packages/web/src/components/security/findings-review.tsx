@@ -16,6 +16,7 @@ import {
 import type {
   SecurityCellWire,
   SecurityEngagementWire,
+  SecurityFindingSeverity,
   SecurityFindingWire,
 } from "@valet/api/wire";
 import type { SecurityFindingsFilters } from "~/api/security";
@@ -46,7 +47,7 @@ import { relativeTime } from "~/lib/relative-time";
 import { useResizablePane } from "~/lib/use-resizable-pane";
 import { ExportDialog } from "./export-dialog";
 import { FileIssueDialog, type FileIssueTarget } from "./file-issue-dialog";
-import { FindingStatusChip, SeverityBadge, severityRank } from "./severity";
+import { FindingStatusChip, SeverityBadge, SeverityBar, severityRank } from "./severity";
 
 /**
  * Findings review — the triage surface (valet-security design §Findings
@@ -185,6 +186,11 @@ export function FindingsReview({
   const query = useSecurityFindings(sessionId, filters, polling ? 5_000 : false);
   const findings = useMemo(() => flattenFindings(query.data?.pages), [query.data]);
   const rows = useMemo(() => groupFindings(findings, sort), [findings, sort]);
+  const severityCounts = useMemo(() => {
+    const counts: Partial<Record<SecurityFindingSeverity, number>> = {};
+    for (const f of findings) counts[f.severity] = (counts[f.severity] ?? 0) + 1;
+    return counts;
+  }, [findings]);
 
   // Selection: mount-time state from a prop (the permalink param), so the
   // useState pairs with a prop-synced effect gated by a userTouched ref —
@@ -368,6 +374,12 @@ export function FindingsReview({
           Export
         </Button>
       </div>
+
+      {findings.length > 0 && (
+        <div className="border-b border-line px-3 py-2">
+          <SeverityBar counts={severityCounts} />
+        </div>
+      )}
 
       {actionError && (
         <div className="px-3 py-1.5 text-xs text-danger-600 bg-danger-wash border-b border-line">

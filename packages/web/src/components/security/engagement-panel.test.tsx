@@ -308,13 +308,14 @@ describe("SecuritySessionLayout", () => {
     });
     renderPanel();
     const summary = await screen.findByTestId("review-summary");
-    // Focus + a category chip + the compact plan render read-only.
+    // Focus + a category chip render read-only in the summary.
     expect(summary.textContent).toContain("the multi-tenant data path");
     expect(summary.textContent).toContain("Authorization");
-    expect(summary.textContent).toContain("recon");
-    expect(summary.textContent).toContain("authz-sweep");
-    // The plan shows the triad flag inline.
-    expect(summary.textContent).toContain("triad");
+    // Once cells exist, the plan lives in the live cell rail (the Steps
+    // section), not duplicated in the summary.
+    expect(summary.textContent).not.toContain("authz-sweep");
+    expect(screen.getByText("Steps")).toBeTruthy();
+    expect(screen.getByText("01-recon")).toBeTruthy();
     // No editable editor renders on the session page.
     expect(screen.queryByTestId("config-form")).toBeNull();
     expect(screen.queryByTestId("plan-steps-editor")).toBeNull();

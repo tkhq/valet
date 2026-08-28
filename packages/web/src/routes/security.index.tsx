@@ -416,7 +416,7 @@ function ReviewRow({ session }: { session: SessionSummary }) {
 
   const status = engagement?.status;
   const meta = status ? STATUS_META[status] : null;
-  const done = cells.filter((c) => c.status === "settled").length;
+  const done = cells.filter((c) => c.status === "completed").length;
   const total = cells.length;
   const terminal = status === "completed" || status === "failed";
   const repoName = engagement?.repoFullName ?? session.title ?? session.workspace;
