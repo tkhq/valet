@@ -126,7 +126,10 @@ export function EngagementPanel({
     );
   }
   return (
-    <div className="flex flex-col min-h-0">
+    // `[&>*]:shrink-0` keeps every section at its natural height so the panel
+    // scrolls (the aside owns the scroll) instead of the flex column squeezing
+    // the report and findings when the plan is long.
+    <div className="flex flex-col min-h-0 [&>*]:shrink-0">
       {closed && (engagement.status === "completed" || engagement.status === "failed") && (
         <ManifestCard
           cells={cells}
@@ -209,16 +212,20 @@ export function EngagementPanel({
         <NeedsSection sessionId={sessionId} needs={needs} canAdminister={canAdminister} />
       )}
 
-      {/* The engagement steps and their live status — the single plan view. */}
+      {/* The engagement steps and their live status — the single plan view. A
+          long plan (triads multiply the cells) is bounded here and scrolls on
+          its own, so it never squeezes the report and findings below it. */}
       {cells.length > 0 && (
-        <div className="flex items-baseline gap-2 border-b border-line px-4 pb-2 pt-3">
+        <div className="flex shrink-0 items-baseline gap-2 border-b border-line px-4 pb-2 pt-3">
           <h3 className="text-xs font-semibold text-ink">Steps</h3>
           <span className="text-[11px] tabular-nums text-muted">
             {cells.filter((c) => c.status === "completed").length}/{cells.length}
           </span>
         </div>
       )}
-      <CellRail cells={cells} onOpenChild={onOpenChild} />
+      <div className="max-h-80 shrink-0 overflow-y-auto">
+        <CellRail cells={cells} onOpenChild={onOpenChild} />
+      </div>
 
       {coverageQ.data && <CoverageSection rollup={coverageQ.data.rollup} />}
 

@@ -397,7 +397,7 @@ export function FindingsReview({
           aria-label="Findings"
           tabIndex={0}
           onKeyDown={handleListKeyDown}
-          className="xl:w-[var(--sec-findings-list-w)] xl:max-w-[70%] xl:border-r border-b xl:border-b-0 border-line overflow-y-auto max-h-72 xl:max-h-none focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-400"
+          className="xl:w-[var(--sec-findings-list-w)] xl:max-w-[70%] xl:border-r border-b xl:border-b-0 border-line overflow-y-auto max-h-72 xl:max-h-[32rem] focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-400"
         >
           {query.isPending ? (
             <div className="px-3 py-4 text-xs text-muted">
@@ -447,7 +447,7 @@ export function FindingsReview({
         />
 
         {/* Detail */}
-        <div className="flex-1 min-w-0 overflow-y-auto">
+        <div className="flex-1 min-w-0 overflow-y-auto xl:max-h-[32rem]">
           {selected ? (
             <FindingDetail
               finding={selected}
