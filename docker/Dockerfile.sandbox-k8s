@@ -176,6 +176,17 @@ RUN case "${TARGETARCH:-amd64}" in \
 COPY docker/sec-preflight.sh /usr/local/bin/sec-preflight
 RUN chmod +x /usr/local/bin/sec-preflight
 
+# Live-testing tool bake (M-P4a proof). The declared-tool mechanism provisions a
+# repo's tools per engagement; this bakes ONE lightweight live tool as proof the
+# path reaches a real binary — `curl` (already installed above) plus a small fuzz
+# wordlist the dast/fuzz personas point at. A heavier scanner (nuclei, ZAP) is
+# provisioning DATA a repo declares in .valet/security.yml (a ToolDecl install/
+# image/mcp), installed per repo, NOT baked for every session. The live personas
+# read VALET_SECURITY_AUTHORIZED_SCOPE to bound their egress to the authorized
+# scope (M-P4b) — sandbox egress otherwise stays closed, same posture as the
+# static scanners above.
+COPY docker/sec-fuzz-wordlist.txt /usr/local/share/valet/sec-fuzz-wordlist.txt
+
 # Browser automation. The bundled `browser` plugin skill tells the agent it
 # has `agent-browser`; without these two layers the agent follows the skill
 # and bash answers "command not found".

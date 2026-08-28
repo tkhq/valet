@@ -59,6 +59,32 @@ export const SAST_PERSONA = "sast";
  * It reports no new findings and flips no statuses; it composes what the earlier
  * cells already ruled on. `review: false`. */
 export const REPORT_PERSONA = "report";
+/** The dast persona id: dynamic testing against a RUNNING target within the
+ * engagement's authorized scope, using the declared live tools (M-P4b). Probes
+ * every reachable endpoint x method x actor with OWASP-aligned checks. Never
+ * acts outside the authorized scope. */
+export const DAST_PERSONA = "dast";
+
+/** The fuzz persona id: mutation testing against a RUNNING target within the
+ * authorized scope, enumerating every input point x mutation family (M-P4b).
+ * Never acts outside scope. */
+export const FUZZ_PERSONA = "fuzz";
+
+/** The exploit persona id: drives a confirmed finding to a non-destructive
+ * proof of concept against a RUNNING target within the authorized scope
+ * (M-P4b). Never runs destructive payloads; never acts outside scope. */
+export const EXPLOIT_PERSONA = "exploit";
+
+/** The live personas (M-P4b): they operate against a running target within the
+ * authorized scope, so their dispatch prompt carries the scope and the egress
+ * gate applies. A cell whose persona is in this set is a "live" cell. */
+export const LIVE_PERSONAS: readonly string[] = [DAST_PERSONA, FUZZ_PERSONA, EXPLOIT_PERSONA];
+
+/** True when a persona id is a live persona (M-P4b) — it runs against a running
+ * target and needs the authorized scope + egress gate. */
+export function isLivePersona(persona: string): boolean {
+  return LIVE_PERSONAS.includes(persona);
+}
 
 // The api bundle's inline-assets step only inlines a `readFileSync(new
 // URL("<literal>", import.meta.url), "utf8")` whose literal is AT the call
@@ -101,6 +127,21 @@ export const BUNDLED_PERSONAS: readonly SecurityPersona[] = [
     id: REPORT_PERSONA,
     label: "Report",
     roleMarkdown: readFileSync(new URL("../../personas/report.md", import.meta.url), "utf8"),
+  },
+  {
+    id: DAST_PERSONA,
+    label: "DAST",
+    roleMarkdown: readFileSync(new URL("../../personas/dast.md", import.meta.url), "utf8"),
+  },
+  {
+    id: FUZZ_PERSONA,
+    label: "Fuzz",
+    roleMarkdown: readFileSync(new URL("../../personas/fuzz.md", import.meta.url), "utf8"),
+  },
+  {
+    id: EXPLOIT_PERSONA,
+    label: "Exploit",
+    roleMarkdown: readFileSync(new URL("../../personas/exploit.md", import.meta.url), "utf8"),
   },
 ];
 

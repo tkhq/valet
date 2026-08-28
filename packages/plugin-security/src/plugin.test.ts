@@ -18,6 +18,9 @@ describe("plugin manifest", () => {
       "attack-tree",
       "sast",
       "report",
+      "dast",
+      "fuzz",
+      "exploit",
     ]);
   });
 

@@ -737,6 +737,84 @@ steps:
     expect(engagement.plan).not.toContain("secrets-config");
   });
 
+  it("stores declared tools + authorized scope from the config (M-P4a/M-P4b)", async () => {
+    const CONFIG_WITH_TOOLS = `version: 1
+scope:
+  hosts:
+    - staging.example.com
+tools:
+  - id: nuclei
+    install: apt-get install -y nuclei
+    egress:
+      - staging.example.com
+  - id: zap
+    mcp:
+      url: http://127.0.0.1:8090
+      prefix: mcp__zap__
+steps:
+  - ordinal: 1
+    persona: code-review
+    mode: fresh
+    name: recon
+    playbook: recon
+    goal: Map the codebase and seed the checklist
+    reads: []
+  - ordinal: 2
+    persona: dast
+    mode: fresh
+    name: dynamic
+    playbook: dast
+    goal: Probe the running target within the authorized scope
+    reads: [1]
+`;
+    fixture = startGithubFixture({
+      getRepo: () => ({ body: { default_branch: "main" } }),
+      getContents: (_owner, _repo, path) =>
+        path === ".valet/security.yml"
+          ? {
+              body: {
+                content: Buffer.from(CONFIG_WITH_TOOLS, "utf8").toString("base64"),
+                encoding: "base64",
+              },
+            }
+          : { status: 404, body: { message: "Not Found" } },
+    });
+    process.env.GITHUB_API_URL = fixture.url;
+    api = await bootTestApi({ githubApiUrl: fixture.url });
+
+    const sessionId = await createSecuritySession();
+    const engagement = await loadEngagement(sessionId);
+
+    expect(engagement.hasRepoConfig).toBe(true);
+    // The structured tool decls round-trip on config_tools.
+    expect(JSON.parse(engagement.configTools ?? "null")).toEqual([
+      { id: "nuclei", install: "apt-get install -y nuclei", egress: ["staging.example.com"] },
+      { id: "zap", mcp: { url: "http://127.0.0.1:8090", prefix: "mcp__zap__" } },
+    ]);
+    // The authorized scope round-trips on authorized_scope.
+    expect(JSON.parse(engagement.authorizedScope ?? "null")).toEqual({
+      hosts: ["staging.example.com"],
+    });
+    // The plan carries the live dast step.
+    expect(engagement.plan).toContain("persona: dast");
+
+    // The live-persona dispatch prompt names the authorized scope (M-P4b).
+    const { buildDispatchPrompt, createSecurityEngagementService, parseAuthorizedScopeHosts } =
+      await import("../services/security-engagements.js");
+    const { parsePlan, KNOWN_PERSONAS } = await import("@valet/plugin-security");
+    const service = createSecurityEngagementService({ db: api!.providers.db });
+    const started = await service.startEngagement(engagement.id, { resolvedSha: "a".repeat(40) });
+    const dastCell = started.cells.find((c) => c.persona === "dast");
+    if (!dastCell) throw new Error("expected a dast cell");
+    const plan = parsePlan(started.engagement.plan, KNOWN_PERSONAS);
+    const prompt = buildDispatchPrompt(dastCell, plan, [], "PROTOCOL", false, {
+      scopeHosts: parseAuthorizedScopeHosts(started.engagement.authorizedScope),
+    });
+    expect(prompt).toContain("--- Authorized scope (live testing) ---");
+    expect(prompt).toContain("- staging.example.com");
+    expect(prompt).toContain("action outside this scope is forbidden");
+  });
+
   it("fetches a repo-defined persona's markdown and stashes it on the engagement (M-P2c)", async () => {
     const PERSONA_PATH = ".claude/agents/my-persona.md";
     const PERSONA_MD = [

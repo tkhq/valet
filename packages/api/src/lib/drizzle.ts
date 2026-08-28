@@ -386,6 +386,7 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
       "config_personas" text,
       "config_persona_markdown" text,
       "config_tools" text,
+      "authorized_scope" text,
       "has_repo_config" boolean DEFAULT false NOT NULL,
       "report_markdown" text,
       "report_json" text,
@@ -457,6 +458,13 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     describe: "security_engagements.config_tools column",
     probe: { kind: "column", table: "security_engagements", column: "config_tools" },
     sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "config_tools" text',
+  },
+  {
+    // Authorized live-testing scope (M-P4b): the hosts the live personas may
+    // reach. JSON `{ hosts: string[] }`. Null when no live testing is authorized.
+    describe: "security_engagements.authorized_scope column",
+    probe: { kind: "column", table: "security_engagements", column: "authorized_scope" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "authorized_scope" text',
   },
   {
     describe: "security_engagements.has_repo_config column",

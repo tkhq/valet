@@ -21,11 +21,25 @@ export {
   ARCHITECT_PERSONA,
   VERIFIER_PERSONA,
   REPORT_PERSONA,
+  THREAT_MODEL_PERSONA,
+  ATTACK_TREE_PERSONA,
+  SAST_PERSONA,
+  DAST_PERSONA,
+  FUZZ_PERSONA,
+  EXPLOIT_PERSONA,
+  LIVE_PERSONAS,
+  isLivePersona,
 } from "./personas.js";
 export type { SecurityPersona } from "./personas.js";
 export { expandTriads, hasTriad } from "./triad.js";
-export { parseSecurityConfig, configToPlanYaml } from "./config.js";
-export type { SecurityConfig } from "./config.js";
+export {
+  parseSecurityConfig,
+  configToPlanYaml,
+  parseToolDecls,
+  normalizeScopeHost,
+  egressHostInScope,
+} from "./config.js";
+export type { SecurityConfig, ToolDecl, McpToolDecl, SecurityScope } from "./config.js";
 export { protocolMarkdown } from "./protocol.js";
 export { KNOWN_PLAYBOOKS, isKnownPlaybook, playbookMarkdown } from "./playbooks.js";
 export type { PlaybookName } from "./playbooks.js";

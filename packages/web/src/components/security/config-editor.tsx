@@ -56,13 +56,17 @@ export function ConfigEditor({
   const savedCategories = engagement.categories ?? [];
 
   if (!editable) {
-    // Nothing to show when the review carried no focus, invariants, categories.
-    if (savedFocus.trim() === "" && savedInvariants.length === 0 && savedCategories.length === 0) {
-      return null;
-    }
+    const hasFocus =
+      savedFocus.trim() !== "" || savedInvariants.length > 0 || savedCategories.length > 0;
+    const hasLive =
+      (engagement.authorizedScope?.hosts.length ?? 0) > 0 ||
+      (engagement.configTools?.length ?? 0) > 0;
+    // Nothing to show when the review carried no focus, invariants, categories,
+    // scope, or declared tools.
+    if (!hasFocus && !hasLive) return null;
     return (
       <div className="border-b border-line px-4 py-3" data-testid="config-readonly">
-        <h3 className="text-xs font-semibold text-ink">Review focus</h3>
+        {hasFocus && <h3 className="text-xs font-semibold text-ink">Review focus</h3>}
         {savedFocus.trim() !== "" && (
           <p className="mt-1 text-[11px] text-muted" data-testid="config-readonly-focus">
             {savedFocus}
@@ -88,17 +92,77 @@ export function ConfigEditor({
             </ul>
           </div>
         )}
+        <LiveTestingPanel engagement={engagement} />
       </div>
     );
   }
 
   return (
-    <ConfigEditorForm
-      sessionId={sessionId}
-      savedFocus={savedFocus}
-      savedInvariants={savedInvariants}
-      savedCategories={savedCategories}
-    />
+    <>
+      <ConfigEditorForm
+        sessionId={sessionId}
+        savedFocus={savedFocus}
+        savedInvariants={savedInvariants}
+        savedCategories={savedCategories}
+      />
+      <LiveTestingPanel engagement={engagement} />
+    </>
+  );
+}
+
+/**
+ * The "Live testing" affordance (M-P4b). Shows the authorized scope and the
+ * declared live tools an engagement carries. Authorization-sensitive: when a
+ * plan runs live personas, the scope names the exact hosts they may reach. The
+ * scope and tools are declared in the repo's `.valet/security.yml` and are
+ * read-only here — a human commits the scope, so the UI never edits it.
+ *
+ * Renders nothing when the engagement declares no scope and no tools.
+ */
+function LiveTestingPanel({ engagement }: { engagement: SecurityEngagementWire }) {
+  const hosts = engagement.authorizedScope?.hosts ?? [];
+  const tools = engagement.configTools ?? [];
+  if (hosts.length === 0 && tools.length === 0) return null;
+  return (
+    <div className="mt-3 border-t border-line pt-3" data-testid="live-testing">
+      <h3 className="text-xs font-semibold text-ink">Live testing</h3>
+      {hosts.length > 0 ? (
+        <div className="mt-1" data-testid="live-authorized-scope">
+          <span className="text-[11px] font-medium text-muted">Authorized scope (hosts)</span>
+          <ul className="mt-1 list-disc pl-4 text-[11px] text-ink">
+            {hosts.map((host) => (
+              <li key={host}>{host}</li>
+            ))}
+          </ul>
+          <p className="mt-1 text-[11px] text-muted">
+            Live personas reach only these hosts. Egress is allowlisted to this scope.
+          </p>
+        </div>
+      ) : (
+        tools.length > 0 && (
+          <p className="mt-1 text-[11px] text-muted" data-testid="live-no-scope">
+            No authorized scope is declared. Live personas have no target.
+          </p>
+        )
+      )}
+      {tools.length > 0 && (
+        <div className="mt-2" data-testid="live-declared-tools">
+          <span className="text-[11px] font-medium text-muted">Declared tools</span>
+          <ul className="mt-1 list-disc pl-4 text-[11px] text-ink">
+            {tools.map((tool) => (
+              <li key={tool.id}>
+                {tool.id}
+                {tool.egress && tool.egress.length > 0 ? (
+                  <span className="text-muted"> — egress: {tool.egress.join(", ")}</span>
+                ) : tool.mcp ? (
+                  <span className="text-muted"> — MCP: {tool.mcp.url}</span>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
   );
 }
 

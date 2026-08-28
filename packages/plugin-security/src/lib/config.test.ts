@@ -43,7 +43,8 @@ describe("parseSecurityConfig", () => {
       "all admin routes sit behind requireAdmin",
     ]);
     expect(config.categories).toEqual(["authz", "multi-tenancy"]);
-    expect(config.tools).toEqual(["gitleaks"]);
+    // A bare-string tool normalizes to a ToolDecl (M-P4a).
+    expect(config.tools).toEqual([{ id: "gitleaks" }]);
     expect(config.steps).toHaveLength(2);
     expect(config.steps?.map((c) => c.ordinal)).toEqual([1, 2]);
     expect(config.steps?.[0].persona).toBe("code-review");
@@ -88,15 +89,100 @@ personas:
     expect(() => parseSecurityConfig(yaml, KNOWN)).toThrow(/non-empty markdown path/);
   });
 
-  it("rejects non-string invariants/categories/tools", () => {
+  it("rejects non-string invariants/categories", () => {
     expect(() => parseSecurityConfig("version: 1\ninvariants: [1, 2]\n", KNOWN)).toThrow(
       /"invariants" must be a list of strings/,
     );
     expect(() => parseSecurityConfig("version: 1\ncategories: notalist\n", KNOWN)).toThrow(
       /"categories" must be a list of strings/,
     );
+  });
+
+  it("rejects a malformed tool decl (M-P4a)", () => {
+    // A number is neither a tool id nor a map.
     expect(() => parseSecurityConfig("version: 1\ntools: [1]\n", KNOWN)).toThrow(
-      /"tools" must be a list of strings/,
+      /tools\[0\] must be a tool id or a map/,
+    );
+    // A map with no id.
+    expect(() =>
+      parseSecurityConfig("version: 1\ntools:\n  - install: apt-get install nuclei\n", KNOWN),
+    ).toThrow(/tools\[0\] must have a non-empty "id"/);
+    // An mcp decl with no url.
+    expect(() =>
+      parseSecurityConfig("version: 1\ntools:\n  - id: x\n    mcp:\n      prefix: mcp__x__\n", KNOWN),
+    ).toThrow(/"mcp.url" must be a non-empty URL/);
+  });
+
+  it("parses a structured tool decl with install, mcp, and egress (M-P4a)", () => {
+    const yaml = `version: 1
+scope:
+  hosts:
+    - staging.example.com
+tools:
+  - id: nuclei
+    install: apt-get install -y nuclei
+    egress:
+      - staging.example.com
+  - id: zap
+    mcp:
+      url: http://127.0.0.1:8090
+      prefix: mcp__zap__
+`;
+    const config = parseSecurityConfig(yaml, KNOWN);
+    expect(config.scope).toEqual({ hosts: ["staging.example.com"] });
+    expect(config.tools).toEqual([
+      { id: "nuclei", install: "apt-get install -y nuclei", egress: ["staging.example.com"] },
+      { id: "zap", mcp: { url: "http://127.0.0.1:8090", prefix: "mcp__zap__" } },
+    ]);
+  });
+
+  it("accepts an egress host that is a subdomain of an authorized scope host", () => {
+    const yaml = `version: 1
+scope:
+  hosts:
+    - example.com
+tools:
+  - id: nuclei
+    egress:
+      - api.example.com
+`;
+    const config = parseSecurityConfig(yaml, KNOWN);
+    expect(config.tools?.[0].egress).toEqual(["api.example.com"]);
+  });
+
+  it("rejects a declared egress host outside the authorized scope (M-P4b)", () => {
+    const yaml = `version: 1
+scope:
+  hosts:
+    - staging.example.com
+tools:
+  - id: nuclei
+    egress:
+      - evil.example.org
+`;
+    expect(() => parseSecurityConfig(yaml, KNOWN)).toThrow(
+      /egress host "evil.example.org" is outside the authorized scope/,
+    );
+  });
+
+  it("rejects an egress host when no scope is declared (M-P4b)", () => {
+    const yaml = `version: 1
+tools:
+  - id: nuclei
+    egress:
+      - staging.example.com
+`;
+    expect(() => parseSecurityConfig(yaml, KNOWN)).toThrow(
+      /outside the authorized scope \[\(none declared\)\]/,
+    );
+  });
+
+  it("rejects a scope with no hosts (M-P4b)", () => {
+    expect(() => parseSecurityConfig("version: 1\nscope:\n  hosts: []\n", KNOWN)).toThrow(
+      /"scope.hosts" must be a non-empty list/,
+    );
+    expect(() => parseSecurityConfig("version: 1\nscope: notamap\n", KNOWN)).toThrow(
+      /"scope" must be a map with a "hosts" list/,
     );
   });
 
@@ -151,6 +237,7 @@ describe("BUNDLED_PERSONAS", () => {
     const ids = BUNDLED_PERSONAS.map((p) => p.id);
     // The triad personas sit after code-review; the M-P2c model personas follow,
     // then the M-P3 report persona.
+    // The triad personas sit after code-review; the model then live personas follow.
     expect(ids).toEqual([
       "code-review",
       "architect",
@@ -159,6 +246,9 @@ describe("BUNDLED_PERSONAS", () => {
       "attack-tree",
       "sast",
       "report",
+      "dast",
+      "fuzz",
+      "exploit",
     ]);
     expect(bundledPersonaIds()).toEqual(ids);
 

@@ -4,6 +4,8 @@ export * from './meta.js';
 // MCP client infrastructure (for MCP-backed action sources)
 export { McpClient } from './mcp/client.js';
 export type { McpTool, McpToolResult } from './mcp/types.js';
+export { mcpActionPlugin } from './mcp/action-plugin.js';
+export type { McpActionPluginOptions } from './mcp/action-plugin.js';
 
 // MCP OAuth (dynamic client registration + PKCE)
 export {

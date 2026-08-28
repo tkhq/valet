@@ -76,6 +76,7 @@ const planningSecurity: GetSessionSecurityResponse = {
     categories: null,
     configPersonas: null,
     configTools: null,
+    authorizedScope: null,
     createdAt: 1,
     updatedAt: 2,
   },
@@ -233,5 +234,30 @@ describe("ConfigEditor", () => {
     await screen.findByText("acme/site");
     expect(screen.queryByTestId("config-readonly")).toBeNull();
     expect(screen.queryByTestId("config-editor")).toBeNull();
+  });
+
+  it("shows the authorized scope and declared tools for live testing (M-P4b)", async () => {
+    getSecurityMock.mockResolvedValue({
+      ...planningSecurity,
+      engagement: {
+        ...planningSecurity.engagement,
+        status: "running",
+        focus: null,
+        invariants: null,
+        authorizedScope: { hosts: ["staging.example.com", "api.staging.example.com"] },
+        configTools: [
+          { id: "nuclei", egress: ["staging.example.com"] },
+          { id: "zap", mcp: { url: "http://127.0.0.1:8090", prefix: "mcp__zap__" } },
+        ],
+      },
+    });
+    renderPanel();
+    const live = await screen.findByTestId("live-testing");
+    const scope = within(live).getByTestId("live-authorized-scope");
+    expect(within(scope).getByText("staging.example.com")).toBeTruthy();
+    expect(within(scope).getByText("api.staging.example.com")).toBeTruthy();
+    const tools = within(live).getByTestId("live-declared-tools");
+    expect(within(tools).getByText(/nuclei/)).toBeTruthy();
+    expect(within(tools).getByText(/zap/)).toBeTruthy();
   });
 });

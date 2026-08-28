@@ -13,7 +13,20 @@ describe("playbooks", () => {
       "attack-tree",
       "sast",
       "report",
+      "dast",
+      "fuzz",
+      "exploit",
     ]);
+  });
+
+  it("the live playbooks (M-P4b) name authorized-scope discipline", () => {
+    for (const name of ["dast", "fuzz", "exploit"] as const) {
+      const md = playbookMarkdown(name);
+      expect(md.toLowerCase()).toContain("authorized scope");
+      // Each names the running target it operates against.
+      expect(md).toMatch(/running target/i);
+    }
+    expect(playbookMarkdown("exploit")).toMatch(/READ.*RESTORE/s);
   });
 
   it("loads every known playbook with framework grounding and evidence guidance", () => {
