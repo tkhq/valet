@@ -46,6 +46,7 @@
     { "path": "./packages/plugin-sandbox-tunnels" },
     { "path": "./packages/plugin-personas" },
     { "path": "./packages/plugin-memory" },
+    { "path": "./packages/plugin-security" },
     { "path": "./packages/sandbox-gateway" },
     { "path": "./packages/api" }
   ]

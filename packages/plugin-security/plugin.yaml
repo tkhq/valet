@@ -1,0 +1,6 @@
+name: security
+version: 0.0.1
+description: Security engagement runner skill, code-review persona, and plan library
+icon: "\U0001F510"
+enabled: false
+v2: true
