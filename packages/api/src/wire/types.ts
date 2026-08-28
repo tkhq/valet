@@ -175,7 +175,7 @@ export type SecurityFindingStatus = "open" | "verified" | "refuted";
 export interface SecurityEngagementWire {
   id: string;
   sessionId: string;
-  status: "planning" | "running" | "completed" | "failed";
+  status: "planning" | "running" | "completed" | "failed" | "cancelled";
   repoFullName: string;
   /** Pinned commit SHA once started; empty while planning. */
   repoRef: string;

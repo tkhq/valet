@@ -18,7 +18,7 @@
  * never spawns on its own.
  */
 import { randomUUID } from "node:crypto";
-import { and, asc, count, desc, eq, gt, ilike, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, ilike, inArray, or, sql } from "drizzle-orm";
 import {
   cellDir,
   findingFingerprint,
@@ -609,11 +609,60 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     return { cell: updated[0], reason };
   }
 
+  /**
+   * Cancel a planning or running engagement (spec §Cancel). Human-only at the
+   * route; the service holds the transition. Sets the engagement to
+   * 'cancelled' and fails every unsettled cell (pending/running/yielded) with
+   * a "engagement cancelled" reason in one transaction. A running cell's
+   * `child_session_id` returns so the route tears the in-flight child down.
+   * A cancelled engagement dispatches nothing (dispatchCell refuses) and
+   * never re-closes.
+   */
+  async function cancelEngagement(
+    engagementId: string,
+  ): Promise<{ engagement: SecurityEngagementRow; terminatedChildSessionId?: string }> {
+    const engagement = await loadEngagement(engagementId);
+    if (engagement.status !== "planning" && engagement.status !== "running") {
+      throw new Error(
+        `The engagement is ${engagement.status}. Only a planning or running engagement can be cancelled.`,
+      );
+    }
+    const cells = await loadCells(engagementId);
+    const running = cells.find((c) => c.status === "running");
+    const terminatedChildSessionId = running?.childSessionId ?? undefined;
+    const ts = now();
+    const updatedEngagement = await db.transaction(async (tx) => {
+      // Fail every unsettled cell with the cancel reason. Completed and
+      // already-failed cells keep their terminal status.
+      const failed = await tx
+        .update(securityCells)
+        .set({ status: "failed", settledAt: ts })
+        .where(
+          and(
+            eq(securityCells.engagementId, engagementId),
+            inArray(securityCells.status, ["pending", "running", "yielded"]),
+          ),
+        )
+        .returning({ id: securityCells.id });
+      for (let i = 0; i < failed.length; i += 1) recordSecurityCellSettled("failed");
+      const rows = await tx
+        .update(securityEngagements)
+        .set({ status: "cancelled", updatedAt: ts })
+        .where(eq(securityEngagements.id, engagementId))
+        .returning();
+      return rows[0];
+    });
+    return { engagement: updatedEngagement, terminatedChildSessionId };
+  }
+
   /** Close the engagement and compute the manifest. */
   async function closeEngagement(engagementId: string): Promise<EngagementManifest> {
     const engagement = await loadEngagement(engagementId);
     if (engagement.status === "completed" || engagement.status === "failed") {
       throw new Error(`The engagement is already ${engagement.status}. Read the manifest from the thread.`);
+    }
+    if (engagement.status === "cancelled") {
+      throw new Error("The engagement was cancelled. A cancelled engagement never closes.");
     }
     if (engagement.status === "planning") {
       throw new Error("The engagement never started. Call sec_start, run the cells, then close.");
@@ -1094,6 +1143,7 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     dispatchCell,
     completeCell,
     failCell,
+    cancelEngagement,
     closeEngagement,
     writeFile,
     readFile,

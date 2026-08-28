@@ -1,9 +1,15 @@
 import { useState, type ReactNode } from "react";
-import { useEngagement, useSecurityFindings, flattenFindings } from "~/api/security";
+import {
+  useEngagement,
+  useSecurityFindings,
+  useCancelEngagement,
+  flattenFindings,
+  apiErrorText,
+} from "~/api/security";
 import { useMe, useTeams } from "~/api/settings";
 import { useSession } from "~/api/queries";
 import { useStreamStore } from "~/stores/stream";
-import { Spinner } from "~/components/primitives";
+import { Button, ConfirmDialog, Spinner } from "~/components/primitives";
 import { cn } from "~/lib/cn";
 import { useResizablePane } from "~/lib/use-resizable-pane";
 import { CellRail } from "./cell-rail";
@@ -61,6 +67,9 @@ export function EngagementPanel({
     engagementQ.data?.engagement.status === "failed";
   const allFindingsQ = useSecurityFindings(closed ? sessionId : "", {});
 
+  const cancelMutation = useCancelEngagement(sessionId);
+  const [confirmCancel, setConfirmCancel] = useState(false);
+
   if (engagementQ.isPending) {
     return (
       <div className="p-4 text-xs text-muted">
@@ -77,6 +86,11 @@ export function EngagementPanel({
   }
 
   const { engagement, cells } = engagementQ.data;
+  // The cancel action is a human-only stop for an in-flight review. Show it
+  // only while the engagement can still be cancelled AND the caller can
+  // administer — the route enforces both; this only hides a button that 403s.
+  const cancellable =
+    canAdminister && (engagement.status === "planning" || engagement.status === "running");
   return (
     <div className="flex flex-col min-h-0">
       {closed && (engagement.status === "completed" || engagement.status === "failed") && (
@@ -86,13 +100,41 @@ export function EngagementPanel({
           status={engagement.status}
         />
       )}
-      <div className="border-b border-line px-4 py-2 text-xs text-muted">
-        <span className="font-mono text-ink">{engagement.repoFullName}</span>
-        {engagement.repoRef !== "" && (
-          <span className="font-mono"> @ {engagement.repoRef.slice(0, 12)}</span>
+      <div className="border-b border-line px-4 py-2 text-xs text-muted flex items-center gap-2">
+        <div className="min-w-0 flex-1">
+          <span className="font-mono text-ink">{engagement.repoFullName}</span>
+          {engagement.repoRef !== "" && (
+            <span className="font-mono"> @ {engagement.repoRef.slice(0, 12)}</span>
+          )}
+          <span> · {engagement.status}</span>
+        </div>
+        {cancellable && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => setConfirmCancel(true)}
+          >
+            Cancel review
+          </Button>
         )}
-        <span> · {engagement.status}</span>
       </div>
+      <ConfirmDialog
+        open={confirmCancel}
+        onOpenChange={(open) => {
+          setConfirmCancel(open);
+          if (!open) cancelMutation.reset();
+        }}
+        title="Cancel this security review?"
+        description="This stops the engagement and fails every unsettled cell. It cannot be resumed."
+        confirmLabel="Cancel review"
+        pendingLabel="Cancelling…"
+        pending={cancelMutation.isPending}
+        error={cancelMutation.isError ? apiErrorText(cancelMutation.error) : undefined}
+        onConfirm={() => {
+          cancelMutation.mutate(undefined, { onSuccess: () => setConfirmCancel(false) });
+        }}
+      />
       <CellRail cells={cells} onOpenChild={onOpenChild} />
       <div className="border-t border-line" />
       <FindingsReview

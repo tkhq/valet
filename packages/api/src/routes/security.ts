@@ -81,6 +81,8 @@ import {
   type SecurityHandoffRow,
 } from "../schema/index.js";
 import { canAdministerSession, canViewSession } from "../services/session-access.js";
+import { routeAttention, type AttentionDeps } from "../orchestrator/attention.js";
+import { parseAssistantSessionId } from "@valet/engine";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { resolveApiTokenOrNull, resolveRefSha } from "../bakes/source-service.js";
 import { buildChildStatusReader, ChildLimitError } from "../orchestrator/children.js";
@@ -414,6 +416,40 @@ async function resolveToolSession(
 function sessionOwner(row: SessionRow): Principal {
   const type = row.ownerType === "team" || row.ownerType === "org" ? row.ownerType : "user";
   return { type, id: row.ownerId !== "" ? row.ownerId : row.userId };
+}
+
+/**
+ * Where a person lands to open this session (mirrors attention-wiring's
+ * `attentionHref`): an assistant's conversation lives at `/chat`, every other
+ * session keeps the direct `/sessions/:id` link.
+ */
+function attentionHref(sessionId: string): string {
+  const assistantId = parseAssistantSessionId(sessionId);
+  return assistantId === null
+    ? `/sessions/${encodeURIComponent(sessionId)}`
+    : `/chat?assistant=${encodeURIComponent(assistantId)}`;
+}
+
+/**
+ * The completion notification's AttentionDeps: the same db + channel deliverer
+ * the boot-time `wireAttentionRouter` uses (main.ts), so a close/cancel ping
+ * reaches web and any wired channel by the one router path.
+ */
+function attentionDepsFrom(c: Context<AppEnv>): AttentionDeps {
+  const { db, channelHost } = c.var.providers;
+  return { db, channels: [channelHost.attentionDeliverer()] };
+}
+
+/** A short severity roll-up for the completion body, e.g. "12 findings — 2
+ * critical, 3 high". Counts are distinct fingerprints from the close manifest.
+ * "No findings" when the engagement produced none. */
+function findingSummary(distinctBySeverity: Record<FindingSeverity, number>): string {
+  const order: FindingSeverity[] = ["critical", "high", "medium", "low", "info"];
+  const total = order.reduce((sum, sev) => sum + distinctBySeverity[sev], 0);
+  if (total === 0) return "No findings.";
+  const parts = order.filter((sev) => distinctBySeverity[sev] > 0).map((sev) => `${distinctBySeverity[sev]} ${sev}`);
+  const noun = total === 1 ? "finding" : "findings";
+  return `${total} ${noun} — ${parts.join(", ")}.`;
 }
 
 /** The runner's resolved session model, read from the live engine session so
@@ -940,6 +976,7 @@ securityRouter.post("/:id/security/close", async (c) => {
   const sessionId = c.req.param("id");
   const resolved = await resolveToolSession(c, sessionId, "mutate");
   if ("failure" in resolved) return resolved.failure;
+  const row = resolved.ok;
 
   const loaded = await loadEngagementOr404(c, sessionId);
   if ("failure" in loaded) return loaded.failure;
@@ -947,6 +984,22 @@ securityRouter.post("/:id/security/close", async (c) => {
 
   try {
     const manifest = await security.closeEngagement(result.engagement.id);
+    // Completion ping: the human OR the runner (via sec_close) closes, so the
+    // owner learns the review ended either way. The dedupe key makes a re-close
+    // or retry a no-op — routeAttention inserts once per engagement close.
+    const ended = manifest.status === "completed" ? "complete" : "ended";
+    await routeAttention(attentionDepsFrom(c), {
+      kind: "notification",
+      owner: sessionOwner(row),
+      sessionId,
+      title: manifest.status === "completed" ? "Security review complete" : "Security review ended",
+      body: `${manifest.repoFullName} review ${ended}. ${findingSummary(manifest.findings.distinctBySeverity)}`,
+      href: attentionHref(sessionId),
+      dedupeKey: `security-close:${result.engagement.id}`,
+    }).catch((err) => {
+      // Best-effort: a notification failure must not fail the close.
+      console.error(`security close: attention route failed for ${result.engagement.id}:`, err);
+    });
     const response: SecurityCloseResponse = { manifest };
     return c.json(response);
   } catch (err) {
@@ -1263,6 +1316,83 @@ securityRouter.post("/:id/security/findings/:findingId/status", async (c) => {
     if (message.startsWith("No finding")) return c.json({ error: message }, 404);
     return c.json({ error: message }, 409);
   }
+});
+
+/**
+ * POST /:id/security/cancel — stop a planning or running engagement (spec
+ * §Cancel). HUMAN action: `resolveHumanSession(.., "administer")` refuses the
+ * internal token (403) so the runner cannot cancel itself, and gates on
+ * `canAdministerSession`. The service flips the engagement to 'cancelled' and
+ * fails every unsettled cell; if a cell had a running child, this route tears
+ * it down through the session-terminate seam (`engineHost.destroy` +
+ * soft-delete, the same path DELETE /api/sessions/:id runs). Teardown is
+ * best-effort — the status flip is the source of truth, so a destroy failure
+ * logs and the route still returns the cancelled engagement.
+ */
+securityRouter.post("/:id/security/cancel", async (c) => {
+  const sessionId = c.req.param("id");
+  const resolved = await resolveHumanSession(c, sessionId, "administer");
+  if ("failure" in resolved) return resolved.failure;
+  const { row } = resolved.ok;
+
+  const loaded = await loadEngagementOr404(c, sessionId);
+  if ("failure" in loaded) return loaded.failure;
+  const { security, result } = loaded;
+  const { db, engineHost } = c.var.providers;
+
+  let cancelled;
+  try {
+    cancelled = await security.cancelEngagement(result.engagement.id);
+  } catch (err) {
+    return serviceError(c, err);
+  }
+
+  // Tear the in-flight persona child down, if any — the same seam DELETE
+  // /api/sessions/:id uses: engine + sandbox destroy, then soft-delete the
+  // session row. Best-effort: a failure logs and the cancel still succeeds.
+  const childId = cancelled.terminatedChildSessionId;
+  if (childId) {
+    try {
+      await engineHost.destroy(childId);
+      await db
+        .update(agentSessions)
+        .set({ status: "deleted", updatedAt: Date.now() })
+        .where(eq(agentSessions.id, childId));
+    } catch (err) {
+      console.error(`security cancel: child ${childId} teardown failed:`, err);
+    }
+  }
+
+  // Cancellation ping: the owner learns the review ended (spec §Cancel). Dedupe
+  // shares the close key — a review ends once, whether closed or cancelled.
+  await routeAttention(attentionDepsFrom(c), {
+    kind: "notification",
+    owner: sessionOwner(row),
+    sessionId,
+    title: "Security review cancelled",
+    body: `${result.engagement.repoFullName} review cancelled.`,
+    href: attentionHref(sessionId),
+    dedupeKey: `security-close:${result.engagement.id}`,
+  }).catch((err) => {
+    console.error(`security cancel: attention route failed for ${result.engagement.id}:`, err);
+  });
+
+  // Re-read cells so the response reflects the cancel's failed-cell writes.
+  const after = await security.getEngagement(cancelled.engagement.id);
+  const response: GetSessionSecurityResponse = {
+    engagement: {
+      id: cancelled.engagement.id,
+      sessionId: cancelled.engagement.sessionId,
+      status: cancelled.engagement.status,
+      repoFullName: cancelled.engagement.repoFullName,
+      repoRef: cancelled.engagement.repoRef,
+      plan: cancelled.engagement.plan,
+      createdAt: cancelled.engagement.createdAt,
+      updatedAt: cancelled.engagement.updatedAt,
+    },
+    cells: (after?.cells ?? []).map((cell) => cellToWire(cell, null)),
+  };
+  return c.json(response);
 });
 
 const EXPORT_FORMATS = {

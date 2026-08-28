@@ -688,6 +688,77 @@ describe("security engagement service", () => {
     expect(manifest.cells[4].status).toBe("failed");
   });
 
+  // ── Cancel ───────────────────────────────────────────────────────────────
+
+  it("cancelEngagement from planning sets cancelled and fails pending cells", async () => {
+    const engagement = await makePlanning();
+    const cancelled = await svc.cancelEngagement(engagement.id);
+    expect(cancelled.engagement.status).toBe("cancelled");
+    expect(cancelled.terminatedChildSessionId).toBeUndefined();
+  });
+
+  it("cancelEngagement from running fails the running cell and returns its child", async () => {
+    const { engagement, cells } = await makeStarted();
+    const { cell } = await svc.dispatchCell(engagement.id, { cellId: cells[0].id, spawn });
+    expect(cell.status).toBe("running");
+    expect(cell.childSessionId).toBe("child_1");
+
+    const cancelled = await svc.cancelEngagement(engagement.id);
+    expect(cancelled.engagement.status).toBe("cancelled");
+    expect(cancelled.terminatedChildSessionId).toBe("child_1");
+
+    // Every unsettled cell (the running one AND the pending remainder) is
+    // failed; a cancelled engagement holds no live work.
+    const after = await db
+      .select()
+      .from(securityCells)
+      .where(eq(securityCells.engagementId, engagement.id));
+    expect(after.every((c) => c.status === "failed")).toBe(true);
+    expect(after.every((c) => c.settledAt !== null)).toBe(true);
+  });
+
+  it("cancelEngagement keeps completed cells terminal and skips yielded/pending only", async () => {
+    const { engagement, cells } = await makeStarted();
+    await runCellToCompletion(engagement.id, cells[0]); // completed
+    await runCellToCompletion(engagement.id, cells[1], YIELD_DOC); // yielded
+
+    const cancelled = await svc.cancelEngagement(engagement.id);
+    expect(cancelled.engagement.status).toBe("cancelled");
+    expect(cancelled.terminatedChildSessionId).toBeUndefined();
+
+    const after = await db
+      .select()
+      .from(securityCells)
+      .where(eq(securityCells.engagementId, engagement.id));
+    const byOrdinal = new Map(after.map((c) => [c.ordinal, c.status]));
+    expect(byOrdinal.get(1)).toBe("completed"); // untouched
+    expect(byOrdinal.get(2)).toBe("failed"); // yielded → failed
+    expect(byOrdinal.get(3)).toBe("failed"); // pending → failed
+  });
+
+  it("cancelEngagement refuses a completed engagement", async () => {
+    const { engagement, cells } = await makeStarted();
+    for (const cell of cells) await runCellToCompletion(engagement.id, cell);
+    await svc.closeEngagement(engagement.id);
+    await expect(svc.cancelEngagement(engagement.id)).rejects.toThrow(
+      "Only a planning or running engagement can be cancelled.",
+    );
+  });
+
+  it("dispatchCell refuses on a cancelled engagement", async () => {
+    const { engagement, cells } = await makeStarted();
+    await svc.cancelEngagement(engagement.id);
+    await expect(svc.dispatchCell(engagement.id, { cellId: cells[0].id, spawn })).rejects.toThrow(
+      "The engagement is cancelled. A closed engagement dispatches nothing.",
+    );
+  });
+
+  it("closeEngagement refuses a cancelled engagement", async () => {
+    const { engagement } = await makeStarted();
+    await svc.cancelEngagement(engagement.id);
+    await expect(svc.closeEngagement(engagement.id)).rejects.toThrow();
+  });
+
   // ── Progress ─────────────────────────────────────────────────────────────
 
   it("getRunningCellProgress parses the running cell's latest state doc, tolerantly", async () => {

@@ -344,6 +344,7 @@ const STATUS_VARIANT: Record<
   running: "accent",
   completed: "success",
   failed: "danger",
+  cancelled: "neutral",
 };
 
 function ReviewRow({ session }: { session: SessionSummary }) {

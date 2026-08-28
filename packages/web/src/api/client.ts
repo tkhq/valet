@@ -489,6 +489,14 @@ export const api = {
       `/sessions/${encodeURIComponent(id)}/security/issues/digest`,
       body,
     ),
+  /** POST /sessions/:id/security/cancel — stop a planning or running
+   * engagement (human action; session admin). Returns the cancelled
+   * engagement + cells. */
+  cancelSecurityReview: (id: string) =>
+    request<GetSessionSecurityResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/security/cancel`,
+    ),
   createSession: (body: CreateSessionRequest) =>
     request<CreateSessionResponse>("POST", "/sessions", body),
   deleteSession: (id: string) =>

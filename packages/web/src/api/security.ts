@@ -115,6 +115,19 @@ export function flattenFindings(
   return pages?.flatMap((p) => p.findings) ?? [];
 }
 
+/** POST .../security/cancel — stop a planning or running engagement (spec
+ * §Cancel). Invalidates the engagement query so the panel re-reads the
+ * cancelled status and the failed cells. */
+export function useCancelEngagement(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<GetSessionSecurityResponse, Error, void>({
+    mutationFn: () => api.cancelSecurityReview(sessionId),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qkSecurity.engagement(sessionId) });
+    },
+  });
+}
+
 /** POST .../findings/:findingId/status — human verify/refute. Invalidates
  * every findings page of the session (any filter may hold the row). */
 export function useReviewFinding(sessionId: string) {

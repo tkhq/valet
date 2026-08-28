@@ -168,6 +168,23 @@ describe("SecurityRunnerDriver", () => {
     void sessionId;
   });
 
+  it("does not nudge a cancelled engagement (swept only for planning/running)", async () => {
+    const { engagementId, cells } = await seedStarted();
+    // A cancelled engagement fails every unsettled cell and leaves running
+    // neither. The sweep queries planning|running only, so it never sees it.
+    await svc.cancelEngagement(engagementId);
+    const cancelled = await db
+      .select({ status: securityEngagements.status })
+      .from(securityEngagements)
+      .where(eq(securityEngagements.id, engagementId));
+    expect(cancelled[0].status).toBe("cancelled");
+    void cells;
+
+    await makeDriver().sweep();
+
+    expect(submit).not.toHaveBeenCalled();
+  });
+
   it("caps nudges: N no-progress nudges, then one stall message, then quiet", async () => {
     const { sessionId } = await seedStarted();
     const driver = makeDriver(3);

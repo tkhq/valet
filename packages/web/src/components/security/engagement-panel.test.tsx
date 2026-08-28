@@ -21,6 +21,7 @@ import { useStreamStore } from "~/stores/stream";
 const getSessionMock = vi.fn<(id: string) => Promise<GetSessionResponse>>();
 const getSecurityMock = vi.fn<(id: string) => Promise<GetSessionSecurityResponse>>();
 const listFindingsMock = vi.fn<() => Promise<ListSecurityFindingsResponse>>();
+const cancelReviewMock = vi.fn<(id: string) => Promise<GetSessionSecurityResponse>>();
 
 vi.mock("~/api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/client")>();
@@ -31,16 +32,38 @@ vi.mock("~/api/client", async (importOriginal) => {
       getSession: (id: string) => getSessionMock(id),
       getSessionSecurity: (id: string) => getSecurityMock(id),
       listSecurityFindings: () => listFindingsMock(),
+      cancelSecurityReview: (id: string) => cancelReviewMock(id),
     },
   };
 });
+
+interface MeQuery {
+  data: { id: string; orgRole: string };
+  isLoading: boolean;
+  error: null;
+}
+interface TeamsQuery {
+  data: { teams: Array<{ id: string; callerRole: string }> };
+  isLoading: boolean;
+  error: null;
+}
+const meMock = vi.fn<() => MeQuery>(() => ({
+  data: { id: "u-1", orgRole: "member" },
+  isLoading: false,
+  error: null,
+}));
+const teamsMock = vi.fn<() => TeamsQuery>(() => ({
+  data: { teams: [] },
+  isLoading: false,
+  error: null,
+}));
 
 vi.mock("~/api/settings", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/settings")>();
   return {
     ...actual,
-    useMe: () => ({ data: { id: "u-1", orgRole: "member" }, isLoading: false, error: null }),
-    useTeams: () => ({ data: { teams: [] }, isLoading: false, error: null }),
+    useMe: () => meMock(),
+    useTeams: () => teamsMock(),
   };
 });
 
@@ -50,7 +73,7 @@ vi.mock("@tanstack/react-router", () => ({
   ),
 }));
 
-import { SecuritySessionLayout } from "./engagement-panel";
+import { EngagementPanel, SecuritySessionLayout } from "./engagement-panel";
 
 const security: GetSessionSecurityResponse = {
   engagement: {
@@ -128,8 +151,25 @@ beforeEach(() => {
   getSessionMock.mockResolvedValue(session);
   getSecurityMock.mockResolvedValue(security);
   listFindingsMock.mockResolvedValue({ findings: [], nextCursor: null });
+  cancelReviewMock.mockReset();
+  cancelReviewMock.mockResolvedValue(security);
+  meMock.mockReturnValue({ data: { id: "u-1", orgRole: "member" }, isLoading: false, error: null });
+  teamsMock.mockReturnValue({ data: { teams: [] }, isLoading: false, error: null });
   useStreamStore.getState().remove("s-1");
 });
+
+function renderPanel() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  return render(
+    <QueryClientProvider client={client}>
+      <TooltipProvider>
+        <EngagementPanel sessionId="s-1" />
+      </TooltipProvider>
+    </QueryClientProvider>,
+  );
+}
 
 describe("SecuritySessionLayout", () => {
   it("renders the mobile Chat | Panel toggle with both panes", async () => {
@@ -164,6 +204,49 @@ describe("SecuritySessionLayout", () => {
       useStreamStore.getState().setPendingGates("s-1", []);
     });
     expect(screen.queryByTestId("pending-gate-dot")).toBeNull();
+  });
+
+  it("shows Cancel review for an admin on a running engagement and cancels through confirm", async () => {
+    renderPanel();
+    const cancelBtn = await screen.findByRole("button", { name: "Cancel review" });
+    expect(cancelBtn).toBeTruthy();
+
+    // Opening the confirm and confirming calls the cancel mutation once.
+    fireEvent.click(cancelBtn);
+    const dialog = await screen.findByText("Cancel this security review?");
+    expect(dialog).toBeTruthy();
+    const confirm = screen
+      .getAllByRole("button", { name: "Cancel review" })
+      .find((b) => b !== cancelBtn);
+    expect(confirm).toBeTruthy();
+    if (confirm) fireEvent.click(confirm);
+    await vi.waitFor(() => expect(cancelReviewMock).toHaveBeenCalledWith("s-1"));
+  });
+
+  it("hides Cancel review on a completed engagement", async () => {
+    getSecurityMock.mockResolvedValue({
+      ...security,
+      engagement: { ...security.engagement, status: "completed" },
+    });
+    renderPanel();
+    // Wait for the panel to settle (the repo line renders once loaded).
+    await screen.findByText("acme/site");
+    expect(screen.queryByRole("button", { name: "Cancel review" })).toBeNull();
+  });
+
+  it("hides Cancel review for a non-admin on a team-owned engagement", async () => {
+    getSessionMock.mockResolvedValue({
+      ...session,
+      owner: { type: "team", id: "team-1" },
+    });
+    teamsMock.mockReturnValue({
+      data: { teams: [{ id: "team-1", callerRole: "member" }] },
+      isLoading: false,
+      error: null,
+    });
+    renderPanel();
+    await screen.findByText("acme/site");
+    expect(screen.queryByRole("button", { name: "Cancel review" })).toBeNull();
   });
 
   it("resizes the security panel via the keyboard and persists the width", async () => {

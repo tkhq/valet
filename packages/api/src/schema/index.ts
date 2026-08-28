@@ -1719,7 +1719,7 @@ export const securityEngagements = pgTable(
     id: text("id").primaryKey(),
     sessionId: text("session_id").notNull(),
     status: text("status", {
-      enum: ["planning", "running", "completed", "failed"],
+      enum: ["planning", "running", "completed", "failed", "cancelled"],
     })
       .notNull()
       .default("planning"),
