@@ -39,11 +39,18 @@ import {
 import type { ObjectStoreConfig } from "./workspace-persistence.js";
 import type { CheckpointUploadUrls } from "./workspace-scripts.js";
 
-/** How long a presigned checkpoint PUT stays valid. Generous relative to a
- * large upload; the URLs are minted immediately before the in-pod exec. */
-const PRESIGN_EXPIRY_SECONDS = 30 * 60;
+/** How long a presigned checkpoint PUT stays valid. The provider derives
+ * its exec deadline from this value on purpose: an exec abandoned at the
+ * timeout cannot be killed remotely, and URLs that outlive the timeout
+ * would let the orphaned in-pod script commit `latest` AFTER a newer
+ * checkpoint — silently rewinding the pointer. Expiring the URLs with
+ * the exec deadline revokes the orphan's write authority instead
+ * (residual: one S3 request already started at the boundary). */
+export const PRESIGN_EXPIRY_SECONDS = 10 * 60;
 
-const CHECKPOINT_ID_PATTERN = /^[a-zA-Z0-9._-]+$/;
+// The makeCheckpointId grammar. The ck- prefix matters: a bare-charset
+// check admits "." and "..", which a URL consumer would path-normalize.
+const CHECKPOINT_ID_PATTERN = /^ck-[a-zA-Z0-9._-]+$/;
 
 function isNoSuchKey(err: unknown): boolean {
   if (typeof err !== "object" || err === null) return false;
@@ -232,7 +239,10 @@ export class ObjectStoreWorkspaceStore implements WorkspaceStore, WorkspaceCheck
     if (!(body instanceof Readable)) {
       throw new Error(`checkpoint ${manifest.checkpointId}: object body is not a Node stream`);
     }
-    return this.cfg.gzip ? body.pipe(createGunzip()) : body;
+    // pipeline, not .pipe — same reason as checkpoint(): a mid-stream S3
+    // body error must destroy the gunzip stream the caller reads, not
+    // crash the process as an unhandled "error".
+    return this.cfg.gzip ? pipeline(body, createGunzip(), () => {}) : body;
   }
 
   async purge(ref: WorkspaceRef): Promise<void> {
@@ -288,8 +298,11 @@ export class ObjectStoreWorkspaceStore implements WorkspaceStore, WorkspaceCheck
     // live pointer and protect its target too, so a raced prune can never
     // delete the checkpoint `latest` names and leave the pointer dangling
     // (which reads as "no checkpoint" and silently cold-starts the next
-    // open). The read-then-delete window that remains is closed by the
-    // provider's per-sandbox checkpoint serialization.
+    // open). The read-then-delete window that remains is narrowed — not
+    // closed — by the provider's per-sandbox checkpoint serialization,
+    // which is per-process: two api replicas (or the Node-side
+    // checkpoint() path) can still interleave here. Single-replica apis
+    // are the deployed shape today.
     const protectedIds = new Set([latestCheckpointId]);
     const pointer = await this.getBody(latestPointerKey(this.cfg.prefix, ref));
     const pointerId = pointer?.trim();

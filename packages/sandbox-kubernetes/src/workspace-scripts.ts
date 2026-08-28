@@ -22,8 +22,11 @@
  *   into the init container ONLY, which exits before user code runs.
  *
  * Both scripts target /bin/sh (dash/busybox compatible: no pipefail, no
- * bashisms) and need only `curl` (>= 7.75 for --aws-sigv4) and `tar` in
- * the image.
+ * bashisms). Required utilities: `curl` (>= 7.75 for --aws-sigv4), `tar`,
+ * and the busybox/coreutils staples `mktemp`, `touch`, `sleep`, `wc`,
+ * `tr`, `grep`, `find`, `head`, `cat`, `rm`. The manifest fields are
+ * validated as digits before upload, so a missing utility fails the
+ * checkpoint instead of committing a malformed manifest.
  */
 import { DEFAULT_CHECKPOINT_IGNORE } from "@valet/engine";
 import { shQuote } from "./exec.js";
@@ -72,11 +75,12 @@ export function buildRestoreScript(): string {
     `note() { printf '%s' "$1" > /dev/termination-log 2>/dev/null || true; }`,
     // INV-1: restore only into an empty workspace.
     `if [ -n "$(ls -A "$WS" 2>/dev/null)" ]; then note "skipped reason=non-empty"; echo "workspace-restore: /workspace not empty; skipping restore (INV-1)"; exit 0; fi`,
-    `AK=$(cat ${shQuote(`${WORKSPACE_STORE_CREDS_MOUNT_PATH}/AWS_ACCESS_KEY_ID`)}) || { note "failed reason=creds"; exit 1; }`,
-    `SK=$(cat ${shQuote(`${WORKSPACE_STORE_CREDS_MOUNT_PATH}/AWS_SECRET_ACCESS_KEY`)}) || { note "failed reason=creds"; exit 1; }`,
     // Failure handling (INV-7): under "fallback" leave /workspace empty and
     // exit 0 so the main container cold-starts from the image; under
-    // "block" exit non-zero so the pod fails to start.
+    // "block" exit non-zero so the pod fails to start. Defined before the
+    // credential reads so a creds failure honors the policy too — exiting
+    // 1 under "fallback" would CrashLoop every sandbox on a Secret
+    // key-name drift, the exact outage class fallback exists to absorb.
     `fail() {`,
     `  echo "workspace-restore: $1. The sandbox starts from the baked image; check the object store config and credentials." >&2`,
     // :-fallback, despite set -u: a missing mode env must not invert
@@ -86,6 +90,8 @@ export function buildRestoreScript(): string {
     `  note "cold-start reason=restore-failed"`,
     `  exit 0`,
     `}`,
+    `AK=$(cat ${shQuote(`${WORKSPACE_STORE_CREDS_MOUNT_PATH}/AWS_ACCESS_KEY_ID`)}) || fail "credentials read failed (is the workspace-store Secret mounted with the expected key names?)"`,
+    `SK=$(cat ${shQuote(`${WORKSPACE_STORE_CREDS_MOUNT_PATH}/AWS_SECRET_ACCESS_KEY`)}) || fail "credentials read failed (is the workspace-store Secret mounted with the expected key names?)"`,
     `BASE="\${${RESTORE_ENV.baseUrl}}/\${${RESTORE_ENV.workspacePrefix}}"`,
     `code=$(curl -s -o /tmp/ws-latest -w '%{http_code}' ${sigv4} "\${BASE}latest") || fail "latest pointer read failed (curl exit $?)"`,
     `if [ "$code" = "404" ]; then note "cold-start reason=no-checkpoint"; echo "workspace-restore: no committed checkpoint; cold start from image"; exit 0; fi`,
@@ -95,6 +101,10 @@ export function buildRestoreScript(): string {
     `[ "$code" = "200" ] || fail "latest pointer read failed (http $code)"`,
     `CKPT=$(cat /tmp/ws-latest)`,
     // Never interpolate untrusted bucket content into a URL unvalidated.
+    // Require the makeCheckpointId grammar (ck- prefix + safe charset):
+    // the charset check alone admits "." and "..", which curl would
+    // path-normalize into a sibling key.
+    `case "$CKPT" in (ck-*) ;; (*) fail "latest pointer holds an invalid checkpoint id";; esac`,
     `case "$CKPT" in (*[!a-zA-Z0-9._-]*|"") fail "latest pointer holds an invalid checkpoint id";; esac`,
     `curl -sf -o /tmp/ws-data.tar.gz ${sigv4} "\${BASE}checkpoints/\${CKPT}/data.tar.gz" || fail "checkpoint download failed (curl exit $?)"`,
     `tar -xf /tmp/ws-data.tar.gz -C "$WS" || fail "checkpoint extract failed"`,
@@ -191,22 +201,39 @@ export function buildCheckpointScript(input: CheckpointScriptInput): string {
     // nothing under /workspace is newer — deletes count too, they bump the
     // parent directory's mtime — the committed checkpoint already covers
     // the current state and the upload is skipped. The marker lives in
-    // /tmp, so a fresh pod always takes a full checkpoint.
-    `if [ -e "$MARKER" ] && [ -z "$(find /workspace ${prunes}-newer "$MARKER" -print 2>/dev/null | head -n 1)" ]; then echo "${CHECKPOINT_UNCHANGED_SENTINEL}"; exit 0; fi`,
+    // /tmp, so a fresh pod always takes a full checkpoint. Fail-closed:
+    // the find output goes through a file so a find error (missing
+    // applet, unsupported flag) takes the checkpoint instead of reading
+    // as "no changes".
+    `if [ -e "$MARKER" ] && find /workspace ${prunes}-newer "$MARKER" -print > "$TMP/changed" 2>/dev/null && [ ! -s "$TMP/changed" ]; then echo "${CHECKPOINT_UNCHANGED_SENTINEL}"; exit 0; fi`,
+    // The 1s barrier keeps the marker's second strictly BELOW the scan
+    // start: busybox find compares whole seconds with strict >, so a
+    // write landing in the marker's own second would otherwise be
+    // invisible to every later scan.
     `touch "$TMP/started"`,
+    `sleep 1`,
     // GNU tar exits 1 for "file changed as we read it" — expected on a
     // live workspace and the archive is still valid; only >1 is fatal.
+    // (busybox tar exits 1 for ALL errors, so the create rc alone cannot
+    // be trusted — the listing pass below is the integrity check that
+    // rejects a truncated archive on either tar.)
     `tar -c${z}f "$TMP/data.tar.gz" ${excludes} -C /workspace .; rc=$?; [ "$rc" -le 1 ] || exit 12`,
+    `tar -t${z}f "$TMP/data.tar.gz" > "$TMP/list" || exit 16`,
     `SIZE=$(wc -c < "$TMP/data.tar.gz" | tr -d ' ')`,
-    `COUNT=$(tar -t${z}f "$TMP/data.tar.gz" | grep -cv '^\\./$')`,
+    `COUNT=$(grep -cv '^\\./$' "$TMP/list")`,
+    // Digits-only guards: a missing wc/tr/grep yields an empty expansion
+    // under set -u, which would commit a malformed manifest.json.
+    `case "$SIZE" in (''|*[!0-9]*) exit 17;; esac`,
+    `case "$COUNT" in (''|*[!0-9]*) exit 17;; esac`,
     `curl -sf -X PUT --upload-file "$TMP/data.tar.gz" "$VALET_WS_DATA_URL" || exit 13`,
     `printf '{"checkpointId":"%s","createdAtMs":%s,"sizeBytes":%s,"entryCount":%s}' ` +
       `${shQuote(input.checkpointId)} ${String(Math.floor(input.createdAtMs))} "$SIZE" "$COUNT" > "$TMP/manifest.json"`,
     `curl -sf -X PUT --upload-file "$TMP/manifest.json" "$VALET_WS_MANIFEST_URL" || exit 14`,
     `printf '%s' ${shQuote(input.checkpointId)} > "$TMP/latest"`,
     `curl -sf -X PUT --upload-file "$TMP/latest" "$VALET_WS_LATEST_URL" || exit 15`,
-    // Marker mtime = tar scan start, not commit time: files written while
-    // the upload ran stay newer than the marker and force the next pass.
+    // Marker mtime = pre-scan barrier time: files written while tar or the
+    // upload ran stay strictly newer than the marker and force the next
+    // pass (see the sleep above).
     `touch -r "$TMP/started" "$MARKER"`,
     `echo "checkpoint-committed size=$SIZE entries=$COUNT"`,
   ].join("\n");

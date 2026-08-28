@@ -317,6 +317,23 @@ describe("workspace checkpoint on suspend", () => {
     expect(objectsApi.patches).toHaveLength(1); // the suspend still proceeded (INV-7)
   });
 
+  it("fails closed when the restore outcome cannot be read", async () => {
+    // An unreadable outcome must not disarm the clobber guard: the stake
+    // is permanent loss of the last good checkpoint; the cost of the
+    // skip is one interval.
+    const podStatusApi: SandboxPodStatusApi = {
+      async getPodStatus() {
+        throw new Error("apiserver throttled");
+      },
+    };
+    const { provider, store, execApi, objectsApi } = makeProvider({ objectStore: true, podStatusApi });
+    await provider.suspend("ws-1");
+
+    expect(store.calls).toEqual(["latest"]);
+    expect(execApi.commands).toHaveLength(0);
+    expect(objectsApi.patches).toHaveLength(1); // suspend still proceeded (INV-7)
+  });
+
   it("skips the commit when the in-pod script reports an unchanged workspace", async () => {
     const execApi = new FakeExecApi();
     execApi.stdout = "checkpoint-unchanged\n";

@@ -476,7 +476,14 @@ async function runBootChain(): Promise<void> {
   const sweepWorkspaceCheckpoints = providers.sandboxProvider.sweepWorkspaceCheckpoints?.bind(
     providers.sandboxProvider,
   );
-  if (sweepWorkspaceCheckpoints && instanceConfig?.workspacePersistence?.policy.periodicCheckpoint) {
+  if (
+    sweepWorkspaceCheckpoints &&
+    // Only the object-store backend checkpoints; starting the timer for
+    // none/rwx-volume would fire a guaranteed no-op pass every interval
+    // and read as "periodic checkpoints run" when they never will.
+    instanceConfig?.workspacePersistence?.backend === "object-store" &&
+    instanceConfig.workspacePersistence.policy.periodicCheckpoint
+  ) {
     const intervalMs = instanceConfig.workspacePersistence.policy.minCheckpointIntervalMs;
     workspaceCheckpointSweep = startSweepTimer("WorkspaceCheckpointSweep", intervalMs, async () => {
       const startedAt = Date.now();

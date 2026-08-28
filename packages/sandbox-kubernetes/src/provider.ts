@@ -128,7 +128,11 @@ import {
   SESSION_ANNOTATION_KEY,
 } from "./manifest.js";
 import type { K8sProviderConfig } from "./types.js";
-import { makeCheckpointId, type WorkspaceCheckpointStore } from "./workspace-object-store.js";
+import {
+  makeCheckpointId,
+  PRESIGN_EXPIRY_SECONDS,
+  type WorkspaceCheckpointStore,
+} from "./workspace-object-store.js";
 import {
   buildCheckpointScript,
   CHECKPOINT_UNCHANGED_SENTINEL,
@@ -164,8 +168,26 @@ const GATEWAY_PORT = 9000;
 
 /** Deadline for one in-pod checkpoint (tar + three uploads). Generous — a
  * multi-hundred-MB workspace over a same-region link fits comfortably; the
- * exec default (60s) does not. */
-const WORKSPACE_CHECKPOINT_TIMEOUT_MS = 10 * 60_000;
+ * exec default (60s) does not. Derived from the presign expiry ON PURPOSE:
+ * a timed-out exec cannot be killed remotely, and its write authority must
+ * end when the provider gives up (see PRESIGN_EXPIRY_SECONDS). */
+const WORKSPACE_CHECKPOINT_TIMEOUT_MS = PRESIGN_EXPIRY_SECONDS * 1000;
+
+/** Outer settlement deadline for one queued checkpoint attempt. execInPod's
+ * timeout starts only after the exec WebSocket is established; a hung
+ * upgrade handshake or S3 call would otherwise wedge the sandbox's
+ * checkpoint chain — and with it suspend, destroy, the reaper, and the
+ * periodic sweep — forever (INV-7 requires "never blocks"). */
+const WORKSPACE_CHECKPOINT_OUTER_DEADLINE_MS = WORKSPACE_CHECKPOINT_TIMEOUT_MS + 60_000;
+
+/** Exec budget for the pre-roll flush inside create(). The engine's ready
+ * waiters reject at ~60s (SANDBOX_READY_TIMEOUT_MS in
+ * packages/engine/src/sandbox/policy.ts), so a full-length flush would
+ * error first turns fleet-wide on every image upgrade. Best effort: a
+ * flush that cannot finish in this budget fails without committing and
+ * the roll proceeds — the same delta loss the roll had before the flush
+ * existed. The unchanged-skip makes the idle-sandbox case instant. */
+const WORKSPACE_ROLL_CHECKPOINT_TIMEOUT_MS = 45_000;
 
 /** Concurrent in-pod checkpoint execs per sweep pass. A serial pass sums
  * every tar+upload and can stretch far past the sweep interval; unbounded
@@ -805,9 +827,17 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       if (check.differs) {
         console.log(`k8s sandbox ${name}: rolling pod (image ${check.liveImage} → ${manifestImage})`);
         // The live pod (and, under object-store, its emptyDir workspace) is
-        // about to be deleted on purpose — flush a best-effort reap
-        // checkpoint first so the roll loses nothing since the last commit.
-        await this.maybeCheckpointWorkspace(name, { kind: "reap" });
+        // about to be deleted on purpose — flush a best-effort checkpoint
+        // first so the roll loses nothing since the last commit. The
+        // SUSPEND event, not reap: the sandbox keeps living after the
+        // roll, and `checkpointOnReap: false` (a sandbox-death knob) must
+        // not disable a keep-alive flush. Short budget — see
+        // WORKSPACE_ROLL_CHECKPOINT_TIMEOUT_MS.
+        await this.maybeCheckpointWorkspace(
+          name,
+          { kind: "suspend" },
+          { execTimeoutMs: WORKSPACE_ROLL_CHECKPOINT_TIMEOUT_MS },
+        );
         // Capture the old pod UID before deletion so the wait-for-fresh loop
         // below can detect when the controller has reconciled a NEW pod object
         // (same name, new UID) — rather than racing against a stale
@@ -893,6 +923,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       await this.deps.secretsApi.deleteSecret(this.cfg.namespace, credsSecretName(id)).catch(() => {});
     }
     await deleteSandbox(this.deps.objectsApi, this.cfg, id);
+    this.restoreOutcomeRecorded.delete(id);
   }
 
   /** NON-terminal (decision 5, NON-NEGOTIABLE): a no-op that leaves the CR
@@ -1051,11 +1082,35 @@ export class KubernetesSandboxProvider implements SandboxProvider {
 
   /**
    * Serialized entry point for `checkpointWorkspaceNow` — see
-   * `checkpointChain`. Never rejects (the inner path catches everything).
+   * `checkpointChain`. Never rejects (the inner path catches everything)
+   * and ALWAYS settles: an outer deadline abandons an attempt whose I/O
+   * hangs before execInPod's own timer starts (WebSocket upgrade, S3
+   * calls), so a wedged attempt cannot block suspend/destroy/sweeps or
+   * later links of the chain. The abandoned attempt keeps running, but
+   * its presigned URLs expire with the exec deadline, so it cannot
+   * commit `latest` afterward.
    */
-  private async maybeCheckpointWorkspace(id: string, event: WorkspaceLifecycleEvent): Promise<void> {
+  private async maybeCheckpointWorkspace(
+    id: string,
+    event: WorkspaceLifecycleEvent,
+    opts?: { execTimeoutMs?: number },
+  ): Promise<void> {
     const prev = this.checkpointChain.get(id) ?? Promise.resolve();
-    const run = prev.then(() => this.checkpointWorkspaceNow(id, event));
+    const run = prev.then(() => {
+      let timer: NodeJS.Timeout | undefined;
+      const deadline = new Promise<void>((resolve) => {
+        timer = setTimeout(() => {
+          recordWorkspaceCheckpoint("object-store", "failed");
+          console.error(
+            `k8s sandbox ${id}: workspace checkpoint on ${event.kind} missed its outer deadline; abandoning the attempt`,
+          );
+          resolve();
+        }, WORKSPACE_CHECKPOINT_OUTER_DEADLINE_MS);
+        timer.unref?.();
+      });
+      const attempt = this.checkpointWorkspaceNow(id, event, opts).finally(() => clearTimeout(timer));
+      return Promise.race([attempt, deadline]);
+    });
     this.checkpointChain.set(id, run);
     try {
       await run;
@@ -1076,7 +1131,11 @@ export class KubernetesSandboxProvider implements SandboxProvider {
    * pod → object store directly over the in-pod exec seam. The sandbox
    * never holds bucket credentials (INV-3/INV-6).
    */
-  private async checkpointWorkspaceNow(id: string, event: WorkspaceLifecycleEvent): Promise<void> {
+  private async checkpointWorkspaceNow(
+    id: string,
+    event: WorkspaceLifecycleEvent,
+    opts?: { execTimeoutMs?: number },
+  ): Promise<void> {
     const wp = this.cfg.workspacePersistence;
     const store = this.deps.workspaceStore;
     if (wp?.backend !== "object-store" || !store) return;
@@ -1123,7 +1182,20 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       // delete the good data — a transient store outage would become
       // permanent loss. Refuse, loudly; the good checkpoint restores when
       // the pod is recreated (resume or roll retries the init container).
-      const restoreOutcome = await this.readRestoreOutcome(podName).catch(() => null);
+      let restoreOutcome: WorkspaceRestoreOutcome | null;
+      try {
+        restoreOutcome = await this.readRestoreOutcome(podName);
+      } catch (err) {
+        // Fail closed: an UNREADABLE outcome must not disarm the guard —
+        // the stake is permanent loss of the last good checkpoint; the
+        // cost of skipping is one interval of durability.
+        recordWorkspaceCheckpoint("object-store", "skipped");
+        console.warn(
+          `k8s sandbox ${id}: could not read the restore outcome; skipping checkpoint on ${event.kind} (fail closed):`,
+          err,
+        );
+        return;
+      }
       if (restoreOutcome?.kind === "cold_start" && restoreOutcome.reason === "restore-failed") {
         recordWorkspaceCheckpoint("object-store", "blocked_cold_start");
         console.warn(
@@ -1150,7 +1222,11 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         },
         podName,
         script,
-        { env: checkpointScriptEnv(urls), timeout: WORKSPACE_CHECKPOINT_TIMEOUT_MS, maxOutputBytes: 64 * 1024 },
+        {
+          env: checkpointScriptEnv(urls),
+          timeout: opts?.execTimeoutMs ?? WORKSPACE_CHECKPOINT_TIMEOUT_MS,
+          maxOutputBytes: 64 * 1024,
+        },
       );
       if (result.exitCode === 0 && result.stdout.includes(CHECKPOINT_UNCHANGED_SENTINEL)) {
         // Nothing changed since the last commit from this pod — the
@@ -1189,13 +1265,24 @@ export class KubernetesSandboxProvider implements SandboxProvider {
    * message records nothing (none/rwx backends, pods predating the init
    * container).
    */
+  /** Last pod whose restore outcome was recorded, per sandbox. create()'s
+   * adopt path and an idempotent resume() re-observe the SAME pod;
+   * re-recording would inflate `valet.workspace.restores` (and its
+   * `failed` alert series) on every api restart or failure-recovery
+   * cycle. In-process only: a restart re-records once per pod, which is
+   * bounded and acceptable. */
+  private readonly restoreOutcomeRecorded = new Map<string, string>();
+
   private async recordRestoreOutcome(id: string): Promise<void> {
     if (this.cfg.workspacePersistence?.backend !== "object-store" || !this.deps.podStatusApi) return;
     try {
       const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, id);
       if (podName === null) return;
+      if (this.restoreOutcomeRecorded.get(id) === podName) return;
       const outcome = await this.readRestoreOutcome(podName);
-      if (outcome === null || outcome.kind === "skipped") return; // INV-1 skip is not a restore attempt
+      if (outcome === null) return; // init container not terminated yet — retry on the next observation
+      this.restoreOutcomeRecorded.set(id, podName);
+      if (outcome.kind === "skipped") return; // INV-1 skip is not a restore attempt
       if (outcome.kind === "restored") {
         recordWorkspaceRestore("object-store", "restored");
         return;
