@@ -327,6 +327,14 @@ export interface ChannelTransport {
    */
   conversationKeyFromThreadKey?(threadKey: string): string | null;
   /**
+   * Engine thread key for a raw event payload, so a reply to a
+   * channel-triggered event routes back to its conversation. `payload` is the
+   * provider's inner event object (e.g. a Slack `app_mention`). Returns `null`
+   * for an event with no conversation to reply into (a workspace-join, a
+   * channel-lifecycle event). Consumed by the event dispatcher.
+   */
+  threadKeyFromEvent?(eventKey: string, payload: unknown): string | null;
+  /**
    * Resolve a workspace member by email (Slack: `users.lookupByEmail`).
    * `null` = the email names nobody in the workspace — a normal outcome the
    * caller uses to fall back to another flow, never an error. Rejects with

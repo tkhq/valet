@@ -786,6 +786,18 @@ export class SlackTransport implements ChannelTransport {
     return conversationKeyFor(this.teamId, channelId, threadTs);
   }
 
+  threadKeyFromEvent(eventKey: string, payload: unknown): string | null {
+    // Only message-like events name a conversation to reply into. A reaction,
+    // a channel-lifecycle change, or a workspace-join has no thread to answer.
+    if (eventKey !== "slack.message" && eventKey !== "slack.app_mention") return null;
+    if (typeof payload !== "object" || payload === null) return null;
+    const p = payload as Record<string, unknown>;
+    const channel = typeof p.channel === "string" ? p.channel : undefined;
+    const ts = typeof p.thread_ts === "string" ? p.thread_ts : typeof p.ts === "string" ? p.ts : undefined;
+    if (channel === undefined || ts === undefined) return null;
+    return `slack:${channel}:${ts}`;
+  }
+
   // ─── Feature-detected extras (not part of ChannelTransport) ───────────
 
   /** Workspace-member typeahead for the identity-link flow (users.list, bot token). */
