@@ -330,6 +330,31 @@ describe("ChannelHost.handleUpdate", () => {
     ]);
   });
 
+  it("does not auto-post an overheard turn (origin.reply = manual)", async () => {
+    const session = await defaultAssistantSessionFor(
+      { db: testDb.appDb, engineHost },
+      { type: "org", id: ORG_ID },
+      { actorUserId: USER_ID, orgId: ORG_ID },
+    );
+    const content: SignalContent = {
+      kind: "signal",
+      signalType: "keyed.message",
+      body: "a passing remark in a followed thread",
+      origin: { channelType: "keyed", threadKey: "keyed:D100", reply: "manual", messageTs: "1.5" },
+    };
+    const thread = session.thread("events");
+    await thread.submitPrompt(content, { dispatchId: "evt-manual" });
+
+    // Wait for the assistant turn to finish; its message_end drives the bridge,
+    // which must NOT post because the message was only overheard.
+    for (let i = 0; i < 200; i++) {
+      const entries = await session.providers.store.getEntries(session.id, thread.id);
+      if (entries.some((e) => e.type === "message" && e.role === "assistant" && e.stopReason === "end_turn")) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(keyedTransport.sent).toEqual([]);
+  });
+
   // ── conversationKey ⇄ threadKey round trip ────────────────────────────
   //
   // Outbound delivery reads a stored thread key and has to rebuild the
