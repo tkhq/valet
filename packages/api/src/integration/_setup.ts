@@ -48,6 +48,7 @@ import { SkillSyncService } from "../services/skill-sync.js";
 import { GitHubSkillRepoReader } from "../services/skill-repo-reader.js";
 import { skillRepoReaderFactory } from "../services/skill-source-credential.js";
 import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
+import { channelThreadContextFetcher } from "../events/channel-thread-context.js";
 import { channelOriginResolver } from "../events/channel-origin.js";
 import { resolveOrgId } from "../lib/org.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
@@ -501,14 +502,22 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     db,
     workflowStore,
     workflowRunHost,
-    deliverToOrchestrator: buildOrchestratorTarget({ db, engineHost }),
+    deliverToOrchestrator: buildOrchestratorTarget({
+      db,
+      engineHost,
+      fetchThreadContext: channelThreadContextFetcher(channelHost),
+    }),
   });
 
   const eventDispatcher = new EventDispatcher({
     db,
     workflowRunHost,
     workflowStore,
-    deliverToOrchestrator: buildOrchestratorTarget({ db, engineHost }),
+    deliverToOrchestrator: buildOrchestratorTarget({
+      db,
+      engineHost,
+      fetchThreadContext: channelThreadContextFetcher(channelHost),
+    }),
     resolveChannelOrigin: channelOriginResolver(channelHost),
   });
 

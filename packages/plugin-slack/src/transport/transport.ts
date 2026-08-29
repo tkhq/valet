@@ -42,6 +42,7 @@ import {
 import { buildContentBlocks, SLACK_MAX_BLOCKS, SLACK_TEXT_LIMIT } from "../message-chunking.js";
 import { SKIP_SUBTYPES } from "../subtypes.js";
 import { SlackApi, SlackApiError, SLACK_MARKDOWN_TEXT_LIMIT } from "./api.js";
+import { fetchThreadTranscript } from "./thread-context.js";
 import { markdownToSlackMrkdwn, neutralizeSlackMentions } from "./format.js";
 import { verifySlackSignatureSync } from "./verify.js";
 
@@ -757,6 +758,12 @@ export class SlackTransport implements ChannelTransport {
     } catch {
       // Not an agent thread, or the scope is missing — nothing to show.
     }
+  }
+
+  /** Prior thread messages as an attributed transcript — see `ChannelTransport`.
+   *  `selfUserId` strips the bot's own mention from the seeded trigger line. */
+  async fetchThreadContext(channelId: string, threadTs: string): Promise<string | null> {
+    return fetchThreadTranscript(this.api, { channelId, threadTs, selfUserId: this.botUserId });
   }
 
   async fetchMedia(media: InboundChannelMedia): Promise<FetchedChannelMedia | null> {

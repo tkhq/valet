@@ -129,6 +129,30 @@ Step 1 of the automation wizard becomes "What should happen?":
 The wizard maps an outcome to the existing `event_subscriptions` create; no new
 create endpoint.
 
+### 8. First-turn thread-context hydration
+
+A mention often lands mid-thread, so the trigger message alone leaves the
+assistant blind — it would have to call `read_thread` before it can act, and
+without that it answers itself. On the assistant's FIRST turn in a channel
+thread, the delivery path seeds the thread's earlier messages instead.
+
+- `ChannelTransport.fetchThreadContext(channelId, threadTs)` returns the prior
+  messages as a plain attributed transcript, one line per message, `Name: text`,
+  oldest first. Slack backs it with `conversations.replies` + `users.info`
+  (`packages/plugin-slack/src/transport/thread-context.ts`); names resolve
+  best-effort and fall back to `@id`. A long thread drops its oldest lines under
+  a `[N earlier message(s) omitted]` note.
+- `deliverToAssistantThread` seeds only when the target valet thread has no
+  entries yet, so a re-mention or a followed message never re-seeds. The
+  transcript is prepended to the delivered body under "Conversation so far in
+  this thread", split from the trigger message by a `---` rule.
+- Wired on the mention path only (`buildOrchestratorTarget` ->
+  `channelThreadContextFetcher(channelHost)`). The follow path never delivers
+  first, so it leaves the hook unset.
+- The persona's `## Channels` block frames a thread as a group conversation:
+  read who said what, answer the addressed person by name, act on the request
+  from the thread rather than asking for context it already holds.
+
 ## Invariants (alert, do not auto-repair)
 
 - A follow record has one owner: the subscription that created it. The

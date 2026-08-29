@@ -387,6 +387,15 @@ export interface ChannelTransport {
    * their Valet email. Optional: providers without a member directory omit it.
    */
   listWorkspaceMembers?(query: string): Promise<Array<{ id: string; name: string; realName?: string }>>;
+  /**
+   * Prior messages in a thread as a plain attributed transcript (`Name: text`
+   * per line), to hydrate an assistant's FIRST turn in that thread so it starts
+   * with the whole conversation instead of the lone trigger message. `channelId`
+   * and `threadTs` come from the `ChannelOrigin.threadKey`. `null` when the
+   * thread is empty, unreadable, or the provider has no thread history. Optional:
+   * providers without threads omit it.
+   */
+  fetchThreadContext?(channelId: string, threadTs: string): Promise<string | null>;
 
   // ── Streaming egress ────────────────────────────────────────────────
   //

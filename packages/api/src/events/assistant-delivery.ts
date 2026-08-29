@@ -8,14 +8,23 @@
  * go through here, so the org check and delivery shape can never drift between
  * them.
  */
-import type { Principal, SignalContent } from "@valet/engine";
+import type { ChannelOrigin, Principal, SignalContent } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import { ensureDefaultAssistantSession } from "../assistants/service.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 
 export async function deliverToAssistantThread(
-  deps: { db: AppDb; engineHost: EngineHost },
+  deps: {
+    db: AppDb;
+    engineHost: EngineHost;
+    /**
+     * Seed a channel thread's earlier messages on the assistant's FIRST turn in
+     * it. Wired only on the mention path (`orchestrator-target`); the follow
+     * path never delivers first, so it leaves this unset.
+     */
+    fetchThreadContext?: (origin: ChannelOrigin) => Promise<string | null>;
+  },
   args: {
     orgId: string;
     owner: Principal;
@@ -41,5 +50,20 @@ export async function deliverToAssistantThread(
     });
     throw new Error(`delivery refused: assistant org mismatch (${data.orgId} != ${args.orgId})`);
   }
-  await session.thread(args.threadKey).submitPrompt(args.signal, { dispatchId: args.dispatchId });
+  const thread = session.thread(args.threadKey);
+  let signal = args.signal;
+  // On the assistant's FIRST turn in a channel thread, prepend the thread's
+  // earlier messages so it participates in the group conversation with full
+  // context instead of the lone trigger message. Later messages already stream
+  // in on the same thread, so a thread that already has entries never re-seeds.
+  if (deps.fetchThreadContext && signal.origin) {
+    const existing = await session.providers.store.getEntries(session.id, thread.id);
+    if (existing.length === 0) {
+      const transcript = await deps.fetchThreadContext(signal.origin);
+      if (transcript) {
+        signal = { ...signal, body: `Conversation so far in this thread:\n${transcript}\n\n---\n\n${signal.body}` };
+      }
+    }
+  }
+  await thread.submitPrompt(signal, { dispatchId: args.dispatchId });
 }
