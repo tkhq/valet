@@ -3087,6 +3087,24 @@ export interface EventSubscriptionFilterWire {
   label?: string;
 }
 
+/** One provider-populated choice for a filter value (a Slack user, a repo). */
+export interface FilterOptionWire {
+  id: string;
+  label: string;
+  hint?: string;
+}
+
+/**
+ * Response of `GET /api/events/filter-options`. `reason` is set (with an empty
+ * `options`) when the source cannot resolve now — unknown source, an
+ * unconnected integration, or a provider error — so the picker can explain the
+ * empty list and fall back to free text.
+ */
+export interface FilterOptionsResponse {
+  options: FilterOptionWire[];
+  reason?: string;
+}
+
 // `{ kind: "signal" }` (wake parked workflow runs) is intentionally absent:
 // no workflow node parks on the event-signal shape yet, so the CRUD
 // validator rejects it — see routes/events.ts TARGET_KINDS.
