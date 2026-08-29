@@ -111,7 +111,7 @@ export function SubscriptionCreateDialog({
         for (const f of entry.filters ?? []) {
           if (seen.has(f.field)) continue;
           seen.add(f.field);
-          out.push({ field: f.field, description: f.description });
+          out.push({ field: f.field, description: f.description, options: f.options });
         }
       }
     }
