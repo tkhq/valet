@@ -93,6 +93,13 @@ export async function createWorkflowSchedule(
     cron: string;
     timezone?: string;
     input?: unknown;
+    /**
+     * The team that owns an orchestrator-prompt schedule, so a scheduled prompt
+     * created in a team workspace fires the TEAM's assistant, not the caller's.
+     * The route validates membership before passing it. Ignored for a workflow
+     * target (owner follows the workflow).
+     */
+    teamId?: string;
   },
   now = Date.now(),
 ): Promise<{ ok: true; schedule: WorkflowScheduleSummary } | { ok: false; error: string }> {
@@ -134,6 +141,12 @@ export async function createWorkflowSchedule(
     // a strictly larger audience than the team that owns the workflow. The
     // column now holds a team, so the schedule follows its workflow.
     scheduleOwner = { ownerType: owned.ownerType, ownerId: owned.ownerId };
+  } else if (input.teamId) {
+    // Orchestrator-prompt schedule created in a team workspace: the team owns
+    // it, so `deliverToOrchestrator` fires the team's assistant. Membership is
+    // the route's to check (existence-hiding 404) before this runs; without a
+    // teamId the schedule stays the caller's own, as before.
+    scheduleOwner = { ownerType: "team", ownerId: input.teamId };
   }
 
   const inserted = await db

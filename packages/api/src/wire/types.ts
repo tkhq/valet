@@ -2231,6 +2231,14 @@ export type CreateWorkflowScheduleRequest = {
   name: string;
   cron: string;
   timezone?: string;
+  /**
+   * The workspace an ORCHESTRATOR-prompt schedule belongs to: a team id fires
+   * the team's assistant, absent fires the caller's own. Ignored for a
+   * `workflow` target, whose owner follows the workflow. The switcher supplies
+   * it (`scope.teamId`), the same shape `CreateSessionRequest` and
+   * create-workflow take.
+   */
+  teamId?: string;
 } & (
   | { target: { kind: "workflow"; workflowId: string; input?: unknown } }
   | { target: { kind: "orchestrator"; prompt: string } }

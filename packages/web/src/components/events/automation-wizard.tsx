@@ -280,8 +280,16 @@ export function AutomationWizard({
         },
       );
     } else {
+      // A scheduled prompt fires an assistant, so it belongs to the active
+      // workspace — send the team so it fires the TEAM's assistant, not the
+      // caller's. (The workflow target above needs none: it follows the
+      // workflow's own owner.)
       createSchedule.mutate(
-        { ...base, target: { kind: "orchestrator", prompt: prompt.trim() } },
+        {
+          ...base,
+          target: { kind: "orchestrator", prompt: prompt.trim() },
+          ...(scopedTeamId ? { teamId: scopedTeamId } : {}),
+        },
         {
           onSuccess: () => onOpenChange(false),
           onError: (err) => setError(errorText(err)),
