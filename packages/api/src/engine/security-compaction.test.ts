@@ -25,17 +25,25 @@ const recordStale = vi.fn();
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 
-const DOC = [
-  "protocol_version: 1",
-  "status: working",
-  "checklist:",
-  "  pending: 4",
-  "  done: 1",
-  "queue:",
-  "  pending: 2",
-  "  done: 0",
-  "",
-].join("\n");
+/** The acting cell's own working doc. Strict: every required key, cell/persona
+ * naming the writing cell (filled from the materialized row at write time). */
+function workingDoc(cell: SecurityCellRow): string {
+  return [
+    "protocol_version: 1",
+    `cell: ${cell.dir}`,
+    `persona: ${cell.persona}`,
+    "status: working",
+    "checklist:",
+    "  pending: 4",
+    "  done: 1",
+    "queue:",
+    "  pending: 2",
+    "  done: 0",
+    "findings: []",
+    "log: []",
+    "",
+  ].join("\n");
+}
 
 describe("securityCompactionHook", () => {
   let db: AppDb;
@@ -63,7 +71,7 @@ describe("securityCompactionHook", () => {
     await svc.writeFile(engagementId, {
       actorCellId: cell.id,
       path: `/cells/${cell.dir}/state.yml`,
-      content: DOC,
+      content: workingDoc(cell),
     });
   });
 

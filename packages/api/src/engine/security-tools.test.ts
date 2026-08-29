@@ -412,9 +412,18 @@ describe("sec_cell_complete", () => {
       cellId: cell.id,
       path: "/cells/01-recon/state.yml",
       revision: 1,
-      content: ["protocol_version: 1", "status: done", "checklist: { pending: 0, done: 4 }", "queue: { pending: 2, done: 9 }"].join(
-        "\n",
-      ),
+      // Strict-valid doc (parseStateDoc must succeed) that still fails the exit
+      // ruling: status done with queue.pending 2. The complete tool rules on it.
+      content: [
+        "protocol_version: 1",
+        `cell: ${cell.dir}`,
+        `persona: ${cell.persona}`,
+        "status: done",
+        "checklist: { pending: 0, done: 4 }",
+        "queue: { pending: 2, done: 9 }",
+        "findings: []",
+        "log: []",
+      ].join("\n"),
       createdAt: now,
     });
 

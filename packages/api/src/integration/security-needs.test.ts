@@ -74,6 +74,8 @@ describe("api integration: pivot-coordinator + needs loop (M-P4c)", () => {
         path: `/cells/${cells[0].dir}/state.yml`,
         content: [
           "protocol_version: 1",
+          `cell: ${cells[0].dir}`,
+          `persona: ${cells[0].persona}`,
           "status: done",
           "checklist:",
           "  pending: 0",
@@ -81,6 +83,8 @@ describe("api integration: pivot-coordinator + needs loop (M-P4c)", () => {
           "queue:",
           "  pending: 0",
           "  done: 2",
+          "findings: []",
+          "log: []",
           "",
         ].join("\n"),
       });
@@ -108,6 +112,8 @@ describe("api integration: pivot-coordinator + needs loop (M-P4c)", () => {
         path: `/cells/${cells[1].dir}/state.yml`,
         content: [
           "protocol_version: 1",
+          `cell: ${cells[1].dir}`,
+          `persona: ${cells[1].persona}`,
           "status: yielding",
           "checklist:",
           "  pending: 4",
@@ -115,6 +121,8 @@ describe("api integration: pivot-coordinator + needs loop (M-P4c)", () => {
           "queue:",
           "  pending: 4",
           "  done: 1",
+          "findings: []",
+          "log: []",
           "",
         ].join("\n"),
       });

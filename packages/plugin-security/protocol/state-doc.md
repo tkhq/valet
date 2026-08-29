@@ -16,28 +16,32 @@ Your durable working state is a YAML document at `/cells/<your cell dir>/state.y
 
 ```yaml
 protocol_version: 1
-engagement: eng_abc123
-cell: cell_01
-persona: code-review
-mode: fresh
-status: working        # working | yielding | done
+engagement: eng_abc123           # your engagement id if your prompt names one, else this placeholder
+cell: 04-authz-sweep             # YOUR cell dir, exactly as your dispatch prompt names it
+persona: code-review             # YOUR persona, exactly as your dispatch prompt names it
+mode: fresh                      # fresh | resume
+status: working                  # working | yielding | done
 checklist:
   pending: 0
   done: 14
 queue:
   pending: 0
   done: 22
-findings: [fnd_9a1, fnd_9a2, fnd_9b0]   # ids from sec_finding_report
+findings: [fnd_9a1, fnd_9a2, fnd_9b0]   # ids sec_finding_report returned to YOU
 log:
   - "swept packages/api/src/routes for authz gaps"
   - "queued follow-up on token minting path"
 ```
 
+The example above is a SHAPE, not a document to copy. Fill every field with YOUR cell's real values.
+
 - `protocol_version` is 1. The server rejects other values.
-- `status` is `working` while you loop, `yielding` for a deliberate stop, `done` only at the exit condition.
-- `checklist` counts review items; `queue` counts discovered follow-ups.
-- `findings` lists the ids `sec_finding_report` returned.
+- `cell` MUST be your own cell dir, and `persona` MUST be your own persona — the exact values your dispatch prompt names. The server refuses a state doc whose `cell` or `persona` names a different cell. Copying this example's values, another cell's doc, or an invented cell is the commonest way a write is refused.
+- `status` is `working` while you loop, `yielding` for a deliberate stop, `done` only at the exit condition. `done` is refused unless `checklist.pending` and `queue.pending` are both 0.
+- `checklist` and `queue` counts are integers `>= 0`, both `pending` and `done` present.
+- `findings` lists ONLY the ids `sec_finding_report` returned to your cell. The server refuses an id your cell never reported.
 - `log` is a short list of what happened, newest last.
+- No other top-level keys are allowed — the server refuses an unknown or misspelled key by name.
 
 ## Checkpoint cadence
 

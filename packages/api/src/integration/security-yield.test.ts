@@ -49,9 +49,13 @@ const PLAN = [
   "    goal: Map the codebase",
 ].join("\n");
 
+// Both docs are the 01-recon cell's own (persona code-review). Strict: every
+// required key, cell/persona naming THIS cell.
 /** Attempt 1's deliberate stop: work remains on the queue. */
 const YIELDING_DOC = [
   "protocol_version: 1",
+  "cell: 01-recon",
+  "persona: code-review",
   "status: yielding",
   "checklist:",
   "  pending: 2",
@@ -59,11 +63,15 @@ const YIELDING_DOC = [
   "queue:",
   "  pending: 5",
   "  done: 12",
+  "findings: []",
+  "log: []",
 ].join("\n");
 
 /** Attempt 2 finishes: done with both pending counts at zero. */
 const DONE_DOC = [
   "protocol_version: 1",
+  "cell: 01-recon",
+  "persona: code-review",
   "status: done",
   "checklist:",
   "  pending: 0",
@@ -71,6 +79,8 @@ const DONE_DOC = [
   "queue:",
   "  pending: 0",
   "  done: 17",
+  "findings: []",
+  "log: []",
 ].join("\n");
 
 /** ≥ 200 characters of evidence, per the finding body floor. */

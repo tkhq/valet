@@ -33,6 +33,9 @@ import {
   parsePlan,
   VERIFIER_PERSONA,
   parseStateDoc,
+  collectStateDocViolations,
+  stateDocIdentityViolations,
+  stateDocWriteError,
   playbookMarkdown,
   protocolMarkdown,
   ruleExit,
@@ -466,6 +469,7 @@ export function buildDispatchPrompt(
     "",
     `Your cell directory in the engagement tree is /cells/${cell.dir}/.`,
     `Write your state doc to /cells/${cell.dir}/state.yml with sec_fs_write.`,
+    `In that state doc set exactly "cell: ${cell.dir}" and "persona: ${cell.persona}". The server refuses a state doc whose cell or persona names a different cell — never copy the protocol example or another cell's doc.`,
   );
   if (readsCells.length > 0) {
     lines.push("", "Read these predecessor state docs with sec_fs_read before you start:");
@@ -1386,8 +1390,35 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
       );
     }
     if (basename(args.path) === "state.yml") {
-      // Throws the protocol's own corrective message on a bad doc.
-      parseStateDoc(args.content);
+      // Strict rails for the durable state doc. Three layers, all reported at
+      // once so the persona fixes everything in one rewrite:
+      //   1. Structural — unknown keys, missing fields, bad counts, done vs
+      //      pending consistency (collectStateDocViolations).
+      //   2. Identity — cell/persona MUST name the acting cell. This is what
+      //      catches the copied-example / hallucinated-doc failure: a recon
+      //      cell that writes a `06-verify` / `verifier` doc is refused here.
+      //   3. Finding-id existence — every id in `findings` MUST be a finding
+      //      THIS cell actually reported (no invented or borrowed ids).
+      const { doc, violations: structural } = collectStateDocViolations(args.content);
+      const violations = [...structural];
+      if (doc) {
+        violations.push(...stateDocIdentityViolations(doc, { cell: cell.dir, persona: cell.persona }));
+        if (doc.findings.length > 0) {
+          const ownRows = await db
+            .select({ id: securityFindings.id })
+            .from(securityFindings)
+            .where(and(eq(securityFindings.engagementId, engagementId), eq(securityFindings.cellId, cell.id)));
+          const own = new Set(ownRows.map((r) => r.id));
+          const foreign = doc.findings.filter((id) => !own.has(id));
+          if (foreign.length > 0) {
+            violations.push(
+              `findings names id(s) this cell did not report: ${foreign.join(", ")}. ` +
+                `List only the ids sec_finding_report returned to THIS cell.`,
+            );
+          }
+        }
+      }
+      if (violations.length > 0) throw new Error(stateDocWriteError(violations));
     }
 
     const insertNext = async (): Promise<{ path: string; revision: number }> => {

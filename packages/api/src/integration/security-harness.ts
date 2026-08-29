@@ -74,16 +74,35 @@ export async function waitFor(
   throw new Error(`waitFor: timed out waiting for ${label}`);
 }
 
-/** A protocol-valid state doc with the given status and counts. */
+/**
+ * A strict-compliant state doc for the acting cell. The strict validator
+ * (packages/plugin-security/src/lib/state-doc.ts) requires every top-level key
+ * and refuses a doc whose `cell`/`persona` do not name the writing cell, so
+ * the caller MUST pass the dispatched cell's real `dir` and `persona`. Both
+ * are on the dispatch result (`dispatched.cell.dir`, `dispatched.cell.persona`).
+ * `findings`/`log` default to empty lists (the keys must still exist). Pass
+ * `findings` only with ids the cell actually reported — the write path refuses
+ * a foreign id.
+ */
 export function stateDoc(args: {
+  cell: string;
+  persona: string;
   status: "working" | "yielding" | "done";
   checklist?: { pending: number; done: number };
   queue?: { pending: number; done: number };
+  findings?: string[];
+  log?: string[];
+  mode?: "fresh" | "resume";
 }): string {
   const checklist = args.checklist ?? { pending: 0, done: 1 };
   const queue = args.queue ?? { pending: 0, done: 1 };
-  return [
-    "protocol_version: 1",
+  const findings = args.findings ?? [];
+  const log = args.log ?? [];
+  const lines = ["protocol_version: 1"];
+  if (args.mode) lines.push(`mode: ${args.mode}`);
+  lines.push(
+    `cell: ${args.cell}`,
+    `persona: ${args.persona}`,
     `status: ${args.status}`,
     "checklist:",
     `  pending: ${checklist.pending}`,
@@ -91,7 +110,15 @@ export function stateDoc(args: {
     "queue:",
     `  pending: ${queue.pending}`,
     `  done: ${queue.done}`,
-  ].join("\n");
+    `findings: [${findings.join(", ")}]`,
+  );
+  if (log.length === 0) {
+    lines.push("log: []");
+  } else {
+    lines.push("log:");
+    for (const entry of log) lines.push(`  - ${JSON.stringify(entry)}`);
+  }
+  return lines.join("\n");
 }
 
 /** REST-create a kind='security' session with the repo binding pinned to
@@ -192,6 +219,31 @@ export async function writeFileAsChild(
   return (await res.json()) as SecurityWriteFileResponse;
 }
 
+/**
+ * Attempt a tree write acting AS the dispatched child WITHOUT asserting 200.
+ * The strict state-doc write path refuses a bad state.yml with a 409 whose
+ * body carries the combined corrective. Returns the status and the relayed
+ * error so a test can assert the refusal and its message.
+ */
+export async function tryWriteFileAsChild(
+  api: TestApi,
+  childSessionId: string,
+  path: string,
+  content: string,
+): Promise<{ status: number; error?: string; body: unknown }> {
+  const res = await fetch(`${api.baseUrl}/api/sessions/${childSessionId}/security/files`, {
+    method: "POST",
+    headers: actingAs(childSessionId),
+    body: JSON.stringify({ path, content }),
+  });
+  const body: unknown = await res.json();
+  const error =
+    typeof body === "object" && body !== null && "error" in body
+      ? String((body as { error: unknown }).error)
+      : undefined;
+  return { status: res.status, error, body };
+}
+
 /** Report a finding acting AS the dispatched child. */
 export async function reportFindingAsChild(
   api: TestApi,
@@ -270,7 +322,7 @@ export async function runCellToCompletion(
     api,
     childId!,
     `/cells/${dispatched.cell.dir}/state.yml`,
-    stateDoc({ status: "done" }),
+    stateDoc({ cell: dispatched.cell.dir, persona: dispatched.cell.persona, status: "done" }),
   );
   await settleChildByAbort(api, childId!);
   const ruling = await completeCellViaRoute(api, sessionId, dispatched.cell.id);

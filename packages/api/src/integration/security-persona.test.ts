@@ -58,8 +58,12 @@ const PLAN = [
   "    review: true",
 ].join("\n");
 
+// The recon cell (01-recon, persona code-review) writes its own done doc.
+// Strict: every required key, plus cell/persona naming THIS cell.
 const DONE_STATE_DOC = [
   "protocol_version: 1",
+  "cell: 01-recon",
+  "persona: code-review",
   "status: done",
   "checklist:",
   "  pending: 0",
@@ -67,6 +71,8 @@ const DONE_STATE_DOC = [
   "queue:",
   "  pending: 0",
   "  done: 3",
+  "findings: []",
+  "log: []",
 ].join("\n");
 
 /** ≥ 200 characters of evidence, per the finding body floor. */

@@ -1,6 +1,14 @@
 export { parsePlan, cellDirSlug, cellDir, MAX_PLAN_CELLS } from "./plan.js";
 export type { PlanCell, EngagementPlan } from "./plan.js";
-export { parseStateDoc, ruleExit, PROTOCOL_VERSION } from "./state-doc.js";
+export {
+  parseStateDoc,
+  collectStateDocViolations,
+  stateDocIdentityViolations,
+  stateDocWriteError,
+  STATE_DOC_KEYS,
+  ruleExit,
+  PROTOCOL_VERSION,
+} from "./state-doc.js";
 export type { StateDoc, StateDocStatus, ExitRuling } from "./state-doc.js";
 export { findingFingerprint } from "./fingerprint.js";
 export {

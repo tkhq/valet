@@ -135,6 +135,8 @@ describe("api integration: report artifact over the cell claim", () => {
       await engineHost.liveSession(reconChild)?.abort();
       const reconState = [
         "protocol_version: 1",
+        `cell: ${recon.cell.dir}`,
+        `persona: ${recon.cell.persona}`,
         "status: done",
         "checklist:",
         "  pending: 0",
@@ -142,6 +144,8 @@ describe("api integration: report artifact over the cell claim", () => {
         "queue:",
         "  pending: 0",
         "  done: 0",
+        "findings: []",
+        "log: []",
         "",
       ].join("\n");
       await fetch(`${api.baseUrl}/api/sessions/${reconChild}/security/files`, {

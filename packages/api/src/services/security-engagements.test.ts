@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, count, eq } from "drizzle-orm";
 import type { PgDb } from "@valet/store-postgres";
 import {
   codeReviewPresetPlan,
@@ -42,24 +42,41 @@ const FLAT_PLAN = serializePlan(
     }),
 );
 
-const DONE_DOC = [
-  "protocol_version: 1",
-  "status: done",
-  "checklist:",
-  "  pending: 0",
-  "  done: 5",
-  "queue:",
-  "  pending: 0",
-  "  done: 3",
-  "",
-].join("\n");
+/**
+ * The strict validator refuses a state doc whose cell/persona do not name the
+ * writing cell, so every doc is built from the acting cell's real dir/persona
+ * (SecurityCellRow). Each doc carries every required key.
+ */
+function doneDoc(cell: { dir: string; persona: string }): string {
+  return [
+    "protocol_version: 1",
+    `cell: ${cell.dir}`,
+    `persona: ${cell.persona}`,
+    "status: done",
+    "checklist:",
+    "  pending: 0",
+    "  done: 5",
+    "queue:",
+    "  pending: 0",
+    "  done: 3",
+    "findings: []",
+    "log: []",
+    "",
+  ].join("\n");
+}
 
-const YIELD_DOC = DONE_DOC.replace("status: done", "status: yielding").replace(
-  "  pending: 0\n  done: 3",
-  "  pending: 31\n  done: 3",
-);
+function yieldDoc(cell: { dir: string; persona: string }): string {
+  return doneDoc(cell)
+    .replace("status: done", "status: yielding")
+    .replace("  pending: 0\n  done: 3", "  pending: 31\n  done: 3");
+}
 
-const VIOLATION_DOC = DONE_DOC.replace("queue:\n  pending: 0", "queue:\n  pending: 2");
+/** A done doc with queue.pending 2 — the write path refuses it, and ruleExit
+ * (via completeCell) rules it a violation. Only a DIRECT securityFiles insert
+ * can put it in the DB, mimicking a row that predates a protocol change. */
+function violationDoc(cell: { dir: string; persona: string }): string {
+  return doneDoc(cell).replace("queue:\n  pending: 0", "queue:\n  pending: 2");
+}
 
 /** A body long enough to clear the 200-character evidence floor. */
 const EVIDENCE = `The route reads the session id from the URL and never checks ownership. Excerpt: db.select().from(sessions).where(eq(sessions.id, id)) — any authenticated caller can read any session, which leaks other tenants' transcripts.`;
@@ -89,8 +106,13 @@ describe("security engagement service", () => {
     return svc.startEngagement(engagement.id, { resolvedSha: SHA });
   }
 
-  /** Dispatch a cell, write its state doc, and settle it via completeCell. */
-  async function runCellToCompletion(engagementId: string, cell: SecurityCellRow, doc = DONE_DOC) {
+  /** Dispatch a cell, write its state doc, and settle it via completeCell. The
+   * doc defaults to the cell's own done doc (strict identity-correct). */
+  async function runCellToCompletion(
+    engagementId: string,
+    cell: SecurityCellRow,
+    doc = doneDoc(cell),
+  ) {
     await svc.dispatchCell(engagementId, { cellId: cell.id, spawn });
     await svc.writeFile(engagementId, {
       actorCellId: cell.id,
@@ -286,7 +308,7 @@ describe("security engagement service", () => {
 
   it("re-dispatching a yielded cell increments attempts and honors a mode override", async () => {
     const { engagement, cells } = await makeStarted();
-    const result = await runCellToCompletion(engagement.id, cells[0], YIELD_DOC);
+    const result = await runCellToCompletion(engagement.id, cells[0], yieldDoc(cells[0]));
     expect(result.outcome).toBe("yielded");
 
     const { cell } = await svc.dispatchCell(engagement.id, {
@@ -356,20 +378,109 @@ describe("security engagement service", () => {
 
   it("completeCell rules yielding → yielded", async () => {
     const { engagement, cells } = await makeStarted();
-    const result = await runCellToCompletion(engagement.id, cells[0], YIELD_DOC);
+    const result = await runCellToCompletion(engagement.id, cells[0], yieldDoc(cells[0]));
     expect(result.outcome).toBe("yielded");
     if (result.outcome === "yielded") expect(result.cell.status).toBe("yielded");
   });
 
   it("completeCell rules done-with-pending-queue as a violation, cell stays running", async () => {
     const { engagement, cells } = await makeStarted();
-    const result = await runCellToCompletion(engagement.id, cells[0], VIOLATION_DOC);
+    await svc.dispatchCell(engagement.id, { cellId: cells[0].id, spawn });
+    // The strict write path refuses a done doc with queue.pending 2, so this
+    // row can only reach the DB by a direct insert — a row that predates a
+    // protocol change. completeCell then rules it a violation via ruleExit.
+    await db.insert(securityFiles).values({
+      id: "file_viol",
+      engagementId: engagement.id,
+      cellId: cells[0].id,
+      path: `/cells/${cells[0].dir}/state.yml`,
+      revision: 1,
+      content: violationDoc(cells[0]),
+      createdAt: Date.now(),
+    });
+    const result = await svc.completeCell(engagement.id, cells[0].id, { settled: true });
     expect(result.outcome).toBe("violation");
     if (result.outcome === "violation") {
       expect(result.violation).toContain("queue.pending is 2");
     }
     const rows = await db.select().from(securityCells).where(eq(securityCells.id, cells[0].id));
     expect(rows[0].status).toBe("running");
+  });
+
+  it("writeFile refuses a done state doc with queue.pending left, naming the count", async () => {
+    const { engagement, cells } = await makeStarted();
+    await svc.dispatchCell(engagement.id, { cellId: cells[0].id, spawn });
+    await expect(
+      svc.writeFile(engagement.id, {
+        actorCellId: cells[0].id,
+        path: `/cells/${cells[0].dir}/state.yml`,
+        content: violationDoc(cells[0]),
+      }),
+    ).rejects.toThrow(/queue\.pending is 2, not 0/);
+    // The refused write stored nothing.
+    const [{ n }] = await db
+      .select({ n: count() })
+      .from(securityFiles)
+      .where(eq(securityFiles.path, `/cells/${cells[0].dir}/state.yml`));
+    expect(Number(n)).toBe(0);
+  });
+
+  it("writeFile refuses a state doc whose cell/persona name a DIFFERENT cell (identity rails)", async () => {
+    // The exact failure this fix exists for: a cell writes to its OWN correct
+    // path, but the doc's identity fields name another cell (a copied example
+    // or hallucination). The path prefix passes; the identity check refuses it.
+    const { engagement, cells } = await makeStarted();
+    await svc.dispatchCell(engagement.id, { cellId: cells[0].id, spawn });
+    await expect(
+      svc.writeFile(engagement.id, {
+        actorCellId: cells[0].id,
+        path: `/cells/${cells[0].dir}/state.yml`, // cell[0]'s OWN path
+        content: doneDoc(cells[1]), // but the doc names cell[1]'s dir
+      }),
+    ).rejects.toThrow(
+      new RegExp(
+        `writing the state doc for cell "${cells[0].dir}"[\\s\\S]*Set "cell: ${cells[0].dir}"`,
+      ),
+    );
+    // Nothing stored at the acting cell's path.
+    const [{ n }] = await db
+      .select({ n: count() })
+      .from(securityFiles)
+      .where(eq(securityFiles.path, `/cells/${cells[0].dir}/state.yml`));
+    expect(Number(n)).toBe(0);
+  });
+
+  it("writeFile refuses a state doc naming a finding id this cell never reported", async () => {
+    const { engagement, cells } = await makeStarted();
+    await svc.dispatchCell(engagement.id, { cellId: cells[0].id, spawn });
+    const doc = doneDoc(cells[0]).replace("findings: []", "findings: [fnd_ghost]");
+    await expect(
+      svc.writeFile(engagement.id, {
+        actorCellId: cells[0].id,
+        path: `/cells/${cells[0].dir}/state.yml`,
+        content: doc,
+      }),
+    ).rejects.toThrow(/did not report: fnd_ghost/);
+  });
+
+  it("writeFile accepts a state doc listing a finding id THIS cell reported", async () => {
+    const { engagement, cells } = await makeStarted();
+    await svc.dispatchCell(engagement.id, { cellId: cells[0].id, spawn });
+    const { finding } = await svc.reportFinding(engagement.id, {
+      cellId: cells[0].id,
+      severity: "high",
+      title: "IDOR on sessions",
+      file: "src/routes/sessions.ts",
+      line: 42,
+      body: EVIDENCE,
+    });
+    const doc = doneDoc(cells[0]).replace("findings: []", `findings: [${finding.id}]`);
+    const written = await svc.writeFile(engagement.id, {
+      actorCellId: cells[0].id,
+      path: `/cells/${cells[0].dir}/state.yml`,
+      content: doc,
+    });
+    expect(written.revision).toBe(1);
   });
 
   it("completeCell rules a missing state doc as a violation", async () => {
@@ -399,7 +510,7 @@ describe("security engagement service", () => {
       svc.writeFile(engagement.id, {
         actorCellId: cells[0].id,
         path: "/cells/02-authz-sweep/state.yml",
-        content: DONE_DOC,
+        content: doneDoc(cells[1]),
       }),
     ).rejects.toThrow(
       "Write refused: /cells/02-authz-sweep/state.yml is outside your cell directory /cells/01-recon/.",
@@ -1170,7 +1281,7 @@ describe("security engagement service", () => {
     await svc.writeFile(engagement.id, {
       actorCellId: cells[1].id,
       path: `/cells/${cells[1].dir}/state.yml`,
-      content: YIELD_DOC,
+      content: yieldDoc(cells[1]),
     });
     await svc.completeCell(engagement.id, cells[1].id, { settled: true });
     await svc.resolveNeeds(engagement.id);
@@ -1242,7 +1353,7 @@ describe("security engagement service", () => {
     await svc.writeFile(engagement.id, {
       actorCellId: cells[1].id,
       path: `/cells/${cells[1].dir}/state.yml`,
-      content: YIELD_DOC,
+      content: yieldDoc(cells[1]),
     });
     await svc.completeCell(engagement.id, cells[1].id, { settled: true });
     await svc.resolveNeeds(engagement.id);
@@ -1298,7 +1409,7 @@ describe("security engagement service", () => {
   it("cancelEngagement keeps completed cells terminal and skips yielded/pending only", async () => {
     const { engagement, cells } = await makeStarted();
     await runCellToCompletion(engagement.id, cells[0]); // completed
-    await runCellToCompletion(engagement.id, cells[1], YIELD_DOC); // yielded
+    await runCellToCompletion(engagement.id, cells[1], yieldDoc(cells[1])); // yielded
 
     const cancelled = await svc.cancelEngagement(engagement.id);
     expect(cancelled.engagement.status).toBe("cancelled");
@@ -1349,6 +1460,8 @@ describe("security engagement service", () => {
       path: `/cells/${cells[0].dir}/state.yml`,
       content: [
         "protocol_version: 1",
+        `cell: ${cells[0].dir}`,
+        `persona: ${cells[0].persona}`,
         "status: working",
         "checklist:",
         "  pending: 33",
@@ -1356,6 +1469,8 @@ describe("security engagement service", () => {
         "queue:",
         "  pending: 3",
         "  done: 22",
+        "findings: []",
+        "log: []",
       ].join("\n"),
     });
     expect(await svc.getRunningCellProgress(engagement.id)).toEqual({
@@ -1406,7 +1521,7 @@ describe("security engagement service", () => {
     await clocked.writeFile(created.id, {
       actorCellId: cells[0].id,
       path: `/cells/${cells[0].dir}/state.yml`,
-      content: YIELD_DOC,
+      content: yieldDoc(cells[0]),
     });
     clock += STATE_DOC_STALE_MS + 60_000;
     const stale = await clocked.stampCellCompaction("child_stamp");
@@ -2084,17 +2199,12 @@ describe("security engagement service", () => {
     await svc.writeFile(parent.engagement.id, {
       actorCellId: parent.cells[0].id,
       path: `/cells/${parent.cells[0].dir}/state.yml`,
-      content: [
-        "protocol_version: 1",
-        "status: done",
-        "checklist:",
-        "  pending: 0",
-        "  done: 5",
-        "queue:",
-        "  pending: 0",
-        "  done: 3",
-        "# recon: 12 routes mapped, auth boundary at middleware/auth.ts",
-      ].join("\n"),
+      // The recon note rides in the log — the /prior/recon.md mount serves the
+      // whole doc, so the note stays reachable to the re-scan child.
+      content: doneDoc(parent.cells[0]).replace(
+        "log: []",
+        'log:\n  - "recon: 12 routes mapped, auth boundary at middleware/auth.ts"',
+      ),
     });
     await svc.completeCell(parent.engagement.id, parent.cells[0].id, { settled: true });
     // A verified finding and a refuted finding.

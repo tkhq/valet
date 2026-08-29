@@ -62,6 +62,7 @@ import {
   settleChildByAbort,
   startViaRoute,
   stateDoc,
+  tryWriteFileAsChild,
   waitFor,
   watchSettled,
   writeFileAsChild,
@@ -219,6 +220,8 @@ describe("acceptance scenario A: code-review engagement end to end", () => {
 
       // A.5: state doc revisions drive the cell rail's live progress.
       const reconDocV1 = stateDoc({
+        cell: d1.cell.dir,
+        persona: d1.cell.persona,
         status: "working",
         checklist: { pending: 33, done: 14 },
         queue: { pending: 3, done: 5 },
@@ -231,6 +234,8 @@ describe("acceptance scenario A: code-review engagement end to end", () => {
         queue: { pending: 3, done: 5 },
       });
       const reconDocV2 = stateDoc({
+        cell: d1.cell.dir,
+        persona: d1.cell.persona,
         status: "working",
         checklist: { pending: 12, done: 35 },
         queue: { pending: 1, done: 7 },
@@ -242,7 +247,12 @@ describe("acceptance scenario A: code-review engagement end to end", () => {
       });
 
       // A.6: done + zeros → sec_cell_complete passes.
-      const reconDone = stateDoc({ status: "done", checklist: { pending: 0, done: 47 } });
+      const reconDone = stateDoc({
+        cell: d1.cell.dir,
+        persona: d1.cell.persona,
+        status: "done",
+        checklist: { pending: 0, done: 47 },
+      });
       await writeFileAsChild(api, child1, "/cells/01-recon/state.yml", reconDone);
       await settleChildByAbort(api, child1);
       const c1 = await completeCellViaRoute(api, sessionId, d1.cell.id);
@@ -291,7 +301,12 @@ describe("acceptance scenario A: code-review engagement end to end", () => {
         api,
         child2,
         "/cells/02-authz-sweep/state.yml",
-        stateDoc({ status: "done" }),
+        stateDoc({
+          cell: d2.cell.dir,
+          persona: d2.cell.persona,
+          status: "done",
+          findings: [f1.finding.id, f2.finding.id],
+        }),
       );
       await settleChildByAbort(api, child2);
       expect((await completeCellViaRoute(api, sessionId, d2.cell.id)).outcome).toBe("completed");
@@ -321,7 +336,12 @@ describe("acceptance scenario A: code-review engagement end to end", () => {
       expect(reviewed.finding.status).toBe("refuted");
       expect(reviewed.finding.statusActor).toBe(d4.cell.id);
 
-      await writeFileAsChild(api, child4, "/cells/04-verify/state.yml", stateDoc({ status: "done" }));
+      await writeFileAsChild(
+        api,
+        child4,
+        "/cells/04-verify/state.yml",
+        stateDoc({ cell: d4.cell.dir, persona: d4.cell.persona, status: "done" }),
+      );
       await settleChildByAbort(api, child4);
       expect((await completeCellViaRoute(api, sessionId, d4.cell.id)).outcome).toBe("completed");
 
@@ -416,7 +436,12 @@ describe("acceptance scenario B: api restart is a non-event", () => {
       // Cell 1 completes pre-restart, leaving durable rows to check later.
       const d1 = await dispatchViaRoute(api, sessionId, threadId);
       const child1 = d1.cell.childSessionId!;
-      await writeFileAsChild(api, child1, "/cells/01-recon/state.yml", stateDoc({ status: "done" }));
+      await writeFileAsChild(
+        api,
+        child1,
+        "/cells/01-recon/state.yml",
+        stateDoc({ cell: d1.cell.dir, persona: d1.cell.persona, status: "done" }),
+      );
       const finding1 = await reportFindingAsChild(api, child1, {
         severity: "high",
         title: "SQL injection in login handler",
@@ -441,7 +466,12 @@ describe("acceptance scenario B: api restart is a non-event", () => {
         api,
         child2,
         "/cells/02-authz-sweep/state.yml",
-        stateDoc({ status: "working", queue: { pending: 4, done: 2 } }),
+        stateDoc({
+          cell: d2.cell.dir,
+          persona: d2.cell.persona,
+          status: "working",
+          queue: { pending: 4, done: 2 },
+        }),
       );
       const finding2 = await reportFindingAsChild(api, child2, {
         severity: "medium",
@@ -545,7 +575,12 @@ describe("acceptance scenario B: api restart is a non-event", () => {
 
       // B.3 tail: the loop continues through sec_cell_complete — the claim
       // survived the restart, so the child finishes its doc and completes.
-      await writeFileAsChild(api, child2, "/cells/02-authz-sweep/state.yml", stateDoc({ status: "done" }));
+      await writeFileAsChild(
+        api,
+        child2,
+        "/cells/02-authz-sweep/state.yml",
+        stateDoc({ cell: d2.cell.dir, persona: d2.cell.persona, status: "done" }),
+      );
       const ruling = await completeCellViaRoute(api, sessionId, cell2Id);
       expect(ruling.outcome).toBe("completed");
       expect(ruling.cell?.attempts).toBe(1);
@@ -566,7 +601,7 @@ const PLAN_ONE_CELL = [
 
 describe("acceptance scenario C: exit condition enforced", () => {
   it(
-    "done with queue.pending 2 → named violation, cell stays running → corrected doc → completed",
+    "done with queue.pending 2 → write refused naming the count, cell stays running → corrected doc → completed",
     async () => {
       api = await bootTestApi();
       const { db } = api.providers;
@@ -580,42 +615,45 @@ describe("acceptance scenario C: exit condition enforced", () => {
       const cellId = d1.cell.id;
       const child = d1.cell.childSessionId!;
 
-      // C.1: the persona settles while the doc claims done with queue work
-      // left.
-      await writeFileAsChild(
+      // C.1: the persona tries to write a done doc while the queue still has
+      // pending work. The strict write path refuses it — done is a claim the
+      // counts must back — and names the exact field, so nothing false is ever
+      // stored. This is stronger than the old flow: the lie never persists.
+      const refused = await tryWriteFileAsChild(
         api,
         child,
         "/cells/01-recon/state.yml",
-        stateDoc({ status: "done", queue: { pending: 2, done: 20 } }),
+        stateDoc({ cell: d1.cell.dir, persona: d1.cell.persona, status: "done", queue: { pending: 2, done: 20 } }),
       );
-      await settleChildByAbort(api, child);
+      expect(refused.status).toBe(409);
+      expect(refused.error).toContain("queue.pending is 2");
+      expect(refused.error).toContain("Write state.yml again following /protocol.md.");
 
-      // C.2: sec_cell_complete refuses, naming the violation.
-      const violated = await completeCellViaRoute(api, sessionId, cellId);
-      expect(violated.outcome).toBe("violation");
-      expect(violated.violation).toContain("queue.pending is 2");
+      // The refused write stored nothing: the cell has no state doc revision.
+      const docRows = await db
+        .select()
+        .from(securityFiles)
+        .where(eq(securityFiles.path, `/cells/${d1.cell.dir}/state.yml`));
+      expect(docRows).toHaveLength(0);
 
-      // The cell never showed completed before the pass (spec C.4): the row
-      // is still running after the violation ruling.
+      // The cell never showed completed (spec C.4): the row is still running.
       const midRows = await db.select().from(securityCells).where(eq(securityCells.id, cellId)).limit(1);
       expect(midRows[0].status).toBe("running");
       expect(midRows[0].settledAt).toBeNull();
 
-      // C.3: the runner steers with child_send ("keep looping"). The steer
-      // machinery is generic children.ts plumbing; what matters here is its
-      // EFFECT — the same child (its write claim lives while the cell runs)
-      // drains the queue and writes a corrected final doc. The durable watch
-      // stays settled the whole time.
-      expect(await watchSettled(db, child)).toBe(true);
+      // C.3: the persona drains the queue and writes a corrected final doc.
+      // Now the counts back the claim, so the write succeeds.
       const corrected = await writeFileAsChild(
         api,
         child,
         "/cells/01-recon/state.yml",
-        stateDoc({ status: "done", queue: { pending: 0, done: 22 } }),
+        stateDoc({ cell: d1.cell.dir, persona: d1.cell.persona, status: "done", queue: { pending: 0, done: 22 } }),
       );
-      expect(corrected.revision).toBe(2);
+      expect(corrected.revision).toBe(1);
+      await settleChildByAbort(api, child);
+      expect(await watchSettled(db, child)).toBe(true);
 
-      // C.4: the re-ruling passes.
+      // C.4: the ruling passes.
       const passed = await completeCellViaRoute(api, sessionId, cellId);
       expect(passed.outcome).toBe("completed");
       const doneRows = await db.select().from(securityCells).where(eq(securityCells.id, cellId)).limit(1);
@@ -678,7 +716,12 @@ describe("acceptance scenario D: yield and child death", () => {
       expect(child2).not.toBe(child1);
 
       // Attempt 2 completes normally.
-      await writeFileAsChild(api, child2, "/cells/01-recon/state.yml", stateDoc({ status: "done" }));
+      await writeFileAsChild(
+        api,
+        child2,
+        "/cells/01-recon/state.yml",
+        stateDoc({ cell: resumed.cell.dir, persona: resumed.cell.persona, status: "done" }),
+      );
       await settleChildByAbort(api, child2);
       const ruling = await completeCellViaRoute(api, sessionId, cellId);
       expect(ruling.outcome).toBe("completed");
