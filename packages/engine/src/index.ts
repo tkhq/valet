@@ -32,6 +32,7 @@ export {
   decideReconciliation,
   resolveSubmissionText,
   resolvePartialSubmissionText,
+  originFromEntries,
   validateSignalTagName,
   validateSignalAttributeKeys,
   renderSignalEnvelope,

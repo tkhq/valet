@@ -15,7 +15,9 @@
 import { randomBytes } from "node:crypto";
 import { eq } from "drizzle-orm";
 import {
+  originFromEntries,
   parseAssistantSessionId,
+  type ChannelOrigin,
   type ChannelTransport,
   type CommandResultEntry,
   type CredentialStore,
@@ -485,11 +487,6 @@ export class ChannelHost {
     if (this.streamBridge.isStreamed(sessionId, messageId)) return;
     const thread = await this.deps.engineStore.getThread(sessionId, threadId);
     if (!thread) return;
-    const mapped = this.channelThreadFor(thread.key);
-    if (!mapped) return;
-
-    const dedupeKey = `${sessionId}:${messageId}`;
-    if (this.delivered.has(dedupeKey)) return;
 
     const entries = await this.deps.engineStore.getEntries(sessionId, threadId);
     const entry = entries.find((e) => e.id === messageId && e.type === "message" && e.role === "assistant");
@@ -501,34 +498,69 @@ export class ChannelHost {
     // like "Let me check." + tool call + final answer double-delivers.
     if (entry.stopReason !== "end_turn") return;
 
+    // Delivery target: the thread's own channel key (a DM or channel thread),
+    // or, when the turn ran on a non-channel thread (the shared "events" thread
+    // an event delivery lands on), the submission's own channel origin. The
+    // origin binds to the submission, so interleaved events on one "events"
+    // thread each reply to their own conversation.
+    let target = this.channelThreadFor(thread.key);
+    if (!target) {
+      const origin = entry.queueItemId ? originFromEntries(entries, entry.queueItemId) : undefined;
+      target = origin ? this.channelTargetForOrigin(origin) : null;
+    }
+    if (!target) return;
+
+    const dedupeKey = `${sessionId}:${messageId}`;
+    if (this.delivered.has(dedupeKey)) return;
     this.markDelivered(dedupeKey);
 
-    const transport = this.transports.get(mapped.channelType);
+    const transport = this.transports.get(target.channelType);
     if (!transport) return;
 
-    if (entry.content) {
-      await transport.send(mapped.conversationKey, { markdown: entry.content });
-    }
-    for (const part of entry.parts ?? []) {
-      if (part.type !== "attachment") continue;
-      const attachment = part.attachment;
-      if (attachment.type === "image") {
-        await transport.sendMedia(mapped.conversationKey, {
-          type: "image",
-          data: attachment.data,
-          mimeType: attachment.mimeType,
-          name: attachment.name,
-        });
-      } else if (attachment.type === "file") {
-        await transport.sendMedia(mapped.conversationKey, {
-          type: "file",
-          data: attachment.data,
-          mimeType: attachment.mimeType,
-          name: attachment.name,
-        });
+    try {
+      if (entry.content) {
+        await transport.send(target.conversationKey, { markdown: entry.content });
       }
-      // "text" ToolAttachment variant is skipped (rule 2).
+      for (const part of entry.parts ?? []) {
+        if (part.type !== "attachment") continue;
+        const attachment = part.attachment;
+        if (attachment.type === "image") {
+          await transport.sendMedia(target.conversationKey, {
+            type: "image",
+            data: attachment.data,
+            mimeType: attachment.mimeType,
+            name: attachment.name,
+          });
+        } else if (attachment.type === "file") {
+          await transport.sendMedia(target.conversationKey, {
+            type: "file",
+            data: attachment.data,
+            mimeType: attachment.mimeType,
+            name: attachment.name,
+          });
+        }
+        // "text" ToolAttachment variant is skipped (rule 2).
+      }
+    } catch (err) {
+      // A reply the assistant produced but could not deliver is a reportable
+      // miss, not a silent drop: surface it on the Problems tab.
+      const orgId = this.orgId ?? (await this.deps.resolveOrgId());
+      await this.dropLog(orgId, "channel_reply_failed", target.conversationKey, String(err));
     }
+  }
+
+  /**
+   * Resolve a submission's `ChannelOrigin` to an outbound target. Mirrors the
+   * `channelThreadFor` rebuild hop: the transport turns the stored thread key
+   * back into a conversationKey (Slack injects the workspace id it holds).
+   * `null` when the channel is not running or the transport disowns the key.
+   */
+  private channelTargetForOrigin(origin: ChannelOrigin): { channelType: string; conversationKey: string } | null {
+    if (!this.isRunning(origin.channelType)) return null;
+    const transport = this.transports.get(origin.channelType);
+    const conversationKey = transport?.conversationKeyFromThreadKey?.(origin.threadKey);
+    if (conversationKey === undefined || conversationKey === null) return null;
+    return { channelType: origin.channelType, conversationKey };
   }
 
   /**
