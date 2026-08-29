@@ -926,20 +926,18 @@ describe("POST /webhooks/github-app", () => {
     expect(["pending", "delivered"]).toContain(deliveryRows[0].status);
   });
 
-  it("ingests forwarded events with no matching subscription (event row, zero deliveries)", async () => {
+  it("drops forwarded events with no matching subscription (nothing stored)", async () => {
     api = await bootTestApi({ plugins: [githubPlugin] });
     const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
 
     const res = await postForwardedWebhook(api.baseUrl, "pull_request", PR_OPENED_PAYLOAD, webhookSecret, "gh-del-2");
+    // The route still acks (204): the event verified, it just matched no
+    // subscription. Ingest is match-gated for privacy, so an unsubscribed
+    // event is dropped and never persisted.
     expect(res.status).toBe(204);
 
     const eventRows = await api.providers.db.select().from(events).where(eq(events.orgId, "local-org"));
-    expect(eventRows).toHaveLength(1);
-    const deliveryRows = await api.providers.db
-      .select()
-      .from(eventDeliveries)
-      .where(eq(eventDeliveries.eventId, eventRows[0].id));
-    expect(deliveryRows).toHaveLength(0);
+    expect(eventRows).toHaveLength(0);
   });
 
   it("dedupes a redelivered webhook (same x-github-delivery -> one events row, one delivery)", async () => {

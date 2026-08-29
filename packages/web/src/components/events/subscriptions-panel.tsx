@@ -26,7 +26,7 @@ import { errorText } from "~/lib/error-text";
 import { useListOwner } from "~/lib/use-list-owner";
 import { OwnerBadge } from "~/components/owner-badge";
 import { eligibleTeams } from "~/components/session/assistant-rail";
-import { SubscriptionCreateDialog } from "./subscription-create-dialog";
+import { AutomationWizard } from "./automation-wizard";
 
 /** Mirrors the server's `canMutateSubscription`: an org-owned subscription
  * is everyone's to manage, a team's belongs to its members, and a personal
@@ -60,8 +60,8 @@ function describeTarget(
 /**
  * Event subscriptions: the rules that turn an ingested event into action —
  * a workflow run or an orchestrator prompt. List with enable/disable and
- * delete; create via `SubscriptionCreateDialog`. Rows show filters
- * read-only (filters are API-only for now).
+ * delete; create via `AutomationWizard`. Rows show filters read-only
+ * (filters are API-only for now).
  *
  * The list is the active workspace's, plus every org-owned subscription. An
  * org-owned row belongs to no single workspace, so the route returns it in
@@ -111,7 +111,7 @@ export function SubscriptionsPanel() {
         </p>
         <Button type="button" size="sm" className="shrink-0 gap-1.5" onClick={() => setCreating(true)}>
           <Plus className="h-3.5 w-3.5" aria-hidden />
-          New subscription
+          New automation
         </Button>
       </div>
 
@@ -145,11 +145,11 @@ export function SubscriptionsPanel() {
         </div>
       )}
 
-      {/* Mounted only while open: the dialog computes its default target at
+      {/* Mounted only while open: the wizard computes its default target at
           mount, so mount time must be open time (see its header comment).
           Also keeps its catalog/workflow queries off the tab's initial
           load. */}
-      {creating && <SubscriptionCreateDialog open onOpenChange={setCreating} />}
+      {creating && <AutomationWizard open onOpenChange={setCreating} />}
     </div>
   );
 }

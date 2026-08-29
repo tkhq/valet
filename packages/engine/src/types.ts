@@ -226,6 +226,21 @@ export interface AwaitResultOptions {
 // ── Prompts ────────────────────────────────────────────────────────
 
 /**
+ * Where a channel-originated signal came from, carried so a reply can route
+ * back to the same conversation. `threadKey` is the host-side thread key
+ * (`slack:{channelId}:{threadTs}`), NOT a full conversationKey — the outbound
+ * bridge rebuilds the conversationKey from it via
+ * `conversationKeyFromThreadKey`, which injects the workspace id from the org
+ * credential. Binds to the submission, not the thread: the shared "events"
+ * thread aggregates many origins, so each reply routes by its own submission's
+ * origin.
+ */
+export interface ChannelOrigin {
+  channelType: string;
+  threadKey: string;
+}
+
+/**
  * A signal is an event the agent observes rather than a direct user→assistant
  * message: a Slack thread reply, a GitHub issue comment, a webhook, a timer,
  * or another session's settlement. External conversations are multi-party —
@@ -242,6 +257,8 @@ export interface SignalContent {
   attributes?: Record<string, string>;
   /** XML envelope tag for model rendering. Must match /^[A-Za-z_][A-Za-z0-9_.-]*$/; defaults to 'signal'. */
   tagName?: string;
+  /** Set when this signal came from a channel and a reply should route back to it. */
+  origin?: ChannelOrigin;
 }
 
 export type PromptContent =
@@ -421,6 +438,8 @@ export interface MessageEntry extends BaseEntry {
     senderSessionId?: string;
     senderOwner?: Principal;
     hopCount?: number;
+    /** Channel this signal came from, so the reply routes back (see `ChannelOrigin`). */
+    origin?: ChannelOrigin;
   };
 }
 

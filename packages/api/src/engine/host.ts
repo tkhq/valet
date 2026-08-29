@@ -70,6 +70,7 @@ import {
   securityCells,
   securityEngagements,
   sessionRepos,
+  teams,
   users,
   type SecurityCellRow,
 } from "../schema/index.js";
@@ -1935,6 +1936,17 @@ export class EngineHost {
     await ensureTodayJournal(db, scope);
     const snapshotContent = await assembleMemorySnapshot(db, scope);
     const personaPrefix = await this.resolvePersonaPrefix(db, scope, assistant.name, assistant.personality);
+    // The owner's human name, so the persona names the team/org instead of its
+    // raw id (the "team_<uuid>" leak). A missing row falls back to a neutral
+    // phrase inside the persona.
+    let ownerDisplayName: string | undefined;
+    if (principal.type === "team") {
+      const rows = await db.select({ name: teams.name }).from(teams).where(eq(teams.id, principal.id)).limit(1);
+      ownerDisplayName = rows[0]?.name;
+    } else if (principal.type === "org") {
+      const rows = await db.select({ name: orgs.name }).from(orgs).where(eq(orgs.id, principal.id)).limit(1);
+      ownerDisplayName = rows[0]?.name;
+    }
 
     const existing = await this.opts.engineStore.getSession(sessionId);
     const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, meta.actorUserId, meta.orgId);
@@ -2009,7 +2021,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(meta.orgId),
-      systemPrompt: personaPrefix + orchestratorPersona(principal),
+      systemPrompt: personaPrefix + orchestratorPersona(principal, ownerDisplayName),
       tools: [...buildMemoryTools(), ...extras.tools],
       skills: extras.skills.length ? extras.skills : undefined,
       roles: extras.roles.length ? extras.roles : undefined,

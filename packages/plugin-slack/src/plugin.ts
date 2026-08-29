@@ -2,8 +2,13 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { loadSkillFromMarkdown, type ValetPlugin } from "@valet/engine";
 import { slackPlugin } from "./actions/actions.js";
+import { slackFilterOptionResolvers } from "./transport/filter-options.js";
 import { slackTransportFactory } from "./transport/transport.js";
 import { slackTriggerDefs } from "./triggers.js";
+
+// Re-exported so the api's Slack app manifest can pin its bot-event
+// subscriptions against the event types these triggers actually match.
+export { slackTriggerEventTypes } from "./triggers.js";
 
 const skillMd = readFileSync(fileURLToPath(new URL("../skills/slack-tools/SKILL.md", import.meta.url)), "utf8");
 
@@ -14,6 +19,7 @@ const plugin: ValetPlugin = {
   actions: [slackPlugin],
   triggers: slackTriggerDefs,
   transports: [slackTransportFactory],
+  filterOptionResolvers: slackFilterOptionResolvers,
   skills: [loadSkillFromMarkdown(skillMd, "plugin", "slack-tools")],
   identityLink: {
     provider: "slack",

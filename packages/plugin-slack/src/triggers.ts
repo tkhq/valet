@@ -60,15 +60,23 @@ function makeVerify(eventTypes: readonly string[]): TriggerDef["verify"] {
     const eventType = str(event?.type);
     if (!event || eventType === undefined || !eventTypes.includes(eventType)) return null;
 
-    // Message events only: suppress the app's own posts (bot_id) and the same
-    // set of noise subtypes the channel transport drops (edits, deletes,
-    // join/leave/topic system messages). Without the bot_id drop, a workflow
-    // subscribed to slack.message that also posts to Slack self-triggers into
-    // an unbounded loop. Using the shared SKIP_SUBTYPES — rather than
-    // "everything except file_share" — keeps fully-populated human events like
-    // thread_broadcast and me_message, which carry a real user/text/channel.
-    if (eventType === "message") {
+    // Suppress the app's own posts (bot_id) for both message and app_mention.
+    // Without this drop, a workflow subscribed to slack.message or
+    // slack.app_mention that also posts to Slack self-triggers into an
+    // unbounded loop: its own channel post re-fires slack.message, and a post
+    // whose text @-mentions the bot re-fires slack.app_mention. A Slack bot
+    // post carries bot_id on both event types, so the one guard closes both
+    // loops.
+    if (eventType === "message" || eventType === "app_mention") {
       if (str(event.bot_id) !== undefined) return null;
+    }
+
+    // Message events also drop the noise subtypes the channel transport drops
+    // (edits, deletes, join/leave/topic system messages). Using the shared
+    // SKIP_SUBTYPES — rather than "everything except file_share" — keeps
+    // fully-populated human events like thread_broadcast and me_message, which
+    // carry a real user/text/channel.
+    if (eventType === "message") {
       const subtype = str(event.subtype);
       if (subtype !== undefined && SKIP_SUBTYPES.has(subtype)) return null;
     }
@@ -117,6 +125,9 @@ function toEvent(event: VerifiedEvent): NormalizedEvent {
     case "message":
       summary = `message in ${channel ?? "unknown channel"} by ${user ?? "unknown user"}`;
       break;
+    case "app_mention":
+      summary = `app mentioned in ${channel ?? "unknown channel"} by ${user ?? "unknown user"}`;
+      break;
     case "reaction_added":
     case "reaction_removed":
       summary = `reaction :${reaction ?? "?"}: ${type === "reaction_added" ? "added" : "removed"} in ${channel ?? "unknown channel"} by ${user ?? "unknown user"}`;
@@ -160,74 +171,149 @@ function toEvent(event: VerifiedEvent): NormalizedEvent {
   };
 }
 
-function def(
-  id: string,
-  eventTypes: readonly string[],
-  description: string,
-  catalog: EventCatalogEntry[],
-): TriggerDef {
-  return { id, service: "slack", description, verify: makeVerify(eventTypes), toEvent, catalog };
+/**
+ * One trigger definition, before it is compiled to a `TriggerDef`. `eventTypes`
+ * is the set of Slack Events API `event.type` values this trigger matches. It
+ * is the single source both `slackTriggerDefs` (which hides it inside a `verify`
+ * closure) and `slackTriggerEventTypes` (which the Slack app manifest reads)
+ * derive from, so the two can never drift.
+ */
+interface TriggerSpec {
+  id: string;
+  eventTypes: readonly string[];
+  description: string;
+  catalog: EventCatalogEntry[];
 }
 
-export const slackTriggerDefs: TriggerDef[] = [
-  def("slack.message", ["message"], "Slack message posted in a conversation the app can see", [
-    {
-      key: "slack.message",
-      description: "Message posted in a channel or DM visible to the Slack app",
-      filters: [
-        { field: "channel", path: "channel", description: "Slack channel id (C…/D…)" },
-        { field: "channel_type", path: "channel_type", description: "Conversation type (channel, group, im, mpim)" },
-        { field: "user", path: "user", description: "Slack user id of the sender" },
-      ],
-      // High-volume: only persisted when a subscription matches (match-gated).
-      ephemeral: true,
-    },
-  ]),
-  def("slack.reaction", ["reaction_added", "reaction_removed"], "Slack emoji reactions added or removed", [
-    {
-      key: "slack.reaction_added",
-      description: "Emoji reaction added to a message",
-      filters: [
-        { field: "channel", path: "item.channel", description: "Slack channel id of the reacted message" },
-        { field: "reaction", path: "reaction", description: "Emoji name without colons (e.g. tada)" },
-        { field: "user", path: "user", description: "Slack user id of the reactor" },
-        { field: "item_user", path: "item_user", description: "Slack user id of the message author" },
-      ],
-    },
-    {
-      key: "slack.reaction_removed",
-      description: "Emoji reaction removed from a message",
-      filters: [
-        { field: "channel", path: "item.channel", description: "Slack channel id of the reacted message" },
-        { field: "reaction", path: "reaction", description: "Emoji name without colons (e.g. tada)" },
-        { field: "user", path: "user", description: "Slack user id of the reactor" },
-        { field: "item_user", path: "item_user", description: "Slack user id of the message author" },
-      ],
-    },
-  ]),
-  def("slack.member", ["member_joined_channel", "member_left_channel"], "Slack channel membership changes", [
-    {
-      key: "slack.member_joined_channel",
-      description: "User joined a channel",
-      filters: [
-        { field: "channel", path: "channel", description: "Slack channel id" },
-        { field: "user", path: "user", description: "Slack user id who joined" },
-      ],
-    },
-    {
-      key: "slack.member_left_channel",
-      description: "User left a channel",
-      filters: [
-        { field: "channel", path: "channel", description: "Slack channel id" },
-        { field: "user", path: "user", description: "Slack user id who left" },
-      ],
-    },
-  ]),
-  def(
-    "slack.channel",
-    ["channel_created", "channel_rename", "channel_archive", "channel_unarchive"],
-    "Slack channel lifecycle events",
-    [
+const triggerSpecs: TriggerSpec[] = [
+  {
+    id: "slack.app_mention",
+    eventTypes: ["app_mention"],
+    description: "Slack app was @-mentioned in a conversation the app can see",
+    catalog: [
+      {
+        key: "slack.app_mention",
+        description: "The Slack app (bot) was @-mentioned in a channel or thread",
+        filters: [
+          {
+            field: "channel",
+            path: "channel",
+            description: "Slack channel id where the mention happened",
+            options: { source: "slack.channels" },
+          },
+          {
+            field: "user",
+            path: "user",
+            description: "Slack user id of the mentioner",
+            options: { source: "slack.users" },
+          },
+          { field: "text", path: "text", description: "Message text, for a slash command or a pattern match" },
+        ],
+      },
+    ],
+  },
+  {
+    id: "slack.message",
+    eventTypes: ["message"],
+    description: "Slack message posted in a conversation the app can see",
+    catalog: [
+      {
+        key: "slack.message",
+        description: "Message posted in a channel or DM visible to the Slack app",
+        filters: [
+          {
+            field: "channel",
+            path: "channel",
+            description: "Slack channel id (C…/D…)",
+            options: { source: "slack.channels" },
+          },
+          { field: "channel_type", path: "channel_type", description: "Conversation type (channel, group, im, mpim)" },
+          {
+            field: "user",
+            path: "user",
+            description: "Slack user id of the sender",
+            options: { source: "slack.users" },
+          },
+          { field: "text", path: "text", description: "Message text, for a slash command or a pattern match" },
+        ],
+      },
+    ],
+  },
+  {
+    id: "slack.reaction",
+    eventTypes: ["reaction_added", "reaction_removed"],
+    description: "Slack emoji reactions added or removed",
+    catalog: [
+      {
+        key: "slack.reaction_added",
+        description: "Emoji reaction added to a message",
+        filters: [
+          {
+            field: "channel",
+            path: "item.channel",
+            description: "Slack channel id of the reacted message",
+            options: { source: "slack.channels" },
+          },
+          { field: "reaction", path: "reaction", description: "Emoji name without colons (e.g. tada)" },
+          {
+            field: "user",
+            path: "user",
+            description: "Slack user id of the reactor",
+            options: { source: "slack.users" },
+          },
+          { field: "item_user", path: "item_user", description: "Slack user id of the message author" },
+        ],
+      },
+      {
+        key: "slack.reaction_removed",
+        description: "Emoji reaction removed from a message",
+        filters: [
+          {
+            field: "channel",
+            path: "item.channel",
+            description: "Slack channel id of the reacted message",
+            options: { source: "slack.channels" },
+          },
+          { field: "reaction", path: "reaction", description: "Emoji name without colons (e.g. tada)" },
+          {
+            field: "user",
+            path: "user",
+            description: "Slack user id of the reactor",
+            options: { source: "slack.users" },
+          },
+          { field: "item_user", path: "item_user", description: "Slack user id of the message author" },
+        ],
+      },
+    ],
+  },
+  {
+    id: "slack.member",
+    eventTypes: ["member_joined_channel", "member_left_channel"],
+    description: "Slack channel membership changes",
+    catalog: [
+      {
+        key: "slack.member_joined_channel",
+        description: "User joined a channel",
+        filters: [
+          { field: "channel", path: "channel", description: "Slack channel id", options: { source: "slack.channels" } },
+          { field: "user", path: "user", description: "Slack user id who joined", options: { source: "slack.users" } },
+        ],
+      },
+      {
+        key: "slack.member_left_channel",
+        description: "User left a channel",
+        filters: [
+          { field: "channel", path: "channel", description: "Slack channel id", options: { source: "slack.channels" } },
+          { field: "user", path: "user", description: "Slack user id who left", options: { source: "slack.users" } },
+        ],
+      },
+    ],
+  },
+  {
+    id: "slack.channel",
+    eventTypes: ["channel_created", "channel_rename", "channel_archive", "channel_unarchive"],
+    description: "Slack channel lifecycle events",
+    catalog: [
       {
         key: "slack.channel_created",
         description: "Channel created",
@@ -252,22 +338,54 @@ export const slackTriggerDefs: TriggerDef[] = [
         filters: [{ field: "channel", path: "channel", description: "Unarchived channel id" }],
       },
     ],
-  ),
-  def("slack.file", ["file_shared"], "Slack file shared", [
-    {
-      key: "slack.file_shared",
-      description: "File shared into a conversation",
-      filters: [
-        { field: "channel", path: "channel_id", description: "Slack channel id the file was shared in" },
-        { field: "user", path: "user_id", description: "Slack user id who shared the file" },
-      ],
-    },
-  ]),
-  def("slack.team", ["team_join"], "Slack workspace membership", [
-    {
-      key: "slack.team_join",
-      description: "New member joined the workspace",
-      filters: [],
-    },
-  ]),
+  },
+  {
+    id: "slack.file",
+    eventTypes: ["file_shared"],
+    description: "Slack file shared",
+    catalog: [
+      {
+        key: "slack.file_shared",
+        description: "File shared into a conversation",
+        filters: [
+          { field: "channel", path: "channel_id", description: "Slack channel id the file was shared in" },
+          { field: "user", path: "user_id", description: "Slack user id who shared the file" },
+        ],
+      },
+    ],
+  },
+  {
+    id: "slack.team",
+    eventTypes: ["team_join"],
+    description: "Slack workspace membership",
+    catalog: [
+      {
+        key: "slack.team_join",
+        description: "New member joined the workspace",
+        filters: [],
+      },
+    ],
+  },
+];
+
+export const slackTriggerDefs: TriggerDef[] = triggerSpecs.map((spec) => ({
+  id: spec.id,
+  service: "slack",
+  description: spec.description,
+  verify: makeVerify(spec.eventTypes),
+  toEvent,
+  catalog: spec.catalog,
+}));
+
+/**
+ * Every Slack Events API `event.type` the trigger defs above match. The Slack
+ * app manifest (`SLACK_BOT_EVENTS`, packages/api/src/services/slack-app.ts)
+ * MUST subscribe to each of these, or Slack never delivers the event and the
+ * trigger silently never fires. One caveat: the `message` type is delivered
+ * as one bot event per channel type (`message.channels`, `message.im`, …), so
+ * the manifest expands it; `slack-app.test.ts` pins that expansion against
+ * this list.
+ */
+export const slackTriggerEventTypes: readonly string[] = [
+  ...new Set(triggerSpecs.flatMap((spec) => spec.eventTypes)),
 ];

@@ -96,13 +96,15 @@ export const SLACK_OPTIONAL_BOT_SCOPES: readonly string[] = [
   // Bot-sender enrichment (`bots.info`) rides `users:read` above. There is
   // no granular `bots:read` scope — Slack rejects a manifest that asks for
   // one.
+  // Delivery of `app_mention`, the event the slack.app_mention workflow
+  // trigger matches (packages/plugin-slack/src/triggers.ts). Without it Slack
+  // never delivers the mention and the trigger never fires.
+  "app_mentions:read",
 
   // ── V1 parity, held for surfaces that are ported next ───────────────
   // The scopes below have no v2 consumer yet. They ride along so an
   // installed app does not need a reinstall when each surface lands —
   // Slack grants only what the installed manifest declared.
-  // `app_mention` channel triggers (V1 mention routing).
-  "app_mentions:read",
   // Persona posting: `chat.postMessage` username/icon overrides.
   "chat:write.customize",
   // Posting into public channels the bot has not joined.
@@ -115,15 +117,26 @@ export const SLACK_OPTIONAL_BOT_SCOPES: readonly string[] = [
 ];
 
 /**
- * Bot events the agent surface needs. Order is not significant.
+ * Bot events this app subscribes to. Order is not significant.
  *
- * Workflow triggers over channel activity (reactions, membership, files)
- * are a different surface: add those event names here when it lands. The
- * scopes they read with are already declared in
- * `SLACK_OPTIONAL_BOT_SCOPES`, so landing the surface does not force a
- * reinstall of every workspace app.
+ * Two surfaces share this list. Slack delivers only the event types an app
+ * subscribes to, so an event type absent here never reaches the api.
+ *
+ * 1. The agent DM surface (`app_home_opened`, `app_context_changed`,
+ *    `message.im`).
+ * 2. The workflow-trigger surface: the channel-activity events the Slack
+ *    trigger defs match (`packages/plugin-slack/src/triggers.ts`). The scopes
+ *    these read with are already declared in `SLACK_OPTIONAL_BOT_SCOPES`, so
+ *    landing them forces no reinstall of an already-installed workspace app.
+ *
+ * `slack-app.test.ts` pins this list against `slackTriggerEventTypes` so a new
+ * trigger def cannot ship a catalog entry that Slack never delivers. The one
+ * mapping that is not one-to-one is `message`: the trigger matches the
+ * `message` type, which Slack delivers as one bot event per channel type, so
+ * all four `message.*` variants appear below.
  */
 export const SLACK_BOT_EVENTS: readonly string[] = [
+  // ── Agent DM surface ──────────────────────────────────────────────────
   // Replaces `assistant_thread_started`. The handler gates on
   // `tab === "messages"`.
   "app_home_opened",
@@ -131,8 +144,32 @@ export const SLACK_BOT_EVENTS: readonly string[] = [
   // events. An app that never reads the context still needs the
   // subscription for that side effect.
   "app_context_changed",
-  // The user's turn.
+  // The user's turn (DM). Also the `slack.message` trigger's DM half.
   "message.im",
+
+  // ── Workflow-trigger surface (slackTriggerEventTypes) ─────────────────
+  // `slack.message` in channels, private groups, and group DMs. DMs ride
+  // `message.im` above.
+  "message.channels",
+  "message.groups",
+  "message.mpim",
+  // `slack.app_mention` — the bot was @-mentioned.
+  "app_mention",
+  // `slack.reaction`.
+  "reaction_added",
+  "reaction_removed",
+  // `slack.member`.
+  "member_joined_channel",
+  "member_left_channel",
+  // `slack.channel` lifecycle.
+  "channel_created",
+  "channel_rename",
+  "channel_archive",
+  "channel_unarchive",
+  // `slack.file`.
+  "file_shared",
+  // `slack.team`.
+  "team_join",
 ];
 
 /** Slack's own limits. A manifest that exceeds one of them is rejected whole. */

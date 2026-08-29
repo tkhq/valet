@@ -3685,7 +3685,13 @@ export interface GetPrebuildForRepoResponse {
 export interface EventCatalogEntryWire {
   key: string;
   description: string;
-  filters: { field: string; path: string; description: string }[];
+  filters: {
+    field: string;
+    path: string;
+    description: string;
+    /** When set, the value is chosen from a provider-populated list (see `GET /api/events/filter-options`). */
+    options?: { source: string; dependsOn?: string[] };
+  }[];
 }
 
 export interface GetEventCatalogResponse {
@@ -3695,8 +3701,32 @@ export interface GetEventCatalogResponse {
 /** Mirrors `events/match.ts`'s `SubscriptionFilter`. */
 export interface EventSubscriptionFilterWire {
   field: string;
-  op: "eq" | "in" | "prefix" | "contains";
+  op: "eq" | "in" | "prefix" | "contains" | "regex";
   value: string | string[];
+  /**
+   * Optional display label for the value — a resolved name for a raw id (a
+   * Slack user id shown as "Alice"). The editor renders it; matching ignores
+   * it. Persisted verbatim in the `filters` jsonb.
+   */
+  label?: string;
+}
+
+/** One provider-populated choice for a filter value (a Slack user, a repo). */
+export interface FilterOptionWire {
+  id: string;
+  label: string;
+  hint?: string;
+}
+
+/**
+ * Response of `GET /api/events/filter-options`. `reason` is set (with an empty
+ * `options`) when the source cannot resolve now — unknown source, an
+ * unconnected integration, or a provider error — so the picker can explain the
+ * empty list and fall back to free text.
+ */
+export interface FilterOptionsResponse {
+  options: FilterOptionWire[];
+  reason?: string;
 }
 
 // `{ kind: "signal" }` (wake parked workflow runs) is intentionally absent:
@@ -3824,6 +3854,23 @@ export interface RedeliverEventResponse {
 export interface GetEventResponse {
   event: EventSummaryWire & { payload: unknown };
   deliveries: EventDeliveryWire[];
+}
+
+/** One `event_drop_log` row — an event that arrived but did not become a feed
+ * row. `detail` names the corrective action; no payload is retained. */
+export interface EventDropWire {
+  id: string;
+  reason: string;
+  detail: string;
+  createdAt: number;
+}
+
+/** `GET /api/events/drops` — recent drops plus the last time ANY event reached
+ * ingest (matched or not), so the Problems tab can tell "nothing arrived" from
+ * "arrived but matched nothing". */
+export interface ListEventDropsResponse {
+  drops: EventDropWire[];
+  lastEventAt: number | null;
 }
 
 // ── REST: health (single-binary CLI, portable-runtime plan) ──────────────

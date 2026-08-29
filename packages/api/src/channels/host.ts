@@ -15,7 +15,9 @@
 import { randomBytes } from "node:crypto";
 import { eq } from "drizzle-orm";
 import {
+  originFromEntries,
   parseAssistantSessionId,
+  type ChannelOrigin,
   type ChannelTransport,
   type CommandResultEntry,
   type CredentialStore,
@@ -39,6 +41,7 @@ import { loadSessionMeta } from "../engine/session-meta.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
 import { canResolveSessionGate } from "../services/session-access.js";
 import { writeDropLog } from "../orchestrator/signals.js";
+import { EVENTS_THREAD_KEY } from "../events/orchestrator-target.js";
 import type { AttentionChannelDeliverer, AttentionEvent } from "../orchestrator/attention.js";
 import { consumeLinkCode, identityForExternal, identityForUser, linkIdentity } from "./identity-links.js";
 import { DbActiveStreamStore, type ActiveStreamStore } from "./active-streams.js";
@@ -485,11 +488,13 @@ export class ChannelHost {
     if (this.streamBridge.isStreamed(sessionId, messageId)) return;
     const thread = await this.deps.engineStore.getThread(sessionId, threadId);
     if (!thread) return;
-    const mapped = this.channelThreadFor(thread.key);
-    if (!mapped) return;
 
-    const dedupeKey = `${sessionId}:${messageId}`;
-    if (this.delivered.has(dedupeKey)) return;
+    // A thread that neither maps to a channel nor is the orchestrator "events"
+    // firehose (a plain web session) can never deliver here — return before the
+    // entries read, so a Slack-connected deployment does not read the store on
+    // every web turn. `mapped` is a cheap, synchronous key check.
+    const mapped = this.channelThreadFor(thread.key);
+    if (!mapped && thread.key !== EVENTS_THREAD_KEY) return;
 
     const entries = await this.deps.engineStore.getEntries(sessionId, threadId);
     const entry = entries.find((e) => e.id === messageId && e.type === "message" && e.role === "assistant");
@@ -501,34 +506,73 @@ export class ChannelHost {
     // like "Let me check." + tool call + final answer double-delivers.
     if (entry.stopReason !== "end_turn") return;
 
+    // Delivery target: the thread's own channel key (a DM or channel thread),
+    // or, on the "events" thread an event delivery lands on, the submission's
+    // own channel origin. The origin binds to the submission, so interleaved
+    // events on one "events" thread each reply to their own conversation.
+    let target = mapped;
+    if (!target) {
+      const origin = entry.queueItemId ? originFromEntries(entries, entry.queueItemId) : undefined;
+      target = origin ? this.channelTargetForOrigin(origin) : null;
+    }
+    if (!target) return;
+
+    const dedupeKey = `${sessionId}:${messageId}`;
+    if (this.delivered.has(dedupeKey)) return;
     this.markDelivered(dedupeKey);
 
-    const transport = this.transports.get(mapped.channelType);
+    const transport = this.transports.get(target.channelType);
     if (!transport) return;
 
-    if (entry.content) {
-      await transport.send(mapped.conversationKey, { markdown: entry.content });
-    }
-    for (const part of entry.parts ?? []) {
-      if (part.type !== "attachment") continue;
-      const attachment = part.attachment;
-      if (attachment.type === "image") {
-        await transport.sendMedia(mapped.conversationKey, {
-          type: "image",
-          data: attachment.data,
-          mimeType: attachment.mimeType,
-          name: attachment.name,
-        });
-      } else if (attachment.type === "file") {
-        await transport.sendMedia(mapped.conversationKey, {
-          type: "file",
-          data: attachment.data,
-          mimeType: attachment.mimeType,
-          name: attachment.name,
-        });
+    try {
+      if (entry.content) {
+        await transport.send(target.conversationKey, { markdown: entry.content });
       }
-      // "text" ToolAttachment variant is skipped (rule 2).
+      for (const part of entry.parts ?? []) {
+        if (part.type !== "attachment") continue;
+        const attachment = part.attachment;
+        if (attachment.type === "image") {
+          await transport.sendMedia(target.conversationKey, {
+            type: "image",
+            data: attachment.data,
+            mimeType: attachment.mimeType,
+            name: attachment.name,
+          });
+        } else if (attachment.type === "file") {
+          await transport.sendMedia(target.conversationKey, {
+            type: "file",
+            data: attachment.data,
+            mimeType: attachment.mimeType,
+            name: attachment.name,
+          });
+        }
+        // "text" ToolAttachment variant is skipped (rule 2).
+      }
+    } catch (err) {
+      // A reply the assistant produced but could not deliver is a reportable
+      // miss, not a silent drop: surface it on the Problems tab. Also log it —
+      // the catch is broad, so a code fault (not just a transport error) lands
+      // here and must stay visible in the server log, not only the drop table.
+      console.error("[channels] channel reply delivery failed", err);
+      const orgId = this.orgId ?? (await this.deps.resolveOrgId());
+      await this.dropLog(orgId, "channel_reply_failed", target.conversationKey, String(err));
     }
+  }
+
+  /**
+   * Resolve a submission's `ChannelOrigin` to an outbound target. Mirrors the
+   * `channelThreadFor` rebuild hop: the transport turns the stored thread key
+   * back into a conversationKey (Slack injects the workspace id it holds).
+   * `null` when the channel is not running or the transport disowns the key.
+   */
+  private channelTargetForOrigin(origin: ChannelOrigin): { channelType: string; conversationKey: string } | null {
+    if (!this.isRunning(origin.channelType)) return null;
+    const transport = this.transports.get(origin.channelType);
+    const conversationKey = transport?.conversationKeyFromThreadKey?.(origin.threadKey);
+    // Empty is as unusable as null: a rebuild that produced no address must not
+    // be sent to.
+    if (!conversationKey) return null;
+    return { channelType: origin.channelType, conversationKey };
   }
 
   /**

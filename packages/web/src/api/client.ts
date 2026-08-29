@@ -172,8 +172,10 @@ import type {
   PutLlmProviderPreferencesResponse,
   CreateEventSubscriptionRequest,
   CreateEventSubscriptionResponse,
+  FilterOptionsResponse,
   GetEventCatalogResponse,
   GetEventResponse,
+  ListEventDropsResponse,
   ListEventsResponse,
   ListEventSubscriptionsResponse,
   PatchEventSubscriptionRequest,
@@ -870,6 +872,16 @@ export const api = {
   // attempts, the plugin trigger catalog, and subscription CRUD. Both lists
   // take an optional workspace owner.
   getEventCatalog: () => request<GetEventCatalogResponse>("GET", "/events/catalog"),
+  // Provider-populated choices for one filter field's `source`. `q` narrows the
+  // list; `deps` carries each dependsOn field's value as its own query param
+  // (the route reads `repo=<value>`, not a `deps` object).
+  getFilterOptions: (params: { source: string; q?: string; deps?: Record<string, string> }) => {
+    const qs = new URLSearchParams();
+    qs.set("source", params.source);
+    if (params.q) qs.set("q", params.q);
+    for (const [field, value] of Object.entries(params.deps ?? {})) qs.set(field, value);
+    return request<FilterOptionsResponse>("GET", `/events/filter-options?${qs.toString()}`);
+  },
   listEvents: (params?: { service?: string; key?: string }, owner?: OwnerFilter) => {
     const qs = new URLSearchParams();
     if (params?.service) qs.set("service", params.service);
@@ -878,6 +890,7 @@ export const api = {
     const path = q ? `/events?${q}${ownerSuffix(owner)}` : `/events${ownerQuery(owner)}`;
     return request<ListEventsResponse>("GET", path);
   },
+  listEventDrops: () => request<ListEventDropsResponse>("GET", "/events/drops"),
   getEvent: (id: string) => request<GetEventResponse>("GET", `/events/${encodeURIComponent(id)}`),
   redeliverEvent: (id: string) =>
     request<RedeliverEventResponse>("POST", `/events/${encodeURIComponent(id)}/redeliver`),

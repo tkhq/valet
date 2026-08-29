@@ -16,6 +16,7 @@ import {
   slackRequestUrl,
 } from "./slack-app.js";
 import { SLACK_USER_SCOPES } from "@valet/plugin-slack-user/oauth";
+import { slackTriggerEventTypes } from "@valet/plugin-slack/plugin";
 
 describe("slack bot events", () => {
   it("subscribes the agent messaging experience, not the legacy assistant one", () => {
@@ -24,6 +25,28 @@ describe("slack bot events", () => {
     expect(SLACK_BOT_EVENTS).toContain("message.im");
     expect(SLACK_BOT_EVENTS).not.toContain("assistant_thread_started");
     expect(SLACK_BOT_EVENTS).not.toContain("assistant_thread_context_changed");
+  });
+
+  it("subscribes to every event type the Slack trigger defs match", () => {
+    // Slack delivers only subscribed event types. A trigger def whose event
+    // type is absent here ships a catalog entry that can never fire — the
+    // exact invisible no-op this pin exists to catch. `message` is the one
+    // non-1:1 mapping: it arrives as one bot event per channel type.
+    const subscribed = new Set(SLACK_BOT_EVENTS);
+    for (const eventType of slackTriggerEventTypes) {
+      if (eventType === "message") {
+        // `message` arrives as one bot event per channel type, and the
+        // slack.message trigger matches every channel type. So all four
+        // variants must be subscribed. Asserting only that some `message.*`
+        // exists would pass a manifest trimmed to `message.im` while
+        // channel/group/mpim triggers silently went dark.
+        for (const variant of ["message.channels", "message.groups", "message.im", "message.mpim"]) {
+          expect(subscribed, `slack.message needs ${variant} subscribed`).toContain(variant);
+        }
+        continue;
+      }
+      expect(subscribed, `trigger event ${eventType} must be subscribed in SLACK_BOT_EVENTS`).toContain(eventType);
+    }
   });
 });
 

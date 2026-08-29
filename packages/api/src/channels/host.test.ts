@@ -6,6 +6,7 @@ import {
   type ChannelTransport,
   type InboundChannelEvent,
   type OutboundChannelMessage,
+  type SignalContent,
   type ValetPlugin,
 } from "@valet/engine";
 import { PgSessionStore, PgEventStream } from "@valet/store-postgres";
@@ -301,6 +302,32 @@ describe("ChannelHost.handleUpdate", () => {
     expect(fakeTransport.answered[0]).toMatchObject({ callbackId: "cb9" });
     const drops = await testDb.appDb.select().from(eventDropLog);
     expect(drops.some((d) => d.reason === "unsupported_kind" && d.detail.includes("unknown_gate_ref"))).toBe(true);
+  });
+
+  it("replies to the channel origin when the turn ran on the shared events thread", async () => {
+    const session = await defaultAssistantSessionFor(
+      { db: testDb.appDb, engineHost },
+      { type: "org", id: ORG_ID },
+      { actorUserId: USER_ID, orgId: ORG_ID },
+    );
+    const content: SignalContent = {
+      kind: "signal",
+      signalType: "keyed.app_mention",
+      body: "who are you",
+      origin: { channelType: "keyed", threadKey: "keyed:D100" },
+    };
+    await session.thread("events").submitPrompt(content, { dispatchId: "evt-1" });
+
+    // The turn runs async; the faux assistant replies "ok" and message_end
+    // drives the outbound bridge. The "events" thread key does not decode to a
+    // channel, so the reply must route by the submission's origin.
+    for (let i = 0; i < 200; i++) {
+      if (keyedTransport.sent.length > 0) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(keyedTransport.sent).toEqual([
+      { conversationKey: "keyed:R1:D100", message: { markdown: "ok" } },
+    ]);
   });
 
   // ── conversationKey ⇄ threadKey round trip ────────────────────────────

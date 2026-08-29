@@ -53,6 +53,12 @@ export interface SlackMember {
   deleted: boolean;
 }
 
+export interface SlackChannel {
+  id: string;
+  name: string;
+  isArchived: boolean;
+}
+
 export class SlackApi {
   constructor(
     private readonly token: string,
@@ -278,6 +284,34 @@ export class SlackApi {
     }
     const nextCursor = str(rec(res.response_metadata)?.next_cursor);
     return { members, nextCursor: nextCursor !== undefined && nextCursor !== "" ? nextCursor : undefined };
+  }
+
+  /**
+   * conversations.list page of public and private channels. `types` is
+   * fixed to `public_channel,private_channel`; DMs and group DMs are not
+   * subscribable channels. Excludes archived channels — a filter that names
+   * a dead channel never matches.
+   */
+  async listChannels(cursor?: string): Promise<{ channels: SlackChannel[]; nextCursor?: string }> {
+    const params: Record<string, unknown> = {
+      limit: 200,
+      types: "public_channel,private_channel",
+      exclude_archived: true,
+    };
+    if (cursor) params.cursor = cursor;
+    const res = await this.get("conversations.list", params);
+    const raw = Array.isArray(res.channels) ? res.channels : [];
+    const channels: SlackChannel[] = [];
+    for (const item of raw) {
+      const c = rec(item);
+      if (!c) continue;
+      const id = str(c.id);
+      const name = str(c.name);
+      if (!id || !name) continue;
+      channels.push({ id, name, isArchived: c.is_archived === true });
+    }
+    const nextCursor = str(rec(res.response_metadata)?.next_cursor);
+    return { channels, nextCursor: nextCursor !== undefined && nextCursor !== "" ? nextCursor : undefined };
   }
 
   /**

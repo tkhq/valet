@@ -183,22 +183,16 @@ describe("event system e2e: signed webhook → subscription match → workflow r
     expect(params.input.type).toBe("event");
     expect(params.input.data.key).toBe("linear.issue.create");
 
-    // ── Negative: team OTHER fails the filter — event row, no delivery ──
+    // ── Negative: team OTHER fails the filter — event is dropped, not stored ──
+    // Ingest is match-gated: an event that matches no subscription (here the
+    // filter excludes it) is never persisted. This is the privacy rule — the
+    // events table keeps only what a subscription asked for.
     const negRes = await postLinear(api.baseUrl, issueCreateBody("OTHER", "iss-2"), "del-2");
     expect(negRes.status).toBe(204);
 
     const allEvents = await api.providers.db.select().from(events).where(eq(events.orgId, "local-org"));
-    expect(allEvents).toHaveLength(2);
-    const negEvent = allEvents.find((e) => e.id !== eventRows[0].id);
-    expect(negEvent).toBeDefined();
-    expect(negEvent!.eventKey).toBe("linear.issue.create");
-
-    await api.providers.eventDispatcher.pollOnce();
-    const negDeliveries = await api.providers.db
-      .select()
-      .from(eventDeliveries)
-      .where(eq(eventDeliveries.eventId, negEvent!.id));
-    expect(negDeliveries).toHaveLength(0);
+    expect(allEvents).toHaveLength(1);
+    expect(allEvents[0].id).toBe(eventRows[0].id);
 
     // The run count is unchanged — the filtered event started nothing.
     const runsAfter = await api.providers.db
@@ -438,21 +432,18 @@ describe("event system e2e: signed GitHub webhook → subscription match → wor
     expect(params.input.type).toBe("event");
     expect(params.input.data.key).toBe("github.pull_request.opened");
 
-    // ── Negative: another repo fails the filter — event row, no delivery ─
+    // ── Negative: another repo fails the filter — event is dropped, not stored ─
+    // Ingest is match-gated: an event no subscription matches (the repo filter
+    // excludes it) is never persisted. The events table keeps only what a
+    // subscription asked for.
     const negRes = await postGithubDelivery(api.baseUrl, prOpenedBody("acme/other", 8), "gh-del-2");
     expect(negRes.status).toBe(204);
 
     const allEvents = await api.providers.db.select().from(events).where(eq(events.orgId, "local-org"));
-    expect(allEvents).toHaveLength(2);
-    const negEvent = allEvents.find((e) => e.id !== eventRows[0].id);
-    expect(negEvent).toBeDefined();
+    expect(allEvents).toHaveLength(1);
+    expect(allEvents[0].id).toBe(eventRows[0].id);
 
     await api.providers.eventDispatcher.pollOnce();
-    const negDeliveries = await api.providers.db
-      .select()
-      .from(eventDeliveries)
-      .where(eq(eventDeliveries.eventId, negEvent!.id));
-    expect(negDeliveries).toHaveLength(0);
 
     const runsAfter = await api.providers.db
       .select()

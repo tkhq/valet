@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { eventKeyMatches, filtersMatch, resolvePath } from "./match.js";
+import { eventKeyMatches, filtersMatch, resolvePath, validateRegexPattern } from "./match.js";
 import type { EventCatalogEntry } from "@valet/engine";
 
 const CATALOG: EventCatalogEntry[] = [
@@ -49,9 +49,33 @@ describe("filtersMatch", () => {
     expect(filtersMatch(payload, "github.pull_request.opened", [{ field: "repo", op: "prefix", value: "tkhq/" }], CATALOG)).toBe(true);
     expect(filtersMatch(payload, "github.pull_request.opened", [{ field: "sender", op: "contains", value: "onne" }], CATALOG)).toBe(true);
   });
+  it("regex matches and fails closed on a bad pattern", () => {
+    expect(filtersMatch(payload, "github.pull_request.opened", [{ field: "repo", op: "regex", value: "^tkhq/.*$" }], CATALOG)).toBe(true);
+    expect(filtersMatch(payload, "github.pull_request.opened", [{ field: "repo", op: "regex", value: "^other/" }], CATALOG)).toBe(false);
+    // An invalid pattern must return false, never throw.
+    expect(filtersMatch(payload, "github.pull_request.opened", [{ field: "repo", op: "regex", value: "(" }], CATALOG)).toBe(false);
+  });
+
+  it("regex is compiled once and reused across events (cache)", () => {
+    // Two matches with the same pattern exercise the compiled-regex cache; both
+    // must behave identically.
+    const f = [{ field: "repo", op: "regex" as const, value: "^tkhq/" }];
+    expect(filtersMatch(payload, "github.pull_request.opened", f, CATALOG)).toBe(true);
+    expect(filtersMatch({ repository: { full_name: "other/x" }, sender: { login: "z" } }, "github.pull_request.opened", f, CATALOG)).toBe(false);
+  });
+
   it("unknown field never matches", () => {
     expect(filtersMatch(payload, "github.pull_request.opened", [{ field: "nope", op: "eq", value: "x" }], CATALOG)).toBe(false);
   });
+  it("validateRegexPattern accepts a normal pattern, rejects long/invalid/nested-quantifier", () => {
+    expect(validateRegexPattern("^tkhq/.*$")).toBeNull();
+    expect(validateRegexPattern("(a|b|c)+")).toBeNull(); // alternation, not nested quantifier
+    expect(validateRegexPattern("x".repeat(201))).toContain("too long");
+    expect(validateRegexPattern("(")).toContain("invalid");
+    expect(validateRegexPattern("(a+)+")).toContain("nests");
+    expect(validateRegexPattern("(.*)*")).toContain("nests");
+  });
+
   it("empty filter list always matches", () => {
     expect(filtersMatch(payload, "github.pull_request.opened", [], CATALOG)).toBe(true);
   });

@@ -3938,6 +3938,7 @@ function buildSignalMeta(
     senderSessionId: stamp?.senderSessionId,
     senderOwner: stamp?.senderOwner,
     hopCount: stamp?.hopCount,
+    origin: content.origin,
   };
 }
 

@@ -48,6 +48,7 @@ import { SkillSyncService } from "../services/skill-sync.js";
 import { GitHubSkillRepoReader } from "../services/skill-repo-reader.js";
 import { skillRepoReaderFactory } from "../services/skill-source-credential.js";
 import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
+import { channelOriginResolver } from "../events/channel-origin.js";
 import { resolveOrgId } from "../lib/org.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
@@ -508,6 +509,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     workflowRunHost,
     workflowStore,
     deliverToOrchestrator: buildOrchestratorTarget({ db, engineHost }),
+    resolveChannelOrigin: channelOriginResolver(channelHost),
   });
 
   const webhookRateLimiter = new WorkflowWebhookRateLimiter(opts.webhookRateLimit ?? { limit: 30, windowMs: 60_000 });

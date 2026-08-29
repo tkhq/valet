@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
   deriveQueueState,
+  originFromEntries,
+  renderSignalEnvelope,
   resolvePartialSubmissionText,
   resolveSubmissionText,
 } from "../src/submission.js";
@@ -216,5 +218,56 @@ describe("resolveSubmissionText / resolvePartialSubmissionText (pure)", () => {
     ];
     expect(resolveSubmissionText(otherOnly, "q-1")).toBeUndefined();
     expect(resolvePartialSubmissionText(otherOnly, "q-1")).toBeUndefined();
+  });
+});
+
+describe("renderSignalEnvelope with channel origin", () => {
+  it("renders origin as the thread key attribute, sorted with the rest", () => {
+    const signal: NonNullable<MessageEntry["signal"]> = {
+      signalType: "slack.app_mention",
+      tagName: "signal",
+      origin: { channelType: "slack", threadKey: "slack:C1:1.2" },
+    };
+    expect(renderSignalEnvelope(signal, "who are you")).toBe(
+      `<signal signalType="slack.app_mention" origin="slack:C1:1.2">who are you</signal>`,
+    );
+  });
+});
+
+describe("originFromEntries (pure)", () => {
+  function userSignalEntry(queueItemId: string, threadKey: string): MessageEntry {
+    return {
+      id: `u-${queueItemId}`,
+      sessionId: "sess-1",
+      threadId: THREAD,
+      parentId: null,
+      createdAt: 1_000,
+      type: "message",
+      role: "user",
+      content: "hi",
+      queueItemId,
+      signal: {
+        signalType: "slack.app_mention",
+        tagName: "signal",
+        origin: { channelType: "slack", threadKey },
+      },
+    };
+  }
+
+  it("returns the signal entry's origin for a matching queueItemId", () => {
+    const entries: SessionEntry[] = [
+      userSignalEntry("q-1", "slack:C1:1.2"),
+      assistantEntry({ content: "ack", queueItemId: "q-1", stopReason: "end_turn" }),
+    ];
+    expect(originFromEntries(entries, "q-1")).toEqual({ channelType: "slack", threadKey: "slack:C1:1.2" });
+    expect(originFromEntries(entries, "q-2")).toBeUndefined();
+  });
+
+  it("returns undefined when the signal entry has no origin", () => {
+    const entries: SessionEntry[] = [
+      assistantEntry({ content: "user text", queueItemId: "q-1", role: "user" }),
+      assistantEntry({ content: "ack", queueItemId: "q-1", stopReason: "end_turn" }),
+    ];
+    expect(originFromEntries(entries, "q-1")).toBeUndefined();
   });
 });

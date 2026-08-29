@@ -80,6 +80,11 @@ export function conversationKeyFor(teamId: string, channelId: string, threadTs: 
   return `slack:${teamId}:${channelId}:${threadTs}`;
 }
 
+/** The engine thread key for a Slack conversation (no team id — it lives on the credential). */
+export function threadKeyFor(channelId: string, threadTs: string): string {
+  return `slack:${channelId}:${threadTs}`;
+}
+
 export function parseConversationKey(key: string): SlackConversationRef | null {
   if (!key.startsWith("slack:")) return null;
   const parts = key.slice("slack:".length).split(":");
@@ -773,7 +778,7 @@ export class SlackTransport implements ChannelTransport {
   threadKeyFromConversationKey(conversationKey: string): string {
     const target = parseConversationKey(conversationKey);
     if (!target) return conversationKey;
-    return `slack:${target.channelId}:${target.threadTs}`;
+    return threadKeyFor(target.channelId, target.threadTs);
   }
 
   conversationKeyFromThreadKey(threadKey: string): string | null {
@@ -784,6 +789,18 @@ export class SlackTransport implements ChannelTransport {
     if (parts.length !== 2 || parts.some((p) => p === "")) return null;
     const [channelId, threadTs] = parts;
     return conversationKeyFor(this.teamId, channelId, threadTs);
+  }
+
+  threadKeyFromEvent(eventKey: string, payload: unknown): string | null {
+    // Only message-like events name a conversation to reply into. A reaction,
+    // a channel-lifecycle change, or a workspace-join has no thread to answer.
+    if (eventKey !== "slack.message" && eventKey !== "slack.app_mention") return null;
+    if (typeof payload !== "object" || payload === null) return null;
+    const p = payload as Record<string, unknown>;
+    const channel = typeof p.channel === "string" ? p.channel : undefined;
+    const ts = typeof p.thread_ts === "string" ? p.thread_ts : typeof p.ts === "string" ? p.ts : undefined;
+    if (channel === undefined || ts === undefined) return null;
+    return threadKeyFor(channel, ts);
   }
 
   // ─── Feature-detected extras (not part of ChannelTransport) ───────────
@@ -812,6 +829,34 @@ export class SlackTransport implements ChannelTransport {
           continue;
         }
         out.push({ id: member.id, name: member.name, realName: member.realName });
+        if (out.length >= 20) return out;
+      }
+      cursor = page.nextCursor;
+      if (pages >= MAX_PAGES) break;
+    } while (cursor !== undefined);
+    return out;
+  }
+
+  /**
+   * Channel typeahead for the event-filter picker (conversations.list, bot
+   * token). Returns public and private channels matching `query` by name.
+   */
+  async listWorkspaceChannels(query: string): Promise<Array<{ id: string; name: string }>> {
+    const q = query.trim().toLowerCase();
+    const out: Array<{ id: string; name: string }> = [];
+    let cursor: string | undefined;
+    // Bound the SCAN, not just the match count: mirror listWorkspaceMembers so
+    // a selective query in a workspace with thousands of channels cannot page
+    // the whole directory and hang the typeahead.
+    const MAX_PAGES = 10;
+    let pages = 0;
+    do {
+      const page = await this.api.listChannels(cursor);
+      pages += 1;
+      for (const channel of page.channels) {
+        if (channel.isArchived) continue;
+        if (q !== "" && !channel.name.toLowerCase().includes(q)) continue;
+        out.push({ id: channel.id, name: channel.name });
         if (out.length >= 20) return out;
       }
       cursor = page.nextCursor;

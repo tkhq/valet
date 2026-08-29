@@ -109,6 +109,34 @@ describe("SignalContent admission", () => {
     faux.unregister();
   });
 
+  it("round-trips a channel origin from the signal onto the persisted entry", async () => {
+    const faux = registerFauxProvider({ provider: "sigorigin" });
+    faux.setResponses([fauxAssistantMessage("ack")]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+
+    const content: SignalContent = {
+      kind: "signal",
+      signalType: "slack.app_mention",
+      body: "who's assistant are you",
+      origin: { channelType: "slack", threadKey: "slack:C1:1.2" },
+    };
+    const receipt = await session.prompt(content);
+    await waitForStatus(events, receipt.threadId, "idle");
+
+    const entries = await session.readEntries("web:default");
+    const userEntry = entries.find((e) => e.type === "message" && e.role === "user") as MessageEntry;
+    expect(userEntry.signal?.origin).toEqual({ channelType: "slack", threadKey: "slack:C1:1.2" });
+
+    faux.unregister();
+  });
+
   it("renders with a custom tagName", async () => {
     const faux = registerFauxProvider({ provider: "sig2" });
     faux.setResponses([fauxAssistantMessage("ack")]);
