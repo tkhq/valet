@@ -1,5 +1,18 @@
 import { ARCHITECT_PERSONA, VERIFIER_PERSONA } from "./personas.js";
-import type { PlanCell } from "./plan.js";
+import { NAME_MAX, type PlanCell } from "./plan.js";
+
+/** The longest suffix a triad sibling appends to the base name (`-verify`).
+ * The base is capped so every derived name (`${base}-verify`) stays within
+ * NAME_MAX — parsePlan enforces the same limit on read-back. */
+const TRIAD_SUFFIX_MAX = "-verify".length;
+
+/** Cap a triad's base name so `${base}-plan` and `${base}-verify` both fit
+ * within NAME_MAX. Trims a trailing hyphen the slice may leave. */
+function triadBase(name: string | undefined): string {
+  const base = name ?? "phase";
+  const cap = NAME_MAX - TRIAD_SUFFIX_MAX;
+  return base.length <= cap ? base : base.slice(0, cap).replace(/-+$/, "");
+}
 
 /**
  * Expand every `triad: true` phase cell into an architect → worker → verifier
@@ -57,7 +70,7 @@ export function expandTriads(cells: PlanCell[]): PlanCell[] {
     // persona, playbook, paths, mode, and goal. A triad phase needs a stable
     // base name for the -plan / -verify siblings; fall back to "phase" when the
     // phase cell has no explicit name.
-    const base = cell.name ?? "phase";
+    const base = triadBase(cell.name);
     const architectOrdinal = nextOrdinal++;
     const workerOrdinal = nextOrdinal++;
     nextOrdinal++; // verifier ordinal (assigned by position below)

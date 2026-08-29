@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cellDir, parsePlan, type PlanCell } from "./plan.js";
+import { cellDir, NAME_MAX, parsePlan, type PlanCell } from "./plan.js";
 import { expandTriads, hasTriad } from "./triad.js";
 import { presetPlan, serializePlan } from "./presets.js";
 import { KNOWN_PERSONAS } from "./presets.js";
@@ -131,6 +131,34 @@ describe("expandTriads", () => {
     for (const cell of reparsed.cells) {
       for (const r of cell.reads) expect(r).toBeLessThan(cell.ordinal);
     }
+  });
+
+  it("caps a long base name so `-verify`/`-plan` siblings stay within NAME_MAX", () => {
+    // Regression: a triad base of `secrets-and-tokens` (18) + `-verify` (7) is
+    // 25 chars — over NAME_MAX (24). Before the cap this passed sec_start but
+    // parsePlan rejected it on read-back at dispatch, and the immutable plan
+    // deadlocked every dispatch. The base is now capped, so all siblings fit
+    // and the expanded plan re-parses cleanly.
+    const cells: PlanCell[] = [
+      { ordinal: 1, persona: "code-review", mode: "fresh", name: "recon", goal: "Map", reads: [] },
+      {
+        ordinal: 2,
+        persona: "code-review",
+        mode: "fresh",
+        name: "secrets-and-tokens",
+        playbook: "secrets-config",
+        goal: "Audit tokens",
+        reads: [1],
+        triad: true,
+      },
+    ];
+    const expanded = expandTriads(cells);
+    for (const cell of expanded) {
+      expect((cell.name ?? "").length).toBeLessThanOrEqual(NAME_MAX);
+    }
+    // The whole expanded plan re-parses — parsePlan enforces NAME_MAX, so this
+    // is exactly the check that used to throw at dispatch.
+    expect(() => parsePlan(serializePlan(expanded), KNOWN_PERSONAS)).not.toThrow();
   });
 
   it("produces filesystem-safe, unique cell dirs", () => {

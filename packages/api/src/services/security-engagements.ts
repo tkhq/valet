@@ -893,6 +893,13 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     const planYaml =
       hasTriad(parsed.cells) || globs ? serializePlan(scopedCells) : engagement.plan;
 
+    // Re-validate the EXPANDED plan before the engagement freezes. Triad
+    // expansion derives `-plan`/`-verify` names and could, for a long base,
+    // produce a name that only parsePlan (on read-back at dispatch) rejects —
+    // and by then the plan is immutable, so dispatch deadlocks. Fail here, at
+    // the sec_start gate, with the same corrective message instead.
+    parsePlan(planYaml, knownPersonasForEngagement(engagement));
+
     const ts = now();
     const cellValues = scopedCells.map((planCell) => ({
       id: `cell_${randomUUID()}`,
@@ -1010,6 +1017,12 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
       dispatchedAt: target.dispatchedAt,
     };
 
+    // Validate the plan BEFORE the claim. parsePlan is pure (it does not need
+    // the claimed row), so any structural error throws here while the cell is
+    // still pending — a throw after the claim would leave the cell `running`
+    // with a pre-minted child id that was never spawned ("CHILD GONE").
+    const plan = parsePlan(engagement.plan, knownPersonasForEngagement(engagement));
+
     // Pre-mint the child session id (the same `child_` shape children.ts
     // mints — this IS the session id the spawn builds) and stamp it in the
     // claim, BEFORE the spawn: the host's child-session build resolves the
@@ -1033,7 +1046,6 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
       .returning();
     const cell = claimed[0];
 
-    const plan = parsePlan(engagement.plan, knownPersonasForEngagement(engagement));
     const readOrdinals = parseReads(cell.reads);
     const readsCells = cells.filter((c) => readOrdinals.includes(c.ordinal));
     // Delta re-run (pivot-coordinator, M-P4c): an answered need on THIS cell

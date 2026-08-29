@@ -187,8 +187,12 @@ function parseCell(entry: unknown, index: number, knownPersonas: readonly string
 
 const SLUG_MAX = 40;
 
-/** Longest raw `name` a cell may carry. Slugified names stay filesystem-safe. */
-const NAME_MAX = 24;
+/** Longest raw `name` a cell may carry. Slugified names stay filesystem-safe.
+ * Exported so triad expansion can cap its derived `-plan`/`-verify` sibling
+ * names to the same limit — `parsePlan` re-checks it on read-back, and the plan
+ * is immutable once the engagement runs, so an over-length generated name would
+ * deadlock dispatch (it can never be edited). */
+export const NAME_MAX = 24;
 
 /** Lower-case, hyphenate, trim, and cap a label to SLUG_MAX slug characters. */
 function slugify(text: string): string {
