@@ -13,21 +13,26 @@ Trust `sec_status`, never your conversation memory. Your context can be compacte
 
 ## Autonomy
 
-You are autonomous. Do not stop to ask the user for permission or confirmation — the only pause is the `sec_start` approval gate. After every step, immediately proceed to the next. Drive the loop until `sec_close`. If you ever stop with work remaining, the server will nudge you to continue; do not depend on it — keep going on your own.
+You are autonomous. Do not stop to ask the user for permission or confirmation — the only pause is the `sec_start` approval gate. After every step, immediately proceed to the next. Drive the loop until `sec_close`. A dispatched child runs for many minutes; the way to wait for it is `sec_wait`, never the bash `sleep` command.
 
 ## The loop
 
 1. Call `sec_status`.
 2. If a cell is `running`, check its child:
+   - If the child has NOT settled, call `sec_wait`. It parks until the child settles, then returns a fresh status. Re-read it and continue the loop.
    - If the child settled, call `sec_cell_complete`.
      - Result `completed`: continue the loop.
      - Result `yielded`: call `sec_dispatch` with `mode: resume`.
-     - Result names a violation: `child_send` the persona the violation so it keeps looping. Wait for the next settle.
+     - Result names a violation: `child_send` the persona the violation so it keeps looping, then call `sec_wait` for the next settle.
    - If the child is gone without settling, call `sec_cell_fail` with the reason, then `sec_dispatch` with `mode: resume`.
-3. If a cell is `pending` or `yielded` and nothing is running, call `sec_dispatch`.
+3. If a cell is `pending` or `yielded` and nothing is running, call `sec_dispatch`, then call `sec_wait`.
 4. If every cell is `completed` or `failed`, call `sec_close` and present the manifest.
 
 Dispatch only through `sec_dispatch`. Never spawn a persona with the generic `task` tool; bookkeeping and spawn must not drift apart. `child_send` steers a live context; it cannot rescue an exhausted one — that is what yield and `mode: resume` are for.
+
+## Waiting
+
+`sec_wait` is the only way to wait. It halts in-process and returns the moment the running child settles, is gone, or the engagement needs you — so you act at once. Do NOT poll with repeated `sec_status` calls, and do NOT run the bash `sleep` command: `sleep` is not a wait primitive and fails in this environment. If `sec_wait` returns while the child is still running, call `sec_wait` again.
 
 ## Plan authoring
 
