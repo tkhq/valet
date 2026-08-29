@@ -256,6 +256,22 @@ turn that produces no reply at all is a reportable miss, not a silent drop.
   caches per org; a `dependsOn` source scopes to its parent value.
 - **Full `make e2e` scorecard**, per CLAUDE.md, before claiming done.
 
+## Deviations (Part 1, as built)
+
+- **Explicit `reply_to_origin` action deferred.** The design named both an
+  auto-reply safety net and an explicit reply action. Part 1 ships the
+  auto-reply plus a persona instruction. A standalone action posts to Slack
+  directly, so it would double-post against the safety net unless new
+  cross-turn suppression state is threaded between the engine action and the
+  host bridge. The safety net already guarantees delivery, so the action is
+  deferred until that suppression is worth building.
+- **Sender name is a handle, not a resolved display name.** The dispatcher sets
+  the signal's `sender` attribute from `event.actor` (`login` or `externalId`).
+  For a Slack `app_mention` this is the raw Slack user id, because the event
+  carries no username. Resolving it to a display name reuses Part 2's
+  name-resolution service; until then a channel-origin sender can surface as an
+  id. The headline identity fix (the team name) is complete.
+
 ## Sequencing
 
 One project, one PR onto `dev-v2`, built in this order so each step is
