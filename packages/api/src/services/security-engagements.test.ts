@@ -369,6 +369,95 @@ describe("security engagement service", () => {
     expect(rows[0].attempts).toBe(0);
   });
 
+  it("caps cell dispatch attempts: the 6th dispatch fails the cell and does not re-spawn (fix 5)", async () => {
+    const { engagement, cells } = await makeStarted();
+    const cell = cells[0];
+    // Drive attempts to MAX_CELL_ATTEMPTS (5) — each dispatch increments, then
+    // reset the row to pending so the next dispatch is allowed.
+    for (let i = 0; i < 5; i++) {
+      await svc.dispatchCell(engagement.id, { cellId: cell.id, spawn });
+      await db
+        .update(securityCells)
+        .set({ status: "yielded" })
+        .where(eq(securityCells.id, cell.id));
+    }
+    const before = spawnCount;
+    const rowsBefore = await db.select().from(securityCells).where(eq(securityCells.id, cell.id));
+    expect(rowsBefore[0].attempts).toBe(5);
+
+    // The 6th dispatch is refused: cell marked failed, no spawn, a clear error.
+    await expect(
+      svc.dispatchCell(engagement.id, { cellId: cell.id, spawn }),
+    ).rejects.toThrow(/failed after 5 attempts.*never settled.*needs your attention/s);
+    expect(spawnCount).toBe(before); // no re-spawn
+
+    const rowsAfter = await db.select().from(securityCells).where(eq(securityCells.id, cell.id));
+    expect(rowsAfter[0].status).toBe("failed");
+    expect(rowsAfter[0].statusReason).toContain("exhausted 5 dispatch attempts");
+    expect(rowsAfter[0].attempts).toBe(5); // not incremented past the cap
+  });
+
+  it("re-dispatch returns the replaced prior child id so the route tears it down (fix 6)", async () => {
+    const { engagement, cells } = await makeStarted();
+    const cell = cells[0];
+    const first = await svc.dispatchCell(engagement.id, { cellId: cell.id, spawn });
+    const priorChildId = first.cell.childSessionId;
+    expect(priorChildId).toBeTruthy();
+    expect(first.replacedChildSessionId).toBeNull(); // first dispatch replaces nothing
+
+    // Yield, then re-dispatch: the prior child id is returned for teardown.
+    await db.update(securityCells).set({ status: "yielded" }).where(eq(securityCells.id, cell.id));
+    const second = await svc.dispatchCell(engagement.id, { cellId: cell.id, spawn });
+    expect(second.replacedChildSessionId).toBe(priorChildId);
+    expect(second.cell.childSessionId).not.toBe(priorChildId);
+  });
+
+  it("reportFinding is idempotent for a same-cell re-report (fix 7): one row, existing returned", async () => {
+    const { engagement, cells } = await makeStarted();
+    const args = {
+      cellId: cells[0].id,
+      severity: "high" as const,
+      file: "src/routes/sessions.ts",
+      line: 42,
+      title: "IDOR on session read",
+      body: EVIDENCE,
+    };
+    const first = await svc.reportFinding(engagement.id, args);
+    const second = await svc.reportFinding(engagement.id, args);
+    // Same row both times, no duplicate insert.
+    expect(second.finding.id).toBe(first.finding.id);
+    const [{ n }] = await db
+      .select({ n: count() })
+      .from(securityFindings)
+      .where(eq(securityFindings.engagementId, engagement.id));
+    expect(Number(n)).toBe(1);
+  });
+
+  it("reportNeed dedups an open need (fix 8): one row for a same-shape re-report", async () => {
+    const { engagement, cells } = await makeStarted();
+    const args = {
+      cellId: cells[0].id,
+      kind: "credential" as const,
+      description: "Needs a GitHub token to reach the private submodule",
+    };
+    const first = await svc.reportNeed(engagement.id, args);
+    const second = await svc.reportNeed(engagement.id, args);
+    expect(second.id).toBe(first.id);
+  });
+
+  it("reportCoverage dedups an identical row (fix 9): a replay does not inflate the rollup", async () => {
+    const { engagement, cells } = await makeStarted();
+    const args = {
+      cellId: cells[0].id,
+      area: "secrets scan",
+      status: "assessed" as const,
+      tool: "gitleaks",
+    };
+    const first = await svc.reportCoverage(engagement.id, args);
+    const second = await svc.reportCoverage(engagement.id, args);
+    expect(second.id).toBe(first.id);
+  });
+
   // ── completeCell rulings ─────────────────────────────────────────────────
 
   it("completeCell refuses an unsettled child", async () => {
@@ -1086,11 +1175,14 @@ describe("security engagement service", () => {
       const result = await runCellToCompletion(engagement.id, cell);
       expect(result.outcome).toBe("completed");
     }
-    // Two findings sharing one fingerprint (same file/bucket/title) plus one
-    // distinct — the manifest counts 2 distinct, not 3 rows.
+    // Two findings sharing one fingerprint (same file/bucket/title) reported
+    // from DIFFERENT cells, plus one distinct — the manifest counts 2 distinct,
+    // not 3 rows. (Same-cell same-fingerprint re-reports now dedup at insert,
+    // fix 7, so a shared fingerprint must span cells to make two rows.) The
+    // recon cell (cells[0]) is repo-wide, so it may report the same path.
     const shape = { file: "src/routes/sessions.ts", line: 42, title: "IDOR on sessions" };
     await svc.reportFinding(engagement.id, { cellId: cells[1].id, severity: "high", ...shape, body: EVIDENCE });
-    await svc.reportFinding(engagement.id, { cellId: cells[1].id, severity: "high", ...shape, line: 45, body: EVIDENCE });
+    await svc.reportFinding(engagement.id, { cellId: cells[0].id, severity: "high", ...shape, line: 45, body: EVIDENCE });
     const third = await svc.reportFinding(engagement.id, {
       cellId: cells[2].id,
       severity: "medium",
@@ -1117,7 +1209,7 @@ describe("security engagement service", () => {
       status: "completed",
       attempts: 1,
       stateDocRevisions: 1,
-      findings: 2,
+      findings: 1,
     });
     expect(manifest.findings.total).toBe(3);
     expect(manifest.findings.distinctBySeverity).toEqual({

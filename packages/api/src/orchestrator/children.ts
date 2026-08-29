@@ -843,62 +843,106 @@ export function buildChildReader(deps: ChildrenDeps): ChildReader {
 }
 
 /**
+ * The ONE settlement definition shared by the `child_status` reader (fix 1)
+ * and the `sec_cell_complete` actuator (fix 1), plus every direct
+ * `child_watches` consumer through the reconcile write (fix 3).
+ *
+ * Returns `null` on the same "not yours / does not exist / deleted" contract
+ * as `buildChildReader`: a missing edge row, a missing `agent_sessions` row,
+ * or a deleted child all answer `null`, so a foreign session id stays
+ * unguessable. Otherwise it derives settlement from the child's OWN durable
+ * turn state and heals a stale-false watch row.
+ *
+ * `child_watches.settled` is flipped by the in-memory `child.settled` signal.
+ * That signal is NOT durable: a process restart (a deploy) drops it, and
+ * boot-restore's watcher re-arm can time out, leaving the row unsettled even
+ * though the child's turn is durably settled in the store. A stale-false row
+ * makes `sec_cell_complete` 409 "the child has not settled" forever — the
+ * runner then fails and re-dispatches a child that already finished, looping
+ * and orphaning sandboxes. Derive settlement from durable state instead: no
+ * unsettled submission AND at least one settled submission (the second guard
+ * rejects a just-dispatched child that has not run yet, which also has zero
+ * unsettled). A yielded child is settled here on purpose — its turn ended;
+ * the caller resumes it.
+ */
+export async function resolveChildSettlement(
+  deps: ChildrenDeps,
+  childSessionId: string,
+  parentSessionId: string,
+): Promise<{ settled: boolean; lastActivityAt: number | null } | null> {
+  const rows = await deps.db
+    .select({ settled: childWatches.settled })
+    .from(childWatches)
+    .where(
+      and(
+        eq(childWatches.childSessionId, childSessionId),
+        eq(childWatches.parentSessionId, parentSessionId),
+      ),
+    )
+    .limit(1);
+  // No row means the caller does not own this child, or it does not exist.
+  // Both answer `null`: telling them apart would confirm that somebody else's
+  // session id is real.
+  if (rows.length === 0) return null;
+
+  const childRows = await deps.db
+    .select({ status: agentSessions.status })
+    .from(agentSessions)
+    .where(eq(agentSessions.id, childSessionId))
+    .limit(1);
+  const child = childRows[0];
+  // A deleted child answers the same null as a missing one.
+  if (!child || child.status === "deleted") return null;
+
+  const lastActivityAt = await deps.engineStore.latestActivityAt(childSessionId);
+  const rowSettled = rows[0].settled === true;
+  if (rowSettled) return { settled: true, lastActivityAt };
+
+  const unsettled = await deps.engineStore.listUnsettledSubmissions(childSessionId);
+  if (unsettled.length > 0) return { settled: false, lastActivityAt };
+  const settledSubs = await deps.engineStore.listSettledSubmissionsBefore(childSessionId, Date.now());
+  const settled = settledSubs.length > 0;
+
+  // Fix 3 — crash-window reconcile. The in-memory `child.settled` signal was
+  // lost (a deploy dropped it, or the boot re-arm timed out) but the child's
+  // turn IS durably settled: heal the stale-false row so every DIRECT
+  // consumer (org-ceiling counting in enforceLimits, boot-restore, the
+  // /complete actuator) sees the same truth without re-deriving it. CLAUDE.md
+  // permits this auto-repair because the violation is expected in the crash
+  // window it names, not a silent invariant repair. Best-effort: a write
+  // failure logs and never fails the read.
+  if (settled) {
+    try {
+      await deps.db
+        .update(childWatches)
+        .set({ settled: true })
+        .where(
+          and(
+            eq(childWatches.childSessionId, childSessionId),
+            eq(childWatches.parentSessionId, parentSessionId),
+          ),
+        );
+    } catch (err) {
+      console.error(
+        `resolveChildSettlement: failed to reconcile stale child_watches.settled for ${childSessionId}:`,
+        err,
+      );
+    }
+  }
+  return { settled, lastActivityAt };
+}
+
+/**
  * Builds the `ChildStatusReader` injected into every orchestrator's
  * `toolConfig.childStatusReader` — the backend of the engine's
- * `child_status` built-in. Authority is the same `child_watches` edge as
+ * `child_status` built-in. A thin wrapper over `resolveChildSettlement`, the
+ * one settlement definition. Authority is the same `child_watches` edge as
  * `buildChildReader`. The activity clock reads the engine store directly:
  * a status check must never wake the child (no sandbox token, no
  * reconcile, no engine rows for a deleted child).
  */
 export function buildChildStatusReader(deps: ChildrenDeps): ChildStatusReader {
-  return async (req, ctx) => {
-    const rows = await deps.db
-      .select({ settled: childWatches.settled })
-      .from(childWatches)
-      .where(
-        and(
-          eq(childWatches.childSessionId, req.childSessionId),
-          eq(childWatches.parentSessionId, ctx.parentSessionId),
-        ),
-      )
-      .limit(1);
-    // No row means the caller does not own this child, or it does not
-    // exist. Both answer `null`: telling them apart would confirm that
-    // somebody else's session id is real.
-    if (rows.length === 0) return null;
-
-    const childRows = await deps.db
-      .select({ status: agentSessions.status })
-      .from(agentSessions)
-      .where(eq(agentSessions.id, req.childSessionId))
-      .limit(1);
-    const child = childRows[0];
-    // A deleted child answers the same null as a missing one.
-    if (!child || child.status === "deleted") return null;
-
-    const lastActivityAt = await deps.engineStore.latestActivityAt(req.childSessionId);
-    if (rows[0].settled === true) return { settled: true, lastActivityAt };
-
-    // `child_watches.settled` is flipped by the in-memory `child.settled`
-    // signal. That signal is NOT durable: a process restart (a deploy) drops
-    // it, and boot-restore's watcher re-arm can time out, leaving the row
-    // unsettled even though the child's turn is durably settled in the store.
-    // A stale-false row makes `sec_cell_complete` 409 "the child has not
-    // settled" forever — the runner then fails and re-dispatches a child that
-    // already finished, looping and orphaning sandboxes. Self-heal by deriving
-    // settlement from the child's OWN durable turn state: no unsettled
-    // submission AND at least one settled submission (the second guard rejects
-    // a just-dispatched child that has not run yet, which also has zero
-    // unsettled). A yielded child is settled here on purpose — its turn ended;
-    // the caller resumes it.
-    const unsettled = await deps.engineStore.listUnsettledSubmissions(req.childSessionId);
-    if (unsettled.length > 0) return { settled: false, lastActivityAt };
-    const settledSubs = await deps.engineStore.listSettledSubmissionsBefore(
-      req.childSessionId,
-      Date.now(),
-    );
-    return { settled: settledSubs.length > 0, lastActivityAt };
-  };
+  return async (req, ctx) => resolveChildSettlement(deps, req.childSessionId, ctx.parentSessionId);
 }
 
 /**

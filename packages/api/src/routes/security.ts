@@ -80,7 +80,6 @@ import { buildActionInvoker } from "../plugins/action-invoker.js";
 import { persistInvocationAudit } from "../policies/service.js";
 import {
   agentSessions,
-  childWatches,
   securityCells,
   securityFindingComments,
   securityFindingLinks,
@@ -101,7 +100,11 @@ import { routeAttention, type AttentionDeps } from "../orchestrator/attention.js
 import { parseAssistantSessionId } from "@valet/engine";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { resolveApiTokenOrNull, resolveChangedFiles, resolveRefSha } from "../bakes/source-service.js";
-import { buildChildStatusReader, ChildLimitError } from "../orchestrator/children.js";
+import {
+  buildChildStatusReader,
+  ChildLimitError,
+  resolveChildSettlement,
+} from "../orchestrator/children.js";
 import {
   createSecurityEngagementService,
   type CellProgress,
@@ -1564,7 +1567,32 @@ securityRouter.post("/:id/security/dispatch", async (c) => {
   };
 
   try {
-    const { cell } = await security.dispatchCell(result.engagement.id, { cellId, mode, spawn });
+    const { cell, replacedChildSessionId } = await security.dispatchCell(result.engagement.id, {
+      cellId,
+      mode,
+      spawn,
+    });
+    // Fix 6 — tear down the child the re-dispatch abandoned. A re-dispatch of a
+    // yielded/failed cell overwrites the cell's child_session_id with the new
+    // one; the prior child (a still-running pod) would otherwise leak. Tear it
+    // down the same way the cancel route does — engine + sandbox destroy, then
+    // soft-delete the session row — so the reconcile sweep reaps any straggler.
+    // Best-effort: a failure logs and the dispatch still succeeds.
+    if (replacedChildSessionId) {
+      const { db: teardownDb, engineHost } = c.var.providers;
+      try {
+        await engineHost.destroy(replacedChildSessionId);
+        await teardownDb
+          .update(agentSessions)
+          .set({ status: "deleted", updatedAt: Date.now() })
+          .where(eq(agentSessions.id, replacedChildSessionId));
+      } catch (err) {
+        console.error(
+          `security dispatch: replaced child ${replacedChildSessionId} teardown failed:`,
+          err,
+        );
+      }
+    }
     const response: SecurityDispatchResponse = { cell: cellToWire(cell, null) };
     return c.json(response);
   } catch (err) {
@@ -1581,28 +1609,27 @@ securityRouter.post("/:id/security/cells/:cellId/complete", async (c) => {
   const loaded = await loadEngagementOr404(c, sessionId);
   if ("failure" in loaded) return loaded.failure;
   const { security, result } = loaded;
-  const { db } = c.var.providers;
+  const { db, engineHost, engineStore, prebuildService } = c.var.providers;
 
-  // `settled` comes from the durable child watch, not from the agent's
-  // narration: the watch row is the same signal the settlement watcher
-  // marks after admitting child.settled.
+  // `settled` comes from the SAME durable settlement definition the
+  // `child_status` reader uses — `resolveChildSettlement` — not a raw read of
+  // `child_watches.settled`. A raw read trusts the in-memory `child.settled`
+  // signal, which a restart drops; the resolver derives settlement from the
+  // child's own durable turn state and heals the stale-false row (fix 3), so
+  // the reader and this actuator can never disagree. A null result (not the
+  // caller's child, or deleted) is treated as not settled.
   const cell = result.cells.find((candidate) => candidate.id === cellId);
   if (!cell) {
     return c.json({ error: `No cell ${cellId} in this engagement. Check the id with sec_status.` }, 404);
   }
   let settled = false;
   if (cell.childSessionId) {
-    const watchRows = await db
-      .select({ settled: childWatches.settled })
-      .from(childWatches)
-      .where(
-        and(
-          eq(childWatches.childSessionId, cell.childSessionId),
-          eq(childWatches.parentSessionId, sessionId),
-        ),
-      )
-      .limit(1);
-    settled = watchRows[0]?.settled === true;
+    const resolved = await resolveChildSettlement(
+      { db, engineHost, engineStore, prebuildService },
+      cell.childSessionId,
+      sessionId,
+    );
+    settled = resolved?.settled === true;
   }
 
   try {

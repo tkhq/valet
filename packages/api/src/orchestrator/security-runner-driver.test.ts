@@ -17,6 +17,7 @@ import {
 import {
   NUDGE_TEXT,
   SecurityRunnerDriver,
+  SUBMIT_STALL_TEXT,
   type RunnerSubmit,
 } from "./security-runner-driver.js";
 
@@ -29,6 +30,9 @@ describe("SecurityRunnerDriver", () => {
   let submit: ReturnType<typeof vi.fn> & RunnerSubmit;
   /** Injected idle signal — empty means idle, non-empty means working/gated. */
   let unsettled: unknown[];
+  /** Per-session unsettled override (fix 2): a child session id → its list.
+   * Falls back to `unsettled` for any id not in the map (the runner session). */
+  let unsettledBySession: Map<string, unknown[]>;
   let spawnCount: number;
   const spawn = async () => ({ childSessionId: `child_${++spawnCount}` });
 
@@ -37,18 +41,23 @@ describe("SecurityRunnerDriver", () => {
     svc = createSecurityEngagementService({ db, now: () => NOW });
     submit = vi.fn(async () => undefined) as ReturnType<typeof vi.fn> & RunnerSubmit;
     unsettled = [];
+    unsettledBySession = new Map();
     spawnCount = 0;
   });
 
-  function makeDriver(maxStalls = 3): SecurityRunnerDriver {
+  function makeDriver(maxStalls = 3, maxSubmitFailures = 3): SecurityRunnerDriver {
     return new SecurityRunnerDriver({
       db,
-      engineStore: { listUnsettledSubmissions: async () => unsettled },
+      engineStore: {
+        listUnsettledSubmissions: async (sessionId: string) =>
+          unsettledBySession.get(sessionId) ?? unsettled,
+      },
       submit,
       now: () => NOW,
       // Sweep is driven manually; interval is only used by start().
       sweepIntervalMs: 20_000,
       maxStalls,
+      maxSubmitFailures,
     });
   }
 
@@ -95,16 +104,51 @@ describe("SecurityRunnerDriver", () => {
     expect(text).toBe(NUDGE_TEXT);
   });
 
-  it("does not nudge while a cell is running (a persona child is in flight)", async () => {
-    const { engagementId, cells } = await seedStarted();
+  it("does not nudge while a running cell's child is still working (has an unsettled submission)", async () => {
+    const { cells } = await seedStarted();
     await db
       .update(securityCells)
-      .set({ status: "running" })
+      .set({ status: "running", childSessionId: "child_working" })
       .where(eq(securityCells.id, cells[0].id));
+    // The child is genuinely working: the child.settled signal path owns the
+    // self-advance, so the sweep must stay silent (fix 2 skip condition).
+    unsettledBySession.set("child_working", [{ id: "q1" }]);
 
     await makeDriver().sweep();
 
     expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("nudges a running cell whose child has settled (no unsettled submission) — the lost-signal gap", async () => {
+    const { cells } = await seedStarted();
+    await db
+      .update(securityCells)
+      .set({ status: "running", childSessionId: "child_settled" })
+      .where(eq(securityCells.id, cells[0].id));
+    // The child finished but the child.settled signal was lost (a restart). Its
+    // unsettled list is empty, and the runner is idle → nudge (fix 2). Without
+    // this the runner loops re-dispatching a finished child.
+    unsettledBySession.set("child_settled", []);
+
+    await makeDriver().sweep();
+
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(submit.mock.calls[0][1]).toBe(NUDGE_TEXT);
+  });
+
+  it("nudges a running cell mid-dispatch (no childSessionId yet)", async () => {
+    const { cells } = await seedStarted();
+    // A running cell with no child id is mid-dispatch. It falls through to the
+    // idle nudge — the polling net owns the gap (fix 2).
+    await db
+      .update(securityCells)
+      .set({ status: "running", childSessionId: null })
+      .where(eq(securityCells.id, cells[0].id));
+
+    await makeDriver().sweep();
+
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(submit.mock.calls[0][1]).toBe(NUDGE_TEXT);
   });
 
   it("does not nudge when the runner has an unsettled submission", async () => {
@@ -265,5 +309,31 @@ describe("SecurityRunnerDriver", () => {
     await driver.sweep();
     expect(submit).toHaveBeenCalledTimes(3);
     for (const [, text] of submit.mock.calls) expect(text).toBe(NUDGE_TEXT);
+  });
+
+  it("alerts ONCE after repeated submit failures (fix 10b: an un-restorable runner)", async () => {
+    await seedStarted();
+    // Every submit throws — a cold start for an un-restorable runner. The
+    // driver counts consecutive failures and trips the alert at the cap.
+    submit.mockImplementation(async () => {
+      throw new Error("cold start failed: session not restorable");
+    });
+    const driver = makeDriver(10, 3); // high nudge cap so the submit cap trips first
+
+    // Three failing sweeps reach maxSubmitFailures=3. On the third, the alert
+    // fires: recordSecurityRunnerStalled() + one SUBMIT_STALL_TEXT ask.
+    await driver.sweep(); // failure 1
+    await driver.sweep(); // failure 2
+    await driver.sweep(); // failure 3 → alert (nudge attempt + one human ask)
+
+    const askCalls = submit.mock.calls.filter(([, text]) => text === SUBMIT_STALL_TEXT);
+    expect(askCalls).toHaveLength(1);
+
+    // Further failing sweeps stay quiet on the human ask — alerted once.
+    const before = submit.mock.calls.filter(([, text]) => text === SUBMIT_STALL_TEXT).length;
+    await driver.sweep();
+    await driver.sweep();
+    const after = submit.mock.calls.filter(([, text]) => text === SUBMIT_STALL_TEXT).length;
+    expect(after).toBe(before);
   });
 });

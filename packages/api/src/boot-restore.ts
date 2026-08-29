@@ -84,6 +84,13 @@ export interface BoundedRestoreOpts {
   timeoutMs: number;
   /** Checked before each session is pulled; true stops the pass (shutdown). */
   shouldStop?: () => boolean;
+  /**
+   * Called once per session that exceeds `timeoutMs` (fix 10a). Production
+   * passes `recordBootRestoreTimeout` so an un-restorable session is visible
+   * as a metric, not just a log line. Injected (not imported here) to keep
+   * this module free of the OTel dependency chain so it stays unit-testable.
+   */
+  onTimeout?: (sessionId: string) => void;
 }
 
 export interface BoundedRestoreResult {
@@ -140,6 +147,13 @@ export async function runBoundedRestore(
         if (raced === "timeout") {
           result.timedOut++;
           abandonedInFlight++;
+          // Emit the alert per timed-out session (fix 10a). Best-effort: a
+          // throwing hook must never abort the restore pass.
+          try {
+            opts.onTimeout?.(id);
+          } catch (err) {
+            console.error(`boot restore: onTimeout hook threw for ${id}:`, err);
+          }
           // The attempt is now unobserved by the race; keep watching it so
           // its outcome is never silent — a late failure logged here is the
           // only trail an operator gets for a session that never came back.

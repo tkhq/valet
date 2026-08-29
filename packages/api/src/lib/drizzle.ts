@@ -582,6 +582,7 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
       "reads" text DEFAULT '[]' NOT NULL,
       "review" boolean DEFAULT false NOT NULL,
       "status" text DEFAULT 'pending' NOT NULL,
+      "status_reason" text,
       "attempts" integer DEFAULT 0 NOT NULL,
       "compacted_at" bigint,
       "child_session_id" text,
@@ -589,6 +590,14 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
       "settled_at" bigint,
       "created_at" bigint NOT NULL
     )`,
+  },
+  {
+    // Why a cell reached its terminal status (fix 5, attempt-cap failure).
+    // Null on every row written before the column existed and on a normally-
+    // settled cell — the cell rail reads null as "no explicit reason".
+    describe: "security_cells.status_reason column",
+    probe: { kind: "column", table: "security_cells", column: "status_reason" },
+    sql: 'ALTER TABLE "security_cells" ADD COLUMN IF NOT EXISTS "status_reason" text',
   },
   {
     describe: "security_cells_engagement_ordinal_unique index",

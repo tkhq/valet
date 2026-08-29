@@ -29,6 +29,7 @@ import {
   ChildWatcher,
   ChildLimitError,
   classifyWatcherError,
+  resolveChildSettlement,
   type ChildrenDeps,
   resultBody,
   parseTaskRepo,
