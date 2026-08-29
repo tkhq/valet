@@ -671,9 +671,13 @@ export const api = {
     request<unknown>("PUT", `/memory${ownerQuery(owner)}`, body),
   deleteMemoryDoc: (path: string, owner?: OwnerFilter) =>
     request<unknown>("DELETE", `/memory?path=${encodeURIComponent(path)}${ownerSuffix(owner)}`),
-  exportMemory: () => request<ExportMemoryResponse>("GET", "/memory/export"),
-  importMemory: (body: ImportMemoryRequest) =>
-    request<ImportMemoryResponse>("POST", "/memory/import", body),
+  // `owner` scopes the bundle to a workspace, like every other memory read:
+  // a team export is the team's corpus, a team import writes into it (the
+  // route authorizes the write). Omitted reads/writes your own.
+  exportMemory: (owner?: OwnerFilter) =>
+    request<ExportMemoryResponse>("GET", `/memory/export${ownerQuery(owner)}`),
+  importMemory: (body: ImportMemoryRequest, owner?: OwnerFilter) =>
+    request<ImportMemoryResponse>("POST", `/memory/import${ownerQuery(owner)}`, body),
 
   // threads + messages (session-scoped)
   listThreads: (sessionId: string, opts?: { archived?: boolean }) =>

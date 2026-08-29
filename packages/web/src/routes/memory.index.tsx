@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useMemoryTree } from "~/api/memory";
 import { useListOwner } from "~/lib/use-list-owner";
-import { useOrchestratorInfo } from "~/api/orchestrator";
+import { useScopedAssistantName } from "~/api/assistants";
 
 /**
  * `/memory` index child — the explorer's resting state (Task 6 brief,
@@ -18,8 +18,9 @@ function MemoryIndexPage() {
   // view of yours. The switcher says which one is being read.
   const owner = useListOwner();
   const treeQ = useMemoryTree(owner);
-  const info = useOrchestratorInfo();
-  const name = info.data?.name ?? "your assistant";
+  // Name the assistant of the ACTIVE workspace — a team's default under team
+  // scope — not always the caller's personal one.
+  const name = useScopedAssistantName(owner);
 
   const nothingRemembered = treeQ.data !== undefined && treeQ.data.entries.length === 0;
 

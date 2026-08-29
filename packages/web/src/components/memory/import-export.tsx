@@ -3,9 +3,11 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Download, Upload, X } from "lucide-react";
 import { api } from "~/api/client";
 import { qkMemory } from "~/api/memory";
+import { useOrg, useTeams } from "~/api/settings";
 import type { ImportMemoryResponse } from "~/api/memory-types";
 import { Button, Spinner } from "~/components/primitives";
 import { downloadTextFile } from "~/lib/download";
+import { useListOwner } from "~/lib/use-list-owner";
 
 /** Parsed, validated bundle — what the confirm step shows and the import
  * request sends. */
@@ -104,10 +106,27 @@ export function MemoryImportExport() {
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
   const [trusted, setTrusted] = useState(false);
 
+  // Memory belongs to the active workspace: a team export is the team's
+  // corpus, a team import writes into it. Without this the buttons always hit
+  // the caller's own memory, whatever the switcher said.
+  const owner = useListOwner();
+
+  // Import is a write. A team's corpus is written by its admins (the same
+  // rule `authorizeOwner` enforces on `POST /memory/import`), so a plain
+  // member sees Export but not Import rather than clicking into a 403. Export
+  // is a read, allowed for any member. Mirrors `memory-doc.tsx`'s `canWrite`.
+  const isTeamScope = owner?.ownerType === "team";
+  const teamsQ = useTeams({ enabled: isTeamScope });
+  const orgQ = useOrg({ enabled: isTeamScope });
+  const canImport =
+    !isTeamScope ||
+    orgQ.data?.callerRole === "admin" ||
+    teamsQ.data?.teams.some((t) => t.id === owner?.ownerId && t.callerRole === "admin") === true;
+
   async function onExport() {
     setPhase({ kind: "busy", label: "Exporting…" });
     try {
-      const res = await api.exportMemory();
+      const res = await api.exportMemory(owner);
       const bundle = {
         format: "valet-memory-bundle@1",
         source: "v2",
@@ -157,7 +176,7 @@ export function MemoryImportExport() {
   async function onConfirmImport(bundle: ParsedBundle) {
     setPhase({ kind: "busy", label: "Importing…" });
     try {
-      const result = await api.importMemory({ files: bundle.files, trusted });
+      const result = await api.importMemory({ files: bundle.files, trusted }, owner);
       await queryClient.invalidateQueries({ queryKey: qkMemory.tree() });
       setPhase({ kind: "done", result });
     } catch (err) {
@@ -203,14 +222,16 @@ export function MemoryImportExport() {
           >
             <Download className="h-3.5 w-3.5" /> Export
           </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={phase.kind === "busy"}
-          >
-            <Upload className="h-3.5 w-3.5" /> Import
-          </Button>
+          {canImport && (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={phase.kind === "busy"}
+            >
+              <Upload className="h-3.5 w-3.5" /> Import
+            </Button>
+          )}
           {phase.kind === "busy" && (
             <span className="flex items-center gap-1.5 text-muted">
               <Spinner size={12} /> {phase.label}

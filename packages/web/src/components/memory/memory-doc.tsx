@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { qkMemory, useMemoryDoc } from "~/api/memory";
-import { useOrchestratorInfo } from "~/api/orchestrator";
+import { useScopedAssistantName } from "~/api/assistants";
 import { useOrg, useTeams } from "~/api/settings";
 import { api, ApiError, type OwnerFilter } from "~/api/client";
 import { Badge, Button, Spinner } from "~/components/primitives";
@@ -64,9 +64,11 @@ export interface MemoryDocProps {
  */
 export function MemoryDoc({ path, owner, onNavigateToChat, onDeleted, onOpenPath }: MemoryDocProps) {
   const docQ = useMemoryDoc(path, owner);
-  const info = useOrchestratorInfo();
   const queryClient = useQueryClient();
-  const name = info.data?.name ?? "your assistant";
+  // The active workspace's assistant — a team's default under team scope. The
+  // footer prefill below stays personal-only, so its use of this name only
+  // ever renders under personal scope.
+  const name = useScopedAssistantName(owner);
 
   // Team memory: reads follow membership, writes follow authority (team
   // admin or org admin — `authorizeOwner` in routes/memory.ts). Mirror that
