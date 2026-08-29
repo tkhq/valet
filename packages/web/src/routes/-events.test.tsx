@@ -184,6 +184,9 @@ vi.mock("~/api/events", () => ({
 
 vi.mock("~/api/workflows", () => ({
   useWorkflows: () => ({ data: workflowsData, isLoading: false, error: null }),
+  // The AutomationWizard imports this for its schedule branch. The event
+  // branch never calls it, but the hook must exist for the wizard to render.
+  useCreateSchedule: () => ({ mutate: vi.fn(), isPending: false }),
 }));
 
 // Teams back the subscription owner badges and the workspace-scoped create
@@ -351,6 +354,22 @@ describe("EventsPage — Subscriptions", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Subscriptions" }));
   }
 
+  function clickNext() {
+    fireEvent.click(screen.getByRole("button", { name: /^Next$/ }));
+  }
+
+  /**
+   * Open the AutomationWizard and drive its event branch to the "Then" step,
+   * where the target radios live. Step order: When → Match → Then → Review.
+   * The wizard defaults to the event branch, so step 1 needs only Next.
+   */
+  function openWizardToTargetStep(eventKey: string) {
+    fireEvent.click(screen.getByRole("button", { name: /New automation/ }));
+    clickNext(); // When → Match (event is the default branch)
+    fireEvent.click(screen.getByText(eventKey)); // pick the event key
+    clickNext(); // Match → Then
+  }
+
   it("lists subscriptions with the workflow target resolved to its name", () => {
     openSubscriptionsTab();
     expect(screen.getByText("PR alerts")).toBeTruthy();
@@ -388,13 +407,15 @@ describe("EventsPage — Subscriptions", () => {
 
   it("creates a subscription from a name, catalog-picked keys, and the default target", async () => {
     openSubscriptionsTab();
-    fireEvent.click(screen.getByRole("button", { name: /New subscription/ }));
+    // Drive the wizard: When → Match (pick key) → Then (personal default) →
+    // Review (name, create).
+    openWizardToTargetStep("github.pr.merged");
+    clickNext(); // Then → Review, keeping the personal-assistant default.
 
-    fireEvent.change(screen.getByLabelText("Subscription name"), {
+    fireEvent.change(screen.getByLabelText("Automation name"), {
       target: { value: "Merged PRs" },
     });
-    fireEvent.click(screen.getByText("github.pr.merged"));
-    fireEvent.click(screen.getByRole("button", { name: "Create subscription" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create automation" }));
 
     await waitFor(() =>
       expect(createMutate).toHaveBeenCalledWith(
@@ -443,19 +464,19 @@ describe("EventsPage — Subscriptions", () => {
     teamsData = { teams: [team("t_eng", "Engineering", "member")] };
     scopeTeamId = "t_eng";
     openSubscriptionsTab();
-    fireEvent.click(screen.getByRole("button", { name: /New subscription/ }));
+    openWizardToTargetStep("github.pr.merged");
 
-    // The team option exists and is preselected.
+    // On the Then step, the team option exists and is preselected.
     const teamRadio = screen.getByRole("radio", {
       name: /Notify Engineering's assistant/,
     }) as HTMLInputElement;
     expect(teamRadio.checked).toBe(true);
 
-    fireEvent.change(screen.getByLabelText("Subscription name"), {
+    clickNext(); // Then → Review, keeping the team default.
+    fireEvent.change(screen.getByLabelText("Automation name"), {
       target: { value: "Team PRs" },
     });
-    fireEvent.click(screen.getByText("github.pr.merged"));
-    fireEvent.click(screen.getByRole("button", { name: "Create subscription" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create automation" }));
 
     await waitFor(() =>
       expect(createMutate).toHaveBeenCalledWith(
@@ -470,61 +491,94 @@ describe("EventsPage — Subscriptions", () => {
     );
   });
 
-  // Ownership follows the TARGET, not the workspace on screen, so a row can
-  // land in a list other than the one that created it. The dialog names the
-  // list it lands in, in BOTH directions.
-  it("in a team workspace, says a personally-filed subscription lands elsewhere", () => {
+  // In a team workspace the Then step offers every target: the team default
+  // plus a switch to the personal, org, and workflow targets. The wizard no
+  // longer prints an "ownership lands elsewhere" note (the old dialog did),
+  // so this asserts the target choices are present and switchable — the
+  // intent that team-target visibility follows the workspace.
+  it("in a team workspace, offers the team default and a switch to every other target", () => {
     teamsData = { teams: [team("t_eng", "Engineering", "member")] };
     scopeTeamId = "t_eng";
-    openSubscriptionsTab();
-    fireEvent.click(screen.getByRole("button", { name: /New subscription/ }));
+    workflowsData.workflows.push({
+      id: "wf_extra",
+      name: "Nightly",
+      definition: {},
+      createdAt: 1,
+      updatedAt: 1,
+      ownerType: "user" as const,
+      ownerId: "u1",
+    });
+    try {
+      openSubscriptionsTab();
+      openWizardToTargetStep("github.pr.merged");
 
-    // The team default is filed to the team, so nothing to warn about.
-    expect(screen.queryByText(/listed in your personal workspace/)).toBeNull();
+      // The team target is the default.
+      const teamRadio = screen.getByRole("radio", {
+        name: /Notify Engineering's assistant/,
+      }) as HTMLInputElement;
+      expect(teamRadio.checked).toBe(true);
 
-    fireEvent.click(screen.getByRole("radio", { name: /Notify your assistant/ }));
-    expect(screen.getByText(/not in Engineering/)).toBeTruthy();
+      // The reader can switch to the personal, org, and workflow targets.
+      const userRadio = screen.getByRole("radio", { name: /Notify your assistant/ });
+      fireEvent.click(userRadio);
+      expect((userRadio as HTMLInputElement).checked).toBe(true);
 
-    // A workflow target follows the WORKFLOW's owner. The first option is
-    // personally owned, so this one does leave the team's list.
-    fireEvent.click(screen.getByRole("radio", { name: /Run a workflow/ }));
-    expect(screen.getByText(/not in Engineering/)).toBeTruthy();
+      const workflowRadio = screen.getByRole("radio", { name: /Run a workflow/ });
+      fireEvent.click(workflowRadio);
+      expect((workflowRadio as HTMLInputElement).checked).toBe(true);
 
-    // The org assistant files an org-owned row, which lists in every
-    // workspace — no note.
-    fireEvent.click(screen.getByRole("radio", { name: /Notify the org assistant/ }));
-    expect(screen.queryByText(/listed in your personal workspace/)).toBeNull();
+      const orgRadio = screen.getByRole("radio", { name: /Notify the org assistant/ });
+      fireEvent.click(orgRadio);
+      expect((orgRadio as HTMLInputElement).checked).toBe(true);
+    } finally {
+      workflowsData.workflows = workflowsData.workflows.filter((w) => w.id !== "wf_extra");
+    }
   });
 
-  it("personal workspace: a personally-filed target gets no note", () => {
+  it("personal workspace: the Then step shows target options and no ownership note", () => {
     openSubscriptionsTab();
-    fireEvent.click(screen.getByRole("button", { name: /New subscription/ }));
+    openWizardToTargetStep("github.pr.merged");
+    // The wizard names the target plainly; it prints no "ownership follows the
+    // target" note (the old dialog's copy is gone).
     expect(screen.queryByText(/Ownership follows the target/)).toBeNull();
+    expect(screen.getByRole("radio", { name: /Notify your assistant/ })).toBeTruthy();
   });
 
-  // The direction a workspace-gated notice cannot reach. A team workflow
-  // armed from the personal workspace is filed to that team, so it leaves
-  // the tab that created it just as completely as the reverse case — and
-  // there is no team on screen to gate the warning on.
-  it("personal workspace: names the team a team workflow's subscription lands in", () => {
+  // A workflow target is chosen through the wizard's plain Workflow select.
+  // The wizard no longer prints where the row lands, so this drives the
+  // create body instead: a workflow target posts `{ kind: "workflow" }`.
+  it("personal workspace: a workflow target posts a workflow-kind subscription", async () => {
     teamsData = { teams: [team("t_eng", "Engineering", "member")] };
     openSubscriptionsTab();
-    fireEvent.click(screen.getByRole("button", { name: /New subscription/ }));
-    fireEvent.click(screen.getByRole("radio", { name: /Run a workflow/ }));
-    expect(screen.queryByText(/Ownership follows the target/)).toBeNull();
+    openWizardToTargetStep("github.pr.merged");
 
-    // The workflow picker is a `SelectMenu`, driven the way its own suite
-    // drives it: open the trigger, then click the option.
-    fireEvent.keyDown(screen.getByRole("button", { name: "Deploy pipeline" }), { key: "Enter" });
-    fireEvent.click(screen.getByText("Team pipeline"));
-    expect(screen.getByText(/listed in Engineering/)).toBeTruthy();
-    expect(screen.getByText(/not in your personal workspace/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("radio", { name: /Run a workflow/ }));
+    // The wizard's workflow picker is a plain `<select aria-label="Workflow">`.
+    fireEvent.change(screen.getByLabelText("Workflow"), { target: { value: "wf_team" } });
+    clickNext(); // Then → Review
+
+    fireEvent.change(screen.getByLabelText("Automation name"), {
+      target: { value: "Team deploy" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create automation" }));
+
+    await waitFor(() =>
+      expect(createMutate).toHaveBeenCalledWith(
+        {
+          name: "Team deploy",
+          eventKeys: ["github.pr.merged"],
+          filters: [],
+          target: { kind: "workflow", workflowId: "wf_team" },
+        },
+        expect.anything(),
+      ),
+    );
   });
 
   it("personal workspace: no team target is offered", () => {
     teamsData = { teams: [team("t_eng", "Engineering", "member")] };
     openSubscriptionsTab();
-    fireEvent.click(screen.getByRole("button", { name: /New subscription/ }));
+    openWizardToTargetStep("github.pr.merged");
     expect(screen.queryByRole("radio", { name: /Engineering's assistant/ })).toBeNull();
   });
 

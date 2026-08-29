@@ -21,7 +21,7 @@
  * workflow kind (`EventSubscriptionTargetWire`), so a workflow-targeted event
  * rule needs no separate event-trigger endpoint.
  */
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Button,
   Dialog,
@@ -84,8 +84,6 @@ export function AutomationWizard({
   const scopedTeam = ws?.kind === "team" ? ws.team : undefined;
   const scopedTeamId = scopedTeam?.id;
 
-  // Computed once, at mount. The panel mounts this wizard only while open, so
-  // mount time is open time — nothing rewrites the target afterwards.
   const [step, setStep] = useState<Step>(1);
   const [name, setName] = useState("");
   const [when, setWhen] = useState<When>("event");
@@ -94,8 +92,24 @@ export function AutomationWizard({
   const [cron, setCron] = useState("");
   const [timezone, setTimezone] = useState(defaultTimezone());
   const [prompt, setPrompt] = useState("");
+  // Seeded from the active workspace at mount, then resynced when the
+  // workspace changes (below) unless the reader already picked a target.
   const [target, setTarget] = useState<TargetChoice>(() => initialTarget(scopedTeamId));
   const [error, setError] = useState<string | null>(null);
+
+  // A manual target choice wins: once the reader picks a target, a later
+  // workspace switch must not overwrite it. The default target seeds from the
+  // active workspace, so it must follow a workspace change until then (see
+  // CLAUDE.md "Mount-time state from props").
+  const userTouched = useRef(false);
+  function chooseTarget(next: TargetChoice) {
+    userTouched.current = true;
+    setTarget(next);
+  }
+  useEffect(() => {
+    if (userTouched.current) return;
+    setTarget(initialTarget(scopedTeamId));
+  }, [scopedTeamId]);
 
   const workflows = workflowsQ.data?.workflows ?? [];
   const services = catalogQ.data?.services ?? [];
@@ -244,7 +258,7 @@ export function AutomationWizard({
           {step === 3 && (
             <ThenStep
               target={target}
-              onTargetChange={setTarget}
+              onTargetChange={chooseTarget}
               scopedTeam={scopedTeam}
               workflows={workflows}
               when={when}
@@ -377,7 +391,9 @@ function EventMatchStep({
         <p className="mb-1.5 text-xs font-medium text-muted">Events</p>
         {catalogLoading && <LoadingRow label="Loading catalog…" className="py-2 text-xs" />}
         {catalogError && (
-          <ErrorRow className="py-2 text-xs">Failed to load the event catalog.</ErrorRow>
+          <ErrorRow className="py-2 text-xs">
+            Could not load the event catalog. Retry, or check your integrations in Settings.
+          </ErrorRow>
         )}
         {!catalogLoading && !catalogError && services.length === 0 && (
           <p className="py-2 text-xs text-muted">

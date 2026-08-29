@@ -1,8 +1,8 @@
 /**
  * FilterEditor — the field/operator/value rows that build an event
  * subscription's filters. Shared by the workflow TriggerDialog and the event
- * SubscriptionCreateDialog, which post the same `{field, op, value}` shape to
- * the same `validateSubscription` on the server.
+ * AutomationWizard, which post the same `{field, op, value}` shape to the same
+ * `validateSubscription` on the server.
  *
  * A row's `value` is held as the raw text the user typed. The `in` operator
  * splits it into a list at submit (`toWireFilters`), so the form never needs
@@ -16,12 +16,23 @@ import { Button, Input } from "~/components/primitives";
 export type FilterOp = "eq" | "in" | "prefix" | "contains" | "regex";
 
 export interface UiFilterRow {
+  /** A stable, view-only row identity. Each row holds picker state (query,
+   * debounce), so React must key the row by this, not by array index. An
+   * index key hands one row's state to another when a row is removed or the
+   * list reorders. Never sent on the wire. */
+  id: string;
   field: string;
   op: FilterOp;
   value: string;
   /** Display name for a picker value (a resolved id → "Alice"). Persisted on
    * the wire filter, ignored by matching, shown as the selected label. */
   label?: string;
+}
+
+/** Mint a stable row id. `crypto.randomUUID` is present in every browser this
+ * app targets and in the jsdom test runtime. */
+function newRowId(): string {
+  return crypto.randomUUID();
 }
 
 /** One filterable field the selected event declares. `description` is a hint. */
@@ -88,7 +99,8 @@ export function fromWireFilters(filters: unknown[]): UiFilterRow[] {
         ? r.value
         : "";
     const label = typeof r.label === "string" ? r.label : undefined;
-    rows.push(label !== undefined ? { field, op, value, label } : { field, op, value });
+    const id = newRowId();
+    rows.push(label !== undefined ? { id, field, op, value, label } : { id, field, op, value });
   }
   return rows;
 }
@@ -154,7 +166,7 @@ export function FilterEditor({
     onChange(rows.filter((_, idx) => idx !== i));
   }
   function add() {
-    onChange([...rows, { field: fields[0]?.field ?? "", op: "eq", value: "" }]);
+    onChange([...rows, { id: newRowId(), field: fields[0]?.field ?? "", op: "eq", value: "" }]);
   }
 
   // No fields and no existing rows: nothing to configure. Say so, rather than
@@ -190,7 +202,7 @@ export function FilterEditor({
           .filter(Boolean)
           .join(" ");
         return (
-          <div key={i} className="space-y-1">
+          <div key={row.id} className="space-y-1">
             <div className="flex items-center gap-2">
               <select
                 aria-label="Filter field"
