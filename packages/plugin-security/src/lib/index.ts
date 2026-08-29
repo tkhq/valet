@@ -51,6 +51,8 @@ export {
   egressHostInScope,
 } from "./config.js";
 export type { SecurityConfig, ToolDecl, McpToolDecl, SecurityScope } from "./config.js";
+export { pathMatchesGlobs } from "./paths.js";
+export { KNOWN_SCANNERS, isKnownScanner } from "./scanners.js";
 export { protocolMarkdown } from "./protocol.js";
 export { KNOWN_PLAYBOOKS, isKnownPlaybook, playbookMarkdown } from "./playbooks.js";
 export type { PlaybookName } from "./playbooks.js";

@@ -124,7 +124,7 @@ describe("api integration: coverage ledger over the cell claim", () => {
       });
       expect(reasonless.status).toBe(409);
       expect(((await reasonless.json()) as { error: string }).error).toMatch(
-        /reason naming the consequence/,
+        /substantive reason .* naming the consequence/,
       );
 
       // A not_assessed WITH a reason lands.

@@ -251,6 +251,17 @@ Two tool sets, both built in `packages/api/src/engine/security-tools.ts`, both c
 
 Runner sessions also get `sec_fs_read` / `sec_fs_list` / `sec_findings_list` (read-only on the tree) so the runner can summarize without a child. The generic `task` / `child_read` / `child_send` / `child_status` tools stay available to the runner for steering; dispatch itself goes through `sec_dispatch` only, so bookkeeping and spawn cannot drift apart.
 
+#### Finding location verification (guardrail 4)
+
+`sec_finding_report` verifies a cited `file:line` against the persona cell's cloned sandbox before it records the finding. The acting session is the persona child; its sandbox holds the target repo cloned at the pinned commit. The route calls `EngineHost.readSandboxFileMeta(actingSessionId, file)`, which reaches the child's live sandbox without waking it (cache-only, `ready` attachment only, mirroring the `child_status` liveness path) and reads existence + line count with `Sandbox.stat`/`readFile`. The path is a workspace-relative value, never a shell argv, so there is no injection surface. The check runs only when the finding carries a `file`; `line` is checked only when both `file` and `line` are present.
+
+The fail-open/closed split is mandatory:
+
+- **Fail CLOSED** only on a CONFIRMED-absent file or an out-of-range line: the sandbox read succeeded and the file is not there, or the file has N lines and the cited line is greater than N. The route refuses with a 400 that names the problem and tells the persona to cite a real path or line.
+- **Fail OPEN** on ANY indeterminacy: no live/ready sandbox, no repo clone, a non-isolated (local/virtual) provider, an unresolved clone root, or a read error or timeout. `readSandboxFileMeta` returns `null` and the route accepts the finding. A sandbox hiccup must never block a real finding — that failure is worse than the guard.
+
+The route existence check runs BEFORE the service; the service keeps guardrail-2's path-shape and scope checks. `readSandboxFileMeta` never throws — every failure path resolves to `null`.
+
 ## The Loop, Crash, and Resume
 
 The engagement-runner skill instructs this loop:

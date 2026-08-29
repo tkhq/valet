@@ -28,6 +28,8 @@ Injection is a reachability problem: untrusted input flows to a sink that interp
 
 Show the source (file:line), the sink (file:line), the data path between them, and why the neutralization (if any) does not cover this sink. Name the CWE and the injection class. A payload sketch that would reach the sink strengthens it but the traced path is the requirement.
 
+A finding `file` must be a repo-relative path (no leading `/`, no `..`) inside your cell's assigned scope. The server refuses a file outside your scope — it belongs to another cell. Title the finding by the vulnerability, not a placeholder.
+
 ## Severity guidance
 
 - **critical** — unauthenticated RCE (command/code/deserialization) or full-database SQLi; SSRF reaching cloud metadata or an internal admin service.

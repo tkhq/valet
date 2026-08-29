@@ -27,8 +27,11 @@ import {
   findingFingerprint,
   hasTriad,
   isKnownPlaybook,
+  isKnownScanner,
   isLivePersona,
   KNOWN_PERSONAS,
+  KNOWN_SCANNERS,
+  pathMatchesGlobs,
   RECONCILE_PERSONA,
   parsePlan,
   VERIFIER_PERSONA,
@@ -76,6 +79,47 @@ export const MAX_FILE_BYTES = 256 * 1024;
 export const MAX_REVISIONS_PER_PATH = 512;
 export const MIN_FINDING_BODY_CHARS = 200;
 export const MAX_FINDINGS_PER_CELL = 100;
+
+// ── Reporting-integrity guardrails (§reporting integrity) ─────────────────
+// A weaker model must not corrupt the reporting record. Each limit is a floor
+// or a ceiling the security service enforces at the HTTP seam; every rejection
+// names the corrective action so the persona fixes its input and retries.
+
+/** Floor and ceiling on a finding title. Long enough to name a vulnerability,
+ * short enough to stay a title. */
+export const MIN_FINDING_TITLE_CHARS = 8;
+export const MAX_FINDING_TITLE_CHARS = 200;
+/** Ceiling on a finding `file` path. A repo-relative path is never this long. */
+export const MAX_FINDING_FILE_CHARS = 1024;
+/** Bounds on a finding `line`. A source file never exceeds ten million lines. */
+export const MIN_FINDING_LINE = 1;
+export const MAX_FINDING_LINE = 10_000_000;
+/** Placeholder titles a persona must not report — a real finding names the
+ * vulnerability, not a stub. Matched case-insensitively after trim. */
+export const FINDING_TITLE_PLACEHOLDERS: readonly string[] = [
+  "finding",
+  "todo",
+  "n/a",
+  "na",
+  "xxx",
+  "test",
+  "tbd",
+  "placeholder",
+  "issue",
+];
+
+/** Floor on a report markdown body — a real report, not a stub. */
+export const MIN_REPORT_MARKDOWN_CHARS = 200;
+/** Ceiling on a report markdown body (same 256 KB tree-write ceiling). */
+export const MAX_REPORT_BYTES = MAX_FILE_BYTES;
+/** Every `fnd_...` id token a report may cite. The cross-check extracts these
+ * from the markdown and the JSON snapshot and confirms each exists. */
+export const REPORT_FINDING_ID_PATTERN = /fnd_[0-9a-f-]{8,}/g;
+
+/** Floor on a review reason and a not_assessed coverage reason — a substantive
+ * rationale, not "ok". */
+export const MIN_REVIEW_REASON_CHARS = 20;
+export const MIN_COVERAGE_REASON_CHARS = 12;
 
 /** Cap on a finding-comment body (spec §Re-scan / iterate). A note is a short
  * human rationale, not a report. */
@@ -1720,6 +1764,66 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
         "Finding body must carry evidence: a code excerpt and the reasoning from source to impact (at least 200 characters).",
       );
     }
+
+    // Guardrail: a real title, a clean relative file, a sane line, and a file
+    // inside the cell's assigned scope. Each throws a named corrective so the
+    // persona fixes its input and retries.
+    const title = args.title.trim();
+    if (title.length < MIN_FINDING_TITLE_CHARS || title.length > MAX_FINDING_TITLE_CHARS) {
+      throw new Error(
+        `A finding title must be ${MIN_FINDING_TITLE_CHARS}–${MAX_FINDING_TITLE_CHARS} characters. Name the vulnerability and its location.`,
+      );
+    }
+    if (FINDING_TITLE_PLACEHOLDERS.includes(title.toLowerCase())) {
+      throw new Error(
+        `A finding title must name the vulnerability, not a placeholder like "${title}". Name the flaw, e.g. "IDOR on GET /sessions/:id".`,
+      );
+    }
+    if (args.file !== undefined) {
+      const file = args.file;
+      if (file.trim() === "") {
+        throw new Error(
+          "A finding file must be a repo-relative path like packages/api/src/routes/x.ts, or omit it for a repo-wide finding.",
+        );
+      }
+      if (
+        file.startsWith("/") ||
+        file.includes("\\") ||
+        file.split("/").some((seg) => seg === "..") ||
+        file.length > MAX_FINDING_FILE_CHARS
+      ) {
+        throw new Error(
+          `A finding file must be a clean repo-relative path like packages/api/src/routes/x.ts — no leading "/", no ".." segment, no backslash, at most ${MAX_FINDING_FILE_CHARS} characters.`,
+        );
+      }
+    }
+    if (args.line !== undefined) {
+      if (args.file === undefined) {
+        throw new Error(
+          "A finding line has no meaning without a file. Add the repo-relative file, or omit the line.",
+        );
+      }
+      if (
+        !Number.isInteger(args.line) ||
+        args.line < MIN_FINDING_LINE ||
+        args.line > MAX_FINDING_LINE
+      ) {
+        throw new Error(
+          `A finding line must be a whole number from ${MIN_FINDING_LINE} to ${MAX_FINDING_LINE}. Point to the vulnerable line, or omit the line.`,
+        );
+      }
+    }
+    // Scope adherence: a path-scoped cell may only report findings inside its
+    // globs. Recon / verify / repo-wide cells declare no globs and skip this.
+    if (args.file !== undefined) {
+      const scopeGlobs = cellScopeGlobs(engagement, cell);
+      if (scopeGlobs.length > 0 && !pathMatchesGlobs(args.file, scopeGlobs)) {
+        throw new Error(
+          `Finding file ${args.file} is outside your cell's scope (${scopeGlobs.join(", ")}). Report only within your assigned paths, or the finding belongs to another cell.`,
+        );
+      }
+    }
+
     const fingerprint = findingFingerprint({ file: args.file, line: args.line, title: args.title });
     const siblings = await db
       .select()
@@ -1819,9 +1923,9 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     if (!finding) {
       throw new Error(`No finding ${args.findingId} in this engagement. List findings with sec_findings_list.`);
     }
-    if (!args.reason || args.reason.trim() === "") {
+    if (args.reason.trim().length < MIN_REVIEW_REASON_CHARS) {
       throw new Error(
-        `A ${args.status} ruling needs a reason. Name what the evidence shows or what it missed.`,
+        `A ${args.status} ruling needs a substantive reason (at least ${MIN_REVIEW_REASON_CHARS} characters): name what the evidence shows or what it missed.`,
       );
     }
     // Forward-only: from open to any verdict; from verified to fixed (a carried
@@ -2009,9 +2113,9 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
       );
     }
     const reason = args.reason?.trim() ?? "";
-    if (args.status === "not_assessed" && reason === "") {
+    if (args.status === "not_assessed" && reason.length < MIN_COVERAGE_REASON_CHARS) {
       throw new Error(
-        "A not_assessed area needs a reason naming the consequence, e.g. 'secrets not scanned because gitleaks is missing'.",
+        `A not_assessed area needs a substantive reason (at least ${MIN_COVERAGE_REASON_CHARS} characters) naming the consequence, e.g. 'secrets not scanned because gitleaks is missing'.`,
       );
     }
     if (reason.length > MAX_COVERAGE_REASON_CHARS) {
@@ -2020,6 +2124,13 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
       );
     }
     const tool = args.tool?.trim();
+    // A claimed scanner must be a real one, so "we scanned it with X" is honest.
+    // Hand-assessed coverage (no tool) is legitimate for code-review / authz.
+    if (tool !== undefined && tool !== "" && !isKnownScanner(tool)) {
+      throw new Error(
+        `Unknown tool "${tool}"; name a real scanner (${KNOWN_SCANNERS.join(", ")}) or omit the tool.`,
+      );
+    }
     const inserted = await db
       .insert(securityCoverage)
       .values({
@@ -2049,6 +2160,83 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     args: { markdown: string; json: unknown },
   ): Promise<SecurityReport> {
     await loadEngagement(engagementId);
+
+    // Guardrail: the report is the deliverable. Collect every problem, then
+    // throw one combined corrective the report cell can fix in a single rewrite.
+    const problems: string[] = [];
+    const markdown = args.markdown;
+    if (markdown.trim() === "") {
+      problems.push("the markdown report is empty; write the full report body");
+    } else if (markdown.length < MIN_REPORT_MARKDOWN_CHARS) {
+      problems.push(
+        `the markdown report is ${markdown.length} characters; a real report is at least ${MIN_REPORT_MARKDOWN_CHARS}`,
+      );
+    }
+    const markdownBytes = Buffer.byteLength(markdown, "utf8");
+    if (markdownBytes > MAX_REPORT_BYTES) {
+      problems.push(
+        `the markdown report is ${markdownBytes} bytes; the limit is ${MAX_REPORT_BYTES} (256 KB) — trim or split it`,
+      );
+    }
+    if (
+      args.json === null ||
+      typeof args.json !== "object" ||
+      Array.isArray(args.json)
+    ) {
+      problems.push(
+        "json must be a non-null object snapshot (not a string, array, number, or null)",
+      );
+    }
+
+    // Fabricated-reference check: extract every fnd_ id token from the markdown
+    // AND the JSON snapshot, then confirm each is a real finding row for THIS
+    // engagement. This is the hard guarantee — a report may not cite an invented
+    // finding.
+    const citedIds = new Set<string>();
+    for (const source of [markdown, safeStringify(args.json)]) {
+      for (const match of source.matchAll(REPORT_FINDING_ID_PATTERN)) {
+        citedIds.add(match[0]);
+      }
+    }
+    let refutedCited = false;
+    if (citedIds.size > 0) {
+      const rows = await db
+        .select({ id: securityFindings.id, status: securityFindings.status })
+        .from(securityFindings)
+        .where(
+          and(
+            eq(securityFindings.engagementId, engagementId),
+            inArray(securityFindings.id, [...citedIds]),
+          ),
+        );
+      const byId = new Map(rows.map((r) => [r.id, r.status]));
+      const bogus = [...citedIds].filter((id) => !byId.has(id)).sort();
+      if (bogus.length > 0) {
+        problems.push(
+          `the report references finding id(s) that do not exist in this engagement: ${bogus.join(", ")}`,
+        );
+      }
+      refutedCited = [...citedIds].some((id) => byId.get(id) === "refuted");
+    }
+
+    // Refuted-as-active heuristic (best-effort): the shape is too tolerant to
+    // prove a refuted finding is presented as real, so require only the weaker,
+    // reliable signal — a report that cites a refuted finding must acknowledge
+    // refutation somewhere (the word "refuted" or "dismissed" in the markdown).
+    // The fabricated-id check above is the hard guarantee; this is a nudge.
+    if (refutedCited && !/refuted|dismissed/i.test(markdown)) {
+      problems.push(
+        'the report cites a refuted finding but never says "refuted" or "dismissed"; move dismissed findings to a labeled appendix',
+      );
+    }
+
+    if (problems.length > 0) {
+      const body = problems.map((p) => `  - ${p}`).join("\n");
+      throw new Error(
+        `The report has ${problems.length} problem(s):\n${body}\nFix the report and call sec_report_write again.`,
+      );
+    }
+
     const ts = now();
     await db
       .update(securityEngagements)
@@ -2592,6 +2780,17 @@ function basename(path: string): string {
   return idx === -1 ? path : path.slice(idx + 1);
 }
 
+/** Serialize a value for the report id scan, never throwing. A circular or
+ * non-serializable snapshot yields "" — the markdown is still scanned, and the
+ * separate non-object check rejects a malformed snapshot on its own. */
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? "";
+  } catch {
+    return "";
+  }
+}
+
 /** Parse the engagement's `changed_paths` JSON (a string[] or null). Returns
  * null for a null/absent/unparseable value — the /prior/diff.md mount reads
  * that as "no diff captured, full re-scan". */
@@ -2701,6 +2900,28 @@ function authorizedScopeGlobs(engagement: SecurityEngagementRow): string[] {
       const trimmed = p.trim();
       if (trimmed !== "") globs.add(trimmed);
     }
+  }
+  return [...globs];
+}
+
+/** One cell's scope globs (§reportFinding scope check). The plan cell that
+ * shares this cell's ordinal owns the include globs; `startEngagement` wrote the
+ * materialized (expanded + diff-scoped) plan back, so the ordinals agree. A cell
+ * with no globs — recon, verify, a repo-wide sweep — returns an empty list, and
+ * the caller treats that as "no scope constraint". A plan that fails to parse
+ * returns an empty list too: a broken plan must not falsely reject a finding. */
+function cellScopeGlobs(engagement: SecurityEngagementRow, cell: SecurityCellRow): string[] {
+  let plan: EngagementPlan;
+  try {
+    plan = parsePlan(engagement.plan, knownPersonasForEngagement(engagement));
+  } catch {
+    return [];
+  }
+  const planCell = plan.cells.find((c) => c.ordinal === cell.ordinal);
+  const globs = new Set<string>();
+  for (const p of planCell?.paths ?? []) {
+    const trimmed = p.trim();
+    if (trimmed !== "") globs.add(trimmed);
   }
   return [...globs];
 }

@@ -69,6 +69,7 @@ import {
   orgs,
   securityCells,
   securityEngagements,
+  sessionRepos,
   users,
   type SecurityCellRow,
 } from "../schema/index.js";
@@ -397,6 +398,128 @@ function pinnedIdSet(pins: readonly PinnedActionSpec[]): ReadonlySet<string> {
 }
 
 const SYSTEM_PROMPT = CODING_SYSTEM_PROMPT;
+
+/**
+ * Size ceiling for the line-count read in `readSandboxFileMeta` (Valet Security
+ * guardrail 4). A file over this size skips the line check — reading megabytes
+ * to validate a cited line is not worth it — and reports an infinite line count
+ * so no cited line ever reads as "past the end". 2 MB covers ordinary source.
+ */
+const MAX_LINE_CHECK_BYTES = 2 * 1024 * 1024;
+
+/** True when an error is a filesystem not-found (`code: "ENOENT"`). The docker
+ * and local sandboxes surface node `fs` errors; the virtual sandbox stamps the
+ * same `code`. A not-found is a CONFIRMED-absent file, not an indeterminate
+ * read error. */
+function isEnoent(err: unknown): boolean {
+  if (typeof err === "object" && err !== null) {
+    const code = (err as Record<string, unknown>).code;
+    if (code === "ENOENT") return true;
+  }
+  // Some providers only carry the string in the message.
+  return err instanceof Error && /\bENOENT\b/.test(err.message);
+}
+
+/**
+ * Join a repo-relative finding path onto the primary clone's target dir, both
+ * relative to the sandbox workspace root (Valet Security guardrail 4). Returns
+ * a WORKSPACE-RELATIVE path (no leading slash) — the one path shape every
+ * sandbox backend resolves identically against the workspace root. Returns
+ * `null` when the input escapes the clone root (`..` or an absolute file), so a
+ * cited path can never read outside the reviewed tree.
+ */
+function joinRepoRelPath(targetDir: string | null, file: string): string | null {
+  const dir = (targetDir ?? ".").replace(/^\.\/?/, "").replace(/\/+$/, "");
+  // A finding `file` is repo-relative; reject an absolute or empty path.
+  if (file === "" || file.startsWith("/")) return null;
+
+  // Normalize the FILE portion alone and refuse any `..` that would climb above
+  // the clone root — the boundary is the repo-relative path itself, so a `..`
+  // that escapes it must be rejected before it can pop the clone-root prefix.
+  const fileParts: string[] = [];
+  for (const part of file.split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") {
+      if (fileParts.length === 0) return null; // escapes the clone root
+      fileParts.pop();
+      continue;
+    }
+    fileParts.push(part);
+  }
+  if (fileParts.length === 0) return null;
+
+  const dirParts = dir === "" ? [] : dir.split("/").filter((p) => p !== "" && p !== ".");
+  const out = [...dirParts, ...fileParts];
+  if (out.length === 0) return null;
+  return out.join("/");
+}
+
+/** Count the lines in a file's text: the number of `\n` plus one for the final
+ * line when it has no trailing newline (so a one-line file with no newline is 1,
+ * not 0). An empty file is 0 lines. */
+function countLines(content: string): number {
+  if (content === "") return 0;
+  let newlines = 0;
+  for (let i = 0; i < content.length; i++) {
+    if (content[i] === "\n") newlines += 1;
+  }
+  // A trailing newline means the last `\n` terminates the final line; no
+  // trailing newline means one more line than there are newlines.
+  return content.endsWith("\n") ? newlines : newlines + 1;
+}
+
+/**
+ * The pure sandbox read behind `EngineHost.readSandboxFileMeta` (Valet Security
+ * guardrail 4). Exported so a unit test drives it directly with a fake
+ * `Sandbox`, without a live host or DB.
+ *
+ * `targetDir` is the primary clone's dir, relative to the sandbox workspace
+ * root; `file` is the repo-relative finding path. The combined path is passed
+ * as a WORKSPACE-RELATIVE value to `Sandbox.stat`/`readFile` — never a shell
+ * argv, so there is no injection surface.
+ *
+ * Returns:
+ *   - `{ exists: false, lines: 0 }` — the file is confirmed absent (ENOENT), or
+ *     the path resolves to a directory, or the path escapes the clone root.
+ *   - `{ exists: true, lines }` — the file exists; `lines` is its line count, or
+ *     `Infinity` for a file over `MAX_LINE_CHECK_BYTES` (the line check is a
+ *     courtesy, so a huge file never rejects any cited line).
+ *
+ * A `stat`/`readFile` failure that is NOT an ENOENT THROWS — the caller
+ * (`readSandboxFileMeta`) catches it and fails open (indeterminate).
+ */
+export async function verifyFileInSandbox(
+  sandbox: Sandbox,
+  targetDir: string | null,
+  file: string,
+): Promise<{ exists: boolean; lines: number }> {
+  const rel = joinRepoRelPath(targetDir, file);
+  // A path that escapes the clone root is not a valid location in the reviewed
+  // tree — treat it as absent (fail closed).
+  if (rel === null) return { exists: false, lines: 0 };
+
+  let size: number;
+  try {
+    const meta = await sandbox.stat(rel);
+    // A directory is not a valid finding location — treat it as absent.
+    if (!meta.isFile) return { exists: false, lines: 0 };
+    size = meta.size;
+  } catch (err) {
+    // Fail CLOSED only on a CONFIRMED-absent file: an ENOENT means the sandbox
+    // answered and the path is not there. Every other `stat` failure
+    // (transport/exec error, permission, provider hiccup) is INDETERMINATE —
+    // re-throw so the caller returns null (fail open).
+    if (isEnoent(err)) return { exists: false, lines: 0 };
+    throw err;
+  }
+
+  // Line count. Skip the read for a large file (not worth streaming megabytes)
+  // — report it exists with an Infinity line count so no cited line is ever
+  // "past the end".
+  if (size > MAX_LINE_CHECK_BYTES) return { exists: true, lines: Number.POSITIVE_INFINITY };
+  const content = await sandbox.readFile(rel);
+  return { exists: true, lines: countLines(content) };
+}
 
 /**
  * Per-process cache of live `Engine`/`Session` pairs keyed by app session id.
@@ -2221,6 +2344,79 @@ export class EngineHost {
    * (`SandboxProvider.deriveId`); null for backend-assigned ids. */
   deriveSandboxId(sessionKey: string): string | null {
     return this.opts.sandboxProvider.deriveId?.(sessionKey) ?? null;
+  }
+
+  /**
+   * Verify a cited `file` against a session's cloned sandbox (Valet Security
+   * guardrail 4, finding location verification). The finding-report route calls
+   * this BEFORE the service so a persona cell cannot cite a path or line that is
+   * not in the reviewed tree.
+   *
+   * Return shape:
+   *   - `null` (INDETERMINATE) → the caller MUST fail OPEN (accept the finding).
+   *     Returned when the session is not cached, its attachment is not `ready`,
+   *     it has no repo clone (the clone root is unknown), or the sandbox read
+   *     throws/times out. A sandbox hiccup must NEVER block a real finding.
+   *   - `{ exists, lines }` → the read succeeded. `exists:false` is a CONFIRMED
+   *     absent file (fail CLOSED). `lines` is the exact line count of an
+   *     existing file, so the caller can reject an out-of-range cited line.
+   *
+   * This method NEVER throws — every failure path resolves to `null`.
+   *
+   * It reaches the sandbox WITHOUT waking it: `liveSession` reads the in-memory
+   * cache only (never `sessionFor`, which would build/restore), and it acts only
+   * when the attachment is already `ready` — the same non-waking discipline the
+   * `child_status` liveness path and the command/AGENTS.md providers use.
+   *
+   * The clone root is the session's primary `session_repos` binding target dir,
+   * relative to the sandbox workspace root. A finding `file` is repo-relative, so
+   * the in-sandbox path is `<targetDir>/<file>`, passed as a WORKSPACE-RELATIVE
+   * path to `Sandbox.stat`/`readFile`. A relative path is the one cross-backend
+   * contract (workspace-prep's path-discipline note): it resolves against the
+   * sandbox workspace root for docker, local, and virtual alike. The path never
+   * enters a shell command, so there is no injection surface — `stat`/`readFile`
+   * take the path as a value, not an argv.
+   */
+  async readSandboxFileMeta(
+    sessionId: string,
+    repoRelPath: string,
+  ): Promise<{ exists: boolean; lines: number } | null> {
+    try {
+      // Non-waking: cache-only. A session that is not live (evicted, never
+      // built) is indeterminate — never force a build just to verify.
+      const session = this.liveSession(sessionId);
+      if (!session || session.attachment.state !== "ready") return null;
+      if (!this.opts.db) return null;
+
+      // Only an ISOLATED provider performs a real clone into a real tree
+      // (`buildSpecProvider` gates prep on isolation). A non-isolated provider
+      // (local/virtual) execs against the host or an empty in-memory FS, so its
+      // tree is not the reviewed clone — indeterminate, fail open. This also
+      // keeps the guard off the virtual-sandbox integration harness, whose
+      // findings cite files no `git clone` ever materialized.
+      if (this.opts.sandboxProvider.capabilities().isolated !== true) return null;
+
+      // Clone root = the primary binding's target dir, relative to the sandbox
+      // workspace root. No binding → non-git/virtual workspace, clone root
+      // unknown → indeterminate.
+      const bindingRows = await this.opts.db
+        .select({ targetDir: sessionRepos.targetDir })
+        .from(sessionRepos)
+        .where(eq(sessionRepos.sessionId, sessionId))
+        .orderBy(sessionRepos.position)
+        .limit(1);
+      const binding = bindingRows[0];
+      if (!binding) return null;
+
+      // The pure read (existence + line count). A thrown transport/exec error
+      // bubbles to the outer catch and fails open; a CONFIRMED-absent file
+      // returns `{exists:false}` and fails closed.
+      return await verifyFileInSandbox(session.sandbox, binding.targetDir, repoRelPath);
+    } catch {
+      // ANY unexpected failure (exec/read transport error, timeout, provider
+      // hiccup) → indeterminate → the caller fails OPEN. Never throw.
+      return null;
+    }
   }
 
   /**

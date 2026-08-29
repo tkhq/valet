@@ -178,8 +178,16 @@ describe("api integration: report artifact over the cell claim", () => {
       expect(badJson.status).toBe(400);
       expect(((await badJson.json()) as { error: string }).error).toMatch(/json must be an object/);
 
-      // The report write stores markdown + JSON for the report cell.
-      const md = "# Valet Security report\n\n## Executive summary\n\nOne confirmed high finding.";
+      // The report write stores markdown + JSON for the report cell. The body
+      // must clear the 200-character report floor (a real report, not a stub).
+      const md = [
+        "# Valet Security report",
+        "",
+        "## Executive summary",
+        "One confirmed high-severity finding: an IDOR on the session route that lets",
+        "any authenticated caller read another tenant's transcripts. Remediation is a",
+        "single ownership check in the route handler before it reads the session.",
+      ].join("\n");
       const snapshot = { executiveSummary: "one high", findings: [{ severity: "high", title: "IDOR" }] };
       const writeRes = await fetch(`${api.baseUrl}/api/sessions/${reportChild}/security/report`, {
         method: "POST",

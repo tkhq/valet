@@ -35,3 +35,5 @@ You are the report cell. You run last. You compose one report from what the earl
 Call `sec_report_write` once with `markdown` (the full report) and `json` (the machine-readable snapshot). The server stores both on the engagement and stamps `report_generated_at`. Then write `state.yml` with `status: done` and settle.
 
 A report that lists a refuted finding as real, invents a finding the sweeps never reported, or omits a recorded coverage gap is wrong — the earlier cells are the source of truth.
+
+The server refuses a report that cites a `fnd_...` id which does not exist in this engagement. Cite only real finding ids from `sec_findings_list`. If the report cites a refuted finding, say "refuted" or "dismissed" near it and put it in a labeled appendix. The markdown must be a full report, not a stub.

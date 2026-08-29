@@ -195,7 +195,10 @@ describe("api integration: security triage routes (M6)", () => {
       expect(deniedBody.error).toContain("session admin");
 
       // The org admin (local-user) holds the right.
-      const allowed = await postJson(statusUrl, { status: "verified", reason: "confirmed" });
+      const allowed = await postJson(statusUrl, {
+        status: "verified",
+        reason: "confirmed by reproducing the request against main",
+      });
       expect(allowed.status).toBe(200);
     } finally {
       await api.cleanup();

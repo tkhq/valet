@@ -28,6 +28,8 @@ Report a finding via `sec_finding_report` the moment it is confirmed. Do not bat
 
 Every finding body must carry evidence: a code excerpt and the reasoning from source to impact. A finding without evidence is noise wearing a severity badge; the server rejects it.
 
+The server verifies your cited `file` and `line` against the clone. Read the file with the Read tool first and cite a real repo-relative path and a real line. The server refuses a finding whose file does not exist or whose line is past the end.
+
 Severity rubric:
 
 - **critical** — remotely exploitable compromise of data or execution with no preconditions.

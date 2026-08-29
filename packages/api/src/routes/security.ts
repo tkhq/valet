@@ -1835,6 +1835,51 @@ securityRouter.post("/:id/security/findings", async (c) => {
     return c.json({ error: "line must be a positive integer." }, 400);
   }
 
+  // Guardrail 4 (finding location verification): verify a cited file:line against
+  // the persona cell's cloned sandbox BEFORE the service records it. The acting
+  // session IS the persona child (resolvePersonaActor bound `sessionId` to the
+  // cell claim), and that child has the target repo cloned at the pinned commit.
+  //
+  // Fail-CLOSED only on a CONFIRMED-absent file or an out-of-range line: the
+  // sandbox read succeeded and the path is not there, or the file has fewer
+  // lines than the cited line. Fail-OPEN on ANY indeterminacy — `null` from
+  // `readSandboxFileMeta` (no live/ready sandbox, no clone, read error) — so a
+  // sandbox hiccup never blocks a real finding. Only applies when the finding
+  // carries a `file`; `line` is checked only when both are present.
+  if (typeof body.file === "string" && body.file.trim() !== "") {
+    let meta: { exists: boolean; lines: number } | null = null;
+    try {
+      const { engineHost } = c.var.providers;
+      meta = await engineHost.readSandboxFileMeta(sessionId, body.file);
+    } catch {
+      // The host method never throws, but stay best-effort: a thrown host call
+      // is itself indeterminate — proceed (fail open).
+      meta = null;
+    }
+    if (meta !== null) {
+      if (!meta.exists) {
+        return c.json(
+          {
+            error:
+              `Finding refused: "${body.file}" does not exist in the repository at the reviewed commit. ` +
+              "Cite a real repo-relative path (check with the Read tool before reporting).",
+          },
+          400,
+        );
+      }
+      if (typeof body.line === "number" && body.line > meta.lines) {
+        return c.json(
+          {
+            error:
+              `Finding refused: "${body.file}" has ${meta.lines} lines; line ${body.line} is past the end. ` +
+              "Cite the real line.",
+          },
+          400,
+        );
+      }
+    }
+  }
+
   try {
     const reported = await security.reportFinding(engagement.id, {
       cellId: cell.id,

@@ -81,6 +81,19 @@ function violationDoc(cell: { dir: string; persona: string }): string {
 /** A body long enough to clear the 200-character evidence floor. */
 const EVIDENCE = `The route reads the session id from the URL and never checks ownership. Excerpt: db.select().from(sessions).where(eq(sessions.id, id)) — any authenticated caller can read any session, which leaks other tenants' transcripts.`;
 
+/** A report markdown body long enough to clear the 200-character report floor. */
+const REPORT_MD = [
+  "# Valet Security report",
+  "",
+  "## Executive summary",
+  "One confirmed high-severity finding: an IDOR on the session route that lets",
+  "any authenticated caller read another tenant's transcripts. Remediation is a",
+  "single ownership check in the route handler.",
+  "",
+  "## Coverage",
+  "Secrets scanned with gitleaks; authz reviewed by hand.",
+].join("\n");
+
 describe("security engagement service", () => {
   let db: AppDb;
   let svc: SecurityEngagementService;
@@ -681,6 +694,107 @@ describe("security engagement service", () => {
     expect(second.siblings.map((s) => s.id)).toEqual([first.finding.id]);
   });
 
+  it("reportFinding rejects a placeholder title", async () => {
+    const { engagement, cells } = await makeStarted();
+    await expect(
+      svc.reportFinding(engagement.id, {
+        cellId: cells[0].id,
+        severity: "high",
+        title: "placeholder",
+        body: EVIDENCE,
+      }),
+    ).rejects.toThrow(/name the vulnerability, not a placeholder/);
+  });
+
+  it("reportFinding rejects a too-short title", async () => {
+    const { engagement, cells } = await makeStarted();
+    await expect(
+      svc.reportFinding(engagement.id, {
+        cellId: cells[0].id,
+        severity: "high",
+        title: "bug",
+        body: EVIDENCE,
+      }),
+    ).rejects.toThrow(/A finding title must be 8–200 characters/);
+  });
+
+  it("reportFinding rejects an absolute or traversal file", async () => {
+    const { engagement, cells } = await makeStarted();
+    await expect(
+      svc.reportFinding(engagement.id, {
+        cellId: cells[0].id,
+        severity: "high",
+        title: "IDOR on sessions",
+        file: "/etc/passwd",
+        body: EVIDENCE,
+      }),
+    ).rejects.toThrow(/clean repo-relative path/);
+    await expect(
+      svc.reportFinding(engagement.id, {
+        cellId: cells[0].id,
+        severity: "high",
+        title: "IDOR on sessions",
+        file: "../../secrets.ts",
+        body: EVIDENCE,
+      }),
+    ).rejects.toThrow(/clean repo-relative path/);
+  });
+
+  it("reportFinding rejects a line with no file", async () => {
+    const { engagement, cells } = await makeStarted();
+    await expect(
+      svc.reportFinding(engagement.id, {
+        cellId: cells[0].id,
+        severity: "high",
+        title: "IDOR on sessions",
+        line: 42,
+        body: EVIDENCE,
+      }),
+    ).rejects.toThrow(/has no meaning without a file/);
+  });
+
+  it("reportFinding rejects a non-positive line", async () => {
+    const { engagement, cells } = await makeStarted();
+    await expect(
+      svc.reportFinding(engagement.id, {
+        cellId: cells[0].id,
+        severity: "high",
+        title: "IDOR on sessions",
+        file: "src/routes/sessions.ts",
+        line: 0,
+        body: EVIDENCE,
+      }),
+    ).rejects.toThrow(/A finding line must be a whole number/);
+  });
+
+  it("reportFinding rejects a file outside a path-scoped cell's globs", async () => {
+    const { engagement, cells } = await makeScopedStarted();
+    // cells[1] is the ordinal-2 sweep scoped to packages/payments/**.
+    await expect(
+      svc.reportFinding(engagement.id, {
+        cellId: cells[1].id,
+        severity: "high",
+        title: "IDOR on sessions",
+        file: "packages/api/src/routes/sessions.ts",
+        body: EVIDENCE,
+      }),
+    ).rejects.toThrow(/outside your cell's scope/);
+  });
+
+  it("reportFinding accepts a clean in-scope finding", async () => {
+    const { engagement, cells } = await makeScopedStarted();
+    const { finding } = await svc.reportFinding(engagement.id, {
+      cellId: cells[1].id,
+      severity: "high",
+      title: "Missing authz on charge endpoint",
+      file: "packages/payments/src/charge.ts",
+      line: 42,
+      body: EVIDENCE,
+    });
+    expect(finding.file).toBe("packages/payments/src/charge.ts");
+    expect(finding.line).toBe(42);
+  });
+
   it("reviewFinding is forward-only and gated to review cells or user actors", async () => {
     const { engagement, cells } = await makeStarted();
     const { finding } = await svc.reportFinding(engagement.id, {
@@ -702,7 +816,7 @@ describe("security engagement service", () => {
       }),
     ).rejects.toThrow("Only review cells may flip finding statuses.");
 
-    // Reason is required.
+    // A substantive reason is required (>= 20 characters).
     await expect(
       svc.reviewFinding(engagement.id, {
         findingId: finding.id,
@@ -710,7 +824,15 @@ describe("security engagement service", () => {
         reason: "  ",
         actor: cells[4].id,
       }),
-    ).rejects.toThrow("needs a reason");
+    ).rejects.toThrow("needs a substantive reason (at least 20 characters)");
+    await expect(
+      svc.reviewFinding(engagement.id, {
+        findingId: finding.id,
+        status: "refuted",
+        reason: "too short",
+        actor: cells[4].id,
+      }),
+    ).rejects.toThrow("needs a substantive reason (at least 20 characters)");
 
     // The review cell flips it.
     const refuted = await svc.reviewFinding(engagement.id, {
@@ -727,7 +849,7 @@ describe("security engagement service", () => {
       svc.reviewFinding(engagement.id, {
         findingId: finding.id,
         status: "verified",
-        reason: "changed my mind",
+        reason: "changed my mind after re-reading the code",
         actor: "user:u1",
       }),
     ).rejects.toThrow(`Finding ${finding.id} is already refuted. Status flips are forward-only.`);
@@ -763,7 +885,7 @@ describe("security engagement service", () => {
       svc.reviewFinding(engagement.id, {
         findingId: finding.id,
         status: "refuted",
-        reason: "the plan says so",
+        reason: "the plan says so and I reviewed it",
         actor: architect.id,
       }),
     ).rejects.toThrow("Only review cells may flip finding statuses.");
@@ -772,7 +894,7 @@ describe("security engagement service", () => {
       svc.reviewFinding(engagement.id, {
         findingId: finding.id,
         status: "refuted",
-        reason: "I take it back",
+        reason: "I take it back after a second look",
         actor: worker.id,
       }),
     ).rejects.toThrow("Only review cells may flip finding statuses.");
@@ -1052,7 +1174,7 @@ describe("security engagement service", () => {
         status: "not_assessed",
         tool: "semgrep",
       }),
-    ).rejects.toThrow(/reason naming the consequence/);
+    ).rejects.toThrow(/substantive reason .* naming the consequence/);
   });
 
   it("reportCoverage rejects an empty area", async () => {
@@ -1060,6 +1182,59 @@ describe("security engagement service", () => {
     await expect(
       svc.reportCoverage(engagement.id, { cellId: cells[1].id, area: "   ", status: "assessed" }),
     ).rejects.toThrow(/Coverage needs an area/);
+  });
+
+  it("reportCoverage rejects an unknown tool", async () => {
+    const { engagement, cells } = await makeStarted();
+    await expect(
+      svc.reportCoverage(engagement.id, {
+        cellId: cells[1].id,
+        area: "secrets scan",
+        status: "assessed",
+        tool: "my-scanner",
+      }),
+    ).rejects.toThrow(/Unknown tool "my-scanner"/);
+  });
+
+  it("reportCoverage accepts a known scanner and a version-suffixed one", async () => {
+    const { engagement, cells } = await makeStarted();
+    const bare = await svc.reportCoverage(engagement.id, {
+      cellId: cells[1].id,
+      area: "secrets scan",
+      status: "assessed",
+      tool: "gitleaks",
+    });
+    expect(bare.tool).toBe("gitleaks");
+    const suffixed = await svc.reportCoverage(engagement.id, {
+      cellId: cells[1].id,
+      area: "sast owasp",
+      status: "assessed",
+      tool: "semgrep p/owasp-top-ten",
+    });
+    expect(suffixed.tool).toBe("semgrep p/owasp-top-ten");
+  });
+
+  it("reportCoverage accepts hand-assessed coverage with no tool", async () => {
+    const { engagement, cells } = await makeStarted();
+    const row = await svc.reportCoverage(engagement.id, {
+      cellId: cells[1].id,
+      area: "authz review",
+      status: "assessed",
+    });
+    expect(row.tool).toBeNull();
+    expect(row.status).toBe("assessed");
+  });
+
+  it("reportCoverage rejects a trivial not_assessed reason", async () => {
+    const { engagement, cells } = await makeStarted();
+    await expect(
+      svc.reportCoverage(engagement.id, {
+        cellId: cells[1].id,
+        area: "secrets scan",
+        status: "not_assessed",
+        reason: "no time",
+      }),
+    ).rejects.toThrow(/substantive reason/);
   });
 
   it("closeEngagement manifest includes the coverage rollup and the gap list", async () => {
@@ -1109,7 +1284,7 @@ describe("security engagement service", () => {
     // No report cell has run — the columns are null.
     expect(await svc.getReport(engagement.id)).toBeNull();
 
-    const md = "# Report\n\nExec summary: one confirmed high finding.";
+    const md = REPORT_MD;
     const json = { executiveSummary: "one high", findings: [{ severity: "high", title: "IDOR" }] };
     const written = await svc.writeReport(engagement.id, { markdown: md, json });
     expect(written.markdown).toBe(md);
@@ -1126,18 +1301,119 @@ describe("security engagement service", () => {
 
   it("writeReport overwrites a prior report (a re-run replaces the stale artifact)", async () => {
     const { engagement } = await makeStarted();
-    await svc.writeReport(engagement.id, { markdown: "# First", json: { v: 1 } });
-    await svc.writeReport(engagement.id, { markdown: "# Second", json: { v: 2 } });
+    const first = `${REPORT_MD}\n\nRevision one.`;
+    const second = `${REPORT_MD}\n\nRevision two.`;
+    await svc.writeReport(engagement.id, { markdown: first, json: { v: 1 } });
+    await svc.writeReport(engagement.id, { markdown: second, json: { v: 2 } });
     const read = await svc.getReport(engagement.id);
-    expect(read!.markdown).toBe("# Second");
+    expect(read!.markdown).toBe(second);
     expect(read!.json).toEqual({ v: 2 });
+  });
+
+  it("writeReport rejects empty or too-short markdown", async () => {
+    const { engagement } = await makeStarted();
+    await expect(
+      svc.writeReport(engagement.id, { markdown: "   ", json: {} }),
+    ).rejects.toThrow(/the markdown report is empty/);
+    await expect(
+      svc.writeReport(engagement.id, { markdown: "# Report\n\nToo short.", json: {} }),
+    ).rejects.toThrow(/a real report is at least 200/);
+  });
+
+  it("writeReport rejects a non-object json snapshot", async () => {
+    const { engagement } = await makeStarted();
+    await expect(
+      svc.writeReport(engagement.id, { markdown: REPORT_MD, json: "not an object" }),
+    ).rejects.toThrow(/json must be a non-null object snapshot/);
+    await expect(
+      svc.writeReport(engagement.id, { markdown: REPORT_MD, json: [1, 2, 3] }),
+    ).rejects.toThrow(/json must be a non-null object snapshot/);
+    await expect(
+      svc.writeReport(engagement.id, { markdown: REPORT_MD, json: null }),
+    ).rejects.toThrow(/json must be a non-null object snapshot/);
+  });
+
+  it("writeReport rejects a report that cites a finding id not in the engagement", async () => {
+    const { engagement, cells } = await makeStarted();
+    const { finding } = await svc.reportFinding(engagement.id, {
+      cellId: cells[0].id,
+      severity: "high",
+      title: "IDOR on sessions",
+      file: "src/routes/sessions.ts",
+      line: 42,
+      body: EVIDENCE,
+    });
+    const bogus = "fnd_deadbeef-0000-0000-0000-000000000000";
+    // Cite a real id (fine) and a bogus id (rejected, and the bogus id is named).
+    const md = `${REPORT_MD}\n\nSee ${finding.id} and ${bogus}.`;
+    await expect(
+      svc.writeReport(engagement.id, { markdown: md, json: { cited: [finding.id, bogus] } }),
+    ).rejects.toThrow(
+      new RegExp(`do not exist in this engagement: ${bogus.replace(/[-]/g, "\\-")}`),
+    );
+  });
+
+  it("writeReport rejects a bogus id that appears only in the json snapshot", async () => {
+    const { engagement } = await makeStarted();
+    const bogus = "fnd_abadface-1111-2222-3333-444444444444";
+    await expect(
+      svc.writeReport(engagement.id, { markdown: REPORT_MD, json: { findings: [{ id: bogus }] } }),
+    ).rejects.toThrow(/do not exist in this engagement/);
+  });
+
+  it("writeReport accepts a report citing only real finding ids", async () => {
+    const { engagement, cells } = await makeStarted();
+    const { finding } = await svc.reportFinding(engagement.id, {
+      cellId: cells[0].id,
+      severity: "high",
+      title: "IDOR on sessions",
+      file: "src/routes/sessions.ts",
+      line: 42,
+      body: EVIDENCE,
+    });
+    const md = `${REPORT_MD}\n\nConfirmed finding ${finding.id}.`;
+    const written = await svc.writeReport(engagement.id, {
+      markdown: md,
+      json: { findings: [{ id: finding.id, severity: "high" }] },
+    });
+    expect(written.markdown).toBe(md);
+  });
+
+  it("writeReport nudges a report that cites a refuted finding without acknowledging it", async () => {
+    const { engagement, cells } = await makeStarted();
+    const { finding } = await svc.reportFinding(engagement.id, {
+      cellId: cells[0].id,
+      severity: "high",
+      title: "IDOR on sessions",
+      file: "src/routes/sessions.ts",
+      line: 42,
+      body: EVIDENCE,
+    });
+    await svc.reviewFinding(engagement.id, {
+      findingId: finding.id,
+      status: "refuted",
+      reason: "middleware enforces ownership before the route runs",
+      actor: cells[4].id,
+    });
+    // The report cites the refuted id but never says "refuted"/"dismissed".
+    const md = `${REPORT_MD}\n\nActive finding ${finding.id} remains open.`;
+    await expect(
+      svc.writeReport(engagement.id, { markdown: md, json: { findings: [{ id: finding.id }] } }),
+    ).rejects.toThrow(/cites a refuted finding but never says/);
+    // Acknowledging refutation clears the nudge.
+    const ok = `${REPORT_MD}\n\nAppendix: finding ${finding.id} was refuted (false positive).`;
+    const written = await svc.writeReport(engagement.id, {
+      markdown: ok,
+      json: { findings: [{ id: finding.id }] },
+    });
+    expect(written.markdown).toBe(ok);
   });
 
   it("closeEngagement manifest includes the report the report cell wrote", async () => {
     const { engagement, cells } = await makeStarted();
     // The report cell writes the artifact before the runner closes.
     await svc.writeReport(engagement.id, {
-      markdown: "# Valet Security report\n\nOne confirmed finding.",
+      markdown: REPORT_MD,
       json: { executiveSummary: "one finding" },
     });
     for (const cell of cells) await runCellToCompletion(engagement.id, cell);
@@ -1847,13 +2123,13 @@ describe("security engagement service", () => {
     await svc.reviewFinding(parent.engagement.id, {
       findingId: pa.finding.id,
       status: "verified",
-      reason: "reproduced",
+      reason: "reproduced against the pinned SHA build",
       actor: parent.cells[4].id,
     });
     await svc.reviewFinding(parent.engagement.id, {
       findingId: pb.finding.id,
       status: "refuted",
-      reason: "false positive",
+      reason: "false positive: the taint never reaches a sink",
       actor: parent.cells[4].id,
     });
 
@@ -1973,7 +2249,7 @@ describe("security engagement service", () => {
     await svc.reviewFinding(parent.engagement.id, {
       findingId: pa.finding.id,
       status: "verified",
-      reason: "reproduced",
+      reason: "reproduced against the pinned SHA build",
       actor: parent.cells[4].id,
     });
 
@@ -2005,7 +2281,7 @@ describe("security engagement service", () => {
     await svc.reviewFinding(parent.engagement.id, {
       findingId: pa.finding.id,
       status: "verified",
-      reason: "reproduced",
+      reason: "reproduced against the pinned SHA build",
       actor: parent.cells[4].id,
     });
     const child = await startedChildOf(parent.engagement.id);
@@ -2015,7 +2291,7 @@ describe("security engagement service", () => {
       svc.reviewFinding(child.engagement.id, {
         findingId: carried.id,
         status: "fixed",
-        reason: "nope",
+        reason: "not a real fix, the guard is bypassable",
         actor: child.cells[0].id,
       }),
     ).rejects.toThrow(/review cell or the reconcile cell/);
@@ -2039,13 +2315,13 @@ describe("security engagement service", () => {
     await svc.reviewFinding(parent.engagement.id, {
       findingId: pa.finding.id,
       status: "refuted",
-      reason: "false positive",
+      reason: "false positive: the taint never reaches a sink",
       actor: parent.cells[4].id,
     });
     await svc.reviewFinding(parent.engagement.id, {
       findingId: pc.finding.id,
       status: "verified",
-      reason: "confirmed",
+      reason: "confirmed by reproducing the request",
       actor: parent.cells[4].id,
     });
 
@@ -2068,7 +2344,7 @@ describe("security engagement service", () => {
     await svc.reviewFinding(child.engagement.id, {
       findingId: carriedC.id,
       status: "fixed",
-      reason: "the sink is gone",
+      reason: "the sink is gone after the escaping fix",
       actor: reconcile.id,
     });
     await svc.reportFinding(child.engagement.id, {
@@ -2094,10 +2370,10 @@ describe("security engagement service", () => {
     // new (empty diff). recurring = 2, new = 0.
     const parent = await makeStarted();
     await svc.reportFinding(parent.engagement.id, {
-      cellId: parent.cells[0].id, severity: "high", file: "src/a.ts", line: 1, title: "A", body: EVIDENCE,
+      cellId: parent.cells[0].id, severity: "high", file: "src/a.ts", line: 1, title: "Finding A on route", body: EVIDENCE,
     });
     await svc.reportFinding(parent.engagement.id, {
-      cellId: parent.cells[0].id, severity: "high", file: "src/b.ts", line: 2, title: "B", body: EVIDENCE,
+      cellId: parent.cells[0].id, severity: "high", file: "src/b.ts", line: 2, title: "Finding B on route", body: EVIDENCE,
     });
     const child = await startedChildOf(parent.engagement.id);
     const diff = await svc.diffEngagement(child.engagement.id);
@@ -2109,7 +2385,7 @@ describe("security engagement service", () => {
 
   it("parentFingerprints returns the parent's fingerprint set, empty without a parent", async () => {
     const parent = await makeStarted();
-    const shape = { file: "src/x.ts", line: 1, title: "X" };
+    const shape = { file: "src/x.ts", line: 1, title: "Finding X on route" };
     const pf = await svc.reportFinding(parent.engagement.id, {
       cellId: parent.cells[0].id,
       severity: "low",

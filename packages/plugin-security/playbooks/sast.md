@@ -36,6 +36,8 @@ The scanners (gitleaks and semgrep) are bootstrapped into the sandbox at cell st
 
 Per rule pack record: the pack, the tool that ran it (or "absent"), the count of files scanned, the count of raw hits, and the count that survived triage. If a scanner emits N hits but fewer than N appear in your findings or recorded false positives, you silently dropped hits — a coverage gap, not a clean pass.
 
+A coverage `tool` must name a real scanner (gitleaks, semgrep, trufflehog, bandit, gosec, brakeman, eslint, cargo-audit). The server refuses an unknown tool. Omit the tool for a hand-assessed area.
+
 ## Evidence standard for this cell
 
 Every finding cites `tool:rule@file:line` AND carries a human-verified dataflow: source (user input) → intermediate transforms → sink, each with a file:line. The rule id alone is not a finding; the scanner detected a pattern, you confirmed a reachable taint path.

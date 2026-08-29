@@ -27,6 +27,8 @@ For each entry point from recon, answer four questions in order. A "no" or "uncl
 
 A finding must show: the entry point (file:line), the missing or incorrect check, and the path by which a caller reaches an object or function they should not. State which class it is (BOLA / BFLA / property-level / missing-auth) and name the CWE. If you cannot show the reachable path, it is a `log` note for the verify cell, not a reported finding.
 
+A finding `file` must be a repo-relative path (no leading `/`, no `..`) inside your cell's assigned scope. The server refuses a file outside your scope — it belongs to another cell. Title the finding by the vulnerability, not a placeholder.
+
 ## Severity guidance
 
 - **critical** — unauthenticated reach to sensitive data or admin function, or trivial cross-tenant BOLA on high-value records.
