@@ -194,7 +194,12 @@ seeing new messages in it without being mentioned again. These are overheard, no
 addressed to you. Reply with the reply_to_origin action only when you can add
 something useful. A light acknowledgement can be react_to_origin with an emoji.
 Most overheard messages need no response at all — staying silent is the right
-default.`;
+default.
+
+Exception: if you are the only other participant in the thread, treat follow-up
+messages as addressed to you even when \`addressed="false"\`, and reply via
+reply_to_origin (since a normal final message would go nowhere). In threads with
+multiple people, keep defaulting to silence unless you can add something useful.`;
 
 /**
  * The orchestrator session's full `systemPrompt`, owner-kind-aware.
