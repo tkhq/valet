@@ -18,18 +18,22 @@
  */
 import { Hono } from "hono";
 import { and, count, desc, eq, isNull } from "drizzle-orm";
-import type { Principal } from "@valet/engine";
+import { parseAssistantSessionId, type Principal } from "@valet/engine";
 import type { AppEnv } from "../env.js";
+import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions, childWatches } from "../schema/index.js";
 import {
   applyProfilePatch,
   ArchivedAssistantError,
   ensureDefaultAssistantSession,
   findDefaultAssistant,
+  loadAssistant,
   resolveDefaultAssistant,
   validateProfilePatch,
 } from "../assistants/service.js";
+import { assistantOwner, canViewAssistantOwner } from "../assistants/access.js";
 import { readOwnFile, writeFile, type MemoryScope } from "../services/memory.js";
+import { canViewSession } from "../services/session-access.js";
 import type {
   EnsureOrchestratorResponse,
   GetOrchestratorChildrenResponse,
@@ -45,6 +49,36 @@ export const orchestratorRouter = new Hono<AppEnv>();
 
 function userPrincipal(userId: string): Principal {
   return { type: "user", id: userId };
+}
+
+/**
+ * May the caller view the children of `parentSessionId`? A child run's parent
+ * is an assistant session (`assistant:{id}`), so authority comes from the
+ * assistant's OWNER — a team member reaches a team assistant's runs, the same
+ * audience `canViewAssistantOwner` serves. Authorizing off the assistant row
+ * (not an `agent_sessions` row) is what lets this work before the assistant's
+ * engine session is ever materialized: `GET /orchestrator/info` hands out a
+ * session id without writing that row. A non-assistant parent (not produced by
+ * any spawn path today) falls back to the session row's own view check.
+ * Returns false when neither resolves.
+ */
+async function canViewChildrenOf(
+  db: AppDb,
+  parentSessionId: string,
+  callerId: string,
+): Promise<boolean> {
+  const assistantId = parseAssistantSessionId(parentSessionId);
+  if (assistantId !== null) {
+    const row = await loadAssistant(db, assistantId);
+    return row ? canViewAssistantOwner(db, assistantOwner(row), callerId) : false;
+  }
+  const rows = await db
+    .select()
+    .from(agentSessions)
+    .where(eq(agentSessions.id, parentSessionId))
+    .limit(1);
+  const row = rows[0];
+  return row ? canViewSession(db, row, callerId) : false;
 }
 
 // ── Ensure (create-if-absent) ───────────────────────────────────────────────
@@ -225,21 +259,40 @@ orchestratorRouter.patch("/info", async (c) => {
 // ── Children ─────────────────────────────────────────────────────────────
 
 /** GET /api/orchestrator/children — decision 6: `child_watches` ⋈
- * `agent_sessions` for the caller's default assistant, newest first.
- * Creates nothing: a caller with no default assistant has no children, so
- * the empty list is the honest answer. `outcome` is never populated this
- * pass — `child_watches` has no outcome column, and decision 6 marks
- * deriving one (e.g. from the engine store's submission outcome) as an
- * optional future improvement, not required here; the UI only needs
- * `status: 'settled'` to show a checkmark. */
+ * `agent_sessions` for one assistant, newest first. Creates nothing: an
+ * assistant with no children answers the empty list honestly. `outcome` is
+ * never populated this pass — `child_watches` has no outcome column, and
+ * decision 6 marks deriving one (e.g. from the engine store's submission
+ * outcome) as an optional future improvement, not required here; the UI only
+ * needs `status: 'settled'` to show a checkmark.
+ *
+ * `?sessionId=` names WHICH assistant session to list children for. The chat
+ * thread tree passes the OPEN assistant's session id, so a TEAM assistant's
+ * runs — e.g. a team worker trigger's child — nest under it the same way your
+ * own default's do. Any session the caller can view (`canViewSession`, so a
+ * team member reaches a team assistant) is allowed; existence-hiding 404s the
+ * rest. Absent = your own default assistant, the original behavior a caller
+ * that named only itself is asking for. */
 orchestratorRouter.get("/children", async (c) => {
   const { db } = c.var.providers;
   const user = c.var.user;
 
-  const assistant = await findDefaultAssistant(db, user.orgId, userPrincipal(user.id));
-  if (!assistant) {
-    const empty: GetOrchestratorChildrenResponse = { children: [] };
-    return c.json(empty);
+  const scopedSessionId = c.req.query("sessionId");
+  let parentSessionId: string;
+  if (scopedSessionId !== undefined) {
+    // Existence-hiding: an unknown id and one the caller cannot view answer
+    // the same 404 every cross-owner session read here uses.
+    if (!(await canViewChildrenOf(db, scopedSessionId, user.id))) {
+      return c.json({ error: "session not found" }, 404);
+    }
+    parentSessionId = scopedSessionId;
+  } else {
+    const assistant = await findDefaultAssistant(db, user.orgId, userPrincipal(user.id));
+    if (!assistant) {
+      const empty: GetOrchestratorChildrenResponse = { children: [] };
+      return c.json(empty);
+    }
+    parentSessionId = assistant.sessionId;
   }
 
   const rows = await db
@@ -254,7 +307,7 @@ orchestratorRouter.get("/children", async (c) => {
     .innerJoin(agentSessions, eq(agentSessions.id, childWatches.childSessionId))
     .where(
       and(
-        eq(childWatches.parentSessionId, assistant.sessionId),
+        eq(childWatches.parentSessionId, parentSessionId),
         isNull(childWatches.dismissedAt),
       ),
     )
@@ -280,25 +333,25 @@ orchestratorRouter.post("/children/:childSessionId/dismiss", async (c) => {
   const user = c.var.user;
   const childSessionId = c.req.param("childSessionId");
 
-  // Read the parent id from the caller's default assistant, the same source
-  // the children list uses. A watch row records the session that spawned the
-  // child, so any other derivation of the parent id matches no row and every
-  // dismiss answers "not found".
-  const assistant = await findDefaultAssistant(db, user.orgId, userPrincipal(user.id));
-  if (!assistant) return c.json({ error: "child not found" }, 404);
-
+  // Authority comes from the watch row's PARENT session, not the caller's own
+  // default assistant: a team assistant's child is dismissed by any member who
+  // can view that assistant, the same audience the scoped children list serves.
+  // Deriving the parent from the caller's default (the old behavior) 404'd
+  // every team child even when the caller could see it.
   const rows = await db
-    .select({ settled: childWatches.settled })
+    .select({ parentSessionId: childWatches.parentSessionId, settled: childWatches.settled })
     .from(childWatches)
-    .where(
-      and(
-        eq(childWatches.childSessionId, childSessionId),
-        eq(childWatches.parentSessionId, assistant.sessionId),
-      ),
-    )
+    .where(eq(childWatches.childSessionId, childSessionId))
     .limit(1);
-  if (!rows[0]) return c.json({ error: "child not found" }, 404);
-  if (!rows[0].settled) {
+  const watch = rows[0];
+  if (!watch) return c.json({ error: "child not found" }, 404);
+
+  // Existence-hiding: a child whose parent assistant the caller cannot view
+  // answers the same "not found" a missing child does.
+  if (!(await canViewChildrenOf(db, watch.parentSessionId, user.id))) {
+    return c.json({ error: "child not found" }, 404);
+  }
+  if (!watch.settled) {
     return c.json(
       { error: "child is still running. Wait for it to settle, then dismiss it." },
       409,
@@ -315,7 +368,7 @@ orchestratorRouter.post("/children/:childSessionId/dismiss", async (c) => {
     .where(
       and(
         eq(childWatches.childSessionId, childSessionId),
-        eq(childWatches.parentSessionId, assistant.sessionId),
+        eq(childWatches.parentSessionId, watch.parentSessionId),
         eq(childWatches.settled, true),
         isNull(childWatches.dismissedAt),
       ),

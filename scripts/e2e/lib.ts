@@ -90,6 +90,7 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/team-dashboard.test.ts",
   "src/integration/thread-archive.test.ts",
   "src/integration/child-dismiss.test.ts",
+  "src/integration/orchestrator-children-scope.test.ts",
   "src/integration/command-route.test.ts",
   "src/integration/policies.e2e.test.ts",
   "src/integration/github-repo.e2e.test.ts",
