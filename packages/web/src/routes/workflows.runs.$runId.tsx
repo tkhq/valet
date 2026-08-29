@@ -2,6 +2,7 @@ import { useState } from "react";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import type { WorkflowRunDetail } from "@valet/api/wire";
 import { useCancelRun, useRetryRun, useRunDetail } from "~/api/workflows";
+import { useAdoptWorkspaceScope } from "~/lib/workspace-scope";
 import { ApprovalCard } from "~/components/workflows/approval-card";
 import { CheckpointList } from "~/components/workflows/checkpoint-list";
 import { PolicyGateCard } from "~/components/workflows/policy-gate-card";
@@ -33,6 +34,10 @@ export const Route = createFileRoute("/workflows/runs/$runId")({
 function RunDetailPage() {
   const { runId } = Route.useParams();
   const { data, isLoading, error } = useRunDetail(runId);
+  // Arriving from a run notification for a team's run: move the switcher to
+  // the run's workspace so the nav matches the page instead of showing
+  // Personal. `data` is undefined while loading; adoption waits for it.
+  useAdoptWorkspaceScope(data?.owner);
   const cancelRun = useCancelRun(runId);
   const retryRun = useRetryRun(runId);
   const navigate = useNavigate();

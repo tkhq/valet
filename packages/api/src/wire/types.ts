@@ -1794,6 +1794,13 @@ export interface WorkflowRunDetail {
     definition: unknown;
     params: unknown;
   };
+  /**
+   * The workspace this run belongs to (the run's owner). The run page adopts
+   * it into the switcher, so arriving from a notification lands you in the
+   * run's workspace instead of the one you came from. Same `{type, id}` shape
+   * `SessionSummary.owner` uses.
+   */
+  owner: { type: "user" | "team" | "org"; id: string };
   checkpoints: WorkflowRunCheckpoint[];
   signals: WorkflowRunSignal[];
   pendingGates: WorkflowPendingGate[];

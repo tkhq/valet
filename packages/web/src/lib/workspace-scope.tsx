@@ -175,3 +175,39 @@ const PERSONAL_SCOPE: WorkspaceScope = {
 export function useWorkspaceScope(): WorkspaceScope {
   return useContext(WorkspaceScopeContext) ?? PERSONAL_SCOPE;
 }
+
+/**
+ * Adopt a resource's workspace when you land on its page — from a
+ * notification, a shared link, or a bookmark. The switcher then matches what
+ * is on screen instead of leaving you in the workspace you came from, which
+ * is the friction a team-owned session or workflow-run deep link caused: you
+ * arrived with the nav still on Personal while the page belonged to a team.
+ *
+ * This is the same "the thing you have open decides the workspace" rule the
+ * scope provider already applies to the open assistant on `/chat`, extended
+ * to detail pages that carry no `?assistant=`. A user-owned resource adopts
+ * your personal workspace for the same reason.
+ *
+ * Keyed on the owner, so a manual switch made afterward on the same page is
+ * NOT overridden — the effect only re-fires when you open a different
+ * resource. `owner` is `undefined` while the page's data loads; adoption
+ * waits for it.
+ */
+export function useAdoptWorkspaceScope(owner: { type: string; id: string } | undefined): void {
+  const { setKey } = useWorkspaceScope();
+  const key = workspaceKeyForOwner(owner);
+  useEffect(() => {
+    if (key !== undefined) setKey(key);
+  }, [key, setKey]);
+}
+
+/**
+ * The switcher key a resource's owner maps to: a team id for a team-owned
+ * resource, else your personal workspace. `undefined` while the owner is
+ * unknown (data still loading), which suppresses adoption. Pure, so the
+ * mapping is tested without a provider.
+ */
+export function workspaceKeyForOwner(owner: { type: string; id: string } | undefined): string | undefined {
+  if (!owner) return undefined;
+  return owner.type === "team" ? owner.id : PERSONAL;
+}

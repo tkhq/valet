@@ -160,3 +160,21 @@ listed so the next pass starts here.
   plus every org-owned row: an org-owned subscription belongs to no single
   workspace, and a row that appeared in none of them could never be
   disabled from the page that created it.
+
+## Resolved friction: deep links adopt the resource's workspace (2026-08-29)
+
+The switcher thesis — "everything below me belongs to this workspace" — held
+for lists but broke on arrival from a notification or a shared link. A
+team-owned standalone session (`/sessions/$sessionId`) and a workflow run
+(`/workflows/runs/$runId`) both loaded correctly (they are id-addressed and
+authorized per row), but the switcher stayed on whatever workspace the reader
+came from — so the nav claimed "Personal" while the session header badged a
+team. Nothing corrected it, because those hrefs carry no scope hint.
+
+`useAdoptWorkspaceScope(owner)` closes this: a detail page adopts its
+resource's workspace on load, the same rule the scope provider already applies
+to the open assistant on `/chat` (the open thing decides the workspace). It is
+keyed on the owner, so a manual switch afterward is not overridden, and it
+waits for the data (owner `undefined` → no-op). The session page reads
+`GetSessionResponse.owner`; the run detail response gained an `owner` field for
+the same purpose. `/chat` still adopts through the assistant, unchanged.
