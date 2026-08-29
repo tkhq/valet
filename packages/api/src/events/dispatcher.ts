@@ -30,6 +30,7 @@ import type { ChannelOrigin, SignalContent } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, events, eventSubscriptions, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { definitionVersionId } from "../workflows/definition-version.js";
+import { upsertFollowedThread } from "./followed-threads.js";
 
 /** Retry backoff per failed attempt; a failure past the last entry is dead. */
 const BACKOFF_MS = [30_000, 120_000, 600_000, 1_800_000];
@@ -86,6 +87,9 @@ function channelText(payload: unknown): string | undefined {
 interface SubscriptionTarget {
   kind: "workflow" | "orchestrator" | "signal";
   workflowId?: string;
+  /** When true, an orchestrator channel delivery follows the thread: later
+   * messages route to the assistant without a re-mention. */
+  follow?: boolean;
 }
 
 export class EventDispatcher {
@@ -193,6 +197,23 @@ export class EventDispatcher {
           if (sender) attributes.sender = sender;
         } else {
           body = `${event.summary}\n\n${JSON.stringify(event.payload).slice(0, MAX_BODY_EXCERPT_CHARS)}`;
+        }
+        // A follow-enabled rule binds the thread now, so later messages in it
+        // route to this assistant without a re-mention. The threadKey is
+        // `{channelType}:{channelId}:{threadTs}`.
+        if (target.follow && origin) {
+          const parts = origin.threadKey.split(":");
+          if (parts.length === 3 && parts[1] !== "" && parts[2] !== "") {
+            await upsertFollowedThread(this.deps.db, {
+              orgId: event.orgId,
+              channelType: origin.channelType,
+              channelId: parts[1],
+              threadTs: parts[2],
+              ownerType: sub.ownerType,
+              ownerId: sub.ownerId,
+              createdBy: sub.createdBy,
+            });
+          }
         }
         await this.deps.deliverToOrchestrator({
           orgId: event.orgId,
