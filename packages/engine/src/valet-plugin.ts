@@ -396,6 +396,21 @@ export interface ChannelTransport {
    * providers without threads omit it.
    */
   fetchThreadContext?(channelId: string, threadTs: string): Promise<string | null>;
+  /**
+   * Normalize an inbound message into what an agent should read: the sender's
+   * display name (not a raw id) and the message text with the bot's own mention
+   * stripped, other mentions resolved to names, and markup collapsed. The event
+   * dispatcher and follow-router stamp the result so the model never sees
+   * `sender="U0AJ…"` or `<@U…>` markup. `senderName` is absent when `userId` is
+   * omitted or names nobody. Optional: a transport without a directory omits it.
+   */
+  normalizeForAgent?(msg: { userId?: string; text: string }): Promise<{ senderName?: string; text: string }>;
+  /**
+   * The ts of the specific message that triggered a channel event, so a reply
+   * turn can `react_to_origin` to it. Distinct from the thread key's `threadTs`,
+   * which is the parent. `null` for an event with no single message. Optional.
+   */
+  messageTsFromEvent?(eventKey: string, payload: unknown): string | null;
 
   // ── Streaming egress ────────────────────────────────────────────────
   //

@@ -72,6 +72,16 @@ export interface EventDispatcherDeps {
    * conversation. Wired from `channelHost.transportFor(...).threadKeyFromEvent`.
    */
   resolveChannelOrigin?: (service: string, eventKey: string, payload: unknown) => ChannelOrigin | null;
+  /**
+   * Resolve a channel message's sender display name and clean its text, so the
+   * delivered signal names the person and drops raw ids / Slack markup. Wired
+   * from `channelHost` (`channelMessageNormalizer`). Absent → the raw text and
+   * id are used unchanged.
+   */
+  normalizeChannelMessage?: (
+    service: string,
+    msg: { userId?: string; text: string },
+  ) => Promise<{ senderName?: string; text: string }>;
 }
 
 /** The message text on a channel event payload (`text`), when present. */
@@ -181,19 +191,26 @@ export class EventDispatcher {
       if (target.kind === "workflow" && target.workflowId) {
         await this.startWorkflow(target.workflowId, sub.id, delivery.id, event, refs);
       } else if (target.kind === "orchestrator") {
-        // A channel event routes a reply back: stamp the origin, and render a
-        // readable body (summary + message text) instead of a raw JSON dump.
+        // A channel event routes a reply back: stamp the origin, and render the
+        // message as the agent should read it — the sender's name and the clean
+        // text, not the machine summary or raw `<@U…>` markup and ids.
         // A non-channel event keeps the compact JSON excerpt it always had.
         const origin = this.deps.resolveChannelOrigin?.(event.service, event.eventKey, event.payload) ?? null;
         const attributes: Record<string, string> = { ...refs, eventId: event.id, service: event.service };
         let body: string;
         if (origin) {
-          const text = channelText(event.payload);
-          body = [event.summary, text].filter((s): s is string => !!s).join("\n\n").slice(0, MAX_BODY_EXCERPT_CHARS);
           // `actor` is untyped jsonb, owned by ingest (NormalizedEvent.actor is
           // `{ externalId, login? }`) — same narrowing convention as `refs`.
           const actor = event.actor as { externalId?: string; login?: string } | null;
-          const sender = actor?.login ?? actor?.externalId;
+          const rawText = channelText(event.payload) ?? "";
+          const normalized = (await this.deps.normalizeChannelMessage?.(event.service, {
+            userId: actor?.externalId,
+            text: rawText,
+          })) ?? { text: rawText };
+          // The clean text is the body; fall back to the summary only when the
+          // message carries no text of its own (e.g. a file-only post).
+          body = (normalized.text || event.summary).slice(0, MAX_BODY_EXCERPT_CHARS);
+          const sender = normalized.senderName ?? actor?.login ?? actor?.externalId;
           if (sender) attributes.sender = sender;
         } else {
           body = `${event.summary}\n\n${JSON.stringify(event.payload).slice(0, MAX_BODY_EXCERPT_CHARS)}`;

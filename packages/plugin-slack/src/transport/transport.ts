@@ -43,6 +43,7 @@ import { buildContentBlocks, SLACK_MAX_BLOCKS, SLACK_TEXT_LIMIT } from "../messa
 import { SKIP_SUBTYPES } from "../subtypes.js";
 import { SlackApi, SlackApiError, SLACK_MARKDOWN_TEXT_LIMIT } from "./api.js";
 import { fetchThreadTranscript } from "./thread-context.js";
+import { enrichSlackText } from "./text-enrich.js";
 import { markdownToSlackMrkdwn, neutralizeSlackMentions } from "./format.js";
 import { verifySlackSignatureSync } from "./verify.js";
 
@@ -764,6 +765,25 @@ export class SlackTransport implements ChannelTransport {
    *  `selfUserId` strips the bot's own mention from the seeded trigger line. */
   async fetchThreadContext(channelId: string, threadTs: string): Promise<string | null> {
     return fetchThreadTranscript(this.api, { channelId, threadTs, selfUserId: this.botUserId });
+  }
+
+  /** Normalize an inbound message for an agent — see `ChannelTransport`. Resolves
+   *  the sender's name and cleans the text so the model never sees raw ids or
+   *  Slack markup. */
+  async normalizeForAgent(msg: { userId?: string; text: string }): Promise<{ senderName?: string; text: string }> {
+    const senderName = msg.userId ? (await this.api.usersInfo(msg.userId).catch(() => null))?.displayName : undefined;
+    const text = await enrichSlackText(this.api, msg.text, this.botUserId);
+    return { senderName, text };
+  }
+
+  /** The triggering message's own ts, so `react_to_origin` has a target — see
+   *  `ChannelTransport`. `thread_ts` would point at the parent, not the message
+   *  that mentioned the bot. */
+  messageTsFromEvent(eventKey: string, payload: unknown): string | null {
+    if (eventKey !== "slack.message" && eventKey !== "slack.app_mention") return null;
+    if (typeof payload !== "object" || payload === null) return null;
+    const ts = (payload as Record<string, unknown>).ts;
+    return typeof ts === "string" ? ts : null;
   }
 
   async fetchMedia(media: InboundChannelMedia): Promise<FetchedChannelMedia | null> {

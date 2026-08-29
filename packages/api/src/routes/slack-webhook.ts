@@ -69,6 +69,7 @@ import { ingestEvent } from "../events/ingest.js";
 import type { ChannelHost } from "../channels/host.js";
 import type { EngineHost } from "../engine/host.js";
 import { handleFollowedMessage } from "../channels/follow-router.js";
+import { channelMessageNormalizer } from "../events/channel-origin.js";
 
 /**
  * Slack updates are small JSON; files arrive by reference, never inline. The
@@ -171,7 +172,14 @@ async function fanOutUpdate(deps: FanOutDeps, raw: RawChannelUpdate): Promise<vo
   // Follow-router: a threaded message on a followed thread routes to the bound
   // assistant. Independent of the two consumers above; its error is contained.
   try {
-    await handleFollowedMessage({ db: deps.db, engineHost: deps.engineHost }, { orgId: deps.orgId, raw });
+    await handleFollowedMessage(
+      {
+        db: deps.db,
+        engineHost: deps.engineHost,
+        normalizeChannelMessage: channelMessageNormalizer(deps.channelHost),
+      },
+      { orgId: deps.orgId, raw },
+    );
   } catch (err) {
     console.error("[slack-webhook] follow-router failed", err);
   }

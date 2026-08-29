@@ -76,7 +76,13 @@ export function renderSignalEnvelope(
   if (signal.hopCount !== undefined) attrs.hop = String(signal.hopCount);
   // The thread key already carries the channel type as its prefix
   // (`slack:C1:1.2`), so it reads as a compact origin for the model.
-  if (signal.origin !== undefined) attrs.origin = signal.origin.threadKey;
+  if (signal.origin !== undefined) {
+    attrs.origin = signal.origin.threadKey;
+    // Tell the agent whether it was addressed (a mention/DM, reply auto-posts)
+    // or is overhearing a followed thread (reply only via reply_to_origin), so
+    // it does not answer into the void or double-post.
+    attrs.addressed = signal.origin.reply === "manual" ? "false" : "true";
+  }
 
   const rest = Object.keys(attrs)
     .sort()

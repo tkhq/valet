@@ -153,6 +153,34 @@ thread, the delivery path seeds the thread's earlier messages instead.
   read who said what, answer the addressed person by name, act on the request
   from the thread rather than asking for context it already holds.
 
+### 9. Agent-readable inbound messages
+
+The event->signal path used to hand the agent raw ids and Slack markup, while
+the transport path resolved them — so the agent saw `sender="U0AJ…"`, a machine
+summary (`app mentioned in C.. by U..`), and `<@U07BOT>` markup, and could not
+follow the persona's "answer by name". These fixes make one inbound view:
+
+- `ChannelTransport.normalizeForAgent({ userId, text })` resolves the sender's
+  display name and cleans the text: strip the bot's own mention, resolve other
+  `<@U…>` mentions to names, collapse channel and url markup. The event
+  dispatcher and the follow-router stamp the result, so `sender` is a name and
+  the body is clean prose. Backed by `users.info` (cached per client) and a
+  shared `enrichSlackText`, which the transcript also uses.
+- `ChannelTransport.messageTsFromEvent` gives `channelOriginResolver` the
+  triggering message ts, so a mention's `ChannelOrigin` carries `messageTs` and
+  `react_to_origin` has a target. The resolver also stamps `reply: "auto"`.
+- `renderSignalEnvelope` renders `addressed="true"|"false"` from the origin's
+  reply mode, so the agent tells an addressed mention (answer normally) from an
+  overheard follow (reply only via `reply_to_origin`) without guessing.
+- The transcript resolves in-text mentions to names, keeps a `[shared: file]`
+  marker for a file-only message, attributes the bot's own prior posts as "You",
+  and preserves the thread's opening message when it trims a long thread.
+
+Deferred (tracked separately): re-hydrating an overheard message after a gap
+(needs a last-seen ts on the follow row), a feedback signal when an overheard or
+addressed reply is dropped, and hardening the first-turn seed against two rapid
+mentions on one new thread.
+
 ## Invariants (alert, do not auto-repair)
 
 - A follow record has one owner: the subscription that created it. The

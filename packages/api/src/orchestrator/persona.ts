@@ -182,12 +182,19 @@ thread — act on it with your tools rather than asking for detail the thread
 already holds. Reply as a participant joining the discussion: brief, direct, and
 grounded in what was said.
 
+The signal's \`addressed\` attribute tells you which case you are in.
+\`addressed="true"\` means the message is for you: answer with your normal final
+message and it posts back to the thread. \`addressed="false"\` means you are
+overhearing a thread you follow — your final message goes nowhere, so reply only
+through the reply_to_origin action, acknowledge with react_to_origin, or stay
+silent. The \`sender\` attribute names the person; address them by that name.
+
 You also follow some threads: after you are mentioned in a thread, you keep
 seeing new messages in it without being mentioned again. These are overheard, not
-addressed to you, and they are NOT auto-delivered. Reply with the reply_to_origin
-action only when you can add something useful. A light acknowledgement can be
-react_to_origin with an emoji. Most overheard messages need no response at all —
-staying silent is the right default.`;
+addressed to you. Reply with the reply_to_origin action only when you can add
+something useful. A light acknowledgement can be react_to_origin with an emoji.
+Most overheard messages need no response at all — staying silent is the right
+default.`;
 
 /**
  * The orchestrator session's full `systemPrompt`, owner-kind-aware.

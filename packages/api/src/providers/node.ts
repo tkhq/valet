@@ -62,7 +62,7 @@ import { ChannelHost, publicUrlFromEnv } from "../channels/host.js";
 import { EventDispatcher } from "../events/dispatcher.js";
 import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
 import { channelThreadContextFetcher } from "../events/channel-thread-context.js";
-import { channelOriginResolver } from "../events/channel-origin.js";
+import { channelOriginResolver, channelMessageNormalizer } from "../events/channel-origin.js";
 import { FsBlobStore } from "./blob-fs.js";
 import { pgliteWasmOptions } from "../assets/base.js";
 import {
@@ -714,6 +714,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     workflowStore,
     deliverToOrchestrator,
     resolveChannelOrigin: channelOriginResolver(channelHost),
+    normalizeChannelMessage: channelMessageNormalizer(channelHost),
   });
 
   // Skill-repository sync (agent-skills design). `readerFor` gives each

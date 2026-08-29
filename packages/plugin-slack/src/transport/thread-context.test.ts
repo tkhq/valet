@@ -61,13 +61,51 @@ describe("fetchThreadTranscript", () => {
     ).toBeNull();
   });
 
-  it("drops the oldest lines and notes the omission when the thread is long", async () => {
+  it("keeps the thread root and the newest tail, dropping the middle when long", async () => {
     const long = "x".repeat(500);
     const messages = Array.from({ length: 20 }, (_, i) => ({ user: "U1", text: `${i}-${long}` }));
     const api = fakeApi(messages, { U1: "Brian" });
     const out = await fetchThreadTranscript(api, { channelId: "C1", threadTs: "1.0" });
-    expect(out).toMatch(/^\[\d+ earlier message\(s\) omitted\]\n/);
+    expect(out).toMatch(/^Brian: 0-/); // the opening message (topic) is preserved
+    expect(out).toContain("[");
+    expect(out).toMatch(/\[\d+ earlier message\(s\) omitted\]/); // the middle is dropped
     expect(out).toContain("Brian: 19-"); // newest kept
-    expect(out).not.toContain("Brian: 0-"); // oldest dropped
+    expect(out).not.toContain("Brian: 5-"); // a middle message dropped
+  });
+
+  it("resolves in-text @mentions of other users to names", async () => {
+    const api = fakeApi(
+      [
+        { user: "U1", text: "assigning to <@U2>" },
+        { user: "U2", text: "on it" },
+      ],
+      { U1: "Brian", U2: "Conner Swann" },
+    );
+    const out = await fetchThreadTranscript(api, { channelId: "C1", threadTs: "1.0" });
+    expect(out).toBe("Brian: assigning to @Conner Swann\nConner Swann: on it");
+  });
+
+  it("keeps a file-only message as a marker instead of dropping it", async () => {
+    const api = fakeApi(
+      [
+        { user: "U1", text: "look at this", files: [{ name: "error.png" }] },
+        { user: "U1", text: "", files: [{ name: "trace.log" }] },
+      ],
+      { U1: "Brian" },
+    );
+    const out = await fetchThreadTranscript(api, { channelId: "C1", threadTs: "1.0" });
+    expect(out).toBe("Brian: look at this\nBrian: [shared: trace.log]");
+  });
+
+  it("attributes the bot's own prior replies as You", async () => {
+    const api = fakeApi(
+      [
+        { user: "U1", text: "any update?" },
+        { user: "UBOT", text: "shipped it" },
+      ],
+      { U1: "Brian" },
+    );
+    const out = await fetchThreadTranscript(api, { channelId: "C1", threadTs: "1.0", selfUserId: "UBOT" });
+    expect(out).toBe("Brian: any update?\nYou: shipped it");
   });
 });

@@ -145,6 +145,11 @@ export async function startFakeSlackApi(): Promise<FakeSlackApi> {
         return c.json({ ok: true, team_id: "T1", user_id: "UBOT", bot_id: "B1" });
       case "users.list":
         return c.json({ ok: true, members, response_metadata: { next_cursor: "" } });
+      case "users.info": {
+        const member = members.find((m) => m.id === body.user);
+        if (!member) return c.json({ ok: false, error: "user_not_found" });
+        return c.json({ ok: true, user: member });
+      }
       case "conversations.list":
         return c.json({ ok: true, channels, response_metadata: { next_cursor: "" } });
       case "users.lookupByEmail": {

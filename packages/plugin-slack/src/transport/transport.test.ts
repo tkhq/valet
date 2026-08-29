@@ -170,6 +170,39 @@ describe("threadKeyFromEvent", () => {
   });
 });
 
+describe("messageTsFromEvent", () => {
+  it("returns the triggering message's own ts (not thread_ts)", () => {
+    const transport = makeTransport();
+    const payload = { type: "app_mention", channel: CHANNEL, ts: "1700000000.000200", thread_ts: "1700000000.000100" };
+    expect(transport.messageTsFromEvent("slack.app_mention", payload)).toBe("1700000000.000200");
+  });
+
+  it("returns null for a non-message event or a payload with no ts", () => {
+    const transport = makeTransport();
+    expect(transport.messageTsFromEvent("slack.team_join", { user: "U9" })).toBeNull();
+    expect(transport.messageTsFromEvent("slack.app_mention", { channel: CHANNEL })).toBeNull();
+  });
+});
+
+describe("normalizeForAgent", () => {
+  it("resolves the sender's display name and cleans the text of self-mention and markup", async () => {
+    const transport = makeTransport();
+    fake.setMembers([
+      { id: "U1", profile: { display_name: "Brian Brown" } },
+      { id: "U2", profile: { real_name: "Conner Swann" } },
+    ]);
+    const out = await transport.normalizeForAgent({ userId: "U1", text: "<@UBOT> ping <@U2> about <https://x.io|the doc>" });
+    expect(out).toEqual({ senderName: "Brian Brown", text: "ping @Conner Swann about the doc" });
+  });
+
+  it("leaves senderName undefined when there is no sender or the id names nobody", async () => {
+    const transport = makeTransport();
+    fake.setMembers([]);
+    expect(await transport.normalizeForAgent({ text: "hi" })).toEqual({ senderName: undefined, text: "hi" });
+    expect(await transport.normalizeForAgent({ userId: "U9", text: "hi" })).toEqual({ senderName: undefined, text: "hi" });
+  });
+});
+
 describe("parseUpdate — the agent surface events", () => {
   it("routes a direct message and anchors the turn to the user's own message", () => {
     const transport = makeTransport();
