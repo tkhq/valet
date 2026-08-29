@@ -208,6 +208,15 @@ describe("github toEvent", () => {
       expect(def.catalog[0].filters.some((f) => f.field === "repo")).toBe(true);
     }
   });
+
+  it("annotates the repo filter with the github.repos option source", () => {
+    for (const def of githubTriggerDefs.filter((t) => t.id !== "github.ping")) {
+      for (const entry of def.catalog) {
+        const repoFilter = entry.filters.find((f) => f.field === "repo");
+        expect(repoFilter?.options).toEqual({ source: "github.repos" });
+      }
+    }
+  });
 });
 
 // ─── Review event families ──────────────────────────────────────────────────

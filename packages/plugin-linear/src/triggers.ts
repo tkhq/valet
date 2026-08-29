@@ -88,16 +88,20 @@ function toEvent(event: VerifiedEvent): NormalizedEvent {
   };
 }
 
+// The `team` filter matches on the team KEY (path ends in `.team.key`), so its
+// option source resolves to team keys, not uuids. See ./filter-options.ts.
+const TEAM_SOURCE = { source: "linear.teams" } as const;
+
 const FILTERS: Record<string, EventCatalogEntry["filters"]> = {
   Issue: [
-    { field: "team", path: "data.team.key", description: "Linear team key" },
+    { field: "team", path: "data.team.key", description: "Linear team key", options: TEAM_SOURCE },
     { field: "identifier", path: "data.identifier", description: "Issue identifier (e.g. TKAI-9)" },
     { field: "state", path: "data.state.name", description: "Workflow state name" },
     { field: "assignee", path: "data.assignee.name", description: "Assignee display name" },
   ],
-  Comment: [{ field: "team", path: "data.issue.team.key", description: "Linear team key" }],
+  Comment: [{ field: "team", path: "data.issue.team.key", description: "Linear team key", options: TEAM_SOURCE }],
   Project: [{ field: "project", path: "data.name", description: "Project name" }],
-  Cycle: [{ field: "team", path: "data.team.key", description: "Linear team key" }],
+  Cycle: [{ field: "team", path: "data.team.key", description: "Linear team key", options: TEAM_SOURCE }],
   IssueLabel: [{ field: "label", path: "data.name", description: "Label name" }],
   Reaction: [{ field: "emoji", path: "data.emoji", description: "Reaction emoji" }],
 };

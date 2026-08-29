@@ -1,5 +1,6 @@
 import { mcpActionPlugin } from '@valet/sdk/mcp';
 import type { ValetPlugin } from '@valet/engine';
+import { LINEAR_TEAMS_SOURCE, makeLinearTeamsResolver } from './filter-options.js';
 import { linearTemplates } from './templates.js';
 import { linearTriggerDefs } from './triggers.js';
 
@@ -16,6 +17,9 @@ const plugin: ValetPlugin = {
   ],
   triggers: linearTriggerDefs,
   templates: linearTemplates,
+  filterOptionResolvers: {
+    [LINEAR_TEAMS_SOURCE]: makeLinearTeamsResolver(),
+  },
   credentials: [
     {
       type: 'oauth2',

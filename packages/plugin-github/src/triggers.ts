@@ -130,7 +130,14 @@ const EVENT_ACTIONS: Record<string, string[]> = {
 };
 
 const COMMON_FILTERS: EventCatalogEntry["filters"] = [
-  { field: "repo", path: "repository.full_name", description: "Repository (owner/name)" },
+  {
+    field: "repo",
+    path: "repository.full_name",
+    description: "Repository (owner/name)",
+    // The picker fills this field from the `github.repos` resolver: the
+    // installation's visible repositories, keyed by `owner/name`.
+    options: { source: "github.repos" },
+  },
   { field: "sender", path: "sender.login", description: "GitHub login of the actor" },
 ];
 

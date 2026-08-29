@@ -838,6 +838,34 @@ export class SlackTransport implements ChannelTransport {
   }
 
   /**
+   * Channel typeahead for the event-filter picker (conversations.list, bot
+   * token). Returns public and private channels matching `query` by name.
+   */
+  async listWorkspaceChannels(query: string): Promise<Array<{ id: string; name: string }>> {
+    const q = query.trim().toLowerCase();
+    const out: Array<{ id: string; name: string }> = [];
+    let cursor: string | undefined;
+    // Bound the SCAN, not just the match count: mirror listWorkspaceMembers so
+    // a selective query in a workspace with thousands of channels cannot page
+    // the whole directory and hang the typeahead.
+    const MAX_PAGES = 10;
+    let pages = 0;
+    do {
+      const page = await this.api.listChannels(cursor);
+      pages += 1;
+      for (const channel of page.channels) {
+        if (channel.isArchived) continue;
+        if (q !== "" && !channel.name.toLowerCase().includes(q)) continue;
+        out.push({ id: channel.id, name: channel.name });
+        if (out.length >= 20) return out;
+      }
+      cursor = page.nextCursor;
+      if (pages >= MAX_PAGES) break;
+    } while (cursor !== undefined);
+    return out;
+  }
+
+  /**
    * Resolve a workspace member by email (users.lookupByEmail; needs the
    * `users:read.email` bot scope). Powers the "DM me the code" identity-link
    * delivery. `null` = the email names nobody here — the caller falls back
