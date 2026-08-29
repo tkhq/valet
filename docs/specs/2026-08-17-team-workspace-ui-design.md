@@ -81,6 +81,27 @@ the switcher — legible and trustworthy.
    validated against the team list, so a stale key from a team the
    caller left cannot flash a 404 in place of the totals.
 
+8. **`/chat` follows the switcher too.** Added 2026-08-29. Arriving at
+   `/chat` with no `?assistant=` used to open your PERSONAL default, even
+   when the switcher named a team — so switching to a team on another page
+   and then opening chat showed personal threads until you clicked the
+   team's assistant. The page now opens the ACTIVE workspace's default
+   assistant (`scopedDefaultAssistant`), and canonicalizes the URL to it
+   under a team scope, so the sidebar highlight, the shared-with notice, and
+   the threads all match the switcher. A team that owns no assistant keeps
+   the personal fallback. The rail's thread tree resolves the same way.
+
+9. **A team assistant's child runs nest under it.** Added 2026-08-29.
+   `GET /api/orchestrator/children` used to resolve only the CALLER's
+   personal default assistant, and the chat thread tree showed children for
+   that one assistant alone. A child spawned by a team assistant — e.g. a
+   team worker trigger's `task` — was therefore invisible: excluded from the
+   standalone Sessions list AND nested under no thread tree. The endpoint now
+   takes `?sessionId=` to scope children to any assistant the caller can view
+   (`canViewChildrenOf`, authorized off the assistant's owner so a team member
+   reaches a team assistant), and the thread tree passes the open assistant's
+   session id. Dismiss authorizes the same way.
+
 ## Known limits
 
 An adversarial review (2026-08-17) confirmed four limits this pass ships

@@ -19,7 +19,12 @@ import { qk } from "./queries";
 
 export const qkOrchestrator = {
   info: () => ["orchestrator", "info"] as const,
-  children: () => ["orchestrator", "children"] as const,
+  // Keyed by parent session so one assistant's children never overwrite
+  // another's in the cache. Bare key stays for the caller's own default.
+  children: (sessionId?: string) =>
+    sessionId
+      ? (["orchestrator", "children", sessionId] as const)
+      : (["orchestrator", "children"] as const),
 };
 
 export function useOrchestratorInfo(
@@ -32,12 +37,16 @@ export function useOrchestratorInfo(
   });
 }
 
+/** Children of one assistant session. `sessionId` is the OPEN assistant in
+ * the thread tree, so a team assistant's runs nest under it; omitted reads the
+ * caller's own default. */
 export function useOrchestratorChildren(
+  sessionId?: string,
   opts?: Partial<UseQueryOptions<GetOrchestratorChildrenResponse>>,
 ) {
   return useQuery<GetOrchestratorChildrenResponse>({
-    queryKey: qkOrchestrator.children(),
-    queryFn: () => api.getOrchestratorChildren(),
+    queryKey: qkOrchestrator.children(sessionId),
+    queryFn: () => api.getOrchestratorChildren(sessionId),
     ...opts,
   });
 }
@@ -58,13 +67,15 @@ export function useTeamChildren(
 }
 
 /** Dismiss a settled child from the thread tree. Display state only — the
- * child session and its history stay reachable from the Sessions page. */
-export function useDismissChild() {
+ * child session and its history stay reachable from the Sessions page.
+ * `sessionId` is the parent whose children list to refresh, so a team
+ * assistant's tree updates in place. */
+export function useDismissChild(sessionId?: string) {
   const qc = useQueryClient();
   return useMutation<{ ok: true }, Error, string>({
     mutationFn: (childSessionId) => api.dismissChild(childSessionId),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkOrchestrator.children() });
+      qc.invalidateQueries({ queryKey: qkOrchestrator.children(sessionId) });
     },
   });
 }

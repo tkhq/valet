@@ -59,6 +59,7 @@ export function AssistantRail() {
   // component reads. Validation of the value stays in `routes/chat.tsx`.
   const search = (useSearch({ strict: false }) ?? {}) as { assistant?: string };
   const navigate = useNavigate();
+  const scope = useWorkspaceScope();
 
   const teams = eligibleTeams(teamsQ.data?.teams, orgQ.data?.features.organizations);
   const groups = groupAssistants(assistantsQ.data?.assistants, teams);
@@ -75,9 +76,15 @@ export function AssistantRail() {
   const showAssistants = resolved && total > 1;
 
   // Only an assistant the caller can actually reach may drive the thread
-  // tree — a stale or hand-edited `?assistant=` falls back to your own
-  // default rather than rendering a session the viewer cannot read.
-  const active = findAssistant(groups, search.assistant) ?? ownDefaultAssistant(groups);
+  // tree. With no `?assistant=`, open the ACTIVE workspace's default — so the
+  // team you switched to shows its assistant and threads here, not your own
+  // (the bug when you arrived at `/chat` with a team already in scope). A
+  // stale or hand-edited `?assistant=` still falls back the same way rather
+  // than rendering a session the viewer cannot read.
+  const active =
+    findAssistant(groups, search.assistant) ??
+    scopedDefaultAssistant(groups, scope.key) ??
+    ownDefaultAssistant(groups);
 
   // Costs no request: the bell is already polling this query. For the
   // session with an open WS (the open conversation), the stream store's
@@ -100,7 +107,6 @@ export function AssistantRail() {
   // more" control to stay bounded. Scoping to one workspace bounds it by
   // construction: the block is as tall as one owner's assistant list,
   // whether you belong to two teams or twenty.
-  const scope = useWorkspaceScope();
   const shown = groups.filter((g) => g.key === scope.key);
 
   const [renaming, setRenaming] = useState<AssistantSummary | null>(null);
@@ -129,16 +135,11 @@ export function AssistantRail() {
           ))}
         </div>
       )}
-      {/* Children are deliberately omitted on every assistant but your own
-          default: `GET /api/orchestrator/children` resolves the CALLER's own
-          orchestrator, so rendering them elsewhere would nest your personal
-          child sessions under another assistant's threads — wrong, not
-          merely absent. Threads themselves work fully. */}
-      {active ? (
-        <ThreadTree sessionId={active.sessionId} showChildren={isOwnDefault(active)} />
-      ) : (
-        <ThreadTree />
-      )}
+      {/* Children nest under whichever assistant is open, personal or team:
+          `GET /api/orchestrator/children?sessionId=` scopes the list to that
+          assistant's session (access-checked), so a team worker trigger's
+          child appears under the team assistant that spawned it. */}
+      {active ? <ThreadTree sessionId={active.sessionId} /> : <ThreadTree />}
       {renaming && (
         <RenameAssistantDialog
           key={renaming.id}
@@ -237,16 +238,25 @@ export function ownDefaultAssistant(groups: AssistantGroup[]): AssistantSummary 
   return own.find((a) => a.isDefault) ?? own[0];
 }
 
+/** The default assistant of one workspace (`scopeKey` is `"user"` or a team
+ * id), or undefined when that workspace owns none. `/chat` opens this when no
+ * `?assistant=` is set, so switching to a team scopes the conversation to that
+ * team's assistant. Undefined (not a personal fallback) so a caller can tell a
+ * team with no assistant apart from your own default and decide what to do. */
+export function scopedDefaultAssistant(
+  groups: AssistantGroup[],
+  scopeKey: string,
+): AssistantSummary | undefined {
+  const scoped = groups.find((group) => group.key === scopeKey)?.assistants ?? [];
+  return scoped.find((a) => a.isDefault) ?? scoped[0];
+}
+
 /** What the row is called. An assistant nobody has named says so, rather
  * than borrowing a name the user never chose. */
 export function assistantLabel(assistant: AssistantSummary): string {
   const name = assistant.name?.trim();
   if (name) return name;
   return assistant.isDefault ? "Default assistant" : "Untitled assistant";
-}
-
-function isOwnDefault(assistant: AssistantSummary): boolean {
-  return assistant.owner.type === "user" && assistant.isDefault;
 }
 
 /** Creating, renaming and archiving follow the same rule as administering a

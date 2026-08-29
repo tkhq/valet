@@ -15,6 +15,7 @@ import {
   findAssistant,
   groupAssistants,
   ownDefaultAssistant,
+  scopedDefaultAssistant,
 } from "./assistant-rail";
 
 function team(id: string, name = id, callerRole: "admin" | "member" | null = "member"): TeamSummary {
@@ -107,6 +108,37 @@ describe("findAssistant and ownDefaultAssistant", () => {
 
   it("falls back to the default of your own assistants", () => {
     expect(ownDefaultAssistant(groups)?.id).toBe("second");
+  });
+});
+
+describe("scopedDefaultAssistant", () => {
+  const groups = groupAssistants(
+    [
+      own("mine"),
+      own("second", { isDefault: true }),
+      ownedBy("t1", "p1"),
+      ownedBy("t1", "p2", { isDefault: true }),
+    ],
+    [team("t1", "Platform")],
+  );
+
+  it("opens the active team's default, not your own — the reported bug", () => {
+    expect(scopedDefaultAssistant(groups, "t1")?.id).toBe("p2");
+  });
+
+  it("opens your own default when the scope is personal", () => {
+    expect(scopedDefaultAssistant(groups, "user")?.id).toBe("second");
+  });
+
+  it("falls back to the first when a workspace marks no default", () => {
+    const noDefault = groupAssistants([ownedBy("t1", "p1"), ownedBy("t1", "p2")], [team("t1")]);
+    expect(scopedDefaultAssistant(noDefault, "t1")?.id).toBe("p1");
+  });
+
+  it("is undefined for a workspace that owns no assistant, so the caller can tell", () => {
+    // A team with no assistant returns undefined rather than borrowing your
+    // own default — the caller decides whether to fall back or create one.
+    expect(scopedDefaultAssistant(groupAssistants([own("mine")], [team("t1")]), "t1")).toBeUndefined();
   });
 });
 

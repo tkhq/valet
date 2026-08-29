@@ -12,7 +12,9 @@ import {
   findAssistant,
   groupAssistants,
   ownDefaultAssistant,
+  scopedDefaultAssistant,
 } from "~/components/session/assistant-rail";
+import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { Spinner } from "~/components/primitives";
 
 interface ChatSearch {
@@ -61,6 +63,7 @@ function ChatPage() {
   const teamsQ = useTeams();
   const orgQ = useOrg();
   const navigate = useNavigate({ from: Route.fullPath });
+  const scope = useWorkspaceScope();
   const ensure = useEnsureOrchestrator();
   const ensureAssistantSession = useEnsureAssistantSession();
   // Session ids this page has confirmed exist, so it never mounts the
@@ -97,8 +100,29 @@ function ChatPage() {
   // the list fails, so a broken assistants call costs you the switcher
   // rather than the conversation.
   const ownDefault = ownDefaultAssistant(groups);
-  const personalSessionId = ownDefault?.sessionId ?? info.data?.sessionId;
+  // With no `?assistant=`, open the ACTIVE workspace's default assistant, so
+  // arriving at `/chat` with a team already in scope shows that team's
+  // conversation — not your personal one (the reported bug). Falls back to
+  // your own default when the scoped workspace owns no assistant, or on a
+  // cold load before the list lands (`info` answers first).
+  const scopedDefault = scopedDefaultAssistant(groups, scope.key);
+  const fallback = scopedDefault ?? ownDefault;
+  const personalSessionId = fallback?.sessionId ?? info.data?.sessionId;
   const sessionId = active?.sessionId ?? personalSessionId;
+
+  // Canonicalize the URL to the scoped team default so the sidebar highlight,
+  // the "shared with the team" notice and any `?child=` all resolve to the
+  // opened assistant — the same move the workspace switcher makes when you
+  // pick a team from `/chat`. Personal scope keeps the param-less URL (its
+  // default IS the fallback), and a team that owns no assistant leaves
+  // `scopedDefault` undefined, so this fires once, only for a real team
+  // assistant, after the list resolves.
+  useEffect(() => {
+    if (assistant === undefined && scopeResolved && scope.teamId && scopedDefault) {
+      navigate({ replace: true, search: (prev) => ({ ...prev, assistant: scopedDefault.id }) });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [assistant, scopeResolved, scope.teamId, scopedDefault?.id]);
 
   const team =
     active?.owner.type === "team"
@@ -115,7 +139,7 @@ function ChatPage() {
   // routes remain the fallback for exactly one case — a cold load where the
   // assistants list has not arrived, so there is no id to send yet and only
   // `GET /info` knows the caller's own session.
-  const activeId = active?.id ?? ownDefault?.id;
+  const activeId = active?.id ?? fallback?.id;
   useEffect(() => {
     if (activeId) ensureAssistantSession.mutate(activeId, { onSuccess: markOpened });
     else if (personalSessionId) ensure.mutate(undefined, { onSuccess: markOpened });

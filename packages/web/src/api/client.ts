@@ -593,8 +593,16 @@ export const api = {
     request<GetOrchestratorInfoResponse>("GET", "/orchestrator/info"),
   patchOrchestratorInfo: (body: PatchOrchestratorInfoRequest) =>
     request<PatchOrchestratorInfoResponse>("PATCH", "/orchestrator/info", body),
-  getOrchestratorChildren: () =>
-    request<GetOrchestratorChildrenResponse>("GET", "/orchestrator/children"),
+  /** `sessionId` scopes the list to one assistant's children — the open
+   * assistant in the chat thread tree, so a team assistant's runs nest under
+   * it. Omitted = your own default assistant. */
+  getOrchestratorChildren: (sessionId?: string) =>
+    request<GetOrchestratorChildrenResponse>(
+      "GET",
+      sessionId
+        ? `/orchestrator/children?sessionId=${encodeURIComponent(sessionId)}`
+        : "/orchestrator/children",
+    ),
   dismissChild: (childSessionId: string) =>
     request<{ ok: true }>(
       "POST",

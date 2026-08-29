@@ -170,18 +170,18 @@ export interface ThreadTreeProps {
   /** Whose threads to show. Defaults to the caller's own assistant. */
   sessionId?: string;
   /**
-   * Nest child sessions under the thread that spawned them. Must be false
-   * for any session other than the caller's own assistant:
-   * `GET /api/orchestrator/children` resolves the CALLER's orchestrator
-   * rather than `sessionId`, so leaving it on would nest the viewer's
-   * personal children under someone else's threads.
+   * Nest child sessions under the thread that spawned them. Safe for any
+   * assistant the caller can view: `GET /api/orchestrator/children?sessionId=`
+   * scopes the list to THIS `sessionId` (access-checked), so a team
+   * assistant's runs nest under its own threads rather than borrowing the
+   * caller's personal children.
    */
   showChildren?: boolean;
 }
 
 function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showChildren: boolean }) {
   const threadsQ = useThreads(sessionId);
-  const childrenQ = useOrchestratorChildren({
+  const childrenQ = useOrchestratorChildren(sessionId, {
     refetchInterval: CHILDREN_POLL_MS,
     enabled: showChildren,
   });
@@ -191,7 +191,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   const createThread = useCreateThread(sessionId);
   const setArchived = useSetThreadArchived(sessionId);
   const replaceSandbox = useReplaceSandbox(sessionId);
-  const dismissChild = useDismissChild();
+  const dismissChild = useDismissChild(sessionId);
   const [showArchived, setShowArchived] = useState(false);
   const archivedQ = useArchivedThreads(sessionId, { enabled: showArchived });
   const navigate = useNavigate({ from: "/chat" });
