@@ -620,6 +620,11 @@ export interface ToolContext {
   decisionGateId?: string;
   replyChannelType?: string;
   replyChannelId?: string;
+  /**
+   * The channel this turn's message came from, when it was a channel signal.
+   * `reply_to_origin` / `react_to_origin` read it so the model supplies no ids.
+   */
+  origin?: ChannelOrigin;
   cwd?: string;
   repo?: { url?: string; branch?: string; ref?: string; provider?: string };
   credentials: CredentialProvider;

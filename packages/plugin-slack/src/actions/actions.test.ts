@@ -168,6 +168,45 @@ describe('slack actions', () => {
     });
   });
 
+  it('reply_to_origin posts chat.postMessage into the origin thread, no ids from the model', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '9.9' }));
+    const result = await action('slack.reply_to_origin').execute(
+      { text: 'here is the answer' },
+      pluginCtx({ origin: { channelType: 'slack', threadKey: 'slack:C1:1.2', reply: 'manual', messageTs: '1.5' } }),
+    );
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://slack.com/api/chat.postMessage');
+    expect(JSON.parse(init.body as string)).toEqual({ channel: 'C1', thread_ts: '1.2', text: 'here is the answer' });
+    expect(result).toEqual({ success: true, data: { channel: 'C1', ts: '9.9' } });
+  });
+
+  it('reply_to_origin errors with no channel origin, without calling Slack', async () => {
+    const result = await action('slack.reply_to_origin').execute({ text: 'x' }, pluginCtx());
+    expect(result).toMatchObject({ success: false });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('react_to_origin adds a reaction to the origin message', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+    const result = await action('slack.react_to_origin').execute(
+      { emoji: 'eyes' },
+      pluginCtx({ origin: { channelType: 'slack', threadKey: 'slack:C1:1.2', reply: 'manual', messageTs: '1.5' } }),
+    );
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://slack.com/api/reactions.add');
+    expect(JSON.parse(init.body as string)).toEqual({ channel: 'C1', timestamp: '1.5', name: 'eyes' });
+    expect(result).toEqual({ success: true, data: { channel: 'C1', timestamp: '1.5', name: 'eyes' } });
+  });
+
+  it('react_to_origin errors when the origin has no message ts', async () => {
+    const result = await action('slack.react_to_origin').execute(
+      { emoji: 'eyes' },
+      pluginCtx({ origin: { channelType: 'slack', threadKey: 'slack:C1:1.2', reply: 'manual' } }),
+    );
+    expect(result).toMatchObject({ success: false });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('list_channels fetches joined channels via users.conversations (GET, paginated)', async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse(200, {

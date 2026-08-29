@@ -3219,6 +3219,9 @@ export class Thread {
   }): ToolContext {
     const { signal, toolCallId, toolName, toolArgs } = args;
     const session = this.session;
+    const runningContent = this.runningItem?.content;
+    const origin =
+      runningContent !== undefined && isSignalContent(runningContent) ? runningContent.origin : undefined;
     return {
       userId: session.options.userId,
       orgId: session.options.orgId,
@@ -3233,6 +3236,9 @@ export class Thread {
       policyResolver: session.options.policyResolver,
       pluginStoreFactory: session.options.pluginStoreFactory,
       queueItemId: this.runningItem?.id,
+      // The running submission's channel origin, when it is a channel signal,
+      // so reply_to_origin / react_to_origin answer the right conversation.
+      origin,
       signal,
       decisionGateId: this.toolCtxOverlay.gateId,
       suspendedDecision: this.suspendedDecisionForReplay,
