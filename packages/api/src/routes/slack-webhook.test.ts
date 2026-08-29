@@ -13,11 +13,13 @@ import slackPlugin from "@valet/plugin-slack/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { eventDeliveries, eventDropLog, events, eventSubscriptions } from "../schema/index.js";
 import { __resetSlackWebhookThrottle } from "./slack-webhook.js";
+import { __resetIngestDropThrottle } from "../events/ingest.js";
 
 let api: TestApi | undefined;
 
 beforeEach(() => {
   __resetSlackWebhookThrottle();
+  __resetIngestDropThrottle();
 });
 
 afterEach(async () => {
@@ -365,6 +367,47 @@ describe("POST /api/channels/slack/webhook", () => {
     await expect.poll(() => dropReasons(api!), { timeout: 5_000 }).toContain("slack_retry");
     expect(await eventCount(api, "Ev-react-dup")).toBe(1);
     expect(await deliveryCount(api, "Ev-react-dup")).toBe(1);
+  });
+
+  it("does not drop-log an event no subscription names (ambient traffic stays silent)", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    // No subscription seeded, so nothing names slack.reaction_added.
+    const body = envelope(reactionAdded(), "Ev-react-nosub");
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+
+    // Let the fire-and-forget fan-out run, then confirm nothing was stored and
+    // no filter-excluded drop was written for it.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(await eventCount(api, "Ev-react-nosub")).toBe(0);
+    expect(await dropReasons(api)).not.toContain("filter_excluded");
+  });
+
+  it("drop-logs filter_excluded when a subscription names the key but its filter excludes the event", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    const now = Date.now();
+    await api.providers.db.insert(eventSubscriptions).values({
+      id: "sub_react_filtered",
+      orgId: "local-org",
+      ownerType: "org",
+      ownerId: "local-org",
+      name: "reactions in C999 only",
+      eventKeys: ["slack.reaction_added"],
+      // reactionAdded() is in C500, which this filter excludes.
+      filters: [{ field: "channel", op: "eq", value: "C999" }],
+      target: { kind: "orchestrator" },
+      enabled: true,
+      createdBy: "local-user",
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const body = envelope(reactionAdded(), "Ev-react-filtered");
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+
+    await expect.poll(() => dropReasons(api!), { timeout: 5_000 }).toContain("filter_excluded");
+    expect(await eventCount(api, "Ev-react-filtered")).toBe(0);
   });
 
   it("ingests a signed app_mention and queues a delivery for a matching subscription", async () => {

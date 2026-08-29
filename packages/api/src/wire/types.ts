@@ -3208,6 +3208,23 @@ export interface GetEventResponse {
   deliveries: EventDeliveryWire[];
 }
 
+/** One `event_drop_log` row — an event that arrived but did not become a feed
+ * row. `detail` names the corrective action; no payload is retained. */
+export interface EventDropWire {
+  id: string;
+  reason: string;
+  detail: string;
+  createdAt: number;
+}
+
+/** `GET /api/events/drops` — recent drops plus the last time ANY event reached
+ * ingest (matched or not), so the Problems tab can tell "nothing arrived" from
+ * "arrived but matched nothing". */
+export interface ListEventDropsResponse {
+  drops: EventDropWire[];
+  lastEventAt: number | null;
+}
+
 // ── REST: health (single-binary CLI, portable-runtime plan) ──────────────
 //
 // `GET /api/health` — public, unauthenticated. The API currently answers

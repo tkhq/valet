@@ -8,7 +8,8 @@ import { and, eq } from "drizzle-orm";
 import type { EventCatalogEntry, NormalizedEvent, ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, events, eventSubscriptions } from "../schema/index.js";
-import { subscriptionMatchesEvent } from "./match.js";
+import { subscriptionMatchesEvent, subscriptionNamesKey } from "./match.js";
+import { writeDropLog } from "../orchestrator/signals.js";
 
 export interface IngestDeps {
   db: AppDb;
@@ -31,6 +32,41 @@ export interface IngestResult {
   /** True when the event matched no enabled subscription and was not
    * persisted. Valet retains an event only when a subscription asked for it. */
   skipped?: boolean;
+}
+
+/**
+ * Drop-logs the high-signal miss: a subscription NAMES this event key but its
+ * filter excluded this occurrence — the "why didn't my trigger fire?" case.
+ * Throttled per (org, event key): one row a minute is enough to diagnose a bad
+ * filter without a busy key flooding the table. The row records only the event
+ * KEY, never the payload or refs.
+ *
+ * An event no subscription names at all is NOT logged here — for a high-volume
+ * key like slack.message that is every message, so logging it would re-flood
+ * the drop-log the privacy design keeps small. The "last event received" signal
+ * (`GET /api/events/drops`) answers "is anything arriving?" for that case.
+ */
+const FILTER_DROP_COOLDOWN_MS = 60_000;
+const filterDropLoggedAt = new Map<string, number>();
+
+/** Test-only: clears the per-process filter-drop throttle so a suite can assert
+ * one row per key without the cooldown bleeding across cases. */
+export function __resetIngestDropThrottle(): void {
+  filterDropLoggedAt.clear();
+}
+
+async function logFilterExcludedDrop(db: AppDb, orgId: string, eventKey: string): Promise<void> {
+  const throttleKey = `${orgId}:${eventKey}`;
+  const now = Date.now();
+  const last = filterDropLoggedAt.get(throttleKey);
+  if (last !== undefined && now - last < FILTER_DROP_COOLDOWN_MS) return;
+  filterDropLoggedAt.set(throttleKey, now);
+  const detail = `A ${eventKey} event arrived, but every subscription for it excluded it by filter. Check the filters on your ${eventKey} subscription.`;
+  try {
+    await writeDropLog(db, { orgId, reason: "filter_excluded", detail });
+  } catch (err) {
+    console.error("[ingest] filter-excluded drop-log failed", err);
+  }
 }
 
 export async function ingestEvent(
@@ -68,7 +104,16 @@ export async function ingestEvent(
     .from(eventSubscriptions)
     .where(and(eq(eventSubscriptions.orgId, orgId), eq(eventSubscriptions.enabled, true)));
   const matched = subs.filter((sub) => subscriptionMatchesEvent(sub, event.key, event.payload, catalog));
-  if (matched.length === 0) return { eventId, duplicate: false, deliveries: 0, skipped: true };
+  if (matched.length === 0) {
+    // If a subscription NAMES this key but every one filtered this occurrence
+    // out, record it so "my trigger didn't fire" is answerable. An event no
+    // subscription names is ambient traffic and stays silent. Either way the
+    // event itself is never persisted.
+    if (subs.some((sub) => subscriptionNamesKey(sub, event.key))) {
+      await logFilterExcludedDrop(deps.db, orgId, event.key);
+    }
+    return { eventId, duplicate: false, deliveries: 0, skipped: true };
+  }
 
   const result = await deps.db.transaction(async (tx) => {
     const inserted = await tx

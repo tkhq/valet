@@ -13,6 +13,7 @@ import type { RunHost } from "@valet/workflow";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import {
   eventDeliveries,
+  eventDropLog,
   events,
   eventSubscriptions,
   teamMembers,
@@ -26,6 +27,7 @@ import type {
   EventSubscriptionTargetWire,
   GetEventCatalogResponse,
   GetEventResponse,
+  ListEventDropsResponse,
   ListEventsResponse,
   ListEventSubscriptionsResponse,
   PatchEventSubscriptionResponse,
@@ -125,6 +127,37 @@ async function seedEventRow(
     receivedAt: args.receivedAt,
   });
 }
+
+describe("GET /api/events/drops", () => {
+  it("returns org-scoped drops newest-first with the last-event timestamp", async () => {
+    const a = await boot();
+    const now = Date.now();
+    await a.providers.db.insert(eventDropLog).values([
+      { id: "d_old", orgId: "local-org", reason: "filter_excluded", detail: "old", createdAt: now - 3000 },
+      { id: "d_new", orgId: "local-org", reason: "bad_signature", detail: "new", createdAt: now - 1000 },
+      { id: "d_foreign", orgId: "other-org", reason: "unknown_org", detail: "x", createdAt: now },
+    ]);
+    // A matched event is more recent than any drop, so it sets lastEventAt.
+    await seedEventRow(a, { id: "ev_1", receivedAt: now - 500 });
+
+    const res = await fetch(`${a.baseUrl}/api/events/drops`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListEventDropsResponse;
+
+    expect(body.drops.map((d) => d.id)).toEqual(["d_new", "d_old"]);
+    expect(body.drops[0].reason).toBe("bad_signature");
+    expect(body.lastEventAt).toBe(now - 500);
+  });
+
+  it("resolves /events/drops as the literal path, not an event id", async () => {
+    const a = await boot();
+    const res = await fetch(`${a.baseUrl}/api/events/drops`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as ListEventDropsResponse;
+    expect(body.drops).toEqual([]);
+    expect(body.lastEventAt).toBeNull();
+  });
+});
 
 describe("GET /api/events/catalog", () => {
   it("returns the merged plugin catalog grouped by service", async () => {

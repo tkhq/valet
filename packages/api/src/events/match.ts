@@ -56,6 +56,16 @@ export function subscriptionMatchesEvent(
   );
 }
 
+/**
+ * Whether a subscription's key patterns name this event, ignoring its filters.
+ * Ingest uses it to tell "no subscription wants this key" from "a subscription
+ * wants it but a filter excluded this occurrence" when it drop-logs an
+ * unmatched event.
+ */
+export function subscriptionNamesKey(sub: { eventKeys: unknown }, eventKey: string): boolean {
+  return eventKeyMatches(eventKey, sub.eventKeys as string[]);
+}
+
 export function filtersMatch(
   payload: unknown,
   eventKey: string,

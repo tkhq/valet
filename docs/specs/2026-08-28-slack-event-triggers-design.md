@@ -156,6 +156,28 @@ Two consequences a reader should know:
   subscription created later. This is the intended trade: Valet does not retain
   data no subscription asked for so that it can be delivered retroactively.
 
+## Debuggability: the Problems tab
+
+Match-gating means an unmatched event leaves the events table empty, so "I set
+up a trigger and nothing happened" has to be answerable somewhere. The Events
+page gains a **Problems** tab (`GET /api/events/drops`) that surfaces the
+`event_drop_log` the webhook routes already write — bad signature, wrong
+workspace, missing credential, slow-ack retry — plus a "last event received"
+timestamp (the max of the newest events row and the newest drop-log row). That
+timestamp answers "is anything arriving at all?" without exposing any payload.
+
+Ingest also drop-logs one match-gated miss: an event whose key a subscription
+**names** but whose filter excluded this occurrence (`filter_excluded`). That is
+the high-signal "my trigger didn't fire" case, and it is bounded by user intent
+(a subscription must exist). It is throttled per (org, event key) at one row a
+minute, and records only the event key — never the payload or refs, so the
+privacy rule holds.
+
+An event that **no** subscription names is deliberately NOT drop-logged. For a
+high-volume key like `slack.message` that is every message in the workspace, so
+logging it would re-flood the drop-log the privacy design keeps small. The "last
+event received" signal covers that case instead.
+
 ## Custom slash commands that route to triggers or assistants
 
 This was an investigation request alongside the issue. Two distinct systems

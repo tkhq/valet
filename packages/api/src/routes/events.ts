@@ -18,7 +18,7 @@ import { and, desc, eq, exists, gte, or, sql, type SQL } from "drizzle-orm";
 import type { EventCatalogEntry, ValetPlugin } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { eventDeliveries, events, eventSubscriptions } from "../schema/index.js";
+import { eventDeliveries, eventDropLog, events, eventSubscriptions } from "../schema/index.js";
 import { readOwnerFilter } from "./_owner-filter.js";
 import { catalogForService } from "../events/ingest.js";
 import { subscriptionMatchesEvent } from "../events/match.js";
@@ -33,6 +33,7 @@ import type {
   EventSummaryWire,
   GetEventCatalogResponse,
   GetEventResponse,
+  ListEventDropsResponse,
   ListEventsResponse,
   ListEventSubscriptionsResponse,
   PatchEventSubscriptionRequest,
@@ -299,6 +300,47 @@ eventsRouter.get("/events", async (c) => {
     .limit(limit);
 
   const resp: ListEventsResponse = { events: rows.map(rowToEventSummary) };
+  return c.json(resp);
+});
+
+/**
+ * `GET /api/events/drops` — recent reasons an event arrived but did not become
+ * a feed row: a bad signature, the wrong workspace, a missing credential, or
+ * (the common one) it matched no subscription. Answers "my trigger didn't
+ * fire" when the feed is empty. Registered before `/events/:id` so the literal
+ * path wins over the id param. No payload is exposed — the drop-log holds none.
+ */
+eventsRouter.get("/events/drops", async (c) => {
+  const { db } = c.var.providers;
+  const user = c.var.user;
+  const rawLimit = Number.parseInt(c.req.query("limit") ?? "", 10);
+  const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, FEED_MAX_LIMIT) : FEED_DEFAULT_LIMIT;
+
+  const rows = await db
+    .select()
+    .from(eventDropLog)
+    .where(eq(eventDropLog.orgId, user.orgId))
+    .orderBy(desc(eventDropLog.createdAt))
+    .limit(limit);
+
+  // "Last event received" = the most recent time ANY event reached ingest,
+  // matched (an events row) or not (a drop-log row). rows[0] already holds the
+  // newest drop; one more indexed read gets the newest matched event.
+  const lastEventRow = await db
+    .select({ at: events.receivedAt })
+    .from(events)
+    .where(eq(events.orgId, user.orgId))
+    .orderBy(desc(events.receivedAt))
+    .limit(1);
+  const candidates = [rows[0]?.createdAt, lastEventRow[0]?.at].filter(
+    (v): v is number => typeof v === "number",
+  );
+  const lastEventAt = candidates.length > 0 ? Math.max(...candidates) : null;
+
+  const resp: ListEventDropsResponse = {
+    drops: rows.map((r) => ({ id: r.id, reason: r.reason, detail: r.detail, createdAt: r.createdAt })),
+    lastEventAt,
+  };
   return c.json(resp);
 });
 
