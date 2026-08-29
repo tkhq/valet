@@ -186,6 +186,8 @@ export class EventDispatcher {
         if (origin) {
           const text = channelText(event.payload);
           body = [event.summary, text].filter((s): s is string => !!s).join("\n\n").slice(0, MAX_BODY_EXCERPT_CHARS);
+          // `actor` is untyped jsonb, owned by ingest (NormalizedEvent.actor is
+          // `{ externalId, login? }`) — same narrowing convention as `refs`.
           const actor = event.actor as { externalId?: string; login?: string } | null;
           const sender = actor?.login ?? actor?.externalId;
           if (sender) attributes.sender = sender;

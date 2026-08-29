@@ -41,6 +41,7 @@ import { loadSessionMeta } from "../engine/session-meta.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
 import { canResolveSessionGate } from "../services/session-access.js";
 import { writeDropLog } from "../orchestrator/signals.js";
+import { EVENTS_THREAD_KEY } from "../events/orchestrator-target.js";
 import type { AttentionChannelDeliverer, AttentionEvent } from "../orchestrator/attention.js";
 import { consumeLinkCode, identityForExternal, identityForUser, linkIdentity } from "./identity-links.js";
 import { DbActiveStreamStore, type ActiveStreamStore } from "./active-streams.js";
@@ -488,6 +489,13 @@ export class ChannelHost {
     const thread = await this.deps.engineStore.getThread(sessionId, threadId);
     if (!thread) return;
 
+    // A thread that neither maps to a channel nor is the orchestrator "events"
+    // firehose (a plain web session) can never deliver here — return before the
+    // entries read, so a Slack-connected deployment does not read the store on
+    // every web turn. `mapped` is a cheap, synchronous key check.
+    const mapped = this.channelThreadFor(thread.key);
+    if (!mapped && thread.key !== EVENTS_THREAD_KEY) return;
+
     const entries = await this.deps.engineStore.getEntries(sessionId, threadId);
     const entry = entries.find((e) => e.id === messageId && e.type === "message" && e.role === "assistant");
     if (!entry || entry.type !== "message") return;
@@ -499,11 +507,10 @@ export class ChannelHost {
     if (entry.stopReason !== "end_turn") return;
 
     // Delivery target: the thread's own channel key (a DM or channel thread),
-    // or, when the turn ran on a non-channel thread (the shared "events" thread
-    // an event delivery lands on), the submission's own channel origin. The
-    // origin binds to the submission, so interleaved events on one "events"
-    // thread each reply to their own conversation.
-    let target = this.channelThreadFor(thread.key);
+    // or, on the "events" thread an event delivery lands on, the submission's
+    // own channel origin. The origin binds to the submission, so interleaved
+    // events on one "events" thread each reply to their own conversation.
+    let target = mapped;
     if (!target) {
       const origin = entry.queueItemId ? originFromEntries(entries, entry.queueItemId) : undefined;
       target = origin ? this.channelTargetForOrigin(origin) : null;
@@ -543,7 +550,10 @@ export class ChannelHost {
       }
     } catch (err) {
       // A reply the assistant produced but could not deliver is a reportable
-      // miss, not a silent drop: surface it on the Problems tab.
+      // miss, not a silent drop: surface it on the Problems tab. Also log it —
+      // the catch is broad, so a code fault (not just a transport error) lands
+      // here and must stay visible in the server log, not only the drop table.
+      console.error("[channels] channel reply delivery failed", err);
       const orgId = this.orgId ?? (await this.deps.resolveOrgId());
       await this.dropLog(orgId, "channel_reply_failed", target.conversationKey, String(err));
     }
@@ -559,7 +569,9 @@ export class ChannelHost {
     if (!this.isRunning(origin.channelType)) return null;
     const transport = this.transports.get(origin.channelType);
     const conversationKey = transport?.conversationKeyFromThreadKey?.(origin.threadKey);
-    if (conversationKey === undefined || conversationKey === null) return null;
+    // Empty is as unusable as null: a rebuild that produced no address must not
+    // be sent to.
+    if (!conversationKey) return null;
     return { channelType: origin.channelType, conversationKey };
   }
 

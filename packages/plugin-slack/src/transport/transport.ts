@@ -80,6 +80,11 @@ export function conversationKeyFor(teamId: string, channelId: string, threadTs: 
   return `slack:${teamId}:${channelId}:${threadTs}`;
 }
 
+/** The engine thread key for a Slack conversation (no team id — it lives on the credential). */
+export function threadKeyFor(channelId: string, threadTs: string): string {
+  return `slack:${channelId}:${threadTs}`;
+}
+
 export function parseConversationKey(key: string): SlackConversationRef | null {
   if (!key.startsWith("slack:")) return null;
   const parts = key.slice("slack:".length).split(":");
@@ -773,7 +778,7 @@ export class SlackTransport implements ChannelTransport {
   threadKeyFromConversationKey(conversationKey: string): string {
     const target = parseConversationKey(conversationKey);
     if (!target) return conversationKey;
-    return `slack:${target.channelId}:${target.threadTs}`;
+    return threadKeyFor(target.channelId, target.threadTs);
   }
 
   conversationKeyFromThreadKey(threadKey: string): string | null {
@@ -795,7 +800,7 @@ export class SlackTransport implements ChannelTransport {
     const channel = typeof p.channel === "string" ? p.channel : undefined;
     const ts = typeof p.thread_ts === "string" ? p.thread_ts : typeof p.ts === "string" ? p.ts : undefined;
     if (channel === undefined || ts === undefined) return null;
-    return `slack:${channel}:${ts}`;
+    return threadKeyFor(channel, ts);
   }
 
   // ─── Feature-detected extras (not part of ChannelTransport) ───────────
