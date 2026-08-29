@@ -154,6 +154,23 @@ create endpoint.
   subscription with `follow` set.
 - Full `make e2e` before done.
 
+## Known limitations (as built)
+
+- **Follow is set at create, not toggled on an existing rule.** `PATCH
+  /event-subscriptions/:id` does not mutate `target` (it never did — a target
+  change can reassign the owner, which needs the create-time owner scoping).
+  To change following, recreate the rule through the wizard. A target-aware
+  PATCH is a separate, owner-scoped change.
+- **No unfollow endpoint yet.** Per the product decision, following is unbounded
+  in time and there is no TTL reaper. A record is removed only manually today; a
+  "stop following" action and a channel-deletion cascade are a planned
+  follow-up. `last_activity_at` is written so a future surface can list stale
+  follows. A busy workspace should expect `followed_threads` to grow with the
+  number of distinct threads the bot is engaged in.
+- **Wizard recomputation is not memoized.** The wizard rebuilds its filter-field
+  union per render; it is a config dialog, not a hot path, so this is left as a
+  minor future cleanup rather than risk a stale-render change.
+
 ## Sequencing
 
 One project, one PR onto `dev-v2` (after the thread-binding fix lands), built in
