@@ -20,8 +20,7 @@
 import type { SignalContent } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
-import { ensureDefaultAssistantSession } from "../assistants/service.js";
-import { writeDropLog } from "../orchestrator/signals.js";
+import { deliverToAssistantThread } from "./assistant-delivery.js";
 import type { OrchestratorDeliverFn } from "./dispatcher.js";
 
 /**
@@ -44,24 +43,16 @@ export function threadKeyForSignal(signal: SignalContent): string {
 
 export function buildOrchestratorTarget(deps: { db: AppDb; engineHost: EngineHost }): OrchestratorDeliverFn {
   return async ({ orgId, ownerType, ownerId, actorUserId, signal, dispatchId }) => {
-    // A subscription names an OWNER, never one assistant of that owner, so
-    // this resolves the owner's default — the target automation gets when
-    // nobody chose.
-    const { session } = await ensureDefaultAssistantSession(
-      { db: deps.db, engineHost: deps.engineHost },
-      { type: ownerType, id: ownerId },
-      { actorUserId, orgId },
-    );
-    const data = await session.toData();
-    if (data.orgId !== orgId) {
-      await writeDropLog(deps.db, {
-        orgId,
-        reason: "event_target_mismatch",
-        conversationKey: dispatchId,
-        detail: `assistant session ${session.id} belongs to org ${data.orgId}, event belongs to org ${orgId}`,
-      });
-      throw new Error(`event delivery refused: assistant org mismatch (${data.orgId} != ${orgId})`);
-    }
-    await session.thread(threadKeyForSignal(signal)).submitPrompt(signal, { dispatchId });
+    // A subscription names an OWNER, never one assistant of that owner, so the
+    // shared delivery helper resolves the owner's default assistant.
+    await deliverToAssistantThread(deps, {
+      orgId,
+      owner: { type: ownerType, id: ownerId },
+      actorUserId,
+      threadKey: threadKeyForSignal(signal),
+      signal,
+      dispatchId,
+      mismatchReason: "event_target_mismatch",
+    });
   };
 }

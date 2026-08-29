@@ -904,6 +904,25 @@ function parseSlackThreadKey(threadKey: string): { channelId: string; threadTs: 
   return { channelId: parts[0], threadTs: parts[1] };
 }
 
+/**
+ * The channel, thread, message ts, and bot token for an "…_to_origin" action, or
+ * a corrective error when the turn has no Slack origin or the integration is not
+ * connected. One guard for both actions.
+ */
+async function resolveSlackOrigin(
+  ctx: PluginActionContext,
+): Promise<{ channelId: string; threadTs: string; messageTs?: string; token: string } | { error: string }> {
+  const origin = ctx.origin;
+  if (!origin || origin.channelType !== 'slack') {
+    return { error: 'This turn did not come from a Slack channel, so there is nothing to reply to.' };
+  }
+  const parsed = parseSlackThreadKey(origin.threadKey);
+  if (!parsed) return { error: 'The origin thread could not be resolved from the message.' };
+  const token = (await ctx.credentials.get())?.accessToken;
+  if (!token) return { error: 'Connect the Slack integration in Settings > Integrations to reply.' };
+  return { channelId: parsed.channelId, threadTs: parsed.threadTs, messageTs: origin.messageTs, token };
+}
+
 const replyToOrigin = action(Type.Object({
     text: Type.String({ description: 'The reply text (Slack markdown).' }),
   }))({
@@ -913,24 +932,17 @@ const replyToOrigin = action(Type.Object({
     'Reply in the Slack thread this message came from. Use it to answer an overheard message in a thread you are following. No channel or thread id is needed.',
   riskLevel: 'medium',
   execute: async (args, ctx) => {
-    const origin = ctx.origin;
-    if (!origin || origin.channelType !== 'slack') {
-      return { success: false, error: 'This turn did not come from a Slack channel, so there is nothing to reply to.' };
-    }
-    const parsed = parseSlackThreadKey(origin.threadKey);
-    if (!parsed) return { success: false, error: 'The origin thread could not be resolved from the message.' };
-    const cred = await ctx.credentials.get();
-    const token = cred?.accessToken;
-    if (!token) return { success: false, error: 'Missing bot_token' };
-    const res = await slackFetch('chat.postMessage', token, {
-      channel: parsed.channelId,
-      thread_ts: parsed.threadTs,
+    const o = await resolveSlackOrigin(ctx);
+    if ('error' in o) return { success: false, error: o.error };
+    const res = await slackFetch('chat.postMessage', o.token, {
+      channel: o.channelId,
+      thread_ts: o.threadTs,
       text: args.text,
     });
     if (!res.ok) return slackError(res);
     const data = (await res.json()) as { ok: boolean; error?: string; ts?: string };
     if (!data.ok) return slackError(res, data);
-    return { success: true, data: { channel: parsed.channelId, ts: data.ts } };
+    return { success: true, data: { channel: o.channelId, ts: data.ts } };
   },
 });
 
@@ -943,24 +955,20 @@ const reactToOrigin = action(Type.Object({
     'Add an emoji reaction to the message this turn came from. A light way to acknowledge an overheard message without replying. No channel or timestamp is needed.',
   riskLevel: 'low',
   execute: async (args, ctx) => {
-    const origin = ctx.origin;
-    if (!origin || origin.channelType !== 'slack' || !origin.messageTs) {
-      return { success: false, error: 'This turn did not come from a Slack message, so there is nothing to react to.' };
+    const o = await resolveSlackOrigin(ctx);
+    if ('error' in o) return { success: false, error: o.error };
+    if (!o.messageTs) {
+      return { success: false, error: 'This turn came from no specific Slack message, so there is nothing to react to.' };
     }
-    const parsed = parseSlackThreadKey(origin.threadKey);
-    if (!parsed) return { success: false, error: 'The origin channel could not be resolved from the message.' };
-    const cred = await ctx.credentials.get();
-    const token = cred?.accessToken;
-    if (!token) return { success: false, error: 'Missing bot_token' };
-    const res = await slackFetch('reactions.add', token, {
-      channel: parsed.channelId,
-      timestamp: origin.messageTs,
+    const res = await slackFetch('reactions.add', o.token, {
+      channel: o.channelId,
+      timestamp: o.messageTs,
       name: args.emoji,
     });
     if (!res.ok) return slackError(res);
     const data = (await res.json()) as { ok: boolean; error?: string };
     if (!data.ok) return slackError(res, data);
-    return { success: true, data: { channel: parsed.channelId, timestamp: origin.messageTs, name: args.emoji } };
+    return { success: true, data: { channel: o.channelId, timestamp: o.messageTs, name: args.emoji } };
   },
 });
 

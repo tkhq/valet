@@ -46,7 +46,10 @@ export async function upsertFollowedThread(db: AppDb, row: FollowedThreadRow): P
         followedThreads.channelId,
         followedThreads.threadTs,
       ],
-      set: { ownerType: row.ownerType, ownerId: row.ownerId, lastActivityAt: now },
+      // `createdBy` too: it is the actor the follow-router runs the assistant
+      // session as, so a re-bind by a different owner must carry the new
+      // binder's actor, not the first one's.
+      set: { ownerType: row.ownerType, ownerId: row.ownerId, createdBy: row.createdBy, lastActivityAt: now },
     });
 }
 

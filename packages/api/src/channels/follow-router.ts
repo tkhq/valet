@@ -8,9 +8,8 @@
  */
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
-import { ensureDefaultAssistantSession } from "../assistants/service.js";
+import { deliverToAssistantThread } from "../events/assistant-delivery.js";
 import { findFollowedThread, touchFollowedThread } from "../events/followed-threads.js";
-import { writeDropLog } from "../orchestrator/signals.js";
 
 export interface FollowRouterDeps {
   db: AppDb;
@@ -71,27 +70,15 @@ export async function handleFollowedMessage(
   });
   if (!follow) return;
 
-  const { session } = await ensureDefaultAssistantSession(
-    { db: deps.db, engineHost: deps.engineHost },
-    { type: follow.ownerType, id: follow.ownerId },
-    { actorUserId: follow.createdBy, orgId: args.orgId },
-  );
-  const data = await session.toData();
-  if (data.orgId !== args.orgId) {
-    await writeDropLog(deps.db, {
-      orgId: args.orgId,
-      reason: "followed_target_mismatch",
-      conversationKey: `slack:follow:${f.eventId}`,
-      detail: `assistant session ${session.id} belongs to org ${data.orgId}, message belongs to org ${args.orgId}`,
-    });
-    return;
-  }
-
   const threadKey = `slack:${f.channel}:${f.threadTs}`;
   const attributes: Record<string, string> = { channel: f.channel };
   if (f.user) attributes.sender = f.user;
-  await session.thread(threadKey).submitPrompt(
-    {
+  await deliverToAssistantThread(deps, {
+    orgId: args.orgId,
+    owner: { type: follow.ownerType, id: follow.ownerId },
+    actorUserId: follow.createdBy,
+    threadKey,
+    signal: {
       kind: "signal",
       signalType: "slack.message",
       body: f.text === "" ? "(message)" : f.text,
@@ -99,7 +86,8 @@ export async function handleFollowedMessage(
       // Overheard: the assistant observes it and replies only if it acts.
       origin: { channelType: "slack", threadKey, reply: "manual", messageTs: f.ts },
     },
-    { dispatchId: `slack:follow:${f.eventId}` },
-  );
+    dispatchId: `slack:follow:${f.eventId}`,
+    mismatchReason: "followed_target_mismatch",
+  });
   await touchFollowedThread(deps.db, follow.id);
 }

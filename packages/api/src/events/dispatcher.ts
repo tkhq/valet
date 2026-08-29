@@ -198,23 +198,6 @@ export class EventDispatcher {
         } else {
           body = `${event.summary}\n\n${JSON.stringify(event.payload).slice(0, MAX_BODY_EXCERPT_CHARS)}`;
         }
-        // A follow-enabled rule binds the thread now, so later messages in it
-        // route to this assistant without a re-mention. The threadKey is
-        // `{channelType}:{channelId}:{threadTs}`.
-        if (target.follow && origin) {
-          const parts = origin.threadKey.split(":");
-          if (parts.length === 3 && parts[1] !== "" && parts[2] !== "") {
-            await upsertFollowedThread(this.deps.db, {
-              orgId: event.orgId,
-              channelType: origin.channelType,
-              channelId: parts[1],
-              threadTs: parts[2],
-              ownerType: sub.ownerType,
-              ownerId: sub.ownerId,
-              createdBy: sub.createdBy,
-            });
-          }
-        }
         await this.deps.deliverToOrchestrator({
           orgId: event.orgId,
           ownerType: sub.ownerType,
@@ -229,6 +212,23 @@ export class EventDispatcher {
           },
           dispatchId: `event:${delivery.id}`,
         });
+        // Bind the thread only AFTER the delivery lands, so a mention whose
+        // delivery fails does not leave a followed thread with no listener. The
+        // threadKey is `{channelType}:{channelId}:{threadTs}`.
+        if (target.follow && origin) {
+          const parts = origin.threadKey.split(":");
+          if (parts.length === 3 && parts[1] !== "" && parts[2] !== "") {
+            await upsertFollowedThread(this.deps.db, {
+              orgId: event.orgId,
+              channelType: origin.channelType,
+              channelId: parts[1],
+              threadTs: parts[2],
+              ownerType: sub.ownerType,
+              ownerId: sub.ownerId,
+              createdBy: sub.createdBy,
+            });
+          }
+        }
       } else if (target.kind === "signal") {
         await this.signalParkedRuns(event, refs);
       } else {
