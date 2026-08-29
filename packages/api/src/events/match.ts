@@ -10,6 +10,65 @@ export interface SubscriptionFilter {
   value: string | string[];
 }
 
+/** Longest regex pattern a subscription may carry. Bounds compile cost. */
+export const MAX_REGEX_PATTERN_LENGTH = 200;
+/** Longest input the regex is tested against, per event. Bounds backtracking cost. */
+const MAX_REGEX_INPUT_LENGTH = 2_000;
+
+/**
+ * A regex pattern this event system refuses to store, or `null` when it is
+ * safe. Node has no non-backtracking regex engine available here, so a
+ * subscription's pattern is untrusted input that runs on every event. Three
+ * write-time gates keep a single rule from stalling ingest:
+ *
+ * 1. length — a pattern over `MAX_REGEX_PATTERN_LENGTH` is refused.
+ * 2. validity — a pattern that does not compile is refused.
+ * 3. nesting — an unbounded quantifier applied to a group that itself holds an
+ *    unbounded quantifier (`(a+)+`, `(.*)*`, `(a+)*`) is the classic
+ *    catastrophic-backtracking shape; it is refused.
+ *
+ * This is a heuristic, not a proof: it does not catch every dangerous pattern
+ * (nested groups slip past 3). At match time `filtersMatch` also caps the input
+ * length and caches the compiled pattern. A full fix is a re2-class engine.
+ */
+export function validateRegexPattern(pattern: string): string | null {
+  if (pattern.length > MAX_REGEX_PATTERN_LENGTH) {
+    return `regex pattern is too long (max ${MAX_REGEX_PATTERN_LENGTH} characters). Shorten it.`;
+  }
+  try {
+    new RegExp(pattern);
+  } catch {
+    return `invalid regular expression. Fix the pattern.`;
+  }
+  // A group (no nested parens) that contains `*`/`+`, immediately quantified by
+  // `*`/`+` — the exponential-backtracking shape.
+  if (/\([^()]*[*+][^()]*\)[*+]/.test(pattern)) {
+    return `regex pattern nests unbounded quantifiers, which can hang matching. Simplify it.`;
+  }
+  return null;
+}
+
+/** Compiled-pattern memo so a rule's regex is built once, not per event. `null` = a pattern that will not compile. */
+const compiledRegexCache = new Map<string, RegExp | null>();
+const COMPILED_REGEX_CACHE_CAP = 500;
+
+function compileRegexCached(pattern: string): RegExp | null {
+  const hit = compiledRegexCache.get(pattern);
+  if (hit !== undefined) return hit;
+  let compiled: RegExp | null;
+  try {
+    compiled = new RegExp(pattern);
+  } catch {
+    compiled = null;
+  }
+  if (compiledRegexCache.size >= COMPILED_REGEX_CACHE_CAP) {
+    const oldest = compiledRegexCache.keys().next().value;
+    if (oldest !== undefined) compiledRegexCache.delete(oldest);
+  }
+  compiledRegexCache.set(pattern, compiled);
+  return compiled;
+}
+
 /** Trailing-wildcard key match: "github.pull_request.*" matches
  * "github.pull_request.opened" but not "github.pull_request_review.x" —
  * the wildcard only crosses a `.` boundary. */
@@ -89,15 +148,16 @@ export function filtersMatch(
         return typeof filter.value === "string" && actual.startsWith(filter.value);
       case "contains":
         return typeof filter.value === "string" && actual.includes(filter.value);
-      case "regex":
+      case "regex": {
         // A bad pattern fails closed — it never matches and never throws, so a
-        // malformed rule cannot break the ingest transaction.
+        // malformed rule cannot break the ingest transaction. The pattern is
+        // compiled once (cached) and tested against a bounded slice of the
+        // input, so backtracking cost stays bounded per event.
         if (typeof filter.value !== "string") return false;
-        try {
-          return new RegExp(filter.value).test(actual);
-        } catch {
-          return false;
-        }
+        const re = compileRegexCached(filter.value);
+        if (re === null) return false;
+        return re.test(actual.slice(0, MAX_REGEX_INPUT_LENGTH));
+      }
     }
   });
 }

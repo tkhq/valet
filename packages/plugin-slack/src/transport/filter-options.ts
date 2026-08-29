@@ -43,21 +43,31 @@ function hasToken(credential: StoredCredential | null): credential is StoredCred
 async function resolveUsers(ctx: FilterOptionContext, apiBaseUrl?: string): Promise<FilterOption[]> {
   if (!hasToken(ctx.credential)) return [];
   const transport = directoryTransport(ctx.credential, apiBaseUrl);
-  const members = await transport.listWorkspaceMembers(ctx.q ?? "");
-  return members.map((member) => {
-    const label = member.realName ?? member.name;
-    const option: FilterOption = { id: member.id, label };
-    if (member.realName !== undefined && member.realName !== member.name) option.hint = `@${member.name}`;
-    return option;
-  });
+  try {
+    const members = await transport.listWorkspaceMembers(ctx.q ?? "");
+    return members.map((member) => {
+      const label = member.realName ?? member.name;
+      const option: FilterOption = { id: member.id, label };
+      if (member.realName !== undefined && member.realName !== member.name) option.hint = `@${member.name}`;
+      return option;
+    });
+  } catch {
+    // Contract: a provider error is an empty list, not a throw — the endpoint
+    // turns it into a free-text fallback.
+    return [];
+  }
 }
 
 /** List public and private channels matching `ctx.q`, labeled `#name`. */
 async function resolveChannels(ctx: FilterOptionContext, apiBaseUrl?: string): Promise<FilterOption[]> {
   if (!hasToken(ctx.credential)) return [];
   const transport = directoryTransport(ctx.credential, apiBaseUrl);
-  const channels = await transport.listWorkspaceChannels(ctx.q ?? "");
-  return channels.map((channel) => ({ id: channel.id, label: `#${channel.name}` }));
+  try {
+    const channels = await transport.listWorkspaceChannels(ctx.q ?? "");
+    return channels.map((channel) => ({ id: channel.id, label: `#${channel.name}` }));
+  } catch {
+    return [];
+  }
 }
 
 /** Source name → resolver, as registered on the Slack plugin manifest. */

@@ -362,6 +362,17 @@ describe("POST /api/event-subscriptions", () => {
     expect(body.error).toContain("matches");
   });
 
+  it("400s a catastrophic-backtracking regex pattern, with a fix hint", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, {
+      ...VALID_BODY,
+      filters: [{ field: "repo", op: "regex", value: "(a+)+" }],
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("nests");
+  });
+
   it("400s a filter with missing/empty value for op eq, naming the field", async () => {
     const a = await boot();
     const res = await postSubscription(a.baseUrl, {

@@ -21,7 +21,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, eventDropLog, events, eventSubscriptions } from "../schema/index.js";
 import { readOwnerFilter } from "./_owner-filter.js";
 import { catalogForService } from "../events/ingest.js";
-import { subscriptionMatchesEvent } from "../events/match.js";
+import { subscriptionMatchesEvent, validateRegexPattern } from "../events/match.js";
 import { ownedDefinitionRow } from "../workflows/service.js";
 import { isTeamMember } from "../services/teams.js";
 import type {
@@ -157,6 +157,12 @@ export function validateSubscription(
       // eq / prefix / contains / regex — value must be a non-empty string
       if (typeof f.value !== "string" || f.value.length === 0) {
         return `filter value invalid for op ${f.op} on field ${f.field}`;
+      }
+      // A regex runs on every event, so refuse an invalid, oversized, or
+      // catastrophic-backtracking pattern at write time (see match.ts).
+      if (f.op === "regex") {
+        const regexError = validateRegexPattern(f.value);
+        if (regexError) return regexError;
       }
     }
     if (!selectedEntries.some((e) => e.filters.some((cf) => cf.field === f.field))) {
@@ -314,7 +320,12 @@ eventsRouter.get("/events/filter-options", async (c) => {
     reason = "Connect the integration in Settings to choose from a list. Type the value instead.";
   }
 
-  if (filterOptionsCache.size >= FILTER_OPTIONS_CACHE_CAP) filterOptionsCache.clear();
+  // Evict the oldest single entry (Map preserves insertion order), not the
+  // whole cache — one org's typeahead must not flush every other org's.
+  if (filterOptionsCache.size >= FILTER_OPTIONS_CACHE_CAP) {
+    const oldest = filterOptionsCache.keys().next().value;
+    if (oldest !== undefined) filterOptionsCache.delete(oldest);
+  }
   filterOptionsCache.set(cacheKey, { options, expiresAt: Date.now() + FILTER_OPTIONS_TTL_MS });
 
   const resp: FilterOptionsResponse = reason === undefined ? { options } : { options, reason };
