@@ -1,0 +1,86 @@
+name: Authorization
+detect_when:
+  - "The repo exposes API endpoints with different auth requirements"
+  - "The routes include /admin or /dashboard paths"
+  - "The code references roles or permissions"
+dedup: "If multi-tenancy is also loaded, multi-tenancy owns cross-tenant access threats and this file owns within-tenant privilege escalation. If policy-engines is also loaded, it owns policy-specific threats (degenerate policy, precedence, self-issuance) and this file owns direct authorization bypass and IDOR."
+
+threat_patterns:
+  idor:
+    description: Direct object reference allowing access to other users' resources
+    cwe: CWE-639
+    capec: CAPEC-122
+    mitre_attack: null
+    skill: low
+    likelihood: high
+    prereqs:
+      - Resource IDs visible in URLs or request bodies
+      - Multiple user accounts available for testing
+    look_for:
+      - sequential or predictable resource IDs
+      - resource access without an ownership check
+      - ID parameters in the URL, body, or headers
+      - a different response for own vs another's resource
+
+  privilege_escalation_vertical:
+    description: A lower-privilege user reaching higher-privilege functions
+    cwe: CWE-269
+    capec: CAPEC-233
+    mitre_attack: T1078
+    skill: medium
+    likelihood: medium
+    prereqs:
+      - At least two privilege levels exist
+      - A lower-privilege account is available
+    look_for:
+      - admin endpoints reachable with a user token
+      - a role check in the UI only, not the backend
+      - a role field in the request body (mass assignment)
+      - missing middleware on specific routes
+
+  privilege_escalation_horizontal:
+    description: A same-privilege user reaching another user's resources
+    cwe: CWE-639
+    capec: CAPEC-17
+    mitre_attack: null
+    skill: low
+    likelihood: high
+    prereqs:
+      - Multiple same-privilege accounts exist
+      - User-specific resources are reachable through the API
+    look_for:
+      - a user ID from the request trusted without a session check
+      - user ID substitution in API calls
+      - shared resources without an ownership check
+
+  authorization_bypass:
+    description: Circumventing authorization checks entirely
+    cwe: CWE-862
+    capec: CAPEC-87
+    mitre_attack: T1190
+    skill: medium
+    likelihood: medium
+    prereqs:
+      - Authorization middleware is in use
+      - Multiple routes or HTTP methods are available
+    look_for:
+      - endpoints that miss the auth middleware
+      - HTTP method switching (GET vs POST vs PUT)
+      - path traversal that bypasses route-level auth
+      - an API version with different auth requirements
+      - GraphQL field-level auth vs query-level auth
+
+  insecure_defaults:
+    description: Default permissions that are too permissive
+    cwe: CWE-276
+    capec: null
+    mitre_attack: null
+    skill: low
+    likelihood: medium
+    prereqs:
+      - A user or resource creation endpoint exists
+    look_for:
+      - new users get admin by default
+      - an empty policy means allow-all
+      - wildcard permissions accepted
+      - the default API key has full access

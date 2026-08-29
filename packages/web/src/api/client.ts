@@ -65,7 +65,22 @@ import type {
   GetSlackAppResponse,
   GetWorkflowImportFileResponse,
   GetSessionResponse,
+  GetSessionSecurityResponse,
   GetSkillResponse,
+  ListSecurityCoverageResponse,
+  ListSecurityFindingsResponse,
+  SecurityAddFindingCommentResponse,
+  SecurityDigestIssueResponse,
+  SecurityFileIssueResponse,
+  SecurityFindingSeverity,
+  SecurityFindingStatus,
+  SecurityPlanCellInput,
+  SecurityPreviewRequest,
+  SecurityPreviewResponse,
+  SecurityResolveNeedsResponse,
+  SecurityReviewFindingResponse,
+  SecuritySetConfigResponse,
+  SecuritySetPlanResponse,
   GetWorkflowResponse,
   GetWorkflowRunResponse,
   GetWorkflowTriggerCatalogResponse,
@@ -118,6 +133,7 @@ import type {
   MeResponse,
   OrgDirectoryResponse,
   OrgMembersResponse,
+  OrgPluginsResponse,
   OrgResponse,
   PatchLlmProviderRequest,
   PatchLlmProviderResponse,
@@ -130,11 +146,14 @@ import type {
   PatchIdentityLinkRequest,
   PatchOrgPolicyRequest,
   PatchOrgPolicyResponse,
+  PatchOrgPluginRequest,
+  PatchOrgPluginResponse,
   PatchOrgRequest,
   PatchOrgResponse,
   PatchSessionRequest,
   PatchSessionResponse,
   PauseSessionResponse,
+  SessionKind,
   PatchThreadRequest,
   PatchThreadResponse,
   PostGithubAppCredentialRequest,
@@ -396,6 +415,17 @@ export interface SkillSourceListQuery {
   cursor?: string;
 }
 
+/** Filters + cursor page the security findings list accepts. Mirrors the
+ * route's query params (`GET /sessions/:id/security/findings`). */
+export interface SecurityFindingsQuery {
+  severity?: SecurityFindingSeverity;
+  status?: SecurityFindingStatus;
+  cellId?: string;
+  path?: string;
+  cursor?: string;
+  limit?: number;
+}
+
 /** Filters the cross-workflow run list accepts. Array fields match any-of. */
 export interface WorkflowRunFilter extends WorkflowRunPage {
   workflowIds?: string[];
@@ -411,11 +441,130 @@ export const api = {
 
   // sessions
   /** Unscoped lists the caller's own sessions plus every team's they can
-   * reach. `owner` narrows it to one workspace. */
-  listSessions: (owner?: OwnerFilter) =>
-    request<ListSessionsResponse>("GET", `/sessions${ownerQuery(owner)}`),
+   * reach. `owner` narrows it to one workspace; `kind` to one session kind
+   * (the security hub sends `kind=security`). */
+  listSessions: (owner?: OwnerFilter, kind?: SessionKind) =>
+    request<ListSessionsResponse>(
+      "GET",
+      kind ? `/sessions?kind=${kind}${ownerSuffix(owner)}` : `/sessions${ownerQuery(owner)}`,
+    ),
   getSession: (id: string) =>
     request<GetSessionResponse>("GET", `/sessions/${encodeURIComponent(id)}`),
+  /** GET /sessions/:id/security — the session's engagement + cells
+   * (valet-security design §Web Surfaces). 404s for a non-security session. */
+  getSessionSecurity: (id: string) =>
+    request<GetSessionSecurityResponse>("GET", `/sessions/${encodeURIComponent(id)}/security`),
+  /** GET /sessions/:id/security/findings — filtered, cursor-paginated
+   * (valet-security design §Findings review). */
+  listSecurityFindings: (id: string, params: SecurityFindingsQuery = {}) => {
+    const qs = new URLSearchParams();
+    if (params.severity) qs.set("severity", params.severity);
+    if (params.status) qs.set("status", params.status);
+    if (params.cellId) qs.set("cellId", params.cellId);
+    if (params.path) qs.set("path", params.path);
+    if (params.cursor) qs.set("cursor", params.cursor);
+    if (params.limit !== undefined) qs.set("limit", String(params.limit));
+    const suffix = qs.size > 0 ? `?${qs.toString()}` : "";
+    return request<ListSecurityFindingsResponse>(
+      "GET",
+      `/sessions/${encodeURIComponent(id)}/security/findings${suffix}`,
+    );
+  },
+  /** GET /sessions/:id/security/coverage — the coverage ledger (NOT_ASSESSED,
+   * M-P2d): every coverage row + the assessed/not_assessed rollup with gaps. */
+  getSecurityCoverage: (id: string) =>
+    request<ListSecurityCoverageResponse>(
+      "GET",
+      `/sessions/${encodeURIComponent(id)}/security/coverage`,
+    ),
+  /** POST /sessions/:id/security/plan/cells — replace the plan from structured
+   * steps during planning (dynamic-config M-F2; session admin). The server
+   * assigns dense ordinals in array order. Returns the new cell count. */
+  setSecurityPlanCells: (id: string, cells: SecurityPlanCellInput[]) =>
+    request<SecuritySetPlanResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/security/plan/cells`,
+      { cells },
+    ),
+  /** POST /sessions/:id/security/config — edit the engagement's focus, known
+   * invariants, and loaded threat categories during planning (dynamic-config
+   * M-F3, M-P2a; session admin). Returns the saved values. */
+  setSecurityConfig: (
+    id: string,
+    body: { focus?: string | null; invariants?: string[]; categories?: string[] },
+  ) =>
+    request<SecuritySetConfigResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/security/config`,
+      body,
+    ),
+  /** POST /sessions/:id/security/findings/:findingId/status — human
+   * verify/refute (forward-only; session admin). */
+  reviewSecurityFinding: (
+    id: string,
+    findingId: string,
+    body: { status: "verified" | "refuted"; reason: string },
+  ) =>
+    request<SecurityReviewFindingResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/security/findings/${encodeURIComponent(findingId)}/status`,
+      body,
+    ),
+  /** POST /sessions/:id/security/findings/:findingId/comments — add a human
+   * note to a finding (view-gated; human-only). Returns the created comment. */
+  addSecurityFindingComment: (id: string, findingId: string, body: { body: string }) =>
+    request<SecurityAddFindingCommentResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/security/findings/${encodeURIComponent(findingId)}/comments`,
+      body,
+    ),
+  /** POST /sessions/:id/security/findings/:findingId/issues — file one
+   * GitHub/Linear issue; idempotent per (finding, provider). */
+  fileSecurityIssue: (
+    id: string,
+    findingId: string,
+    body: { provider: "github" | "linear"; repo?: string; teamId?: string },
+  ) =>
+    request<SecurityFileIssueResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/security/findings/${encodeURIComponent(findingId)}/issues`,
+      body,
+    ),
+  /** POST /sessions/:id/security/issues/digest — one digest issue from many
+   * findings; writes no link rows. */
+  fileSecurityDigest: (
+    id: string,
+    body: { provider: "github" | "linear"; findingIds: string[]; repo?: string; teamId?: string },
+  ) =>
+    request<SecurityDigestIssueResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/security/issues/digest`,
+      body,
+    ),
+  /** POST /sessions/:id/security/cancel — stop a planning or running
+   * engagement (human action; session admin). Returns the cancelled
+   * engagement + cells. */
+  cancelSecurityReview: (id: string) =>
+    request<GetSessionSecurityResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/security/cancel`,
+    ),
+  /** POST /sessions/:id/security/needs/resolve — the consolidated human answer
+   * + delta re-run (pivot-coordinator, M-P4c; session admin). Marks each need
+   * answered and resets only the affected cells to pending. */
+  resolveSecurityNeeds: (
+    id: string,
+    answers: { needId: string; resolution: string; dismiss?: boolean }[],
+  ) =>
+    request<SecurityResolveNeedsResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/security/needs/resolve`,
+      { answers },
+    ),
+  /** POST /sessions/security/preview — the setup page's read-only preview of
+   * the config + plan a review would seed. Creates nothing. */
+  securityPreview: (body: SecurityPreviewRequest) =>
+    request<SecurityPreviewResponse>("POST", "/sessions/security/preview", body),
   createSession: (body: CreateSessionRequest) =>
     request<CreateSessionResponse>("POST", "/sessions", body),
   deleteSession: (id: string) =>
@@ -498,6 +647,11 @@ export const api = {
     request<{ ok: boolean }>("DELETE", `/artifacts/${encodeURIComponent(id)}`),
   patchOrgSettings: (body: PatchOrgSettingsRequest) =>
     request<OrgSettingsResponse>("PATCH", "/org/settings", body),
+  // org plugin entitlements (plugin-entitlements design). `getOrgPlugins` is
+  // member-readable; `patchOrgPlugin` is org-admin-only (403 otherwise).
+  getOrgPlugins: () => request<OrgPluginsResponse>("GET", "/org/plugins"),
+  patchOrgPlugin: (name: string, body: PatchOrgPluginRequest) =>
+    request<PatchOrgPluginResponse>("PATCH", `/org/plugins/${encodeURIComponent(name)}`, body),
   getMemoryDoc: (path: string, owner?: OwnerFilter) =>
     request<GetMemoryDocResponse>(
       "GET",

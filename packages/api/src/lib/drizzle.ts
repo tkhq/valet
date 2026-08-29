@@ -313,6 +313,41 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'CREATE INDEX IF NOT EXISTS "llm_proxy_requests_user_created" ON "llm_proxy_requests" ("user_id", "created_at")',
   },
   {
+    // The shared plugin store (docs/specs/2026-08-29-plugin-store-design.md).
+    // One core table so a plugin persists data with no per-plugin migration;
+    // the entitlement rail is its first consumer under plugin "valet". Columns
+    // in lockstep with `plugin_store` in 0000_app.sql.
+    describe: "plugin_store table",
+    probe: { kind: "table", table: "plugin_store" },
+    sql: `CREATE TABLE IF NOT EXISTS "plugin_store" (
+      "id" text PRIMARY KEY NOT NULL,
+      "plugin" text NOT NULL,
+      "scope_type" text NOT NULL,
+      "scope_id" text NOT NULL,
+      "collection" text NOT NULL,
+      "key" text NOT NULL,
+      "doc" jsonb NOT NULL,
+      "revision" integer NOT NULL DEFAULT 1,
+      "created_at" bigint NOT NULL,
+      "updated_at" bigint NOT NULL
+    )`,
+  },
+  {
+    describe: "plugin_store_identity_unique index",
+    probe: { kind: "index", index: "plugin_store_identity_unique" },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "plugin_store_identity_unique" ON "plugin_store" ("plugin","scope_type","scope_id","collection","key")',
+  },
+  {
+    describe: "plugin_store_list index",
+    probe: { kind: "index", index: "plugin_store_list" },
+    sql: 'CREATE INDEX IF NOT EXISTS "plugin_store_list" ON "plugin_store" ("plugin","scope_type","scope_id","collection")',
+  },
+  {
+    describe: "plugin_store_doc_gin index",
+    probe: { kind: "index", index: "plugin_store_doc_gin" },
+    sql: 'CREATE INDEX IF NOT EXISTS "plugin_store_doc_gin" ON "plugin_store" USING gin ("doc")',
+  },
+  {
     // The cost_entries VIEW was rewritten (#432): it added a `use_case` column
     // and a UNION ALL leg over llm_proxy_requests. A view's output columns
     // appear in information_schema.columns, so the `column` probe on the new
@@ -371,6 +406,348 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
         p."cost_usd" AS "cost_total", (p."cost_usd" IS NOT NULL) AS "priced", 'proxy' AS "use_case"
       FROM "llm_proxy_requests" p
       WHERE p."total_tokens" > 0`,
+  },
+  {
+    // Which authoring surface a session drives (Valet Security spec; shared
+    // shape with the Valet Design PR #396). DEFAULT backfills every
+    // pre-existing row to 'code' — the answer a fresh database gives.
+    describe: "agent_sessions.kind column",
+    probe: { kind: "column", table: "agent_sessions", column: "kind" },
+    sql: 'ALTER TABLE "agent_sessions" ADD COLUMN IF NOT EXISTS "kind" text NOT NULL DEFAULT \'code\'',
+  },
+  {
+    // Valet Security tables (docs/specs/2026-08-27-valet-security-design.md).
+    // Whole-table siblings of the column repairs; keep each in lockstep with
+    // 0000_app.sql.
+    describe: "security_engagements table",
+    probe: { kind: "table", table: "security_engagements" },
+    sql: `CREATE TABLE IF NOT EXISTS "security_engagements" (
+      "id" text PRIMARY KEY NOT NULL,
+      "session_id" text NOT NULL,
+      "status" text DEFAULT 'planning' NOT NULL,
+      "repo_full_name" text NOT NULL,
+      "repo_ref" text DEFAULT '' NOT NULL,
+      "plan" text DEFAULT '' NOT NULL,
+      "parent_engagement_id" text,
+      "base_ref" text,
+      "changed_paths" text,
+      "focus" text,
+      "invariants" text,
+      "categories" text,
+      "config_personas" text,
+      "config_persona_markdown" text,
+      "config_tools" text,
+      "authorized_scope" text,
+      "has_repo_config" boolean DEFAULT false NOT NULL,
+      "report_markdown" text,
+      "report_json" text,
+      "report_generated_at" bigint,
+      "created_at" bigint NOT NULL,
+      "updated_at" bigint NOT NULL
+    )`,
+  },
+  {
+    describe: "security_engagements_session_unique index",
+    probe: { kind: "index", index: "security_engagements_session_unique" },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "security_engagements_session_unique" ON "security_engagements" ("session_id")',
+  },
+  {
+    // The re-scan lineage link (re-scan / iterate). Null on every engagement
+    // written before the column existed — read as "not a re-scan", the same
+    // answer a first review gets. The whole-table CREATE above does not add a
+    // column to an already-created table, so this column repair is separate.
+    describe: "security_engagements.parent_engagement_id column",
+    probe: { kind: "column", table: "security_engagements", column: "parent_engagement_id" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "parent_engagement_id" text',
+  },
+  {
+    // Diff-scoped re-scan (re-scan / iterate): the parent SHA the diff ran
+    // against. Null on a first review, or a full-scan fallback. Separate
+    // column repair because the whole-table CREATE does not add a column to an
+    // already-created table.
+    describe: "security_engagements.base_ref column",
+    probe: { kind: "column", table: "security_engagements", column: "base_ref" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "base_ref" text',
+  },
+  {
+    // Diff-scoped re-scan (re-scan / iterate): the JSON array of changed file
+    // paths the sweeps scoped to. Null on a first review or a full-scan
+    // fallback.
+    describe: "security_engagements.changed_paths column",
+    probe: { kind: "column", table: "security_engagements", column: "changed_paths" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "changed_paths" text',
+  },
+  {
+    // Repo config context (dynamic-config M-F1): parsed from `.valet/security.yml`
+    // at create. Null on a preset-seeded engagement. Separate column repairs
+    // because the whole-table CREATE does not add a column to an existing table.
+    describe: "security_engagements.focus column",
+    probe: { kind: "column", table: "security_engagements", column: "focus" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "focus" text',
+  },
+  {
+    describe: "security_engagements.invariants column",
+    probe: { kind: "column", table: "security_engagements", column: "invariants" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "invariants" text',
+  },
+  {
+    describe: "security_engagements.categories column",
+    probe: { kind: "column", table: "security_engagements", column: "categories" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "categories" text',
+  },
+  {
+    describe: "security_engagements.config_personas column",
+    probe: { kind: "column", table: "security_engagements", column: "config_personas" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "config_personas" text',
+  },
+  {
+    describe: "security_engagements.config_persona_markdown column",
+    probe: { kind: "column", table: "security_engagements", column: "config_persona_markdown" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "config_persona_markdown" text',
+  },
+  {
+    describe: "security_engagements.config_tools column",
+    probe: { kind: "column", table: "security_engagements", column: "config_tools" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "config_tools" text',
+  },
+  {
+    // Authorized live-testing scope (M-P4b): the hosts the live personas may
+    // reach. JSON `{ hosts: string[] }`. Null when no live testing is authorized.
+    describe: "security_engagements.authorized_scope column",
+    probe: { kind: "column", table: "security_engagements", column: "authorized_scope" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "authorized_scope" text',
+  },
+  {
+    describe: "security_engagements.has_repo_config column",
+    probe: { kind: "column", table: "security_engagements", column: "has_repo_config" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "has_repo_config" boolean DEFAULT false NOT NULL',
+  },
+  {
+    // The report artifact (M-P3): the report cell writes the markdown report and
+    // its JSON snapshot; both stay null until it runs. Separate column repairs
+    // because the whole-table CREATE does not add a column to an existing table.
+    describe: "security_engagements.report_markdown column",
+    probe: { kind: "column", table: "security_engagements", column: "report_markdown" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "report_markdown" text',
+  },
+  {
+    describe: "security_engagements.report_json column",
+    probe: { kind: "column", table: "security_engagements", column: "report_json" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "report_json" text',
+  },
+  {
+    describe: "security_engagements.report_generated_at column",
+    probe: { kind: "column", table: "security_engagements", column: "report_generated_at" },
+    sql: 'ALTER TABLE "security_engagements" ADD COLUMN IF NOT EXISTS "report_generated_at" bigint',
+  },
+  {
+    describe: "security_engagements_parent index",
+    probe: { kind: "index", index: "security_engagements_parent" },
+    sql: 'CREATE INDEX IF NOT EXISTS "security_engagements_parent" ON "security_engagements" ("parent_engagement_id")',
+  },
+  {
+    describe: "security_cells table",
+    probe: { kind: "table", table: "security_cells" },
+    sql: `CREATE TABLE IF NOT EXISTS "security_cells" (
+      "id" text PRIMARY KEY NOT NULL,
+      "engagement_id" text NOT NULL,
+      "ordinal" integer NOT NULL,
+      "persona" text NOT NULL,
+      "mode" text DEFAULT 'fresh' NOT NULL,
+      "goal" text NOT NULL,
+      "dir" text NOT NULL,
+      "reads" text DEFAULT '[]' NOT NULL,
+      "review" boolean DEFAULT false NOT NULL,
+      "status" text DEFAULT 'pending' NOT NULL,
+      "attempts" integer DEFAULT 0 NOT NULL,
+      "compacted_at" bigint,
+      "child_session_id" text,
+      "dispatched_at" bigint,
+      "settled_at" bigint,
+      "created_at" bigint NOT NULL
+    )`,
+  },
+  {
+    describe: "security_cells_engagement_ordinal_unique index",
+    probe: { kind: "index", index: "security_cells_engagement_ordinal_unique" },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "security_cells_engagement_ordinal_unique" ON "security_cells" ("engagement_id", "ordinal")',
+  },
+  {
+    describe: "security_cells_child_session index",
+    probe: { kind: "index", index: "security_cells_child_session" },
+    sql: 'CREATE INDEX IF NOT EXISTS "security_cells_child_session" ON "security_cells" ("child_session_id")',
+  },
+  {
+    describe: "security_files table",
+    probe: { kind: "table", table: "security_files" },
+    sql: `CREATE TABLE IF NOT EXISTS "security_files" (
+      "id" text PRIMARY KEY NOT NULL,
+      "engagement_id" text NOT NULL,
+      "cell_id" text NOT NULL,
+      "path" text NOT NULL,
+      "revision" integer NOT NULL,
+      "content" text NOT NULL,
+      "created_at" bigint NOT NULL
+    )`,
+  },
+  {
+    describe: "security_files_path_revision_unique index",
+    probe: { kind: "index", index: "security_files_path_revision_unique" },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "security_files_path_revision_unique" ON "security_files" ("engagement_id", "path", "revision")',
+  },
+  {
+    describe: "security_findings table",
+    probe: { kind: "table", table: "security_findings" },
+    sql: `CREATE TABLE IF NOT EXISTS "security_findings" (
+      "id" text PRIMARY KEY NOT NULL,
+      "engagement_id" text NOT NULL,
+      "cell_id" text NOT NULL,
+      "fingerprint" text NOT NULL,
+      "severity" text NOT NULL,
+      "title" text NOT NULL,
+      "file" text,
+      "line" integer,
+      "body" text DEFAULT '' NOT NULL,
+      "status" text DEFAULT 'open' NOT NULL,
+      "status_reason" text,
+      "status_actor" text,
+      "recurring" boolean DEFAULT false NOT NULL,
+      "carried_from_finding_id" text,
+      "created_at" bigint NOT NULL
+    )`,
+  },
+  {
+    // Re-scan v2 carried-finding flag. DEFAULT backfills every pre-existing
+    // row to false — a first review's findings are never recurring.
+    describe: "security_findings.recurring column",
+    probe: { kind: "column", table: "security_findings", column: "recurring" },
+    sql: 'ALTER TABLE "security_findings" ADD COLUMN IF NOT EXISTS "recurring" boolean NOT NULL DEFAULT false',
+  },
+  {
+    // Re-scan v2 carried-finding provenance. Null on rows written before the
+    // column existed and on every first-seen finding.
+    describe: "security_findings.carried_from_finding_id column",
+    probe: { kind: "column", table: "security_findings", column: "carried_from_finding_id" },
+    sql: 'ALTER TABLE "security_findings" ADD COLUMN IF NOT EXISTS "carried_from_finding_id" text',
+  },
+  {
+    describe: "security_findings_engagement index",
+    probe: { kind: "index", index: "security_findings_engagement" },
+    sql: 'CREATE INDEX IF NOT EXISTS "security_findings_engagement" ON "security_findings" ("engagement_id")',
+  },
+  {
+    describe: "security_finding_links table",
+    probe: { kind: "table", table: "security_finding_links" },
+    sql: `CREATE TABLE IF NOT EXISTS "security_finding_links" (
+      "id" text PRIMARY KEY NOT NULL,
+      "finding_id" text NOT NULL,
+      "engagement_id" text NOT NULL,
+      "provider" text NOT NULL,
+      "external_id" text NOT NULL,
+      "url" text NOT NULL,
+      "created_by" text NOT NULL,
+      "created_at" bigint NOT NULL
+    )`,
+  },
+  {
+    describe: "security_finding_links_provider_unique index",
+    probe: { kind: "index", index: "security_finding_links_provider_unique" },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "security_finding_links_provider_unique" ON "security_finding_links" ("finding_id", "provider")',
+  },
+  {
+    describe: "security_handoffs table",
+    probe: { kind: "table", table: "security_handoffs" },
+    sql: `CREATE TABLE IF NOT EXISTS "security_handoffs" (
+      "id" text PRIMARY KEY NOT NULL,
+      "engagement_id" text NOT NULL,
+      "finding_id" text NOT NULL,
+      "child_session_id" text NOT NULL,
+      "title" text NOT NULL,
+      "task" text,
+      "created_by" text NOT NULL,
+      "created_at" bigint NOT NULL
+    )`,
+  },
+  {
+    describe: "security_handoffs_engagement index",
+    probe: { kind: "index", index: "security_handoffs_engagement" },
+    sql: 'CREATE INDEX IF NOT EXISTS "security_handoffs_engagement" ON "security_handoffs" ("engagement_id")',
+  },
+  {
+    describe: "security_handoffs_finding index",
+    probe: { kind: "index", index: "security_handoffs_finding" },
+    sql: 'CREATE INDEX IF NOT EXISTS "security_handoffs_finding" ON "security_handoffs" ("finding_id")',
+  },
+  {
+    describe: "security_finding_comments table",
+    probe: { kind: "table", table: "security_finding_comments" },
+    sql: `CREATE TABLE IF NOT EXISTS "security_finding_comments" (
+      "id" text PRIMARY KEY NOT NULL,
+      "finding_id" text NOT NULL,
+      "engagement_id" text NOT NULL,
+      "body" text NOT NULL,
+      "author_user_id" text NOT NULL,
+      "created_at" bigint NOT NULL
+    )`,
+  },
+  {
+    describe: "security_finding_comments_finding index",
+    probe: { kind: "index", index: "security_finding_comments_finding" },
+    sql: 'CREATE INDEX IF NOT EXISTS "security_finding_comments_finding" ON "security_finding_comments" ("finding_id")',
+  },
+  {
+    describe: "security_finding_comments_engagement index",
+    probe: { kind: "index", index: "security_finding_comments_engagement" },
+    sql: 'CREATE INDEX IF NOT EXISTS "security_finding_comments_engagement" ON "security_finding_comments" ("engagement_id")',
+  },
+  {
+    describe: "security_coverage table",
+    probe: { kind: "table", table: "security_coverage" },
+    sql: `CREATE TABLE IF NOT EXISTS "security_coverage" (
+      "id" text PRIMARY KEY NOT NULL,
+      "engagement_id" text NOT NULL,
+      "cell_id" text NOT NULL,
+      "area" text NOT NULL,
+      "status" text NOT NULL,
+      "tool" text,
+      "reason" text,
+      "created_at" bigint NOT NULL
+    )`,
+  },
+  {
+    describe: "security_coverage_engagement index",
+    probe: { kind: "index", index: "security_coverage_engagement" },
+    sql: 'CREATE INDEX IF NOT EXISTS "security_coverage_engagement" ON "security_coverage" ("engagement_id")',
+  },
+  {
+    describe: "security_coverage_cell index",
+    probe: { kind: "index", index: "security_coverage_cell" },
+    sql: 'CREATE INDEX IF NOT EXISTS "security_coverage_cell" ON "security_coverage" ("cell_id")',
+  },
+  {
+    describe: "security_needs table",
+    probe: { kind: "table", table: "security_needs" },
+    sql: `CREATE TABLE IF NOT EXISTS "security_needs" (
+      "id" text PRIMARY KEY NOT NULL,
+      "engagement_id" text NOT NULL,
+      "cell_id" text NOT NULL,
+      "kind" text NOT NULL,
+      "description" text NOT NULL,
+      "status" text DEFAULT 'open' NOT NULL,
+      "resolution" text,
+      "created_at" bigint NOT NULL,
+      "resolved_at" bigint
+    )`,
+  },
+  {
+    describe: "security_needs_engagement index",
+    probe: { kind: "index", index: "security_needs_engagement" },
+    sql: 'CREATE INDEX IF NOT EXISTS "security_needs_engagement" ON "security_needs" ("engagement_id")',
+  },
+  {
+    describe: "security_needs_cell index",
+    probe: { kind: "index", index: "security_needs_cell" },
+    sql: 'CREATE INDEX IF NOT EXISTS "security_needs_cell" ON "security_needs" ("cell_id")',
   },
 ];
 

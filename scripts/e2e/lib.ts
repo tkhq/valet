@@ -95,6 +95,25 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/github-repo.e2e.test.ts",
   "src/integration/workflow-github-credential.e2e.test.ts",
   "src/integration/usage-summary.test.ts",
+  "src/integration/plugin-entitlements.test.ts",
+  // Valet Security integration suites run keyless: the virtual sandbox
+  // provider and abort-based settlement need no model key.
+  "src/integration/security-settlement.test.ts",
+  "src/integration/security-persona.test.ts",
+  "src/integration/security-yield.test.ts",
+  "src/integration/security-routes.test.ts",
+  "src/integration/security-triage.test.ts",
+  "src/integration/security-acceptance.test.ts",
+  "src/integration/security-cancel.test.ts",
+  "src/integration/security-rescan-diff.test.ts",
+  "src/integration/security-plan-edit.test.ts",
+  "src/integration/security-config-edit.test.ts",
+  "src/integration/security-comments.test.ts",
+  "src/integration/security-coverage.test.ts",
+  "src/integration/security-finding-location.test.ts",
+  "src/integration/security-report.test.ts",
+  "src/integration/security-needs.test.ts",
+  "src/integration/security-setup.test.ts",
 ];
 
 const INTEGRATION_AGENT_FILES = [
@@ -130,6 +149,7 @@ const TESTED_PLUGINS = [
   "@valet/plugin-google-workspace",
   "@valet/plugin-linear",
   "@valet/plugin-openai",
+  "@valet/plugin-security",
   "@valet/plugin-slack",
   "@valet/plugin-slack-user",
   "@valet/plugin-telegram",

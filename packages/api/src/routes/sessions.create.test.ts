@@ -650,6 +650,314 @@ describe("POST /api/sessions: zero-config repo sources", () => {
   });
 });
 
+describe("POST /api/sessions: security .valet/security.yml config (M-F1)", () => {
+  let api: TestApi | undefined;
+  let fixture: Awaited<ReturnType<typeof startGithubFixture>> | undefined;
+  const REPO = { fullName: "acme/api", cloneUrl: "https://github.com/acme/api.git" };
+
+  const CONFIG_YAML = `version: 1
+focus: Check the auth boundary
+invariants:
+  - tenant id is always checked in the repository layer
+categories:
+  - authz
+steps:
+  - ordinal: 1
+    persona: code-review
+    mode: fresh
+    name: recon
+    playbook: recon
+    goal: Map the codebase and seed the checklist from the file inventory
+    reads: []
+  - ordinal: 2
+    persona: code-review
+    mode: fresh
+    name: authz
+    playbook: authz
+    goal: Sweep authorization on every route from the recon map
+    reads: [1]
+`;
+
+  const prevGithubApiUrl = process.env.GITHUB_API_URL;
+
+  afterEach(async () => {
+    await api?.cleanup();
+    api = undefined;
+    await fixture?.close();
+    fixture = undefined;
+    if (prevGithubApiUrl === undefined) delete process.env.GITHUB_API_URL;
+    else process.env.GITHUB_API_URL = prevGithubApiUrl;
+  });
+
+  async function loadEngagement(sessionId: string) {
+    const { createSecurityEngagementService } = await import(
+      "../services/security-engagements.js"
+    );
+    const service = createSecurityEngagementService({ db: api!.providers.db });
+    const result = await service.getEngagementBySession(sessionId);
+    if (!result) throw new Error("no engagement");
+    return result.engagement;
+  }
+
+  async function createSecuritySession(): Promise<string> {
+    const workspace = await mkdtemp(join(tmpdir(), "valet-session-secconfig-"));
+    const res = await fetch(`${api!.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace, repo: REPO, kind: "security" }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateSessionResponse;
+    return body.id;
+  }
+
+  it("seeds the plan from the repo config's steps and stores the config context", async () => {
+    fixture = startGithubFixture({
+      getRepo: () => ({ body: { default_branch: "main" } }),
+      getContents: (_owner, _repo, path) =>
+        path === ".valet/security.yml"
+          ? { body: { content: Buffer.from(CONFIG_YAML, "utf8").toString("base64"), encoding: "base64" } }
+          : { status: 404, body: { message: "Not Found" } },
+    });
+    process.env.GITHUB_API_URL = fixture.url;
+    api = await bootTestApi({ githubApiUrl: fixture.url });
+
+    const sessionId = await createSecuritySession();
+    const engagement = await loadEngagement(sessionId);
+
+    expect(engagement.hasRepoConfig).toBe(true);
+    expect(engagement.focus).toBe("Check the auth boundary");
+    expect(engagement.invariants).toBe(
+      JSON.stringify(["tenant id is always checked in the repository layer"]),
+    );
+    expect(engagement.categories).toBe(JSON.stringify(["authz"]));
+    // The plan came from the config's two steps, not the five-cell preset.
+    expect(engagement.plan).toContain("name: recon");
+    expect(engagement.plan).toContain("name: authz");
+    expect(engagement.plan).not.toContain("secrets-config");
+  });
+
+  it("stores declared tools + authorized scope from the config (M-P4a/M-P4b)", async () => {
+    const CONFIG_WITH_TOOLS = `version: 1
+scope:
+  hosts:
+    - staging.example.com
+tools:
+  - id: nuclei
+    install: apt-get install -y nuclei
+    egress:
+      - staging.example.com
+  - id: zap
+    mcp:
+      url: http://127.0.0.1:8090
+      prefix: mcp__zap__
+steps:
+  - ordinal: 1
+    persona: code-review
+    mode: fresh
+    name: recon
+    playbook: recon
+    goal: Map the codebase and seed the checklist
+    reads: []
+  - ordinal: 2
+    persona: dast
+    mode: fresh
+    name: dynamic
+    playbook: dast
+    goal: Probe the running target within the authorized scope
+    reads: [1]
+`;
+    fixture = startGithubFixture({
+      getRepo: () => ({ body: { default_branch: "main" } }),
+      getContents: (_owner, _repo, path) =>
+        path === ".valet/security.yml"
+          ? {
+              body: {
+                content: Buffer.from(CONFIG_WITH_TOOLS, "utf8").toString("base64"),
+                encoding: "base64",
+              },
+            }
+          : { status: 404, body: { message: "Not Found" } },
+    });
+    process.env.GITHUB_API_URL = fixture.url;
+    api = await bootTestApi({ githubApiUrl: fixture.url });
+
+    const sessionId = await createSecuritySession();
+    const engagement = await loadEngagement(sessionId);
+
+    expect(engagement.hasRepoConfig).toBe(true);
+    // The structured tool decls round-trip on config_tools.
+    expect(JSON.parse(engagement.configTools ?? "null")).toEqual([
+      { id: "nuclei", install: "apt-get install -y nuclei", egress: ["staging.example.com"] },
+      { id: "zap", mcp: { url: "http://127.0.0.1:8090", prefix: "mcp__zap__" } },
+    ]);
+    // The authorized scope round-trips on authorized_scope.
+    expect(JSON.parse(engagement.authorizedScope ?? "null")).toEqual({
+      hosts: ["staging.example.com"],
+    });
+    // The plan carries the live dast step.
+    expect(engagement.plan).toContain("persona: dast");
+
+    // The live-persona dispatch prompt names the authorized scope (M-P4b).
+    const { buildDispatchPrompt, createSecurityEngagementService, parseAuthorizedScopeHosts } =
+      await import("../services/security-engagements.js");
+    const { parsePlan, KNOWN_PERSONAS } = await import("@valet/plugin-security");
+    const service = createSecurityEngagementService({ db: api!.providers.db });
+    const started = await service.startEngagement(engagement.id, { resolvedSha: "a".repeat(40) });
+    const dastCell = started.cells.find((c) => c.persona === "dast");
+    if (!dastCell) throw new Error("expected a dast cell");
+    const plan = parsePlan(started.engagement.plan, KNOWN_PERSONAS);
+    const prompt = buildDispatchPrompt(dastCell, plan, [], "PROTOCOL", false, {
+      scopeHosts: parseAuthorizedScopeHosts(started.engagement.authorizedScope),
+    });
+    expect(prompt).toContain("--- Authorized scope (live testing) ---");
+    expect(prompt).toContain("- staging.example.com");
+    expect(prompt).toContain("action outside this scope is forbidden");
+  });
+
+  it("fetches a repo-defined persona's markdown and stashes it on the engagement (M-P2c)", async () => {
+    const PERSONA_PATH = ".claude/agents/my-persona.md";
+    const PERSONA_MD = [
+      "---",
+      "name: my-persona",
+      "description: A repo-defined persona.",
+      "---",
+      "",
+      "You are the CUSTOM repo persona. Do the special sweep.",
+    ].join("\n");
+    const CONFIG_WITH_PERSONA = `version: 1
+personas:
+  my-persona: ${PERSONA_PATH}
+steps:
+  - ordinal: 1
+    persona: code-review
+    mode: fresh
+    name: recon
+    playbook: recon
+    goal: Map the codebase and seed the checklist
+    reads: []
+  - ordinal: 2
+    persona: my-persona
+    mode: fresh
+    name: custom
+    goal: Run the repo-defined persona sweep
+    reads: [1]
+`;
+    fixture = startGithubFixture({
+      getRepo: () => ({ body: { default_branch: "main" } }),
+      getContents: (_owner, _repo, path) => {
+        if (path === ".valet/security.yml") {
+          return {
+            body: {
+              content: Buffer.from(CONFIG_WITH_PERSONA, "utf8").toString("base64"),
+              encoding: "base64",
+            },
+          };
+        }
+        if (path === PERSONA_PATH) {
+          return { body: { content: Buffer.from(PERSONA_MD, "utf8").toString("base64"), encoding: "base64" } };
+        }
+        return { status: 404, body: { message: "Not Found" } };
+      },
+    });
+    process.env.GITHUB_API_URL = fixture.url;
+    api = await bootTestApi({ githubApiUrl: fixture.url });
+
+    const sessionId = await createSecuritySession();
+    const engagement = await loadEngagement(sessionId);
+
+    expect(engagement.hasRepoConfig).toBe(true);
+    // The id → path map is stored.
+    expect(engagement.configPersonas).toBe(JSON.stringify({ "my-persona": PERSONA_PATH }));
+    // The resolved markdown is stashed so the host attaches the repo role.
+    const stashed = JSON.parse(engagement.configPersonaMarkdown ?? "null") as Record<string, string>;
+    expect(stashed["my-persona"]).toContain("CUSTOM repo persona");
+    // The plan uses the repo persona on the second step.
+    expect(engagement.plan).toContain("persona: my-persona");
+  });
+
+  it("stashes no persona markdown when the repo persona file is missing (M-P2c fallback)", async () => {
+    const CONFIG_MISSING_PERSONA = `version: 1
+personas:
+  ghost: .claude/agents/ghost.md
+steps:
+  - ordinal: 1
+    persona: code-review
+    mode: fresh
+    name: recon
+    playbook: recon
+    goal: Map the codebase and seed the checklist
+    reads: []
+  - ordinal: 2
+    persona: ghost
+    mode: fresh
+    name: ghost-step
+    goal: Run the ghost persona
+    reads: [1]
+`;
+    fixture = startGithubFixture({
+      getRepo: () => ({ body: { default_branch: "main" } }),
+      getContents: (_owner, _repo, path) =>
+        path === ".valet/security.yml"
+          ? {
+              body: {
+                content: Buffer.from(CONFIG_MISSING_PERSONA, "utf8").toString("base64"),
+                encoding: "base64",
+              },
+            }
+          : { status: 404, body: { message: "Not Found" } },
+    });
+    process.env.GITHUB_API_URL = fixture.url;
+    api = await bootTestApi({ githubApiUrl: fixture.url });
+
+    const sessionId = await createSecuritySession();
+    const engagement = await loadEngagement(sessionId);
+
+    // The config still applies (the map is stored), but no markdown resolved —
+    // the host will fall back to code-review for the ghost persona.
+    expect(engagement.hasRepoConfig).toBe(true);
+    expect(engagement.configPersonas).toBe(JSON.stringify({ ghost: ".claude/agents/ghost.md" }));
+    expect(engagement.configPersonaMarkdown).toBeNull();
+  });
+
+  it("falls back to the preset plan with has_repo_config false when no config is present", async () => {
+    fixture = startGithubFixture({
+      getRepo: () => ({ body: { default_branch: "main" } }),
+      getContents: () => ({ status: 404, body: { message: "Not Found" } }),
+    });
+    process.env.GITHUB_API_URL = fixture.url;
+    api = await bootTestApi({ githubApiUrl: fixture.url });
+
+    const sessionId = await createSecuritySession();
+    const engagement = await loadEngagement(sessionId);
+
+    expect(engagement.hasRepoConfig).toBe(false);
+    expect(engagement.focus).toBeNull();
+    // The five-cell code-review preset seeded the plan.
+    expect(engagement.plan).toContain("name: secrets-config");
+    expect(engagement.plan).toContain("name: verify");
+  });
+
+  it("falls back to the preset when the config is invalid, with has_repo_config false", async () => {
+    fixture = startGithubFixture({
+      getRepo: () => ({ body: { default_branch: "main" } }),
+      getContents: (_owner, _repo, path) =>
+        path === ".valet/security.yml"
+          ? { body: { content: Buffer.from("version: 2\n", "utf8").toString("base64"), encoding: "base64" } }
+          : { status: 404, body: { message: "Not Found" } },
+    });
+    process.env.GITHUB_API_URL = fixture.url;
+    api = await bootTestApi({ githubApiUrl: fixture.url });
+
+    const sessionId = await createSecuritySession();
+    const engagement = await loadEngagement(sessionId);
+
+    expect(engagement.hasRepoConfig).toBe(false);
+    // The preset seeded the plan despite the present-but-invalid config.
+    expect(engagement.plan).toContain("name: verify");
+  });
+});
+
 /**
  * A standalone session could only ever be personal: create hardcoded
  * `ownerType: "user"`, so nothing else could own one. Scoping the Sessions

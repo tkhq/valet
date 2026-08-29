@@ -16,7 +16,7 @@ import {
   type SandboxStatus,
 } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, imageSources, bakes } from "../schema/index.js";
+import { agentSessions, imageSources, bakes, securityEngagements, securityCells } from "../schema/index.js";
 import type { RepoBinding } from "../wire/types.js";
 
 const ORG = "local-org";
@@ -246,6 +246,62 @@ describe("EngineHost buildSpecProvider", () => {
     expect(provider.execs.some((c) => c.includes("git-credential-valet"))).toBe(false);
     expect(provider.execs.some((c) => c.includes("git config"))).toBe(false);
     expect(provider.execs).toHaveLength(0);
+  });
+
+  it("security persona cell appends the three scanner-bootstrap steps; a normal session does not", async () => {
+    const provider = makeIsolatedProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+    const now = Date.now();
+
+    // A normal repo session: no security cell claims it → no scanner steps.
+    const normalId = "sp-normal";
+    await insertSession(api.providers.db, normalId);
+    const normal = await api.providers.engineHost.sessionFor(normalId, {
+      userId: USER,
+      orgId: ORG,
+      workspace: `/tmp/${normalId}`,
+      repos: [primaryBinding],
+    });
+    await normal.attachment.ensureReady({ timeoutMs: 5_000 });
+    expect(provider.execs.some((c) => c.includes("sec-preflight"))).toBe(false);
+    expect(provider.execs.some((c) => c.includes("gitleaks"))).toBe(false);
+    expect(provider.execs.some((c) => c.includes("semgrep"))).toBe(false);
+
+    // A security persona cell claims a second session as its dispatched child.
+    const cellChildId = "sp-security-child";
+    await insertSession(api.providers.db, cellChildId);
+    await api.providers.db.insert(securityEngagements).values({
+      id: "sp-eng-1",
+      sessionId: "sp-eng-parent",
+      status: "running",
+      repoFullName: "acme/widgets",
+      createdAt: now,
+      updatedAt: now,
+    });
+    await api.providers.db.insert(securityCells).values({
+      id: "sp-cell-1",
+      engagementId: "sp-eng-1",
+      ordinal: 1,
+      persona: "code-review",
+      goal: "review",
+      dir: "01-review",
+      status: "running",
+      childSessionId: cellChildId,
+      createdAt: now,
+    });
+
+    const cellSession = await api.providers.engineHost.sessionFor(cellChildId, {
+      userId: USER,
+      orgId: ORG,
+      workspace: `/tmp/${cellChildId}`,
+      repos: [primaryBinding],
+    });
+    await cellSession.attachment.ensureReady({ timeoutMs: 5_000 });
+
+    // The three scanner-bootstrap steps ran on the persona cell sandbox.
+    expect(provider.execs.some((c) => c.includes("/usr/local/bin/sec-preflight"))).toBe(true);
+    expect(provider.execs.some((c) => c.includes("command -v gitleaks"))).toBe(true);
+    expect(provider.execs.some((c) => c.includes("command -v semgrep"))).toBe(true);
   });
 
   it("repo session on isolated+customImage provider: newer pushed prebuild produces different image ref", async () => {

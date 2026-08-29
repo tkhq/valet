@@ -1,5 +1,5 @@
 import type { Model } from "@earendil-works/pi-ai/compat";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -25,10 +25,13 @@ import {
   type StoredCredential,
   type ResolvedModel,
   type PolicyResolver,
+  type PluginStore,
 } from "@valet/engine";
 import type { ValetPlugin } from "@valet/engine";
+import { pluginStore } from "../services/plugin-store.js";
 import {
   buildPluginCatalog,
+  loadRoleFromMarkdown,
   type ActionPlugin,
   type CommandContext,
   type CommandDef,
@@ -55,6 +58,7 @@ import { loadSessionMeta } from "./session-meta.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";
 import { buildPrepSteps } from "./prep-steps.js";
+import { securityToolPrepSteps } from "./security-bootstrap.js";
 import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
 import { getOrgModelPreferences } from "../services/org.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
@@ -62,7 +66,16 @@ import { resolveOpenAiCredential } from "../services/openai-key.js";
 import { hasOrgKey } from "../services/model-catalog.js";
 import { listLlmProviders, parseModelId, providerNamespace } from "../services/llm-providers.js";
 import type { AppDb } from "../lib/drizzle.js";
-import { agentSessions, orgs, teams, users } from "../schema/index.js";
+import {
+  agentSessions,
+  orgs,
+  securityCells,
+  securityEngagements,
+  sessionRepos,
+  teams,
+  users,
+  type SecurityCellRow,
+} from "../schema/index.js";
 import { loadAssistant } from "../assistants/service.js";
 import { applyBehaviorToPlugins, filterSkillSources, parseAssistantBehavior } from "../assistants/behavior.js";
 import { personaPrefixText } from "../assistants/persona.js";
@@ -73,9 +86,20 @@ import {
   mintSandboxJwt,
   revokeSandboxTokens,
 } from "../auth/sandbox-tokens.js";
+import securityPlugin from "@valet/plugin-security/plugin";
 import { CODING_SYSTEM_PROMPT } from "./prompt-rules.js";
 import { orchestratorPersona } from "../orchestrator/persona.js";
 import { buildMemoryTools } from "../orchestrator/memory-tools.js";
+import { buildSecurityPersonaTools, buildSecurityRunnerTools } from "./security-tools.js";
+import { securityCompactionHook } from "./security-compaction.js";
+import {
+  authorizedScopeEnv,
+  egressViolations,
+  parseAuthorizedScopeHosts,
+  parseConfigToolDecls,
+  securityDeclaredMcpPlugins,
+} from "./security-provisioning.js";
+import { egressHostInScope } from "@valet/plugin-security";
 import { assembleMemorySnapshot } from "../orchestrator/snapshot.js";
 import { ensureTodayJournal } from "../orchestrator/bootstrap.js";
 import { journalCompactionHook } from "../orchestrator/compaction.js";
@@ -83,8 +107,63 @@ import { readOwnFile, type MemoryScope } from "../services/memory.js";
 import { listSkillSourcesFor } from "../services/skills.js";
 import { mergedSkillSources, pluginSessionExtras, type PluginSessionExtras } from "../plugins/assemble.js";
 import { gateUnavailableActions, unavailableServiceSet } from "../services/integration-availability.js";
+import { orgAllowsPluginForUser } from "../services/plugin-entitlements.js";
 import { PINNED_ACTIONS } from "../plugins/pinned-actions.js";
 
+
+/**
+ * The security roles to attach for a claimed cell's persona (dynamic-config
+ * M-F1, repo-persona roles M-P2c). Returns the ONE role that matches the cell's
+ * persona, so a `code-review` cell gets only the code-review role, not every
+ * security role.
+ *
+ * Resolution order (repo wins):
+ *   1. A bundled persona id (`code-review`, `architect`, `verifier`,
+ *      `threat-model`, `attack-tree`, `sast`) → its bundled role.
+ *   2. A repo-defined persona (a key in `.valet/security.yml`'s `personas` map)
+ *      → a RoleSpec built from `repoRoleMarkdown`, the markdown fetched from the
+ *      clone at create and stashed on the engagement. The RoleSpec's `name` is
+ *      forced to the cell's persona id so the dispatch prompt's `role` overlay
+ *      resolves, regardless of the markdown's own frontmatter name.
+ *   3. No bundled role and no repo markdown → the code-review role, with a
+ *      logged corrective note.
+ *
+ * `repoRoleMarkdown` is the resolved markdown for THIS persona (the caller looks
+ * it up in the engagement's `config_persona_markdown` map). Absent means no repo
+ * role was stashed for this persona; the function then falls back.
+ */
+export function securityRolesForCell(
+  persona: string,
+  repoRoleMarkdown?: string,
+): NonNullable<typeof securityPlugin.roles> {
+  const roles = securityPlugin.roles ?? [];
+  const match = roles.find((r) => r.name === persona);
+  if (match) return [match];
+
+  if (repoRoleMarkdown && repoRoleMarkdown.trim() !== "") {
+    try {
+      const role = loadRoleFromMarkdown(repoRoleMarkdown, "session", persona);
+      // Force the role name to the persona id: the dispatch prompt sets
+      // `role: cell.persona`, so the overlay resolves by the config key, not by
+      // whatever frontmatter name the repo file carries.
+      return [{ ...role, name: persona }];
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `security: repo persona "${persona}" role markdown failed to load (${detail}); ` +
+          "attaching the code-review role. Fix the persona markdown in the repo.",
+      );
+    }
+  }
+
+  const fallback = roles.find((r) => r.name === "code-review");
+  console.warn(
+    `security: persona "${persona}" has no bundled role and no readable repo role; ` +
+      "attaching the code-review role. Define the persona in .valet/security.yml's " +
+      "personas map with a readable markdown path to run it under its own role.",
+  );
+  return fallback ? [fallback] : [];
+}
 
 export interface EngineHostOpts {
   engineStore: SessionStore;
@@ -323,6 +402,128 @@ function pinnedIdSet(pins: readonly PinnedActionSpec[]): ReadonlySet<string> {
 }
 
 const SYSTEM_PROMPT = CODING_SYSTEM_PROMPT;
+
+/**
+ * Size ceiling for the line-count read in `readSandboxFileMeta` (Valet Security
+ * guardrail 4). A file over this size skips the line check — reading megabytes
+ * to validate a cited line is not worth it — and reports an infinite line count
+ * so no cited line ever reads as "past the end". 2 MB covers ordinary source.
+ */
+const MAX_LINE_CHECK_BYTES = 2 * 1024 * 1024;
+
+/** True when an error is a filesystem not-found (`code: "ENOENT"`). The docker
+ * and local sandboxes surface node `fs` errors; the virtual sandbox stamps the
+ * same `code`. A not-found is a CONFIRMED-absent file, not an indeterminate
+ * read error. */
+function isEnoent(err: unknown): boolean {
+  if (typeof err === "object" && err !== null) {
+    const code = (err as Record<string, unknown>).code;
+    if (code === "ENOENT") return true;
+  }
+  // Some providers only carry the string in the message.
+  return err instanceof Error && /\bENOENT\b/.test(err.message);
+}
+
+/**
+ * Join a repo-relative finding path onto the primary clone's target dir, both
+ * relative to the sandbox workspace root (Valet Security guardrail 4). Returns
+ * a WORKSPACE-RELATIVE path (no leading slash) — the one path shape every
+ * sandbox backend resolves identically against the workspace root. Returns
+ * `null` when the input escapes the clone root (`..` or an absolute file), so a
+ * cited path can never read outside the reviewed tree.
+ */
+function joinRepoRelPath(targetDir: string | null, file: string): string | null {
+  const dir = (targetDir ?? ".").replace(/^\.\/?/, "").replace(/\/+$/, "");
+  // A finding `file` is repo-relative; reject an absolute or empty path.
+  if (file === "" || file.startsWith("/")) return null;
+
+  // Normalize the FILE portion alone and refuse any `..` that would climb above
+  // the clone root — the boundary is the repo-relative path itself, so a `..`
+  // that escapes it must be rejected before it can pop the clone-root prefix.
+  const fileParts: string[] = [];
+  for (const part of file.split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") {
+      if (fileParts.length === 0) return null; // escapes the clone root
+      fileParts.pop();
+      continue;
+    }
+    fileParts.push(part);
+  }
+  if (fileParts.length === 0) return null;
+
+  const dirParts = dir === "" ? [] : dir.split("/").filter((p) => p !== "" && p !== ".");
+  const out = [...dirParts, ...fileParts];
+  if (out.length === 0) return null;
+  return out.join("/");
+}
+
+/** Count the lines in a file's text: the number of `\n` plus one for the final
+ * line when it has no trailing newline (so a one-line file with no newline is 1,
+ * not 0). An empty file is 0 lines. */
+function countLines(content: string): number {
+  if (content === "") return 0;
+  let newlines = 0;
+  for (let i = 0; i < content.length; i++) {
+    if (content[i] === "\n") newlines += 1;
+  }
+  // A trailing newline means the last `\n` terminates the final line; no
+  // trailing newline means one more line than there are newlines.
+  return content.endsWith("\n") ? newlines : newlines + 1;
+}
+
+/**
+ * The pure sandbox read behind `EngineHost.readSandboxFileMeta` (Valet Security
+ * guardrail 4). Exported so a unit test drives it directly with a fake
+ * `Sandbox`, without a live host or DB.
+ *
+ * `targetDir` is the primary clone's dir, relative to the sandbox workspace
+ * root; `file` is the repo-relative finding path. The combined path is passed
+ * as a WORKSPACE-RELATIVE value to `Sandbox.stat`/`readFile` — never a shell
+ * argv, so there is no injection surface.
+ *
+ * Returns:
+ *   - `{ exists: false, lines: 0 }` — the file is confirmed absent (ENOENT), or
+ *     the path resolves to a directory, or the path escapes the clone root.
+ *   - `{ exists: true, lines }` — the file exists; `lines` is its line count, or
+ *     `Infinity` for a file over `MAX_LINE_CHECK_BYTES` (the line check is a
+ *     courtesy, so a huge file never rejects any cited line).
+ *
+ * A `stat`/`readFile` failure that is NOT an ENOENT THROWS — the caller
+ * (`readSandboxFileMeta`) catches it and fails open (indeterminate).
+ */
+export async function verifyFileInSandbox(
+  sandbox: Sandbox,
+  targetDir: string | null,
+  file: string,
+): Promise<{ exists: boolean; lines: number }> {
+  const rel = joinRepoRelPath(targetDir, file);
+  // A path that escapes the clone root is not a valid location in the reviewed
+  // tree — treat it as absent (fail closed).
+  if (rel === null) return { exists: false, lines: 0 };
+
+  let size: number;
+  try {
+    const meta = await sandbox.stat(rel);
+    // A directory is not a valid finding location — treat it as absent.
+    if (!meta.isFile) return { exists: false, lines: 0 };
+    size = meta.size;
+  } catch (err) {
+    // Fail CLOSED only on a CONFIRMED-absent file: an ENOENT means the sandbox
+    // answered and the path is not there. Every other `stat` failure
+    // (transport/exec error, permission, provider hiccup) is INDETERMINATE —
+    // re-throw so the caller returns null (fail open).
+    if (isEnoent(err)) return { exists: false, lines: 0 };
+    throw err;
+  }
+
+  // Line count. Skip the read for a large file (not worth streaming megabytes)
+  // — report it exists with an Infinity line count so no cited line is ever
+  // "past the end".
+  if (size > MAX_LINE_CHECK_BYTES) return { exists: true, lines: Number.POSITIVE_INFINITY };
+  const content = await sandbox.readFile(rel);
+  return { exists: true, lines: countLines(content) };
+}
 
 /**
  * Per-process cache of live `Engine`/`Session` pairs keyed by app session id.
@@ -569,13 +770,41 @@ export class EngineHost {
   }
 
   private async buildSession(sessionId: string, meta: SessionMeta): Promise<Session> {
+    // Security runner wiring (Valet Security spec §Tools): a session whose
+    // app row carries kind='security' gets the sec_* runner tools, the
+    // engagement-runner skill, and the child read/send/status seams —
+    // deliberately NOT the childSpawner, so the generic `task` tool answers
+    // unavailable and every dispatch goes through sec_dispatch (Decision 3).
+    // plugin-security is registry-enabled (M9), but `sessionExtras`/
+    // `skillsProviderFor` filter it out of the base plugin set — plugin
+    // skills attach globally, and the engagement-runner skill must reach
+    // ONLY runner builds (spec implementation deviation 20). The directly
+    // imported manifest, threaded as an extra plugin for this build only,
+    // is the single attach path, so the skill lands exactly once.
+    const isSecurityRunner = (await this.storedKind(sessionId)) === "security";
+    // Persona child wiring (M4): a session a running security cell claims
+    // gets the persona tool set, the persona role, and the tool endpoint
+    // config — the post-restart rebuild path for dispatched cell children
+    // (the first build goes through `buildChildSession`, same wiring).
+    const personaCell = isSecurityRunner ? null : await this.claimedSecurityCell(sessionId);
+    // Declared-tool provisioning (M-P4a/M-P4b): a persona child gets its
+    // engagement's declared MCP servers as extra plugins and the authorized-
+    // scope egress allowlist env. Empty for the runner and non-security builds.
+    const securityProvisioning = personaCell
+      ? await this.securityProvisioningForCell(personaCell)
+      : { mcpPlugins: [], scopeEnv: {} };
+    const extraPlugins = isSecurityRunner
+      ? [securityPlugin]
+      : personaCell
+        ? securityProvisioning.mcpPlugins
+        : [];
     // `SessionMeta` carries no principal, and this builder passes no `owner`
     // to the engine either — `Session`'s constructor then defaults the
     // principal to `{ type: "user", id: options.userId }`. So the acting
     // user IS this session's owner, and the same `{ user, meta.userId }`
     // scope the session's credentials already use is the honest one here.
-    const extras = await this.sessionExtras({ type: "user", id: meta.userId }, meta.orgId);
-    const skillsProvider = this.skillsProviderFor({ type: "user", id: meta.userId }, meta.orgId);
+    const extras = await this.sessionExtras({ type: "user", id: meta.userId }, meta.orgId, [], extraPlugins);
+    const skillsProvider = this.skillsProviderFor({ type: "user", id: meta.userId }, meta.orgId, extraPlugins);
 
     const engine = new Engine({
       providers: {
@@ -621,7 +850,7 @@ export class EngineHost {
         );
       });
     };
-    const specProvider = await this.buildSpecProvider(sessionId, meta, onStartRef);
+    const specProvider = await this.buildSpecProvider(sessionId, meta, onStartRef, personaCell != null);
     const credentialResolver = this.buildCredentialResolver(sessionId, meta.userId, meta.orgId);
     // Slash-command options (Task 10). The workspace-skills provider's sandbox
     // accessor closes over `builtSession` — resolved lazily, so it is safe that
@@ -648,15 +877,71 @@ export class EngineHost {
     // override at provision time — the engine applies
     // DesiredSandboxSpec.image when the specProvider returns one.
     const image = this.opts.defaultImages?.full ?? this.opts.defaultImage;
+    // Authorized-scope egress allowlist env (M-P4b): a live persona child
+    // carries VALET_SECURITY_AUTHORIZED_SCOPE so its live tools bound egress to
+    // the human-declared scope. Merged over the mint env; empty otherwise, so a
+    // non-live build's env is byte-identical to before. See
+    // security-provisioning.ts for the enforcement-seam note.
+    const sandboxEnv =
+      Object.keys(securityProvisioning.scopeEnv).length > 0
+        ? { ...(sandboxMint?.env ?? {}), ...securityProvisioning.scopeEnv }
+        : sandboxMint?.env;
     const sandboxOpts = {
       workspace: meta.workspace,
       image,
-      env: sandboxMint?.env,
+      env: sandboxEnv,
       profile,
       ...(dockerFlag ? { docker: true } : {}),
       ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
     };
     const policyResolver = this.getPolicyResolver();
+    const pluginStoreFactory = this.getPluginStoreFactory();
+    // Runner tools sit before the plugin tools so the loop surface reads
+    // first in the tool list. The toolConfig mirrors the orchestrator's
+    // (apiBaseUrl + internal token for the sec_* HTTP seam; child
+    // read/send/status seams for steering dispatched personas) minus the
+    // childSpawner — see the isSecurityRunner comment above.
+    const sessionTools = isSecurityRunner
+      ? [...buildSecurityRunnerTools(), ...extras.tools]
+      : personaCell
+        ? [...buildSecurityPersonaTools({ review: personaCell.review, persona: personaCell.persona }), ...extras.tools]
+        : extras.tools;
+    const securityToolConfig = isSecurityRunner
+      ? {
+          toolConfig: {
+            ...(this.opts.apiBaseUrl ? { apiBaseUrl: this.opts.apiBaseUrl } : {}),
+            internalToken: internalToken(),
+            ...(this.opts.childReader ? { childReader: this.opts.childReader } : {}),
+            ...(this.opts.childSender ? { childSender: this.opts.childSender } : {}),
+            ...(this.opts.childStatusReader ? { childStatusReader: this.opts.childStatusReader } : {}),
+          },
+        }
+      : personaCell
+        ? {
+            // The persona tools' HTTP seam only — no child seams and no
+            // spawner (a persona child steers nothing and spawns nothing).
+            toolConfig: {
+              ...(this.opts.apiBaseUrl ? { apiBaseUrl: this.opts.apiBaseUrl } : {}),
+              internalToken: internalToken(),
+            },
+            // Compaction is observable, not silent (M5, spec §Context
+            // Discipline): stamp + staleness alert on the claiming cell.
+            // `claimedSecurityCell` returned a row, so a db handle exists;
+            // the guard narrows the type only.
+            ...(this.opts.db ? { compactionHooks: [securityCompactionHook(this.opts.db)] } : {}),
+          }
+        : {};
+    // The persona role registers on the session (roles registry) so the
+    // dispatch prompt's per-turn `role` overlay resolves. Attach ONLY the role
+    // matching the claimed cell's persona (not every security role) — the
+    // engagement-runner SKILL stays off persona children. A repo-defined
+    // persona loads its role from the engagement's stashed markdown (M-P2c).
+    const personaRepoRoleMarkdown = personaCell
+      ? await this.repoRoleMarkdownForCell(personaCell)
+      : undefined;
+    const sessionRoles = personaCell
+      ? [...extras.roles, ...securityRolesForCell(personaCell.persona, personaRepoRoleMarkdown)]
+      : extras.roles;
     const session = existing
       ? await engine.restoreSession({
           sessionId,
@@ -669,15 +954,17 @@ export class EngineHost {
             modelSpec,
             resolveModel,
             systemPrompt: SYSTEM_PROMPT,
-            tools: extras.tools.length ? extras.tools : undefined,
+            tools: sessionTools.length ? sessionTools : undefined,
             skills: extras.skills.length ? extras.skills : undefined,
-            roles: extras.roles.length ? extras.roles : undefined,
+            roles: sessionRoles.length ? sessionRoles : undefined,
+            ...securityToolConfig,
             ...(skillsProvider ? { skillsProvider } : {}),
             ...(specProvider ? { specProvider } : {}),
             ...(credentialResolver ? { credentialResolver } : {}),
             ...(commandOptions ?? {}),
             ...(repoInstructionsProvider ? { repoInstructionsProvider } : {}),
             ...(policyResolver ? { policyResolver } : {}),
+            ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
           },
         })
       : await engine.createSession({
@@ -690,15 +977,17 @@ export class EngineHost {
           modelSpec,
           resolveModel,
           systemPrompt: SYSTEM_PROMPT,
-          tools: extras.tools.length ? extras.tools : undefined,
+          tools: sessionTools.length ? sessionTools : undefined,
           skills: extras.skills.length ? extras.skills : undefined,
-          roles: extras.roles.length ? extras.roles : undefined,
+          roles: sessionRoles.length ? sessionRoles : undefined,
+          ...securityToolConfig,
           ...(skillsProvider ? { skillsProvider } : {}),
           ...(specProvider ? { specProvider } : {}),
           ...(credentialResolver ? { credentialResolver } : {}),
           ...(commandOptions ?? {}),
           ...(repoInstructionsProvider ? { repoInstructionsProvider } : {}),
           ...(policyResolver ? { policyResolver } : {}),
+          ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
         });
 
     builtSession = session;
@@ -744,21 +1033,112 @@ export class EngineHost {
    * a workflow run's prompt must not meet that. Only the caller knows whether
    * a human is watching, so only the caller passes pins.
    */
+  /**
+   * The registry plugin set every session build starts from, with
+   * plugin-security filtered OUT (spec implementation deviation 20).
+   * Plugin skills have no scoping mechanism — `pluginSessionExtras`
+   * attaches every plugin's skills to every session — and the
+   * engagement-runner skill instructs a loop only `kind='security'`
+   * runners have the sec_* tools for. The plugin stays registry-enabled
+   * for discovery; the kind-gated build paths re-add the directly
+   * imported manifest (`extraPlugins` for the runner skill, the
+   * persona-cell `roles` concat for the code-review role), each exactly
+   * once.
+   */
+  private basePlugins(): ValetPlugin[] {
+    return (this.opts.plugins ?? []).filter((p) => p.name !== securityPlugin.name);
+  }
+
+  /**
+   * Whether `name` is in the deployment's loaded plugin set — the instance
+   * (operator) switch half of the plugin entitlement rail (plugin-entitlements
+   * design). Reads `this.opts.plugins`, the full assembled set, so a plugin
+   * that `basePlugins`/`sessionExtras` filter out of normal sessions (security)
+   * still reads as loaded. Off here means off for every org, regardless of the
+   * org entitlement mode.
+   */
+  isPluginLoaded(name: string): boolean {
+    return (this.opts.plugins ?? []).some((p) => p.name === name);
+  }
+
+  /**
+   * The loaded plugins that opted into org gating (a `gate` manifest field).
+   * Drives the admin API and the `GET /api/org` visibility block, and
+   * validates admin writes. A plugin with no `gate` rides the instance switch
+   * only and never appears here.
+   */
+  gateablePlugins(): { name: string; label: string; description: string }[] {
+    return (this.opts.plugins ?? [])
+      .filter((p): p is ValetPlugin & { gate: NonNullable<ValetPlugin["gate"]> } => p.gate !== undefined)
+      .map((p) => ({ name: p.name, label: p.gate.label, description: p.gate.description }));
+  }
+
+  /**
+   * Drops every GATEABLE plugin the owner's org disables for the owner. A
+   * plugin with no `gate` is never touched. Only a USER-principal owner is
+   * checked: a team-owned session has no single member to resolve the `teams`
+   * mode against, so it keeps every gateable plugin (the create-route gate
+   * still refuses a team member who cannot use a plugin-backed kind).
+   *
+   * Best-effort: with no db, or when the entitlement read throws, the plugin
+   * stays in the set (default to allowed) and the failure is logged — an
+   * entitlement lookup must never break a session build.
+   */
+  private async filterEntitledPlugins(
+    plugins: ValetPlugin[],
+    owner: Principal,
+    orgId: string,
+  ): Promise<ValetPlugin[]> {
+    const db = this.opts.db;
+    if (!db || owner.type !== "user") return plugins;
+    const gateable = new Set(this.gateablePlugins().map((g) => g.name));
+    if (gateable.size === 0) return plugins;
+    const kept: ValetPlugin[] = [];
+    for (const plugin of plugins) {
+      if (!gateable.has(plugin.name)) {
+        kept.push(plugin);
+        continue;
+      }
+      try {
+        if (await orgAllowsPluginForUser(db, orgId, owner.id, plugin.name)) kept.push(plugin);
+      } catch (err) {
+        console.error(
+          `EngineHost: plugin entitlement check for '${plugin.name}' (org ${orgId}) failed; keeping plugin:`,
+          err instanceof Error ? err.message : String(err),
+        );
+        kept.push(plugin);
+      }
+    }
+    return kept;
+  }
+
   private async sessionExtras(
     owner: Principal,
     orgId: string,
     pins: readonly PinnedActionSpec[] = [],
+    // Build-scoped plugin additions (the security runner's disabled-in-
+    // registry manifest) — appended after the registry set so registry
+    // plugins keep shadow priority.
+    extraPlugins: readonly ValetPlugin[] = [],
     behavior: AssistantBehavior | null = null,
   ): Promise<PluginSessionExtras> {
+    const assembled = [...this.basePlugins(), ...extraPlugins];
+    // Org entitlement filter (plugin-entitlements design): drop any GATEABLE
+    // plugin the owner's org disables for the owner, so a disabled
+    // action-plugin's tools never reach a normal session. Best-effort — a
+    // lookup failure leaves the plugin in place (default to allowed) and logs,
+    // so an entitlement read can never break a build. Security rides its
+    // create-route gate primarily; this covers future action-plugins.
+    const allPlugins = await this.filterEntitledPlugins(assembled, owner, orgId);
     // Availability gate (integration-availability design): a service whose
     // deployment/org prerequisite is missing never reaches the catalog, so
     // `list_tools` has nothing to hide. Per-build, not process-static: the
     // org-credential half of availability changes when an admin connects or
     // removes the org app.
     const gated = gateUnavailableActions(
-      this.opts.plugins ?? [],
+      allPlugins,
       await unavailableServiceSet({
-        plugins: this.opts.plugins ?? [],
+        plugins: allPlugins,
         orgId,
         credentials: this.opts.engineCredentials,
         env: process.env,
@@ -795,6 +1175,10 @@ export class EngineHost {
   private skillsProviderFor(
     owner: Principal,
     orgId: string,
+    // Must match the `extraPlugins` the build's `sessionExtras` got, or a
+    // registry refresh silently DROPS the extras' skills (the refresh
+    // replaces the session's whole skill map from this provider).
+    extraPlugins: readonly ValetPlugin[] = [],
     behavior: AssistantBehavior | null = null,
   ): (() => Promise<SkillSource[]>) | undefined {
     const db = this.opts.db;
@@ -803,7 +1187,8 @@ export class EngineHost {
     // closure's lifetime — every behavior PATCH evicts the cached session
     // (assistant-editor design, Task 2), so a stale result never outlives
     // its config. Only the stored-skill read is per-call.
-    const filtered = applyBehaviorToPlugins(this.opts.plugins ?? [], behavior);
+    const plugins = [...this.basePlugins(), ...extraPlugins];
+    const filtered = applyBehaviorToPlugins(plugins, behavior);
     return async () =>
       mergedSkillSources(
         filtered,
@@ -888,6 +1273,7 @@ export class EngineHost {
     sessionId: string,
     meta: SessionMeta,
     onStartRef?: (ref: SessionStartRef) => void | Promise<void>,
+    installSecurityTools = false,
   ): Promise<import("@valet/engine").SpecProvider | undefined> {
     const hasRepos = meta.repos && meta.repos.length > 0;
     // Non-isolated providers (local/virtual) exec against the host process.
@@ -925,6 +1311,15 @@ export class EngineHost {
 
       const spec = computeSpec(snap);
       const steps = buildPrepSteps(snap, spec.steps, onStartRef);
+      // Scanner bootstrap (Valet Security): a security persona cell installs
+      // gitleaks + semgrep + sec-preflight AFTER the clone/bind steps, so the
+      // tools land in the ready, cloned sandbox. Best-effort (critical: false)
+      // — a blocked-egress install fails without aborting the sandbox, and
+      // sec-preflight then reports the tool absent. Every security cell gets
+      // the same steps; non-security sessions get none.
+      if (installSecurityTools) {
+        steps.push(...securityToolPrepSteps());
+      }
 
       return {
         image: spec.image !== stockImage ? spec.image : undefined,
@@ -1003,6 +1398,20 @@ export class EngineHost {
    * built-in risk→approval fallback, byte-identical to pre-policy behavior).
    * Built once and memoized — the resolver is session-agnostic.
    */
+  /**
+   * The plugin-store factory threaded onto every session's
+   * `CreateSessionOptions.pluginStoreFactory` (plugin-store design). `call_tool`
+   * calls it with a plugin action's `service` and binds the result to that
+   * action's `PluginActionContext.pluginStore`, so an action reads and writes
+   * only its own rows. Returns `undefined` without an app db (db-less tests),
+   * so plugin actions then see no `pluginStore` — the pre-store behavior.
+   */
+  private getPluginStoreFactory(): ((pluginName: string) => PluginStore) | undefined {
+    const db = this.opts.db;
+    if (!db) return undefined;
+    return (pluginName: string) => pluginStore(db, pluginName);
+  }
+
   private getPolicyResolver(): PolicyResolver | undefined {
     if (!this.opts.db) return undefined;
     if (!this.policyResolverInstance) {
@@ -1311,6 +1720,127 @@ export class EngineHost {
   }
 
   /**
+   * The session kind stored on the app session row. Answers `"code"` (the
+   * column default) when the host has no db handle or no row exists —
+   * db-less builds never get the security wiring.
+   */
+  private async storedKind(sessionId: string): Promise<string> {
+    const db = this.opts.db;
+    if (!db) return "code";
+    const rows = await db
+      .select({ kind: agentSessions.kind })
+      .from(agentSessions)
+      .where(eq(agentSessions.id, sessionId))
+      .limit(1);
+    return rows[0]?.kind ?? "code";
+  }
+
+  /**
+   * The running security cell (if any) that claims this session id as its
+   * dispatched child (Valet Security M4). The claim exists BEFORE the child
+   * session is built — `dispatchCell` stamps `child_session_id` pre-spawn —
+   * so both first builds and post-restart rebuilds see it. One indexed
+   * query (`security_cells_child_session`); non-security sessions pay a
+   * single miss. `null` without a db, the usual graceful degradation.
+   */
+  private async claimedSecurityCell(sessionId: string): Promise<SecurityCellRow | null> {
+    const db = this.opts.db;
+    if (!db) return null;
+    const rows = await db
+      .select()
+      .from(securityCells)
+      .where(and(eq(securityCells.childSessionId, sessionId), eq(securityCells.status, "running")))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  /**
+   * The repo-defined role markdown for a claimed cell's persona (M-P2c). Reads
+   * the cell's engagement `config_persona_markdown` map (id → markdown, stashed
+   * at create from the clone) and returns the entry for the cell's persona.
+   * Returns undefined for a bundled persona (no repo markdown), a preset-seeded
+   * engagement (no map), or a persona the map does not name. `securityRolesForCell`
+   * uses the result to attach a repo persona's own role, repo wins.
+   */
+  private async repoRoleMarkdownForCell(cell: SecurityCellRow): Promise<string | undefined> {
+    const db = this.opts.db;
+    if (!db) return undefined;
+    const rows = await db
+      .select({ md: securityEngagements.configPersonaMarkdown })
+      .from(securityEngagements)
+      .where(eq(securityEngagements.id, cell.engagementId))
+      .limit(1);
+    const raw = rows[0]?.md;
+    if (!raw) return undefined;
+    let map: unknown;
+    try {
+      map = JSON.parse(raw);
+    } catch {
+      return undefined;
+    }
+    if (typeof map !== "object" || map === null || Array.isArray(map)) return undefined;
+    const value = (map as Record<string, unknown>)[cell.persona];
+    return typeof value === "string" ? value : undefined;
+  }
+
+  /**
+   * The declared-tool provisioning for a claimed persona cell (Valet Security
+   * M-P4a + M-P4b). Reads the cell's engagement `config_tools` and
+   * `authorized_scope`, then returns:
+   *
+   *   - `mcpPlugins`: a `ValetPlugin` per declared MCP server, added to the
+   *     persona child's extra plugins so the child's tool set carries the
+   *     server's tools (M-P4a). Reuses the config-connector MCP seam.
+   *   - `scopeEnv`: the authorized-scope egress allowlist env
+   *     (`VALET_SECURITY_AUTHORIZED_SCOPE`), merged into the child sandbox env.
+   *     A live tool reads it to bound egress to the human-declared scope
+   *     (M-P4b). Empty when no scope is declared.
+   *
+   * Egress gate: every declared egress host is re-validated against the
+   * authorized scope here (the config parser already refused an out-of-scope
+   * egress at create; this guards a stored/hand-edited row). An out-of-scope
+   * egress is dropped with a warning — a live tool is never provisioned with
+   * egress the human did not authorize.
+   *
+   * No db, or a non-security cell, yields empty provisioning.
+   */
+  private async securityProvisioningForCell(
+    cell: SecurityCellRow,
+  ): Promise<{ mcpPlugins: ValetPlugin[]; scopeEnv: Record<string, string> }> {
+    const db = this.opts.db;
+    if (!db) return { mcpPlugins: [], scopeEnv: {} };
+    const rows = await db
+      .select({
+        tools: securityEngagements.configTools,
+        scope: securityEngagements.authorizedScope,
+      })
+      .from(securityEngagements)
+      .where(eq(securityEngagements.id, cell.engagementId))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return { mcpPlugins: [], scopeEnv: {} };
+    const scopeHosts = parseAuthorizedScopeHosts(row.scope);
+    const declared = parseConfigToolDecls(row.tools);
+    // Egress gate (M-P4b): drop a decl's out-of-scope egress before provisioning.
+    const violations = egressViolations(declared, scopeHosts);
+    for (const v of violations) {
+      console.warn(
+        `security: declared tool "${v.toolId}" egress host "${v.host}" is outside the authorized scope ` +
+          `for engagement ${cell.engagementId}; not provisioning that egress. Fix .valet/security.yml.`,
+      );
+    }
+    const inScope = declared.map((decl) => {
+      if (!decl.egress || decl.egress.length === 0) return decl;
+      const kept = decl.egress.filter((host) => egressHostInScope(host, scopeHosts));
+      return kept.length === decl.egress.length ? decl : { ...decl, egress: kept };
+    });
+    return {
+      mcpPlugins: securityDeclaredMcpPlugins(inScope),
+      scopeEnv: authorizedScopeEnv(scopeHosts),
+    };
+  }
+
+  /**
    * The sandbox profile stored on the app session row. Answers `"headless"`
    * when the host has no db handle (tests that wire none) and when no row
    * exists yet, which is the column's own default.
@@ -1456,7 +1986,7 @@ export class EngineHost {
     // (`use-workflow-assistant.ts`), so this scope costs the panel nothing.
     const pins = principal.type === "user" ? PINNED_ACTIONS : [];
     const pinnedIds = pinnedIdSet(pins);
-    const extras = await this.sessionExtras(principal, meta.orgId, pins, behavior);
+    const extras = await this.sessionExtras(principal, meta.orgId, pins, [], behavior);
 
     // The profile comes from the app row, not from the caller's meta. An
     // assistant session is woken by many callers — the web, a channel
@@ -1486,7 +2016,8 @@ export class EngineHost {
       pinnedIds,
     );
     const policyResolver = this.getPolicyResolver();
-    const skillsProvider = this.skillsProviderFor(principal, meta.orgId, behavior);
+    const pluginStoreFactory = this.getPluginStoreFactory();
+    const skillsProvider = this.skillsProviderFor(principal, meta.orgId, [], behavior);
     const sessionOptions = {
       userId: meta.actorUserId,
       orgId: meta.orgId,
@@ -1494,6 +2025,7 @@ export class EngineHost {
       purpose: "orchestrator" as const,
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(policyResolver ? { policyResolver } : {}),
+      ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
       owner: principal,
       queueMode,
       sandbox: {
@@ -1919,6 +2451,79 @@ export class EngineHost {
   }
 
   /**
+   * Verify a cited `file` against a session's cloned sandbox (Valet Security
+   * guardrail 4, finding location verification). The finding-report route calls
+   * this BEFORE the service so a persona cell cannot cite a path or line that is
+   * not in the reviewed tree.
+   *
+   * Return shape:
+   *   - `null` (INDETERMINATE) → the caller MUST fail OPEN (accept the finding).
+   *     Returned when the session is not cached, its attachment is not `ready`,
+   *     it has no repo clone (the clone root is unknown), or the sandbox read
+   *     throws/times out. A sandbox hiccup must NEVER block a real finding.
+   *   - `{ exists, lines }` → the read succeeded. `exists:false` is a CONFIRMED
+   *     absent file (fail CLOSED). `lines` is the exact line count of an
+   *     existing file, so the caller can reject an out-of-range cited line.
+   *
+   * This method NEVER throws — every failure path resolves to `null`.
+   *
+   * It reaches the sandbox WITHOUT waking it: `liveSession` reads the in-memory
+   * cache only (never `sessionFor`, which would build/restore), and it acts only
+   * when the attachment is already `ready` — the same non-waking discipline the
+   * `child_status` liveness path and the command/AGENTS.md providers use.
+   *
+   * The clone root is the session's primary `session_repos` binding target dir,
+   * relative to the sandbox workspace root. A finding `file` is repo-relative, so
+   * the in-sandbox path is `<targetDir>/<file>`, passed as a WORKSPACE-RELATIVE
+   * path to `Sandbox.stat`/`readFile`. A relative path is the one cross-backend
+   * contract (workspace-prep's path-discipline note): it resolves against the
+   * sandbox workspace root for docker, local, and virtual alike. The path never
+   * enters a shell command, so there is no injection surface — `stat`/`readFile`
+   * take the path as a value, not an argv.
+   */
+  async readSandboxFileMeta(
+    sessionId: string,
+    repoRelPath: string,
+  ): Promise<{ exists: boolean; lines: number } | null> {
+    try {
+      // Non-waking: cache-only. A session that is not live (evicted, never
+      // built) is indeterminate — never force a build just to verify.
+      const session = this.liveSession(sessionId);
+      if (!session || session.attachment.state !== "ready") return null;
+      if (!this.opts.db) return null;
+
+      // Only an ISOLATED provider performs a real clone into a real tree
+      // (`buildSpecProvider` gates prep on isolation). A non-isolated provider
+      // (local/virtual) execs against the host or an empty in-memory FS, so its
+      // tree is not the reviewed clone — indeterminate, fail open. This also
+      // keeps the guard off the virtual-sandbox integration harness, whose
+      // findings cite files no `git clone` ever materialized.
+      if (this.opts.sandboxProvider.capabilities().isolated !== true) return null;
+
+      // Clone root = the primary binding's target dir, relative to the sandbox
+      // workspace root. No binding → non-git/virtual workspace, clone root
+      // unknown → indeterminate.
+      const bindingRows = await this.opts.db
+        .select({ targetDir: sessionRepos.targetDir })
+        .from(sessionRepos)
+        .where(eq(sessionRepos.sessionId, sessionId))
+        .orderBy(sessionRepos.position)
+        .limit(1);
+      const binding = bindingRows[0];
+      if (!binding) return null;
+
+      // The pure read (existence + line count). A thrown transport/exec error
+      // bubbles to the outer catch and fails open; a CONFIRMED-absent file
+      // returns `{exists:false}` and fails closed.
+      return await verifyFileInSandbox(session.sandbox, binding.targetDir, repoRelPath);
+    } catch {
+      // ANY unexpected failure (exec/read transport error, timeout, provider
+      // hiccup) → indeterminate → the caller fails OPEN. Never throw.
+      return null;
+    }
+  }
+
+  /**
    * The host `resolveModel` seam (engine `ResolvedModel`, Task 1) bound to one
    * org's provider config — passed into every `createSession`/`restoreSession`
    * options object so the engine resolves the effective model spec + per-turn
@@ -2125,6 +2730,37 @@ export class EngineHost {
     // session gets that team's skills, not the spawning user's.
     const extras = await this.sessionExtras(opts.owner, opts.orgId);
     const skillsProvider = this.skillsProviderFor(opts.owner, opts.orgId);
+    // Persona child wiring (Valet Security M4): the security dispatch
+    // stamps its cell claim (`child_session_id`) BEFORE the spawn builds
+    // this session, so this first build already sees it and attaches the
+    // persona tool set, the persona role, and the tool endpoint config.
+    // One indexed query; ordinary task children pay a single miss.
+    const personaCell = await this.claimedSecurityCell(childSessionId);
+    // Declared-tool provisioning (M-P4a/M-P4b): the persona child's declared MCP
+    // servers and authorized-scope egress env. `sessionExtras` above ran with no
+    // extra plugins; re-run it with the declared MCP plugins so the child's tool
+    // set carries them. Empty (byte-identical to before) for a non-persona child.
+    const securityProvisioning = personaCell
+      ? await this.securityProvisioningForCell(personaCell)
+      : { mcpPlugins: [], scopeEnv: {} };
+    const provisionedExtras =
+      personaCell && securityProvisioning.mcpPlugins.length > 0
+        ? await this.sessionExtras(opts.owner, opts.orgId, [], securityProvisioning.mcpPlugins)
+        : extras;
+    const childTools = personaCell
+      ? [...buildSecurityPersonaTools({ review: personaCell.review, persona: personaCell.persona }), ...provisionedExtras.tools]
+      : provisionedExtras.tools;
+    // The persona role registers on the session (roles registry) so the
+    // dispatch prompt's per-turn `role` overlay resolves. Attach ONLY the role
+    // matching the claimed cell's persona — the engagement-runner SKILL stays
+    // off persona children. A repo-defined persona loads its role from the
+    // engagement's stashed markdown (M-P2c).
+    const childRepoRoleMarkdown = personaCell
+      ? await this.repoRoleMarkdownForCell(personaCell)
+      : undefined;
+    const childRoles = personaCell
+      ? [...provisionedExtras.roles, ...securityRolesForCell(personaCell.persona, childRepoRoleMarkdown)]
+      : provisionedExtras.roles;
 
     const existing = await this.opts.engineStore.getSession(childSessionId);
     const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, opts.actorUserId, opts.orgId, opts.modelId);
@@ -2133,6 +2769,7 @@ export class EngineHost {
     const sandboxMint = await this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId, profile);
     const credentialResolver = this.buildCredentialResolver(childSessionId, opts.actorUserId, opts.orgId);
     const policyResolver = this.getPolicyResolver();
+    const pluginStoreFactory = this.getPluginStoreFactory();
     // A child spawned with a repo binding (the spawner inserts the
     // `session_repos` row before calling in here) gets the same declarative
     // clone prep a REST-created session gets. Only this first build decides —
@@ -2161,7 +2798,7 @@ export class EngineHost {
           profile,
           ...(opts.docker !== undefined ? { docker: opts.docker } : {}),
         };
-    const specProvider = await this.buildSpecProvider(childSessionId, meta);
+    const specProvider = await this.buildSpecProvider(childSessionId, meta, undefined, personaCell != null);
     // Repo AGENTS.md instructions (agents-md spec, decision 5): a child
     // spawned with a repo binding reads its AGENTS.md exactly like a
     // REST-created session. `builtSession` is assigned below, after the
@@ -2179,6 +2816,7 @@ export class EngineHost {
       purpose: "child" as const,
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(policyResolver ? { policyResolver } : {}),
+      ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
       owner: opts.owner,
       parentSessionId: opts.parentSessionId,
       parentThreadId: opts.parentThreadId,
@@ -2187,7 +2825,18 @@ export class EngineHost {
         // Single-lineage stock default, same fall-through as a REST-created
         // session (`sessionFor`).
         image: this.opts.defaultImages?.full ?? this.opts.defaultImage,
-        env: sandboxMint?.env,
+        // Authorized-scope egress allowlist env (M-P4b): a live persona child
+        // carries VALET_SECURITY_AUTHORIZED_SCOPE. Empty for a non-live child,
+        // so the env stays byte-identical.
+        // TODO(M-P4b egress): SandboxCreateOpts has no network-policy field, so
+        // this env is the enforcement seam the live tools honor. Full network-
+        // level egress lockdown (a k8s NetworkPolicy / egress firewall keyed on
+        // this allowlist) is a sandbox-infra follow-up — add it here on the
+        // child sandbox spec once SandboxProvider supports an egress policy.
+        env:
+          Object.keys(securityProvisioning.scopeEnv).length > 0
+            ? { ...(sandboxMint?.env ?? {}), ...securityProvisioning.scopeEnv }
+            : sandboxMint?.env,
         profile,
         ...(opts.docker ? { docker: true } : {}),
         ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
@@ -2196,9 +2845,24 @@ export class EngineHost {
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
       systemPrompt: SYSTEM_PROMPT,
-      tools: extras.tools.length ? extras.tools : undefined,
-      skills: extras.skills.length ? extras.skills : undefined,
-      roles: extras.roles.length ? extras.roles : undefined,
+      tools: childTools.length ? childTools : undefined,
+      skills: provisionedExtras.skills.length ? provisionedExtras.skills : undefined,
+      roles: childRoles.length ? childRoles : undefined,
+      // The persona tools' HTTP seam only — still NO childSpawner (the
+      // depth-limit contract) and no child seams.
+      ...(personaCell
+        ? {
+            toolConfig: {
+              ...(this.opts.apiBaseUrl ? { apiBaseUrl: this.opts.apiBaseUrl } : {}),
+              internalToken: internalToken(),
+            },
+            // Compaction is observable, not silent (M5, spec §Context
+            // Discipline) — same hook as the post-restart rebuild path in
+            // `buildSession`. Db guard narrows the type only (the claim
+            // lookup already required one).
+            ...(this.opts.db ? { compactionHooks: [securityCompactionHook(this.opts.db)] } : {}),
+          }
+        : {}),
       ...(skillsProvider ? { skillsProvider } : {}),
       ...(specProvider ? { specProvider } : {}),
       ...(repoInstructionsProvider ? { repoInstructionsProvider } : {}),
@@ -2282,6 +2946,7 @@ export class EngineHost {
     const sandboxMint = await this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId, "headless");
     const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId);
     const policyResolver = this.getPolicyResolver();
+    const pluginStoreFactory = this.getPluginStoreFactory();
     const sessionOptions = {
       userId: opts.actorUserId,
       orgId: opts.orgId,
@@ -2289,6 +2954,7 @@ export class EngineHost {
       purpose: "workflow" as const,
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(policyResolver ? { policyResolver } : {}),
+      ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
       owner: opts.owner,
       // Tier 0 (sandbox-tiering spec, 2026-08-22): workflow sessions are
       // sandbox-less by default, like orchestrators. A session-node turn

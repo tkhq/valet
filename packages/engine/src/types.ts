@@ -491,6 +491,83 @@ export interface MessageQuery {
   includeSystemEntries?: boolean;
 }
 
+// ── Plugin store ───────────────────────────────────────────────────
+
+/**
+ * The scope a plugin document is stored under
+ * (docs/specs/2026-08-29-plugin-store-design.md). Maps to the
+ * `(scope_type, scope_id)` pair of the `plugin_store` table; `global` carries
+ * no id. A plugin never crosses plugins — every `ScopedPluginStore` is already
+ * bound to one plugin name.
+ */
+export type PluginStoreScope =
+  | { type: "global" }
+  | { type: "org"; id: string }
+  | { type: "team"; id: string }
+  | { type: "user"; id: string }
+  | { type: "session"; id: string };
+
+/**
+ * One stored plugin document. `doc` is the plugin's own typed payload
+ * (persisted as opaque jsonb; the plugin validates it). `revision` starts at 1
+ * and bumps on every `put`; pass it back through `put`'s `ifRevision` for
+ * optimistic concurrency.
+ */
+export interface PluginStoreDoc<T> {
+  key: string;
+  doc: T;
+  revision: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * A plugin's key/document store within one scope. Read and write typed
+ * documents by `(collection, key)`; the store persists opaque jsonb, so the
+ * caller owns the `T`.
+ */
+export interface ScopedPluginStore {
+  /** The stored document, or null when no row matches `(collection, key)`. */
+  get<T>(collection: string, key: string): Promise<PluginStoreDoc<T> | null>;
+  /**
+   * Upsert `doc` at `(collection, key)`, bumping `revision`. Pass
+   * `ifRevision` to fail the write when the stored revision has moved
+   * (optimistic concurrency): a mismatch throws `PluginStoreConflictError`.
+   */
+  put<T>(
+    collection: string,
+    key: string,
+    doc: T,
+    opts?: { ifRevision?: number },
+  ): Promise<PluginStoreDoc<T>>;
+  /**
+   * List documents in `collection`, ordered by `key`. `prefix` filters to
+   * keys that start with it; `limit` caps the page; `cursor` continues a
+   * previous page. `nextCursor` is null when the page is the last.
+   */
+  list<T>(
+    collection: string,
+    opts?: { prefix?: string; limit?: number; cursor?: string },
+  ): Promise<{ items: PluginStoreDoc<T>[]; nextCursor: string | null }>;
+  /** Delete `(collection, key)`. Returns true when a row was removed. */
+  delete(collection: string, key: string): Promise<boolean>;
+}
+
+/**
+ * A plugin's persistence handle, bound to one plugin name. Pick a scope
+ * through `scope(...)` or one of the convenience views, then read/write typed
+ * documents. Surfaced to plugin actions as `ToolContext.pluginStore`, bound to
+ * the action's owning plugin.
+ */
+export interface PluginStore {
+  scope(scope: PluginStoreScope): ScopedPluginStore;
+  global(): ScopedPluginStore;
+  org(orgId: string): ScopedPluginStore;
+  team(teamId: string): ScopedPluginStore;
+  user(userId: string): ScopedPluginStore;
+  session(sessionId: string): ScopedPluginStore;
+}
+
 // ── Tools ──────────────────────────────────────────────────────────
 
 export type RiskLevel = "low" | "medium" | "high" | "critical";
@@ -546,6 +623,23 @@ export interface ToolContext {
    * called with the correct owner without threading it through toolConfig.
    */
   owner?: Principal;
+  /**
+   * The owning plugin's persistence handle, bound to the action's plugin and
+   * available to plugin actions (docs/specs/2026-08-29-plugin-store-design.md).
+   * Set on the `PluginActionContext` by `call_tool`'s executor from
+   * `pluginStoreFactory` below — bound to the action's `service`. Absent on a
+   * first-class (built-in) tool's context and when the host wires no factory.
+   */
+  pluginStore?: PluginStore;
+  /**
+   * Host-internal seam (NOT plugin-facing): builds a `PluginStore` bound to a
+   * given plugin name. `call_tool` calls it with the action's `service` to set
+   * `pluginStore` on the `PluginActionContext`, so each plugin action reads and
+   * writes only its own rows. Threaded from
+   * `CreateSessionOptions.pluginStoreFactory` via `buildToolContext`. Absent in
+   * hosts (and tests) that wire no store.
+   */
+  pluginStoreFactory?: (pluginName: string) => PluginStore;
   requestDecision: (gate: DecisionGateRequest) => Promise<DecisionResolution>;
   /**
    * Optional host policy resolver consulted by `call_tool` before invoking a
@@ -1885,6 +1979,15 @@ export interface CreateSessionOptions {
    * a transient store error). Threaded onto `ToolContext.policyResolver`.
    */
   policyResolver?: PolicyResolver;
+  /**
+   * Optional host-provided factory for plugin persistence
+   * (docs/specs/2026-08-29-plugin-store-design.md). When present, `call_tool`
+   * calls it with a plugin action's `service` and sets the result on the
+   * action's `PluginActionContext.pluginStore`, so the action reads and writes
+   * only its own rows. Threaded onto `ToolContext.pluginStoreFactory` via
+   * `buildToolContext`. Absent === no `pluginStore` on plugin actions.
+   */
+  pluginStoreFactory?: (pluginName: string) => PluginStore;
   queueMode?: QueueMode;
   /** Collect-mode buffering window in ms (default 5000). */
   collectWindowMs?: number;
@@ -2082,6 +2185,16 @@ export interface SpawnChildRequest {
   /** Request a rootless docker daemon inside the child's sandbox
    * (docker-in-sandbox, `SandboxCreateOpts.docker`). */
   docker?: boolean;
+  /**
+   * Pre-assigned child session id. A host seam that must durably record the
+   * id BEFORE the child session is built sets it (the security dispatch
+   * stamps its cell claim first, so the host's session build sees the claim
+   * and attaches the persona toolset). The `task` built-in never sets it.
+   */
+  sessionId?: string;
+  /** Role name applied to the spawn prompt's turn (`PromptOptions.role`
+   * — the session must register the role in its `roles` option). */
+  role?: string;
 }
 
 export interface SpawnChildResult {

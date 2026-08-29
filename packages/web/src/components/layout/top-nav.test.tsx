@@ -17,9 +17,37 @@ import {
   createRoute,
   createRouter,
 } from "@tanstack/react-router";
+import type { OrgPluginWire } from "@valet/api/wire";
 import { TopNav } from "./top-nav";
 import { AppShell } from "./app-shell";
 import { WorkspaceScopeProvider } from "~/lib/workspace-scope";
+
+// The nav gates the Security link on the `security` plugin's entitlement,
+// read from `useOrg().data.plugins`. Mock the settings reads so the gate is
+// deterministic; `securityPlugins` is mutable per test.
+let securityPlugins: OrgPluginWire[] = [
+  {
+    name: "security",
+    label: "Valet Security",
+    description: "",
+    instanceEnabled: true,
+    entitlement: { mode: "all", teamIds: [] },
+    enabledForCaller: true,
+  },
+];
+
+vi.mock("~/api/settings", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/settings")>();
+  return {
+    ...actual,
+    useOrg: () => ({
+      data: { callerRole: "admin", features: { organizations: true }, plugins: securityPlugins },
+      isLoading: false,
+      error: null,
+    }),
+    useTeams: () => ({ data: { teams: [] }, isLoading: false, error: null }),
+  };
+});
 
 vi.mock("~/api/orchestrator", () => ({
   useOrchestratorInfo: () => ({
@@ -87,6 +115,19 @@ function renderNav(opts: { withSidebar?: boolean } = {}) {
 }
 
 describe("TopNav", () => {
+  beforeEach(() => {
+    securityPlugins = [
+      {
+        name: "security",
+        label: "Valet Security",
+        description: "",
+        instanceEnabled: true,
+        entitlement: { mode: "all", teamIds: [] },
+        enabledForCaller: true,
+      },
+    ];
+  });
+
   it("renders the Valet logo, not the orchestrator's name", async () => {
     renderNav();
     expect(await screen.findByText("Valet")).toBeTruthy();
@@ -109,7 +150,7 @@ describe("TopNav", () => {
     expect(labels.indexOf("Skills")).toBeLessThan(labels.indexOf("Integrations"));
   });
 
-  // The six labelled links do not fit beside the logo and the icons on a
+  // The labelled links do not fit beside the logo and the icons on a
   // phone. They live in one scrollable landmark so the row can slide
   // sideways instead of pushing the settings icon off-screen; jsdom has no
   // layout, so this guards the STRUCTURE that makes the CSS fix possible.
@@ -125,11 +166,44 @@ describe("TopNav", () => {
       "Memory",
       "Sessions",
       "Workflows",
+      "Security",
       "Events",
       "Usage",
       "Skills",
       "Integrations",
     ]);
+  });
+
+  it("renders a Security link beside Workflows", async () => {
+    renderNav();
+    const link = await screen.findByRole("link", { name: "Security" });
+    expect(link.getAttribute("href")).toBe("/security");
+
+    const labels = screen.getAllByRole("link").map((el) => el.textContent);
+    expect(labels.indexOf("Security")).toBe(labels.indexOf("Workflows") + 1);
+  });
+
+  it("hides the Security link when the plugin is not enabled for the caller", async () => {
+    securityPlugins = [
+      {
+        name: "security",
+        label: "Valet Security",
+        description: "",
+        instanceEnabled: true,
+        entitlement: { mode: "off", teamIds: [] },
+        enabledForCaller: false,
+      },
+    ];
+    renderNav();
+    await screen.findByText("Valet");
+    expect(screen.queryByRole("link", { name: "Security" })).toBeNull();
+  });
+
+  it("hides the Security link when no security plugin is loaded", async () => {
+    securityPlugins = [];
+    renderNav();
+    await screen.findByText("Valet");
+    expect(screen.queryByRole("link", { name: "Security" })).toBeNull();
   });
 
   // The logo and the two icons sit OUTSIDE that scroller, so they stay put

@@ -15,7 +15,27 @@ import {
   type SessionRunFields,
 } from "../sessions/run-state.js";
 import { canAdministerSession, canViewSession } from "../services/session-access.js";
+import {
+  createSecurityEngagementService,
+  type SecurityConfigContext,
+} from "../services/security-engagements.js";
+import { seedSecurityReview, seededConfigContext } from "../services/security-seed.js";
+import { planCellInputToCell, PlanCellInputError } from "./security.js";
+import { resolveApiTokenOrNull, resolveRefSha } from "../bakes/source-service.js";
 import { isTeamMember, listTeamsForUser } from "../services/teams.js";
+import { orgAllowsPluginForUser } from "../services/plugin-entitlements.js";
+import {
+  bundledPersonaIds,
+  isKnownPreset,
+  parsePlan,
+  presetPlan,
+  rescanPlan,
+  SECURITY_PRESETS,
+  securityKickoffPrompt,
+  securitySessionTitle,
+  serializePlan,
+} from "@valet/plugin-security";
+import { deriveSecretKey } from "../lib/secret-crypto.js";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import {
@@ -111,6 +131,9 @@ function rowToSummary(row: typeof agentSessions.$inferSelect, run: SessionRunFie
     id: row.id,
     workspace: row.workspace,
     status: row.status as SessionStatus,
+    // The column is free text (shared shape with #396's 'design'); the wire
+    // narrows to the kinds this API mints.
+    kind: row.kind === "security" ? "security" : "code",
     runState: run.runState,
     title: row.title ?? undefined,
     createdAt: row.createdAt,
@@ -190,6 +213,13 @@ sessionsRouter.get("/", async (c) => {
     owner = { type: ownerType, id: ownerId };
   }
 
+  // Optional kind filter, the shape the security hub reads
+  // (`GET /api/sessions?kind=security`).
+  const kindFilter = c.req.query("kind");
+  if (kindFilter !== undefined && kindFilter !== "code" && kindFilter !== "security") {
+    return c.json({ error: "kind must be 'code' or 'security'." }, 400);
+  }
+
   // Three round trips, whatever the number of sessions: the two
   // `listStandaloneSessions` makes, plus ONE cross-session read of every
   // unsettled submission (the same call the admin submissions route uses).
@@ -201,8 +231,13 @@ sessionsRouter.get("/", async (c) => {
   ]);
   const bySession = groupSubmissionsBySession(unsettled);
 
+  const filtered =
+    kindFilter === undefined
+      ? standalone
+      : standalone.filter((row) => (row.kind === "security" ? "security" : "code") === kindFilter);
+
   const body: ListSessionsResponse = {
-    sessions: standalone.map((row) =>
+    sessions: filtered.map((row) =>
       rowToSummary(row, deriveRunFields(runStateRow(row), bySession.get(row.id) ?? [])),
     ),
   };
@@ -211,8 +246,29 @@ sessionsRouter.get("/", async (c) => {
 
 // ── Create ────────────────────────────────────────────────────────────────
 
+/** A security review defaults to a capable model, not the account/org
+ * fallback. `resolveModelForBuild` bottoms out at `claude-haiku-4-5`, which
+ * is too weak for security review, so a security session with no explicit
+ * model gets this instead. An explicit `model` on the request always wins. */
+const SECURITY_DEFAULT_MODEL = "claude-sonnet-4-6";
+
+/**
+ * Session kinds backed by a gateable plugin (plugin-entitlements design). A
+ * kind in this map may only be created when its plugin is instance-loaded AND
+ * the caller's org admits the caller. A future plugin-backed kind adds one
+ * entry here. `code` is not backed by a plugin, so it is absent.
+ */
+const KIND_TO_PLUGIN: Partial<Record<"code" | "security", string>> = {
+  security: "security",
+};
+
+/** UI label for a gateable plugin's kind, for the refusal messages below. */
+const PLUGIN_LABEL: Record<string, string> = {
+  security: "Valet Security",
+};
+
 sessionsRouter.post("/", async (c) => {
-  const { db, engineStore, prebuildService } = c.var.providers;
+  const { db, engineStore, prebuildService, engineCredentials, encryptionKey } = c.var.providers;
   const user = c.var.user;
   let body: CreateSessionRequest;
   try {
@@ -239,6 +295,93 @@ sessionsRouter.post("/", async (c) => {
     return c.json({ error: "docker must be a boolean. Send true or false, or omit the field." }, 400);
   }
   const docker = body.docker === true;
+  if (body.kind !== undefined && body.kind !== "code" && body.kind !== "security") {
+    return c.json({ error: "kind must be 'code' or 'security'." }, 400);
+  }
+  const kind = body.kind ?? "code";
+
+  // Plugin entitlement gate (plugin-entitlements design). A plugin-backed kind
+  // needs two things: the plugin loaded on this deployment (the instance
+  // switch), and the caller's org admits the caller (the org mode). Placed
+  // here, before anything is written, so a refusal never leaves an orphaned
+  // session or engagement row.
+  const gatingPlugin = KIND_TO_PLUGIN[kind];
+  if (gatingPlugin) {
+    const label = PLUGIN_LABEL[gatingPlugin] ?? gatingPlugin;
+    if (!c.var.providers.engineHost.isPluginLoaded(gatingPlugin)) {
+      return c.json({ error: `${label} is not enabled on this deployment.` }, 403);
+    }
+    if (!(await orgAllowsPluginForUser(db, user.orgId, user.id, gatingPlugin))) {
+      return c.json(
+        { error: `${label} is not enabled for your account. Ask an org admin to enable it.` },
+        403,
+      );
+    }
+  }
+
+  // A security session's sweep preset and path scope. Validated here, before
+  // anything is written, so a bad id or a mistyped `paths` is a bad request,
+  // not a failed seed. Both fields only matter for a security session; a code
+  // session ignores them.
+  const presetId = body.preset ?? "code-review";
+  if (kind === "security") {
+    if (typeof presetId !== "string" || !isKnownPreset(presetId)) {
+      const known = SECURITY_PRESETS.map((p) => p.id).join(", ");
+      return c.json(
+        { error: `Unknown preset "${String(presetId)}". Known presets: ${known}. Pick one when you start the review.` },
+        400,
+      );
+    }
+    if (
+      body.paths !== undefined &&
+      (!Array.isArray(body.paths) || body.paths.some((p) => typeof p !== "string"))
+    ) {
+      return c.json(
+        { error: "paths must be a list of strings. Send the include globs, or omit the field." },
+        400,
+      );
+    }
+    // Setup-page overrides (`/security/new`): the final config + plan the user
+    // edited before create. Validated here, before anything is written.
+    if (body.securityConfig !== undefined) {
+      const sc = body.securityConfig;
+      if (typeof sc !== "object" || sc === null || Array.isArray(sc)) {
+        return c.json({ error: "securityConfig must be an object with focus, invariants, or categories." }, 400);
+      }
+      if (sc.focus !== undefined && sc.focus !== null && typeof sc.focus !== "string") {
+        return c.json({ error: "securityConfig.focus must be a text note or null." }, 400);
+      }
+      if (
+        sc.invariants !== undefined &&
+        (!Array.isArray(sc.invariants) || sc.invariants.some((v) => typeof v !== "string"))
+      ) {
+        return c.json({ error: "securityConfig.invariants must be a list of strings." }, 400);
+      }
+      if (
+        sc.categories !== undefined &&
+        (!Array.isArray(sc.categories) || sc.categories.some((v) => typeof v !== "string"))
+      ) {
+        return c.json({ error: "securityConfig.categories must be a list of strings." }, 400);
+      }
+    }
+    if (body.planCells !== undefined && (!Array.isArray(body.planCells) || body.planCells.length === 0)) {
+      return c.json({ error: "planCells must be a non-empty list of plan steps, or omit the field." }, 400);
+    }
+  }
+
+  // A model, when present, is a non-empty string id from the catalog. Rejected
+  // here so a mistyped model is a bad request, not a silently ignored field.
+  if (body.model !== undefined && (typeof body.model !== "string" || body.model.length === 0)) {
+    return c.json(
+      { error: "model must be a non-empty string. Send a model id from GET /api/models." },
+      400,
+    );
+  }
+  // The session-default model. A security session with no explicit model uses
+  // a capable default instead of the haiku floor `resolveModelForBuild` would
+  // otherwise reach. A code session with no model keeps normal resolution
+  // (undefined → user default → org preferred → hardcoded default).
+  const effectiveModel = body.model ?? (kind === "security" ? SECURITY_DEFAULT_MODEL : undefined);
 
   // An explicit `teamId: null` from a client that always sends the field is
   // a real shape — the body is an unchecked cast — so it must fall through to
@@ -259,7 +402,59 @@ sessionsRouter.post("/", async (c) => {
   if ("error" in parsedRepos) {
     return c.json({ error: parsedRepos.error }, 400);
   }
-  const { repos } = parsedRepos;
+  let { repos } = parsedRepos;
+
+  // Re-scan / iterate: `rescanOf` names a prior security SESSION this review
+  // re-scans. Resolve its engagement, reuse the repo binding and the plan, and
+  // link the new engagement to it. The request wins on any explicit override
+  // (repo, preset, paths, model). Validated here, before anything is written.
+  let rescanParentEngagementId: string | undefined;
+  let rescanPlanYaml: string | undefined;
+  if (body.rescanOf !== undefined) {
+    if (kind !== "security") {
+      return c.json({ error: "rescanOf only applies to a security session. Send kind 'security'." }, 400);
+    }
+    if (typeof body.rescanOf !== "string" || body.rescanOf === "") {
+      return c.json({ error: "rescanOf must be a prior security session id." }, 400);
+    }
+    const priorRows = await db
+      .select()
+      .from(agentSessions)
+      .where(eq(agentSessions.id, body.rescanOf))
+      .limit(1);
+    const prior = priorRows[0];
+    // Existence-hiding: an unknown id, a session the caller cannot view, or a
+    // non-security session all answer the same 404.
+    if (!prior || prior.kind !== "security" || !(await canViewSession(db, prior, user.id))) {
+      return c.json({ error: "The prior review was not found, or you cannot view it." }, 404);
+    }
+    const priorSecurity = createSecurityEngagementService({ db });
+    const priorEngagement = await priorSecurity.getEngagementBySession(body.rescanOf);
+    if (!priorEngagement) {
+      return c.json({ error: "The prior session has no security engagement to re-scan." }, 404);
+    }
+    rescanParentEngagementId = priorEngagement.engagement.id;
+    // Re-scan v2: seed the plan from `rescanPlan(presetId)` — recon → reconcile
+    // → the diff-scoped sweeps → verify → report. The reconcile pass re-checks
+    // the carried findings; the sweeps find what the changed code introduced.
+    // This replaces reusing the parent's flat plan, which had no reconcile cell.
+    // The re-scan naturally picks up new commits: sec_start resolves the LATEST
+    // default-branch SHA and scopes the sweeps to the diff.
+    if (body.planCells === undefined) {
+      rescanPlanYaml = rescanPlan(presetId);
+    }
+    // Reuse the prior repo binding unless the request supplies its own.
+    if (repos.length === 0) {
+      repos = await getSessionRepos(db, body.rescanOf);
+    }
+  }
+
+  // An engagement reviews one repo at one pinned SHA (spec §Vocabulary), so
+  // a security session must arrive with a binding — there is nothing to
+  // review without one.
+  if (kind === "security" && repos.length === 0) {
+    return c.json({ error: "A security review needs a repository. Pick one when you start the review." }, 400);
+  }
 
   // Auto-create the workspace dir if it doesn't exist; reject if the path
   // exists but is a file (Docker bind-mount needs a directory).
@@ -279,12 +474,79 @@ sessionsRouter.post("/", async (c) => {
     }
   }
 
+  // Dynamic config (M-F1) + setup-page overrides (`/security/new`): a security
+  // review reads the repo's `.valet/security.yml` through the GitHub contents
+  // API BEFORE the sandbox exists, and seeds its config + plan from it (or the
+  // preset fallback). `seedSecurityReview` owns that seeding — the same function
+  // the preview endpoint calls, so a preview shows exactly what create seeds.
+  //
+  // When the setup page sends `planCells`, that edited plan wins over the seed;
+  // when it sends `securityConfig`, those focus / invariants / categories
+  // override the seed. The repo-committed tools / scope / personas always come
+  // from the seed — the user does not edit those. A re-scan that reuses the
+  // prior plan skips the plan seed but still resolves the repo config context.
+  let securityPlan = kind === "security" ? presetPlan(presetId, { paths: body.paths }) : "";
+  let engagementConfig: SecurityConfigContext | undefined;
+  let engagementHasRepoConfig = false;
+  if (kind === "security") {
+    const [owner, repo] = repos[0].fullName.split("/");
+    if (owner && repo) {
+      const tokenDeps = { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) };
+      const seeded = await seedSecurityReview({
+        owner,
+        repo,
+        ...(repos[0].ref ? { ref: repos[0].ref } : {}),
+        presetId,
+        ...(body.paths ? { paths: body.paths } : {}),
+        tokenDeps,
+        orgId: user.orgId,
+      });
+      engagementHasRepoConfig = seeded.hasRepoConfig;
+
+      // The plan: the re-scan v2 plan (recon → reconcile → sweeps → verify →
+      // report), the setup page's edited plan, or the seeded plan (config steps
+      // / preset). The edited plan is validated through the same path
+      // `/plan/cells` uses.
+      if (rescanPlanYaml !== undefined) {
+        securityPlan = rescanPlanYaml;
+      } else if (body.planCells !== undefined) {
+        try {
+          const cells = body.planCells.map((raw, i) => planCellInputToCell(raw, i + 1));
+          const personaKeys = seeded.personas ? Object.keys(seeded.personas) : [];
+          // Validate against the bundled ids ∪ the repo-declared personas, so a
+          // config persona in an edited step stays valid.
+          parsePlan(serializePlan(cells), [...bundledPersonaIds(), ...personaKeys]);
+          securityPlan = serializePlan(cells);
+        } catch (err) {
+          if (err instanceof PlanCellInputError) return c.json({ error: err.message }, 400);
+          return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+        }
+      } else {
+        securityPlan = seeded.planYaml;
+      }
+
+      engagementConfig = seededConfigContext(seeded, body.securityConfig);
+    }
+  }
+
+  // A security session names its target so the list reads at a glance (#7).
+  // The user's explicit title always wins; otherwise derive one from the repo
+  // and ref: "Security review · owner/repo@ref". Omit "@ref" for the default
+  // branch (null/empty ref). A 40-hex SHA shortens to 7 chars. The whole title
+  // stays within the 80-char column and reads well in a narrow list.
+  const sessionTitle =
+    body.title ??
+    (kind === "security" ? securitySessionTitle(repos[0].fullName, repos[0].ref) : null);
+
   const now = Date.now();
   const id = newId("s");
   // Session row + repo bindings must land atomically — a failure between
   // the two statements would otherwise leave an orphaned agentSessions row
   // with no bindings (review finding on commit d0de1af3).
   let created: typeof agentSessions.$inferSelect | undefined;
+  // The seeded engagement id, captured from the create transaction so the
+  // setup-page path can materialize its cells right after commit.
+  let securityEngagementId: string | undefined;
   await db.transaction(async (tx) => {
     const inserted = await tx
       .insert(agentSessions)
@@ -293,12 +555,13 @@ sessionsRouter.post("/", async (c) => {
         userId: user.id,
         orgId: user.orgId,
         workspace: body.workspace,
-        title: body.title ?? null,
+        title: sessionTitle,
         status: "active",
         ownerType: owner.type,
         ownerId: owner.id,
         profile,
         docker,
+        kind,
         createdAt: now,
         updatedAt: now,
       })
@@ -326,6 +589,34 @@ sessionsRouter.post("/", async (c) => {
         })),
       );
     }
+
+    // A security session is an engagement runner: seed its engagement in
+    // the SAME transaction, so no security session ever exists without one
+    // (the security routes and tools resolve session → engagement). The final
+    // config + plan arrive from the setup page (`/security/new`); `seedSecurityReview`
+    // resolved the repo-committed context above.
+    if (kind === "security") {
+      const security = createSecurityEngagementService({ db });
+      const engagement = await security.createEngagement(
+        {
+          sessionId: id,
+          repoFullName: repos[0].fullName,
+          // The plan comes from (in order): the re-scan v2 plan on a re-scan, the
+          // setup page's edited `planCells`, the repo's `.valet/security.yml`
+          // steps, or the request's preset + paths. `securityPlan` resolved all
+          // four above.
+          plan: securityPlan,
+          ...(rescanParentEngagementId ? { parentEngagementId: rescanParentEngagementId } : {}),
+          ...(engagementConfig ? { config: engagementConfig } : {}),
+          // `has_repo_config` is the seed's flag, not "did a config context
+          // exist": a preset review with a user-edited focus carries a config
+          // context but no repo config seeded it.
+          hasRepoConfig: engagementHasRepoConfig,
+        },
+        tx,
+      );
+      securityEngagementId = engagement.id;
+    }
   });
 
   // Zero-config generation (spec decision 13): after the bindings land,
@@ -340,6 +631,53 @@ sessionsRouter.post("/", async (c) => {
     });
   }
 
+  // Setup-page start (`/security/new`): when the request carries the final
+  // edited plan, the user already reviewed the config + plan and clicked "Start
+  // review" — that click IS the spend approval the old on-session sec_start gate
+  // asked for. So materialize the cells now instead of leaving the engagement in
+  // an editable planning state waiting on the runner. Resolve the binding's ref
+  // to a commit SHA the same way the sec_start tool does, then `startEngagement`.
+  // Best-effort: a SHA-resolution failure logs and leaves the engagement
+  // planning — the runner's kickoff below can still start it. A re-scan keeps
+  // the runner-driven start (it diffs against the parent at sec_start).
+  // Whether the engagement is already running when the kickoff turn queues.
+  // On the setup-page path the create route starts it here, so the runner must
+  // not call sec_start (that route 409s a running engagement and the approval
+  // gate is redundant). A start failure leaves this false and the runner starts
+  // the engagement itself through sec_start.
+  let securityAlreadyStarted = false;
+  if (
+    kind === "security" &&
+    body.planCells !== undefined &&
+    rescanParentEngagementId === undefined &&
+    securityEngagementId
+  ) {
+    const [owner, repo] = repos[0].fullName.split("/");
+    if (owner && repo) {
+      try {
+        // An already-pinned 40-hex ref needs no GitHub lookup — the engagement
+        // is deterministic offline (mirrors the start-preview route).
+        const ref = repos[0].ref;
+        let resolvedSha: string;
+        if (ref && /^[0-9a-f]{40}$/i.test(ref)) {
+          resolvedSha = ref.toLowerCase();
+        } else {
+          const tokenDeps = { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) };
+          const token = await resolveApiTokenOrNull(tokenDeps, user.orgId, owner, repo);
+          resolvedSha = (await resolveRefSha(tokenDeps, token, owner, repo, ref)).toLowerCase();
+        }
+        const security = createSecurityEngagementService({ db });
+        await security.startEngagement(securityEngagementId, { resolvedSha });
+        securityAlreadyStarted = true;
+      } catch (err) {
+        console.warn(
+          `security create: could not start engagement ${securityEngagementId} for ${repos[0].fullName} at create; ` +
+            `the runner can start it. Cause: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+  }
+
   // `initialPrompt` (wire `CreateSessionRequest`): queue the first turn once
   // the row and its repo bindings are durable, through the same submit path
   // `POST /api/sessions/:id/messages` uses. The prompt goes to the session's
@@ -350,11 +688,39 @@ sessionsRouter.post("/", async (c) => {
   // believing nothing was created while an orphan row stayed behind. The
   // caller sees `runState: "idle"` instead of "working" and can send the
   // prompt again through the messages route; the server logs the cause.
+  // A security session is an engagement runner, not a chat: it must start
+  // working the moment it is created, so it always gets a kickoff turn even
+  // when the user left the focus box empty. The user's optional prompt folds
+  // in as focus notes. A code session only runs when the user sends a prompt.
+  // Persist the chosen model BEFORE the kickoff turn so the first turn runs on
+  // it, not the haiku floor. `setModel` is the same durable path PATCH uses:
+  // it saves `SessionData.model`, so `resolveModelForBuild` returns it on this
+  // build and every rebuild after eviction. The kickoff below reuses the cached
+  // session this materializes. Best-effort like the kickoff: a failure logs and
+  // does not fail the create — the row and engagement are already durable, and
+  // the model can be re-set through PATCH.
+  if (effectiveModel && created) {
+    const { engineHost } = c.var.providers;
+    try {
+      const engineSession = await engineHost.sessionFor(id, await loadSessionMeta(db, created));
+      await engineSession.setModel(effectiveModel);
+    } catch (err) {
+      console.error(`session ${id}: set default model ${effectiveModel} failed:`, err);
+    }
+  }
+
+  const firstPrompt =
+    kind === "security"
+      ? securityKickoffPrompt(repos[0].fullName, {
+          ...(body.initialPrompt ? { focusNotes: body.initialPrompt } : {}),
+          alreadyStarted: securityAlreadyStarted,
+        })
+      : body.initialPrompt;
   let queuedPrompt = false;
-  if (body.initialPrompt && created) {
+  if (firstPrompt && created) {
     try {
       queuedPrompt =
-        (await submitSessionPrompt(c.var.providers, created, body.initialPrompt, {
+        (await submitSessionPrompt(c.var.providers, created, firstPrompt, {
           author: promptAuthorFromUser(c.var.user),
         })) !== null;
     } catch (err) {
@@ -369,12 +735,14 @@ sessionsRouter.post("/", async (c) => {
     id,
     workspace: body.workspace,
     status: "active",
+    kind,
     ...deriveRunFields({ status: "active", updatedAt: now }, unsettled),
-    title: body.title,
+    ...(sessionTitle !== null ? { title: sessionTitle } : {}),
     owner,
     createdAt: now,
     updatedAt: now,
     messageCount: 0,
+    ...(effectiveModel ? { model: effectiveModel } : {}),
     profile,
     docker,
     ...(repos.length > 0 ? { repos } : {}),

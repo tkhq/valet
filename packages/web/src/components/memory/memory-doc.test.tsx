@@ -63,6 +63,7 @@ const orgFixture = {
   features: { organizations: true, ssoTeamSync: false },
   ssoTeamGroups: [],
   allowPublicArtifacts: false,
+  plugins: [],
   callerRole: "member" as const,
 };
 

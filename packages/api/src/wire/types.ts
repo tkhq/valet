@@ -52,6 +52,11 @@ export type SessionStatus = "active" | "hibernated" | "archived" | "deleted";
  * interactive sessions may request "full". */
 export type SandboxProfile = "headless" | "full";
 
+/** Which authoring surface the session drives. 'security' sessions carry a
+ * security engagement (docs/specs/2026-08-27-valet-security-design.md);
+ * everything else is 'code'. Distinct from the engine's lifecycle purpose. */
+export type SessionKind = "code" | "security";
+
 /**
  * What a session is DOING right now. `SessionStatus` is the lifecycle of the
  * row; this is the run state the Sessions surface reads at a glance.
@@ -75,6 +80,7 @@ export interface SessionSummary {
   id: string;
   workspace: string;
   status: SessionStatus;
+  kind: SessionKind;
   /** What the session is doing. See `SessionRunState` for the precedence. */
   runState: SessionRunState;
   title?: string;
@@ -125,6 +131,13 @@ export interface CreateSessionRequest {
    * any other cross-owner access. Mirrors `CreateWorkflowRequest.teamId` —
    * one spelling for "make this the team's, not mine". */
   teamId?: string;
+  /** Defaults to "code". A "security" session requires a repo binding and
+   * is seeded with a security engagement in the create transaction. */
+  kind?: SessionKind;
+  /** Session-default model id (a value from `GET /api/models`). When omitted
+   * on a security session, the server picks a capable default rather than the
+   * account/org fallback; on a code session it falls to normal resolution. */
+  model?: string;
   /** Optional first user prompt; if set, server enqueues immediately after creation. */
   initialPrompt?: string;
   /** Defaults to "headless" server-side when omitted. */
@@ -136,6 +149,35 @@ export interface CreateSessionRequest {
   repos?: RepoBinding[];
   /** Sugar for a single repo binding — equivalent to `repos: [repo]`. */
   repo?: RepoBinding;
+  /** Security sweep preset id (a value from `SECURITY_PRESETS`). Chooses which
+   * cells the seeded engagement plan runs. Defaults to "code-review". Only a
+   * security session reads it. */
+  preset?: string;
+  /** Optional include globs that scope the security review's sweeps (authz,
+   * injection, secrets-config) to part of the repo. Recon and verify stay
+   * repo-wide. Only a security session reads it. */
+  paths?: string[];
+  /** Re-scan / iterate: a prior security SESSION id this review re-scans. The
+   * new engagement reuses the prior repo binding and plan (unless preset/paths
+   * /model override) and links to the prior engagement, so refutations carry
+   * forward and the diff reads against it. Only a security session reads it;
+   * the caller must be able to view the prior session. */
+  rescanOf?: string;
+  /** Final focus / invariants / categories from the `/security/new` setup page.
+   * When present on a security create, these override the repo-seeded config
+   * columns. Repo-committed tools, scope, and personas still come from the
+   * repo's `.valet/security.yml`. Only a security session reads it. */
+  securityConfig?: {
+    focus?: string | null;
+    invariants?: string[];
+    categories?: string[];
+  };
+  /** Final plan steps from the `/security/new` setup page (dynamic-config
+   * M-F2). When present on a security create, the server uses these verbatim
+   * instead of re-seeding the plan from the repo config or preset. The server
+   * assigns dense ordinals 1..N in array order. Only a security session reads
+   * it. */
+  planCells?: SecurityPlanCellInput[];
 }
 
 export interface ListSessionsResponse {
@@ -150,6 +192,533 @@ export type GetSessionResponse = SessionDetail;
 export interface SandboxJwtResponse {
   token: string;
   expiresAt: number;
+}
+
+// ── REST: security engagements ───────────────────────────────────────────
+// docs/specs/2026-08-27-valet-security-design.md. Read routes only this
+// milestone; mutations arrive with the runner tools and the triage surface.
+
+export type SecurityFindingSeverity = "critical" | "high" | "medium" | "low" | "info";
+/** `fixed` (re-scan v2): the finding was real and is now resolved — distinct
+ * from `refuted` (a false positive). The reconcile pass marks a carried finding
+ * `fixed` when the change resolved it. */
+export type SecurityFindingStatus = "open" | "verified" | "refuted" | "fixed";
+
+export interface SecurityEngagementWire {
+  id: string;
+  sessionId: string;
+  status: "planning" | "running" | "completed" | "failed" | "cancelled";
+  repoFullName: string;
+  /** Pinned commit SHA once started; empty while planning. */
+  repoRef: string;
+  plan: string;
+  /** Diff-scoped re-scan (re-scan / iterate): the prior review's pinned SHA the
+   * sweeps diffed against. Null on a first review or a full-scan fallback. */
+  baseRef: string | null;
+  /** Diff-scoped re-scan: the changed file paths the sweeps scoped to (JSON
+   * parsed from `changed_paths`). Null on a first review or a full-scan
+   * fallback (the panel then shows "Full re-scan"). */
+  changedPaths: string[] | null;
+  /** True when a valid `.valet/security.yml` seeded this engagement
+   * (dynamic-config M-F1). The panel shows the review source: the repo config
+   * vs a bundled preset. */
+  hasRepoConfig: boolean;
+  /** Repo config context (dynamic-config M-F1), parsed from the repo config at
+   * create. Null when the engagement used a preset, or the field was absent.
+   * Stored for later milestones; not yet wired into prompts. */
+  focus: string | null;
+  invariants: string[] | null;
+  categories: string[] | null;
+  configPersonas: Record<string, string> | null;
+  /** Declared tools the config named (M-P4a). Each is a `{ id, install?, image?,
+   * mcp?, egress? }` decl; the panel shows the id list. Null when the config
+   * declared no tools. */
+  configTools: SecurityToolDeclWire[] | null;
+  /** The authorized live-testing scope (M-P4b): the hosts the live personas may
+   * reach. Null when no live testing is authorized. The panel surfaces this
+   * prominently — it is authorization-sensitive. */
+  authorizedScope: { hosts: string[] } | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** One declared tool on the wire (M-P4a). Mirrors the plugin's `ToolDecl`. */
+export interface SecurityToolDeclWire {
+  id: string;
+  install?: string;
+  image?: string;
+  mcp?: { url: string; prefix?: string };
+  egress?: string[];
+}
+
+export interface SecurityCellWire {
+  id: string;
+  ordinal: number;
+  persona: string;
+  mode: "fresh" | "resume";
+  goal: string;
+  dir: string;
+  /** Earlier ordinals whose state docs this cell's dispatch prompt names. */
+  reads: number[];
+  review: boolean;
+  status: "pending" | "running" | "completed" | "yielded" | "failed";
+  attempts: number;
+  compactedAt: number | null;
+  childSessionId: string | null;
+  dispatchedAt: number | null;
+  settledAt: number | null;
+  createdAt: number;
+  /** Live progress parsed from the latest state doc; running cell only. */
+  progress?: {
+    status: "working" | "yielding" | "done";
+    checklist: { pending: number; done: number };
+    queue: { pending: number; done: number };
+  };
+}
+
+/** Engagement spend: the runner session plus its cell children, summed from
+ * `cost_entries` (fix-session handoffs are not counted). `priced` is false
+ * when any counted turn is unpriced (an unpriced provider) — show tokens, not
+ * a wrong dollar amount. Zeros mean nothing spent yet. */
+export interface SecurityCostWire {
+  costUsd: number;
+  totalTokens: number;
+  priced: boolean;
+}
+
+/** The re-scan diff against the parent engagement (re-scan / iterate).
+ * Present on the GET /:id/security response only when this engagement has a
+ * parent. `fixedCount` is null while this engagement runs (a scan that has
+ * not finished has not looked everywhere) and a number once it is terminal. */
+export interface SecurityDiffWire {
+  parentEngagementId: string;
+  /** The parent engagement's session id, for a link back to the prior review.
+   * Null when the parent row is gone. */
+  parentSessionId: string | null;
+  /** Distinct fingerprints new in this engagement (absent from the parent). */
+  newCount: number;
+  /** Distinct fingerprints present in both engagements. */
+  recurringCount: number;
+  /** Parent fingerprints (open or verified) absent here — a fix. Null while
+   * running, a number once terminal. */
+  fixedCount: number | null;
+  /** Findings this engagement auto-refuted by carry-forward. */
+  carriedRefutedCount: number;
+}
+
+/** One plan step, parsed from the engagement's `plan` YAML for the step editor
+ * (dynamic-config M-F2). Meaningful during planning, before cells materialize.
+ * The `mode` is fixed `fresh` for the editor's steps; it is not surfaced. */
+export interface SecurityPlanCellWire {
+  ordinal: number;
+  persona: string;
+  name?: string;
+  goal: string;
+  playbook?: string;
+  paths?: string[];
+  reads: number[];
+  review: boolean;
+  /** When true, this phase runs as an architect → worker → verifier triad
+   * (M-P2b). `expandTriads` materializes it into three cells at start. The
+   * step editor toggles it per step. */
+  triad?: boolean;
+}
+
+/** One step the structured plan-edit route accepts (dynamic-config M-F2). No
+ * ordinal — the server assigns dense ordinals 1..N in array order. */
+export interface SecurityPlanCellInput {
+  persona: string;
+  name?: string;
+  goal: string;
+  playbook?: string;
+  paths?: string[];
+  reads: number[];
+  review?: boolean;
+  /** Run this phase as an architect → worker → verifier triad (M-P2b). */
+  triad?: boolean;
+}
+
+/** GET /api/sessions/:id/security */
+export interface GetSessionSecurityResponse {
+  engagement: SecurityEngagementWire;
+  cells: SecurityCellWire[];
+  cost: SecurityCostWire;
+  /** The engagement's `plan` YAML parsed into structured steps (dynamic-config
+   * M-F2). The step editor reads this during planning; empty on a malformed
+   * plan. Independent of `cells`, which materialize only at sec_start. */
+  planCells: SecurityPlanCellWire[];
+  /** The re-scan diff, when this engagement re-scans a prior one. Absent on a
+   * first review. */
+  diff?: SecurityDiffWire;
+  /** The report artifact (M-P3): the markdown report, its JSON snapshot, and
+   * the generation time. Null until the report cell runs. */
+  report: SecurityReportWire | null;
+  /** The pivot-coordinator needs still open or waiting on a human, plus the
+   * auto-resolved ones for the panel's informational list (M-P4c). Absent when
+   * the engagement recorded no needs. */
+  needs?: SecurityNeedWire[];
+}
+
+/** POST /api/sessions/security/preview — request body. A read-only preview of
+ * the config + plan a security review would seed from a repo's
+ * `.valet/security.yml` (or the preset fallback), before any session exists.
+ * The setup page (`/security/new`) prefills its editors from the response. */
+export interface SecurityPreviewRequest {
+  /** The repo full name (`owner/repo`) or a GitHub URL. */
+  repo: string;
+  /** Optional branch / tag / SHA to read the config at. Omit for the default
+   * branch HEAD. */
+  ref?: string;
+  /** The sweep preset id, used when the repo has no `.valet/security.yml`
+   * steps. Defaults to "code-review". */
+  preset: string;
+  /** Optional include globs that scope the preset sweeps. */
+  paths?: string[];
+}
+
+/** POST /api/sessions/security/preview — response. The seeded config plus the
+ * plan parsed into structured steps. No session is created. */
+export interface SecurityPreviewResponse {
+  config: {
+    focus: string | null;
+    invariants: string[];
+    categories: string[];
+    /** Repo-committed live-testing scope + declared tools (read-only, not
+     * editable in the setup page). Null when the config declares none. */
+    authorizedScope: { hosts: string[] } | null;
+    configTools: SecurityToolDeclWire[] | null;
+    /** True when a valid `.valet/security.yml` seeded this preview. */
+    hasRepoConfig: boolean;
+  };
+  /** The seeded plan parsed into structured steps for the plan editor. */
+  planCells: SecurityPlanCellWire[];
+}
+
+/** The engagement report artifact (M-P3). The report cell writes `markdown`
+ * (the multi-audience report) and `json` (a machine-readable snapshot) with
+ * `sec_report_write`. `generatedAt` is the write time. */
+export interface SecurityReportWire {
+  markdown: string;
+  /** The machine-readable JSON snapshot object (parsed). Null when the stored
+   * snapshot failed to parse — the markdown stays the primary artifact. */
+  json: unknown;
+  generatedAt: number;
+}
+
+/** GET /api/sessions/:id/security/report — the report artifact or null. */
+export interface GetSecurityReportResponse {
+  report: SecurityReportWire | null;
+}
+
+/** POST /api/sessions/:id/security/report — the stored report (persona,
+ * report cell only). */
+export interface SecurityWriteReportResponse {
+  report: SecurityReportWire;
+}
+
+export interface SecurityFindingWire {
+  id: string;
+  cellId: string;
+  fingerprint: string;
+  severity: SecurityFindingSeverity;
+  title: string;
+  file: string | null;
+  line: number | null;
+  body: string;
+  status: SecurityFindingStatus;
+  statusReason: string | null;
+  statusActor: string | null;
+  createdAt: number;
+  /** Filed external issues; populated on the findings LIST route only. */
+  links?: SecurityFindingLinkWire[];
+  /** Fix sessions spawned from this finding; findings LIST route only. */
+  handoffs?: SecurityHandoffWire[];
+  /** Human triage notes on this finding, oldest-first; findings LIST route
+   * only. On a re-scan these ride into `/prior/findings.md`. */
+  comments?: SecurityFindingCommentWire[];
+  /** Re-scan v2: true when this finding was carried from the parent engagement
+   * (seeded at re-scan start) or a diff-sweep re-report matched a carried
+   * fingerprint. Persisted on the row. Present on the findings LIST route only,
+   * and only when the engagement re-scans a prior one — absent (undefined) on a
+   * first review. */
+  recurring?: boolean;
+  /** Re-scan v2: the parent engagement's finding id this row was carried from.
+   * Present on the findings LIST route only; null on a first-seen finding. */
+  carriedFromFindingId?: string | null;
+}
+
+/** One fix session spawned from a finding (sec_handoff). Opened through the
+ * child slide-over. */
+export interface SecurityHandoffWire {
+  childSessionId: string;
+  title: string;
+  task?: string;
+  createdAt: number;
+}
+
+/** One human note on a finding (spec §Re-scan / iterate). A viewer may add
+ * one — commenting is collaboration, not an admin action. */
+export interface SecurityFindingCommentWire {
+  id: string;
+  body: string;
+  authorUserId: string;
+  createdAt: number;
+}
+
+/** POST /api/sessions/:id/security/findings/:findingId/comments — the created
+ * note. */
+export interface SecurityAddFindingCommentResponse {
+  comment: SecurityFindingCommentWire;
+}
+
+/** One filed external issue for one finding (spec §Filing issues). */
+export interface SecurityFindingLinkWire {
+  id: string;
+  findingId: string;
+  provider: "github" | "linear";
+  externalId: string;
+  url: string;
+  createdBy: string;
+  createdAt: number;
+}
+
+/** POST /api/sessions/:id/security/findings/:findingId/issues. `created`
+ * is false when the unique-index idempotency guard returned the existing
+ * link instead of filing again. */
+export interface SecurityFileIssueResponse {
+  link: SecurityFindingLinkWire;
+  created: boolean;
+}
+
+/** POST /api/sessions/:id/security/issues/digest — one digest issue, no
+ * per-finding link rows. */
+export interface SecurityDigestIssueResponse {
+  url: string;
+}
+
+/** GET /api/sessions/:id/security/findings */
+export interface ListSecurityFindingsResponse {
+  findings: SecurityFindingWire[];
+  nextCursor: string | null;
+}
+
+/** GET /api/sessions/:id/security/start-preview — everything the `sec_start`
+ * approval gate names before anything spawns. */
+export interface SecurityStartPreviewResponse {
+  repoFullName: string;
+  resolvedSha: string;
+  cells: Array<{ ordinal: number; persona: string; name: string; goal: string }>;
+}
+
+/** GET /api/sessions/:id/security/status — the `sec_status` resume primitive. */
+export interface GetSecurityStatusResponse {
+  engagement: SecurityEngagementWire;
+  cells: SecurityCellWire[];
+  findingCounts: Record<SecurityFindingSeverity, number>;
+  /** The running cell's child, when one is running and dispatched. */
+  runningChild: {
+    cellId: string;
+    childSessionId: string;
+    settled: boolean;
+    lastActivityAt: number | null;
+    /** True when the child session is gone (deleted/missing) without settling. */
+    childGone: boolean;
+  } | null;
+}
+
+/** POST /api/sessions/:id/security/plan (YAML) and
+ * POST /api/sessions/:id/security/plan/cells (structured, dynamic-config M-F2). */
+export interface SecuritySetPlanResponse {
+  cellCount: number;
+}
+
+/** POST /api/sessions/:id/security/config — edit the engagement's focus, known
+ * invariants, and loaded threat categories during planning (dynamic-config
+ * M-F3, M-P2a). Returns the saved values; null/empty when cleared. */
+export interface SecuritySetConfigResponse {
+  focus: string | null;
+  invariants: string[];
+  categories: string[];
+}
+
+/** POST /api/sessions/:id/security/dispatch */
+export interface SecurityDispatchResponse {
+  cell: SecurityCellWire;
+}
+
+/** POST /api/sessions/:id/security/cells/:cellId/complete */
+export interface SecurityCompleteCellResponse {
+  outcome: "completed" | "yielded" | "violation";
+  /** The server's exit-condition ruling, verbatim, on a violation. */
+  violation?: string;
+  cell?: SecurityCellWire;
+}
+
+/** POST /api/sessions/:id/security/cells/:cellId/fail */
+export interface SecurityFailCellResponse {
+  cell: SecurityCellWire;
+  reason: string;
+}
+
+/** One coverage row a persona recorded (NOT_ASSESSED ledger, M-P2d). `status`
+ * is `assessed` when a check ran or `not_assessed` when its tool was absent; a
+ * not_assessed row carries a `reason` naming the consequence. */
+export interface SecurityCoverageWire {
+  id: string;
+  cellId: string;
+  area: string;
+  status: "assessed" | "not_assessed";
+  tool: string | null;
+  reason: string | null;
+  createdAt: number;
+}
+
+/** One NOT_ASSESSED gap in the manifest coverage rollup (M-P2d). */
+export interface SecurityCoverageGapWire {
+  area: string;
+  tool: string | null;
+  reason: string;
+}
+
+/** The coverage rollup (NOT_ASSESSED ledger, M-P2d): assessed vs not_assessed
+ * counts and the NOT_ASSESSED gap list with reasons. */
+export interface SecurityCoverageRollupWire {
+  assessed: number;
+  notAssessed: number;
+  gaps: SecurityCoverageGapWire[];
+}
+
+/** GET /api/sessions/:id/security/coverage — the engagement's coverage rows
+ * plus the assessed/not_assessed rollup (M-P2d). The panel shows the rollup
+ * and lists the gaps. */
+export interface ListSecurityCoverageResponse {
+  coverage: SecurityCoverageWire[];
+  rollup: SecurityCoverageRollupWire;
+}
+
+/** The `sec_close` manifest (service `EngagementManifest`, wire copy). */
+export interface SecurityManifestWire {
+  engagementId: string;
+  status: "completed" | "failed";
+  repoFullName: string;
+  repoRef: string;
+  cells: Array<{
+    ordinal: number;
+    dir: string;
+    persona: string;
+    status: string;
+    attempts: number;
+    stateDocRevisions: number;
+    findings: number;
+  }>;
+  /** Coverage honesty (M-P2d): assessed/not_assessed counts + the gap list. */
+  coverage: SecurityCoverageRollupWire;
+  /** The report artifact (M-P3): present when the report cell wrote one. */
+  report: SecurityReportWire | null;
+  findings: {
+    total: number;
+    distinctBySeverity: Record<SecurityFindingSeverity, number>;
+    statusBreakdown: { open: number; verified: number; refuted: number };
+    filedLinks: number;
+  };
+}
+
+/** POST /api/sessions/:id/security/close */
+export interface SecurityCloseResponse {
+  manifest: SecurityManifestWire;
+}
+
+/** POST /api/sessions/:id/security/handoff */
+export interface SecurityHandoffResponse {
+  childSessionId: string;
+  title: string;
+}
+
+/** GET /api/sessions/:id/security/files?path=&revision= */
+export interface SecurityTreeFileResponse {
+  path: string;
+  /** Revision served; null for the virtual mounts (/protocol.md, /plan.yml). */
+  revision: number | null;
+  content: string;
+}
+
+/** GET /api/sessions/:id/security/files/list?prefix= */
+export interface ListSecurityFilesResponse {
+  files: Array<{ path: string; revisions: number; size: number }>;
+}
+
+/** POST /api/sessions/:id/security/files — persona write (M4). */
+export interface SecurityWriteFileResponse {
+  path: string;
+  revision: number;
+}
+
+/** POST /api/sessions/:id/security/findings — persona report (M4). */
+export interface SecurityReportFindingResponse {
+  finding: SecurityFindingWire;
+  /** Existing findings sharing the fingerprint — advisory dedup. */
+  siblings: SecurityFindingWire[];
+  /** Re-scan / iterate: set when the parent engagement had refuted this
+   * fingerprint, so the finding was inserted already refuted (carry-forward).
+   * Null on a first-seen fingerprint or a non-re-scan engagement. */
+  carriedFrom?: { parentEngagementId: string; reason: string };
+}
+
+/** POST /api/sessions/:id/security/findings/:findingId/review — persona
+ * review-cell path (M4). */
+export interface SecurityReviewFindingResponse {
+  finding: SecurityFindingWire;
+}
+
+/** POST /api/sessions/:id/security/coverage — persona coverage claim
+ * (NOT_ASSESSED ledger, M-P2d). */
+export interface SecurityReportCoverageResponse {
+  coverage: SecurityCoverageWire;
+}
+
+/** The class of thing a persona is blocked on (pivot-coordinator, M-P4c). */
+export type SecurityNeedKind = "credential" | "dependency" | "scope" | "decision" | "tool";
+
+/** One need a persona recorded (pivot-coordinator, M-P4c). `status` tracks it
+ * through the loop: 'open' when recorded, 'auto_resolved' when the coordinator
+ * ruled it already-authorized (with a resolution note), 'needs_human' when it
+ * waits on the consolidated human ask, 'answered' when the human resolved it,
+ * 'dismissed' when the human ruled it not worth pursuing. `resolution` is the
+ * auto-resolution note or the human answer; null while open/needs_human. */
+export interface SecurityNeedWire {
+  id: string;
+  cellId: string;
+  kind: SecurityNeedKind;
+  description: string;
+  status: "open" | "auto_resolved" | "needs_human" | "answered" | "dismissed";
+  resolution: string | null;
+  createdAt: number;
+  resolvedAt: number | null;
+}
+
+/** POST /api/sessions/:id/security/needs — persona need report (M-P4c). The
+ * created need, and the coordinator's sweep result: the needs it auto-resolved
+ * and the ones now waiting on the human. */
+export interface SecurityReportNeedResponse {
+  need: SecurityNeedWire;
+  /** Needs the coordinator auto-resolved this sweep (already-authorized). */
+  autoResolved: SecurityNeedWire[];
+  /** Every need now waiting on the consolidated human ask. */
+  needsHuman: SecurityNeedWire[];
+}
+
+/** GET /api/sessions/:id/security/needs — the engagement's needs (M-P4c). The
+ * panel lists auto-resolved (informational) and needs-human items. */
+export interface ListSecurityNeedsResponse {
+  needs: SecurityNeedWire[];
+}
+
+/** POST /api/sessions/:id/security/needs/resolve — the human answer +
+ * delta re-run (M-P4c). The needs the human answered and the cells the delta
+ * re-run reset to pending — only the cells whose needs were answered. */
+export interface SecurityResolveNeedsResponse {
+  answered: SecurityNeedWire[];
+  resetCellIds: string[];
 }
 
 /** POST /api/sessions/:id/pause — manual hibernation (sandbox hibernation
@@ -2482,8 +3051,57 @@ export interface OrgResponse {
    * readable by every member (the share UI needs it to know whether to
    * offer the `public` option), writable only via `PATCH /api/org/settings`. */
   allowPublicArtifacts: boolean;
+  /**
+   * The gateable plugins on this deployment, with this org's entitlement and
+   * this caller's effective access (plugin-entitlements design). A plugin's
+   * nav item / hub reads `enabledForCaller` and hides when false. Empty when
+   * no loaded plugin declares a `gate`.
+   */
+  plugins: OrgPluginWire[];
   callerRole: "admin" | "member";
 }
+
+// ── REST: plugin entitlements (plugin-entitlements design) ────────────────
+
+/** Mirrors `PluginEntitlementMode` from `@valet/shared`, restated on the wire
+ * so this module stays import-free. */
+export type PluginEntitlementModeWire = "off" | "all" | "teams";
+
+/** One org's entitlement for one plugin. `teamIds` matters only for `teams`. */
+export interface PluginEntitlementWire {
+  mode: PluginEntitlementModeWire;
+  teamIds: string[];
+}
+
+/**
+ * One gateable plugin, as the org surfaces present it:
+ *  - `instanceEnabled` — the deployment loaded the plugin (the instance switch).
+ *  - `entitlement` — this org's mode + teams (defaulted to `all` when unset).
+ *  - `enabledForCaller` — instanceEnabled AND the org mode admits THIS caller.
+ */
+export interface OrgPluginWire {
+  name: string;
+  label: string;
+  description: string;
+  instanceEnabled: boolean;
+  entitlement: PluginEntitlementWire;
+  enabledForCaller: boolean;
+}
+
+/** `GET /api/org/plugins` — any member reads; non-admins get it read-only. */
+export interface OrgPluginsResponse {
+  plugins: OrgPluginWire[];
+}
+
+/** `PATCH /api/org/plugins/:name` body — org admin only. `teamIds` is required
+ * for `teams` mode and ignored otherwise. */
+export interface PatchOrgPluginRequest {
+  mode: PluginEntitlementModeWire;
+  teamIds?: string[];
+}
+
+/** `PATCH /api/org/plugins/:name` response — the updated plugin entry. */
+export type PatchOrgPluginResponse = OrgPluginWire;
 
 /** Whitelisted fields only — unknown top-level keys 400. */
 export interface PatchOrgRequest {

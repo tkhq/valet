@@ -24,6 +24,8 @@ import {
   slugify,
   repoDockerFlag,
   clearRepoDockerCache,
+  resolveChangedFiles,
+  fetchRepoFile,
 } from "./source-service.js";
 
 const orgId = "org1";
@@ -1330,6 +1332,52 @@ describe("SourceService", () => {
       expect(retentionCalls.flatMap((c) => c.imageRefs)).toEqual(["ref/null", "ref/sized"]);
     });
   });
+
+  describe("fetchRepoFile (dynamic-config M-F1)", () => {
+    // Replace the beforeEach fixture with one that serves the contents API and
+    // the repo default-branch lookup; afterEach closes whatever `fixture` holds.
+    async function withContents(
+      getContents: (owner: string, repo: string, path: string, ref: string | undefined) => GithubFixtureResponse,
+    ): Promise<void> {
+      await fixture.close();
+      fixture = startGithubFixture({
+        getRepo: () => ({ body: { default_branch: "main" } }),
+        getContents,
+      });
+    }
+
+    it("decodes a repo file's base64 content at the default branch", async () => {
+      let seenRef: string | undefined;
+      await withContents((_owner, _repo, path, ref) => {
+        seenRef = ref;
+        if (path === ".valet/security.yml") {
+          return { body: { content: b64("version: 1\n"), encoding: "base64" } };
+        }
+        return { status: 404, body: { message: "Not Found" } };
+      });
+      const content = await fetchRepoFile(githubTokenDeps(), "tok", "acme", "api", ".valet/security.yml");
+      expect(content).toBe("version: 1\n");
+      // No ref passed → resolved to the repo's default branch.
+      expect(seenRef).toBe("main");
+    });
+
+    it("returns null on a 404 (missing file)", async () => {
+      await withContents(() => ({ status: 404, body: { message: "Not Found" } }));
+      const content = await fetchRepoFile(githubTokenDeps(), "tok", "acme", "api", ".valet/security.yml");
+      expect(content).toBeNull();
+    });
+
+    it("honors an explicit ref without the default-branch lookup", async () => {
+      let seenRef: string | undefined;
+      await withContents((_owner, _repo, _path, ref) => {
+        seenRef = ref;
+        return { body: { content: b64("version: 1\n"), encoding: "base64" } };
+      });
+      const content = await fetchRepoFile(githubTokenDeps(), "tok", "acme", "api", ".valet/security.yml", "abc123");
+      expect(content).toBe("version: 1\n");
+      expect(seenRef).toBe("abc123");
+    });
+  });
 });
 
 // ── pure helpers (ported) ────────────────────────────────────────────────
@@ -1529,5 +1577,82 @@ describe("repoDockerFlag", () => {
     // The map was cleared at entry 1000. This call re-fetches cleanly.
     const result = await repoDockerFlag(deps(), "tok", "o", "cap-check", "main");
     expect(result).toBe(false);
+  });
+});
+
+describe("resolveChangedFiles", () => {
+  let fixture: GithubFixture;
+  let compareHandler: (owner: string, repo: string, range: string) => GithubFixtureResponse;
+  let db: AppDb;
+  let credentials: PgCredentialStore;
+
+  // A full GitHubTokenDeps (no cast) — resolveChangedFiles reads only
+  // apiUrl/githubUrl, but the type is the whole shape, so build it properly.
+  function deps(): GitHubTokenDeps {
+    return {
+      db,
+      credentials,
+      key: deriveSecretKey("cache-key"),
+      apiUrl: fixture.url,
+      githubUrl: fixture.url,
+      now: () => NOW,
+    };
+  }
+
+  beforeEach(async () => {
+    const { appDb, pgdb } = await freshTestPgDb();
+    db = appDb;
+    credentials = new PgCredentialStore(pgdb, deriveSecretKey("test-key"));
+    compareHandler = () => ({ body: { files: [] } });
+    fixture = startGithubFixture({ getCompare: (o, r, range) => compareHandler(o, r, range) });
+  });
+
+  afterEach(async () => {
+    await fixture.close();
+  });
+
+  it("parses files[].filename from the compare response", async () => {
+    compareHandler = () => ({
+      body: {
+        status: "ahead",
+        files: [
+          { filename: "packages/api/src/routes/security.ts", status: "modified" },
+          { filename: "packages/web/src/panel.tsx", status: "added" },
+          { filename: "README.md", status: "modified" },
+        ],
+      },
+    });
+    const changed = await resolveChangedFiles(deps(), "tok", "acme", "api", "base_sha", "head_sha");
+    expect(changed).toEqual([
+      "packages/api/src/routes/security.ts",
+      "packages/web/src/panel.tsx",
+      "README.md",
+    ]);
+  });
+
+  it("hits the compare endpoint with the base...head range", async () => {
+    await resolveChangedFiles(deps(), "tok", "acme", "api", "aaa", "bbb");
+    const call = fixture.calls.find((c) => c.path.includes("/compare/"));
+    expect(call?.params.range).toBe("aaa...bbb");
+  });
+
+  it("returns [] when base is empty without calling the API", async () => {
+    const changed = await resolveChangedFiles(deps(), "tok", "acme", "api", "", "head_sha");
+    expect(changed).toEqual([]);
+    expect(fixture.calls.some((c) => c.path.includes("/compare/"))).toBe(false);
+  });
+
+  it("throws on an error response so the caller can fall back to a full scan", async () => {
+    compareHandler = () => ({ status: 404, body: { message: "Not Found" } });
+    await expect(
+      resolveChangedFiles(deps(), "tok", "acme", "api", "base_sha", "head_sha"),
+    ).rejects.toThrow();
+  });
+
+  it("throws when the response has no files list", async () => {
+    compareHandler = () => ({ body: { status: "ahead" } });
+    await expect(
+      resolveChangedFiles(deps(), "tok", "acme", "api", "base_sha", "head_sha"),
+    ).rejects.toThrow(/no files list/);
   });
 });

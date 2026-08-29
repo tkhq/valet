@@ -1,0 +1,103 @@
+name: Webhooks and Callbacks
+detect_when:
+  - "API paths contain webhook, callback, notification, or subscribe"
+  - "The code makes outbound HTTP requests triggered by user actions"
+  - "Forms have fields accepting a URL or callback parameter"
+
+threat_patterns:
+  ssrf_via_webhook:
+    description: Using a webhook URL to reach internal services
+    cwe: CWE-918
+    capec: CAPEC-664
+    mitre_attack: null
+    skill: medium
+    likelihood: high
+    prereqs:
+      - Webhook registration accepts a user-supplied URL
+      - The server makes outbound requests to the webhook URL
+    look_for:
+      - a webhook URL not validated against internal IP ranges
+      - DNS rebinding possible on the webhook target
+      - redirect following on webhook delivery
+      - cloud metadata endpoints reachable (169.254.169.254)
+
+  webhook_signature_bypass:
+    description: Forging or bypassing webhook delivery signatures
+    cwe: CWE-345
+    capec: null
+    mitre_attack: null
+    skill: medium
+    likelihood: medium
+    prereqs:
+      - Webhook deliveries include a signature header
+      - A shared secret is used for signing
+    look_for:
+      - a missing signature on webhook deliveries
+      - a weak signing algorithm (MD5, SHA1 without HMAC)
+      - a shared secret with insufficient entropy
+      - a timing attack on signature comparison
+      - an optional signature header (unsigned requests accepted)
+
+  webhook_replay:
+    description: Replaying captured webhook deliveries
+    cwe: CWE-294
+    capec: null
+    mitre_attack: null
+    skill: low
+    likelihood: medium
+    prereqs:
+      - Webhook deliveries are captured or observable
+      - No timestamp or nonce is in the signed payload
+    look_for:
+      - no timestamp in the signed payload
+      - no nonce or delivery ID for deduplication
+      - a replayed webhook triggering duplicate processing
+      - no expiry window on webhook signatures
+
+  webhook_data_exfiltration:
+    description: Sensitive data sent to an attacker-controlled webhook endpoint
+    cwe: CWE-200
+    capec: null
+    mitre_attack: null
+    skill: low
+    likelihood: medium
+    prereqs:
+      - Webhook payloads contain sensitive data
+      - The webhook URL is changeable by a user
+    look_for:
+      - a webhook payload containing secrets or PII
+      - webhook registration without an authorization check
+      - a webhook URL changeable without re-authentication
+      - no allowlist for webhook destinations
+
+  callback_injection:
+    description: Manipulating the callback flow for authentication or authorization
+    cwe: CWE-601
+    capec: null
+    mitre_attack: null
+    skill: medium
+    likelihood: medium
+    prereqs:
+      - An OAuth or payment callback flow exists
+      - A callback URL parameter is accepted in the request
+    look_for:
+      - an OAuth callback URL with an open redirect
+      - a payment callback URL controllable by a user
+      - a verification callback to an attacker-controlled endpoint
+      - webhook retry logic exploitable for timing attacks
+
+  event_flooding:
+    description: Triggering excessive webhook deliveries
+    cwe: CWE-770
+    capec: null
+    mitre_attack: null
+    skill: low
+    likelihood: medium
+    prereqs:
+      - Webhook delivery is triggered by user actions
+      - No rate limit is on outbound webhooks
+    look_for:
+      - no rate limit on outbound webhooks
+      - actions that trigger multiple webhook amplification
+      - webhook failure retry without backoff
+      - recursive webhooks (a webhook triggering an action that triggers a webhook)

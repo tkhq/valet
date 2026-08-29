@@ -92,6 +92,7 @@ import {
   SkillSourceInputError,
 } from "../services/skill-sources.js";
 import type { SkillSyncOutcome } from "../services/skill-sync.js";
+import securityPlugin from "@valet/plugin-security/plugin";
 import { skillSources, type SkillRow, type SkillSourceRow } from "../schema/index.js";
 import type {
   CreateSkillRequest,
@@ -118,9 +119,18 @@ interface OwnedSkill {
 }
 
 function ownedSkills(plugins: ValetPlugin[]): OwnedSkill[] {
-  return plugins.flatMap((plugin) =>
-    (plugin.skills ?? []).map((skill) => ({ plugin: plugin.name, skill })),
-  );
+  return plugins
+    // The security plugin's only skill is the engagement-runner control skill,
+    // which the host attaches to `kind='security'` runner sessions and to nobody
+    // else (`EngineHost.basePlugins` filters it out of every normal build for
+    // the same reason). It is not a user-facing library skill, so it never
+    // belongs in the `/api/skills` catalog. Filter it here by the same name
+    // check host.ts uses, so a deployment that loads the plugin (registry, or a
+    // test harness) does not surface the runner skill in the library.
+    .filter((plugin) => plugin.name !== securityPlugin.name)
+    .flatMap((plugin) =>
+      (plugin.skills ?? []).map((skill) => ({ plugin: plugin.name, skill })),
+    );
 }
 
 function toPluginSummary({ plugin, skill }: OwnedSkill): PluginSkillSummary {

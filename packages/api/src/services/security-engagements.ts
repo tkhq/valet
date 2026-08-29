@@ -1,0 +1,3020 @@
+/**
+ * Valet Security engagement service — the ONE owner of every engagement and
+ * cell transition (docs/specs/2026-08-27-valet-security-design.md, §Tools,
+ * §The Loop). The runner agent narrates; these functions decide. Nothing
+ * outside this file mutates security_* rows.
+ *
+ * Substrate rules held here:
+ *   - The plan is immutable once the engagement runs (setPlan).
+ *   - Cells run serially: dispatchCell refuses while another cell runs.
+ *   - The engagement tree is append-only revisions; the path prefix IS the
+ *     write claim (writeFile).
+ *   - Findings are insert-only with forward-only status (reviewFinding).
+ *   - Exit conditions are ruled server-side from the persona's own state
+ *     doc (completeCell) — a polite-but-wrong runner cannot mark work done.
+ *
+ * Spawning is a per-call seam (`SpawnCellChild`): the M3 tool layer passes
+ * the host ChildSpawner-backed function; tests pass a fake. The service
+ * never spawns on its own.
+ */
+import { randomUUID } from "node:crypto";
+import { and, asc, count, desc, eq, gt, ilike, inArray, or, sql } from "drizzle-orm";
+import {
+  ARCHITECT_PERSONA,
+  categoryDigest,
+  cellDir,
+  expandTriads,
+  findingFingerprint,
+  hasTriad,
+  isKnownPlaybook,
+  isKnownScanner,
+  isLivePersona,
+  KNOWN_PERSONAS,
+  KNOWN_SCANNERS,
+  pathMatchesGlobs,
+  RECONCILE_PERSONA,
+  parsePlan,
+  VERIFIER_PERSONA,
+  parseStateDoc,
+  collectStateDocViolations,
+  stateDocIdentityViolations,
+  stateDocWriteError,
+  playbookMarkdown,
+  protocolMarkdown,
+  ruleExit,
+  serializePlan,
+  type EngagementPlan,
+  type PlanCell,
+  type SecurityScope,
+  type StateDoc,
+  type ToolDecl,
+} from "@valet/plugin-security";
+import type { AppDb } from "../lib/drizzle.js";
+import {
+  securityCells,
+  securityCoverage,
+  securityEngagements,
+  securityFiles,
+  securityFindingComments,
+  securityFindingLinks,
+  securityFindings,
+  securityHandoffs,
+  securityNeeds,
+  type SecurityCellRow,
+  type SecurityCoverageRow,
+  type SecurityEngagementRow,
+  type SecurityFindingCommentRow,
+  type SecurityFindingRow,
+  type SecurityHandoffRow,
+  type SecurityNeedRow,
+} from "../schema/index.js";
+import {
+  recordSecurityCellsCreated,
+  recordSecurityCellSettled,
+} from "../observability/security-metrics.js";
+
+// ── Limits (spec §Data Model size guard, §Tools) ──────────────────────────
+
+export const MAX_FILE_BYTES = 256 * 1024;
+export const MAX_REVISIONS_PER_PATH = 512;
+export const MIN_FINDING_BODY_CHARS = 200;
+export const MAX_FINDINGS_PER_CELL = 100;
+
+// ── Reporting-integrity guardrails (§reporting integrity) ─────────────────
+// A weaker model must not corrupt the reporting record. Each limit is a floor
+// or a ceiling the security service enforces at the HTTP seam; every rejection
+// names the corrective action so the persona fixes its input and retries.
+
+/** Floor and ceiling on a finding title. Long enough to name a vulnerability,
+ * short enough to stay a title. */
+export const MIN_FINDING_TITLE_CHARS = 8;
+export const MAX_FINDING_TITLE_CHARS = 200;
+/** Ceiling on a finding `file` path. A repo-relative path is never this long. */
+export const MAX_FINDING_FILE_CHARS = 1024;
+/** Bounds on a finding `line`. A source file never exceeds ten million lines. */
+export const MIN_FINDING_LINE = 1;
+export const MAX_FINDING_LINE = 10_000_000;
+/** Placeholder titles a persona must not report — a real finding names the
+ * vulnerability, not a stub. Matched case-insensitively after trim. */
+export const FINDING_TITLE_PLACEHOLDERS: readonly string[] = [
+  "finding",
+  "todo",
+  "n/a",
+  "na",
+  "xxx",
+  "test",
+  "tbd",
+  "placeholder",
+  "issue",
+];
+
+/** Floor on a report markdown body — a real report, not a stub. */
+export const MIN_REPORT_MARKDOWN_CHARS = 200;
+/** Ceiling on a report markdown body (same 256 KB tree-write ceiling). */
+export const MAX_REPORT_BYTES = MAX_FILE_BYTES;
+/** Every `fnd_...` id token a report may cite. The cross-check extracts these
+ * from the markdown and the JSON snapshot and confirms each exists. */
+export const REPORT_FINDING_ID_PATTERN = /fnd_[0-9a-f-]{8,}/g;
+
+/** Floor on a review reason and a not_assessed coverage reason — a substantive
+ * rationale, not "ok". */
+export const MIN_REVIEW_REASON_CHARS = 20;
+export const MIN_COVERAGE_REASON_CHARS = 12;
+
+/** Cap on a finding-comment body (spec §Re-scan / iterate). A note is a short
+ * human rationale, not a report. */
+export const MAX_FINDING_COMMENT_CHARS = 4000;
+
+/**
+ * The checkpoint stride (spec §Context Discipline): a cell-claimed thread
+ * that compacts while its latest state doc is older than this is losing
+ * work the tree never saw. The compaction hook emits the staleness metric
+ * past this age; nothing auto-repairs.
+ */
+export const STATE_DOC_STALE_MS = 10 * 60_000;
+
+export type FindingSeverity = "critical" | "high" | "medium" | "low" | "info";
+/** `fixed` (re-scan v2): the finding was real and is now resolved — distinct
+ * from `refuted` (a false positive). */
+export type FindingStatus = "open" | "verified" | "refuted" | "fixed";
+export type CoverageStatus = "assessed" | "not_assessed";
+
+/** The class of thing a persona is blocked on (pivot-coordinator, M-P4c). A
+ * 'credential' or a 'decision' always needs a human. A 'tool' or a 'scope' may
+ * be auto-resolvable when it is already-declared / already-authorized. A
+ * 'dependency' the plan can spawn is auto-resolvable; otherwise it needs a
+ * human. */
+export type NeedKind = "credential" | "dependency" | "scope" | "decision" | "tool";
+export type NeedStatus = "open" | "auto_resolved" | "needs_human" | "answered" | "dismissed";
+
+/** Cap on a need description and a resolution note (pivot-coordinator, M-P4c).
+ * A need names one blocked item in a sentence; a resolution is the
+ * auto-resolution note or the human answer, not a report. */
+export const MAX_NEED_DESCRIPTION_CHARS = 2000;
+export const MAX_NEED_RESOLUTION_CHARS = 4000;
+
+/** Cap on a coverage area label and its reason (NOT_ASSESSED ledger, M-P2d).
+ * An area is a short scope label ("secrets scan"); a reason is one sentence
+ * naming the consequence, not a report. */
+export const MAX_COVERAGE_AREA_CHARS = 200;
+export const MAX_COVERAGE_REASON_CHARS = 1000;
+
+const SEVERITIES: readonly FindingSeverity[] = ["critical", "high", "medium", "low", "info"];
+
+/**
+ * The persona set a stored plan validates against: the bundled ids ∪ the
+ * engagement's repo-declared persona keys (M-P2c, repo wins). A repo config may
+ * name its own personas in the plan; validating a stored plan against the
+ * bundled set alone would reject it at start/dispatch. Reads the engagement's
+ * `configPersonas` column (JSON Record id → path); an absent/invalid value
+ * contributes no extra keys.
+ */
+function knownPersonasForEngagement(engagement: { configPersonas: string | null }): string[] {
+  if (!engagement.configPersonas) return [...KNOWN_PERSONAS];
+  let map: unknown;
+  try {
+    map = JSON.parse(engagement.configPersonas);
+  } catch {
+    return [...KNOWN_PERSONAS];
+  }
+  if (typeof map !== "object" || map === null || Array.isArray(map)) return [...KNOWN_PERSONAS];
+  return [...KNOWN_PERSONAS, ...Object.keys(map as Record<string, unknown>)];
+}
+
+/** Spawn seam: the M3 tool layer backs this with the host ChildSpawner. */
+export type SpawnCellChild = (req: {
+  title: string;
+  message: string;
+  repo: string;
+  ref: string;
+  /**
+   * The child session id `dispatchCell` pre-minted and stamped on the cell
+   * BEFORE this spawn runs, so the host's session build sees the claim and
+   * attaches the persona toolset + role (M4). The real seam passes it to
+   * the ChildSpawner as `sessionId`; a fake may ignore it and return its
+   * own id — `dispatchCell` re-stamps whatever the spawn returns.
+   */
+  childSessionId: string;
+  /** The persona role name for the dispatch prompt's turn. */
+  role: string;
+}) => Promise<{ childSessionId: string }>;
+
+export interface EngagementWithCells {
+  engagement: SecurityEngagementRow;
+  cells: SecurityCellRow[];
+}
+
+/** The repo config context stored on an engagement (dynamic-config M-F1). The
+ * subset of `SecurityConfig` persisted for later milestones — the plan is
+ * seeded separately from the config's steps. */
+export interface SecurityConfigContext {
+  focus?: string;
+  invariants?: string[];
+  categories?: string[];
+  personas?: Record<string, string>;
+  /** Repo-defined persona role markdown, resolved from the clone at create
+   * (M-P2c). Keyed by the same ids as `personas` (which holds id → path). The
+   * host attaches a repo persona's role from this map. */
+  personaMarkdown?: Record<string, string>;
+  /** Declared tools the config named (M-P4a). Structured `ToolDecl`s. Stored as
+   * JSON on `config_tools`; the host provisions a persona child's tools from it. */
+  tools?: ToolDecl[];
+  /** The authorized live-testing scope (M-P4b). Stored as JSON on
+   * `authorized_scope`; the live-persona dispatch prompt names its hosts and the
+   * child sandbox egress allowlist derives from them. */
+  scope?: SecurityScope;
+}
+
+export type CompleteCellResult =
+  | { outcome: "completed"; cell: SecurityCellRow }
+  | { outcome: "yielded"; cell: SecurityCellRow }
+  | { outcome: "violation"; violation: string };
+
+export interface ManifestCell {
+  ordinal: number;
+  dir: string;
+  persona: string;
+  status: string;
+  attempts: number;
+  stateDocRevisions: number;
+  findings: number;
+}
+
+/** One NOT_ASSESSED gap in the close manifest (M-P2d): a scope area that was
+ * not assessed, with the tool involved and the consequence. */
+export interface CoverageGap {
+  area: string;
+  tool: string | null;
+  reason: string;
+}
+
+/** The coverage rollup in the close manifest (NOT_ASSESSED ledger, M-P2d,
+ * spec §Coverage honesty). Counts assessed vs not_assessed, and lists every
+ * NOT_ASSESSED area with its reason so the report names the gaps the team
+ * should know about. */
+export interface CoverageRollup {
+  assessed: number;
+  notAssessed: number;
+  gaps: CoverageGap[];
+}
+
+/** The report artifact stored on the engagement (M-P3). The report cell writes
+ * both with `sec_report_write`; the panel renders `markdown` and the export
+ * route serves either. `json` is the parsed JSON snapshot object; `generatedAt`
+ * is the write time. Null on `getReport` when the report cell never ran. */
+export interface SecurityReport {
+  markdown: string;
+  json: unknown;
+  generatedAt: number;
+}
+
+/** The outcome of one `resolveNeeds` sweep (pivot-coordinator, M-P4c). The
+ * coordinator auto-resolved `autoResolved` open needs (already-authorized
+ * items, each with a visible resolution row) and surfaced `needsHuman` to the
+ * consolidated human ask. `pendingHuman` is every need now waiting on a human
+ * (this sweep's new ones plus any earlier unanswered), so the caller opens ONE
+ * ask, not one per need. */
+export interface ResolveNeedsResult {
+  autoResolved: SecurityNeedRow[];
+  needsHuman: SecurityNeedRow[];
+  pendingHuman: SecurityNeedRow[];
+}
+
+/** The outcome of `resolveEngagementNeeds` (the human answer path, M-P4c). The
+ * needs the human answered, and the cells the delta re-run reset to pending —
+ * only the cells whose needs were answered, never the whole engagement. */
+export interface AnswerNeedsResult {
+  answered: SecurityNeedRow[];
+  resetCells: SecurityCellRow[];
+}
+
+export interface EngagementManifest {
+  engagementId: string;
+  status: "completed" | "failed";
+  repoFullName: string;
+  repoRef: string;
+  cells: ManifestCell[];
+  /** Coverage honesty (M-P2d): the assessed/not_assessed rollup + gap list. */
+  coverage: CoverageRollup;
+  /** The report artifact (M-P3): present when the report cell wrote one, null
+   * otherwise. The runner presents it after close. */
+  report: SecurityReport | null;
+  findings: {
+    /** All finding rows, near-duplicates included. */
+    total: number;
+    /** One count per distinct fingerprint, keyed by the group's highest
+     * severity — near-duplicate reports do not inflate the headline. */
+    distinctBySeverity: Record<FindingSeverity, number>;
+    /** Per finding row (each row's status is an audit fact of its own). */
+    statusBreakdown: { open: number; verified: number; refuted: number };
+    filedLinks: number;
+  };
+}
+
+export interface TreeEntry {
+  path: string;
+  /** Latest revision number; virtual mounts report 1. */
+  revisions: number;
+  /** Byte size of the latest revision. */
+  size: number;
+}
+
+export interface TreeFile {
+  path: string;
+  /** Revision served; null for the virtual mounts (/protocol.md, /plan.yml). */
+  revision: number | null;
+  content: string;
+}
+
+export interface CellCompactionStamp {
+  cell: SecurityCellRow;
+  /** Age of the freshest durable checkpoint at compaction time: the latest
+   * state doc revision, or the dispatch when no doc exists yet. */
+  stateDocAgeMs: number;
+  /** True when `stateDocAgeMs` exceeds `STATE_DOC_STALE_MS`. */
+  stale: boolean;
+}
+
+export interface CellProgress {
+  status: StateDoc["status"];
+  checklist: { pending: number; done: number };
+  queue: { pending: number; done: number };
+}
+
+/** The re-scan diff against the parent engagement (re-scan v2). Computed from
+ * this engagement's carried/updated rows; see `diffEngagement`. `fixedCount` is
+ * live (the reconcile pass marks findings fixed during the run), so it is always
+ * a number on a re-scan. */
+export interface SecurityDiff {
+  parentEngagementId: string;
+  /** The parent engagement's session id, so the UI links back to it. Null
+   * when the parent row is gone. */
+  parentSessionId: string | null;
+  /** Findings the diff sweeps introduced (not carried). */
+  newCount: number;
+  /** Carried findings still live (not fixed, not refuted). */
+  recurringCount: number;
+  /** Carried findings the change resolved (status fixed). */
+  fixedCount: number | null;
+  /** Carried findings refuted (a dismissal carried from the parent). */
+  carriedRefutedCount: number;
+}
+
+export interface ListFindingsOptions {
+  cellId?: string;
+  severity?: FindingSeverity;
+  status?: FindingStatus;
+  /** Substring match against the finding's file path. */
+  path?: string;
+  cursor?: string;
+  limit?: number;
+}
+
+// ── Dispatch prompt (pure, exported for unit tests) ───────────────────────
+
+/**
+ * The selective dispatch prompt (spec §Context Discipline, Decision 8): the
+ * persona, the goal, mode, path scope, the cell's own directory, ONLY the
+ * `reads`-declared cells' state doc paths, and the protocol verbatim. The
+ * rest of the tree stays discoverable through sec_fs_list; the prompt does
+ * not spend context on it.
+ *
+ * `rescan` is set when the engagement re-scans a prior one (re-scan / iterate).
+ * It adds cell-role-specific language that points the persona at the read-only
+ * `/prior/` mounts (the prior recon map, the git diff, and the prior findings
+ * digest) so the persona re-reasons about the delta instead of the whole repo.
+ * A cell is the recon cell when it is the ordinal-1 cell; a review cell is a
+ * `review: true` cell (verify); every other cell is a scoped sweep.
+ *
+ * `config` carries the engagement's focus + invariants (dynamic-config M-F3)
+ * and loaded threat categories (M-P2a), seeded from `.valet/security.yml` or
+ * edited in the UI. When present, a clearly delimited block rides on EVERY
+ * persona dispatch just before the protocol: the focus weights the persona's
+ * checklist, a stated invariant turns a confirmed violation into a high-signal
+ * finding, and the loaded categories put the domain's known attack surface in
+ * front of the persona. An absent focus, empty invariants, and empty categories
+ * add nothing — the prompt is byte-identical to before.
+ *
+ * `needsResolutions` carries the answers to this cell's earlier needs
+ * (pivot-coordinator, M-P4c). On a DELTA re-run — a cell reset to pending after
+ * a human answered its need — each answer rides on the dispatch as a delimited
+ * block, so the persona continues with the credential, decision, or scope it
+ * was blocked on. An empty list adds nothing.
+ */
+export function buildDispatchPrompt(
+  cell: SecurityCellRow,
+  plan: EngagementPlan,
+  readsCells: SecurityCellRow[],
+  protocol: string,
+  rescan = false,
+  config: {
+    focus?: string | null;
+    invariants?: string[] | null;
+    categories?: string[] | null;
+    /** The authorized live-testing scope hosts (M-P4b). A live persona's
+     * dispatch prompt names these explicitly and forbids acting outside them.
+     * A non-live persona ignores the scope. */
+    scopeHosts?: string[] | null;
+  } = {},
+  needsResolutions: { kind: NeedKind; description: string; resolution: string }[] = [],
+): string {
+  const planCell = plan.cells.find((p) => p.ordinal === cell.ordinal);
+  const lines: string[] = [
+    `You are the "${cell.persona}" persona for security cell ${cell.dir} (ordinal ${cell.ordinal}).`,
+    "",
+    `Goal: ${cell.goal}`,
+    `Mode: ${cell.mode}`,
+  ];
+  // Triad role framing (M-P2b). The architect plans the phase and declares
+  // coverage; it reports NO findings. The verifier audits the worker: it
+  // re-derives each finding's dataflow, audits coverage, and refutes what does
+  // not hold. Every other persona (the worker, recon, the engagement verify)
+  // keeps the default framing. The reads-paths mechanism already points the
+  // worker at the architect's plan and the verifier at the worker's state doc.
+  if (cell.persona === ARCHITECT_PERSONA) {
+    lines.push(
+      "",
+      "You are the ARCHITECT of this phase. Plan it: detect the surface, write a falsifiable checklist (one row per area, each row naming what to look for and the evidence that proves it), and declare coverage (every area covered or a justified skip).",
+      "Write architect_plan.md and seed state.yml to your cell directory. Do NOT run scanners and do NOT report findings — the worker executes your checklist.",
+    );
+  } else if (cell.persona === VERIFIER_PERSONA) {
+    lines.push(
+      "",
+      "You are the VERIFIER of this phase. Audit the worker cell you read: re-derive every finding's dataflow from the cited source (do not trust the prior artifact), confirm severity, and audit that every checklist item was covered or justifiably skipped.",
+      "Write verification.md with per-finding and per-checklist audit rows and a PASS / CONDITIONAL / FAIL verdict. Refute a finding you disprove with sec_finding_review (name what the evidence missed); do NOT verify a finding you merely agree with unless you independently re-derived it.",
+    );
+  }
+  if (cell.mode === "resume") {
+    lines.push(
+      `Resume: read your own latest state doc at /cells/${cell.dir}/state.yml with sec_fs_read before any other work, and continue from its queue.`,
+    );
+  }
+  if (rescan) {
+    const isRecon = cell.ordinal === 1;
+    const isReview = cell.review === true;
+    lines.push("");
+    if (isRecon) {
+      lines.push(
+        "This is a RE-SCAN. Read /prior/recon.md (the prior map) and /prior/diff.md (what changed since the last review) with sec_fs_read before anything.",
+        "Inherit the prior map; UPDATE it only for the changed files — do not re-map unchanged code.",
+        "Read /prior/findings.md to know what was already found.",
+      );
+    } else if (isReview) {
+      lines.push(
+        "This is a RE-SCAN. Reconcile /prior/findings.md against the current code with sec_fs_read.",
+        "A prior verified or open finding whose file changed and no longer applies should be reported here or noted as fixed; carry the rest.",
+        "Attack every open finding as usual.",
+      );
+    } else {
+      lines.push(
+        "This is a RE-SCAN scoped to the changed code (see /prior/diff.md, read it with sec_fs_read).",
+        "The prior findings are in /prior/findings.md — confirm which still apply to the changed files and find issues the diff introduced.",
+        "Do not re-review unchanged code.",
+      );
+    }
+  }
+  if (planCell?.paths && planCell.paths.length > 0) {
+    lines.push(`Scope: limit the sweep to these path globs: ${planCell.paths.join(", ")}`);
+  }
+  // Authorized live-testing scope (M-P4b). A live persona (dast/fuzz/exploit)
+  // operates against a RUNNING target, so its dispatch prompt names the exact
+  // hosts it may reach and forbids acting outside them. This is
+  // authorization-sensitive: it is the ONLY authorization the persona has. A
+  // live persona with no declared scope is told to stop, not to guess a target.
+  // A non-live persona ignores the scope entirely (byte-identical prompt).
+  if (isLivePersona(cell.persona)) {
+    const scopeHosts = (config.scopeHosts ?? []).map((h) => h.trim()).filter((h) => h !== "");
+    lines.push("", "--- Authorized scope (live testing) ---");
+    if (scopeHosts.length > 0) {
+      lines.push(
+        "",
+        "You are a LIVE persona: you test a RUNNING target. You are authorized to reach ONLY these hosts:",
+      );
+      for (const host of scopeHosts) lines.push(`- ${host}`);
+      lines.push(
+        "",
+        "Never send a request to any other host. A finding or action outside this scope is forbidden. Respect the declared rate limits, and never run a destructive payload.",
+      );
+    } else {
+      lines.push(
+        "",
+        "No authorized scope is declared for this engagement. You have NO target and NO authorization to reach any host. Do not guess a target. Record a not_assessed coverage row naming the missing scope, and settle.",
+      );
+    }
+  }
+  if (planCell?.playbook) {
+    lines.push(
+      "",
+      `Methodology: read /playbooks/${planCell.playbook}.md with sec_fs_read before you start. ` +
+        "It is your framework-grounded checklist for this cell (OWASP, ASVS, WSTG, CWE). Work from it.",
+    );
+  }
+  lines.push(
+    "",
+    `Your cell directory in the engagement tree is /cells/${cell.dir}/.`,
+    `Write your state doc to /cells/${cell.dir}/state.yml with sec_fs_write.`,
+    `In that state doc set exactly "cell: ${cell.dir}" and "persona: ${cell.persona}". The server refuses a state doc whose cell or persona names a different cell — never copy the protocol example or another cell's doc.`,
+  );
+  if (readsCells.length > 0) {
+    lines.push("", "Read these predecessor state docs with sec_fs_read before you start:");
+    for (const r of readsCells) {
+      lines.push(`- /cells/${r.dir}/state.yml`);
+    }
+  }
+  // Engagement focus + known invariants (dynamic-config M-F3). A delimited
+  // block just before the protocol so it reads as engagement context, not a
+  // per-cell instruction. Only emitted when a value is present.
+  const focus = config.focus?.trim();
+  const invariants = (config.invariants ?? []).map((inv) => inv.trim()).filter((inv) => inv !== "");
+  // Loaded threat categories (M-P2a): the digest of the named categories'
+  // threat patterns. `categoryDigest` skips unknown ids and returns "" when
+  // none load, so a byte-identical prompt when categories are absent.
+  const categories = (config.categories ?? []).filter((id) => id.trim() !== "");
+  const digest = categories.length > 0 ? categoryDigest(categories) : "";
+  if (focus || invariants.length > 0 || digest !== "") {
+    lines.push("", "--- Engagement configuration ---");
+    if (focus) {
+      lines.push(
+        "",
+        `Focus of this review (from the engagement): ${focus}. Weight your checklist toward this, but do not skip your cell's core coverage.`,
+      );
+    }
+    if (invariants.length > 0) {
+      lines.push(
+        "",
+        "Known invariants the team asserts hold. Treat a VIOLATION of any as a high-signal finding — a broken invariant is exactly what the team wants to know:",
+      );
+      for (const inv of invariants) lines.push(`- ${inv}`);
+    }
+    if (digest !== "") {
+      lines.push(
+        "",
+        "Threat categories loaded (domain attack surface to check against). Each pattern names its CWE/CAPEC and what to look for in the code — work through them for your cell's scope:",
+        "",
+        digest,
+      );
+    }
+  }
+  // Needs resolutions (pivot-coordinator, M-P4c). On a delta re-run the human
+  // (or the coordinator) answered a need this cell recorded — carry the answer
+  // so the persona continues from where it was blocked. Only emitted when a
+  // resolution is present, so a normal dispatch is byte-identical.
+  const resolutions = needsResolutions.filter(
+    (r) => r.description.trim() !== "" && r.resolution.trim() !== "",
+  );
+  if (resolutions.length > 0) {
+    lines.push(
+      "",
+      "--- Resolved needs (continue the blocked work) ---",
+      "",
+      "You earlier reported that you were blocked. The block is now resolved. Use each answer and continue your checklist — do not re-report the same need:",
+    );
+    for (const r of resolutions) {
+      lines.push(`- [${r.kind}] ${r.description.trim()} → ${r.resolution.trim()}`);
+    }
+  }
+  lines.push(
+    "",
+    "The protocol below is the contract you operate under. It is also mounted read-only at /protocol.md.",
+    "",
+    "---",
+    "",
+    protocol,
+  );
+  return lines.join("\n");
+}
+
+/** The distinct playbook names a plan's cells reference, in listing order.
+ * Tolerant of an unparseable plan (returns none) — listing must not throw. */
+function playbooksInPlan(planYaml: string): string[] {
+  let plan: EngagementPlan;
+  try {
+    plan = parsePlan(planYaml, KNOWN_PERSONAS);
+  } catch {
+    return [];
+  }
+  const names: string[] = [];
+  for (const cell of plan.cells) {
+    if (cell.playbook && isKnownPlaybook(cell.playbook) && !names.includes(cell.playbook)) {
+      names.push(cell.playbook);
+    }
+  }
+  return names;
+}
+
+// ── Service ────────────────────────────────────────────────────────────────
+
+export interface SecurityEngagementServiceDeps {
+  db: AppDb;
+  now?: () => number;
+}
+
+export function createSecurityEngagementService(deps: SecurityEngagementServiceDeps) {
+  const { db } = deps;
+  const now = deps.now ?? Date.now;
+
+  async function loadEngagement(engagementId: string): Promise<SecurityEngagementRow> {
+    const rows = await db
+      .select()
+      .from(securityEngagements)
+      .where(eq(securityEngagements.id, engagementId))
+      .limit(1);
+    const row = rows[0];
+    if (!row) {
+      throw new Error(`No engagement ${engagementId}. Check the id with sec_status.`);
+    }
+    return row;
+  }
+
+  async function loadCells(engagementId: string): Promise<SecurityCellRow[]> {
+    return db
+      .select()
+      .from(securityCells)
+      .where(eq(securityCells.engagementId, engagementId))
+      .orderBy(asc(securityCells.ordinal));
+  }
+
+  async function loadCell(engagementId: string, cellId: string): Promise<SecurityCellRow> {
+    const rows = await db
+      .select()
+      .from(securityCells)
+      .where(and(eq(securityCells.engagementId, engagementId), eq(securityCells.id, cellId)))
+      .limit(1);
+    const row = rows[0];
+    if (!row) {
+      throw new Error(`No cell ${cellId} in this engagement. Check the id with sec_status.`);
+    }
+    return row;
+  }
+
+  async function latestStateDocRow(engagementId: string, dir: string) {
+    const rows = await db
+      .select()
+      .from(securityFiles)
+      .where(
+        and(
+          eq(securityFiles.engagementId, engagementId),
+          eq(securityFiles.path, `/cells/${dir}/state.yml`),
+        ),
+      )
+      .orderBy(desc(securityFiles.revision))
+      .limit(1);
+    return rows[0];
+  }
+
+  /**
+   * Copy every finding from the parent engagement into this engagement as a
+   * recurring carried row (re-scan v2, §Seed carried findings). Runs once at
+   * re-scan start, inside `startEngagement`'s transaction, AFTER cells
+   * materialize. Preserves the parent's fingerprint, severity, title, body,
+   * file, line, and STATUS (a parent-verified finding stays verified; a
+   * parent-refuted one stays refuted — a dismissal is never re-triaged). Each
+   * carried row is `recurring: true`, `carried_from_finding_id` = the parent
+   * finding id, and attaches to the reconcile cell that re-checks them.
+   *
+   * Idempotent: seeds only when this engagement has no findings yet. A second
+   * call (a re-dispatched start, a retry) sees existing rows and no-ops.
+   */
+  async function seedCarriedFindings(
+    dbh: AppDb,
+    engagementId: string,
+    parentEngagementId: string,
+    reconcileCellId: string,
+    ts: number,
+  ): Promise<void> {
+    const [{ n: existing }] = await dbh
+      .select({ n: count() })
+      .from(securityFindings)
+      .where(eq(securityFindings.engagementId, engagementId));
+    if (Number(existing ?? 0) > 0) return; // Already seeded — idempotent guard.
+
+    const parentFindings = await dbh
+      .select()
+      .from(securityFindings)
+      .where(eq(securityFindings.engagementId, parentEngagementId))
+      .orderBy(asc(securityFindings.createdAt), asc(securityFindings.id));
+    if (parentFindings.length === 0) return;
+
+    const carried = parentFindings.map((f) => ({
+      id: `fnd_${randomUUID()}`,
+      engagementId,
+      cellId: reconcileCellId,
+      fingerprint: f.fingerprint,
+      severity: f.severity,
+      title: f.title,
+      file: f.file,
+      line: f.line,
+      body: f.body,
+      // Preserve the parent's verdict: a verified finding stays verified, a
+      // refuted one stays refuted. Do NOT reset to open — the reconcile pass
+      // re-checks each, and a dismissal must not resurface for re-triage.
+      status: f.status,
+      statusReason: f.statusReason,
+      statusActor: f.statusActor,
+      recurring: true,
+      carriedFromFindingId: f.id,
+      createdAt: ts,
+    }));
+    await dbh.insert(securityFindings).values(carried);
+  }
+
+  /**
+   * Seed the engagement row for a new kind='security' session. `dbh` lets
+   * the session-create route pass its open transaction so the session row
+   * and the engagement land atomically.
+   */
+  async function createEngagement(
+    args: {
+      sessionId: string;
+      repoFullName: string;
+      plan: string;
+      /** The prior engagement this run re-scans (re-scan / iterate). Sets the
+       * new engagement's `parent_engagement_id`, which drives carry-forward
+       * refutations in reportFinding and the diff summary. */
+      parentEngagementId?: string;
+      /** Repo config context (dynamic-config M-F1), parsed from
+       * `.valet/security.yml` at create. Present only when a valid repo config
+       * seeded this engagement; a preset-seeded engagement omits it and the
+       * columns stay null with `has_repo_config` false. Stored for later
+       * milestones (M-F3 invariants, M-P2a categories, M-P4 tools); not wired
+       * into prompts this milestone. */
+      config?: SecurityConfigContext;
+      /** Overrides the `has_repo_config` column. Defaults to `config !==
+       * undefined`. The setup page's create path passes the real flag: a
+       * preset review with a user-edited focus carries a config context but
+       * `has_repo_config` stays false, because no `.valet/security.yml` seeded
+       * it. */
+      hasRepoConfig?: boolean;
+    },
+    dbh: AppDb = db,
+  ): Promise<SecurityEngagementRow> {
+    // Fail fast on a malformed plan — a planning-status engagement whose
+    // plan cannot parse would strand the runner at sec_start. A repo config may
+    // name its own personas in the plan (M-P2c, repo wins); the known set is the
+    // bundled ids ∪ the config's persona keys, matching parseSecurityConfig.
+    const configPersonaKeys = args.config?.personas ? Object.keys(args.config.personas) : [];
+    parsePlan(args.plan, [...KNOWN_PERSONAS, ...configPersonaKeys]);
+    const ts = now();
+    const config = args.config;
+    const inserted = await dbh
+      .insert(securityEngagements)
+      .values({
+        id: `eng_${randomUUID()}`,
+        sessionId: args.sessionId,
+        status: "planning",
+        repoFullName: args.repoFullName,
+        plan: args.plan,
+        parentEngagementId: args.parentEngagementId ?? null,
+        focus: config?.focus ?? null,
+        invariants: config?.invariants ? JSON.stringify(config.invariants) : null,
+        categories: config?.categories ? JSON.stringify(config.categories) : null,
+        configPersonas: config?.personas ? JSON.stringify(config.personas) : null,
+        configPersonaMarkdown:
+          config?.personaMarkdown && Object.keys(config.personaMarkdown).length > 0
+            ? JSON.stringify(config.personaMarkdown)
+            : null,
+        configTools: config?.tools ? JSON.stringify(config.tools) : null,
+        authorizedScope:
+          config?.scope && config.scope.hosts.length > 0 ? JSON.stringify(config.scope) : null,
+        hasRepoConfig: args.hasRepoConfig ?? config !== undefined,
+        createdAt: ts,
+        updatedAt: ts,
+      })
+      .returning();
+    return inserted[0];
+  }
+
+  async function getEngagement(engagementId: string): Promise<EngagementWithCells | null> {
+    const rows = await db
+      .select()
+      .from(securityEngagements)
+      .where(eq(securityEngagements.id, engagementId))
+      .limit(1);
+    const engagement = rows[0];
+    if (!engagement) return null;
+    return { engagement, cells: await loadCells(engagement.id) };
+  }
+
+  async function getEngagementBySession(sessionId: string): Promise<EngagementWithCells | null> {
+    const rows = await db
+      .select()
+      .from(securityEngagements)
+      .where(eq(securityEngagements.sessionId, sessionId))
+      .limit(1);
+    const engagement = rows[0];
+    if (!engagement) return null;
+    return { engagement, cells: await loadCells(engagement.id) };
+  }
+
+  /**
+   * Replace the plan while the engagement is still planning. `knownPersonas`
+   * defaults to the bundled registry; the structured plan-edit route passes the
+   * bundled ids ∪ the engagement's repo-declared persona keys (dynamic-config
+   * M-F2), so a config persona stays valid.
+   */
+  async function setPlan(
+    engagementId: string,
+    planYaml: string,
+    knownPersonas: readonly string[] = KNOWN_PERSONAS,
+  ): Promise<SecurityEngagementRow> {
+    const engagement = await loadEngagement(engagementId);
+    if (engagement.status !== "planning") {
+      throw new Error("The plan is immutable once the engagement is running.");
+    }
+    parsePlan(planYaml, knownPersonas);
+    const updated = await db
+      .update(securityEngagements)
+      .set({ plan: planYaml, updatedAt: now() })
+      .where(eq(securityEngagements.id, engagementId))
+      .returning();
+    return updated[0];
+  }
+
+  /**
+   * Edit the engagement's focus, known invariants, and loaded threat categories
+   * while it is still planning (dynamic-config M-F3, M-P2a). Repo config seeds
+   * these at create; this lets a user add or change them in the UI before start.
+   * Only the passed fields change: a `focus` of `null` clears it, an omitted
+   * `focus` leaves it. `invariants` and `categories` are stored as a JSON
+   * string[]; an omitted list leaves it, and `[]` clears it. The caller
+   * validates category ids against `isKnownCategory` before this runs. Refuses
+   * once the engagement runs, matching setPlan's immutability rule.
+   */
+  async function setEngagementConfig(
+    engagementId: string,
+    args: { focus?: string | null; invariants?: string[]; categories?: string[] },
+  ): Promise<SecurityEngagementRow> {
+    const engagement = await loadEngagement(engagementId);
+    if (engagement.status !== "planning") {
+      throw new Error(
+        "The focus, invariants, and categories are immutable once the engagement is running.",
+      );
+    }
+    const patch: Partial<typeof securityEngagements.$inferInsert> = { updatedAt: now() };
+    if (args.focus !== undefined) {
+      const trimmed = args.focus?.trim() ?? "";
+      patch.focus = trimmed === "" ? null : trimmed;
+    }
+    if (args.invariants !== undefined) {
+      const cleaned = args.invariants.map((inv) => inv.trim()).filter((inv) => inv !== "");
+      patch.invariants = cleaned.length > 0 ? JSON.stringify(cleaned) : null;
+    }
+    if (args.categories !== undefined) {
+      const cleaned = args.categories.map((id) => id.trim()).filter((id) => id !== "");
+      patch.categories = cleaned.length > 0 ? JSON.stringify(cleaned) : null;
+    }
+    const updated = await db
+      .update(securityEngagements)
+      .set(patch)
+      .where(eq(securityEngagements.id, engagementId))
+      .returning();
+    return updated[0];
+  }
+
+  /**
+   * Materialize cells from the plan and pin the repo ref. SHA resolution
+   * happens in the caller (the sec_start tool); this function only refuses
+   * an empty pin.
+   *
+   * Diff-scoped re-scan (re-scan / iterate): when the engagement has a parent
+   * and the caller passes a non-null `changedFiles` list (the GitHub compare
+   * of the parent's pinned SHA → the new HEAD), the sweep cells are scoped to
+   * the changed directories. Recon (ordinal 1) and review cells stay repo-wide.
+   *
+   * Scoping REWRITES `engagement.plan`: the changed-dir globs land on the sweep
+   * cells' `paths`, and both the materialized `security_cells` and the plan
+   * mount (`/plan.yml`) then show the diff plan. `buildDispatchPrompt` already
+   * reads `planCell.paths`, so the persona's Scope line follows for free. The
+   * base SHA and the changed-path list persist on the engagement row
+   * (`base_ref`/`changed_paths`) for the `/prior/diff.md` mount and the UI
+   * banner. `changedFiles = null` (a first review, or a re-scan whose compare
+   * failed / whose parent had no pinned SHA) runs a FULL scan with no scoping,
+   * and the plan is materialized unchanged.
+   */
+  async function startEngagement(
+    engagementId: string,
+    args: { resolvedSha: string; baseRef?: string | null; changedFiles?: string[] | null },
+  ): Promise<EngagementWithCells> {
+    const engagement = await loadEngagement(engagementId);
+    if (engagement.status !== "planning") {
+      throw new Error(
+        `The engagement is already ${engagement.status}. Only a planning engagement can start.`,
+      );
+    }
+    if (!args.resolvedSha || args.resolvedSha.trim() === "") {
+      throw new Error("Pin the repository to a commit SHA before starting.");
+    }
+    const parsed = parsePlan(engagement.plan, knownPersonasForEngagement(engagement));
+    // Expand every `triad: true` phase into an architect → worker → verifier
+    // triad (M-P2b). Ordinals renumber densely and reads edges remap onto the
+    // expanded cells. A plan with no triad cells passes through unchanged, so a
+    // preset that declares no triads (or a repo config) materializes as before.
+    const plan: EngagementPlan = { cells: expandTriads(parsed.cells) };
+
+    // Diff-scope only a re-scan with a non-empty changed-file list. Derive the
+    // changed directories once; a diff too wide to scope usefully falls back to
+    // a full scan (globs = null) but still records base_ref + changed_paths.
+    const changedFiles =
+      engagement.parentEngagementId && args.changedFiles ? args.changedFiles : null;
+    const globs = changedFiles ? changedDirGlobs(changedFiles) : null;
+
+    // Inject the globs onto the sweep cells (not recon, not review) and serialize
+    // the adjusted plan back. When there are no globs (full scan) the plan is the
+    // expanded plan; a first-review preset with no triads is byte-identical to
+    // before, and a triad preset materializes the expanded cells.
+    const scopedCells: PlanCell[] = plan.cells.map((planCell) => {
+      // A sweep gets the diff globs. Recon (ordinal 1), the verify/review cells,
+      // and the re-scan reconcile cell stay repo-wide: reconcile re-checks EVERY
+      // carried finding wherever it lives, not only the changed files.
+      const isSweep =
+        planCell.ordinal !== 1 &&
+        planCell.review !== true &&
+        planCell.persona !== RECONCILE_PERSONA;
+      if (!globs || !isSweep) return planCell;
+      return { ...planCell, paths: mergePaths(planCell.paths, globs) };
+    });
+    // Serialize the expanded (and, on a re-scan, scoped) plan back so /plan.yml
+    // and the materialized cells agree. A plan with no triads and no globs keeps
+    // the stored plan byte-for-byte; a triad plan re-serializes the expanded
+    // cells. `hasTriad(parsed.cells)` is the "did expansion change anything"
+    // signal — expandTriads is identity on a plan with no triad cells.
+    const planYaml =
+      hasTriad(parsed.cells) || globs ? serializePlan(scopedCells) : engagement.plan;
+
+    // Re-validate the EXPANDED plan before the engagement freezes. Triad
+    // expansion derives `-plan`/`-verify` names and could, for a long base,
+    // produce a name that only parsePlan (on read-back at dispatch) rejects —
+    // and by then the plan is immutable, so dispatch deadlocks. Fail here, at
+    // the sec_start gate, with the same corrective message instead.
+    parsePlan(planYaml, knownPersonasForEngagement(engagement));
+
+    const ts = now();
+    const cellValues = scopedCells.map((planCell) => ({
+      id: `cell_${randomUUID()}`,
+      engagementId,
+      ordinal: planCell.ordinal,
+      persona: planCell.persona,
+      mode: planCell.mode,
+      goal: planCell.goal,
+      dir: cellDir(planCell),
+      reads: JSON.stringify(planCell.reads),
+      review: planCell.review === true,
+      status: "pending" as const,
+      attempts: 0,
+      createdAt: ts,
+    }));
+    // The reconcile cell owns re-checking the carried findings (re-scan v2). It
+    // is the cell whose persona is `reconcile`; carried rows attach to it. Null
+    // on a first review or a plan with no reconcile cell (carried seeding then
+    // no-ops).
+    const reconcileCellValue = cellValues.find((c) => c.persona === RECONCILE_PERSONA);
+
+    await db.transaction(async (tx) => {
+      await tx.insert(securityCells).values(cellValues);
+      await tx
+        .update(securityEngagements)
+        .set({
+          status: "running",
+          repoRef: args.resolvedSha,
+          plan: planYaml,
+          // Persist the diff context for the /prior/diff.md mount and the UI
+          // banner. Only a re-scan (has a parent) records a base_ref; a first
+          // review never diffs. Both null on a full scan (no parent, or a
+          // re-scan whose compare failed / whose parent had no pinned SHA).
+          baseRef: engagement.parentEngagementId ? args.baseRef ?? null : null,
+          changedPaths: changedFiles ? JSON.stringify(changedFiles) : null,
+          updatedAt: ts,
+        })
+        .where(eq(securityEngagements.id, engagementId));
+
+      // Re-scan v2 (§Seed carried findings): copy EVERY finding from the parent
+      // into this engagement as a recurring carried row, attached to the
+      // reconcile cell. Preserve fingerprint, severity, title, body, file, line,
+      // and the parent's status (a verified finding stays verified; a refuted
+      // one stays refuted — never re-triage a dismissal). Idempotent: seeds only
+      // when this engagement has no rows yet.
+      if (engagement.parentEngagementId && reconcileCellValue) {
+        await seedCarriedFindings(
+          tx,
+          engagementId,
+          engagement.parentEngagementId,
+          reconcileCellValue.id,
+          ts,
+        );
+      }
+    });
+    recordSecurityCellsCreated(cellValues.length);
+    const result = await getEngagement(engagementId);
+    // The transaction above just wrote these rows; absence is impossible.
+    if (!result) throw new Error(`No engagement ${engagementId}. Check the id with sec_status.`);
+    return result;
+  }
+
+  /**
+   * Dispatch one cell: claim it (status running, attempts + 1), spawn the
+   * persona child through the injected seam, stamp the child on the row.
+   * Serial v1: refuses while any OTHER cell is running.
+   */
+  async function dispatchCell(
+    engagementId: string,
+    args: { cellId?: string; mode?: "fresh" | "resume"; spawn: SpawnCellChild },
+  ): Promise<{ cell: SecurityCellRow; prompt: string }> {
+    const engagement = await loadEngagement(engagementId);
+    if (engagement.status !== "running") {
+      throw new Error(
+        engagement.status === "planning"
+          ? "Start the engagement with sec_start before dispatching cells."
+          : `The engagement is ${engagement.status}. A closed engagement dispatches nothing.`,
+      );
+    }
+    const cells = await loadCells(engagementId);
+
+    let target: SecurityCellRow | undefined;
+    if (args.cellId !== undefined) {
+      target = cells.find((c) => c.id === args.cellId);
+      if (!target) {
+        throw new Error(`No cell ${args.cellId} in this engagement. Check the id with sec_status.`);
+      }
+      if (target.status === "completed") {
+        throw new Error(
+          `Cell ${ordinalLabel(target)} is completed. Completed cells never re-run; dispatch a pending cell instead.`,
+        );
+      }
+    } else {
+      target = cells.find((c) => c.status === "pending");
+      if (!target) {
+        throw new Error(
+          "No pending cell to dispatch. Call sec_status, then name a yielded or failed cell to re-dispatch.",
+        );
+      }
+    }
+
+    const runningOther = cells.find((c) => c.status === "running" && c.id !== target.id);
+    if (runningOther) {
+      throw new Error(
+        `Cell ${ordinalLabel(runningOther)} is still running. Complete or fail it before dispatching another.`,
+      );
+    }
+
+    const effectiveMode = args.mode ?? target.mode;
+    const prior = {
+      status: target.status,
+      attempts: target.attempts,
+      mode: target.mode,
+      childSessionId: target.childSessionId,
+      dispatchedAt: target.dispatchedAt,
+    };
+
+    // Validate the plan BEFORE the claim. parsePlan is pure (it does not need
+    // the claimed row), so any structural error throws here while the cell is
+    // still pending — a throw after the claim would leave the cell `running`
+    // with a pre-minted child id that was never spawned ("CHILD GONE").
+    const plan = parsePlan(engagement.plan, knownPersonasForEngagement(engagement));
+
+    // Pre-mint the child session id (the same `child_` shape children.ts
+    // mints — this IS the session id the spawn builds) and stamp it in the
+    // claim, BEFORE the spawn: the host's child-session build resolves the
+    // cell claim by `child_session_id` to attach the persona toolset + role,
+    // so the claim must exist when the build runs (M4).
+    const plannedChildSessionId = `child_${randomUUID()}`;
+
+    // Claim first (one atomic UPDATE): a second dispatch racing in sees the
+    // running status and refuses. The spawn happens outside a transaction —
+    // the real spawner writes its own rows through the same connection.
+    const claimed = await db
+      .update(securityCells)
+      .set({
+        status: "running",
+        attempts: target.attempts + 1,
+        mode: effectiveMode,
+        childSessionId: plannedChildSessionId,
+        dispatchedAt: now(),
+      })
+      .where(eq(securityCells.id, target.id))
+      .returning();
+    const cell = claimed[0];
+
+    const readOrdinals = parseReads(cell.reads);
+    const readsCells = cells.filter((c) => readOrdinals.includes(c.ordinal));
+    // Delta re-run (pivot-coordinator, M-P4c): an answered need on THIS cell
+    // rides on the dispatch as a resolution block, so the persona continues
+    // from where it was blocked. A cell with no answered need adds nothing.
+    const answeredNeeds = await db
+      .select()
+      .from(securityNeeds)
+      .where(
+        and(
+          eq(securityNeeds.engagementId, engagementId),
+          eq(securityNeeds.cellId, cell.id),
+          eq(securityNeeds.status, "answered"),
+        ),
+      )
+      .orderBy(asc(securityNeeds.createdAt), asc(securityNeeds.id));
+    const prompt = buildDispatchPrompt(
+      cell,
+      plan,
+      readsCells,
+      protocolMarkdown(),
+      engagement.parentEngagementId !== null,
+      // Focus + invariants + loaded threat categories ride on every dispatch
+      // (dynamic-config M-F3, M-P2a). The invariants and categories columns are
+      // JSON string[]; a malformed value adds nothing.
+      {
+        focus: engagement.focus,
+        invariants: parseJsonStringArrayColumn(engagement.invariants),
+        categories: parseJsonStringArrayColumn(engagement.categories),
+        // Authorized scope (M-P4b): only a live persona reads it, but pass it
+        // always — buildDispatchPrompt gates on the persona.
+        scopeHosts: parseAuthorizedScopeHosts(engagement.authorizedScope),
+      },
+      answeredNeeds.map((need) => ({
+        kind: narrowNeedKind(need.kind),
+        description: need.description,
+        resolution: need.resolution ?? "",
+      })),
+    );
+
+    let childSessionId: string;
+    try {
+      const spawned = await args.spawn({
+        title: `Security cell ${cell.dir}`,
+        message: prompt,
+        repo: engagement.repoFullName,
+        ref: engagement.repoRef,
+        childSessionId: plannedChildSessionId,
+        role: cell.persona,
+      });
+      childSessionId = spawned.childSessionId;
+    } catch (err) {
+      // Undo THIS call's own claim, not a repair of somebody else's state:
+      // no child exists, so no dispatch happened and attempts must not
+      // count one. The error propagates to the caller unchanged.
+      await db
+        .update(securityCells)
+        .set({
+          status: prior.status,
+          attempts: prior.attempts,
+          mode: prior.mode,
+          childSessionId: prior.childSessionId,
+          dispatchedAt: prior.dispatchedAt,
+        })
+        .where(eq(securityCells.id, cell.id));
+      throw err;
+    }
+
+    const stamped = await db
+      .update(securityCells)
+      .set({ childSessionId, dispatchedAt: now() })
+      .where(eq(securityCells.id, cell.id))
+      .returning();
+    return { cell: stamped[0], prompt };
+  }
+
+  /**
+   * Rule on a running cell's exit. The caller (the M3 tool layer) checks
+   * the child watch and passes `settled`; the service trusts a true flag
+   * but refuses false.
+   */
+  async function completeCell(
+    engagementId: string,
+    cellId: string,
+    args: { settled: boolean },
+  ): Promise<CompleteCellResult> {
+    const cell = await loadCell(engagementId, cellId);
+    if (cell.status !== "running") {
+      throw new Error(
+        `Cell ${ordinalLabel(cell)} is ${cell.status}, not running. Only a running cell can complete.`,
+      );
+    }
+    if (!args.settled) {
+      throw new Error("The cell's child has not settled. Wait for it to finish.");
+    }
+    const docRow = await latestStateDocRow(engagementId, cell.dir);
+    if (!docRow) {
+      return {
+        outcome: "violation",
+        violation: `No state doc found at /cells/${cell.dir}/state.yml. The persona must write one before completing.`,
+      };
+    }
+    let doc: StateDoc;
+    try {
+      doc = parseStateDoc(docRow.content);
+    } catch (err) {
+      // Writes validate state.yml, so a parse failure here means the row
+      // predates a protocol change — surface it as a violation to loop on.
+      return { outcome: "violation", violation: err instanceof Error ? err.message : String(err) };
+    }
+    const ruling = ruleExit(doc);
+    if (ruling.outcome === "violation") {
+      return { outcome: "violation", violation: ruling.violation };
+    }
+    const status = ruling.outcome === "done" ? ("completed" as const) : ("yielded" as const);
+    const updated = await db
+      .update(securityCells)
+      .set({ status, settledAt: now() })
+      .where(eq(securityCells.id, cell.id))
+      .returning();
+    if (status === "completed") recordSecurityCellSettled("completed");
+    return status === "completed"
+      ? { outcome: "completed", cell: updated[0] }
+      : { outcome: "yielded", cell: updated[0] };
+  }
+
+  /** Explicit, agent-invoked failure. Nothing sweeps cells to failed. */
+  async function failCell(
+    engagementId: string,
+    cellId: string,
+    reason: string,
+  ): Promise<{ cell: SecurityCellRow; reason: string }> {
+    const cell = await loadCell(engagementId, cellId);
+    if (cell.status !== "running") {
+      throw new Error(
+        `Cell ${ordinalLabel(cell)} is ${cell.status}, not running. Only a running cell can fail.`,
+      );
+    }
+    if (!reason || reason.trim() === "") {
+      throw new Error("Give a reason for the failure so the manifest and re-dispatch carry it.");
+    }
+    const updated = await db
+      .update(securityCells)
+      .set({ status: "failed", settledAt: now() })
+      .where(eq(securityCells.id, cell.id))
+      .returning();
+    recordSecurityCellSettled("failed");
+    return { cell: updated[0], reason };
+  }
+
+  /**
+   * Cancel a planning or running engagement (spec §Cancel). Human-only at the
+   * route; the service holds the transition. Sets the engagement to
+   * 'cancelled' and fails every unsettled cell (pending/running/yielded) with
+   * a "engagement cancelled" reason in one transaction. A running cell's
+   * `child_session_id` returns so the route tears the in-flight child down.
+   * A cancelled engagement dispatches nothing (dispatchCell refuses) and
+   * never re-closes.
+   */
+  async function cancelEngagement(
+    engagementId: string,
+  ): Promise<{ engagement: SecurityEngagementRow; terminatedChildSessionId?: string }> {
+    const engagement = await loadEngagement(engagementId);
+    if (engagement.status !== "planning" && engagement.status !== "running") {
+      throw new Error(
+        `The engagement is ${engagement.status}. Only a planning or running engagement can be cancelled.`,
+      );
+    }
+    const cells = await loadCells(engagementId);
+    const running = cells.find((c) => c.status === "running");
+    const terminatedChildSessionId = running?.childSessionId ?? undefined;
+    const ts = now();
+    const updatedEngagement = await db.transaction(async (tx) => {
+      // Fail every unsettled cell with the cancel reason. Completed and
+      // already-failed cells keep their terminal status.
+      const failed = await tx
+        .update(securityCells)
+        .set({ status: "failed", settledAt: ts })
+        .where(
+          and(
+            eq(securityCells.engagementId, engagementId),
+            inArray(securityCells.status, ["pending", "running", "yielded"]),
+          ),
+        )
+        .returning({ id: securityCells.id });
+      for (let i = 0; i < failed.length; i += 1) recordSecurityCellSettled("failed");
+      const rows = await tx
+        .update(securityEngagements)
+        .set({ status: "cancelled", updatedAt: ts })
+        .where(eq(securityEngagements.id, engagementId))
+        .returning();
+      return rows[0];
+    });
+    return { engagement: updatedEngagement, terminatedChildSessionId };
+  }
+
+  /** Close the engagement and compute the manifest. */
+  async function closeEngagement(engagementId: string): Promise<EngagementManifest> {
+    const engagement = await loadEngagement(engagementId);
+    if (engagement.status === "completed" || engagement.status === "failed") {
+      throw new Error(`The engagement is already ${engagement.status}. Read the manifest from the thread.`);
+    }
+    if (engagement.status === "cancelled") {
+      throw new Error("The engagement was cancelled. A cancelled engagement never closes.");
+    }
+    if (engagement.status === "planning") {
+      throw new Error("The engagement never started. Call sec_start, run the cells, then close.");
+    }
+    const cells = await loadCells(engagementId);
+    const blocker = cells.find(
+      (c) => c.status === "pending" || c.status === "running" || c.status === "yielded",
+    );
+    if (blocker) {
+      throw new Error(
+        `Cell ${ordinalLabel(blocker)} is ${blocker.status}. Complete or fail every cell before closing.`,
+      );
+    }
+
+    const findings = await db
+      .select()
+      .from(securityFindings)
+      .where(eq(securityFindings.engagementId, engagementId));
+    const [{ n: filedLinks }] = await db
+      .select({ n: count() })
+      .from(securityFindingLinks)
+      .where(eq(securityFindingLinks.engagementId, engagementId));
+
+    const manifestCells: ManifestCell[] = [];
+    for (const cell of cells) {
+      const [{ n: revisions }] = await db
+        .select({ n: count() })
+        .from(securityFiles)
+        .where(
+          and(
+            eq(securityFiles.engagementId, engagementId),
+            eq(securityFiles.path, `/cells/${cell.dir}/state.yml`),
+          ),
+        );
+      manifestCells.push({
+        ordinal: cell.ordinal,
+        dir: cell.dir,
+        persona: cell.persona,
+        status: cell.status,
+        attempts: cell.attempts,
+        stateDocRevisions: Number(revisions ?? 0),
+        findings: findings.filter((f) => f.cellId === cell.id).length,
+      });
+    }
+
+    // Distinct fingerprints: one count per group, keyed by the group's
+    // highest severity, so five near-duplicate reports read as one.
+    const bySeverity: Record<FindingSeverity, number> = {
+      critical: 0,
+      high: 0,
+      medium: 0,
+      low: 0,
+      info: 0,
+    };
+    const groups = new Map<string, FindingSeverity>();
+    for (const f of findings) {
+      const sev = narrowSeverity(f.severity);
+      const current = groups.get(f.fingerprint);
+      if (current === undefined || SEVERITIES.indexOf(sev) < SEVERITIES.indexOf(current)) {
+        groups.set(f.fingerprint, sev);
+      }
+    }
+    for (const sev of groups.values()) bySeverity[sev] += 1;
+
+    const statusBreakdown = { open: 0, verified: 0, refuted: 0 };
+    for (const f of findings) {
+      if (f.status === "open" || f.status === "verified" || f.status === "refuted") {
+        statusBreakdown[f.status] += 1;
+      }
+    }
+
+    // Coverage rollup (NOT_ASSESSED ledger, M-P2d): count assessed vs
+    // not_assessed and collect every NOT_ASSESSED area with its reason, so the
+    // manifest names the gaps the team should know about.
+    const coverageRows = await listCoverage(engagementId);
+    const coverage: CoverageRollup = {
+      assessed: 0,
+      notAssessed: 0,
+      gaps: [],
+    };
+    for (const row of coverageRows) {
+      if (row.status === "not_assessed") {
+        coverage.notAssessed += 1;
+        coverage.gaps.push({ area: row.area, tool: row.tool, reason: row.reason ?? "" });
+      } else {
+        coverage.assessed += 1;
+      }
+    }
+
+    const allCompleted = cells.every((c) => c.status === "completed");
+    const finalStatus = allCompleted ? ("completed" as const) : ("failed" as const);
+    await db
+      .update(securityEngagements)
+      .set({ status: finalStatus, updatedAt: now() })
+      .where(eq(securityEngagements.id, engagementId));
+
+    return {
+      engagementId,
+      status: finalStatus,
+      repoFullName: engagement.repoFullName,
+      repoRef: engagement.repoRef,
+      cells: manifestCells,
+      coverage,
+      // The report artifact (M-P3): included when the report cell wrote one. The
+      // engagement row already holds it (the report cell runs before close).
+      report: reportFromRow(engagement),
+      findings: {
+        total: findings.length,
+        distinctBySeverity: bySeverity,
+        statusBreakdown,
+        filedLinks: Number(filedLinks ?? 0),
+      },
+    };
+  }
+
+  /**
+   * Append a revision to the engagement tree. The path prefix IS the write
+   * claim: a cell writes only under /cells/<its dir>/.
+   */
+  async function writeFile(
+    engagementId: string,
+    args: { actorCellId: string; path: string; content: string },
+  ): Promise<{ path: string; revision: number }> {
+    await loadEngagement(engagementId);
+    const cell = await loadCell(engagementId, args.actorCellId);
+    const prefix = `/cells/${cell.dir}/`;
+    if (!args.path.startsWith(prefix)) {
+      throw new Error(`Write refused: ${args.path} is outside your cell directory ${prefix}.`);
+    }
+    const size = Buffer.byteLength(args.content, "utf8");
+    if (size > MAX_FILE_BYTES) {
+      throw new Error(
+        `Write refused: the content is ${size} bytes; the limit is ${MAX_FILE_BYTES} (256 KB). The tree holds working state — split or trim the content.`,
+      );
+    }
+    if (basename(args.path) === "state.yml") {
+      // Strict rails for the durable state doc. Three layers, all reported at
+      // once so the persona fixes everything in one rewrite:
+      //   1. Structural — unknown keys, missing fields, bad counts, done vs
+      //      pending consistency (collectStateDocViolations).
+      //   2. Identity — cell/persona MUST name the acting cell. This is what
+      //      catches the copied-example / hallucinated-doc failure: a recon
+      //      cell that writes a `06-verify` / `verifier` doc is refused here.
+      //   3. Finding-id existence — every id in `findings` MUST be a finding
+      //      THIS cell actually reported (no invented or borrowed ids).
+      const { doc, violations: structural } = collectStateDocViolations(args.content);
+      const violations = [...structural];
+      if (doc) {
+        violations.push(...stateDocIdentityViolations(doc, { cell: cell.dir, persona: cell.persona }));
+        if (doc.findings.length > 0) {
+          const ownRows = await db
+            .select({ id: securityFindings.id })
+            .from(securityFindings)
+            .where(and(eq(securityFindings.engagementId, engagementId), eq(securityFindings.cellId, cell.id)));
+          const own = new Set(ownRows.map((r) => r.id));
+          const foreign = doc.findings.filter((id) => !own.has(id));
+          if (foreign.length > 0) {
+            violations.push(
+              `findings names id(s) this cell did not report: ${foreign.join(", ")}. ` +
+                `List only the ids sec_finding_report returned to THIS cell.`,
+            );
+          }
+        }
+      }
+      if (violations.length > 0) throw new Error(stateDocWriteError(violations));
+    }
+
+    const insertNext = async (): Promise<{ path: string; revision: number }> => {
+      const latest = await db
+        .select({ revision: securityFiles.revision })
+        .from(securityFiles)
+        .where(and(eq(securityFiles.engagementId, engagementId), eq(securityFiles.path, args.path)))
+        .orderBy(desc(securityFiles.revision))
+        .limit(1);
+      const nextRevision = (latest[0]?.revision ?? 0) + 1;
+      if (nextRevision > MAX_REVISIONS_PER_PATH) {
+        throw new Error(
+          `Write refused: ${args.path} already has ${MAX_REVISIONS_PER_PATH} revisions, the maximum. Consolidate writes — the tree holds working state, not a log.`,
+        );
+      }
+      await db.insert(securityFiles).values({
+        id: `file_${randomUUID()}`,
+        engagementId,
+        cellId: cell.id,
+        path: args.path,
+        revision: nextRevision,
+        content: args.content,
+        createdAt: now(),
+      });
+      return { path: args.path, revision: nextRevision };
+    };
+
+    try {
+      return await insertNext();
+    } catch (err) {
+      // Two concurrent writers can compute the same next revision; the
+      // unique index (engagement_id, path, revision) rejects the loser.
+      // Retry once with a fresh read — a second loss propagates.
+      if (isUniqueViolation(err)) return insertNext();
+      throw err;
+    }
+  }
+
+  /** The three read-only `/prior/` mounts a re-scan seeds C's tree with (re-scan
+   * / iterate): the prior recon map, the git diff, and the prior findings
+   * digest. All resolve against the PARENT engagement P. Returns null for a path
+   * that is not a `/prior/` mount, so `readFile` falls through to stored rows.
+   * Throws a corrective error when the engagement has no parent — `/prior/*` is
+   * meaningless on a first review. */
+  async function priorMount(
+    engagement: SecurityEngagementRow,
+    path: string,
+  ): Promise<string | null> {
+    if (path !== "/prior/diff.md" && path !== "/prior/recon.md" && path !== "/prior/findings.md") {
+      return null;
+    }
+    if (!engagement.parentEngagementId) {
+      throw new Error(
+        "This is not a re-scan; there is no prior engagement. The /prior/ mounts exist only on a re-scan (a review created with rescanOf).",
+      );
+    }
+    const parentId = engagement.parentEngagementId;
+    if (path === "/prior/diff.md") return buildPriorDiffMd(engagement);
+    if (path === "/prior/recon.md") return buildPriorReconMd(parentId);
+    return buildPriorFindingsMd(parentId);
+  }
+
+  /** `/prior/diff.md`: the base→head SHA range and the changed-file list, or a
+   * full-re-scan note when no diff was captured (compare failed, or the parent
+   * had no pinned SHA). */
+  function buildPriorDiffMd(engagement: SecurityEngagementRow): string {
+    const changed = parsePathList(engagement.changedPaths);
+    if (!engagement.baseRef || changed === null) {
+      return [
+        "# Prior diff",
+        "",
+        "Full re-scan: prior commit unavailable, scanning everything.",
+        "The changed-file diff could not be captured (the prior review had no pinned commit, or the compare failed), so this re-scan reviews the whole repository. Use /prior/recon.md and /prior/findings.md as your starting point.",
+        "",
+      ].join("\n");
+    }
+    const lines = [
+      "# Prior diff",
+      "",
+      `Base (prior review commit): ${engagement.baseRef}`,
+      `Head (this review commit): ${engagement.repoRef || "(pinned at start)"}`,
+      "",
+      `${changed.length} changed file${changed.length === 1 ? "" : "s"} since the prior review:`,
+      "",
+    ];
+    for (const file of changed) lines.push(`- ${file}`);
+    lines.push("");
+    return lines.join("\n");
+  }
+
+  /** `/prior/recon.md`: P's latest recon state doc (P's ordinal-1 cell dir), or
+   * a short note when P produced no recon map. */
+  async function buildPriorReconMd(parentId: string): Promise<string> {
+    const reconCell = (
+      await db
+        .select({ dir: securityCells.dir })
+        .from(securityCells)
+        .where(and(eq(securityCells.engagementId, parentId), eq(securityCells.ordinal, 1)))
+        .limit(1)
+    )[0];
+    if (reconCell) {
+      const docRow = await latestStateDocRow(parentId, reconCell.dir);
+      if (docRow) {
+        return [
+          "# Prior recon map",
+          "",
+          `Inherited from the prior review's recon cell (/cells/${reconCell.dir}/state.yml). Update it only for the changed files.`,
+          "",
+          docRow.content,
+          "",
+        ].join("\n");
+      }
+    }
+    return [
+      "# Prior recon map",
+      "",
+      "No prior recon map: the prior review's recon cell wrote no state doc. Map the codebase fresh, then focus the sweeps on the changed files in /prior/diff.md.",
+      "",
+    ].join("\n");
+  }
+
+  /** `/prior/findings.md`: a digest of P's findings grouped by status
+   * (verified / open / refuted), each with severity, title, file:line, status,
+   * and a short body excerpt. A finding that a human commented on during triage
+   * carries those notes under a "Notes:" line — the load-bearing carry (spec
+   * §Re-scan / iterate): the persona sees the prior human reasoning ("intended —
+   * the check is in middleware X"), not just the status. */
+  async function buildPriorFindingsMd(parentId: string): Promise<string> {
+    const findings = await db
+      .select()
+      .from(securityFindings)
+      .where(eq(securityFindings.engagementId, parentId))
+      .orderBy(asc(securityFindings.createdAt), asc(securityFindings.id));
+    const lines = ["# Prior findings", ""];
+    if (findings.length === 0) {
+      lines.push("The prior review produced no findings.", "");
+      return lines.join("\n");
+    }
+    // One grouped query for the page's comments, oldest-first (thread order).
+    const commentRows = await db
+      .select()
+      .from(securityFindingComments)
+      .where(eq(securityFindingComments.engagementId, parentId))
+      .orderBy(asc(securityFindingComments.createdAt), asc(securityFindingComments.id));
+    const commentsByFinding = new Map<string, SecurityFindingCommentRow[]>();
+    for (const c of commentRows) {
+      const list = commentsByFinding.get(c.findingId) ?? [];
+      list.push(c);
+      commentsByFinding.set(c.findingId, list);
+    }
+    const groups: { status: FindingStatus; heading: string }[] = [
+      { status: "verified", heading: "Verified (confirmed real)" },
+      { status: "open", heading: "Open (not yet triaged)" },
+      { status: "refuted", heading: "Refuted (dismissed — carried forward, do not re-triage)" },
+    ];
+    for (const { status, heading } of groups) {
+      const group = findings.filter((f) => f.status === status);
+      if (group.length === 0) continue;
+      lines.push(`## ${heading} — ${group.length}`, "");
+      for (const f of group) {
+        const loc = f.file ? `${f.file}${f.line != null ? `:${f.line}` : ""}` : "(no file)";
+        lines.push(`- [${f.severity}] ${f.title} — ${loc}`);
+        const excerpt = f.body.replace(/\s+/g, " ").trim().slice(0, 280);
+        if (excerpt !== "") lines.push(`  ${excerpt}${f.body.length > 280 ? "…" : ""}`);
+        // The human triage notes: the persona reads the prior reasoning, not
+        // just the verdict. Author is not named — "team note:" is enough.
+        const comments = commentsByFinding.get(f.id) ?? [];
+        if (comments.length > 0) {
+          lines.push("  Notes:");
+          for (const c of comments) {
+            const note = c.body.replace(/\s+/g, " ").trim();
+            if (note !== "") lines.push(`  - team note: ${note}`);
+          }
+        }
+      }
+      lines.push("");
+    }
+    return lines.join("\n");
+  }
+
+  /** Read a tree path: the virtual mounts first, then stored revisions. */
+  async function readFile(
+    engagementId: string,
+    path: string,
+    revision?: number,
+  ): Promise<TreeFile> {
+    const engagement = await loadEngagement(engagementId);
+    if (path === "/protocol.md") return { path, revision: null, content: protocolMarkdown() };
+    if (path === "/plan.yml") return { path, revision: null, content: engagement.plan };
+    if (path.startsWith("/playbooks/") && path.endsWith(".md")) {
+      const name = path.slice("/playbooks/".length, -".md".length);
+      if (isKnownPlaybook(name)) return { path, revision: null, content: playbookMarkdown(name) };
+      throw new Error(`No playbook at ${path}. Use sec_fs_list to see the tree.`);
+    }
+    if (path.startsWith("/prior/")) {
+      const content = await priorMount(engagement, path);
+      if (content !== null) return { path, revision: null, content };
+      throw new Error(`No file at ${path}. Use sec_fs_list to see the tree.`);
+    }
+    const conditions = [eq(securityFiles.engagementId, engagementId), eq(securityFiles.path, path)];
+    if (revision !== undefined) conditions.push(eq(securityFiles.revision, revision));
+    const rows = await db
+      .select()
+      .from(securityFiles)
+      .where(and(...conditions))
+      .orderBy(desc(securityFiles.revision))
+      .limit(1);
+    const row = rows[0];
+    if (!row) {
+      if (revision !== undefined) {
+        throw new Error(`No revision ${revision} at ${path}. Use sec_fs_list to see the tree.`);
+      }
+      throw new Error(`No file at ${path}. Use sec_fs_list to see the tree.`);
+    }
+    return { path: row.path, revision: row.revision, content: row.content };
+  }
+
+  /** List tree paths (latest revision + size), virtual mounts included. */
+  async function listFiles(engagementId: string, prefix?: string): Promise<TreeEntry[]> {
+    const engagement = await loadEngagement(engagementId);
+    const rows = await db
+      .select({
+        path: securityFiles.path,
+        revision: securityFiles.revision,
+        size: sql<number>`length(${securityFiles.content})`,
+      })
+      .from(securityFiles)
+      .where(
+        prefix !== undefined
+          ? and(
+              eq(securityFiles.engagementId, engagementId),
+              sql`${securityFiles.path} LIKE ${`${prefix}%`}`,
+            )
+          : eq(securityFiles.engagementId, engagementId),
+      );
+    const byPath = new Map<string, TreeEntry>();
+    for (const row of rows) {
+      const existing = byPath.get(row.path);
+      if (!existing || row.revision > existing.revisions) {
+        byPath.set(row.path, { path: row.path, revisions: row.revision, size: Number(row.size) });
+      }
+    }
+    const mounts: TreeEntry[] = [
+      { path: "/plan.yml", revisions: 1, size: Buffer.byteLength(engagement.plan, "utf8") },
+      { path: "/protocol.md", revisions: 1, size: Buffer.byteLength(protocolMarkdown(), "utf8") },
+    ];
+    // Only the playbooks this plan references appear in the tree, so the
+    // listing reflects the engagement rather than every bundled playbook.
+    for (const name of playbooksInPlan(engagement.plan)) {
+      mounts.push({
+        path: `/playbooks/${name}.md`,
+        revisions: 1,
+        size: Buffer.byteLength(playbookMarkdown(name), "utf8"),
+      });
+    }
+    // The read-only /prior/ reasoning mounts appear only on a re-scan (re-scan /
+    // iterate) — a first review has no prior engagement to seed from. The size
+    // is generated content; report 0 rather than build every digest for a list.
+    if (engagement.parentEngagementId) {
+      for (const name of ["diff", "recon", "findings"]) {
+        mounts.push({ path: `/prior/${name}.md`, revisions: 1, size: 0 });
+      }
+    }
+    for (const mount of mounts) {
+      if (prefix === undefined || mount.path.startsWith(prefix)) byPath.set(mount.path, mount);
+    }
+    return [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path));
+  }
+
+  /** Insert a finding; the server computes the fingerprint and returns any
+   * siblings sharing it (advisory dedup — the persona decides).
+   *
+   * Re-scan v2 (§reportFinding + diff counts): the parent's findings are already
+   * seeded into this engagement as carried recurring rows at re-scan start. When
+   * a diff-sweep re-report matches a CARRIED fingerprint, the carried row is the
+   * canonical one — the re-report confirms it and does NOT insert a duplicate;
+   * the carried row returns. `carriedFrom` names the source when the carried row
+   * was refuted (a dismissal the reviewer should not re-triage). A first-seen
+   * fingerprint (no carried match) is inserted `open` with `recurring: false`. */
+  async function reportFinding(
+    engagementId: string,
+    args: {
+      cellId: string;
+      severity: FindingSeverity;
+      title: string;
+      file?: string;
+      line?: number;
+      body: string;
+    },
+  ): Promise<{
+    finding: SecurityFindingRow;
+    siblings: SecurityFindingRow[];
+    carriedFrom: { parentEngagementId: string; reason: string } | null;
+  }> {
+    const engagement = await loadEngagement(engagementId);
+    const cell = await loadCell(engagementId, args.cellId);
+    if (args.body.length < MIN_FINDING_BODY_CHARS) {
+      throw new Error(
+        "Finding body must carry evidence: a code excerpt and the reasoning from source to impact (at least 200 characters).",
+      );
+    }
+
+    // Guardrail: a real title, a clean relative file, a sane line, and a file
+    // inside the cell's assigned scope. Each throws a named corrective so the
+    // persona fixes its input and retries.
+    const title = args.title.trim();
+    if (title.length < MIN_FINDING_TITLE_CHARS || title.length > MAX_FINDING_TITLE_CHARS) {
+      throw new Error(
+        `A finding title must be ${MIN_FINDING_TITLE_CHARS}–${MAX_FINDING_TITLE_CHARS} characters. Name the vulnerability and its location.`,
+      );
+    }
+    if (FINDING_TITLE_PLACEHOLDERS.includes(title.toLowerCase())) {
+      throw new Error(
+        `A finding title must name the vulnerability, not a placeholder like "${title}". Name the flaw, e.g. "IDOR on GET /sessions/:id".`,
+      );
+    }
+    if (args.file !== undefined) {
+      const file = args.file;
+      if (file.trim() === "") {
+        throw new Error(
+          "A finding file must be a repo-relative path like packages/api/src/routes/x.ts, or omit it for a repo-wide finding.",
+        );
+      }
+      if (
+        file.startsWith("/") ||
+        file.includes("\\") ||
+        file.split("/").some((seg) => seg === "..") ||
+        file.length > MAX_FINDING_FILE_CHARS
+      ) {
+        throw new Error(
+          `A finding file must be a clean repo-relative path like packages/api/src/routes/x.ts — no leading "/", no ".." segment, no backslash, at most ${MAX_FINDING_FILE_CHARS} characters.`,
+        );
+      }
+    }
+    if (args.line !== undefined) {
+      if (args.file === undefined) {
+        throw new Error(
+          "A finding line has no meaning without a file. Add the repo-relative file, or omit the line.",
+        );
+      }
+      if (
+        !Number.isInteger(args.line) ||
+        args.line < MIN_FINDING_LINE ||
+        args.line > MAX_FINDING_LINE
+      ) {
+        throw new Error(
+          `A finding line must be a whole number from ${MIN_FINDING_LINE} to ${MAX_FINDING_LINE}. Point to the vulnerable line, or omit the line.`,
+        );
+      }
+    }
+    // Scope adherence: a path-scoped cell may only report findings inside its
+    // globs. Recon / verify / repo-wide cells declare no globs and skip this.
+    if (args.file !== undefined) {
+      const scopeGlobs = cellScopeGlobs(engagement, cell);
+      if (scopeGlobs.length > 0 && !pathMatchesGlobs(args.file, scopeGlobs)) {
+        throw new Error(
+          `Finding file ${args.file} is outside your cell's scope (${scopeGlobs.join(", ")}). Report only within your assigned paths, or the finding belongs to another cell.`,
+        );
+      }
+    }
+
+    const fingerprint = findingFingerprint({ file: args.file, line: args.line, title: args.title });
+    const siblings = await db
+      .select()
+      .from(securityFindings)
+      .where(
+        and(
+          eq(securityFindings.engagementId, engagementId),
+          eq(securityFindings.fingerprint, fingerprint),
+        ),
+      );
+
+    // Reconcile with a carried row: a re-report matching a carried fingerprint
+    // confirms the canonical carried row rather than inserting a duplicate. The
+    // carried row is the one the reconcile pass rules on.
+    const carriedSibling = siblings.find((s) => s.recurring);
+    if (carriedSibling) {
+      const carriedFrom =
+        carriedSibling.status === "refuted" && engagement.parentEngagementId
+          ? {
+              parentEngagementId: engagement.parentEngagementId,
+              reason: carriedSibling.statusReason ?? "",
+            }
+          : null;
+      return { finding: carriedSibling, siblings, carriedFrom };
+    }
+
+    // A first-seen finding: enforce the per-cell cap, then insert open,
+    // recurring=false.
+    const [{ n: existing }] = await db
+      .select({ n: count() })
+      .from(securityFindings)
+      .where(and(eq(securityFindings.engagementId, engagementId), eq(securityFindings.cellId, cell.id)));
+    if (Number(existing ?? 0) >= MAX_FINDINGS_PER_CELL) {
+      throw new Error(
+        "Finding cap reached (100 per cell). Consolidate related findings instead of enumerating.",
+      );
+    }
+
+    const inserted = await db
+      .insert(securityFindings)
+      .values({
+        id: `fnd_${randomUUID()}`,
+        engagementId,
+        cellId: cell.id,
+        fingerprint,
+        severity: args.severity,
+        title: args.title,
+        file: args.file ?? null,
+        line: args.line ?? null,
+        body: args.body,
+        status: "open" as const,
+        recurring: false,
+        createdAt: now(),
+      })
+      .returning();
+    return { finding: inserted[0], siblings, carriedFrom: null };
+  }
+
+  /**
+   * Forward-only status flip. Verdicts: `verified` / `refuted` (a review cell or
+   * the human), or `fixed` (re-scan v2 — the reconcile pass, a review cell, or
+   * the human). Actors: `user:<id>` (the human review route) or a cell id.
+   *
+   * Gating (spec threat 8: a prompt-injected sweep persona must not flip its
+   * peers' findings):
+   *   - `verified` / `refuted` — a review cell only.
+   *   - `fixed` — a review cell OR a `reconcile`-persona cell. The reconcile pass
+   *     rules a carried finding resolved; a review cell may also mark a finding
+   *     it disproved-by-fix.
+   * The human (`user:<id>`) may set any verdict.
+   *
+   * Transitions: `open → verified | refuted | fixed`, and `verified → fixed`
+   * (the reconcile pass marks a previously-verified carried finding resolved).
+   * Every other flip is refused (forward-only).
+   */
+  async function reviewFinding(
+    engagementId: string,
+    args: {
+      findingId: string;
+      status: "verified" | "refuted" | "fixed";
+      reason: string;
+      actor: string;
+    },
+  ): Promise<SecurityFindingRow> {
+    await loadEngagement(engagementId);
+    const rows = await db
+      .select()
+      .from(securityFindings)
+      .where(
+        and(
+          eq(securityFindings.engagementId, engagementId),
+          eq(securityFindings.id, args.findingId),
+        ),
+      )
+      .limit(1);
+    const finding = rows[0];
+    if (!finding) {
+      throw new Error(`No finding ${args.findingId} in this engagement. List findings with sec_findings_list.`);
+    }
+    if (args.reason.trim().length < MIN_REVIEW_REASON_CHARS) {
+      throw new Error(
+        `A ${args.status} ruling needs a substantive reason (at least ${MIN_REVIEW_REASON_CHARS} characters): name what the evidence shows or what it missed.`,
+      );
+    }
+    // Forward-only: from open to any verdict; from verified to fixed (a carried
+    // verified finding the change resolved). Everything else is refused.
+    const allowed =
+      finding.status === "open" ||
+      (finding.status === "verified" && args.status === "fixed");
+    if (!allowed) {
+      throw new Error(`Finding ${finding.id} is already ${finding.status}. Status flips are forward-only.`);
+    }
+    if (!args.actor.startsWith("user:")) {
+      const cells = await db
+        .select()
+        .from(securityCells)
+        .where(and(eq(securityCells.engagementId, engagementId), eq(securityCells.id, args.actor)))
+        .limit(1);
+      const actorCell = cells[0];
+      if (!actorCell) {
+        throw new Error("Only review cells may flip finding statuses.");
+      }
+      // A `fixed` verdict is the reconcile pass's job: allow a reconcile-persona
+      // cell OR a review cell. `verified`/`refuted` stay review-cell only.
+      const isReconcile = actorCell.persona === RECONCILE_PERSONA;
+      if (args.status === "fixed") {
+        if (!actorCell.review && !isReconcile) {
+          throw new Error("Only a review cell or the reconcile cell may mark a finding fixed.");
+        }
+      } else if (!actorCell.review) {
+        throw new Error("Only review cells may flip finding statuses.");
+      }
+    }
+    const updated = await db
+      .update(securityFindings)
+      .set({ status: args.status, statusReason: args.reason, statusActor: args.actor })
+      .where(eq(securityFindings.id, finding.id))
+      .returning();
+    return updated[0];
+  }
+
+  async function listFindings(
+    engagementId: string,
+    options: ListFindingsOptions = {},
+  ): Promise<{ findings: SecurityFindingRow[]; nextCursor: string | null }> {
+    const limit = Math.min(Math.max(options.limit ?? 100, 1), 500);
+    const conditions = [eq(securityFindings.engagementId, engagementId)];
+    if (options.cellId !== undefined) conditions.push(eq(securityFindings.cellId, options.cellId));
+    if (options.severity !== undefined) conditions.push(eq(securityFindings.severity, options.severity));
+    if (options.status !== undefined) conditions.push(eq(securityFindings.status, options.status));
+    if (options.path !== undefined && options.path !== "") {
+      conditions.push(ilike(securityFindings.file, `%${escapeLike(options.path)}%`));
+    }
+    if (options.cursor !== undefined) {
+      const parsed = parseCursor(options.cursor);
+      const after = or(
+        gt(securityFindings.createdAt, parsed.createdAt),
+        and(eq(securityFindings.createdAt, parsed.createdAt), gt(securityFindings.id, parsed.id)),
+      );
+      // `or` with two defined operands never returns undefined; guard for
+      // the type only.
+      if (after) conditions.push(after);
+    }
+    const rows = await db
+      .select()
+      .from(securityFindings)
+      .where(and(...conditions))
+      .orderBy(asc(securityFindings.createdAt), asc(securityFindings.id))
+      .limit(limit + 1);
+    const page = rows.slice(0, limit);
+    const nextCursor =
+      rows.length > limit && page.length > 0
+        ? `${page[page.length - 1].createdAt}:${page[page.length - 1].id}`
+        : null;
+    return { findings: page, nextCursor };
+  }
+
+  /**
+   * Record a fix session spawned from a finding (sec_handoff). Insert-only;
+   * no unique constraint — a finding may spawn several fix sessions. The
+   * findings-list route surfaces these per finding and the child slide-over
+   * opens each one.
+   */
+  async function recordHandoff(args: {
+    engagementId: string;
+    findingId: string;
+    childSessionId: string;
+    title: string;
+    task?: string;
+    createdBy: string;
+  }): Promise<SecurityHandoffRow> {
+    const inserted = await db
+      .insert(securityHandoffs)
+      .values({
+        id: `hnd_${randomUUID()}`,
+        engagementId: args.engagementId,
+        findingId: args.findingId,
+        childSessionId: args.childSessionId,
+        title: args.title,
+        task: args.task ?? null,
+        createdBy: args.createdBy,
+        createdAt: now(),
+      })
+      .returning();
+    return inserted[0];
+  }
+
+  /** Fix sessions for the engagement, newest first; optionally one finding. */
+  async function listHandoffs(
+    engagementId: string,
+    options: { findingId?: string } = {},
+  ): Promise<SecurityHandoffRow[]> {
+    const conditions = [eq(securityHandoffs.engagementId, engagementId)];
+    if (options.findingId !== undefined) {
+      conditions.push(eq(securityHandoffs.findingId, options.findingId));
+    }
+    return db
+      .select()
+      .from(securityHandoffs)
+      .where(and(...conditions))
+      .orderBy(desc(securityHandoffs.createdAt), desc(securityHandoffs.id));
+  }
+
+  /**
+   * Add a human note to a finding (spec §Re-scan / iterate). Insert-only; no
+   * unique constraint — a finding carries a thread of many notes. The caller
+   * confirms the finding belongs to the engagement (the route does); the body
+   * is validated non-empty and capped. On a re-scan, these notes ride into
+   * `/prior/findings.md`, so the personas see the prior human reasoning.
+   */
+  async function addFindingComment(
+    engagementId: string,
+    args: { findingId: string; body: string; authorUserId: string },
+  ): Promise<SecurityFindingCommentRow> {
+    const body = args.body.trim();
+    if (body === "") {
+      throw new Error("A note needs a body. Write what you want the next scan to know.");
+    }
+    if (body.length > MAX_FINDING_COMMENT_CHARS) {
+      throw new Error(
+        `A note is at most ${MAX_FINDING_COMMENT_CHARS} characters. Trim it to the reasoning that matters.`,
+      );
+    }
+    const inserted = await db
+      .insert(securityFindingComments)
+      .values({
+        id: `cmt_${randomUUID()}`,
+        findingId: args.findingId,
+        engagementId,
+        body,
+        authorUserId: args.authorUserId,
+        createdAt: now(),
+      })
+      .returning();
+    return inserted[0];
+  }
+
+  /**
+   * Record one coverage claim for a cell (NOT_ASSESSED ledger, M-P2d, spec
+   * §Coverage honesty). Insert-only; no unique constraint — a cell records one
+   * row per area it covered or skipped. `area` is required and non-empty;
+   * `status` is `assessed` (a check ran) or `not_assessed` (a tool absent). A
+   * `not_assessed` row MUST carry a reason — the whole point of the ledger is
+   * that an absent tool names its consequence, never a silent gap. `tool` is the
+   * scanner involved, or null when no specific tool backs the area. The caller
+   * confirms the cell belongs to the engagement (the persona route does).
+   */
+  async function reportCoverage(
+    engagementId: string,
+    args: {
+      cellId: string;
+      area: string;
+      status: CoverageStatus;
+      tool?: string | null;
+      reason?: string | null;
+    },
+  ): Promise<SecurityCoverageRow> {
+    await loadEngagement(engagementId);
+    const cell = await loadCell(engagementId, args.cellId);
+    const area = args.area.trim();
+    if (area === "") {
+      throw new Error("Coverage needs an area. Name the scope, e.g. 'secrets scan' or 'semgrep owasp'.");
+    }
+    if (area.length > MAX_COVERAGE_AREA_CHARS) {
+      throw new Error(
+        `The coverage area is at most ${MAX_COVERAGE_AREA_CHARS} characters. Use a short scope label.`,
+      );
+    }
+    const reason = args.reason?.trim() ?? "";
+    if (args.status === "not_assessed" && reason.length < MIN_COVERAGE_REASON_CHARS) {
+      throw new Error(
+        `A not_assessed area needs a substantive reason (at least ${MIN_COVERAGE_REASON_CHARS} characters) naming the consequence, e.g. 'secrets not scanned because gitleaks is missing'.`,
+      );
+    }
+    if (reason.length > MAX_COVERAGE_REASON_CHARS) {
+      throw new Error(
+        `The coverage reason is at most ${MAX_COVERAGE_REASON_CHARS} characters. Name the consequence in one sentence.`,
+      );
+    }
+    const tool = args.tool?.trim();
+    // A claimed scanner must be a real one, so "we scanned it with X" is honest.
+    // Hand-assessed coverage (no tool) is legitimate for code-review / authz.
+    if (tool !== undefined && tool !== "" && !isKnownScanner(tool)) {
+      throw new Error(
+        `Unknown tool "${tool}"; name a real scanner (${KNOWN_SCANNERS.join(", ")}) or omit the tool.`,
+      );
+    }
+    const inserted = await db
+      .insert(securityCoverage)
+      .values({
+        id: `cov_${randomUUID()}`,
+        engagementId,
+        cellId: cell.id,
+        area,
+        status: args.status,
+        tool: tool !== undefined && tool !== "" ? tool : null,
+        reason: reason !== "" ? reason : null,
+        createdAt: now(),
+      })
+      .returning();
+    return inserted[0];
+  }
+
+  /**
+   * Store the report artifact on the engagement (M-P3). The report cell writes
+   * both the markdown report and its JSON snapshot with `sec_report_write`; this
+   * stamps them plus `report_generated_at`. `json` is serialized to a JSON
+   * string column. The caller (the report route) confirms the acting cell is
+   * the report cell — the service only stores. Overwrites a prior report, so a
+   * re-dispatched report cell replaces the stale artifact rather than appending.
+   */
+  async function writeReport(
+    engagementId: string,
+    args: { markdown: string; json: unknown },
+  ): Promise<SecurityReport> {
+    await loadEngagement(engagementId);
+
+    // Guardrail: the report is the deliverable. Collect every problem, then
+    // throw one combined corrective the report cell can fix in a single rewrite.
+    const problems: string[] = [];
+    const markdown = args.markdown;
+    if (markdown.trim() === "") {
+      problems.push("the markdown report is empty; write the full report body");
+    } else if (markdown.length < MIN_REPORT_MARKDOWN_CHARS) {
+      problems.push(
+        `the markdown report is ${markdown.length} characters; a real report is at least ${MIN_REPORT_MARKDOWN_CHARS}`,
+      );
+    }
+    const markdownBytes = Buffer.byteLength(markdown, "utf8");
+    if (markdownBytes > MAX_REPORT_BYTES) {
+      problems.push(
+        `the markdown report is ${markdownBytes} bytes; the limit is ${MAX_REPORT_BYTES} (256 KB) — trim or split it`,
+      );
+    }
+    if (
+      args.json === null ||
+      typeof args.json !== "object" ||
+      Array.isArray(args.json)
+    ) {
+      problems.push(
+        "json must be a non-null object snapshot (not a string, array, number, or null)",
+      );
+    }
+
+    // Fabricated-reference check: extract every fnd_ id token from the markdown
+    // AND the JSON snapshot, then confirm each is a real finding row for THIS
+    // engagement. This is the hard guarantee — a report may not cite an invented
+    // finding.
+    const citedIds = new Set<string>();
+    for (const source of [markdown, safeStringify(args.json)]) {
+      for (const match of source.matchAll(REPORT_FINDING_ID_PATTERN)) {
+        citedIds.add(match[0]);
+      }
+    }
+    let refutedCited = false;
+    if (citedIds.size > 0) {
+      const rows = await db
+        .select({ id: securityFindings.id, status: securityFindings.status })
+        .from(securityFindings)
+        .where(
+          and(
+            eq(securityFindings.engagementId, engagementId),
+            inArray(securityFindings.id, [...citedIds]),
+          ),
+        );
+      const byId = new Map(rows.map((r) => [r.id, r.status]));
+      const bogus = [...citedIds].filter((id) => !byId.has(id)).sort();
+      if (bogus.length > 0) {
+        problems.push(
+          `the report references finding id(s) that do not exist in this engagement: ${bogus.join(", ")}`,
+        );
+      }
+      refutedCited = [...citedIds].some((id) => byId.get(id) === "refuted");
+    }
+
+    // Refuted-as-active heuristic (best-effort): the shape is too tolerant to
+    // prove a refuted finding is presented as real, so require only the weaker,
+    // reliable signal — a report that cites a refuted finding must acknowledge
+    // refutation somewhere (the word "refuted" or "dismissed" in the markdown).
+    // The fabricated-id check above is the hard guarantee; this is a nudge.
+    if (refutedCited && !/refuted|dismissed/i.test(markdown)) {
+      problems.push(
+        'the report cites a refuted finding but never says "refuted" or "dismissed"; move dismissed findings to a labeled appendix',
+      );
+    }
+
+    if (problems.length > 0) {
+      const body = problems.map((p) => `  - ${p}`).join("\n");
+      throw new Error(
+        `The report has ${problems.length} problem(s):\n${body}\nFix the report and call sec_report_write again.`,
+      );
+    }
+
+    const ts = now();
+    await db
+      .update(securityEngagements)
+      .set({
+        reportMarkdown: args.markdown,
+        reportJson: JSON.stringify(args.json),
+        reportGeneratedAt: ts,
+        updatedAt: ts,
+      })
+      .where(eq(securityEngagements.id, engagementId));
+    return { markdown: args.markdown, json: args.json, generatedAt: ts };
+  }
+
+  /** The engagement's report artifact (M-P3), or null when the report cell
+   * never ran (all three columns null). A stored `report_json` that fails to
+   * parse yields `json: null` rather than a throw — the markdown is still the
+   * primary artifact. */
+  async function getReport(engagementId: string): Promise<SecurityReport | null> {
+    const engagement = await loadEngagement(engagementId);
+    return reportFromRow(engagement);
+  }
+
+  /**
+   * Record one need a persona is blocked on (pivot-coordinator, M-P4c, spec
+   * §Pivot-coordinator). A persona that cannot go deeper — it lacks a
+   * credential, a running dependency, a scope expansion, an out-of-band
+   * decision, or a declared tool — records a structured need instead of
+   * stopping (a silent coverage gap). Insert-only; status starts 'open'. The
+   * caller confirms the cell belongs to the engagement (the persona route
+   * does). The coordinator (`resolveNeeds`) rules on the open needs later.
+   */
+  async function reportNeed(
+    engagementId: string,
+    args: { cellId: string; kind: NeedKind; description: string },
+  ): Promise<SecurityNeedRow> {
+    await loadEngagement(engagementId);
+    const cell = await loadCell(engagementId, args.cellId);
+    const description = args.description.trim();
+    if (description === "") {
+      throw new Error(
+        "A need must name what is blocked. Describe the credential, dependency, scope, decision, or tool you cannot proceed without.",
+      );
+    }
+    if (description.length > MAX_NEED_DESCRIPTION_CHARS) {
+      throw new Error(
+        `A need description is at most ${MAX_NEED_DESCRIPTION_CHARS} characters. Name the one blocked item in a sentence.`,
+      );
+    }
+    const inserted = await db
+      .insert(securityNeeds)
+      .values({
+        id: `need_${randomUUID()}`,
+        engagementId,
+        cellId: cell.id,
+        kind: args.kind,
+        description,
+        status: "open",
+        createdAt: now(),
+      })
+      .returning();
+    return inserted[0];
+  }
+
+  /**
+   * The pivot-coordinator sweep (M-P4c, spec §Pivot-coordinator). The ONE owner
+   * of the needs-resolution flow — not a silent repair. For every OPEN need:
+   *   - Auto-resolve only what is UNAMBIGUOUSLY already-authorized:
+   *       * a 'tool' the engagement's config declared (config_tools) — mark it
+   *         to provision, auto_resolved with a note;
+   *       * a 'scope' item already inside the engagement's authorized scope
+   *         (the plan cells' path globs) — auto_resolved;
+   *       * a 'dependency' the plan can spawn (a persona already in the plan) —
+   *         auto_resolved.
+   *     Each auto-resolution writes an EXPLICIT resolution row (visible), never
+   *     a silent skip.
+   *   - Everything else → needs_human. A 'credential' and a 'decision' never
+   *     auto-resolve: the coordinator never grants a credential or expands
+   *     scope beyond what the human declared.
+   * The remainder BLOCKS its cell's deeper progress and surfaces to the human;
+   * it does not disappear. The caller opens ONE consolidated ask over
+   * `needsHuman` (or `pendingHuman` for the full backlog), never one per need.
+   */
+  async function resolveNeeds(engagementId: string): Promise<ResolveNeedsResult> {
+    const engagement = await loadEngagement(engagementId);
+    const openNeeds = await db
+      .select()
+      .from(securityNeeds)
+      .where(and(eq(securityNeeds.engagementId, engagementId), eq(securityNeeds.status, "open")))
+      .orderBy(asc(securityNeeds.createdAt), asc(securityNeeds.id));
+
+    // The engagement's authorized surface, computed once.
+    const declaredTools = new Set(
+      parseDeclaredToolIds(engagement.configTools).map((t) => t.trim().toLowerCase()),
+    );
+    const authorizedGlobs = authorizedScopeGlobs(engagement);
+    const plannedPersonas = plannedPersonaSet(engagement);
+
+    const autoResolved: SecurityNeedRow[] = [];
+    const needsHuman: SecurityNeedRow[] = [];
+    const ts = now();
+    for (const need of openNeeds) {
+      const auto = autoResolutionFor(need, {
+        declaredTools,
+        authorizedGlobs,
+        plannedPersonas,
+      });
+      if (auto !== null) {
+        const updated = await db
+          .update(securityNeeds)
+          .set({ status: "auto_resolved", resolution: auto, resolvedAt: ts })
+          .where(eq(securityNeeds.id, need.id))
+          .returning();
+        autoResolved.push(updated[0]);
+      } else {
+        const updated = await db
+          .update(securityNeeds)
+          .set({ status: "needs_human" })
+          .where(eq(securityNeeds.id, need.id))
+          .returning();
+        needsHuman.push(updated[0]);
+      }
+    }
+
+    // The full human backlog: this sweep's new needs_human plus any earlier
+    // unanswered ones — so the caller opens ONE consolidated ask, not one per
+    // sweep and not one per need.
+    const pendingHuman = await db
+      .select()
+      .from(securityNeeds)
+      .where(
+        and(eq(securityNeeds.engagementId, engagementId), eq(securityNeeds.status, "needs_human")),
+      )
+      .orderBy(asc(securityNeeds.createdAt), asc(securityNeeds.id));
+
+    return { autoResolved, needsHuman, pendingHuman };
+  }
+
+  /**
+   * The human answer + delta re-run (pivot-coordinator, M-P4c). For each
+   * answered need: mark it 'answered' with the human's resolution, then reset
+   * ONLY the cell that recorded it back to 'pending' so the runner re-dispatches
+   * it — the answer rides into that cell's next dispatch prompt
+   * (`buildDispatchPrompt`). A cell is reset once even when several of its needs
+   * were answered. Never touches a cell with no answered need — this is a delta
+   * re-run, not a whole-engagement re-run. A `dismiss` answer marks the need
+   * 'dismissed' and does NOT reset its cell (the human ruled the block is not
+   * worth pursuing). Refuses a need id not in this engagement, or one that is
+   * not needs_human. Runs in one transaction.
+   */
+  async function resolveEngagementNeeds(
+    engagementId: string,
+    answers: { needId: string; resolution: string; dismiss?: boolean }[],
+  ): Promise<AnswerNeedsResult> {
+    await loadEngagement(engagementId);
+    if (answers.length === 0) {
+      throw new Error("Send at least one answer. Name the need id and its resolution.");
+    }
+    return db.transaction(async (tx) => {
+      const answered: SecurityNeedRow[] = [];
+      const cellsToReset = new Set<string>();
+      const ts = now();
+      for (const answer of answers) {
+        const rows = await tx
+          .select()
+          .from(securityNeeds)
+          .where(
+            and(eq(securityNeeds.engagementId, engagementId), eq(securityNeeds.id, answer.needId)),
+          )
+          .limit(1);
+        const need = rows[0];
+        if (!need) {
+          throw new Error(`No need ${answer.needId} in this engagement. List needs with the needs route.`);
+        }
+        if (need.status !== "needs_human") {
+          throw new Error(
+            `Need ${need.id} is ${need.status}, not needs_human. Only a need waiting on a human can be answered.`,
+          );
+        }
+        const dismiss = answer.dismiss === true;
+        const resolution = answer.resolution.trim();
+        if (!dismiss && resolution === "") {
+          throw new Error(
+            `Need ${need.id} needs an answer. Give the credential, decision, or scope, or dismiss it.`,
+          );
+        }
+        if (resolution.length > MAX_NEED_RESOLUTION_CHARS) {
+          throw new Error(
+            `A need resolution is at most ${MAX_NEED_RESOLUTION_CHARS} characters. Give the answer, not a report.`,
+          );
+        }
+        const updated = await tx
+          .update(securityNeeds)
+          .set({
+            status: dismiss ? "dismissed" : "answered",
+            resolution: dismiss ? (resolution !== "" ? resolution : "Dismissed by the reviewer.") : resolution,
+            resolvedAt: ts,
+          })
+          .where(eq(securityNeeds.id, need.id))
+          .returning();
+        answered.push(updated[0]);
+        // A delta re-run resets only an ANSWERED need's cell; a dismissal does
+        // not — the human ruled the block is not worth pursuing.
+        if (!dismiss) cellsToReset.add(need.cellId);
+      }
+
+      const resetCells: SecurityCellRow[] = [];
+      for (const cellId of cellsToReset) {
+        // Reset the cell to pending for the delta re-dispatch. A completed cell
+        // stays completed only if it was never blocked — but a cell that
+        // reported a need is settled/yielded/failed; reset it so the runner
+        // picks it up. `mode: resume` lets the persona continue from its own
+        // state doc; the answered-need block rides on the next dispatch.
+        const updated = await tx
+          .update(securityCells)
+          .set({ status: "pending", mode: "resume", settledAt: null })
+          .where(and(eq(securityCells.engagementId, engagementId), eq(securityCells.id, cellId)))
+          .returning();
+        if (updated[0]) resetCells.push(updated[0]);
+      }
+      return { answered, resetCells };
+    });
+  }
+
+  /** The engagement's needs, oldest-first; optionally one status or cell. */
+  async function listNeeds(
+    engagementId: string,
+    options: { status?: NeedStatus; cellId?: string } = {},
+  ): Promise<SecurityNeedRow[]> {
+    const conditions = [eq(securityNeeds.engagementId, engagementId)];
+    if (options.status !== undefined) conditions.push(eq(securityNeeds.status, options.status));
+    if (options.cellId !== undefined) conditions.push(eq(securityNeeds.cellId, options.cellId));
+    return db
+      .select()
+      .from(securityNeeds)
+      .where(and(...conditions))
+      .orderBy(asc(securityNeeds.createdAt), asc(securityNeeds.id));
+  }
+
+  /** The engagement's coverage rows, oldest-first; optionally one cell. */
+  async function listCoverage(
+    engagementId: string,
+    options: { cellId?: string } = {},
+  ): Promise<SecurityCoverageRow[]> {
+    const conditions = [eq(securityCoverage.engagementId, engagementId)];
+    if (options.cellId !== undefined) conditions.push(eq(securityCoverage.cellId, options.cellId));
+    return db
+      .select()
+      .from(securityCoverage)
+      .where(and(...conditions))
+      .orderBy(asc(securityCoverage.createdAt), asc(securityCoverage.id));
+  }
+
+  /** Notes on the engagement's findings, oldest-first (thread order);
+   * optionally one finding. */
+  async function listFindingComments(
+    engagementId: string,
+    options: { findingId?: string } = {},
+  ): Promise<SecurityFindingCommentRow[]> {
+    const conditions = [eq(securityFindingComments.engagementId, engagementId)];
+    if (options.findingId !== undefined) {
+      conditions.push(eq(securityFindingComments.findingId, options.findingId));
+    }
+    return db
+      .select()
+      .from(securityFindingComments)
+      .where(and(...conditions))
+      .orderBy(asc(securityFindingComments.createdAt), asc(securityFindingComments.id));
+  }
+
+  /**
+   * Stamp a compaction on the running cell that claims `childSessionId`
+   * (M5, spec §Context Discipline). Alert, don't auto-repair: this stamps
+   * `compacted_at` and measures state-doc staleness for the caller to
+   * report — it never mutates cell status, re-dispatches, or kills
+   * anything. Returns null when no running cell claims the session (an
+   * unclaimed session's compaction is not a security event).
+   */
+  async function stampCellCompaction(childSessionId: string): Promise<CellCompactionStamp | null> {
+    const rows = await db
+      .select()
+      .from(securityCells)
+      .where(
+        and(eq(securityCells.childSessionId, childSessionId), eq(securityCells.status, "running")),
+      )
+      .limit(1);
+    const claimed = rows[0];
+    if (!claimed) return null;
+    const ts = now();
+    const updated = await db
+      .update(securityCells)
+      .set({ compactedAt: ts })
+      .where(eq(securityCells.id, claimed.id))
+      .returning();
+    const cell = updated[0];
+    const docRow = await latestStateDocRow(cell.engagementId, cell.dir);
+    // No state doc yet → measure from the dispatch: a persona that compacts
+    // without ever checkpointing is the staleness worst case, not a fresh one.
+    const reference = docRow?.createdAt ?? cell.dispatchedAt ?? cell.createdAt;
+    const stateDocAgeMs = Math.max(0, ts - reference);
+    return { cell, stateDocAgeMs, stale: stateDocAgeMs > STATE_DOC_STALE_MS };
+  }
+
+  /**
+   * Engagement spend: the runner session PLUS every cell's child session,
+   * summed from `cost_entries` (spec §engagement cost). Fix-session handoffs
+   * (`security_handoffs.child_session_id`) are separate follow-up work and are
+   * NOT counted — the review cost is the runner + its cells. `priced` is false
+   * when any counted turn is unpriced (`cost_total IS NULL`, an unpriced
+   * provider), so the panel shows tokens without a wrong dollar amount. Returns
+   * zeros while the engagement has no runner turn or cell children yet.
+   */
+  async function getEngagementCost(
+    engagementId: string,
+  ): Promise<{ costUsd: number; totalTokens: number; priced: boolean }> {
+    const engagement = await loadEngagement(engagementId);
+    const cells = await loadCells(engagementId);
+    const ids = [
+      engagement.sessionId,
+      ...cells
+        .map((c) => c.childSessionId)
+        .filter((id): id is string => id !== null),
+    ];
+    // No session ids yet (planning, no runner turn) → zeros. Also guards the
+    // empty-list case: `IN ()` is malformed SQL.
+    if (ids.length === 0) return { costUsd: 0, totalTokens: 0, priced: true };
+    const result = (await db.execute(sql`
+      SELECT COALESCE(SUM(cost_total),0) AS cost_usd,
+             COALESCE(SUM(total_tokens),0) AS total_tokens,
+             COALESCE(bool_or(cost_total IS NULL), false) AS has_unpriced
+      FROM cost_entries
+      WHERE session_id IN (${sql.join(ids, sql`, `)})`)) as {
+      rows: { cost_usd: unknown; total_tokens: unknown; has_unpriced: unknown }[];
+    };
+    const row = result.rows[0];
+    return {
+      costUsd: Number(row?.cost_usd ?? 0),
+      totalTokens: Number(row?.total_tokens ?? 0),
+      priced: row?.has_unpriced !== true,
+    };
+  }
+
+  /**
+   * The re-scan diff against the parent engagement (re-scan v2). Null when this
+   * engagement has no `parent_engagement_id` (a first review). Computed from
+   * THIS engagement's SEEDED/updated rows — the parent's findings were carried
+   * in at re-scan start, so the counts read straight off the `recurring` and
+   * `status` columns:
+   *   - recurringCount: carried (`recurring`) findings still live — not fixed,
+   *     not refuted.
+   *   - newCount: findings the diff sweeps introduced (not carried).
+   *   - fixedCount: findings marked `fixed` (a carried finding the change
+   *     resolved). No longer null once terminal; the reconcile pass marks these
+   *     during the run, so the count is live and always a number.
+   *   - carriedRefutedCount: carried findings that are refuted (a dismissal
+   *     carried forward from the parent — do not re-triage).
+   */
+  async function diffEngagement(engagementId: string): Promise<SecurityDiff | null> {
+    const engagement = await loadEngagement(engagementId);
+    if (!engagement.parentEngagementId) return null;
+
+    const parent = await db
+      .select({ sessionId: securityEngagements.sessionId })
+      .from(securityEngagements)
+      .where(eq(securityEngagements.id, engagement.parentEngagementId))
+      .limit(1);
+    // The parent row may be gone (deleted). The lineage id is still on this row;
+    // the counts read from this engagement's own carried rows regardless.
+    const parentSessionId = parent[0]?.sessionId ?? null;
+
+    const childFindings = await db
+      .select()
+      .from(securityFindings)
+      .where(eq(securityFindings.engagementId, engagementId));
+
+    let newCount = 0;
+    let recurringCount = 0;
+    let fixedCount = 0;
+    let carriedRefutedCount = 0;
+    for (const f of childFindings) {
+      if (!f.recurring) {
+        // A finding the diff sweeps introduced. A fixed non-carried row cannot
+        // arise (reconcile only rules carried rows), so it counts as new.
+        newCount += 1;
+        continue;
+      }
+      // Carried from the parent.
+      if (f.status === "fixed") fixedCount += 1;
+      else if (f.status === "refuted") carriedRefutedCount += 1;
+      else recurringCount += 1; // open or verified — still live.
+    }
+
+    return {
+      parentEngagementId: engagement.parentEngagementId,
+      parentSessionId,
+      newCount,
+      recurringCount,
+      fixedCount,
+      carriedRefutedCount,
+    };
+  }
+
+  /** The distinct fingerprints present in the parent engagement (re-scan /
+   * iterate). Empty when this engagement has no parent. The findings route
+   * marks a finding `recurring` when its fingerprint is in this set. */
+  async function parentFingerprints(engagementId: string): Promise<Set<string>> {
+    const engagement = await loadEngagement(engagementId);
+    if (!engagement.parentEngagementId) return new Set();
+    const rows = await db
+      .select({ fingerprint: securityFindings.fingerprint })
+      .from(securityFindings)
+      .where(eq(securityFindings.engagementId, engagement.parentEngagementId));
+    return new Set(rows.map((r) => r.fingerprint));
+  }
+
+  /** Tolerant progress read for the cell rail: null when nothing useful. */
+  async function getRunningCellProgress(engagementId: string): Promise<CellProgress | null> {
+    const cells = await loadCells(engagementId);
+    const running = cells.find((c) => c.status === "running");
+    if (!running) return null;
+    const docRow = await latestStateDocRow(engagementId, running.dir);
+    if (!docRow) return null;
+    try {
+      const doc = parseStateDoc(docRow.content);
+      return { status: doc.status, checklist: doc.checklist, queue: doc.queue };
+    } catch {
+      // Rail display only — a stale/unparseable doc renders as no progress,
+      // never as an error.
+      return null;
+    }
+  }
+
+  return {
+    createEngagement,
+    getEngagement,
+    getEngagementBySession,
+    setPlan,
+    setEngagementConfig,
+    startEngagement,
+    dispatchCell,
+    completeCell,
+    failCell,
+    cancelEngagement,
+    closeEngagement,
+    writeFile,
+    readFile,
+    listFiles,
+    reportFinding,
+    reviewFinding,
+    listFindings,
+    recordHandoff,
+    listHandoffs,
+    addFindingComment,
+    listFindingComments,
+    reportCoverage,
+    listCoverage,
+    writeReport,
+    getReport,
+    reportNeed,
+    resolveNeeds,
+    resolveEngagementNeeds,
+    listNeeds,
+    stampCellCompaction,
+    getRunningCellProgress,
+    getEngagementCost,
+    diffEngagement,
+    parentFingerprints,
+  };
+}
+
+export type SecurityEngagementService = ReturnType<typeof createSecurityEngagementService>;
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+function ordinalLabel(cell: { ordinal: number }): string {
+  return String(cell.ordinal).padStart(2, "0");
+}
+
+/** Build the report artifact from an engagement row (M-P3), or null when the
+ * report cell never wrote one. A `report_json` that fails to parse yields
+ * `json: null` — the markdown stays the primary artifact and a bad JSON column
+ * must not throw. */
+function reportFromRow(row: SecurityEngagementRow): SecurityReport | null {
+  if (row.reportMarkdown === null || row.reportGeneratedAt === null) return null;
+  let json: unknown = null;
+  if (row.reportJson !== null) {
+    try {
+      json = JSON.parse(row.reportJson);
+    } catch {
+      // A malformed stored JSON snapshot renders as null; the markdown report
+      // is the primary artifact.
+    }
+  }
+  return { markdown: row.reportMarkdown, json, generatedAt: row.reportGeneratedAt };
+}
+
+/** Cap on the number of changed-dir globs a diff-scoped sweep carries. Past
+ * this the diff is too wide to scope usefully — the caller falls back to a full
+ * scan (globs = null) so a sweeping refactor still gets a whole-repo review. */
+export const MAX_CHANGED_DIR_GLOBS = 24;
+
+/**
+ * Derive changed-directory include globs from a list of changed file paths
+ * (re-scan / iterate diff scoping). Keeps up to two path segments: a top-level
+ * dir becomes `<dir>/**`, and a one-level-deep dir becomes `<a>/<b>/**`. A
+ * changed root-level file (no slash) yields the repo-wide `**` glob, which
+ * un-scopes the sweep — a changed root file must still be reviewed. Returns
+ * null when the distinct glob count exceeds `MAX_CHANGED_DIR_GLOBS` (fall back
+ * to a full scan) or when the list is empty.
+ */
+export function changedDirGlobs(changedFiles: string[]): string[] | null {
+  const globs = new Set<string>();
+  for (const raw of changedFiles) {
+    const file = raw.trim();
+    if (file === "") continue;
+    const segments = file.split("/").filter((s) => s !== "");
+    if (segments.length <= 1) {
+      // A root-level file — its parent is the repo root. Scope to everything.
+      globs.add("**");
+      continue;
+    }
+    const depth = Math.min(segments.length - 1, 2);
+    globs.add(`${segments.slice(0, depth).join("/")}/**`);
+  }
+  if (globs.size === 0) return null;
+  if (globs.has("**")) return ["**"];
+  if (globs.size > MAX_CHANGED_DIR_GLOBS) return null;
+  return [...globs].sort();
+}
+
+/** Merge a plan cell's existing include globs with the diff globs, deduped.
+ * A cell that already scopes to part of the repo keeps that scope AND gains the
+ * diff globs (a union — the persona sweeps either). */
+function mergePaths(existing: string[] | undefined, globs: string[]): string[] {
+  if (!existing || existing.length === 0) return globs;
+  const merged = new Set([...existing, ...globs]);
+  return [...merged];
+}
+
+function basename(path: string): string {
+  const idx = path.lastIndexOf("/");
+  return idx === -1 ? path : path.slice(idx + 1);
+}
+
+/** Serialize a value for the report id scan, never throwing. A circular or
+ * non-serializable snapshot yields "" — the markdown is still scanned, and the
+ * separate non-object check rejects a malformed snapshot on its own. */
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** Parse the engagement's `changed_paths` JSON (a string[] or null). Returns
+ * null for a null/absent/unparseable value — the /prior/diff.md mount reads
+ * that as "no diff captured, full re-scan". */
+function parsePathList(raw: string | null): string[] | null {
+  if (raw === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed.filter((p): p is string => typeof p === "string");
+  } catch {
+    // A malformed value is treated as no diff — the mount falls back to full.
+  }
+  return null;
+}
+
+/** Parse the engagement's `invariants` JSON (a string[] or null), for the
+ * dispatch prompt (dynamic-config M-F3). Returns [] for a null/absent/malformed
+ * value — a bad column must not throw a dispatch. */
+/** Parse a stored JSON string[] column (invariants, categories). A null or
+ * malformed value yields [], so a bad column adds nothing to the prompt. */
+function parseJsonStringArrayColumn(raw: string | null): string[] {
+  if (raw === null) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed.filter((v): v is string => typeof v === "string");
+  } catch {
+    // A malformed value is treated as an empty list.
+  }
+  return [];
+}
+
+/** The declared-tool ids on `config_tools` (M-P4c coordinator). Since M-P4a the
+ * column holds `ToolDecl[]` (objects with an `id`); a legacy string entry is
+ * still read as its own id. A malformed value yields []. */
+function parseDeclaredToolIds(raw: string | null): string[] {
+  if (raw === null) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const ids: string[] = [];
+    for (const entry of parsed) {
+      if (typeof entry === "string") ids.push(entry);
+      else if (typeof entry === "object" && entry !== null) {
+        const id = (entry as Record<string, unknown>).id;
+        if (typeof id === "string") ids.push(id);
+      }
+    }
+    return ids;
+  } catch {
+    return [];
+  }
+}
+
+/** Parse the engagement's `authorized_scope` JSON (`{ hosts: string[] }` or
+ * null) into the host list (M-P4b). Returns [] for a null/absent/malformed
+ * value — a live persona with no scope is told to stop, not to guess. */
+export function parseAuthorizedScopeHosts(raw: string | null): string[] {
+  if (raw === null) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      const hosts = (parsed as Record<string, unknown>).hosts;
+      if (Array.isArray(hosts)) return hosts.filter((h): h is string => typeof h === "string");
+    }
+  } catch {
+    // A malformed value is treated as no scope.
+  }
+  return [];
+}
+
+function parseReads(reads: string): number[] {
+  try {
+    const parsed: unknown = JSON.parse(reads);
+    if (Array.isArray(parsed)) return parsed.filter((n): n is number => typeof n === "number");
+  } catch {
+    // Stamped by startEngagement from a validated plan; fall through.
+  }
+  return [];
+}
+
+function narrowSeverity(value: string): FindingSeverity {
+  return (SEVERITIES as readonly string[]).includes(value) ? (value as FindingSeverity) : "info";
+}
+
+const NEED_KINDS: readonly NeedKind[] = ["credential", "dependency", "scope", "decision", "tool"];
+
+/** Narrow a stored need kind; defaults to 'decision' (always human) for an
+ * unexpected value, so a bad column never auto-resolves. */
+function narrowNeedKind(value: string): NeedKind {
+  return (NEED_KINDS as readonly string[]).includes(value) ? (value as NeedKind) : "decision";
+}
+
+/** The engagement's authorized scope globs (pivot-coordinator, M-P4c): every
+ * path glob any plan cell declares. This is the boundary the coordinator will
+ * NOT expand past — a scope need auto-resolves only when it names a path
+ * already inside this set. A plan whose cells declare no paths yields an empty
+ * set, so no scope need auto-resolves. */
+function authorizedScopeGlobs(engagement: SecurityEngagementRow): string[] {
+  let plan: EngagementPlan;
+  try {
+    plan = parsePlan(engagement.plan, knownPersonasForEngagement(engagement));
+  } catch {
+    return [];
+  }
+  const globs = new Set<string>();
+  for (const cell of plan.cells) {
+    for (const p of cell.paths ?? []) {
+      const trimmed = p.trim();
+      if (trimmed !== "") globs.add(trimmed);
+    }
+  }
+  return [...globs];
+}
+
+/** One cell's scope globs (§reportFinding scope check). The plan cell that
+ * shares this cell's ordinal owns the include globs; `startEngagement` wrote the
+ * materialized (expanded + diff-scoped) plan back, so the ordinals agree. A cell
+ * with no globs — recon, verify, a repo-wide sweep — returns an empty list, and
+ * the caller treats that as "no scope constraint". A plan that fails to parse
+ * returns an empty list too: a broken plan must not falsely reject a finding. */
+function cellScopeGlobs(engagement: SecurityEngagementRow, cell: SecurityCellRow): string[] {
+  let plan: EngagementPlan;
+  try {
+    plan = parsePlan(engagement.plan, knownPersonasForEngagement(engagement));
+  } catch {
+    return [];
+  }
+  const planCell = plan.cells.find((c) => c.ordinal === cell.ordinal);
+  const globs = new Set<string>();
+  for (const p of planCell?.paths ?? []) {
+    const trimmed = p.trim();
+    if (trimmed !== "") globs.add(trimmed);
+  }
+  return [...globs];
+}
+
+/** The personas the plan already declares (pivot-coordinator, M-P4c). A
+ * 'dependency' need auto-resolves only when it names a persona already in the
+ * plan — a dependency the plan can spawn, not a new one the human must
+ * authorize. */
+function plannedPersonaSet(engagement: SecurityEngagementRow): Set<string> {
+  let plan: EngagementPlan;
+  try {
+    plan = parsePlan(engagement.plan, knownPersonasForEngagement(engagement));
+  } catch {
+    return new Set();
+  }
+  return new Set(plan.cells.map((c) => c.persona.trim().toLowerCase()));
+}
+
+/**
+ * Rule whether one open need is unambiguously already-authorized
+ * (pivot-coordinator, M-P4c). Returns the resolution note when it is, or null
+ * when a human must answer. CONSERVATIVE by contract:
+ *   - 'credential' and 'decision' ALWAYS return null. The coordinator never
+ *     grants a credential or makes an out-of-band decision.
+ *   - 'tool' auto-resolves only when the engagement declared it (config_tools).
+ *   - 'scope' auto-resolves only when its description names a glob already in
+ *     the authorized scope (a substring match against a declared glob).
+ *   - 'dependency' auto-resolves only when its description names a persona
+ *     already in the plan.
+ * Anything not matched returns null and surfaces to the human — the need does
+ * not disappear.
+ */
+function autoResolutionFor(
+  need: SecurityNeedRow,
+  ctx: { declaredTools: Set<string>; authorizedGlobs: string[]; plannedPersonas: Set<string> },
+): string | null {
+  const kind = narrowNeedKind(need.kind);
+  const text = need.description.toLowerCase();
+  if (kind === "credential" || kind === "decision") return null;
+  if (kind === "tool") {
+    // A declared-but-not-yet-provisioned tool: the human already authorized it
+    // in the config, so mark it to provision.
+    for (const tool of ctx.declaredTools) {
+      if (tool !== "" && text.includes(tool)) {
+        return `Auto-resolved: '${tool}' is declared in the engagement config (config_tools). Marked for provisioning.`;
+      }
+    }
+    return null;
+  }
+  if (kind === "scope") {
+    // A path already inside the authorized scope — the coordinator expands
+    // within, never past, what the human declared.
+    for (const glob of ctx.authorizedGlobs) {
+      // Strip glob wildcards and trailing path separators, so a glob like
+      // 'packages/payments/**' matches a description naming 'packages/payments'.
+      const needle = glob
+        .replace(/\*+/g, "")
+        .replace(/\/+$/, "")
+        .trim()
+        .toLowerCase();
+      if (needle !== "" && text.includes(needle)) {
+        return `Auto-resolved: the requested scope is already inside the authorized scope glob '${glob}'.`;
+      }
+    }
+    return null;
+  }
+  // dependency
+  for (const persona of ctx.plannedPersonas) {
+    if (persona !== "" && text.includes(persona)) {
+      return `Auto-resolved: the '${persona}' persona is already in the plan and can be spawned as a dependency.`;
+    }
+  }
+  return null;
+}
+
+function parseCursor(cursor: string): { createdAt: number; id: string } {
+  const idx = cursor.indexOf(":");
+  const createdAt = idx > 0 ? Number(cursor.slice(0, idx)) : Number.NaN;
+  const id = idx > 0 ? cursor.slice(idx + 1) : "";
+  if (!Number.isFinite(createdAt) || id === "") {
+    throw new Error("Invalid cursor. Pass the nextCursor value from the previous page, or omit it.");
+  }
+  return { createdAt, id };
+}
+
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, (m) => `\\${m}`);
+}
+
+function isUniqueViolation(err: unknown): boolean {
+  if (typeof err !== "object" || err === null) return false;
+  const rec = err as Record<string, unknown>;
+  if (rec.code === "23505") return true;
+  const message = typeof rec.message === "string" ? rec.message : "";
+  return message.includes("duplicate key");
+}

@@ -3231,6 +3231,7 @@ export class Thread {
       config: session.options.toolConfig,
       owner: session.owner,
       policyResolver: session.options.policyResolver,
+      pluginStoreFactory: session.options.pluginStoreFactory,
       queueItemId: this.runningItem?.id,
       signal,
       decisionGateId: this.toolCtxOverlay.gateId,

@@ -30,6 +30,7 @@ import type {
   OpenrouterRegistryResponse,
   OrgDirectoryResponse,
   OrgMembersResponse,
+  OrgPluginsResponse,
   OrgResponse,
   OrgSettingsResponse,
   PatchLlmProviderRequest,
@@ -38,6 +39,8 @@ import type {
   PatchMeResponse,
   PatchOrgMemberRequest,
   PatchOrgMemberResponse,
+  PatchOrgPluginRequest,
+  PatchOrgPluginResponse,
   PatchOrgRequest,
   PatchOrgResponse,
   PatchOrgSettingsRequest,
@@ -56,6 +59,21 @@ import type {
 } from "@valet/api/wire";
 import { api } from "./client";
 
+/**
+ * Whether a named plugin is enabled for the current caller, read from the org
+ * query's `plugins` list (plugin-entitlements design). Returns `undefined`
+ * while the org query has not resolved, so a caller can hide a gated surface
+ * without flashing it — treat `undefined` as "not yet known", not "off".
+ * Returns `false` when the plugin is unknown (not loaded on this deployment).
+ */
+export function pluginEnabledForCaller(
+  org: OrgResponse | undefined,
+  name: string,
+): boolean | undefined {
+  if (!org) return undefined;
+  return org.plugins.find((p) => p.name === name)?.enabledForCaller ?? false;
+}
+
 // ── Query key factory ────────────────────────────────────────────────────
 
 export const qkSettings = {
@@ -63,6 +81,7 @@ export const qkSettings = {
   org: () => ["settings", "org"] as const,
   orgMembers: () => ["settings", "org", "members"] as const,
   orgDirectory: () => ["settings", "org", "directory"] as const,
+  orgPlugins: () => ["settings", "org", "plugins"] as const,
   models: () => ["settings", "models"] as const,
   llmProviders: () => ["settings", "llmProviders"] as const,
   openrouterRegistry: () => ["settings", "openrouterRegistry"] as const,
@@ -122,6 +141,19 @@ export function useOrgDirectory(opts?: UseQueryOptions<OrgDirectoryResponse>) {
     // Same reasoning as `useOrg` above: membership changes rarely, nothing
     // here depends on it being fresh, and the app default (5s) would refetch
     // the whole directory on every remount of the Teams page.
+    staleTime: 60_000,
+    ...opts,
+  });
+}
+
+/** Gateable plugins with this org's entitlement (plugin-entitlements design).
+ * Any member reads it; the admin settings page edits it. The nav item and hub
+ * gate on `useOrg().data.plugins` instead — the app already fetches org, so
+ * this dedicated read only powers the admin page. */
+export function useOrgPlugins(opts?: Partial<UseQueryOptions<OrgPluginsResponse>>) {
+  return useQuery<OrgPluginsResponse>({
+    queryKey: qkSettings.orgPlugins(),
+    queryFn: () => api.getOrgPlugins(),
     staleTime: 60_000,
     ...opts,
   });
@@ -215,6 +247,25 @@ export function usePatchOrgSettings() {
   return useMutation<OrgSettingsResponse, Error, PatchOrgSettingsRequest>({
     mutationFn: (body) => api.patchOrgSettings(body),
     onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkSettings.org() });
+    },
+  });
+}
+
+/** Sets one plugin's entitlement (`PATCH /api/org/plugins/:name`) — org admin
+ * only. Invalidates BOTH the dedicated plugins read (the admin page) AND the
+ * org read (the nav item + hub gate on `useOrg().data.plugins`), so a mode
+ * change refreshes visibility everywhere. */
+export function usePatchOrgPlugin() {
+  const qc = useQueryClient();
+  return useMutation<
+    PatchOrgPluginResponse,
+    Error,
+    { name: string; body: PatchOrgPluginRequest }
+  >({
+    mutationFn: ({ name, body }) => api.patchOrgPlugin(name, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkSettings.orgPlugins() });
       qc.invalidateQueries({ queryKey: qkSettings.org() });
     },
   });

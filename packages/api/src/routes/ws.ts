@@ -122,6 +122,7 @@ export function registerWsRoutes(
                 id: row.id,
                 workspace: row.workspace,
                 status: row.status as SessionStatus,
+                kind: row.kind === "security" ? "security" : "code",
                 runState: run.runState,
                 owner: { type: row.ownerType as AssistantOwner["type"], id: row.ownerId },
                 title: row.title ?? undefined,

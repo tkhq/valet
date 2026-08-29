@@ -1,0 +1,87 @@
+name: Multi-Tenancy
+detect_when:
+  - "API paths contain org, tenant, workspace, or team"
+  - "URL patterns include tenant/org ID segments (for example /orgs/{id}/...)"
+  - "The repo has organization or workspace management pages"
+dedup: "If authz is also loaded, this file owns cross-tenant access and tenant-boundary threats and authz owns within-tenant privilege escalation. Cross-tenant IDOR belongs here, not in authz."
+
+threat_patterns:
+  cross_tenant_access:
+    description: Reaching another tenant's resources by manipulating the tenant ID
+    cwe: CWE-639
+    capec: CAPEC-122
+    mitre_attack: null
+    skill: low
+    likelihood: high
+    prereqs:
+      - Multiple tenants exist in the system
+      - A tenant ID is present in API requests
+    look_for:
+      - a tenant ID from the request trusted without a session check
+      - a tenant ID in the JWT not cross-checked against resource ownership
+      - endpoints accepting a tenant ID as a parameter
+      - database queries not scoped to the authenticated tenant
+
+  tenant_data_leakage:
+    description: Data from one tenant leaking to another
+    cwe: CWE-200
+    capec: null
+    mitre_attack: null
+    skill: medium
+    likelihood: medium
+    prereqs:
+      - Shared infrastructure across tenants
+      - Search, cache, or logging spans tenant boundaries
+    look_for:
+      - shared caches without tenant-scoped keys
+      - search results including cross-tenant data
+      - error messages revealing another tenant's data
+      - shared file storage without a tenant prefix
+
+  tenant_enumeration:
+    description: Discovering the existence of other tenants
+    cwe: CWE-204
+    capec: null
+    mitre_attack: null
+    skill: low
+    likelihood: high
+    prereqs:
+      - Tenant-specific identifiers in URLs or responses
+      - A tenant creation or lookup endpoint exists
+    look_for:
+      - different error messages for valid vs invalid tenant IDs
+      - tenant subdomains discoverable by brute force
+      - a public tenant directory or search
+      - an invitation system leaking tenant names
+
+  privilege_crossing:
+    description: Privileges in one tenant affecting another
+    cwe: CWE-269
+    capec: null
+    mitre_attack: null
+    skill: medium
+    likelihood: medium
+    prereqs:
+      - A user holds roles in multiple tenants
+      - Admin functionality is scoped per tenant
+    look_for:
+      - an admin in tenant A reaching tenant B's admin functions
+      - a global admin confused with a tenant admin
+      - an invitation accepted in the wrong tenant context
+      - API keys valid across tenants
+
+  resource_exhaustion_cross_tenant:
+    description: One tenant consuming shared resources and affecting others
+    cwe: CWE-770
+    capec: null
+    mitre_attack: null
+    skill: low
+    likelihood: medium
+    prereqs:
+      - Shared resources across tenants
+      - Per-tenant quotas may be missing
+    look_for:
+      - shared compute or storage without per-tenant quotas
+      - a noisy neighbor in a shared database
+      - rate limits applied globally, not per-tenant
+      - a shared queue without tenant priority

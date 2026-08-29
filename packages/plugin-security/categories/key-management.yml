@@ -1,0 +1,102 @@
+name: Key Management
+detect_when:
+  - "API paths contain key, sign, encrypt, decrypt, or certificate"
+  - "The code references HSM, enclave, vault, KMS, or a cryptographic library"
+  - "The team asserts a cryptographic-integrity invariant"
+
+threat_patterns:
+  key_extraction:
+    description: Extracting private keys from storage or memory
+    cwe: CWE-312
+    capec: CAPEC-37
+    mitre_attack: T1552
+    skill: medium
+    likelihood: medium
+    prereqs:
+      - Cryptographic keys are stored server-side
+      - Key storage is reachable through the application layer
+    look_for:
+      - keys stored in plaintext in the database
+      - keys in environment variables reachable through SSRF
+      - key material in logs or error messages
+      - key export endpoints without sufficient authorization
+
+  weak_key_generation:
+    description: Predictable or insufficient key material
+    cwe: CWE-330
+    capec: null
+    mitre_attack: null
+    skill: high
+    likelihood: low
+    prereqs:
+      - The application generates cryptographic keys
+      - The generation logic is available for analysis
+    look_for:
+      - an insufficient entropy source
+      - deterministic key derivation without a proper salt
+      - a key length below the recommended minimum
+      - deprecated algorithms (RSA-1024, DSA)
+
+  key_reuse:
+    description: The same key used across security boundaries
+    cwe: CWE-321
+    capec: null
+    mitre_attack: null
+    skill: medium
+    likelihood: medium
+    prereqs:
+      - Multiple security contexts or environments exist
+      - Keys are used across boundaries
+    look_for:
+      - a signing key shared between environments
+      - the same key for encryption and authentication
+      - a key shared across tenants
+      - test keys in production
+
+  missing_key_rotation:
+    description: Keys that cannot be or are never rotated
+    cwe: CWE-320
+    capec: null
+    mitre_attack: null
+    skill: low
+    likelihood: medium
+    prereqs:
+      - Long-lived cryptographic keys are in use
+      - No rotation API or process is observed
+    look_for:
+      - no key rotation API or process
+      - rotation breaks existing sessions or tokens
+      - no key versioning (old keys cannot be identified)
+      - revoked keys still accepted
+
+  key_derivation_flaws:
+    description: Insecure key derivation from passwords or master keys
+    cwe: CWE-916
+    capec: null
+    mitre_attack: null
+    skill: high
+    likelihood: low
+    prereqs:
+      - Keys are derived from passwords or master keys
+      - The derivation function is available for analysis
+    look_for:
+      - a low iteration count on PBKDF2/scrypt/argon2
+      - a missing or predictable salt
+      - MD5 or SHA1 used for key derivation
+      - a master key reachable by the application layer
+
+  enclave_trust_boundary:
+    description: Trusting enclave output without verification
+    cwe: CWE-347
+    capec: null
+    mitre_attack: null
+    skill: high
+    likelihood: low
+    prereqs:
+      - An HSM or enclave integration is present
+      - Enclave API endpoints are reachable
+    look_for:
+      - enclave attestation not verified by the client
+      - the enclave API accepts unsigned requests
+      - the enclave trusts the application layer for authorization
+      - side-channel exposure through timing or errors

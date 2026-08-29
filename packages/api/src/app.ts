@@ -25,6 +25,7 @@ import { messagesRouter } from "./routes/messages.js";
 import { adminRouter } from "./routes/admin.js";
 import { teamsRouter } from "./routes/teams.js";
 import { memoryRouter } from "./routes/memory.js";
+import { securityRouter } from "./routes/security.js";
 import { orchestratorRouter } from "./routes/orchestrator.js";
 import { assistantsRouter } from "./routes/assistants.js";
 import { notificationsRouter } from "./routes/notifications.js";
@@ -272,9 +273,10 @@ export function createApp(
   app.use("/api/*", buildAuthMiddleware({ auth: auth ?? null, db: providers.db }));
 
   app.route("/api/sessions", sessionsRouter);
-  // Messages + threads + file uploads share /api/sessions/:id/* — mounted under same prefix.
+  // Messages + threads + file uploads + security share /api/sessions/:id/* — mounted under same prefix.
   app.route("/api/sessions", messagesRouter);
   app.route("/api/sessions", fileUploadRouter);
+  app.route("/api/sessions", securityRouter);
   app.route("/api/admin", adminRouter);
   app.route("/api/teams", teamsRouter);
   app.route("/api/memory", memoryRouter);

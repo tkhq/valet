@@ -29,10 +29,14 @@ import {
 import { HibernationReaper } from "../engine/hibernation-reaper.js";
 import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
 import { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
+import { SecurityRunnerDriver } from "../orchestrator/security-runner-driver.js";
+import { submitSessionPrompt } from "../routes/messages.js";
+import { resolveSecurityNudgeIntervalMs, resolveSecurityNudgeMaxStalls } from "./security-nudge.js";
 import { withSandboxCapacityGate } from "../engine/gated-sandbox-provider.js";
 import { principalFromOwner, routeAttention } from "../orchestrator/attention.js";
 import { resolveOrgSessionCeiling } from "../orchestrator/limits.js";
 import { assemblePlugins } from "../plugins/assemble.js";
+import { ensurePluginStoreIndexes } from "../services/plugin-store.js";
 import { workflowsActionPlugin } from "../workflows/actions.js";
 import { skillsActionPlugin } from "../services/skills-actions.js";
 import { assistantsActionPlugin } from "../assistants/actions.js";
@@ -375,6 +379,11 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         [workflowsActions, skillsActions, assistantsActions],
       ]);
 
+  // Declared plugin-store expression indexes (plugin-store design). Idempotent
+  // `CREATE INDEX IF NOT EXISTS`, run once per boot after the plugin set is
+  // known — no plugin declares one yet, so this is a no-op today.
+  await ensurePluginStoreIndexes(pgdb, plugins);
+
   // Refresh-on-read decorator (integration-OAuth design): wraps the raw
   // credential store so any `engineCredentials.get()` call transparently
   // refreshes near-expiry oauth2 tokens using the plugins' oauth
@@ -499,6 +508,19 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineHost,
     engineStore,
     idleMs: resolveIdleMinutes(process.env) * 60_000,
+  });
+
+  // Autonomy nudge sweep (valet-security spec §Autonomy). Re-drives an idle
+  // security runner that stopped with work remaining; a stall cap alerts the
+  // user after N no-progress nudges instead of looping. Nudges through the
+  // same `submitSessionPrompt` path the kickoff uses. `start()`/`stop()` are
+  // called from `main.ts`, next to the other sweeps.
+  const securityRunnerDriver = new SecurityRunnerDriver({
+    db,
+    engineStore,
+    submit: (row, text) => submitSessionPrompt({ db, engineHost }, row, text),
+    sweepIntervalMs: resolveSecurityNudgeIntervalMs(process.env),
+    maxStalls: resolveSecurityNudgeMaxStalls(process.env),
   });
 
   // Backfill default bases for existing orgs (idempotent). Fires once at
@@ -718,10 +740,17 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     engineCredentials,
     engineHost,
     childWatcher,
+    childSpawner: (req, ctx) => {
+      // Same one-slot indirection as the EngineHost wiring above; by the
+      // time any route runs, `spawnerRef` is long assigned.
+      if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
+      return spawnerRef(req, ctx);
+    },
     hibernationReaper,
     workflowSandboxReclaimer,
     sandboxReconcileSweep,
     idleHibernationSweep,
+    securityRunnerDriver,
     channelHost,
     workflowStore,
     workflowRunHost,

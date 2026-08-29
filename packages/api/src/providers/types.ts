@@ -1,6 +1,7 @@
 import type {
   ActionPlugin,
   BlobStore,
+  ChildSpawner,
   CredentialStore,
   EventStream,
   SandboxProvider,
@@ -18,6 +19,7 @@ import type { HibernationReaper } from "../engine/hibernation-reaper.js";
 import type { WorkflowSandboxReclaimer } from "../workflows/sandbox-reclaim.js";
 import type { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
 import type { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
+import type { SecurityRunnerDriver } from "../orchestrator/security-runner-driver.js";
 import type { ChannelHost } from "../channels/host.js";
 import type { EventDispatcher } from "../events/dispatcher.js";
 import type { WorkflowScheduler } from "../workflows/scheduler.js";
@@ -56,6 +58,13 @@ export interface Providers {
   engineHost: EngineHost;
   /** Durable child-settlement watcher (Phase 4 decision 11); `rearm()` is called at boot. */
   childWatcher: ChildWatcher;
+  /**
+   * The SAME `ChildSpawner` instance wired into orchestrator sessions'
+   * `toolConfig` (children.ts machinery: limits, watch row, armed watcher).
+   * Route-level dispatchers — the security `sec_dispatch`/`sec_handoff`
+   * routes — spawn through this so bookkeeping and spawn never drift apart.
+   */
+  childSpawner: ChildSpawner;
   /** Destroys sandboxes hibernated past the retention window; `start()`/`stop()` called from main.ts. */
   hibernationReaper: HibernationReaper;
   /** Destroys settled workflow runs' session sandboxes; `start()`/`stop()` called from main.ts. */
@@ -64,6 +73,10 @@ export interface Providers {
   sandboxReconcileSweep: SandboxReconcileSweep;
   /** Hibernates idle active sessions evicted from the host cache; `start()`/`stop()` called from main.ts. */
   idleHibernationSweep: IdleHibernationSweep;
+  /** Autonomy nudge sweep — re-drives an idle security runner with work
+   * remaining, capped by a stall budget; `start()`/`stop()` called from
+   * main.ts (valet-security spec §Autonomy). */
+  securityRunnerDriver: SecurityRunnerDriver;
   /** Inbound/outbound channel transport routing (Task 8); `start()`/`stop()` called from main.ts. */
   channelHost: ChannelHost;
 

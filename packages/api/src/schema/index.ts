@@ -348,6 +348,11 @@ export const agentSessions = pgTable(
     // Request a rootless docker daemon inside this session's sandbox
     // (docker-in-sandbox). See docs/specs/2026-08-15-sandbox-docker-design.md.
     docker: boolean("docker").notNull().default(false),
+    // Which authoring surface the session drives ('code' default,
+    // 'security' = engagement runner). Distinct from the engine's
+    // lifecycle `purpose`. Shared shape with the Valet Design PR (#396),
+    // which adds 'design' — second-lander rebases to a no-op.
+    kind: text("kind").notNull().default("code"),
     // The `bakes.id` this session's sandbox booted from, when session
     // create resolved the primary repo binding to a `pushed` bake image
     // (sandbox images v2 plan, Task 4). Null for cold-start sessions (no
@@ -1370,6 +1375,43 @@ export const llmProxyRequests = pgTable(
 
 export type LlmProxyRequestRow = typeof llmProxyRequests.$inferSelect;
 
+// ─── Plugin store (docs/specs/2026-08-29-plugin-store-design.md) ───────────
+//
+// One core table for plugin-owned persistence. `plugin` is the owning
+// plugin's name ("valet" for core-owned data, e.g. the entitlement rail);
+// `(scope_type, scope_id)` maps `PluginStoreScope` ("" id for global);
+// `collection` is the plugin's namespace within its data. `doc` is opaque
+// jsonb the plugin validates. Read/written by `services/plugin-store.ts`;
+// declared expression indexes ride on top via `ensurePluginStoreIndexes`.
+export const pluginStore = pgTable(
+  "plugin_store",
+  {
+    id: text("id").primaryKey(),
+    plugin: text("plugin").notNull(),
+    scopeType: text("scope_type").notNull(),
+    scopeId: text("scope_id").notNull(),
+    collection: text("collection").notNull(),
+    key: text("key").notNull(),
+    doc: jsonb("doc").notNull(),
+    revision: integer("revision").notNull().default(1),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    uniqueIndex("plugin_store_identity_unique").on(
+      t.plugin,
+      t.scopeType,
+      t.scopeId,
+      t.collection,
+      t.key,
+    ),
+    index("plugin_store_list").on(t.plugin, t.scopeType, t.scopeId, t.collection),
+    index("plugin_store_doc_gin").using("gin", t.doc),
+  ],
+);
+
+export type PluginStoreRow = typeof pluginStore.$inferSelect;
+
 // ─── Session repo bindings (GitHub/repo integration plan, Task 2) ──────────
 //
 // One row per repo bound to a session (session-create route accepts
@@ -1709,3 +1751,321 @@ export type EventRow = typeof events.$inferSelect;
 export type EventSubscriptionRow = typeof eventSubscriptions.$inferSelect;
 export type EventDeliveryRow = typeof eventDeliveries.$inferSelect;
 export type LinearInstallationRow = typeof linearInstallations.$inferSelect;
+
+// ── Valet Security (docs/specs/2026-08-27-valet-security-design.md) ───────
+//
+// One engagement per kind='security' session; cells dispatch persona child
+// sessions; security_files is the append-only engagement tree.
+
+export const securityEngagements = pgTable(
+  "security_engagements",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id").notNull(),
+    status: text("status", {
+      enum: ["planning", "running", "completed", "failed", "cancelled"],
+    })
+      .notNull()
+      .default("planning"),
+    repoFullName: text("repo_full_name").notNull(),
+    // Pinned at sec_start to a resolved commit SHA so every persona reads
+    // an identical tree. Empty while planning.
+    repoRef: text("repo_ref").notNull().default(""),
+    // Engagement plan YAML — the note's orchestration.yml. Immutable once
+    // the engagement is running.
+    plan: text("plan").notNull().default(""),
+    // The prior engagement this one re-scans (re-scan / iterate). Null on a
+    // first review; set to the parent engagement id on a re-scan. No unique
+    // constraint — a parent may be re-scanned any number of times.
+    parentEngagementId: text("parent_engagement_id"),
+    // Diff-scoped re-scan (re-scan / iterate). Set only on a re-scan whose
+    // parent had a pinned SHA. `base_ref` is the parent's pinned SHA the diff
+    // ran against (base); `changed_paths` is the JSON array of changed file
+    // paths from the GitHub compare (base..new HEAD). Both null on a first
+    // review, or on a re-scan that fell back to a full scan (compare failed,
+    // or the parent had no pinned SHA).
+    baseRef: text("base_ref"),
+    changedPaths: text("changed_paths"),
+    // Repo config context (dynamic-config M-F1): parsed from `.valet/security.yml`
+    // at create, stored for later milestones. `hasRepoConfig` records whether a
+    // valid repo config seeded this engagement (the panel shows the source); the
+    // other columns hold the config's context. `focus` is free text; the rest are
+    // JSON. Null on an engagement seeded from a preset (no repo config, or the
+    // config was absent/invalid).
+    focus: text("focus"),
+    invariants: text("invariants"),
+    categories: text("categories"),
+    configPersonas: text("config_personas"),
+    // Repo-defined persona role markdown, fetched from the clone through the
+    // GitHub contents API at create (M-P2c). JSON Record id → markdown. Keyed
+    // by the same ids as `configPersonas` (which holds id → path). The host's
+    // `securityRolesForCell` reads this at persona-child build so a repo persona
+    // runs under its OWN role, not the code-review fallback. Null when the
+    // config declares no personas, or none of the declared files were readable.
+    configPersonaMarkdown: text("config_persona_markdown"),
+    // Declared tools (M-P4a): the config's `tools` list as a JSON `ToolDecl[]`
+    // (id + optional install/image/mcp/egress). The host provisions a persona
+    // child's declared tools from this at build. Null when the config declares
+    // no tools.
+    configTools: text("config_tools"),
+    // Authorized live-testing scope (M-P4b): the config's `scope` as a JSON
+    // `{ hosts: string[] }`. The live personas (dast/fuzz/exploit) may reach
+    // ONLY these hosts; the dispatch prompt names them, and the child sandbox's
+    // egress allowlist is derived from them. Null when the config declares no
+    // scope (no live testing is authorized).
+    authorizedScope: text("authorized_scope"),
+    hasRepoConfig: boolean("has_repo_config").notNull().default(false),
+    // The report artifact (M-P3): the report cell writes both with
+    // `sec_report_write`, and the panel/export surface them. `reportMarkdown`
+    // is the multi-audience markdown report; `reportJson` is a machine-readable
+    // JSON snapshot (stored as a JSON string). `reportGeneratedAt` is the
+    // write time. All null until the report cell runs.
+    reportMarkdown: text("report_markdown"),
+    reportJson: text("report_json"),
+    reportGeneratedAt: bigint("report_generated_at", { mode: "number" }),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    uniqueIndex("security_engagements_session_unique").on(t.sessionId),
+    index("security_engagements_parent").on(t.parentEngagementId),
+  ],
+);
+
+export const securityCells = pgTable(
+  "security_cells",
+  {
+    id: text("id").primaryKey(),
+    engagementId: text("engagement_id").notNull(),
+    ordinal: integer("ordinal").notNull(),
+    persona: text("persona").notNull(),
+    mode: text("mode", { enum: ["fresh", "resume"] }).notNull().default("fresh"),
+    goal: text("goal").notNull(),
+    // Stable engagement-tree directory slug ("01-recon"), stamped at
+    // sec_start so dispatch prompts can name literal paths.
+    dir: text("dir").notNull(),
+    // JSON array of earlier ordinals whose state docs this cell's dispatch
+    // prompt names (the plan's DAG edges — selective context).
+    reads: text("reads").notNull().default("[]"),
+    // Grants sec_finding_review to this cell's persona. Only review cells
+    // may flip finding statuses.
+    review: boolean("review").notNull().default(false),
+    status: text("status", {
+      enum: ["pending", "running", "completed", "yielded", "failed"],
+    })
+      .notNull()
+      .default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    // Stamped by the compaction hook when the claiming child's thread
+    // compacts — surfaced as a badge on the cell rail, never auto-repaired.
+    compactedAt: bigint("compacted_at", { mode: "number" }),
+    childSessionId: text("child_session_id"),
+    dispatchedAt: bigint("dispatched_at", { mode: "number" }),
+    settledAt: bigint("settled_at", { mode: "number" }),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    uniqueIndex("security_cells_engagement_ordinal_unique").on(t.engagementId, t.ordinal),
+    index("security_cells_child_session").on(t.childSessionId),
+  ],
+);
+
+export const securityFiles = pgTable(
+  "security_files",
+  {
+    id: text("id").primaryKey(),
+    engagementId: text("engagement_id").notNull(),
+    // Owning cell — the path-prefix write claim resolves through it.
+    cellId: text("cell_id").notNull(),
+    path: text("path").notNull(),
+    // Append-only: a write to an existing path inserts revision + 1.
+    revision: integer("revision").notNull(),
+    content: text("content").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    uniqueIndex("security_files_path_revision_unique").on(t.engagementId, t.path, t.revision),
+  ],
+);
+
+export const securityFindings = pgTable(
+  "security_findings",
+  {
+    id: text("id").primaryKey(),
+    engagementId: text("engagement_id").notNull(),
+    cellId: text("cell_id").notNull(),
+    // sha256(file, line bucket, normalized title) first 16 hex — advisory
+    // dedup and the manifest's distinct counts.
+    fingerprint: text("fingerprint").notNull(),
+    severity: text("severity", {
+      enum: ["critical", "high", "medium", "low", "info"],
+    }).notNull(),
+    title: text("title").notNull(),
+    file: text("file"),
+    line: integer("line"),
+    body: text("body").notNull().default(""),
+    // Forward-only: open → verified | refuted | fixed, and verified → fixed. No
+    // route mutates the other columns after insert ("verifier flips bits, never
+    // rewrites"). `fixed` = the finding was real and is now resolved (re-scan
+    // v2); distinct from `refuted` = a false positive.
+    status: text("status", { enum: ["open", "verified", "refuted", "fixed"] })
+      .notNull()
+      .default("open"),
+    statusReason: text("status_reason"),
+    // Cell id or `user:<id>` — who flipped the status.
+    statusActor: text("status_actor"),
+    // Re-scan v2 (re-scan / iterate): true when this finding was carried from
+    // the parent engagement at re-scan start, or a diff-sweep re-report matched
+    // a carried fingerprint. A first review's rows are all false.
+    recurring: boolean("recurring").notNull().default(false),
+    // The parent engagement's finding this row was seeded from (re-scan v2), so
+    // provenance is traceable. Null on a first-seen finding.
+    carriedFromFindingId: text("carried_from_finding_id"),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [index("security_findings_engagement").on(t.engagementId)],
+);
+
+export const securityFindingLinks = pgTable(
+  "security_finding_links",
+  {
+    id: text("id").primaryKey(),
+    findingId: text("finding_id").notNull(),
+    engagementId: text("engagement_id").notNull(),
+    provider: text("provider", { enum: ["github", "linear"] }).notNull(),
+    externalId: text("external_id").notNull(),
+    url: text("url").notNull(),
+    // Always a user id — only humans file issues (spec Decision 10).
+    createdBy: text("created_by").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    // The idempotency guard: one issue per finding per provider.
+    uniqueIndex("security_finding_links_provider_unique").on(t.findingId, t.provider),
+  ],
+);
+
+export const securityHandoffs = pgTable(
+  "security_handoffs",
+  {
+    id: text("id").primaryKey(),
+    engagementId: text("engagement_id").notNull(),
+    findingId: text("finding_id").notNull(),
+    // The spawned fix session — opened through the child slide-over.
+    childSessionId: text("child_session_id").notNull(),
+    title: text("title").notNull(),
+    // The optional extra instruction the runner passed to sec_handoff.
+    task: text("task"),
+    createdBy: text("created_by").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  // No unique constraint: a finding may spawn several fix sessions.
+  (t) => [
+    index("security_handoffs_engagement").on(t.engagementId),
+    index("security_handoffs_finding").on(t.findingId),
+  ],
+);
+
+export const securityFindingComments = pgTable(
+  "security_finding_comments",
+  {
+    id: text("id").primaryKey(),
+    findingId: text("finding_id").notNull(),
+    engagementId: text("engagement_id").notNull(),
+    body: text("body").notNull(),
+    // Always a user id — commenting is a human triage action (spec §Re-scan /
+    // iterate). The runner and personas never comment through this route.
+    authorUserId: text("author_user_id").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  // No unique constraint: a finding may carry a thread of many comments.
+  (t) => [
+    index("security_finding_comments_finding").on(t.findingId),
+    index("security_finding_comments_engagement").on(t.engagementId),
+  ],
+);
+
+// One row per coverage claim a persona records (NOT_ASSESSED ledger, M-P2d,
+// spec §Coverage honesty). `status` is `assessed` when a check ran or
+// `not_assessed` when its tool was absent; a not_assessed row carries a
+// `reason` naming the consequence ("secrets not scanned because gitleaks is
+// missing"). Insert-only, no unique constraint — a cell records one row per
+// area it covered or skipped. The close manifest rolls these into an
+// assessed/not_assessed count plus the gap list.
+export const securityCoverage = pgTable(
+  "security_coverage",
+  {
+    id: text("id").primaryKey(),
+    engagementId: text("engagement_id").notNull(),
+    // The cell that recorded the coverage — the persona's claim.
+    cellId: text("cell_id").notNull(),
+    // What was in scope, e.g. "secrets scan", "semgrep owasp".
+    area: text("area").notNull(),
+    status: text("status", { enum: ["assessed", "not_assessed"] }).notNull(),
+    // The tool involved (gitleaks, semgrep, …). Null when no specific tool
+    // backs the area.
+    tool: text("tool"),
+    // The consequence / why-not. Required for not_assessed (the service and
+    // route reject a not_assessed without one); null for an assessed row.
+    reason: text("reason"),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    index("security_coverage_engagement").on(t.engagementId),
+    index("security_coverage_cell").on(t.cellId),
+  ],
+);
+
+// One row per need a persona records (pivot-coordinator + needs loop, M-P4c,
+// spec §Pivot-coordinator). During a sweep a persona that cannot go deeper —
+// it lacks a credential, a running dependency, a scope expansion, or an
+// out-of-band decision — records a structured need instead of stopping (a
+// silent gap) or blocking a human per item. The coordinator auto-resolves
+// what is unambiguously already-authorized (a declared tool, an in-scope
+// item), batches the rest into ONE consolidated human ask, then re-runs only
+// the affected cells. `kind` classes the need; `status` tracks it through the
+// loop; `resolution` records the auto-resolution note or the human answer.
+// Insert-only rows, forward status. No unique constraint — a cell may record
+// several needs.
+export const securityNeeds = pgTable(
+  "security_needs",
+  {
+    id: text("id").primaryKey(),
+    engagementId: text("engagement_id").notNull(),
+    // The cell that recorded the need — the persona's claim. The delta re-run
+    // resets this cell to pending once its need is answered.
+    cellId: text("cell_id").notNull(),
+    // What class of thing is blocked: a 'credential', a running 'dependency',
+    // a 'scope' expansion, an out-of-band 'decision', or a 'tool' to provision.
+    kind: text("kind", {
+      enum: ["credential", "dependency", "scope", "decision", "tool"],
+    }).notNull(),
+    description: text("description").notNull(),
+    // 'open' when recorded; the coordinator flips it to 'auto_resolved' (an
+    // already-authorized item), 'needs_human' (the consolidated ask), then
+    // 'answered' (the human resolved it). 'dismissed' is a human no-op.
+    status: text("status", {
+      enum: ["open", "auto_resolved", "needs_human", "answered", "dismissed"],
+    })
+      .notNull()
+      .default("open"),
+    // The auto-resolution note or the human answer. Null while open/needs_human.
+    resolution: text("resolution"),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    resolvedAt: bigint("resolved_at", { mode: "number" }),
+  },
+  (t) => [
+    index("security_needs_engagement").on(t.engagementId),
+    index("security_needs_cell").on(t.cellId),
+  ],
+);
+
+export type SecurityEngagementRow = typeof securityEngagements.$inferSelect;
+export type SecurityCellRow = typeof securityCells.$inferSelect;
+export type SecurityFileRow = typeof securityFiles.$inferSelect;
+export type SecurityFindingRow = typeof securityFindings.$inferSelect;
+export type SecurityFindingLinkRow = typeof securityFindingLinks.$inferSelect;
+export type SecurityHandoffRow = typeof securityHandoffs.$inferSelect;
+export type SecurityFindingCommentRow = typeof securityFindingComments.$inferSelect;
+export type SecurityCoverageRow = typeof securityCoverage.$inferSelect;
+export type SecurityNeedRow = typeof securityNeeds.$inferSelect;

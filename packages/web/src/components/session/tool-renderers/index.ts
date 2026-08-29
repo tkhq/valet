@@ -19,6 +19,7 @@ import { memShareRenderer } from "./mem-share";
 import { memWriteRenderer } from "./mem-write";
 import { openaiMediaRenderer } from "./openai-media";
 import { readRenderer } from "./read";
+import { securityRenderers } from "./security";
 import { skillRenderer } from "./skill";
 import { threadReadRenderer } from "./thread-read";
 import { workflowRenderer } from "./workflow";
@@ -39,6 +40,9 @@ const RENDERERS: ToolRenderer[] = [
   workflowRenderer,
   findReplaceRenderer,
   openaiMediaRenderer,
+  // The `sec_*` engagement tools (specific cards first, then the family
+  // catch-all) — before the fallback, per the registry rule.
+  ...securityRenderers,
   // … add plugin-specific renderers here as the ecosystem grows.
   fallbackRenderer,
 ];

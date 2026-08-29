@@ -54,6 +54,7 @@ function session(over: Partial<SessionSummary> & Pick<SessionSummary, "id">): Se
   return {
     workspace: "acme/api",
     status: "active",
+    kind: "code",
     runState: "idle",
     createdAt: 1,
     updatedAt: 1,

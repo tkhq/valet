@@ -63,6 +63,7 @@
     "@valet/plugin-openai": "workspace:*",
     "@valet/plugin-assistants": "workspace:*",
     "@valet/plugin-sandbox-tunnels": "workspace:*",
+    "@valet/plugin-security": "workspace:*",
     "@valet/plugin-sentry": "workspace:*",
     "@valet/plugin-slack": "workspace:*",
     "@valet/plugin-slack-user": "workspace:*",

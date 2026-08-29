@@ -238,7 +238,9 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
 
     await enforceLimits(deps.db, ctx.parentSessionId, orgId, deps.orgSessionCeiling);
 
-    const childSessionId = newChildSessionId();
+    // A pre-assigned id (the security dispatch's cell-claim seam) wins so
+    // the caller's durable claim row names the session this spawn builds.
+    const childSessionId = req.sessionId ?? newChildSessionId();
     const workspace = join(deps.workspaceRoot ?? join(homedir(), ".valet", "children"), childSessionId);
     await mkdir(workspace, { recursive: true });
 
@@ -304,7 +306,11 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
     // in shared-session transcripts and as a named sender in the UI, both
     // wrong for agent text. Actor linkage stays on the child_watches row
     // (`actorUserId` below).
-    const receipt = await childSession.prompt(req.prompt, {});
+    const receipt = await childSession.prompt(req.prompt, {
+      // Per-turn role overlay (the security dispatch names the persona
+      // role; the claimed child's build registered it in options.roles).
+      ...(req.role !== undefined ? { role: req.role } : {}),
+    });
 
     await deps.db
       .insert(childWatches)

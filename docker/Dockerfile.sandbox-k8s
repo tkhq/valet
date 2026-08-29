@@ -142,6 +142,51 @@ RUN curl -fsSL -o /tmp/gh.deb \
     && rm /tmp/gh.deb \
     && gh --version
 
+# Security scanners (valet-security design, §plugin-security "Sandbox
+# image"): pinned, read-only, offline-capable — personas run them against
+# the clone, and rule updates ride image rebuilds, not runtime downloads,
+# so sandbox egress stays closed. gitleaks ships its default ruleset inside
+# the binary. gitleaks ONLY: semgrep is a Python package and this image
+# carries no Python runtime, so baking it would add a whole toolchain for
+# one tool (spec implementation deviation; plan risk 6 pre-authorizes
+# gitleaks-only). Release assets are per-arch tarballs with a published
+# checksums.txt — the sha256 per arch is pinned below, so a GITLEAKS_VERSION
+# bump must also update both hashes from the new checksums.txt.
+ARG GITLEAKS_VERSION=8.30.1
+RUN case "${TARGETARCH:-amd64}" in \
+      amd64) GITLEAKS_ARCH=x64; \
+             GITLEAKS_SHA256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb ;; \
+      arm64) GITLEAKS_ARCH=arm64; \
+             GITLEAKS_SHA256=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080 ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL -o /tmp/gitleaks.tar.gz \
+      "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${GITLEAKS_ARCH}.tar.gz" \
+    && echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks \
+    && rm /tmp/gitleaks.tar.gz \
+    && gitleaks version
+
+# sec-preflight — the tool-presence probe the sast/secrets personas run before
+# they record coverage (NOT_ASSESSED ledger, M-P2d). It prints a tool table:
+# name, present(y/n), version, and the consequence that becomes NOT_ASSESSED
+# when the tool is absent. gitleaks probes present here; semgrep and the
+# language scanners probe absent (not baked — see the note above), so the
+# persona records them as not_assessed with the printed consequence.
+COPY docker/sec-preflight.sh /usr/local/bin/sec-preflight
+RUN chmod +x /usr/local/bin/sec-preflight
+
+# Live-testing tool bake (M-P4a proof). The declared-tool mechanism provisions a
+# repo's tools per engagement; this bakes ONE lightweight live tool as proof the
+# path reaches a real binary — `curl` (already installed above) plus a small fuzz
+# wordlist the dast/fuzz personas point at. A heavier scanner (nuclei, ZAP) is
+# provisioning DATA a repo declares in .valet/security.yml (a ToolDecl install/
+# image/mcp), installed per repo, NOT baked for every session. The live personas
+# read VALET_SECURITY_AUTHORIZED_SCOPE to bound their egress to the authorized
+# scope (M-P4b) — sandbox egress otherwise stays closed, same posture as the
+# static scanners above.
+COPY docker/sec-fuzz-wordlist.txt /usr/local/share/valet/sec-fuzz-wordlist.txt
+
 # Browser automation. The bundled `browser` plugin skill tells the agent it
 # has `agent-browser`; without these two layers the agent follows the skill
 # and bash answers "command not found".

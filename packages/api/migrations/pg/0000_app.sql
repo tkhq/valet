@@ -223,6 +223,7 @@ CREATE TABLE "agent_sessions" (
 	"owner_id" text DEFAULT '' NOT NULL,
 	"profile" text DEFAULT 'headless' NOT NULL,
 	"docker" boolean DEFAULT false NOT NULL,
+	"kind" text DEFAULT 'code' NOT NULL,
 	"bake_id" text,
 	"hibernated_sandbox_id" text,
 	"sandbox_reclaimed_at" bigint,
@@ -964,6 +965,207 @@ CREATE TABLE "llm_proxy_requests" (
 CREATE INDEX "llm_proxy_requests_org_created" ON "llm_proxy_requests" ("org_id", "created_at");
 --> statement-breakpoint
 CREATE INDEX "llm_proxy_requests_user_created" ON "llm_proxy_requests" ("user_id", "created_at");
+--> statement-breakpoint
+-- ── Plugin store (docs/specs/2026-08-29-plugin-store-design.md) ───────────
+--
+-- One core table for plugin-owned persistence, so a plugin persists config,
+-- settings, and moderate collections with zero further migrations. `plugin`
+-- is the owning plugin's name ("valet" for core-owned data); a scoped view
+-- never crosses plugins. `doc` is opaque jsonb the plugin validates itself.
+CREATE TABLE "plugin_store" (
+	"id" text PRIMARY KEY NOT NULL,
+	"plugin" text NOT NULL,
+	"scope_type" text NOT NULL,
+	"scope_id" text NOT NULL,
+	"collection" text NOT NULL,
+	"key" text NOT NULL,
+	"doc" jsonb NOT NULL,
+	"revision" integer NOT NULL DEFAULT 1,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "plugin_store_identity_unique" ON "plugin_store" ("plugin","scope_type","scope_id","collection","key");
+--> statement-breakpoint
+CREATE INDEX "plugin_store_list" ON "plugin_store" ("plugin","scope_type","scope_id","collection");
+--> statement-breakpoint
+CREATE INDEX "plugin_store_doc_gin" ON "plugin_store" USING gin ("doc");
+--> statement-breakpoint
+-- ── Valet Security (docs/specs/2026-08-27-valet-security-design.md) ───────
+--
+-- One security engagement per kind='security' session. Cells dispatch
+-- persona child sessions; the engagement tree (security_files) is the
+-- personas' shared virtual filesystem, append-only by (path, revision).
+CREATE TABLE "security_engagements" (
+	"id" text PRIMARY KEY NOT NULL,
+	"session_id" text NOT NULL,
+	"status" text DEFAULT 'planning' NOT NULL,
+	"repo_full_name" text NOT NULL,
+	"repo_ref" text DEFAULT '' NOT NULL,
+	"plan" text DEFAULT '' NOT NULL,
+	"parent_engagement_id" text,
+	"base_ref" text,
+	"changed_paths" text,
+	"focus" text,
+	"invariants" text,
+	"categories" text,
+	"config_personas" text,
+	"config_persona_markdown" text,
+	"config_tools" text,
+	"authorized_scope" text,
+	"has_repo_config" boolean DEFAULT false NOT NULL,
+	"report_markdown" text,
+	"report_json" text,
+	"report_generated_at" bigint,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "security_engagements_session_unique" ON "security_engagements" ("session_id");
+--> statement-breakpoint
+CREATE INDEX "security_engagements_parent" ON "security_engagements" ("parent_engagement_id");
+--> statement-breakpoint
+CREATE TABLE "security_cells" (
+	"id" text PRIMARY KEY NOT NULL,
+	"engagement_id" text NOT NULL,
+	"ordinal" integer NOT NULL,
+	"persona" text NOT NULL,
+	"mode" text DEFAULT 'fresh' NOT NULL,
+	"goal" text NOT NULL,
+	"dir" text NOT NULL,
+	"reads" text DEFAULT '[]' NOT NULL,
+	"review" boolean DEFAULT false NOT NULL,
+	"status" text DEFAULT 'pending' NOT NULL,
+	"attempts" integer DEFAULT 0 NOT NULL,
+	"compacted_at" bigint,
+	"child_session_id" text,
+	"dispatched_at" bigint,
+	"settled_at" bigint,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "security_cells_engagement_ordinal_unique" ON "security_cells" ("engagement_id", "ordinal");
+--> statement-breakpoint
+CREATE INDEX "security_cells_child_session" ON "security_cells" ("child_session_id");
+--> statement-breakpoint
+CREATE TABLE "security_files" (
+	"id" text PRIMARY KEY NOT NULL,
+	"engagement_id" text NOT NULL,
+	"cell_id" text NOT NULL,
+	"path" text NOT NULL,
+	"revision" integer NOT NULL,
+	"content" text NOT NULL,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "security_files_path_revision_unique" ON "security_files" ("engagement_id", "path", "revision");
+--> statement-breakpoint
+CREATE TABLE "security_findings" (
+	"id" text PRIMARY KEY NOT NULL,
+	"engagement_id" text NOT NULL,
+	"cell_id" text NOT NULL,
+	"fingerprint" text NOT NULL,
+	"severity" text NOT NULL,
+	"title" text NOT NULL,
+	"file" text,
+	"line" integer,
+	"body" text DEFAULT '' NOT NULL,
+	"status" text DEFAULT 'open' NOT NULL,
+	"status_reason" text,
+	"status_actor" text,
+	"recurring" boolean DEFAULT false NOT NULL,
+	"carried_from_finding_id" text,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "security_findings_engagement" ON "security_findings" ("engagement_id");
+--> statement-breakpoint
+CREATE TABLE "security_finding_links" (
+	"id" text PRIMARY KEY NOT NULL,
+	"finding_id" text NOT NULL,
+	"engagement_id" text NOT NULL,
+	"provider" text NOT NULL,
+	"external_id" text NOT NULL,
+	"url" text NOT NULL,
+	"created_by" text NOT NULL,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "security_finding_links_provider_unique" ON "security_finding_links" ("finding_id", "provider");
+--> statement-breakpoint
+-- One row per sec_handoff spawn: the fix session opened from a finding.
+-- No unique constraint — a finding may spawn several fix sessions.
+CREATE TABLE "security_handoffs" (
+	"id" text PRIMARY KEY NOT NULL,
+	"engagement_id" text NOT NULL,
+	"finding_id" text NOT NULL,
+	"child_session_id" text NOT NULL,
+	"title" text NOT NULL,
+	"task" text,
+	"created_by" text NOT NULL,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "security_handoffs_engagement" ON "security_handoffs" ("engagement_id");
+--> statement-breakpoint
+CREATE INDEX "security_handoffs_finding" ON "security_handoffs" ("finding_id");
+--> statement-breakpoint
+-- One row per human note on a finding (spec §Re-scan / iterate). No unique
+-- constraint — a finding may carry a thread of many comments. author_user_id
+-- is always a user id: commenting is a human action, never the runner's.
+CREATE TABLE "security_finding_comments" (
+	"id" text PRIMARY KEY NOT NULL,
+	"finding_id" text NOT NULL,
+	"engagement_id" text NOT NULL,
+	"body" text NOT NULL,
+	"author_user_id" text NOT NULL,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "security_finding_comments_finding" ON "security_finding_comments" ("finding_id");
+--> statement-breakpoint
+CREATE INDEX "security_finding_comments_engagement" ON "security_finding_comments" ("engagement_id");
+--> statement-breakpoint
+-- One row per coverage claim a persona records (NOT_ASSESSED ledger, M-P2d).
+-- status is 'assessed' or 'not_assessed'; a not_assessed row carries a reason
+-- naming the consequence. No unique constraint — a cell records one row per
+-- area. The close manifest rolls these into a coverage summary + gap list.
+CREATE TABLE "security_coverage" (
+	"id" text PRIMARY KEY NOT NULL,
+	"engagement_id" text NOT NULL,
+	"cell_id" text NOT NULL,
+	"area" text NOT NULL,
+	"status" text NOT NULL,
+	"tool" text,
+	"reason" text,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "security_coverage_engagement" ON "security_coverage" ("engagement_id");
+--> statement-breakpoint
+CREATE INDEX "security_coverage_cell" ON "security_coverage" ("cell_id");
+--> statement-breakpoint
+-- One row per need a persona records (pivot-coordinator + needs loop, M-P4c).
+-- kind classes what is blocked; status tracks it through the loop
+-- (open -> auto_resolved | needs_human -> answered | dismissed); resolution
+-- records the auto-resolution note or the human answer. No unique constraint —
+-- a cell may record several needs. The coordinator auto-resolves only
+-- already-authorized items; the rest surface to the human, then re-run.
+CREATE TABLE "security_needs" (
+	"id" text PRIMARY KEY NOT NULL,
+	"engagement_id" text NOT NULL,
+	"cell_id" text NOT NULL,
+	"kind" text NOT NULL,
+	"description" text NOT NULL,
+	"status" text DEFAULT 'open' NOT NULL,
+	"resolution" text,
+	"created_at" bigint NOT NULL,
+	"resolved_at" bigint
+);
+--> statement-breakpoint
+CREATE INDEX "security_needs_engagement" ON "security_needs" ("engagement_id");
+--> statement-breakpoint
+CREATE INDEX "security_needs_cell" ON "security_needs" ("cell_id");
 --> statement-breakpoint
 -- ── cost_entries ──────────────────────────────────────────────────────────
 --

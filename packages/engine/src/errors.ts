@@ -98,6 +98,29 @@ export class ValidationError extends Error {
 }
 
 /**
+ * Thrown by a `PluginStore` `put` whose `ifRevision` does not match the row's
+ * current revision (optimistic-concurrency conflict —
+ * docs/specs/2026-08-29-plugin-store-design.md). The caller re-reads the
+ * document and retries against the new revision.
+ */
+export class PluginStoreConflictError extends Error {
+  readonly code = "plugin_store_conflict";
+
+  constructor(
+    public readonly collection: string,
+    public readonly key: string,
+    public readonly expectedRevision: number,
+    public readonly actualRevision: number | null,
+  ) {
+    super(
+      `plugin store conflict on ${collection}/${key}: expected revision ${expectedRevision}, ` +
+        `found ${actualRevision ?? "no row"}. Re-read the document and retry.`,
+    );
+    this.name = "PluginStoreConflictError";
+  }
+}
+
+/**
  * Thrown at admission when a thread already holds `cap` unsettled,
  * non-superseded submissions. Steer admissions are exempt (they supersede
  * the thread's pending items in the same atomic step, so they never grow

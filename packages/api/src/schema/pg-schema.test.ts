@@ -77,6 +77,15 @@ const APP_TABLES = [
   "event_subscriptions",
   "event_deliveries",
   "linear_installations",
+  "security_engagements",
+  "security_cells",
+  "security_files",
+  "security_findings",
+  "security_finding_links",
+  "security_handoffs",
+  "security_finding_comments",
+  "security_coverage",
+  "security_needs",
 ];
 
 async function tableExists(db: PgDb, table: string): Promise<boolean> {
@@ -107,6 +116,300 @@ describe("pg app schema + migrations", () => {
     for (const table of APP_TABLES) {
       expect(await tableExists(db, table), `expected table ${table} to exist`).toBe(true);
     }
+  });
+
+  it("defaults agent_sessions.kind to 'code'", async () => {
+    const result = await db.query(
+      "SELECT column_default, is_nullable FROM information_schema.columns WHERE table_name = 'agent_sessions' AND column_name = 'kind'",
+    );
+    expect(result.rows).toHaveLength(1);
+    const row = result.rows[0] as { column_default: string; is_nullable: string };
+    expect(row.column_default).toContain("'code'");
+    expect(row.is_nullable).toBe("NO");
+  });
+
+  it("enforces append-only revisions on security_files (engagement, path, revision) unique", async () => {
+    const now = Date.now();
+    await db.query(
+      "INSERT INTO security_files (id, engagement_id, cell_id, path, revision, content, created_at) VALUES ('sf1', 'eng1', 'cell1', '/cells/01-recon/state.yml', 1, 'a', $1)",
+      [now],
+    );
+    await expect(
+      db.query(
+        "INSERT INTO security_files (id, engagement_id, cell_id, path, revision, content, created_at) VALUES ('sf2', 'eng1', 'cell1', '/cells/01-recon/state.yml', 1, 'b', $1)",
+        [now],
+      ),
+    ).rejects.toThrow(/security_files_path_revision_unique|duplicate key/);
+    // Same path, next revision: allowed — that is the append.
+    await db.query(
+      "INSERT INTO security_files (id, engagement_id, cell_id, path, revision, content, created_at) VALUES ('sf3', 'eng1', 'cell1', '/cells/01-recon/state.yml', 2, 'b', $1)",
+      [now],
+    );
+    await db.query("DELETE FROM security_files WHERE engagement_id = 'eng1'");
+  });
+
+  it("links a re-scan engagement to its parent via parent_engagement_id", async () => {
+    const now = Date.now();
+    // A first review: parent_engagement_id null.
+    await db.query(
+      "INSERT INTO security_engagements (id, session_id, status, repo_full_name, plan, created_at, updated_at) VALUES ('eng_parent', 's_parent', 'completed', 'acme/api', '', $1, $1)",
+      [now],
+    );
+    // A re-scan: parent_engagement_id names the first review.
+    await db.query(
+      "INSERT INTO security_engagements (id, session_id, status, repo_full_name, plan, parent_engagement_id, created_at, updated_at) VALUES ('eng_child', 's_child', 'planning', 'acme/api', '', 'eng_parent', $1, $1)",
+      [now],
+    );
+    const rows = await db.query(
+      "SELECT id, parent_engagement_id FROM security_engagements WHERE id IN ('eng_parent', 'eng_child') ORDER BY id",
+    );
+    expect(rows.rows).toEqual([
+      { id: "eng_child", parent_engagement_id: "eng_parent" },
+      { id: "eng_parent", parent_engagement_id: null },
+    ]);
+    // No unique constraint on the parent: a second re-scan of the same parent
+    // is allowed.
+    await db.query(
+      "INSERT INTO security_engagements (id, session_id, status, repo_full_name, plan, parent_engagement_id, created_at, updated_at) VALUES ('eng_child2', 's_child2', 'planning', 'acme/api', '', 'eng_parent', $1, $1)",
+      [now],
+    );
+    await db.query("DELETE FROM security_engagements WHERE id IN ('eng_parent', 'eng_child', 'eng_child2')");
+  });
+
+  it("stores the diff-scoped re-scan base_ref and changed_paths, defaulting null", async () => {
+    const now = Date.now();
+    // A full-scan engagement: both diff columns null.
+    await db.query(
+      "INSERT INTO security_engagements (id, session_id, status, repo_full_name, plan, created_at, updated_at) VALUES ('eng_full', 's_full', 'running', 'acme/api', '', $1, $1)",
+      [now],
+    );
+    // A diff-scoped re-scan: base_ref + a JSON changed-path array.
+    await db.query(
+      "INSERT INTO security_engagements (id, session_id, status, repo_full_name, plan, base_ref, changed_paths, created_at, updated_at) VALUES ('eng_diff', 's_diff', 'running', 'acme/api', '', 'abc123', $2, $1, $1)",
+      [now, JSON.stringify(["src/a.ts", "src/b.ts"])],
+    );
+    const rows = await db.query(
+      "SELECT id, base_ref, changed_paths FROM security_engagements WHERE id IN ('eng_full', 'eng_diff') ORDER BY id",
+    );
+    expect(rows.rows).toEqual([
+      { id: "eng_diff", base_ref: "abc123", changed_paths: JSON.stringify(["src/a.ts", "src/b.ts"]) },
+      { id: "eng_full", base_ref: null, changed_paths: null },
+    ]);
+    await db.query("DELETE FROM security_engagements WHERE id IN ('eng_full', 'eng_diff')");
+  });
+
+  it("stores the repo-config context columns, defaulting null / has_repo_config false", async () => {
+    const now = Date.now();
+    // A preset-seeded engagement: config columns null, has_repo_config false.
+    await db.query(
+      "INSERT INTO security_engagements (id, session_id, status, repo_full_name, plan, created_at, updated_at) VALUES ('eng_preset', 's_preset', 'planning', 'acme/api', '', $1, $1)",
+      [now],
+    );
+    // A config-seeded engagement: focus text + JSON invariants/categories/
+    // personas/tools + has_repo_config true.
+    const invariants = JSON.stringify(["tenant id is always checked"]);
+    const categories = JSON.stringify(["authz", "multi-tenancy"]);
+    const personas = JSON.stringify({ "threat-model": ".claude/agents/threat-model.md" });
+    const tools = JSON.stringify(["gitleaks"]);
+    await db.query(
+      "INSERT INTO security_engagements (id, session_id, status, repo_full_name, plan, focus, invariants, categories, config_personas, config_tools, has_repo_config, created_at, updated_at) VALUES ('eng_cfg', 's_cfg', 'planning', 'acme/api', '', $2, $3, $4, $5, $6, true, $1, $1)",
+      [now, "Check the auth boundary", invariants, categories, personas, tools],
+    );
+    const rows = await db.query(
+      "SELECT id, focus, invariants, categories, config_personas, config_tools, has_repo_config FROM security_engagements WHERE id IN ('eng_preset', 'eng_cfg') ORDER BY id",
+    );
+    expect(rows.rows).toEqual([
+      {
+        id: "eng_cfg",
+        focus: "Check the auth boundary",
+        invariants,
+        categories,
+        config_personas: personas,
+        config_tools: tools,
+        has_repo_config: true,
+      },
+      {
+        id: "eng_preset",
+        focus: null,
+        invariants: null,
+        categories: null,
+        config_personas: null,
+        config_tools: null,
+        has_repo_config: false,
+      },
+    ]);
+    await db.query("DELETE FROM security_engagements WHERE id IN ('eng_preset', 'eng_cfg')");
+  });
+
+  it("stores the report artifact columns, defaulting null (M-P3)", async () => {
+    const now = Date.now();
+    // A fresh engagement: the report columns are null until the report cell runs.
+    await db.query(
+      "INSERT INTO security_engagements (id, session_id, status, repo_full_name, plan, created_at, updated_at) VALUES ('eng_norep', 's_norep', 'running', 'acme/api', '', $1, $1)",
+      [now],
+    );
+    // An engagement whose report cell ran: markdown + JSON snapshot + generated time.
+    const reportJson = JSON.stringify({ executiveSummary: "one high finding", findings: [] });
+    await db.query(
+      "INSERT INTO security_engagements (id, session_id, status, repo_full_name, plan, report_markdown, report_json, report_generated_at, created_at, updated_at) VALUES ('eng_rep', 's_rep', 'completed', 'acme/api', '', $2, $3, $4, $1, $1)",
+      [now, "# Report\n\nExec summary.", reportJson, now + 5],
+    );
+    // Cast the bigint to text so the assertion does not depend on the driver's
+    // bigint representation (string vs number) — the same reason the other
+    // security_engagements schema tests SELECT only text columns.
+    const rows = await db.query(
+      "SELECT id, report_markdown, report_json, report_generated_at::text AS report_generated_at FROM security_engagements WHERE id IN ('eng_norep', 'eng_rep') ORDER BY id",
+    );
+    expect(rows.rows).toEqual([
+      {
+        id: "eng_norep",
+        report_markdown: null,
+        report_json: null,
+        report_generated_at: null,
+      },
+      {
+        id: "eng_rep",
+        report_markdown: "# Report\n\nExec summary.",
+        report_json: reportJson,
+        report_generated_at: String(now + 5),
+      },
+    ]);
+    await db.query("DELETE FROM security_engagements WHERE id IN ('eng_norep', 'eng_rep')");
+  });
+
+  it("stores declared tools + authorized_scope, defaulting null (M-P4a/M-P4b)", async () => {
+    const now = Date.now();
+    // Structured tool decls (M-P4a) + an authorized scope (M-P4b).
+    const tools = JSON.stringify([
+      { id: "nuclei", install: "apt-get install -y nuclei", egress: ["staging.example.com"] },
+      { id: "zap", mcp: { url: "http://127.0.0.1:8090", prefix: "mcp__zap__" } },
+    ]);
+    const scope = JSON.stringify({ hosts: ["staging.example.com"] });
+    await db.query(
+      "INSERT INTO security_engagements (id, session_id, status, repo_full_name, plan, config_tools, authorized_scope, has_repo_config, created_at, updated_at) VALUES ('eng_live', 's_live', 'planning', 'acme/api', '', $2, $3, true, $1, $1)",
+      [now, tools, scope],
+    );
+    // A non-live engagement: authorized_scope null.
+    await db.query(
+      "INSERT INTO security_engagements (id, session_id, status, repo_full_name, plan, created_at, updated_at) VALUES ('eng_nolive', 's_nolive', 'planning', 'acme/api', '', $1, $1)",
+      [now],
+    );
+    const rows = await db.query(
+      "SELECT id, config_tools, authorized_scope FROM security_engagements WHERE id IN ('eng_live', 'eng_nolive') ORDER BY id",
+    );
+    expect(rows.rows).toEqual([
+      { id: "eng_live", config_tools: tools, authorized_scope: scope },
+      { id: "eng_nolive", config_tools: null, authorized_scope: null },
+    ]);
+    await db.query("DELETE FROM security_engagements WHERE id IN ('eng_live', 'eng_nolive')");
+  });
+
+  it("enforces one issue link per finding per provider", async () => {
+    const now = Date.now();
+    await db.query(
+      "INSERT INTO security_finding_links (id, finding_id, engagement_id, provider, external_id, url, created_by, created_at) VALUES ('sl1', 'fnd1', 'eng1', 'github', '7', 'https://github.com/o/r/issues/7', 'user1', $1)",
+      [now],
+    );
+    await expect(
+      db.query(
+        "INSERT INTO security_finding_links (id, finding_id, engagement_id, provider, external_id, url, created_by, created_at) VALUES ('sl2', 'fnd1', 'eng1', 'github', '8', 'https://github.com/o/r/issues/8', 'user1', $1)",
+        [now],
+      ),
+    ).rejects.toThrow(/security_finding_links_provider_unique|duplicate key/);
+    await db.query("DELETE FROM security_finding_links WHERE engagement_id = 'eng1'");
+  });
+
+  it("records fix-session handoffs with no unique constraint per finding", async () => {
+    const now = Date.now();
+    // Two fix sessions for the same finding — both must persist.
+    await db.query(
+      "INSERT INTO security_handoffs (id, engagement_id, finding_id, child_session_id, title, task, created_by, created_at) VALUES ('hnd1', 'eng1', 'fnd1', 'child1', 'Fix: A', 'do it', 'user1', $1)",
+      [now],
+    );
+    await db.query(
+      "INSERT INTO security_handoffs (id, engagement_id, finding_id, child_session_id, title, task, created_by, created_at) VALUES ('hnd2', 'eng1', 'fnd1', 'child2', 'Fix: A again', NULL, 'user1', $1)",
+      [now + 1],
+    );
+    const rows = await db.query(
+      "SELECT id, child_session_id, task FROM security_handoffs WHERE finding_id = 'fnd1' ORDER BY created_at",
+    );
+    expect(rows.rows).toHaveLength(2);
+    // Nullable task round-trips as null.
+    expect((rows.rows[1] as { task: string | null }).task).toBeNull();
+    await db.query("DELETE FROM security_handoffs WHERE engagement_id = 'eng1'");
+  });
+
+  it("records finding comments with no unique constraint per finding", async () => {
+    const now = Date.now();
+    // Two comments on one finding — a thread; both must persist, oldest first.
+    await db.query(
+      "INSERT INTO security_finding_comments (id, finding_id, engagement_id, body, author_user_id, created_at) VALUES ('cmt1', 'fnd1', 'eng1', 'Intended: the check is in middleware X.', 'user1', $1)",
+      [now],
+    );
+    await db.query(
+      "INSERT INTO security_finding_comments (id, finding_id, engagement_id, body, author_user_id, created_at) VALUES ('cmt2', 'fnd1', 'eng1', 'Confirm this is fixed next scan.', 'user2', $1)",
+      [now + 1],
+    );
+    const rows = await db.query(
+      "SELECT id, body, author_user_id FROM security_finding_comments WHERE finding_id = 'fnd1' ORDER BY created_at",
+    );
+    expect(rows.rows).toHaveLength(2);
+    expect((rows.rows[0] as { id: string }).id).toBe("cmt1");
+    expect((rows.rows[1] as { author_user_id: string }).author_user_id).toBe("user2");
+    await db.query("DELETE FROM security_finding_comments WHERE engagement_id = 'eng1'");
+  });
+
+  it("round-trips coverage rows with no unique constraint per cell", async () => {
+    const now = Date.now();
+    // An assessed row (a check ran) and a not_assessed row (a tool absent) —
+    // both persist; the not_assessed carries a consequence reason.
+    await db.query(
+      "INSERT INTO security_coverage (id, engagement_id, cell_id, area, status, tool, reason, created_at) VALUES ('cov1', 'eng1', 'cell1', 'secrets scan', 'assessed', 'gitleaks', NULL, $1)",
+      [now],
+    );
+    await db.query(
+      "INSERT INTO security_coverage (id, engagement_id, cell_id, area, status, tool, reason, created_at) VALUES ('cov2', 'eng1', 'cell1', 'semgrep owasp', 'not_assessed', 'semgrep', 'OWASP sink rules not scanned because semgrep is missing.', $1)",
+      [now + 1],
+    );
+    const rows = await db.query(
+      "SELECT id, area, status, tool, reason FROM security_coverage WHERE engagement_id = 'eng1' ORDER BY created_at",
+    );
+    expect(rows.rows).toHaveLength(2);
+    expect((rows.rows[0] as { status: string }).status).toBe("assessed");
+    expect((rows.rows[1] as { reason: string }).reason).toContain("semgrep is missing");
+    await db.query("DELETE FROM security_coverage WHERE engagement_id = 'eng1'");
+  });
+
+  it("round-trips needs rows with no unique constraint per cell", async () => {
+    const now = Date.now();
+    // An open credential need (needs a human) and an auto_resolved scope need
+    // (the coordinator ruled it already-authorized, with a resolution note).
+    await db.query(
+      "INSERT INTO security_needs (id, engagement_id, cell_id, kind, description, status, resolution, created_at, resolved_at) VALUES ('need1', 'eng1', 'cell1', 'credential', 'A staging API token to reach the admin route.', 'needs_human', NULL, $1, NULL)",
+      [now],
+    );
+    await db.query(
+      "INSERT INTO security_needs (id, engagement_id, cell_id, kind, description, status, resolution, created_at, resolved_at) VALUES ('need2', 'eng1', 'cell1', 'scope', 'Sweep the payments dir already in scope.', 'auto_resolved', 'Already inside the authorized scope.', $1, $2)",
+      [now + 1, now + 2],
+    );
+    const rows = await db.query(
+      "SELECT id, kind, status, resolution FROM security_needs WHERE engagement_id = 'eng1' ORDER BY created_at",
+    );
+    expect(rows.rows).toHaveLength(2);
+    expect((rows.rows[0] as { status: string }).status).toBe("needs_human");
+    expect((rows.rows[1] as { resolution: string }).resolution).toContain("authorized scope");
+    await db.query("DELETE FROM security_needs WHERE engagement_id = 'eng1'");
+  });
+
+  it("defaults security_needs.status to 'open'", async () => {
+    const now = Date.now();
+    await db.query(
+      "INSERT INTO security_needs (id, engagement_id, cell_id, kind, description, created_at) VALUES ('need3', 'eng1', 'cell1', 'decision', 'Approve a destructive test against staging?', $1)",
+      [now],
+    );
+    const rows = await db.query("SELECT status FROM security_needs WHERE id = 'need3'");
+    expect((rows.rows[0] as { status: string }).status).toBe("open");
+    await db.query("DELETE FROM security_needs WHERE id = 'need3'");
   });
 
   it("tracks the applied migration in __valet_app_migrations", async () => {
@@ -569,6 +872,15 @@ describe("pg app schema + migrations", () => {
       { table: "agent_sessions", column: "sandbox_reclaimed_at" },
       { table: "mcp_oauth_clients", column: "registered_scopes" },
       { table: "mcp_oauth_clients", column: "scopes_supported" },
+      { table: "security_engagements", column: "base_ref" },
+      { table: "security_engagements", column: "changed_paths" },
+      { table: "security_engagements", column: "focus" },
+      { table: "security_engagements", column: "invariants" },
+      { table: "security_engagements", column: "categories" },
+      { table: "security_engagements", column: "config_personas" },
+      { table: "security_engagements", column: "config_tools" },
+      { table: "security_engagements", column: "authorized_scope" },
+      { table: "security_engagements", column: "has_repo_config" },
     ];
 
     async function columnExists(table: string, column: string): Promise<boolean> {

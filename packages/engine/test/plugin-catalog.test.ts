@@ -24,6 +24,8 @@ import {
   type PluginAction,
   type PluginActionContext,
   type PluginActionResult,
+  type PluginStore,
+  type ScopedPluginStore,
   type PolicyDecision,
   type PolicyInvocationRecord,
   type PolicyResolver,
@@ -418,6 +420,90 @@ describe("pluginCatalogTools: call_tool", () => {
     if (!toolEnd || toolEnd.event.type !== "tool_end") throw new Error("no tool_end");
     expect(toolEnd.event.result).toContain("Test issue");
     expect(toolEnd.event.result).toContain("42");
+
+    faux.unregister();
+  });
+
+  it("binds ctx.pluginStore to the action's own plugin and round-trips a doc", async () => {
+    const { plugin, calls } = makeMockPlugin();
+    const tools = pluginCatalogTools({ plugins: [plugin] });
+
+    // Record which plugin name the factory was asked for, and hand back a
+    // trivial in-memory store so the action can round-trip a doc.
+    const factoryCalls: string[] = [];
+    const backing = new Map<string, unknown>();
+    const makeScoped = (): ScopedPluginStore => ({
+      get: async <T,>(collection: string, key: string) => {
+        const doc = backing.get(`${collection}/${key}`);
+        return doc === undefined
+          ? null
+          : { key, doc: doc as T, revision: 1, createdAt: 0, updatedAt: 0 };
+      },
+      put: async <T,>(collection: string, key: string, doc: T) => {
+        backing.set(`${collection}/${key}`, doc);
+        return { key, doc, revision: 1, createdAt: 0, updatedAt: 0 };
+      },
+      list: async () => ({ items: [], nextCursor: null }),
+      delete: async () => false,
+    });
+    const fakeStoreFor = (pluginName: string): PluginStore => {
+      factoryCalls.push(pluginName);
+      const scoped = makeScoped();
+      return {
+        scope: () => scoped,
+        global: () => scoped,
+        org: () => scoped,
+        team: () => scoped,
+        user: () => scoped,
+        session: () => scoped,
+      };
+    };
+
+    const faux = registerFauxProvider({ provider: "call-store" });
+    faux.setResponses([
+      fauxAssistantMessage(
+        [
+          fauxToolCall(
+            "call_tool",
+            {
+              tool_id: "github.get_issue",
+              params: { owner: "o", repo: "r", issueNumber: 7 },
+              summary: "fetch issue 7",
+            },
+            { id: "tc-store" },
+          ),
+        ],
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("ok"),
+    ]);
+
+    const { engine, events, credentials } = makeEngine();
+    await credentials.save({ type: "user", id: "u" }, "github", {
+      type: "oauth2",
+      accessToken: "ghp_secret",
+    });
+    const session = await engine.createSession({
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+      tools,
+      pluginStoreFactory: fakeStoreFor,
+    });
+    const receipt = await session.prompt("get issue");
+    await waitForIdle(events, receipt.threadId);
+
+    expect(calls).toHaveLength(1);
+    // The factory was asked for the action's OWN plugin name.
+    expect(factoryCalls).toEqual(["github"]);
+    const store = calls[0].ctx.pluginStore;
+    expect(store).toBeDefined();
+    // Round-trip a doc through the bound store.
+    await store!.org("o").put("settings", "k", { v: 1 });
+    const got = await store!.org("o").get<{ v: number }>("settings", "k");
+    expect(got?.doc).toEqual({ v: 1 });
 
     faux.unregister();
   });

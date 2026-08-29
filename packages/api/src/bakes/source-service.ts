@@ -293,6 +293,37 @@ async function readGithubFile(
   return Buffer.from(payload.content.replace(/\n/g, ""), "base64").toString("utf8");
 }
 
+/**
+ * Read one repo file's decoded content through the GitHub Contents API. Returns
+ * null when the file is missing (404) OR any fetch/parse/auth failure — the
+ * caller treats a null as "no file", never an error. `ref` defaults to the
+ * repository's default branch (one extra `GET /repos/{owner}/{repo}` to resolve
+ * it). Used by the security create route to read `.valet/security.yml` before
+ * the sandbox exists (dynamic-config M-F1).
+ */
+export async function fetchRepoFile(
+  deps: GitHubTokenDeps,
+  token: string | null,
+  owner: string,
+  repo: string,
+  path: string,
+  ref?: string,
+): Promise<string | null> {
+  let resolvedRef = ref;
+  if (resolvedRef === undefined) {
+    try {
+      const repoInfo = await fetchGithubJson(deps, token, `/repos/${owner}/${repo}`);
+      resolvedRef =
+        isRecord(repoInfo) && typeof repoInfo.default_branch === "string"
+          ? repoInfo.default_branch
+          : "main";
+    } catch {
+      return null;
+    }
+  }
+  return readGithubFile(deps, token, owner, repo, resolvedRef, path);
+}
+
 /** Resolves the recipe for `owner/repo@sha` entirely via the GitHub Contents
  * API (no clone). */
 export async function resolveRecipeFromGitHub(
@@ -357,9 +388,71 @@ export async function repoDockerFlag(
   return value;
 }
 
+/**
+ * Resolves an arbitrary ref (branch, tag, or SHA prefix) to its commit SHA
+ * via `GET /repos/{owner}/{repo}/commits/{ref}`; no ref resolves the default
+ * branch head (`resolveHeadSha`). The security engagement start flow pins
+ * `security_engagements.repo_ref` through this seam.
+ */
+export async function resolveRefSha(
+  deps: GitHubTokenDeps,
+  token: string | null,
+  owner: string,
+  repo: string,
+  ref?: string,
+): Promise<string> {
+  if (ref === undefined || ref === "") {
+    return (await resolveHeadSha(deps, token, owner, repo)).sha;
+  }
+  const commit = await fetchGithubJson(
+    deps,
+    token,
+    `/repos/${owner}/${repo}/commits/${encodeURIComponent(ref)}`,
+  );
+  const sha = isRecord(commit) && typeof commit.sha === "string" ? commit.sha : undefined;
+  if (!sha) throw new Error(`GitHub API returned no sha for ${owner}/${repo}@${ref}`);
+  return sha;
+}
+
+/**
+ * Resolves the changed file paths between two commits via the GitHub compare
+ * API (`GET /repos/{owner}/{repo}/compare/{base}...{head}`). Reads
+ * `files[].filename` from the response. Used by the diff-scoped re-scan flow
+ * (valet-security design §Re-scan / iterate) to scope the sweeps to the delta.
+ *
+ * The caller handles the empty/failure case: an empty `base` returns [] (no
+ * diff possible), and any API error propagates so the start route can fall
+ * back to a full scan. GitHub caps a compare at 300 files — a diff wider than
+ * that returns a truncated list, which the caller treats as "too many changes,
+ * scan everything".
+ */
+export async function resolveChangedFiles(
+  deps: GitHubTokenDeps,
+  token: string | null,
+  owner: string,
+  repo: string,
+  base: string,
+  head: string,
+): Promise<string[]> {
+  if (base === "" || head === "") return [];
+  const payload = await fetchGithubJson(
+    deps,
+    token,
+    `/repos/${owner}/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`,
+  );
+  if (!isRecord(payload) || !Array.isArray(payload.files)) {
+    throw new Error(`GitHub compare returned no files list for ${owner}/${repo} ${base}...${head}`);
+  }
+  const paths: string[] = [];
+  for (const entry of payload.files) {
+    if (isRecord(entry) && typeof entry.filename === "string") paths.push(entry.filename);
+  }
+  return paths;
+}
+
 /** Resolves an `api`-purpose GitHub token for `owner/repo`, falling back to
  * `null` (unauthenticated) when NO credential is configured at all. */
-async function resolveApiTokenOrNull(
+export async function resolveApiTokenOrNull(
   deps: GitHubTokenDeps,
   orgId: string,
   owner: string,

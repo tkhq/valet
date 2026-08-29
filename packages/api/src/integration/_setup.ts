@@ -19,18 +19,28 @@ import {
   type ChildReader,
   type ChildSender,
   type ChildSpawner,
+  type ChildStatusReader,
   type SandboxProvider,
   type ValetPlugin,
 } from "@valet/engine";
+import securityPlugin from "@valet/plugin-security/plugin";
 import { PgSessionStore, PgEventStream } from "@valet/store-postgres";
 import { createDefaultNodeExecutors, LocalRunHost, type OnApprovalGrant, type RunHost } from "@valet/workflow";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost, type EngineHostOpts } from "../engine/host.js";
 import { buildHibernationHooks } from "../engine/hibernation-hooks.js";
-import { buildChildReader, buildChildSender, buildChildSpawner, ChildWatcher } from "../orchestrator/children.js";
+import {
+  buildChildReader,
+  buildChildSender,
+  buildChildSpawner,
+  buildChildStatusReader,
+  ChildWatcher,
+} from "../orchestrator/children.js";
 import { HibernationReaper } from "../engine/hibernation-reaper.js";
 import { SandboxReconcileSweep } from "../engine/sandbox-reconcile-sweep.js";
 import { IdleHibernationSweep } from "../engine/idle-hibernation-sweep.js";
+import { SecurityRunnerDriver } from "../orchestrator/security-runner-driver.js";
+import { submitSessionPrompt } from "../routes/messages.js";
 import { ChannelHost } from "../channels/host.js";
 import { EventDispatcher } from "../events/dispatcher.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
@@ -91,6 +101,14 @@ export interface BootTestApiOpts {
   /** Plugin set for the assembled `Providers.plugins`/`actionPluginByService`
    * — tests never scan node_modules; default `[]`. */
   plugins?: ValetPlugin[];
+  /**
+   * Leaves the bundled security plugin OUT of the assembled set. Default
+   * `false`: the harness seeds `securityPlugin` to mirror real boot, so
+   * `isPluginLoaded("security")` is true. A test proving the
+   * instance-disabled create gate (plugin-entitlements design) sets this to
+   * `true`.
+   */
+  omitSecurityPlugin?: boolean;
   /**
    * Boots with a real better-auth instance instead of stub-only mode: sets
    * `BETTER_AUTH_SECRET=test-secret` and unsets `VALET_LOCAL_AUTH` (both
@@ -275,7 +293,18 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   const port = await getFreePort();
   const apiBaseUrl = `http://127.0.0.1:${port}`;
 
-  const { plugins, actionPluginByService } = assemblePlugins([[...(opts.plugins ?? [])]]);
+  // The security plugin is a bundled plugin: at real boot it is always in the
+  // assembled set (registry.gen.ts), so `EngineHost.isPluginLoaded("security")`
+  // is true and the plugin-entitlement create gate lets a security session
+  // through. The integration harness otherwise boots with only `opts.plugins`,
+  // which would leave security instance-disabled and 403 every security test.
+  // Include it by default to mirror production; a test proving the
+  // instance-disabled path opts out with `omitSecurityPlugin`.
+  const seededPlugins: ValetPlugin[] = [...(opts.plugins ?? [])];
+  if (!opts.omitSecurityPlugin && !seededPlugins.some((p) => p.name === securityPlugin.name)) {
+    seededPlugins.push(securityPlugin);
+  }
+  const { plugins, actionPluginByService } = assemblePlugins([seededPlugins]);
 
   // Same circular-construction indirection as providers/node.ts — see its
   // comment. Test callers that want to unit-test the spawner/watcher/reader
@@ -285,6 +314,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   let spawnerRef: ChildSpawner | undefined;
   let readerRef: ChildReader | undefined;
   let senderRef: ChildSender | undefined;
+  let statusRef: ChildStatusReader | undefined;
   // Default hibernation hooks are the SAME db-backed implementation real
   // boot uses (`providers/node.ts`) — matches production behavior for tests
   // that don't need to observe the hooks directly. `opts.on*` overrides
@@ -321,6 +351,10 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
       if (!senderRef) throw new Error("childSender invoked before provider wiring completed");
       return senderRef(req, ctx);
     },
+    childStatusReader: (req, ctx) => {
+      if (!statusRef) throw new Error("childStatusReader invoked before provider wiring completed");
+      return statusRef(req, ctx);
+    },
   });
   // Prebuilds are out of scope for the integration harness (no real
   // docker/kubernetes builder wired here unless a test injects one); routes
@@ -350,6 +384,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   spawnerRef = buildChildSpawner(childrenDeps, childWatcher);
   readerRef = buildChildReader(childrenDeps);
   senderRef = buildChildSender(childrenDeps, childWatcher);
+  statusRef = buildChildStatusReader(childrenDeps);
 
   // retentionMs 0 disables the sweep; behavior is tested in engine/hibernation-reaper.test.ts.
   const hibernationReaper = new HibernationReaper({ db, engineHost, engineStore, retentionMs: 0 });
@@ -368,6 +403,15 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // idleMs 0 disables the sweep; behavior is tested in
   // engine/idle-hibernation-sweep.test.ts.
   const idleHibernationSweep = new IdleHibernationSweep({ db, engineHost, engineStore, idleMs: 0 });
+
+  // sweepIntervalMs 0 disables the sweep; behavior is tested in
+  // orchestrator/security-runner-driver.test.ts.
+  const securityRunnerDriver = new SecurityRunnerDriver({
+    db,
+    engineStore,
+    submit: (row, text) => submitSessionPrompt({ db, engineHost }, row, text),
+    sweepIntervalMs: 0,
+  });
 
   const channelHost = new ChannelHost({
     db,
@@ -490,10 +534,15 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     engineCredentials,
     engineHost,
     childWatcher,
+    childSpawner: (req, ctx) => {
+      if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
+      return spawnerRef(req, ctx);
+    },
     hibernationReaper,
     workflowSandboxReclaimer,
     sandboxReconcileSweep,
     idleHibernationSweep,
+    securityRunnerDriver,
     channelHost,
     workflowStore,
     workflowRunHost,
