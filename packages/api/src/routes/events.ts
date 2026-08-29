@@ -15,13 +15,13 @@
 import { Hono } from "hono";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, exists, gte, or, sql, type SQL } from "drizzle-orm";
-import type { EventCatalogEntry, ValetPlugin } from "@valet/engine";
+import type { EventCatalogEntry, FilterOption, FilterOptionResolver, ValetPlugin } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, eventDropLog, events, eventSubscriptions } from "../schema/index.js";
 import { readOwnerFilter } from "./_owner-filter.js";
 import { catalogForService } from "../events/ingest.js";
-import { subscriptionMatchesEvent } from "../events/match.js";
+import { subscriptionMatchesEvent, validateRegexPattern } from "../events/match.js";
 import { ownedDefinitionRow } from "../workflows/service.js";
 import { isTeamMember } from "../services/teams.js";
 import type {
@@ -31,6 +31,7 @@ import type {
   EventSubscriptionTargetWire,
   EventSubscriptionWire,
   EventSummaryWire,
+  FilterOptionsResponse,
   GetEventCatalogResponse,
   GetEventResponse,
   ListEventDropsResponse,
@@ -63,7 +64,7 @@ async function canMutateSubscription(
   return row.ownerId === userId;
 }
 
-const FILTER_OPS = ["eq", "in", "prefix", "contains"] as const;
+const FILTER_OPS = ["eq", "in", "prefix", "contains", "regex"] as const;
 // `signal` (wake parked workflow runs) is deliberately NOT accepted yet:
 // no workflow node parks on the `event:{key}` signal shape the dispatcher
 // would emit, so a signal-target subscription would validate and then
@@ -153,9 +154,15 @@ export function validateSubscription(
         return `filter value invalid for op in on field ${f.field}`;
       }
     } else {
-      // eq / prefix / contains — value must be a non-empty string
+      // eq / prefix / contains / regex — value must be a non-empty string
       if (typeof f.value !== "string" || f.value.length === 0) {
         return `filter value invalid for op ${f.op} on field ${f.field}`;
+      }
+      // A regex runs on every event, so refuse an invalid, oversized, or
+      // catastrophic-backtracking pattern at write time (see match.ts).
+      if (f.op === "regex") {
+        const regexError = validateRegexPattern(f.value);
+        if (regexError) return regexError;
       }
     }
     if (!selectedEntries.some((e) => e.filters.some((cf) => cf.field === f.field))) {
@@ -233,6 +240,95 @@ eventsRouter.get("/events/catalog", (c) => {
   const resp: GetEventCatalogResponse = {
     services: services.map((service) => ({ service, entries: catalogForService(plugins, service) })),
   };
+  return c.json(resp);
+});
+
+// ── Filter options ────────────────────────────────────────────────────────
+
+/** The plugin (its `name` is the credential service) and resolver for a source. */
+function resolverForSource(
+  plugins: ValetPlugin[],
+  source: string,
+): { plugin: ValetPlugin; resolver: FilterOptionResolver } | null {
+  for (const plugin of plugins) {
+    const resolver = plugin.filterOptionResolvers?.[source];
+    if (resolver) return { plugin, resolver };
+  }
+  return null;
+}
+
+/** The `dependsOn` a catalog field declares for this source (`["repo"]`), or empty. */
+function dependsOnForSource(plugins: ValetPlugin[], source: string): string[] {
+  for (const entry of allCatalogEntries(plugins)) {
+    for (const field of entry.filters) {
+      if (field.options?.source === source) return field.options.dependsOn ?? [];
+    }
+  }
+  return [];
+}
+
+/** Per-(org, source, deps, q) memo so a keystroke does not re-hit the provider. */
+const FILTER_OPTIONS_TTL_MS = 60_000;
+const FILTER_OPTIONS_CACHE_CAP = 500;
+const filterOptionsCache = new Map<string, { options: FilterOption[]; expiresAt: number }>();
+
+/**
+ * Lists the options for one filter field's source, so a rule filters on a
+ * looked-up name, not a raw id. Dispatches to the owning plugin's resolver,
+ * scoped by the org's credential for that plugin's service, and memoized with a
+ * short TTL. An unknown source, an unconnected integration, or a provider error
+ * returns `{ options: [], reason }` (200) — never an error status — so the
+ * picker degrades to free text instead of breaking the form.
+ */
+eventsRouter.get("/events/filter-options", async (c) => {
+  const user = c.var.user;
+  const { plugins, engineCredentials } = c.var.providers;
+  const source = c.req.query("source");
+  if (!source) return c.json({ error: "source query parameter is required" }, 400);
+
+  const found = resolverForSource(plugins, source);
+  if (!found) {
+    const resp: FilterOptionsResponse = { options: [], reason: `unknown option source: ${source}` };
+    return c.json(resp);
+  }
+
+  const deps: Record<string, string> = {};
+  for (const dep of dependsOnForSource(plugins, source)) {
+    const value = c.req.query(dep);
+    if (value) deps[dep] = value;
+  }
+  const q = c.req.query("q") || undefined;
+
+  const cacheKey = `${user.orgId}:${source}:${JSON.stringify(deps)}:${q ?? ""}`;
+  const cached = filterOptionsCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return c.json({ options: cached.options } satisfies FilterOptionsResponse);
+  }
+
+  // The plugin name is its credential service (slack/github/linear).
+  const credential = (await engineCredentials.get({ type: "org", id: user.orgId }, found.plugin.name)) ?? null;
+
+  let options: FilterOption[] = [];
+  let reason: string | undefined;
+  try {
+    options = await found.resolver({ orgId: user.orgId, q, deps, credential });
+  } catch (err) {
+    console.error(`[events] filter-options resolver ${source} failed`, err);
+    reason = "The provider could not list options right now. Type the value instead.";
+  }
+  if (options.length === 0 && reason === undefined && credential === null) {
+    reason = "Connect the integration in Settings to choose from a list. Type the value instead.";
+  }
+
+  // Evict the oldest single entry (Map preserves insertion order), not the
+  // whole cache — one org's typeahead must not flush every other org's.
+  if (filterOptionsCache.size >= FILTER_OPTIONS_CACHE_CAP) {
+    const oldest = filterOptionsCache.keys().next().value;
+    if (oldest !== undefined) filterOptionsCache.delete(oldest);
+  }
+  filterOptionsCache.set(cacheKey, { options, expiresAt: Date.now() + FILTER_OPTIONS_TTL_MS });
+
+  const resp: FilterOptionsResponse = reason === undefined ? { options } : { options, reason };
   return c.json(resp);
 });
 

@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import githubPlugin from "@valet/plugin-github/plugin";
 import linearPlugin from "@valet/plugin-linear/plugin";
+import type { ValetPlugin } from "@valet/engine";
 import type { RunHost } from "@valet/workflow";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import {
@@ -195,6 +196,20 @@ describe("POST /api/event-subscriptions", () => {
     expect(rows[0].eventKeys).toEqual(["github.pull_request.opened"]);
   });
 
+  it("round-trips a filter's display label; matching ignores it", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, {
+      ...VALID_BODY,
+      filters: [{ field: "repo", op: "eq", value: "acme/widgets", label: "Widgets repo" }],
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateEventSubscriptionResponse;
+    expect(body.filters).toEqual([{ field: "repo", op: "eq", value: "acme/widgets", label: "Widgets repo" }]);
+    // The label is persisted verbatim in the jsonb, not stripped by the writer.
+    const rows = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, body.id));
+    expect(rows[0].filters).toEqual([{ field: "repo", op: "eq", value: "acme/widgets", label: "Widgets repo" }]);
+  });
+
   it("orchestrator target with orchestrator=org writes an org-owned row", async () => {
     const a = await boot();
     const res = await postSubscription(a.baseUrl, {
@@ -340,11 +355,22 @@ describe("POST /api/event-subscriptions", () => {
     const a = await boot();
     const res = await postSubscription(a.baseUrl, {
       ...VALID_BODY,
-      filters: [{ field: "repo", op: "regex", value: "x" }],
+      filters: [{ field: "repo", op: "matches", value: "x" }],
     });
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("regex");
+    expect(body.error).toContain("matches");
+  });
+
+  it("400s a catastrophic-backtracking regex pattern, with a fix hint", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, {
+      ...VALID_BODY,
+      filters: [{ field: "repo", op: "regex", value: "(a+)+" }],
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("nests");
   });
 
   it("400s a filter with missing/empty value for op eq, naming the field", async () => {
@@ -1255,5 +1281,96 @@ describe("event subscriptions — team ownership", () => {
       .from(eventSubscriptions)
       .where(eq(eventSubscriptions.id, created.id));
     expect(rows[0]?.enabled).toBe(true);
+  });
+});
+
+describe("GET /api/events/filter-options", () => {
+  // A plugin with two option sources: a plain one and one that dependsOn the
+  // first, so the endpoint's dispatch, query passthrough, and dependsOn gating
+  // are exercised without hitting a real provider.
+  const fixturePlugin: ValetPlugin = {
+    name: "fixture",
+    version: "0",
+    triggers: [
+      {
+        id: "fixture.thing",
+        service: "fixture",
+        description: "",
+        verify: () => null,
+        toEvent: (e) => ({
+          key: "fixture.thing",
+          dedupeKey: "d",
+          occurredAt: new Date(0).toISOString(),
+          refs: {},
+          summary: "",
+          payload: e.payload,
+        }),
+        catalog: [
+          {
+            key: "fixture.thing",
+            description: "",
+            filters: [
+              { field: "repo", path: "repo", description: "", options: { source: "fixture.repos" } },
+              { field: "branch", path: "branch", description: "", options: { source: "fixture.branches", dependsOn: ["repo"] } },
+            ],
+          },
+        ],
+      },
+    ],
+    filterOptionResolvers: {
+      "fixture.repos": async (ctx) =>
+        [
+          { id: "acme/app", label: "acme/app" },
+          { id: "acme/web", label: "acme/web" },
+        ].filter((o) => !ctx.q || o.label.includes(ctx.q)),
+      "fixture.branches": async (ctx) => (ctx.deps.repo ? [{ id: "main", label: "main" }] : []),
+    },
+  };
+
+  async function bootFixture(): Promise<TestApi> {
+    api = await bootTestApi({ plugins: [fixturePlugin] });
+    return api;
+  }
+
+  it("lists a source's options and filters by q", async () => {
+    const a = await bootFixture();
+    const all = (await (await fetch(`${a.baseUrl}/api/events/filter-options?source=fixture.repos`)).json()) as {
+      options: { id: string; label: string }[];
+    };
+    expect(all.options).toEqual([
+      { id: "acme/app", label: "acme/app" },
+      { id: "acme/web", label: "acme/web" },
+    ]);
+    const filtered = (await (await fetch(`${a.baseUrl}/api/events/filter-options?source=fixture.repos&q=web`)).json()) as {
+      options: { id: string }[];
+    };
+    expect(filtered.options).toEqual([{ id: "acme/web", label: "acme/web" }]);
+  });
+
+  it("passes a dependsOn value through; empty without it", async () => {
+    const a = await bootFixture();
+    const without = (await (await fetch(`${a.baseUrl}/api/events/filter-options?source=fixture.branches`)).json()) as {
+      options: unknown[];
+    };
+    expect(without.options).toEqual([]);
+    const withRepo = (await (
+      await fetch(`${a.baseUrl}/api/events/filter-options?source=fixture.branches&repo=acme/app`)
+    ).json()) as { options: { id: string }[] };
+    expect(withRepo.options).toEqual([{ id: "main", label: "main" }]);
+  });
+
+  it("unknown source returns an empty list and a reason, not an error", async () => {
+    const a = await bootFixture();
+    const res = await fetch(`${a.baseUrl}/api/events/filter-options?source=nope`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { options: unknown[]; reason?: string };
+    expect(body.options).toEqual([]);
+    expect(body.reason).toContain("unknown option source");
+  });
+
+  it("400s when source is missing", async () => {
+    const a = await bootFixture();
+    const res = await fetch(`${a.baseUrl}/api/events/filter-options`);
+    expect(res.status).toBe(400);
   });
 });

@@ -13,6 +13,7 @@ import {
 import type {
   CreateEventSubscriptionRequest,
   CreateEventSubscriptionResponse,
+  FilterOptionsResponse,
   GetEventCatalogResponse,
   GetEventResponse,
   ListEventDropsResponse,
@@ -39,8 +40,17 @@ function ownerKey(owner: OwnerFilter | undefined, held: boolean): readonly strin
   return held ? [UNRESOLVED_OWNER] : [];
 }
 
+/** Stable key for a filter-options lookup. `deps` is stringified so its key
+ * order does not split the cache; `q` is a trailing element so an empty query
+ * shares a prefix with a typed one. */
+function filterOptionsKey(source: string, q: string, deps: Record<string, string>): readonly string[] {
+  return ["events", "filter-options", source, JSON.stringify(deps), q] as const;
+}
+
 export const qkEvents = {
   catalog: () => ["events", "catalog"] as const,
+  filterOptions: (source: string, q: string, deps: Record<string, string>) =>
+    filterOptionsKey(source, q, deps),
   feed: (service?: string, key?: string, owner?: OwnerFilter, held = false) =>
     ["events", "feed", service ?? "", key ?? "", ...ownerKey(owner, held)] as const,
   detail: (id: string) => ["events", "detail", id] as const,
@@ -55,6 +65,27 @@ export function useEventCatalog(opts?: Partial<UseQueryOptions<GetEventCatalogRe
     queryFn: () => api.getEventCatalog(),
     // The catalog only changes on a plugin registry change (a deploy).
     staleTime: 5 * 60_000,
+    ...opts,
+  });
+}
+
+/**
+ * Provider-populated choices for one filter field's `source` (a Slack user, a
+ * repo). `q` narrows the list; `deps` names each dependsOn field's value. The
+ * server returns `{ options: [], reason }` for an unknown source, an
+ * unconnected integration, or a provider error, so the caller falls back to
+ * free text. Pass `enabled: false` until every dependsOn value is present.
+ */
+export function useFilterOptions(
+  { source, q = "", deps = {} }: { source: string; q?: string; deps?: Record<string, string> },
+  opts?: Partial<UseQueryOptions<FilterOptionsResponse>>,
+) {
+  return useQuery<FilterOptionsResponse>({
+    queryKey: qkEvents.filterOptions(source, q, deps),
+    queryFn: () => api.getFilterOptions({ source, q, deps }),
+    // The provider list is stable across keystrokes within a short window; a
+    // fresh lookup only matters when the query or a dep changes (a new key).
+    staleTime: 30_000,
     ...opts,
   });
 }

@@ -3067,7 +3067,13 @@ export interface GetPrebuildForRepoResponse {
 export interface EventCatalogEntryWire {
   key: string;
   description: string;
-  filters: { field: string; path: string; description: string }[];
+  filters: {
+    field: string;
+    path: string;
+    description: string;
+    /** When set, the value is chosen from a provider-populated list (see `GET /api/events/filter-options`). */
+    options?: { source: string; dependsOn?: string[] };
+  }[];
 }
 
 export interface GetEventCatalogResponse {
@@ -3077,8 +3083,32 @@ export interface GetEventCatalogResponse {
 /** Mirrors `events/match.ts`'s `SubscriptionFilter`. */
 export interface EventSubscriptionFilterWire {
   field: string;
-  op: "eq" | "in" | "prefix" | "contains";
+  op: "eq" | "in" | "prefix" | "contains" | "regex";
   value: string | string[];
+  /**
+   * Optional display label for the value — a resolved name for a raw id (a
+   * Slack user id shown as "Alice"). The editor renders it; matching ignores
+   * it. Persisted verbatim in the `filters` jsonb.
+   */
+  label?: string;
+}
+
+/** One provider-populated choice for a filter value (a Slack user, a repo). */
+export interface FilterOptionWire {
+  id: string;
+  label: string;
+  hint?: string;
+}
+
+/**
+ * Response of `GET /api/events/filter-options`. `reason` is set (with an empty
+ * `options`) when the source cannot resolve now — unknown source, an
+ * unconnected integration, or a provider error — so the picker can explain the
+ * empty list and fall back to free text.
+ */
+export interface FilterOptionsResponse {
+  options: FilterOptionWire[];
+  reason?: string;
 }
 
 // `{ kind: "signal" }` (wake parked workflow runs) is intentionally absent:

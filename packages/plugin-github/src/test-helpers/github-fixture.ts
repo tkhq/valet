@@ -77,6 +77,9 @@ export interface GithubFixtureHandlers {
   /** `GET /installation/repositories` — same auth-header view; the real API
    * rejects user tokens on this endpoint. */
   listInstallationRepos?: (authHeader: string | undefined) => GithubFixtureResponse;
+  /** `GET /repos/:owner/:repo/branches` — receives the parsed query so a
+   * fixture can assert `per_page`/`page`. */
+  listBranches?: (owner: string, repo: string, query: Record<string, string>) => GithubFixtureResponse;
 }
 
 export interface GithubFixture {
@@ -131,6 +134,7 @@ const DEFAULTS: Required<GithubFixtureHandlers> = {
   listInstallationRepos: () => ({
     body: { total_count: 1, repositories: [{ full_name: "fixture-org/repo" }] },
   }),
+  listBranches: () => ({ body: [{ name: "main" }] }),
 };
 
 function listenPort(server: ServerType): number {
@@ -288,6 +292,14 @@ export function startGithubFixture(handlerOverrides: GithubFixtureHandlers = {})
     record(c, {});
     const auth = c.req.header("authorization") ?? undefined;
     const { status, body } = handlers.listInstallationRepos(auth);
+    return c.json(body as object, status ?? 200);
+  });
+
+  app.get("/repos/:owner/:repo/branches", (c) => {
+    const owner = c.req.param("owner");
+    const repo = c.req.param("repo");
+    record(c, { owner, repo });
+    const { status, body } = handlers.listBranches(owner, repo, c.req.query());
     return c.json(body as object, status ?? 200);
   });
 

@@ -1,4 +1,5 @@
 import type {
+  ChannelOrigin,
   MessageEntry,
   PromptAuthor,
   QueueItem,
@@ -73,6 +74,9 @@ export function renderSignalEnvelope(
   const attrs: Record<string, string> = { ...(signal.attributes ?? {}) };
   if (signal.senderSessionId !== undefined) attrs.sender_session = signal.senderSessionId;
   if (signal.hopCount !== undefined) attrs.hop = String(signal.hopCount);
+  // The thread key already carries the channel type as its prefix
+  // (`slack:C1:1.2`), so it reads as a compact origin for the model.
+  if (signal.origin !== undefined) attrs.origin = signal.origin.threadKey;
 
   const rest = Object.keys(attrs)
     .sort()
@@ -299,4 +303,21 @@ export function resolvePartialSubmissionText(entries: SessionEntry[], queueItemI
     }
   }
   return text;
+}
+
+/**
+ * PURE — returns the `ChannelOrigin` of the user signal entry that started the
+ * submission `queueItemId`, or `undefined` when the submission did not come
+ * from a channel. The outbound bridge uses this to route a reply back to the
+ * origin conversation even when the submission landed on the shared "events"
+ * thread (whose thread key does not itself decode to a channel).
+ */
+export function originFromEntries(entries: SessionEntry[], queueItemId: string): ChannelOrigin | undefined {
+  let origin: ChannelOrigin | undefined;
+  for (const e of entries) {
+    if (e.type === "message" && e.role === "user" && e.queueItemId === queueItemId && e.signal?.origin) {
+      origin = e.signal.origin;
+    }
+  }
+  return origin;
 }

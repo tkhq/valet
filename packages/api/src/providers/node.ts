@@ -57,6 +57,7 @@ import { resolveOrgId } from "../lib/org.js";
 import { ChannelHost, publicUrlFromEnv } from "../channels/host.js";
 import { EventDispatcher } from "../events/dispatcher.js";
 import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
+import { channelOriginResolver } from "../events/channel-origin.js";
 import { FsBlobStore } from "./blob-fs.js";
 import { pgliteWasmOptions } from "../assets/base.js";
 import {
@@ -685,6 +686,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     workflowRunHost,
     workflowStore,
     deliverToOrchestrator,
+    resolveChannelOrigin: channelOriginResolver(channelHost),
   });
 
   // Skill-repository sync (agent-skills design). `readerFor` gives each

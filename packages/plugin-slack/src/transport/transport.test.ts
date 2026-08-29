@@ -117,6 +117,33 @@ describe("conversation key codec", () => {
   });
 });
 
+describe("threadKeyFromEvent", () => {
+  it("builds a thread key from an app_mention payload", () => {
+    const transport = makeTransport();
+    const payload = { type: "app_mention", channel: CHANNEL, user: "U1", text: "<@UBOT> hi", ts: "1700000000.000100" };
+    expect(transport.threadKeyFromEvent("slack.app_mention", payload)).toBe(`slack:${CHANNEL}:1700000000.000100`);
+  });
+
+  it("anchors to thread_ts when the mention is inside a thread", () => {
+    const transport = makeTransport();
+    const payload = { type: "app_mention", channel: CHANNEL, ts: "1700000000.000200", thread_ts: "1700000000.000100" };
+    expect(transport.threadKeyFromEvent("slack.app_mention", payload)).toBe(`slack:${CHANNEL}:1700000000.000100`);
+  });
+
+  it("builds a thread key from a channel message payload", () => {
+    const transport = makeTransport();
+    const payload = { type: "message", channel: CHANNEL, ts: "1700000000.000300" };
+    expect(transport.threadKeyFromEvent("slack.message", payload)).toBe(`slack:${CHANNEL}:1700000000.000300`);
+  });
+
+  it("returns null for an event with no conversation to reply into", () => {
+    const transport = makeTransport();
+    expect(transport.threadKeyFromEvent("slack.team_join", { type: "team_join", user: { id: "U9" } })).toBeNull();
+    // Missing channel is not routable.
+    expect(transport.threadKeyFromEvent("slack.app_mention", { type: "app_mention" })).toBeNull();
+  });
+});
+
 describe("parseUpdate — the agent surface events", () => {
   it("routes a direct message and anchors the turn to the user's own message", () => {
     const transport = makeTransport();

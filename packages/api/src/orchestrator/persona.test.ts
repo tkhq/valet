@@ -32,6 +32,22 @@ describe("orchestratorPersona", () => {
     }
   });
 
+  it("names the team when a display name is given, never the raw id", () => {
+    const persona = flat(orchestratorPersona({ type: "team", id: "team_c7268244" }, "Platform"));
+    expect(persona).toContain("Platform");
+    expect(persona).not.toContain("team_c7268244");
+  });
+
+  it("falls back to a neutral phrase without a name, still never the raw id", () => {
+    const persona = flat(orchestratorPersona({ type: "team", id: "team_c7268244" }));
+    expect(persona).not.toContain("team_c7268244");
+  });
+
+  it("tells the model a channel answer is delivered back automatically", () => {
+    const persona = flat(orchestratorPersona({ type: "team", id: "t1" }, "Platform"));
+    expect(persona).toContain("delivered back to that same channel");
+  });
+
   it("tells the model to check list_tools before denying a capability", () => {
     const persona = flat(orchestratorPersona({ type: "user", id: "u1" }));
     expect(persona).toContain("call list_tools");

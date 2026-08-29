@@ -23,6 +23,13 @@ import { ensureDefaultAssistantSession } from "../assistants/service.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import type { OrchestratorDeliverFn } from "./dispatcher.js";
 
+/**
+ * The thread every event delivery lands on — the owner's default assistant
+ * "events" firehose. Named so the outbound reply path can recognise it without
+ * a magic string (`ChannelHost.deliverAssistantMessage`).
+ */
+export const EVENTS_THREAD_KEY = "events";
+
 export function buildOrchestratorTarget(deps: { db: AppDb; engineHost: EngineHost }): OrchestratorDeliverFn {
   return async ({ orgId, ownerType, ownerId, actorUserId, signal, dispatchId }) => {
     // A subscription names an OWNER, never one assistant of that owner, so
@@ -43,6 +50,6 @@ export function buildOrchestratorTarget(deps: { db: AppDb; engineHost: EngineHos
       });
       throw new Error(`event delivery refused: assistant org mismatch (${data.orgId} != ${orgId})`);
     }
-    await session.thread("events").submitPrompt(signal, { dispatchId });
+    await session.thread(EVENTS_THREAD_KEY).submitPrompt(signal, { dispatchId });
   };
 }

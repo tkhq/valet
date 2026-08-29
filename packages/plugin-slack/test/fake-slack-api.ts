@@ -11,6 +11,8 @@ export interface FakeSlackApi {
   addFile(name: string, bytes: Uint8Array): void;
   /** Workspace members returned by users.list. */
   setMembers(members: Array<Record<string, unknown>>): void;
+  /** Channels returned by conversations.list. */
+  setChannels(channels: Array<Record<string, unknown>>): void;
   /** files.info registry: fileId → file object. */
   setFileInfo(fileId: string, file: Record<string, unknown>): void;
   /** Make the next call to `method` return `{ ok: false, error }` once. */
@@ -43,6 +45,7 @@ export async function startFakeSlackApi(): Promise<FakeSlackApi> {
   const pendingFailures = new Map<string, string>();
   const streams = new Map<string, FakeStream>();
   let members: Array<Record<string, unknown>> = [];
+  let channels: Array<Record<string, unknown>> = [];
   let nextTs = 1;
 
   const app = new Hono();
@@ -142,6 +145,8 @@ export async function startFakeSlackApi(): Promise<FakeSlackApi> {
         return c.json({ ok: true, team_id: "T1", user_id: "UBOT", bot_id: "B1" });
       case "users.list":
         return c.json({ ok: true, members, response_metadata: { next_cursor: "" } });
+      case "conversations.list":
+        return c.json({ ok: true, channels, response_metadata: { next_cursor: "" } });
       case "users.lookupByEmail": {
         const member = members.find((m) => {
           const profile = m.profile as Record<string, unknown> | undefined;
@@ -170,6 +175,9 @@ export async function startFakeSlackApi(): Promise<FakeSlackApi> {
     addFile: (name, bytes) => files.set(name, bytes),
     setMembers: (m) => {
       members = m;
+    },
+    setChannels: (ch) => {
+      channels = ch;
     },
     setFileInfo: (fileId, file) => fileInfos.set(fileId, file),
     failNext: (method, error = "simulated_failure") => pendingFailures.set(method, error),

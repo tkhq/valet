@@ -130,7 +130,14 @@ const EVENT_ACTIONS: Record<string, string[]> = {
 };
 
 const COMMON_FILTERS: EventCatalogEntry["filters"] = [
-  { field: "repo", path: "repository.full_name", description: "Repository (owner/name)" },
+  {
+    field: "repo",
+    path: "repository.full_name",
+    description: "Repository (owner/name)",
+    // The picker fills this field from the `github.repos` resolver: the
+    // installation's visible repositories, keyed by `owner/name`.
+    options: { source: "github.repos" },
+  },
   { field: "sender", path: "sender.login", description: "GitHub login of the actor" },
 ];
 
@@ -156,6 +163,27 @@ const COMMENT_BODY_FILTER = {
  * useful but undeclared makes the subscription silently match nothing.
  */
 const EXTRA_FILTERS: Record<string, EventCatalogEntry["filters"]> = {
+  // The pull_request payload carries BARE branch names at `pull_request.base.ref`
+  // and `pull_request.head.ref` ("main", "feature-x") — not a full ref like the
+  // push payload's `refs/heads/main`. The `github.branches` resolver returns bare
+  // branch names, so the picker's value matches the payload scalar directly. Both
+  // fields depend on the `repo` filter (declared in COMMON_FILTERS) so the picker
+  // populates once a repo is chosen.
+  pull_request: [
+    PR_NUMBER_FILTER,
+    {
+      field: "base_branch",
+      path: "pull_request.base.ref",
+      description: "Base branch of the pull request (the branch it merges into).",
+      options: { source: "github.branches", dependsOn: ["repo"] },
+    },
+    {
+      field: "head_branch",
+      path: "pull_request.head.ref",
+      description: "Head branch of the pull request (the branch with the changes).",
+      options: { source: "github.branches", dependsOn: ["repo"] },
+    },
+  ],
   pull_request_review: [
     PR_NUMBER_FILTER,
     {
