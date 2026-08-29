@@ -7,6 +7,7 @@ import type {
 } from "@valet/api/wire";
 import { Button } from "~/components/primitives";
 import { ReviewCostLine } from "./cost-chip";
+import { RescanBreakdown } from "./findings-review";
 import { RescanDiffBanner } from "./rescan-diff";
 import { SEVERITY_ORDER, SeverityBar } from "./severity";
 
@@ -22,7 +23,7 @@ import { SEVERITY_ORDER, SeverityBar } from "./severity";
 
 export interface ManifestSummary {
   distinctBySeverity: Record<SecurityFindingSeverity, number>;
-  statusBreakdown: { open: number; verified: number; refuted: number };
+  statusBreakdown: { open: number; verified: number; refuted: number; fixed: number };
   /** Findings with at least one filed issue link. */
   issuesFiled: number;
   /** Findings a human (status_actor `user:*`) verified or refuted. */
@@ -38,7 +39,7 @@ export function summarizeManifest(
   findings: SecurityFindingWire[],
 ): ManifestSummary {
   const byFingerprint = new Map<string, SecurityFindingSeverity>();
-  const statusBreakdown = { open: 0, verified: 0, refuted: 0 };
+  const statusBreakdown = { open: 0, verified: 0, refuted: 0, fixed: 0 };
   let issuesFiled = 0;
   let humanReviewed = 0;
   for (const f of findings) {
@@ -129,6 +130,9 @@ export function ManifestCard({
           className="mt-2"
         />
       )}
+      {/* Re-scan / iterate: the new/recurring/fixed/dismissed tally, above the
+          severity bar. Terminal here, so `fixedCount` is a number. */}
+      {diff && <RescanBreakdown diff={diff} />}
       {findings.length > 0 ? (
         <SeverityBar counts={summary.distinctBySeverity} className="mt-2.5" />
       ) : (
@@ -136,8 +140,9 @@ export function ManifestCard({
       )}
       <div className="mt-1.5 text-[11px] text-muted">
         {summary.statusBreakdown.open} open · {summary.statusBreakdown.verified} verified ·{" "}
-        {summary.statusBreakdown.refuted} refuted · {summary.issuesFiled} filed as issues ·{" "}
-        {summary.humanReviewed} human-reviewed
+        {summary.statusBreakdown.refuted} refuted ·{" "}
+        {summary.statusBreakdown.fixed > 0 && <>{summary.statusBreakdown.fixed} fixed · </>}
+        {summary.issuesFiled} filed as issues · {summary.humanReviewed} human-reviewed
       </div>
       <ReviewCostLine cost={cost} />
     </section>

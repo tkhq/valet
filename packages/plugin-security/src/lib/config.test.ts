@@ -249,6 +249,7 @@ describe("BUNDLED_PERSONAS", () => {
       "dast",
       "fuzz",
       "exploit",
+      "reconcile",
     ]);
     expect(bundledPersonaIds()).toEqual(ids);
 

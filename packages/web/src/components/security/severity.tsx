@@ -1,3 +1,4 @@
+import { Check } from "lucide-react";
 import type { SecurityFindingSeverity, SecurityFindingStatus } from "@valet/api/wire";
 import { cn } from "~/lib/cn";
 
@@ -104,6 +105,12 @@ const STATUS_CLASS: Record<SecurityFindingStatus, string> = {
   open: "bg-neutral-100 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300",
   verified: "bg-success-wash text-success-600 dark:text-success-500",
   refuted: "bg-neutral-100 text-muted line-through dark:bg-neutral-800",
+  // Re-scan v2: a carried finding the reconcile pass confirmed is resolved.
+  // Calm-positive, not an error — it reads differently from `verified` (a
+  // still-open, human-confirmed issue) with a leading check mark. `verified`
+  // fills the pill; `fixed` outlines it so the two never blur together.
+  fixed:
+    "bg-success-wash text-success-600 ring-1 ring-inset ring-success-600/40 dark:text-success-500",
 };
 
 export function FindingStatusChip({
@@ -116,11 +123,12 @@ export function FindingStatusChip({
   return (
     <span
       className={cn(
-        "inline-flex items-center rounded-sm px-1.5 py-0.5 text-[11px] font-medium tracking-wide",
+        "inline-flex items-center gap-0.5 rounded-sm px-1.5 py-0.5 text-[11px] font-medium tracking-wide",
         STATUS_CLASS[status],
         className,
       )}
     >
+      {status === "fixed" && <Check className="h-2.5 w-2.5" aria-hidden />}
       {status}
     </span>
   );

@@ -2,6 +2,7 @@ import {
   ATTACK_TREE_PERSONA,
   bundledPersonaIds,
   CODE_REVIEW_PERSONA,
+  RECONCILE_PERSONA,
   REPORT_PERSONA,
   SAST_PERSONA,
   THREAT_MODEL_PERSONA,
@@ -231,6 +232,20 @@ const REPORT: SweepDef = {
   goal: "Read the whole engagement — recon, confirmed findings, coverage ledger, verify verdict — and write the report artifact",
 };
 
+/** The reconcile cell of a re-scan (re-scan v2). Runs as cell 2, right after
+ * recon and before the diff-scoped sweeps. It reads `/prior/findings.md` and the
+ * carried findings, re-checks each against the current code, and marks a carried
+ * finding fixed or leaves it recurring. It reports NO new findings and runs as a
+ * single cell, never a triad. It stays repo-wide (no diff globs) — it re-checks
+ * every carried finding wherever it lives, not only the changed files. */
+const RECONCILE: SweepDef = {
+  name: "reconcile",
+  playbook: "reconcile",
+  persona: RECONCILE_PERSONA,
+  triad: false,
+  goal: "Re-check every carried finding against the current code; mark fixed what the change resolved, leave the rest recurring; report nothing new",
+};
+
 /** The middle sweeps of each preset, in order. Recon (cell 1) and verify (last
  * cell) bookend every preset and are added by `buildPresetCells`. */
 const PRESET_SWEEPS: Record<string, SweepDef[]> = {
@@ -355,6 +370,98 @@ function buildPresetCells(sweeps: SweepDef[], opts?: { paths?: string[]; report?
   }
 
   return cells;
+}
+
+/**
+ * Build the ordered cells of a re-scan plan (re-scan v2): recon (cell 1) →
+ * reconcile (cell 2) → the diff-scoped sweeps → verify → report (when the base
+ * preset has one). This is the incremental algorithm:
+ *   - recon reads `/prior/recon.md` and `/prior/diff.md` and updates the map for
+ *     the changed files only;
+ *   - reconcile reads `/prior/findings.md` and the carried findings and rules
+ *     each carried finding fixed or recurring;
+ *   - the sweeps sweep the changed code for NEW vulnerabilities (the service
+ *     scopes them to the changed dirs at start);
+ *   - verify attacks every open finding; report (optional) writes the artifact.
+ *
+ * The sweeps are the base preset's middle sweeps (so a re-scan of a
+ * `code-review` review runs authz / injection / secrets-config), each carrying
+ * `triad: true` and reading recon. Recon, reconcile, and verify stay repo-wide;
+ * the service's diff scoping targets only the sweep cells. Every returned string
+ * round-trips through `parsePlan`.
+ */
+function buildRescanCells(sweeps: SweepDef[], opts?: { report?: boolean }): PlanCell[] {
+  const cells: PlanCell[] = [];
+
+  // Cell 1: recon (reads nothing). Reads /prior/recon.md + /prior/diff.md.
+  cells.push({ ordinal: 1, persona: CODE_REVIEW_PERSONA, mode: "fresh", ...RECON, reads: [] });
+
+  // Cell 2: reconcile (reads recon). Single cell, repo-wide, reports nothing new.
+  const { persona: reconcilePersona, triad: _reconcileTriad, ...reconcileFields } = RECONCILE;
+  cells.push({
+    ordinal: 2,
+    persona: reconcilePersona ?? RECONCILE_PERSONA,
+    mode: "fresh",
+    ...reconcileFields,
+    reads: [1],
+  });
+
+  // The diff-scoped sweeps: the base preset's middle sweeps, each reading recon.
+  sweeps.forEach((sweep, i) => {
+    const { persona: sweepPersona, triad: sweepTriad, ...sweepFields } = sweep;
+    const isTriad = sweepTriad ?? true;
+    cells.push({
+      ordinal: i + 3,
+      persona: sweepPersona ?? CODE_REVIEW_PERSONA,
+      mode: "fresh",
+      ...sweepFields,
+      reads: [1],
+      ...(isTriad ? { triad: true } : {}),
+    });
+  });
+
+  // Verify: attacks every open finding, reads every prior ordinal.
+  const verifyOrdinal = sweeps.length + 3;
+  cells.push({
+    ordinal: verifyOrdinal,
+    persona: CODE_REVIEW_PERSONA,
+    mode: "fresh",
+    ...VERIFY,
+    reads: Array.from({ length: verifyOrdinal - 1 }, (_, i) => i + 1),
+    review: true,
+  });
+
+  // Report (optional): reads every prior ordinal including verify.
+  if (opts?.report) {
+    const reportOrdinal = verifyOrdinal + 1;
+    const { persona: reportPersona, triad: _reportTriad, ...reportFields } = REPORT;
+    cells.push({
+      ordinal: reportOrdinal,
+      persona: reportPersona ?? REPORT_PERSONA,
+      mode: "fresh",
+      ...reportFields,
+      reads: Array.from({ length: reportOrdinal - 1 }, (_, i) => i + 1),
+    });
+  }
+
+  return cells;
+}
+
+/**
+ * The re-scan plan YAML for a base preset id (re-scan v2). Throws on an unknown
+ * id. The plan is recon → reconcile → the base preset's sweeps → verify →
+ * report (when the base preset has one). The service seeds a re-scan
+ * engagement's plan from this instead of reusing the parent's flat plan, so a
+ * re-scan runs the reconcile pass over the carried findings. Round-trips through
+ * `parsePlan`.
+ */
+export function rescanPlan(id: string): string {
+  const sweeps = PRESET_SWEEPS[id];
+  if (sweeps === undefined) {
+    const known = SECURITY_PRESETS.map((p) => p.id).join(", ");
+    throw new Error(`Unknown security preset "${id}". Known presets: ${known}.`);
+  }
+  return serializePlan(buildRescanCells(sweeps, { report: PRESET_HAS_REPORT.has(id) }));
 }
 
 /**

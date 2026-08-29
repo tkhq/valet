@@ -59,6 +59,14 @@ export const SAST_PERSONA = "sast";
  * It reports no new findings and flips no statuses; it composes what the earlier
  * cells already ruled on. `review: false`. */
 export const REPORT_PERSONA = "report";
+/** The reconcile persona id: runs the reconcile pass of a re-scan (re-scan v2).
+ * It re-checks every finding carried from the prior review against the current
+ * code and marks a carried finding fixed when the change resolved it, or leaves
+ * it recurring. It reports no new findings — the diff sweeps do that. `review:
+ * false`; the reconcile cell may still set `fixed` (the review tool gates on the
+ * reconcile persona). Source/config-only. */
+export const RECONCILE_PERSONA = "reconcile";
+
 /** The dast persona id: dynamic testing against a RUNNING target within the
  * engagement's authorized scope, using the declared live tools (M-P4b). Probes
  * every reachable endpoint x method x actor with OWASP-aligned checks. Never
@@ -142,6 +150,11 @@ export const BUNDLED_PERSONAS: readonly SecurityPersona[] = [
     id: EXPLOIT_PERSONA,
     label: "Exploit",
     roleMarkdown: readFileSync(new URL("../../personas/exploit.md", import.meta.url), "utf8"),
+  },
+  {
+    id: RECONCILE_PERSONA,
+    label: "Reconcile",
+    roleMarkdown: readFileSync(new URL("../../personas/reconcile.md", import.meta.url), "utf8"),
   },
 ];
 

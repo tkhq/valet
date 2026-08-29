@@ -28,6 +28,7 @@ import {
   isKnownPreset,
   parsePlan,
   presetPlan,
+  rescanPlan,
   SECURITY_PRESETS,
   securityKickoffPrompt,
   securitySessionTitle,
@@ -373,7 +374,7 @@ sessionsRouter.post("/", async (c) => {
   // link the new engagement to it. The request wins on any explicit override
   // (repo, preset, paths, model). Validated here, before anything is written.
   let rescanParentEngagementId: string | undefined;
-  let rescanPlan: string | undefined;
+  let rescanPlanYaml: string | undefined;
   if (body.rescanOf !== undefined) {
     if (kind !== "security") {
       return c.json({ error: "rescanOf only applies to a security session. Send kind 'security'." }, 400);
@@ -398,11 +399,14 @@ sessionsRouter.post("/", async (c) => {
       return c.json({ error: "The prior session has no security engagement to re-scan." }, 404);
     }
     rescanParentEngagementId = priorEngagement.engagement.id;
-    // Reuse the prior plan unless the request overrides the preset or paths.
-    // The re-scan naturally picks up new commits: sec_start resolves the
-    // LATEST default-branch SHA, so the same plan sweeps the newer tree.
-    if (body.preset === undefined && body.paths === undefined) {
-      rescanPlan = priorEngagement.engagement.plan;
+    // Re-scan v2: seed the plan from `rescanPlan(presetId)` — recon → reconcile
+    // → the diff-scoped sweeps → verify → report. The reconcile pass re-checks
+    // the carried findings; the sweeps find what the changed code introduced.
+    // This replaces reusing the parent's flat plan, which had no reconcile cell.
+    // The re-scan naturally picks up new commits: sec_start resolves the LATEST
+    // default-branch SHA and scopes the sweeps to the diff.
+    if (body.planCells === undefined) {
+      rescanPlanYaml = rescanPlan(presetId);
     }
     // Reuse the prior repo binding unless the request supplies its own.
     if (repos.length === 0) {
@@ -464,11 +468,12 @@ sessionsRouter.post("/", async (c) => {
       });
       engagementHasRepoConfig = seeded.hasRepoConfig;
 
-      // The plan: the prior plan on a re-scan, the setup page's edited plan, or
-      // the seeded plan (config steps / preset). The edited plan is validated
-      // through the same path `/plan/cells` uses.
-      if (rescanPlan !== undefined) {
-        securityPlan = rescanPlan;
+      // The plan: the re-scan v2 plan (recon → reconcile → sweeps → verify →
+      // report), the setup page's edited plan, or the seeded plan (config steps
+      // / preset). The edited plan is validated through the same path
+      // `/plan/cells` uses.
+      if (rescanPlanYaml !== undefined) {
+        securityPlan = rescanPlanYaml;
       } else if (body.planCells !== undefined) {
         try {
           const cells = body.planCells.map((raw, i) => planCellInputToCell(raw, i + 1));
@@ -561,7 +566,7 @@ sessionsRouter.post("/", async (c) => {
         {
           sessionId: id,
           repoFullName: repos[0].fullName,
-          // The plan comes from (in order): the prior plan on a re-scan, the
+          // The plan comes from (in order): the re-scan v2 plan on a re-scan, the
           // setup page's edited `planCells`, the repo's `.valet/security.yml`
           // steps, or the request's preset + paths. `securityPlan` resolved all
           // four above.

@@ -789,12 +789,16 @@ export const secFindingReportTool = defineTool({
 export const secFindingReviewTool = defineTool({
   name: "sec_finding_review",
   description:
-    "Rule on one open finding: 'verified' when the evidence survives your attack, 'refuted' when it does not. " +
-    "Forward-only; the reason must name what the evidence shows or what it missed.",
+    "Rule on one finding: 'verified' when the evidence survives your attack, 'refuted' when it does not, or 'fixed' " +
+    "(re-scan reconcile) when a carried finding was real and the current code resolved it. Forward-only; the reason " +
+    "must name what the evidence shows, what it missed, or how the change fixed it. Only a review cell sets " +
+    "verified/refuted; a reconcile or review cell sets fixed.",
   parameters: Type.Object({
     finding_id: Type.String(),
-    status: Type.Union([Type.Literal("verified"), Type.Literal("refuted")]),
-    reason: Type.String({ description: "What the evidence shows (verified) or what it missed (refuted)." }),
+    status: Type.Union([Type.Literal("verified"), Type.Literal("refuted"), Type.Literal("fixed")]),
+    reason: Type.String({
+      description: "What the evidence shows (verified), what it missed (refuted), or how the change resolved it (fixed).",
+    }),
   }),
   execute: async (args, ctx) => {
     const cfg = resolveSecurityConfig(ctx);
@@ -1000,13 +1004,16 @@ export function buildSecurityRunnerTools(): ToolDef[] {
 
 /**
  * The persona `sec_*` ToolDefs for a cell-claimed child session (spec
- * §Tools "Persona tools"). `sec_finding_review` attaches only when the
- * claiming cell has `review: true` — a prompt-injected sweep persona must
- * not refute its peers' findings (spec threat 8). `sec_report_write` attaches
- * only to a `report`-persona cell (M-P3) — only the report cell writes the
- * engagement report.
+ * §Tools "Persona tools"). `sec_finding_review` attaches when the claiming cell
+ * has `review: true` OR is the re-scan `reconcile` cell — a prompt-injected
+ * sweep persona must not flip its peers' findings (spec threat 8), but the
+ * reconcile cell marks carried findings fixed (re-scan v2). The service gates
+ * which verdict each cell may set. `sec_report_write` attaches only to a
+ * `report`-persona cell (M-P3) — only the report cell writes the engagement
+ * report.
  */
 export function buildSecurityPersonaTools(opts: { review: boolean; persona?: string }): ToolDef[] {
+  const canReview = opts.review || opts.persona === "reconcile";
   return [
     secFsWriteTool,
     secFsReadTool,
@@ -1015,7 +1022,7 @@ export function buildSecurityPersonaTools(opts: { review: boolean; persona?: str
     secFindingReportTool,
     secCoverageReportTool,
     secNeedReportTool,
-    ...(opts.review ? [secFindingReviewTool] : []),
+    ...(canReview ? [secFindingReviewTool] : []),
     ...(opts.persona === "report" ? [secReportWriteTool] : []),
   ];
 }

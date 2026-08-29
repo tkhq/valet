@@ -1860,14 +1860,23 @@ export const securityFindings = pgTable(
     file: text("file"),
     line: integer("line"),
     body: text("body").notNull().default(""),
-    // Forward-only: open → verified | refuted. No route mutates the other
-    // columns after insert ("verifier flips bits, never rewrites").
-    status: text("status", { enum: ["open", "verified", "refuted"] })
+    // Forward-only: open → verified | refuted | fixed, and verified → fixed. No
+    // route mutates the other columns after insert ("verifier flips bits, never
+    // rewrites"). `fixed` = the finding was real and is now resolved (re-scan
+    // v2); distinct from `refuted` = a false positive.
+    status: text("status", { enum: ["open", "verified", "refuted", "fixed"] })
       .notNull()
       .default("open"),
     statusReason: text("status_reason"),
     // Cell id or `user:<id>` — who flipped the status.
     statusActor: text("status_actor"),
+    // Re-scan v2 (re-scan / iterate): true when this finding was carried from
+    // the parent engagement at re-scan start, or a diff-sweep re-report matched
+    // a carried fingerprint. A first review's rows are all false.
+    recurring: boolean("recurring").notNull().default(false),
+    // The parent engagement's finding this row was seeded from (re-scan v2), so
+    // provenance is traceable. Null on a first-seen finding.
+    carriedFromFindingId: text("carried_from_finding_id"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
   (t) => [index("security_findings_engagement").on(t.engagementId)],

@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import type {
   SecurityCellWire,
+  SecurityDiffWire,
   SecurityEngagementWire,
   SecurityFindingSeverity,
   SecurityFindingWire,
@@ -131,7 +132,43 @@ const STATUS_OPTIONS = [
   { value: "open", label: "Open" },
   { value: "verified", label: "Verified" },
   { value: "refuted", label: "Refuted" },
+  { value: "fixed", label: "Fixed" },
 ] as const;
+
+/** Re-scan / iterate: a compact one-line breakdown of the diff counts, above
+ * the findings list. Each tally carries a colored dot — new is accent, recurring
+ * muted, fixed success, dismissed muted + struck. Renders only on a re-scan
+ * (the caller passes `diff` only then). `fixedCount` is null while running; the
+ * fixed tally is omitted until it fills. */
+export function RescanBreakdown({ diff }: { diff: SecurityDiffWire }) {
+  const items: { label: string; count: number; dot: string; struck?: boolean }[] = [
+    { label: "new", count: diff.newCount, dot: "bg-moss" },
+    { label: "recurring", count: diff.recurringCount, dot: "bg-neutral-400 dark:bg-neutral-500" },
+  ];
+  if (diff.fixedCount !== null) {
+    items.push({ label: "fixed", count: diff.fixedCount, dot: "bg-success-600 dark:bg-success-500" });
+  }
+  items.push({
+    label: "dismissed",
+    count: diff.carriedRefutedCount,
+    dot: "bg-neutral-400 dark:bg-neutral-500",
+    struck: true,
+  });
+  return (
+    <div
+      className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted"
+      aria-label="Re-scan breakdown"
+    >
+      {items.map((item) => (
+        <span key={item.label} className="inline-flex items-center gap-1">
+          <span className={cn("h-2 w-2 rounded-full", item.dot)} aria-hidden />
+          <span className="tabular-nums font-medium text-ink">{item.count}</span>
+          <span className={cn(item.struck && "line-through")}>{item.label}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
 
 /** The default reason the Verify action stamps. The route requires a
  * non-empty reason for both statuses; refute prompts, verify does not (the
@@ -145,6 +182,7 @@ export function FindingsReview({
   canAdminister,
   initialFindingId,
   polling,
+  diff,
   onOpenChild,
 }: {
   sessionId: string;
@@ -157,6 +195,9 @@ export function FindingsReview({
   initialFindingId?: string;
   /** True while the engagement runs — findings refetch on the poll cadence. */
   polling: boolean;
+  /** Re-scan / iterate: the diff against the parent engagement. Present only on
+   * a re-scan; drives the new/recurring/fixed/dismissed breakdown line. */
+  diff?: SecurityDiffWire;
   /** Open a fix session as the in-page `?child=` slide-over. Absent (e.g.
    * standalone rendering) falls back to the child's standalone page. */
   onOpenChild?: (childId: string) => void;
@@ -378,9 +419,10 @@ export function FindingsReview({
         </Button>
       </div>
 
-      {findings.length > 0 && (
-        <div className="border-b border-line px-3 py-2">
-          <SeverityBar counts={severityCounts} />
+      {(findings.length > 0 || diff) && (
+        <div className="border-b border-line px-3 py-2 space-y-2">
+          {diff && <RescanBreakdown diff={diff} />}
+          {findings.length > 0 && <SeverityBar counts={severityCounts} />}
         </div>
       )}
 

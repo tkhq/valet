@@ -25,6 +25,7 @@ export const KNOWN_PLAYBOOKS = [
   "dast",
   "fuzz",
   "exploit",
+  "reconcile",
 ] as const;
 
 export type PlaybookName = (typeof KNOWN_PLAYBOOKS)[number];
@@ -66,6 +67,8 @@ function readPlaybook(name: PlaybookName): string {
       return readFileSync(new URL("../../playbooks/fuzz.md", import.meta.url), "utf8");
     case "exploit":
       return readFileSync(new URL("../../playbooks/exploit.md", import.meta.url), "utf8");
+    case "reconcile":
+      return readFileSync(new URL("../../playbooks/reconcile.md", import.meta.url), "utf8");
   }
 }
 

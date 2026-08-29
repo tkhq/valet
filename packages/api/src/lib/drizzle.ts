@@ -560,8 +560,24 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
       "status" text DEFAULT 'open' NOT NULL,
       "status_reason" text,
       "status_actor" text,
+      "recurring" boolean DEFAULT false NOT NULL,
+      "carried_from_finding_id" text,
       "created_at" bigint NOT NULL
     )`,
+  },
+  {
+    // Re-scan v2 carried-finding flag. DEFAULT backfills every pre-existing
+    // row to false — a first review's findings are never recurring.
+    describe: "security_findings.recurring column",
+    probe: { kind: "column", table: "security_findings", column: "recurring" },
+    sql: 'ALTER TABLE "security_findings" ADD COLUMN IF NOT EXISTS "recurring" boolean NOT NULL DEFAULT false',
+  },
+  {
+    // Re-scan v2 carried-finding provenance. Null on rows written before the
+    // column existed and on every first-seen finding.
+    describe: "security_findings.carried_from_finding_id column",
+    probe: { kind: "column", table: "security_findings", column: "carried_from_finding_id" },
+    sql: 'ALTER TABLE "security_findings" ADD COLUMN IF NOT EXISTS "carried_from_finding_id" text',
   },
   {
     describe: "security_findings_engagement index",

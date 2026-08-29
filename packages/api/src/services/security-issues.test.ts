@@ -69,6 +69,8 @@ function finding(overrides: Partial<SecurityFindingRow> & { id: string }): Secur
     status: "open",
     statusReason: null,
     statusActor: null,
+    recurring: false,
+    carriedFromFindingId: null,
     createdAt: 1_000,
     ...overrides,
   };

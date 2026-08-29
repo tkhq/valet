@@ -77,6 +77,8 @@ function finding(overrides: Partial<SecurityFindingRow> & { id: string }): Secur
     status: "open",
     statusReason: null,
     statusActor: null,
+    recurring: false,
+    carriedFromFindingId: null,
     createdAt: 1_000,
     ...overrides,
   };
@@ -224,7 +226,7 @@ describe("buildMarkdownReport", () => {
     expect(report).toContain("| high | 1 |");
     expect(report).toContain("| low | 1 |");
     expect(report).toContain("| critical | 0 |");
-    expect(report).toContain("Status: 1 open, 1 verified, 1 refuted (3 finding rows).");
+    expect(report).toContain("Status: 1 open, 1 verified, 1 refuted, 0 fixed (3 finding rows).");
   });
 
   it("renders per-finding sections with location, status reason, and cells table", () => {

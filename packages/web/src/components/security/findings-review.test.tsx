@@ -14,6 +14,7 @@ import type {
   ListSecurityFindingsResponse,
   SecurityAddFindingCommentResponse,
   SecurityCellWire,
+  SecurityDiffWire,
   SecurityEngagementWire,
   SecurityFindingWire,
   SecurityReviewFindingResponse,
@@ -121,9 +122,7 @@ function finding(over: Partial<SecurityFindingWire> & { id: string }): SecurityF
   };
 }
 
-function renderReview(props?: Partial<Parameters<typeof FindingsReview>[0]>): {
-  container: HTMLElement;
-} {
+function renderReview(props?: Partial<Parameters<typeof FindingsReview>[0]>) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -474,6 +473,71 @@ describe("FindingsReview admin gating", () => {
     fireEvent.keyDown(list, { key: "r" });
     expect(reviewMock).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+});
+
+describe("FindingsReview re-scan surface", () => {
+  const diff: SecurityDiffWire = {
+    parentEngagementId: "eng-parent",
+    parentSessionId: "s-parent",
+    newCount: 2,
+    recurringCount: 3,
+    fixedCount: 4,
+    carriedRefutedCount: 1,
+  };
+
+  it("offers a Fixed status filter option", async () => {
+    renderReview();
+    await waitFor(() => expect(listFindingsMock).toHaveBeenCalled());
+    fireEvent.keyDown(screen.getByRole("button", { name: "Any status" }), { key: "Enter" });
+    expect(screen.getByText("Fixed")).toBeTruthy();
+    fireEvent.click(screen.getByText("Fixed"));
+    await waitFor(() =>
+      expect(listFindingsMock).toHaveBeenCalledWith(
+        "s-1",
+        expect.objectContaining({ status: "fixed" }),
+      ),
+    );
+  });
+
+  it("renders the diff breakdown line only when a diff is present", async () => {
+    listFindingsMock.mockResolvedValue({
+      findings: [finding({ id: "f-1" })],
+      nextCursor: null,
+    });
+    const { unmount } = renderReview({ diff });
+    const breakdown = await screen.findByLabelText("Re-scan breakdown");
+    expect(within(breakdown).getByText("new")).toBeTruthy();
+    expect(within(breakdown).getByText("recurring")).toBeTruthy();
+    expect(within(breakdown).getByText("fixed")).toBeTruthy();
+    expect(within(breakdown).getByText("dismissed")).toBeTruthy();
+    unmount();
+
+    // A first review passes no diff — the breakdown line is absent.
+    renderReview();
+    await screen.findAllByRole("option");
+    expect(screen.queryByLabelText("Re-scan breakdown")).toBeNull();
+  });
+
+  it("shows the fixed status chip on a carried-and-resolved finding", async () => {
+    listFindingsMock.mockResolvedValue({
+      findings: [
+        finding({
+          id: "f-fixed",
+          title: "Resolved issue",
+          status: "fixed",
+          recurring: true,
+          carriedFromFindingId: "parent-f-1",
+        }),
+      ],
+      nextCursor: null,
+    });
+    renderReview({ diff });
+    const [row] = await screen.findAllByRole("option");
+    expect(within(row).getByText("fixed")).toBeTruthy();
+    // The detail pane auto-selects the only finding; its header chip too.
+    const detail = await screen.findByRole("article");
+    expect(within(detail).getByText("fixed")).toBeTruthy();
   });
 });
 

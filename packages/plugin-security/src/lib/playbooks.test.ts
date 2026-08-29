@@ -16,6 +16,7 @@ describe("playbooks", () => {
       "dast",
       "fuzz",
       "exploit",
+      "reconcile",
     ]);
   });
 
@@ -48,6 +49,17 @@ describe("playbooks", () => {
     expect(playbookMarkdown("attack-tree")).toMatch(/attack tree|ATT&CK|kill chain/i);
     expect(playbookMarkdown("sast")).toContain("CWE-89");
     expect(playbookMarkdown("sast")).toContain("gitleaks");
+  });
+
+  it("the reconcile playbook (re-scan v2) names the three paths and the fixed/recurring outcomes", () => {
+    const md = playbookMarkdown("reconcile");
+    expect(md.length).toBeGreaterThan(400);
+    expect(md).toMatch(/unchanged/i); // carried finding, file unchanged
+    expect(md).toMatch(/in the diff|changed/i); // carried finding, file changed
+    expect(md).toMatch(/new/i); // new vulns belong to the sweeps, not reconcile
+    expect(md).toMatch(/\bfixed\b/i);
+    expect(md).toMatch(/recurring/i);
+    expect(md).toContain("sec_finding_review");
   });
 
   it("isKnownPlaybook gates names", () => {

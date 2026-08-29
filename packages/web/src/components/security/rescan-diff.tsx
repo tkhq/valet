@@ -11,6 +11,10 @@ import { cn } from "~/lib/cn";
  * not looked everywhere yet), so the banner says the fixed count arrives once
  * it finishes. `terminal` mirrors the engagement's terminal status — the same
  * gate the server uses to fill `fixedCount`.
+ *
+ * The scope line has three cases: an empty diff (a base commit, but no changed
+ * files — carried findings re-checked, no new ones), a scoped diff (N changed
+ * files since the parent SHA), and a full re-scan (no diff captured).
  */
 export function RescanDiffBanner({
   diff,
@@ -34,13 +38,19 @@ export function RescanDiffBanner({
   if (terminal && diff.fixedCount !== null) {
     parts.push(`${diff.fixedCount} fixed`);
   }
-  // Diff-scope line (re-scan / iterate): "Scoped to N changed files since
-  // <short base sha>", or "Full re-scan (prior commit unavailable)" on the
-  // fallback where no diff was captured.
+  // Diff-scope line (re-scan / iterate). Three cases:
+  //  1. Empty diff: the re-scan captured a base commit but nothing changed.
+  //     Say so plainly — the carried findings were re-checked, no new ones.
+  //  2. Scoped: N changed files since the parent's SHA.
+  //  3. Full re-scan: no diff was captured (prior commit unavailable).
   const scoped = baseRef != null && changedPaths != null;
-  const scopeText = scoped
-    ? `Scoped to ${changedPaths.length} changed file${changedPaths.length === 1 ? "" : "s"} since ${baseRef.slice(0, 12)}`
-    : "Full re-scan (prior commit unavailable)";
+  const emptyDiff = scoped && changedPaths.length === 0;
+  const carried = diff.recurringCount + (terminal && diff.fixedCount !== null ? diff.fixedCount : 0);
+  const scopeText = emptyDiff
+    ? `No changes since the last review — carried ${carried} finding${carried === 1 ? "" : "s"}, re-checked, ${diff.newCount} new.`
+    : scoped
+      ? `Scoped to ${changedPaths.length} changed file${changedPaths.length === 1 ? "" : "s"} since ${baseRef.slice(0, 12)}`
+      : "Full re-scan (prior commit unavailable)";
   return (
     <div
       className={cn(

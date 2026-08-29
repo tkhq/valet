@@ -144,7 +144,7 @@ export interface FindingSummary {
   /** One count per distinct fingerprint, keyed by the group's highest
    * severity — the same distinct-count rule the close manifest uses. */
   distinctBySeverity: Record<FindingSeverity, number>;
-  statusBreakdown: { open: number; verified: number; refuted: number };
+  statusBreakdown: { open: number; verified: number; refuted: number; fixed: number };
 }
 
 export function summarizeFindings(findings: SecurityFindingRow[]): FindingSummary {
@@ -167,7 +167,7 @@ export function summarizeFindings(findings: SecurityFindingRow[]): FindingSummar
   }
   for (const severity of groups.values()) distinctBySeverity[severity] += 1;
 
-  const statusBreakdown = { open: 0, verified: 0, refuted: 0 };
+  const statusBreakdown = { open: 0, verified: 0, refuted: 0, fixed: 0 };
   for (const finding of findings) statusBreakdown[finding.status] += 1;
   return { distinctBySeverity, statusBreakdown };
 }
@@ -208,7 +208,8 @@ export function buildMarkdownReport(input: SecurityExportInput): string {
   lines.push(
     "",
     `Status: ${statusBreakdown.open} open, ${statusBreakdown.verified} verified, ` +
-      `${statusBreakdown.refuted} refuted (${input.findings.length} finding rows).`,
+      `${statusBreakdown.refuted} refuted, ${statusBreakdown.fixed} fixed ` +
+      `(${input.findings.length} finding rows).`,
     "",
   );
 

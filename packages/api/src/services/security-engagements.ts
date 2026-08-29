@@ -29,6 +29,7 @@ import {
   isKnownPlaybook,
   isLivePersona,
   KNOWN_PERSONAS,
+  RECONCILE_PERSONA,
   parsePlan,
   VERIFIER_PERSONA,
   parseStateDoc,
@@ -86,7 +87,9 @@ export const MAX_FINDING_COMMENT_CHARS = 4000;
 export const STATE_DOC_STALE_MS = 10 * 60_000;
 
 export type FindingSeverity = "critical" | "high" | "medium" | "low" | "info";
-export type FindingStatus = "open" | "verified" | "refuted";
+/** `fixed` (re-scan v2): the finding was real and is now resolved — distinct
+ * from `refuted` (a false positive). */
+export type FindingStatus = "open" | "verified" | "refuted" | "fixed";
 export type CoverageStatus = "assessed" | "not_assessed";
 
 /** The class of thing a persona is blocked on (pivot-coordinator, M-P4c). A
@@ -291,22 +294,22 @@ export interface CellProgress {
   queue: { pending: number; done: number };
 }
 
-/** The re-scan diff against the parent engagement (re-scan / iterate). See
- * `diffEngagement` for the exact semantics; `fixedCount` is null while this
- * engagement runs and a number once it is terminal. */
+/** The re-scan diff against the parent engagement (re-scan v2). Computed from
+ * this engagement's carried/updated rows; see `diffEngagement`. `fixedCount` is
+ * live (the reconcile pass marks findings fixed during the run), so it is always
+ * a number on a re-scan. */
 export interface SecurityDiff {
   parentEngagementId: string;
   /** The parent engagement's session id, so the UI links back to it. Null
    * when the parent row is gone. */
   parentSessionId: string | null;
-  /** Distinct fingerprints in this engagement, absent from the parent. */
+  /** Findings the diff sweeps introduced (not carried). */
   newCount: number;
-  /** Distinct fingerprints present in both engagements. */
+  /** Carried findings still live (not fixed, not refuted). */
   recurringCount: number;
-  /** Parent fingerprints (open or verified) absent here — a fix. Null while
-   * running (a scan that has not finished has not looked everywhere). */
+  /** Carried findings the change resolved (status fixed). */
   fixedCount: number | null;
-  /** Findings this engagement auto-refuted by carry-forward. */
+  /** Carried findings refuted (a dismissal carried from the parent). */
   carriedRefutedCount: number;
 }
 
@@ -612,6 +615,62 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
   }
 
   /**
+   * Copy every finding from the parent engagement into this engagement as a
+   * recurring carried row (re-scan v2, §Seed carried findings). Runs once at
+   * re-scan start, inside `startEngagement`'s transaction, AFTER cells
+   * materialize. Preserves the parent's fingerprint, severity, title, body,
+   * file, line, and STATUS (a parent-verified finding stays verified; a
+   * parent-refuted one stays refuted — a dismissal is never re-triaged). Each
+   * carried row is `recurring: true`, `carried_from_finding_id` = the parent
+   * finding id, and attaches to the reconcile cell that re-checks them.
+   *
+   * Idempotent: seeds only when this engagement has no findings yet. A second
+   * call (a re-dispatched start, a retry) sees existing rows and no-ops.
+   */
+  async function seedCarriedFindings(
+    dbh: AppDb,
+    engagementId: string,
+    parentEngagementId: string,
+    reconcileCellId: string,
+    ts: number,
+  ): Promise<void> {
+    const [{ n: existing }] = await dbh
+      .select({ n: count() })
+      .from(securityFindings)
+      .where(eq(securityFindings.engagementId, engagementId));
+    if (Number(existing ?? 0) > 0) return; // Already seeded — idempotent guard.
+
+    const parentFindings = await dbh
+      .select()
+      .from(securityFindings)
+      .where(eq(securityFindings.engagementId, parentEngagementId))
+      .orderBy(asc(securityFindings.createdAt), asc(securityFindings.id));
+    if (parentFindings.length === 0) return;
+
+    const carried = parentFindings.map((f) => ({
+      id: `fnd_${randomUUID()}`,
+      engagementId,
+      cellId: reconcileCellId,
+      fingerprint: f.fingerprint,
+      severity: f.severity,
+      title: f.title,
+      file: f.file,
+      line: f.line,
+      body: f.body,
+      // Preserve the parent's verdict: a verified finding stays verified, a
+      // refuted one stays refuted. Do NOT reset to open — the reconcile pass
+      // re-checks each, and a dismissal must not resurface for re-triage.
+      status: f.status,
+      statusReason: f.statusReason,
+      statusActor: f.statusActor,
+      recurring: true,
+      carriedFromFindingId: f.id,
+      createdAt: ts,
+    }));
+    await dbh.insert(securityFindings).values(carried);
+  }
+
+  /**
    * Seed the engagement row for a new kind='security' session. `dbh` lets
    * the session-create route pass its open transaction so the session row
    * and the engagement land atomically.
@@ -816,7 +875,13 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     // expanded plan; a first-review preset with no triads is byte-identical to
     // before, and a triad preset materializes the expanded cells.
     const scopedCells: PlanCell[] = plan.cells.map((planCell) => {
-      const isSweep = planCell.ordinal !== 1 && planCell.review !== true;
+      // A sweep gets the diff globs. Recon (ordinal 1), the verify/review cells,
+      // and the re-scan reconcile cell stay repo-wide: reconcile re-checks EVERY
+      // carried finding wherever it lives, not only the changed files.
+      const isSweep =
+        planCell.ordinal !== 1 &&
+        planCell.review !== true &&
+        planCell.persona !== RECONCILE_PERSONA;
       if (!globs || !isSweep) return planCell;
       return { ...planCell, paths: mergePaths(planCell.paths, globs) };
     });
@@ -843,6 +908,12 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
       attempts: 0,
       createdAt: ts,
     }));
+    // The reconcile cell owns re-checking the carried findings (re-scan v2). It
+    // is the cell whose persona is `reconcile`; carried rows attach to it. Null
+    // on a first review or a plan with no reconcile cell (carried seeding then
+    // no-ops).
+    const reconcileCellValue = cellValues.find((c) => c.persona === RECONCILE_PERSONA);
+
     await db.transaction(async (tx) => {
       await tx.insert(securityCells).values(cellValues);
       await tx
@@ -860,6 +931,22 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
           updatedAt: ts,
         })
         .where(eq(securityEngagements.id, engagementId));
+
+      // Re-scan v2 (§Seed carried findings): copy EVERY finding from the parent
+      // into this engagement as a recurring carried row, attached to the
+      // reconcile cell. Preserve fingerprint, severity, title, body, file, line,
+      // and the parent's status (a verified finding stays verified; a refuted
+      // one stays refuted — never re-triage a dismissal). Idempotent: seeds only
+      // when this engagement has no rows yet.
+      if (engagement.parentEngagementId && reconcileCellValue) {
+        await seedCarriedFindings(
+          tx,
+          engagementId,
+          engagement.parentEngagementId,
+          reconcileCellValue.id,
+          ts,
+        );
+      }
     });
     recordSecurityCellsCreated(cellValues.length);
     const result = await getEngagement(engagementId);
@@ -1561,13 +1648,13 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
   /** Insert a finding; the server computes the fingerprint and returns any
    * siblings sharing it (advisory dedup — the persona decides).
    *
-   * Re-scan / iterate: when the engagement has a `parent_engagement_id` and
-   * the reported fingerprint matched a REFUTED finding in the parent, the new
-   * finding is inserted already `refuted` (carry-forward). Only a dismissal
-   * carries — so the reviewer never re-triages a false positive it already
-   * dismissed. A prior open or verified fingerprint stays open here, so a real
-   * issue resurfaces for confirmation. `carriedFrom` names the source when it
-   * carried, else null. */
+   * Re-scan v2 (§reportFinding + diff counts): the parent's findings are already
+   * seeded into this engagement as carried recurring rows at re-scan start. When
+   * a diff-sweep re-report matches a CARRIED fingerprint, the carried row is the
+   * canonical one — the re-report confirms it and does NOT insert a duplicate;
+   * the carried row returns. `carriedFrom` names the source when the carried row
+   * was refuted (a dismissal the reviewer should not re-triage). A first-seen
+   * fingerprint (no carried match) is inserted `open` with `recurring: false`. */
   async function reportFinding(
     engagementId: string,
     args: {
@@ -1590,15 +1677,6 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
         "Finding body must carry evidence: a code excerpt and the reasoning from source to impact (at least 200 characters).",
       );
     }
-    const [{ n: existing }] = await db
-      .select({ n: count() })
-      .from(securityFindings)
-      .where(and(eq(securityFindings.engagementId, engagementId), eq(securityFindings.cellId, cell.id)));
-    if (Number(existing ?? 0) >= MAX_FINDINGS_PER_CELL) {
-      throw new Error(
-        "Finding cap reached (100 per cell). Consolidate related findings instead of enumerating.",
-      );
-    }
     const fingerprint = findingFingerprint({ file: args.file, line: args.line, title: args.title });
     const siblings = await db
       .select()
@@ -1610,29 +1688,31 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
         ),
       );
 
-    // Carry-forward: only a parent's REFUTED verdict on the same fingerprint
-    // pre-dismisses this finding. A parent open/verified fingerprint does not
-    // carry — it must resurface open for confirmation.
-    let carriedFrom: { parentEngagementId: string; reason: string } | null = null;
-    if (engagement.parentEngagementId) {
-      const priorRefuted = await db
-        .select()
-        .from(securityFindings)
-        .where(
-          and(
-            eq(securityFindings.engagementId, engagement.parentEngagementId),
-            eq(securityFindings.fingerprint, fingerprint),
-            eq(securityFindings.status, "refuted"),
-          ),
-        )
-        .limit(1);
-      const source = priorRefuted[0];
-      if (source) {
-        carriedFrom = {
-          parentEngagementId: engagement.parentEngagementId,
-          reason: source.statusReason ?? "",
-        };
-      }
+    // Reconcile with a carried row: a re-report matching a carried fingerprint
+    // confirms the canonical carried row rather than inserting a duplicate. The
+    // carried row is the one the reconcile pass rules on.
+    const carriedSibling = siblings.find((s) => s.recurring);
+    if (carriedSibling) {
+      const carriedFrom =
+        carriedSibling.status === "refuted" && engagement.parentEngagementId
+          ? {
+              parentEngagementId: engagement.parentEngagementId,
+              reason: carriedSibling.statusReason ?? "",
+            }
+          : null;
+      return { finding: carriedSibling, siblings, carriedFrom };
+    }
+
+    // A first-seen finding: enforce the per-cell cap, then insert open,
+    // recurring=false.
+    const [{ n: existing }] = await db
+      .select({ n: count() })
+      .from(securityFindings)
+      .where(and(eq(securityFindings.engagementId, engagementId), eq(securityFindings.cellId, cell.id)));
+    if (Number(existing ?? 0) >= MAX_FINDINGS_PER_CELL) {
+      throw new Error(
+        "Finding cap reached (100 per cell). Consolidate related findings instead of enumerating.",
+      );
     }
 
     const inserted = await db
@@ -1647,27 +1727,39 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
         file: args.file ?? null,
         line: args.line ?? null,
         body: args.body,
-        ...(carriedFrom
-          ? {
-              status: "refuted" as const,
-              statusReason: `Carried from the previous review: ${carriedFrom.reason}`,
-              statusActor: "carry-forward",
-            }
-          : { status: "open" as const }),
+        status: "open" as const,
+        recurring: false,
         createdAt: now(),
       })
       .returning();
-    return { finding: inserted[0], siblings, carriedFrom };
+    return { finding: inserted[0], siblings, carriedFrom: null };
   }
 
   /**
-   * Forward-only status flip. Actors: `user:<id>` (the human review route)
-   * or a cell id — and only a review cell may flip (spec threat 8: a
-   * prompt-injected sweep persona must not refute its peers' findings).
+   * Forward-only status flip. Verdicts: `verified` / `refuted` (a review cell or
+   * the human), or `fixed` (re-scan v2 — the reconcile pass, a review cell, or
+   * the human). Actors: `user:<id>` (the human review route) or a cell id.
+   *
+   * Gating (spec threat 8: a prompt-injected sweep persona must not flip its
+   * peers' findings):
+   *   - `verified` / `refuted` — a review cell only.
+   *   - `fixed` — a review cell OR a `reconcile`-persona cell. The reconcile pass
+   *     rules a carried finding resolved; a review cell may also mark a finding
+   *     it disproved-by-fix.
+   * The human (`user:<id>`) may set any verdict.
+   *
+   * Transitions: `open → verified | refuted | fixed`, and `verified → fixed`
+   * (the reconcile pass marks a previously-verified carried finding resolved).
+   * Every other flip is refused (forward-only).
    */
   async function reviewFinding(
     engagementId: string,
-    args: { findingId: string; status: "verified" | "refuted"; reason: string; actor: string },
+    args: {
+      findingId: string;
+      status: "verified" | "refuted" | "fixed";
+      reason: string;
+      actor: string;
+    },
   ): Promise<SecurityFindingRow> {
     await loadEngagement(engagementId);
     const rows = await db
@@ -1689,7 +1781,12 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
         `A ${args.status} ruling needs a reason. Name what the evidence shows or what it missed.`,
       );
     }
-    if (finding.status !== "open") {
+    // Forward-only: from open to any verdict; from verified to fixed (a carried
+    // verified finding the change resolved). Everything else is refused.
+    const allowed =
+      finding.status === "open" ||
+      (finding.status === "verified" && args.status === "fixed");
+    if (!allowed) {
       throw new Error(`Finding ${finding.id} is already ${finding.status}. Status flips are forward-only.`);
     }
     if (!args.actor.startsWith("user:")) {
@@ -1699,7 +1796,17 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
         .where(and(eq(securityCells.engagementId, engagementId), eq(securityCells.id, args.actor)))
         .limit(1);
       const actorCell = cells[0];
-      if (!actorCell || !actorCell.review) {
+      if (!actorCell) {
+        throw new Error("Only review cells may flip finding statuses.");
+      }
+      // A `fixed` verdict is the reconcile pass's job: allow a reconcile-persona
+      // cell OR a review cell. `verified`/`refuted` stay review-cell only.
+      const isReconcile = actorCell.persona === RECONCILE_PERSONA;
+      if (args.status === "fixed") {
+        if (!actorCell.review && !isReconcile) {
+          throw new Error("Only a review cell or the reconcile cell may mark a finding fixed.");
+        }
+      } else if (!actorCell.review) {
         throw new Error("Only review cells may flip finding statuses.");
       }
     }
@@ -2241,73 +2348,53 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
   }
 
   /**
-   * The re-scan diff against the parent engagement (re-scan / iterate). Null
-   * when this engagement has no `parent_engagement_id` (a first review). The
-   * comparison is by distinct fingerprint:
-   *   - newCount: fingerprints in this engagement, not in the parent.
-   *   - recurringCount: fingerprints in BOTH.
-   *   - carriedRefutedCount: this engagement's findings auto-refuted by
-   *     carry-forward (`status_actor = 'carry-forward'`).
-   *   - fixedCount: fingerprints the parent had OPEN or VERIFIED that are
-   *     ABSENT from this engagement. Meaningful ONLY once this engagement is
-   *     terminal (completed/failed) — a still-running scan has not looked
-   *     everywhere yet, so an absent fingerprint is not yet a fix. Returned
-   *     null while running, a number once terminal.
+   * The re-scan diff against the parent engagement (re-scan v2). Null when this
+   * engagement has no `parent_engagement_id` (a first review). Computed from
+   * THIS engagement's SEEDED/updated rows — the parent's findings were carried
+   * in at re-scan start, so the counts read straight off the `recurring` and
+   * `status` columns:
+   *   - recurringCount: carried (`recurring`) findings still live — not fixed,
+   *     not refuted.
+   *   - newCount: findings the diff sweeps introduced (not carried).
+   *   - fixedCount: findings marked `fixed` (a carried finding the change
+   *     resolved). No longer null once terminal; the reconcile pass marks these
+   *     during the run, so the count is live and always a number.
+   *   - carriedRefutedCount: carried findings that are refuted (a dismissal
+   *     carried forward from the parent — do not re-triage).
    */
   async function diffEngagement(engagementId: string): Promise<SecurityDiff | null> {
     const engagement = await loadEngagement(engagementId);
     if (!engagement.parentEngagementId) return null;
 
     const parent = await db
-      .select()
+      .select({ sessionId: securityEngagements.sessionId })
       .from(securityEngagements)
       .where(eq(securityEngagements.id, engagement.parentEngagementId))
       .limit(1);
-    const parentRow = parent[0];
-    // The parent row is gone (deleted). The lineage id is still on this row,
-    // but nothing to compare against — report a lineage with zero deltas.
-    const parentSessionId = parentRow?.sessionId ?? null;
+    // The parent row may be gone (deleted). The lineage id is still on this row;
+    // the counts read from this engagement's own carried rows regardless.
+    const parentSessionId = parent[0]?.sessionId ?? null;
 
     const childFindings = await db
       .select()
       .from(securityFindings)
       .where(eq(securityFindings.engagementId, engagementId));
-    const parentFindings = parentRow
-      ? await db
-          .select()
-          .from(securityFindings)
-          .where(eq(securityFindings.engagementId, engagement.parentEngagementId))
-      : [];
-
-    const childFingerprints = new Set(childFindings.map((f) => f.fingerprint));
-    const parentFingerprints = new Set(parentFindings.map((f) => f.fingerprint));
 
     let newCount = 0;
     let recurringCount = 0;
-    for (const fp of childFingerprints) {
-      if (parentFingerprints.has(fp)) recurringCount += 1;
-      else newCount += 1;
-    }
-
-    const carriedRefutedCount = childFindings.filter(
-      (f) => f.statusActor === "carry-forward",
-    ).length;
-
-    // fixedCount only once terminal. A fingerprint the parent had open or
-    // verified that no longer appears is a fix — but only if this scan
-    // finished. While running, absence is "not looked yet", so null.
-    const terminal = engagement.status === "completed" || engagement.status === "failed";
-    let fixedCount: number | null = null;
-    if (terminal) {
-      const parentLive = new Set(
-        parentFindings
-          .filter((f) => f.status === "open" || f.status === "verified")
-          .map((f) => f.fingerprint),
-      );
-      fixedCount = 0;
-      for (const fp of parentLive) {
-        if (!childFingerprints.has(fp)) fixedCount += 1;
+    let fixedCount = 0;
+    let carriedRefutedCount = 0;
+    for (const f of childFindings) {
+      if (!f.recurring) {
+        // A finding the diff sweeps introduced. A fixed non-carried row cannot
+        // arise (reconcile only rules carried rows), so it counts as new.
+        newCount += 1;
+        continue;
       }
+      // Carried from the parent.
+      if (f.status === "fixed") fixedCount += 1;
+      else if (f.status === "refuted") carriedRefutedCount += 1;
+      else recurringCount += 1; // open or verified — still live.
     }
 
     return {

@@ -199,7 +199,10 @@ export interface SandboxJwtResponse {
 // milestone; mutations arrive with the runner tools and the triage surface.
 
 export type SecurityFindingSeverity = "critical" | "high" | "medium" | "low" | "info";
-export type SecurityFindingStatus = "open" | "verified" | "refuted";
+/** `fixed` (re-scan v2): the finding was real and is now resolved — distinct
+ * from `refuted` (a false positive). The reconcile pass marks a carried finding
+ * `fixed` when the change resolved it. */
+export type SecurityFindingStatus = "open" | "verified" | "refuted" | "fixed";
 
 export interface SecurityEngagementWire {
   id: string;
@@ -433,10 +436,15 @@ export interface SecurityFindingWire {
   /** Human triage notes on this finding, oldest-first; findings LIST route
    * only. On a re-scan these ride into `/prior/findings.md`. */
   comments?: SecurityFindingCommentWire[];
-  /** Re-scan / iterate: true when this fingerprint existed in the parent
-   * engagement. Present on the findings LIST route only, and only when the
-   * engagement re-scans a prior one — absent (undefined) on a first review. */
+  /** Re-scan v2: true when this finding was carried from the parent engagement
+   * (seeded at re-scan start) or a diff-sweep re-report matched a carried
+   * fingerprint. Persisted on the row. Present on the findings LIST route only,
+   * and only when the engagement re-scans a prior one — absent (undefined) on a
+   * first review. */
   recurring?: boolean;
+  /** Re-scan v2: the parent engagement's finding id this row was carried from.
+   * Present on the findings LIST route only; null on a first-seen finding. */
+  carriedFromFindingId?: string | null;
 }
 
 /** One fix session spawned from a finding (sec_handoff). Opened through the

@@ -21,6 +21,7 @@ describe("plugin manifest", () => {
       "dast",
       "fuzz",
       "exploit",
+      "reconcile",
     ]);
   });
 

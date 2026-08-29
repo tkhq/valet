@@ -113,12 +113,19 @@ describe("api integration: diff-scoped re-scan at start", () => {
     expect(sec.engagement.baseRef).toBe(SHA_OLD);
     expect(sec.engagement.changedPaths).toEqual(["src/routes/sessions.ts", "src/auth/login.ts"]);
 
-    // The sweeps carry the changed-dir globs; recon + verify stay repo-wide.
+    // The sweeps carry the changed-dir globs; recon, the reconcile cell, and
+    // verify stay repo-wide (re-scan v2 — reconcile re-checks EVERY carried
+    // finding, not only the changed files).
     const plan = parsePlan(sec.engagement.plan, KNOWN_PERSONAS);
     const recon = plan.cells.find((c) => c.ordinal === 1);
+    const reconcile = plan.cells.find((c) => c.persona === "reconcile");
     const verify = plan.cells.find((c) => c.review === true);
-    const sweeps = plan.cells.filter((c) => c.ordinal !== 1 && c.review !== true);
+    const sweeps = plan.cells.filter(
+      (c) => c.ordinal !== 1 && c.review !== true && c.persona !== "reconcile",
+    );
     expect(recon?.paths).toBeUndefined();
+    expect(reconcile).toBeDefined();
+    expect(reconcile?.paths).toBeUndefined();
     expect(verify?.paths).toBeUndefined();
     expect(sweeps.length).toBeGreaterThan(0);
     for (const sweep of sweeps) {

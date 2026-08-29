@@ -228,6 +228,7 @@ export function EngagementPanel({
         canAdminister={canAdminister}
         initialFindingId={initialFindingId}
         polling={engagement.status === "running"}
+        diff={diff}
         onOpenChild={onOpenChild}
       />
 

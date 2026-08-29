@@ -1046,6 +1046,8 @@ CREATE TABLE "security_findings" (
 	"status" text DEFAULT 'open' NOT NULL,
 	"status_reason" text,
 	"status_actor" text,
+	"recurring" boolean DEFAULT false NOT NULL,
+	"carried_from_finding_id" text,
 	"created_at" bigint NOT NULL
 );
 --> statement-breakpoint

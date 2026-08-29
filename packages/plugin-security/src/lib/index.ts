@@ -12,6 +12,7 @@ export {
   SECURITY_PRESETS,
   isKnownPreset,
   presetPlan,
+  rescanPlan,
   serializePlan,
 } from "./presets.js";
 export type { SecurityPreset } from "./presets.js";
@@ -28,6 +29,7 @@ export {
   DAST_PERSONA,
   FUZZ_PERSONA,
   EXPLOIT_PERSONA,
+  RECONCILE_PERSONA,
   LIVE_PERSONAS,
   isLivePersona,
 } from "./personas.js";

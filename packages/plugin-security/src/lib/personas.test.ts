@@ -11,6 +11,7 @@ import {
   FUZZ_PERSONA,
   isLivePersona,
   LIVE_PERSONAS,
+  RECONCILE_PERSONA,
   SAST_PERSONA,
   THREAT_MODEL_PERSONA,
 } from "./personas.js";
@@ -28,6 +29,7 @@ describe("BUNDLED_PERSONAS", () => {
       "dast",
       "fuzz",
       "exploit",
+      "reconcile",
     ]);
   });
 
@@ -82,5 +84,24 @@ describe("BUNDLED_PERSONAS", () => {
     expect(bundledPersona("nope")).toBeNull();
     // A known one round-trips.
     expect(bundledPersona(CODE_REVIEW_PERSONA)?.id).toBe(CODE_REVIEW_PERSONA);
+  });
+});
+
+describe("reconcile persona (re-scan v2)", () => {
+  it("loads non-empty and names the three paths and the fixed/recurring outcomes", () => {
+    const persona = bundledPersona(RECONCILE_PERSONA);
+    expect(persona).not.toBeNull();
+    const md = persona!.roleMarkdown;
+    expect(md.length).toBeGreaterThan(400);
+    // The three incremental paths.
+    expect(md).toMatch(/unchanged/i); // carried finding, file unchanged
+    expect(md).toMatch(/in the diff|changed/i); // carried finding, file changed
+    expect(md).toMatch(/new/i); // new vulns are the sweeps' job, not reconcile
+    // The two outcomes.
+    expect(md).toMatch(/\bfixed\b/i);
+    expect(md).toMatch(/recurring/i);
+    // It uses the review tool and reports no new findings.
+    expect(md).toContain("sec_finding_review");
+    expect(md).toMatch(/no.*new finding|report NO|report no/i);
   });
 });

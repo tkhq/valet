@@ -8,6 +8,7 @@ import {
   isKnownPreset,
   KNOWN_PERSONAS,
   presetPlan,
+  rescanPlan,
   SECURITY_PRESETS,
   securityKickoffPrompt,
   securitySessionTitle,
@@ -382,5 +383,49 @@ describe("full-pentest preset (M-P2c)", () => {
       "code-review", // verify
       "report", // the report cell
     ]);
+  });
+});
+
+describe("rescanPlan (re-scan v2)", () => {
+  it("round-trips through parsePlan and materializes recon → reconcile → sweeps → verify → report", () => {
+    // The raw plan: recon, reconcile, three triad sweeps, verify, report.
+    const plan = parsePlan(rescanPlan("code-review"), KNOWN_PERSONAS);
+    expect(plan.cells[0].persona).toBe(CODE_REVIEW_PERSONA); // recon
+    expect(plan.cells[0].ordinal).toBe(1);
+    expect(plan.cells[1].persona).toBe("reconcile"); // the reconcile cell
+    expect(plan.cells[1].ordinal).toBe(2);
+    expect(plan.cells[1].playbook).toBe("reconcile");
+    expect(plan.cells[1].reads).toEqual([1]); // reconcile reads recon
+
+    // After materialization, the reconcile cell survives as persona `reconcile`,
+    // recon is first, verify (review) and report bookend the end.
+    const materialized = expandTriads(plan.cells);
+    // Dense ordinals 1..N, earlier-only reads.
+    materialized.forEach((cell, i) => {
+      expect(cell.ordinal).toBe(i + 1);
+      for (const r of cell.reads) expect(r).toBeLessThan(cell.ordinal);
+    });
+    expect(materialized[0].persona).toBe(CODE_REVIEW_PERSONA); // recon
+    const reconcile = materialized.find((c) => c.persona === "reconcile");
+    expect(reconcile).toBeDefined();
+    expect(reconcile?.ordinal).toBe(2); // reconcile is cell 2, before the sweeps
+    // The reconcile cell is repo-wide (no path scoping baked into the plan).
+    expect(reconcile?.paths).toBeUndefined();
+    expect(reconcile?.review).not.toBe(true); // review:false; the tool gates on persona
+    const verify = materialized.find((c) => c.review === true);
+    expect(verify).toBeDefined();
+    const report = materialized[materialized.length - 1];
+    expect(report.persona).toBe("report");
+  });
+
+  it("stays under MAX_PLAN_CELLS after triad expansion", () => {
+    for (const preset of SECURITY_PRESETS) {
+      const materialized = expandTriads(parsePlan(rescanPlan(preset.id), KNOWN_PERSONAS).cells);
+      expect(materialized.length).toBeLessThanOrEqual(MAX_PLAN_CELLS);
+    }
+  });
+
+  it("throws on an unknown preset id", () => {
+    expect(() => rescanPlan("nope")).toThrow(/Unknown security preset/);
   });
 });

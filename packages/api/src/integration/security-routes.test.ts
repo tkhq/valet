@@ -338,17 +338,21 @@ describe("api integration: security session minting + read routes", () => {
       const rescanSec = (await (
         await fetch(`${api.baseUrl}/api/sessions/${rescan.id}/security`)
       ).json()) as GetSessionSecurityResponse;
-      // Same repo, same plan as the parent.
+      // Same repo; the plan is the re-scan v2 plan (recon → reconcile → sweeps →
+      // verify → report), NOT the parent's flat plan — it has a reconcile cell.
       expect(rescanSec.engagement.repoFullName).toBe(parentSec.engagement.repoFullName);
-      expect(rescanSec.engagement.plan).toBe(parentSec.engagement.plan);
-      // The diff names the parent (fixedCount null while planning).
+      const rescanPlanCells = parsePlan(rescanSec.engagement.plan, KNOWN_PERSONAS);
+      expect(rescanPlanCells.cells.some((c) => c.persona === "reconcile")).toBe(true);
+      // The diff names the parent. fixedCount is a number now (re-scan v2 — the
+      // reconcile pass marks findings fixed during the run, so it is live).
       expect(rescanSec.diff).toBeDefined();
       expect(rescanSec.diff?.parentEngagementId).toBe(parentSec.engagement.id);
       expect(rescanSec.diff?.parentSessionId).toBe(parent.id);
-      expect(rescanSec.diff?.fixedCount).toBeNull();
+      expect(rescanSec.diff?.fixedCount).toBe(0);
 
-      // A re-scan that overrides the preset: the request wins, so the plan is
-      // the smaller secrets-config plan, not the parent's five-cell plan.
+      // A re-scan that overrides the preset: the request wins, so the re-scan
+      // plan is built from secrets-config (recon → reconcile → secrets sweep →
+      // verify), not the parent's code-review base.
       const overrideRes = await fetch(`${api.baseUrl}/api/sessions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -365,7 +369,10 @@ describe("api integration: security session minting + read routes", () => {
         await fetch(`${api.baseUrl}/api/sessions/${override.id}/security`)
       ).json()) as GetSessionSecurityResponse;
       const overridePlan = parsePlan(overrideSec.engagement.plan, KNOWN_PERSONAS);
-      expect(overridePlan.cells).toHaveLength(3);
+      // recon, reconcile, secrets-config sweep, verify (secrets-config has no
+      // report cell).
+      expect(overridePlan.cells).toHaveLength(4);
+      expect(overridePlan.cells.some((c) => c.persona === "reconcile")).toBe(true);
       expect(overrideSec.diff?.parentEngagementId).toBe(parentSec.engagement.id);
     } finally {
       await api.cleanup();
@@ -408,6 +415,9 @@ describe("api integration: security session minting + read routes", () => {
       const rescanSec = (await (
         await fetch(`${api.baseUrl}/api/sessions/${rescan.id}/security`)
       ).json()) as GetSessionSecurityResponse;
+      // A carried finding (fp_a) — recurring, provenance to the parent row — and
+      // a new one (fp_new) from a sweep. This mirrors what re-scan-start seeding
+      // and the diff sweeps produce: `recurring` is persisted on the row.
       await db.insert(securityFindings).values([
         {
           id: "fnd_child_a",
@@ -420,6 +430,8 @@ describe("api integration: security session minting + read routes", () => {
           line: 42,
           body: EVIDENCE,
           status: "open" as const,
+          recurring: true,
+          carriedFromFindingId: "fnd_parent_a",
           createdAt: now + 1,
         },
         {
@@ -433,17 +445,20 @@ describe("api integration: security session minting + read routes", () => {
           line: 5,
           body: EVIDENCE,
           status: "open" as const,
+          recurring: false,
           createdAt: now + 2,
         },
       ]);
 
-      // The findings route marks recurring per finding.
+      // The findings route ships the persisted `recurring` flag per finding.
       const findings = (await (
         await fetch(`${api.baseUrl}/api/sessions/${rescan.id}/security/findings`)
       ).json()) as ListSecurityFindingsResponse;
       const byId = new Map(findings.findings.map((f) => [f.id, f]));
       expect(byId.get("fnd_child_a")?.recurring).toBe(true);
+      expect(byId.get("fnd_child_a")?.carriedFromFindingId).toBe("fnd_parent_a");
       expect(byId.get("fnd_child_new")?.recurring).toBe(false);
+      expect(byId.get("fnd_child_new")?.carriedFromFindingId).toBeNull();
 
       // The /security diff: 1 recurring (fp_a), 1 new (fp_new).
       const diffSec = (await (

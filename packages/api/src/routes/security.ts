@@ -604,18 +604,20 @@ securityRouter.get("/:id/security/findings", async (c) => {
       list.push(commentToWire(cm));
       commentsByFinding.set(cm.findingId, list);
     }
-    // Re-scan / iterate: mark a finding `recurring` when its fingerprint
-    // existed in the parent engagement. Empty set (no parent) → the field
-    // stays undefined, so a first review's wire shape is unchanged.
-    const parentFps = await security.parentFingerprints(result.engagement.id);
-    const isRescan = parentFps.size > 0 || result.engagement.parentEngagementId !== null;
+    // Re-scan v2: `recurring` and `carried_from_finding_id` are persisted on the
+    // row (seeded at re-scan start, or set when a diff re-report matched a
+    // carried fingerprint). Ship them only on a re-scan — a first review's wire
+    // shape stays unchanged (both fields absent).
+    const isRescan = result.engagement.parentEngagementId !== null;
     const body: ListSecurityFindingsResponse = {
       findings: page.findings.map((f) => ({
         ...findingToWire(f),
         links: linksByFinding.get(f.id) ?? [],
         handoffs: handoffsByFinding.get(f.id) ?? [],
         comments: commentsByFinding.get(f.id) ?? [],
-        ...(isRescan ? { recurring: parentFps.has(f.fingerprint) } : {}),
+        ...(isRescan
+          ? { recurring: f.recurring, carriedFromFindingId: f.carriedFromFindingId }
+          : {}),
       })),
       nextCursor: page.nextCursor,
     };
@@ -1862,16 +1864,19 @@ securityRouter.post("/:id/security/findings/:findingId/review", async (c) => {
   const { security, engagement, cell } = resolved.ok;
 
   const body = await readJsonBody(c);
-  if (body.status !== "verified" && body.status !== "refuted") {
-    return c.json({ error: "status must be 'verified' or 'refuted'." }, 400);
+  // Re-scan v2: a reconcile cell (or a review cell) may set 'fixed'. The service
+  // gates which cell may set which verdict.
+  if (body.status !== "verified" && body.status !== "refuted" && body.status !== "fixed") {
+    return c.json({ error: "status must be 'verified', 'refuted', or 'fixed'." }, 400);
   }
   if (typeof body.reason !== "string" || body.reason.trim() === "") {
     return c.json({ error: "Send { reason } naming what the evidence shows or what it missed." }, 400);
   }
 
   try {
-    // Actor = the claiming CELL id: the service enforces review-cell gating
-    // (only review cells flip statuses) and forward-only transitions.
+    // Actor = the claiming CELL id: the service enforces verdict gating (review
+    // cells flip verified/refuted; a reconcile or review cell may set fixed) and
+    // forward-only transitions.
     const finding = await security.reviewFinding(engagement.id, {
       findingId,
       status: body.status,
