@@ -40,12 +40,14 @@ const PREFLIGHT_STAGING_PATH = ".valet-prep/sec-preflight";
 /** Final in-sandbox location — referenced only inside `exec` strings. */
 const PREFLIGHT_BIN_PATH = "/usr/local/bin/sec-preflight";
 
-/** Pinned gitleaks release. The asset name shape is
- * `gitleaks_<version>_linux_x64.tar.gz` (verified against the GitHub
- * releases API). Bump this constant to move the pin. */
+/** Pinned gitleaks release. Bump this constant to move the pin. The release
+ * ships per-arch assets (`gitleaks_<version>_linux_x64.tar.gz` and
+ * `..._linux_arm64.tar.gz`); the install step selects the asset by the
+ * sandbox's real arch at run time (see the gitleaks step). A hardcoded arch
+ * installs a binary that cannot execute — gitleaks then reads as absent on an
+ * arm64 sandbox (Apple Silicon dev machines, arm64 k8s nodes). */
 const GITLEAKS_VERSION = "8.28.0";
-const GITLEAKS_ASSET = `gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz`;
-export const GITLEAKS_DOWNLOAD_URL = `https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${GITLEAKS_ASSET}`;
+export const GITLEAKS_RELEASE_URL = `https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}`;
 
 /** The semgrep install command. bookworm-slim ships no pip and enforces
  * PEP 668 (externally-managed), so we install pip via apt then pip-install
@@ -187,19 +189,22 @@ export function securityToolPrepSteps(): import("@valet/engine").PrepStep[] {
       hash: GITLEAKS_HASH,
       critical: false,
       async apply(sandbox: Sandbox): Promise<void> {
-        // Download the pinned static linux-x64 release, extract, and move the
-        // binary into /usr/local/bin (privileged). Idempotent via `command -v`.
-        // Needs egress to github.com; if blocked, the step fails best-effort
-        // and sec-preflight reports gitleaks absent.
+        // Download the pinned static release for the sandbox's ARCH, extract,
+        // and move the binary into /usr/local/bin (privileged). Idempotent via
+        // `command -v`. Needs egress to github.com; if blocked, the step fails
+        // best-effort and sec-preflight reports gitleaks absent. The arch is
+        // read at run time (`uname -m`) because the sandbox may be x86_64 or
+        // aarch64 — a hardcoded arch installs a binary that cannot execute.
         const install = [
           "set -e",
           'tmp="$(mktemp -d)"',
-          `curl -fsSL ${shQuote(GITLEAKS_DOWNLOAD_URL)} -o "$tmp/${GITLEAKS_ASSET}"`,
-          `tar -xzf "$tmp/${GITLEAKS_ASSET}" -C "$tmp" gitleaks`,
+          'case "$(uname -m)" in aarch64|arm64) ga=arm64 ;; x86_64|amd64) ga=x64 ;; *) ga=x64 ;; esac',
+          `curl -fsSL "${GITLEAKS_RELEASE_URL}/gitleaks_${GITLEAKS_VERSION}_linux_\${ga}.tar.gz" -o "$tmp/gitleaks.tar.gz"`,
+          'tar -xzf "$tmp/gitleaks.tar.gz" -C "$tmp" gitleaks',
           'mv "$tmp/gitleaks" /usr/local/bin/gitleaks',
           "chmod 755 /usr/local/bin/gitleaks",
           'rm -rf "$tmp"',
-        ].join(" && ");
+        ].join("\n");
         await bestEffortExec(
           sandbox,
           "install gitleaks",

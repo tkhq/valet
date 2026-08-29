@@ -8,7 +8,7 @@ import type { ExecOpts, ExecResult, Sandbox } from "@valet/engine";
 import {
   securityToolPrepSteps,
   SEC_PREFLIGHT_SCRIPT,
-  GITLEAKS_DOWNLOAD_URL,
+  GITLEAKS_RELEASE_URL,
   SEMGREP_INSTALL_COMMAND,
 } from "./security-bootstrap.js";
 
@@ -93,15 +93,20 @@ describe("securityToolPrepSteps", () => {
 
     await gitleaks.apply(sandbox);
 
-    const install = sandbox.execs.find((e) => e.command.includes(GITLEAKS_DOWNLOAD_URL));
+    const install = sandbox.execs.find((e) => e.command.includes(GITLEAKS_RELEASE_URL));
     expect(install).toBeDefined();
     // Idempotence guard: skip when gitleaks already on PATH.
     expect(install?.command).toContain("command -v gitleaks");
     // Touches /usr/local/bin → privileged.
     expect(install?.command).toContain("/usr/local/bin/gitleaks");
     expect(install?.opts?.privileged).toBe(true);
-    // Pinned URL uses the gitleaks_<ver>_linux_x64.tar.gz asset shape.
-    expect(GITLEAKS_DOWNLOAD_URL).toMatch(/gitleaks_\d+\.\d+\.\d+_linux_x64\.tar\.gz$/);
+    // Arch-aware: the asset is selected from `uname -m` at run time, not
+    // hardcoded — a hardcoded arch installs a binary that cannot execute on an
+    // arm64 sandbox. The command reads the arch and both assets are reachable.
+    expect(install?.command).toContain("uname -m");
+    expect(install?.command).toMatch(/gitleaks_\d+\.\d+\.\d+_linux_\$\{ga\}\.tar\.gz/);
+    expect(install?.command).not.toContain("linux_x64.tar.gz");
+    expect(GITLEAKS_RELEASE_URL).toMatch(/releases\/download\/v\d+\.\d+\.\d+$/);
   });
 
   it("semgrep step installs via pip with an idempotence guard, privileged (apt)", async () => {
