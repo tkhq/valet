@@ -116,8 +116,46 @@ export interface EventCatalogEntry {
   key: string;
   description: string;
   /** Filterable fields: `field` is the user-facing name, `path` a dot-path into the raw payload. */
-  filters: { field: string; path: string; description: string }[];
+  filters: {
+    field: string;
+    path: string;
+    description: string;
+    /**
+     * When set, the field's value is chosen from a provider-populated list, not
+     * typed by hand. `source` names a `FilterOptionResolver` the owning plugin
+     * registers (`slack.users`, `github.repos`). `dependsOn` names earlier
+     * fields whose chosen values scope this one — `github.branches` dependsOn
+     * `["repo"]`, because a branch list means nothing until a repo is chosen.
+     */
+    options?: { source: string; dependsOn?: string[] };
+  }[];
 }
+
+/** An option a filter value can take: a named id the picker shows and stores. */
+export interface FilterOption {
+  id: string;
+  label: string;
+  hint?: string;
+}
+
+/** What a `FilterOptionResolver` receives to list options for a filter field. */
+export interface FilterOptionContext {
+  orgId: string;
+  /** The typeahead query, when the user has typed one. */
+  q?: string;
+  /** Chosen values for the fields this source dependsOn (e.g. `{ repo: "acme/app" }`). */
+  deps: Record<string, string>;
+  /** The org's stored credential for the owning plugin's service; `null` when unconnected. */
+  credential: StoredCredential | null;
+}
+
+/**
+ * Lists the options for one filter-field source (`slack.users` → the workspace
+ * directory). Called by the filter-options endpoint, cached per org. Returns an
+ * empty list (not a throw) when it cannot resolve — a missing credential is a
+ * normal, reportable outcome the picker turns into a free-text fallback.
+ */
+export type FilterOptionResolver = (ctx: FilterOptionContext) => Promise<FilterOption[]>;
 
 export interface TriggerDef {
   /** e.g. "github.pull_request" */
@@ -475,6 +513,13 @@ export interface ValetPlugin {
   templates?: WorkflowTemplate[];
   /** Declares this plugin's provider supports code-based identity linking. */
   identityLink?: IdentityLinkDeclaration;
+  /**
+   * Provider option sources for filter fields, keyed by the `source` name a
+   * catalog field's `options.source` references (`slack.users`,
+   * `github.branches`). Backs the filter-options endpoint so a rule filters on
+   * a looked-up name, never a raw id.
+   */
+  filterOptionResolvers?: Record<string, FilterOptionResolver>;
 }
 
 export interface PluginValidationIssue {
