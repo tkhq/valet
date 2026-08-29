@@ -131,6 +131,39 @@ dev-local: ## Start API + web together (greenfield agent-loop stack)
 	@echo "$(GREEN)Starting greenfield API + web. Open http://localhost:5173$(NC)"
 	@make -j2 dev-api-node dev-web
 
+dev-stop: ## Stop the dev stack on :8788/:5173 gracefully (flushes PGlite, no corruption)
+	@echo "$(GREEN)Stopping the dev stack on :8788/:5173$(NC)"
+	@# SIGTERM the whole ancestry of each port listener — leaf first so the api
+	@# node closes PGlite cleanly (a SIGKILL mid-write corrupts the data dir).
+	@# Killing `make dev-local` alone does NOT reap its tsx-spawned node children,
+	@# which is why they used to orphan and thrash the database.
+	@for port in 8788 5173; do \
+		for pid in $$(lsof -nP -iTCP:$$port -sTCP:LISTEN -t 2>/dev/null); do \
+			chain="$$pid"; cur=$$pid; \
+			for _ in 1 2 3 4 5 6; do \
+				case "$$(ps -o command= -p $$cur 2>/dev/null)" in *"make dev-local"*) break;; esac; \
+				pp=$$(ps -o ppid= -p $$cur 2>/dev/null | tr -d ' '); \
+				if [ -z "$$pp" ] || [ "$$pp" = "1" ]; then break; fi; \
+				chain="$$chain $$pp"; cur=$$pp; \
+			done; \
+			kill -TERM $$chain 2>/dev/null || true; \
+		done; \
+	done
+	@# Wait up to 10s for a clean release, then SIGKILL whatever still holds a port.
+	@for _ in 1 2 3 4 5 6 7 8 9 10; do \
+		[ -z "$$(lsof -nP -iTCP:8788 -iTCP:5173 -sTCP:LISTEN -t 2>/dev/null)" ] && break; \
+		sleep 1; \
+	done
+	@for port in 8788 5173; do \
+		pids=$$(lsof -nP -iTCP:$$port -sTCP:LISTEN -t 2>/dev/null); \
+		[ -n "$$pids" ] && { echo "$(RED)force-killing stuck listener on :$$port$(NC)"; kill -9 $$pids 2>/dev/null; } || true; \
+	done
+	@echo "$(GREEN)Stopped.$(NC)"
+
+dev-restart: ## Stop then start the dev stack cleanly (dev-stop + dev-local)
+	@make dev-stop
+	@make dev-local
+
 dev-clean: ## Delete this worktree's dev data (.valet-dev: PGlite db + blobs)
 	rm -rf .valet-dev
 	@echo "$(GREEN)Removed ./.valet-dev. The next 'make dev-local' starts a fresh database.$(NC)"

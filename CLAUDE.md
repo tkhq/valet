@@ -31,10 +31,12 @@ The database is per-worktree, but ports 8788 (api) and 5173 (web) are machine-wi
 5. Run `make dev-local`.
 6. Confirm health: `curl -sf localhost:8788/api/health`. Startup is fast — if health is not ok within ~5 seconds, do not wait or poll. Read the log for one of the symptoms below.
 
+To restart, run `make dev-restart` (it is `make dev-stop` + `make dev-local`). `make dev-stop` SIGTERMs the whole ancestry of the `:8788`/`:5173` listeners, leaf first, so the api node closes PGlite cleanly. Prefer it over a manual kill: a SIGKILL of the api mid-write corrupts the PGlite dir and forces a `make dev-clean`. Killing `make dev-local` alone does NOT reap its `tsx`-spawned node children — they orphan and thrash the database.
+
 Symptom → cause:
 
 - Vite proxy `ECONNREFUSED /api/...` → the api is down (crashed, or it lost the port race to another stack).
-- PGlite WASM `Aborted()` stack trace at api startup → another process owns the data dir (step 4).
+- PGlite WASM `Aborted()` stack trace at api startup → another process owns the data dir (step 4), OR the dir is corrupt from a SIGKILL mid-write (recover with `make dev-clean`).
 - The UI does not show your changes → :5173 is served from a different checkout (step 2).
 
 `make e2e` isolates its own state (scratch `VALET_DATA_DIR`, random ports 18790+), so it can run beside the dev stack — but Docker-heavy suites can flake from daemon contention while the dev stack's sandboxes run. If a Docker row goes red during concurrent work, re-run it in isolation before you treat it as real: `make e2e E2E_ARGS="--only <suite-id>"`.
