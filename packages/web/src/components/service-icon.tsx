@@ -18,7 +18,7 @@
  * its contrast in both.
  *
  * FIRST-PARTY PLUGINS take a lucide glyph instead of a mark. Workflows,
- * skills, the browser, personas, and sandbox tunnels are capabilities Valet
+ * skills, the browser, assistants, and sandbox tunnels are capabilities Valet
  * writes itself, so no vendor mark for them exists or ever will, and a
  * letter tile teaches the reader nothing about what the plugin does.
  *
@@ -99,13 +99,14 @@ export function brandMark(slug: string | undefined): BrandMark | undefined {
  * (`workflows-actions`, `skills-actions`) for a plugin that declares no
  * credential; a workflow template card names the action service it needs
  * (`workflows`, `skills`); `/skills` names the plugin a skill came from
- * (`browser`, `personas`, `sandbox-tunnels`).
+ * (`browser`, `assistants`, `sandbox-tunnels`).
  */
 const PLUGIN_GLYPHS: Record<string, LucideIcon> = {
   // A real Chromium the agent drives.
   browser: Globe,
   // Who the assistant is being; the manifest picks theatre masks too.
-  personas: Drama,
+  assistants: Drama,
+  "assistants-actions": Drama,
   // A wire out of the sandbox to a public hostname.
   "sandbox-tunnels": Cable,
   skills: GraduationCap,

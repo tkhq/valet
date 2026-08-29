@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import type { GetOrchestratorInfoResponse } from "@valet/api/wire";
 import { useOrchestratorChildren, useOrchestratorInfo } from "~/api/orchestrator";
 import { useNotifications } from "~/api/queries";
@@ -9,19 +9,32 @@ import { IdentityFields } from "~/components/assistant/identity-fields";
 import { MemoryCard } from "~/components/assistant/memory-card";
 import { UsageCard } from "~/components/assistant/usage-card";
 import { TeamsCard } from "~/components/assistant/teams-card";
+import { TeamDashboard } from "~/components/dashboard/team-dashboard";
 import { Spinner } from "~/components/primitives";
+import { useWorkspaceScope } from "~/lib/workspace-scope";
 
 /**
- * `/` — the assistant dashboard (assistant-centered web UI, decision 1).
- * Replaces the old flat session-list home (now at `/sessions`, decision 8).
+ * `/` — the dashboard. Follows the workspace switcher, exactly like every
+ * list page (team dashboard design, 2026-08-27): the personal workspace
+ * renders the assistant dashboard (assistant-centered web UI, decision 1);
+ * a team workspace renders the team's activity dashboard.
  *
- * Branches on `GET /api/orchestrator/info`: `name === null` means first
- * visit — an inline, full-page-centered identity step (decision 11); once
- * named, the identity header + card grid + activity strip.
+ * The personal branch works as before: `GET /api/orchestrator/info` with
+ * `name === null` means first visit — an inline, full-page-centered
+ * identity step (decision 11); once named, the identity header + card grid
+ * + activity strip.
  */
 export const Route = createFileRoute("/")({
-  component: Dashboard,
+  component: Home,
 });
+
+export function Home() {
+  const scope = useWorkspaceScope();
+  if (scope.teamId !== undefined) {
+    return <TeamDashboard teamId={scope.teamId} />;
+  }
+  return <Dashboard />;
+}
 
 export function Dashboard() {
   const info = useOrchestratorInfo();
@@ -69,7 +82,14 @@ function DashboardBody({ info }: { info: GetOrchestratorInfoResponse }) {
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto max-w-5xl space-y-8 px-6 py-8">
-        <IdentityHeader info={info} />
+        <div className="space-y-2">
+          <IdentityHeader info={info} />
+          {/* The one path to an assistant's editor used to be the chat
+              rail's menu; the dashboard links the list page directly. */}
+          <Link to="/assistants" className="text-xs text-moss underline-offset-2 hover:underline">
+            Manage assistants →
+          </Link>
+        </div>
 
         <div className="grid gap-4 md:grid-cols-2">
           <div className="md:col-span-2">

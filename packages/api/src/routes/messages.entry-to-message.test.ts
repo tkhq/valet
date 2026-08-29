@@ -251,3 +251,30 @@ describe("entryToMessage — skill invocation projection", () => {
     expect(entryToMessage(badType, "sess", "th")?.skill).toBeUndefined();
   });
 });
+
+describe("entryToMessage — author projection", () => {
+  it("projects the sender's identity from a user entry", () => {
+    const entry = baseEntry({
+      author: { id: "u_alice", name: "Alice", email: "alice@example.com" },
+    });
+    const msg = entryToMessage(entry, "sess", "th");
+    expect(msg?.author).toEqual({ id: "u_alice", name: "Alice", email: "alice@example.com" });
+  });
+
+  it("keeps channel-plugin externalId off the wire", () => {
+    const entry = baseEntry({
+      author: { id: "u_bob", name: "Bob", externalId: "U123SLACK" },
+    });
+    const msg = entryToMessage(entry, "sess", "th");
+    expect(msg?.author).toEqual({ id: "u_bob", name: "Bob" });
+  });
+
+  it("omits the field for authorless entries and non-user roles", () => {
+    expect(entryToMessage(baseEntry(), "sess", "th")?.author).toBeUndefined();
+    const assistant = baseEntry({
+      role: "assistant",
+      author: { id: "u_alice", name: "Alice" },
+    });
+    expect(entryToMessage(assistant, "sess", "th")?.author).toBeUndefined();
+  });
+});

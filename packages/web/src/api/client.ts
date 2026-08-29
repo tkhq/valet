@@ -120,6 +120,7 @@ import type {
   ListTeamsResponse,
   ListThreadsResponse,
   ListWorkflowRunsResponse,
+  GetTeamChildrenResponse,
   ListWorkflowTriggersResponse,
   WorkflowRunOutcome,
   WorkflowRunStatus,
@@ -130,6 +131,7 @@ import type {
   InstallWorkflowTemplateRequest,
   InstallWorkflowTemplateResponse,
   MeResponse,
+  OrgDirectoryResponse,
   OrgMembersResponse,
   OrgResponse,
   PatchLlmProviderRequest,
@@ -208,6 +210,7 @@ import type {
   UsageSessionsResponse,
   UsageDrillResponse,
   UsageDrillItem,
+  UsageScopeName,
   UsageUseCase,
 } from "@valet/api/wire";
 import type {
@@ -629,7 +632,10 @@ export const api = {
     request<GetArtifactResponse>("GET", `/artifacts/${encodeURIComponent(token)}`),
   shareArtifact: (body: ShareArtifactRequest) =>
     request<ShareArtifactResponse>("POST", "/artifacts/share", body),
-  listArtifacts: () => request<ListArtifactsResponse>("GET", "/artifacts"),
+  getTeamChildren: (teamId: string) =>
+    request<GetTeamChildrenResponse>("GET", `/teams/${encodeURIComponent(teamId)}/children`),
+  listArtifacts: (owner?: OwnerFilter) =>
+    request<ListArtifactsResponse>("GET", `/artifacts${ownerQuery(owner)}`),
   patchArtifact: (id: string, body: PatchArtifactRequest) =>
     request<PatchArtifactResponse>("PATCH", `/artifacts/${encodeURIComponent(id)}`, body),
   revokeArtifact: (id: string) =>
@@ -793,7 +799,7 @@ export const api = {
   },
   // Cross-workflow run list. `parentRunId` is how a batch parent's child
   // runs come back in one request.
-  listRuns: (opts?: WorkflowRunFilter): Promise<ListWorkflowRunsResponse> => {
+  listRuns: (opts?: WorkflowRunFilter): Promise<ListAllWorkflowRunsResponse> => {
     // An any-of filter with no values matches nothing. A query string cannot
     // carry an empty repeated field, so an unguarded request would drop the
     // filter and list every readable run — the opposite of what was asked.
@@ -809,7 +815,7 @@ export const api = {
     if (opts?.limit) qs.set("limit", String(opts.limit));
     if (opts?.cursor) qs.set("cursor", opts.cursor);
     const tail = qs.toString() ? `?${qs}` : "";
-    return request<ListWorkflowRunsResponse>("GET", `/workflows/runs${tail}`);
+    return request<ListAllWorkflowRunsResponse>("GET", `/workflows/runs${tail}`);
   },
   getWorkflowPermissions: (id: string) =>
     request<GetWorkflowPermissionsResponse>(
@@ -927,16 +933,19 @@ export const api = {
   patchMe: (body: PatchMeRequest) => request<PatchMeResponse>("PATCH", "/me", body),
   listModels: () => request<ListModelsResponse>("GET", "/models"),
   getUsageSummary: () => request<UsageSummaryResponse>("GET", "/usage/summary"),
-  usageBreakdown: (window: string = "7d", scope: "me" | "org" = "me") => {
+  usageBreakdown: (window: string = "7d", scope: UsageScopeName = "me", teamId?: string) => {
     const qs = new URLSearchParams({ window, scope });
+    if (teamId !== undefined) qs.set("teamId", teamId);
     return request<UsageBreakdownResponse>("GET", `/usage/breakdown?${qs}`);
   },
-  usageItems: (window: string, scope: "me" | "org", useCase: UsageUseCase) => {
+  usageItems: (window: string, scope: UsageScopeName, useCase: UsageUseCase, teamId?: string) => {
     const qs = new URLSearchParams({ window, scope, useCase });
+    if (teamId !== undefined) qs.set("teamId", teamId);
     return request<UsageDrillResponse>("GET", `/usage/items?${qs}`);
   },
-  usageExportCsvUrl: (window: string, scope: "me" | "org"): string => {
+  usageExportCsvUrl: (window: string, scope: UsageScopeName, teamId?: string): string => {
     const qs = new URLSearchParams({ window, scope });
+    if (teamId !== undefined) qs.set("teamId", teamId);
     return `/api/usage/export.csv?${qs}`;
   },
   usageSessions: (window: string = "7d", useCase?: "orchestrator" | "session") => {
@@ -948,6 +957,7 @@ export const api = {
     request<{ date: string; summary: string | null }>("GET", "/memory/journal-summary"),
   getOrg: () => request<OrgResponse>("GET", "/org"),
   patchOrg: (body: PatchOrgRequest) => request<PatchOrgResponse>("PATCH", "/org", body),
+  getOrgDirectory: () => request<OrgDirectoryResponse>("GET", "/org/directory"),
   getOrgMembers: () => request<OrgMembersResponse>("GET", "/org/members"),
   patchOrgMember: (userId: string, body: PatchOrgMemberRequest) =>
     request<PatchOrgMemberResponse>(

@@ -301,8 +301,12 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
         updatedAt: now,
       });
 
+    // No `author`: the parent AGENT composed this prompt, and `author`
+    // means "the person who wrote this" — it renders as a `[from: …]` line
+    // in shared-session transcripts and as a named sender in the UI, both
+    // wrong for agent text. Actor linkage stays on the child_watches row
+    // (`actorUserId` below).
     const receipt = await childSession.prompt(req.prompt, {
-      author: { id: ctx.actorUserId },
       // Per-turn role overlay (the security dispatch names the persona
       // role; the claimed child's build registered it in options.roles).
       ...(req.role !== undefined ? { role: req.role } : {}),
@@ -966,8 +970,8 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
     // active even when the revived turn never touches the sandbox.
     await deps.engineHost.markSessionUsed(req.childSessionId);
 
+    // No `author` — agent-composed text, same reasoning as the spawn path.
     const receipt = await childSession.prompt(req.message, {
-      author: { id: ctx.actorUserId },
       queueMode: req.interrupt ? "steer" : "followup",
     });
 

@@ -4,11 +4,13 @@ import { cn } from "~/lib/cn";
 
 /**
  * The settings shell's left rail (split-settings design, "Visual direction"
- * + "Routes & navigation"). Two small-caps groups: **You** (always present,
- * four items) and **Organization** (three items, shown only once the
- * `useOrg()` query resolves to gate-on + caller-admin — hidden otherwise,
- * never disabled, and rendered with no flash since it appears only once
- * cached data arrives rather than defaulting open then collapsing).
+ * + "Routes & navigation"; amended 2026-08-28). Two small-caps groups:
+ * **You** (always present) and **Organization** (shown once the `useOrg()`
+ * query resolves to gate-on — hidden otherwise, never disabled, and
+ * rendered with no flash since it appears only once cached data arrives
+ * rather than defaulting open then collapsing). An org admin sees every
+ * Organization item; a plain member sees only Teams, because any member
+ * can create a team and administer the teams they created.
  *
  * Active-state styling is computed from the current pathname (via `cn`'s
  * `twMerge`) rather than TanStack's `activeProps`, which only concatenates
@@ -32,14 +34,20 @@ const YOU_ITEMS = [
 ] as const;
 
 /** Single-user-mode stand-in for Organization · Models — shown under "You"
- * only while the Organization group is hidden (`/settings/models` renders
- * the same sections; the org-admin API authorizes the seeded local user). */
+ * only while the org gate is OFF (`/settings/models` renders the same
+ * sections; the org-admin API authorizes the seeded local user). A gate-on
+ * plain member gets no Models item at all: every section on that page reads
+ * org-admin-only APIs, so the link would lead to a page of error banners. */
 const MODELS_ITEM = { to: "/settings/models", label: "Models" } as const;
+
+/** One source of truth for the Teams path — the rail's two item lists and
+ * the `/settings/organization` route guard must never disagree on it. */
+export const ORG_TEAMS_PATH = "/settings/organization/teams";
 
 const ORGANIZATION_ITEMS = [
   { to: "/settings/organization", label: "General" },
   { to: "/settings/organization/members", label: "Members" },
-  { to: "/settings/organization/teams", label: "Teams" },
+  { to: ORG_TEAMS_PATH, label: "Teams" },
   { to: "/settings/organization/models", label: "Models" },
   { to: "/settings/organization/proxy", label: "Proxy" },
   { to: "/settings/organization/library", label: "Library" },
@@ -50,22 +58,29 @@ const ORGANIZATION_ITEMS = [
   { to: "/settings/organization/action-log", label: "Action log" },
 ] as const;
 
+/** The one Organization item a plain member can use: any member can create
+ * a team, and the creator administers it as its team admin. */
+const MEMBER_ORGANIZATION_ITEMS = [{ to: ORG_TEAMS_PATH, label: "Teams" }] as const;
+
 export function SettingsRail() {
   const orgQ = useOrg();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const showOrganizationGroup =
-    orgQ.data?.features.organizations === true && orgQ.data.callerRole === "admin";
+  const orgAdmin = orgQ.data?.callerRole === "admin";
+  const showOrganizationGroup = orgQ.data?.features.organizations === true;
+  const organizationItems = orgAdmin ? ORGANIZATION_ITEMS : MEMBER_ORGANIZATION_ITEMS;
 
   // Wait for `useOrg()` to resolve before appending — same no-flash rule as
   // the Organization group (an org-mode admin must never see the item
-  // appear and then vanish).
+  // appear and then vanish). Keyed to the gate, not the caller's role: with
+  // the gate on, an admin finds Models in the Organization group, and a
+  // plain member gets no Models link at all (see MODELS_ITEM's comment).
   const youItems = orgQ.data && !showOrganizationGroup ? [...YOU_ITEMS, MODELS_ITEM] : YOU_ITEMS;
 
   return (
     <nav aria-label="Settings" className="w-full shrink-0 space-y-6 text-sm sm:w-[200px]">
       <RailGroup label="You" items={youItems} pathname={pathname} />
       {showOrganizationGroup && (
-        <RailGroup label="Organization" items={ORGANIZATION_ITEMS} pathname={pathname} />
+        <RailGroup label="Organization" items={organizationItems} pathname={pathname} />
       )}
     </nav>
   );

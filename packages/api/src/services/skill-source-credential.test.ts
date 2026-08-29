@@ -6,6 +6,7 @@
  *
  *   - a personal source uses its OWNER's credential;
  *   - a team source uses the credential of the user who ADDED it;
+ *   - a config-managed team source (`skillsrc_cfg_*`) uses the org App;
  *   - an org source uses the org's GitHub App installation token;
  *   - anything else reads anonymously.
  *
@@ -243,6 +244,44 @@ describe("resolveSkillSourceCredential", () => {
       );
 
       expect(credential).toEqual({ kind: "none" });
+    });
+
+    it("uses the App for a config-managed team source with no createdBy", async () => {
+      // Reconcile inserts omit createdBy. That NULL is an operator
+      // declaration, not a pre-column UI row, so the read uses the org App
+      // the same way an org config source does — not kind none.
+      await installApp();
+      fixture = startGithubFixture({
+        createInstallationToken: () => ({
+          body: { token: "ghs_install", expires_at: new Date(NOW + 3600_000).toISOString() },
+        }),
+      });
+
+      const credential = await resolveSkillSourceCredential(
+        deps(),
+        sourceRow({
+          id: "skillsrc_cfg_deadbeef0001",
+          ownerType: "team",
+          ownerId: TEAM,
+          createdBy: null,
+        }),
+      );
+
+      expect(credential).toEqual({ kind: "installation", token: "ghs_install" });
+    });
+
+    it("names the App install when a config-managed team source has no App", async () => {
+      fixture = startGithubFixture();
+      const credential = await resolveSkillSourceCredential(
+        deps(),
+        sourceRow({
+          id: "skillsrc_cfg_deadbeef0001",
+          ownerType: "team",
+          ownerId: TEAM,
+          createdBy: null,
+        }),
+      );
+      expect(credential).toEqual({ kind: "missing_app" });
     });
 
     it("drops to anonymous, not to the App, when the creator disconnects", async () => {

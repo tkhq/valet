@@ -81,10 +81,16 @@ export function configInviteId(email: string): string {
   return `invite_cfg_${suffix}`;
 }
 
-/** Stable id for a config-managed skill source: `skillsrc_cfg_` + sha256(`${repo}|${ref}|${subpath}`).hex.slice(0,12) */
-export function configSkillSourceId(repo: string, ref: string, subpath: string): string {
+/** Stable id for a config-managed skill source: `skillsrc_cfg_` + sha256(`${ownerType}|${ownerId}|${repo}|${ref}|${subpath}`).hex.slice(0,12) */
+export function configSkillSourceId(
+  ownerType: "org" | "team",
+  ownerId: string,
+  repo: string,
+  ref: string,
+  subpath: string,
+): string {
   const suffix = createHash("sha256")
-    .update(`${repo}|${ref}|${subpath}`)
+    .update(`${ownerType}|${ownerId}|${repo}|${ref}|${subpath}`)
     .digest("hex")
     .slice(0, 12);
   return `skillsrc_cfg_${suffix}`;
@@ -658,27 +664,63 @@ async function reconcileSkillSourcesPass(db: AppDb, cfg: InstanceConfig): Promis
 
   // Normalized dedupe: two entries can differ in raw repo string (e.g.
   // `obra/superpowers` vs `https://github.com/obra/superpowers.git`) or in ref
-  // only yet still resolve to the same (repoFullName, subpath) pair, which
-  // collides on the DB unique index. The validator's raw-string check misses
-  // these variants, so normalize with `parseRepoInput` and reject the collision
-  // here with a clean error BEFORE any insert (no partial write).
+  // only yet still resolve to the same (owner, repoFullName, subpath) triple,
+  // which collides on the DB unique index. Two teams may track the same
+  // folder. The validator's raw-string check misses URL variants, so
+  // normalize with `parseRepoInput` and reject the collision here with a
+  // clean error BEFORE any insert (no partial write).
   const seenPairs = new Map<string, string>();
+  const resolved: Array<{
+    repo: string;
+    repoFullName: string;
+    ref: string;
+    subpath: string;
+    ownerType: "org" | "team";
+    ownerId: string;
+    desiredId: string;
+  }> = [];
   for (const entry of cfg.skillSources) {
     const parsed = parseRepoInput(entry.repo, { ref: entry.ref, subpath: entry.subpath });
-    const pairKey = `${parsed.repoFullName}|${parsed.subpath}`;
+    let ownerType: "org" | "team" = "org";
+    let ownerId = orgId;
+    if (entry.team) {
+      const team = await findTeamByName(db, orgId, entry.team);
+      if (!team) {
+        throw new InstanceConfigError(
+          `skillSources: "${entry.repo}" names team "${entry.team}" which does not exist. Add that team under teams:, or remove the team field.`,
+        );
+      }
+      ownerType = "team";
+      ownerId = team.id;
+    }
+    const pairKey = `${ownerType}|${ownerId}|${parsed.repoFullName}|${parsed.subpath}`;
     const priorRepo = seenPairs.get(pairKey);
     if (priorRepo !== undefined) {
       throw new InstanceConfigError(
-        `skillSources: "${priorRepo}" and "${entry.repo}" resolve to the same repository "${parsed.repoFullName}" and subpath "${parsed.subpath}". Remove one; a source can track only one ref.`,
+        `skillSources: "${priorRepo}" and "${entry.repo}" resolve to the same repository "${parsed.repoFullName}" and subpath "${parsed.subpath}" for the same owner. Remove one; a source can track only one ref.`,
       );
     }
     seenPairs.set(pairKey, entry.repo);
+    const desiredId = configSkillSourceId(
+      ownerType,
+      ownerId,
+      parsed.repoFullName,
+      parsed.ref,
+      parsed.subpath,
+    );
+    resolved.push({
+      repo: entry.repo,
+      repoFullName: parsed.repoFullName,
+      ref: parsed.ref,
+      subpath: parsed.subpath,
+      ownerType,
+      ownerId,
+      desiredId,
+    });
   }
 
-  for (const entry of cfg.skillSources) {
-    const parsed = parseRepoInput(entry.repo, { ref: entry.ref, subpath: entry.subpath });
-    const { repoFullName, ref, subpath } = parsed;
-    const desiredId = configSkillSourceId(repoFullName, ref, subpath);
+  for (const item of resolved) {
+    const { repoFullName, ref, subpath, ownerType, ownerId, desiredId } = item;
     desiredIds.add(desiredId);
 
     // Check if the row already exists with the desired id.
@@ -715,8 +757,8 @@ async function reconcileSkillSourcesPass(db: AppDb, cfg: InstanceConfig): Promis
       .where(
         and(
           eq(skillSources.orgId, orgId),
-          eq(skillSources.ownerType, "org"),
-          eq(skillSources.ownerId, orgId),
+          eq(skillSources.ownerType, ownerType),
+          eq(skillSources.ownerId, ownerId),
           eq(skillSources.repoFullName, repoFullName),
           eq(skillSources.subpath, subpath),
           notLike(skillSources.id, "skillsrc_cfg_%"),
@@ -731,12 +773,13 @@ async function reconcileSkillSourcesPass(db: AppDb, cfg: InstanceConfig): Promis
       continue;
     }
 
-    // Insert org-owned skill source with deterministic id.
+    // Insert the config-owned row. Omit `team` → org owner (today's
+    // default). A named team writes that team's owner.
     await db.insert(skillSources).values({
       id: desiredId,
       orgId,
-      ownerType: "org",
-      ownerId: orgId,
+      ownerType,
+      ownerId,
       repoFullName,
       ref,
       subpath,

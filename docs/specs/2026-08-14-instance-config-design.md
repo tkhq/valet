@@ -131,6 +131,7 @@ skillSources:
   - repo: obra/superpowers      # owner/repo on github.com
     ref: main                   # optional; omitted = default branch
     subpath: skills             # optional; omitted = repository root
+    team: Platform              # optional; omitted = org owner
 
 mcpServers:
   - name: salesforce            # action service; tools appear as salesforce.<tool>
@@ -153,7 +154,7 @@ Top-level keys in v1:
 | `org`          | object | DB reconciler → `orgs`, `org_members`, `invites`   |
 | `teams`        | list   | DB reconciler → `teams`, `team_members`            |
 | `llmProviders` | list   | DB reconciler → `llm_providers`                    |
-| `skillSources` | list   | DB reconciler → `skill_sources` (org-owned)        |
+| `skillSources` | list   | DB reconciler → `skill_sources` (org-owned, or team-owned when `team` is set) |
 | `mcpServers`   | list   | boot config assembly (synthesized MCP plugins)     |
 
 Every key except `version` is optional, and so is every subfield —
@@ -285,7 +286,7 @@ database is a no-op the second time.
 Config-created rows carry a recognizable id prefix instead of a new
 `managed_by` column:
 
-- skill sources: `skillsrc_cfg_<sha256(repo|ref|subpath)[:12]>`
+- skill sources: `skillsrc_cfg_<sha256(ownerType|ownerId|repo|ref|subpath)[:12]>`
 - invites: `invite_cfg_<sha256(email)[:12]>`
 
 The reconciler owns exactly the rows matching these prefixes. UI-created
@@ -370,7 +371,9 @@ it would be a new auth-config option, not a file concern.
 ### `teams` section
 
 A team's identity is its name — `teams` has a unique (org, name) index, so
-the reconciler keys by name and no id-prefix marking is needed:
+the reconciler keys by name and no id-prefix marking is needed. Parse trims
+`teams[].name` the same way it trims `skillSources[].team`, so a quoted
+name with padding still matches.
 
 - A declared team that does not exist → created with `origin: config` (id
   `team_cfg_<hash>` for traceability; identity remains the name).
@@ -476,7 +479,21 @@ both and the pair survives together.
   has service-level guards — the org default model's provider refuses to
   delete — and stays in the UI.)
 
-Declared sources are org-owned (`owner_type='org'`). For each entry the
+Declared sources are org-owned (`owner_type='org'`) unless `team` names a
+team created by the teams pass. That field writes `owner_type='team'` and
+`owner_id` to that team's id. An unknown team name fails boot and names
+both the source and the team. Omit `team` to keep today's org owner.
+
+The insert omits `created_by`. There is no adding user. A UI team source
+uses that column's credential; a NULL there reads GitHub anonymously. A
+`skillsrc_cfg_*` team row is an operator declaration, so sync resolves
+GitHub with the org App (`auth: "app"`), the same privilege as an org
+config source. A private team folder therefore syncs when the App covers
+the repository. A UI-created team source (id not `skillsrc_cfg_`) still
+uses `created_by` and never climbs to the App.
+
+The config id hashes `(ownerType, ownerId, repo, ref, subpath)` so two
+teams can track the same folder without colliding. For each entry the
 reconciler upserts a `skillsrc_cfg_*` row; the existing `SkillSyncService`
 poller picks it up like any other source — the config file feeds the
 subsystem, it does not replace it.
@@ -488,10 +505,11 @@ wipe retry backoff. The reconciler kicks only a dead claim: `status` is
 five-minute claim lease. An error row keeps its backoff. The UPDATE
 repeats `last_synced_at IS NULL` so a finishing sync is not kicked.
 
-- A `skillsrc_cfg_*` row whose (repo, ref, subpath) no longer appears in
-  the file → deleted through the existing delete path, which also deletes
-  the mirrored `origin='repo'` skills (mirror semantics, per
-  `services/skill-sources.ts`).
+- A `skillsrc_cfg_*` row whose owner-aware id is no longer desired →
+  deleted through the existing delete path, which also deletes the
+  mirrored `origin='repo'` skills (mirror semantics, per
+  `services/skill-sources.ts`). A hand-created row for the same
+  repo+subpath stays.
 - The same repo+subpath already tracked by an *unmanaged* row for the same
   owner → skip and log. The reconciler does not adopt or fight rows a
   human created.

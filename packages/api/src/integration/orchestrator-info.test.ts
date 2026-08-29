@@ -220,6 +220,43 @@ describe("PATCH /api/orchestrator/info", () => {
     expect(rows[0]?.isDefault).toBe(true);
   });
 
+  it("an editor-set personality column does not mute /info edits: the last write wins everywhere", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+
+    // Resolve the default row, then write its personality COLUMN the way the
+    // assistant editor does.
+    await fetch(`${api.baseUrl}/api/orchestrator/info`);
+    const rows = await db.select().from(assistants);
+    const assistantId = rows[0]?.id;
+    expect(assistantId).toBeDefined();
+    await fetch(`${api.baseUrl}/api/assistants/${assistantId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Wren", personality: "Formal." }),
+    });
+
+    // The legacy settings page edits through /info. Before the convergence
+    // this wrote only the memory file, which the column silently overrode.
+    const patchRes = await fetch(`${api.baseUrl}/api/orchestrator/info`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ personality: "Casual." }),
+    });
+    expect(patchRes.status).toBe(200);
+
+    const infoRes = await fetch(`${api.baseUrl}/api/orchestrator/info`);
+    const infoBody = (await infoRes.json()) as GetOrchestratorInfoResponse;
+    expect(infoBody.personality).toBe("Casual.");
+
+    const session = await defaultAssistantSessionFor(
+      api.providers,
+      { type: "user", id: "local-user" },
+      { actorUserId: "local-user", orgId: "local-org" },
+    );
+    expect(session.options.systemPrompt).toContain("You are Wren. Casual.");
+  });
+
   it("evicts the cache (not destroy): the engine session row survives a PATCH after ensure", async () => {
     api = await bootTestApi();
 

@@ -16,11 +16,13 @@ import { ToolBody } from "./tool-renderers/tool-shell";
 import { Thinking } from "./tool-renderers/thinking";
 import { extractSkillInvocation, type SkillBlock } from "./tool-renderers/skill";
 import { cn } from "~/lib/cn";
+import { userInitials } from "~/lib/user-initials";
 
 export function MessageItem({
   message,
   suppressEmptyPlaceholder = false,
   queued = false,
+  viewerId,
 }: {
   message: StreamMessage;
   /** True for the last message while the agent is mid-turn — an empty
@@ -28,9 +30,14 @@ export function MessageItem({
   suppressEmptyPlaceholder?: boolean;
   /** True while this user message is still waiting in the queue. */
   queued?: boolean;
+  /** The signed-in user's id — see `MessageList`'s prop doc. */
+  viewerId?: string;
 }) {
   const isUser = message.role === "user";
   const copyText = messageCopyText(message);
+  // Defined only for another member's message on a shared session; the
+  // viewer's own messages (and authorless rows) keep the "You" treatment.
+  const teammate = isUser ? senderLabel(message.author, viewerId) : undefined;
   return (
     <article className={cn("group px-4 py-3", isUser && "bg-neutral-100/50 dark:bg-neutral-900/40")}>
       {/* Row background spans full width; the content column is capped at a
@@ -38,13 +45,19 @@ export function MessageItem({
       <div className="mx-auto flex w-full max-w-4xl gap-3">
         <Avatar size="sm">
           <AvatarFallback>
-            {isUser ? <UserIcon className="h-3.5 w-3.5" /> : <Bot className="h-3.5 w-3.5" />}
+            {teammate ? (
+              userInitials(teammate)
+            ) : isUser ? (
+              <UserIcon className="h-3.5 w-3.5" />
+            ) : (
+              <Bot className="h-3.5 w-3.5" />
+            )}
           </AvatarFallback>
         </Avatar>
         <div className="flex-1 min-w-0 space-y-2">
           <div className="text-xs text-muted flex items-center gap-2">
             <span className="font-medium text-[--fg]/80">
-              {isUser ? "You" : message.role === "assistant" ? "Assistant" : message.role}
+              {isUser ? teammate ?? "You" : message.role === "assistant" ? "Assistant" : message.role}
             </span>
             <span>•</span>
             <span>{formatTime(message.createdAt)}</span>
@@ -142,6 +155,22 @@ export function messageCopyText(message: StreamMessage): string {
     if (block) return `/skill:${block.name}${block.rest ? ` ${block.rest}` : ""}`;
   }
   return raw;
+}
+
+/**
+ * The display label for a user message sent by someone OTHER than the
+ * viewer — a teammate on a shared (team-owned) session. Returns undefined
+ * for the viewer's own messages and for authorless rows (personal
+ * sessions, optimistic rows, entries from before authors were stamped);
+ * the caller renders those as "You". `||` (not `??`) so an empty-string
+ * name still falls through to email. Exported for tests.
+ */
+export function senderLabel(
+  author: StreamMessage["author"],
+  viewerId: string | undefined,
+): string | undefined {
+  if (!author || author.id === viewerId) return undefined;
+  return author.name || author.email || "Teammate";
 }
 
 function PartView({

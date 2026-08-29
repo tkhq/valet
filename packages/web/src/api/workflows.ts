@@ -115,9 +115,9 @@ export function useWorkflowRuns(
  * list one batch parent's child runs. */
 export function useRuns(
   filter?: WorkflowRunFilter,
-  opts?: Partial<UseQueryOptions<ListWorkflowRunsResponse>>,
+  opts?: Partial<UseQueryOptions<ListAllWorkflowRunsResponse>>,
 ) {
-  return useQuery<ListWorkflowRunsResponse>({
+  return useQuery<ListAllWorkflowRunsResponse>({
     queryKey: qkWorkflows.runList(filter),
     queryFn: () => api.listRuns(filter),
     ...opts,

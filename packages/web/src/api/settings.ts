@@ -28,6 +28,7 @@ import type {
   ListTeamsResponse,
   MeResponse,
   OpenrouterRegistryResponse,
+  OrgDirectoryResponse,
   OrgMembersResponse,
   OrgResponse,
   OrgSettingsResponse,
@@ -61,6 +62,7 @@ export const qkSettings = {
   me: () => ["settings", "me"] as const,
   org: () => ["settings", "org"] as const,
   orgMembers: () => ["settings", "org", "members"] as const,
+  orgDirectory: () => ["settings", "org", "directory"] as const,
   models: () => ["settings", "models"] as const,
   llmProviders: () => ["settings", "llmProviders"] as const,
   openrouterRegistry: () => ["settings", "openrouterRegistry"] as const,
@@ -80,6 +82,11 @@ export function useMe(opts?: Partial<UseQueryOptions<MeResponse>>) {
   return useQuery<MeResponse>({
     queryKey: qkSettings.me(),
     queryFn: () => api.getMe(),
+    // Viewer identity is static for the app session and its mutations
+    // invalidate the key; without this, every fresh mount past the 5s app
+    // default (e.g. each chat slide-over open) refetches it. Same
+    // reasoning as `useOrg` below.
+    staleTime: 60_000,
     ...opts,
   });
 }
@@ -101,6 +108,21 @@ export function useOrgMembers(opts?: UseQueryOptions<OrgMembersResponse>) {
   return useQuery<OrgMembersResponse>({
     queryKey: qkSettings.orgMembers(),
     queryFn: () => api.getOrgMembers(),
+    ...opts,
+  });
+}
+
+/** Member-visible display identity of every org member — what the teams
+ * page uses for roster names and the add-member picker. Reachable by any
+ * org member, unlike `useOrgMembers()` (org-admin roster). */
+export function useOrgDirectory(opts?: UseQueryOptions<OrgDirectoryResponse>) {
+  return useQuery<OrgDirectoryResponse>({
+    queryKey: qkSettings.orgDirectory(),
+    queryFn: () => api.getOrgDirectory(),
+    // Same reasoning as `useOrg` above: membership changes rarely, nothing
+    // here depends on it being fresh, and the app default (5s) would refetch
+    // the whole directory on every remount of the Teams page.
+    staleTime: 60_000,
     ...opts,
   });
 }

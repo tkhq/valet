@@ -22,6 +22,7 @@ import {
 import { renderTemplate } from "./roles-skills/index.js";
 import {
   deriveQueueState,
+  formatSenderLine,
   MAX_PENDING_PER_THREAD,
   namespaceInternalDispatchId,
   renderSignalEnvelope,
@@ -597,6 +598,10 @@ export class Thread {
         .map((it, i) => `[${i + 1}] ${promptText(it.content)}`)
         .join("\n\n");
       const merged = this.buildQueueItem(mergedContent, {
+        // Collect mode has no v2 producer today (REST rejects it; no
+        // session sets it). If one lands, a multi-author window needs
+        // per-constituent authors — this first-item stamp would credit
+        // every constituent's text to one sender in the transcript and UI.
         author: collecting[0].author,
         channel: collecting[0].channel,
         replyTarget: collecting[0].replyTarget,
@@ -1437,7 +1442,20 @@ export class Thread {
    * the toolResult message before continuing.
    */
   rehydrateTranscript(entries: SessionEntry[]): void {
-    this.agent.state.messages = entriesToAgentMessages(entries, this.session.options.model);
+    this.agent.state.messages = entriesToAgentMessages(entries, this.session.options.model, {
+      attributeAuthors: this.attributeAuthors,
+    });
+  }
+
+  /**
+   * Whether user messages carry a `[from: …]` sender line in the LLM
+   * transcript. On when the session is shared (team/org-owned) — several
+   * people prompt the same thread there, and the model cannot differentiate
+   * them from the text alone. Personal sessions have one author; the line
+   * would be noise.
+   */
+  private get attributeAuthors(): boolean {
+    return this.session.owner.type !== "user";
   }
 
   setMode(mode: QueueMode): void {
@@ -2414,11 +2432,15 @@ export class Thread {
       // separate synthetic append: entriesToAgentMessages is the single owner
       // of toolResult emission (no callId is ever answered twice).
       const entries = await store.getEntries(this.session.id, this.id);
-      this.agent.state.messages = entriesToAgentMessages(entries, {
-        api: this.session.options.model.api,
-        provider: this.session.options.model.provider,
-        id: this.session.options.model.id,
-      });
+      this.agent.state.messages = entriesToAgentMessages(
+        entries,
+        {
+          api: this.session.options.model.api,
+          provider: this.session.options.model.provider,
+          id: this.session.options.model.id,
+        },
+        { attributeAuthors: this.attributeAuthors },
+      );
       this.agent.state.tools = this.buildTools();
 
       // Host resolver (if any) delivers this resumed turn's per-turn key before
@@ -2717,9 +2739,14 @@ export class Thread {
     // finally, before the role restore, so both idioms nest correctly
     // whether or not a role was applied this turn.
     const coldHintPrompt = this.applyColdHintForTurn();
+    // The sender line must match what entriesToAgentMessages renders for
+    // this entry on reload — same gate (shared owner, non-signal), same
+    // render function — or the hot and cold transcripts diverge.
+    const sender =
+      this.attributeAuthors && !isSignalContent(item.content) ? item.author : undefined;
     try {
       try {
-        await this.runAgent(text, attachments);
+        await this.runAgent(text, attachments, sender);
       } catch (err) {
         // Record the throw for settlement: a stream failing before its first
         // message_start leaves no assistant message this turn, and
@@ -2883,8 +2910,9 @@ export class Thread {
   private async runAgent(
     text: string,
     attachments?: MessageEntry["attachments"],
+    sender?: PromptAuthor,
   ): Promise<void> {
-    const content = userContentBlocks(text, attachments);
+    const content = userContentBlocks(text, attachments, sender);
     await this.agent.prompt({
       role: "user",
       content,
@@ -3009,6 +3037,7 @@ export class Thread {
         headEntries: head,
         model,
         toolOutputMaxChars: cfg?.toolOutputMaxChars,
+        attributeAuthors: this.attributeAuthors,
         previousSummary,
         // Reactive compaction fires WITHIN a claimed turn (and proactive
         // just after runAgent, still before the turn's finally clears it),
@@ -3051,11 +3080,15 @@ export class Thread {
     // Step 5: rewrite agent.state.messages. The simplest and most
     // correct path is to rebuild from the now-augmented DAG.
     const updatedEntries = await store.getEntries(session.id, this.id);
-    this.agent.state.messages = entriesToAgentMessages(updatedEntries, {
-      api: session.options.model.api,
-      provider: session.options.model.provider,
-      id: session.options.model.id,
-    });
+    this.agent.state.messages = entriesToAgentMessages(
+      updatedEntries,
+      {
+        api: session.options.model.api,
+        provider: session.options.model.provider,
+        id: session.options.model.id,
+      },
+      { attributeAuthors: this.attributeAuthors },
+    );
 
     await session.emit(
       { type: "compaction_end", threadId: this.id },
@@ -4015,21 +4048,30 @@ function findMostRecentCompaction(
  * File attachments (sandbox uploads) render as a system-authored note
  * prepended to the text — the model reads paths, not bytes. Image
  * attachments render as image content blocks.
+ *
+ * `sender` (when set) renders as a `[from: …]` line above the text so the
+ * model can tell which person sent the message. Callers pass it only on
+ * shared (team/org-owned) sessions — on a personal session every prompt has
+ * the same author and the line would be noise.
  */
 export function userContentBlocks(
   text: string,
   attachments: MessageEntry["attachments"] | undefined,
+  sender?: PromptAuthor,
 ): Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> {
   const files = (attachments ?? []).filter(
     (a): a is Extract<NonNullable<MessageEntry["attachments"]>[number], { type: "file" }> =>
       a.type === "file",
   );
   const note = formatFileAttachmentsNote(files);
+  const senderLine = formatSenderLine(sender);
+  const prefixed = [senderLine, note, text].filter((s) => s !== undefined && s !== "").join("\n\n");
   return [
-    { type: "text" as const, text: note ? `${note}\n\n${text}` : text },
+    { type: "text" as const, text: prefixed },
     ...attachmentsToImageBlocks(attachments),
   ];
 }
+
 
 export function attachmentsToImageBlocks(
   attachments: MessageEntry["attachments"] | undefined,
@@ -4063,6 +4105,14 @@ export function attachmentsToImageBlocks(
 export function entriesToAgentMessages(
   entries: readonly SessionEntry[],
   modelHint: { api: string; provider: string; id: string },
+  opts?: {
+    /**
+     * Render each user entry's `author` as a `[from: …]` line (shared
+     * team/org sessions, where prompts come from different people). Signal
+     * entries are exempt — their envelope already names the sender.
+     */
+    attributeAuthors?: boolean;
+  },
 ): AgentMessage[] {
   // 1. Find the most recent CompactionEntry. Everything in its coveredEntryIds is dropped.
   let activeCompaction: { summary: string; covered: Set<string> } | undefined;
@@ -4094,7 +4144,8 @@ export function entriesToAgentMessages(
 
     if (e.role === "user") {
       const text = e.signal ? renderSignalEnvelope(e.signal, e.content) : e.content;
-      const contentBlocks = userContentBlocks(text, e.attachments);
+      const sender = opts?.attributeAuthors && !e.signal ? e.author : undefined;
+      const contentBlocks = userContentBlocks(text, e.attachments, sender);
       out.push({
         role: "user",
         content: contentBlocks,

@@ -68,13 +68,40 @@ export function useCreateAssistant() {
   });
 }
 
-/** Rename, or promote to default. `isDefault: true` demotes the previous
- * default in the same write, so no separate demote call exists. */
+/** Rename, promote to default, or rewrite persona/behavior. `isDefault:
+ * true` demotes the previous default in the same write, so no separate
+ * demote call exists. */
 export function usePatchAssistant() {
   const qc = useQueryClient();
   return useMutation<PatchAssistantResponse, Error, { id: string; body: PatchAssistantRequest }>({
     mutationFn: ({ id, body }) => api.patchAssistant(id, body),
-    onSuccess: () => {
+    onSuccess: (updated) => {
+      // Write the response into the cache SYNCHRONOUSLY, before the refetch:
+      // the editor's section saves build each PATCH body from the cached
+      // row's `behavior`, so a save issued right after another must read the
+      // first save's result, not the pre-save fetch — or it silently reverts
+      // it. The invalidate still runs as the authoritative re-read.
+      qc.setQueryData<ListAssistantsResponse>(qkAssistants.list(), (prev) =>
+        prev === undefined
+          ? prev
+          : {
+              assistants: prev.assistants.map((a) => {
+                if (a.id === updated.id) return updated;
+                // A promote demotes the owner's previous default server-side;
+                // mirror it, or defaultAssistantFor keeps resolving the OLD
+                // default (it sorts first) until the refetch lands.
+                if (
+                  updated.isDefault &&
+                  a.isDefault &&
+                  a.owner.type === updated.owner.type &&
+                  a.owner.id === updated.owner.id
+                ) {
+                  return { ...a, isDefault: false };
+                }
+                return a;
+              }),
+            },
+      );
       qc.invalidateQueries({ queryKey: qkAssistants.list() });
     },
   });

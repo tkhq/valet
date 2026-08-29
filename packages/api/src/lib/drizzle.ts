@@ -251,6 +251,22 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'ALTER TABLE "mcp_oauth_clients" ADD COLUMN IF NOT EXISTS "scopes_supported" jsonb',
   },
   {
+    // Per-assistant personality prose (assistant editor, #325). Null on rows
+    // from before the column existed, which the persona builder reads as
+    // "no personality section" — the same answer a fresh assistant gets.
+    describe: "assistants.personality column",
+    probe: { kind: "column", table: "assistants", column: "personality" },
+    sql: 'ALTER TABLE "assistants" ADD COLUMN IF NOT EXISTS "personality" text',
+  },
+  {
+    // Per-assistant behavior config JSON (assistant editor, #325). Null reads
+    // as "no restrictions" at wake (host.ts parseAssistantBehavior), matching
+    // pre-editor behavior.
+    describe: "assistants.behavior column",
+    probe: { kind: "column", table: "assistants", column: "behavior" },
+    sql: 'ALTER TABLE "assistants" ADD COLUMN IF NOT EXISTS "behavior" text',
+  },
+  {
     // The LLM recording gateway's request log (#432). The gateway writes a row
     // here on every recorded call, so an already-migrated DB without it 500s
     // at runtime. Columns are in lockstep with `llm_proxy_requests` in

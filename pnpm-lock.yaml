@@ -86,6 +86,9 @@ importers:
       '@valet/engine':
         specifier: workspace:*
         version: link:../engine
+      '@valet/plugin-assistants':
+        specifier: workspace:*
+        version: link:../plugin-assistants
       '@valet/plugin-browser':
         specifier: workspace:*
         version: link:../plugin-browser
@@ -119,9 +122,6 @@ importers:
       '@valet/plugin-openai':
         specifier: workspace:*
         version: link:../plugin-openai
-      '@valet/plugin-personas':
-        specifier: workspace:*
-        version: link:../plugin-personas
       '@valet/plugin-sandbox-tunnels':
         specifier: workspace:*
         version: link:../plugin-sandbox-tunnels
@@ -405,6 +405,22 @@ importers:
         specifier: ^4.0.18
         version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@20.19.39)(jiti@1.21.7)(jsdom@25.0.1)(tsx@4.21.0)(yaml@2.9.0)
 
+  packages/plugin-assistants:
+    dependencies:
+      '@valet/engine':
+        specifier: workspace:*
+        version: link:../engine
+    devDependencies:
+      '@types/node':
+        specifier: ^20.0.0
+        version: 20.19.39
+      typescript:
+        specifier: ^5.3.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.0.18
+        version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@20.19.39)(jiti@1.21.7)(jsdom@25.0.1)(tsx@4.21.0)(yaml@2.9.0)
+
   packages/plugin-browser:
     dependencies:
       '@valet/engine':
@@ -679,22 +695,6 @@ importers:
       vitest:
         specifier: ^4.0.18
         version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@22.20.1)(jiti@1.21.7)(jsdom@25.0.1)(tsx@4.21.0)(yaml@2.9.0)
-
-  packages/plugin-personas:
-    dependencies:
-      '@valet/engine':
-        specifier: workspace:*
-        version: link:../engine
-    devDependencies:
-      '@types/node':
-        specifier: ^20.0.0
-        version: 20.19.39
-      typescript:
-        specifier: ^5.3.3
-        version: 5.9.3
-      vitest:
-        specifier: ^4.0.18
-        version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@20.19.39)(jiti@1.21.7)(jsdom@25.0.1)(tsx@4.21.0)(yaml@2.9.0)
 
   packages/plugin-sandbox-tunnels:
     dependencies:

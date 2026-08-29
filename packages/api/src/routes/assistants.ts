@@ -2,8 +2,8 @@
  * Assistants — the named agents a principal owns.
  *
  *   GET    /api/assistants        → list, optionally filtered by owner
- *   POST   /api/assistants        → create one
- *   PATCH  /api/assistants/:id    → rename, or promote to default
+ *   POST   /api/assistants        → create one, with optional personality/behavior
+ *   PATCH  /api/assistants/:id    → rename, promote to default, set personality/behavior
  *   DELETE /api/assistants/:id    → archive (never destroy)
  *
  * Authorization is the session rule, unchanged: reading follows
@@ -22,6 +22,7 @@ import { Hono } from "hono";
 import type { Principal } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import {
+  applyProfilePatch,
   archiveAssistant,
   ArchivedAssistantError,
   createAssistant,
@@ -29,8 +30,8 @@ import {
   ensureAssistantSession,
   listAssistantsForOwners,
   loadAssistant,
-  patchAssistant,
   toAssistantSummary,
+  validateProfilePatch,
 } from "../assistants/service.js";
 import { assistantOwner, canAdministerAssistantOwner, canViewAssistantOwner } from "../assistants/access.js";
 import { readOwnerFilter } from "./_owner-filter.js";
@@ -110,20 +111,25 @@ assistantsRouter.post("/", async (c) => {
   if (body.name !== undefined && typeof body.name !== "string") {
     return c.json({ error: "name must be a string." }, 400);
   }
+  const personaErr = validateProfilePatch(body);
+  if (personaErr) return c.json({ error: personaErr }, 400);
 
   if (!(await canAdministerAssistantOwner(db, owner, user.id))) {
     return c.json({ error: "owner not found" }, 404);
   }
 
-  const row = await createAssistant(db, user.orgId, owner, body.name ?? null);
+  const row = await createAssistant(db, user.orgId, owner, body.name ?? null, {
+    personality: body.personality ?? null,
+    behavior: body.behavior ?? null,
+  });
   const response: CreateAssistantResponse = toAssistantSummary(row);
   return c.json(response, 201);
 });
 
-// ── Patch (rename / promote) ──────────────────────────────────────────────
+// ── Patch (rename / promote / personality / behavior) ─────────────────────
 
 assistantsRouter.patch("/:id", async (c) => {
-  const { db } = c.var.providers;
+  const { db, engineHost } = c.var.providers;
   const user = c.var.user;
 
   let body: PatchAssistantRequest;
@@ -132,8 +138,8 @@ assistantsRouter.patch("/:id", async (c) => {
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
-  if (body.name !== undefined && typeof body.name !== "string") {
-    return c.json({ error: "name must be a string." }, 400);
+  if (body.name !== undefined && body.name !== null && typeof body.name !== "string") {
+    return c.json({ error: "name must be a string, or null to clear it." }, 400);
   }
   if (body.isDefault !== undefined && body.isDefault !== true) {
     return c.json(
@@ -141,8 +147,15 @@ assistantsRouter.patch("/:id", async (c) => {
       400,
     );
   }
-  if (body.name === undefined && body.isDefault === undefined) {
-    return c.json({ error: "Send a name, or isDefault: true." }, 400);
+  const personaErr = validateProfilePatch(body);
+  if (personaErr) return c.json({ error: personaErr }, 400);
+  if (
+    body.name === undefined &&
+    body.isDefault === undefined &&
+    body.personality === undefined &&
+    body.behavior === undefined
+  ) {
+    return c.json({ error: "Send a name, isDefault: true, personality, or behavior." }, 400);
   }
 
   const row = await loadAssistant(db, c.req.param("id"));
@@ -152,7 +165,10 @@ assistantsRouter.patch("/:id", async (c) => {
   }
 
   try {
-    const updated = await patchAssistant(db, row, body);
+    // applyProfilePatch owns the changed-values eviction rule (service.ts) —
+    // cache-only, shared with the orchestrator /info route and the
+    // assistants.* actions.
+    const updated = await applyProfilePatch(db, row, body, (sid) => engineHost.evictCache(sid));
     const response: PatchAssistantResponse = toAssistantSummary(updated);
     return c.json(response);
   } catch (err) {
