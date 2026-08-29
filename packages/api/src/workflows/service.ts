@@ -1356,6 +1356,14 @@ export async function getWorkflowRunDetail(
       definition: run.definition,
       params: run.params,
     },
+    // Guaranteed non-null by the authorization guard at the top. The web run
+    // page adopts this into the workspace switcher. The store types
+    // `ownerType` as a bare string; the persisted column only ever holds the
+    // three owner kinds, so the cast restores the wire union.
+    owner: {
+      type: run.owner!.ownerType as "user" | "team" | "org",
+      id: run.owner!.ownerId,
+    },
     checkpoints: checkpoints.map(toRunCheckpoint),
     signals: signals.map((s) => ({
       signalId: s.signalId,

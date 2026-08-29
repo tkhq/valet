@@ -3,6 +3,7 @@ import { ArrowLeft } from "lucide-react";
 import type { OrchestratorChildSummary } from "@valet/api/wire";
 import { useOrchestratorChildren, useOrchestratorInfo } from "~/api/orchestrator";
 import { useSession } from "~/api/queries";
+import { useAdoptWorkspaceScope } from "~/lib/workspace-scope";
 import { SecuritySessionLayout } from "~/components/security/engagement-panel";
 import { ChildPanel } from "~/components/session/child-panel";
 import { SessionView } from "~/components/session/session-view";
@@ -58,6 +59,10 @@ function SessionPage() {
   // panel layout. The query is shared with SessionView's own read, so this
   // adds no request.
   const session = useSession(sessionId);
+  // Arriving from a notification or shared link for a team-owned session:
+  // move the switcher to that session's workspace so the nav matches the
+  // header (which badges the owning team) instead of leaving you in Personal.
+  useAdoptWorkspaceScope(session.data?.owner);
 
   // The assistant's own session lives at `/chat`, not this standalone
   // session route. Notification/activity hrefs built server-side (see

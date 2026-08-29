@@ -15,7 +15,12 @@
  */
 import { describe, expect, it } from "vitest";
 import type { AssistantSummary } from "@valet/api/wire";
-import { PERSONAL, resolveWorkspaceKey, workspaceOfAssistant } from "./workspace-scope";
+import {
+  PERSONAL,
+  resolveWorkspaceKey,
+  workspaceKeyForOwner,
+  workspaceOfAssistant,
+} from "./workspace-scope";
 
 const ME = { type: "user", id: "u1" } as const;
 
@@ -114,5 +119,23 @@ describe("resolveWorkspaceKey", () => {
         membershipKnown: false,
       }),
     ).toBe("team_2");
+  });
+});
+
+describe("workspaceKeyForOwner (deep-link scope adoption)", () => {
+  it("maps a team-owned resource to that team's key", () => {
+    expect(workspaceKeyForOwner({ type: "team", id: "team_9" })).toBe("team_9");
+  });
+
+  it("maps a user-owned resource to the personal workspace", () => {
+    expect(workspaceKeyForOwner({ type: "user", id: "u1" })).toBe(PERSONAL);
+  });
+
+  it("maps an org-owned resource to the personal workspace (no switcher scope for org)", () => {
+    expect(workspaceKeyForOwner({ type: "org", id: "org1" })).toBe(PERSONAL);
+  });
+
+  it("is undefined while the owner is unknown, so adoption waits for the data", () => {
+    expect(workspaceKeyForOwner(undefined)).toBeUndefined();
   });
 });
