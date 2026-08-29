@@ -56,6 +56,7 @@ import { loadSessionMeta } from "./session-meta.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";
 import { buildPrepSteps } from "./prep-steps.js";
+import { securityToolPrepSteps } from "./security-bootstrap.js";
 import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
 import { getOrgModelPreferences } from "../services/org.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
@@ -722,7 +723,7 @@ export class EngineHost {
         );
       });
     };
-    const specProvider = await this.buildSpecProvider(sessionId, meta, onStartRef);
+    const specProvider = await this.buildSpecProvider(sessionId, meta, onStartRef, personaCell != null);
     const credentialResolver = this.buildCredentialResolver(sessionId, meta.userId, meta.orgId);
     // Slash-command options (Task 10). The workspace-skills provider's sandbox
     // accessor closes over `builtSession` — resolved lazily, so it is safe that
@@ -1072,6 +1073,7 @@ export class EngineHost {
     sessionId: string,
     meta: SessionMeta,
     onStartRef?: (ref: SessionStartRef) => void | Promise<void>,
+    installSecurityTools = false,
   ): Promise<import("@valet/engine").SpecProvider | undefined> {
     const hasRepos = meta.repos && meta.repos.length > 0;
     // Non-isolated providers (local/virtual) exec against the host process.
@@ -1109,6 +1111,15 @@ export class EngineHost {
 
       const spec = computeSpec(snap);
       const steps = buildPrepSteps(snap, spec.steps, onStartRef);
+      // Scanner bootstrap (Valet Security): a security persona cell installs
+      // gitleaks + semgrep + sec-preflight AFTER the clone/bind steps, so the
+      // tools land in the ready, cloned sandbox. Best-effort (critical: false)
+      // — a blocked-egress install fails without aborting the sandbox, and
+      // sec-preflight then reports the tool absent. Every security cell gets
+      // the same steps; non-security sessions get none.
+      if (installSecurityTools) {
+        steps.push(...securityToolPrepSteps());
+      }
 
       return {
         image: spec.image !== stockImage ? spec.image : undefined,
@@ -2486,7 +2497,7 @@ export class EngineHost {
           profile,
           ...(opts.docker !== undefined ? { docker: opts.docker } : {}),
         };
-    const specProvider = await this.buildSpecProvider(childSessionId, meta);
+    const specProvider = await this.buildSpecProvider(childSessionId, meta, undefined, personaCell != null);
     // Repo AGENTS.md instructions (agents-md spec, decision 5): a child
     // spawned with a repo binding reads its AGENTS.md exactly like a
     // REST-created session. `builtSession` is assigned below, after the

@@ -2,7 +2,9 @@
 
 **Frameworks:** OWASP Top 10 2021 A02:2021 Cryptographic Failures, A05:2021 Security Misconfiguration, A07:2021 Identification and Authentication Failures, A08:2021 Software and Data Integrity Failures; OWASP ASVS 4.0.3 V2 Authentication, V3 Session Management, V6 Stored Cryptography, V7 Error Handling and Logging, V9 Communication, V14 Configuration; OWASP WSTG v4.2 §4.2 Configuration and Deployment, §4.4 Authentication, §4.9 Cryptography; CWE-798 Use of Hard-coded Credentials, CWE-259 Hard-coded Password, CWE-321 Hard-coded Cryptographic Key, CWE-312 Cleartext Storage of Sensitive Information, CWE-319 Cleartext Transmission, CWE-327 Broken/Risky Crypto Algorithm, CWE-328 Weak Hash, CWE-916 Weak Password Hash, CWE-330 Insufficient Randomness, CWE-295 Improper Certificate Validation, CWE-522 Insufficiently Protected Credentials, CWE-1188 Insecure Default, CWE-489 Debug Code.
 
-This cell is scanner-led. Run the pre-baked scanners first, triage their output, then do the reasoning a scanner cannot. `gitleaks detect --no-git --source .` (and `--source .` over history if the clone carries it) enumerates candidate secrets; you confirm which are live, in-scope, and reachable, and you find the crypto and config problems the scanner does not model.
+This cell is scanner-led. Run the scanners first, triage their output, then do the reasoning a scanner cannot. `gitleaks detect --no-git --source .` (and `--source .` over history if the clone carries it) enumerates candidate secrets; you confirm which are live, in-scope, and reachable, and you find the crypto and config problems the scanner does not model.
+
+The scanners (gitleaks and semgrep) are bootstrapped into the sandbox at cell start. An absent tool means the bootstrap could not reach the network — record it as a NOT_ASSESSED coverage row.
 
 ## Method
 
