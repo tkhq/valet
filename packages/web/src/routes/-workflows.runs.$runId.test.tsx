@@ -49,6 +49,7 @@ function baseRun(
       params: {},
       ...overrides,
     },
+    owner: { type: "user", id: "u1" },
     checkpoints: [],
     signals: [],
     pendingGates,
