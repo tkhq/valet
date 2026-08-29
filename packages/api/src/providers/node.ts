@@ -61,7 +61,8 @@ import { resolveOrgId } from "../lib/org.js";
 import { ChannelHost, publicUrlFromEnv } from "../channels/host.js";
 import { EventDispatcher } from "../events/dispatcher.js";
 import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
-import { channelOriginResolver } from "../events/channel-origin.js";
+import { channelThreadContextFetcher } from "../events/channel-thread-context.js";
+import { channelOriginResolver, channelMessageNormalizer } from "../events/channel-origin.js";
 import { FsBlobStore } from "./blob-fs.js";
 import { pgliteWasmOptions } from "../assets/base.js";
 import {
@@ -692,7 +693,11 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // Workflow schedule loop — cron-driven run starts (time-based counterpart
   // of the event dispatcher's workflow targets). `start()`/`stop()` from
   // main.ts alongside the dispatcher.
-  const deliverToOrchestrator = buildOrchestratorTarget({ db, engineHost });
+  const deliverToOrchestrator = buildOrchestratorTarget({
+    db,
+    engineHost,
+    fetchThreadContext: channelThreadContextFetcher(channelHost),
+  });
   const workflowScheduler = new WorkflowScheduler({ db, workflowStore, workflowRunHost, deliverToOrchestrator });
 
   // Coarse per-workflow cap for the public webhook-trigger route — bounds
@@ -709,6 +714,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     workflowStore,
     deliverToOrchestrator,
     resolveChannelOrigin: channelOriginResolver(channelHost),
+    normalizeChannelMessage: channelMessageNormalizer(channelHost),
   });
 
   // Skill-repository sync (agent-skills design). `readerFor` gives each

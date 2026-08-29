@@ -337,6 +337,39 @@ export class SlackApi {
     return { id, displayName };
   }
 
+  /** conversations.replies → the thread's messages (parent first). Empty when
+   *  the thread is gone or the bot cannot read the channel. */
+  async conversationsReplies(channel: string, threadTs: string, limit = 100): Promise<Record<string, unknown>[]> {
+    const res = await this.get("conversations.replies", { channel, ts: threadTs, limit });
+    return Array.isArray(res.messages) ? (res.messages as Record<string, unknown>[]) : [];
+  }
+
+  /** users.info → the member's display name, or null when the id names nobody.
+   *  Cached per client: a thread transcript resolves the same authors and
+   *  in-text mentions repeatedly, and the transport outlives one message. */
+  private readonly userInfoCache = new Map<string, { id: string; displayName: string } | null>();
+  async usersInfo(userId: string): Promise<{ id: string; displayName: string } | null> {
+    const cached = this.userInfoCache.get(userId);
+    if (cached !== undefined) return cached;
+    let res: SlackResponse;
+    try {
+      res = await this.get("users.info", { user: userId });
+    } catch {
+      return null; // a transient failure is not cached — the next lookup retries.
+    }
+    const user = rec(res.user);
+    if (!user) {
+      this.userInfoCache.set(userId, null);
+      return null;
+    }
+    const profile = rec(user.profile);
+    const displayName =
+      str(profile?.display_name) || str(profile?.real_name) || str(user.real_name) || str(user.name) || userId;
+    const result = { id: userId, displayName };
+    this.userInfoCache.set(userId, result);
+    return result;
+  }
+
   async filesInfo(fileId: string): Promise<Record<string, unknown>> {
     const res = await this.get("files.info", { file: fileId });
     return rec(res.file) ?? {};

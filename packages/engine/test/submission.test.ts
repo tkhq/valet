@@ -222,14 +222,26 @@ describe("resolveSubmissionText / resolvePartialSubmissionText (pure)", () => {
 });
 
 describe("renderSignalEnvelope with channel origin", () => {
-  it("renders origin as the thread key attribute, sorted with the rest", () => {
+  it("renders origin as the thread key attribute plus addressed, sorted with the rest", () => {
     const signal: NonNullable<MessageEntry["signal"]> = {
       signalType: "slack.app_mention",
       tagName: "signal",
       origin: { channelType: "slack", threadKey: "slack:C1:1.2" },
     };
+    // Default (no reply mode) is addressed — a mention answers directly.
     expect(renderSignalEnvelope(signal, "who are you")).toBe(
-      `<signal signalType="slack.app_mention" origin="slack:C1:1.2">who are you</signal>`,
+      `<signal signalType="slack.app_mention" addressed="true" origin="slack:C1:1.2">who are you</signal>`,
+    );
+  });
+
+  it("renders addressed=\"false\" for an overheard (manual-reply) origin", () => {
+    const signal: NonNullable<MessageEntry["signal"]> = {
+      signalType: "slack.message",
+      tagName: "signal",
+      origin: { channelType: "slack", threadKey: "slack:C1:1.2", reply: "manual" },
+    };
+    expect(renderSignalEnvelope(signal, "any update?")).toBe(
+      `<signal signalType="slack.message" addressed="false" origin="slack:C1:1.2">any update?</signal>`,
     );
   });
 });

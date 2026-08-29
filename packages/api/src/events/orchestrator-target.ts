@@ -17,7 +17,7 @@
  * thrown instead of delivered — a subscription-matching bug can't silently
  * deliver an event into another org's assistant.
  */
-import type { SignalContent } from "@valet/engine";
+import type { ChannelOrigin, SignalContent } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import { deliverToAssistantThread } from "./assistant-delivery.js";
@@ -41,7 +41,12 @@ export function threadKeyForSignal(signal: SignalContent): string {
   return signal.origin?.threadKey ?? EVENTS_THREAD_KEY;
 }
 
-export function buildOrchestratorTarget(deps: { db: AppDb; engineHost: EngineHost }): OrchestratorDeliverFn {
+export function buildOrchestratorTarget(deps: {
+  db: AppDb;
+  engineHost: EngineHost;
+  /** Seed a channel thread's earlier messages on the assistant's first turn. */
+  fetchThreadContext?: (origin: ChannelOrigin) => Promise<string | null>;
+}): OrchestratorDeliverFn {
   return async ({ orgId, ownerType, ownerId, actorUserId, signal, dispatchId }) => {
     // A subscription names an OWNER, never one assistant of that owner, so the
     // shared delivery helper resolves the owner's default assistant.

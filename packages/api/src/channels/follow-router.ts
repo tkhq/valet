@@ -14,6 +14,15 @@ import { findFollowedThread, touchFollowedThread } from "../events/followed-thre
 export interface FollowRouterDeps {
   db: AppDb;
   engineHost: EngineHost;
+  /**
+   * Resolve the sender's display name and clean the message text, so an
+   * overheard line names the person and drops raw ids / Slack markup. Wired from
+   * `channelHost` (`channelMessageNormalizer`). Absent → raw text and id.
+   */
+  normalizeChannelMessage?: (
+    service: string,
+    msg: { userId?: string; text: string },
+  ) => Promise<{ senderName?: string; text: string }>;
 }
 
 interface SlackMessageFields {
@@ -71,8 +80,12 @@ export async function handleFollowedMessage(
   if (!follow) return;
 
   const threadKey = `slack:${f.channel}:${f.threadTs}`;
+  const normalized = (await deps.normalizeChannelMessage?.("slack", { userId: f.user, text: f.text })) ?? {
+    text: f.text,
+  };
   const attributes: Record<string, string> = { channel: f.channel };
-  if (f.user) attributes.sender = f.user;
+  const sender = normalized.senderName ?? f.user;
+  if (sender) attributes.sender = sender;
   await deliverToAssistantThread(deps, {
     orgId: args.orgId,
     owner: { type: follow.ownerType, id: follow.ownerId },
@@ -81,7 +94,7 @@ export async function handleFollowedMessage(
     signal: {
       kind: "signal",
       signalType: "slack.message",
-      body: f.text === "" ? "(message)" : f.text,
+      body: normalized.text === "" ? "(message)" : normalized.text,
       attributes,
       // Overheard: the assistant observes it and replies only if it acts.
       origin: { channelType: "slack", threadKey, reply: "manual", messageTs: f.ts },
