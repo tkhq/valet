@@ -21,8 +21,18 @@ function findTrigger(eventType: string) {
 const PULL_REQUEST_PAYLOAD = {
   action: "opened",
   number: 42,
-  pull_request: { id: 1, title: "Add feature" },
+  pull_request: {
+    id: 1,
+    number: 42,
+    title: "Add feature",
+    // BARE branch names ("main", "feature-x"), not full refs like the push
+    // payload's `refs/heads/main`. The github.branches resolver returns bare
+    // names, so these match the picker's value directly.
+    base: { ref: "main" },
+    head: { ref: "feature-x" },
+  },
   repository: { full_name: "acme/widgets" },
+  sender: { login: "octocat", id: 583231 },
 };
 
 const ISSUES_PAYLOAD = {
@@ -402,6 +412,24 @@ describe("github review event families", () => {
     ]);
   });
 
+  it("wires base_branch and head_branch filters on pull_request to the github.branches resolver", () => {
+    const entry = catalogEntry("github.pull_request", "github.pull_request.opened");
+    const byField = new Map(entry.filters.map((f) => [f.field, f]));
+
+    // Both branch fields read a BARE branch name that the resolver's bare-name
+    // options match directly.
+    expect(byField.get("base_branch")?.path).toBe("pull_request.base.ref");
+    expect(byField.get("head_branch")?.path).toBe("pull_request.head.ref");
+
+    for (const field of ["base_branch", "head_branch"]) {
+      expect(byField.get(field)?.options).toEqual({ source: "github.branches", dependsOn: ["repo"] });
+    }
+
+    // dependsOn: ["repo"] must reference a field named exactly "repo" on the
+    // same event.
+    expect(byField.get("repo")?.field).toBe("repo");
+  });
+
   it("declares review_state and pr_number filters on pull_request_review", () => {
     const entry = catalogEntry("github.pull_request_review", "github.pull_request_review.submitted");
     const byField = new Map(entry.filters.map((f) => [f.field, f.path]));
@@ -439,6 +467,7 @@ describe("github review event families", () => {
 
   it("resolves every declared filter path to a scalar on a real payload", () => {
     const cases: [string, string, unknown][] = [
+      ["github.pull_request", "github.pull_request.opened", PULL_REQUEST_PAYLOAD],
       ["github.pull_request_review", "github.pull_request_review.submitted", REVIEW_SUBMITTED_PAYLOAD],
       [
         "github.pull_request_review_comment",
