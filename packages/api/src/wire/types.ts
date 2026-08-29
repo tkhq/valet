@@ -3067,7 +3067,13 @@ export interface GetPrebuildForRepoResponse {
 export interface EventCatalogEntryWire {
   key: string;
   description: string;
-  filters: { field: string; path: string; description: string }[];
+  filters: {
+    field: string;
+    path: string;
+    description: string;
+    /** When set, the value is chosen from a provider-populated list (see `GET /api/events/filter-options`). */
+    options?: { source: string; dependsOn?: string[] };
+  }[];
 }
 
 export interface GetEventCatalogResponse {
