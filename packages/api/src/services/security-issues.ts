@@ -8,7 +8,8 @@
  * (`plugins/action-invoker.ts`), with the ACTING user's credentials:
  * GitHub through `github.create_issue` (plugin-github, `issues:write`),
  * Linear through the Linear MCP integration's runtime-discovered
- * `create_issue` tool. No bespoke API clients (Decision 11).
+ * `save_issue` tool (create-or-update; with no `id` it creates). No bespoke
+ * API clients (Decision 11).
  *
  * Idempotency lives in `security_finding_links`' unique index
  * `(finding_id, provider)`: filing checks for an existing link FIRST and
@@ -199,12 +200,14 @@ export async function createIssueViaProvider(
   }
   const data = await invokeProvider(deps, "linear", ctx, {
     service: "linear",
-    // The Linear MCP server resolves its tool list at runtime
-    // (mcpActionPlugin.resolveActions → tools/list); `create_issue` is the
-    // issue-creation tool it exposes, the sibling of the `list_issues` name
-    // plugin-linear's templates verified live. A rename upstream fails here
-    // with the invoker's own "unknown action" error, not silently.
-    action: "create_issue",
+    // The Linear MCP server (mcp.linear.app) resolves its tool list at runtime
+    // (mcpActionPlugin.resolveActions → tools/list). Its issue-creation tool is
+    // `save_issue` (create-or-update: with no `id` it creates), the sibling of
+    // the `list_issues` name plugin-linear's templates verified live. There is
+    // no `create_issue` tool — using it fails with the invoker's own "unknown
+    // action" error. `title`/`description`/`team` match save_issue's create
+    // params (team is required on create).
+    action: "save_issue",
     params: { title: req.title, description: req.body, team: req.teamId },
     invocationId: mintInvocationId("linear"),
   });

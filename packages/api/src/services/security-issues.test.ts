@@ -213,7 +213,7 @@ describe("security issue filing", () => {
     expect(invoker.calls).toHaveLength(0);
   });
 
-  it("linear happy path: invokes create_issue with the team and parses the MCP text result", async () => {
+  it("linear happy path: invokes save_issue with the team and parses the MCP text result", async () => {
     const invoker = fakeInvoker(() => ({
       ok: true,
       // The Linear MCP action returns text content — often JSON text.
@@ -237,7 +237,7 @@ describe("security issue filing", () => {
     expect(filed.link.url).toBe("https://linear.app/acme/issue/SEC-12/idor-on-sessions");
     const req = invoker.calls[0];
     expect(req.service).toBe("linear");
-    expect(req.action).toBe("create_issue");
+    expect(req.action).toBe("save_issue");
     expect(req.params.team).toBe("team_sec");
     expect(req.params.title).toBe("[high] IDOR on sessions");
   });
