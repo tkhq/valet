@@ -213,6 +213,29 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "artifacts_owner_path_unique" ON "artifacts" ("owner_type","owner_id","source_memory_path")',
   },
   {
+    // Slack thread auto-follow: a thread the assistant follows so later messages
+    // route to the bound assistant without a re-mention.
+    describe: "followed_threads table",
+    probe: { kind: "table", table: "followed_threads" },
+    sql: `CREATE TABLE IF NOT EXISTS "followed_threads" (
+      "id" text PRIMARY KEY NOT NULL,
+      "org_id" text NOT NULL,
+      "channel_type" text NOT NULL,
+      "channel_id" text NOT NULL,
+      "thread_ts" text NOT NULL,
+      "owner_type" text NOT NULL,
+      "owner_id" text NOT NULL,
+      "created_by" text NOT NULL,
+      "created_at" bigint NOT NULL,
+      "last_activity_at" bigint NOT NULL
+    )`,
+  },
+  {
+    describe: "followed_threads_key index",
+    probe: { kind: "index", index: "followed_threads_key" },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "followed_threads_key" ON "followed_threads" ("org_id","channel_type","channel_id","thread_ts")',
+  },
+  {
     // Hibernated-sandbox reaper bookkeeping. Null on rows hibernated before
     // the columns existed — the reaper falls back to a derived handle for
     // those (engine/hibernation-reaper.ts).
