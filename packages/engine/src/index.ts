@@ -6,6 +6,7 @@ export {
   ConflictError,
   TimeoutError,
   ValidationError,
+  PluginStoreConflictError,
   PendingCapError,
   WorkspaceProvisioningError,
   SandboxSupersededError,

@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { and, eq } from "drizzle-orm";
 import { ValidationError, type PluginEntitlement } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { orgMembers, orgs, teamMembers, teams, users } from "../schema/index.js";
+import { orgMembers, orgs, pluginStore, teamMembers, teams, users } from "../schema/index.js";
 import {
   getPluginEntitlement,
   getPluginEntitlements,
@@ -118,5 +119,27 @@ describe("plugin entitlements service", () => {
   it("normalizes teamIds to empty for off and all", async () => {
     await setPluginEntitlement(db, ORG, "security", { mode: "all", teamIds: ["team_eng"] });
     expect(await getPluginEntitlement(db, ORG, "security")).toEqual({ mode: "all", teamIds: [] });
+  });
+
+  it("persists into plugin_store under plugin 'valet', org scope", async () => {
+    await setPluginEntitlement(db, ORG, "security", { mode: "off", teamIds: [] });
+    // Query the shared plugin_store table directly to prove the storage seam.
+    const rows = await db
+      .select()
+      .from(pluginStore)
+      .where(
+        and(
+          eq(pluginStore.plugin, "valet"),
+          eq(pluginStore.collection, "plugin-entitlements"),
+          eq(pluginStore.scopeType, "org"),
+          eq(pluginStore.scopeId, ORG),
+          eq(pluginStore.key, "security"),
+        ),
+      );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].doc).toEqual({ mode: "off", teamIds: [] });
+    // No org row carries the removed column anymore — the store owns this data.
+    const orgRow = await db.select().from(orgs).where(eq(orgs.id, ORG)).limit(1);
+    expect(orgRow[0]).not.toHaveProperty("pluginEntitlements");
   });
 });

@@ -65,13 +65,6 @@ export const orgs = pgTable("orgs", {
   // visibility option is not offered. Live-checked on every artifact read,
   // so flipping it off immediately re-gates existing `public` artifacts.
   allowPublicArtifacts: boolean("allow_public_artifacts").notNull().default(false),
-  // Per-plugin org entitlement map (plugin-entitlements design). Keyed by
-  // plugin name, shape `{ "<name>": { mode: "off"|"all"|"teams", teamIds: [] } }`.
-  // NULL / a missing key both resolve to `{ mode: "all", teamIds: [] }`, which
-  // keeps an instance-loaded plugin on for every member until an admin narrows
-  // it. Read/written by `services/plugin-entitlements.ts` — jsonb, mirroring
-  // the `features` / `model_preferences` columns above.
-  pluginEntitlements: jsonb("plugin_entitlements"),
 });
 
 // better-auth's default model name for the user table is "user" (singular);
@@ -1381,6 +1374,43 @@ export const llmProxyRequests = pgTable(
 );
 
 export type LlmProxyRequestRow = typeof llmProxyRequests.$inferSelect;
+
+// ─── Plugin store (docs/specs/2026-08-29-plugin-store-design.md) ───────────
+//
+// One core table for plugin-owned persistence. `plugin` is the owning
+// plugin's name ("valet" for core-owned data, e.g. the entitlement rail);
+// `(scope_type, scope_id)` maps `PluginStoreScope` ("" id for global);
+// `collection` is the plugin's namespace within its data. `doc` is opaque
+// jsonb the plugin validates. Read/written by `services/plugin-store.ts`;
+// declared expression indexes ride on top via `ensurePluginStoreIndexes`.
+export const pluginStore = pgTable(
+  "plugin_store",
+  {
+    id: text("id").primaryKey(),
+    plugin: text("plugin").notNull(),
+    scopeType: text("scope_type").notNull(),
+    scopeId: text("scope_id").notNull(),
+    collection: text("collection").notNull(),
+    key: text("key").notNull(),
+    doc: jsonb("doc").notNull(),
+    revision: integer("revision").notNull().default(1),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    uniqueIndex("plugin_store_identity_unique").on(
+      t.plugin,
+      t.scopeType,
+      t.scopeId,
+      t.collection,
+      t.key,
+    ),
+    index("plugin_store_list").on(t.plugin, t.scopeType, t.scopeId, t.collection),
+    index("plugin_store_doc_gin").using("gin", t.doc),
+  ],
+);
+
+export type PluginStoreRow = typeof pluginStore.$inferSelect;
 
 // ─── Session repo bindings (GitHub/repo integration plan, Task 2) ──────────
 //

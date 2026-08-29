@@ -25,8 +25,10 @@ import {
   type StoredCredential,
   type ResolvedModel,
   type PolicyResolver,
+  type PluginStore,
 } from "@valet/engine";
 import type { ValetPlugin } from "@valet/engine";
+import { pluginStore } from "../services/plugin-store.js";
 import {
   buildPluginCatalog,
   loadRoleFromMarkdown,
@@ -893,6 +895,7 @@ export class EngineHost {
       ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
     };
     const policyResolver = this.getPolicyResolver();
+    const pluginStoreFactory = this.getPluginStoreFactory();
     // Runner tools sit before the plugin tools so the loop surface reads
     // first in the tool list. The toolConfig mirrors the orchestrator's
     // (apiBaseUrl + internal token for the sec_* HTTP seam; child
@@ -961,6 +964,7 @@ export class EngineHost {
             ...(commandOptions ?? {}),
             ...(repoInstructionsProvider ? { repoInstructionsProvider } : {}),
             ...(policyResolver ? { policyResolver } : {}),
+            ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
           },
         })
       : await engine.createSession({
@@ -983,6 +987,7 @@ export class EngineHost {
           ...(commandOptions ?? {}),
           ...(repoInstructionsProvider ? { repoInstructionsProvider } : {}),
           ...(policyResolver ? { policyResolver } : {}),
+          ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
         });
 
     builtSession = session;
@@ -1393,6 +1398,20 @@ export class EngineHost {
    * built-in risk→approval fallback, byte-identical to pre-policy behavior).
    * Built once and memoized — the resolver is session-agnostic.
    */
+  /**
+   * The plugin-store factory threaded onto every session's
+   * `CreateSessionOptions.pluginStoreFactory` (plugin-store design). `call_tool`
+   * calls it with a plugin action's `service` and binds the result to that
+   * action's `PluginActionContext.pluginStore`, so an action reads and writes
+   * only its own rows. Returns `undefined` without an app db (db-less tests),
+   * so plugin actions then see no `pluginStore` — the pre-store behavior.
+   */
+  private getPluginStoreFactory(): ((pluginName: string) => PluginStore) | undefined {
+    const db = this.opts.db;
+    if (!db) return undefined;
+    return (pluginName: string) => pluginStore(db, pluginName);
+  }
+
   private getPolicyResolver(): PolicyResolver | undefined {
     if (!this.opts.db) return undefined;
     if (!this.policyResolverInstance) {
@@ -1997,6 +2016,7 @@ export class EngineHost {
       pinnedIds,
     );
     const policyResolver = this.getPolicyResolver();
+    const pluginStoreFactory = this.getPluginStoreFactory();
     const skillsProvider = this.skillsProviderFor(principal, meta.orgId, [], behavior);
     const sessionOptions = {
       userId: meta.actorUserId,
@@ -2005,6 +2025,7 @@ export class EngineHost {
       purpose: "orchestrator" as const,
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(policyResolver ? { policyResolver } : {}),
+      ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
       owner: principal,
       queueMode,
       sandbox: {
@@ -2748,6 +2769,7 @@ export class EngineHost {
     const sandboxMint = await this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId, profile);
     const credentialResolver = this.buildCredentialResolver(childSessionId, opts.actorUserId, opts.orgId);
     const policyResolver = this.getPolicyResolver();
+    const pluginStoreFactory = this.getPluginStoreFactory();
     // A child spawned with a repo binding (the spawner inserts the
     // `session_repos` row before calling in here) gets the same declarative
     // clone prep a REST-created session gets. Only this first build decides —
@@ -2794,6 +2816,7 @@ export class EngineHost {
       purpose: "child" as const,
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(policyResolver ? { policyResolver } : {}),
+      ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
       owner: opts.owner,
       parentSessionId: opts.parentSessionId,
       parentThreadId: opts.parentThreadId,
@@ -2923,6 +2946,7 @@ export class EngineHost {
     const sandboxMint = await this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId, "headless");
     const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId);
     const policyResolver = this.getPolicyResolver();
+    const pluginStoreFactory = this.getPluginStoreFactory();
     const sessionOptions = {
       userId: opts.actorUserId,
       orgId: opts.orgId,
@@ -2930,6 +2954,7 @@ export class EngineHost {
       purpose: "workflow" as const,
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(policyResolver ? { policyResolver } : {}),
+      ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
       owner: opts.owner,
       // Tier 0 (sandbox-tiering spec, 2026-08-22): workflow sessions are
       // sandbox-less by default, like orchestrators. A session-node turn

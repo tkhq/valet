@@ -36,6 +36,7 @@ import { withSandboxCapacityGate } from "../engine/gated-sandbox-provider.js";
 import { principalFromOwner, routeAttention } from "../orchestrator/attention.js";
 import { resolveOrgSessionCeiling } from "../orchestrator/limits.js";
 import { assemblePlugins } from "../plugins/assemble.js";
+import { ensurePluginStoreIndexes } from "../services/plugin-store.js";
 import { workflowsActionPlugin } from "../workflows/actions.js";
 import { skillsActionPlugin } from "../services/skills-actions.js";
 import { assistantsActionPlugin } from "../assistants/actions.js";
@@ -377,6 +378,11 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         configMcpPlugins(opts.instanceConfig?.mcpServers, process.env),
         [workflowsActions, skillsActions, assistantsActions],
       ]);
+
+  // Declared plugin-store expression indexes (plugin-store design). Idempotent
+  // `CREATE INDEX IF NOT EXISTS`, run once per boot after the plugin set is
+  // known — no plugin declares one yet, so this is a no-op today.
+  await ensurePluginStoreIndexes(pgdb, plugins);
 
   // Refresh-on-read decorator (integration-OAuth design): wraps the raw
   // credential store so any `engineCredentials.get()` call transparently

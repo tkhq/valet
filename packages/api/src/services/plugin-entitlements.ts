@@ -15,10 +15,19 @@
 import { and, eq, inArray } from "drizzle-orm";
 import { ValidationError, type PluginEntitlement, type PluginEntitlementMode } from "@valet/shared";
 import type { AppQueryable } from "../lib/drizzle.js";
-import { orgs, teamMembers, teams } from "../schema/index.js";
+import { teamMembers, teams } from "../schema/index.js";
+import { pluginStore } from "./plugin-store.js";
 
 /** The default entry for a plugin an org never configured: on for everyone. */
 export const DEFAULT_ENTITLEMENT: PluginEntitlement = { mode: "all", teamIds: [] };
+
+/**
+ * Where the entitlement rail persists (plugin-store design). The rail is core,
+ * so it uses the reserved `"valet"` plugin namespace and the `org` scope. Each
+ * gated plugin's entitlement is one document keyed by the target plugin name.
+ */
+const ENTITLEMENTS_PLUGIN = "valet";
+const ENTITLEMENTS_COLLECTION = "plugin-entitlements";
 
 const MODES: readonly PluginEntitlementMode[] = ["off", "all", "teams"];
 
@@ -26,7 +35,7 @@ function isMode(v: unknown): v is PluginEntitlementMode {
   return typeof v === "string" && (MODES as readonly string[]).includes(v);
 }
 
-/** Narrows one raw jsonb value into a `PluginEntitlement`, or `undefined` when
+/** Narrows one stored document into a `PluginEntitlement`, or `undefined` when
  * the value is not a well-formed entry (which reads as "no entry" → default). */
 function parseEntitlement(raw: unknown): PluginEntitlement | undefined {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
@@ -38,32 +47,30 @@ function parseEntitlement(raw: unknown): PluginEntitlement | undefined {
   return { mode: rec.mode, teamIds };
 }
 
-/** Reads the raw `orgs.plugin_entitlements` jsonb as a plain record. `{}` when
- * the column is null or holds a non-object value. */
-async function readRawEntitlements(db: AppQueryable, orgId: string): Promise<Record<string, unknown>> {
-  const rows = await db
-    .select({ pluginEntitlements: orgs.pluginEntitlements })
-    .from(orgs)
-    .where(eq(orgs.id, orgId))
-    .limit(1);
-  const value = rows[0]?.pluginEntitlements;
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  return value as Record<string, unknown>;
+/** The org's entitlement store view, bound to the reserved "valet" namespace. */
+function entitlementStore(db: AppQueryable, orgId: string) {
+  return pluginStore(db, ENTITLEMENTS_PLUGIN).org(orgId);
 }
 
-/** The whole entitlement map for an org, defaulted per plugin. Only keys the
- * jsonb actually holds appear — a plugin with no entry is absent here and
- * resolves to the default through `getPluginEntitlement`. */
+/** The whole entitlement map for an org, defaulted per plugin. Only plugins the
+ * store actually holds a document for appear — a plugin with no entry is absent
+ * here and resolves to the default through `getPluginEntitlement`. */
 export async function getPluginEntitlements(
   db: AppQueryable,
   orgId: string,
 ): Promise<Record<string, PluginEntitlement>> {
-  const raw = await readRawEntitlements(db, orgId);
   const out: Record<string, PluginEntitlement> = {};
-  for (const [name, value] of Object.entries(raw)) {
-    const parsed = parseEntitlement(value);
-    if (parsed) out[name] = parsed;
-  }
+  let cursor: string | null | undefined;
+  do {
+    const page = await entitlementStore(db, orgId).list<unknown>(ENTITLEMENTS_COLLECTION, {
+      cursor: cursor ?? undefined,
+    });
+    for (const item of page.items) {
+      const parsed = parseEntitlement(item.doc);
+      if (parsed) out[item.key] = parsed;
+    }
+    cursor = page.nextCursor;
+  } while (cursor);
   return out;
 }
 
@@ -73,13 +80,13 @@ export async function getPluginEntitlement(
   orgId: string,
   name: string,
 ): Promise<PluginEntitlement> {
-  const raw = await readRawEntitlements(db, orgId);
-  return parseEntitlement(raw[name]) ?? { ...DEFAULT_ENTITLEMENT };
+  const doc = await entitlementStore(db, orgId).get<unknown>(ENTITLEMENTS_COLLECTION, name);
+  return parseEntitlement(doc?.doc) ?? { ...DEFAULT_ENTITLEMENT };
 }
 
 /**
- * Writes one plugin's entitlement, merged into the jsonb so other plugins'
- * entries survive. Validates the mode against the enum and every team id
+ * Writes one plugin's entitlement as its own document, so other plugins'
+ * entries are untouched. Validates the mode against the enum and every team id
  * against the org's teams — a team from another org, or an unknown id,
  * rejects the whole write. `teamIds` is normalized to `[]` for `off`/`all`
  * (only `teams` mode uses it), and duplicates are dropped.
@@ -115,9 +122,10 @@ export async function setPluginEntitlement(
     teamIds = requested;
   }
 
-  const raw = await readRawEntitlements(db, orgId);
-  const next = { ...raw, [name]: { mode: entitlement.mode, teamIds } };
-  await db.update(orgs).set({ pluginEntitlements: next }).where(eq(orgs.id, orgId));
+  await entitlementStore(db, orgId).put<PluginEntitlement>(ENTITLEMENTS_COLLECTION, name, {
+    mode: entitlement.mode,
+    teamIds,
+  });
 }
 
 /**

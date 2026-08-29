@@ -1185,12 +1185,17 @@ async function executeAction(
   // the action sees the same ToolContext shape plus actionId/service/summary,
   // with credentials defaulting to the plugin's credentialService.
   const credentialService = entry.plugin.credentialService ?? entry.service;
+  // Bind the plugin store to THIS action's owning plugin so the action reads
+  // and writes only its own rows (plugin-store design). The base ToolContext is
+  // turn-scoped and plugin-agnostic; the factory it carries re-scopes here.
+  const pluginStore = ctx.pluginStoreFactory?.(entry.service);
   const actionCtx: PluginActionContext = {
     ...ctx,
     actionId: entry.action.id,
     service: entry.service,
     summary,
     credentials: scopedCredentialProvider(ctx, credentialService),
+    ...(pluginStore ? { pluginStore } : {}),
   };
 
   const startedAt = Date.now();

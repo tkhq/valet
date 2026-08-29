@@ -172,15 +172,6 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "sso_team_groups" jsonb',
   },
   {
-    // Per-plugin org entitlement map (plugin-entitlements design). Null on
-    // every org row written before the column existed, which the service
-    // reads as "no entry", so every plugin defaults to mode `all` — the
-    // pre-flag always-on behavior.
-    describe: "orgs.plugin_entitlements column",
-    probe: { kind: "column", table: "orgs", column: "plugin_entitlements" },
-    sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "plugin_entitlements" jsonb',
-  },
-  {
     // Artifact-sharing opt-in (artifacts design). The DEFAULT backfills
     // every pre-existing org row to `false` — anonymous sharing stays off
     // until an admin opts in, the same answer a fresh database gets.
@@ -320,6 +311,41 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     describe: "llm_proxy_requests_user_created index",
     probe: { kind: "index", index: "llm_proxy_requests_user_created" },
     sql: 'CREATE INDEX IF NOT EXISTS "llm_proxy_requests_user_created" ON "llm_proxy_requests" ("user_id", "created_at")',
+  },
+  {
+    // The shared plugin store (docs/specs/2026-08-29-plugin-store-design.md).
+    // One core table so a plugin persists data with no per-plugin migration;
+    // the entitlement rail is its first consumer under plugin "valet". Columns
+    // in lockstep with `plugin_store` in 0000_app.sql.
+    describe: "plugin_store table",
+    probe: { kind: "table", table: "plugin_store" },
+    sql: `CREATE TABLE IF NOT EXISTS "plugin_store" (
+      "id" text PRIMARY KEY NOT NULL,
+      "plugin" text NOT NULL,
+      "scope_type" text NOT NULL,
+      "scope_id" text NOT NULL,
+      "collection" text NOT NULL,
+      "key" text NOT NULL,
+      "doc" jsonb NOT NULL,
+      "revision" integer NOT NULL DEFAULT 1,
+      "created_at" bigint NOT NULL,
+      "updated_at" bigint NOT NULL
+    )`,
+  },
+  {
+    describe: "plugin_store_identity_unique index",
+    probe: { kind: "index", index: "plugin_store_identity_unique" },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "plugin_store_identity_unique" ON "plugin_store" ("plugin","scope_type","scope_id","collection","key")',
+  },
+  {
+    describe: "plugin_store_list index",
+    probe: { kind: "index", index: "plugin_store_list" },
+    sql: 'CREATE INDEX IF NOT EXISTS "plugin_store_list" ON "plugin_store" ("plugin","scope_type","scope_id","collection")',
+  },
+  {
+    describe: "plugin_store_doc_gin index",
+    probe: { kind: "index", index: "plugin_store_doc_gin" },
+    sql: 'CREATE INDEX IF NOT EXISTS "plugin_store_doc_gin" ON "plugin_store" USING gin ("doc")',
   },
   {
     // The cost_entries VIEW was rewritten (#432): it added a `use_case` column

@@ -528,6 +528,22 @@ export interface ValetPlugin {
    * a looked-up name, never a raw id.
    */
   filterOptionResolvers?: Record<string, FilterOptionResolver>;
+  /**
+   * Hot document fields this plugin filters on at volume
+   * (docs/specs/2026-08-29-plugin-store-design.md). The host ensures a
+   * matching expression index on the shared `plugin_store` table at boot
+   * (`(doc->>'<field>')`, scoped by plugin + collection), idempotently. Absent
+   * === the table's GIN index covers general filters. `collection` and `field`
+   * MUST be identifier-safe (`[a-z0-9_]+`) — the boot ensurer rejects anything
+   * else rather than build an index from unsanitized text.
+   */
+  storeIndexes?: PluginStoreIndex[];
+}
+
+/** One declared `plugin_store` expression index (see `ValetPlugin.storeIndexes`). */
+export interface PluginStoreIndex {
+  collection: string;
+  field: string;
 }
 
 /** UI-facing labels for a gateable plugin (see `ValetPlugin.gate`). */
@@ -542,6 +558,10 @@ export interface PluginValidationIssue {
 }
 
 const NAME_RE = /^[a-z][a-z0-9-]*$/;
+/** Identifier-safe check for a declared store index's collection/field. Matches
+ * the boot ensurer's rule so a manifest that would build an unsafe index name
+ * is rejected at load, not at boot. */
+const STORE_IDENTIFIER_RE = /^[a-z0-9_]+$/;
 const RISK_LEVELS: readonly RiskLevel[] = ["low", "medium", "high", "critical"];
 const CREDENTIAL_TYPES = ["oauth2", "api_key", "bot_token", "service_account"] as const;
 
@@ -860,6 +880,16 @@ export function validateValetPlugin(
       }
     }
   }
+
+  checkArray(v.storeIndexes, "storeIndexes", issues, (idx, path) => {
+    const record = asRecord(idx, path, issues);
+    if (!record) return;
+    for (const key of ["collection", "field"] as const) {
+      if (typeof record[key] !== "string" || !STORE_IDENTIFIER_RE.test(record[key] as string)) {
+        issues.push({ path: `${path}.${key}`, message: "required identifier-safe string matching /^[a-z0-9_]+$/" });
+      }
+    }
+  });
 
   if (issues.length > 0) return { ok: false, issues };
   return { ok: true, plugin: value as ValetPlugin };

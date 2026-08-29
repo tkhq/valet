@@ -6,8 +6,7 @@ CREATE TABLE "orgs" (
 	"sso_team_groups" jsonb,
 	"created_at" bigint NOT NULL,
 	"bare_skill_commands" boolean NOT NULL DEFAULT false,
-	"allow_public_artifacts" boolean NOT NULL DEFAULT false,
-	"plugin_entitlements" jsonb
+	"allow_public_artifacts" boolean NOT NULL DEFAULT false
 );
 --> statement-breakpoint
 CREATE TABLE "user" (
@@ -966,6 +965,31 @@ CREATE TABLE "llm_proxy_requests" (
 CREATE INDEX "llm_proxy_requests_org_created" ON "llm_proxy_requests" ("org_id", "created_at");
 --> statement-breakpoint
 CREATE INDEX "llm_proxy_requests_user_created" ON "llm_proxy_requests" ("user_id", "created_at");
+--> statement-breakpoint
+-- ── Plugin store (docs/specs/2026-08-29-plugin-store-design.md) ───────────
+--
+-- One core table for plugin-owned persistence, so a plugin persists config,
+-- settings, and moderate collections with zero further migrations. `plugin`
+-- is the owning plugin's name ("valet" for core-owned data); a scoped view
+-- never crosses plugins. `doc` is opaque jsonb the plugin validates itself.
+CREATE TABLE "plugin_store" (
+	"id" text PRIMARY KEY NOT NULL,
+	"plugin" text NOT NULL,
+	"scope_type" text NOT NULL,
+	"scope_id" text NOT NULL,
+	"collection" text NOT NULL,
+	"key" text NOT NULL,
+	"doc" jsonb NOT NULL,
+	"revision" integer NOT NULL DEFAULT 1,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "plugin_store_identity_unique" ON "plugin_store" ("plugin","scope_type","scope_id","collection","key");
+--> statement-breakpoint
+CREATE INDEX "plugin_store_list" ON "plugin_store" ("plugin","scope_type","scope_id","collection");
+--> statement-breakpoint
+CREATE INDEX "plugin_store_doc_gin" ON "plugin_store" USING gin ("doc");
 --> statement-breakpoint
 -- ── Valet Security (docs/specs/2026-08-27-valet-security-design.md) ───────
 --
