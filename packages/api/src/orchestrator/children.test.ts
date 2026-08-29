@@ -9,7 +9,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { eq, and } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import type {
   QueueItem,
   Sandbox,
@@ -1593,6 +1593,53 @@ describe("buildChildStatusReader", () => {
       { childSessionId: spawned.childSessionId },
       { parentSessionId: "parent-status-settled" },
     );
+    expect(status?.settled).toBe(true);
+  });
+
+  it("derives settled=true from the child's durable turn state when the watch flag was lost to a restart", async () => {
+    // Regression (prod incident): a deploy dropped the in-memory `child.settled`
+    // signal, so `child_watches.settled` stayed false even though the child's
+    // turn had durably settled. `sec_cell_complete` then 409'd "not settled"
+    // forever and the runner re-dispatched a finished child in a loop. The
+    // reader must self-heal by reading the child's own durable turn state.
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const spawner = buildChildSpawner(deps, new ChildWatcher(deps));
+    const statusReader = buildChildStatusReader(deps);
+
+    await api.providers.engineHost.sessionFor("parent-status-restart", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const spawned = await spawner(
+      { prompt: "verify the phase" },
+      {
+        parentSessionId: "parent-status-restart",
+        parentThreadId: "web:default",
+        actorUserId: "local-user",
+        owner: { type: "user", id: "local-user" },
+      },
+    );
+
+    // The child's turn settles durably (its queue item → settled), but the
+    // child.settled signal never lands, so the watch row stays unsettled —
+    // exactly the stranded state a mid-flight restart leaves.
+    await api.providers.db.execute(
+      sql`UPDATE engine_queue_items SET status = 'settled', updated_at = ${Date.now() - 1000} WHERE session_id = ${spawned.childSessionId}`,
+    );
+    const [watch] = await api.providers.db
+      .select({ settled: childWatches.settled })
+      .from(childWatches)
+      .where(eq(childWatches.childSessionId, spawned.childSessionId))
+      .limit(1);
+    expect(watch.settled).toBe(false);
+
+    const status = await statusReader(
+      { childSessionId: spawned.childSessionId },
+      { parentSessionId: "parent-status-restart" },
+    );
+    // Derived from the durable turn state, not the stale watch flag.
     expect(status?.settled).toBe(true);
   });
 

@@ -877,7 +877,27 @@ export function buildChildStatusReader(deps: ChildrenDeps): ChildStatusReader {
     if (!child || child.status === "deleted") return null;
 
     const lastActivityAt = await deps.engineStore.latestActivityAt(req.childSessionId);
-    return { settled: rows[0].settled === true, lastActivityAt };
+    if (rows[0].settled === true) return { settled: true, lastActivityAt };
+
+    // `child_watches.settled` is flipped by the in-memory `child.settled`
+    // signal. That signal is NOT durable: a process restart (a deploy) drops
+    // it, and boot-restore's watcher re-arm can time out, leaving the row
+    // unsettled even though the child's turn is durably settled in the store.
+    // A stale-false row makes `sec_cell_complete` 409 "the child has not
+    // settled" forever — the runner then fails and re-dispatches a child that
+    // already finished, looping and orphaning sandboxes. Self-heal by deriving
+    // settlement from the child's OWN durable turn state: no unsettled
+    // submission AND at least one settled submission (the second guard rejects
+    // a just-dispatched child that has not run yet, which also has zero
+    // unsettled). A yielded child is settled here on purpose — its turn ended;
+    // the caller resumes it.
+    const unsettled = await deps.engineStore.listUnsettledSubmissions(req.childSessionId);
+    if (unsettled.length > 0) return { settled: false, lastActivityAt };
+    const settledSubs = await deps.engineStore.listSettledSubmissionsBefore(
+      req.childSessionId,
+      Date.now(),
+    );
+    return { settled: settledSubs.length > 0, lastActivityAt };
   };
 }
 
