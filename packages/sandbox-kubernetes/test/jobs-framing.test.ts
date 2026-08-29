@@ -43,12 +43,34 @@ describe("jobKickoffCommand", () => {
     // The wait must come after the backgrounded job group and before the
     // final "started" echo, not inside the backgrounded subshell itself
     // (else it wouldn't block execJobInPod's own exec call at all).
-    const backgroundIdx = cmd.indexOf(") &");
+    const backgroundIdx = cmd.indexOf(") </dev/null >/dev/null 2>&1 &");
     const waitIdx = cmd.indexOf("while [ ! -f");
     const startedIdx = cmd.lastIndexOf("echo started");
     expect(backgroundIdx).toBeGreaterThan(-1);
     expect(waitIdx).toBeGreaterThan(backgroundIdx);
     expect(startedIdx).toBeGreaterThan(waitIdx);
+  });
+
+  it("nulls the backgrounded group's OWN stdio so the containerd (EKS) kickoff exec returns instead of hanging until the job ends", () => {
+    // The inner job redirects its own streams to OUT/FIFO, but the `( ... )`
+    // subshell wrapper lives for the job's whole duration and would otherwise
+    // inherit the kickoff exec's stdout/stderr. containerd's exec streaming
+    // does not close until every copy of that pipe closes, so without this
+    // redirect a job-mode command longer than 60s trips EXEC_DEFAULT_TIMEOUT_MS
+    // and surfaces as `execJob kickoff failed (exit 124)`. Both the uncapped and
+    // capped kickoff shapes must redirect the background group's own stdio.
+    for (const cmd of [
+      jobKickoffCommand("job-1", "sleep 300"),
+      jobKickoffCommand("job-1", "sleep 300", 1024),
+    ]) {
+      expect(cmd).toContain(") </dev/null >/dev/null 2>&1 &");
+      // The redirect belongs to the background group, not the inner job: the
+      // job keeps writing to OUT (uncapped) or the fifo (capped).
+      const bgIdx = cmd.indexOf(") </dev/null >/dev/null 2>&1 &");
+      const startedIdx = cmd.lastIndexOf("echo started");
+      expect(bgIdx).toBeGreaterThan(-1);
+      expect(startedIdx).toBeGreaterThan(bgIdx);
+    }
   });
 
   it("embeds the inner command's text, doubly shell-quoted (once for `exec sh -c`, once for the outer `setsid sh -c`)", () => {

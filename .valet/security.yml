@@ -15,6 +15,13 @@ focus: >
   and rotation; and the security-engagement persona seam, where a cell-claimed
   child session drives the server-enforced sec_* tools.
 
+  Scope is the v2 stack only. The legacy v1 stack is OUT OF SCOPE: do not audit
+  packages/worker, packages/client, packages/runner, or backend/. That stack is
+  frozen, pinned to a separate prod deploy at a fixed commit, and slated for
+  deletion — no v2 change ships to it. Skip those paths, spend no cell budget
+  reading them, and report no findings against them. If a v2 trust boundary
+  meets v1 code, assess the v2 side only.
+
 invariants:
   - Every sandbox has one owning session that deletes it; created minus deleted trends to zero.
   - The in-sandbox gateway enforces sid === VALET_SESSION_ID from the JWT; one session's token is rejected in another session's sandbox.
@@ -45,6 +52,8 @@ steps:
       their auth/authz guards, the engine's session/thread/persona seams, the
       sandbox providers, GitHub token handling, and the security-engagement
       service. Produce the entry-point and trust-boundary map the later cells read.
+      Stay in the v2 stack; the v1 legacy stack (packages/worker, packages/client,
+      packages/runner, backend/) is out of scope — do not map or read it.
     reads: []
 
   - ordinal: 2
@@ -93,6 +102,8 @@ steps:
       Run the baked scanners (gitleaks) plus targeted grep packs over the tree,
       triage the raw output into evidence-backed findings, and record coverage
       per rule pack. Report every tool that is absent as a NOT_ASSESSED gap.
+      Scope scans to the v2 stack; exclude the v1 legacy paths (packages/worker,
+      packages/client, packages/runner, backend/).
     reads: [1]
 
   - ordinal: 6

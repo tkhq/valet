@@ -45,6 +45,7 @@ import {
   secProtocolReadTool,
   secStartTool,
   secStatusTool,
+  secWaitTool,
   ESTIMATED_TOKENS_PER_CELL,
 } from "./security-tools.js";
 
@@ -109,11 +110,12 @@ async function engagementOf(a: TestApi, sessionId: string): Promise<GetSessionSe
 }
 
 describe("buildSecurityRunnerTools", () => {
-  it("returns exactly the eleven runner sec_* tools", () => {
+  it("returns exactly the twelve runner sec_* tools", () => {
     expect(buildSecurityRunnerTools().map((t) => t.name)).toEqual([
       "sec_plan_set",
       "sec_start",
       "sec_status",
+      "sec_wait",
       "sec_dispatch",
       "sec_cell_complete",
       "sec_cell_fail",
@@ -499,6 +501,75 @@ describe("sec_status", () => {
     expect(result.text).toContain("01-recon [code-review] running");
     expect(result.text).toContain("critical 0");
     expect(result.text).toContain("CHILD GONE");
+  });
+});
+
+describe("sec_wait", () => {
+  it("answers [security_unavailable] without apiBaseUrl/internalToken", async () => {
+    const result = await secWaitTool.execute({}, makeCtx());
+    expect(result.text).toBe("[security_unavailable] security endpoint not configured");
+  });
+
+  it("returns the status snapshot at once when the running child is already settled", async () => {
+    api = await bootTestApi();
+    const created = await createSecuritySession(api.baseUrl);
+    const { db } = api.providers;
+    const service = createSecurityEngagementService({ db });
+    const found = await service.getEngagementBySession(created.id);
+    await service.startEngagement(found!.engagement.id, { resolvedSha: SHA });
+    const { cell } = await service.dispatchCell(found!.engagement.id, {
+      spawn: async () => ({ childSessionId: "child-settled" }),
+    });
+    // A real spawn creates the child's session row; the mock does not, so
+    // insert it — the status route verifies the child session exists before
+    // trusting the settled flag (else it reports CHILD GONE).
+    await db.insert(agentSessions).values({
+      id: "child-settled",
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+      ownerType: "user",
+      ownerId: "local-user",
+      profile: "headless",
+      docker: false,
+      status: "active",
+      kind: "code",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    // A settled watch → sec_wait must not park; it returns the snapshot so the
+    // runner rules on the cell immediately.
+    await db.insert(childWatches).values({
+      childSessionId: "child-settled",
+      queueItemId: `qi-${cell.id}`,
+      parentSessionId: created.id,
+      parentThreadId: "t-runner",
+      actorUserId: "local-user",
+      orgId: "local-org",
+      settled: true,
+      createdAt: Date.now(),
+    });
+
+    const started = Date.now();
+    const result = await secWaitTool.execute({ timeout_seconds: 30 }, toolCtx(api, created.id));
+    // Returned promptly (no 30s park) with a settled snapshot, no wait note.
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(result.text).toContain("running cell child child-settled: settled=true");
+    expect(result.text).not.toContain("sec_wait: still running");
+  });
+
+  it("returns at once when no cell is running (dispatch work is due)", async () => {
+    api = await bootTestApi();
+    const created = await createSecuritySession(api.baseUrl);
+    const { db } = api.providers;
+    const service = createSecurityEngagementService({ db });
+    const found = await service.getEngagementBySession(created.id);
+    await service.startEngagement(found!.engagement.id, { resolvedSha: SHA });
+
+    const started = Date.now();
+    const result = await secWaitTool.execute({ timeout_seconds: 30 }, toolCtx(api, created.id));
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(result.text).toContain("01-recon [code-review] pending");
   });
 });
 

@@ -223,9 +223,21 @@ export function jobKickoffCommand(execId: string, innerCommand: string, maxOutpu
       `rm -f ${shQuote(fifo)}`;
   }
 
+  // The backgrounded group MUST redirect its OWN stdio away from the exec
+  // channel (`</dev/null >/dev/null 2>&1`), not just the inner job's. The inner
+  // `setsid` already sends the JOB's streams to OUT/FIFO, but the `( ... )`
+  // subshell wrapper still inherits this exec's stdout/stderr and lives for the
+  // job's full duration (it runs `setsid ...` synchronously). containerd's exec
+  // streaming (EKS) does not return until every copy of the stdout pipe is
+  // closed, so an un-redirected background group holds the kickoff exec open for
+  // the whole job — `execInPod` then hits EXEC_DEFAULT_TIMEOUT_MS (60s) and
+  // reports exit 124 as `execJob kickoff failed`, breaking every job-mode
+  // command longer than 60s. dockerd (local Rancher/moby) does NOT wait for the
+  // drain, which is why this stayed invisible in dev. Nulling the group's stdio
+  // lets the kickoff return as soon as `echo started` prints.
   return (
     `mkdir -p ${shQuote(JOBS_DIR)} && : > ${shQuote(outFile)} && ` +
-    `( ${wrapped} ) & ` +
+    `( ${wrapped} ) </dev/null >/dev/null 2>&1 & ` +
     `${waitForPid}; ` +
     `echo started`
   );
