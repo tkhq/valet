@@ -195,6 +195,20 @@ describe("POST /api/event-subscriptions", () => {
     expect(rows[0].eventKeys).toEqual(["github.pull_request.opened"]);
   });
 
+  it("round-trips a filter's display label; matching ignores it", async () => {
+    const a = await boot();
+    const res = await postSubscription(a.baseUrl, {
+      ...VALID_BODY,
+      filters: [{ field: "repo", op: "eq", value: "acme/widgets", label: "Widgets repo" }],
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateEventSubscriptionResponse;
+    expect(body.filters).toEqual([{ field: "repo", op: "eq", value: "acme/widgets", label: "Widgets repo" }]);
+    // The label is persisted verbatim in the jsonb, not stripped by the writer.
+    const rows = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, body.id));
+    expect(rows[0].filters).toEqual([{ field: "repo", op: "eq", value: "acme/widgets", label: "Widgets repo" }]);
+  });
+
   it("orchestrator target with orchestrator=org writes an org-owned row", async () => {
     const a = await boot();
     const res = await postSubscription(a.baseUrl, {

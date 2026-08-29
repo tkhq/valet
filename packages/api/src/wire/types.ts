@@ -3079,6 +3079,12 @@ export interface EventSubscriptionFilterWire {
   field: string;
   op: "eq" | "in" | "prefix" | "contains" | "regex";
   value: string | string[];
+  /**
+   * Optional display label for the value — a resolved name for a raw id (a
+   * Slack user id shown as "Alice"). The editor renders it; matching ignores
+   * it. Persisted verbatim in the `filters` jsonb.
+   */
+  label?: string;
 }
 
 // `{ kind: "signal" }` (wake parked workflow runs) is intentionally absent:
