@@ -17,10 +17,13 @@ import { validateSubscription } from "../routes/events.js";
 import { catalogForService } from "../events/ingest.js";
 import {
   canAccessTriggerRow,
+  canAccessTriggerRowInScope,
   ownedDefinitionRow,
+  scopedTriggerAccess,
   triggerAccessSets,
   type TriggerAccessSets,
   type WorkflowOwner,
+  type WorkflowOwnerRef,
 } from "./service.js";
 
 export interface WorkflowTriggerSummary {
@@ -128,19 +131,25 @@ export async function listWorkflowTriggers(
   owner: WorkflowOwner,
   workflowId?: string,
   sets?: TriggerAccessSets,
+  scope?: WorkflowOwnerRef,
 ): Promise<WorkflowTriggerSummary[]> {
   const conditions = [eq(eventSubscriptions.orgId, owner.orgId)];
   // `target` is JSONB; the workflow id lives at target->>'workflowId'.
   if (workflowId !== undefined) conditions.push(sql`${eventSubscriptions.target}->>'workflowId' = ${workflowId}`);
-  const [rows, resolvedSets] = await Promise.all([
-    db.select().from(eventSubscriptions).where(and(...conditions)),
-    sets ?? triggerAccessSets(db, owner),
-  ]);
+  const rows = await db.select().from(eventSubscriptions).where(and(...conditions));
+  // Scoped list: one workspace's rows only (owned by the scope, or targeting a
+  // workflow it owns) — a personal row does not ride along into a team scope.
+  const scopedAccess = scope ? await scopedTriggerAccess(db, scope) : undefined;
+  const resolvedSets = scopedAccess ? undefined : sets ?? (await triggerAccessSets(db, owner));
   return rows
     .map((row) => {
       const trigger = rowToTrigger(row);
       if (!trigger) return null;
-      return canAccessTriggerRow(owner, resolvedSets, triggerAccessRow(row, trigger)) ? trigger : null;
+      const accessRow = triggerAccessRow(row, trigger);
+      const allowed = scopedAccess
+        ? canAccessTriggerRowInScope(scopedAccess, accessRow)
+        : canAccessTriggerRow(owner, resolvedSets!, accessRow);
+      return allowed ? trigger : null;
     })
     .filter((t): t is WorkflowTriggerSummary => t !== null);
 }

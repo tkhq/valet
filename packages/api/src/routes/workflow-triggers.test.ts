@@ -631,3 +631,116 @@ describe("same-org owner scoping", () => {
     expect(patchRes.status).toBe(200);
   });
 });
+
+// ── 14. Workspace scope filter (?ownerType=&ownerId=) ─────────────────────
+// The hub's flat Triggers and Runs tabs pin ONE workspace via the switcher.
+// The property under test: a caller's OWN personal row must NOT ride along
+// into a team scope — the tab shows one workspace, not the caller's union.
+
+describe("GET /api/workflows/{triggers,runs}?ownerType=&ownerId=", () => {
+  const DEFINITION = {
+    version: "dag/v1",
+    nodes: [
+      { id: "trigger", type: "trigger" },
+      { id: "stop", type: "stop" },
+    ],
+    edges: [{ from: "trigger", to: "stop" }],
+  };
+
+  /** A team in `local-org` the caller is NOT a member of. */
+  async function seedTeamWithoutCaller(a: TestApi, teamId: string): Promise<void> {
+    await a.providers.db
+      .insert(teams)
+      .values({ id: teamId, orgId: "local-org", name: teamId, createdAt: Date.now() });
+  }
+
+  it("triggers: a team scope shows the team's rows, not the caller's personal ones", async () => {
+    const a = await boot();
+    await seedTeamWithCaller(a, "team_a");
+    await seedWorkflowRow(a, "wf_team", { type: "team", id: "team_a" });
+    // Team rows: a team-owned schedule, and a trigger created by `someone` on
+    // the team workflow (kept by the workflow-reach arm).
+    await seedScheduleRow(a, "sched_team", "local-org", {
+      workflowId: "wf_team",
+      owner: { type: "team", id: "team_a" },
+    });
+    await seedEventTriggerRow(a, "trig_team", "local-org", "wf_team");
+    // The caller's OWN personal schedule — reachable, but not this workspace.
+    await seedScheduleRow(a, "sched_mine", "local-org", { owner: { type: "user", id: "local-user" } });
+
+    const res = await fetch(`${a.baseUrl}/api/workflows/triggers?ownerType=team&ownerId=team_a`);
+    expect(res.status).toBe(200);
+    const ids = ((await res.json()) as ListWorkflowTriggersResponse).triggers.map((t) => t.id);
+    expect(ids).toContain("sched_team");
+    expect(ids).toContain("trig_team");
+    // The crux: the caller's personal schedule does not leak into the team tab.
+    expect(ids).not.toContain("sched_mine");
+  });
+
+  it("triggers: a personal scope drops the teams, keeping only the caller's own rows", async () => {
+    const a = await boot();
+    await seedTeamWithCaller(a, "team_a");
+    await seedWorkflowRow(a, "wf_team", { type: "team", id: "team_a" });
+    await seedScheduleRow(a, "sched_team", "local-org", {
+      workflowId: "wf_team",
+      owner: { type: "team", id: "team_a" },
+    });
+    await seedScheduleRow(a, "sched_mine", "local-org", { owner: { type: "user", id: "local-user" } });
+
+    const res = await fetch(`${a.baseUrl}/api/workflows/triggers?ownerType=user&ownerId=local-user`);
+    expect(res.status).toBe(200);
+    const ids = ((await res.json()) as ListWorkflowTriggersResponse).triggers.map((t) => t.id);
+    expect(ids).toContain("sched_mine");
+    expect(ids).not.toContain("sched_team");
+  });
+
+  it("triggers: a team the caller is not on 404s, existence-hidden", async () => {
+    const a = await boot();
+    await seedTeamWithoutCaller(a, "team_x");
+    const forbidden = await fetch(`${a.baseUrl}/api/workflows/triggers?ownerType=team&ownerId=team_x`);
+    const missing = await fetch(`${a.baseUrl}/api/workflows/triggers?ownerType=team&ownerId=team_nope`);
+    expect(forbidden.status).toBe(404);
+    expect(missing.status).toBe(404);
+    expect(await forbidden.json()).toEqual(await missing.json());
+  });
+
+  it("triggers: a half-given filter 400s", async () => {
+    const a = await boot();
+    const res = await fetch(`${a.baseUrl}/api/workflows/triggers?ownerType=team`);
+    expect(res.status).toBe(400);
+  });
+
+  it("runs: a team scope shows only the team workflow's runs", async () => {
+    const a = await boot();
+    await seedTeamWithCaller(a, "team_a");
+    const mineWf = await createWorkflow(a.baseUrl, "mine-wf");
+    await seedWorkflowRow(a, "wf_team", { type: "team", id: "team_a" });
+    await a.providers.workflowStore.createRun(
+      "run_mine",
+      { workflowId: mineWf, definitionVersionId: "v1" },
+      DEFINITION,
+      "v1",
+      { ownerType: "user", ownerId: "local-user" },
+    );
+    await a.providers.workflowStore.createRun(
+      "run_team",
+      { workflowId: "wf_team", definitionVersionId: "v1" },
+      DEFINITION,
+      "v1",
+      { ownerType: "team", ownerId: "team_a" },
+    );
+
+    const res = await fetch(`${a.baseUrl}/api/workflows/runs?ownerType=team&ownerId=team_a`);
+    expect(res.status).toBe(200);
+    const runIds = ((await res.json()) as ListAllWorkflowRunsResponse).runs.map((r) => r.runId);
+    expect(runIds).toContain("run_team");
+    expect(runIds).not.toContain("run_mine");
+  });
+
+  it("runs: a team the caller is not on 404s", async () => {
+    const a = await boot();
+    await seedTeamWithoutCaller(a, "team_x");
+    const res = await fetch(`${a.baseUrl}/api/workflows/runs?ownerType=team&ownerId=team_x`);
+    expect(res.status).toBe(404);
+  });
+});

@@ -86,6 +86,33 @@ export interface WorkflowOwnerRef {
   ownerId: string;
 }
 
+const WORKFLOW_OWNER_TYPES: ReadonlySet<string> = new Set(["user", "team", "org"]);
+
+export function isWorkflowOwnerType(value: string): value is WorkflowOwnerType {
+  return WORKFLOW_OWNER_TYPES.has(value);
+}
+
+/**
+ * The `?ownerType=&ownerId=` list filter, or `{}` when absent. Returns an
+ * error string when one half is present and the other is not — the same shape
+ * `GET /api/assistants` and `GET /api/sessions` take, so one client builds one
+ * query for all of them. Shared by the workflow definitions, runs, and
+ * triggers routes so every workflow list scopes the same way.
+ */
+export function parseWorkflowOwnerFilter(
+  ownerType: string | undefined,
+  ownerId: string | undefined,
+): { scope?: WorkflowOwnerRef; error?: string } {
+  if (ownerType === undefined && ownerId === undefined) return {};
+  if (ownerType === undefined || ownerId === undefined) {
+    return { error: "Filter by owner with both ownerType and ownerId, or send neither." };
+  }
+  if (!isWorkflowOwnerType(ownerType)) {
+    return { error: "ownerType must be 'user', 'team' or 'org'." };
+  }
+  return { scope: { ownerType, ownerId } };
+}
+
 export function newWorkflowId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -283,13 +310,61 @@ export function canAccessTriggerRow(
 }
 
 /** The same read as `ownedWorkflowIds`, with the display name each id needs
- * when the rows leave their own workflow's page. */
-async function ownedWorkflowNames(db: AppDb, owner: WorkflowOwner): Promise<Map<string, string>> {
+ * when the rows leave their own workflow's page. `scope` narrows to one owner
+ * — the hub's Runs tab under the switcher — the same way `listWorkflowDefinitions`
+ * does; it carries no authorization (the caller was already checked for the
+ * scope), so an unscoped call still returns the caller's full reach. */
+async function ownedWorkflowNames(
+  db: AppDb,
+  owner: WorkflowOwner,
+  scope?: WorkflowOwnerRef,
+): Promise<Map<string, string>> {
+  const where = scope
+    ? and(eq(workflowDefinitions.ownerType, scope.ownerType), eq(workflowDefinitions.ownerId, scope.ownerId))
+    : await ownedDefinitionFilter(db, owner);
   const rows = await db
     .select({ id: workflowDefinitions.id, name: workflowDefinitions.name })
     .from(workflowDefinitions)
-    .where(await ownedDefinitionFilter(db, owner));
+    .where(where);
   return new Map(rows.map((r) => [r.id, r.name]));
+}
+
+/**
+ * Trigger-row access for ONE workspace scope — the Triggers hub under the
+ * switcher. A row belongs to the scope when the scope owns it, or when it
+ * targets a workflow the scope owns (the same workflow-reach arm
+ * `canAccessTriggerRow` keeps for legacy rows whose owner column pre-dates the
+ * team/workflow binding). `workflowIds` are the scope's workflows, loaded once
+ * per request. The caller has already been authorized for the scope.
+ */
+export interface ScopedTriggerAccess {
+  scope: WorkflowOwnerRef;
+  workflowIds: Set<string>;
+}
+
+export async function scopedTriggerAccess(
+  db: AppDb,
+  scope: WorkflowOwnerRef,
+): Promise<ScopedTriggerAccess> {
+  const rows = await db
+    .select({ id: workflowDefinitions.id })
+    .from(workflowDefinitions)
+    .where(and(eq(workflowDefinitions.ownerType, scope.ownerType), eq(workflowDefinitions.ownerId, scope.ownerId)));
+  return { scope, workflowIds: new Set(rows.map((r) => r.id)) };
+}
+
+/**
+ * The deliberate difference from `canAccessTriggerRow`: a caller's OWN
+ * personal row does NOT match a team scope. The hub shows one workspace, not
+ * the caller's union across workspaces, so the owner arm compares the row to
+ * the SCOPE, not to the caller.
+ */
+export function canAccessTriggerRowInScope(
+  access: ScopedTriggerAccess,
+  row: { ownerType: string; ownerId: string; workflowId?: string | null },
+): boolean {
+  if (row.ownerType === access.scope.ownerType && row.ownerId === access.scope.ownerId) return true;
+  return row.workflowId != null && access.workflowIds.has(row.workflowId);
 }
 
 /**
@@ -915,6 +990,14 @@ export interface OwnerRunsFilter extends RunPageOptions {
   /** Children of one run — this is how a batch parent's items come back in one query. */
   parentRunId?: string;
   since?: number;
+  /**
+   * One workspace, for the hub's Runs tab under the switcher. Narrows the
+   * readable set to workflows THIS owner owns, instead of every workflow the
+   * caller may reach. Carries no authorization: the route has already checked
+   * the caller may reach `scope` (`isAuthorizedForOwner`), the same contract
+   * `listWorkflowDefinitions`'s `scope` takes.
+   */
+  scope?: WorkflowOwnerRef;
 }
 
 /**
@@ -935,7 +1018,7 @@ export async function listRunsForOwner(
   owner: WorkflowOwner,
   filter: OwnerRunsFilter = {},
 ): Promise<ListAllWorkflowRunsResponse | null> {
-  const nameById = await ownedWorkflowNames(deps.db, owner);
+  const nameById = await ownedWorkflowNames(deps.db, owner, filter.scope);
   const readable = [...nameById.keys()];
   let workflowIds = readable;
   if (filter.workflowIds !== undefined) {

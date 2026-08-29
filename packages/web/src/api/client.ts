@@ -936,16 +936,22 @@ export const api = {
       body,
     ),
 
-  // workflow triggers (spec 2026-08-15)
-  listWorkflowTriggers: (workflowId?: string) =>
+  // workflow triggers (spec 2026-08-15). `owner` scopes the flat hub list to
+  // one workspace; the per-workflow editor passes `workflowId` and no owner.
+  listWorkflowTriggers: (owner?: OwnerFilter, workflowId?: string) =>
     request<ListWorkflowTriggersResponse>(
       "GET",
-      `/workflows/triggers${workflowId ? `?workflowId=${encodeURIComponent(workflowId)}` : ""}`,
+      `/workflows/triggers${
+        workflowId ? `?workflowId=${encodeURIComponent(workflowId)}${ownerSuffix(owner)}` : ownerQuery(owner)
+      }`,
     ),
   getWorkflowTriggerCatalog: () =>
     request<GetWorkflowTriggerCatalogResponse>("GET", "/workflows/trigger-catalog"),
-  listAllWorkflowRuns: (limit?: number) =>
-    request<ListAllWorkflowRunsResponse>("GET", `/workflows/runs${limit ? `?limit=${limit}` : ""}`),
+  listAllWorkflowRuns: (owner?: OwnerFilter, limit?: number) =>
+    request<ListAllWorkflowRunsResponse>(
+      "GET",
+      `/workflows/runs${limit ? `?limit=${limit}${ownerSuffix(owner)}` : ownerQuery(owner)}`,
+    ),
   createWorkflowSchedule: (body: CreateWorkflowScheduleRequest) =>
     request<WorkflowScheduleResponse>("POST", "/workflows/schedules", body),
   updateWorkflowSchedule: (id: string, body: UpdateWorkflowScheduleRequest) =>
