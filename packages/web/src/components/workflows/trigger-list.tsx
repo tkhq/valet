@@ -10,6 +10,7 @@ import {
   useWorkflowTriggers,
   useWorkflows,
 } from "~/api/workflows";
+import type { OwnerFilter } from "~/api/client";
 import { Button, ConfirmDialog, Spinner, Switch } from "~/components/primitives";
 import { TriggerDialog } from "./trigger-dialog";
 
@@ -33,8 +34,16 @@ function triggerSummary(t: WorkflowTriggerItem): string {
   return t.detail.eventKeys.join(", ");
 }
 
-export function TriggerList({ workflowId }: { workflowId?: string }) {
-  const { data, isLoading, error } = useWorkflowTriggers(workflowId);
+export function TriggerList({
+  workflowId,
+  owner,
+}: {
+  workflowId?: string;
+  /** Scopes the flat hub list to one workspace. Unset per-workflow, where
+   * `workflowId` already narrows the list. */
+  owner?: OwnerFilter;
+}) {
+  const { data, isLoading, error } = useWorkflowTriggers(workflowId, owner);
   const workflowsQ = useWorkflows();
   const updateSchedule = useUpdateSchedule();
   const updateEvent = useUpdateEventTrigger();

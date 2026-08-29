@@ -25,6 +25,7 @@ import {
   listWorkflowDefinitions,
   listWorkflowRuns,
   listWorkflowVersions,
+  parseWorkflowOwnerFilter,
   resolveWorkflowApproval,
   retryWorkflowRun,
   startWorkflowRun,
@@ -34,8 +35,6 @@ import {
   RUN_PAGE_LIMIT_MAX,
   RUN_STATUS_VALUES,
   type WorkflowOwner,
-  type WorkflowOwnerRef,
-  type WorkflowOwnerType,
   type WorkflowServiceDeps,
 } from "../workflows/service.js";
 import {
@@ -119,29 +118,6 @@ function serviceCtx(c: {
   };
 }
 
-const OWNER_TYPES: ReadonlySet<string> = new Set(["user", "team", "org"]);
-
-function isWorkflowOwnerType(value: string): value is WorkflowOwnerType {
-  return OWNER_TYPES.has(value);
-}
-
-/** The `?ownerType=&ownerId=` filter, or undefined when absent. Returns an
- * error string when one half is present and the other is not — the same
- * shape `GET /api/assistants` and `GET /api/sessions` take, so one client
- * builds one query for all three. */
-function readOwnerFilter(
-  ownerType: string | undefined,
-  ownerId: string | undefined,
-): { scope?: WorkflowOwnerRef; error?: string } {
-  if (ownerType === undefined && ownerId === undefined) return {};
-  if (ownerType === undefined || ownerId === undefined) {
-    return { error: "Filter by owner with both ownerType and ownerId, or send neither." };
-  }
-  if (!isWorkflowOwnerType(ownerType)) {
-    return { error: "ownerType must be 'user', 'team' or 'org'." };
-  }
-  return { scope: { ownerType, ownerId } };
-}
 
 // ── Definitions ───────────────────────────────────────────────────────────
 
@@ -191,7 +167,7 @@ workflowsRouter.post("/", async (c) => {
 workflowsRouter.get("/", async (c) => {
   const { deps, owner } = serviceCtx(c);
 
-  const filter = readOwnerFilter(c.req.query("ownerType"), c.req.query("ownerId"));
+  const filter = parseWorkflowOwnerFilter(c.req.query("ownerType"), c.req.query("ownerId"));
   if (filter.error) return c.json({ error: filter.error }, 400);
   // The same check `GET /api/workflows/:id` runs, asked of the owner instead
   // of a row, and answered here rather than in the query — an id from a
@@ -223,6 +199,16 @@ workflowsRouter.get("/runs", async (c) => {
   const limit = parseRunLimit(c.req.query("limit"));
   if ("error" in limit) return c.json({ error: limit.error }, 400);
 
+  // Optional `?ownerType=&ownerId=` scope: the hub's Runs tab pins one
+  // workspace, the same shape `GET /workflows` takes. A filter the caller may
+  // not use 404s exactly like one that matches nothing — the definitions
+  // list's rule, kept identical here.
+  const filter = parseWorkflowOwnerFilter(c.req.query("ownerType"), c.req.query("ownerId"));
+  if (filter.error) return c.json({ error: filter.error }, 400);
+  if (filter.scope && !(await isAuthorizedForOwner(deps.db, owner, filter.scope))) {
+    return c.json({ error: "owner not found" }, 404);
+  }
+
   // A whole number, not merely finite: `created_at` is an integer column, and
   // a fractional or out-of-range value reaches the driver as a syntax error.
   const rawSince = blankToUndefined(c.req.query("since"));
@@ -253,6 +239,7 @@ workflowsRouter.get("/runs", async (c) => {
       since,
       limit: limit.limit,
       cursor: blankToUndefined(c.req.query("cursor")),
+      scope: filter.scope,
     });
   } catch (err) {
     if (err instanceof WorkflowCursorError) return c.json({ error: err.message }, 400);

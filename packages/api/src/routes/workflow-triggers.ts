@@ -10,7 +10,12 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type { AppEnv } from "../env.js";
-import { triggerAccessSets, type WorkflowOwner } from "../workflows/service.js";
+import {
+  isAuthorizedForOwner,
+  parseWorkflowOwnerFilter,
+  triggerAccessSets,
+  type WorkflowOwner,
+} from "../workflows/service.js";
 import {
   createWorkflowSchedule,
   deleteWorkflowSchedule,
@@ -56,11 +61,20 @@ workflowTriggersRouter.get("/triggers", async (c) => {
   const owner = ownerFrom(c);
   const workflowId = c.req.query("workflowId") || undefined;
 
-  // One access-set build serves both lists.
-  const sets = await triggerAccessSets(db, owner);
+  // Optional `?ownerType=&ownerId=` scope: the hub's flat Triggers tab pins
+  // one workspace, the same shape `GET /workflows` and `GET /workflows/runs`
+  // take. A filter the caller may not use 404s like one that matches nothing.
+  const filter = parseWorkflowOwnerFilter(c.req.query("ownerType"), c.req.query("ownerId"));
+  if (filter.error) return c.json({ error: filter.error }, 400);
+  if (filter.scope && !(await isAuthorizedForOwner(db, owner, filter.scope))) {
+    return c.json({ error: "owner not found" }, 404);
+  }
+
+  // One access-set build serves both lists (unused when a scope narrows them).
+  const sets = filter.scope ? undefined : await triggerAccessSets(db, owner);
   const [schedules, events] = await Promise.all([
-    listWorkflowSchedules(db, owner, workflowId, sets),
-    listWorkflowTriggers(db, owner, workflowId, sets),
+    listWorkflowSchedules(db, owner, workflowId, sets, filter.scope),
+    listWorkflowTriggers(db, owner, workflowId, sets, filter.scope),
   ]);
   const triggers: WorkflowTriggerItem[] = [
     ...schedules.map((s): WorkflowTriggerItem => ({

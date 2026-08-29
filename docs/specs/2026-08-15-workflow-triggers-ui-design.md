@@ -220,6 +220,18 @@ aggregate list.
   documented org-wide read; only this workflow-trigger surface is
   owner-scoped.
 
+- **The hub's Runs and Triggers tabs ignored the switcher (fixed 2026-08-29).**
+  `GET /workflows/runs` and `GET /workflows/triggers` took no owner filter, so
+  the two flat hub tabs showed the caller's runs and triggers unioned with
+  every team's — under a header that named one workspace, the switcher inert.
+  Both routes now accept `?ownerType=&ownerId=` like `GET /workflows`
+  (`parseWorkflowOwnerFilter` + `isAuthorizedForOwner`, cross-owner 404s
+  existence-hidden), and the web tabs pass `useListOwner()`. A scoped trigger
+  list uses `canAccessTriggerRowInScope`, whose deliberate difference from
+  `canAccessTriggerRow` is that a caller's OWN personal row does not ride along
+  into a team scope: the tab shows one workspace, not the caller's union. The
+  per-workflow editor panel is unchanged — `workflowId` already scopes it.
+
 ## Known gap: a template cannot arm an event trigger
 
 `WorkflowTemplate` (`@valet/engine`) declares a `schedule`, and

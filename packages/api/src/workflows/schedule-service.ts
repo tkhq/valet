@@ -11,10 +11,13 @@ import type { AppDb } from "../lib/drizzle.js";
 import { workflowSchedules } from "../schema/index.js";
 import {
   canAccessTriggerRow,
+  canAccessTriggerRowInScope,
   ownedDefinitionRow,
+  scopedTriggerAccess,
   triggerAccessSets,
   type TriggerAccessSets,
   type WorkflowOwner,
+  type WorkflowOwnerRef,
 } from "./service.js";
 
 export interface WorkflowScheduleSummary {
@@ -165,13 +168,19 @@ export async function listWorkflowSchedules(
   owner: WorkflowOwner,
   workflowId?: string,
   sets?: TriggerAccessSets,
+  scope?: WorkflowOwnerRef,
 ): Promise<WorkflowScheduleSummary[]> {
   const conditions = [eq(workflowSchedules.orgId, owner.orgId)];
   if (workflowId !== undefined) conditions.push(eq(workflowSchedules.workflowId, workflowId));
-  const [rows, resolvedSets] = await Promise.all([
-    db.select().from(workflowSchedules).where(and(...conditions)),
-    sets ?? triggerAccessSets(db, owner),
-  ]);
+  const rows = await db.select().from(workflowSchedules).where(and(...conditions));
+  // A scoped list shows ONE workspace: a row owned by the scope, or targeting
+  // a workflow it owns. Unlike the caller's-reach filter, a personal row does
+  // not ride along into a team scope.
+  if (scope) {
+    const access = await scopedTriggerAccess(db, scope);
+    return rows.filter((row) => canAccessTriggerRowInScope(access, row)).map(rowToSummary);
+  }
+  const resolvedSets = sets ?? (await triggerAccessSets(db, owner));
   return rows.filter((row) => canAccessTriggerRow(owner, resolvedSets, row)).map(rowToSummary);
 }
 

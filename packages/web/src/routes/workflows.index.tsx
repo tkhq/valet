@@ -122,7 +122,7 @@ export function WorkflowsIndexPage() {
           <WorkflowsTab onNew={() => setNewOpen(true)} onImport={() => setImportOpen(true)} />
         )}
         {tab === "runs" && <RunsTab />}
-        {tab === "triggers" && <TriggerList />}
+        {tab === "triggers" && <TriggersTab />}
         {tab === "templates" && <TemplateGallery />}
       </div>
     </div>
@@ -136,7 +136,9 @@ function WorkflowsTab({ onNew, onImport }: { onNew: () => void; onImport: () => 
   // so switching appeared to do nothing.
   const owner = useListOwner();
   const { data, isLoading, error } = useWorkflows(owner);
-  const triggersQ = useWorkflowTriggers();
+  // Scoped to the same workspace, so the per-row schedule/event badge counts
+  // match the list they annotate rather than the caller's whole reach.
+  const triggersQ = useWorkflowTriggers(undefined, owner);
   const workflows = data?.workflows ?? [];
 
   // Group triggers by workflowId for per-row badges.
@@ -351,8 +353,19 @@ function DefinitionRow({
   );
 }
 
+/** Renders the hub's flat Triggers tab under the active workspace. A thin
+ * wrapper so `TriggerList` (also used per-workflow) reads the switcher only
+ * here, where there is no workflow id to scope it. */
+function TriggersTab() {
+  const owner = useListOwner();
+  return <TriggerList owner={owner} />;
+}
+
 function RunsTab() {
-  const { data, isLoading, error } = useAllWorkflowRuns();
+  // The Runs tab is a workspace list like the others: without the switcher's
+  // owner it shows the caller's runs plus every team's, ignoring the scope.
+  const owner = useListOwner();
+  const { data, isLoading, error } = useAllWorkflowRuns(owner);
   const runs = data?.runs ?? [];
 
   if (isLoading) {

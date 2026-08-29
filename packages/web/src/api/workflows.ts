@@ -57,8 +57,12 @@ export const qkWorkflows = {
   versions: (id: string) => ["workflows", id, "versions"] as const,
   version: (id: string, version: number) => ["workflows", id, "versions", version] as const,
   webhook: (id: string) => ["workflows", id, "webhook"] as const,
-  triggers: (workflowId?: string) => ["workflows", "triggers", workflowId ?? "all"] as const,
-  allRuns: () => ["workflows", "all-runs"] as const,
+  // Owner is a trailing element (like `list`), so the workflowId-only /
+  // page-less forms stay the prefix that invalidates every workspace at once.
+  triggers: (workflowId?: string, owner?: OwnerFilter) =>
+    ["workflows", "triggers", workflowId ?? "all", ...(owner ? [owner.ownerType, owner.ownerId] : [])] as const,
+  allRuns: (owner?: OwnerFilter) =>
+    ["workflows", "all-runs", ...(owner ? [owner.ownerType, owner.ownerId] : [])] as const,
   triggerCatalog: () => ["workflows", "trigger-catalog"] as const,
   // Sits under the `detail(id)` prefix on purpose: saving the definition
   // invalidates the detail, and the predictions must follow the definition.
@@ -166,13 +170,16 @@ export function useRunDetail(
   });
 }
 
+/** `owner` scopes the flat hub Triggers tab to one workspace; the
+ * per-workflow editor passes only `workflowId`. */
 export function useWorkflowTriggers(
   workflowId?: string,
+  owner?: OwnerFilter,
   opts?: Partial<UseQueryOptions<ListWorkflowTriggersResponse>>,
 ) {
   return useQuery<ListWorkflowTriggersResponse>({
-    queryKey: qkWorkflows.triggers(workflowId),
-    queryFn: () => api.listWorkflowTriggers(workflowId),
+    queryKey: qkWorkflows.triggers(workflowId, owner),
+    queryFn: () => api.listWorkflowTriggers(owner, workflowId),
     ...opts,
   });
 }
@@ -185,10 +192,14 @@ export function useTriggerCatalog() {
   });
 }
 
-export function useAllWorkflowRuns(opts?: Partial<UseQueryOptions<ListAllWorkflowRunsResponse>>) {
+/** `owner` scopes the hub Runs tab to one workspace. */
+export function useAllWorkflowRuns(
+  owner?: OwnerFilter,
+  opts?: Partial<UseQueryOptions<ListAllWorkflowRunsResponse>>,
+) {
   return useQuery<ListAllWorkflowRunsResponse>({
-    queryKey: qkWorkflows.allRuns(),
-    queryFn: () => api.listAllWorkflowRuns(),
+    queryKey: qkWorkflows.allRuns(owner),
+    queryFn: () => api.listAllWorkflowRuns(owner),
     refetchInterval: 5000, // runs move; same cadence as run detail
     ...opts,
   });
