@@ -22,7 +22,9 @@ import type {
   PatchAssistantRequest,
   PatchAssistantResponse,
 } from "@valet/api/wire";
+import type { OwnerFilter } from "./client";
 import { api } from "./client";
+import { useOrchestratorInfo } from "./orchestrator";
 import { qk } from "./queries";
 
 export const qkAssistants = {
@@ -56,6 +58,26 @@ export function defaultAssistantFor(
     (a) => a.owner.type === ownerType && a.owner.id === ownerId,
   );
   return owned.find((a) => a.isDefault) ?? owned[0];
+}
+
+/**
+ * The display name of the assistant that owns a workspace's memory and
+ * threads, for hint copy like "Talk to {name}". A team scope names the team's
+ * default assistant; personal scope keeps the caller's own assistant name
+ * (from orchestrator info, which answers before the assistants list on a cold
+ * load). Falls back to a generic phrase so the copy is never blank or wrong.
+ */
+export function useScopedAssistantName(owner?: OwnerFilter): string {
+  const info = useOrchestratorInfo();
+  const isTeam = owner?.ownerType === "team";
+  // Only a team scope needs the list; personal reads from `info`.
+  const assistantsQ = useAssistants({ enabled: isTeam });
+  if (isTeam) {
+    const teamAssistant = defaultAssistantFor(assistantsQ.data?.assistants, "team", owner.ownerId);
+    const named = teamAssistant?.name?.trim();
+    return named && named.length > 0 ? named : "the team's assistant";
+  }
+  return info.data?.name ?? "your assistant";
 }
 
 export function useCreateAssistant() {

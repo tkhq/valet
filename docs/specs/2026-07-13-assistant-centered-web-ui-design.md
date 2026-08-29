@@ -68,6 +68,18 @@ Two panes:
 
 Read-only. No editing, no graph, no import UI this pass (import stays curl/API).
 
+Amended 2026-08-29: **the whole explorer follows the workspace switcher.** The
+tree, search, doc pane, and Import/Export all read the active workspace
+(`useListOwner`), so a team workspace shows the team's corpus, not yours. Two
+gaps closed here: Import/Export were still hitting the caller's own memory
+under a team scope (they now thread the owner, and a team import writes into
+the team corpus — authorized by `POST /memory/import`), and the empty-state
+and 404 hints named your personal assistant even under a team scope (they now
+name the active workspace's assistant via `useScopedAssistantName`). Import is
+a write, so a plain team member sees Export but not Import — the same authority
+the doc pane's edit/pin/delete already enforce. Sharing and the "Ask {name} to
+update this" prefill stay personal-only (`mem_share` refuses team paths in v1).
+
 ### `/sessions` and `/sessions/$sessionId` — standalone sessions
 
 - The list shows **standalone sessions only** (owner user, purpose `interactive`; children and orchestrators excluded). "New session" dialog lives here. Framing copy: this is the space for direct/automation sessions.
