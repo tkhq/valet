@@ -16,6 +16,7 @@ import {
   triggerAccessSets,
   type WorkflowOwner,
 } from "../workflows/service.js";
+import { isTeamMember } from "../services/teams.js";
 import {
   createWorkflowSchedule,
   deleteWorkflowSchedule,
@@ -147,6 +148,19 @@ workflowTriggersRouter.post("/schedules", async (c) => {
     );
   }
 
+  // An orchestrator-prompt schedule created in a team workspace fires the
+  // TEAM's assistant, so it is team-owned. Validate membership here, before
+  // anything is written — a non-member's team id 404s exactly like an unknown
+  // one, the existence-hiding convention every cross-owner route uses. A
+  // workflow-target schedule ignores teamId (its owner follows the workflow).
+  let teamId: string | undefined;
+  if (body.target.kind === "orchestrator" && typeof body.teamId === "string") {
+    if (!(await isTeamMember(db, body.teamId, user.id))) {
+      return c.json({ error: "team not found" }, 404);
+    }
+    teamId = body.teamId;
+  }
+
   const result = await createWorkflowSchedule(db, user, {
     name: body.name,
     cron: body.cron,
@@ -154,6 +168,7 @@ workflowTriggersRouter.post("/schedules", async (c) => {
     workflowId: body.target.kind === "workflow" ? body.target.workflowId : undefined,
     prompt: body.target.kind === "orchestrator" ? body.target.prompt : undefined,
     input: body.target.kind === "workflow" ? body.target.input : undefined,
+    teamId,
   });
   if (!result.ok) return c.json({ error: withCronHint(result.error) }, 400);
   const resp: WorkflowScheduleResponse = { schedule: result.schedule };

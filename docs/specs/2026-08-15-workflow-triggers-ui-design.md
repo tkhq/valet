@@ -232,6 +232,18 @@ aggregate list.
   into a team scope: the tab shows one workspace, not the caller's union. The
   per-workflow editor panel is unchanged — `workflowId` already scopes it.
 
+- **Scheduled prompts ignored the workspace switcher (fixed 2026-08-29).** A
+  scheduled ORCHESTRATOR-prompt automation ("on a schedule, send this prompt")
+  created in a team workspace was owned by the caller personally, so
+  `deliverToOrchestrator` fired the caller's own assistant and billed the
+  individual — the team's scheduled prompt was invisible and misrouted. The
+  automation wizard now sends `teamId` from the active scope, `POST
+  /workflows/schedules` validates membership (existence-hiding 404) and owns
+  the schedule by the team, and `createWorkflowSchedule` stamps the team owner
+  on the orchestrator-prompt path. A workflow-target schedule is unchanged: its
+  owner still follows the workflow. Event triggers already followed their
+  workflow, so only the schedule's prompt branch needed the fix.
+
 ## Known gap: a template cannot arm an event trigger
 
 `WorkflowTemplate` (`@valet/engine`) declares a `schedule`, and

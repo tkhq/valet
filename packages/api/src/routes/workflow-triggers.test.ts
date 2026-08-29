@@ -222,6 +222,74 @@ describe("POST /api/workflows/schedules", () => {
   });
 });
 
+// ── 3b. Orchestrator-prompt schedule follows the workspace ────────────────
+
+describe("POST /api/workflows/schedules — orchestrator-prompt workspace scope", () => {
+  async function createPromptSchedule(a: TestApi, body: Record<string, unknown>) {
+    return fetch(`${a.baseUrl}/api/workflows/schedules`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it("a team member's scheduled prompt is owned by the TEAM, so it fires the team assistant", async () => {
+    const a = await boot();
+    await seedTeamWithCaller(a, "team_a");
+
+    const res = await createPromptSchedule(a, {
+      name: "team standup",
+      cron: VALID_CRON,
+      target: { kind: "orchestrator", prompt: "post the standup" },
+      teamId: "team_a",
+    });
+    expect(res.status).toBe(201);
+    const scheduleId = ((await res.json()) as WorkflowScheduleResponse).schedule.scheduleId;
+
+    const rows = await a.providers.db
+      .select({ ownerType: workflowSchedules.ownerType, ownerId: workflowSchedules.ownerId })
+      .from(workflowSchedules)
+      .where(eq(workflowSchedules.id, scheduleId));
+    expect(rows[0]).toEqual({ ownerType: "team", ownerId: "team_a" });
+  });
+
+  it("a non-member's team id 404s, existence-hidden, and writes nothing", async () => {
+    const a = await boot();
+    await a.providers.db
+      .insert(teams)
+      .values({ id: "team_x", orgId: "local-org", name: "team_x", createdAt: Date.now() });
+
+    const res = await createPromptSchedule(a, {
+      name: "sneaky",
+      cron: VALID_CRON,
+      target: { kind: "orchestrator", prompt: "hi" },
+      teamId: "team_x",
+    });
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { error: string }).error).toBe("team not found");
+
+    const rows = await a.providers.db.select().from(workflowSchedules);
+    expect(rows).toHaveLength(0);
+  });
+
+  it("no teamId keeps the schedule the caller's own (personal, unchanged)", async () => {
+    const a = await boot();
+    const res = await createPromptSchedule(a, {
+      name: "my standup",
+      cron: VALID_CRON,
+      target: { kind: "orchestrator", prompt: "remind me" },
+    });
+    expect(res.status).toBe(201);
+    const scheduleId = ((await res.json()) as WorkflowScheduleResponse).schedule.scheduleId;
+
+    const rows = await a.providers.db
+      .select({ ownerType: workflowSchedules.ownerType, ownerId: workflowSchedules.ownerId })
+      .from(workflowSchedules)
+      .where(eq(workflowSchedules.id, scheduleId));
+    expect(rows[0]).toEqual({ ownerType: "user", ownerId: "local-user" });
+  });
+});
+
 // ── 4. GET /api/workflows/triggers — both kinds present ──────────────────
 
 describe("GET /api/workflows/triggers", () => {
