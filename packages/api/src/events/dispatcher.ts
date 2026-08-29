@@ -26,7 +26,7 @@
  */
 import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
 import type { RunHost, RunParams, WorkflowStore, WorkflowTriggerPayload } from "@valet/workflow";
-import type { SignalContent } from "@valet/engine";
+import type { ChannelOrigin, SignalContent } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, events, eventSubscriptions, workflowDefinitions, workflowRuns } from "../schema/index.js";
 import { definitionVersionId } from "../workflows/definition-version.js";
@@ -64,6 +64,22 @@ export interface EventDispatcherDeps {
   workflowStore: WorkflowStore;
   /** Seam over `ensureDefaultAssistantSession` + `thread("events").submitPrompt` — see `orchestrator-target.ts`. */
   deliverToOrchestrator: OrchestratorDeliverFn;
+  /**
+   * Where a channel-originated event should route a reply. Returns the origin
+   * for a channel event that names a conversation (a Slack message or mention),
+   * or `null` for a non-channel event (GitHub, Linear) or one with no
+   * conversation. Wired from `channelHost.transportFor(...).threadKeyFromEvent`.
+   */
+  resolveChannelOrigin?: (service: string, eventKey: string, payload: unknown) => ChannelOrigin | null;
+}
+
+/** The message text on a channel event payload (`text`), when present. */
+function channelText(payload: unknown): string | undefined {
+  if (typeof payload === "object" && payload !== null) {
+    const t = (payload as Record<string, unknown>).text;
+    if (typeof t === "string" && t.length > 0) return t;
+  }
+  return undefined;
 }
 
 /** The `target` jsonb column's shape — written only by the subscriptions CRUD validator. */
@@ -161,6 +177,21 @@ export class EventDispatcher {
       if (target.kind === "workflow" && target.workflowId) {
         await this.startWorkflow(target.workflowId, sub.id, delivery.id, event, refs);
       } else if (target.kind === "orchestrator") {
+        // A channel event routes a reply back: stamp the origin, and render a
+        // readable body (summary + message text) instead of a raw JSON dump.
+        // A non-channel event keeps the compact JSON excerpt it always had.
+        const origin = this.deps.resolveChannelOrigin?.(event.service, event.eventKey, event.payload) ?? null;
+        const attributes: Record<string, string> = { ...refs, eventId: event.id, service: event.service };
+        let body: string;
+        if (origin) {
+          const text = channelText(event.payload);
+          body = [event.summary, text].filter((s): s is string => !!s).join("\n\n").slice(0, MAX_BODY_EXCERPT_CHARS);
+          const actor = event.actor as { externalId?: string; login?: string } | null;
+          const sender = actor?.login ?? actor?.externalId;
+          if (sender) attributes.sender = sender;
+        } else {
+          body = `${event.summary}\n\n${JSON.stringify(event.payload).slice(0, MAX_BODY_EXCERPT_CHARS)}`;
+        }
         await this.deps.deliverToOrchestrator({
           orgId: event.orgId,
           ownerType: sub.ownerType,
@@ -169,8 +200,9 @@ export class EventDispatcher {
           signal: {
             kind: "signal",
             signalType: event.eventKey,
-            body: `${event.summary}\n\n${JSON.stringify(event.payload).slice(0, MAX_BODY_EXCERPT_CHARS)}`,
-            attributes: { ...refs, eventId: event.id, service: event.service },
+            body,
+            attributes,
+            origin: origin ?? undefined,
           },
           dispatchId: `event:${delivery.id}`,
         });

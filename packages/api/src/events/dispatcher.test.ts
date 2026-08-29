@@ -41,6 +41,12 @@ interface SeedOpts {
   status?: "pending" | "failed";
   eventKey?: string;
   ownerId?: string;
+  service?: string;
+  eventKeys?: string[];
+  refs?: Record<string, string>;
+  summary?: string;
+  payload?: unknown;
+  actor?: unknown;
 }
 
 describe("EventDispatcher", () => {
@@ -60,12 +66,13 @@ describe("EventDispatcher", () => {
     await db.insert(events).values({
       id: eventId,
       orgId: ORG,
-      service: "github",
+      service: opts.service ?? "github",
       eventKey: opts.eventKey ?? "github.issues.opened",
       dedupeKey: randomUUID(),
-      refs: { repo: "acme/site", installation_id: "42" },
-      summary: "Issue #7 opened: broken build",
-      payload: { action: "opened", issue: { number: 7 } },
+      actor: opts.actor ?? null,
+      refs: opts.refs ?? { repo: "acme/site", installation_id: "42" },
+      summary: opts.summary ?? "Issue #7 opened: broken build",
+      payload: opts.payload ?? { action: "opened", issue: { number: 7 } },
       occurredAt: now - 5_000,
       receivedAt: now,
     });
@@ -75,7 +82,7 @@ describe("EventDispatcher", () => {
       ownerType: opts.ownerType ?? "user",
       ownerId: opts.ownerId ?? "user-1",
       name: "test sub",
-      eventKeys: ["github.issues.*"],
+      eventKeys: opts.eventKeys ?? ["github.issues.*"],
       filters: [],
       target: opts.target,
       enabled: true,
@@ -237,6 +244,41 @@ describe("EventDispatcher", () => {
     const row = await getDelivery(deliveryId);
     expect(row.status).toBe("delivered");
     expect(row.attempts).toBe(1);
+  });
+
+  it("channel-origin orchestrator delivery: readable body + origin + sender, no raw JSON", async () => {
+    const { deliveryId } = await seedDelivery({
+      target: { kind: "orchestrator" },
+      ownerType: "team",
+      service: "slack",
+      eventKey: "slack.app_mention",
+      eventKeys: ["slack.app_mention"],
+      refs: { channel: "C1", user: "U9" },
+      summary: "Mention in #deploys",
+      payload: { type: "app_mention", channel: "C1", user: "U9", text: "who are you", ts: "1.2" },
+      actor: { externalId: "U9" },
+    });
+
+    const deliver = vi.fn<OrchestratorDeliverFn>(async () => {});
+    const dispatcher = new EventDispatcher({
+      db: tdb.appDb,
+      workflowRunHost: fakeRunHost(),
+      workflowStore: new PgWorkflowStore(tdb.pgdb),
+      deliverToOrchestrator: deliver,
+      resolveChannelOrigin: (service) =>
+        service === "slack" ? { channelType: "slack", threadKey: "slack:C1:1.2" } : null,
+    });
+    await dispatcher.pollOnce();
+
+    expect(deliver).toHaveBeenCalledTimes(1);
+    const args = deliver.mock.calls[0][0];
+    expect(args.signal.origin).toEqual({ channelType: "slack", threadKey: "slack:C1:1.2" });
+    expect(args.signal.body).toContain("who are you");
+    expect(args.signal.body).not.toContain("{"); // no raw JSON dump
+    expect(args.signal.attributes?.sender).toBe("U9");
+
+    const row = await getDelivery(deliveryId);
+    expect(row.status).toBe("delivered");
   });
 
   it("signal target: inserts workflow_signals for org runs parked on event:<key> and wakes them", async () => {
