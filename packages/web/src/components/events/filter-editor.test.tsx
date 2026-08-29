@@ -179,7 +179,9 @@ describe("FilterEditor value picker", () => {
       expect.objectContaining({ enabled: true }),
     );
 
-    // The option shows its label, not the raw id. An update preserves the row id.
+    // The results are a focus-driven popover: focus opens it, then the option
+    // shows its label, not the raw id. An update preserves the row id.
+    fireEvent.focus(screen.getByLabelText("Filter value search"));
     fireEvent.click(screen.getByRole("option", { name: /Alice/ }));
     expect(onChange).toHaveBeenCalledWith([
       { id: "r1", field: "user", op: "eq", value: "U1", label: "Alice" },

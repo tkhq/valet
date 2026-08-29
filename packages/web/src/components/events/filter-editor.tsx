@@ -52,6 +52,26 @@ const OP_OPTIONS: { value: FilterOp; label: string }[] = [
   { value: "regex", label: "matches pattern" },
 ];
 
+/** Plain-language names for the fields a person recognizes, in place of the raw
+ * catalog field key. Unknown fields fall back to a title-cased key. */
+const FIELD_LABELS: Record<string, string> = {
+  channel: "Channel",
+  user: "User",
+  text: "Message text",
+  channel_type: "Conversation type",
+  reaction: "Reaction",
+  item_user: "Message author",
+  creator: "Creator",
+  repo: "Repository",
+  base_branch: "Base branch",
+  head_branch: "Head branch",
+  team: "Team",
+};
+
+export function fieldLabel(field: string): string {
+  return FIELD_LABELS[field] ?? field.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+}
+
 /**
  * Convert form rows to the wire shape. A row with no field or no value is
  * dropped, because a half-filled row is not a filter and would 400. The `in`
@@ -212,7 +232,7 @@ export function FilterEditor({
               >
                 {options.map((f) => (
                   <option key={f.field} value={f.field}>
-                    {f.field}
+                    {fieldLabel(f.field)}
                   </option>
                 ))}
               </select>
@@ -303,6 +323,9 @@ function FilterValuePicker({
 }) {
   const [query, setQuery] = useState("");
   const [debounced, setDebounced] = useState("");
+  // The results are a popover: shown while the search input has focus, hidden
+  // otherwise, so the list never pushes the form open or spills out of it.
+  const [open, setOpen] = useState(false);
 
   // Debounce the typed query ~200ms so a keystroke burst is one lookup.
   useEffect(() => {
@@ -338,33 +361,50 @@ function FilterValuePicker({
   }
 
   return (
-    <div className="min-w-0 flex-1 space-y-1">
+    <div className="relative min-w-0 flex-1">
       <Input
         aria-label="Filter value search"
         value={query}
         onChange={(e) => setQuery(e.target.value)}
-        placeholder={ready ? "Search…" : `Pick a ${missingDep} first`}
+        onFocus={() => setOpen(true)}
+        // Delay the close so a click on an option registers first.
+        onBlur={() => setTimeout(() => setOpen(false), 120)}
+        // Once picked, the resolved name shows as the placeholder; typing searches again.
+        placeholder={ready ? (label ?? (value || "Search…")) : `Pick a ${missingDep} first`}
         disabled={!ready}
         className="min-w-0 flex-1"
       />
-      {/* The current selection shows its resolved label, not the raw id. */}
-      {value && (
-        <p className="pl-1 text-xs text-muted">
+      {value && !open && (
+        <p className="mt-0.5 pl-1 text-xs text-muted">
           Selected: <span className="text-ink">{label ?? value}</span>
         </p>
       )}
-      {ready && (
-        <div role="listbox" aria-label="Filter value options" className="space-y-0.5">
-          {optionsQ.isLoading && <p className="pl-1 text-xs text-muted">Loading…</p>}
+      {open && ready && (
+        <div
+          role="listbox"
+          aria-label="Filter value options"
+          className="absolute z-20 mt-1 max-h-52 w-full overflow-auto rounded-md border border-line bg-paper py-1 shadow-lg"
+        >
+          {optionsQ.isLoading && <p className="px-2 py-1 text-xs text-muted">Loading…</p>}
+          {!optionsQ.isLoading && options.length === 0 && (
+            <p className="px-2 py-1 text-xs text-muted">No matches</p>
+          )}
           {options.map((o) => (
             <button
               key={o.id}
               type="button"
               role="option"
               aria-selected={o.id === value}
-              onClick={() => onPick(o.id, o.label)}
-              className={`block w-full rounded px-2 py-1 text-left text-sm hover:bg-hover ${
-                o.id === value ? "bg-hover text-ink" : "text-ink"
+              // Keep the input focused through the click so onBlur does not
+              // close the popover before onClick fires.
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                onPick(o.id, o.label);
+                setQuery("");
+                setOpen(false);
+              }}
+              className={`block w-full px-2 py-1 text-left text-sm text-ink hover:bg-hover ${
+                o.id === value ? "bg-hover" : ""
               }`}
             >
               {o.label}

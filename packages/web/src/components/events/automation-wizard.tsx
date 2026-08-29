@@ -388,7 +388,7 @@ function EventMatchStep({
   return (
     <div className="space-y-4">
       <div>
-        <p className="mb-1.5 text-xs font-medium text-muted">Events</p>
+        <p className="mb-1.5 text-xs font-medium text-muted">Run this when any of these happens</p>
         {catalogLoading && <LoadingRow label="Loading catalog…" className="py-2 text-xs" />}
         {catalogError && (
           <ErrorRow className="py-2 text-xs">
@@ -403,13 +403,14 @@ function EventMatchStep({
         <div className="max-h-56 space-y-3 overflow-y-auto">
           {services.map((s) => (
             <div key={s.service}>
-              <p className="mb-1 text-xs font-medium text-ink">{s.service}</p>
-              <div className="space-y-1">
+              <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted">
+                {s.service.charAt(0).toUpperCase() + s.service.slice(1)}
+              </p>
+              <div className="space-y-0.5">
                 {s.entries.map((entry) => (
                   <label
                     key={entry.key}
-                    className="flex items-start gap-2 text-sm text-ink"
-                    title={entry.description}
+                    className="flex cursor-pointer items-start gap-2.5 rounded-md px-2 py-1.5 hover:bg-hover"
                   >
                     <input
                       type="checkbox"
@@ -417,7 +418,12 @@ function EventMatchStep({
                       checked={keys.has(entry.key)}
                       onChange={() => onToggleKey(entry.key)}
                     />
-                    <span className="font-mono text-xs">{entry.key}</span>
+                    <span className="min-w-0">
+                      {/* Plain language first — what the person recognizes, not
+                          the event key (how the system is built). */}
+                      <span className="block text-sm text-ink">{entry.description}</span>
+                      <span className="block font-mono text-[11px] leading-tight text-muted">{entry.key}</span>
+                    </span>
                   </label>
                 ))}
               </div>

@@ -193,7 +193,7 @@ const triggerSpecs: TriggerSpec[] = [
     catalog: [
       {
         key: "slack.app_mention",
-        description: "The Slack app (bot) was @-mentioned in a channel or thread",
+        description: "When someone @-mentions the bot in a channel or thread",
         filters: [
           {
             field: "channel",
@@ -219,7 +219,7 @@ const triggerSpecs: TriggerSpec[] = [
     catalog: [
       {
         key: "slack.message",
-        description: "Message posted in a channel or DM visible to the Slack app",
+        description: "When a message is posted in a channel or DM the bot can see",
         filters: [
           {
             field: "channel",
@@ -246,7 +246,7 @@ const triggerSpecs: TriggerSpec[] = [
     catalog: [
       {
         key: "slack.reaction_added",
-        description: "Emoji reaction added to a message",
+        description: "When someone adds an emoji reaction to a message",
         filters: [
           {
             field: "channel",
@@ -266,7 +266,7 @@ const triggerSpecs: TriggerSpec[] = [
       },
       {
         key: "slack.reaction_removed",
-        description: "Emoji reaction removed from a message",
+        description: "When someone removes an emoji reaction from a message",
         filters: [
           {
             field: "channel",
@@ -293,7 +293,7 @@ const triggerSpecs: TriggerSpec[] = [
     catalog: [
       {
         key: "slack.member_joined_channel",
-        description: "User joined a channel",
+        description: "When someone joins a channel",
         filters: [
           { field: "channel", path: "channel", description: "Slack channel id", options: { source: "slack.channels" } },
           { field: "user", path: "user", description: "Slack user id who joined", options: { source: "slack.users" } },
@@ -301,7 +301,7 @@ const triggerSpecs: TriggerSpec[] = [
       },
       {
         key: "slack.member_left_channel",
-        description: "User left a channel",
+        description: "When someone leaves a channel",
         filters: [
           { field: "channel", path: "channel", description: "Slack channel id", options: { source: "slack.channels" } },
           { field: "user", path: "user", description: "Slack user id who left", options: { source: "slack.users" } },
@@ -316,7 +316,7 @@ const triggerSpecs: TriggerSpec[] = [
     catalog: [
       {
         key: "slack.channel_created",
-        description: "Channel created",
+        description: "When a channel is created",
         filters: [
           { field: "channel", path: "channel.id", description: "New channel id" },
           { field: "creator", path: "channel.creator", description: "Slack user id of the creator" },
@@ -324,17 +324,17 @@ const triggerSpecs: TriggerSpec[] = [
       },
       {
         key: "slack.channel_rename",
-        description: "Channel renamed",
+        description: "When a channel is renamed",
         filters: [{ field: "channel", path: "channel.id", description: "Renamed channel id" }],
       },
       {
         key: "slack.channel_archive",
-        description: "Channel archived",
+        description: "When a channel is archived",
         filters: [{ field: "channel", path: "channel", description: "Archived channel id" }],
       },
       {
         key: "slack.channel_unarchive",
-        description: "Channel unarchived",
+        description: "When a channel is unarchived",
         filters: [{ field: "channel", path: "channel", description: "Unarchived channel id" }],
       },
     ],
@@ -346,7 +346,7 @@ const triggerSpecs: TriggerSpec[] = [
     catalog: [
       {
         key: "slack.file_shared",
-        description: "File shared into a conversation",
+        description: "When a file is shared into a conversation",
         filters: [
           { field: "channel", path: "channel_id", description: "Slack channel id the file was shared in" },
           { field: "user", path: "user_id", description: "Slack user id who shared the file" },
@@ -361,7 +361,7 @@ const triggerSpecs: TriggerSpec[] = [
     catalog: [
       {
         key: "slack.team_join",
-        description: "New member joined the workspace",
+        description: "When someone joins the workspace",
         filters: [],
       },
     ],
