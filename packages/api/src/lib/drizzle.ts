@@ -172,6 +172,15 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "sso_team_groups" jsonb',
   },
   {
+    // Per-plugin org entitlement map (plugin-entitlements design). Null on
+    // every org row written before the column existed, which the service
+    // reads as "no entry", so every plugin defaults to mode `all` — the
+    // pre-flag always-on behavior.
+    describe: "orgs.plugin_entitlements column",
+    probe: { kind: "column", table: "orgs", column: "plugin_entitlements" },
+    sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "plugin_entitlements" jsonb',
+  },
+  {
     // Artifact-sharing opt-in (artifacts design). The DEFAULT backfills
     // every pre-existing org row to `false` — anonymous sharing stays off
     // until an admin opts in, the same answer a fresh database gets.

@@ -251,6 +251,7 @@ function org(callerRole: "admin" | "member", organizations = true): OrgResponse 
     features: { organizations, ssoTeamSync: false },
     ssoTeamGroups: [],
     allowPublicArtifacts: false,
+    plugins: [],
     callerRole,
   };
 }

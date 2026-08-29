@@ -65,6 +65,13 @@ export const orgs = pgTable("orgs", {
   // visibility option is not offered. Live-checked on every artifact read,
   // so flipping it off immediately re-gates existing `public` artifacts.
   allowPublicArtifacts: boolean("allow_public_artifacts").notNull().default(false),
+  // Per-plugin org entitlement map (plugin-entitlements design). Keyed by
+  // plugin name, shape `{ "<name>": { mode: "off"|"all"|"teams", teamIds: [] } }`.
+  // NULL / a missing key both resolve to `{ mode: "all", teamIds: [] }`, which
+  // keeps an instance-loaded plugin on for every member until an admin narrows
+  // it. Read/written by `services/plugin-entitlements.ts` — jsonb, mirroring
+  // the `features` / `model_preferences` columns above.
+  pluginEntitlements: jsonb("plugin_entitlements"),
 });
 
 // better-auth's default model name for the user table is "user" (singular);

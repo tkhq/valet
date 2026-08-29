@@ -17,6 +17,12 @@ const runnerMd = readFileSync(
 const plugin: ValetPlugin = {
   name: "security",
   version: "0.1.0",
+  // Opts into the org entitlement rail (plugin-entitlements design). An org
+  // admin can turn Valet Security off, on for everyone, or on for named teams.
+  gate: {
+    label: "Valet Security",
+    description: "AI security review of a repository — planned sweeps, findings, and a report.",
+  },
   skills: [loadSkillFromMarkdown(runnerMd, "plugin", "security-engagement-runner")],
   // One RoleSpec per bundled persona. The host attaches ONLY the role whose
   // name matches a claimed cell's persona (see engine/host.ts).

@@ -156,6 +156,7 @@ function org(organizations: boolean): OrgResponse {
     createdAt: 0,
     ssoTeamGroups: [],
     allowPublicArtifacts: false,
+    plugins: [],
     callerRole: "member",
     features: { organizations, ssoTeamSync: false },
   };

@@ -40,6 +40,7 @@ let orgData: OrgResponse = {
   createdAt: 0,
   callerRole: "admin",
   allowPublicArtifacts: false,
+  plugins: [],
   features: { organizations: true, ssoTeamSync: false },
   ssoTeamGroups: [],
 };
@@ -88,7 +89,7 @@ import { SkillEditor } from "~/components/skills/skill-editor";
 
 describe("OrganizationLibraryPage — org skills panel", () => {
   beforeEach(() => {
-    orgData = { id: "org_1", name: "Acme", createdAt: 0, callerRole: "admin", features: { organizations: true, ssoTeamSync: false }, ssoTeamGroups: [], allowPublicArtifacts: false };
+    orgData = { id: "org_1", name: "Acme", createdAt: 0, callerRole: "admin", features: { organizations: true, ssoTeamSync: false }, ssoTeamGroups: [], allowPublicArtifacts: false, plugins: [] };
     createSkill.mockClear();
     skillsQuery.mockClear();
     sourcesQuery.mockClear();
@@ -147,7 +148,7 @@ describe("OrganizationLibraryPage — org skills panel", () => {
  */
 describe("SkillEditor — the org scope", () => {
   beforeEach(() => {
-    orgData = { id: "org_1", name: "Acme", createdAt: 0, callerRole: "admin", features: { organizations: true, ssoTeamSync: false }, ssoTeamGroups: [], allowPublicArtifacts: false };
+    orgData = { id: "org_1", name: "Acme", createdAt: 0, callerRole: "admin", features: { organizations: true, ssoTeamSync: false }, ssoTeamGroups: [], allowPublicArtifacts: false, plugins: [] };
     createSkill.mockClear();
   });
 

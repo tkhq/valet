@@ -148,6 +148,7 @@ export {
   type StreamRef,
   type SuggestedPrompt,
   type ValetPlugin,
+  type PluginGate,
   type CredentialDeclaration,
   type OAuthDeclaration,
   type OAuthIdentity,

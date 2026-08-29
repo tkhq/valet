@@ -12,6 +12,7 @@ export * from "./spinner.js";
 export * from "./separator.js";
 export * from "./scroll-area.js";
 export * from "./switch.js";
+export * from "./checkbox.js";
 export * from "./confirm-dialog.js";
 export * from "./query-state.js";
 export * from "./select-menu.js";

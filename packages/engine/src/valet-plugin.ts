@@ -473,6 +473,20 @@ export interface ValetPlugin {
   templates?: WorkflowTemplate[];
   /** Declares this plugin's provider supports code-based identity linking. */
   identityLink?: IdentityLinkDeclaration;
+  /**
+   * Declares this plugin as gateable by the org entitlement rail
+   * (docs/specs/2026-08-29-plugin-entitlements-design.md). A plugin with a
+   * `gate` opts into per-org admin control: off / all users / specific teams.
+   * The `label` and `description` drive the admin UI. A plugin with no `gate`
+   * is not org-gateable — it rides the instance (deployment) switch only.
+   */
+  gate?: PluginGate;
+}
+
+/** UI-facing labels for a gateable plugin (see `ValetPlugin.gate`). */
+export interface PluginGate {
+  label: string;
+  description: string;
 }
 
 export interface PluginValidationIssue {
@@ -785,6 +799,17 @@ export function validateValetPlugin(
       }
       if (link.deliveryReply !== undefined && typeof link.deliveryReply !== "function") {
         issues.push({ path: "identityLink.deliveryReply", message: "must be a function when present" });
+      }
+    }
+  }
+
+  if (v.gate !== undefined) {
+    const gate = asRecord(v.gate, "gate", issues);
+    if (gate) {
+      for (const key of ["label", "description"] as const) {
+        if (typeof gate[key] !== "string" || gate[key] === "") {
+          issues.push({ path: `gate.${key}`, message: "required non-empty string" });
+        }
       }
     }
   }

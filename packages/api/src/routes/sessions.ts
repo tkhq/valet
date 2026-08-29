@@ -23,6 +23,7 @@ import { seedSecurityReview, seededConfigContext } from "../services/security-se
 import { planCellInputToCell, PlanCellInputError } from "./security.js";
 import { resolveApiTokenOrNull, resolveRefSha } from "../bakes/source-service.js";
 import { isTeamMember, listTeamsForUser } from "../services/teams.js";
+import { orgAllowsPluginForUser } from "../services/plugin-entitlements.js";
 import {
   bundledPersonaIds,
   isKnownPreset,
@@ -251,6 +252,21 @@ sessionsRouter.get("/", async (c) => {
  * model gets this instead. An explicit `model` on the request always wins. */
 const SECURITY_DEFAULT_MODEL = "claude-sonnet-4-6";
 
+/**
+ * Session kinds backed by a gateable plugin (plugin-entitlements design). A
+ * kind in this map may only be created when its plugin is instance-loaded AND
+ * the caller's org admits the caller. A future plugin-backed kind adds one
+ * entry here. `code` is not backed by a plugin, so it is absent.
+ */
+const KIND_TO_PLUGIN: Partial<Record<"code" | "security", string>> = {
+  security: "security",
+};
+
+/** UI label for a gateable plugin's kind, for the refusal messages below. */
+const PLUGIN_LABEL: Record<string, string> = {
+  security: "Valet Security",
+};
+
 sessionsRouter.post("/", async (c) => {
   const { db, engineStore, prebuildService, engineCredentials, encryptionKey } = c.var.providers;
   const user = c.var.user;
@@ -283,6 +299,25 @@ sessionsRouter.post("/", async (c) => {
     return c.json({ error: "kind must be 'code' or 'security'." }, 400);
   }
   const kind = body.kind ?? "code";
+
+  // Plugin entitlement gate (plugin-entitlements design). A plugin-backed kind
+  // needs two things: the plugin loaded on this deployment (the instance
+  // switch), and the caller's org admits the caller (the org mode). Placed
+  // here, before anything is written, so a refusal never leaves an orphaned
+  // session or engagement row.
+  const gatingPlugin = KIND_TO_PLUGIN[kind];
+  if (gatingPlugin) {
+    const label = PLUGIN_LABEL[gatingPlugin] ?? gatingPlugin;
+    if (!c.var.providers.engineHost.isPluginLoaded(gatingPlugin)) {
+      return c.json({ error: `${label} is not enabled on this deployment.` }, 403);
+    }
+    if (!(await orgAllowsPluginForUser(db, user.orgId, user.id, gatingPlugin))) {
+      return c.json(
+        { error: `${label} is not enabled for your account. Ask an org admin to enable it.` },
+        403,
+      );
+    }
+  }
 
   // A security session's sweep preset and path scope. Validated here, before
   // anything is written, so a bad id or a mistyped `paths` is a bad request,

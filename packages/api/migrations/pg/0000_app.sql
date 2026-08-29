@@ -6,7 +6,8 @@ CREATE TABLE "orgs" (
 	"sso_team_groups" jsonb,
 	"created_at" bigint NOT NULL,
 	"bare_skill_commands" boolean NOT NULL DEFAULT false,
-	"allow_public_artifacts" boolean NOT NULL DEFAULT false
+	"allow_public_artifacts" boolean NOT NULL DEFAULT false,
+	"plugin_entitlements" jsonb
 );
 --> statement-breakpoint
 CREATE TABLE "user" (

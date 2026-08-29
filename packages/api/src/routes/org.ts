@@ -35,12 +35,23 @@ import {
   type OrgFeatures,
   type OrgRole,
 } from "../services/org.js";
+import {
+  getPluginEntitlement,
+  orgAllowsPluginForUser,
+  setPluginEntitlement,
+} from "../services/plugin-entitlements.js";
+import type { EngineHost } from "../engine/host.js";
+import type { PluginEntitlementMode } from "@valet/shared";
 import type {
   OrgDirectoryResponse,
   OrgMembersResponse,
+  OrgPluginsResponse,
+  OrgPluginWire,
   OrgResponse,
   PatchOrgMemberRequest,
   PatchOrgMemberResponse,
+  PatchOrgPluginRequest,
+  PatchOrgPluginResponse,
   PatchOrgResponse,
 } from "../wire/types.js";
 
@@ -52,7 +63,44 @@ function isOrgRole(v: unknown): v is OrgRole {
   return v === "admin" || v === "member";
 }
 
-async function loadOrgResponse(db: AppDb, orgId: string, callerRole: OrgRole): Promise<OrgResponse | undefined> {
+/**
+ * The gateable-plugin block for the org surfaces (plugin-entitlements design).
+ * One entry per loaded plugin that declares a `gate`: the deployment switch,
+ * this org's entitlement, and whether the mode admits THIS caller. Shared by
+ * `GET /api/org` and `GET /api/org/plugins`, so the two never drift.
+ */
+async function buildOrgPlugins(
+  db: AppDb,
+  engineHost: EngineHost,
+  orgId: string,
+  callerId: string,
+): Promise<OrgPluginWire[]> {
+  const gateable = engineHost.gateablePlugins();
+  return Promise.all(
+    gateable.map(async (plugin) => {
+      const instanceEnabled = engineHost.isPluginLoaded(plugin.name);
+      const entitlement = await getPluginEntitlement(db, orgId, plugin.name);
+      const enabledForCaller =
+        instanceEnabled && (await orgAllowsPluginForUser(db, orgId, callerId, plugin.name));
+      return {
+        name: plugin.name,
+        label: plugin.label,
+        description: plugin.description,
+        instanceEnabled,
+        entitlement,
+        enabledForCaller,
+      };
+    }),
+  );
+}
+
+async function loadOrgResponse(
+  db: AppDb,
+  engineHost: EngineHost,
+  orgId: string,
+  callerId: string,
+  callerRole: OrgRole,
+): Promise<OrgResponse | undefined> {
   const rows = await db.select().from(orgs).where(eq(orgs.id, orgId)).limit(1);
   const row = rows[0];
   if (!row) return undefined;
@@ -60,6 +108,7 @@ async function loadOrgResponse(db: AppDb, orgId: string, callerRole: OrgRole): P
   // Never-set (NULL) flattens to `[]` on the wire: both mirror nothing, so
   // the client needs no null case.
   const ssoTeamGroups = (await getSsoTeamGroups(db, orgId)) ?? [];
+  const plugins = await buildOrgPlugins(db, engineHost, orgId, callerId);
   return {
     id: row.id,
     name: row.name,
@@ -67,6 +116,7 @@ async function loadOrgResponse(db: AppDb, orgId: string, callerRole: OrgRole): P
     features,
     ssoTeamGroups,
     allowPublicArtifacts: row.allowPublicArtifacts,
+    plugins,
     callerRole,
   };
 }
@@ -84,10 +134,10 @@ async function requireOrgAdmin(c: Context<AppEnv>) {
 // ── GET /api/org — any org member ────────────────────────────────────────
 
 orgRouter.get("/", async (c) => {
-  const { db } = c.var.providers;
+  const { db, engineHost } = c.var.providers;
   const user = c.var.user;
   const admin = await isOrgAdmin(db, user.orgId, user.id);
-  const body = await loadOrgResponse(db, user.orgId, admin ? "admin" : "member");
+  const body = await loadOrgResponse(db, engineHost, user.orgId, user.id, admin ? "admin" : "member");
   if (!body) return c.json({ error: "org not found" }, 404);
   return c.json(body);
 });
@@ -98,7 +148,7 @@ orgRouter.patch("/", async (c) => {
   const forbidden = await requireOrgAdmin(c);
   if (forbidden) return forbidden;
 
-  const { db } = c.var.providers;
+  const { db, engineHost } = c.var.providers;
   const user = c.var.user;
 
   let raw: Record<string, unknown>;
@@ -175,7 +225,7 @@ orgRouter.patch("/", async (c) => {
     }
   }
 
-  const body = await loadOrgResponse(db, user.orgId, "admin");
+  const body = await loadOrgResponse(db, engineHost, user.orgId, user.id, "admin");
   if (!body) return c.json({ error: "org not found" }, 404);
   const resp: PatchOrgResponse = body;
   return c.json(resp);
@@ -266,5 +316,81 @@ orgRouter.patch("/members/:userId", async (c) => {
   }
 
   const resp: PatchOrgMemberResponse = { ok: true };
+  return c.json(resp);
+});
+
+// ── Plugin entitlements (plugin-entitlements design) ─────────────────────
+//
+// `GET  /api/org/plugins`        → any member reads the gateable-plugin block.
+// `PATCH /api/org/plugins/:name` → org admin sets one plugin's mode + teams.
+//
+// Not tied to the `organizations` feature gate: a single-org deployment with
+// the gate off still runs plugins, and an admin must still be able to narrow
+// one. The admin write uses `requireOrgAdmin`, the same guard as `PATCH /`.
+
+const ENTITLEMENT_MODES: readonly PluginEntitlementMode[] = ["off", "all", "teams"];
+
+function isEntitlementMode(v: unknown): v is PluginEntitlementMode {
+  return typeof v === "string" && (ENTITLEMENT_MODES as readonly string[]).includes(v);
+}
+
+orgRouter.get("/plugins", async (c) => {
+  const { db, engineHost } = c.var.providers;
+  const user = c.var.user;
+  const plugins = await buildOrgPlugins(db, engineHost, user.orgId, user.id);
+  const body: OrgPluginsResponse = { plugins };
+  return c.json(body);
+});
+
+orgRouter.patch("/plugins/:name", async (c) => {
+  const forbidden = await requireOrgAdmin(c);
+  if (forbidden) return forbidden;
+
+  const { db, engineHost } = c.var.providers;
+  const user = c.var.user;
+  const name = c.req.param("name");
+
+  // The name must be a currently-gateable plugin. An unknown/non-gateable
+  // name 404s — a write to it could never take effect.
+  const gateable = engineHost.gateablePlugins();
+  const plugin = gateable.find((p) => p.name === name);
+  if (!plugin) {
+    return c.json({ error: `Unknown plugin '${name}'. It is not gateable on this deployment.` }, 404);
+  }
+
+  let body: PatchOrgPluginRequest;
+  try {
+    body = (await c.req.json()) as PatchOrgPluginRequest;
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  if (!isEntitlementMode(body.mode)) {
+    return c.json({ error: `mode must be one of ${ENTITLEMENT_MODES.join(", ")}` }, 400);
+  }
+  const teamIds = body.teamIds ?? [];
+  if (!Array.isArray(teamIds) || teamIds.some((id) => typeof id !== "string")) {
+    return c.json({ error: "teamIds must be a list of team ids, or omit the field." }, 400);
+  }
+
+  try {
+    await setPluginEntitlement(db, user.orgId, name, { mode: body.mode, teamIds });
+  } catch (err) {
+    if (err instanceof ValidationError) return c.json({ error: err.message }, 400);
+    throw err;
+  }
+
+  // Return the updated entry in the same shape the visibility block uses.
+  const instanceEnabled = engineHost.isPluginLoaded(name);
+  const entitlement = await getPluginEntitlement(db, user.orgId, name);
+  const enabledForCaller =
+    instanceEnabled && (await orgAllowsPluginForUser(db, user.orgId, user.id, name));
+  const resp: PatchOrgPluginResponse = {
+    name: plugin.name,
+    label: plugin.label,
+    description: plugin.description,
+    instanceEnabled,
+    entitlement,
+    enabledForCaller,
+  };
   return c.json(resp);
 });

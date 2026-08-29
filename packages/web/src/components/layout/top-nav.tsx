@@ -5,7 +5,7 @@ import { useSidebarControls } from "./app-shell";
 import { useOrchestratorInfo } from "~/api/orchestrator";
 import { useAssistants, useCreateAssistant } from "~/api/assistants";
 import { useSession } from "~/api/queries";
-import { useOrg, useTeams } from "~/api/settings";
+import { pluginEnabledForCaller, useOrg, useTeams } from "~/api/settings";
 import { eligibleTeams } from "~/components/session/assistant-rail";
 import {
   WorkspaceSwitcher,
@@ -153,6 +153,10 @@ export function TopNav() {
   });
   const routeSession = useSession(sessionRouteId ?? "");
   const onSecuritySession = routeSession.data?.kind === "security";
+  // Gate the Security link on the `security` plugin's entitlement for this
+  // caller. `undefined` (org not yet loaded) hides the link — no flash of a
+  // link the caller may not have, matching the settings rail's no-flash rule.
+  const securityEnabled = pluginEnabledForCaller(orgQ.data, "security") === true;
   const navigate = useNavigate();
   const createAssistant = useCreateAssistant();
 
@@ -249,9 +253,11 @@ export function TopNav() {
           Sessions
         </NavLink>
         <NavLink to="/workflows">Workflows</NavLink>
-        <NavLink to="/security" active={onSecuritySession ? true : undefined}>
-          Security
-        </NavLink>
+        {securityEnabled && (
+          <NavLink to="/security" active={onSecuritySession ? true : undefined}>
+            Security
+          </NavLink>
+        )}
         <NavLink to="/events">Events</NavLink>
         <NavLink to="/usage">Usage</NavLink>
         <NavLink to="/skills">Skills</NavLink>

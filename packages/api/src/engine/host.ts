@@ -104,6 +104,7 @@ import { readOwnFile, type MemoryScope } from "../services/memory.js";
 import { listSkillSourcesFor } from "../services/skills.js";
 import { mergedSkillSources, pluginSessionExtras, type PluginSessionExtras } from "../plugins/assemble.js";
 import { gateUnavailableActions, unavailableServiceSet } from "../services/integration-availability.js";
+import { orgAllowsPluginForUser } from "../services/plugin-entitlements.js";
 import { PINNED_ACTIONS } from "../plugins/pinned-actions.js";
 
 
@@ -1042,6 +1043,69 @@ export class EngineHost {
     return (this.opts.plugins ?? []).filter((p) => p.name !== securityPlugin.name);
   }
 
+  /**
+   * Whether `name` is in the deployment's loaded plugin set — the instance
+   * (operator) switch half of the plugin entitlement rail (plugin-entitlements
+   * design). Reads `this.opts.plugins`, the full assembled set, so a plugin
+   * that `basePlugins`/`sessionExtras` filter out of normal sessions (security)
+   * still reads as loaded. Off here means off for every org, regardless of the
+   * org entitlement mode.
+   */
+  isPluginLoaded(name: string): boolean {
+    return (this.opts.plugins ?? []).some((p) => p.name === name);
+  }
+
+  /**
+   * The loaded plugins that opted into org gating (a `gate` manifest field).
+   * Drives the admin API and the `GET /api/org` visibility block, and
+   * validates admin writes. A plugin with no `gate` rides the instance switch
+   * only and never appears here.
+   */
+  gateablePlugins(): { name: string; label: string; description: string }[] {
+    return (this.opts.plugins ?? [])
+      .filter((p): p is ValetPlugin & { gate: NonNullable<ValetPlugin["gate"]> } => p.gate !== undefined)
+      .map((p) => ({ name: p.name, label: p.gate.label, description: p.gate.description }));
+  }
+
+  /**
+   * Drops every GATEABLE plugin the owner's org disables for the owner. A
+   * plugin with no `gate` is never touched. Only a USER-principal owner is
+   * checked: a team-owned session has no single member to resolve the `teams`
+   * mode against, so it keeps every gateable plugin (the create-route gate
+   * still refuses a team member who cannot use a plugin-backed kind).
+   *
+   * Best-effort: with no db, or when the entitlement read throws, the plugin
+   * stays in the set (default to allowed) and the failure is logged — an
+   * entitlement lookup must never break a session build.
+   */
+  private async filterEntitledPlugins(
+    plugins: ValetPlugin[],
+    owner: Principal,
+    orgId: string,
+  ): Promise<ValetPlugin[]> {
+    const db = this.opts.db;
+    if (!db || owner.type !== "user") return plugins;
+    const gateable = new Set(this.gateablePlugins().map((g) => g.name));
+    if (gateable.size === 0) return plugins;
+    const kept: ValetPlugin[] = [];
+    for (const plugin of plugins) {
+      if (!gateable.has(plugin.name)) {
+        kept.push(plugin);
+        continue;
+      }
+      try {
+        if (await orgAllowsPluginForUser(db, orgId, owner.id, plugin.name)) kept.push(plugin);
+      } catch (err) {
+        console.error(
+          `EngineHost: plugin entitlement check for '${plugin.name}' (org ${orgId}) failed; keeping plugin:`,
+          err instanceof Error ? err.message : String(err),
+        );
+        kept.push(plugin);
+      }
+    }
+    return kept;
+  }
+
   private async sessionExtras(
     owner: Principal,
     orgId: string,
@@ -1052,7 +1116,14 @@ export class EngineHost {
     extraPlugins: readonly ValetPlugin[] = [],
     behavior: AssistantBehavior | null = null,
   ): Promise<PluginSessionExtras> {
-    const allPlugins = [...this.basePlugins(), ...extraPlugins];
+    const assembled = [...this.basePlugins(), ...extraPlugins];
+    // Org entitlement filter (plugin-entitlements design): drop any GATEABLE
+    // plugin the owner's org disables for the owner, so a disabled
+    // action-plugin's tools never reach a normal session. Best-effort — a
+    // lookup failure leaves the plugin in place (default to allowed) and logs,
+    // so an entitlement read can never break a build. Security rides its
+    // create-route gate primarily; this covers future action-plugins.
+    const allPlugins = await this.filterEntitledPlugins(assembled, owner, orgId);
     // Availability gate (integration-availability design): a service whose
     // deployment/org prerequisite is missing never reaches the catalog, so
     // `list_tools` has nothing to hide. Per-build, not process-static: the

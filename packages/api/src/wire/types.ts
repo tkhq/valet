@@ -3051,8 +3051,57 @@ export interface OrgResponse {
    * readable by every member (the share UI needs it to know whether to
    * offer the `public` option), writable only via `PATCH /api/org/settings`. */
   allowPublicArtifacts: boolean;
+  /**
+   * The gateable plugins on this deployment, with this org's entitlement and
+   * this caller's effective access (plugin-entitlements design). A plugin's
+   * nav item / hub reads `enabledForCaller` and hides when false. Empty when
+   * no loaded plugin declares a `gate`.
+   */
+  plugins: OrgPluginWire[];
   callerRole: "admin" | "member";
 }
+
+// ── REST: plugin entitlements (plugin-entitlements design) ────────────────
+
+/** Mirrors `PluginEntitlementMode` from `@valet/shared`, restated on the wire
+ * so this module stays import-free. */
+export type PluginEntitlementModeWire = "off" | "all" | "teams";
+
+/** One org's entitlement for one plugin. `teamIds` matters only for `teams`. */
+export interface PluginEntitlementWire {
+  mode: PluginEntitlementModeWire;
+  teamIds: string[];
+}
+
+/**
+ * One gateable plugin, as the org surfaces present it:
+ *  - `instanceEnabled` — the deployment loaded the plugin (the instance switch).
+ *  - `entitlement` — this org's mode + teams (defaulted to `all` when unset).
+ *  - `enabledForCaller` — instanceEnabled AND the org mode admits THIS caller.
+ */
+export interface OrgPluginWire {
+  name: string;
+  label: string;
+  description: string;
+  instanceEnabled: boolean;
+  entitlement: PluginEntitlementWire;
+  enabledForCaller: boolean;
+}
+
+/** `GET /api/org/plugins` — any member reads; non-admins get it read-only. */
+export interface OrgPluginsResponse {
+  plugins: OrgPluginWire[];
+}
+
+/** `PATCH /api/org/plugins/:name` body — org admin only. `teamIds` is required
+ * for `teams` mode and ignored otherwise. */
+export interface PatchOrgPluginRequest {
+  mode: PluginEntitlementModeWire;
+  teamIds?: string[];
+}
+
+/** `PATCH /api/org/plugins/:name` response — the updated plugin entry. */
+export type PatchOrgPluginResponse = OrgPluginWire;
 
 /** Whitelisted fields only — unknown top-level keys 400. */
 export interface PatchOrgRequest {

@@ -23,6 +23,7 @@ import {
   type SandboxProvider,
   type ValetPlugin,
 } from "@valet/engine";
+import securityPlugin from "@valet/plugin-security/plugin";
 import { PgSessionStore, PgEventStream } from "@valet/store-postgres";
 import { createDefaultNodeExecutors, LocalRunHost, type OnApprovalGrant, type RunHost } from "@valet/workflow";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
@@ -99,6 +100,14 @@ export interface BootTestApiOpts {
   /** Plugin set for the assembled `Providers.plugins`/`actionPluginByService`
    * — tests never scan node_modules; default `[]`. */
   plugins?: ValetPlugin[];
+  /**
+   * Leaves the bundled security plugin OUT of the assembled set. Default
+   * `false`: the harness seeds `securityPlugin` to mirror real boot, so
+   * `isPluginLoaded("security")` is true. A test proving the
+   * instance-disabled create gate (plugin-entitlements design) sets this to
+   * `true`.
+   */
+  omitSecurityPlugin?: boolean;
   /**
    * Boots with a real better-auth instance instead of stub-only mode: sets
    * `BETTER_AUTH_SECRET=test-secret` and unsets `VALET_LOCAL_AUTH` (both
@@ -283,7 +292,18 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   const port = await getFreePort();
   const apiBaseUrl = `http://127.0.0.1:${port}`;
 
-  const { plugins, actionPluginByService } = assemblePlugins([[...(opts.plugins ?? [])]]);
+  // The security plugin is a bundled plugin: at real boot it is always in the
+  // assembled set (registry.gen.ts), so `EngineHost.isPluginLoaded("security")`
+  // is true and the plugin-entitlement create gate lets a security session
+  // through. The integration harness otherwise boots with only `opts.plugins`,
+  // which would leave security instance-disabled and 403 every security test.
+  // Include it by default to mirror production; a test proving the
+  // instance-disabled path opts out with `omitSecurityPlugin`.
+  const seededPlugins: ValetPlugin[] = [...(opts.plugins ?? [])];
+  if (!opts.omitSecurityPlugin && !seededPlugins.some((p) => p.name === securityPlugin.name)) {
+    seededPlugins.push(securityPlugin);
+  }
+  const { plugins, actionPluginByService } = assemblePlugins([seededPlugins]);
 
   // Same circular-construction indirection as providers/node.ts — see its
   // comment. Test callers that want to unit-test the spawner/watcher/reader

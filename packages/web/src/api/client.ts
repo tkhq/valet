@@ -133,6 +133,7 @@ import type {
   MeResponse,
   OrgDirectoryResponse,
   OrgMembersResponse,
+  OrgPluginsResponse,
   OrgResponse,
   PatchLlmProviderRequest,
   PatchLlmProviderResponse,
@@ -145,6 +146,8 @@ import type {
   PatchIdentityLinkRequest,
   PatchOrgPolicyRequest,
   PatchOrgPolicyResponse,
+  PatchOrgPluginRequest,
+  PatchOrgPluginResponse,
   PatchOrgRequest,
   PatchOrgResponse,
   PatchSessionRequest,
@@ -642,6 +645,11 @@ export const api = {
     request<{ ok: boolean }>("DELETE", `/artifacts/${encodeURIComponent(id)}`),
   patchOrgSettings: (body: PatchOrgSettingsRequest) =>
     request<OrgSettingsResponse>("PATCH", "/org/settings", body),
+  // org plugin entitlements (plugin-entitlements design). `getOrgPlugins` is
+  // member-readable; `patchOrgPlugin` is org-admin-only (403 otherwise).
+  getOrgPlugins: () => request<OrgPluginsResponse>("GET", "/org/plugins"),
+  patchOrgPlugin: (name: string, body: PatchOrgPluginRequest) =>
+    request<PatchOrgPluginResponse>("PATCH", `/org/plugins/${encodeURIComponent(name)}`, body),
   getMemoryDoc: (path: string, owner?: OwnerFilter) =>
     request<GetMemoryDocResponse>(
       "GET",
