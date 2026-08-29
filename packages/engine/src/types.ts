@@ -238,6 +238,16 @@ export interface AwaitResultOptions {
 export interface ChannelOrigin {
   channelType: string;
   threadKey: string;
+  /**
+   * How the assistant answers this turn. `"auto"` (the default) posts the final
+   * turn back to the channel — a direct mention or a DM, which is addressed.
+   * `"manual"` suppresses the auto-post: an overheard message in a followed
+   * thread, which the assistant answers only if it chooses to, through the
+   * `reply_to_origin` / `react_to_origin` actions.
+   */
+  reply?: "auto" | "manual";
+  /** The specific message that triggered this turn, for `react_to_origin`. */
+  messageTs?: string;
 }
 
 /**
@@ -610,6 +620,11 @@ export interface ToolContext {
   decisionGateId?: string;
   replyChannelType?: string;
   replyChannelId?: string;
+  /**
+   * The channel this turn's message came from, when it was a channel signal.
+   * `reply_to_origin` / `react_to_origin` read it so the model supplies no ids.
+   */
+  origin?: ChannelOrigin;
   cwd?: string;
   repo?: { url?: string; branch?: string; ref?: string; provider?: string };
   credentials: CredentialProvider;

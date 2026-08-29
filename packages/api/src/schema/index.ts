@@ -1605,6 +1605,28 @@ export const eventSubscriptions = pgTable(
   (t) => [index("event_subscriptions_org_enabled").on(t.orgId, t.enabled)],
 );
 
+/**
+ * A Slack thread the assistant follows: once bound (by a follow-enabled
+ * mention), later messages in the thread route to the bound owner's assistant
+ * without a re-mention. One row per `(org, channel, thread)`.
+ */
+export const followedThreads = pgTable(
+  "followed_threads",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    channelType: text("channel_type").notNull(),
+    channelId: text("channel_id").notNull(),
+    threadTs: text("thread_ts").notNull(),
+    ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull(),
+    ownerId: text("owner_id").notNull(),
+    createdBy: text("created_by").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    lastActivityAt: bigint("last_activity_at", { mode: "number" }).notNull(),
+  },
+  (t) => [uniqueIndex("followed_threads_key").on(t.orgId, t.channelType, t.channelId, t.threadTs)],
+);
+
 // Workflow schedules — cron-driven run starts (the time-based counterpart
 // of `{kind:"workflow"}` event subscriptions). `next_fire_at` is
 // PRECOMPUTED at write time and after every fire so the scheduler's poll

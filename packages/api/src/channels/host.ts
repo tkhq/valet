@@ -506,15 +506,19 @@ export class ChannelHost {
     // like "Let me check." + tool call + final answer double-delivers.
     if (entry.stopReason !== "end_turn") return;
 
+    // The submission's channel origin (from its user signal entry). Used both to
+    // pick a delivery target when the thread key does not map, and to decide
+    // whether this turn auto-posts at all.
+    const origin = entry.queueItemId ? originFromEntries(entries, entry.queueItemId) : undefined;
+    // An overheard turn (a message in a followed thread the assistant did not
+    // choose to answer here) does not auto-post; the assistant replies only
+    // through reply_to_origin / react_to_origin, or stays silent.
+    if (origin?.reply === "manual") return;
+
     // Delivery target: the thread's own channel key (a DM or channel thread),
     // or, on the "events" thread an event delivery lands on, the submission's
-    // own channel origin. The origin binds to the submission, so interleaved
-    // events on one "events" thread each reply to their own conversation.
-    let target = mapped;
-    if (!target) {
-      const origin = entry.queueItemId ? originFromEntries(entries, entry.queueItemId) : undefined;
-      target = origin ? this.channelTargetForOrigin(origin) : null;
-    }
+    // own channel origin.
+    const target = mapped ?? (origin ? this.channelTargetForOrigin(origin) : null);
     if (!target) return;
 
     const dedupeKey = `${sessionId}:${messageId}`;

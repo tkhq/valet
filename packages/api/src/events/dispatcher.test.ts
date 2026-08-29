@@ -10,6 +10,7 @@ import { eq } from "drizzle-orm";
 import type { RunHost, WorkflowTriggerPayload } from "@valet/workflow";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { PgWorkflowStore } from "../workflows/pg-store.js";
+import { findFollowedThread } from "./followed-threads.js";
 import {
   eventDeliveries,
   events,
@@ -279,6 +280,40 @@ describe("EventDispatcher", () => {
 
     const row = await getDelivery(deliveryId);
     expect(row.status).toBe("delivered");
+  });
+
+  it("records a followed thread for a follow-enabled channel mention; none when follow is off", async () => {
+    async function dispatchMention(follow: boolean) {
+      await seedDelivery({
+        target: { kind: "orchestrator", follow },
+        ownerType: "team",
+        ownerId: "team-x",
+        service: "slack",
+        eventKey: "slack.app_mention",
+        eventKeys: ["slack.app_mention"],
+        refs: { channel: "C1" },
+        summary: "Mention",
+        payload: { type: "app_mention", channel: "C1", text: "hi", ts: "1.2" },
+      });
+      const dispatcher = new EventDispatcher({
+        db: tdb.appDb,
+        workflowRunHost: fakeRunHost(),
+        workflowStore: new PgWorkflowStore(tdb.pgdb),
+        deliverToOrchestrator: vi.fn<OrchestratorDeliverFn>(async () => {}),
+        resolveChannelOrigin: (service) =>
+          service === "slack" ? { channelType: "slack", threadKey: "slack:C1:1.2" } : null,
+      });
+      await dispatcher.pollOnce();
+    }
+
+    await dispatchMention(false);
+    const key = { orgId: ORG, channelType: "slack", channelId: "C1", threadTs: "1.2" };
+    expect(await findFollowedThread(tdb.appDb, key)).toBeNull();
+
+    await dispatchMention(true);
+    const row = await findFollowedThread(tdb.appDb, key);
+    expect(row?.ownerType).toBe("team");
+    expect(row?.ownerId).toBe("team-x");
   });
 
   it("signal target: inserts workflow_signals for org runs parked on event:<key> and wakes them", async () => {

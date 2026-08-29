@@ -3737,7 +3737,14 @@ export type EventSubscriptionTargetWire =
   /** `teamId` is required when `orchestrator` is `"team"`, and refused
    * otherwise — the two fields are one choice, and a `teamId` alongside
    * `"user"` would name a team the delivery never reaches. */
-  | { kind: "orchestrator"; orchestrator?: "user" | "team" | "org"; teamId?: string };
+  | {
+      kind: "orchestrator";
+      orchestrator?: "user" | "team" | "org";
+      teamId?: string;
+      /** Follow the thread: after this rule delivers a channel mention, later
+       * messages in that thread route to the assistant without a re-mention. */
+      follow?: boolean;
+    };
 
 export interface EventSubscriptionWire {
   id: string;

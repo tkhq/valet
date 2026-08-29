@@ -870,6 +870,21 @@ CREATE TABLE "event_subscriptions" (
 --> statement-breakpoint
 CREATE INDEX "event_subscriptions_org_enabled" ON "event_subscriptions" ("org_id","enabled");
 --> statement-breakpoint
+CREATE TABLE "followed_threads" (
+	"id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"channel_type" text NOT NULL,
+	"channel_id" text NOT NULL,
+	"thread_ts" text NOT NULL,
+	"owner_type" text NOT NULL,
+	"owner_id" text NOT NULL,
+	"created_by" text NOT NULL,
+	"created_at" bigint NOT NULL,
+	"last_activity_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "followed_threads_key" ON "followed_threads" ("org_id","channel_type","channel_id","thread_ts");
+--> statement-breakpoint
 CREATE TABLE "workflow_schedules" (
 	"id" text PRIMARY KEY NOT NULL,
 	"org_id" text NOT NULL,

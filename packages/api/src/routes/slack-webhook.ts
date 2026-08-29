@@ -67,6 +67,8 @@ import { resolveOrgId } from "../lib/org.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import { ingestEvent } from "../events/ingest.js";
 import type { ChannelHost } from "../channels/host.js";
+import type { EngineHost } from "../engine/host.js";
+import { handleFollowedMessage } from "../channels/follow-router.js";
 
 /**
  * Slack updates are small JSON; files arrive by reference, never inline. The
@@ -127,6 +129,7 @@ interface FanOutDeps {
   plugins: ValetPlugin[];
   transport: ChannelTransport;
   channelHost: ChannelHost;
+  engineHost: EngineHost;
   triggerDefs: TriggerDef[];
   onIngest: () => void;
   orgId: string;
@@ -164,12 +167,20 @@ async function fanOutUpdate(deps: FanOutDeps, raw: RawChannelUpdate): Promise<vo
   } catch (err) {
     console.error("[slack-webhook] event consumer failed", err);
   }
+
+  // Follow-router: a threaded message on a followed thread routes to the bound
+  // assistant. Independent of the two consumers above; its error is contained.
+  try {
+    await handleFollowedMessage({ db: deps.db, engineHost: deps.engineHost }, { orgId: deps.orgId, raw });
+  } catch (err) {
+    console.error("[slack-webhook] follow-router failed", err);
+  }
 }
 
 export const slackWebhookRouter = new Hono<AppEnv>();
 
 slackWebhookRouter.post("/webhook", async (c) => {
-  const { db, plugins, engineCredentials, channelHost, eventDispatcher } = c.var.providers;
+  const { db, plugins, engineCredentials, channelHost, engineHost, eventDispatcher } = c.var.providers;
 
   // Reject on the declared length before reading the body, then again on
   // the bytes actually read — the header can be absent or lying.
@@ -281,6 +292,7 @@ slackWebhookRouter.post("/webhook", async (c) => {
     plugins,
     transport,
     channelHost,
+    engineHost,
     triggerDefs: slackTriggerDefs(plugins),
     onIngest: eventDispatcher.nudge,
     orgId,
