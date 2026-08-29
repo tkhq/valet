@@ -38,6 +38,7 @@ import { syncAllAppWebhookUrls } from "./services/github-app.js";
 import { publicUrlFromEnv } from "./channels/host.js";
 import { wireAttentionRouter } from "./orchestrator/attention-wiring.js";
 import { initTelemetry } from "./observability/otel.js";
+import { recordBootRestoreTimeout } from "./observability/security-metrics.js";
 import { ensureWorkflowSession } from "./workflows/engine-deps.js";
 import { restoreOneSession, runBoundedRestore, type RestoreSessionDeps } from "./boot-restore.js";
 import { ensureEnvProviders } from "./proxy/upstream.js";
@@ -138,6 +139,8 @@ async function restoreUnsettledSessions(providers: Providers, shouldStop: () => 
     concurrency: BOOT_RESTORE_CONCURRENCY,
     timeoutMs: BOOT_RESTORE_SESSION_TIMEOUT_MS,
     shouldStop,
+    // Fix 10a: page on a session whose restore never comes back within budget.
+    onTimeout: () => recordBootRestoreTimeout(),
   });
   console.log(
     `boot restore: restored ${result.restored} sessions with unsettled submissions` +

@@ -1051,6 +1051,7 @@ CREATE TABLE "security_cells" (
 	"reads" text DEFAULT '[]' NOT NULL,
 	"review" boolean DEFAULT false NOT NULL,
 	"status" text DEFAULT 'pending' NOT NULL,
+	"status_reason" text,
 	"attempts" integer DEFAULT 0 NOT NULL,
 	"compacted_at" bigint,
 	"child_session_id" text,

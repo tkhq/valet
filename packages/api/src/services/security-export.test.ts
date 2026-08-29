@@ -54,6 +54,7 @@ function cell(overrides: Partial<SecurityCellRow> & { id: string; ordinal: numbe
     reads: "[]",
     review: false,
     status: "completed",
+    statusReason: null,
     attempts: 1,
     compactedAt: null,
     childSessionId: null,

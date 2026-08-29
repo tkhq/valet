@@ -14,6 +14,8 @@ let createdCounter: Counter | null = null;
 let settledCounter: Counter | null = null;
 let compactionStaleCounter: Counter | null = null;
 let runnerStalledCounter: Counter | null = null;
+let cellExhaustedCounter: Counter | null = null;
+let bootRestoreTimeoutCounter: Counter | null = null;
 
 /** Cells materialized by startEngagement. */
 export function recordSecurityCellsCreated(count: number): void {
@@ -69,4 +71,36 @@ export function recordSecurityRunnerStalled(): void {
     });
   }
   runnerStalledCounter.add(1);
+}
+
+/**
+ * A cell was re-dispatched past its attempt cap without ever settling
+ * (`dispatchCell`, fix 5). The cap turns a strand that would loop and orphan a
+ * sandbox on every pass into ONE terminal failure the runner surfaces. This
+ * counter pages the stuck cell so a human reviews it — alert, don't loop.
+ */
+export function recordSecurityCellExhausted(): void {
+  if (!cellExhaustedCounter) {
+    cellExhaustedCounter = metrics.getMeter("@valet/api").createCounter("valet.security.cells.exhausted", {
+      description: "Security cells failed after exhausting the dispatch attempt cap",
+    });
+  }
+  cellExhaustedCounter.add(1);
+}
+
+/**
+ * A session's boot restore exceeded its per-session wait budget (fix 10a).
+ * The restore pass counts and logs a timeout, but a timed-out session whose
+ * work never comes back is invisible without a metric. This counter makes each
+ * one visible so a persistent un-restorable session pages a human.
+ */
+export function recordBootRestoreTimeout(): void {
+  if (!bootRestoreTimeoutCounter) {
+    bootRestoreTimeoutCounter = metrics
+      .getMeter("@valet/api")
+      .createCounter("valet.boot.restore.timeout", {
+        description: "Sessions whose boot restore exceeded the per-session wait budget",
+      });
+  }
+  bootRestoreTimeoutCounter.add(1);
 }

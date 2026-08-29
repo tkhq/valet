@@ -396,6 +396,24 @@ describe("sec_cell_complete", () => {
     });
 
     const now = Date.now();
+    // A real spawn creates the child's session row; the mock spawn above does
+    // not, so insert it — `resolveChildSettlement` (the shared settle check the
+    // /complete route now uses) verifies the child session exists and is not
+    // deleted before trusting the watch flag.
+    await db.insert(agentSessions).values({
+      id: "child-viol",
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+      ownerType: "user",
+      ownerId: "local-user",
+      profile: "headless",
+      docker: false,
+      status: "active",
+      kind: "code",
+      createdAt: now,
+      updatedAt: now,
+    });
     await db.insert(childWatches).values({
       childSessionId: "child-viol",
       queueItemId: "qi-viol",

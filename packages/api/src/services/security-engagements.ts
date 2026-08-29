@@ -18,7 +18,7 @@
  * never spawns on its own.
  */
 import { randomUUID } from "node:crypto";
-import { and, asc, count, desc, eq, gt, ilike, inArray, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, or, sql } from "drizzle-orm";
 import {
   ARCHITECT_PERSONA,
   categoryDigest,
@@ -69,6 +69,7 @@ import {
   type SecurityNeedRow,
 } from "../schema/index.js";
 import {
+  recordSecurityCellExhausted,
   recordSecurityCellsCreated,
   recordSecurityCellSettled,
 } from "../observability/security-metrics.js";
@@ -79,6 +80,16 @@ export const MAX_FILE_BYTES = 256 * 1024;
 export const MAX_REVISIONS_PER_PATH = 512;
 export const MIN_FINDING_BODY_CHARS = 200;
 export const MAX_FINDINGS_PER_CELL = 100;
+
+/**
+ * Cap on a cell's dispatch attempts (fix 5). Without it a strand that never
+ * settles re-dispatches forever — the prod incident hit 6+ — and each pass
+ * orphans a sandbox. The Nth failed dispatch marks the cell terminally failed
+ * and pages a human instead of looping. Must land WITH the driver's stale-
+ * signal fix (fix 2): together they turn an infinite spawn loop into one
+ * bounded failure.
+ */
+export const MAX_CELL_ATTEMPTS = 5;
 
 // ── Reporting-integrity guardrails (§reporting integrity) ─────────────────
 // A weaker model must not corrupt the reporting record. Each limit is a floor
@@ -1018,7 +1029,7 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
   async function dispatchCell(
     engagementId: string,
     args: { cellId?: string; mode?: "fresh" | "resume"; spawn: SpawnCellChild },
-  ): Promise<{ cell: SecurityCellRow; prompt: string }> {
+  ): Promise<{ cell: SecurityCellRow; prompt: string; replacedChildSessionId: string | null }> {
     const engagement = await loadEngagement(engagementId);
     if (engagement.status !== "running") {
       throw new Error(
@@ -1071,12 +1082,41 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     // with a pre-minted child id that was never spawned ("CHILD GONE").
     const plan = parsePlan(engagement.plan, knownPersonasForEngagement(engagement));
 
+    // Attempt cap (fix 5). BEFORE the claim: if this dispatch would exceed the
+    // cap, do NOT re-dispatch. A cell that never settles would otherwise loop
+    // forever (the incident hit 6+), orphaning a sandbox each pass. Mark the
+    // cell terminally failed, page a human with a metric, and throw a clear
+    // error the runner surfaces so it moves on to the next cell or closes.
+    if (prior.attempts + 1 > MAX_CELL_ATTEMPTS) {
+      const reason = `exhausted ${MAX_CELL_ATTEMPTS} dispatch attempts without settling`;
+      await db
+        .update(securityCells)
+        .set({ status: "failed", statusReason: reason, settledAt: now() })
+        .where(eq(securityCells.id, target.id));
+      recordSecurityCellSettled("failed");
+      recordSecurityCellExhausted();
+      throw new Error(
+        `Cell ${ordinalLabel(target)} failed after ${MAX_CELL_ATTEMPTS} attempts; it never settled. ` +
+          "It needs your attention — review the cell and steer or close.",
+      );
+    }
+
     // Pre-mint the child session id (the same `child_` shape children.ts
     // mints — this IS the session id the spawn builds) and stamp it in the
     // claim, BEFORE the spawn: the host's child-session build resolves the
     // cell claim by `child_session_id` to attach the persona toolset + role,
     // so the claim must exist when the build runs (M4).
     const plannedChildSessionId = `child_${randomUUID()}`;
+
+    // The prior child this re-dispatch abandons (fix 6). A re-dispatch of a
+    // yielded/failed cell overwrites `child_session_id` with the freshly minted
+    // one, stranding the previous child (a still-running pod) with no teardown.
+    // Return it so the route tears it down; the reconcile sweep then reaps any
+    // straggler. Null on a first dispatch or when the id is unchanged.
+    const replacedChildSessionId =
+      prior.childSessionId && prior.childSessionId !== plannedChildSessionId
+        ? prior.childSessionId
+        : null;
 
     // Claim first (one atomic UPDATE): a second dispatch racing in sees the
     // running status and refuses. The spawn happens outside a transaction —
@@ -1167,7 +1207,7 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
       .set({ childSessionId, dispatchedAt: now() })
       .where(eq(securityCells.id, cell.id))
       .returning();
-    return { cell: stamped[0], prompt };
+    return { cell: stamped[0], prompt, replacedChildSessionId };
   }
 
   /**
@@ -1850,6 +1890,17 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
       return { finding: carriedSibling, siblings, carriedFrom };
     }
 
+    // Restart-replay idempotency (fix 7): a first-seen finding re-reported on a
+    // resumed turn must not double-insert. The fingerprint is (file, line
+    // bucket, title), so a sibling from the SAME cell with the same fingerprint
+    // IS this finding — return the existing row instead of inserting a
+    // duplicate. This complements the carried-sibling short-circuit above,
+    // which only covers a re-report matching a CARRIED (cross-engagement) row.
+    const sameCellSibling = siblings.find((s) => s.cellId === cell.id);
+    if (sameCellSibling) {
+      return { finding: sameCellSibling, siblings, carriedFrom: null };
+    }
+
     // A first-seen finding: enforce the per-cell cap, then insert open,
     // recurring=false.
     const [{ n: existing }] = await db
@@ -2131,6 +2182,28 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
         `Unknown tool "${tool}"; name a real scanner (${KNOWN_SCANNERS.join(", ")}) or omit the tool.`,
       );
     }
+    const toolValue = tool !== undefined && tool !== "" ? tool : null;
+    // Restart-replay dedup (fix 9): a coverage row re-reported on a resumed
+    // turn must not double-insert — a duplicate inflates the close-manifest
+    // rollup. An identical row for (engagement, cell, area, status, tool) is
+    // the same coverage claim; return it instead of inserting.
+    const existing = await db
+      .select()
+      .from(securityCoverage)
+      .where(
+        and(
+          eq(securityCoverage.engagementId, engagementId),
+          eq(securityCoverage.cellId, cell.id),
+          eq(securityCoverage.area, area),
+          eq(securityCoverage.status, args.status),
+          toolValue === null
+            ? isNull(securityCoverage.tool)
+            : eq(securityCoverage.tool, toolValue),
+        ),
+      )
+      .orderBy(asc(securityCoverage.createdAt), asc(securityCoverage.id))
+      .limit(1);
+    if (existing[0]) return existing[0];
     const inserted = await db
       .insert(securityCoverage)
       .values({
@@ -2139,7 +2212,7 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
         cellId: cell.id,
         area,
         status: args.status,
-        tool: tool !== undefined && tool !== "" ? tool : null,
+        tool: toolValue,
         reason: reason !== "" ? reason : null,
         createdAt: now(),
       })
@@ -2285,6 +2358,26 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
         `A need description is at most ${MAX_NEED_DESCRIPTION_CHARS} characters. Name the one blocked item in a sentence.`,
       );
     }
+    // Restart-replay dedup (fix 8): a need re-reported on a resumed turn must
+    // not double-insert. An OPEN or needs_human need for the same
+    // (engagement, cell, kind, description) is the same block — return it
+    // instead of inserting. A resolved/answered/dismissed need is settled, so
+    // a fresh block with the same shape is legitimately new and inserts.
+    const existing = await db
+      .select()
+      .from(securityNeeds)
+      .where(
+        and(
+          eq(securityNeeds.engagementId, engagementId),
+          eq(securityNeeds.cellId, cell.id),
+          eq(securityNeeds.kind, args.kind),
+          eq(securityNeeds.description, description),
+          inArray(securityNeeds.status, ["open", "needs_human"]),
+        ),
+      )
+      .orderBy(asc(securityNeeds.createdAt), asc(securityNeeds.id))
+      .limit(1);
+    if (existing[0]) return existing[0];
     const inserted = await db
       .insert(securityNeeds)
       .values({
@@ -2337,39 +2430,44 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     const autoResolved: SecurityNeedRow[] = [];
     const needsHuman: SecurityNeedRow[] = [];
     const ts = now();
-    for (const need of openNeeds) {
-      const auto = autoResolutionFor(need, {
-        declaredTools,
-        authorizedGlobs,
-        plannedPersonas,
-      });
-      if (auto !== null) {
-        const updated = await db
-          .update(securityNeeds)
-          .set({ status: "auto_resolved", resolution: auto, resolvedAt: ts })
-          .where(eq(securityNeeds.id, need.id))
-          .returning();
-        autoResolved.push(updated[0]);
-      } else {
-        const updated = await db
-          .update(securityNeeds)
-          .set({ status: "needs_human" })
-          .where(eq(securityNeeds.id, need.id))
-          .returning();
-        needsHuman.push(updated[0]);
+    // Atomic (fix 8): the per-need status flips and the backlog read run in one
+    // transaction, so a crash mid-sweep never leaves some needs resolved and
+    // others still open, and the consolidated ask reads a consistent backlog.
+    const pendingHuman = await db.transaction(async (tx) => {
+      for (const need of openNeeds) {
+        const auto = autoResolutionFor(need, {
+          declaredTools,
+          authorizedGlobs,
+          plannedPersonas,
+        });
+        if (auto !== null) {
+          const updated = await tx
+            .update(securityNeeds)
+            .set({ status: "auto_resolved", resolution: auto, resolvedAt: ts })
+            .where(eq(securityNeeds.id, need.id))
+            .returning();
+          autoResolved.push(updated[0]);
+        } else {
+          const updated = await tx
+            .update(securityNeeds)
+            .set({ status: "needs_human" })
+            .where(eq(securityNeeds.id, need.id))
+            .returning();
+          needsHuman.push(updated[0]);
+        }
       }
-    }
 
-    // The full human backlog: this sweep's new needs_human plus any earlier
-    // unanswered ones — so the caller opens ONE consolidated ask, not one per
-    // sweep and not one per need.
-    const pendingHuman = await db
-      .select()
-      .from(securityNeeds)
-      .where(
-        and(eq(securityNeeds.engagementId, engagementId), eq(securityNeeds.status, "needs_human")),
-      )
-      .orderBy(asc(securityNeeds.createdAt), asc(securityNeeds.id));
+      // The full human backlog: this sweep's new needs_human plus any earlier
+      // unanswered ones — so the caller opens ONE consolidated ask, not one per
+      // sweep and not one per need.
+      return tx
+        .select()
+        .from(securityNeeds)
+        .where(
+          and(eq(securityNeeds.engagementId, engagementId), eq(securityNeeds.status, "needs_human")),
+        )
+        .orderBy(asc(securityNeeds.createdAt), asc(securityNeeds.id));
+    });
 
     return { autoResolved, needsHuman, pendingHuman };
   }

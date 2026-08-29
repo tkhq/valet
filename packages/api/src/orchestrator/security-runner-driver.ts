@@ -52,6 +52,13 @@ function stallText(nudges: number): string {
   );
 }
 
+/** The one message the driver posts when the runner cannot be resumed at all
+ * (fix 10b): repeated submit failures mean the runner session will not take a
+ * prompt (an un-restorable cold start). Ask the human to step in. */
+export const SUBMIT_STALL_TEXT =
+  "The security runner could not be resumed automatically. It needs your input: " +
+  "reopen the engagement's session and continue the loop, or tell me how to proceed.";
+
 /** The submit seam. Defaults to `submitSessionPrompt`; tests inject a spy so
  * they assert the call and its text without a real engine turn. */
 export type RunnerSubmit = (
@@ -69,7 +76,20 @@ interface StallState {
   stalls: number;
   /** True once the stall message was posted for `signature` — post it once. */
   alerted: boolean;
+  /** Consecutive `submit` failures for this engagement (fix 10b). A cold-start
+   * submit that throws forever (an un-restorable runner) would otherwise fail
+   * silently; this counts the run and trips ONE alert at the cap. Reset to 0 on
+   * a submit that succeeds. */
+  submitFailures: number;
+  /** True once the submit-failure alert fired — post it once, same contract as
+   * `alerted`. */
+  submitAlerted: boolean;
 }
+
+/** Consecutive submit failures before the driver alerts (fix 10b). Same shape
+ * as the nudge stall cap: repeated failure for one engagement pages a human
+ * ONCE instead of retrying forever in silence. */
+const DEFAULT_MAX_SUBMIT_FAILURES = 3;
 
 export interface SecurityRunnerDriverDeps {
   db: AppDb;
@@ -85,6 +105,8 @@ export interface SecurityRunnerDriverDeps {
   sweepIntervalMs?: number;
   /** No-progress nudges before the sweep alerts instead of nudging. */
   maxStalls?: number;
+  /** Consecutive submit failures before the driver alerts (fix 10b). */
+  maxSubmitFailures?: number;
 }
 
 export class SecurityRunnerDriver {
@@ -94,10 +116,56 @@ export class SecurityRunnerDriver {
   private readonly stalls = new Map<string, StallState>();
   private readonly now: () => number;
   private readonly maxStalls: number;
+  private readonly maxSubmitFailures: number;
 
   constructor(private readonly deps: SecurityRunnerDriverDeps) {
     this.now = deps.now ?? Date.now;
     this.maxStalls = deps.maxStalls ?? DEFAULT_MAX_STALLS;
+    this.maxSubmitFailures = deps.maxSubmitFailures ?? DEFAULT_MAX_SUBMIT_FAILURES;
+  }
+
+  /**
+   * Submit with a failure budget (fix 10b). A cold-start submit for an
+   * un-restorable runner can throw on every sweep with no alert. Count
+   * consecutive failures per engagement; at the cap, emit the stall metric and
+   * post ONE human ask — the same alert-once contract the nudge cap uses. A
+   * success resets the count. Returns true when the submit succeeded.
+   */
+  private async safeSubmit(
+    engagementId: string,
+    runnerRow: typeof agentSessions.$inferSelect,
+    text: string,
+  ): Promise<boolean> {
+    try {
+      await this.deps.submit(runnerRow, text);
+      const state = this.stalls.get(engagementId);
+      if (state) {
+        state.submitFailures = 0;
+        state.submitAlerted = false;
+      }
+      return true;
+    } catch (err) {
+      const state = this.stalls.get(engagementId);
+      if (state) {
+        state.submitFailures += 1;
+        if (state.submitFailures >= this.maxSubmitFailures && !state.submitAlerted) {
+          state.submitAlerted = true;
+          recordSecurityRunnerStalled();
+          // Best-effort human ask over the SAME failing seam: if this throws
+          // too, the metric already fired, so the alert is not lost.
+          try {
+            await this.deps.submit(runnerRow, SUBMIT_STALL_TEXT);
+          } catch (askErr) {
+            console.error(
+              `SecurityRunnerDriver: submit-stall human ask also failed for ${engagementId}:`,
+              askErr,
+            );
+          }
+        }
+      }
+      console.error(`SecurityRunnerDriver: submit failed for engagement ${engagementId}:`, err);
+      return false;
+    }
   }
 
   async sweep(): Promise<void> {
@@ -140,9 +208,21 @@ export class SecurityRunnerDriver {
       .from(securityCells)
       .where(eq(securityCells.engagementId, engagement.id));
 
-    // 2. A persona child is in flight → skip. The child.settled signal drives
-    // the runner; nudging now would race that self-advance.
-    if (cells.some((c) => c.status === "running")) return;
+    // 2. Dispatch is serial (dispatchCell refuses a second running cell), so
+    // there is at most one running cell. Skip ONLY when its child is genuinely
+    // working — an unsettled submission means the child.settled signal path
+    // owns the self-advance and nudging now would race it. A running cell whose
+    // child has NO unsettled submission (settled but the signal was lost, or
+    // the child is gone) falls through to the nudge: the exact stale-signal gap
+    // the incident hit. A running cell mid-dispatch (no childSessionId yet)
+    // also falls through — the polling net owns every idle-with-work gap.
+    const runningCell = cells.find((c) => c.status === "running");
+    if (runningCell?.childSessionId) {
+      const childUnsettled = await this.deps.engineStore.listUnsettledSubmissions(
+        runningCell.childSessionId,
+      );
+      if (childUnsettled.length > 0) return;
+    }
 
     // 3. A gated OR actively-working submission is UNSETTLED. A non-empty list
     // means the runner is either working or blocked on the sec_start approval
@@ -165,9 +245,17 @@ export class SecurityRunnerDriver {
     const prior = this.stalls.get(engagement.id);
 
     if (!prior || prior.signature !== signature) {
-      // Progress (or first sight): reset the budget, then nudge once.
-      this.stalls.set(engagement.id, { signature, stalls: 1, alerted: false });
-      await this.deps.submit(runnerRow, NUDGE_TEXT);
+      // Progress (or first sight): reset the budget, then nudge once. Carry the
+      // submit-failure count forward across a signature change — a runner that
+      // will not take a prompt fails regardless of engagement progress.
+      this.stalls.set(engagement.id, {
+        signature,
+        stalls: 1,
+        alerted: false,
+        submitFailures: prior?.submitFailures ?? 0,
+        submitAlerted: prior?.submitAlerted ?? false,
+      });
+      await this.safeSubmit(engagement.id, runnerRow, NUDGE_TEXT);
       return;
     }
 
@@ -178,14 +266,14 @@ export class SecurityRunnerDriver {
       if (!prior.alerted) {
         prior.alerted = true;
         recordSecurityRunnerStalled();
-        await this.deps.submit(runnerRow, stallText(prior.stalls));
+        await this.safeSubmit(engagement.id, runnerRow, stallText(prior.stalls));
       }
       return;
     }
 
     // Same signature, under the cap: count this no-progress nudge and re-drive.
     prior.stalls += 1;
-    await this.deps.submit(runnerRow, NUDGE_TEXT);
+    await this.safeSubmit(engagement.id, runnerRow, NUDGE_TEXT);
   }
 
   /** A stable signature of engagement progress: status, every cell's status by

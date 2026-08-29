@@ -1877,6 +1877,10 @@ export const securityCells = pgTable(
     })
       .notNull()
       .default("pending"),
+    // Why a cell reached its terminal status — set when dispatchCell fails a
+    // cell for exhausting the attempt cap (fix 5). Null on a normally-settled
+    // cell. Surfaced on the cell rail so a human sees why it stopped.
+    statusReason: text("status_reason"),
     attempts: integer("attempts").notNull().default(0),
     // Stamped by the compaction hook when the claiming child's thread
     // compacts — surfaced as a badge on the cell rail, never auto-repaired.
