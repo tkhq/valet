@@ -195,6 +195,13 @@ export class SlackTransport implements ChannelTransport {
    * inbound turn is the right thread for both.
    */
   private readonly lastTurn = new Map<string, string>();
+  /**
+   * conversationKeys minted for a fresh DM (`openDirectConversation`), whose
+   * threadTs is synthetic and names no real message. A reply on such a key must
+   * stay top-level, so `replyThreadTs` does not fall back to the key's threadTs
+   * for these.
+   */
+  private readonly syntheticKeys = new Map<string, true>();
   /** Monotonic counter for collision avoidance in synthetic ts generation. */
   private syntheticTsCounter = 0;
 
@@ -428,6 +435,22 @@ export class SlackTransport implements ChannelTransport {
     }
   }
 
+  /**
+   * The `thread_ts` an outbound message should carry.
+   *
+   * Prefer the thread root recorded for the most recent INBOUND turn on this
+   * key (`lastTurn`). When none was recorded — a reply routed from an event
+   * trigger, whose `parseUpdate` never ran for this conversation — fall back to
+   * the key's own thread root, which is the real message ts. A synthetic
+   * fresh-DM key names no real thread, so it stays top-level (`undefined`).
+   */
+  private replyThreadTs(conversationKey: string): string | undefined {
+    const recorded = this.lastTurn.get(conversationKey);
+    if (recorded !== undefined) return recorded;
+    if (this.syntheticKeys.has(conversationKey)) return undefined;
+    return parseConversationKey(conversationKey)?.threadTs;
+  }
+
   // ─── Socket Mode (local-dev ingress) ──────────────────────────────────
 
   private async *socketModePoll(appToken: string, signal: AbortSignal): AsyncIterable<RawChannelUpdate> {
@@ -622,7 +645,7 @@ export class SlackTransport implements ChannelTransport {
 
   async send(conversationKey: string, message: OutboundChannelMessage): Promise<SendRef> {
     const target = this.mustParse(conversationKey);
-    const threadTs = this.lastTurn.get(conversationKey);
+    const threadTs = this.replyThreadTs(conversationKey);
     const formatted = markdownToSlackMrkdwn(message.markdown);
     let text = formatted;
     let blocks: Record<string, unknown>[] | undefined;
@@ -644,7 +667,7 @@ export class SlackTransport implements ChannelTransport {
     await this.api.completeUploadExternal({
       fileId,
       channelId: target.channelId,
-      threadTs: this.lastTurn.get(conversationKey),
+      threadTs: this.replyThreadTs(conversationKey),
       initialComment: attachment.caption,
     });
     // files.completeUploadExternal returns no message ts; the file id is the
@@ -682,7 +705,7 @@ export class SlackTransport implements ChannelTransport {
         })),
       },
     ];
-    const threadTs = this.lastTurn.get(conversationKey);
+    const threadTs = this.replyThreadTs(conversationKey);
     const res = await this.api.postMessage({
       channel: target.channelId,
       text,
@@ -724,6 +747,9 @@ export class SlackTransport implements ChannelTransport {
    * the turn, and the status lapses on its own after two minutes.
    */
   async sendTyping(conversationKey: string): Promise<void> {
+    // Only a conversation with a recorded inbound turn gets a shimmer; a
+    // fresh/uninitiated key stays quiet (not `replyThreadTs`, which would
+    // shimmer an event-triggered thread that never sent an inbound turn here).
     const threadTs = this.lastTurn.get(conversationKey);
     if (threadTs === undefined) return;
     try {
@@ -918,7 +944,11 @@ export class SlackTransport implements ChannelTransport {
     const secs = Math.floor(Date.now() / 1000);
     const micro = this.syntheticTsCounter++ % 1_000_000;
     const syntheticTs = `${secs}.${String(micro).padStart(6, "0")}`;
-    return conversationKeyFor(this.teamId, channelId, syntheticTs);
+    const key = conversationKeyFor(this.teamId, channelId, syntheticTs);
+    // A fresh DM has no real thread; mark the key so a reply on it stays
+    // top-level instead of threading under the synthetic ts.
+    this.remember(this.syntheticKeys, key, true);
+    return key;
   }
 
   /**
