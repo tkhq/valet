@@ -359,13 +359,14 @@ describe("EventsPage — Subscriptions", () => {
   }
 
   /**
-   * Open the AutomationWizard and drive its event branch to the "Then" step,
-   * where the target radios live. Step order: When → Match → Then → Review.
-   * The wizard defaults to the event branch, so step 1 needs only Next.
+   * Open the AutomationWizard and drive the raw event branch to the "Then"
+   * step, where the target radios live. Step order: What → Match → Then →
+   * Review. The advanced outcome is the raw event + filter + target flow.
    */
   function openWizardToTargetStep(eventKey: string) {
     fireEvent.click(screen.getByRole("button", { name: /New automation/ }));
-    clickNext(); // When → Match (event is the default branch)
+    fireEvent.click(screen.getByLabelText(/Advanced \/ custom trigger/)); // What: raw event flow
+    clickNext(); // What → Match
     fireEvent.click(screen.getByText(eventKey)); // pick the event key
     clickNext(); // Match → Then
   }

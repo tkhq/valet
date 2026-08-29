@@ -1,17 +1,20 @@
 /**
- * AutomationWizard — one flow for the three creation surfaces that used to be
+ * AutomationWizard — one flow for the creation surfaces that used to be
  * separate: an event subscription, a workflow event trigger, and a schedule.
  *
- * Four steps:
- *  1. When   — on an event, or on a schedule.
- *  2. Match  — event: pick one or more keys, then friendly filters.
- *              schedule: a cron expression and a timezone.
- *  3. Then   — notify an assistant (yours / a team's / the org's), or run a
- *              workflow.
- *  4. Review — a plain-language sentence built from the choices, using names
- *              not ids, and a Create button.
+ * The wizard is outcome-first. Step 1 asks what should happen, not which
+ * primitive to build. The outcome then picks the steps and the store:
  *
- * On submit the wizard writes to the existing store for the branch:
+ *  - Reply to Slack mentions → a channel picker, which assistant answers, and
+ *    a "Keep following the thread" toggle. POSTs an event subscription on
+ *    `slack.app_mention` with an orchestrator target that carries `follow`.
+ *  - Run a workflow on an event → the event picker, then a workflow target.
+ *  - Send a notification → the event picker, then an orchestrator target.
+ *  - Advanced / custom trigger → the raw event + filter + target flow.
+ *  - On a schedule → a cron expression, then an orchestrator prompt or a
+ *    workflow target.
+ *
+ * On submit the wizard writes to the store for the branch:
  *  - event + assistant  → POST /api/event-subscriptions (orchestrator target)
  *  - event + workflow    → POST /api/event-subscriptions (workflow target)
  *  - schedule            → POST /api/workflows/schedules
@@ -21,7 +24,7 @@
  * workflow kind (`EventSubscriptionTargetWire`), so a workflow-targeted event
  * rule needs no separate event-trigger endpoint.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Button,
   Dialog,
@@ -46,12 +49,26 @@ import { useTeams } from "~/api/settings";
 import { errorText } from "~/lib/error-text";
 import { useActiveWorkspace } from "~/components/workspace-clause";
 
-type When = "event" | "schedule";
+/** The reply outcome always subscribes to this one event key, so the reader
+ * never sees a raw event picker for it. */
+const SLACK_APP_MENTION = "slack.app_mention";
 
-type TargetChoice =
+/** The channel filter the `slack.app_mention` event declares. Its options
+ * source populates the same channel-name picker the FilterEditor uses. */
+const SLACK_CHANNEL_FIELD: FilterField = {
+  field: "channel",
+  description: "Slack channel id where the mention happened",
+  options: { source: "slack.channels" },
+};
+
+/** The outcome the reader picks first. It decides the steps and the store. */
+type Outcome = "reply" | "workflow" | "notify" | "advanced" | "schedule";
+
+type OrchestratorChoice =
   | { kind: "orchestrator"; orchestrator: "user" | "org" }
-  | { kind: "orchestrator"; orchestrator: "team"; teamId: string }
-  | { kind: "workflow"; workflowId: string };
+  | { kind: "orchestrator"; orchestrator: "team"; teamId: string };
+
+type TargetChoice = OrchestratorChoice | { kind: "workflow"; workflowId: string };
 
 type Step = 1 | 2 | 3 | 4;
 
@@ -66,6 +83,15 @@ function initialTarget(scopedTeamId: string | undefined): TargetChoice {
   return scopedTeamId !== undefined
     ? { kind: "orchestrator", orchestrator: "team", teamId: scopedTeamId }
     : { kind: "orchestrator", orchestrator: "user" };
+}
+
+/** The step labels for one outcome. The reply outcome skips the separate Then
+ * step: its single config step holds the assistant choice too. */
+function stepPlan(outcome: Outcome): { labels: string[]; count: Step } {
+  if (outcome === "reply") {
+    return { labels: ["What", "Reply", "Review"], count: 3 };
+  }
+  return { labels: ["What", "Match", "Then", "Review"], count: 4 };
 }
 
 export function AutomationWizard({
@@ -85,8 +111,8 @@ export function AutomationWizard({
   const scopedTeamId = scopedTeam?.id;
 
   const [step, setStep] = useState<Step>(1);
+  const [outcome, setOutcome] = useState<Outcome>("reply");
   const [name, setName] = useState("");
-  const [when, setWhen] = useState<When>("event");
   const [keys, setKeys] = useState<Set<string>>(new Set());
   const [filterRows, setFilterRows] = useState<UiFilterRow[]>([]);
   const [cron, setCron] = useState("");
@@ -95,6 +121,10 @@ export function AutomationWizard({
   // Seeded from the active workspace at mount, then resynced when the
   // workspace changes (below) unless the reader already picked a target.
   const [target, setTarget] = useState<TargetChoice>(() => initialTarget(scopedTeamId));
+  // The reply outcome's own channel picker and follow toggle. Held apart from
+  // `filterRows` so the raw-filter machinery stays owned by the other outcomes.
+  const [replyChannel, setReplyChannel] = useState<UiFilterRow[]>([]);
+  const [follow, setFollow] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   // A manual target choice wins: once the reader picks a target, a later
@@ -116,6 +146,13 @@ export function AutomationWizard({
   const teams = teamsQ.data?.teams ?? [];
 
   const isPending = createSubscription.isPending || createSchedule.isPending;
+  const plan = stepPlan(outcome);
+
+  const isSchedule = outcome === "schedule";
+  // Only the advanced outcome shows the raw multi-event picker. The workflow
+  // and notify outcomes still pick one event, but never carry a target the
+  // outcome forbids.
+  const isEventOutcome = outcome === "workflow" || outcome === "notify" || outcome === "advanced";
 
   // Filter fields the selected events declare, unioned and deduped by field —
   // a filter is valid when any selected event declares it (the same rule the
@@ -153,41 +190,75 @@ export function AutomationWizard({
   // Which step the reader is on decides whether Next is allowed. Each gate
   // matches what the step collects, so the reader cannot skip an empty field.
   function canAdvance(): boolean {
-    if (step === 1) return true; // `when` always has a value.
+    if (step === 1) return true; // An outcome always has a value.
+    if (outcome === "reply") {
+      // Reply step: the channel is optional and the assistant target is always
+      // set, so there is nothing to block.
+      return step === 2;
+    }
     if (step === 2) {
-      return when === "event" ? keys.size > 0 : cron.trim().length > 0;
+      return isSchedule ? cron.trim().length > 0 : keys.size > 0;
     }
     if (step === 3) return targetReady;
     return true;
   }
 
+  const isLastStep = step === plan.count;
   const canCreate = name.trim().length > 0 && targetReady && !isPending;
 
   function next() {
     setError(null);
-    setStep((s) => (Math.min(s + 1, 4) as Step));
+    setStep((s) => (Math.min(s + 1, plan.count) as Step));
   }
   function back() {
     setError(null);
     setStep((s) => (Math.max(s - 1, 1) as Step));
   }
 
+  function orchestratorTargetFrom(t: TargetChoice): OrchestratorChoice {
+    // The reply and notify outcomes only ever hold an orchestrator target, so
+    // this narrows without a cast the type system cannot follow.
+    return t.kind === "orchestrator" ? t : { kind: "orchestrator", orchestrator: "user" };
+  }
+
   function submit() {
     if (!canCreate) return;
     setError(null);
 
-    if (when === "event") {
+    if (outcome === "reply") {
+      const channelFilters = toWireFilters(replyChannel);
+      createSubscription.mutate(
+        {
+          name: name.trim(),
+          eventKeys: [SLACK_APP_MENTION],
+          filters: channelFilters,
+          target: { ...orchestratorTargetFrom(target), follow },
+        },
+        {
+          onSuccess: () => onOpenChange(false),
+          onError: (err) => setError(errorText(err)),
+        },
+      );
+      return;
+    }
+
+    if (isEventOutcome) {
       const incomplete = incompleteFilterRow(filterRows);
       if (incomplete) {
         setError(`Enter a value for the "${incomplete}" filter, or remove the row.`);
         return;
       }
+      // The notify outcome speaks to an assistant, never follows a thread.
+      const eventTarget: EventSubscriptionTarget =
+        outcome === "notify"
+          ? { ...orchestratorTargetFrom(target), follow: false }
+          : target;
       createSubscription.mutate(
         {
           name: name.trim(),
           eventKeys: [...keys],
           filters: toWireFilters(filterRows),
-          target,
+          target: eventTarget,
         },
         {
           onSuccess: () => onOpenChange(false),
@@ -225,15 +296,27 @@ export function AutomationWizard({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         title="New automation"
-        description="Set up an event rule or a schedule in one flow."
+        description="Pick what should happen, then fill in the details."
         className="max-w-lg"
       >
-        <StepHeader step={step} />
+        <StepHeader step={step} plan={plan} />
 
         <div className="space-y-4">
-          {step === 1 && <WhenStep when={when} onChange={setWhen} />}
+          {step === 1 && <OutcomeStep outcome={outcome} onChange={setOutcome} />}
 
-          {step === 2 && when === "event" && (
+          {step === 2 && outcome === "reply" && (
+            <ReplyStep
+              channelRows={replyChannel}
+              onChannelChange={setReplyChannel}
+              target={orchestratorTargetFrom(target)}
+              onTargetChange={chooseTarget}
+              scopedTeam={scopedTeam}
+              follow={follow}
+              onFollowChange={setFollow}
+            />
+          )}
+
+          {step === 2 && isEventOutcome && (
             <EventMatchStep
               services={services}
               catalogLoading={catalogQ.isLoading}
@@ -243,10 +326,11 @@ export function AutomationWizard({
               filterFields={filterFields}
               filterRows={filterRows}
               onFilterChange={setFilterRows}
+              singleEvent={outcome !== "advanced"}
             />
           )}
 
-          {step === 2 && when === "schedule" && (
+          {step === 2 && isSchedule && (
             <ScheduleMatchStep
               cron={cron}
               onCronChange={setCron}
@@ -255,29 +339,32 @@ export function AutomationWizard({
             />
           )}
 
-          {step === 3 && (
+          {step === 3 && (isEventOutcome || isSchedule) && (
             <ThenStep
               target={target}
               onTargetChange={chooseTarget}
               scopedTeam={scopedTeam}
               workflows={workflows}
-              when={when}
+              isSchedule={isSchedule}
+              allowWorkflow={outcome === "workflow" || isSchedule || outcome === "advanced"}
+              allowOrchestrator={outcome !== "workflow"}
               prompt={prompt}
               onPromptChange={setPrompt}
             />
           )}
 
-          {step === 4 && (
+          {isLastStep && (
             <ReviewStep
               name={name}
               onNameChange={setName}
               summary={summarize({
-                when,
+                outcome,
                 keys,
-                filterRows,
+                filterRows: outcome === "reply" ? replyChannel : filterRows,
                 cron,
                 timezone,
                 target,
+                follow,
                 workflows,
                 teams,
                 scopedTeam,
@@ -294,12 +381,12 @@ export function AutomationWizard({
               Back
             </Button>
           )}
-          {step < 4 && (
+          {!isLastStep && (
             <Button type="button" onClick={next} disabled={!canAdvance()}>
               Next
             </Button>
           )}
-          {step === 4 && (
+          {isLastStep && (
             <Button type="button" onClick={submit} disabled={!canCreate}>
               {isPending ? "Creating…" : "Create automation"}
             </Button>
@@ -310,54 +397,158 @@ export function AutomationWizard({
   );
 }
 
-const STEP_LABELS: Record<Step, string> = {
-  1: "When",
-  2: "Match",
-  3: "Then",
-  4: "Review",
-};
+/** The subscription target the event branch posts. A workflow target has no
+ * follow flag; an orchestrator target may. */
+type EventSubscriptionTarget = TargetChoice | (OrchestratorChoice & { follow: boolean });
 
-function StepHeader({ step }: { step: Step }) {
+function StepHeader({ step, plan }: { step: Step; plan: { labels: string[]; count: Step } }) {
   return (
     <p className="text-xs font-medium text-muted">
-      Step {step} of 4 — {STEP_LABELS[step]}
+      Step {step} of {plan.count} — {plan.labels[step - 1]}
     </p>
   );
 }
 
-function WhenStep({ when, onChange }: { when: When; onChange: (w: When) => void }) {
+const OUTCOMES: { value: Outcome; title: string; hint: string }[] = [
+  {
+    value: "reply",
+    title: "Reply to Slack mentions",
+    hint: "An assistant answers when someone @-mentions the app in Slack.",
+  },
+  {
+    value: "workflow",
+    title: "Run a workflow on an event",
+    hint: "Start a workflow when a connected integration reports an event.",
+  },
+  {
+    value: "notify",
+    title: "Send a notification",
+    hint: "Tell an assistant when a connected integration reports an event.",
+  },
+  {
+    value: "schedule",
+    title: "On a schedule",
+    hint: "Run an assistant or a workflow on a cron schedule you set.",
+  },
+  {
+    value: "advanced",
+    title: "Advanced / custom trigger",
+    hint: "Pick raw event keys and filters, then any target.",
+  },
+];
+
+function OutcomeStep({ outcome, onChange }: { outcome: Outcome; onChange: (o: Outcome) => void }) {
   return (
     <fieldset className="space-y-2">
-      <legend className="mb-1 text-sm font-medium text-ink">Start on</legend>
+      <legend className="mb-1 text-sm font-medium text-ink">What should happen?</legend>
+      {OUTCOMES.map((o) => (
+        <label key={o.value} className="flex items-start gap-2 text-sm text-ink">
+          <input
+            type="radio"
+            name="automation-outcome"
+            className="mt-0.5"
+            checked={outcome === o.value}
+            onChange={() => onChange(o.value)}
+          />
+          <span>
+            {o.title}
+            <span className="block text-xs text-muted">{o.hint}</span>
+          </span>
+        </label>
+      ))}
+    </fieldset>
+  );
+}
+
+/**
+ * The reply outcome's one config step: an optional channel, which assistant
+ * answers, and the follow toggle. No raw event key is shown — the event is
+ * always `slack.app_mention`.
+ */
+function ReplyStep({
+  channelRows,
+  onChannelChange,
+  target,
+  onTargetChange,
+  scopedTeam,
+  follow,
+  onFollowChange,
+}: {
+  channelRows: UiFilterRow[];
+  onChannelChange: (rows: UiFilterRow[]) => void;
+  target: OrchestratorChoice;
+  onTargetChange: (t: TargetChoice) => void;
+  scopedTeam: { id: string; name: string } | undefined;
+  follow: boolean;
+  onFollowChange: (v: boolean) => void;
+}) {
+  // Reuse the FilterEditor's channel-name picker, locked to the one channel
+  // field. It shows channel names, not ids, from the `slack.channels` source.
+  const channelFields = useMemo(() => [SLACK_CHANNEL_FIELD], []);
+  return (
+    <div className="space-y-4">
+      <div>
+        <p className="mb-1.5 text-xs font-medium text-muted">Channel (optional)</p>
+        <FilterEditor fields={channelFields} rows={channelRows} onChange={onChannelChange} />
+        <p className="mt-1.5 text-xs text-muted">
+          Leave empty to reply in every channel the app can see. Add one channel to reply there
+          only.
+        </p>
+      </div>
+
+      <div>
+        <p className="mb-1.5 text-xs font-medium text-muted">Which assistant answers</p>
+        <div className="space-y-1.5">
+          <label className="flex items-center gap-2 text-sm text-ink">
+            <input
+              type="radio"
+              name="automation-reply-target"
+              checked={target.orchestrator === "user"}
+              onChange={() => onTargetChange({ kind: "orchestrator", orchestrator: "user" })}
+            />
+            Your assistant
+          </label>
+          {scopedTeam && (
+            <label className="flex items-center gap-2 text-sm text-ink">
+              <input
+                type="radio"
+                name="automation-reply-target"
+                checked={target.orchestrator === "team"}
+                onChange={() =>
+                  onTargetChange({ kind: "orchestrator", orchestrator: "team", teamId: scopedTeam.id })
+                }
+              />
+              {scopedTeam.name}&apos;s assistant
+            </label>
+          )}
+          <label className="flex items-center gap-2 text-sm text-ink">
+            <input
+              type="radio"
+              name="automation-reply-target"
+              checked={target.orchestrator === "org"}
+              onChange={() => onTargetChange({ kind: "orchestrator", orchestrator: "org" })}
+            />
+            The org assistant
+          </label>
+        </div>
+      </div>
+
       <label className="flex items-start gap-2 text-sm text-ink">
         <input
-          type="radio"
-          name="automation-when"
+          type="checkbox"
           className="mt-0.5"
-          checked={when === "event"}
-          onChange={() => onChange("event")}
+          checked={follow}
+          onChange={(e) => onFollowChange(e.target.checked)}
         />
         <span>
-          On an event
+          Keep following the thread
           <span className="block text-xs text-muted">
-            Run when a connected integration reports a matching event.
+            After the first reply, later messages in that thread reach the assistant without a
+            new mention.
           </span>
         </span>
       </label>
-      <label className="flex items-start gap-2 text-sm text-ink">
-        <input
-          type="radio"
-          name="automation-when"
-          className="mt-0.5"
-          checked={when === "schedule"}
-          onChange={() => onChange("schedule")}
-        />
-        <span>
-          On a schedule
-          <span className="block text-xs text-muted">Run on a cron schedule you set.</span>
-        </span>
-      </label>
-    </fieldset>
+    </div>
   );
 }
 
@@ -375,6 +566,7 @@ function EventMatchStep({
   filterFields,
   filterRows,
   onFilterChange,
+  singleEvent,
 }: {
   services: CatalogService[];
   catalogLoading: boolean;
@@ -384,11 +576,14 @@ function EventMatchStep({
   filterFields: FilterField[];
   filterRows: UiFilterRow[];
   onFilterChange: (rows: UiFilterRow[]) => void;
+  singleEvent: boolean;
 }) {
   return (
     <div className="space-y-4">
       <div>
-        <p className="mb-1.5 text-xs font-medium text-muted">Run this when any of these happens</p>
+        <p className="mb-1.5 text-xs font-medium text-muted">
+          {singleEvent ? "Run this when this happens" : "Run this when any of these happens"}
+        </p>
         {catalogLoading && <LoadingRow label="Loading catalog…" className="py-2 text-xs" />}
         {catalogError && (
           <ErrorRow className="py-2 text-xs">
@@ -488,7 +683,9 @@ function ThenStep({
   onTargetChange,
   scopedTeam,
   workflows,
-  when,
+  isSchedule,
+  allowWorkflow,
+  allowOrchestrator,
   prompt,
   onPromptChange,
 }: {
@@ -496,82 +693,92 @@ function ThenStep({
   onTargetChange: (t: TargetChoice) => void;
   scopedTeam: { id: string; name: string } | undefined;
   workflows: { id: string; name: string }[];
-  when: When;
+  isSchedule: boolean;
+  allowWorkflow: boolean;
+  allowOrchestrator: boolean;
   prompt: string;
   onPromptChange: (v: string) => void;
 }) {
   return (
     <div className="space-y-1.5">
-      <label className="flex items-center gap-2 text-sm text-ink">
-        <input
-          type="radio"
-          name="automation-target"
-          checked={target.kind === "orchestrator" && target.orchestrator === "user"}
-          onChange={() => onTargetChange({ kind: "orchestrator", orchestrator: "user" })}
-        />
-        Notify your assistant
-      </label>
-      {/* Only the active workspace's team is offered. Targeting a different
-          team is a workspace change, not a form field. */}
-      {scopedTeam && (
-        <label className="flex items-center gap-2 text-sm text-ink">
-          <input
-            type="radio"
-            name="automation-target"
-            checked={target.kind === "orchestrator" && target.orchestrator === "team"}
-            onChange={() =>
-              onTargetChange({ kind: "orchestrator", orchestrator: "team", teamId: scopedTeam.id })
-            }
-          />
-          Notify {scopedTeam.name}&apos;s assistant
-        </label>
+      {allowOrchestrator && (
+        <>
+          <label className="flex items-center gap-2 text-sm text-ink">
+            <input
+              type="radio"
+              name="automation-target"
+              checked={target.kind === "orchestrator" && target.orchestrator === "user"}
+              onChange={() => onTargetChange({ kind: "orchestrator", orchestrator: "user" })}
+            />
+            Notify your assistant
+          </label>
+          {/* Only the active workspace's team is offered. Targeting a different
+              team is a workspace change, not a form field. */}
+          {scopedTeam && (
+            <label className="flex items-center gap-2 text-sm text-ink">
+              <input
+                type="radio"
+                name="automation-target"
+                checked={target.kind === "orchestrator" && target.orchestrator === "team"}
+                onChange={() =>
+                  onTargetChange({ kind: "orchestrator", orchestrator: "team", teamId: scopedTeam.id })
+                }
+              />
+              Notify {scopedTeam.name}&apos;s assistant
+            </label>
+          )}
+          <label className="flex items-center gap-2 text-sm text-ink">
+            <input
+              type="radio"
+              name="automation-target"
+              checked={target.kind === "orchestrator" && target.orchestrator === "org"}
+              onChange={() => onTargetChange({ kind: "orchestrator", orchestrator: "org" })}
+            />
+            Notify the org assistant
+          </label>
+        </>
       )}
-      <label className="flex items-center gap-2 text-sm text-ink">
-        <input
-          type="radio"
-          name="automation-target"
-          checked={target.kind === "orchestrator" && target.orchestrator === "org"}
-          onChange={() => onTargetChange({ kind: "orchestrator", orchestrator: "org" })}
-        />
-        Notify the org assistant
-      </label>
-      <label className="flex items-center gap-2 text-sm text-ink">
-        <input
-          type="radio"
-          name="automation-target"
-          checked={target.kind === "workflow"}
-          disabled={workflows.length === 0}
-          onChange={() => onTargetChange({ kind: "workflow", workflowId: workflows[0]?.id ?? "" })}
-        />
-        Run a workflow
-      </label>
-      {target.kind === "workflow" && (
-        <div className="ml-6">
-          <select
-            aria-label="Workflow"
-            value={target.workflowId}
-            onChange={(e) => onTargetChange({ kind: "workflow", workflowId: e.target.value })}
-            className="w-full min-w-0 truncate rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink"
-          >
-            <option value="">— select workflow —</option>
-            {workflows.map((w) => (
-              <option key={w.id} value={w.id}>
-                {w.name}
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
-      {workflows.length === 0 && (
-        <p className="ml-6 text-xs text-muted">
-          You have no workflows yet — create one on the Workflows page to use this target.
-        </p>
+      {allowWorkflow && (
+        <>
+          <label className="flex items-center gap-2 text-sm text-ink">
+            <input
+              type="radio"
+              name="automation-target"
+              checked={target.kind === "workflow"}
+              disabled={workflows.length === 0}
+              onChange={() => onTargetChange({ kind: "workflow", workflowId: workflows[0]?.id ?? "" })}
+            />
+            Run a workflow
+          </label>
+          {target.kind === "workflow" && (
+            <div className="ml-6">
+              <select
+                aria-label="Workflow"
+                value={target.workflowId}
+                onChange={(e) => onTargetChange({ kind: "workflow", workflowId: e.target.value })}
+                className="w-full min-w-0 truncate rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink"
+              >
+                <option value="">— select workflow —</option>
+                {workflows.map((w) => (
+                  <option key={w.id} value={w.id}>
+                    {w.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+          {workflows.length === 0 && (
+            <p className="ml-6 text-xs text-muted">
+              You have no workflows yet — create one on the Workflows page to use this target.
+            </p>
+          )}
+        </>
       )}
 
       {/* A scheduled orchestrator run needs a prompt: nothing else tells the
           assistant what to do at the fire. An event rule carries the event as
           its context, so it needs none. */}
-      {when === "schedule" && target.kind === "orchestrator" && (
+      {isSchedule && target.kind === "orchestrator" && (
         <div className="grid gap-1 pt-2">
           <Label htmlFor="automation-prompt">Prompt</Label>
           <Input
@@ -670,21 +877,31 @@ function opWord(op: UiFilterRow["op"]): string {
  * reader confirms the rule without reading an id.
  */
 export function summarize(args: {
-  when: When;
+  outcome: Outcome;
   keys: Set<string>;
   filterRows: UiFilterRow[];
   cron: string;
   timezone: string;
   target: TargetChoice;
+  follow: boolean;
   workflows: { id: string; name: string }[];
   teams: { id: string; name: string }[];
   scopedTeam: { id: string; name: string } | undefined;
 }): string {
   const then = describeTarget(args.target, args.workflows, args.teams, args.scopedTeam);
-  if (args.when === "schedule") {
+
+  if (args.outcome === "reply") {
+    const filters = describeFilters(args.filterRows);
+    const where = filters ? ` in ${filters}` : "";
+    const trailing = args.follow ? " Later thread messages reach the assistant too." : "";
+    return `When the app is @-mentioned${where}, ${then}.${trailing}`;
+  }
+
+  if (args.outcome === "schedule") {
     const cron = args.cron.trim() || "the schedule";
     return `On the cron schedule "${cron}" (${args.timezone.trim() || "UTC"}), ${then}.`;
   }
+
   const keys = [...args.keys];
   const keyText =
     keys.length === 0
