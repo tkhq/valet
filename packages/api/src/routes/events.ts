@@ -63,7 +63,7 @@ async function canMutateSubscription(
   return row.ownerId === userId;
 }
 
-const FILTER_OPS = ["eq", "in", "prefix", "contains"] as const;
+const FILTER_OPS = ["eq", "in", "prefix", "contains", "regex"] as const;
 // `signal` (wake parked workflow runs) is deliberately NOT accepted yet:
 // no workflow node parks on the `event:{key}` signal shape the dispatcher
 // would emit, so a signal-target subscription would validate and then
@@ -153,7 +153,7 @@ export function validateSubscription(
         return `filter value invalid for op in on field ${f.field}`;
       }
     } else {
-      // eq / prefix / contains — value must be a non-empty string
+      // eq / prefix / contains / regex — value must be a non-empty string
       if (typeof f.value !== "string" || f.value.length === 0) {
         return `filter value invalid for op ${f.op} on field ${f.field}`;
       }

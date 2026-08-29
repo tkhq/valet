@@ -3077,7 +3077,7 @@ export interface GetEventCatalogResponse {
 /** Mirrors `events/match.ts`'s `SubscriptionFilter`. */
 export interface EventSubscriptionFilterWire {
   field: string;
-  op: "eq" | "in" | "prefix" | "contains";
+  op: "eq" | "in" | "prefix" | "contains" | "regex";
   value: string | string[];
 }
 

@@ -273,6 +273,7 @@ describe("slackTriggerDefs catalog", () => {
       "channel:channel",
       "channel_type:channel_type",
       "user:user",
+      "text:text",
     ]);
   });
 

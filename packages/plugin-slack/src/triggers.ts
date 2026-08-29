@@ -197,6 +197,7 @@ const triggerSpecs: TriggerSpec[] = [
         filters: [
           { field: "channel", path: "channel", description: "Slack channel id where the mention happened" },
           { field: "user", path: "user", description: "Slack user id of the mentioner" },
+          { field: "text", path: "text", description: "Message text, for a slash command or a pattern match" },
         ],
       },
     ],
@@ -213,6 +214,7 @@ const triggerSpecs: TriggerSpec[] = [
           { field: "channel", path: "channel", description: "Slack channel id (C…/D…)" },
           { field: "channel_type", path: "channel_type", description: "Conversation type (channel, group, im, mpim)" },
           { field: "user", path: "user", description: "Slack user id of the sender" },
+          { field: "text", path: "text", description: "Message text, for a slash command or a pattern match" },
         ],
       },
     ],

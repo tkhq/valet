@@ -6,7 +6,7 @@ import type { EventCatalogEntry } from "@valet/engine";
 
 export interface SubscriptionFilter {
   field: string;
-  op: "eq" | "in" | "prefix" | "contains";
+  op: "eq" | "in" | "prefix" | "contains" | "regex";
   value: string | string[];
 }
 
@@ -89,6 +89,15 @@ export function filtersMatch(
         return typeof filter.value === "string" && actual.startsWith(filter.value);
       case "contains":
         return typeof filter.value === "string" && actual.includes(filter.value);
+      case "regex":
+        // A bad pattern fails closed — it never matches and never throws, so a
+        // malformed rule cannot break the ingest transaction.
+        if (typeof filter.value !== "string") return false;
+        try {
+          return new RegExp(filter.value).test(actual);
+        } catch {
+          return false;
+        }
     }
   });
 }
