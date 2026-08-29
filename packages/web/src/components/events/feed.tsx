@@ -138,15 +138,15 @@ export function EventFeed({
       {ownerFailed && (
         <ErrorRow>
           Could not load your workspace, so this feed cannot narrow to it. Select All to see every
-          event the organization received.
+          event a subscription in the organization matched.
         </ErrorRow>
       )}
 
       {eventsQ.data && eventsQ.data.events.length === 0 && (
         <EmptyRow>
           {scope === "workspace"
-            ? `No events reached this workspace's subscriptions in the last ${WORKSPACE_WINDOW_DAYS} days. Select All to see every event the organization received.`
-            : "No events yet. Events appear here when a connected integration sends a webhook — connect one on the Integrations page."}
+            ? `No events reached this workspace's subscriptions in the last ${WORKSPACE_WINDOW_DAYS} days. Select All to see every event a subscription in the organization matched, or open the Problems tab for events that arrived but matched nothing.`
+            : "No events yet. An event appears here when a webhook matches a subscription. If you expected one, open the Problems tab to see what arrived and why it was dropped."}
         </EmptyRow>
       )}
 

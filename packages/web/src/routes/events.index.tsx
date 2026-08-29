@@ -4,6 +4,7 @@ import { TabBar, tabPanelId } from "~/components/primitives";
 import { WorkspaceClause } from "~/components/workspace-clause";
 import { EventFeed, type FeedScope } from "~/components/events/feed";
 import { SubscriptionsPanel } from "~/components/events/subscriptions-panel";
+import { DropsPanel } from "~/components/events/drops-panel";
 import { textParam } from "~/lib/search-params";
 
 /**
@@ -44,6 +45,7 @@ const TABS_LABEL = "Events sections";
 const TABS = [
   { id: "activity", label: "Activity" },
   { id: "subscriptions", label: "Subscriptions" },
+  { id: "problems", label: "Problems" },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
@@ -77,16 +79,16 @@ export function EventsPage() {
           aria-labelledby={`${tabPanelId(TABS_LABEL, tab)}-tab`}
           className="mt-6"
         >
-          {tab === "activity" ? (
+          {tab === "activity" && (
             <EventFeed
               scope={scope}
               onScopeChange={(next) =>
                 void navigate({ to: "/events", search: next === "all" ? { scope: "all" } : {} })
               }
             />
-          ) : (
-            <SubscriptionsPanel />
           )}
+          {tab === "subscriptions" && <SubscriptionsPanel />}
+          {tab === "problems" && <DropsPanel />}
         </div>
       </div>
     </div>

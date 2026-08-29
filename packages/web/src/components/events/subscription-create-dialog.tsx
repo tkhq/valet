@@ -1,5 +1,13 @@
 import { useState } from "react";
 import { Button, Dialog, DialogContent, DialogFooter, ErrorRow, Input, LoadingRow, SelectMenu } from "~/components/primitives";
+import {
+  FilterEditor,
+  incompleteFilterRow,
+  pruneFilterRows,
+  toWireFilters,
+  type FilterField,
+  type UiFilterRow,
+} from "~/components/events/filter-editor";
 import { useCreateEventSubscription, useEventCatalog } from "~/api/events";
 import { useWorkflows } from "~/api/workflows";
 import { errorText } from "~/lib/error-text";
@@ -57,8 +65,8 @@ function filedElsewhere(
 
 /**
  * Create dialog for an event subscription. Offers only catalog keys, so a
- * subscription cannot name an event the ingest matcher can never match.
- * Filters are API-only for now — this dialog does not build them.
+ * subscription cannot name an event the ingest matcher can never match, and
+ * builds filters from the fields the selected events declare.
  */
 export function SubscriptionCreateDialog({
   open,
@@ -84,30 +92,57 @@ export function SubscriptionCreateDialog({
   // option appears (unselected) when the query lands.
   const [name, setName] = useState("");
   const [keys, setKeys] = useState<Set<string>>(new Set());
+  const [filterRows, setFilterRows] = useState<UiFilterRow[]>([]);
   const [target, setTarget] = useState<TargetChoice>(() => targetFor(scopedTeamId));
   const [error, setError] = useState<string | null>(null);
 
   const workflows = workflowsQ.data?.workflows ?? [];
   const services = catalogQ.data?.services ?? [];
+
+  // Filter fields the selected events declare, unioned and deduped by field —
+  // a filter is valid when any selected event declares it (same rule the
+  // server's validateSubscription applies).
+  function unionFilterFields(selected: Set<string>): FilterField[] {
+    const out: FilterField[] = [];
+    const seen = new Set<string>();
+    for (const s of services) {
+      for (const entry of s.entries) {
+        if (!selected.has(entry.key)) continue;
+        for (const f of entry.filters ?? []) {
+          if (seen.has(f.field)) continue;
+          seen.add(f.field);
+          out.push({ field: f.field, description: f.description });
+        }
+      }
+    }
+    return out;
+  }
+  const filterFields = unionFilterFields(keys);
   const targetReady = target.kind === "orchestrator" || target.workflowId.length > 0;
   const elsewhere = filedElsewhere(filedOwner(target, workflows), ws, teamsQ.data?.teams ?? []);
   const canSubmit = name.trim().length > 0 && keys.size > 0 && targetReady && !create.isPending;
 
 
   function toggleKey(key: string) {
-    setKeys((cur) => {
-      const next = new Set(cur);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
+    const next = new Set(keys);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    setKeys(next);
+    // Drop filters whose field none of the now-selected events declare, so an
+    // orphaned filter cannot 400 on submit.
+    setFilterRows((rows) => pruneFilterRows(rows, unionFilterFields(next)));
   }
 
   function submit() {
     if (!canSubmit) return;
+    const incomplete = incompleteFilterRow(filterRows);
+    if (incomplete) {
+      setError(`Enter a value for the "${incomplete}" filter, or remove the row.`);
+      return;
+    }
     setError(null);
     create.mutate(
-      { name: name.trim(), eventKeys: [...keys], target },
+      { name: name.trim(), eventKeys: [...keys], filters: toWireFilters(filterRows), target },
       {
         onSuccess: () => onOpenChange(false),
         onError: (err) => setError(errorText(err)),
@@ -167,6 +202,17 @@ export function SubscriptionCreateDialog({
               ))}
             </div>
           </div>
+
+          {keys.size > 0 && (
+            <div>
+              <p className="mb-1.5 text-xs font-medium text-muted">Filters</p>
+              <FilterEditor fields={filterFields} rows={filterRows} onChange={setFilterRows} />
+              <p className="mt-1.5 text-xs text-muted">
+                A subscription matches only when every filter matches. Add none to match every
+                selected event.
+              </p>
+            </div>
+          )}
 
           <div>
             <p className="mb-1.5 text-xs font-medium text-muted">Then</p>

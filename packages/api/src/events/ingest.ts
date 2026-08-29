@@ -8,7 +8,8 @@ import { and, eq } from "drizzle-orm";
 import type { EventCatalogEntry, NormalizedEvent, ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, events, eventSubscriptions } from "../schema/index.js";
-import { eventKeyMatches, filtersMatch, type SubscriptionFilter } from "./match.js";
+import { subscriptionMatchesEvent, subscriptionNamesKey } from "./match.js";
+import { writeDropLog } from "../orchestrator/signals.js";
 
 export interface IngestDeps {
   db: AppDb;
@@ -28,9 +29,44 @@ export interface IngestResult {
   eventId: string;
   duplicate: boolean;
   deliveries: number;
-  /** True when an `ephemeral` catalog key matched no subscription and the
-   * event was not persisted. */
+  /** True when the event matched no enabled subscription and was not
+   * persisted. Valet retains an event only when a subscription asked for it. */
   skipped?: boolean;
+}
+
+/**
+ * Drop-logs the high-signal miss: a subscription NAMES this event key but its
+ * filter excluded this occurrence — the "why didn't my trigger fire?" case.
+ * Throttled per (org, event key): one row a minute is enough to diagnose a bad
+ * filter without a busy key flooding the table. The row records only the event
+ * KEY, never the payload or refs.
+ *
+ * An event no subscription names at all is NOT logged here — for a high-volume
+ * key like slack.message that is every message, so logging it would re-flood
+ * the drop-log the privacy design keeps small. The "last event received" signal
+ * (`GET /api/events/drops`) answers "is anything arriving?" for that case.
+ */
+const FILTER_DROP_COOLDOWN_MS = 60_000;
+const filterDropLoggedAt = new Map<string, number>();
+
+/** Test-only: clears the per-process filter-drop throttle so a suite can assert
+ * one row per key without the cooldown bleeding across cases. */
+export function __resetIngestDropThrottle(): void {
+  filterDropLoggedAt.clear();
+}
+
+async function logFilterExcludedDrop(db: AppDb, orgId: string, eventKey: string): Promise<void> {
+  const throttleKey = `${orgId}:${eventKey}`;
+  const now = Date.now();
+  const last = filterDropLoggedAt.get(throttleKey);
+  if (last !== undefined && now - last < FILTER_DROP_COOLDOWN_MS) return;
+  filterDropLoggedAt.set(throttleKey, now);
+  const detail = `A ${eventKey} event arrived, but every subscription for it excluded it by filter. Check the filters on your ${eventKey} subscription.`;
+  try {
+    await writeDropLog(db, { orgId, reason: "filter_excluded", detail });
+  } catch (err) {
+    console.error("[ingest] filter-excluded drop-log failed", err);
+  }
 }
 
 export async function ingestEvent(
@@ -46,29 +82,37 @@ export async function ingestEvent(
   const parsedOccurredAt = Date.parse(event.occurredAt);
   const occurredAt = Number.isFinite(parsedOccurredAt) ? parsedOccurredAt : now;
 
-  // Match-gated persistence for high-volume keys. An `ephemeral` catalog
-  // entry (`slack.message` is the one today) is matched against
-  // subscriptions BEFORE any insert, so an unsubscribed key never touches
-  // the events table. Subscribing is what turns the firehose on.
+  // Match-gated persistence, for every event. The event is matched against
+  // the org's enabled subscriptions in ONE read; one that matches nothing is
+  // dropped and never touches the events table. This is a privacy rule: Valet
+  // retains event data only when a subscription asked for it, so an org that
+  // watches one repo does not accumulate every other event its webhook happens
+  // to deliver. Subscribing is what turns persistence on.
   //
-  // The gate and the in-transaction match read the subscription set at
-  // different instants, so a concurrent change produces at most one
-  // boundary artifact: a subscription created between the two reads costs
-  // one skipped event; a subscription disabled between them persists one
-  // event whose in-transaction match finds nothing, leaving a row with zero
-  // deliveries. Both are benign and correct themselves on the next event.
-  const entry = catalog.find((e) => e.key === event.key);
-  if (entry?.ephemeral) {
-    const subs = await deps.db
-      .select()
-      .from(eventSubscriptions)
-      .where(and(eq(eventSubscriptions.orgId, orgId), eq(eventSubscriptions.enabled, true)));
-    const anyMatch = subs.some(
-      (sub) =>
-        eventKeyMatches(event.key, sub.eventKeys as string[]) &&
-        filtersMatch(event.payload, event.key, sub.filters as SubscriptionFilter[], catalog),
-    );
-    if (!anyMatch) return { eventId, duplicate: false, deliveries: 0, skipped: true };
+  // The match is the full key + filter test, so an event a subscription
+  // excludes by filter is dropped like one no subscription names at all — the
+  // filter is a privacy boundary, not only a delivery boundary.
+  //
+  // The same matched set gates persistence and seeds the deliveries, so the
+  // "store it" and "deliver it" decisions can never disagree. A subscription
+  // changed between this read and the insert costs one boundary event (a new
+  // one misses this event; a deleted one gets a harmless orphan delivery, safe
+  // because `event_deliveries` holds no foreign key to the subscription). The
+  // next event sees the change.
+  const subs = await deps.db
+    .select()
+    .from(eventSubscriptions)
+    .where(and(eq(eventSubscriptions.orgId, orgId), eq(eventSubscriptions.enabled, true)));
+  const matched = subs.filter((sub) => subscriptionMatchesEvent(sub, event.key, event.payload, catalog));
+  if (matched.length === 0) {
+    // If a subscription NAMES this key but every one filtered this occurrence
+    // out, record it so "my trigger didn't fire" is answerable. An event no
+    // subscription names is ambient traffic and stays silent. Either way the
+    // event itself is never persisted.
+    if (subs.some((sub) => subscriptionNamesKey(sub, event.key))) {
+      await logFilterExcludedDrop(deps.db, orgId, event.key);
+    }
+    return { eventId, duplicate: false, deliveries: 0, skipped: true };
   }
 
   const result = await deps.db.transaction(async (tx) => {
@@ -91,32 +135,17 @@ export async function ingestEvent(
       .returning({ id: events.id });
     if (inserted.length === 0) return { eventId, duplicate: true, deliveries: 0 };
 
-    const subs = await tx
-      .select()
-      .from(eventSubscriptions)
-      .where(and(eq(eventSubscriptions.orgId, orgId), eq(eventSubscriptions.enabled, true)));
-
-    // The two jsonb columns come back `unknown`; their shapes are owned by
-    // the subscriptions CRUD validator (Task 7) which only writes these
-    // exact types.
-    const matched = subs.filter(
-      (sub) =>
-        eventKeyMatches(event.key, sub.eventKeys as string[]) &&
-        filtersMatch(event.payload, event.key, sub.filters as SubscriptionFilter[], catalog),
+    await tx.insert(eventDeliveries).values(
+      matched.map((sub) => ({
+        id: randomUUID(),
+        eventId,
+        subscriptionId: sub.id,
+        status: "pending" as const,
+        attempts: 0,
+        nextAttemptAt: now,
+        createdAt: now,
+      })),
     );
-    if (matched.length > 0) {
-      await tx.insert(eventDeliveries).values(
-        matched.map((sub) => ({
-          id: randomUUID(),
-          eventId,
-          subscriptionId: sub.id,
-          status: "pending" as const,
-          attempts: 0,
-          nextAttemptAt: now,
-          createdAt: now,
-        })),
-      );
-    }
     return { eventId, duplicate: false, deliveries: matched.length };
   });
 

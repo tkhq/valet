@@ -42,7 +42,7 @@ vi.mock("~/api/workflows", () => ({
             {
               key: "github.pull_request.opened",
               description: "A pull request was opened",
-              filters: [],
+              filters: [{ field: "branch", description: "Base branch" }],
             },
           ],
         },
@@ -160,9 +160,32 @@ describe("TriggerDialog", () => {
     expect(createScheduleMutateAsync).not.toHaveBeenCalled();
   });
 
-  // ── Item 4: emptying textarea on EDIT clears the stored value ────────────
+  it("builds a filter from the picker on create", async () => {
+    createEventTriggerMutateAsync.mockClear().mockResolvedValue({});
+    render(<TriggerDialog open onOpenChange={() => {}} workflowId="wf_1" />);
+    fireEvent.click(screen.getByText(/^Event$/));
+    fireEvent.change(screen.getByLabelText(/name/i), { target: { value: "on pr" } });
+    fireEvent.change(screen.getByLabelText(/event/i), {
+      target: { value: "github.pull_request.opened" },
+    });
+    // Add one filter row (field defaults to the event's first field: branch),
+    // then type a value.
+    fireEvent.click(screen.getByText(/^Add filter$/));
+    fireEvent.change(screen.getByLabelText("Filter value"), { target: { value: "main" } });
+    fireEvent.click(screen.getByText(/^Create$/));
+    await waitFor(() =>
+      expect(createEventTriggerMutateAsync).toHaveBeenCalledWith({
+        workflowId: "wf_1",
+        name: "on pr",
+        eventKeys: ["github.pull_request.opened"],
+        filters: [{ field: "branch", op: "eq", value: "main" }],
+      }),
+    );
+  });
 
-  it("sends filters: [] when the filters textarea is cleared on EDIT", async () => {
+  // ── Item 4: removing the last filter row on EDIT clears the stored value ──
+
+  it("sends filters: [] when the pre-filled filter row is removed on EDIT", async () => {
     updateEventMutateAsync.mockClear().mockResolvedValue({});
     const editingEvent = {
       kind: "event" as const,
@@ -176,8 +199,8 @@ describe("TriggerDialog", () => {
       },
     };
     render(<TriggerDialog open onOpenChange={() => {}} editing={editingEvent} />);
-    // Clear the filters textarea (it was pre-filled with JSON from editing.detail.filters).
-    fireEvent.change(screen.getByLabelText(/filters/i), { target: { value: "" } });
+    // The picker renders the pre-filled branch=main row; remove it.
+    fireEvent.click(screen.getByRole("button", { name: /remove filter/i }));
     fireEvent.click(screen.getByText(/^Save$/));
     await waitFor(() => expect(updateEventMutateAsync).toHaveBeenCalled());
     const callArg = updateEventMutateAsync.mock.calls[updateEventMutateAsync.mock.calls.length - 1][0];

@@ -117,12 +117,6 @@ export interface EventCatalogEntry {
   description: string;
   /** Filterable fields: `field` is the user-facing name, `path` a dot-path into the raw payload. */
   filters: { field: string; path: string; description: string }[];
-  /**
-   * High-volume keys (e.g. slack.message) opt into match-gated persistence:
-   * ingest matches subscriptions FIRST and skips the insert entirely when
-   * nothing matches. Default false = always persist.
-   */
-  ephemeral?: boolean;
 }
 
 export interface TriggerDef {

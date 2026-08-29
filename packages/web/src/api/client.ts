@@ -155,6 +155,7 @@ import type {
   CreateEventSubscriptionResponse,
   GetEventCatalogResponse,
   GetEventResponse,
+  ListEventDropsResponse,
   ListEventsResponse,
   ListEventSubscriptionsResponse,
   PatchEventSubscriptionRequest,
@@ -724,6 +725,7 @@ export const api = {
     const path = q ? `/events?${q}${ownerSuffix(owner)}` : `/events${ownerQuery(owner)}`;
     return request<ListEventsResponse>("GET", path);
   },
+  listEventDrops: () => request<ListEventDropsResponse>("GET", "/events/drops"),
   getEvent: (id: string) => request<GetEventResponse>("GET", `/events/${encodeURIComponent(id)}`),
   redeliverEvent: (id: string) =>
     request<RedeliverEventResponse>("POST", `/events/${encodeURIComponent(id)}/redeliver`),

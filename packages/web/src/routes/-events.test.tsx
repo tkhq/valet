@@ -401,6 +401,7 @@ describe("EventsPage — Subscriptions", () => {
         {
           name: "Merged PRs",
           eventKeys: ["github.pr.merged"],
+          filters: [],
           target: { kind: "orchestrator", orchestrator: "user" },
         },
         expect.anything(),
@@ -461,6 +462,7 @@ describe("EventsPage — Subscriptions", () => {
         {
           name: "Team PRs",
           eventKeys: ["github.pr.merged"],
+          filters: [],
           target: { kind: "orchestrator", orchestrator: "team", teamId: "t_eng" },
         },
         expect.anything(),

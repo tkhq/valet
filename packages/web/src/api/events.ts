@@ -15,6 +15,7 @@ import type {
   CreateEventSubscriptionResponse,
   GetEventCatalogResponse,
   GetEventResponse,
+  ListEventDropsResponse,
   ListEventsResponse,
   ListEventSubscriptionsResponse,
   PatchEventSubscriptionRequest,
@@ -43,6 +44,7 @@ export const qkEvents = {
   feed: (service?: string, key?: string, owner?: OwnerFilter, held = false) =>
     ["events", "feed", service ?? "", key ?? "", ...ownerKey(owner, held)] as const,
   detail: (id: string) => ["events", "detail", id] as const,
+  drops: () => ["events", "drops"] as const,
   subscriptions: (owner?: OwnerFilter, held = false) =>
     ["events", "subscriptions", ...ownerKey(owner, held)] as const,
 };
@@ -84,6 +86,18 @@ export function useEvent(id: string, opts?: Partial<UseQueryOptions<GetEventResp
     // Deliveries advance (pending -> delivered/failed) while a row stays
     // expanded; poll so the badge follows.
     refetchInterval: 15_000,
+    ...opts,
+  });
+}
+
+/** Recent reasons an event arrived but did not become a feed row, plus the
+ * last time any event reached ingest. Polls like the feed — new drops land
+ * from external webhooks at any time. */
+export function useEventDrops(opts?: Partial<UseQueryOptions<ListEventDropsResponse>>) {
+  return useQuery<ListEventDropsResponse>({
+    queryKey: qkEvents.drops(),
+    queryFn: () => api.listEventDrops(),
+    refetchInterval: 30_000,
     ...opts,
   });
 }
