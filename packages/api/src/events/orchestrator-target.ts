@@ -17,6 +17,7 @@
  * thrown instead of delivered — a subscription-matching bug can't silently
  * deliver an event into another org's assistant.
  */
+import type { SignalContent } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import { ensureDefaultAssistantSession } from "../assistants/service.js";
@@ -24,11 +25,22 @@ import { writeDropLog } from "../orchestrator/signals.js";
 import type { OrchestratorDeliverFn } from "./dispatcher.js";
 
 /**
- * The thread every event delivery lands on — the owner's default assistant
- * "events" firehose. Named so the outbound reply path can recognise it without
- * a magic string (`ChannelHost.deliverAssistantMessage`).
+ * The thread a non-channel event delivery lands on — the owner's default
+ * assistant "events" firehose. Named so the outbound reply path can recognise
+ * it without a magic string (`ChannelHost.deliverAssistantMessage`).
  */
 export const EVENTS_THREAD_KEY = "events";
+
+/**
+ * Which assistant thread an event signal lands on. A channel-originated signal
+ * binds to a thread keyed by its Slack thread (`slack:{channel}:{threadTs}`),
+ * so one Slack thread maps to one assistant thread: a top-level mention opens a
+ * new thread, and a later message in the same Slack thread routes to the same
+ * one. Everything else (GitHub, Linear, a timer) shares the "events" firehose.
+ */
+export function threadKeyForSignal(signal: SignalContent): string {
+  return signal.origin?.threadKey ?? EVENTS_THREAD_KEY;
+}
 
 export function buildOrchestratorTarget(deps: { db: AppDb; engineHost: EngineHost }): OrchestratorDeliverFn {
   return async ({ orgId, ownerType, ownerId, actorUserId, signal, dispatchId }) => {
@@ -50,6 +62,6 @@ export function buildOrchestratorTarget(deps: { db: AppDb; engineHost: EngineHos
       });
       throw new Error(`event delivery refused: assistant org mismatch (${data.orgId} != ${orgId})`);
     }
-    await session.thread(EVENTS_THREAD_KEY).submitPrompt(signal, { dispatchId });
+    await session.thread(threadKeyForSignal(signal)).submitPrompt(signal, { dispatchId });
   };
 }

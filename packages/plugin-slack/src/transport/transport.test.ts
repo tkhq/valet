@@ -117,6 +117,32 @@ describe("conversation key codec", () => {
   });
 });
 
+describe("send threads on the conversation key's thread root", () => {
+  it("threads on the key's threadTs when no inbound turn was recorded (event-triggered reply)", async () => {
+    const transport = makeTransport();
+    // No parseUpdate/primeTurn: the reply's key was rebuilt from a thread key
+    // by the outbound bridge (the app_mention trigger path), so `lastTurn` is
+    // empty. The reply must still land in the mention's thread.
+    const conversationKey = conversationKeyFor(TEAM, CHANNEL, "1700000000.000100");
+    await transport.send(conversationKey, { markdown: "hi" });
+    expect(lastCall("chat.postMessage").thread_ts).toBe("1700000000.000100");
+  });
+
+  it("threads a primed (inbound) conversation, unchanged", async () => {
+    const transport = makeTransport();
+    const key = primeTurn(transport, "1700000000.000200");
+    await transport.send(key, { markdown: "reply" });
+    expect(lastCall("chat.postMessage").thread_ts).toBe("1700000000.000200");
+  });
+
+  it("stays top-level for a fresh DM key from openDirectConversation (no real thread)", async () => {
+    const transport = makeTransport();
+    const key = await transport.openDirectConversation("U9");
+    await transport.send(key, { markdown: "nudge" });
+    expect(lastCall("chat.postMessage").thread_ts).toBeUndefined();
+  });
+});
+
 describe("threadKeyFromEvent", () => {
   it("builds a thread key from an app_mention payload", () => {
     const transport = makeTransport();
