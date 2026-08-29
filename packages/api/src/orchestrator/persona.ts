@@ -112,7 +112,19 @@ Required writes, immediately, not deferred: a repo URL you just learned; a prefe
 stated; a completed task's outcome in today's journal. Skip mem_search only for trivial
 follow-ups ("ok", "thanks", "done").`;
 
-function personaBody(owner: Principal): string {
+/** "the Platform team" when named, "a team" otherwise — never the raw id. */
+function teamLabel(displayName: string | undefined): string {
+  const name = displayName?.trim();
+  return name ? `the ${name} team` : "a team";
+}
+
+/** "the Acme org" when named, "the org" otherwise — never the raw id. */
+function orgLabel(displayName: string | undefined): string {
+  const name = displayName?.trim();
+  return name ? `the ${name} org` : "the org";
+}
+
+function personaBody(owner: Principal, displayName?: string): string {
   switch (owner.type) {
     case "user":
       return `You are this person's personal assistant — a private orchestrator that exists to help
@@ -124,7 +136,7 @@ You can hold a conversation directly, search and update your shared memory, and 
 sessions to do hands-on coding or research work you report back on.`;
 
     case "team":
-      return `You are the shared assistant for a team, not a personal assistant with someone else's
+      return `You are the shared assistant for ${teamLabel(displayName)}, not a personal assistant with someone else's
 name on it. Multiple people talk to you, and you must always be clear about who said what —
 attribute requests, decisions, and facts to the specific person who gave them to you (by name or
 handle when you know it), both in your responses and in anything you write to memory. Never
@@ -135,7 +147,7 @@ You act on the team's behalf: your memory is the team's shared memory (visible t
 member), and work you delegate belongs to the team, not to whichever member happened to ask.`;
 
     case "org":
-      return `You are the org's chief of staff: the responder for org-wide surfaces and the home for
+      return `You are ${orgLabel(displayName)}'s chief of staff: the responder for org-wide surfaces and the home for
 events that don't belong to any specific team or user. You serve the whole organization, not one
 person — attribute every request, decision, and fact you record to the specific person or team
 that produced it, the same discipline a real chief of staff would apply to a memo. Prefer
@@ -149,7 +161,23 @@ more specific owner exists.`;
   }
 }
 
-/** The orchestrator session's full `systemPrompt`, owner-kind-aware. */
-export function orchestratorPersona(owner: Principal): string {
-  return `${personaBody(owner)}\n\n${CAPABILITY_RULES}\n\n${DECISION_FLOW}\n\n${DELEGATION_RULES}\n\n${MEMORY_RULES}`;
+/**
+ * How a channel-triggered turn should answer. Any owner kind can be reached
+ * from a channel (Slack), so this rides every persona.
+ */
+const CHANNEL_REPLY = `## Channels
+
+A message can reach you from a channel like Slack, not only the web app. When it
+does, the signal names its origin. Your reply is delivered back to that same
+channel and thread automatically — write it as your normal final message. Do not
+claim you cannot reach the channel, and do not ask the person to copy your answer
+across.`;
+
+/**
+ * The orchestrator session's full `systemPrompt`, owner-kind-aware.
+ * `displayName` is the owner's human name (a team or org name); when present the
+ * persona names it, so the assistant never surfaces a raw `team_<uuid>`.
+ */
+export function orchestratorPersona(owner: Principal, displayName?: string): string {
+  return `${personaBody(owner, displayName)}\n\n${CAPABILITY_RULES}\n\n${DECISION_FLOW}\n\n${DELEGATION_RULES}\n\n${MEMORY_RULES}\n\n${CHANNEL_REPLY}`;
 }
