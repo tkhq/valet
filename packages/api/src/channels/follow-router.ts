@@ -1,0 +1,105 @@
+/**
+ * The follow-router: the third consumer of a Slack webhook update, beside the
+ * channel (DM) and event-trigger consumers. A threaded channel message on a
+ * thread the assistant follows routes to the bound assistant's per-thread valet
+ * thread as an OVERHEARD signal — the assistant reads it and answers only if it
+ * chooses to (via reply_to_origin / react_to_origin), or stays silent. A
+ * message on an unfollowed thread is ignored and never stored.
+ */
+import type { AppDb } from "../lib/drizzle.js";
+import type { EngineHost } from "../engine/host.js";
+import { ensureDefaultAssistantSession } from "../assistants/service.js";
+import { findFollowedThread, touchFollowedThread } from "../events/followed-threads.js";
+import { writeDropLog } from "../orchestrator/signals.js";
+
+export interface FollowRouterDeps {
+  db: AppDb;
+  engineHost: EngineHost;
+}
+
+interface SlackMessageFields {
+  channel: string;
+  threadTs: string;
+  ts: string;
+  user?: string;
+  text: string;
+  eventId: string;
+}
+
+/**
+ * The message fields the follow-router reads from a raw Slack `event_callback`
+ * envelope, or `null` when the update is not a routable threaded human message.
+ * Drops the bot's own posts (`bot_id`) so a follow cannot self-loop, and the
+ * noise subtypes (edits, joins) the channel transport also drops.
+ */
+export function slackMessageFields(raw: unknown): SlackMessageFields | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const env = raw as Record<string, unknown>;
+  const eventId = typeof env.event_id === "string" ? env.event_id : undefined;
+  const event = env.event;
+  if (typeof event !== "object" || event === null) return null;
+  const e = event as Record<string, unknown>;
+  if (e.type !== "message") return null;
+  if (typeof e.bot_id === "string") return null;
+  if (typeof e.subtype === "string") return null;
+  const channel = typeof e.channel === "string" ? e.channel : undefined;
+  const threadTs = typeof e.thread_ts === "string" ? e.thread_ts : undefined; // threaded only
+  const ts = typeof e.ts === "string" ? e.ts : undefined;
+  if (channel === undefined || threadTs === undefined || ts === undefined || eventId === undefined) return null;
+  const user = typeof e.user === "string" ? e.user : undefined;
+  const text = typeof e.text === "string" ? e.text : "";
+  return { channel, threadTs, ts, user, text, eventId };
+}
+
+/**
+ * Route a raw Slack update to the bound assistant when its thread is followed.
+ * A no-op for a non-message, a bot post, a top-level message, or an unfollowed
+ * thread. `dispatchId` makes a redelivery idempotent.
+ */
+export async function handleFollowedMessage(
+  deps: FollowRouterDeps,
+  args: { orgId: string; raw: unknown },
+): Promise<void> {
+  const f = slackMessageFields(args.raw);
+  if (!f) return;
+
+  const follow = await findFollowedThread(deps.db, {
+    orgId: args.orgId,
+    channelType: "slack",
+    channelId: f.channel,
+    threadTs: f.threadTs,
+  });
+  if (!follow) return;
+
+  const { session } = await ensureDefaultAssistantSession(
+    { db: deps.db, engineHost: deps.engineHost },
+    { type: follow.ownerType, id: follow.ownerId },
+    { actorUserId: follow.createdBy, orgId: args.orgId },
+  );
+  const data = await session.toData();
+  if (data.orgId !== args.orgId) {
+    await writeDropLog(deps.db, {
+      orgId: args.orgId,
+      reason: "followed_target_mismatch",
+      conversationKey: `slack:follow:${f.eventId}`,
+      detail: `assistant session ${session.id} belongs to org ${data.orgId}, message belongs to org ${args.orgId}`,
+    });
+    return;
+  }
+
+  const threadKey = `slack:${f.channel}:${f.threadTs}`;
+  const attributes: Record<string, string> = { channel: f.channel };
+  if (f.user) attributes.sender = f.user;
+  await session.thread(threadKey).submitPrompt(
+    {
+      kind: "signal",
+      signalType: "slack.message",
+      body: f.text === "" ? "(message)" : f.text,
+      attributes,
+      // Overheard: the assistant observes it and replies only if it acts.
+      origin: { channelType: "slack", threadKey, reply: "manual", messageTs: f.ts },
+    },
+    { dispatchId: `slack:follow:${f.eventId}` },
+  );
+  await touchFollowedThread(deps.db, follow.id);
+}
