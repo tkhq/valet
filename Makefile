@@ -116,7 +116,14 @@ dev-opencode: docker-up ## Start OpenCode container
 
 dev-api-node: ## Start the new Node API (@valet/api) on :8788
 	@echo "$(GREEN)Starting @valet/api on :8788$(NC)"
-	@set -a; [ -f .env ] && . ./.env; set +a; \
+	@# Valet-in-Valet: when the sandbox's env-fetch shim (docs/valet-in-valet-dev.md)
+	@# has written a tmpfs env file, source it before .env so ANTHROPIC_API_KEY
+	@# from the Valet API's credential store reaches the dev api. Missing on a
+	@# laptop; the `-f` guard keeps this a no-op there.
+	@set -a; \
+	if [ -x /usr/local/bin/valet-fetch-env ]; then /usr/local/bin/valet-fetch-env >/dev/null 2>&1 || true; fi; \
+	[ -f /dev/shm/valet-env ] && . /dev/shm/valet-env; \
+	[ -f .env ] && . ./.env; set +a; \
 	if [ -z "$$ANTHROPIC_API_KEY" ]; then echo "$(RED)ANTHROPIC_API_KEY is required (env or .env)$(NC)"; exit 1; fi; \
 	if [ -z "$$BETTER_AUTH_SECRET" ] && [ -z "$$VALET_LOCAL_AUTH" ]; then export VALET_LOCAL_AUTH=1; fi; \
 	if [ -f config/valet.dev.yaml ] && [ -z "$$VALET_CONFIG" ]; then export VALET_CONFIG="$$(pwd)/config/valet.dev.yaml"; fi; \
@@ -299,8 +306,12 @@ k8s-build-fast: ## Build ONLY the api image WITHOUT the workspace typecheck. Fas
 
 k8s-sandbox-install: ## Install vendored agent-sandbox controller + CRD + webhook into Rancher Desktop
 	@if ! kubectl config get-contexts rancher-desktop >/dev/null 2>&1; then \
-		echo "$(RED)No 'rancher-desktop' kubectl context found. Enable Kubernetes in Rancher Desktop first.$(NC)"; \
-		exit 1; \
+		if command -v valet-cluster-up >/dev/null 2>&1; then \
+			valet-cluster-up || { echo "$(RED)valet-cluster-up failed. See docs/valet-in-valet-dev.md.$(NC)"; exit 1; }; \
+		else \
+			echo "$(RED)No 'rancher-desktop' kubectl context found. Enable Kubernetes in Rancher Desktop first.$(NC)"; \
+			exit 1; \
+		fi; \
 	fi
 	@echo "$(GREEN)Applying $(AGENT_SANDBOX_MANIFEST) to context rancher-desktop$(NC)"
 	$(KUBECTL_RANCHER) apply -f $(AGENT_SANDBOX_MANIFEST)
@@ -336,8 +347,12 @@ HELM_RANCHER = helm --kube-context rancher-desktop
 
 k8s-up: ## Install agent-sandbox (if needed) + helm upgrade --install the valet chart onto Rancher Desktop
 	@if ! kubectl config get-contexts rancher-desktop >/dev/null 2>&1; then \
-		echo "$(RED)No 'rancher-desktop' kubectl context found. Enable Kubernetes in Rancher Desktop first.$(NC)"; \
-		exit 1; \
+		if command -v valet-cluster-up >/dev/null 2>&1; then \
+			valet-cluster-up || { echo "$(RED)valet-cluster-up failed. See docs/valet-in-valet-dev.md.$(NC)"; exit 1; }; \
+		else \
+			echo "$(RED)No 'rancher-desktop' kubectl context found. Enable Kubernetes in Rancher Desktop first.$(NC)"; \
+			exit 1; \
+		fi; \
 	fi
 	@$(MAKE) k8s-sandbox-install
 	@set -a; [ -f .env ] && . ./.env; set +a; \
