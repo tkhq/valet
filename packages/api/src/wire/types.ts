@@ -3613,6 +3613,23 @@ export interface SandboxGitAnonymous {
 
 export type PostSandboxGitCredentialResponse = SandboxGitCredential | SandboxGitAnonymous;
 
+// ── REST: in-sandbox env-var minting (Valet-in-Valet dev, prebuild
+// integration) ──────────────────────────────────────────────────────────
+// `POST /api/sandbox/env` — sandbox-token authed. A Valet sandbox running
+// the Valet dev stack fetches `ANTHROPIC_API_KEY` at attach time and writes
+// it to a tmpfs file the shell sources. Same auth model as
+// `/api/sandbox/git-credential`; org LLM-provider credential first, then
+// the api's own `process.env.ANTHROPIC_API_KEY`. `apiKey === null` means
+// no key exists ANYWHERE — the sandbox boots keyless and surfaces the
+// same "ANTHROPIC_API_KEY is required" message a laptop developer sees.
+// See `routes/sandbox-env.ts` and `docs/valet-in-valet-dev.md`.
+
+export interface PostSandboxEnvResponse {
+  /** The ANTHROPIC_API_KEY the sandbox may use for the Valet dev stack.
+   * `null` when no org credential and no process env fallback exists. */
+  anthropicApiKey: string | null;
+}
+
 // ── REST: sandbox image sources + bakes (sandbox-reconciliation plan, Task 17) ──
 //
 // `/api/org/sources` — org-admin CRUD for all image source kinds
