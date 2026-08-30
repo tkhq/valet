@@ -32,6 +32,7 @@ THRESHOLDS = {
     "docs/cli.md": 4.0,
     "docs/architecture.md": 4.5,
     "docs/kubernetes.md": 4.5,
+    "docs/valet-in-valet-dev.md": 3.5,
     "docs/security-model.md": 5.0,
     "docs/environment-variables.md": 3.5,
     "docs/api-reference.md": 4.0,
