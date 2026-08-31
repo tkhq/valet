@@ -88,10 +88,12 @@ export async function loadAssistant(db: AppQueryable, assistantId: string): Prom
  * stay side-effect-free.
  *
  * Matches the partial unique index exactly: `is_default` alone identifies
- * the row. Archiving the default is refused (`archiveAssistant`), so a
- * default row is always live and no `archived_at` filter is needed here —
- * adding one would hide a row the index still counts, and the resolver
- * below would then try to create a second default and fail.
+ * the row. A default row is always live, so no `archived_at` filter is
+ * needed here — adding one would hide a row the index still counts, and
+ * the resolver below would then try to create a second default and fail.
+ * Two writers hold that invariant: `archiveAssistant` refuses the default,
+ * and `retireAssistant` (session delete) clears `is_default` in the same
+ * update that archives.
  */
 export async function findDefaultAssistant(
   db: AppQueryable,
@@ -475,4 +477,26 @@ export async function archiveAssistant(db: AppDb, row: AssistantRow): Promise<As
     throw new Error(`assistants: ${row.id} disappeared during its own archive`);
   }
   return result;
+}
+
+/**
+ * Retire one assistant because its SESSION was deleted (TKAI-296).
+ *
+ * Session delete is the "remove this assistant" action for a team's
+ * assistant, so — unlike `archiveAssistant` — the default is not refused.
+ * Both fields move in ONE update, which is what keeps
+ * `findDefaultAssistant`'s invariant ("a row with is_default is never
+ * archived"): `archived_at` drops the row from every list and rail, and
+ * clearing `is_default` frees the `assistants_default_owner` partial
+ * unique slot so `resolveDefaultAssistant` mints a fresh default on the
+ * owner's next access.
+ *
+ * Takes `AppQueryable` so the caller can run it in the same transaction
+ * as the session soft-delete.
+ */
+export async function retireAssistant(db: AppQueryable, assistantId: string): Promise<void> {
+  await db
+    .update(assistants)
+    .set({ archivedAt: Date.now(), isDefault: false })
+    .where(eq(assistants.id, assistantId));
 }

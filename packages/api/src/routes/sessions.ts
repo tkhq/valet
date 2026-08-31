@@ -15,7 +15,7 @@ import {
   type SessionRunFields,
 } from "../sessions/run-state.js";
 import { canAdministerSession, canViewSession } from "../services/session-access.js";
-import { loadAssistant } from "../assistants/service.js";
+import { loadAssistant, retireAssistant } from "../assistants/service.js";
 import {
   createSecurityEngagementService,
   type SecurityConfigContext,
@@ -1277,17 +1277,15 @@ sessionsRouter.delete("/:id", async (c) => {
   // admin's only surface for that. An assistant-prefixed id with no
   // assistant row is an orphan and may be deleted as cleanup.
   const assistantId = parseAssistantSessionId(id);
-  if (assistantId !== null) {
-    const assistant = await loadAssistant(db, assistantId);
-    if (assistant && assistant.ownerType !== "team") {
-      return c.json(
-        {
-          error:
-            "your assistant's session cannot be deleted. Use Replace sandbox to reset its workspace.",
-        },
-        400,
-      );
-    }
+  const assistant = assistantId !== null ? await loadAssistant(db, assistantId) : undefined;
+  if (assistant && assistant.ownerType !== "team") {
+    return c.json(
+      {
+        error:
+          "your assistant's session cannot be deleted. Use Replace sandbox to reset its workspace.",
+      },
+      400,
+    );
   }
 
   // Tear down engine + sandbox first; even if it fails we still want to soft-delete.
@@ -1295,10 +1293,17 @@ sessionsRouter.delete("/:id", async (c) => {
     console.error(`engineHost.destroy(${id}) failed:`, err);
   });
 
-  await db
-    .update(agentSessions)
-    .set({ status: "deleted", updatedAt: Date.now() })
-    .where(eq(agentSessions.id, id));
+  // Deleting a team assistant's session IS removing the assistant — the
+  // header item is labeled "Delete this team's assistant". Retire the row
+  // in the same transaction as the soft-delete (TKAI-296): a live row kept
+  // the assistant in every teammate's rail, pointing at a dead session.
+  await db.transaction(async (tx) => {
+    await tx
+      .update(agentSessions)
+      .set({ status: "deleted", updatedAt: Date.now() })
+      .where(eq(agentSessions.id, id));
+    if (assistant) await retireAssistant(tx, assistant.id);
+  });
 
   return c.json({ ok: true });
 });

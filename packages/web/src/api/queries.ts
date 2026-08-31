@@ -171,6 +171,12 @@ export function useDeleteSession() {
     mutationFn: (id) => api.deleteSession(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.sessions() });
+      // Deleting a team assistant's session retires the assistant row
+      // server-side (TKAI-296) — refresh the rail so it drops right away
+      // instead of on the next focus refetch. Literal key rather than
+      // `qkAssistants.list()`: assistants.ts imports from this file, and
+      // the factory would close an import cycle.
+      qc.invalidateQueries({ queryKey: ["assistants"] });
     },
   });
 }

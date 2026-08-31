@@ -72,6 +72,17 @@ gets a stable target.
 
 A default cannot be archived while it is the default. Promote another first.
 
+Amended 2026-08-31 (TKAI-296): one exception, session delete. `DELETE
+/api/sessions/:id` on a team assistant's session retires the assistant in
+the same transaction as the session soft-delete: `archived_at` is set and
+`is_default` is cleared in one update. Clearing `is_default` keeps the
+invariant above ("a row with `is_default` is never archived") and frees the
+partial unique slot, so the team's next access mints a fresh default
+instead of resolving to the retired one. Before this, the assistant row
+outlived its deleted session and stayed in every teammate's rail as a
+zombie. A user-owned assistant's session is not deletable at all (TKAI-253),
+so retire only ever fires for team assistants.
+
 ## Schema
 
 `assistants` replaces `orchestrator_identities`. `handle` becomes `name`,

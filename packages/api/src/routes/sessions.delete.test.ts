@@ -6,11 +6,16 @@
  * as the assistant move refusal). A TEAM's assistant stays deletable —
  * the session header menu is a team admin's only surface for that — and
  * a plain session keeps its normal delete.
+ *
+ * Deleting a team assistant's session also RETIRES the assistant row
+ * (TKAI-296): archived + is_default cleared in the same transaction, so
+ * the rail drops it and the team can mint a fresh default.
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, assistants, teamMembers, teams } from "../schema/index.js";
+import { resolveDefaultAssistant } from "../assistants/service.js";
 
 async function seedSession(
   api: TestApi,
@@ -107,6 +112,25 @@ describe("DELETE /api/sessions/:id — assistant guard", () => {
     const res = await del(api, "assistant:asst_team");
     expect(res.status).toBe(200);
     expect(await storedStatus(api, "assistant:asst_team")).toBe("deleted");
+
+    // TKAI-296: the delete retires the assistant row in the same
+    // transaction — archived (so every rail drops it) with is_default
+    // cleared (so the partial unique slot is free again).
+    const retired = (
+      await db.select().from(assistants).where(eq(assistants.id, "asst_team")).limit(1)
+    )[0];
+    expect(retired?.archivedAt).not.toBeNull();
+    expect(retired?.isDefault).toBe(false);
+
+    // The freed slot is what lets the team mint a fresh default on its
+    // next access instead of resolving to the retired one.
+    const fresh = await resolveDefaultAssistant(db, "local-org", {
+      type: "team",
+      id: "team_del",
+    });
+    expect(fresh.id).not.toBe("asst_team");
+    expect(fresh.isDefault).toBe(true);
+    expect(fresh.archivedAt).toBeNull();
   });
 
   it("still deletes a plain personal session", async () => {
