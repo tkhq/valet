@@ -9,7 +9,13 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../src/integration/_setup.js";
-import { agentSessions, assistants, teamMembers, teams } from "../src/schema/index.js";
+import {
+  agentSessions,
+  assistants,
+  teamMembers,
+  teams,
+  workflowDefinitions,
+} from "../src/schema/index.js";
 import { setOrgFeatures } from "../src/services/org.js";
 import type { CreateTeamResponse, ListTeamMembersResponse, ListTeamsResponse } from "../src/wire/types.js";
 
@@ -166,6 +172,54 @@ describe("teams routes", () => {
         .where(eq(agentSessions.id, "assistant:asst_team_del"))
     )[0];
     expect(sess?.status).toBe("deleted");
+  });
+
+  // The workflow refusal must land BEFORE the assistant teardown: a refused
+  // delete that had already destroyed the assistants' engine sessions would
+  // erase their history on a request that reports 409 and changes nothing.
+  it("refuses a workflow-owning team before touching its assistants", async () => {
+    api = await bootTestApi();
+    const { baseUrl, providers } = api;
+    const { db } = providers;
+
+    const createRes = await createTeam(baseUrl, "Platform");
+    const { team } = (await createRes.json()) as CreateTeamResponse;
+
+    await db.insert(workflowDefinitions).values({
+      id: "wf_team_del",
+      orgId: "local-org",
+      ownerType: "team",
+      ownerId: team.id,
+      name: "Nightly",
+      definition: { nodes: [], edges: [] },
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await db.insert(assistants).values({
+      id: "asst_wf_team",
+      orgId: "local-org",
+      ownerType: "team",
+      ownerId: team.id,
+      name: null,
+      personality: null,
+      behavior: null,
+      sessionId: "assistant:asst_wf_team",
+      isDefault: true,
+      createdAt: Date.now(),
+      archivedAt: null,
+    });
+
+    const delRes = await fetch(`${baseUrl}/api/teams/${team.id}`, {
+      method: "DELETE",
+      headers: HEADERS,
+    });
+    expect(delRes.status).toBe(409);
+
+    const row = (
+      await db.select().from(assistants).where(eq(assistants.id, "asst_wf_team"))
+    )[0];
+    expect(row?.archivedAt).toBeNull();
+    expect(row?.isDefault).toBe(true);
   });
 
   it("404s on a team id that doesn't exist (or belongs to another org)", async () => {

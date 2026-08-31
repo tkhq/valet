@@ -41,6 +41,7 @@ import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import {
   agentSessions,
+  assistants,
   childWatches,
   messages as messagesTable,
   sessionRepos,
@@ -179,17 +180,28 @@ export async function listStandaloneSessions(db: AppDb, userId: string, owner?: 
       ? or(mine, teamRows)
       : mine;
 
-  const [rows, childRows] = await Promise.all([
+  const [rows, childRows, assistantRows] = await Promise.all([
     db
       .select()
       .from(agentSessions)
       .where(and(scope, inArray(agentSessions.status, ["active", "hibernated"])))
       .orderBy(desc(agentSessions.updatedAt)),
     db.select({ childSessionId: childWatches.childSessionId }).from(childWatches),
+    // The assistants table, not the id prefix, decides which sessions are
+    // assistant sessions: migrated rows keep legacy `orchestrator:*` ids
+    // the prefix parse cannot recognize. The prefix check below stays as a
+    // belt for `assistant:` ids whose row is gone.
+    db.select({ sessionId: assistants.sessionId }).from(assistants),
   ]);
 
   const childIds = new Set(childRows.map((r) => r.childSessionId));
-  return rows.filter((r) => parseAssistantSessionId(r.id) === null && !childIds.has(r.id));
+  const assistantSessionIds = new Set(assistantRows.map((r) => r.sessionId));
+  return rows.filter(
+    (r) =>
+      !assistantSessionIds.has(r.id) &&
+      parseAssistantSessionId(r.id) === null &&
+      !childIds.has(r.id),
+  );
 }
 
 sessionsRouter.get("/", async (c) => {
@@ -893,7 +905,9 @@ sessionsRouter.patch("/:id", async (c) => {
     // from that owner. Moving only the session row desyncs them — every
     // teammate keeps seeing the assistant but 404s opening it. The web UI
     // hides the action; the API is the contract, so it refuses too.
-    if (parseAssistantSessionId(id) !== null) {
+    // Column lookup, not the prefix parse: migrated rows keep legacy
+    // `orchestrator:*` session ids (same rule as the delete guard below).
+    if ((await loadAssistantBySessionId(db, id)) !== undefined) {
       return c.json(
         { error: "an assistant's session cannot be moved. It belongs to the assistant's owner." },
         400,
@@ -1305,6 +1319,14 @@ sessionsRouter.delete("/:id", async (c) => {
       .set({ status: "deleted", updatedAt: Date.now() })
       .where(eq(agentSessions.id, id));
     if (assistant) await retireAssistant(tx, assistant.id);
+  });
+
+  // Destroy again after the commit: a wake racing the window between the
+  // destroy above and this transaction rebuilds from the not-yet-retired
+  // row and re-caches — and cache hits bypass the archived-wake guard.
+  // Now the row is retired, so a torn-down ghost cannot rebuild.
+  await engineHost.destroy(id).catch((err) => {
+    console.error(`engineHost.destroy(${id}) failed:`, err);
   });
 
   return c.json({ ok: true });

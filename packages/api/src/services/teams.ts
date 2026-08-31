@@ -14,6 +14,9 @@ import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import {
   agentSessions,
   assistants,
+  channelBindings,
+  eventSubscriptions,
+  followedThreads,
   orgMembers,
   skills,
   skillSources,
@@ -512,7 +515,7 @@ export async function listTeamMembers(
  * rather than importing `workflows/service.ts`, which would create a
  * services/teams.ts <-> services/workflows.ts import cycle.
  */
-async function assertNoTeamOwnedWorkflows(db: AppQueryable, teamId: string): Promise<void> {
+export async function assertNoTeamOwnedWorkflows(db: AppQueryable, teamId: string): Promise<void> {
   const rows = await db
     .select({ id: workflowDefinitions.id })
     .from(workflowDefinitions)
@@ -601,6 +604,21 @@ export async function deleteTeam(db: AppDb, opts: DeleteTeamOptions): Promise<vo
         .set({ status: "deleted", updatedAt: Date.now() })
         .where(eq(agentSessions.id, assistant.sessionId));
     }
+    // Machine-driven delivery targets go too. A surviving team-owned event
+    // subscription, channel binding, or followed thread keeps dispatching
+    // to the team principal, and `resolveDefaultAssistant` would then MINT
+    // a fresh assistant for the deleted team (retire freed the default
+    // slot) — resurrecting a dangling-owner assistant on the very next
+    // event.
+    await tx
+      .delete(eventSubscriptions)
+      .where(and(eq(eventSubscriptions.ownerType, "team"), eq(eventSubscriptions.ownerId, opts.teamId)));
+    await tx
+      .delete(channelBindings)
+      .where(and(eq(channelBindings.ownerType, "team"), eq(channelBindings.ownerId, opts.teamId)));
+    await tx
+      .delete(followedThreads)
+      .where(and(eq(followedThreads.ownerType, "team"), eq(followedThreads.ownerId, opts.teamId)));
     await tx.delete(teamMembers).where(eq(teamMembers.teamId, opts.teamId));
     await tx.delete(teams).where(eq(teams.id, opts.teamId));
   });

@@ -43,7 +43,13 @@ documents stay deferred.
 ## One address, not two
 
 Every assistant addresses its session as `assistant:{assistantId}`, the
-default one included.
+default one included. New rows always get that scheme. One deployed
+exception exists: rows migrated from `orchestrator_identities` keep their
+legacy `orchestrator:*` session id and its history. Because of those rows,
+a `parseAssistantSessionId` prefix parse is NOT a safe "is this an
+assistant session?" test — the `session_id` column (the
+`assistants_session` unique index) is the authority. Use
+`loadAssistantBySessionId`.
 
 The cheaper-looking alternative was to keep `orchestrator:{type}:{id}` for a
 principal's default assistant and use a second scheme for the rest. It was
@@ -109,7 +115,7 @@ assistants
   owner_type   text not null      -- user | team | org
   owner_id     text not null
   name         text
-  session_id   text not null      -- assistant:{id}
+  session_id   text not null      -- assistant:{id}; migrated rows keep legacy orchestrator:* ids
   is_default   boolean not null
   created_at   bigint not null
   archived_at  bigint             -- null while live

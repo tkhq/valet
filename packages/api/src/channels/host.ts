@@ -29,14 +29,20 @@ import {
   type GatePromptRef,
   type InboundChannelEvent,
   type PromptAttachment,
+  type Session,
   type SessionStore,
   type Unsubscribe,
   type ValetPlugin,
 } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
-import { agentSessions, assistants, users } from "../schema/index.js";
-import { ensureDefaultAssistantSession, loadAssistant } from "../assistants/service.js";
+import { agentSessions, users } from "../schema/index.js";
+import {
+  ArchivedAssistantError,
+  ensureDefaultAssistantSession,
+  loadAssistant,
+  loadAssistantBySessionId,
+} from "../assistants/service.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
 import { canResolveSessionGate } from "../services/session-access.js";
@@ -995,14 +1001,27 @@ export class ChannelHost {
     // cached under that id would serve later assistant wakes without persona
     // or memory. The assistants table is the authority on which ids those
     // are (`assistants_session` unique index).
-    const assistantRows = await this.deps.db
-      .select({ id: assistants.id })
-      .from(assistants)
-      .where(eq(assistants.sessionId, mapped.sessionId))
-      .limit(1);
-    const session = assistantRows[0]
-      ? await this.deps.engineHost.assistantSessionFor(assistantRows[0].id, { actorUserId: userId, orgId })
-      : await this.deps.engineHost.sessionFor(mapped.sessionId, await loadSessionMeta(this.deps.db, sessionRow));
+    // The wake can refuse: a retired/archived assistant throws
+    // ArchivedAssistantError from the build (TKAI-296). Every rejection
+    // branch in this handler answers the callback — an unanswered one
+    // leaves the clicker's channel UI spinning forever — so the wake
+    // failure must answer too, not escape to handleUpdate's log-only catch.
+    let session: Session;
+    try {
+      const assistant = await loadAssistantBySessionId(this.deps.db, mapped.sessionId);
+      session = assistant
+        ? await this.deps.engineHost.assistantSessionFor(assistant.id, { actorUserId: userId, orgId })
+        : await this.deps.engineHost.sessionFor(mapped.sessionId, await loadSessionMeta(this.deps.db, sessionRow));
+    } catch (err) {
+      console.error("[channels] gate resolve wake failed", err);
+      await transport?.answerCallback?.(
+        gateCallback.callbackId,
+        err instanceof ArchivedAssistantError
+          ? "This assistant was deleted. The approval no longer applies."
+          : "Valet could not process this approval. Open the session in Valet to resolve it.",
+      );
+      return;
+    }
     try {
       await session.resolveDecision(mapped.gateId, {
         actionId: gateCallback.actionId,

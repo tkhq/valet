@@ -76,7 +76,11 @@ import {
   users,
   type SecurityCellRow,
 } from "../schema/index.js";
-import { ArchivedAssistantError, loadAssistant } from "../assistants/service.js";
+import {
+  ArchivedAssistantError,
+  loadAssistant,
+  loadAssistantBySessionId,
+} from "../assistants/service.js";
 import { applyBehaviorToPlugins, filterSkillSources, parseAssistantBehavior } from "../assistants/behavior.js";
 import { personaPrefixText } from "../assistants/persona.js";
 import { internalToken } from "../lib/internal-auth.js";
@@ -761,6 +765,31 @@ export class EngineHost {
     if (cached) return cached.session;
     const pending = this.inflight.get(sessionId);
     if (pending) return pending;
+
+    // Cold build only: the prefix parse above cannot recognize rows
+    // migrated from orchestrator_identities, whose assistants row keeps a
+    // legacy `orchestrator:*` session id — the assistants table is the
+    // authority (`assistants_session` unique index). Without this lookup a
+    // legacy assistant wakes through the generic build below: no persona,
+    // no memory, and no archived-wake refusal. Cache hits above stay
+    // query-free — an assistant session cached via `assistantSessionFor`
+    // lands in the same maps under the same key.
+    if (this.opts.db) {
+      const assistant = await loadAssistantBySessionId(this.opts.db, sessionId);
+      if (assistant) {
+        return this.assistantSessionFor(
+          assistant.id,
+          { actorUserId: meta.userId, orgId: meta.orgId },
+          { sessionId: assistant.sessionId },
+        );
+      }
+      // The awaited lookup opened a gap since the cache/inflight checks
+      // above — re-check, or two concurrent cold wakes both start a build.
+      const cachedAfter = this.cache.get(sessionId);
+      if (cachedAfter) return cachedAfter.session;
+      const pendingAfter = this.inflight.get(sessionId);
+      if (pendingAfter) return pendingAfter;
+    }
 
     const promise = this.buildSession(sessionId, meta).finally(() => {
       this.inflight.delete(sessionId);
@@ -2170,7 +2199,24 @@ export class EngineHost {
    */
   async destroy(sessionId: string): Promise<void> {
     const entry = this.cache.get(sessionId);
-    if (!entry) return;
+    if (!entry) {
+      // Cold session: nothing cached in this process, but every caller of
+      // destroy() means "this session is being deleted", and the durable
+      // engine rows and live grants/tokens must not outlive that. The
+      // sandbox, if one exists, is reclaimed by the reconcile sweep — its
+      // orphan rule keys on the engine session row being gone, which is
+      // exactly what this delete produces.
+      await this.opts.engineStore.deleteSession(sessionId);
+      if (this.opts.db) {
+        await revokeSandboxTokens(this.opts.db, sessionId);
+        try {
+          await revokeSessionGrants(this.opts.db, sessionId);
+        } catch (err) {
+          console.error(`EngineHost: revoking session grants for ${sessionId} failed:`, err);
+        }
+      }
+      return;
+    }
     try {
       await entry.session.destroy();
     } finally {

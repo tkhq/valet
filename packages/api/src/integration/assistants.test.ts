@@ -714,4 +714,34 @@ describe("retireAssistant interactions", () => {
       }),
     ).rejects.toBeInstanceOf(ArchivedAssistantError);
   });
+
+  // Migrated rows keep legacy `orchestrator:*` session ids that sessionFor's
+  // prefix parse cannot recognize — the column-lookup fallback must route
+  // them to the assistant build, where the archived refusal applies.
+  it("a retired migrated assistant refuses to wake through the generic sessionFor path", async () => {
+    api = await bootTestApi();
+    const { db, engineHost } = api.providers;
+    await db.insert(assistants).values({
+      id: "asst_legacy_wake",
+      orgId: "local-org",
+      ownerType: "user",
+      ownerId: "local-user",
+      name: null,
+      personality: null,
+      behavior: null,
+      sessionId: "orchestrator:user:local-user",
+      isDefault: true,
+      createdAt: Date.now(),
+      archivedAt: null,
+    });
+    await retireAssistant(db, "asst_legacy_wake");
+
+    await expect(
+      engineHost.sessionFor("orchestrator:user:local-user", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp/legacy-wake",
+      }),
+    ).rejects.toBeInstanceOf(ArchivedAssistantError);
+  });
 });
