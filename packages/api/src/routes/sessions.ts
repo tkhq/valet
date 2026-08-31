@@ -15,7 +15,7 @@ import {
   type SessionRunFields,
 } from "../sessions/run-state.js";
 import { canAdministerSession, canViewSession } from "../services/session-access.js";
-import { loadAssistant, retireAssistant } from "../assistants/service.js";
+import { loadAssistantBySessionId, retireAssistant } from "../assistants/service.js";
 import {
   createSecurityEngagementService,
   type SecurityConfigContext,
@@ -1274,10 +1274,12 @@ sessionsRouter.delete("/:id", async (c) => {
   // replace covers the reset. The web UI hides the action; the API is the
   // contract, so it refuses too — the same rule as the move refusal above.
   // A TEAM's assistant stays deletable: the session header menu is a team
-  // admin's only surface for that. An assistant-prefixed id with no
-  // assistant row is an orphan and may be deleted as cleanup.
-  const assistantId = parseAssistantSessionId(id);
-  const assistant = assistantId !== null ? await loadAssistant(db, assistantId) : undefined;
+  // admin's only surface for that.
+  // Looked up by the `session_id` COLUMN, not `parseAssistantSessionId`:
+  // rows migrated from orchestrator_identities keep legacy `orchestrator:*`
+  // ids the prefix parse cannot recognize, and those must get the same
+  // refusal and the same retire.
+  const assistant = await loadAssistantBySessionId(db, id);
   if (assistant && assistant.ownerType !== "team") {
     return c.json(
       {

@@ -76,7 +76,7 @@ import {
   users,
   type SecurityCellRow,
 } from "../schema/index.js";
-import { loadAssistant } from "../assistants/service.js";
+import { ArchivedAssistantError, loadAssistant } from "../assistants/service.js";
 import { applyBehaviorToPlugins, filterSkillSources, parseAssistantBehavior } from "../assistants/behavior.js";
 import { personaPrefixText } from "../assistants/persona.js";
 import { internalToken } from "../lib/internal-auth.js";
@@ -1941,6 +1941,14 @@ export class EngineHost {
         `EngineHost: no assistant ${assistantId}. Create one through POST /api/assistants, ` +
           `or resolve the owner's default with resolveDefaultAssistant, before waking its session.`,
       );
+    }
+    // A retired/archived assistant must not wake (TKAI-296). Every
+    // resurrect path funnels through this build — a message POST on the
+    // soft-deleted session, a stale channel gate card, a workflow receipt
+    // — and a rebuild would run a ghost session in parallel with the
+    // owner's next default.
+    if (assistant.archivedAt !== null) {
+      throw new ArchivedAssistantError();
     }
     // The OWNER, not the assistant: memory, journal and skills belong to the
     // principal and are shared by every assistant it owns. Only the

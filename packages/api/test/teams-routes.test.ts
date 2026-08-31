@@ -7,8 +7,9 @@
  * already-unit-tested service.
  */
 import { describe, it, expect, afterEach } from "vitest";
+import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../src/integration/_setup.js";
-import { teamMembers, teams } from "../src/schema/index.js";
+import { agentSessions, assistants, teamMembers, teams } from "../src/schema/index.js";
 import { setOrgFeatures } from "../src/services/org.js";
 import type { CreateTeamResponse, ListTeamMembersResponse, ListTeamsResponse } from "../src/wire/types.js";
 
@@ -109,6 +110,62 @@ describe("teams routes", () => {
     const listRes = await fetch(`${baseUrl}/api/teams`, { headers: HEADERS });
     const { teams } = (await listRes.json()) as ListTeamsResponse;
     expect(teams.map((t) => t.id)).not.toContain(team.id);
+  });
+
+  // TKAI-296: with the membership rows gone, nobody can view or administer
+  // the team's assistant, so a surviving row and session are unreachable
+  // orphans. Team delete retires the assistant and soft-deletes its session.
+  it("deleting a team retires its assistant and deletes the assistant's session", async () => {
+    api = await bootTestApi();
+    const { baseUrl, providers } = api;
+    const { db } = providers;
+
+    const createRes = await createTeam(baseUrl, "Platform");
+    const { team } = (await createRes.json()) as CreateTeamResponse;
+
+    await db.insert(assistants).values({
+      id: "asst_team_del",
+      orgId: "local-org",
+      ownerType: "team",
+      ownerId: team.id,
+      name: null,
+      personality: null,
+      behavior: null,
+      sessionId: "assistant:asst_team_del",
+      isDefault: true,
+      createdAt: Date.now(),
+      archivedAt: null,
+    });
+    await db.insert(agentSessions).values({
+      id: "assistant:asst_team_del",
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp/team-del",
+      status: "active",
+      ownerType: "team",
+      ownerId: team.id,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    const delRes = await fetch(`${baseUrl}/api/teams/${team.id}`, {
+      method: "DELETE",
+      headers: HEADERS,
+    });
+    expect(delRes.status).toBe(200);
+
+    const row = (
+      await db.select().from(assistants).where(eq(assistants.id, "asst_team_del"))
+    )[0];
+    expect(row?.archivedAt).not.toBeNull();
+    expect(row?.isDefault).toBe(false);
+    const sess = (
+      await db
+        .select()
+        .from(agentSessions)
+        .where(eq(agentSessions.id, "assistant:asst_team_del"))
+    )[0];
+    expect(sess?.status).toBe("deleted");
   });
 
   it("404s on a team id that doesn't exist (or belongs to another org)", async () => {

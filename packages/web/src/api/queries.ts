@@ -56,6 +56,10 @@ export const qk = {
       ? (["sessions", id, "messages", threadId] as const)
       : (["sessions", id, "messages"] as const),
   decisions: (id: string) => ["sessions", id, "decisions"] as const,
+  /** Spelled here (not in assistants.ts's `qkAssistants`) so useDeleteSession
+   * below can invalidate it without an import cycle — assistants.ts already
+   * imports this factory and derives `qkAssistants.list` from it. */
+  assistants: () => ["assistants"] as const,
   notifications: () => ["notifications"] as const,
   notificationPreferences: () => ["notifications", "preferences"] as const,
   identityLinks: () => ["identityLinks"] as const,
@@ -173,10 +177,10 @@ export function useDeleteSession() {
       qc.invalidateQueries({ queryKey: qk.sessions() });
       // Deleting a team assistant's session retires the assistant row
       // server-side (TKAI-296) — refresh the rail so it drops right away
-      // instead of on the next focus refetch. Literal key rather than
-      // `qkAssistants.list()`: assistants.ts imports from this file, and
-      // the factory would close an import cycle.
-      qc.invalidateQueries({ queryKey: ["assistants"] });
+      // instead of on the next focus refetch. Unconditional on purpose:
+      // migrated assistants keep legacy non-`assistant:`-prefixed session
+      // ids, so the id alone cannot say whether a retire happened.
+      qc.invalidateQueries({ queryKey: qk.assistants() });
     },
   });
 }

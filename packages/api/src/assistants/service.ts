@@ -20,7 +20,7 @@
  * sent back) go to `EngineHost.assistantSessionFor` directly instead.
  */
 import { randomUUID } from "node:crypto";
-import { and, asc, desc, eq, isNull, or, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, or, sql, type SQL } from "drizzle-orm";
 import { assistantSessionId, type Principal, type Session } from "@valet/engine";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import { agentSessions, assistants, type AssistantRow } from "../schema/index.js";
@@ -79,6 +79,26 @@ function ownerMatch(orgId: string, principal: Principal): SQL | undefined {
 /** One row by id. Returns undefined for an id that does not exist. */
 export async function loadAssistant(db: AppQueryable, assistantId: string): Promise<AssistantRow | undefined> {
   const rows = await db.select().from(assistants).where(eq(assistants.id, assistantId)).limit(1);
+  return rows[0];
+}
+
+/**
+ * The assistant that owns `sessionId`, if any. The assistants table is the
+ * authority on which session ids are assistant sessions (the
+ * `assistants_session` unique index): rows migrated from
+ * `orchestrator_identities` keep legacy `orchestrator:*` ids that a
+ * `parseAssistantSessionId` prefix parse cannot recognize. Callers deciding
+ * "is this session an assistant's?" must use this lookup, not the prefix.
+ */
+export async function loadAssistantBySessionId(
+  db: AppQueryable,
+  sessionId: string,
+): Promise<AssistantRow | undefined> {
+  const rows = await db
+    .select()
+    .from(assistants)
+    .where(eq(assistants.sessionId, sessionId))
+    .limit(1);
   return rows[0];
 }
 
@@ -446,11 +466,18 @@ export async function patchAssistant(
     const updated = await tx
       .update(assistants)
       .set(changes)
-      .where(eq(assistants.id, row.id))
+      // The archived check above ran on a row the ROUTE loaded, before this
+      // transaction. `retireAssistant` (session delete) can archive the row
+      // in between; without this guard, a racing promote would stamp
+      // `is_default` onto an archived row — a default every list hides and
+      // `findDefaultAssistant` returns forever.
+      .where(and(eq(assistants.id, row.id), isNull(assistants.archivedAt)))
       .returning();
     const result = updated[0];
     if (!result) {
-      throw new Error(`assistants: ${row.id} disappeared during its own update`);
+      // Zero rows means the row archived under us (no hard-delete path
+      // exists); the archived refusal is the right answer, just later.
+      throw new ArchivedAssistantError();
     }
     return result;
   });
@@ -495,8 +522,18 @@ export async function archiveAssistant(db: AppDb, row: AssistantRow): Promise<As
  * as the session soft-delete.
  */
 export async function retireAssistant(db: AppQueryable, assistantId: string): Promise<void> {
-  await db
+  const updated = await db
     .update(assistants)
-    .set({ archivedAt: Date.now(), isDefault: false })
-    .where(eq(assistants.id, assistantId));
+    .set({
+      // COALESCE keeps the first archive stamp when the row was archived
+      // before its session died; `is_default` still clears so the slot
+      // frees either way.
+      archivedAt: sql`COALESCE(${assistants.archivedAt}, ${Date.now()})`,
+      isDefault: false,
+    })
+    .where(eq(assistants.id, assistantId))
+    .returning();
+  if (!updated[0]) {
+    throw new Error(`assistants: ${assistantId} disappeared during its own retire`);
+  }
 }

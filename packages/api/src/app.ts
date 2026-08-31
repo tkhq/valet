@@ -8,6 +8,7 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppEnv } from "./env.js";
 import type { RunningServer, ServerAdapter } from "./server-adapter.js";
 import { nodeServerAdapter } from "./server-adapter.node.js";
@@ -360,14 +361,23 @@ export function createApp(
 
   // Final fallback for anything thrown out of a route handler. Without this,
   // Hono returns a generic 500 with the HTML error page; we want JSON.
+  // Service errors that declare their own HTTP status (`statusCode`, e.g.
+  // ArchivedAssistantError's 409) keep it when a route lets one escape —
+  // a client-caused refusal reported as 500 reads as a server fault and
+  // invites retries that can never succeed.
   app.onError((err, c) => {
     console.error(`route error ${c.req.method} ${c.req.path}:`, err);
+    const declared = (err as { statusCode?: unknown }).statusCode;
+    const status =
+      typeof declared === "number" && declared >= 400 && declared <= 599 ? declared : 500;
     return c.json(
       {
         error: err.message ?? "internal error",
         code: (err as NodeJS.ErrnoException).code,
       },
-      500,
+      // Runtime-validated 4xx/5xx above; Hono's closed union cannot narrow
+      // a checked number.
+      status as ContentfulStatusCode,
     );
   });
 

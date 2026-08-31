@@ -12,6 +12,8 @@ import { NotFoundError } from "@valet/shared";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb, AppQueryable } from "../lib/drizzle.js";
 import {
+  agentSessions,
+  assistants,
   orgMembers,
   skills,
   skillSources,
@@ -20,6 +22,7 @@ import {
   workflowDefinitions,
   type TeamRow,
 } from "../schema/index.js";
+import { retireAssistant } from "../assistants/service.js";
 import { getOrgFeatures, isOrgAdmin } from "./org.js";
 
 export type TeamRole = "admin" | "member";
@@ -581,6 +584,23 @@ export async function deleteTeam(db: AppDb, opts: DeleteTeamOptions): Promise<vo
     await tx
       .delete(skillSources)
       .where(and(eq(skillSources.ownerType, "team"), eq(skillSources.ownerId, opts.teamId)));
+    // The team's assistants go with it (TKAI-296): with the membership rows
+    // gone, no caller passes canViewSession/canAdministerSession, so a
+    // surviving assistant row and its session are unreachable orphans —
+    // the same reasoning as the skills removal above. The route tears down
+    // the engine sessions first; for any other caller, the sandbox
+    // reconcile sweep covers a sandbox whose owning session is deleted.
+    const teamAssistants = await tx
+      .select({ id: assistants.id, sessionId: assistants.sessionId })
+      .from(assistants)
+      .where(and(eq(assistants.ownerType, "team"), eq(assistants.ownerId, opts.teamId)));
+    for (const assistant of teamAssistants) {
+      await retireAssistant(tx, assistant.id);
+      await tx
+        .update(agentSessions)
+        .set({ status: "deleted", updatedAt: Date.now() })
+        .where(eq(agentSessions.id, assistant.sessionId));
+    }
     await tx.delete(teamMembers).where(eq(teamMembers.teamId, opts.teamId));
     await tx.delete(teams).where(eq(teams.id, opts.teamId));
   });

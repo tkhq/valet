@@ -37,7 +37,13 @@ async function seedSession(
 
 async function seedAssistant(
   api: TestApi,
-  opts: { id: string; owner: { type: "user" | "team"; id: string } },
+  opts: {
+    id: string;
+    owner: { type: "user" | "team"; id: string };
+    /** Rows migrated from orchestrator_identities keep legacy
+     * `orchestrator:*` session ids — pass one to model them. */
+    sessionId?: string;
+  },
 ): Promise<void> {
   await api.providers.db.insert(assistants).values({
     id: opts.id,
@@ -47,7 +53,7 @@ async function seedAssistant(
     name: null,
     personality: null,
     behavior: null,
-    sessionId: `assistant:${opts.id}`,
+    sessionId: opts.sessionId ?? `assistant:${opts.id}`,
     isDefault: true,
     createdAt: Date.now(),
     archivedAt: null,
@@ -140,5 +146,59 @@ describe("DELETE /api/sessions/:id — assistant guard", () => {
     const res = await del(api, "plain-sess");
     expect(res.status).toBe(200);
     expect(await storedStatus(api, "plain-sess")).toBe("deleted");
+  });
+
+  // Rows migrated from orchestrator_identities keep legacy `orchestrator:*`
+  // session ids that `parseAssistantSessionId` cannot recognize; the guard
+  // and the retire must key off the assistants.session_id COLUMN, or
+  // migrated assistants slip through both.
+  it("refuses a migrated personal assistant with a legacy session id", async () => {
+    api = await bootTestApi();
+    await seedAssistant(api, {
+      id: "asst_legacy_me",
+      owner: { type: "user", id: "local-user" },
+      sessionId: "orchestrator:user:local-user",
+    });
+    await seedSession(api, {
+      id: "orchestrator:user:local-user",
+      owner: { type: "user", id: "local-user" },
+    });
+
+    const res = await del(api, "orchestrator:user:local-user");
+    expect(res.status).toBe(400);
+    expect(await storedStatus(api, "orchestrator:user:local-user")).toBe("active");
+  });
+
+  it("retires a migrated team assistant with a legacy session id", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+    await db.insert(teams).values({
+      id: "team_legacy",
+      orgId: "local-org",
+      name: "Team legacy",
+      origin: "local",
+      externalId: null,
+      createdAt: Date.now(),
+    });
+    await db
+      .insert(teamMembers)
+      .values({ teamId: "team_legacy", userId: "local-user", role: "admin" });
+    await seedAssistant(api, {
+      id: "asst_legacy_team",
+      owner: { type: "team", id: "team_legacy" },
+      sessionId: "orchestrator:team:team_legacy",
+    });
+    await seedSession(api, {
+      id: "orchestrator:team:team_legacy",
+      owner: { type: "team", id: "team_legacy" },
+    });
+
+    const res = await del(api, "orchestrator:team:team_legacy");
+    expect(res.status).toBe(200);
+    const retired = (
+      await db.select().from(assistants).where(eq(assistants.id, "asst_legacy_team")).limit(1)
+    )[0];
+    expect(retired?.archivedAt).not.toBeNull();
+    expect(retired?.isDefault).toBe(false);
   });
 });

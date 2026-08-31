@@ -45,7 +45,14 @@ import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { NotFoundError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import type { AuthUser } from "../middleware/auth.js";
-import { agentSessions, childWatches, teamMembers, teams, type TeamRow } from "../schema/index.js";
+import {
+  agentSessions,
+  assistants,
+  childWatches,
+  teamMembers,
+  teams,
+  type TeamRow,
+} from "../schema/index.js";
 import { isOrgAdmin } from "../services/org.js";
 import { ensureDefaultAssistantSession, listAssistantsForOwners } from "../assistants/service.js";
 import {
@@ -386,7 +393,7 @@ teamsRouter.post("/", async (c) => {
 // ── Delete ────────────────────────────────────────────────────────────────
 
 teamsRouter.delete("/:id", async (c) => {
-  const { db } = c.var.providers;
+  const { db, engineHost } = c.var.providers;
   const user = c.var.user;
   const id = c.req.param("id");
 
@@ -396,6 +403,22 @@ teamsRouter.delete("/:id", async (c) => {
 
   const refusal = (await idpManagedRefusal(db, team, "delete")) ?? configManagedDeleteRefusal(team);
   if (refusal) return c.json(refusal, 409);
+
+  // A team's assistants die with it (TKAI-296). Tear down their engine
+  // sessions and sandboxes first — the same order DELETE /api/sessions/:id
+  // uses — then deleteTeam retires the rows and soft-deletes the sessions
+  // in its transaction. Archived assistants included: an archived
+  // non-default's session can still be live. If deleteTeam then refuses
+  // (owned workflows), the rows stay live and the next wake rebuilds.
+  const teamAssistants = await db
+    .select({ sessionId: assistants.sessionId })
+    .from(assistants)
+    .where(and(eq(assistants.ownerType, "team"), eq(assistants.ownerId, id)));
+  for (const row of teamAssistants) {
+    await engineHost.destroy(row.sessionId).catch((err) => {
+      console.error(`engineHost.destroy(${row.sessionId}) failed:`, err);
+    });
+  }
 
   try {
     await deleteTeam(db, { teamId: id });

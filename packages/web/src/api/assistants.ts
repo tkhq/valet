@@ -28,7 +28,9 @@ import { useOrchestratorInfo } from "./orchestrator";
 import { qk } from "./queries";
 
 export const qkAssistants = {
-  list: () => ["assistants"] as const,
+  // Derived from the central factory: useDeleteSession invalidates the same
+  // key, and two spellings of it would drift apart.
+  list: () => qk.assistants(),
 };
 
 export function useAssistants(opts?: Partial<UseQueryOptions<ListAssistantsResponse>>) {

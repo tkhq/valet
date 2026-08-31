@@ -83,6 +83,20 @@ outlived its deleted session and stayed in every teammate's rail as a
 zombie. A user-owned assistant's session is not deletable at all (TKAI-253),
 so retire only ever fires for team assistants.
 
+Retirement is enforced at three more edges:
+
+- The delete route recognizes an assistant session by the `session_id`
+  COLUMN, not the `assistant:` prefix — rows migrated from
+  `orchestrator_identities` keep legacy `orchestrator:*` ids.
+- A retired (archived) assistant refuses to wake: `buildAssistantSession`
+  throws `ArchivedAssistantError`, so a stale tab's message, a stale
+  channel gate card, or a workflow receipt cannot rebuild a ghost session
+  beside the owner's next default. A racing promote is refused the same
+  way (`patchAssistant`'s update carries an `archived_at IS NULL` guard).
+- Team deletion retires the team's assistants and soft-deletes their
+  sessions in the same transaction that removes the memberships; with the
+  members gone, nobody could ever reach them again.
+
 ## Schema
 
 `assistants` replaces `orchestrator_identities`. `handle` becomes `name`,
