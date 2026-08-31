@@ -724,12 +724,19 @@ export class ChannelHost {
    */
   private async userName(userId: string): Promise<string | undefined> {
     if (!userId) return undefined;
-    const rows = await this.deps.db
-      .select({ name: users.name })
-      .from(users)
-      .where(eq(users.id, userId))
-      .limit(1);
-    return rows[0]?.name || undefined;
+    try {
+      const rows = await this.deps.db
+        .select({ name: users.name })
+        .from(users)
+        .where(eq(users.id, userId))
+        .limit(1);
+      return rows[0]?.name || undefined;
+    } catch (err) {
+      // Best-effort: the name is decoration on the edit. A lookup failure
+      // must not stop the buttons from clearing on every prompt message.
+      console.error("[channels] resolver name lookup failed", err);
+      return undefined;
+    }
   }
 
   /** Rule 1: in-memory LRU dedup, cap `DEDUP_CAP`, FIFO eviction. */
