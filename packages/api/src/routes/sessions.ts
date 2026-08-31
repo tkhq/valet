@@ -15,7 +15,7 @@ import {
   type SessionRunFields,
 } from "../sessions/run-state.js";
 import { canAdministerSession, canViewSession } from "../services/session-access.js";
-import { loadAssistant } from "../assistants/service.js";
+import { loadAssistantBySessionId, retireAssistant } from "../assistants/service.js";
 import {
   createSecurityEngagementService,
   type SecurityConfigContext,
@@ -41,6 +41,7 @@ import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import {
   agentSessions,
+  assistants,
   childWatches,
   messages as messagesTable,
   sessionRepos,
@@ -179,17 +180,28 @@ export async function listStandaloneSessions(db: AppDb, userId: string, owner?: 
       ? or(mine, teamRows)
       : mine;
 
-  const [rows, childRows] = await Promise.all([
+  const [rows, childRows, assistantRows] = await Promise.all([
     db
       .select()
       .from(agentSessions)
       .where(and(scope, inArray(agentSessions.status, ["active", "hibernated"])))
       .orderBy(desc(agentSessions.updatedAt)),
     db.select({ childSessionId: childWatches.childSessionId }).from(childWatches),
+    // The assistants table, not the id prefix, decides which sessions are
+    // assistant sessions: migrated rows keep legacy `orchestrator:*` ids
+    // the prefix parse cannot recognize. The prefix check below stays as a
+    // belt for `assistant:` ids whose row is gone.
+    db.select({ sessionId: assistants.sessionId }).from(assistants),
   ]);
 
   const childIds = new Set(childRows.map((r) => r.childSessionId));
-  return rows.filter((r) => parseAssistantSessionId(r.id) === null && !childIds.has(r.id));
+  const assistantSessionIds = new Set(assistantRows.map((r) => r.sessionId));
+  return rows.filter(
+    (r) =>
+      !assistantSessionIds.has(r.id) &&
+      parseAssistantSessionId(r.id) === null &&
+      !childIds.has(r.id),
+  );
 }
 
 sessionsRouter.get("/", async (c) => {
@@ -893,7 +905,14 @@ sessionsRouter.patch("/:id", async (c) => {
     // from that owner. Moving only the session row desyncs them — every
     // teammate keeps seeing the assistant but 404s opening it. The web UI
     // hides the action; the API is the contract, so it refuses too.
-    if (parseAssistantSessionId(id) !== null) {
+    // Both tests on purpose: the column lookup covers migrated rows with
+    // legacy `orchestrator:*` session ids, and the prefix keeps refusing an
+    // `assistant:` id even when its row is gone — the address stays
+    // structural either way.
+    if (
+      parseAssistantSessionId(id) !== null ||
+      (await loadAssistantBySessionId(db, id)) !== undefined
+    ) {
       return c.json(
         { error: "an assistant's session cannot be moved. It belongs to the assistant's owner." },
         400,
@@ -1274,20 +1293,20 @@ sessionsRouter.delete("/:id", async (c) => {
   // replace covers the reset. The web UI hides the action; the API is the
   // contract, so it refuses too — the same rule as the move refusal above.
   // A TEAM's assistant stays deletable: the session header menu is a team
-  // admin's only surface for that. An assistant-prefixed id with no
-  // assistant row is an orphan and may be deleted as cleanup.
-  const assistantId = parseAssistantSessionId(id);
-  if (assistantId !== null) {
-    const assistant = await loadAssistant(db, assistantId);
-    if (assistant && assistant.ownerType !== "team") {
-      return c.json(
-        {
-          error:
-            "your assistant's session cannot be deleted. Use Replace sandbox to reset its workspace.",
-        },
-        400,
-      );
-    }
+  // admin's only surface for that.
+  // Looked up by the `session_id` COLUMN, not `parseAssistantSessionId`:
+  // rows migrated from orchestrator_identities keep legacy `orchestrator:*`
+  // ids the prefix parse cannot recognize, and those must get the same
+  // refusal and the same retire.
+  const assistant = await loadAssistantBySessionId(db, id);
+  if (assistant && assistant.ownerType !== "team") {
+    return c.json(
+      {
+        error:
+          "your assistant's session cannot be deleted. Use Replace sandbox to reset its workspace.",
+      },
+      400,
+    );
   }
 
   // Tear down engine + sandbox first; even if it fails we still want to soft-delete.
@@ -1295,10 +1314,25 @@ sessionsRouter.delete("/:id", async (c) => {
     console.error(`engineHost.destroy(${id}) failed:`, err);
   });
 
-  await db
-    .update(agentSessions)
-    .set({ status: "deleted", updatedAt: Date.now() })
-    .where(eq(agentSessions.id, id));
+  // Deleting a team assistant's session IS removing the assistant — the
+  // header item is labeled "Delete this team's assistant". Retire the row
+  // in the same transaction as the soft-delete (TKAI-296): a live row kept
+  // the assistant in every teammate's rail, pointing at a dead session.
+  await db.transaction(async (tx) => {
+    await tx
+      .update(agentSessions)
+      .set({ status: "deleted", updatedAt: Date.now() })
+      .where(eq(agentSessions.id, id));
+    if (assistant) await retireAssistant(tx, assistant.id);
+  });
+
+  // Destroy again after the commit: a wake racing the window between the
+  // destroy above and this transaction rebuilds from the not-yet-retired
+  // row and re-caches — and cache hits bypass the archived-wake guard.
+  // Now the row is retired, so a torn-down ghost cannot rebuild.
+  await engineHost.destroy(id).catch((err) => {
+    console.error(`engineHost.destroy(${id}) failed:`, err);
+  });
 
   return c.json({ ok: true });
 });

@@ -66,7 +66,11 @@ import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import { buildActionInvoker, type ActionInvokerOpts } from "../plugins/action-invoker.js";
 import { workflowDefinitions } from "../schema/index.js";
-import { loadAssistant, resolveDefaultAssistant } from "../assistants/service.js";
+import {
+  ArchivedAssistantError,
+  loadAssistant,
+  resolveDefaultAssistant,
+} from "../assistants/service.js";
 
 // Same compile-time-vs-runtime bridge `resolveModelId` solves in
 // `packages/engine/src/thread.ts` and `EngineHost.resolveModel` (host.ts):
@@ -340,7 +344,25 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
       queueItemId: string,
       awaitOpts?: WorkflowAwaitResultOptions,
     ) {
-      const session = await ensureSession(opts, sessionId);
+      // The wake can refuse: a retired assistant's session must not
+      // rebuild (TKAI-296), and its submission can never produce more
+      // output. A throw here strikes the drive loop (an in-memory counter
+      // that resets on restart) instead of failing the node — report a
+      // failed outcome so `handleOutcome` settles the node cleanly.
+      let session;
+      try {
+        session = await ensureSession(opts, sessionId);
+      } catch (err) {
+        if (err instanceof ArchivedAssistantError) {
+          return {
+            queueItemId,
+            outcome: "failed" as const,
+            error:
+              "The assistant for this node was deleted. Re-run the workflow to use the owner's current assistant.",
+          };
+        }
+        throw err;
+      }
       const thread = session.threadById(threadId);
       if (!thread) {
         throw new Error(`workflow engine-deps: thread not found: ${threadId} on session ${sessionId}`);
@@ -351,7 +373,15 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
     },
 
     async abort(sessionId: string, threadId: string): Promise<void> {
-      const session = await ensureSession(opts, sessionId);
+      // A retired assistant has nothing left to abort — the delete already
+      // tore its session down. Throwing here would break run cancellation.
+      let session;
+      try {
+        session = await ensureSession(opts, sessionId);
+      } catch (err) {
+        if (err instanceof ArchivedAssistantError) return;
+        throw err;
+      }
       await session.abort({ threadId });
     },
 

@@ -43,7 +43,13 @@ documents stay deferred.
 ## One address, not two
 
 Every assistant addresses its session as `assistant:{assistantId}`, the
-default one included.
+default one included. New rows always get that scheme. One deployed
+exception exists: rows migrated from `orchestrator_identities` keep their
+legacy `orchestrator:*` session id and its history. Because of those rows,
+a `parseAssistantSessionId` prefix parse is NOT a safe "is this an
+assistant session?" test — the `session_id` column (the
+`assistants_session` unique index) is the authority. Use
+`loadAssistantBySessionId`.
 
 The cheaper-looking alternative was to keep `orchestrator:{type}:{id}` for a
 principal's default assistant and use a second scheme for the rest. It was
@@ -72,6 +78,31 @@ gets a stable target.
 
 A default cannot be archived while it is the default. Promote another first.
 
+Amended 2026-08-31 (TKAI-296): one exception, session delete. `DELETE
+/api/sessions/:id` on a team assistant's session retires the assistant in
+the same transaction as the session soft-delete: `archived_at` is set and
+`is_default` is cleared in one update. Clearing `is_default` keeps the
+invariant above ("a row with `is_default` is never archived") and frees the
+partial unique slot, so the team's next access mints a fresh default
+instead of resolving to the retired one. Before this, the assistant row
+outlived its deleted session and stayed in every teammate's rail as a
+zombie. A user-owned assistant's session is not deletable at all (TKAI-253),
+so retire only ever fires for team assistants.
+
+Retirement is enforced at three more edges:
+
+- The delete route recognizes an assistant session by the `session_id`
+  COLUMN, not the `assistant:` prefix — rows migrated from
+  `orchestrator_identities` keep legacy `orchestrator:*` ids.
+- A retired (archived) assistant refuses to wake: `buildAssistantSession`
+  throws `ArchivedAssistantError`, so a stale tab's message, a stale
+  channel gate card, or a workflow receipt cannot rebuild a ghost session
+  beside the owner's next default. A racing promote is refused the same
+  way (`patchAssistant`'s update carries an `archived_at IS NULL` guard).
+- Team deletion retires the team's assistants and soft-deletes their
+  sessions in the same transaction that removes the memberships; with the
+  members gone, nobody could ever reach them again.
+
 ## Schema
 
 `assistants` replaces `orchestrator_identities`. `handle` becomes `name`,
@@ -84,7 +115,7 @@ assistants
   owner_type   text not null      -- user | team | org
   owner_id     text not null
   name         text
-  session_id   text not null      -- assistant:{id}
+  session_id   text not null      -- assistant:{id}; migrated rows keep legacy orchestrator:* ids
   is_default   boolean not null
   created_at   bigint not null
   archived_at  bigint             -- null while live

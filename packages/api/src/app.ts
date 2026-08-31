@@ -8,6 +8,8 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
+import { ValetError } from "@valet/shared";
 import type { AppEnv } from "./env.js";
 import type { RunningServer, ServerAdapter } from "./server-adapter.js";
 import { nodeServerAdapter } from "./server-adapter.node.js";
@@ -360,14 +362,33 @@ export function createApp(
 
   // Final fallback for anything thrown out of a route handler. Without this,
   // Hono returns a generic 500 with the HTML error page; we want JSON.
+  // Service errors that declare their own HTTP status keep it when a route
+  // lets one escape — a client-caused refusal reported as 500 reads as a
+  // server fault and invites retries that can never succeed. Only errors
+  // that OPTED IN qualify: a ValetError subclass, or the repo's ad-hoc
+  // service-error convention of a numeric `statusCode` PLUS a string
+  // `code` (e.g. ArchivedAssistantError). A bare third-party error with an
+  // upstream statusCode stays a 500 — relabeling it as a client fault
+  // would hide a server-side failure from alerting.
   app.onError((err, c) => {
     console.error(`route error ${c.req.method} ${c.req.path}:`, err);
+    const duck = err as { statusCode?: unknown; code?: unknown };
+    const declared =
+      err instanceof ValetError
+        ? err.statusCode
+        : typeof duck.statusCode === "number" && typeof duck.code === "string"
+          ? duck.statusCode
+          : undefined;
+    const status =
+      typeof declared === "number" && declared >= 400 && declared <= 599 ? declared : 500;
     return c.json(
       {
         error: err.message ?? "internal error",
         code: (err as NodeJS.ErrnoException).code,
       },
-      500,
+      // Runtime-validated 4xx/5xx above; Hono's closed union cannot narrow
+      // a checked number.
+      status as ContentfulStatusCode,
     );
   });
 

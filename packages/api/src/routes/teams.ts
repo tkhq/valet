@@ -45,11 +45,19 @@ import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { NotFoundError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import type { AuthUser } from "../middleware/auth.js";
-import { agentSessions, childWatches, teamMembers, teams, type TeamRow } from "../schema/index.js";
+import {
+  agentSessions,
+  assistants,
+  childWatches,
+  teamMembers,
+  teams,
+  type TeamRow,
+} from "../schema/index.js";
 import { isOrgAdmin } from "../services/org.js";
 import { ensureDefaultAssistantSession, listAssistantsForOwners } from "../assistants/service.js";
 import {
   addMember,
+  assertNoTeamOwnedWorkflows,
   canAdministerTeam,
   ConfigManagedTeamError,
   createTeam,
@@ -386,7 +394,7 @@ teamsRouter.post("/", async (c) => {
 // ── Delete ────────────────────────────────────────────────────────────────
 
 teamsRouter.delete("/:id", async (c) => {
-  const { db } = c.var.providers;
+  const { db, engineHost } = c.var.providers;
   const user = c.var.user;
   const id = c.req.param("id");
 
@@ -397,8 +405,45 @@ teamsRouter.delete("/:id", async (c) => {
   const refusal = (await idpManagedRefusal(db, team, "delete")) ?? configManagedDeleteRefusal(team);
   if (refusal) return c.json(refusal, 409);
 
+  // Refuse for owned workflows BEFORE the destroy loop below. deleteTeam
+  // re-checks inside its transaction (authoritative under the ownership
+  // lock), but a refusal there would land after the assistants' engine
+  // sessions were already destroyed — turning a refused, no-op-looking
+  // delete into permanent history loss.
+  try {
+    await assertNoTeamOwnedWorkflows(db, id);
+  } catch (err) {
+    const mapped = handleServiceError(err);
+    if (mapped) return c.json(mapped.body, mapped.status);
+    throw err;
+  }
+
+  // A team's assistants die with it (TKAI-296). Tear down their engine
+  // sessions and sandboxes first — the same order DELETE /api/sessions/:id
+  // uses — then deleteTeam retires the rows and soft-deletes the sessions
+  // in its transaction. Archived assistants included: an archived
+  // non-default's session can still be live.
+  const teamAssistants = await db
+    .select({ sessionId: assistants.sessionId })
+    .from(assistants)
+    .where(and(eq(assistants.ownerType, "team"), eq(assistants.ownerId, id)));
+  for (const row of teamAssistants) {
+    await engineHost.destroy(row.sessionId).catch((err) => {
+      console.error(`engineHost.destroy(${row.sessionId}) failed:`, err);
+    });
+  }
+
   try {
     await deleteTeam(db, { teamId: id });
+    // Destroy again after the commit: a wake racing the window between the
+    // first destroy and the retire can re-cache a rebuilt session, and
+    // cache hits bypass the archived-wake guard. Now the rows are retired,
+    // so a torn-down ghost cannot rebuild.
+    for (const row of teamAssistants) {
+      await engineHost.destroy(row.sessionId).catch((err) => {
+        console.error(`engineHost.destroy(${row.sessionId}) failed:`, err);
+      });
+    }
     return c.json({ ok: true });
   } catch (err) {
     const mapped = handleServiceError(err);
