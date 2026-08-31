@@ -509,11 +509,20 @@ export class ChannelHost {
     const entry = entries.find((e) => e.id === messageId && e.type === "message" && e.role === "assistant");
     if (!entry || entry.type !== "message") return;
     // message_end fires with reason "end_turn" for every non-abort assistant
-    // message, including mid-turn narration before a tool call. Only the
-    // turn's genuine final message persists stopReason "end_turn" — mid-turn
-    // messages persist with stopReason undefined. Without this check a turn
-    // like "Let me check." + tool call + final answer double-delivers.
-    if (entry.stopReason !== "end_turn") return;
+    // message, including a mid-turn message that stopped on a tool call
+    // (those persist stopReason undefined; only the turn's last message
+    // persists "end_turn"). Deliver every message that carries text or an
+    // attachment, not just the turn-final one: a model can put its whole
+    // reply in the same message as its first tool call and end the turn on
+    // an empty message, so gating on stopReason "end_turn" drops that reply
+    // while the agent believes it answered. The per-message dedup below and
+    // the isStreamed marker prevent double-posting, and the streaming path
+    // already shows mid-turn text as it is produced. On a transport without
+    // streaming, a turn with several text-bearing messages posts one channel
+    // message per text round — deliberate, not spam: it mirrors what the
+    // streamed path shows.
+    const hasAttachment = (entry.parts ?? []).some((part) => part.type === "attachment");
+    if (!entry.content && !hasAttachment) return;
 
     // The submission's channel origin (from its user signal entry). Used both to
     // pick a delivery target when the thread key does not map, and to decide

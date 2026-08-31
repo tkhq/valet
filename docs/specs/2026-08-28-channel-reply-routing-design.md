@@ -115,10 +115,14 @@ second, DM-style conversation door for channel mentions.
 **Auto-reply (safety net).** Extend `deliverAssistantMessage`
 (`channels/host.ts:474`). Today it maps `thread.key → conversationKey` and skips
 when the map fails. Add: if the finishing submission carries `origin`, resolve
-`origin.threadKey → conversationKey` and post the final `end_turn` message
-there, even though the `"events"` thread key does not map. The existing guards
-hold (end_turn only, skip if already streamed). A post failure is drop-logged
-(`event_drop_log`), never swallowed, so the Problems tab shows it.
+`origin.threadKey → conversationKey` and post the turn's messages there, even
+though the `"events"` thread key does not map. The existing guards hold (skip
+if already streamed, skip empty messages). Delivery is per assistant message,
+not turn-final only: a model can put its whole reply in the same message as its
+first tool call and end the turn on an empty message, so a turn-final gate
+would drop that reply (see the Telegram design's deviation 2). A post failure
+is drop-logged (`event_drop_log`), never swallowed, so the Problems tab shows
+it.
 
 **Reply action (contract).** Add a `reply_to_origin` action. It reads the
 current submission's origin and posts to that thread with no channel/thread

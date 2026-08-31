@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { Type } from "typebox";
 import {
   fauxAssistantMessage,
+  fauxText,
   fauxToolCall,
   registerFauxProvider,
   type FauxProviderRegistration,
@@ -127,6 +128,14 @@ describe("ChannelHost outbound delivery", () => {
               riskLevel: "high",
               parameters: Type.Object({}),
               execute: async () => ({ success: true, data: "done" }),
+            },
+            {
+              id: "fake.lookup",
+              name: "Lookup",
+              description: "a low-risk action that runs without approval",
+              riskLevel: "low",
+              parameters: Type.Object({}),
+              execute: async () => ({ success: true, data: "found" }),
             },
           ],
         },
@@ -295,13 +304,11 @@ describe("ChannelHost outbound delivery", () => {
     expect(fakeTransport.sent.filter((s) => s.message.markdown.includes("web-only result"))).toHaveLength(0);
   });
 
-  it("skips mid-turn assistant messages (message_end fires per-message, not just at turn end)", async () => {
-    // message_end fires with reason "end_turn" for every non-abort assistant
-    // message the engine persists, including mid-turn narration before a
-    // tool call — only the turn's genuine final message persists
-    // stopReason "end_turn" on the entry itself. A mid-turn entry (no
-    // stopReason) paired with a message_end("end_turn") event must not be
-    // delivered.
+  it("delivers a mid-turn assistant message that carries text", async () => {
+    // A model can put its whole reply in the same message as its first tool
+    // call (persisted stopReason undefined) and end the turn on an empty
+    // message. Gating delivery on stopReason "end_turn" drops that reply,
+    // so mid-turn messages with text must deliver.
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("fake:99").id;
     await engineStore.appendEntries(session.id, threadId, [
@@ -313,9 +320,8 @@ describe("ChannelHost outbound delivery", () => {
         parentId: null,
         createdAt: Date.now(),
         role: "assistant",
-        content: "Let me check.",
-        // No stopReason: this is a mid-turn narration message, not the
-        // turn's final one.
+        content: "Hi Carly — noting that down.",
+        // No stopReason: this message stopped on a tool call, mid-turn.
       },
     ]);
 
@@ -329,10 +335,75 @@ describe("ChannelHost outbound delivery", () => {
       `mid-turn-${randomUUID()}`,
     );
 
+    await vi.waitFor(() => {
+      expect(fakeTransport.sent.some((s) => s.message.markdown.includes("Hi Carly"))).toBe(true);
+    });
+  });
+
+  it("skips an assistant message with no text and no attachments", async () => {
+    // The empty turn-final message that follows a reply-then-tool-calls turn
+    // must not produce an empty channel message.
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    await engineStore.appendEntries(session.id, threadId, [
+      {
+        type: "message",
+        id: "empty-final-msg-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant",
+        content: "",
+        stopReason: "end_turn",
+      },
+    ]);
+
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "empty-final-msg-1", reason: "end_turn" },
+      },
+      `empty-final-${randomUUID()}`,
+    );
+
     // Give the (would-be, buggy) delivery a real window to happen before
     // asserting its absence.
     await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(fakeTransport.sent.some((s) => s.message.markdown.includes("Let me check."))).toBe(false);
+    expect(fakeTransport.sent).toHaveLength(0);
+  });
+
+  it("delivers the reply from a text+tool-call message when the turn ends on an empty message", async () => {
+    // Regression: the whole reply rides in the same message as the first
+    // tool call (stopReason toolUse → persisted undefined), then the turn
+    // ends with an empty message (persisted stopReason "end_turn"). The
+    // reply must reach the channel exactly once.
+    faux.setResponses([
+      fauxAssistantMessage(
+        [
+          fauxText("Hi Carly — I'm the team's assistant."),
+          fauxToolCall("call_tool", { tool_id: "fake.lookup", params: {}, summary: "look something up" }, { id: "tc-mid" }),
+        ],
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage(""),
+    ]);
+
+    await host.handleUpdate("fake", inbound({ dispatchId: `fake:${randomUUID()}`, text: "introduce yourself" }));
+
+    await vi.waitFor(
+      () => {
+        expect(fakeTransport.sent.some((s) => s.message.markdown.includes("Hi Carly"))).toBe(true);
+      },
+      { timeout: 3000 },
+    );
+    // Let the turn settle, then assert the reply landed exactly once and the
+    // empty final message produced nothing.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(fakeTransport.sent.filter((s) => s.message.markdown.includes("Hi Carly"))).toHaveLength(1);
+    expect(fakeTransport.sent.filter((s) => s.message.markdown.trim() === "")).toHaveLength(0);
   });
 
   it("gate on a channel thread → sendGatePrompt; resolution → edit", async () => {
