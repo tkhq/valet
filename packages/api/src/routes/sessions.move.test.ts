@@ -9,7 +9,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { agentSessions, childWatches, teamMembers, teams } from "../schema/index.js";
+import { agentSessions, assistants, childWatches, teamMembers, teams } from "../schema/index.js";
 import type { PatchSessionResponse } from "../wire/types.js";
 
 async function seedSession(
@@ -163,6 +163,38 @@ describe("PATCH /api/sessions/:id — teamId (move between workspaces)", () => {
     const body = (await res.json()) as { error: string };
     expect(body.error).toContain("assistant");
     expect(await storedOwner(api, "assistant:as_move")).toEqual({
+      type: "user",
+      id: "local-user",
+    });
+  });
+
+  // Migrated assistants keep legacy `orchestrator:*` session ids the prefix
+  // parse cannot recognize; the refusal keys off the assistants table's
+  // session_id column for them (TKAI-296 review).
+  it("refuses to move a migrated assistant's legacy-id session", async () => {
+    api = await bootTestApi();
+    await seedTeam(api, "team_legacy_mv", ["local-user"]);
+    await api.providers.db.insert(assistants).values({
+      id: "asst_legacy_mv",
+      orgId: "local-org",
+      ownerType: "user",
+      ownerId: "local-user",
+      name: null,
+      personality: null,
+      behavior: null,
+      sessionId: "orchestrator:user:local-user",
+      isDefault: true,
+      createdAt: Date.now(),
+      archivedAt: null,
+    });
+    await seedSession(api, {
+      id: "orchestrator:user:local-user",
+      owner: { type: "user", id: "local-user" },
+    });
+
+    const res = await patch(api, "orchestrator:user:local-user", { teamId: "team_legacy_mv" });
+    expect(res.status).toBe(400);
+    expect(await storedOwner(api, "orchestrator:user:local-user")).toEqual({
       type: "user",
       id: "local-user",
     });

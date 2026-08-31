@@ -905,9 +905,14 @@ sessionsRouter.patch("/:id", async (c) => {
     // from that owner. Moving only the session row desyncs them — every
     // teammate keeps seeing the assistant but 404s opening it. The web UI
     // hides the action; the API is the contract, so it refuses too.
-    // Column lookup, not the prefix parse: migrated rows keep legacy
-    // `orchestrator:*` session ids (same rule as the delete guard below).
-    if ((await loadAssistantBySessionId(db, id)) !== undefined) {
+    // Both tests on purpose: the column lookup covers migrated rows with
+    // legacy `orchestrator:*` session ids, and the prefix keeps refusing an
+    // `assistant:` id even when its row is gone — the address stays
+    // structural either way.
+    if (
+      parseAssistantSessionId(id) !== null ||
+      (await loadAssistantBySessionId(db, id)) !== undefined
+    ) {
       return c.json(
         { error: "an assistant's session cannot be moved. It belongs to the assistant's owner." },
         400,
