@@ -642,7 +642,12 @@ describe("gate prompts", () => {
     expect(body.thread_ts).toBe("1700000000.000700");
     const blocks = body.blocks;
     if (!Array.isArray(blocks)) throw new Error("expected blocks");
-    const actions = blocks[1];
+    expect(blocks[0]).toMatchObject({ type: "header", text: { type: "plain_text", text: "Deploy?" } });
+    expect(blocks[1]).toMatchObject({
+      type: "section",
+      text: { type: "mrkdwn", text: "This ships to production." },
+    });
+    const actions = blocks[blocks.length - 1];
     expect(actions).toMatchObject({
       type: "actions",
       elements: [
@@ -651,6 +656,52 @@ describe("gate prompts", () => {
       ],
     });
     expect(ref.conversationKey).toBe(turnKey);
+  });
+
+  it("renders pre-digested fields as labeled section columns, never raw JSON", async () => {
+    const transport = makeTransport();
+    const turnKey = primeTurn(transport, "1700000000.000700");
+    await transport.sendGatePrompt(turnKey, {
+      gateId: "gate-79",
+      title: "Approve Create PR?",
+      body: "Open a pull request on tkhq/tk-brain.",
+      fields: [
+        { label: "Tool", value: "`github.create_pr`" },
+        { label: "Risk", value: "high" },
+      ],
+      actions: [{ id: "approve", label: "Approve" }],
+    });
+    const body = lastCall("chat.postMessage");
+    const blocks = body.blocks;
+    if (!Array.isArray(blocks)) throw new Error("expected blocks");
+    const fieldSection = blocks[2];
+    expect(fieldSection).toMatchObject({
+      type: "section",
+      fields: [
+        { type: "mrkdwn", text: "*Tool*\n`github.create_pr`" },
+        { type: "mrkdwn", text: "*Risk*\nhigh" },
+      ],
+    });
+    // The notification fallback stays compact: title + body, no field dump.
+    expect(body.text).toBe("*Approve Create PR?*\n\nOpen a pull request on tkhq/tk-brain.");
+  });
+
+  it("splits more than ten fields across sections (Slack's per-section cap)", async () => {
+    const transport = makeTransport();
+    const turnKey = primeTurn(transport, "1700000000.000700");
+    await transport.sendGatePrompt(turnKey, {
+      gateId: "gate-80",
+      title: "Approve?",
+      fields: Array.from({ length: 12 }, (_, i) => ({ label: `k${i}`, value: `v${i}` })),
+      actions: [{ id: "approve", label: "Approve" }],
+    });
+    const blocks = lastCall("chat.postMessage").blocks;
+    if (!Array.isArray(blocks)) throw new Error("expected blocks");
+    const fieldSections = blocks.filter(
+      (b): b is { type: string; fields: unknown[] } =>
+        typeof b === "object" && b !== null && "fields" in b && Array.isArray((b as { fields?: unknown }).fields),
+    );
+    expect(fieldSections.map((s) => s.fields.length)).toEqual([10, 2]);
   });
 
   it("re-keys a DM prompt's ref to the posted ts so the inbound click round-trips", async () => {
@@ -679,19 +730,42 @@ describe("gate prompts", () => {
     expect(inbound?.gateCallback?.gateId).toBe("gate-88");
   });
 
-  it("appends the outcome and clears the buttons, pinning parse to none", async () => {
+  it("replaces the prompt with title + outcome and clears the buttons, pinning parse to none", async () => {
     const transport = makeTransport();
     const ref = await transport.sendGatePrompt(KEY, {
       gateId: "gate-77",
       title: "Deploy?",
+      body: "This ships to production.",
+      fields: [{ label: "Tool", value: "`deploy.ship`" }],
       actions: [{ id: "approve", label: "Approve" }],
     });
-    await transport.updateGatePrompt(ref, { actionId: "approve", label: "✅ Approved" });
+    await transport.updateGatePrompt(ref, {
+      actionId: "approve",
+      label: "✅ Approved by Conner",
+      resolvedAtMs: 1700000000000,
+    });
     const body = lastCall("chat.update");
     expect(body.parse).toBe("none");
-    expect(String(body.text)).toContain("✅ Approved");
+    const text = String(body.text);
+    expect(text).toContain("*Deploy?*");
+    expect(text).toContain("✅ Approved by Conner");
+    expect(text).toContain("<!date^1700000000^{date_short_pretty} at {time}|");
+    // The prompt detail is gone — a settled approval stops occupying the thread.
+    expect(text).not.toContain("This ships to production.");
+    expect(text).not.toContain("deploy.ship");
     const blocks = body.blocks;
     expect(Array.isArray(blocks) ? blocks.length : 0).toBe(1);
+  });
+
+  it("escapes a resolver name that carries mrkdwn control sequences", async () => {
+    const transport = makeTransport();
+    const ref = await transport.sendGatePrompt(KEY, {
+      gateId: "gate-78",
+      title: "Deploy?",
+      actions: [{ id: "approve", label: "Approve" }],
+    });
+    await transport.updateGatePrompt(ref, { actionId: "approve", label: "✅ Approved by <!channel>" });
+    expect(String(lastCall("chat.update").text)).toContain("&lt;!channel>");
   });
 });
 

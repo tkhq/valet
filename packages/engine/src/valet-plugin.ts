@@ -272,13 +272,23 @@ export interface ChannelGatePrompt {
   gateId: string;
   title: string;
   body?: string;
+  /**
+   * Labeled key parameters of the gated action, pre-digested by the host so
+   * every transport renders the same facts natively (Slack: section fields;
+   * Telegram: label/value lines) instead of a raw JSON dump. Values are
+   * standard markdown; long values arrive already truncated. Absent when the
+   * gate has no structured context — `body` then carries everything.
+   */
+  fields?: Array<{ label: string; value: string }>;
   actions: Array<{ id: string; label: string; style?: "primary" | "danger" }>;
 }
 
 export interface ChannelGateResolution {
   actionId?: string;
-  /** Human-readable outcome line, e.g. "✅ Approved". */
+  /** Human-readable outcome line, e.g. "✅ Approved by Conner". */
   label: string;
+  /** Epoch ms of the resolution, for transports that render timestamps. */
+  resolvedAtMs?: number;
 }
 
 export interface FetchedChannelMedia {

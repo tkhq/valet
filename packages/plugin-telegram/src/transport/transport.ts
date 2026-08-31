@@ -187,7 +187,11 @@ export class TelegramTransport implements ChannelTransport {
 
   async sendGatePrompt(conversationKey: string, gate: ChannelGatePrompt): Promise<GatePromptRef> {
     const chatId = chatIdFromConversationKey(conversationKey);
-    const html = markdownToTelegramHtml(gate.body ? `**${gate.title}**\n\n${gate.body}` : `**${gate.title}**`);
+    // Telegram has no field layout; render the host's pre-digested fields as
+    // label/value lines so the card shows the same facts Slack's does.
+    const fieldLines = (gate.fields ?? []).map((f) => `**${f.label}:** ${f.value}`).join("\n");
+    const md = [`**${gate.title}**`, gate.body, fieldLines].filter((part) => part).join("\n\n");
+    const html = markdownToTelegramHtml(md);
     const buttons = gate.actions.map((a) => ({
       text: `${ACTION_EMOJI[a.id] ?? ""}${a.label}`,
       callback_data: `g|${a.id}`,

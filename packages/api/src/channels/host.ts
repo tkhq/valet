@@ -35,7 +35,7 @@ import {
 } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
-import { agentSessions, assistants } from "../schema/index.js";
+import { agentSessions, assistants, users } from "../schema/index.js";
 import { ensureDefaultAssistantSession, loadAssistant } from "../assistants/service.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
@@ -43,6 +43,8 @@ import { canResolveSessionGate } from "../services/session-access.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import { EVENTS_THREAD_KEY } from "../events/orchestrator-target.js";
 import type { AttentionChannelDeliverer, AttentionEvent } from "../orchestrator/attention.js";
+import { attentionHref } from "../orchestrator/attention-wiring.js";
+import { digestGate } from "./gate-digest.js";
 import { consumeLinkCode, identityForExternal, identityForUser, linkIdentity } from "./identity-links.js";
 import { DbActiveStreamStore, type ActiveStreamStore } from "./active-streams.js";
 import { ChannelStreamBridge } from "./stream-bridge.js";
@@ -68,17 +70,24 @@ const UNLINKED_REPLY_COOLDOWN_MS = 60 * 60_000;
 const DELIVERED_CAP = 2048;
 const VERIFY_FAILED_LOG_COOLDOWN_MS = 60_000;
 
-/** Rule 4's label: ✅ for approve/primary, ❌ for deny/danger, else a neutral ☑️. */
-function gateResolutionLabel(actions: DecisionAction[], resolution: DecisionResolution): string {
+/** Rule 4's label: ✅ for approve/primary, ❌ for deny/danger, else a neutral ☑️.
+ * `resolvedByName` (the resolver's display name, when known) turns the line
+ * into an audit fact: "✅ Approved by Conner". */
+function gateResolutionLabel(
+  actions: DecisionAction[],
+  resolution: DecisionResolution,
+  resolvedByName?: string,
+): string {
   const action = actions.find((a) => a.id === resolution.actionId);
   const actionLabel = action?.label;
+  const by = resolvedByName !== undefined ? ` by ${resolvedByName}` : "";
   if (resolution.actionId === "approve" || action?.style === "primary") {
-    return `✅ ${actionLabel ?? resolution.actionId ?? "Resolved"}`;
+    return `✅ ${actionLabel ?? resolution.actionId ?? "Resolved"}${by}`;
   }
   if (resolution.actionId === "deny" || action?.style === "danger") {
-    return `❌ ${actionLabel ?? resolution.actionId ?? "Resolved"}`;
+    return `❌ ${actionLabel ?? resolution.actionId ?? "Resolved"}${by}`;
   }
-  return `☑️ ${actionLabel ?? resolution.value ?? "Resolved"}`;
+  return `☑️ ${actionLabel ?? resolution.value ?? "Resolved"}${by}`;
 }
 
 const LOCALDEV_SUFFIX = ".localdev";
@@ -622,10 +631,19 @@ export class ChannelHost {
     // no defined order and the reader would sometimes see the card first.
     await this.streamBridge.closeForGate(sessionId, gate.threadId);
 
+    // Digest before sending: a tool-approval gate's raw body is a
+    // tool_id/args JSON dump; the card shows the summary plus labeled
+    // fields instead, with a link for the full request.
+    const digest = digestGate(gate);
+    let body = digest.body;
+    if (this.deps.publicUrl) {
+      const link = `[Open in Valet](${this.deps.publicUrl}${attentionHref(sessionId)})`;
+      body = body === undefined ? link : `${body}\n\n${link}`;
+    }
     await this.sendAndRecordGatePrompt(
       transport,
       mapped.conversationKey,
-      { gateId: gate.id, title: gate.title, body: gate.body, actions: gate.actions },
+      { gateId: gate.id, title: digest.title, body, fields: digest.fields, actions: gate.actions },
       sessionId,
     );
   }
@@ -641,7 +659,13 @@ export class ChannelHost {
   private async sendAndRecordGatePrompt(
     transport: ChannelTransport,
     conversationKey: string,
-    prompt: { gateId: string; title: string; body?: string; actions: DecisionAction[] },
+    prompt: {
+      gateId: string;
+      title: string;
+      body?: string;
+      fields?: Array<{ label: string; value: string }>;
+      actions: DecisionAction[];
+    },
     sessionId: string,
   ): Promise<void> {
     const ref = await transport.sendGatePrompt(conversationKey, prompt);
@@ -668,14 +692,18 @@ export class ChannelHost {
     const refs = this.gatePrompts.get(gateId);
     if (!refs || refs.length === 0) return;
     const actions = this.gateActions.get(gateId) ?? [];
-    const label = gateResolutionLabel(actions, resolution);
+    const label = gateResolutionLabel(actions, resolution, await this.userName(resolution.resolvedBy));
 
     for (const ref of refs) {
       const channelType = ref.conversationKey.slice(0, ref.conversationKey.indexOf(":"));
       const transport = this.transports.get(channelType);
       if (transport) {
         try {
-          await transport.updateGatePrompt(ref, { actionId: resolution.actionId, label });
+          await transport.updateGatePrompt(ref, {
+            actionId: resolution.actionId,
+            label,
+            resolvedAtMs: resolution.resolvedAt,
+          });
         } catch (err) {
           // One stale message (deleted DM, revoked scope) must not keep the
           // other copies of the same prompt un-updated.
@@ -687,6 +715,21 @@ export class ChannelHost {
 
     this.gatePrompts.delete(gateId);
     this.gateActions.delete(gateId);
+  }
+
+  /**
+   * Display name for a resolver's user id, for the resolution edit.
+   * `undefined` when the id names no user row (engine-internal resolvers,
+   * e.g. an expiry) — the label then omits the "by …" clause.
+   */
+  private async userName(userId: string): Promise<string | undefined> {
+    if (!userId) return undefined;
+    const rows = await this.deps.db
+      .select({ name: users.name })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+    return rows[0]?.name || undefined;
   }
 
   /** Rule 1: in-memory LRU dedup, cap `DEDUP_CAP`, FIFO eviction. */
@@ -1022,6 +1065,7 @@ export class ChannelHost {
                     gateId: event.gate.id,
                     title: event.title,
                     body: this.attentionBody(event),
+                    fields: event.gate.fields,
                     actions: event.gate.actions,
                   },
                   event.sessionId,

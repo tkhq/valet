@@ -379,6 +379,9 @@ function approvalGateRequest(
       service: entry.service,
       tool_id: actionId,
       args,
+      // The one-line human summary, separate from the machine-readable body
+      // above. Channel deliverers render it instead of the tool_id/args dump.
+      summary,
     },
   };
 }

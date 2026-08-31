@@ -231,6 +231,52 @@ describe("wireAttentionRouter", () => {
     expect(delivered[0]?.sessionId).toBe(sessionId);
   });
 
+  it("decision_gate with tool context delivers a digested body and labeled fields, not raw JSON", async () => {
+    api = await bootTestApi();
+    const { db, engineStore, eventStream } = api.providers;
+    const delivered: AttentionEvent[] = [];
+    unsub = wireAttentionRouter({
+      db,
+      engineStore,
+      eventStream,
+      channels: [
+        {
+          deliver: async (_userId, event) => {
+            delivered.push(event);
+          },
+        },
+      ],
+    });
+
+    const sessionId = `sess-${randomUUID()}`;
+    await engineStore.saveSession(baseSession({ id: sessionId }));
+    const gateId = `gate-${randomUUID()}`;
+    const event = gateEvent(sessionId, gateId, "Approve Do Thing?");
+    if (event.event.type === "decision_gate") {
+      event.event.gate.body = 'do it\n\ntool_id=fake.do_thing\nargs={"a":1}';
+      event.event.gate.context = {
+        riskLevel: "high",
+        service: "fake",
+        tool_id: "fake.do_thing",
+        args: { a: 1 },
+        summary: "do it",
+      };
+    }
+    await eventStream.append(event, `test-gate-${randomUUID()}`);
+
+    await waitFor(async () => delivered.length > 0);
+    expect(delivered[0]?.body).toBe("do it");
+    expect(delivered[0]?.gate?.fields).toEqual([
+      { label: "Tool", value: "`fake.do_thing`" },
+      { label: "Risk", value: "high" },
+      { label: "a", value: "1" },
+    ]);
+    // The stored notification row gets the digested body too.
+    const rows = await db.select().from(notifications).where(eq(notifications.kind, "approval"));
+    expect(rows[0]?.body).toBe("do it");
+    expect(rows[0]?.body).not.toContain("args=");
+  });
+
   it("decision_gate on a standalone session routes an approval to that session's own owner", async () => {
     api = await bootTestApi();
     const { db, engineStore, eventStream } = api.providers;
