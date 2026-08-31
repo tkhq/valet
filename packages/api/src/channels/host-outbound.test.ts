@@ -21,7 +21,7 @@ import {
   type ValetPlugin,
 } from "@valet/engine";
 import { PgSessionStore, PgEventStream } from "@valet/store-postgres";
-import { agentSessions, teamMembers, teams } from "../schema/index.js";
+import { agentSessions, teamMembers, teams, users } from "../schema/index.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost } from "../engine/host.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
@@ -336,6 +336,11 @@ describe("ChannelHost outbound delivery", () => {
   });
 
   it("gate on a channel thread → sendGatePrompt; resolution → edit", async () => {
+    // A named user row makes the resolution label an audit fact ("by …").
+    await testDb.appDb
+      .insert(users)
+      .values({ id: USER_ID, name: "Test Resolver", email: "resolver@example.com" })
+      .onConflictDoNothing();
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("fake:99").id;
 
@@ -348,11 +353,18 @@ describe("ChannelHost outbound delivery", () => {
       ordinal: 1,
       type: "approval",
       title: "Approve the thing?",
-      body: "please confirm",
+      body: 'do the thing\n\ntool_id=fake.do_thing\nargs={"target":"prod"}',
       actions: [
         { id: "approve", label: "Approve", style: "primary" },
         { id: "deny", label: "Deny", style: "danger" },
       ],
+      context: {
+        riskLevel: "high",
+        service: "fake",
+        tool_id: "fake.do_thing",
+        args: { target: "prod" },
+        summary: "do the thing",
+      },
       status: "pending",
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -367,6 +379,16 @@ describe("ChannelHost outbound delivery", () => {
       expect(fakeTransport.gatePrompts).toHaveLength(1);
     });
     expect(fakeTransport.gatePrompts[0]?.prompt).toMatchObject({ gateId: gate.id, title: gate.title });
+
+    // The card is digested: summary body plus labeled fields, no raw JSON dump.
+    const sentPrompt = fakeTransport.gatePrompts[0]?.prompt;
+    expect(sentPrompt?.body).toContain("do the thing");
+    expect(sentPrompt?.body).not.toContain("args=");
+    expect(sentPrompt?.fields).toEqual([
+      { label: "Tool", value: "`fake.do_thing`" },
+      { label: "Risk", value: "high" },
+      { label: "target", value: "prod" },
+    ]);
 
     const ref = fakeTransport.gatePrompts[0]
       ? { conversationKey: fakeTransport.gatePrompts[0].conversationKey, messageId: fakeTransport.gatePrompts[0].messageId }
@@ -397,6 +419,10 @@ describe("ChannelHost outbound delivery", () => {
     });
     expect(fakeTransport.gateEdits[0]?.resolution.label).toContain("✅");
     expect(fakeTransport.gateEdits[0]?.resolution.label).toContain("Approve");
+    // The edit names the resolver and carries the timestamp, so the settled
+    // message can show who decided and when.
+    expect(fakeTransport.gateEdits[0]?.resolution.label).toContain("by Test Resolver");
+    expect(fakeTransport.gateEdits[0]?.resolution.resolvedAtMs).toBeTypeOf("number");
 
     // All three gate maps must be cleared after the edit.
     expect(ref ? host.gateForRef(ref) : null).toBeNull();
@@ -819,13 +845,20 @@ describe("ChannelHost.attentionDeliverer", () => {
         kind: "approval",
         sessionId: "sess-foreign",
         href: "/sessions/sess-foreign",
-        gate: { id: "gate-foreign", actions: [{ id: "approve", label: "Approve" }] },
+        gate: {
+          id: "gate-foreign",
+          actions: [{ id: "approve", label: "Approve" }],
+          fields: [{ label: "Tool", value: "`fake.do_thing`" }],
+        },
       }),
     );
 
     expect(fakeTransport.gatePrompts).toHaveLength(0);
     expect(fakeTransport.sent).toHaveLength(1);
     expect(fakeTransport.sent[0]?.message.markdown).toContain("Open in Valet");
+    // The plain summary still names WHAT was requested — the digested body
+    // alone no longer carries the tool id.
+    expect(fakeTransport.sent[0]?.message.markdown).toContain("**Tool:** `fake.do_thing`");
   });
 
   it("a prompt recorded AFTER its gate settled is edited immediately, not left with live buttons", async () => {

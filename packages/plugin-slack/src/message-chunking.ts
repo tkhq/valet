@@ -22,6 +22,12 @@ export const SLACK_BLOCK_TEXT_LIMIT = 3000;
 /** Slack allows at most 50 blocks per message. */
 export const SLACK_MAX_BLOCKS = 50;
 
+/** Max characters in a header block's plain_text element. */
+export const SLACK_HEADER_LIMIT = 150;
+
+/** Max fields in a single section block. */
+export const SLACK_SECTION_FIELD_LIMIT = 10;
+
 /**
  * Split text into chunks at paragraph boundaries, keeping each chunk under maxLen.
  * Falls back to single-newline splits, then hard-splits at maxLen.

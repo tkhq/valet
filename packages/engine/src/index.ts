@@ -125,6 +125,8 @@ export {
   invokeAction,
   prepareActionArgs,
   approvalModeForAction,
+  toolApprovalGateContext,
+  type ToolApprovalGateContext,
   pinnedToolName,
   MAX_PINNED_ACTIONS,
   RESOLVE_TTL_MS,
