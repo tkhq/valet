@@ -352,8 +352,7 @@ messagesRouter.get("/:id/commands", async (c) => {
   return c.json(body);
 });
 
-/** Upper bound on a hand-typed thread name. Matches the session-rename cap
- * (`sessions.ts`); the header and thread lists render this string. */
+/** Maximum length for a thread title. This matches the session title limit. */
 const MAX_THREAD_TITLE_CHARS = 200;
 
 messagesRouter.patch("/:id/threads/:threadId", async (c) => {
@@ -383,19 +382,14 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
     );
   }
 
-  // Title validation runs before any write so a bad rename never partly
-  // applies alongside a model/archived change in the same request.
-  //
-  // `undefined` = caller did not send `title`; `null` = clear the stored
-  // title. An empty/whitespace-only string is treated as a clear too, so
-  // the UI has a single "wipe this rename" gesture (v1 parity).
+  // Validate the title before changing any thread settings.
   let nextTitle: string | null | undefined;
   if (body.title !== undefined) {
     if (body.title === null) {
       nextTitle = null;
     } else if (typeof body.title !== "string") {
       return c.json(
-        { error: "title must be a string or null. Send the new thread name." },
+        { error: "Set title to a string, or use null to clear it." },
         400,
       );
     } else {
@@ -423,9 +417,7 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
     }
   }
 
-  // Upsert the mirror row once for whichever mirror-owned fields (title,
-  // archived) are being written. The row may not exist yet (auto-title
-  // hasn't run), so title-only renames still need the base fields.
+  // The mirror row can be missing before auto-title runs.
   const wantsArchived = body.archived !== undefined;
   const wantsTitle = nextTitle !== undefined;
   if (wantsArchived || wantsTitle) {
@@ -450,8 +442,7 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
       });
   }
 
-  // Read the current row so the response mirrors what a fresh GET would
-  // return — no stale field left over from a partial write above.
+  // Return the same title and archive state as a subsequent GET.
   const rows = await db
     .select({ archivedAt: sessionThreads.archivedAt, title: sessionThreads.title })
     .from(sessionThreads)

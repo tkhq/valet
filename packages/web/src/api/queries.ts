@@ -339,11 +339,7 @@ export function useSetThreadArchived(sessionId: string) {
   });
 }
 
-/**
- * Rename a thread. Send a trimmed string to set, or `null` to clear back to
- * the auto-title / untitled fallback. The server trims and caps at 200
- * chars; empty strings clear.
- */
+/** Rename a thread. Use `null` to restore the generated title or fallback label. */
 export function useRenameThread(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<PatchThreadResponse, Error, { threadId: string; title: string | null }>({

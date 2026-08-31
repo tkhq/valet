@@ -1036,10 +1036,7 @@ export type CreateThreadResponse = ThreadSummary;
 export interface PatchThreadRequest {
   model?: string | null;
   archived?: boolean;
-  /**
-   * New thread name. Trimmed server-side. Max 200 characters. Send `null`
-   * or `""` to clear.
-   */
+  /** New title. The server trims it and rejects more than 200 characters. */
   title?: string | null;
 }
 

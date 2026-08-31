@@ -1,11 +1,5 @@
-/**
- * Integration test: thread rename via PATCH /threads/:threadId.
- *
- * Rename writes `session_threads.title` (the app-side mirror the sidebar
- * reads). The engine thread is untouched — no Anthropic key needed,
- * virtual sandbox only. Port of v1 manual thread renaming, adapted to the
- * v2 wire shape.
- */
+/** Tests thread renaming through PATCH /threads/:threadId. */
+import { sql } from "drizzle-orm";
 import { describe, it, expect } from "vitest";
 import { bootTestApi } from "./_setup.js";
 import type {
@@ -93,7 +87,6 @@ describe("api integration: thread rename", () => {
       const sessionId = await createSession(api.baseUrl);
       const threadId = await createThread(api.baseUrl, sessionId);
 
-      // Set a title first so the clear has something to clear.
       const first = await patchThread(api.baseUrl, sessionId, threadId, { title: "Draft" });
       expect(first.status).toBe(200);
 
@@ -149,6 +142,51 @@ describe("api integration: thread rename", () => {
 
       const res = await patchThread(api.baseUrl, sessionId, threadId, { title: 42 });
       expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({
+        error: "Set title to a string, or use null to clear it.",
+      });
+    } finally {
+      await api.cleanup();
+    }
+  }, 30_000);
+
+  it("creates a missing mirror row when renaming", async () => {
+    const api = await bootTestApi();
+    try {
+      const sessionId = await createSession(api.baseUrl);
+      const threadId = await createThread(api.baseUrl, sessionId);
+      await api.providers.db.execute(
+        sql`delete from session_threads where id = ${threadId}`,
+      );
+
+      const res = await patchThread(api.baseUrl, sessionId, threadId, { title: "Restored" });
+
+      expect(res.status).toBe(200);
+      expect((await res.json()) as PatchThreadResponse).toMatchObject({
+        id: threadId,
+        title: "Restored",
+      });
+    } finally {
+      await api.cleanup();
+    }
+  }, 30_000);
+
+  it("creates a missing mirror row when archiving", async () => {
+    const api = await bootTestApi();
+    try {
+      const sessionId = await createSession(api.baseUrl);
+      const threadId = await createThread(api.baseUrl, sessionId);
+      await api.providers.db.execute(
+        sql`delete from session_threads where id = ${threadId}`,
+      );
+
+      const res = await patchThread(api.baseUrl, sessionId, threadId, { archived: true });
+      const body = (await res.json()) as PatchThreadResponse;
+
+      expect(res.status).toBe(200);
+      expect(body.id).toBe(threadId);
+      expect(typeof body.archivedAt).toBe("number");
+      expect(body.title).toBeUndefined();
     } finally {
       await api.cleanup();
     }
@@ -160,7 +198,6 @@ describe("api integration: thread rename", () => {
       const sessionId = await createSession(api.baseUrl);
       const threadId = await createThread(api.baseUrl, sessionId);
 
-      // Archive first, then rename — the archive flag must survive.
       const archRes = await patchThread(api.baseUrl, sessionId, threadId, { archived: true });
       expect(archRes.status).toBe(200);
       const archBody = (await archRes.json()) as PatchThreadResponse;
@@ -184,7 +221,6 @@ describe("api integration: thread rename", () => {
       const sessionId = await createSession(api.baseUrl);
       const threadId = await createThread(api.baseUrl, sessionId);
 
-      // Rename first, then archive — the title must survive.
       const rename = await patchThread(api.baseUrl, sessionId, threadId, { title: "Kept" });
       expect(rename.status).toBe(200);
 

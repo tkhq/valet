@@ -388,17 +388,21 @@ describe("ThreadTree — pending-gate dot", () => {
 });
 
 describe("ThreadTree — thread rename", () => {
-  // Double-click on the row is the v1 keyboard-mouse shortcut. The context
-  // menu also carries a Rename item; both trigger the same inline editor.
-  // We exercise the double-click path in tests because it is deterministic
-  // under jsdom (Radix DropdownMenu portals + pointer events do not settle
-  // synchronously enough to observe state changes in the same await tick).
-
   async function openRename(): Promise<HTMLInputElement> {
     const label = screen.getByText("Plan the launch");
     await userEvent.dblClick(label);
-    return (await screen.findByRole("textbox", { name: /rename thread/i })) as HTMLInputElement;
+    return screen.findByRole<HTMLInputElement>("textbox", { name: /rename thread/i });
   }
+
+  it("focuses and selects the title when editing starts", async () => {
+    renderTree();
+
+    const input = await openRename();
+
+    expect(document.activeElement).toBe(input);
+    expect(input.selectionStart).toBe(0);
+    expect(input.selectionEnd).toBe(input.value.length);
+  });
 
   it("renames a thread from an inline editor and sends the trimmed title", async () => {
     renderTree();
@@ -442,30 +446,32 @@ describe("ThreadTree — thread rename", () => {
     renderTree();
 
     await openRename();
-    // Do not edit — Enter on the untouched value should be a no-op.
+    await userEvent.keyboard("{Enter}");
+
+    expect(renameMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("does not save a legacy title that only needs trimming", async () => {
+    threads = [thread({ title: "  Plan the launch  " })];
+    renderTree();
+
+    await openRename();
     await userEvent.keyboard("{Enter}");
 
     expect(renameMutateAsync).not.toHaveBeenCalled();
   });
 
   it("commits at most once when Enter is followed by blur", async () => {
-    // The v1 regression this pins: Enter fires save, then onBlur fires it
-    // again. The savedRef guard must dedupe.
     renderTree();
 
     const input = await openRename();
     await userEvent.clear(input);
     await userEvent.type(input, "Once{enter}");
 
-    // The input unmounts on commit, which also fires onBlur. The guard
-    // must dedupe: exactly one call.
     expect(renameMutateAsync).toHaveBeenCalledTimes(1);
   });
 
   it("exposes a Rename thread item in the context menu", async () => {
-    // We do not exercise the interaction here — the menu selection is
-    // covered by the double-click path above — but the menu item exists
-    // so the affordance is discoverable.
     const user = userEvent.setup();
     renderTree();
     await user.click(screen.getByRole("button", { name: /thread menu/i }));
