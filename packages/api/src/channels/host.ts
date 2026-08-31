@@ -160,6 +160,11 @@ export class ChannelHost {
   private settledOrder: string[] = [];
   private orgId: string | null = null;
   private outboundUnsub: Unsubscribe | null = null;
+  /** Per-(session, thread) outbound delivery chains. Events for one thread
+   * run in arrival order: a mid-turn text message must post before the gate
+   * card its tool call raised, and fire-and-forget handlers would let the
+   * two race. An entry is removed once its chain drains. */
+  private outboundChains = new Map<string, Promise<void>>();
   private delivered = new Set<string>();
   private deliveredOrder: string[] = [];
   /** Per-boot webhook secrets, keyed by channelType — kept only in memory
@@ -417,7 +422,26 @@ export class ChannelHost {
     this.outboundUnsub = this.deps.eventStream.subscribe(
       { eventTypes: ["message_end", "decision_gate", "decision_gate_resolved", "command_result"] },
       (event) => {
-        void this.handleOutboundEvent(event);
+        // Serialize per (session, thread): each handler awaits transport
+        // sends, and two concurrent handlers can land out of order — the
+        // reader would see the approval card before the text that led to it.
+        // An event without a threadId has no thread to order against.
+        const e = event.event;
+        const threadId = "threadId" in e ? e.threadId : undefined;
+        if (threadId === undefined) {
+          void this.handleOutboundEvent(event);
+          return;
+        }
+        const key = `${event.sessionId}\u0000${threadId}`;
+        const tail = (this.outboundChains.get(key) ?? Promise.resolve()).then(() =>
+          this.handleOutboundEvent(event),
+        );
+        this.outboundChains.set(key, tail);
+        // handleOutboundEvent never throws (its body is try/caught), so the
+        // chain cannot reject; finally is only bookkeeping.
+        void tail.finally(() => {
+          if (this.outboundChains.get(key) === tail) this.outboundChains.delete(key);
+        });
       },
     );
   }
@@ -425,6 +449,7 @@ export class ChannelHost {
   stopOutbound(): void {
     this.outboundUnsub?.();
     this.outboundUnsub = null;
+    this.outboundChains.clear();
   }
 
   /** Rule 5: every callback body try/caught — errors logged, never thrown into the stream. */
@@ -482,7 +507,8 @@ export class ChannelHost {
     }
   }
 
-  /** Rule 2: message_end (end_turn only) → resolve the entry, dedup, send text + media attachments. */
+  /** Rule 2: message_end → deliver any assistant message that carries text or
+   * an attachment (mid-turn ones included), dedup per message. */
   private async deliverAssistantMessage(
     sessionId: string,
     threadId: string,

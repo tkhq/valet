@@ -186,6 +186,27 @@ describe('slack actions', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('reply_to_origin refuses an addressed turn (reply "auto") without calling Slack', async () => {
+    // The channel host auto-posts message text on an addressed turn; a post
+    // from the action too would double-post into the same thread.
+    const result = await action('slack.reply_to_origin').execute(
+      { text: 'x' },
+      pluginCtx({ origin: { channelType: 'slack', threadKey: 'slack:C1:1.2', reply: 'auto', messageTs: '1.5' } }),
+    );
+    expect(result).toMatchObject({ success: false });
+    expect(String((result as { error?: string }).error)).toContain('automatically');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('reply_to_origin treats a missing reply mode as addressed (auto is the default)', async () => {
+    const result = await action('slack.reply_to_origin').execute(
+      { text: 'x' },
+      pluginCtx({ origin: { channelType: 'slack', threadKey: 'slack:C1:1.2', messageTs: '1.5' } }),
+    );
+    expect(result).toMatchObject({ success: false });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('react_to_origin adds a reaction to the origin message', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true }));
     const result = await action('slack.react_to_origin').execute(

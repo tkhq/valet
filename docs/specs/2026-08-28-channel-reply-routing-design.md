@@ -130,9 +130,12 @@ argument to guess. The team persona instructs the assistant to use it when it
 answers a channel-originated message. The action is the primary path; the model
 should reply through it.
 
-**No double post.** The turn records whether the assistant already replied to
-origin (through the action). If it did, auto-reply skips. If the model never
-replied, auto-reply posts the final turn. One reply reaches Slack, always.
+**No double post.** The two mechanisms split by `origin.reply`, so exactly one
+is active per turn. An addressed turn (`reply: "auto"`, the default) auto-posts
+the assistant's text-bearing messages, and `slack.reply_to_origin` refuses with
+a corrective error. An overheard turn (`reply: "manual"`) never auto-posts, and
+the action is the only reply path. (The design originally called for turn-level
+"already replied" state; the mode split replaces it — see Deviations.)
 
 #### 1.5 Identity: team name and sender
 
@@ -262,13 +265,13 @@ turn that produces no reply at all is a reportable miss, not a silent drop.
 
 ## Deviations (Part 1, as built)
 
-- **Explicit `reply_to_origin` action deferred.** The design named both an
-  auto-reply safety net and an explicit reply action. Part 1 ships the
-  auto-reply plus a persona instruction. A standalone action posts to Slack
-  directly, so it would double-post against the safety net unless new
-  cross-turn suppression state is threaded between the engine action and the
-  host bridge. The safety net already guarantees delivery, so the action is
-  deferred until that suppression is worth building.
+- **`reply_to_origin` shipped with a mode guard, not suppression state.** The
+  design's turn-level "already replied through the action" recording was never
+  built. Instead the action refuses on an addressed turn
+  (`origin.reply !== "manual"`), where the auto-post already delivers the
+  message text; on an overheard turn the auto-post is suppressed and the
+  action is the only path. The mode split makes the two reply mechanisms
+  mutually exclusive without cross-turn state.
 - **Sender name is a handle, not a resolved display name.** The dispatcher sets
   the signal's `sender` attribute from `event.actor` (`login` or `externalId`).
   For a Slack `app_mention` this is the raw Slack user id, because the event

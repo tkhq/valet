@@ -932,6 +932,18 @@ const replyToOrigin = action(Type.Object({
     'Reply in the Slack thread this message came from. Use it to answer an overheard message in a thread you are following. No channel or thread id is needed.',
   riskLevel: 'medium',
   execute: async (args, ctx) => {
+    // On an addressed turn (reply "auto", the default) the channel host
+    // already posts the assistant's message text to the origin thread, so a
+    // post from here would double-post. This action is the reply path only
+    // for overheard turns (reply "manual"), where the auto-post is
+    // suppressed.
+    if (ctx.origin?.channelType === 'slack' && ctx.origin.reply !== 'manual') {
+      return {
+        success: false,
+        error:
+          'This turn is addressed, so your message text posts to the Slack thread automatically. Write the reply as normal message text instead of calling this action.',
+      };
+    }
     const o = await resolveSlackOrigin(ctx);
     if ('error' in o) return { success: false, error: o.error };
     const res = await slackFetch('chat.postMessage', o.token, {
