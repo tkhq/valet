@@ -15,6 +15,7 @@ import {
   type SessionRunFields,
 } from "../sessions/run-state.js";
 import { canAdministerSession, canViewSession } from "../services/session-access.js";
+import { loadAssistant } from "../assistants/service.js";
 import {
   createSecurityEngagementService,
   type SecurityConfigContext,
@@ -1267,6 +1268,27 @@ sessionsRouter.delete("/:id", async (c) => {
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
   if (!row || !(await canAdministerSession(db, row, userId))) return c.json({ error: "session not found" }, 404);
+
+  // A user's own assistant session is not deletable (TKAI-253): deleting
+  // it destroyed the orchestrator and every thread it held, and sandbox
+  // replace covers the reset. The web UI hides the action; the API is the
+  // contract, so it refuses too — the same rule as the move refusal above.
+  // A TEAM's assistant stays deletable: the session header menu is a team
+  // admin's only surface for that. An assistant-prefixed id with no
+  // assistant row is an orphan and may be deleted as cleanup.
+  const assistantId = parseAssistantSessionId(id);
+  if (assistantId !== null) {
+    const assistant = await loadAssistant(db, assistantId);
+    if (assistant && assistant.ownerType !== "team") {
+      return c.json(
+        {
+          error:
+            "your assistant's session cannot be deleted. Use Replace sandbox to reset its workspace.",
+        },
+        400,
+      );
+    }
+  }
 
   // Tear down engine + sandbox first; even if it fails we still want to soft-delete.
   await engineHost.destroy(id).catch((err) => {
