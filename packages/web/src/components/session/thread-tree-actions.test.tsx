@@ -18,6 +18,7 @@ const navigate = vi.fn();
 const setArchivedMutateAsync = vi.fn().mockResolvedValue({ id: "thread-1" });
 const replaceMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const dismissMutateAsync = vi.fn().mockResolvedValue({ ok: true });
+const renameMutateAsync = vi.fn().mockResolvedValue({ id: "thread-1" });
 
 let threads: ThreadSummary[] = [];
 let archivedThreads: ThreadSummary[] = [];
@@ -46,6 +47,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
     }),
     useCreateThread: () => ({ mutateAsync: vi.fn(), isPending: false }),
     useSetThreadArchived: () => ({ mutateAsync: setArchivedMutateAsync, isPending: false }),
+    useRenameThread: () => ({ mutateAsync: renameMutateAsync, isPending: false }),
     useReplaceSandbox: () => ({ mutateAsync: replaceMutateAsync, isPending: false }),
     // The gate seed (usePendingGatesSeed) stays inert: with no data the
     // effect never touches the store. Gates enter through `pendingGates`.
@@ -127,6 +129,7 @@ beforeEach(() => {
   setArchivedMutateAsync.mockClear();
   replaceMutateAsync.mockClear();
   dismissMutateAsync.mockClear();
+  renameMutateAsync.mockClear();
   threads = [thread()];
   archivedThreads = [];
   children = [];
@@ -312,5 +315,91 @@ describe("ThreadTree — pending-gate dot", () => {
     await user.click(screen.getByRole("button", { name: /show archived/i }));
     const row = screen.getByText("Old gated").closest("li");
     expect(row?.querySelector('[aria-label="Needs your decision"]')).toBeTruthy();
+  });
+});
+
+describe("ThreadTree — thread rename", () => {
+  // Double-click on the row is the v1 keyboard-mouse shortcut. The context
+  // menu also carries a Rename item; both trigger the same inline editor.
+  // We exercise the double-click path in tests because it is deterministic
+  // under jsdom (Radix DropdownMenu portals + pointer events do not settle
+  // synchronously enough to observe state changes in the same await tick).
+
+  async function openRename(): Promise<HTMLInputElement> {
+    const label = screen.getByText("Plan the launch");
+    await userEvent.dblClick(label);
+    return (await screen.findByRole("textbox", { name: /rename thread/i })) as HTMLInputElement;
+  }
+
+  it("renames a thread from an inline editor and sends the trimmed title", async () => {
+    renderTree();
+
+    const input = await openRename();
+    await userEvent.clear(input);
+    await userEvent.type(input, "  Launch plan  {enter}");
+
+    expect(renameMutateAsync).toHaveBeenCalledTimes(1);
+    expect(renameMutateAsync).toHaveBeenCalledWith({
+      threadId: "thread-1",
+      title: "Launch plan",
+    });
+  });
+
+  it("clears the title when the field is emptied", async () => {
+    renderTree();
+
+    const input = await openRename();
+    await userEvent.clear(input);
+    await userEvent.keyboard("{Enter}");
+
+    expect(renameMutateAsync).toHaveBeenCalledWith({
+      threadId: "thread-1",
+      title: null,
+    });
+  });
+
+  it("cancels the rename on Escape without a mutation", async () => {
+    renderTree();
+
+    const input = await openRename();
+    await userEvent.type(input, "unsaved{Escape}");
+
+    expect(renameMutateAsync).not.toHaveBeenCalled();
+    expect(screen.queryByRole("textbox", { name: /rename thread/i })).toBeNull();
+    expect(screen.getByText("Plan the launch")).toBeTruthy();
+  });
+
+  it("does not fire when the title is unchanged", async () => {
+    renderTree();
+
+    await openRename();
+    // Do not edit — Enter on the untouched value should be a no-op.
+    await userEvent.keyboard("{Enter}");
+
+    expect(renameMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("commits at most once when Enter is followed by blur", async () => {
+    // The v1 regression this pins: Enter fires save, then onBlur fires it
+    // again. The savedRef guard must dedupe.
+    renderTree();
+
+    const input = await openRename();
+    await userEvent.clear(input);
+    await userEvent.type(input, "Once{enter}");
+
+    // The input unmounts on commit, which also fires onBlur. The guard
+    // must dedupe: exactly one call.
+    expect(renameMutateAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it("exposes a Rename thread item in the context menu", async () => {
+    // We do not exercise the interaction here — the menu selection is
+    // covered by the double-click path above — but the menu item exists
+    // so the affordance is discoverable.
+    const user = userEvent.setup();
+    renderTree();
+    await user.click(screen.getByRole("button", { name: /thread menu/i }));
+    expect(screen.getByRole("menuitem", { name: /rename thread/i })).toBeTruthy();
   });
 });

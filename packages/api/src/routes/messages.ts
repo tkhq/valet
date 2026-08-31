@@ -325,6 +325,10 @@ messagesRouter.get("/:id/commands", async (c) => {
   return c.json(body);
 });
 
+/** Upper bound on a hand-typed thread name. Matches the session-rename cap
+ * (`sessions.ts`); the header and thread lists render this string. */
+const MAX_THREAD_TITLE_CHARS = 200;
+
 messagesRouter.patch("/:id/threads/:threadId", async (c) => {
   const result = await loadEngineSession(c);
   if ("error" in result) return result.error;
@@ -341,11 +345,45 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
-  if (body.model === undefined && body.archived === undefined) {
+  if (
+    body.model === undefined &&
+    body.archived === undefined &&
+    body.title === undefined
+  ) {
     return c.json(
-      { error: "nothing to patch: send model (null to clear) and/or archived" },
+      { error: "nothing to patch: send model (null to clear), archived, and/or title" },
       400,
     );
+  }
+
+  // Title validation runs before any write so a bad rename never partly
+  // applies alongside a model/archived change in the same request.
+  //
+  // `undefined` = caller did not send `title`; `null` = clear the stored
+  // title. An empty/whitespace-only string is treated as a clear too, so
+  // the UI has a single "wipe this rename" gesture (v1 parity).
+  let nextTitle: string | null | undefined;
+  if (body.title !== undefined) {
+    if (body.title === null) {
+      nextTitle = null;
+    } else if (typeof body.title !== "string") {
+      return c.json(
+        { error: "title must be a string or null. Send the new thread name." },
+        400,
+      );
+    } else {
+      const trimmed = body.title.trim();
+      if (trimmed.length === 0) {
+        nextTitle = null;
+      } else if (trimmed.length > MAX_THREAD_TITLE_CHARS) {
+        return c.json(
+          { error: `title is too long. Use ${MAX_THREAD_TITLE_CHARS} characters or fewer.` },
+          400,
+        );
+      } else {
+        nextTitle = trimmed;
+      }
+    }
   }
 
   if (body.model !== undefined) {
@@ -358,37 +396,48 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
     }
   }
 
-  let archivedAt: number | undefined;
-  if (body.archived !== undefined) {
-    // Upsert — the mirror row may not exist yet (auto-title hasn't run).
-    const next = body.archived ? Date.now() : null;
+  // Upsert the mirror row once for whichever mirror-owned fields (title,
+  // archived) are being written. The row may not exist yet (auto-title
+  // hasn't run), so title-only renames still need the base fields.
+  const wantsArchived = body.archived !== undefined;
+  const wantsTitle = nextTitle !== undefined;
+  if (wantsArchived || wantsTitle) {
+    const nextArchivedAt = wantsArchived
+      ? (body.archived ? Date.now() : null)
+      : undefined;
     await db
       .insert(sessionThreads)
       .values({
         id: thread.id,
         sessionId: session.id,
         createdAt: thread.toThreadData().createdAt,
-        archivedAt: next,
+        archivedAt: nextArchivedAt ?? null,
+        title: nextTitle ?? null,
       })
       .onConflictDoUpdate({
         target: sessionThreads.id,
-        set: { archivedAt: next },
+        set: {
+          ...(wantsArchived ? { archivedAt: nextArchivedAt } : {}),
+          ...(wantsTitle ? { title: nextTitle } : {}),
+        },
       });
-    archivedAt = next ?? undefined;
-  } else {
-    const rows = await db
-      .select({ archivedAt: sessionThreads.archivedAt })
-      .from(sessionThreads)
-      .where(eq(sessionThreads.id, thread.id))
-      .limit(1);
-    archivedAt = rows[0]?.archivedAt ?? undefined;
   }
+
+  // Read the current row so the response mirrors what a fresh GET would
+  // return — no stale field left over from a partial write above.
+  const rows = await db
+    .select({ archivedAt: sessionThreads.archivedAt, title: sessionThreads.title })
+    .from(sessionThreads)
+    .where(eq(sessionThreads.id, thread.id))
+    .limit(1);
+  const archivedAt = rows[0]?.archivedAt ?? undefined;
+  const title = rows[0]?.title ?? undefined;
 
   const summary = threadToSummary(
     thread.id,
     thread.toThreadData().createdAt,
     session.id,
-    undefined,
+    title,
     thread.modelId(),
     thread.key,
     archivedAt,

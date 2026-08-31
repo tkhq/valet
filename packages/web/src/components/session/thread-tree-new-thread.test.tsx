@@ -44,6 +44,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
     }),
     useArchivedThreads: () => ({ data: undefined, isLoading: false, error: null }),
     useSetThreadArchived: () => ({ mutateAsync: vi.fn(), isPending: false }),
+    useRenameThread: () => ({ mutateAsync: vi.fn(), isPending: false }),
     useReplaceSandbox: () => ({ mutateAsync: vi.fn(), isPending: false }),
     // Keeps the gate seed (usePendingGatesSeed) off the real query client.
     useDecisions: () => ({ data: undefined, isLoading: false, error: null }),

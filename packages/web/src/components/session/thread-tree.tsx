@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
-import { Archive, ArchiveRestore, MessageSquare, MoreHorizontal, Plus, RefreshCw, Search, X } from "lucide-react";
+import { Archive, ArchiveRestore, MessageSquare, MoreHorizontal, Pencil, Plus, RefreshCw, Search, X } from "lucide-react";
 import type { DecisionGate, OrchestratorChildSummary, ThreadSummary } from "@valet/api/wire";
 import {
   useArchivedThreads,
   useCreateThread,
+  useRenameThread,
   useReplaceSandbox,
   useSetThreadArchived,
   useThreads,
@@ -190,6 +191,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   useInvalidateChildrenOnQueueState(sessionId, showChildren ? childrenQ.refetch : NO_REFETCH);
   const createThread = useCreateThread(sessionId);
   const setArchived = useSetThreadArchived(sessionId);
+  const renameThread = useRenameThread(sessionId);
   const replaceSandbox = useReplaceSandbox(sessionId);
   const dismissChild = useDismissChild(sessionId);
   const [showArchived, setShowArchived] = useState(false);
@@ -369,6 +371,9 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
               }}
               onReplaceSandbox={() => void replaceSandbox.mutateAsync()}
               onDismissChild={(childSessionId) => void dismissChild.mutateAsync(childSessionId)}
+              onRename={(threadId, title) =>
+                void renameThread.mutateAsync({ threadId, title })
+              }
             />
           ))}
         </nav>
@@ -432,6 +437,7 @@ function ThreadNode({
   onArchive,
   onReplaceSandbox,
   onDismissChild,
+  onRename,
 }: {
   thread: ThreadSummary;
   index: number;
@@ -443,8 +449,51 @@ function ThreadNode({
   onArchive: (threadId: string) => void;
   onReplaceSandbox: () => void;
   onDismissChild: (childSessionId: string) => void;
+  /** Send `null` to clear back to the auto-title / untitled fallback. */
+  onRename: (threadId: string, title: string | null) => void;
 }) {
   const label = thread.title ?? untitledThreadLabel(thread, index);
+
+  // Rename UX (v1 parity): opening the Rename menu item flips the row into
+  // an inline input. Enter/blur commits, Escape cancels. The saved ref
+  // guards against onBlur + Enter firing the save twice — a v1 regression
+  // (commit c9715b09) that we do not need to relearn.
+  const [isEditing, setIsEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+  const savedRef = useRef(false);
+
+  const startEditing = () => {
+    setDraft(thread.title ?? "");
+    savedRef.current = false;
+    setIsEditing(true);
+    // Focus + select after the input mounts so the whole title is ready to
+    // overtype without a manual triple-click.
+    setTimeout(() => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }, 0);
+  };
+
+  const commit = () => {
+    if (savedRef.current) return;
+    savedRef.current = true;
+    const trimmed = draft.trim();
+    const currentTitle = thread.title ?? "";
+    // Only send when the value actually changed — a blur on an unchanged
+    // input should not fire a network request or churn the query cache.
+    if (trimmed !== currentTitle) {
+      // Empty string clears the title back to the auto-title/untitled
+      // fallback, matching the server (`null` and `""` both clear).
+      onRename(thread.id, trimmed.length === 0 ? null : trimmed);
+    }
+    setIsEditing(false);
+  };
+
+  const cancel = () => {
+    savedRef.current = true;
+    setIsEditing(false);
+  };
 
   return (
     <div>
@@ -458,41 +507,76 @@ function ThreadNode({
             : "hover:bg-ink-wash/60 border-l-2 border-transparent",
         )}
       >
-        <Tooltip content={label} delayDuration={600}>
-          <Link
-            to="/chat"
-            search={(prev) => ({
-              ...prev,
-              thread: index === 0 ? undefined : thread.id,
-              child: undefined,
-            })}
-            className={cn(
-              // Left rail marks selection; `pl-[calc(1rem-2px)]` keeps the
-              // title at the same x-offset whether or not the moss rail is
-              // present — no shift when you click between threads.
-              "flex-1 min-w-0 flex items-center py-2 text-sm",
-              "focus-visible:outline-none focus-visible:bg-ink-wash",
-              active ? "text-ink pl-[calc(1rem-2px)] font-medium" : "text-ink/85 pl-4",
-            )}
-          >
-            <span className="flex-1 truncate">{label}</span>
-            {hasPendingGate && (
-              // Amber = blocked on a person, the same vocabulary as the
-              // sessions-list "Needs you" chip. Static on purpose: pulse is
-              // reserved for progress (see childStatusDotClassName). Shown on
-              // the active thread too — the dot marks where gates are, not
-              // where you aren't.
-              <span
-                // role="img": ARIA prohibits accessible names on a bare
-                // span (role generic), so without it screen readers skip
-                // the label entirely.
-                role="img"
-                aria-label="Needs your decision"
-                className="ml-2 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500"
-              />
-            )}
-          </Link>
-        </Tooltip>
+        {isEditing ? (
+          <div className={cn("flex-1 min-w-0 py-1", active ? "pl-[calc(1rem-2px)]" : "pl-4")}>
+            <input
+              ref={inputRef}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  commit();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  cancel();
+                }
+              }}
+              onBlur={commit}
+              maxLength={200}
+              aria-label={`Rename thread: ${label}`}
+              placeholder="Thread name"
+              className={cn(
+                "w-full rounded border border-line bg-surface px-1.5 py-0.5 text-sm text-ink",
+                "outline-none focus:ring-1 focus:ring-moss",
+              )}
+            />
+          </div>
+        ) : (
+          <Tooltip content={label} delayDuration={600}>
+            <Link
+              to="/chat"
+              search={(prev) => ({
+                ...prev,
+                thread: index === 0 ? undefined : thread.id,
+                child: undefined,
+              })}
+              className={cn(
+                // Left rail marks selection; `pl-[calc(1rem-2px)]` keeps the
+                // title at the same x-offset whether or not the moss rail is
+                // present — no shift when you click between threads.
+                "flex-1 min-w-0 flex items-center py-2 text-sm",
+                "focus-visible:outline-none focus-visible:bg-ink-wash",
+                active ? "text-ink pl-[calc(1rem-2px)] font-medium" : "text-ink/85 pl-4",
+              )}
+              onDoubleClick={(e) => {
+                // Double-click = rename, the v1 shortcut. Preventing default
+                // + stopping propagation keeps the click from also
+                // triggering navigation.
+                e.preventDefault();
+                e.stopPropagation();
+                startEditing();
+              }}
+            >
+              <span className="flex-1 truncate">{label}</span>
+              {hasPendingGate && (
+                // Amber = blocked on a person, the same vocabulary as the
+                // sessions-list "Needs you" chip. Static on purpose: pulse is
+                // reserved for progress (see childStatusDotClassName). Shown on
+                // the active thread too — the dot marks where gates are, not
+                // where you aren't.
+                <span
+                  // role="img": ARIA prohibits accessible names on a bare
+                  // span (role generic), so without it screen readers skip
+                  // the label entirely.
+                  role="img"
+                  aria-label="Needs your decision"
+                  className="ml-2 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500"
+                />
+              )}
+            </Link>
+          </Tooltip>
+        )}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
@@ -504,6 +588,10 @@ function ThreadNode({
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start">
+            <DropdownMenuItem onSelect={() => startEditing()}>
+              <Pencil className="h-3.5 w-3.5 mr-2" aria-hidden />
+              Rename thread
+            </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => onArchive(thread.id)}>
               <Archive className="h-3.5 w-3.5 mr-2" aria-hidden />
               Archive thread
