@@ -27,6 +27,9 @@ let setProfileMutateAsync = vi.fn().mockResolvedValue({ ok: true });
  * session. */
 let teamsData: ListTeamsResponse = { teams: [] };
 let assistantsData: ListAssistantsResponse = { assistants: [] };
+/** Set to make a rendered session read as the viewer's own orchestrator —
+ * the header matches this id against `session.id`. */
+let orchInfoData: { sessionId: string; name: string } | undefined = undefined;
 
 // importOriginal, not a bare replacement: vitest.config.ts sets
 // `isolate: false` to share the module registry across test files in a
@@ -56,7 +59,7 @@ vi.mock("~/api/settings", () => ({
 }));
 
 vi.mock("~/api/orchestrator", () => ({
-  useOrchestratorInfo: () => ({ data: undefined, isLoading: false, error: null }),
+  useOrchestratorInfo: () => ({ data: orchInfoData, isLoading: false, error: null }),
 }));
 
 vi.mock("~/api/assistants", async (importOriginal) => {
@@ -109,6 +112,7 @@ beforeEach(() => {
   setProfileMutateAsync = vi.fn().mockResolvedValue({ ok: true });
   teamsData = { teams: [] };
   assistantsData = { assistants: [] };
+  orchInfoData = undefined;
 });
 
 describe("SandboxChip — suspended state", () => {
@@ -217,6 +221,87 @@ describe("SessionHeader — overflow menu", () => {
 
     expect(deleteMutateAsync).not.toHaveBeenCalled();
     confirmSpy.mockRestore();
+  });
+});
+
+/**
+ * TKAI-253 — the orchestrator page must not offer Delete session. The v1
+ * holdover deleted the orchestrator and all of its threads; Replace sandbox
+ * covers the reset. Team assistants keep their delete: the ⋯ menu is the
+ * only surface that can remove one.
+ */
+describe("SessionHeader — no delete on the user's own assistant", () => {
+  it("hides Delete session on the orchestrator page, keeps Replace sandbox", async () => {
+    orchInfoData = { sessionId: "sess-1", name: "Aurora" };
+    const user = userEvent.setup();
+    renderHeader({ state: "ready", epoch: 1 });
+
+    await user.click(screen.getByRole("button", { name: "Session menu" }));
+    expect(screen.getByRole("menuitem", { name: /replace sandbox/i })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: /delete/i })).toBeNull();
+  });
+
+  it("hides delete on a personal assistant from the assistants list", async () => {
+    assistantsData = {
+      assistants: [
+        {
+          id: "asst_me",
+          owner: { type: "user", id: "u1" },
+          sessionId: "sess-1",
+          isDefault: true,
+          createdAt: 1,
+        },
+      ],
+    };
+    const user = userEvent.setup();
+    renderHeader({ state: "ready", epoch: 1 });
+
+    await user.click(screen.getByRole("button", { name: "Session menu" }));
+    expect(screen.getByRole("menuitem", { name: /replace sandbox/i })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: /delete/i })).toBeNull();
+  });
+
+  it("still offers a team admin the team-assistant delete", async () => {
+    teamsData = {
+      teams: [
+        {
+          id: "team_1",
+          orgId: "org_1",
+          name: "Platform",
+          origin: "local",
+          externalId: null,
+          createdAt: 1,
+          memberCount: 3,
+          callerRole: "admin",
+        },
+      ],
+    };
+    assistantsData = {
+      assistants: [
+        {
+          id: "asst_team",
+          owner: { type: "team", id: "team_1" },
+          sessionId: "assistant:asst_team",
+          isDefault: true,
+          createdAt: 1,
+        },
+      ],
+    };
+    const user = userEvent.setup();
+    render(
+      <TooltipProvider>
+        <SessionHeader
+          session={{ ...baseSession(), id: "assistant:asst_team" }}
+          agentStatus="idle"
+          conn="open"
+        />
+      </TooltipProvider>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Session menu" }));
+    expect(
+      screen.getByRole("menuitem", { name: /delete this team's assistant/i }),
+    ).toBeTruthy();
   });
 });
 

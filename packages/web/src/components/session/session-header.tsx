@@ -462,19 +462,26 @@ export function SessionHeader({
                     Move to workspace…
                   </DropdownMenuItem>
                 )}
-                <DropdownMenuItem
-                  className="text-danger-500"
-                  disabled={del.isPending}
-                  onSelect={() => void destroy()}
-                >
-                  <Trash2 className="h-3.5 w-3.5 mr-2" aria-hidden />
-                  {/* Only an assistant session IS the team's assistant. A
-                      team-owned standalone session is a session; calling it
-                      the assistant would threaten the wrong thing. */}
-                  {isAssistantSession && teamId !== null
-                    ? "Delete this team's assistant…"
-                    : "Delete session…"}
-                </DropdownMenuItem>
+                {/* No delete on the user's own assistant page (TKAI-253):
+                    the v1 holdover deleted the orchestrator and every
+                    thread with it, and Replace sandbox already covers the
+                    reset. Team assistants keep theirs — this menu is the
+                    only surface that can remove one. */}
+                {(!isAssistantSession || teamId !== null) && (
+                  <DropdownMenuItem
+                    className="text-danger-500"
+                    disabled={del.isPending}
+                    onSelect={() => void destroy()}
+                  >
+                    <Trash2 className="h-3.5 w-3.5 mr-2" aria-hidden />
+                    {/* Only an assistant session IS the team's assistant. A
+                        team-owned standalone session is a session; calling it
+                        the assistant would threaten the wrong thing. */}
+                    {isAssistantSession && teamId !== null
+                      ? "Delete this team's assistant…"
+                      : "Delete session…"}
+                  </DropdownMenuItem>
+                )}
               </DropdownMenuContent>
             </DropdownMenu>
           </>
