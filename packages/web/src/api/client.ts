@@ -97,6 +97,8 @@ import type {
   ListAllWorkflowRunsResponse,
   ListOrgPoliciesResponse,
   ListPolicyOverridesResponse,
+  ListOpItemsResponse,
+  ListOpVaultsResponse,
   CreateLlmProviderRequest,
   CreateLlmProviderResponse,
   GetLlmProviderPreferencesResponse,
@@ -131,6 +133,8 @@ import type {
   InstallWorkflowTemplateRequest,
   InstallWorkflowTemplateResponse,
   MeResponse,
+  OnePasswordSettingsResponse,
+  OpItemDetailResponse,
   OrgDirectoryResponse,
   OrgMembersResponse,
   OrgPluginsResponse,
@@ -183,6 +187,7 @@ import type {
   PutPolicyOverrideRequest,
   PutPolicyOverrideResponse,
   RedeliverEventResponse,
+  PutOnePasswordSettingsRequest,
   ResolveDecisionRequest,
   ResolveWorkflowApprovalRequest,
   ResolveWorkflowApprovalResponse,
@@ -274,6 +279,22 @@ class ApiError extends Error {
     super(message);
     this.name = "ApiError";
   }
+}
+
+/**
+ * Extract a server-provided `{ error: string }` message from a rejected
+ * request, falling back to a caller-supplied default. Mirrors the
+ * `extractStartLinkError` pattern from the Telegram connect flow — every
+ * inline error surface (picker cascade, credential creation, token save)
+ * uses this instead of a bespoke extractor per call site.
+ */
+function apiErrorMessage(err: unknown, fallback: string): string {
+  if (err instanceof ApiError && err.payload && typeof err.payload === "object") {
+    const message = (err.payload as Record<string, unknown>).error;
+    if (typeof message === "string" && message) return message;
+  }
+  if (err instanceof Error && err.message) return err.message;
+  return fallback;
 }
 
 // `GET /api/auth-config` is unauthenticated and doesn't change without a
@@ -1074,7 +1095,11 @@ export const api = {
 
   // plugins + credentials (plugin-system-v2 plan Task 15 — connect surface)
   listPlugins: () => request<ListPluginsResponse>("GET", "/plugins"),
-  listCredentials: () => request<ListCredentialsResponse>("GET", "/credentials"),
+  listCredentials: (scope?: "user" | "org") =>
+    request<ListCredentialsResponse>(
+      "GET",
+      `/credentials${scope === "org" ? "?scope=org" : ""}`,
+    ),
   putCredential: (service: string, body: PutCredentialRequest) =>
     request<PutCredentialResponse>(
       "PUT",
@@ -1087,6 +1112,27 @@ export const api = {
     request<DeleteCredentialResponse>(
       "DELETE",
       `/credentials/${encodeURIComponent(service)}${opts?.scope ? `?scope=${opts.scope}` : ""}`,
+    ),
+
+  // 1Password picker backend + settings. `scope` selects which
+  // service-account token to browse with — "org" (open to any org member
+  // once the org token is connected) or "personal" (gated server-side by
+  // the org's allowPersonal toggle).
+  getOnePasswordSettings: () =>
+    request<OnePasswordSettingsResponse>("GET", "/onepassword/settings"),
+  putOnePasswordSettings: (body: PutOnePasswordSettingsRequest) =>
+    request<OnePasswordSettingsResponse>("PUT", "/onepassword/settings", body),
+  listOpVaults: (scope: "org" | "personal") =>
+    request<ListOpVaultsResponse>("GET", `/onepassword/vaults?scope=${scope}`),
+  listOpItems: (scope: "org" | "personal", vaultId: string) =>
+    request<ListOpItemsResponse>(
+      "GET",
+      `/onepassword/vaults/${encodeURIComponent(vaultId)}/items?scope=${scope}`,
+    ),
+  getOpItemDetail: (scope: "org" | "personal", vaultId: string, itemId: string) =>
+    request<OpItemDetailResponse>(
+      "GET",
+      `/onepassword/vaults/${encodeURIComponent(vaultId)}/items/${encodeURIComponent(itemId)}?scope=${scope}`,
     ),
 
   // skills — the markdown playbooks the agent reads. The catalog mixes the
@@ -1286,4 +1332,4 @@ export const api = {
     request<ProxySettingsResponse>("PUT", "/proxy/settings", patch),
 };
 
-export { ApiError };
+export { ApiError, apiErrorMessage };

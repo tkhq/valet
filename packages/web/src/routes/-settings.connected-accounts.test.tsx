@@ -8,7 +8,11 @@
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import type { CredentialSummary, GetGithubAppResponse, IdentityLinkStatus } from "@valet/api/wire";
+import type {
+  CredentialSummary,
+  GetGithubAppResponse,
+  IdentityLinkStatus,
+} from "@valet/api/wire";
 import { ApiError } from "~/api/client";
 
 const startMutateAsync = vi.fn();
@@ -344,7 +348,25 @@ describe("ConnectedAccountsPage", () => {
       render(<ConnectedAccountsPage />);
       fireEvent.click(screen.getByRole("button", { name: "Revoke linear" }));
       expect(confirm).toHaveBeenCalled();
-      expect(disconnectCredentialMutate).toHaveBeenCalledWith("linear");
+      expect(disconnectCredentialMutate).toHaveBeenCalledWith({ service: "linear" });
+    });
+
+    it("shows the 1Password reference badge on a reference-backed row, no paste-token affordance", () => {
+      credentialsData = {
+        credentials: [
+          {
+            service: "linear",
+            type: "api_key",
+            connectedAt: "2026-01-02T00:00:00Z",
+            onepasswordRef: "op://Vault One/Item One/credential",
+          },
+        ],
+      };
+      render(<ConnectedAccountsPage />);
+      expect(screen.getByText("op://Vault One/Item One/credential")).toBeTruthy();
+      // Deletion still works via the normal Revoke control — no separate
+      // "edit"/"paste new token" affordance for a reference-backed row.
+      expect(screen.getByRole("button", { name: "Revoke linear" })).toBeTruthy();
     });
   });
 

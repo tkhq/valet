@@ -30,6 +30,7 @@ import {
   type InboundChannelEvent,
   type PromptAttachment,
   type SessionStore,
+  type StoredCredential,
   type Unsubscribe,
   type ValetPlugin,
 } from "@valet/engine";
@@ -43,6 +44,8 @@ import { canResolveSessionGate } from "../services/session-access.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 import { EVENTS_THREAD_KEY } from "../events/orchestrator-target.js";
 import type { AttentionChannelDeliverer, AttentionEvent } from "../orchestrator/attention.js";
+import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
+import { OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
 import { consumeLinkCode, identityForExternal, identityForUser, linkIdentity } from "./identity-links.js";
 import { DbActiveStreamStore, type ActiveStreamStore } from "./active-streams.js";
 import { ChannelStreamBridge } from "./stream-bridge.js";
@@ -61,6 +64,15 @@ export interface ChannelHostDeps {
   /** Durable open-stream state. Defaults to the Postgres store over `db`. */
   activeStreams?: ActiveStreamStore;
   now?: () => number;
+  /**
+   * 1Password reference-credential resolver (owner-precedence contract,
+   * Task 6). Threaded into `resolveOrgCredentialRead` so an org-owned bot
+   * token row carrying `metadata.onepassword` resolves through the org's
+   * shared 1Password token instead of surfacing the raw reference string.
+   * Optional — omit for deployments/tests with no 1Password service wired;
+   * rows then pass through raw, byte-identical to before this task.
+   */
+  onePassword?: OnePasswordService;
 }
 
 const DEDUP_CAP = 2048;
@@ -245,7 +257,24 @@ export class ChannelHost {
         // the outbound queue below AFTER stop() already swept them, leaving
         // ingress running on a closed server with nothing left to stop it.
         if (!this.started) return;
-        const credential = await this.deps.engineCredentials.get({ type: "org", id: orgId }, factory.channelType);
+        // Org-row-only read + 1Password reference resolution, so an
+        // admin-configured reference-backed bot token resolves the same way
+        // a plain pasted token does. A failed resolution must NOT crash
+        // boot — log it and skip this transport, same as "no bot token".
+        let credential: StoredCredential | null;
+        try {
+          credential = await resolveOrgCredentialRead(
+            { credentials: this.deps.engineCredentials, onePassword: this.deps.onePassword },
+            { orgId },
+            factory.channelType,
+          );
+        } catch (err) {
+          if (err instanceof OnePasswordAuthError) {
+            console.error(`[channels] ${factory.channelType}: bot token resolution failed: ${err.message}`);
+            continue;
+          }
+          throw err;
+        }
         if (!credential) {
           console.log(`[channels] ${factory.channelType}: no bot token, transport not started`);
           continue;

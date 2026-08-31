@@ -9,7 +9,7 @@
  * engine's `Session.credentialProvider` read at call time. `PUT`'s optional
  * `scope: "org"` body field (and `GET`/`DELETE`'s `?scope=org` query param)
  * maps the owner to `{type:"org", id:user.orgId}` instead — org admins only
- * (403 `"org admin required"` otherwise, matching `routes/org.ts`'s copy).
+ * (`requireOrgAdmin` against `org_members.role`, not `users.role`).
  * This is how an org admin pastes a shared credential (e.g. a Telegram bot
  * token `ChannelHost` resolves at `{type:"org",id}`) rather than a personal
  * one.
@@ -45,8 +45,11 @@
 import { Hono } from "hono";
 import type { CredentialOwner, StoredCredential } from "@valet/engine";
 import type { AppEnv } from "../env.js";
+import { requireOrgAdmin } from "./_org-admin.js";
 import { requiredScopeError, verifySlackBotToken } from "../services/slack-connect.js";
 import { connectModeFor, findCredentialDeclaration } from "../services/integration-availability.js";
+import { ONEPASSWORD_SERVICE, OnePasswordAuthError, onePasswordMeta } from "../services/onepassword.js";
+import { getAllowPersonalOnePassword } from "../services/org.js";
 import type {
   CredentialSummary,
   DeleteCredentialResponse,
@@ -59,7 +62,9 @@ export const credentialsRouter = new Hono<AppEnv>();
 
 const CREDENTIAL_TYPES: PutCredentialRequest["type"][] = ["oauth2", "api_key", "bot_token", "service_account"];
 
-const ORG_ADMIN_REQUIRED = { error: "org admin required" } as const;
+const PERSONAL_DISABLED = { error: "personal 1Password tokens are disabled by your organization" } as const;
+const ONEPASSWORD_REQUEST_FAILED = { error: "1Password request failed" } as const;
+const ONEPASSWORD_REFERENCE_TYPES: PutCredentialRequest["type"][] = ["api_key", "oauth2"];
 
 function ownerFor(user: { id: string; orgId: string }, scope: "user" | "org"): CredentialOwner {
   return scope === "org" ? { type: "org", id: user.orgId } : { type: "user", id: user.id };
@@ -69,12 +74,30 @@ function isCredentialKind(type: StoredCredential["type"]): type is PutCredential
   return (CREDENTIAL_TYPES as StoredCredential["type"][]).includes(type);
 }
 
+function parseOnePasswordField(
+  value: unknown,
+): { ok: true; reference: string; tokenScope: "org" | "personal" } | { ok: false; error: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, error: "onepassword must be an object with reference and tokenScope" };
+  }
+  const candidate = value as Record<string, unknown>;
+  const { reference, tokenScope } = candidate;
+  if (typeof reference !== "string" || !reference.startsWith("op://")) {
+    return { ok: false, error: "onepassword.reference must be a string that starts with op://" };
+  }
+  if (tokenScope !== "org" && tokenScope !== "personal") {
+    return { ok: false, error: "onepassword.tokenScope must be org or personal" };
+  }
+  return { ok: true, reference, tokenScope };
+}
+
 credentialsRouter.get("/", async (c) => {
   const { engineCredentials } = c.var.providers;
   const user = c.var.user;
   const scope = c.req.query("scope") === "org" ? "org" : "user";
-  if (scope === "org" && user.role !== "admin") {
-    return c.json(ORG_ADMIN_REQUIRED, 403);
+  if (scope === "org") {
+    const gate = await requireOrgAdmin(c);
+    if (gate) return gate;
   }
   const owner = ownerFor(user, scope);
 
@@ -99,6 +122,7 @@ credentialsRouter.get("/", async (c) => {
       login: typeof metadata?.login === "string" ? metadata.login : undefined,
       identityOnly: metadata?.identityOnly === true ? true : undefined,
       refreshFailedAt: typeof metadata?.refreshFailedAt === "number" ? metadata.refreshFailedAt : undefined,
+      onepasswordRef: onePasswordMeta(stored)?.reference,
     });
   }
 
@@ -107,7 +131,7 @@ credentialsRouter.get("/", async (c) => {
 });
 
 credentialsRouter.put("/:service", async (c) => {
-  const { engineCredentials } = c.var.providers;
+  const { engineCredentials, onePassword, db } = c.var.providers;
   const user = c.var.user;
   const service = c.req.param("service");
 
@@ -119,8 +143,9 @@ credentialsRouter.put("/:service", async (c) => {
   }
 
   const scope = body.scope === "org" ? "org" : "user";
-  if (scope === "org" && user.role !== "admin") {
-    return c.json(ORG_ADMIN_REQUIRED, 403);
+  if (scope === "org") {
+    const gate = await requireOrgAdmin(c);
+    if (gate) return gate;
   }
   const owner = ownerFor(user, scope);
 
@@ -161,6 +186,93 @@ credentialsRouter.put("/:service", async (c) => {
 
   if (!CREDENTIAL_TYPES.includes(body.type)) {
     return c.json({ error: `type must be one of ${CREDENTIAL_TYPES.join("|")}` }, 400);
+  }
+
+  // `metadata.onepassword` is a write-once-by-this-route field: the ONLY
+  // place a `{reference, tokenScope}` pair may land in a stored credential's
+  // metadata is the validated `body.onepassword` branch below, which runs
+  // save-time `resolveReference` + the type/mutual-exclusion checks before
+  // persisting it. `host.ts`'s resolver seam keys purely off
+  // `onePasswordMeta(stored)` reading `metadata.onepassword` — an
+  // unvalidated `metadata.onepassword` smuggled in through the plain path
+  // would get live-resolved at read time with none of those guarantees.
+  // Reject rather than silently strip, and unconditionally (regardless of
+  // whether `body.onepassword` is ALSO present) — a caller sending both is
+  // an ambiguous request, not a merge to resolve implicitly.
+  if (body.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata) && "onepassword" in body.metadata) {
+    return c.json({ error: "metadata.onepassword is reserved; use the onepassword request field" }, 400);
+  }
+
+  if (body.onepassword) {
+    // Structural validation (reserved service name) takes precedence over
+    // the personal-toggle policy check below — a request naming the
+    // reserved service is malformed regardless of the org's toggle state.
+    if (service === ONEPASSWORD_SERVICE) {
+      return c.json({ error: "onepassword is a reserved service name" }, 400);
+    }
+    // `github` is resolved through `services/session-github-token.ts` at
+    // session-build time (`host.ts`'s `buildCredentialResolver`), which
+    // takes the `github`-service branch unconditionally when `githubTokenDeps`
+    // + `db` are wired — an onepassword-reference row stored here would be
+    // silently ignored, never resolved. Reject at write time instead of
+    // shipping a credential nothing reads.
+    if (service === "github") {
+      return c.json({ error: "github credentials cannot be 1Password references; use the GitHub connect flow" }, 400);
+    }
+    const hasInlineSecret =
+      (typeof body.accessToken === "string" && body.accessToken.length > 0) ||
+      (typeof body.apiKey === "string" && body.apiKey.length > 0);
+    if (hasInlineSecret) {
+      return c.json({ error: "onepassword reference and inline secret are mutually exclusive" }, 400);
+    }
+    if (!ONEPASSWORD_REFERENCE_TYPES.includes(body.type)) {
+      return c.json({ error: `type must be one of ${ONEPASSWORD_REFERENCE_TYPES.join("|")} for an onepassword reference` }, 400);
+    }
+    const parsed = parseOnePasswordField(body.onepassword);
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    if (scope === "org" && parsed.tokenScope === "personal") {
+      return c.json(
+        { error: "An org-scoped credential cannot use a personal 1Password token. Set tokenScope to org." },
+        400,
+      );
+    }
+    const { reference, tokenScope } = parsed;
+    if (tokenScope === "personal") {
+      const allowed = await getAllowPersonalOnePassword(db, user.orgId);
+      if (!allowed) {
+        return c.json(PERSONAL_DISABLED, 403);
+      }
+    }
+
+    try {
+      await onePassword.resolveReference(tokenScope, { orgId: user.orgId, userId: user.id }, reference);
+    } catch (err) {
+      if (err instanceof OnePasswordAuthError) {
+        return c.json({ error: err.message }, 400);
+      }
+      console.error("onepassword: resolveReference failed:", err);
+      return c.json(ONEPASSWORD_REQUEST_FAILED, 502);
+    }
+
+    const credential: StoredCredential = {
+      type: body.type,
+      metadata: { ...body.metadata, onepassword: { reference, tokenScope } },
+    };
+    await engineCredentials.save(owner, service, credential);
+    const resp: PutCredentialResponse = { ok: true };
+    return c.json(resp);
+  }
+
+  // Plain token write to the reserved `onepassword` service — the caller's
+  // own personal service-account token. Gated by the same org toggle a
+  // `onepassword`-reference credential's `tokenScope: "personal"` is. Only
+  // reached when `body.onepassword` is absent — see the reserved-service
+  // 400 above, which takes precedence when it's present.
+  if (service === ONEPASSWORD_SERVICE && scope === "user") {
+    const allowed = await getAllowPersonalOnePassword(db, user.orgId);
+    if (!allowed) {
+      return c.json(PERSONAL_DISABLED, 403);
+    }
   }
 
   const accessToken = typeof body.accessToken === "string" && body.accessToken.length > 0 ? body.accessToken : undefined;
@@ -230,8 +342,9 @@ credentialsRouter.delete("/:service", async (c) => {
   const { engineCredentials } = c.var.providers;
   const user = c.var.user;
   const scope = c.req.query("scope") === "org" ? "org" : "user";
-  if (scope === "org" && user.role !== "admin") {
-    return c.json(ORG_ADMIN_REQUIRED, 403);
+  if (scope === "org") {
+    const gate = await requireOrgAdmin(c);
+    if (gate) return gate;
   }
   const owner = ownerFor(user, scope);
   const service = c.req.param("service");

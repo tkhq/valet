@@ -2758,6 +2758,10 @@ export interface CredentialSummary {
   /** `metadata.refreshFailedAt`, when a previous token-refresh attempt
    * failed and left the credential needing a reconnect. Epoch ms. */
   refreshFailedAt?: number;
+  /** `metadata.onepassword.reference`, when this credential resolves via a
+   * 1Password reference instead of an inline secret (1Password credential
+   * provider plan, Task 3). Display-only — never secret material. */
+  onepasswordRef?: string;
 }
 
 export interface ListCredentialsResponse {
@@ -2774,6 +2778,10 @@ export interface PutCredentialRequest {
   /** Owner scope for the saved credential. `"org"` requires the caller to be
    * an org admin. Defaults to `"user"`. */
   scope?: "user" | "org";
+  /** Resolve this credential's secret via a 1Password reference instead of
+   * an inline `accessToken`/`apiKey` (1Password credential provider plan,
+   * Task 3). Mutually exclusive with both. */
+  onepassword?: { reference: string; tokenScope: "org" | "personal" };
 }
 
 export interface PutCredentialResponse {
@@ -2782,6 +2790,33 @@ export interface PutCredentialResponse {
 
 export interface DeleteCredentialResponse {
   ok: true;
+}
+
+// ── REST: 1Password picker backend + settings (1Password credential
+// provider plan, Task 3) ───────────────────────────────────────────────────
+
+export interface OnePasswordSettingsResponse {
+  allowPersonal: boolean;
+  orgTokenConnected: boolean;
+  personalTokenConnected: boolean;
+}
+
+export interface PutOnePasswordSettingsRequest {
+  allowPersonal: boolean;
+}
+
+export interface ListOpVaultsResponse {
+  vaults: { id: string; title: string }[];
+}
+
+export interface ListOpItemsResponse {
+  items: { id: string; title: string; vaultId: string }[];
+}
+
+export interface OpItemDetailResponse {
+  id: string;
+  title: string;
+  fields: { id: string; title: string; fieldType: string }[];
 }
 
 // ── REST: me + models (split-settings design) ─────────────────────────────

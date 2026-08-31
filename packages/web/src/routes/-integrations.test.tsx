@@ -203,8 +203,25 @@ vi.mock("~/api/repos", () => ({
 
 vi.mock("~/api/integrations", () => ({
   usePlugins: () => ({ data: currentPluginsData, isLoading: false, error: null }),
+  useCredentials: () => ({ data: { credentials: [] }, isLoading: false, error: null }),
   useConnectCredential: () => ({ mutateAsync: connectMutateAsync, isPending: false, error: null }),
   useDisconnectCredential: () => ({ mutateAsync: disconnectMutateAsync, isPending: false, error: null }),
+}));
+
+vi.mock("~/api/onepassword", () => ({
+  useOnePasswordSettings: () => ({
+    data: {
+      allowPersonal: false,
+      orgTokenConnected: false,
+      personalTokenConnected: false,
+    },
+    isLoading: false,
+    error: null,
+  }),
+  usePutOnePasswordSettings: () => ({ mutate: vi.fn(), isPending: false, error: null }),
+  useOpVaults: () => ({ data: { vaults: [] }, isLoading: false, error: null }),
+  useOpItems: () => ({ data: undefined, isLoading: false, error: null }),
+  useOpItemDetail: () => ({ data: undefined, isLoading: false, error: null }),
 }));
 
 // The org-provided tile's pairing block (identity-link-block.tsx) reads
@@ -384,7 +401,7 @@ describe("IntegrationsPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Disconnect Slack" }));
 
     expect(window.confirm).toHaveBeenCalled();
-    await waitFor(() => expect(disconnectMutateAsync).toHaveBeenCalledWith("slack"));
+    await waitFor(() => expect(disconnectMutateAsync).toHaveBeenCalledWith({ service: "slack" }));
   });
 
   it("opens the pre-connect screen for an oauth service instead of redirecting on click", () => {
@@ -473,7 +490,10 @@ describe("brand marks", () => {
       })),
     };
     const { container } = render(<IntegrationsPage />);
-    const paths = [...container.querySelectorAll("svg path")].map((p) => p.getAttribute("d"));
+    const services = [...container.querySelectorAll("section")].find(
+      (section) => section.querySelector("h2")?.textContent === "Services",
+    );
+    const paths = [...(services?.querySelectorAll("svg path") ?? [])].map((p) => p.getAttribute("d"));
     expect(paths).toHaveLength(3);
     expect(new Set(paths).size).toBe(3);
   });
@@ -1196,6 +1216,7 @@ describe("IntegrationsPage — the search box", () => {
     expect(screen.getByText("Slack")).toBeTruthy();
     expect(screen.queryByText("GitHub")).toBeNull();
     expect(screen.queryByText("DeepWiki")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "1Password" })).toBeNull();
   });
 
   it("matches the description, not just the name", () => {
@@ -1237,5 +1258,17 @@ describe("IntegrationsPage — the search box", () => {
     // Hiding the box on an empty page would leave no way to clear the search.
     expect(screen.getByLabelText("Search integrations")).toBeTruthy();
     expect(screen.queryByText("Services")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "1Password" })).toBeNull();
+  });
+
+  it("shows the 1Password section when the query is empty or names it", () => {
+    render(<IntegrationsPage />);
+    expect(screen.getByRole("heading", { name: "1Password" })).toBeTruthy();
+  });
+
+  it("shows the 1Password section when the query names it", () => {
+    searchParams = { q: "vault" };
+    render(<IntegrationsPage />);
+    expect(screen.getByRole("heading", { name: "1Password" })).toBeTruthy();
   });
 });

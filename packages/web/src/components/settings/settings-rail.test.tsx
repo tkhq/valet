@@ -44,5 +44,6 @@ describe("SettingsRail", () => {
     render(<SettingsRail />);
     expect(screen.getByRole("link", { name: "Action log" })).toBeTruthy();
     expect(screen.getAllByRole("link", { name: "Policies" })).toHaveLength(2);
+    expect(screen.queryByRole("link", { name: "1Password" })).toBeNull();
   });
 });

@@ -51,6 +51,8 @@ import {
   resolveInstallationApiToken,
   type GitHubTokenDeps,
 } from "../services/github-tokens.js";
+import { resolveOrgCredentialRead, resolveUserCredentialRead } from "../services/credential-resolution.js";
+import type { OnePasswordService } from "../services/onepassword.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
 import { persistInvocationAudit, resolveActionPolicy, updateInvocationOutcome } from "../policies/service.js";
 
@@ -124,6 +126,16 @@ export interface ActionInvokerOpts {
     fetchImpl?: typeof fetch;
     now?: () => number;
   };
+  /**
+   * 1Password reference-credential resolver (owner-precedence contract,
+   * Task 6). Threaded into the shared `resolveUserCredentialRead`/
+   * `resolveOrgCredentialRead` helper's `CredentialReadDeps` so a workflow
+   * tool-node action can resolve a `metadata.onepassword`-carrying row the
+   * same way the session resolver and `ChannelHost` do. Optional — omit for
+   * deployments/tests with no 1Password service wired; rows then pass
+   * through raw, byte-identical to before this task.
+   */
+  onePassword?: OnePasswordService;
 }
 
 export type ActionInvoker = (
@@ -252,25 +264,13 @@ async function computeResult(
         `Remove the credential field from this tool node.`,
     };
   }
-  // Owner escalation for org-provided services (integration-availability
-  // rule 5). A `requires.orgCredential` service — the Slack bot token an
-  // admin connects once in Settings → Organization — is stored under the
-  // ORG owner and never on a member's own list. A session resolves it by
-  // escalating from the user owner to the org (`engine/host.ts`'s slack
-  // branch); a workflow tool node runs as the workflow's owner (a user), so
-  // without the same escalation every org-provided service reads null here
-  // and the node fails with the plugin's own missing-credential error
-  // ("Missing bot_token"). Only org-provided services escalate — a plain
-  // personal service reading another owner's credential would be a
-  // privilege escalation, so its miss stays a miss.
-  const orgFallback =
-    declared?.requires?.orgCredential === true && ctx.orgId
-      ? { type: "org" as const, id: ctx.orgId }
-      : undefined;
+  // User→org owner precedence + 1Password reference resolution, matching
+  // `engine/host.ts`. A user-owned run reads the user row first and falls
+  // back to the org row; an org-owned run reads the org row only.
   const baseProvider =
     credentialService === "github"
       ? buildGithubCredentialProvider(opts, req, ctx, owner)
-      : buildCredentialProvider(opts.credentials, owner, credentialService, orgFallback);
+      : buildCredentialProvider(opts, ctx, owner, credentialService);
   // Identity enrichment, the second half of the session path's slack branch
   // (`engine/host.ts`): the resolved token alone cannot answer "may the run
   // owner read this private channel" — `slack.dm_owner` and the private-
@@ -549,22 +549,32 @@ function credentialOwnerFor(owner: Principal): CredentialOwner | null {
   return null;
 }
 
+/**
+ * Non-github `CredentialProvider` — routes through the shared
+ * owner-precedence contract (`services/credential-resolution.ts`)
+ * instead of a raw `CredentialStore.get`. A user-owned run resolves via
+ * `resolveUserCredentialRead` (user row shadows org row, `owner.id` as the
+ * acting user); an org-owned run resolves via `resolveOrgCredentialRead`
+ * (org row only), with `ctx.userId` — the run's actor bookkeeping field —
+ * threaded through for a personal-tokenScope 1Password reference to resolve
+ * against. Either path fills a `metadata.onepassword` row's secret when
+ * `opts.onePassword` is wired; absent onePassword or a non-reference row
+ * passes through raw.
+ */
 function buildCredentialProvider(
-  store: CredentialStore,
+  opts: ActionInvokerOpts,
+  ctx: ActionInvocationContext,
   owner: CredentialOwner,
   defaultService: string,
-  // Org owner to fall back to when `owner`'s own read misses — set only for
-  // an org-provided (`requires.orgCredential`) service, and applied only to
-  // that same service so an incidental read of another service can't reach
-  // the org's credentials. Mirrors `engine/host.ts`'s user→org escalation.
-  orgFallback?: CredentialOwner,
 ): CredentialProvider {
+  const deps = { credentials: opts.credentials, onePassword: opts.onePassword };
   return {
     async get(service?: string): Promise<Credential | null> {
       const svc = service ?? defaultService;
       const stored =
-        (await store.get(owner, svc)) ??
-        (orgFallback && svc === defaultService ? await store.get(orgFallback, svc) : null);
+        owner.type === "user"
+          ? await resolveUserCredentialRead(deps, { orgId: ctx.orgId, userId: owner.id }, svc)
+          : await resolveOrgCredentialRead(deps, { orgId: ctx.orgId, userId: ctx.userId }, svc);
       if (!stored) return null;
       const accessToken = stored.accessToken ?? stored.apiKey ?? "";
       if (accessToken === "") return null;
@@ -650,7 +660,7 @@ function buildGithubCredentialProvider(
         service !== "github" &&
         service !== GITHUB_INSTALLATION_CREDENTIAL_SERVICE
       ) {
-        return buildCredentialProvider(opts.credentials, owner, service).get(service);
+        return buildCredentialProvider(opts, ctx, owner, service).get(service);
       }
       const tokenDeps = opts.githubTokenDeps;
       if (!tokenDeps) {

@@ -10,7 +10,7 @@ import {
 import { useConnectGithub, useDisconnectGithub } from "~/api/repos";
 import { useCredentials, useDisconnectCredential } from "~/api/integrations";
 import { useGithubApp } from "~/api/settings";
-import { ApiError } from "~/api/client";
+import { ApiError, apiErrorMessage } from "~/api/client";
 import { Section } from "~/components/settings/section";
 import { FieldRow } from "~/components/settings/field-row";
 import { Badge, Button, Spinner, Switch } from "~/components/primitives";
@@ -291,7 +291,13 @@ function CredentialsListSection() {
   const credentialsQ = useCredentials();
   const disconnect = useDisconnectCredential();
 
-  const others = (credentialsQ.data?.credentials ?? []).filter((c) => c.service !== "github");
+  // `github` gets its own richer row above; `onepassword` (the reserved
+  // service holding the personal service-account token itself) is surfaced
+  // by `PersonalTokenRow` instead — this list is every OTHER credential,
+  // including 1Password reference-backed ones (badge below).
+  const others = (credentialsQ.data?.credentials ?? []).filter(
+    (c) => c.service !== "github" && c.service !== "onepassword",
+  );
 
   return (
     <Section title="Other credentials" description="Manually connected services.">
@@ -313,6 +319,10 @@ function CredentialsListSection() {
             {cred.identityOnly && <Badge variant="neutral">Identity only</Badge>}
             {cred.refreshFailedAt && <Badge variant="danger">Refresh failed</Badge>}
             {isExpired(cred) && <Badge variant="danger">Expired</Badge>}
+            {/* Reference-backed credentials have no inline secret to edit —
+                only the reference itself, shown as a badge, and deletion via
+                the same Revoke control every other credential uses. */}
+            {cred.onepasswordRef && <Badge variant="accent">{cred.onepasswordRef}</Badge>}
             <Button
               type="button"
               variant="ghost"
@@ -320,7 +330,7 @@ function CredentialsListSection() {
               disabled={disconnect.isPending}
               onClick={() => {
                 if (!confirm(`Revoke ${cred.service}?`)) return;
-                disconnect.mutate(cred.service);
+                disconnect.mutate({ service: cred.service });
               }}
             >
               {disconnect.isPending ? "Revoking…" : `Revoke ${cred.service}`}
