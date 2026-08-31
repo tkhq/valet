@@ -271,10 +271,11 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
 
   return (
     <>
-      {/* `pr-12` reserves room for the AppShell's collapse toggle, which
-          floats at the aside's top-right corner (absolute, so it doesn't
-          contribute to the sidebar's intrinsic max-content width). */}
-      <div className="pl-2 pr-12 pt-2">
+      {/* Match the search field below (`px-2`). The collapse toggle no
+          longer floats over the sidebar — it now sits in the top nav
+          (see `SidebarControls` in `app-shell.tsx`), so there is nothing
+          left to reserve room for at the aside's top-right corner. */}
+      <div className="px-2 pt-2">
         <button
           type="button"
           onClick={() => void createAndNavigate()}
