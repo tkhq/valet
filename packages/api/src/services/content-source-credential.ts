@@ -107,7 +107,7 @@ const CONFIG_SKILL_SOURCE_PREFIX = "skillsrc_cfg_";
  * the org App. See the file comment: a `skillsrc_cfg_*` team row has no
  * adding user, so the `created_by` path would stay anonymous.
  */
-function usesOrgApp(source: SkillSourceRow): boolean {
+function usesOrgApp(source: ContentSourceRow): boolean {
   return (
     source.ownerType === "org" ||
     (source.ownerType === "team" && source.id.startsWith(CONFIG_SKILL_SOURCE_PREFIX))

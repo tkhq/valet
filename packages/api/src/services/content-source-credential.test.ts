@@ -258,7 +258,7 @@ describe("resolveContentSourceCredential", () => {
         }),
       });
 
-      const credential = await resolveSkillSourceCredential(
+      const credential = await resolveContentSourceCredential(
         deps(),
         sourceRow({
           id: "skillsrc_cfg_deadbeef0001",
@@ -273,7 +273,7 @@ describe("resolveContentSourceCredential", () => {
 
     it("names the App install when a config-managed team source has no App", async () => {
       fixture = startGithubFixture();
-      const credential = await resolveSkillSourceCredential(
+      const credential = await resolveContentSourceCredential(
         deps(),
         sourceRow({
           id: "skillsrc_cfg_deadbeef0001",
