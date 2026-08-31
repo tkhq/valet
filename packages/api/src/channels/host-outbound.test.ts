@@ -845,13 +845,20 @@ describe("ChannelHost.attentionDeliverer", () => {
         kind: "approval",
         sessionId: "sess-foreign",
         href: "/sessions/sess-foreign",
-        gate: { id: "gate-foreign", actions: [{ id: "approve", label: "Approve" }] },
+        gate: {
+          id: "gate-foreign",
+          actions: [{ id: "approve", label: "Approve" }],
+          fields: [{ label: "Tool", value: "`fake.do_thing`" }],
+        },
       }),
     );
 
     expect(fakeTransport.gatePrompts).toHaveLength(0);
     expect(fakeTransport.sent).toHaveLength(1);
     expect(fakeTransport.sent[0]?.message.markdown).toContain("Open in Valet");
+    // The plain summary still names WHAT was requested — the digested body
+    // alone no longer carries the tool id.
+    expect(fakeTransport.sent[0]?.message.markdown).toContain("**Tool:** `fake.do_thing`");
   });
 
   it("a prompt recorded AFTER its gate settled is edited immediately, not left with live buttons", async () => {

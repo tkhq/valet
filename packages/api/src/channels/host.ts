@@ -635,11 +635,9 @@ export class ChannelHost {
     // tool_id/args JSON dump; the card shows the summary plus labeled
     // fields instead, with a link for the full request.
     const digest = digestGate(gate);
-    let body = digest.body;
-    if (this.deps.publicUrl) {
-      const link = `[Open in Valet](${this.deps.publicUrl}${attentionHref(sessionId)})`;
-      body = body === undefined ? link : `${body}\n\n${link}`;
-    }
+    const link = this.openInValetLink(attentionHref(sessionId));
+    const body =
+      link === undefined ? digest.body : digest.body === undefined ? link : `${digest.body}\n\n${link}`;
     await this.sendAndRecordGatePrompt(
       transport,
       mapped.conversationKey,
@@ -1093,17 +1091,31 @@ export class ChannelHost {
     };
   }
 
+  /** The one composer of the web deep link, shared by every outbound path. */
+  private openInValetLink(href: string): string | undefined {
+    return this.deps.publicUrl ? `[Open in Valet](${this.deps.publicUrl}${href})` : undefined;
+  }
+
   /** Body-only markdown (no title) for gate prompts, which render the title themselves. */
   private attentionBody(event: AttentionEvent): string | undefined {
     let markdown = event.body ?? "";
-    if (event.href && this.deps.publicUrl) {
-      markdown += `${markdown ? "\n\n" : ""}[Open in Valet](${this.deps.publicUrl}${event.href})`;
-    }
+    const link = event.href ? this.openInValetLink(event.href) : undefined;
+    if (link) markdown += `${markdown ? "\n\n" : ""}${link}`;
     return markdown === "" ? undefined : markdown;
   }
 
+  /**
+   * Plain-summary rendering, for events delivered without an interactive
+   * prompt. A gate event's digested fields ride along here too: the
+   * audience for this path (a recipient who cannot resolve the gate) still
+   * needs to see WHAT was requested, and the digested body alone no longer
+   * carries the tool id or args.
+   */
   private attentionMarkdown(event: AttentionEvent): string {
+    const fields = event.gate?.fields?.length
+      ? event.gate.fields.map((f) => `**${f.label}:** ${f.value}`).join("\n")
+      : undefined;
     const rest = this.attentionBody(event);
-    return rest === undefined ? `**${event.title}**` : `**${event.title}**\n\n${rest}`;
+    return [`**${event.title}**`, fields, rest].filter((part) => part !== undefined).join("\n\n");
   }
 }

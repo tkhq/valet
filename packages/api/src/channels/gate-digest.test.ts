@@ -48,10 +48,28 @@ describe("digestGate", () => {
     expect(digest.fields?.at(-1)).toEqual({ label: "More", value: "+3 more parameters in Valet" });
   });
 
-  it("omits the body when the gate carries no summary, rather than dumping JSON", () => {
+  it("falls back to naming the tool when the gate carries no summary, rather than dumping JSON or going blank", () => {
     const digest = digestGate({ ...TOOL_GATE, context: { ...TOOL_GATE.context, summary: "  " } });
-    expect(digest.body).toBeUndefined();
+    expect(digest.body).toBe("Requested: `github.create_pr`");
     expect(digest.fields?.[0]).toEqual({ label: "Tool", value: "`github.create_pr`" });
+  });
+
+  it("swaps embedded backticks in JSON values so they cannot break the code span", () => {
+    const digest = digestGate({
+      ...TOOL_GATE,
+      context: { ...TOOL_GATE.context, args: { cmd: ["echo `whoami`"] } },
+    });
+    expect(digest.fields).toContainEqual({ label: "cmd", value: '`["echo ʼwhoamiʼ"]`' });
+  });
+
+  it("bounds arg labels so a runaway key cannot blow a transport's field cap", () => {
+    const digest = digestGate({
+      ...TOOL_GATE,
+      context: { ...TOOL_GATE.context, args: { ["k".repeat(200)]: 1 } },
+    });
+    const label = digest.fields?.at(-1)?.label ?? "";
+    expect(label.length).toBeLessThanOrEqual(60);
+    expect(label.endsWith("…")).toBe(true);
   });
 
   it("passes a gate without tool context through untouched (ask_approval)", () => {

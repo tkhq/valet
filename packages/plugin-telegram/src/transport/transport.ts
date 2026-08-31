@@ -14,7 +14,7 @@ import type {
   TransportContext,
 } from "@valet/engine";
 import { TelegramApi } from "./api.js";
-import { markdownToTelegramHtml } from "./format.js";
+import { escapeTelegramHtml, markdownToTelegramHtml } from "./format.js";
 
 const MAX_FILE_BYTES = 20 * 1024 * 1024; // Bot API getFile limit
 const COMMAND_RE = /^\/(\w+)(?:@\w+)?(?:\s+([\s\S]*))?$/;
@@ -79,6 +79,14 @@ function mediaOf(m: TgMessage): InboundChannelMedia[] | undefined {
 }
 
 const ACTION_EMOJI: Record<string, string> = { approve: "✅ ", deny: "❌ " };
+
+/** A gate field value as literal HTML. The digest wraps structured values in
+ * backticks; map that one intended marker to <code> and escape everything
+ * else verbatim. */
+function fieldValueHtml(value: string): string {
+  const code = /^`([^`]*)`$/.exec(value);
+  return code ? `<code>${escapeTelegramHtml(code[1])}</code>` : escapeTelegramHtml(value);
+}
 
 export class TelegramTransport implements ChannelTransport {
   readonly channelType = "telegram";
@@ -188,10 +196,16 @@ export class TelegramTransport implements ChannelTransport {
   async sendGatePrompt(conversationKey: string, gate: ChannelGatePrompt): Promise<GatePromptRef> {
     const chatId = chatIdFromConversationKey(conversationKey);
     // Telegram has no field layout; render the host's pre-digested fields as
-    // label/value lines so the card shows the same facts Slack's does.
-    const fieldLines = (gate.fields ?? []).map((f) => `**${f.label}:** ${f.value}`).join("\n");
-    const md = [`**${gate.title}**`, gate.body, fieldLines].filter((part) => part).join("\n\n");
-    const html = markdownToTelegramHtml(md);
+    // label/value lines so the card shows the same facts Slack's does. The
+    // lines are hand-built HTML, NOT markdown-converted: arg content is
+    // model/third-party controlled, and the converter would turn a crafted
+    // "[text](url)" value into a live spoofed link. The digest's own
+    // backtick wrapper around structured values maps to <code> here.
+    const fieldLines = (gate.fields ?? [])
+      .map((f) => `<b>${escapeTelegramHtml(f.label)}:</b> ${fieldValueHtml(f.value)}`)
+      .join("\n");
+    const md = [`**${gate.title}**`, gate.body].filter((part) => part).join("\n\n");
+    const html = fieldLines === "" ? markdownToTelegramHtml(md) : `${markdownToTelegramHtml(md)}\n\n${fieldLines}`;
     const buttons = gate.actions.map((a) => ({
       text: `${ACTION_EMOJI[a.id] ?? ""}${a.label}`,
       callback_data: `g|${a.id}`,
@@ -207,8 +221,11 @@ export class TelegramTransport implements ChannelTransport {
       // Telegram's omission semantics for reply_markup on editMessageText are
       // ambiguous (community reports disagree), so clear the keyboard
       // explicitly rather than relying on it being dropped implicitly.
+      // Escape, don't markdown-convert: the label carries a user display
+      // name, and the converter would turn "[text](url)" in a name into a
+      // live link inside the edited approval message.
       await this.api.editMessageText({
-        chatId, messageId, html: markdownToTelegramHtml(resolution.label),
+        chatId, messageId, html: escapeTelegramHtml(resolution.label),
         replyMarkup: { inline_keyboard: [] },
       });
     } catch (err) {

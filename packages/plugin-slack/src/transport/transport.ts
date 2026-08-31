@@ -39,12 +39,18 @@ import {
   type SuggestedPrompt,
   type TransportContext,
 } from "@valet/engine";
-import { buildContentBlocks, SLACK_MAX_BLOCKS, SLACK_TEXT_LIMIT } from "../message-chunking.js";
+import {
+  buildContentBlocks,
+  SLACK_HEADER_LIMIT,
+  SLACK_MAX_BLOCKS,
+  SLACK_SECTION_FIELD_LIMIT,
+  SLACK_TEXT_LIMIT,
+} from "../message-chunking.js";
 import { SKIP_SUBTYPES } from "../subtypes.js";
 import { SlackApi, SlackApiError, SLACK_MARKDOWN_TEXT_LIMIT } from "./api.js";
 import { fetchThreadTranscript } from "./thread-context.js";
 import { enrichSlackText } from "./text-enrich.js";
-import { markdownToSlackMrkdwn, neutralizeSlackMentions } from "./format.js";
+import { escapeMrkdwn, markdownToSlackMrkdwn, neutralizeSlackMentions } from "./format.js";
 import { verifySlackSignatureSync } from "./verify.js";
 
 const MAX_IMAGE_DOWNLOAD_BYTES = 10 * 1024 * 1024; // 10 MB (images prefer thumbnails anyway)
@@ -54,19 +60,10 @@ const MAX_FILE_DOWNLOAD_BYTES = 25 * 1024 * 1024; // 25 MB (PDFs, documents)
  * grow faster than per-DM keys, so allow for more active threads. */
 const MAX_TRACKED_ENTRIES = 2000;
 
-/** Slack limits: a header block's plain_text is 150 chars; a section holds 10 fields. */
-const SLACK_HEADER_LIMIT = 150;
-const SLACK_SECTION_FIELD_LIMIT = 10;
-
+/** Code-point-safe truncation: never splits a surrogate pair at the cap. */
 function truncatePlain(text: string, max: number): string {
-  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
-}
-
-/** Escape a plain-text line for an mrkdwn field — same rationale as the
- * escape inside `markdownToSlackMrkdwn`: `&`/`<` render control sequences
- * (mass pings, spoofed links) inert. */
-function escapeMrkdwn(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  const points = [...text];
+  return points.length > max ? `${points.slice(0, max - 1).join("")}…` : text;
 }
 
 /** Slack date token: renders the moment in each reader's own timezone. */
@@ -206,9 +203,12 @@ export class SlackTransport implements ChannelTransport {
 
   /** fileId → private download URLs captured at parseUpdate time. */
   private readonly fileRefs = new Map<string, SlackFileRef>();
-  /** `${conversationKey}#${messageId}` → gate title (mrkdwn), for the
-   * resolution edit: the update keeps the title and drops the prompt detail. */
-  private readonly gateTitles = new Map<string, string>();
+  /** `${conversationKey}#${messageId}` → the mrkdwn the resolution edit
+   * keeps. For a digested tool card that is the title alone (the field dump
+   * is noise once settled); for a gate without fields (ask_approval) it is
+   * title + body — the human-written body IS the record of what was
+   * approved, and the edit must not erase it from the thread. */
+  private readonly gateRetainedTexts = new Map<string, string>();
   /**
    * conversationKey → `thread_ts` of the most recent inbound turn.
    *
@@ -709,22 +709,33 @@ export class SlackTransport implements ChannelTransport {
    */
   async sendGatePrompt(conversationKey: string, gate: ChannelGatePrompt): Promise<GatePromptRef> {
     const target = this.mustParse(conversationKey);
-    const titleMrkdwn = markdownToSlackMrkdwn(`**${gate.title}**`);
+    // A blank title would make the header block invalid (plain_text needs at
+    // least one char) and chat.postMessage would reject the WHOLE card —
+    // buttons included. Nothing upstream guarantees a non-empty title
+    // (ask_approval's schema has no minLength), so substitute here.
+    const title = gate.title.trim() === "" ? "Approval needed" : gate.title;
+    const titleMrkdwn = markdownToSlackMrkdwn(`**${title}**`);
+    const bodyMrkdwn = gate.body ? markdownToSlackMrkdwn(gate.body) : undefined;
     // Notification fallback: title + body, no field detail.
-    const text = gate.body ? `${titleMrkdwn}\n\n${markdownToSlackMrkdwn(gate.body)}` : titleMrkdwn;
+    const text = bodyMrkdwn ? `${titleMrkdwn}\n\n${bodyMrkdwn}` : titleMrkdwn;
     const blocks: Record<string, unknown>[] = [
       // Header block, not a bold section: Slack renders it as a real title,
       // which is what makes the card scannable in a busy thread.
-      { type: "header", text: { type: "plain_text", text: truncatePlain(gate.title, SLACK_HEADER_LIMIT) } },
+      { type: "header", text: { type: "plain_text", text: truncatePlain(title, SLACK_HEADER_LIMIT) } },
     ];
-    if (gate.body) {
-      blocks.push({ type: "section", text: { type: "mrkdwn", text: markdownToSlackMrkdwn(gate.body) } });
+    if (bodyMrkdwn) {
+      blocks.push({ type: "section", text: { type: "mrkdwn", text: bodyMrkdwn } });
     }
     // Key parameters as labeled two-column fields — Slack caps a section at
-    // 10 fields, so overflow rolls into further sections.
+    // 10 fields, so overflow rolls into further sections. Labels and values
+    // are ESCAPED, not markdown-converted: arg content is model/third-party
+    // controlled, and the converter's [text](url) transform would turn a
+    // crafted value into a live spoofed link. With `<` escaped and no link
+    // transform, no mrkdwn control sequence can be formed; the backticks the
+    // digest adds around structured values still render as code natively.
     const fieldTexts = (gate.fields ?? []).map((f) => ({
       type: "mrkdwn",
-      text: `*${markdownToSlackMrkdwn(f.label)}*\n${markdownToSlackMrkdwn(f.value)}`,
+      text: `*${escapeMrkdwn(f.label)}*\n${escapeMrkdwn(f.value)}`,
     }));
     for (let i = 0; i < fieldTexts.length; i += SLACK_SECTION_FIELD_LIMIT) {
       blocks.push({ type: "section", fields: fieldTexts.slice(i, i + SLACK_SECTION_FIELD_LIMIT) });
@@ -759,23 +770,25 @@ export class SlackTransport implements ChannelTransport {
     // match, so re-key the ref by what the click will actually carry: the
     // thread we posted into, or the message's own ts for a root post.
     const refKey = conversationKeyFor(target.teamId, target.channelId, threadTs ?? res.ts);
-    this.remember(this.gateTitles, `${refKey}#${res.ts}`, titleMrkdwn);
+    this.remember(this.gateRetainedTexts, `${refKey}#${res.ts}`, gate.fields?.length ? titleMrkdwn : text);
     return { conversationKey: refKey, messageId: res.ts };
   }
 
   async updateGatePrompt(ref: GatePromptRef, resolution: ChannelGateResolution): Promise<void> {
     const target = this.mustParse(ref.conversationKey);
     const key = `${ref.conversationKey}#${ref.messageId}`;
-    const title = this.gateTitles.get(key);
-    // The edit REPLACES the prompt: title + outcome + timestamp, so a settled
-    // approval stops occupying the thread with the full request. The label
-    // arrives as plain text (it may carry a person's name), so escape it for
-    // mrkdwn; `<!date^…>` renders in the reader's own timezone.
+    const retained = this.gateRetainedTexts.get(key);
+    // The edit REPLACES the prompt with the retained text + outcome, so a
+    // settled tool card stops occupying the thread with its field dump
+    // (a field-less gate keeps its human-written body — see
+    // gateRetainedTexts). The label arrives as plain text (it may carry a
+    // person's name), so escape it for mrkdwn; `<!date^…>` renders in the
+    // reader's own timezone.
     const outcome =
       resolution.resolvedAtMs !== undefined
         ? `${escapeMrkdwn(resolution.label)} · ${slackDateToken(resolution.resolvedAtMs)}`
         : escapeMrkdwn(resolution.label);
-    const text = title !== undefined ? `${title}\n${outcome}` : outcome;
+    const text = retained !== undefined ? `${retained}\n${outcome}` : outcome;
     // Keep a single section block (which clears the buttons) and pin
     // parse: "none" — chat.update defaults parse to "client" and would
     // re-render link markup.
@@ -786,7 +799,7 @@ export class SlackTransport implements ChannelTransport {
       blocks: [{ type: "section", text: { type: "mrkdwn", text } }],
       parse: "none",
     });
-    this.gateTitles.delete(key);
+    this.gateRetainedTexts.delete(key);
   }
 
   /**

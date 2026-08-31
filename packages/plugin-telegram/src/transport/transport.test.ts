@@ -149,6 +149,42 @@ describe("TelegramTransport", () => {
     expect(edit?.body.reply_markup).toEqual({ inline_keyboard: [] });
   });
 
+  it("renders gate fields as literal HTML lines — no live links from arg values or labels", async () => {
+    await transport.sendGatePrompt("telegram:dm:99", {
+      gateId: "gate:f",
+      title: "Approve Create PR?",
+      body: "Open a PR",
+      fields: [
+        { label: "Tool", value: "`github.create_pr`" },
+        { label: "url", value: "[https://good.example](https://evil.example)" },
+      ],
+      actions: [{ id: "approve", label: "Approve" }],
+    });
+    const sent = fake.calls.find((c) => c.method === "sendMessage");
+    const text = String(sent?.body.text);
+    expect(text).toContain("<b>Tool:</b> <code>github.create_pr</code>");
+    // The spoofed-link markdown stays visible text, never an <a> tag.
+    expect(text).toContain("<b>url:</b> [https://good.example](https://evil.example)");
+    expect(text).not.toContain("<a ");
+  });
+
+  it("escapes the resolution label — a display name cannot inject a link into the edit", async () => {
+    const ref = await transport.sendGatePrompt("telegram:dm:99", {
+      gateId: "gate:e",
+      title: "Deploy?",
+      actions: [{ id: "approve", label: "Approve" }],
+    });
+    await transport.updateGatePrompt(ref, {
+      actionId: "approve",
+      label: "✅ Approve by [click](https://evil.example) <b>x</b>",
+    });
+    const edit = fake.calls.find((c) => c.method === "editMessageText");
+    const text = String(edit?.body.text);
+    expect(text).toContain("[click](https://evil.example)");
+    expect(text).toContain("&lt;b&gt;x&lt;/b&gt;");
+    expect(text).not.toContain("<a ");
+  });
+
   it("updateGatePrompt clears the keyboard when editMessageText fails, then rethrows", async () => {
     const ref = await transport.sendGatePrompt("telegram:dm:99", {
       gateId: "gate:x",

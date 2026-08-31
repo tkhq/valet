@@ -686,6 +686,41 @@ describe("gate prompts", () => {
     expect(body.text).toBe("*Approve Create PR?*\n\nOpen a pull request on tkhq/tk-brain.");
   });
 
+  it("field values render escaped, not markdown-converted — no live links from args", async () => {
+    const transport = makeTransport();
+    const turnKey = primeTurn(transport, "1700000000.000700");
+    await transport.sendGatePrompt(turnKey, {
+      gateId: "gate-81",
+      title: "Approve?",
+      fields: [
+        { label: "url", value: "[https://good.example](https://evil.example)" },
+        { label: "note", value: "a <!channel> & b" },
+      ],
+      actions: [{ id: "approve", label: "Approve" }],
+    });
+    const blocks = lastCall("chat.postMessage").blocks;
+    if (!Array.isArray(blocks)) throw new Error("expected blocks");
+    const section = blocks[1] as { fields?: Array<{ text: string }> };
+    // The spoofed-link markdown stays literal text, never an mrkdwn <url|label>.
+    expect(section.fields?.[0]?.text).toBe("*url*\n[https://good.example](https://evil.example)");
+    expect(section.fields?.[1]?.text).toBe("*note*\na &lt;!channel> &amp; b");
+  });
+
+  it("substitutes a placeholder for a blank title instead of posting an invalid header", async () => {
+    const transport = makeTransport();
+    const turnKey = primeTurn(transport, "1700000000.000700");
+    await transport.sendGatePrompt(turnKey, {
+      gateId: "gate-82",
+      title: "   ",
+      actions: [{ id: "approve", label: "Approve" }],
+    });
+    const body = lastCall("chat.postMessage");
+    const blocks = body.blocks;
+    if (!Array.isArray(blocks)) throw new Error("expected blocks");
+    expect(blocks[0]).toMatchObject({ type: "header", text: { type: "plain_text", text: "Approval needed" } });
+    expect(body.text).toBe("*Approval needed*");
+  });
+
   it("splits more than ten fields across sections (Slack's per-section cap)", async () => {
     const transport = makeTransport();
     const turnKey = primeTurn(transport, "1700000000.000700");
@@ -755,6 +790,22 @@ describe("gate prompts", () => {
     expect(text).not.toContain("deploy.ship");
     const blocks = body.blocks;
     expect(Array.isArray(blocks) ? blocks.length : 0).toBe(1);
+  });
+
+  it("keeps the human-written body through the edit for a gate without fields", async () => {
+    const transport = makeTransport();
+    const ref = await transport.sendGatePrompt(KEY, {
+      gateId: "gate-83",
+      title: "Proceed with rollback?",
+      body: "This reverts deploys 122-125 and drops migration 0007.",
+      actions: [{ id: "approve", label: "Approve" }],
+    });
+    await transport.updateGatePrompt(ref, { actionId: "approve", label: "✅ Approved by Conner" });
+    const text = String(lastCall("chat.update").text);
+    // An ask_approval body IS the record of what was approved — it must
+    // survive the edit; only digested tool cards collapse to the title.
+    expect(text).toContain("This reverts deploys 122-125");
+    expect(text).toContain("✅ Approved by Conner");
   });
 
   it("escapes a resolver name that carries mrkdwn control sequences", async () => {

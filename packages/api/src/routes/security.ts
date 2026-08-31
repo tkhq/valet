@@ -97,7 +97,7 @@ import {
 } from "../schema/index.js";
 import { canAdministerSession, canViewSession } from "../services/session-access.js";
 import { routeAttention, type AttentionDeps } from "../orchestrator/attention.js";
-import { parseAssistantSessionId } from "@valet/engine";
+import { attentionHref } from "../orchestrator/attention-wiring.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { resolveApiTokenOrNull, resolveChangedFiles, resolveRefSha } from "../bakes/source-service.js";
 import {
@@ -840,18 +840,6 @@ async function resolveToolSession(
 function sessionOwner(row: SessionRow): Principal {
   const type = row.ownerType === "team" || row.ownerType === "org" ? row.ownerType : "user";
   return { type, id: row.ownerId !== "" ? row.ownerId : row.userId };
-}
-
-/**
- * Where a person lands to open this session (mirrors attention-wiring's
- * `attentionHref`): an assistant's conversation lives at `/chat`, every other
- * session keeps the direct `/sessions/:id` link.
- */
-function attentionHref(sessionId: string): string {
-  const assistantId = parseAssistantSessionId(sessionId);
-  return assistantId === null
-    ? `/sessions/${encodeURIComponent(sessionId)}`
-    : `/chat?assistant=${encodeURIComponent(assistantId)}`;
 }
 
 /**
