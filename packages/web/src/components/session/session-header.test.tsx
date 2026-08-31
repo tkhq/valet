@@ -22,14 +22,17 @@ let renameMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 let setProfileMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 /** The header resolves a team assistant's title and its admin controls from
  * these two lists: the assistant says who owns the session, the team says
- * what that owner is called and what the caller may do. Both empty by
- * default so the pause/delete cases below keep exercising a plain personal
- * session. */
+ * what that owner is called and what the caller may do. Empty-but-RESOLVED
+ * by default so the pause/delete cases below exercise a plain personal
+ * session: the delete item fails closed until both the assistants list and
+ * the orchestrator probe have data (TKAI-253). Set either to `undefined`
+ * to model its query still in flight. */
 let teamsData: ListTeamsResponse = { teams: [] };
-let assistantsData: ListAssistantsResponse = { assistants: [] };
-/** Set to make a rendered session read as the viewer's own orchestrator —
- * the header matches this id against `session.id`. */
-let orchInfoData: { sessionId: string; name: string } | undefined = undefined;
+let assistantsData: ListAssistantsResponse | undefined = { assistants: [] };
+/** The viewer's own orchestrator probe — the header matches its sessionId
+ * against `session.id`. Defaults to a non-matching id so ordinary sessions
+ * read as ordinary. */
+let orchInfoData: { sessionId: string; name: string | null } | undefined = undefined;
 
 // importOriginal, not a bare replacement: vitest.config.ts sets
 // `isolate: false` to share the module registry across test files in a
@@ -112,7 +115,7 @@ beforeEach(() => {
   setProfileMutateAsync = vi.fn().mockResolvedValue({ ok: true });
   teamsData = { teams: [] };
   assistantsData = { assistants: [] };
-  orchInfoData = undefined;
+  orchInfoData = { sessionId: "assistant:asst_viewer_default", name: null };
 });
 
 describe("SandboxChip — suspended state", () => {
@@ -225,10 +228,13 @@ describe("SessionHeader — overflow menu", () => {
 });
 
 /**
- * TKAI-253 — the orchestrator page must not offer Delete session. The v1
- * holdover deleted the orchestrator and all of its threads; Replace sandbox
- * covers the reset. Team assistants keep their delete: the ⋯ menu is the
- * only surface that can remove one.
+ * TKAI-253 — the user's own assistant page must not offer Delete session.
+ * The v1 holdover deleted the orchestrator and all of its threads; Replace
+ * sandbox covers the reset. The item also FAILS CLOSED while the assistants
+ * list or the orchestrator probe is still loading — in that window every
+ * session looks like a plain session, and the gate must not flash the one
+ * destructive action on an assistant page. The team-assistant delete keeps
+ * working; see the team assistant describe below.
  */
 describe("SessionHeader — no delete on the user's own assistant", () => {
   it("hides Delete session on the orchestrator page, keeps Replace sandbox", async () => {
@@ -261,47 +267,37 @@ describe("SessionHeader — no delete on the user's own assistant", () => {
     expect(screen.queryByRole("menuitem", { name: /delete/i })).toBeNull();
   });
 
-  it("still offers a team admin the team-assistant delete", async () => {
-    teamsData = {
-      teams: [
-        {
-          id: "team_1",
-          orgId: "org_1",
-          name: "Platform",
-          origin: "local",
-          externalId: null,
-          createdAt: 1,
-          memberCount: 3,
-          callerRole: "admin",
-        },
-      ],
-    };
-    assistantsData = {
-      assistants: [
-        {
-          id: "asst_team",
-          owner: { type: "team", id: "team_1" },
-          sessionId: "assistant:asst_team",
-          isDefault: true,
-          createdAt: 1,
-        },
-      ],
-    };
+  it("fails closed while the assistants list is loading", async () => {
+    assistantsData = undefined;
     const user = userEvent.setup();
-    render(
-      <TooltipProvider>
-        <SessionHeader
-          session={{ ...baseSession(), id: "assistant:asst_team" }}
-          agentStatus="idle"
-          conn="open"
-        />
-      </TooltipProvider>,
-    );
+    renderHeader({ state: "ready", epoch: 1 });
 
     await user.click(screen.getByRole("button", { name: "Session menu" }));
-    expect(
-      screen.getByRole("menuitem", { name: /delete this team's assistant/i }),
-    ).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: /replace sandbox/i })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: /delete/i })).toBeNull();
+  });
+
+  it("fails closed while the orchestrator probe is loading", async () => {
+    orchInfoData = undefined;
+    const user = userEvent.setup();
+    renderHeader({ state: "ready", epoch: 1 });
+
+    await user.click(screen.getByRole("button", { name: "Session menu" }));
+    expect(screen.getByRole("menuitem", { name: /replace sandbox/i })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: /delete/i })).toBeNull();
+  });
+
+  it("surfaces a failed delete's error text instead of swallowing it", async () => {
+    deleteMutateAsync.mockRejectedValueOnce(new Error("a turn is running"));
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const user = userEvent.setup();
+    renderHeader({ state: "ready", epoch: 1 });
+
+    await user.click(screen.getByRole("button", { name: "Session menu" }));
+    await user.click(screen.getByRole("menuitem", { name: /delete session/i }));
+
+    await waitFor(() => expect(screen.getByText("a turn is running")).toBeTruthy());
+    confirmSpy.mockRestore();
   });
 });
 
@@ -646,6 +642,19 @@ describe("SessionHeader — team assistant", () => {
     renderTeamHeader();
     expect(screen.getByRole("button", { name: /pause/i })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Session menu" })).toBeTruthy();
+  });
+
+  // TKAI-253 removed delete for the user's OWN assistant only. A team's
+  // assistant keeps it: this menu is a team admin's only delete surface.
+  it("keeps the team-assistant delete for a team admin", async () => {
+    withTeam("admin");
+    const user = userEvent.setup();
+    renderTeamHeader();
+
+    await user.click(screen.getByRole("button", { name: "Session menu" }));
+    expect(
+      screen.getByRole("menuitem", { name: /delete this team's assistant/i }),
+    ).toBeTruthy();
   });
 
   it("keeps the controls on a personal session", () => {
