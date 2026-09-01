@@ -51,7 +51,7 @@ import {
   resolveInstallationApiToken,
   type GitHubTokenDeps,
 } from "../services/github-tokens.js";
-import { resolveOrgCredentialRead, resolveUserCredentialRead } from "../services/credential-resolution.js";
+import { orgFallbackPolicy, resolveOrgCredentialRead, resolveUserCredentialRead } from "../services/credential-resolution.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
 import { persistInvocationAudit, resolveActionPolicy, updateInvocationOutcome } from "../policies/service.js";
@@ -571,9 +571,20 @@ function buildCredentialProvider(
   return {
     async get(service?: string): Promise<Credential | null> {
       const svc = service ?? defaultService;
+      // Escalation applies to THIS provider's own service only. An incidental
+      // read of some other service must not reach the org's credentials, even
+      // when that other service is org-provided in its own right.
+      //
+      // The registry falls back to the plugins behind `actionPluginByService`,
+      // the same way the availability gate above resolves it: a caller that
+      // wires only the action map still gets declaration-driven escalation
+      // rather than silently losing it.
+      const registry =
+        opts.plugins ?? [...new Set([...opts.actionPluginByService.values()].map((e) => e.plugin))];
+      const fallback = svc === defaultService ? orgFallbackPolicy(registry, svc) : "none";
       const stored =
         owner.type === "user"
-          ? await resolveUserCredentialRead(deps, { orgId: ctx.orgId, userId: owner.id }, svc)
+          ? await resolveUserCredentialRead(deps, { orgId: ctx.orgId, userId: owner.id }, svc, fallback)
           : await resolveOrgCredentialRead(deps, { orgId: ctx.orgId, userId: ctx.userId }, svc);
       if (!stored) return null;
       const accessToken = stored.accessToken ?? stored.apiKey ?? "";

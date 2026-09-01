@@ -35,6 +35,9 @@ export async function resolveOpenAiCredential(
     { credentials, onePassword },
     { orgId: ctx.orgId, userId: ctx.userId },
     "openai",
+    // The org LLM-provider key above is the org-wide path for this service;
+    // a plain org `openai` row is not a second one. A reference still passes.
+    "reference-only",
   );
   if (direct) return direct;
   const envKey = env.OPENAI_API_KEY?.trim();

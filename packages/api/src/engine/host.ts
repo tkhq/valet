@@ -60,7 +60,7 @@ import { computeSpec, specHash } from "./sandbox-spec.js";
 import { buildPrepSteps } from "./prep-steps.js";
 import { securityToolPrepSteps } from "./security-bootstrap.js";
 import type { OnePasswordService } from "../services/onepassword.js";
-import { resolveUserCredentialRead } from "../services/credential-resolution.js";
+import { orgFallbackPolicy, resolveUserCredentialRead } from "../services/credential-resolution.js";
 import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
 import { getOrgModelPreferences } from "../services/org.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
@@ -1502,7 +1502,12 @@ export class EngineHost {
         // env. `null` keeps the openai tools hidden in list_tools
         // (requiresCredential gating).
         if (!db) {
-          return resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, service);
+          return resolveUserCredentialRead(
+            { credentials, onePassword },
+            { orgId, userId },
+            service,
+            orgFallbackPolicy(this.opts.plugins, service),
+          );
         }
         return resolveOpenAiCredential(db, credentials, { orgId, userId }, process.env, onePassword);
       }
@@ -1529,16 +1534,19 @@ export class EngineHost {
         }
         return { type: "oauth2", accessToken: resolved.token };
       }
-      if (service === "slack") {
-        const stored = await resolveUserCredentialRead(
-          { credentials, onePassword },
-          { orgId, userId },
-          service,
-        );
-        if (stored && db) return withSlackOwnerMetadata(db, userId, stored);
-        return stored;
-      }
-      return resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, service);
+      // Slack is not special-cased for ESCALATION any more: `plugin-slack`
+      // declares `requires.orgCredential`, so `orgFallbackPolicy` reaches the
+      // org row for it and for nothing that has not asked. What stays special
+      // is the identity link, which the private-channel check needs.
+      const fallback = orgFallbackPolicy(this.opts.plugins, service);
+      const stored = await resolveUserCredentialRead(
+        { credentials, onePassword },
+        { orgId, userId },
+        service,
+        fallback,
+      );
+      if (service === "slack" && stored && db) return withSlackOwnerMetadata(db, userId, stored);
+      return stored;
     };
   }
 

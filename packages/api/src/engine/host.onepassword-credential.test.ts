@@ -231,15 +231,11 @@ describe("EngineHost session 1Password credential resolution", () => {
     expect(cred?.accessToken).toBe("my-own-key");
   });
 
-  it("plain (non-reference) org-owned row NOW resolves in a session via the owner-precedence contract (Task 6)", async () => {
-    // Task 6 behavior change: the reference-rows-only org fallback is
-    // retired in favor of `resolveUserCredentialRead`'s shared
-    // owner-precedence contract, which falls back to the org row on a
-    // user-owner miss REGARDLESS of kind. A plain org-owned row (e.g. an
-    // admin-pasted org-wide bot token) is now session-visible — same trust
-    // model the org 1Password token already had. See
-    // `services/credential-resolution.ts`'s module doc for the full
-    // rationale.
+  it("plain (non-reference) org-owned row stays invisible to a session", async () => {
+    // The org row is reachable only for a service some plugin declared
+    // org-provided, or when the row is an admin's 1Password pointer. A plain
+    // org-owned `telegram` bot token is neither, so a member's session sees
+    // nothing — see `services/credential-resolution.ts`'s module doc.
     const credentials = fakeCredentialStore();
     const orgRow: StoredCredential = { type: "bot_token", apiKey: "org-bot-token" };
     await credentials.save({ type: "org", id: orgId }, "telegram", orgRow);
@@ -251,7 +247,7 @@ describe("EngineHost session 1Password credential resolution", () => {
     const session = await h.sessionFor("sess-op-plain-org-fallback", { userId, orgId, workspace: "/tmp" });
     const cred = await session.credentialProvider().get("telegram");
 
-    expect(cred?.accessToken).toBe("org-bot-token");
+    expect(cred).toBeNull();
   });
 
   it("onePassword wired but no githubTokenDeps: resolver is defined, 1Password rows resolve, github falls through to the raw store", async () => {

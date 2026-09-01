@@ -13,20 +13,26 @@
  *   - `ChannelHost`'s bot-token read (`channels/host.ts`) via
  *     `resolveOrgCredentialRead`
  *
- * DELIBERATE BEHAVIOR CHANGE: this retires the reference-rows-only org
- * fallback that used to live in `buildCredentialResolver` (session path).
- * That fallback resolved an org-owned row for a user-owner miss ONLY when
- * the row carried 1Password reference metadata; PLAIN org-owned rows (e.g.
- * an admin-pasted org-wide Linear API key) stayed invisible to sessions.
- * Under this contract, a user-owner miss on `resolveUserCredentialRead`
- * falls back to the org row regardless of kind — member sessions now read
- * ANY org-owned credential row when they have no row of their own for that
- * service, not just 1Password references. This mirrors the trust model the
- * org's shared 1Password token already has (an admin opts a credential into
- * org-wide sharing by creating the org-owned row at all) and matches
- * `github`'s existing user->org token-service tiering precedent.
+ * The escalation is DECLARED, not assumed. Every caller states an
+ * `OrgFallback`, and the default a caller derives from the plugin registry
+ * (`orgFallbackPolicy`) reaches an org row only for a service some plugin
+ * declared org-provided, or when the org row is an admin's 1Password
+ * pointer. A plain org row stays invisible to a member's session.
+ *
+ * That line is deliberate. Org-ownership is an addressing detail for
+ * machinery, not a statement of sharing: an org-owned `linear` row carries
+ * `metadata.webhookSecret` (`routes/linear-connect.ts`), which the inbound
+ * webhook verifies HMACs with, so handing whole org rows to member sessions
+ * would hand out that secret. Reads are not free either —
+ * `OAuthRefreshingCredentialStore.get` refreshes and writes back under the
+ * owner it read, so an org read is an org write.
+ *
+ * This replaces the `service === "slack"` literal the session path used to
+ * carry: `plugin-slack` declares `requires.orgCredential`, so the policy
+ * covers it without naming it.
  */
-import type { CredentialStore, StoredCredential } from "@valet/engine";
+import type { CredentialStore, StoredCredential, ValetPlugin } from "@valet/engine";
+import { findCredentialDeclaration } from "./integration-availability.js";
 import { ONEPASSWORD_SERVICE, onePasswordMeta, type OnePasswordService } from "./onepassword.js";
 
 /** Internal services that must never surface as ordinary session/workflow
@@ -75,15 +81,49 @@ async function resolveRow(
  * that case. Only on a user-row MISS does this fall back to the
  * `{ type: "org", id: ctx.orgId }` row for the same service.
  */
+/**
+ * How far a user-owner read may escalate when the user has no row of their own.
+ *
+ * `"org-provided"` — a plugin declared the service org-provided
+ * (`requires.orgCredential`), so the org row IS the configured credential for
+ * everybody. `"reference-only"` — the org row is reachable only when it is an
+ * admin's 1Password pointer, which is a deliberate act of sharing. `"none"` —
+ * no escalation, for an incidental read of some other service.
+ */
+export type OrgFallback = "none" | "reference-only" | "org-provided";
+
+/**
+ * The escalation policy for one service, read from the plugin declarations.
+ * An absent registry yields `"reference-only"`, so a caller that cannot see
+ * the declarations escalates less rather than more.
+ */
+export function orgFallbackPolicy(plugins: ValetPlugin[] | undefined, service: string): OrgFallback {
+  return findCredentialDeclaration(plugins ?? [], service)?.requires?.orgCredential === true
+    ? "org-provided"
+    : "reference-only";
+}
+
 export async function resolveUserCredentialRead(
   deps: CredentialReadDeps,
   ctx: Required<CredentialReadCtx>,
   service: string,
+  orgFallback: OrgFallback,
 ): Promise<StoredCredential | null> {
   if (isDeniedCredentialService(service)) return null;
   const userRow = await deps.credentials.get({ type: "user", id: ctx.userId }, service);
   if (userRow) return resolveRow(deps, userRow, ctx);
+  if (orgFallback === "none") return null;
+  // Skip the org read entirely when only a reference could qualify and no
+  // 1Password service is wired. `CredentialStore.get` is NOT side-effect free:
+  // `OAuthRefreshingCredentialStore` refreshes on read and writes the result
+  // back under the owner it read, so an org read is an org write.
+  if (orgFallback === "reference-only" && !deps.onePassword) return null;
   const orgRow = await deps.credentials.get({ type: "org", id: ctx.orgId }, service);
+  if (!orgRow) return null;
+  // A plain org row stays invisible. An org-owned `linear` row carries
+  // `metadata.webhookSecret` (`routes/linear-connect.ts`), so returning the
+  // whole row to every member's session would hand out the webhook HMAC.
+  if (orgFallback === "reference-only" && !onePasswordMeta(orgRow)) return null;
   return resolveRow(deps, orgRow, ctx);
 }
 

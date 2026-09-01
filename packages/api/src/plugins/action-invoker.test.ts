@@ -674,10 +674,10 @@ describe("buildActionInvoker", () => {
     expect(seenToken).toBe("my-own-tok");
   });
 
-  it("escalates to the org row on a user-row miss for every service", async () => {
-    // Owner-precedence (1Password plan, Task 6): a user-owner miss falls
-    // back to the org row for every service, not only org-provided ones.
-    // An admin who stored the org row shared it with members.
+  it("does NOT hand a member the org row for a service nobody declared org-provided", async () => {
+    // `personal` declares a plain `api_key` with no `requires.orgCredential`,
+    // so its org row is one person's configuration rather than the org's
+    // shared credential. A member's run must not act as whoever stored it.
     let seenToken: string | null = null;
     const action: PluginAction = {
       id: "personal.whoami",
@@ -710,8 +710,8 @@ describe("buildActionInvoker", () => {
       userOwner,
     );
 
-    expect(result).toEqual({ ok: true, result: { token: "someone-elses" } });
-    expect(seenToken).toBe("someone-elses");
+    expect(result).toEqual({ ok: true, result: { token: null } });
+    expect(seenToken).toBeNull();
   });
 });
 

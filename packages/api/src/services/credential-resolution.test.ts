@@ -67,7 +67,7 @@ describe("internal-service deny list", () => {
       throw new Error("must not resolve — reserved service");
     });
 
-    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "onepassword");
+    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "onepassword", "org-provided");
 
     expect(result).toBeNull();
   });
@@ -97,7 +97,7 @@ describe("internal-service deny list", () => {
       throw new Error("must not resolve — denied service");
     });
 
-    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "github_app");
+    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "github_app", "org-provided");
 
     expect(result).toBeNull();
   });
@@ -127,7 +127,7 @@ describe("internal-service deny list", () => {
       throw new Error("must not resolve — denied service");
     });
 
-    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "llm:prov_1");
+    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "llm:prov_1", "org-provided");
 
     expect(result).toBeNull();
   });
@@ -143,7 +143,7 @@ describe("resolveUserCredentialRead", () => {
       throw new Error("must not resolve — plain row");
     });
 
-    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "linear");
+    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "linear", "org-provided");
 
     expect(result).toBe(userRow);
   });
@@ -165,13 +165,13 @@ describe("resolveUserCredentialRead", () => {
       return { type: row.type, metadata: row.metadata, apiKey: `resolved-for-${ctx.userId}` };
     });
 
-    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "acme");
+    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "acme", "org-provided");
 
     expect(sawRow).toBe(userRow);
     expect(result?.apiKey).toBe(`resolved-for-${userId}`);
   });
 
-  it("user-row miss falls back to a PLAIN org row (deliberate behavior change)", async () => {
+  it("user-row miss reaches a plain org row when the service is org-provided", async () => {
     const credentials = fakeCredentialStore();
     const orgRow: StoredCredential = { type: "bot_token", apiKey: "org-bot-token" };
     await credentials.save({ type: "org", id: orgId }, "telegram", orgRow);
@@ -179,9 +179,55 @@ describe("resolveUserCredentialRead", () => {
       throw new Error("must not resolve — plain row");
     });
 
-    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "telegram");
+    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "telegram", "org-provided");
 
     expect(result).toBe(orgRow);
+  });
+
+  // The containment rule. A plain org row is machinery, not a shared secret:
+  // an org-owned `linear` row carries `metadata.webhookSecret`
+  // (`routes/linear-connect.ts`), so a service nobody declared org-provided
+  // must not hand its whole row to a member's session.
+  it("user-row miss does NOT reach a plain org row under reference-only", async () => {
+    const credentials = fakeCredentialStore();
+    const orgRow: StoredCredential = {
+      type: "api_key",
+      apiKey: "org-linear-key",
+      metadata: { webhookSecret: "must-not-leak" },
+    };
+    await credentials.save({ type: "org", id: orgId }, "linear", orgRow);
+    const onePassword = fakeOnePassword(async () => {
+      throw new Error("must not resolve — the org row must not even be read");
+    });
+
+    const result = await resolveUserCredentialRead(
+      { credentials, onePassword },
+      { orgId, userId },
+      "linear",
+      "reference-only",
+    );
+
+    expect(result).toBeNull();
+  });
+
+  it('"none" never reaches the org row, even for a reference', async () => {
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "org", id: orgId }, "acme", {
+      type: "api_key",
+      metadata: { onepassword: { reference: "op://v/i/f", tokenScope: "org" } },
+    });
+    const onePassword = fakeOnePassword(async () => {
+      throw new Error("must not resolve under 'none'");
+    });
+
+    const result = await resolveUserCredentialRead(
+      { credentials, onePassword },
+      { orgId, userId },
+      "acme",
+      "none",
+    );
+
+    expect(result).toBeNull();
   });
 
   it("user-row miss falls back to an org row carrying a 1Password reference", async () => {
@@ -197,7 +243,7 @@ describe("resolveUserCredentialRead", () => {
       return { type: row.type, metadata: row.metadata, apiKey: `org-secret-for-${ctx.userId}` };
     });
 
-    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "acme");
+    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "acme", "org-provided");
 
     expect(sawRow).toBe(orgRow);
     expect(result?.apiKey).toBe(`org-secret-for-${userId}`);
@@ -209,7 +255,7 @@ describe("resolveUserCredentialRead", () => {
       throw new Error("must not resolve — nothing stored");
     });
 
-    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "nope");
+    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "nope", "org-provided");
 
     expect(result).toBeNull();
   });
@@ -222,7 +268,7 @@ describe("resolveUserCredentialRead", () => {
     };
     await credentials.save({ type: "user", id: userId }, "acme", userRow);
 
-    const result = await resolveUserCredentialRead({ credentials }, { orgId, userId }, "acme");
+    const result = await resolveUserCredentialRead({ credentials }, { orgId, userId }, "acme", "org-provided");
 
     expect(result).toBe(userRow);
   });

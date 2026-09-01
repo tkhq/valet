@@ -24,6 +24,7 @@ import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
+import slackPlugin from "@valet/plugin-slack/plugin";
 import { linkIdentity } from "../channels/identity-links.js";
 import { EngineHost } from "./host.js";
 
@@ -53,6 +54,11 @@ describe("EngineHost session slack credential resolution", () => {
       eventStream: new InMemoryEventStream(),
       engineCredentials: credentials,
       db: appDb,
+      // Escalation to an org row is declaration-driven now
+      // (`orgFallbackPolicy`), and production always wires the registry
+      // (`providers/node.ts`). Without it slack would not escalate here, and
+      // the test would be asserting a wiring gap rather than the rule.
+      plugins: [slackPlugin],
       githubTokenDeps: {
         key: deriveSecretKey("cache-key"),
         apiUrl: fixtureUrl,
@@ -131,14 +137,17 @@ describe("EngineHost session slack credential resolution", () => {
     expect(cred?.metadata?.["team_id"]).toBe("TUSER");
   });
 
-  it("escalates to the org row on a user-row miss for every service", async () => {
+  it("does NOT escalate to the org row for a service no plugin declares org-provided", async () => {
     const { appDb, credentials } = await harness();
-    // Owner-precedence (1Password plan, Task 6): a user-owner miss falls
-    // back to the org row for every service, not only org-provided ones.
+    // The containment rule. `linear` is not declared org-provided, so its org
+    // row is machinery rather than a shared secret — and it carries
+    // `metadata.webhookSecret` in production (`routes/linear-connect.ts`),
+    // which the inbound webhook verifies HMACs with. A member's session that
+    // has no linear row of its own must see nothing.
     await credentials.save({ type: "org", id: orgId }, "linear", {
       type: "api_key",
       apiKey: "lin-org-key",
-      metadata: { workspace_id: "WORG" },
+      metadata: { workspace_id: "WORG", webhookSecret: "must-not-leak" },
     });
     await linkIdentity(appDb, { provider: "slack", externalId: "U42", userId });
 
@@ -148,7 +157,6 @@ describe("EngineHost session slack credential resolution", () => {
     const session = await h.sessionFor("sess-linear-org-fallback", { userId, orgId, workspace: "/tmp" });
     const cred = await session.credentialProvider().get("linear");
 
-    // Session.credentialProvider maps StoredCredential.apiKey → accessToken.
-    expect(cred?.accessToken).toBe("lin-org-key");
+    expect(cred).toBeNull();
   });
 });
