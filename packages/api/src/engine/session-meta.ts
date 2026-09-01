@@ -44,11 +44,11 @@ export interface SessionMetaSource {
    * Omitted by orchestrator/child callers. */
   docker?: boolean;
   /**
-   * Principal ownership from the app row. When `ownerType` is `"team"`,
-   * the loader emits `SessionMeta.ownerTeamId` so the build consults the
-   * team's default model (TKAI-255). Omitted by orchestrator/child callers
-   * — those builders receive the owner explicitly and never come through
-   * `buildSession`.
+   * Principal ownership, from the app row's `owner_type`/`owner_id` or from
+   * an engine `SessionData.owner`. When `ownerType` is `"team"`, the loader
+   * emits `SessionMeta.ownerTeamId` so the build consults the team's
+   * default model (TKAI-255). Every `sessionFor` caller should supply it —
+   * a caller that omits it silently skips the team tier on a first build.
    */
   ownerType?: string;
   ownerId?: string;

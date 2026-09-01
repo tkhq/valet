@@ -20,7 +20,7 @@ import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { requireUser } from "../middleware/auth.js";
 import { orgMembers, users } from "../schema/index.js";
-import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
+import { validateDefaultModelId } from "../services/model-catalog.js";
 import type { MeResponse, PatchMeResponse } from "../wire/types.js";
 
 export const meRouter = new Hono<AppEnv>();
@@ -68,16 +68,25 @@ meRouter.patch("/", async (c) => {
   if (!user) return c.json({ error: "unauthorized" }, 401);
   const { db } = c.var.providers;
 
-  let raw: Record<string, unknown>;
+  let parsed: unknown;
   try {
-    raw = (await c.req.json()) as Record<string, unknown>;
+    parsed = await c.req.json();
   } catch {
-    return c.json({ error: "invalid JSON body" }, 400);
+    return c.json({ error: "invalid JSON body. Send a JSON object, e.g. {\"name\": \"...\"}." }, 400);
   }
+  // `JSON.parse` accepts `null`/numbers/strings, which `Object.keys` and the
+  // `in` operator below would throw on — reject anything but a plain object.
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return c.json({ error: "invalid JSON body. Send a JSON object, e.g. {\"name\": \"...\"}." }, 400);
+  }
+  const raw = parsed as Record<string, unknown>;
 
   const unknownFields = Object.keys(raw).filter((k) => !PATCH_FIELDS.has(k));
   if (unknownFields.length > 0) {
-    return c.json({ error: `unknown field(s): ${unknownFields.join(", ")}` }, 400);
+    return c.json(
+      { error: `unknown field(s): ${unknownFields.join(", ")}. Send only name, avatarUrl, or defaultModel.` },
+      400,
+    );
   }
 
   // Keyed by db column name (`image`, not wire-level `avatarUrl`) since this
@@ -101,16 +110,14 @@ meRouter.patch("/", async (c) => {
   if ("defaultModel" in raw) {
     const defaultModel = raw.defaultModel;
     if (defaultModel !== null && typeof defaultModel !== "string") {
-      return c.json({ error: "defaultModel must be a string or null" }, 400);
+      return c.json(
+        { error: "defaultModel must be a model id from GET /api/models, or null to clear the override." },
+        400,
+      );
     }
-    if (defaultModel !== null) {
-      const { engineCredentials } = c.var.providers;
-      const entries = await buildOrgCatalog(db, engineCredentials, user.orgId);
-      const validIds = catalogValidIds(entries);
-      if (!validIds.has(defaultModel)) {
-        return c.json({ error: `unknown model: ${defaultModel}` }, 400);
-      }
-    }
+    const { engineCredentials } = c.var.providers;
+    const invalid = await validateDefaultModelId(db, engineCredentials, user.orgId, defaultModel);
+    if (invalid) return c.json({ error: invalid }, 400);
     update.defaultModel = defaultModel;
   }
 

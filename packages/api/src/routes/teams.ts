@@ -58,7 +58,7 @@ import {
   type TeamRow,
 } from "../schema/index.js";
 import { isOrgAdmin } from "../services/org.js";
-import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
+import { validateDefaultModelId } from "../services/model-catalog.js";
 import { ensureDefaultAssistantSession, listAssistantsForOwners } from "../assistants/service.js";
 import {
   addMember,
@@ -417,17 +417,29 @@ teamsRouter.patch("/:id", async (c) => {
   if (!team) return c.json({ error: "team not found" }, 404);
   if (!(await canAdministerTeam(db, id, user.id))) return c.json({ error: "team not found" }, 404);
 
-  let raw: Record<string, unknown>;
+  let parsed: unknown;
   try {
-    raw = (await c.req.json()) as Record<string, unknown>;
+    parsed = await c.req.json();
   } catch {
-    return c.json({ error: "invalid JSON body" }, 400);
+    return c.json({ error: "invalid JSON body. Send a JSON object, e.g. {\"defaultModel\": null}." }, 400);
   }
+  // `JSON.parse` accepts `null`/numbers/strings, which `Object.keys` and the
+  // `in` operator below would throw on — reject anything but a plain object.
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return c.json({ error: "invalid JSON body. Send a JSON object, e.g. {\"defaultModel\": null}." }, 400);
+  }
+  const raw = parsed as Record<string, unknown>;
   const unknownFields = Object.keys(raw).filter((k) => !PATCH_TEAM_FIELDS.has(k));
   if (unknownFields.length > 0) {
-    return c.json({ error: `unknown field(s): ${unknownFields.join(", ")}` }, 400);
+    return c.json(
+      { error: `unknown field(s): ${unknownFields.join(", ")}. Send only defaultModel.` },
+      400,
+    );
   }
 
+  // `team` from `loadTeamInOrg` above is fresh within this request; the
+  // write branch swaps it for the UPDATE's own returned row, so no re-read.
+  let fresh: TeamRow = team;
   if ("defaultModel" in raw) {
     const defaultModel = raw.defaultModel;
     if (defaultModel !== null && typeof defaultModel !== "string") {
@@ -436,18 +448,14 @@ teamsRouter.patch("/:id", async (c) => {
         400,
       );
     }
-    if (defaultModel !== null) {
-      const entries = await buildOrgCatalog(db, engineCredentials, user.orgId);
-      if (!catalogValidIds(entries).has(defaultModel)) {
-        return c.json({ error: `unknown model: ${defaultModel}. Send a model id from GET /api/models.` }, 400);
-      }
-    }
-    await db.update(teams).set({ defaultModel }).where(eq(teams.id, id));
+    const invalid = await validateDefaultModelId(db, engineCredentials, user.orgId, defaultModel);
+    if (invalid) return c.json({ error: invalid }, 400);
+    const updated = await db.update(teams).set({ defaultModel }).where(eq(teams.id, id)).returning();
+    // Zero rows = the team was deleted between the gate and the write.
+    if (!updated[0]) return c.json({ error: "team not found" }, 404);
+    fresh = updated[0];
   }
 
-  const rows = await db.select().from(teams).where(eq(teams.id, id)).limit(1);
-  const fresh = rows[0];
-  if (!fresh) return c.json({ error: "team not found" }, 404);
   const resp: PatchTeamResponse = { team: await rowToSummary(db, fresh, user.id) };
   return c.json(resp);
 });

@@ -103,11 +103,12 @@ Teams gain a nullable `teams.default_model`, the team-tier analog of `users.defa
 
 `overrideId ?? userDefaultModel ?? teamDefaultModel ?? firstActiveOrgPreference ?? this.opts.defaultModelId ?? "claude-haiku-4-5"`
 
-- **The team tier applies to team-owned sessions only.** A personal session never reads any team's preference: a user can belong to several teams, and none of them owns that session. The owning team reaches the resolver as `SessionMeta.ownerTeamId` (from the app row's `owner_type`/`owner_id` via `loadSessionMeta`), as the principal for team assistant sessions, and as `opts.owner` for child and workflow builds.
-- **User beats team.** The org sets the default; the team overrides the org; the member overrides both. Most-specific wins.
-- **Like the user tier, the team tier resolves straight through** — no active-provider walk. A team default on a disabled provider fails loudly at build, same as an explicit user default.
-- **Write path:** `PATCH /api/teams/:id { defaultModel }`, whitelist-strict like `PATCH /api/me`, validated against `catalogValidIds`, gated by `canAdministerTeam`. Not origin-gated: an IDP mirror's membership belongs to the identity provider, but `default_model` is Valet-local state no sync writes.
+- **The team tier applies to team-owned sessions only.** A personal session never reads any team's preference: a user can belong to several teams, and none of them owns that session. The owning team reaches the resolver as `SessionMeta.ownerTeamId` (from the app row's `owner_type`/`owner_id` via `loadSessionMeta`, including the orchestrator's hand-built meta sources), as the principal for team assistant sessions, and as `opts.owner` for child and workflow builds.
+- **User beats team, but only on sessions that user starts.** The org sets the default; the team overrides the org; the member overrides both for their own sessions. A SHARED principal-owned session (a team or org assistant, a team-owned child or workflow run) skips the user tier entirely: its resolved model persists (restore-no-clobber), so the first member to touch it would otherwise freeze their personal preference onto every other member.
+- **Like the org tier, the team tier walks past inactive providers.** A team default is imposed on members who did not pick it and cannot clear it, so a default whose provider was later disabled falls through to the org preference list (decision 6) instead of failing every member's build. Only the user's own explicit default resolves straight through and fails loudly.
+- **Write path:** `PATCH /api/teams/:id { defaultModel }`, whitelist-strict like `PATCH /api/me`, validated via the shared `validateDefaultModelId` (`services/model-catalog.ts`), gated by `canAdministerTeam`. Not origin-gated: an IDP mirror's membership belongs to the identity provider, but `default_model` is Valet-local state no sync writes.
 - **Restore is unchanged:** the persisted session model always wins (restore-no-clobber).
+- **Ownership stays per-field.** `SessionMeta.ownerTeamId` feeds the model cascade ONLY. The engine principal for a team-owned `buildSession` session remains `{ type: "user" }` (pre-existing), so credentials and skills stay user-scoped; do not read `ownerTeamId` as the session's principal.
 
 ## Non-goals
 

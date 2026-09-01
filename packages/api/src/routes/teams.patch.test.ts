@@ -114,6 +114,18 @@ describe("PATCH /api/teams/:id", () => {
     expect(res.status).toBe(400);
   });
 
+  it("JSON-valid non-object bodies 400 instead of 500", async () => {
+    api = await bootTestApi();
+    await seedTeam(api);
+
+    for (const body of [null, 42, true, "x", []]) {
+      const res = await patchTeam(api, body, "test-lead");
+      expect(res.status).toBe(400);
+      const parsed = (await res.json()) as { error: string };
+      expect(parsed.error).toMatch(/JSON object/);
+    }
+  });
+
   it("unknown field 400s rather than silently no-oping", async () => {
     api = await bootTestApi();
     await seedTeam(api);

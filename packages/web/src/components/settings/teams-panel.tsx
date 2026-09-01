@@ -30,6 +30,7 @@ import {
   useCreateTeam,
   useDeleteTeam,
   useMe,
+  useModels,
   useOrg,
   usePatchTeam,
   useRemoveTeamMember,
@@ -371,6 +372,15 @@ function TeamRow({
  */
 function TeamDefaultModel({ team, canMutate }: { team: TeamSummary; canMutate: boolean }) {
   const patchTeam = usePatchTeam();
+  // Same label chain as ModelCombobox (curated label, then catalog name,
+  // then raw id) so members and admins read the same words for one value.
+  const modelsQ = useModels();
+  const entry = modelsQ.data?.models.find((m) => m.id === team.defaultModel);
+  const readOnlyLabel =
+    curatedForCatalogId(team.defaultModel)?.label ??
+    entry?.name ??
+    team.defaultModel ??
+    "Organization default";
 
   return (
     <div className="ml-6 mt-2 border-l border-line pl-4">
@@ -385,15 +395,13 @@ function TeamDefaultModel({ team, canMutate }: { team: TeamSummary; canMutate: b
             />
           </div>
         ) : (
-          <span className="text-sm text-ink">
-            {curatedForCatalogId(team.defaultModel)?.label ?? team.defaultModel ?? "Organization default"}
-          </span>
+          <span className="text-sm text-ink">{readOnlyLabel}</span>
         )}
       </div>
       {canMutate && (
         <p className="text-xs text-muted">
-          Sessions in this team's workspace start on this model. A member's personal default
-          still wins for that member.
+          Sessions in this team's workspace start on this model, and so does the team
+          assistant. A member's personal default still wins for sessions that member starts.
         </p>
       )}
       {patchTeam.error != null && (

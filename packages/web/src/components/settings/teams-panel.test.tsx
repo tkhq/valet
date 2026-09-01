@@ -131,6 +131,14 @@ vi.mock("~/api/settings", () => ({
           providerName: "Anthropic",
           active: true,
         },
+        {
+          id: "custom_1/llama-3",
+          name: "Llama 3",
+          providerId: "custom_1",
+          providerKind: "openai_compatible",
+          providerName: "My Router",
+          active: true,
+        },
       ],
     },
     isLoading: false,
@@ -220,6 +228,15 @@ describe("TeamsPanel — team default model (TKAI-255)", () => {
     expect(screen.queryByRole("combobox", { name: "Default model" })).toBeNull();
     // Curated catalog entry → friendly label, not the raw id.
     expect(screen.getByText("Sonnet 4.5")).toBeTruthy();
+  });
+
+  it("plain member sees the catalog name for a non-curated model, not the raw id", () => {
+    callerRole = "member";
+    orgRole = "member";
+    teamDefaultModel = "custom_1/llama-3";
+    openTeam();
+    expect(screen.getByText("Llama 3")).toBeTruthy();
+    expect(screen.queryByText("custom_1/llama-3")).toBeNull();
   });
 
   it("plain member with no team override reads 'Organization default'", () => {

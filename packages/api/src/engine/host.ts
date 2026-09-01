@@ -854,13 +854,13 @@ export class EngineHost {
     });
 
     const existing = await this.opts.engineStore.getSession(sessionId);
-    const { model, spec: modelSpec } = await this.resolveModelForBuild(
-      existing,
-      meta.userId,
-      meta.orgId,
-      undefined,
-      meta.ownerTeamId,
-    );
+    // `userId` stays in the cascade even for a team-owned row: this
+    // builder makes member-started sessions, and the starting member's
+    // personal default wins over the team's for their own session.
+    const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, meta.orgId, {
+      userId: meta.userId,
+      ownerTeamId: meta.ownerTeamId,
+    });
     const resolveModel = this.makeResolveModel(meta.orgId);
     const profile = meta.profile ?? "headless";
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
@@ -2019,13 +2019,14 @@ export class EngineHost {
     }
 
     const existing = await this.opts.engineStore.getSession(sessionId);
-    const { model, spec: modelSpec } = await this.resolveModelForBuild(
-      existing,
-      meta.actorUserId,
-      meta.orgId,
-      undefined,
-      principal.type === "team" ? principal.id : undefined,
-    );
+    // A team/org assistant session is SHARED: whoever happens to wake it
+    // first is not its owner, so their personal default must not persist
+    // onto every other member — only a user-principal assistant reads the
+    // actor's own default (TKAI-255 review round).
+    const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, meta.orgId, {
+      userId: principal.type === "user" ? meta.actorUserId : undefined,
+      ownerTeamId: principal.type === "team" ? principal.id : undefined,
+    });
     const queueMode: "steer" | "followup" = principal.type === "user" ? "steer" : "followup";
     // `principal`, not `meta.actorUserId`: an assistant session belongs to
     // the principal and is shared by everyone who can reach it, exactly like
@@ -2679,7 +2680,19 @@ export class EngineHost {
   private async orgPreferredModel(orgId: string): Promise<string | undefined> {
     if (!this.opts.db) return undefined;
     const prefs = await getOrgModelPreferences(this.opts.db, orgId);
-    if (prefs.length === 0) return undefined;
+    return this.firstActivePreference(orgId, prefs);
+  }
+
+  /**
+   * The first entry of `prefs` whose provider is active, or `undefined`.
+   * Shared by the org tier and the team tier of the cascade — both are
+   * defaults imposed on people who did not pick them, so both must fall
+   * through past an inactive provider instead of failing every build
+   * (llm-providers design decision 6). Only the user's own explicit
+   * default resolves straight through and fails loudly.
+   */
+  private async firstActivePreference(orgId: string, prefs: string[]): Promise<string | undefined> {
+    if (!this.opts.db || prefs.length === 0) return undefined;
     const rows = await listLlmProviders(this.opts.db, orgId);
     for (const pref of prefs) {
       const { namespace } = parseModelId(pref);
@@ -2717,19 +2730,25 @@ export class EngineHost {
 
   /**
    * `teams.default_model` for the team that owns the session being built,
-   * or `undefined` when unset or the host has no `db`. Consulted only for
-   * team-owned sessions (TKAI-255) — a personal session never reads any
-   * team's preference, because a user can belong to several teams and none
-   * of them owns that session. Uncached, same as `userDefaultModel`.
+   * filtered through the same active-provider walk as the org tier — a
+   * team default whose provider was later disabled falls through to the
+   * org preference list instead of failing every member's session build
+   * (members did not pick it and cannot clear it). `undefined` when unset,
+   * inactive, or the host has no `db`. Consulted only for team-owned
+   * sessions (TKAI-255) — a personal session never reads any team's
+   * preference, because a user can belong to several teams and none of
+   * them owns that session. Uncached, same as `userDefaultModel`.
    */
-  private async teamDefaultModel(teamId: string): Promise<string | undefined> {
+  private async teamDefaultModel(orgId: string, teamId: string): Promise<string | undefined> {
     if (!this.opts.db) return undefined;
     const rows = await this.opts.db
       .select({ defaultModel: teams.defaultModel })
       .from(teams)
       .where(eq(teams.id, teamId))
       .limit(1);
-    return rows[0]?.defaultModel ?? undefined;
+    const pref = rows[0]?.defaultModel;
+    if (!pref) return undefined;
+    return this.firstActivePreference(orgId, [pref]);
   }
 
   /**
@@ -2747,21 +2766,25 @@ export class EngineHost {
    * reflects whatever `setModel` (or the original create-time model) set.
    * Only on create does the preference cascade apply (TKAI-255):
    * `overrideId ?? userDefault ?? teamDefault ?? orgPreferred ?? hardcoded`
-   * — most-specific wins, and `teamDefault` is consulted only when the
-   * session is team-owned (`ownerTeamId` present).
+   * — most-specific wins. The tiers are opt-in via `prefs`:
+   *
+   * - `userId` names the person whose personal default may apply. Callers
+   *   building a SHARED principal-owned session (team/org assistant, a
+   *   team-owned workflow or child) must omit it: the first member to
+   *   touch a shared session must not freeze their personal preference
+   *   onto everyone (the resolved model persists, restore-no-clobber).
+   * - `ownerTeamId` opts into the team tier for team-owned sessions.
    */
   private async resolveModelForBuild(
     existing: SessionData | null,
-    userId: string,
     orgId: string,
-    overrideId?: string,
-    ownerTeamId?: string,
+    prefs: { userId?: string; overrideId?: string; ownerTeamId?: string },
   ): Promise<BuildModel> {
     if (existing?.model) return this.resolveModelObject(orgId, existing.model);
     const id =
-      overrideId ??
-      (await this.userDefaultModel(userId)) ??
-      (ownerTeamId ? await this.teamDefaultModel(ownerTeamId) : undefined) ??
+      prefs.overrideId ??
+      (prefs.userId ? await this.userDefaultModel(prefs.userId) : undefined) ??
+      (prefs.ownerTeamId ? await this.teamDefaultModel(orgId, prefs.ownerTeamId) : undefined) ??
       (await this.orgPreferredModel(orgId)) ??
       this.opts.defaultModelId ??
       "claude-haiku-4-5";
@@ -2858,13 +2881,13 @@ export class EngineHost {
       : provisionedExtras.roles;
 
     const existing = await this.opts.engineStore.getSession(childSessionId);
-    const { model, spec: modelSpec } = await this.resolveModelForBuild(
-      existing,
-      opts.actorUserId,
-      opts.orgId,
-      opts.modelId,
-      opts.owner.type === "team" ? opts.owner.id : undefined,
-    );
+    // Team- and org-owned builds are shared: omit `userId` so the acting
+    // member's personal default cannot freeze onto the shared session.
+    const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, opts.orgId, {
+      userId: opts.owner.type === "user" ? opts.actorUserId : undefined,
+      overrideId: opts.modelId,
+      ownerTeamId: opts.owner.type === "team" ? opts.owner.id : undefined,
+    });
 
     const profile = opts.profile ?? "headless";
     const sandboxMint = await this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId, profile);
@@ -3042,13 +3065,13 @@ export class EngineHost {
     const skillsProvider = this.skillsProviderFor(opts.owner, opts.orgId);
 
     const existing = await this.opts.engineStore.getSession(sessionId);
-    const { model, spec: modelSpec } = await this.resolveModelForBuild(
-      existing,
-      opts.actorUserId,
-      opts.orgId,
-      opts.modelId,
-      opts.owner.type === "team" ? opts.owner.id : undefined,
-    );
+    // Team- and org-owned builds are shared: omit `userId` so the acting
+    // member's personal default cannot freeze onto the shared session.
+    const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, opts.orgId, {
+      userId: opts.owner.type === "user" ? opts.actorUserId : undefined,
+      overrideId: opts.modelId,
+      ownerTeamId: opts.owner.type === "team" ? opts.owner.id : undefined,
+    });
 
     const sandboxMint = await this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId, "headless");
     const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId);
