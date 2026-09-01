@@ -148,7 +148,11 @@ async function deliveryCount(a: TestApi, dedupeKey: string): Promise<number> {
   return rows.length;
 }
 
-async function seedSubscription(a: TestApi, eventKeys: string[]): Promise<void> {
+async function seedSubscription(
+  a: TestApi,
+  eventKeys: string[],
+  filters: { field: string; op: string; value: string | string[] }[] = [],
+): Promise<void> {
   const now = Date.now();
   await a.providers.db.insert(eventSubscriptions).values({
     id: `sub_${eventKeys[0].replace(/\W/g, "_")}`,
@@ -157,7 +161,7 @@ async function seedSubscription(a: TestApi, eventKeys: string[]): Promise<void> 
     ownerId: "local-org",
     name: "test subscription",
     eventKeys,
-    filters: [],
+    filters,
     target: { kind: "orchestrator" },
     enabled: true,
     createdBy: "local-user",
@@ -413,13 +417,30 @@ describe("POST /api/channels/slack/webhook", () => {
   it("ingests a signed app_mention and queues a delivery for a matching subscription", async () => {
     api = await bootTestApi({ plugins: [slackPlugin] });
     await seedRunningTransport(api);
-    await seedSubscription(api, ["slack.app_mention"]);
+    // The mention-scope rule (TKAI-299) requires the user filter at match
+    // time; the fixture's mentioner is U100.
+    await seedSubscription(api, ["slack.app_mention"], [{ field: "user", op: "eq", value: "U100" }]);
 
     const body = envelope(appMention(), "Ev-mention");
     expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
 
     await expect.poll(() => eventCount(api!, "Ev-mention"), { timeout: 5_000 }).toBe(1);
     await expect.poll(() => deliveryCount(api!, "Ev-mention"), { timeout: 5_000 }).toBe(1);
+  });
+
+  it("fails closed on a legacy app_mention subscription with no user filter", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    await seedRunningTransport(api);
+    // A row from before the mention-scope gate (TKAI-299): no user filter.
+    // It must NOT fire for anyone's mention, and the miss must be visible in
+    // the drop log rather than silent.
+    await seedSubscription(api, ["slack.app_mention"]);
+
+    const body = envelope(appMention(), "Ev-mention-legacy");
+    expect((await post(api.baseUrl, body, sign(body))).status).toBe(200);
+
+    await expect.poll(() => dropReasons(api!), { timeout: 5_000 }).toContain("filter_excluded");
+    expect(await eventCount(api, "Ev-mention-legacy")).toBe(0);
   });
 
   it("drops an update from another workspace even though its signature is valid", async () => {

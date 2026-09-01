@@ -13,8 +13,10 @@ import { and, eq, sql } from "drizzle-orm";
 import type { ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventSubscriptions } from "../schema/index.js";
-import { validateSubscription } from "../routes/events.js";
 import { catalogForService } from "../events/ingest.js";
+import { storedAnyChannelState } from "../events/mention-scope.js";
+import { validateSubscriptionWrite } from "../events/subscription-write.js";
+import type { SubscriptionFilter } from "../events/match.js";
 import {
   canAccessTriggerRow,
   canAccessTriggerRowInScope,
@@ -69,17 +71,17 @@ export async function createWorkflowTrigger(
   db: AppDb,
   plugins: ValetPlugin[],
   user: { id: string; orgId: string },
-  input: { workflowId: string; name: string; eventKeys: string[]; filters?: unknown[] },
+  input: { workflowId: string; name: string; eventKeys: string[]; filters?: unknown[]; anyChannel?: boolean },
 ): Promise<{ ok: true; trigger: WorkflowTriggerSummary } | { ok: false; error: string }> {
   const target = { kind: "workflow" as const, workflowId: input.workflowId };
-  const filters = input.filters ?? [];
-  const error = validateSubscription(plugins, {
-    name: input.name,
-    eventKeys: input.eventKeys,
-    filters,
-    target,
-  });
-  if (error) return { ok: false, error };
+  const write = await validateSubscriptionWrite(
+    db,
+    plugins,
+    { name: input.name, eventKeys: input.eventKeys, filters: input.filters ?? [], target },
+    { creatorUserId: user.id, anyChannel: input.anyChannel === true, matchChanged: true },
+  );
+  if (!write.ok) return { ok: false, error: write.error };
+  const filters = write.filters;
 
   // Owner-scoped, not just org-scoped: checking only `orgId` let any org
   // member wire event-driven automation onto a workflow they don't own.
@@ -183,6 +185,7 @@ export interface WorkflowTriggerPatch {
   eventKeys?: string[];
   filters?: unknown[];
   enabled?: boolean;
+  anyChannel?: boolean;
 }
 
 export async function updateWorkflowTrigger(
@@ -201,14 +204,30 @@ export async function updateWorkflowTrigger(
 
   const name = patch.name ?? current.name;
   const eventKeys = patch.eventKeys ?? current.eventKeys;
-  const filters = patch.filters ?? current.filters;
-  const error = validateSubscription(plugins, {
-    name,
-    eventKeys,
-    filters,
-    target: { kind: "workflow", workflowId: current.workflowId },
-  });
-  if (error) return { ok: false, status: 400, error };
+  // Mention scoping is keyed to the row's creator and skipped for a patch
+  // that does not change the match — same rule as the subscriptions PATCH
+  // route. The cast narrows filters a prior gated write stored.
+  const write = await validateSubscriptionWrite(
+    db,
+    plugins,
+    {
+      name,
+      eventKeys,
+      filters: patch.filters ?? current.filters,
+      target: { kind: "workflow", workflowId: current.workflowId },
+    },
+    {
+      creatorUserId: accessible.row.createdBy,
+      anyChannel: patch.anyChannel === true,
+      matchChanged: patch.filters !== undefined || patch.eventKeys !== undefined,
+      storedAnyChannel: storedAnyChannelState(
+        current.eventKeys,
+        current.filters as SubscriptionFilter[],
+      ),
+    },
+  );
+  if (!write.ok) return { ok: false, status: 400, error: write.error };
+  const filters = write.filters;
 
   const updated = await db
     .update(eventSubscriptions)

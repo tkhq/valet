@@ -237,6 +237,37 @@ describe("SubscriptionsPanel", () => {
     const toggle = screen.getByRole("switch", { name: "Disable Org watch" }) as HTMLButtonElement;
     expect(toggle.disabled).toBe(false);
   });
+
+  // Mention scoping (TKAI-299): a mention row must say whether it listens in
+  // named channels or everywhere. A non-mention row says neither.
+  it("labels a mention subscription's channel scope, named or any", () => {
+    subscriptionsData = {
+      subscriptions: [
+        subscription({
+          id: "sub_named",
+          name: "Named",
+          eventKeys: ["slack.app_mention"],
+          filters: [
+            { field: "channel", op: "eq", value: "C1", label: "#eng" },
+            { field: "user", op: "eq", value: "U1" },
+          ],
+        }),
+        subscription({
+          id: "sub_any",
+          name: "Anywhere",
+          eventKeys: ["slack.app_mention"],
+          filters: [{ field: "user", op: "eq", value: "U1" }],
+        }),
+      ],
+    };
+    render(
+      <TooltipProvider>
+        <SubscriptionsPanel />
+      </TooltipProvider>,
+    );
+    expect(screen.getByText(/only #eng/)).toBeTruthy();
+    expect(screen.getByText(/any channel/)).toBeTruthy();
+  });
 });
 
 /** The route owns the scope now, so the cases pass it in and read back

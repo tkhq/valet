@@ -8,9 +8,10 @@
  * splits it into a list at submit (`toWireFilters`), so the form never needs
  * a separate list widget.
  */
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import type { EventSubscriptionFilterWire } from "@valet/api/wire";
 import { useFilterOptions } from "~/api/events";
+import { useDebouncedValue } from "~/hooks/use-debounced-value";
 import { Button, Input } from "~/components/primitives";
 
 export type FilterOp = "eq" | "in" | "prefix" | "contains" | "regex";
@@ -322,16 +323,11 @@ function FilterValuePicker({
   onFreeText: (value: string) => void;
 }) {
   const [query, setQuery] = useState("");
-  const [debounced, setDebounced] = useState("");
+  // Debounce the typed query ~200ms so a keystroke burst is one lookup.
+  const debounced = useDebouncedValue(query, 200);
   // The results are a popover: shown while the search input has focus, hidden
   // otherwise, so the list never pushes the form open or spills out of it.
   const [open, setOpen] = useState(false);
-
-  // Debounce the typed query ~200ms so a keystroke burst is one lookup.
-  useEffect(() => {
-    const t = setTimeout(() => setDebounced(query), 200);
-    return () => clearTimeout(t);
-  }, [query]);
 
   // A dependsOn value is missing until its sibling row is filled. The picker
   // cannot scope the list without it, so it stays disabled and names the gap.

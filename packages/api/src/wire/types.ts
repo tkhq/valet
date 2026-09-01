@@ -2281,6 +2281,11 @@ export interface CreateWorkflowEventTriggerRequest {
   name: string;
   eventKeys: string[];
   filters?: unknown[];
+  /** Explicit opt-out of the channel requirement on a `slack.app_mention`
+   * subscription (see `events/mention-scope.ts`). Ignored for other keys.
+   * Not persisted: a stored mention subscription with no channel filter is
+   * the any-channel state. */
+  anyChannel?: boolean;
 }
 
 export interface UpdateWorkflowEventTriggerRequest {
@@ -2288,6 +2293,9 @@ export interface UpdateWorkflowEventTriggerRequest {
   eventKeys?: string[];
   filters?: unknown[];
   enabled?: boolean;
+  /** See `CreateWorkflowEventTriggerRequest.anyChannel`. Only consulted when
+   * the patch changes `filters` or `eventKeys`. */
+  anyChannel?: boolean;
 }
 
 export interface WorkflowEventTriggerResponse {
@@ -3724,6 +3732,11 @@ export interface EventSubscriptionFilterWire {
    * it. Persisted verbatim in the `filters` jsonb.
    */
   label?: string;
+  /**
+   * Optional display labels for an `in` list, aligned with `value` by index
+   * (a channel id list shown as "#eng, #ops"). Matching ignores it.
+   */
+  labels?: string[];
 }
 
 /** One provider-populated choice for a filter value (a Slack user, a repo). */
@@ -3813,6 +3826,11 @@ export interface CreateEventSubscriptionRequest {
   filters?: EventSubscriptionFilterWire[];
   target: EventSubscriptionTargetWire;
   enabled?: boolean;
+  /** Explicit opt-out of the channel requirement on a `slack.app_mention`
+   * subscription (see `events/mention-scope.ts`). Ignored for other keys.
+   * Not persisted: a stored mention subscription with no channel filter is
+   * the any-channel state. */
+  anyChannel?: boolean;
 }
 
 export type CreateEventSubscriptionResponse = EventSubscriptionWire;
@@ -3826,6 +3844,9 @@ export interface PatchEventSubscriptionRequest {
   eventKeys?: string[];
   filters?: EventSubscriptionFilterWire[];
   enabled?: boolean;
+  /** See `CreateEventSubscriptionRequest.anyChannel`. Only consulted when
+   * the patch changes `filters` or `eventKeys`. */
+  anyChannel?: boolean;
 }
 
 export type PatchEventSubscriptionResponse = EventSubscriptionWire;
