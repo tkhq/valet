@@ -1,5 +1,6 @@
 import { Type } from "typebox";
 import type { TSchema } from "typebox";
+import { storedToolResultText } from "../compaction.js";
 import { isDecisionGateExpired } from "../decision-gate.js";
 import type {
   ChildReader,
@@ -312,7 +313,9 @@ function renderNonTextParts(parts: MessagePart[], lines: string[]): void {
         lines.push("(no result recorded — the call was still in flight when this entry was read)");
       } else if (p.error) {
         lines.push(`error: ${p.error}`);
-      } else if (p.elided) {
+      } else if (p.elided && storedToolResultText(p) === undefined) {
+        // Only rows pruned before elision preserved the stored text lose the
+        // output; elided parts with preserved text render normally below.
         lines.push("(result elided to reclaim context; the original output is no longer available)");
       } else if (p.result !== undefined) {
         const text = renderToolResultText(p.result);

@@ -83,16 +83,18 @@ cut-point selection, and the post-compaction transcript rebuild.
 
 ### 5. The proactive trigger rehydrates from the DAG
 
-On rehydrate, the thread seeds `lastAssistantUsage` from the newest persisted
-assistant entry that carries `usage` — unless a `CompactionEntry` follows it,
-in which case the usage no longer describes the live context and the seed is
-skipped (mirrors `skipNextProactiveCheck`).
+On rehydrate, the thread arms a one-shot pre-turn check flag
+(`rehydratedCheckPending`) whenever the rebuilt transcript is non-empty.
+(TKAI-305 replaced the original `lastAssistantUsage` seeding: the trigger
+now estimates the rehydrated transcript directly, so no usage value is
+carried over and a trailing `CompactionEntry` needs no special case — the
+estimate already reflects the summary-plus-tail context.)
 
-The seed needs its own consumer: the regular proactive check runs only
-post-turn, so a seed alone would never protect the first post-restart turn.
-`runItemInner` therefore runs a one-shot PRE-turn check when the seed is
-present — if the persisted usage already exceeds usable, the thread compacts
-before the turn's LLM call. Two ordering rules keep the pass correct: it
+The flag needs its own consumer: the regular proactive check runs only
+post-turn, so the flag alone would never protect the first post-restart
+turn. `runItemInner` therefore runs a one-shot PRE-turn check when the flag
+is set — if the rehydrated transcript's estimate already exceeds usable,
+the thread compacts before the turn's LLM call. Two ordering rules keep the pass correct: it
 runs BEFORE the turn's user entry is appended (compaction rebuilds the agent
 transcript from the DAG, so an already-persisted user entry would enter the
 rebuild AND be prompted again — the model would see it twice), and it

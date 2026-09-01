@@ -32,10 +32,16 @@ async function waitFor(predicate: () => boolean, timeoutMs = 4000): Promise<void
   }
 }
 
+// Long enough that the live transcript's char-based estimate exceeds the
+// tiny fixtures' usable budget (contextWindow 50 → usable 45 tokens ≈ 180
+// chars). The proactive trigger measures the transcript estimate, not
+// provider-reported usage (TKAI-305).
+const OVER_BUDGET_PROMPT = "third prompt " + "x".repeat(400);
+
 describe("compaction: proactive (token threshold)", () => {
-  it("after a turn that pushes usage past usable, runs compaction and inserts a CompactionEntry", async () => {
+  it("after a turn that pushes the context estimate past usable, runs compaction and inserts a CompactionEntry", async () => {
     // Tiny model dimensions: usable = contextWindow - min(reserveCap, maxTokens) = 50 - 5 = 45.
-    // Faux's prompt-length estimator + a small prompt easily exceeds 45 tokens.
+    // OVER_BUDGET_PROMPT alone pushes the live transcript estimate past 45 tokens.
     const faux2 = registerFauxProvider({
       provider: "compact-proactive",
       models: [
@@ -113,7 +119,7 @@ describe("compaction: proactive (token threshold)", () => {
 
     // Trigger the third turn — its response reports high usage, kicking
     // off compaction.
-    const receipt = await session2.prompt("third prompt");
+    const receipt = await session2.prompt(OVER_BUDGET_PROMPT);
     await waitFor(
       () =>
         events2.some(
@@ -187,7 +193,7 @@ describe("compaction: proactive (token threshold)", () => {
       { id: "e-4", sessionId: session.id, threadId: thread.id, parentId: "e-3", type: "message", role: "assistant", content: "second response", createdAt: 4 },
     ]);
 
-    const receipt = await session.prompt("third prompt");
+    const receipt = await session.prompt(OVER_BUDGET_PROMPT);
     await waitFor(() =>
       events.some(
         (e) => e.event.type === "compaction_end" && e.event.threadId === receipt.threadId,
@@ -316,7 +322,7 @@ describe("compaction: auto-continue", () => {
       },
     ]);
 
-    const receipt = await session.prompt("third prompt");
+    const receipt = await session.prompt(OVER_BUDGET_PROMPT);
     // Wait for two turn_ends after the prompt: the original third turn,
     // then the auto-continue turn.
     await waitFor(
@@ -393,7 +399,7 @@ describe("compaction: auto-continue", () => {
       },
     ]);
 
-    const receipt = await session.prompt("third prompt");
+    const receipt = await session.prompt(OVER_BUDGET_PROMPT);
     await waitFor(
       () =>
         events.some(
@@ -509,7 +515,7 @@ describe("compaction: pruning persists via updateEntry", () => {
       },
     ]);
 
-    const receipt = await session.prompt("third prompt");
+    const receipt = await session.prompt(OVER_BUDGET_PROMPT);
     await waitFor(
       () =>
         events.some(
@@ -518,7 +524,9 @@ describe("compaction: pruning persists via updateEntry", () => {
         ),
     );
 
-    // Re-load entries from the store and verify a-1's tool_call.result is elided.
+    // Re-load entries from the store and verify a-1's tool_call is elided —
+    // and that the stored result text survived (TKAI-305: elision applies at
+    // render time; the summarizer still needs the text).
     const entries = await store.getEntries(session.id, thread.id);
     const a1 = entries.find((e) => e.id === "a-1");
     expect(a1?.type).toBe("message");
@@ -527,7 +535,7 @@ describe("compaction: pruning persists via updateEntry", () => {
       expect(tc?.type).toBe("tool_call");
       if (tc?.type === "tool_call") {
         expect(tc.elided).toBe(true);
-        expect(tc.result).toEqual({ elided: true, reason: "pruned" });
+        expect(tc.result).toBe(bigOutput);
       }
     }
 
@@ -574,13 +582,77 @@ describe("compaction: /compact instructions", () => {
   });
 });
 
+describe("compaction: summarizer input (TKAI-305)", () => {
+  const SUMMARY_WITH_NEW_SECTIONS =
+    "## Goal\n- t\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n### Done\n- (none)\n\n### In Progress\n- (none)\n\n### Blocked\n- (none)\n\n## Key Decisions\n- (none)\n\n## Agreed Approach\n- (none)\n\n## Active Tools & Skills\n- (none)\n\n## Next Steps\n- (none)\n\n## Critical Context\n- (none)\n\n## Relevant Files\n- (none)";
+
+  it("a pruned tool result still reaches the summarizer; the template carries the new sections", async () => {
+    const captured: string[] = [];
+    const faux = registerFauxProvider({
+      provider: "compact-elided-summary",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    faux.setResponses([
+      (ctx: { messages: Array<{ content: unknown }> }) => {
+        captured.push(JSON.stringify(ctx.messages));
+        return fauxAssistantMessage(SUMMARY_WITH_NEW_SECTIONS);
+      },
+    ]);
+    const result = await summarize({
+      headEntries: [
+        {
+          id: "u-1",
+          sessionId: "s",
+          threadId: "t",
+          parentId: null,
+          type: "message",
+          role: "user",
+          content: "load the deploy skill and plan the rollout",
+          createdAt: 1,
+        },
+        {
+          id: "a-1",
+          sessionId: "s",
+          threadId: "t",
+          parentId: "u-1",
+          type: "message",
+          role: "assistant",
+          content: "",
+          parts: [
+            {
+              type: "tool_call",
+              callId: "tc-1",
+              toolName: "bash",
+              status: "completed",
+              args: { command: "cat plan.md" },
+              // Elided by an earlier prune pass — the stored text survives.
+              result: "the settled plan is blue-green deploys",
+              elided: true,
+            },
+          ],
+          createdAt: 2,
+        },
+      ],
+      model: faux.getModel("tiny")!,
+    });
+    expect(result.summary).toContain("## Agreed Approach");
+    expect(captured).toHaveLength(1);
+    // The pruned output's text was fed to the summarizer, not the marker.
+    expect(captured[0]).toContain("the settled plan is blue-green deploys");
+    expect(captured[0]).not.toContain("[output elided to save context]");
+    // The prompt instructs the summarizer to keep approach + tool awareness.
+    expect(captured[0]).toContain("## Agreed Approach");
+    expect(captured[0]).toContain("## Active Tools & Skills");
+    faux.unregister();
+  });
+});
+
 describe("compaction: proactive trigger rehydration (restart)", () => {
-  it("seeds the trigger from the newest persisted assistant usage and compacts BEFORE the first post-restart turn", async () => {
-    // usable = contextWindow - min(reserveCap, maxTokens) = 100000 - 5; the
-    // persisted usage total (1,000,000) exceeds it, so the restored thread
-    // must compact before its first turn hits the model. The window is big
-    // enough that the turn's own (estimated) usage stays far under usable —
-    // any compaction observed here is the rehydration seed's doing.
+  it("compacts BEFORE the first post-restart turn when the rehydrated transcript exceeds usable", async () => {
+    // usable = contextWindow - min(reserveCap, maxTokens) = 100000 - 5. The
+    // persisted transcript estimates to ~112k tokens (450k chars / 4), so
+    // the restored thread must compact before its first turn hits the
+    // model. Any compaction observed here is the pre-turn check's doing.
     const faux = registerFauxProvider({
       provider: "compact-restart",
       models: [{ id: "tiny", name: "tiny", contextWindow: 100_000, maxTokens: 5 }],
@@ -621,8 +693,7 @@ describe("compaction: proactive trigger rehydration (restart)", () => {
         parentId: "e-1",
         type: "message",
         role: "assistant",
-        content: "first response",
-        usage: { input: 900_000, output: 100_000, cacheRead: 0, cacheWrite: 0, total: 1_000_000 },
+        content: "x".repeat(300_000), // ~75k estimated tokens
         createdAt: 2,
       },
       {
@@ -642,8 +713,7 @@ describe("compaction: proactive trigger rehydration (restart)", () => {
         parentId: "e-3",
         type: "message",
         role: "assistant",
-        content: "second response",
-        usage: { input: 950_000, output: 50_000, cacheRead: 0, cacheWrite: 0, total: 1_000_000 },
+        content: "y".repeat(150_000), // ~37.5k estimated tokens
         createdAt: 4,
       },
     ]);
@@ -698,7 +768,7 @@ describe("compaction: proactive trigger rehydration (restart)", () => {
     faux.unregister();
   });
 
-  it("skips the seed when a compaction entry follows the newest assistant usage", async () => {
+  it("does not compact after restart when a prior compaction already covers the transcript", async () => {
     const faux = registerFauxProvider({
       provider: "compact-restart-skip",
       models: [{ id: "tiny", name: "tiny", contextWindow: 100_000, maxTokens: 5 }],
@@ -739,14 +809,13 @@ describe("compaction: proactive trigger rehydration (restart)", () => {
         parentId: "e-1",
         type: "message",
         role: "assistant",
-        content: "first response",
-        usage: { input: 950_000, output: 50_000, cacheRead: 0, cacheWrite: 0, total: 1_000_000 },
+        content: "x".repeat(500_000), // huge, but covered by c-1 below
         createdAt: 2,
       },
       {
-        // The usage above predates this compaction — it no longer
-        // describes the live context, so the restored thread must NOT
-        // seed from it (a seed would trigger a spurious pre-turn pass).
+        // The rehydrated transcript replaces the covered entries with the
+        // short summary, so the pre-turn estimate stays far under usable —
+        // the restored thread must NOT run a spurious pre-turn pass.
         id: "c-1",
         sessionId: session1.id,
         threadId: thread1.id,
