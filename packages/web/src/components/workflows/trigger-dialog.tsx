@@ -205,6 +205,10 @@ export function TriggerDialog({
     createEvent.isPending ||
     updateEvent.isPending;
 
+  // Disable the submit button while the event catalog loads, so the user
+  // cannot fire the form before selectedEntry can be resolved.
+  const catalogLoading = kind === "event" && (catalogQ.isLoading || catalogQ.data === undefined);
+
   async function submit() {
     setServerError(null);
     setFormError(null);
@@ -278,6 +282,13 @@ export function TriggerDialog({
         }
       } else {
         // Event trigger.
+        // Block submit while the catalog is still loading: selectedEntry would
+        // be undefined for any key, so the channel-scope check below would
+        // silently pass and the server 400s instead.
+        if (catalogQ.isLoading || catalogQ.data === undefined) {
+          setFormError("The event catalog is still loading. Wait for it to load, then save again.");
+          return;
+        }
         const incomplete = incompleteFilterRow(filterRows);
         if (incomplete) {
           setFormError(`Enter a value for the "${incomplete}" filter, or remove the row.`);
@@ -641,7 +652,7 @@ export function TriggerDialog({
           >
             Cancel
           </Button>
-          <Button onClick={() => void submit()} disabled={isPending}>
+          <Button onClick={() => void submit()} disabled={isPending || catalogLoading}>
             {isPending ? (isEditing ? "Saving…" : "Creating…") : isEditing ? "Save" : "Create"}
           </Button>
         </DialogFooter>
