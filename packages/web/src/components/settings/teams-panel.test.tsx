@@ -218,7 +218,8 @@ describe("TeamsPanel — team default model (TKAI-255)", () => {
     teamDefaultModel = "anthropic/claude-sonnet-4-5";
     openTeam();
     expect(screen.queryByRole("combobox", { name: "Default model" })).toBeNull();
-    expect(screen.getByText("anthropic/claude-sonnet-4-5")).toBeTruthy();
+    // Curated catalog entry → friendly label, not the raw id.
+    expect(screen.getByText("Sonnet 4.5")).toBeTruthy();
   });
 
   it("plain member with no team override reads 'Organization default'", () => {

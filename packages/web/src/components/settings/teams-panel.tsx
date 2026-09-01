@@ -38,6 +38,7 @@ import {
   useTeams,
 } from "~/api/settings";
 import { ModelCombobox } from "~/components/settings/model-combobox";
+import { curatedForCatalogId } from "~/lib/models";
 
 /**
  * Says why a mirrored team has no controls, in the same words the API uses
@@ -384,7 +385,9 @@ function TeamDefaultModel({ team, canMutate }: { team: TeamSummary; canMutate: b
             />
           </div>
         ) : (
-          <span className="text-sm text-ink">{team.defaultModel ?? "Organization default"}</span>
+          <span className="text-sm text-ink">
+            {curatedForCatalogId(team.defaultModel)?.label ?? team.defaultModel ?? "Organization default"}
+          </span>
         )}
       </div>
       {canMutate && (

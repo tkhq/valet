@@ -536,6 +536,28 @@ describe("EngineHost model resolution wiring", () => {
     expect(session.options.model.id).toBe("anthropic/claude-sonnet-4-5");
   });
 
+  it("restore-no-clobber: a later team-default change never clobbers a team-owned session's persisted model (TKAI-255)", async () => {
+    api = await bootTestApi();
+    const { db, engineHost } = api.providers;
+    const team = await createTeam(db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    await db.update(teams).set({ defaultModel: "anthropic/claude-sonnet-4-5" }).where(eq(teams.id, team.id));
+
+    const meta = {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+      ownerTeamId: team.id,
+    };
+    const session = await engineHost.sessionFor("team-owned-restore", meta);
+    expect(session.options.model.id).toBe("anthropic/claude-sonnet-4-5");
+
+    engineHost.evictAll();
+    await db.update(teams).set({ defaultModel: "claude-opus-4-5" }).where(eq(teams.id, team.id));
+
+    const restored = await engineHost.sessionFor("team-owned-restore", meta);
+    expect(restored.options.model.id).toBe("anthropic/claude-sonnet-4-5");
+  });
+
   it("restore still throws when the persisted model's provider was disabled after the fact", async () => {
     api = await bootTestApi();
     const { db, engineHost, engineCredentials } = api.providers;
