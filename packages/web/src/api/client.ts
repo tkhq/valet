@@ -1124,10 +1124,11 @@ export const api = {
     request<OnePasswordSettingsResponse>("PUT", "/onepassword/settings", body),
   listOpVaults: (scope: "org" | "personal") =>
     request<ListOpVaultsResponse>("GET", `/onepassword/vaults?scope=${scope}`),
-  listOpItems: (scope: "org" | "personal", vaultId: string) =>
+  listOpItems: (scope: "org" | "personal", vaultId: string, cursor?: string) =>
     request<ListOpItemsResponse>(
       "GET",
-      `/onepassword/vaults/${encodeURIComponent(vaultId)}/items?scope=${scope}`,
+      `/onepassword/vaults/${encodeURIComponent(vaultId)}/items?scope=${scope}` +
+        (cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""),
     ),
   getOpItemDetail: (scope: "org" | "personal", vaultId: string, itemId: string) =>
     request<OpItemDetailResponse>(

@@ -38,8 +38,14 @@ class FakeOnePasswordService implements OnePasswordService {
     }
     return [{ id: "vault1", title: "Engineering" }];
   }
+  /** Item count is settable so the pagination cases have something to page. */
+  itemCount = 1;
   async listItems() {
-    return [{ id: "item1", title: "Prod DB", vaultId: "vault1" }];
+    return Array.from({ length: this.itemCount }, (_, i) => ({
+      id: `item${i + 1}`,
+      title: i === 0 ? "Prod DB" : `Item ${i + 1}`,
+      vaultId: "vault1",
+    }));
   }
   async getItem() {
     return {
@@ -261,5 +267,58 @@ describe("GET /api/onepassword/vaults/:vaultId/items/:itemId", () => {
       fields: [{ id: "f1", title: "password", fieldType: "CONCEALED" }],
     });
     expect(JSON.stringify(body)).not.toContain('"value"');
+  });
+
+});
+// A vault can hold hundreds of items. The SDK has no page parameter, so the
+// route slices; what that bounds is the response and the DOM built from it.
+describe("GET /api/onepassword/vaults/:vaultId/items — pagination", () => {
+  /** Returns the booted api so the cases below need no non-null assertions. */
+  async function bootWithItems(count: number): Promise<TestApi> {
+    const booted = await bootTestApi();
+    api = booted;
+    const fake = new FakeOnePasswordService();
+    fake.orgToken = true;
+    fake.itemCount = count;
+    booted.providers.onePassword = fake;
+    return booted;
+  }
+
+  it("caps the page and hands back a cursor that continues it", async () => {
+    const api = await bootWithItems(250);
+
+    const first = await fetch(`${api.baseUrl}/api/onepassword/vaults/vault1/items?scope=org&limit=100`);
+    expect(first.status).toBe(200);
+    const page1 = (await first.json()) as { items: { id: string }[]; nextCursor?: string };
+    expect(page1.items).toHaveLength(100);
+    expect(page1.nextCursor).toBeTruthy();
+
+    const second = await fetch(
+      `${api.baseUrl}/api/onepassword/vaults/vault1/items?scope=org&limit=100&cursor=${encodeURIComponent(page1.nextCursor!)}`,
+    );
+    const page2 = (await second.json()) as { items: { id: string }[]; nextCursor?: string };
+    expect(page2.items).toHaveLength(100);
+    // The pages are disjoint and continue where the first one stopped.
+    expect(page2.items[0].id).toBe("item101");
+
+    const third = await fetch(
+      `${api.baseUrl}/api/onepassword/vaults/vault1/items?scope=org&limit=100&cursor=${encodeURIComponent(page2.nextCursor!)}`,
+    );
+    const page3 = (await third.json()) as { items: unknown[]; nextCursor?: string };
+    expect(page3.items).toHaveLength(50);
+    // No cursor on the last page, so a client knows to stop.
+    expect(page3.nextCursor).toBeUndefined();
+  });
+
+  it("400s a corrupted cursor rather than silently restarting at page one", async () => {
+    const api = await bootWithItems(10);
+    const res = await fetch(`${api.baseUrl}/api/onepassword/vaults/vault1/items?scope=org&cursor=not-a-cursor`);
+    expect(res.status).toBe(400);
+  });
+
+  it("400s a non-numeric limit", async () => {
+    const api = await bootWithItems(10);
+    const res = await fetch(`${api.baseUrl}/api/onepassword/vaults/vault1/items?scope=org&limit=abc`);
+    expect(res.status).toBe(400);
   });
 });

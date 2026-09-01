@@ -63,14 +63,20 @@ export function useOpVaults(
 }
 
 /** Step 2 — disabled until a vault is chosen (`vaultId` undefined). */
+/**
+ * One page of a vault's items. `cursor` is the opaque value the previous
+ * page returned as `nextCursor`; it is part of the query key, so paging back
+ * and forth is served from cache rather than re-read from 1Password.
+ */
 export function useOpItems(
   scope: OnePasswordTokenScope,
   vaultId: string | undefined,
+  cursor?: string,
   opts?: Partial<UseQueryOptions<ListOpItemsResponse>>,
 ) {
   return useQuery<ListOpItemsResponse>({
-    queryKey: onePasswordKeys.items(scope, vaultId ?? ""),
-    queryFn: () => api.listOpItems(scope, vaultId as string),
+    queryKey: [...onePasswordKeys.items(scope, vaultId ?? ""), cursor ?? ""],
+    queryFn: () => api.listOpItems(scope, vaultId as string, cursor),
     enabled: !!vaultId,
     ...opts,
   });

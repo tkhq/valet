@@ -2811,6 +2811,8 @@ export interface ListOpVaultsResponse {
 
 export interface ListOpItemsResponse {
   items: { id: string; title: string; vaultId: string }[];
+  /** Pass back as `?cursor=` for the next page. Absent on the last page. */
+  nextCursor?: string;
 }
 
 export interface OpItemDetailResponse {

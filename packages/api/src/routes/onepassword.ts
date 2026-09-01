@@ -27,6 +27,7 @@
  * leaks upstream detail to the client.
  */
 import { Hono, type Context } from "hono";
+import { decodePageCursor, encodePageCursor, readLimit } from "../lib/page-cursor.js";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
 import { OnePasswordAuthError, type OnePasswordScope } from "../services/onepassword.js";
@@ -38,6 +39,10 @@ import type {
   OpItemDetailResponse,
   PutOnePasswordSettingsRequest,
 } from "../wire/types.js";
+
+/** A vault can hold hundreds of items; the picker shows one page at a time. */
+const OP_ITEMS_DEFAULT_LIMIT = 100;
+const OP_ITEMS_MAX_LIMIT = 500;
 
 export const onePasswordRouter = new Hono<AppEnv>();
 
@@ -149,14 +154,39 @@ onePasswordRouter.get("/vaults/:vaultId/items", async (c) => {
   const forbidden = await requireScopeAccess(c, scope);
   if (forbidden) return forbidden;
 
+  const limit = readLimit(c.req.query("limit"), OP_ITEMS_DEFAULT_LIMIT, OP_ITEMS_MAX_LIMIT);
+  if (limit === undefined) return c.json({ error: "limit must be a positive integer" }, 400);
+
+  const rawCursor = c.req.query("cursor");
+  // A corrupted cursor is an error, not a silent jump back to page one: a
+  // client retrying with one must not skip items without being told.
+  const after = rawCursor === undefined ? 0 : readItemOffset(rawCursor);
+  if (after === undefined) return c.json({ error: "invalid cursor" }, 400);
+
   try {
-    const items = await onePassword.listItems(scope, { orgId: user.orgId, userId: user.id }, vaultId);
-    const resp: ListOpItemsResponse = { items };
+    const all = await onePassword.listItems(scope, { orgId: user.orgId, userId: user.id }, vaultId);
+    // Sliced here rather than upstream: `items.list` has no page parameter,
+    // so the SDK call still reads the whole vault. What this bounds is the
+    // response and the DOM built from it, which is where a several-hundred
+    // item vault actually hurts.
+    const page = all.slice(after, after + limit);
+    const end = after + page.length;
+    const resp: ListOpItemsResponse = {
+      items: page,
+      ...(end < all.length ? { nextCursor: encodePageCursor({ after: end }) } : {}),
+    };
     return c.json(resp);
   } catch (err) {
     return mapServiceError(c, err);
   }
 });
+
+/** Offset carried by an items cursor, or undefined when it is unreadable. */
+function readItemOffset(raw: string): number | undefined {
+  const fields = decodePageCursor(raw);
+  const after = fields?.after;
+  return typeof after === "number" && Number.isInteger(after) && after >= 0 ? after : undefined;
+}
 
 onePasswordRouter.get("/vaults/:vaultId/items/:itemId", async (c) => {
   const { onePassword } = c.var.providers;

@@ -34,7 +34,12 @@ export function OnePasswordPicker({ scope, onCompose }: OnePasswordPickerProps) 
   const [fieldId, setFieldId] = useState("");
 
   const vaultsQ = useOpVaults(scope);
-  const itemsQ = useOpItems(scope, vaultId || undefined);
+  // Items arrive a page at a time. `seenItems` keeps the pages already
+  // fetched so the select does not lose options when the next page loads,
+  // and resets whenever the vault or scope changes.
+  const [itemCursor, setItemCursor] = useState<string | undefined>(undefined);
+  const [seenItems, setSeenItems] = useState<{ id: string; title: string }[]>([]);
+  const itemsQ = useOpItems(scope, vaultId || undefined, itemCursor);
   const itemDetailQ = useOpItemDetail(scope, vaultId || undefined, itemId || undefined);
 
   // Changing `scope` (e.g. the tokenScope selector next to this picker)
@@ -44,11 +49,31 @@ export function OnePasswordPicker({ scope, onCompose }: OnePasswordPickerProps) 
     setVaultId("");
     setItemId("");
     setFieldId("");
+    setItemCursor(undefined);
+    setSeenItems([]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scope]);
 
+  // A different vault is a different list: drop the pages read from the last
+  // one, or its items would linger in the select.
+  useEffect(() => {
+    setItemCursor(undefined);
+    setSeenItems([]);
+  }, [vaultId]);
+
   const vaults = vaultsQ.data?.vaults ?? [];
-  const items = itemsQ.data?.items ?? [];
+  const page = itemsQ.data?.items ?? [];
+  const items = seenItems.length > 0 ? seenItems : page;
+  const nextCursor = itemsQ.data?.nextCursor;
+
+  useEffect(() => {
+    if (!itemsQ.data) return;
+    setSeenItems((prev) => {
+      const byId = new Map(prev.map((i) => [i.id, i]));
+      for (const i of itemsQ.data.items) byId.set(i.id, i);
+      return [...byId.values()];
+    });
+  }, [itemsQ.data]);
   const fields = itemDetailQ.data?.fields ?? [];
 
   const error = vaultsQ.error
@@ -114,6 +139,16 @@ export function OnePasswordPicker({ scope, onCompose }: OnePasswordPickerProps) 
             </option>
           ))}
         </select>
+        {nextCursor && (
+          <button
+            type="button"
+            className="text-xs text-muted underline"
+            disabled={itemsQ.isFetching}
+            onClick={() => setItemCursor(nextCursor)}
+          >
+            {itemsQ.isFetching ? "Loading…" : `Load more items (${items.length} so far)`}
+          </button>
+        )}
       </div>
       <div className="space-y-1">
         <Label htmlFor="op-picker-field">Field</Label>
