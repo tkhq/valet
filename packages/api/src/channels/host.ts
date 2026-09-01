@@ -590,13 +590,14 @@ export class ChannelHost {
     // message_end fires with reason "end_turn" for every non-abort assistant
     // message, including a mid-turn message that stopped on a tool call
     // (those persist stopReason undefined; only the turn's last message
-    // persists "end_turn"). Auto-post exactly ONE message per submission:
-    // the first that carries text or an attachment. A model often fronts
-    // its reply in the same message as its first tool call and ends the
-    // turn on an empty message, so a turn-final gate ghosts the reply —
-    // and posting every text round floods the thread with tool narration.
-    // Anything after the first message reaches the channel only through an
-    // explicit reply_to_origin; the persona teaches both halves.
+    // persists "end_turn"). Auto-post TWO messages per submission: the
+    // first that carries text or an attachment (the acknowledgement) and
+    // the turn-final one (the result). The rounds between are tool
+    // narration and stay off the channel. First-only proved insufficient in
+    // the field: a model acks, works for minutes, and ends the turn on the
+    // real answer — which must reach the thread without relying on the
+    // model to call reply_to_origin (and the channel-message path gives the
+    // action no origin to post through anyway).
     const hasAttachment = (entry.parts ?? []).some((part) => part.type === "attachment");
     if (!entry.content && !hasAttachment) return;
 
@@ -631,15 +632,18 @@ export class ChannelHost {
       // reply — the auto-post safety net stands down so the thread gets
       // exactly one.
       if (turnRepliedToOrigin(entries, entry.queueItemId)) return;
-      // One auto-post per gate-delimited segment: the submission's first
-      // text- or attachment-bearing message posts; later messages stay off
-      // the channel. Derived from the persisted entries (not memory), so an
-      // api restart mid-submission cannot double-post. A resolved gate
-      // re-opens the slot once, so the post-approval outcome reaches the
-      // reader who just approved it.
+      // Ack + result, narration suppressed: the segment's first postable
+      // message and the turn-final message (the only one persisted with
+      // stopReason "end_turn") post; the rounds between stay off the
+      // channel. Derived from the persisted entries (not memory), so an api
+      // restart mid-submission cannot double-post. A resolved gate re-opens
+      // the slot once, so a post-approval ack also reaches the reader who
+      // just approved (the final result posts regardless, via isFinal).
       const slotKey = `${sessionId}:turn:${entry.queueItemId}`;
       const first = firstPostableEntry(entries, entry.queueItemId);
-      if (first !== undefined && first.id !== entry.id && !this.reopenedSlots.delete(slotKey)) return;
+      const isFirst = first === undefined || first.id === entry.id;
+      const isFinal = entry.stopReason === "end_turn";
+      if (!isFirst && !isFinal && !this.reopenedSlots.delete(slotKey)) return;
     }
     this.markDelivered(dedupeKey);
 

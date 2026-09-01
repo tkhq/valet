@@ -117,15 +117,17 @@ second, DM-style conversation door for channel mentions.
 when the map fails. Add: if the finishing submission carries `origin`, resolve
 `origin.threadKey → conversationKey` and post there, even though the `"events"`
 thread key does not map. The existing guards hold (skip if already streamed,
-skip empty messages). The safety net posts ONE message per gate segment: the
-segment's first message that carries text or an attachment. A turn-final gate
+skip empty messages). The safety net posts the submission's
+acknowledgement AND its result: each gate segment's first text- or
+attachment-bearing message, plus the turn-final message (the only one
+persisted with stopReason "end_turn"). A turn-final gate
 would drop a reply the model fronts into its first tool-call message, and
 posting every text round floods the thread with narration (see the Telegram
 design's deviation 2). The slot is derived from the persisted entries, not
 held in memory, so an api restart mid-submission cannot double-post. A
 resolved decision gate re-opens the slot: the post-approval outcome reaches
-the reader who approved it. Other later output reaches the thread only
-through `reply_to_origin`. A failed or unroutable post is drop-logged
+the reader who approved it. The rounds between stay off the channel; an extra
+mid-turn update reaches the thread only through `reply_to_origin`. A failed or unroutable post is drop-logged
 (`event_drop_log`), never swallowed, so the Problems tab shows it.
 
 **Reply action (contract).** Add a `reply_to_origin` action. It reads the
@@ -135,7 +137,7 @@ answers a channel-originated message. The action is the primary path; the model
 should reply through it.
 
 **No double post.** An addressed turn (`reply: "auto"`, the default) auto-posts
-only each segment's first text-bearing message; when the submission already
+each segment's first text-bearing message and the turn-final one; when the submission already
 replied through `reply_to_origin`, the auto-post stands down
 (`turnRepliedToOrigin` scans the submission's tool calls for a SUCCESSFUL
 reply — `details.ok === true` on the persisted result). A failed reply must
@@ -272,16 +274,18 @@ turn that produces no reply at all is a reportable miss, not a silent drop.
 
 ## Deviations (Part 1, as built)
 
-- **Auto-reply posts each segment's FIRST message, not the turn's final one.**
-  The design assumed the final turn message was the reply. In practice the
-  model fronts the reply into its first message (often beside its first tool
-  call) and narrates every round after; posting the final message ghosts the
-  reply and posting every round floods the thread. The safety net posts the
-  first text-bearing message per gate segment, derived from the persisted
-  entries (restart-safe, no delivery-state store). The "already replied"
-  check scans the submission's entries for a SUCCESSFUL `….reply_to_origin`
-  call (`details.ok === true`); the action is allowed on addressed turns as
-  the sanctioned path for output after the segment's first message.
+- **Auto-reply posts the ack AND the result, never the narration.** The
+  design assumed the final turn message was the reply. Three field failures
+  refined the rule: posting only the final message ghosts a reply the model
+  fronts beside its first tool call; posting every round floods the thread
+  (18 posts for one investigation turn); posting only the first message
+  drops the final answer, because the model cannot be relied on to call
+  `reply_to_origin` (and the channel-message path gives the action no
+  origin at all). The safety net now posts each gate segment's first
+  text-bearing message plus the turn-final message, derived from the
+  persisted entries (restart-safe, no delivery-state store). The "already
+  replied" check scans the submission's entries for a SUCCESSFUL
+  `….reply_to_origin` call (`details.ok === true`).
 - **`child.settled` inherits the spawning submission's origin.** The spawn
   captures the running submission's `ChannelOrigin` (task builtin →
   `ChildSpawner` ctx) into `child_watches.origin_json`, durable across the
