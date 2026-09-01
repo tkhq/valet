@@ -24,8 +24,8 @@ function fakeOnePassword(): OnePasswordService {
     listItems: unused,
     getItem: unused,
     findCredentialForService: async () => null,
-    resolveCredential: async (row) => row,
-    resolveReference: async (_scope, _ctx, reference) => {
+    resolveCredential: async (row: unknown) => row,
+    resolveReference: async (_scope: string, _ctx: unknown, reference: string) => {
       if (!reference.startsWith("op://ok/")) throw new Error("no such item");
       return `secret-for-${reference}`;
     },
