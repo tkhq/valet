@@ -611,7 +611,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
     filters: body.filters ?? row.filters,
     target: row.target,
   };
-  // Mention scoping is keyed to the CREATOR and skipped for a patch that
+  // Scope enforcement is keyed to the CREATOR and skipped for a patch that
   // does not change the match — so an enabled-only or name-only patch still
   // works after the creator unlinks Slack, and a colleague's patch of an
   // org-owned row cannot re-point the scope at themselves. The casts narrow

@@ -2282,10 +2282,11 @@ export interface CreateWorkflowEventTriggerRequest {
   eventKeys: string[];
   filters?: unknown[];
   /** Explicit opt-out of the channel requirement on a subscription whose
-   * event keys require channel scope (`slack.app_mention`, `slack.message` —
-   * see `events/subscription-scope.ts`). Ignored for unscoped keys. Not
-   * persisted: a stored scope-required subscription with no channel filter
-   * is the any-channel state. */
+   * event keys require channel scope per their catalog entry
+   * (`scope.channelField`) — for example `slack.app_mention` and
+   * `slack.message` (see `events/subscription-scope.ts`). Ignored for
+   * unscoped keys. Not persisted: a stored scope-required subscription with
+   * no channel filter is the any-channel state. */
   anyChannel?: boolean;
 }
 
@@ -3841,10 +3842,11 @@ export interface CreateEventSubscriptionRequest {
   target: EventSubscriptionTargetWire;
   enabled?: boolean;
   /** Explicit opt-out of the channel requirement on a subscription whose
-   * event keys require channel scope (`slack.app_mention`, `slack.message` —
-   * see `events/subscription-scope.ts`). Ignored for unscoped keys. Not
-   * persisted: a stored scope-required subscription with no channel filter
-   * is the any-channel state. */
+   * event keys require channel scope per their catalog entry
+   * (`scope.channelField`) — for example `slack.app_mention` and
+   * `slack.message` (see `events/subscription-scope.ts`). Ignored for
+   * unscoped keys. Not persisted: a stored scope-required subscription with
+   * no channel filter is the any-channel state. */
   anyChannel?: boolean;
 }
 

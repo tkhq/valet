@@ -10,13 +10,14 @@
  *    share a subscription with any other key: the injected filter applies to
  *    every selected key and would silently narrow or kill the others.
  * 2. **Channel scope** (`channelField` — `slack.app_mention`,
- *    `slack.message`). The filters must constrain that field to a non-empty
- *    fixed set (`eq`, or `in` with values), unless the request sets the
- *    explicit `anyChannel` flag. `anyChannel` is not persisted: a stored
- *    scope-required subscription with no channel filter IS the any-channel
- *    state. When the channel filter is required and stored, every selected
- *    key must declare the field, or the filter would silently kill the keys
- *    that do not — the gate refuses the mix instead.
+ *    `slack.message`). The rule is per-field: for each selected entry that
+ *    declares `scope.channelField`, that specific field must be constrained
+ *    to a non-empty fixed set (`eq`, or `in` with values) in the filters,
+ *    unless the request sets the explicit `anyChannel` flag. `anyChannel` is
+ *    not persisted: a stored scope-required subscription with no channel
+ *    filter IS the any-channel state. When a channel filter is required and
+ *    stored, every selected key must declare that field, or the filter would
+ *    silently kill the keys that do not — the gate refuses the mix instead.
  *
  * Every writer reaches this through `validateSubscriptionWrite`
  * (`events/subscription-write.ts`), the one gate in front of every
@@ -54,14 +55,30 @@ function channelFieldsOf(sel: Selection[]): Set<string> {
   return fields;
 }
 
-/** True when the filter constrains a required channel field to a non-empty
- * fixed set. `prefix`, `contains` and `regex` do not count: "starts with C"
- * is the whole workspace. An empty `in` list does not count either — it
- * matches nothing, which is not a channel selection. */
+/** True when the filter constrains `field` to a non-empty fixed set.
+ * `prefix`, `contains` and `regex` do not count: "starts with C" is the
+ * whole workspace. An empty `in` list does not count either — it matches
+ * nothing, which is not a channel selection. */
 function isChannelScopeFilter(f: SubscriptionFilter, fields: Set<string>): boolean {
   if (!fields.has(f.field)) return false;
   if (f.op === "eq") return true;
   return f.op === "in" && Array.isArray(f.value) && f.value.length > 0;
+}
+
+/**
+ * Returns the set of channel field names required by the selected entries
+ * that have no constraining filter in `filters`. An empty set means every
+ * required field is satisfied (or there are none).
+ */
+function unmetChannelFields(sel: Selection[], filters: SubscriptionFilter[]): Set<string> {
+  const unmet = new Set<string>();
+  for (const s of sel) {
+    const field = s.entry.scope?.channelField;
+    if (field === undefined) continue;
+    const satisfied = filters.some((f) => f.field === field && isChannelScopeFilter(f, new Set([field])));
+    if (!satisfied) unmet.add(field);
+  }
+  return unmet;
 }
 
 function isCreatorFilter(f: SubscriptionFilter, field: string, externalId: string): boolean {
@@ -73,19 +90,21 @@ function isCreatorFilter(f: SubscriptionFilter, field: string, externalId: strin
 
 /**
  * Whether a STORED subscription is in the any-channel state: it selects at
- * least one channel-scoped key and carries no channel-scope filter. The
- * `anyChannel` request flag is deliberately not persisted, so this derivation
- * is the stored state. The PATCH paths feed it back as `storedAnyChannel` so
- * an edit that does not touch channel scope is not refused for lacking a
- * flag the server never stored.
+ * least one channel-scoped key and at least one of their required fields is
+ * unconstrained. The `anyChannel` request flag is deliberately not persisted,
+ * so this derivation is the stored state. The PATCH paths feed it back as
+ * `storedAnyChannel` so an edit that does not touch channel scope is not
+ * refused for lacking a flag the server never stored.
  */
 export function storedAnyChannelState(
   plugins: ValetPlugin[],
   eventKeys: string[],
   filters: SubscriptionFilter[],
 ): boolean {
-  const fields = channelFieldsOf(selections(plugins, eventKeys));
-  return fields.size > 0 && !filters.some((f) => isChannelScopeFilter(f, fields));
+  const sel = selections(plugins, eventKeys);
+  const requiredFields = channelFieldsOf(sel);
+  if (requiredFields.size === 0) return false;
+  return unmetChannelFields(sel, filters).size > 0;
 }
 
 export type ScopeResult = { ok: true; filters: SubscriptionFilter[] } | { ok: false; error: string };
@@ -132,10 +151,11 @@ export async function enforceSubscriptionScope(
   if (pinned.length > 0) {
     const other = sel.find((s) => s.entry.key !== pinned[0].entry.key);
     if (other !== undefined) {
+      const pinnedKey = pinned[0].entry.key;
       return {
         ok: false,
         error:
-          `A mention subscription is scoped to your own @-mentions, so it cannot also subscribe ` +
+          `A ${pinnedKey} subscription is scoped to its creator, so it cannot also subscribe ` +
           `to ${other.entry.key}. Create a separate subscription for ${other.entry.key}.`,
       };
     }
@@ -161,12 +181,13 @@ export async function enforceSubscriptionScope(
       error: `"Any channel" removes the channel restriction. Remove the channel filters, or turn "Any channel" off.`,
     };
   }
-  if (channelFields.size > 0 && !args.anyChannel && !hasChannelScope && args.storedAnyChannel !== true) {
-    const noun = pinned.length > 0 ? "A mention subscription" : "This subscription";
+  const unmet = unmetChannelFields(sel, args.filters);
+  if (channelFields.size > 0 && !args.anyChannel && unmet.size > 0 && args.storedAnyChannel !== true) {
+    const unmetList = [...unmet].join(", ");
     return {
       ok: false,
       error:
-        `${noun} needs at least one channel filter (equals, or is one of). ` +
+        `This subscription needs at least one channel filter (equals, or is one of) on: ${unmetList}. ` +
         'Select channels, or choose "Any channel" to listen in every channel the app can see.',
     };
   }
@@ -191,14 +212,16 @@ export async function enforceSubscriptionScope(
 
   const { service, entry } = pinned[0];
   // Non-null: `pinned` filtered on exactly this field being defined.
+  const pinnedKey = entry.key;
   const pinField = entry.scope!.creatorUserField!;
+  const Service = service.charAt(0).toUpperCase() + service.slice(1);
   const identity = await identityForUser(db, service, creatorUserId);
   if (!identity) {
     return {
       ok: false,
       error:
-        "A mention subscription fires only for its creator's own @-mentions, so the creator must link " +
-        "their Slack account in Settings → Connected accounts first.",
+        `A ${pinnedKey} subscription fires only for its creator, so the creator must link their ` +
+        `${Service} account in Settings → Connected accounts first.`,
     };
   }
 
@@ -215,7 +238,7 @@ export async function enforceSubscriptionScope(
   return {
     ok: false,
     error:
-      "A mention subscription fires only for the creator's own @-mentions. " +
-      "Remove the user filter, or set it to the creator's linked Slack user.",
+      `A ${pinnedKey} subscription fires only for its creator. Remove the ${pinField} filter, or ` +
+      `set it to the creator's linked ${Service} user.`,
   };
 }

@@ -197,7 +197,8 @@ such field. The gate refuses the mix and tells the author to create a separate
 subscription. This covers `slack.*` wildcards.
 
 **Channel scope** (`scope.channelField` — `slack.app_mention`,
-`slack.message`). The stored filters must constrain that field to a non-empty
+`slack.message`). The rule is per-field: for each selected entry that declares
+`scope.channelField`, that specific field must be constrained to a non-empty
 fixed set (`eq`, or `in` with values). `prefix`/`contains`/`regex` do not
 count — a prefix is still the whole workspace. An empty `in` list is refused
 outright, because it matches nothing. The explicit `anyChannel: true` request
