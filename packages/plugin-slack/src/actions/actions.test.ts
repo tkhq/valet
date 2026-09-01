@@ -781,8 +781,8 @@ describe('slack actions', () => {
     );
 
     expect(result.success).toBe(false);
-    expect((result as { error: string }).error).toContain('cant_update_message');
-    expect((result as { error: string }).error).toContain('its own messages');
+    expect(result.error).toContain('cant_update_message');
+    expect(result.error).toContain('its own messages');
   });
 
   it('update_message maps message_not_found to a corrective error', async () => {
@@ -795,7 +795,7 @@ describe('slack actions', () => {
     );
 
     expect(result.success).toBe(false);
-    expect((result as { error: string }).error).toContain('Message not found');
+    expect(result.error).toContain('Message not found');
   });
 
   // ─── delete_message (TKAI-298) ─────────────────────────────────────────────
@@ -829,8 +829,8 @@ describe('slack actions', () => {
     );
 
     expect(result.success).toBe(false);
-    expect((result as { error: string }).error).toContain('cant_delete_message');
-    expect((result as { error: string }).error).toContain('its own messages');
+    expect(result.error).toContain('cant_delete_message');
+    expect(result.error).toContain('its own messages');
   });
 
   it('delete_message maps message_not_found to a corrective error', async () => {
@@ -843,6 +843,6 @@ describe('slack actions', () => {
     );
 
     expect(result.success).toBe(false);
-    expect((result as { error: string }).error).toContain('Message not found');
+    expect(result.error).toContain('Message not found');
   });
 });
