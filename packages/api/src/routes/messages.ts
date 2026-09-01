@@ -75,6 +75,29 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
   if (e.type === "command_result") {
     return commandResultEntryToMessage(e, sessionId, threadId);
   }
+  if (e.type === "compaction") {
+    // Project the compaction boundary so the UI can render a divider
+    // (thread-model-pinning and compaction design, decision 7). `content`
+    // carries the summary so clients without a divider renderer still
+    // degrade to readable text.
+    const created =
+      typeof e.createdAt === "number" ? e.createdAt : Date.parse(e.createdAt as unknown as string);
+    return {
+      id: e.id,
+      sessionId,
+      threadId,
+      role: "system",
+      content: e.summary,
+      parts: [],
+      createdAt: Number.isFinite(created) ? created : Date.now(),
+      compaction: {
+        summary: e.summary,
+        tokensBefore: e.tokenCountBefore,
+        tokensAfter: e.tokenCountAfter,
+        coveredEntryIds: e.coveredEntryIds,
+      },
+    };
+  }
   if (e.type !== "message") return null;
   // Engine has 4 roles: user/assistant/tool/system. We forward as-is.
   const role: MessageRole = e.role;

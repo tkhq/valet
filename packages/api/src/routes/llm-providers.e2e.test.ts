@@ -16,7 +16,9 @@
  *      session resolves to it and completes a turn via the resolution
  *      bridge's org key.
  *   3. Disable that provider → the existing session's next turn errors
- *      clearly; `PATCH /sessions/:id` recovers it; after the admin also
+ *      clearly; `PATCH /sessions/:id` repoints the default for new threads
+ *      and `PATCH .../threads/:id` repoints the existing thread's pin
+ *      (threads pin their model at creation); after the admin also
  *      repoints org preferences (the disabled model is no longer a valid
  *      preference — `PUT .../preferences` enforces this), new sessions fall
  *      back to the next entry in preference order.
@@ -251,7 +253,11 @@ describe("api e2e: llm providers exit criteria (fixture-backed, no network)", ()
         }),
       ).rejects.toThrow();
 
-      // ── 6. PATCH .../model recovers the existing session ────────────────
+      // ── 6. Recovery: PATCH the session default AND the thread's pin.
+      //      Threads pin their model at creation (thread-model-pinning
+      //      design, decision 1), so repointing the session alone only
+      //      covers future threads — the existing thread keeps its dead
+      //      pin until it is repointed (or cleared) too. ──────────────────
       const patchModelRes = await fetch(`${api.baseUrl}/api/sessions/${customSessionId}`, {
         method: "PATCH",
         headers: HEADERS,
@@ -260,6 +266,21 @@ describe("api e2e: llm providers exit criteria (fixture-backed, no network)", ()
       expect(patchModelRes.status).toBe(200);
       const patched = await j<GetSessionResponse>(patchModelRes);
       expect(patched.model).toBe("claude-haiku-4-5");
+
+      const threadsRes = await fetch(`${api.baseUrl}/api/sessions/${customSessionId}/threads`);
+      const { threads } = await j<{ threads: Array<{ id: string; model?: string }> }>(threadsRes);
+      expect(threads).toHaveLength(1);
+      // The pin still names the now-dead custom spec.
+      expect(threads[0].model).toBe(customSpec);
+      const patchThreadRes = await fetch(
+        `${api.baseUrl}/api/sessions/${customSessionId}/threads/${threads[0].id}`,
+        {
+          method: "PATCH",
+          headers: HEADERS,
+          body: JSON.stringify({ model: "claude-haiku-4-5" }),
+        },
+      );
+      expect(patchThreadRes.status).toBe(200);
 
       nextAnthropicResponse();
       await driveTurn({ baseUrl: api.baseUrl, wsUrl: api.wsUrl, sessionId: customSessionId, prompt: "recovered" });

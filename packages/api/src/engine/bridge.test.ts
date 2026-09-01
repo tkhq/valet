@@ -131,9 +131,17 @@ describe("busEventToWire", () => {
     expect(out).toEqual([{ type: "turn_end", threadId: "t1", reason: "end_turn" }]);
   });
 
-  it("drops out-of-scope event types (compaction, thread_start, ...)", () => {
+  it("drops out-of-scope event types (thread_start, ...)", () => {
     expect(busEventToWire(ev({ type: "thread_start", threadId: "t1" }))).toEqual([]);
-    expect(busEventToWire(ev({ type: "compaction_start", threadId: "t1" }))).toEqual([]);
+  });
+
+  it("forwards compaction lifecycle events (thread-model-pinning design, decision 7)", () => {
+    expect(busEventToWire(ev({ type: "compaction_start", threadId: "t1" }))).toEqual([
+      { type: "compaction_start", threadId: "t1" },
+    ]);
+    expect(busEventToWire(ev({ type: "compaction_end", threadId: "t1" }))).toEqual([
+      { type: "compaction_end", threadId: "t1" },
+    ]);
   });
 
   it("forwards decision_gate with engine→wire shape projection", () => {
