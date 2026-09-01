@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { eventKeyMatches, filtersMatch, resolvePath, validateRegexPattern } from "./match.js";
+import { eventKeyMatches, filtersMatch, resolvePath, subscriptionMatchesEvent, validateRegexPattern } from "./match.js";
 import type { EventCatalogEntry } from "@valet/engine";
 
 const CATALOG: EventCatalogEntry[] = [
@@ -78,5 +78,37 @@ describe("filtersMatch", () => {
 
   it("empty filter list always matches", () => {
     expect(filtersMatch(payload, "github.pull_request.opened", [], CATALOG)).toBe(true);
+  });
+});
+
+describe("catalog-driven pinning arm", () => {
+  const catalog: EventCatalogEntry[] = [
+    {
+      key: "svc.pinned",
+      description: "a creator-pinned key",
+      filters: [{ field: "user", path: "user", description: "sender" }],
+      scope: { channelField: "channel", creatorUserField: "user" },
+    },
+    {
+      key: "svc.open",
+      description: "a channel-scoped but unpinned key",
+      filters: [{ field: "channel", path: "channel", description: "room" }],
+      scope: { channelField: "channel" },
+    },
+  ];
+
+  it("fails closed on a pinned key with no filter on the pinned field", () => {
+    const sub = { eventKeys: ["svc.pinned"], filters: [] };
+    expect(subscriptionMatchesEvent(sub, "svc.pinned", { user: "U1" }, catalog)).toBe(false);
+  });
+
+  it("matches a pinned key when the pinned-field filter is present", () => {
+    const sub = { eventKeys: ["svc.pinned"], filters: [{ field: "user", op: "eq", value: "U1" }] };
+    expect(subscriptionMatchesEvent(sub, "svc.pinned", { user: "U1" }, catalog)).toBe(true);
+  });
+
+  it("does not fail closed on a channel-scoped, unpinned key with no filters", () => {
+    const sub = { eventKeys: ["svc.open"], filters: [] };
+    expect(subscriptionMatchesEvent(sub, "svc.open", { channel: "C1" }, catalog)).toBe(true);
   });
 });
