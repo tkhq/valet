@@ -72,6 +72,17 @@ describe("POST /api/sandbox-secrets/resolve", () => {
     }
   });
 
+  it("accepts a reference whose vault or item name contains spaces", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = fakeOnePassword();
+    // "ProDex Labs" is an ordinary vault name. An earlier `[^\s]+` pattern
+    // rejected every reference into a vault with a space in its title.
+    const res = await resolve(["op://ok/JumpCloud Login/password"]);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { resolved: Record<string, string> };
+    expect(body.resolved["op://ok/JumpCloud Login/password"]).toBeTruthy();
+  });
+
   it("bounds one request", async () => {
     api = await bootTestApi();
     api.providers.onePassword = fakeOnePassword();

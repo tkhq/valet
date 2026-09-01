@@ -19,9 +19,17 @@ import type { ResolveSandboxSecretsResponse } from "../wire/types.js";
 
 export const sandboxSecretsRouter = new Hono<AppEnv>();
 
-/** References this broker resolves. Only 1Password today; the runner's
- * `SecretsProvider` seam is where a second one would land. */
-const REFERENCE = /^op:\/\/[^\s]+$/;
+/**
+ * References this broker resolves. Only 1Password today; the runner's
+ * `SecretsProvider` seam is where a second one would land.
+ *
+ * `vault/item/field`, and the segments may contain SPACES — a vault called
+ * "ProDex Labs" is ordinary, and an earlier `[^\s]+` rejected every reference
+ * into one. What the prefix and the three segments rule out is the thing that
+ * matters: a path, an env var name or a URL, any of which would turn the
+ * broker into a general read primitive.
+ */
+const REFERENCE = /^op:\/\/[^/\n\r]+\/[^/\n\r]+\/[^/\n\r]+$/;
 
 /** One `run` injecting hundreds of secrets is a mistake, and each reference
  * costs a round trip. */
