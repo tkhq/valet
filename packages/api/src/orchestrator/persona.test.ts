@@ -43,9 +43,11 @@ describe("orchestratorPersona", () => {
     expect(persona).not.toContain("team_c7268244");
   });
 
-  it("tells the model a channel answer is delivered back automatically", () => {
+  it("tells the model the first message auto-posts and later output goes through reply_to_origin", () => {
     const persona = flat(orchestratorPersona({ type: "team", id: "t1" }, "Platform"));
-    expect(persona).toContain("delivered back to that same channel");
+    expect(persona).toContain("the first message you write is posted to the origin thread automatically");
+    expect(persona).toContain("every later message in the turn stays off the channel");
+    expect(persona).toContain("send it with reply_to_origin");
   });
 
   it("tells the model to check list_tools before denying a capability", () => {

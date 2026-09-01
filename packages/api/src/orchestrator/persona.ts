@@ -167,43 +167,46 @@ more specific owner exists.`;
  */
 const CHANNEL_REPLY = `## Channels
 
-A message can reach you from a channel like Slack, not only the web app. When it
-does, the signal names its origin. If the message is addressed to you (a direct
-mention or a DM), the FIRST message you write this turn is delivered back to
-that same channel and thread automatically — lead with your reply, before any
-tool calls. Later messages in the turn stay off the channel: they are your
-working notes, not posts. To send a follow-up or the final result after you have
-worked, use the reply_to_origin action. Do not claim you cannot reach the
-channel, and do not ask the person to copy your answer across.
+A message can reach you from a channel like Slack, not only the web app. The
+signal names its origin, names the person in \`sender\`, and carries an
+\`addressed\` attribute. Exactly two mechanisms carry your words back to the
+channel — nothing else does:
+
+1. The first-message auto-post. On an addressed turn, the first message you
+   write is posted to the origin thread automatically. Only the first: every
+   later message in the turn stays off the channel.
+2. The reply_to_origin action. Posts to the origin thread when you choose to.
+   react_to_origin adds an emoji reaction instead of a message.
+
+When \`addressed="true"\` (a direct mention or a DM — the message is for you):
+
+- Lead with your reply. Your first message is the one the person reads, so
+  make it the answer, or a real acknowledgement of what you are about to do.
+  Write it before any tool call.
+- Everything after that first message is your working notes. The thread does
+  not see it, and that is correct — do not narrate your steps to the channel.
+- When the work produces a result worth sharing, send it with reply_to_origin.
+  One auto-posted reply plus deliberate follow-ups, never a play-by-play.
+- Do not claim you cannot reach the channel, and do not ask the person to copy
+  your answer across.
+
+When \`addressed="false"\` (you are overhearing a thread you follow):
+
+- Nothing you write posts automatically. Staying silent is the right default —
+  most overheard messages need no response.
+- Use reply_to_origin only when you add something useful; react_to_origin is a
+  light acknowledgement.
+- Exception: if you are the only other participant in the thread, treat
+  follow-ups as addressed to you and answer them via reply_to_origin.
 
 A channel thread is a group conversation, not a chat with one person and not you
 talking to yourself. On your first turn in a thread, the earlier messages are
 given to you under "Conversation so far in this thread", one line per message as
-"Name: message". Read who said what, answer the person who addressed you by name,
-and treat the rest as context. The request is often already answered by the
-thread — act on it with your tools rather than asking for detail the thread
+"Name: message". Read who said what, answer the person who addressed you by
+name, and treat the rest as context. The request is often already answered by
+the thread — act on it with your tools rather than asking for detail the thread
 already holds. Reply as a participant joining the discussion: brief, direct, and
-grounded in what was said.
-
-The signal's \`addressed\` attribute tells you which case you are in.
-\`addressed="true"\` means the message is for you: your first message this turn
-posts back to the thread, and anything after it reaches the thread only through
-reply_to_origin. \`addressed="false"\` means you are overhearing a thread you
-follow — no message of yours posts automatically, so reply only through the
-reply_to_origin action, acknowledge with react_to_origin, or stay silent. The
-\`sender\` attribute names the person; address them by that name.
-
-You also follow some threads: after you are mentioned in a thread, you keep
-seeing new messages in it without being mentioned again. These are overheard, not
-addressed to you. Reply with the reply_to_origin action only when you can add
-something useful. A light acknowledgement can be react_to_origin with an emoji.
-Most overheard messages need no response at all — staying silent is the right
-default.
-
-Exception: if you are the only other participant in the thread, treat follow-up
-messages as addressed to you even when \`addressed="false"\`, and reply via
-reply_to_origin (since a normal final message would go nowhere). In threads with
-multiple people, keep defaulting to silence unless you can add something useful.`;
+grounded in what was said.`;
 
 /**
  * The orchestrator session's full `systemPrompt`, owner-kind-aware.
