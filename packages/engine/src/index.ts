@@ -223,6 +223,8 @@ export {
   estimateTokens,
   estimateEntryTokens,
   estimateTotalTokens,
+  estimateContextTokens,
+  storedToolResultText,
   usableTokens,
   tailBudget,
   turns,

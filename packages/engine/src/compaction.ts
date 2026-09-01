@@ -14,13 +14,24 @@ import type { CompactionConfig, SessionEntry } from "./types.js";
 
 const DEFAULTS = {
   reserveCap: 20_000,
-  tailTurns: 2,
+  // Upper bound on turns considered for the verbatim tail; the token budget
+  // (TAIL_FRACTION of usable) is the binding constraint, this only stops a
+  // pathological run of tiny turns from being kept forever.
+  tailTurns: 8,
   minPreserveRecentTokens: 2_000,
-  maxPreserveRecentTokens: 8_000,
   pruneProtectTokens: 40_000,
   pruneMinimumTokens: 20_000,
   toolOutputMaxChars: 2_000,
 } as const;
+
+/** Fraction of the usable context kept verbatim as the tail at a compaction. */
+const TAIL_FRACTION = 0.25;
+
+/**
+ * Rough token estimate for one inline image. Real cost varies by provider
+ * and image size; this only feeds offline budgeting.
+ */
+const IMAGE_TOKEN_ESTIMATE = 1_500;
 
 const DEFAULT_PROTECTED_TOOLS = new Set(["skill", "thread_read"]);
 
@@ -63,6 +74,66 @@ export function estimateTotalTokens(entries: readonly SessionEntry[]): number {
   return total;
 }
 
+/**
+ * Estimate the live agent context: the system prompt plus every message the
+ * next LLM call would send. The proactive compaction trigger uses this so
+ * the trigger and the cut-point budget measure with the same ruler
+ * (estimateTokens). Provider-reported usage also counts tool definitions and
+ * cache reads — context compaction cannot reclaim — so a usage-based trigger
+ * fires long before the transcript warrants it and the estimate-based budget
+ * then mis-sizes the tail (TKAI-305). Known undercounts here (tool
+ * definitions) are backstopped by the reactive overflow path.
+ */
+export function estimateContextTokens(
+  systemPrompt: string | undefined,
+  messages: readonly Message[],
+): number {
+  let total = systemPrompt ? estimateTokens(systemPrompt) : 0;
+  for (const m of messages) {
+    if (m.role === "user") {
+      if (typeof m.content === "string") {
+        total += estimateTokens(m.content);
+        continue;
+      }
+      for (const block of m.content) {
+        if (block.type === "text") total += estimateTokens(block.text);
+        else total += IMAGE_TOKEN_ESTIMATE;
+      }
+    } else if (m.role === "assistant") {
+      for (const block of m.content) {
+        if (block.type === "text") total += estimateTokens(block.text);
+        else if (block.type === "thinking") total += estimateTokens(block.thinking);
+        else if (block.type === "toolCall") {
+          total += estimateTokens(JSON.stringify(block.arguments ?? {}));
+        }
+      }
+    } else if (m.role === "toolResult") {
+      for (const block of m.content) {
+        if (block.type === "text") total += estimateTokens(block.text);
+        else total += IMAGE_TOKEN_ESTIMATE;
+      }
+    }
+  }
+  return total;
+}
+
+/**
+ * The stored result text of a tool_call part, or undefined when the call
+ * produced none — or when a prune pass from before elision preserved the
+ * stored text replaced it with the `{ elided: true }` placeholder.
+ */
+export function storedToolResultText(part: { result?: unknown }): string | undefined {
+  if (part.result === undefined) return undefined;
+  if (
+    typeof part.result === "object" &&
+    part.result !== null &&
+    (part.result as { elided?: unknown }).elided === true
+  ) {
+    return undefined;
+  }
+  return typeof part.result === "string" ? part.result : JSON.stringify(part.result);
+}
+
 // ── Usable budget ──────────────────────────────────────────────────
 
 export function usableTokens(model: Model<any>, cfg?: CompactionConfig): number {
@@ -75,13 +146,15 @@ export function usableTokens(model: Model<any>, cfg?: CompactionConfig): number 
 
 export function tailBudget(usable: number, cfg?: CompactionConfig): number {
   const min = cfg?.minPreserveRecentTokens ?? DEFAULTS.minPreserveRecentTokens;
-  const max = cfg?.maxPreserveRecentTokens ?? DEFAULTS.maxPreserveRecentTokens;
-  const target = Math.floor(usable * 0.25);
-  return clamp(target, min, max);
-}
-
-function clamp(n: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, n));
+  const target = Math.floor(usable * TAIL_FRACTION);
+  // No default ceiling: the budget must scale with the model. A fixed 8k cap
+  // bound on every production model and left ~86% of a 200k window unused
+  // after compaction (TKAI-305). A ceiling applies only when configured.
+  const capped =
+    cfg?.maxPreserveRecentTokens !== undefined
+      ? Math.min(target, cfg.maxPreserveRecentTokens)
+      : target;
+  return Math.max(min, capped);
 }
 
 // ── Turn segmentation ──────────────────────────────────────────────
@@ -323,6 +396,12 @@ function mergeProtectedTools(
 /**
  * Apply a PruneResult to the entries by mutating the matching tool_call parts.
  * The caller is responsible for persisting the mutation back to the SessionStore.
+ *
+ * Elision is a render-time transformation: the part keeps its stored
+ * `result` and only gains `elided: true`. LLM-context assembly replaces the
+ * text with a short placeholder, but the summarizer can still read the
+ * stored text — replacing it here erased the output from both the verbatim
+ * tail and every future summary (TKAI-305).
  */
 export function applyPrune(entries: SessionEntry[], plan: PruneResult): void {
   if (!plan.willCommit) return;
@@ -335,7 +414,6 @@ export function applyPrune(entries: SessionEntry[], plan: PruneResult): void {
       if (part.type !== "tool_call") continue;
       if (!idSet.has(part.callId)) continue;
       part.elided = true;
-      part.result = { elided: true, reason: "pruned" };
     }
   }
 }
@@ -402,6 +480,12 @@ const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <te
 
 ## Key Decisions
 - [decision and why, or "(none)"]
+
+## Agreed Approach
+- [the approach or plan currently agreed with the user, in enough detail to resume it without drifting back to an earlier approach, or "(none)"]
+
+## Active Tools & Skills
+- [tools, skills, or integrations in active use — name each and what it is being used for, or "(none)"]
 
 ## Next Steps
 - [ordered next actions or "(none)"]
@@ -534,14 +618,19 @@ export function entriesToSummaryMessages(
           // Drop thinking from summary input — it's redundant once we have the result.
         } else if (p.type === "tool_call") {
           const argsStr = p.args ? JSON.stringify(p.args) : "";
+          // Elided parts keep their stored text (elision only hides it from
+          // the live context) — feed it to the summarizer so a pruned output
+          // still contributes facts to the summary. Rows pruned before the
+          // text was preserved fall back to the elision marker.
+          const raw = storedToolResultText(p);
           let resultStr = "";
-          if (p.elided) resultStr = "[output elided to save context]";
-          else if (p.result !== undefined) {
-            const raw = typeof p.result === "string" ? p.result : JSON.stringify(p.result);
+          if (raw !== undefined) {
             resultStr =
               raw.length > opts.toolOutputMaxChars
                 ? raw.slice(0, opts.toolOutputMaxChars) + `…(truncated, ${raw.length - opts.toolOutputMaxChars} more chars)`
                 : raw;
+          } else if (p.elided) {
+            resultStr = "[output elided to save context]";
           }
           blocks.push({
             type: "text",

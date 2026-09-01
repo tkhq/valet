@@ -56,6 +56,7 @@ import { Compile } from "typebox/compile";
 import type { TSchema } from "typebox";
 import {
   applyPrune,
+  estimateContextTokens,
   estimateTokens,
   estimateTotalTokens,
   extractFileContext,
@@ -270,13 +271,13 @@ export class Thread {
    */
   private skipNextProactiveCheck = false;
   /**
-   * True when `lastAssistantUsage` was seeded from persisted entries at
-   * rehydrate (spec decision 5). The next `runItemInner` consumes it: a
-   * pre-turn proactive check protects the first post-restart turn — the
-   * regular check only runs post-turn, so without this the first turn after
-   * a restart would hit the model with an over-budget context.
+   * True when a transcript was rehydrated from persisted entries (spec
+   * decision 5). The next `runItemInner` consumes it: a pre-turn proactive
+   * check protects the first post-restart turn — the regular check only
+   * runs post-turn, so without this the first turn after a restart would
+   * hit the model with an over-budget context.
    */
-  private rehydratedUsageSeed = false;
+  private rehydratedCheckPending = false;
   /**
    * Per-thread model override (id string, e.g. "claude-opus-4-7"). When set,
    * overlays the session-default at turn start and is restored after.
@@ -1573,27 +1574,12 @@ export class Thread {
     this.agent.state.messages = entriesToAgentMessages(entries, this.effectiveModelLenient(), {
       attributeAuthors: this.attributeAuthors,
     });
-    // Rehydrate the proactive-compaction trigger (spec decision 5): seed
-    // `lastAssistantUsage` from the newest persisted assistant entry that
-    // carries usage, so the first post-restart turn is protected. If a
-    // CompactionEntry follows that entry, its usage no longer describes the
-    // live context — skip the seed (mirrors `skipNextProactiveCheck`).
-    for (let i = entries.length - 1; i >= 0; i--) {
-      const e = entries[i];
-      if (e.type === "compaction") break;
-      if (e.type === "message" && e.role === "assistant" && e.usage) {
-        const u = e.usage;
-        this.lastAssistantUsage = {
-          input: u.input,
-          output: u.output,
-          cacheRead: u.cacheRead,
-          cacheWrite: u.cacheWrite,
-          total: u.total || u.input + u.output + u.cacheRead + u.cacheWrite,
-        };
-        this.rehydratedUsageSeed = true;
-        break;
-      }
-    }
+    // Arm the pre-turn proactive check (spec decision 5) so the first
+    // post-restart turn is protected. The trigger estimates the rehydrated
+    // transcript directly (TKAI-305), so no usage seeding is needed and a
+    // trailing CompactionEntry needs no special case — the estimate already
+    // reflects it.
+    this.rehydratedCheckPending = this.agent.state.messages.length > 0;
   }
 
   /**
@@ -2932,8 +2918,8 @@ export class Thread {
     // agent.state.messages from the persisted DAG, so a user entry persisted
     // first would enter the rebuilt transcript AND be prompted again by
     // runAgent — the model would see the prompt twice.
-    if (this.rehydratedUsageSeed) {
-      this.rehydratedUsageSeed = false;
+    if (this.rehydratedCheckPending) {
+      this.rehydratedCheckPending = false;
       if (this.shouldCompactProactive()) {
         try {
           await this.compactThread({ mode: "proactive", autoContinue: false });
@@ -3184,15 +3170,26 @@ export class Thread {
     }
     const cfg = this.session.options.compaction;
     if (cfg?.enabled === false) return false;
-    const usage = this.lastAssistantUsage;
-    if (!usage) return false;
     // Budget against the turn's effective model (spec decision 4):
     // shouldCompactProactive only runs from runItem's try block, before the
     // finally restores the baseline, so `agent.state.model` is the resolved
     // turn model — including resolver-only specs `resolveModelId` can't see.
     const usable = usableTokens(this.agent.state.model, cfg);
     if (usable === 0) return false;
-    return usage.total >= usable;
+    // Trigger on the same char-based estimate the cut-point budget uses —
+    // never on provider-reported usage. Reported totals include cache reads
+    // and system/tool overhead that compaction cannot reclaim, so a
+    // usage-based trigger compacts long cached threads that do not need it
+    // (TKAI-305). This runs before the turn's finally-block restores the
+    // baseline prompt, so the estimate sees the overlays the turn used.
+    // Same role filter as `convertToLlm` — custom AgentMessage kinds never
+    // reach the LLM, so they must not count toward the context estimate.
+    const llmMessages = this.agent.state.messages.filter(
+      (m): m is Message =>
+        m.role === "user" || m.role === "assistant" || m.role === "toolResult",
+    );
+    const estimated = estimateContextTokens(this.agent.state.systemPrompt, llmMessages);
+    return estimated >= usable;
   }
 
   /**
@@ -4474,7 +4471,16 @@ export function entriesToAgentMessages(
           toolCallId: p.callId,
           toolName: p.toolName,
           content: [
-            { type: "text", text: isError ? p.error ?? "tool call failed" : toolResultText(p.result) },
+            {
+              type: "text",
+              // Elided parts keep their stored result for the summarizer and
+              // the UI; the LIVE context is where the elision applies.
+              text: isError
+                ? p.error ?? "tool call failed"
+                : p.elided
+                  ? "[output elided to save context]"
+                  : toolResultText(p.result),
+            },
           ],
           isError,
           timestamp: e.createdAt,

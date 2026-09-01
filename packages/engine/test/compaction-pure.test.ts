@@ -1,11 +1,16 @@
 import { describe, it, expect } from "vitest";
+import type { Message } from "@earendil-works/pi-ai/compat";
 import {
   applyPrune,
+  entriesToAgentMessages,
+  entriesToSummaryMessages,
+  estimateContextTokens,
   estimateTokens,
   estimateEntryTokens,
   extractFileContext,
   planPrune,
   selectCutPoint,
+  storedToolResultText,
   tailBudget,
   turns,
   usableTokens,
@@ -102,10 +107,25 @@ describe("compaction: usableTokens / tailBudget", () => {
     expect(usableTokens(MODEL, { reserveTokens: 50_000 })).toBe(50_000);
   });
 
-  it("tailBudget = clamp(usable * 0.25, 2k, 8k)", () => {
-    expect(tailBudget(100_000)).toBe(8_000);
+  it("tailBudget = 25% of usable, floored at 2k", () => {
+    expect(tailBudget(100_000)).toBe(25_000);
     expect(tailBudget(20_000)).toBe(5_000);
     expect(tailBudget(4_000)).toBe(2_000);
+  });
+
+  it("scales with production-size context windows instead of capping at 8k (TKAI-305)", () => {
+    // 200k-context model, 8k maxTokens: usable = 192k → tail = 48k. The old
+    // fixed 8k ceiling kept 4% of the window verbatim on every prod model.
+    const prodModel = { ...MODEL, contextWindow: 200_000 };
+    const usable = usableTokens(prodModel);
+    expect(usable).toBe(192_000);
+    expect(tailBudget(usable)).toBe(48_000);
+  });
+
+  it("maxPreserveRecentTokens caps the budget only when configured", () => {
+    expect(tailBudget(100_000, { maxPreserveRecentTokens: 8_000 })).toBe(8_000);
+    // The floor still wins over a configured ceiling below it.
+    expect(tailBudget(100_000, { maxPreserveRecentTokens: 1_000 })).toBe(2_000);
   });
 });
 
@@ -132,7 +152,7 @@ describe("compaction: selectCutPoint", () => {
   // Use a tokenize override to make the math easy: each entry "weighs" 100 tokens.
   const fixed = () => 100;
 
-  it("keeps the last N turns when they fit the budget", () => {
+  it("keeps the last tailTurns turns when they fit the budget", () => {
     const entries = [
       user("u1", ""),
       assistant("a1", ""),
@@ -141,12 +161,27 @@ describe("compaction: selectCutPoint", () => {
       user("u3", ""),
       assistant("a3", ""),
     ];
-    // budget = 8000 (default) since usable = 100k - 8k = 92k → tailBudget min 8k.
-    const cut = selectCutPoint({ entries, model: MODEL, tokenize: fixed });
-    // Default tailTurns=2: keep u2/a2 + u3/a3 → cutIndex = 2
+    // usable = 100k - 8k = 92k → budget = 23k; tailTurns=2 binds first.
+    const cut = selectCutPoint({ entries, model: MODEL, cfg: { tailTurns: 2 }, tokenize: fixed });
     expect(cut.cutIndex).toBe(2);
     expect(cut.tailStartId).toBe("u2");
     expect(cut.fallbackToFloor).toBe(false);
+  });
+
+  it("default tailTurns lets the token budget bind instead of the turn count", () => {
+    const entries = [
+      user("u1", ""),
+      assistant("a1", ""),
+      user("u2", ""),
+      assistant("a2", ""),
+      user("u3", ""),
+      assistant("a3", ""),
+    ];
+    // All 3 turns (600 est. tokens) fit the 23k budget within the default
+    // tailTurns (8) → nothing to compact.
+    const cut = selectCutPoint({ entries, model: MODEL, tokenize: fixed });
+    expect(cut.cutIndex).toBe(0);
+    expect(cut.tailStartId).toBe("u1");
   });
 
   it("respects tailTurns=1", () => {
@@ -286,7 +321,7 @@ describe("compaction: planPrune", () => {
 });
 
 describe("compaction: applyPrune", () => {
-  it("mutates tool_call parts to elided + placeholder result", () => {
+  it("marks tool_call parts elided but keeps the stored result (TKAI-305)", () => {
     const entries: SessionEntry[] = [
       user("u1", ""),
       assistant("a1", "", [
@@ -312,7 +347,9 @@ describe("compaction: applyPrune", () => {
     expect(tc?.type).toBe("tool_call");
     if (tc?.type === "tool_call") {
       expect(tc.elided).toBe(true);
-      expect(tc.result).toEqual({ elided: true, reason: "pruned" });
+      // The stored text survives — elision applies at render time only, so
+      // the summarizer can still read the output at the next compaction.
+      expect(tc.result).toBe("very long output");
     }
   });
 
@@ -364,5 +401,114 @@ describe("compaction: extractFileContext", () => {
     ];
     const fc = extractFileContext(entries);
     expect(fc.read).toEqual(["/a.txt"]);
+  });
+});
+
+describe("compaction: estimateContextTokens", () => {
+  it("counts the system prompt plus text across all message roles", () => {
+    const messages: Message[] = [
+      { role: "user", content: "a".repeat(40), timestamp: 1 },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "b".repeat(40) },
+          { type: "thinking", thinking: "c".repeat(40) },
+          { type: "toolCall", id: "c1", name: "bash", arguments: { cmd: "d".repeat(20) } },
+        ],
+        api: "anthropic-messages",
+        provider: "anthropic",
+        model: "m",
+        usage: {
+          input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: "stop",
+        timestamp: 2,
+      },
+      {
+        role: "toolResult",
+        toolCallId: "c1",
+        toolName: "bash",
+        content: [{ type: "text", text: "e".repeat(40) }],
+        isError: false,
+        timestamp: 3,
+      },
+    ];
+    const total = estimateContextTokens("s".repeat(40), messages);
+    // 5 × 40-char blocks (system, user, text, thinking, result) = 50 tokens,
+    // plus the toolCall args JSON (~8 tokens).
+    expect(total).toBeGreaterThanOrEqual(50);
+    expect(total).toBeLessThan(70);
+  });
+
+  it("counts image blocks with a flat estimate", () => {
+    const messages: Message[] = [
+      {
+        role: "user",
+        content: [{ type: "image", data: "x", mimeType: "image/png" }],
+        timestamp: 1,
+      },
+    ];
+    expect(estimateContextTokens(undefined, messages)).toBe(1_500);
+  });
+});
+
+describe("compaction: storedToolResultText", () => {
+  it("returns the stored string or JSON", () => {
+    expect(storedToolResultText({ result: "out" })).toBe("out");
+    expect(storedToolResultText({ result: { text: "x" } })).toBe('{"text":"x"}');
+  });
+
+  it("returns undefined for missing results and legacy prune placeholders", () => {
+    expect(storedToolResultText({})).toBeUndefined();
+    expect(storedToolResultText({ result: { elided: true, reason: "pruned" } })).toBeUndefined();
+  });
+});
+
+describe("compaction: elided results and the summarizer (TKAI-305)", () => {
+  const elidedEntry = assistant("a1", "", [
+    {
+      type: "tool_call",
+      callId: "c1",
+      toolName: "bash",
+      status: "completed",
+      args: { cmd: "cat notes" },
+      result: "the agreed rollout plan is blue-green",
+      elided: true,
+    },
+  ]);
+
+  it("feeds an elided-but-preserved tool result to the summarizer", () => {
+    const messages = entriesToSummaryMessages([elidedEntry], { toolOutputMaxChars: 2_000 });
+    const text = JSON.stringify(messages);
+    expect(text).toContain("the agreed rollout plan is blue-green");
+    expect(text).not.toContain("[output elided to save context]");
+  });
+
+  it("falls back to the elision marker when the stored text was discarded (legacy prune)", () => {
+    const legacy = assistant("a1", "", [
+      {
+        type: "tool_call",
+        callId: "c1",
+        toolName: "bash",
+        status: "completed",
+        result: { elided: true, reason: "pruned" },
+        elided: true,
+      },
+    ]);
+    const messages = entriesToSummaryMessages([legacy], { toolOutputMaxChars: 2_000 });
+    expect(JSON.stringify(messages)).toContain("[output elided to save context]");
+  });
+
+  it("renders a placeholder in the LIVE context even though the stored text is preserved", () => {
+    const messages = entriesToAgentMessages(
+      [user("u1", "hi"), elidedEntry],
+      { api: "anthropic-messages", provider: "anthropic", id: "m" },
+    );
+    const toolResult = messages.find((m) => m.role === "toolResult");
+    expect(toolResult).toBeDefined();
+    const text = JSON.stringify(toolResult);
+    expect(text).toContain("[output elided to save context]");
+    expect(text).not.toContain("blue-green");
   });
 });

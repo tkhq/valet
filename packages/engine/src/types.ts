@@ -373,7 +373,13 @@ export type MessagePart =
       args?: unknown;
       result?: unknown;
       error?: string;
-      /** Set by the pruner. When true, `result` has been replaced with a placeholder; the original output is no longer available. */
+      /**
+       * Set by the pruner. When true, LLM-context assembly renders a short
+       * placeholder instead of `result`. The stored `result` text is kept so
+       * the summarizer and the UI can still read it. Rows pruned before this
+       * rule may carry a `{ elided: true, reason: "pruned" }` placeholder as
+       * `result` — their original output is gone.
+       */
       elided?: boolean;
     }
   | { type: "attachment"; attachment: ToolAttachment }
@@ -2169,11 +2175,11 @@ export interface CompactionConfig {
   enabled?: boolean;
   /** Subtract from contextWindow when computing usable space. Default: min(20_000, model.maxOutputTokens). */
   reserveTokens?: number;
-  /** Last N turns are never compacted. Default: 2. */
+  /** At most the last N turns are kept verbatim; the tail token budget decides how many fit. Default: 8. */
   tailTurns?: number;
   /** Floor for tail token budget. Default: 2_000. */
   minPreserveRecentTokens?: number;
-  /** Ceiling for tail token budget. Default: 8_000. */
+  /** Optional ceiling for tail token budget. Default: none — the budget scales as 25% of usable context. */
   maxPreserveRecentTokens?: number;
   /** Recent tool-output bytes never pruned. Default: 40_000 (estimated tokens). */
   pruneProtectTokens?: number;
