@@ -812,7 +812,18 @@ export class Session {
     if (resolved.source === "builtin") {
       source = "builtin";
       name = resolved.name;
-      result = await executeBuiltin(name, args, this, this.options.commandContext, thread);
+      // Same failure contract as the plugin path below: a throwing builtin
+      // (e.g. /compact when the summarizer provider errors) must persist an
+      // ok:false command_result next to the already-persisted echo entry,
+      // not reject the whole submission into a raw HTTP 500 (TKAI-306).
+      try {
+        result = await executeBuiltin(name, args, this, this.options.commandContext, thread);
+      } catch (err) {
+        result = {
+          ok: false,
+          output: err instanceof Error ? err.message : String(err),
+        };
+      }
     } else if (resolved.source === "plugin") {
       source = "plugin";
       name = `${resolved.pluginName}:${resolved.def.name}`;

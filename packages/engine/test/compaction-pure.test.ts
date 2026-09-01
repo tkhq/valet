@@ -505,8 +505,43 @@ describe("compaction: stripAnalysisScratchpad (TKAI-306)", () => {
     expect(stripAnalysisScratchpad(raw)).toBe("## Goal\n- ship it");
   });
 
+  it("removes every analysis block, not just the first", () => {
+    const raw = "<analysis>one</analysis>\n## Goal\n- x\n<analysis>two</analysis>";
+    expect(stripAnalysisScratchpad(raw)).toBe("## Goal\n- x");
+  });
+
+  it("removes an unclosed analysis block (truncated output)", () => {
+    expect(stripAnalysisScratchpad("<analysis>\ntruncated mid-scratch")).toBe("");
+  });
+
   it("passes through output without an analysis block", () => {
     expect(stripAnalysisScratchpad("## Goal\n- x")).toBe("## Goal\n- x");
+  });
+});
+
+describe("compaction: summarizer input caps (TKAI-306)", () => {
+  it("caps giant user prose and tool args so one entry cannot dominate", () => {
+    const messages = entriesToSummaryMessages(
+      [
+        user("u1", "p".repeat(50_000)),
+        assistant("a1", "", [
+          {
+            type: "tool_call",
+            callId: "c1",
+            toolName: "write",
+            status: "completed",
+            args: { content: "q".repeat(50_000) },
+            result: "ok",
+          },
+        ]),
+      ],
+      { toolOutputMaxChars: 2_000 },
+    );
+    const total = JSON.stringify(messages).length;
+    // 100k chars of input collapses to bounded output (20k prose cap +
+    // 2k args cap + framing).
+    expect(total).toBeLessThan(30_000);
+    expect(JSON.stringify(messages)).toContain("truncated");
   });
 });
 

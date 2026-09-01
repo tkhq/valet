@@ -33,6 +33,13 @@ const TAIL_FRACTION = 0.25;
  */
 const IMAGE_TOKEN_ESTIMATE = 1_500;
 
+/**
+ * Per-block ceiling on prose (user content, assistant text) fed to the
+ * summarizer. Generous — ~5k tokens — but bounded, so one giant pasted
+ * message cannot dominate the summarizer input (TKAI-306).
+ */
+const SUMMARY_PROSE_MAX_CHARS = 20_000;
+
 const DEFAULT_PROTECTED_TOOLS = new Set(["skill", "thread_read"]);
 
 // ── Token estimation ───────────────────────────────────────────────
@@ -597,7 +604,13 @@ export class SummarizeOverflowError extends Error {
  * written — storing it would bloat every post-compaction context.
  */
 export function stripAnalysisScratchpad(text: string): string {
-  return text.replace(/<analysis>[\s\S]*?<\/analysis>/, "").trim();
+  // Global: nothing stops the summarizer from emitting two analysis passes.
+  // An UNCLOSED block (output truncated mid-scratchpad) is stripped to the
+  // end — a partial scratchpad must never be persisted as the summary.
+  return text
+    .replace(/<analysis>[\s\S]*?<\/analysis>/g, "")
+    .replace(/<analysis>[\s\S]*$/, "")
+    .trim();
 }
 
 export async function summarize(opts: SummarizeOptions): Promise<SummarizeResult> {
@@ -634,12 +647,20 @@ export async function summarize(opts: SummarizeOptions): Promise<SummarizeResult
   // pi-ai returns API failures as an assistant message with stopReason
   // "error", not a throw. Without this check an errored completion produced
   // an empty summary that was silently persisted as the CompactionEntry.
-  if (result.stopReason === "error" || result.stopReason === "aborted") {
-    if (isContextOverflow(result)) {
+  // "length" fails too: a maxTokens-truncated summary is garbage (often an
+  // unclosed <analysis> block), and the caller can retry with less input.
+  // The contextWindow argument matches the reactive path's overflow check.
+  if (
+    result.stopReason === "error" ||
+    result.stopReason === "aborted" ||
+    result.stopReason === "length"
+  ) {
+    if (isContextOverflow(result, opts.model.contextWindow)) {
       throw new SummarizeOverflowError(result.errorMessage);
     }
     throw new Error(
-      result.errorMessage ?? `summarizer completion failed (${result.stopReason})`,
+      result.errorMessage ??
+        `The summarizer completion failed (${result.stopReason}). Run /compact to retry.`,
     );
   }
 
@@ -648,8 +669,16 @@ export async function summarize(opts: SummarizeOptions): Promise<SummarizeResult
     .map((b) => b.text)
     .join("");
 
+  const summary = stripAnalysisScratchpad(text);
+  if (summary.length === 0) {
+    // A blank summary would silently replace the whole head with nothing.
+    throw new Error(
+      "The summarizer returned no summary text. Run /compact to retry.",
+    );
+  }
+
   return {
-    summary: stripAnalysisScratchpad(text),
+    summary,
     inputTokens: result.usage.input + result.usage.cacheRead,
     outputTokens: result.usage.output,
   };
@@ -665,6 +694,19 @@ export function entriesToSummaryMessages(
   opts: { toolOutputMaxChars: number; attributeAuthors?: boolean },
 ): Message[] {
   const out: Message[] = [];
+  // Every text field fed to the summarizer is capped. Tool results and args
+  // use the tight toolOutputMaxChars; prose gets a generous ceiling. Without
+  // caps, one giant pasted message or Write-args body can dominate the
+  // summarizer input, survive every overflow-retry slice, and make the
+  // thread permanently uncompactable.
+  const capTool = (raw: string): string =>
+    raw.length > opts.toolOutputMaxChars
+      ? raw.slice(0, opts.toolOutputMaxChars) + `…(truncated, ${raw.length - opts.toolOutputMaxChars} more chars)`
+      : raw;
+  const capProse = (raw: string): string =>
+    raw.length > SUMMARY_PROSE_MAX_CHARS
+      ? raw.slice(0, SUMMARY_PROSE_MAX_CHARS) + `…(truncated, ${raw.length - SUMMARY_PROSE_MAX_CHARS} more chars)`
+      : raw;
   for (const e of entries) {
     if (e.type !== "message") continue; // skip CompactionEntry, DecisionGateEntry, BranchSummary
     if (e.role === "user") {
@@ -673,9 +715,10 @@ export function entriesToSummaryMessages(
       // sender). Without it the summary loses who asked for what.
       const senderLine =
         opts.attributeAuthors && !e.signal ? formatSenderLine(e.author) : undefined;
+      const content = capProse(e.content);
       out.push({
         role: "user",
-        content: [{ type: "text", text: senderLine ? `${senderLine}\n\n${e.content}` : e.content }],
+        content: [{ type: "text", text: senderLine ? `${senderLine}\n\n${content}` : content }],
         timestamp: e.createdAt,
       });
       continue;
@@ -685,11 +728,11 @@ export function entriesToSummaryMessages(
       const parts = e.parts ?? [];
       const hadStructured = parts.length > 0;
       for (const p of parts) {
-        if (p.type === "text") blocks.push({ type: "text", text: p.text });
+        if (p.type === "text") blocks.push({ type: "text", text: capProse(p.text) });
         else if (p.type === "thinking") {
           // Drop thinking from summary input — it's redundant once we have the result.
         } else if (p.type === "tool_call") {
-          const argsStr = p.args ? JSON.stringify(p.args) : "";
+          const argsStr = p.args ? capTool(JSON.stringify(p.args)) : "";
           // Elided parts keep their stored text (elision only hides it from
           // the live context) — feed it to the summarizer so a pruned output
           // still contributes facts to the summary. Rows pruned before the
@@ -697,10 +740,7 @@ export function entriesToSummaryMessages(
           const raw = storedToolResultText(p);
           let resultStr = "";
           if (raw !== undefined) {
-            resultStr =
-              raw.length > opts.toolOutputMaxChars
-                ? raw.slice(0, opts.toolOutputMaxChars) + `…(truncated, ${raw.length - opts.toolOutputMaxChars} more chars)`
-                : raw;
+            resultStr = capTool(raw);
           } else if (p.elided) {
             resultStr = "[output elided to save context]";
           }
@@ -710,7 +750,7 @@ export function entriesToSummaryMessages(
           });
         }
       }
-      if (!hadStructured && e.content) blocks.push({ type: "text", text: e.content });
+      if (!hadStructured && e.content) blocks.push({ type: "text", text: capProse(e.content) });
       if (blocks.length === 0) continue;
       out.push({
         role: "assistant",

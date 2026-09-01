@@ -140,6 +140,14 @@ const AUTO_CONTINUE_PROMPT =
 const MAX_CONSECUTIVE_COMPACTION_FAILURES = 3;
 
 /**
+ * What a compaction pass achieved. "compacted" = a summary was persisted;
+ * "pruned" = tool-output elision only; "noop" = the pass found nothing to
+ * reclaim. Proactive callers treat "noop" as breaker-worthy: the trigger
+ * fired but compaction cannot help, so retrying every turn is futile.
+ */
+export type CompactionOutcome = "compacted" | "pruned" | "noop";
+
+/**
  * The summarize call itself can overflow the summarizer model. Each retry
  * drops the oldest half of the head entries fed to the summarizer (the
  * CompactionEntry still covers the full head — the previous summary anchors
@@ -2944,11 +2952,7 @@ export class Thread {
     if (this.rehydratedCheckPending) {
       this.rehydratedCheckPending = false;
       if (this.shouldCompactProactive()) {
-        try {
-          await this.compactThread({ mode: "proactive", autoContinue: false });
-        } catch (err) {
-          this.recordProactiveCompactionFailure(err);
-        }
+        await this.runProactiveCompaction(false);
       }
     }
 
@@ -2997,11 +3001,7 @@ export class Thread {
       // compaction pass before yielding back to the queue. Reactive
       // compaction (overflow retry) is handled inline in runAgent.
       if (this.shouldCompactProactive()) {
-        try {
-          await this.compactThread({ mode: "proactive" });
-        } catch (err) {
-          this.recordProactiveCompactionFailure(err);
-        }
+        await this.runProactiveCompaction();
       }
     } finally {
       this.restoreColdHintAfterTurn(coldHintPrompt);
@@ -3165,7 +3165,19 @@ export class Thread {
     ) {
       this.overflowRetryInProgress = true;
       try {
-        await this.compactThread({ mode: "reactive" });
+        // A failed reactive compaction must not fail the turn as
+        // agent_failed with a confusing summarizer message: report it as
+        // compaction_failed and skip the retry — the recorded overflow
+        // response already carries the turn's honest error (TKAI-306).
+        try {
+          await this.compactThread({ mode: "reactive" });
+        } catch (err) {
+          this.emitError(
+            "compaction_failed",
+            err instanceof Error ? err.message : String(err),
+          );
+          return;
+        }
         // Drop the failed assistant message from the agent transcript and retry.
         this.agent.state.messages = this.agent.state.messages.slice(0, -1);
         await this.agent.prompt({
@@ -3181,21 +3193,44 @@ export class Thread {
   }
 
   /**
-   * Count a failed proactive compaction toward the circuit breaker and emit
-   * the failure. At the cap, emit a distinct event so clients can tell the
-   * user proactive compaction gave up (a plain compaction_failed looks like
-   * a one-off).
+   * Count a failed (or futile) proactive compaction toward the circuit
+   * breaker and emit it. At the cap, emit a distinct event so clients can
+   * tell the user proactive compaction gave up (a plain compaction_failed
+   * looks like a one-off).
    */
-  private recordProactiveCompactionFailure(err: unknown): void {
+  private recordProactiveCompactionFailure(code: string, message: string): void {
     this.consecutiveCompactionFailures++;
-    this.emitError(
-      "compaction_failed",
-      err instanceof Error ? err.message : String(err),
-    );
+    this.emitError(code, message);
     if (this.consecutiveCompactionFailures === MAX_CONSECUTIVE_COMPACTION_FAILURES) {
       this.emitError(
         "compaction_circuit_open",
-        `Automatic compaction stopped after ${MAX_CONSECUTIVE_COMPACTION_FAILURES} consecutive failures. Run /compact to retry manually.`,
+        `Automatic compaction stopped after ${MAX_CONSECUTIVE_COMPACTION_FAILURES} consecutive attempts that failed or reclaimed nothing. Run /compact to retry manually.`,
+      );
+    }
+  }
+
+  /**
+   * Shared handling for both proactive compaction passes (pre-turn
+   * rehydration and post-turn). A thrown compaction counts as a failure; a
+   * "noop" outcome ALSO counts — the trigger fired but nothing was
+   * reclaimable (context dominated by system overhead the estimate cannot
+   * reduce), and without the breaker that repeats silently on every turn.
+   */
+  private async runProactiveCompaction(autoContinue?: false): Promise<void> {
+    try {
+      const outcome = await this.compactThread(
+        autoContinue === false ? { mode: "proactive", autoContinue } : { mode: "proactive" },
+      );
+      if (outcome === "noop") {
+        this.recordProactiveCompactionFailure(
+          "compaction_noop",
+          "Compaction found nothing to reclaim: the recent turns already fit the tail budget, so the context is dominated by the system prompt and tool definitions. Reduce enabled tools or start a new thread.",
+        );
+      }
+    } catch (err) {
+      this.recordProactiveCompactionFailure(
+        "compaction_failed",
+        err instanceof Error ? err.message : String(err),
       );
     }
   }
@@ -3251,9 +3286,9 @@ export class Thread {
      * synthetic continuation would duplicate work.
      */
     autoContinue?: false;
-  }): Promise<void> {
+  }): Promise<CompactionOutcome> {
     const cfg = this.session.options.compaction;
-    if (cfg?.enabled === false) return;
+    if (cfg?.enabled === false) return "noop";
     return withSpan(
       "compaction",
       {
@@ -3272,7 +3307,7 @@ export class Thread {
       autoContinue?: false;
     },
     span?: Span,
-  ): Promise<void> {
+  ): Promise<CompactionOutcome> {
     const cfg = this.session.options.compaction;
     const session = this.session;
     const store = session.providers.store;
@@ -3317,12 +3352,15 @@ export class Thread {
     if (cut.cutIndex === 0 || cut.cutIndex === entries.length) {
       // Nothing to compact: either the tail already fits everything, or
       // there's no tail to preserve. The pruning pass above may have been
-      // sufficient on its own.
-      return;
+      // sufficient on its own. The outcome tells the proactive caller apart:
+      // "pruned" is progress; "noop" means the trigger fired but nothing was
+      // reclaimable (context dominated by system overhead the budget math
+      // cannot see) — left unhandled that repeats silently every turn.
+      return prunePlan.willCommit ? "pruned" : "noop";
     }
 
     const head = entries.slice(0, cut.cutIndex);
-    if (head.length === 0) return;
+    if (head.length === 0) return prunePlan.willCommit ? "pruned" : "noop";
 
     // Step 3: summarize.
     await session.emit(
@@ -3363,8 +3401,24 @@ export class Thread {
           break;
         } catch (err) {
           if (!(err instanceof SummarizeOverflowError)) throw err;
-          const truncated = headForSummary.slice(Math.floor(headForSummary.length / 2));
-          if (attempt + 1 >= MAX_SUMMARIZE_OVERFLOW_RETRIES || truncated.length === 0 || truncated.length === headForSummary.length) {
+          // Align the cut to a user-message boundary: a summarizer input
+          // starting on an assistant message is rejected by providers that
+          // require a user-first transcript, and that 400 is not an
+          // overflow, so it would abort the whole retry loop.
+          const half = Math.floor(headForSummary.length / 2);
+          let start = -1;
+          for (let i = half; i < headForSummary.length; i++) {
+            const e = headForSummary[i];
+            if (e.type === "message" && e.role === "user") {
+              start = i;
+              break;
+            }
+          }
+          const truncated = start >= 0 ? headForSummary.slice(start) : headForSummary.slice(half);
+          if (
+            attempt + 1 >= MAX_SUMMARIZE_OVERFLOW_RETRIES ||
+            truncated.length === headForSummary.length
+          ) {
             throw err;
           }
           headForSummary = truncated;
@@ -3457,6 +3511,8 @@ export class Thread {
     if (opts.autoContinue !== false) {
       this.skipNextProactiveCheck = true;
     }
+
+    return "compacted";
   }
 
   private applyElisionsToAgentMessages(plan: PruneResult): void {
@@ -4463,8 +4519,11 @@ export function entriesToAgentMessages(
 
   const out: AgentMessage[] = [];
   if (activeCompaction) {
+    // thread_read returns the newest `limit` entries (max 200), so this can
+    // reach recent covered turns but not the oldest ones on a long thread —
+    // say "recent" so the model does not overtrust it.
     const escapeHatch = opts?.threadKey
-      ? `\n\nIf you need specific details from before this summary (exact code, error text, tool output), read them with the thread_read tool: key "${opts.threadKey}", includeCompacted true.`
+      ? `\n\nIf you need specific details from recent turns covered by this summary (exact code, error text, tool output), read them with the thread_read tool: key "${opts.threadKey}", limit 200.`
       : "";
     out.push({
       role: "user",

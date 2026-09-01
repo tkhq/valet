@@ -667,6 +667,89 @@ describe("compaction: summarizer failure handling (TKAI-306)", () => {
     faux.unregister();
   });
 
+  it("summarize rejects a length-truncated completion instead of storing garbage", async () => {
+    const faux = registerFauxProvider({
+      provider: "compact-summ-length",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    faux.setResponses([
+      fauxAssistantMessage("<analysis>ran out of tok", { stopReason: "length" }),
+    ]);
+    await expect(
+      summarize({
+        headEntries: [
+          { id: "u-1", sessionId: "s", threadId: "t", parentId: null, type: "message", role: "user", content: "hi", createdAt: 1 },
+        ],
+        model: faux.getModel("tiny")!,
+      }),
+    ).rejects.toThrow("length");
+    faux.unregister();
+  });
+
+  it("summarize rejects when stripping leaves no summary text", async () => {
+    const faux = registerFauxProvider({
+      provider: "compact-summ-blank",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    faux.setResponses([
+      fauxAssistantMessage("<analysis>only a scratchpad, no summary</analysis>"),
+    ]);
+    await expect(
+      summarize({
+        headEntries: [
+          { id: "u-1", sessionId: "s", threadId: "t", parentId: null, type: "message", role: "user", content: "hi", createdAt: 1 },
+        ],
+        model: faux.getModel("tiny")!,
+      }),
+    ).rejects.toThrow("no summary text");
+    faux.unregister();
+  });
+
+  it("a proactive pass with nothing to reclaim counts toward the breaker as compaction_noop", async () => {
+    const faux = registerFauxProvider({
+      provider: "compact-noop-breaker",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+    });
+    // No summarizer responses queued: the pass must never reach summarize.
+    faux.setResponses([
+      fauxAssistantMessage("r1"),
+      fauxAssistantMessage("r2"),
+      fauxAssistantMessage("r3"),
+      fauxAssistantMessage("r4"),
+    ]);
+    const { engine, events } = makeEngine();
+    // A single over-budget turn with NO prior turns: the whole transcript
+    // fits the tail budget (min floor 2k), so cutIndex is 0 → noop.
+    const session = await engine.createSession({
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel("tiny")!,
+      compaction: { autoContinue: false },
+    });
+    for (let turn = 1; turn <= 4; turn++) {
+      const receipt = await session.prompt(OVER_BUDGET_PROMPT);
+      await waitFor(
+        () =>
+          events.filter(
+            (e) => e.event.type === "turn_end" && e.event.threadId === receipt.threadId,
+          ).length >= turn,
+      );
+    }
+    expect(events.filter((e) => e.event.type === "compaction_start")).toHaveLength(0);
+    const noops = events.filter(
+      (e) => e.event.type === "error" && e.event.code === "compaction_noop",
+    );
+    expect(noops).toHaveLength(3); // breaker opens after 3; turn 4 skips
+    expect(
+      events.filter(
+        (e) => e.event.type === "error" && e.event.code === "compaction_circuit_open",
+      ),
+    ).toHaveLength(1);
+    faux.unregister();
+  });
+
   it("summarize strips the <analysis> scratchpad from the stored summary", async () => {
     const faux = registerFauxProvider({
       provider: "compact-summ-analysis",

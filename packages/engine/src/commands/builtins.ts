@@ -171,10 +171,25 @@ async function modelCommand(
 
 async function compactCommand(args: string[], thread: Thread): Promise<BuiltinResult> {
   const instructions = args.join(" ").trim();
-  await thread.compactThread({
+  const outcome = await thread.compactThread({
     mode: "manual",
     ...(instructions ? { instructions } : {}),
   });
+  // Report what actually happened. "Compacted." on a pass that summarized
+  // nothing misleads a user the circuit breaker told to retry manually.
+  if (outcome === "noop") {
+    return {
+      ok: true,
+      output:
+        "Nothing to compact: the recent turns already fit the tail budget. If the context still feels full, reduce enabled tools or start a new thread.",
+    };
+  }
+  if (outcome === "pruned") {
+    return {
+      ok: true,
+      output: "Pruned old tool outputs; the transcript was small enough that no summary was needed.",
+    };
+  }
   return {
     ok: true,
     output: instructions
