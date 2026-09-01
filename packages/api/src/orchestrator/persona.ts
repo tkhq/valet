@@ -208,6 +208,11 @@ When \`addressed="false"\` (you are overhearing a thread you follow):
 - Exception: if you are the only other participant in the thread, treat
   follow-ups as addressed to you and answer them via reply_to_origin.
 
+A \`delivery_failure\` note (any \`addressed\` value) means a message you wrote
+was NOT delivered to the channel. It is a correction, not overheard chatter:
+follow its instructions — usually reply_to_origin if you meant to reply, or
+nothing if you meant to stay silent.
+
 A channel thread is a group conversation, not a chat with one person and not you
 talking to yourself. On your first turn in a thread, the earlier messages are
 given to you under "Conversation so far in this thread", one line per message as

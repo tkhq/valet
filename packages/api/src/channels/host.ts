@@ -169,11 +169,19 @@ function turnRepliedToOrigin(entries: SessionEntry[], queueItemId: string): bool
   return turnCalledOriginTool(entries, queueItemId, [".reply_to_origin"]);
 }
 
-/** True when the submission acted on its origin at all — replied or reacted.
- * The dropped-reply feedback stands down for a turn that acted: the agent
- * already chose its channel response. */
+/** True when the submission delivered a channel response some way — the origin
+ * actions, a direct channel post, or a DM. The dropped-reply feedback stands
+ * down for such a turn: nagging "call reply_to_origin" at an agent that
+ * answered via send_message (or deliberately went private via dm_*) would
+ * invite a duplicate reply. */
 function turnActedOnOrigin(entries: SessionEntry[], queueItemId: string): boolean {
-  return turnCalledOriginTool(entries, queueItemId, [".reply_to_origin", ".react_to_origin"]);
+  return turnCalledOriginTool(entries, queueItemId, [
+    ".reply_to_origin",
+    ".react_to_origin",
+    ".send_message",
+    ".dm_owner",
+    ".dm_user",
+  ]);
 }
 
 /** True when the submission's own prompt IS a delivery-feedback signal
@@ -702,9 +710,13 @@ export class ChannelHost {
       return;
     }
 
+    // Whether the reply's TEXT landed on the channel, so a later attachment
+    // failure does not produce a false "your reply was NOT posted" note.
+    let textPosted = false;
     try {
       if (entry.content) {
         await transport.send(target.conversationKey, { markdown: entry.content });
+        textPosted = true;
       }
       for (const part of entry.parts ?? []) {
         if (part.type !== "attachment") continue;
@@ -737,10 +749,12 @@ export class ChannelHost {
       // Tell the agent its reply never landed, so it can retry or route around
       // the failure instead of believing it answered (TKAI-284). Only for an
       // origin-bearing turn: reply_to_origin needs an origin to post through.
-      // Once per failed message (the dispatchId), and the feedback signal's
-      // manual origin keeps the recovery turn off the auto-post path, so a
-      // still-broken transport cannot loop.
-      if (origin !== undefined && entry.queueItemId !== undefined) {
+      // Only when the TEXT never posted — a partial failure (text landed, an
+      // attachment did not) must not invite a duplicate reply. Once per failed
+      // message (the dispatchId), and the feedback signal's manual origin
+      // keeps the recovery turn off the auto-post path, so a still-broken
+      // transport cannot loop.
+      if (!textPosted && origin !== undefined && entry.queueItemId !== undefined) {
         await this.submitReplyFeedback(sessionId, thread.key, origin, {
           dispatchId: `feedback:reply-failed:${messageId}`,
           body:
@@ -776,6 +790,10 @@ export class ChannelHost {
           kind: "signal",
           signalType: "channel.reply_dropped",
           body: args.body,
+          // Its own envelope tag: the manual origin renders addressed="false",
+          // and the persona reads that as ignorable overheard chatter — this
+          // note is a correction the agent must weigh (persona names the tag).
+          tagName: "delivery_failure",
           attributes: { feedback: "reply_dropped" },
           // Normalized origin — no messageTs. The dispatchId dedup compares
           // CONTENT: a per-message ts would make the once-per-thread repeat a

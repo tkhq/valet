@@ -6,6 +6,7 @@
  * chooses to (via reply_to_origin / react_to_origin), or stays silent. A
  * message on an unfollowed thread is ignored and never stored.
  */
+import { ConflictError } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import { deliverToAssistantThread } from "../events/assistant-delivery.js";
@@ -69,6 +70,15 @@ export function slackMessageFields(raw: unknown): SlackMessageFields | null {
 }
 
 /**
+ * Per-thread routing serialization. Each webhook POST runs its fan-out
+ * detached, so two rapid messages on one thread would otherwise both read the
+ * same `last_seen_ts` and hydrate overlapping windows — the second delivery
+ * would hand the agent the first message twice. In-process state is
+ * sufficient: the api runs single-replica.
+ */
+const routeChains = new Map<string, Promise<void>>();
+
+/**
  * Route a raw Slack update to the bound assistant when its thread is followed.
  * A no-op for a non-message, a bot post, a top-level message, or an unfollowed
  * thread. `dispatchId` makes a redelivery idempotent.
@@ -79,9 +89,25 @@ export async function handleFollowedMessage(
 ): Promise<void> {
   const f = slackMessageFields(args.raw);
   if (!f) return;
+  const key = `${args.orgId}:${f.channel}:${f.threadTs}`;
+  const prior = routeChains.get(key) ?? Promise.resolve();
+  const run = prior.then(() => routeFollowedMessage(deps, args.orgId, f));
+  const tail: Promise<void> = run
+    .catch(() => undefined)
+    .then(() => {
+      if (routeChains.get(key) === tail) routeChains.delete(key);
+    });
+  routeChains.set(key, tail);
+  return run;
+}
 
+async function routeFollowedMessage(
+  deps: FollowRouterDeps,
+  orgId: string,
+  f: SlackMessageFields,
+): Promise<void> {
   const follow = await findFollowedThread(deps.db, {
-    orgId: args.orgId,
+    orgId,
     channelType: "slack",
     channelId: f.channel,
     threadTs: f.threadTs,
@@ -111,23 +137,40 @@ export async function handleFollowedMessage(
     });
     if (missed !== null) {
       body = `Messages in this thread since you last saw it:\n${missed}\n\n---\n\n${body}`;
+      // A hydrated body is already a mini transcript. Excluded from digest
+      // coalescing (via this attribute) so its multi-line block is never
+      // attributed to one sender as a single digest line.
+      attributes.rehydrated = "true";
     }
   }
-  await deliverToAssistantThread(deps, {
-    orgId: args.orgId,
-    owner: { type: follow.ownerType, id: follow.ownerId },
-    actorUserId: follow.createdBy,
-    threadKey,
-    signal: {
-      kind: "signal",
-      signalType: "slack.message",
-      body,
-      attributes,
-      // Overheard: the assistant observes it and replies only if it acts.
-      origin: { channelType: "slack", threadKey, reply: "manual", messageTs: f.ts },
-    },
-    dispatchId: `slack:follow:${f.eventId}`,
-    mismatchReason: "followed_target_mismatch",
-  });
-  await touchFollowedThread(deps.db, follow.id, f.ts);
+  try {
+    await deliverToAssistantThread(deps, {
+      orgId,
+      owner: { type: follow.ownerType, id: follow.ownerId },
+      actorUserId: follow.createdBy,
+      threadKey,
+      signal: {
+        kind: "signal",
+        signalType: "slack.message",
+        body,
+        attributes,
+        // Overheard: the assistant observes it and replies only if it acts.
+        origin: { channelType: "slack", threadKey, reply: "manual", messageTs: f.ts },
+      },
+      dispatchId: `slack:follow:${f.eventId}`,
+      mismatchReason: "followed_target_mismatch",
+    });
+  } catch (err) {
+    // A Slack retry of an event whose FIRST delivery carried a hydration
+    // prefix recomputes a different body for the same dispatchId (the cursor
+    // advanced, so the prefix is gone). That content mismatch is still a
+    // redelivery of an already-delivered message — a no-op, not an error.
+    if (err instanceof ConflictError) return;
+    throw err;
+  }
+  // Advance the gap cursor monotonically: an out-of-order or retried older
+  // event must not rewind it, or the next window replays messages the agent
+  // already saw.
+  const advance = follow.lastSeenTs === null || Number.parseFloat(follow.lastSeenTs) < Number.parseFloat(f.ts);
+  await touchFollowedThread(deps.db, follow.id, advance ? f.ts : undefined);
 }

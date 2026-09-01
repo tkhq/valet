@@ -669,8 +669,9 @@ describe("ChannelHost outbound delivery", () => {
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("events").id;
     await engineStore.appendEntries(session.id, threadId, [
-      // Turn A: overheard, but the agent replied via reply_to_origin — the
-      // swallowed wrap-up is expected, no note.
+      // Turn A: overheard, but the agent posted via send_message (not the
+      // origin actions) — it still acted, so the swallowed wrap-up is
+      // expected and gets no note.
       {
         type: "message",
         id: "acted-user-1",
@@ -703,7 +704,7 @@ describe("ChannelHost outbound delivery", () => {
             callId: "tc-1",
             toolName: "call_tool",
             status: "completed",
-            args: { tool_id: "keyed.reply_to_origin", params: { text: "hi" } },
+            args: { tool_id: "keyed.send_message", params: { text: "hi" } },
             result: { details: { ok: true } },
           },
         ],

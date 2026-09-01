@@ -65,12 +65,16 @@ export function isSignalContent(content: PromptContent): content is SignalConten
  * A delivery-feedback signal (`attributes.feedback`, e.g. "your reply was not
  * posted") never coalesces: it is a correction addressed to the agent, not an
  * overheard line, and merging it into a digest would hide it AND defeat the
- * feedback loop guard that reads the turn's prompt signalType.
+ * feedback loop guard that reads the turn's prompt signalType. A gap-hydrated
+ * signal (`attributes.rehydrated`) never coalesces either: its body is a
+ * multi-line mini transcript, and a digest line would attribute the whole
+ * block to one sender.
  */
 export function overheardCoalesceKey(content: PromptContent): string | undefined {
   if (!isSignalContent(content)) return undefined;
   if (content.origin?.reply !== "manual") return undefined;
   if (content.attributes?.feedback !== undefined) return undefined;
+  if (content.attributes?.rehydrated !== undefined) return undefined;
   return content.origin.threadKey;
 }
 

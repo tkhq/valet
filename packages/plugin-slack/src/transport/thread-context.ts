@@ -71,15 +71,19 @@ export async function fetchThreadTranscript(
   },
 ): Promise<string | null> {
   const windowed = opts.afterTs !== undefined && opts.beforeTs !== undefined;
+  const limit = opts.limit ?? 100;
   let messages: Record<string, unknown>[];
   try {
     // A windowed fetch passes `oldest`: `conversations.replies` pages oldest
     // first, so without the bound a long thread's recent gap would fall
     // outside the first page entirely.
-    messages = await api.conversationsReplies(opts.channelId, opts.threadTs, opts.limit ?? 100, opts.afterTs);
+    messages = await api.conversationsReplies(opts.channelId, opts.threadTs, limit, opts.afterTs);
   } catch {
     return null; // thread gone, or the bot cannot read the channel — hydrate nothing.
   }
+  // A full windowed page means the gap continues past what one page holds:
+  // the NEWEST missed messages are absent. Say so instead of cutting silently.
+  const windowTruncated = windowed && messages.length >= limit;
   if (windowed) {
     // Numeric compare, not lexicographic: a Slack ts is `seconds.micros` and
     // the seconds part could change digit count.
@@ -124,6 +128,7 @@ export async function fetchThreadTranscript(
     }),
   );
   const lines = formatted.filter((l): l is string => !!l);
+  if (windowTruncated) lines.push("[more recent messages not shown — read the thread for the rest]");
   if (lines.length === 0) return null;
 
   return trimToBudget(lines);

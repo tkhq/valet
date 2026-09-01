@@ -162,6 +162,16 @@ describe("handleFollowedMessage", () => {
       threadTs: "1.2",
     });
     expect(row?.lastSeenTs).toBe("1.7");
+
+    // A Slack retry of the same event now recomputes WITHOUT the hydration
+    // prefix (the cursor advanced): the dispatchId content mismatch is a
+    // swallowed no-op, not a thrown ConflictError, and no second entry lands.
+    await handleFollowedMessage(
+      { db: testDb.appDb, engineHost, fetchThreadWindow: async () => null },
+      { orgId: ORG, raw: envelope({ type: "message", channel: "C1", thread_ts: "1.2", ts: "1.7", user: "U9", text: "any update?" }) },
+    );
+    const entries = await session.providers.store.getEntries(session.id, threadId);
+    expect(entries.filter((e) => e.type === "message" && e.role === "user")).toHaveLength(1);
   });
 
   it("delivers the bare message when the window is empty, and skips the fetch with no last_seen_ts", async () => {
