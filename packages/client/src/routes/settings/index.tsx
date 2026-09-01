@@ -752,6 +752,11 @@ function OrchestratorIdentitySection() {
   const nameCheck = useCheckName(nameChanged ? debouncedName : '');
   const nameTaken = nameChanged && debouncedName.length >= 2 && nameCheck.data?.available === false;
 
+  // The PUT sends `name: name || undefined` (undefined = "do not touch"),
+  // so saving a blanked field silently changes nothing and still shows
+  // "Saved". Block the save instead.
+  const requiredBlank = name.trim() === '' || handle.trim() === '';
+
   React.useEffect(() => {
     if (orchInfo?.identity) {
       setName(orchInfo.identity.name);
@@ -768,7 +773,7 @@ function OrchestratorIdentitySection() {
     customInstructions !== (orchInfo.identity?.customInstructions ?? '');
 
   function handleSave() {
-    if (handleTaken || nameTaken) return;
+    if (handleTaken || nameTaken || requiredBlank) return;
     updateIdentity.mutate(
       {
         name: name || undefined,
@@ -901,13 +906,13 @@ function OrchestratorIdentitySection() {
           />
         </div>
         <div className="flex items-center gap-3">
-          <Button onClick={handleSave} disabled={!hasChanges || handleTaken || nameTaken || updateIdentity.isPending}>
+          <Button onClick={handleSave} disabled={!hasChanges || handleTaken || nameTaken || requiredBlank || updateIdentity.isPending}>
             {updateIdentity.isPending ? 'Saving...' : 'Save'}
           </Button>
           {saved && <span className="text-sm text-green-600 dark:text-green-400">Saved</span>}
           {updateIdentity.isError && (
             <span className="text-sm text-red-600 dark:text-red-400">
-              {(updateIdentity.error as Error).message || 'Failed to save'}
+              {updateIdentity.error?.message ?? 'Failed to save'}
             </span>
           )}
         </div>

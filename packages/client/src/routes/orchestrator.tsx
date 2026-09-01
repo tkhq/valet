@@ -384,7 +384,7 @@ function OrchestratorDashboard() {
               ) : autoRestart.restartFailed ? (
                 <button
                   onClick={autoRestart.retry}
-                  title={(autoRestart.error as Error | null)?.message}
+                  title={autoRestart.error?.message}
                   className="inline-flex items-center gap-1.5 rounded-md border border-red-300 bg-red-50 px-3 py-1.5 text-sm font-medium text-red-700 transition-colors hover:bg-red-100 dark:border-red-700 dark:bg-red-950/30 dark:text-red-400 dark:hover:bg-red-950/50"
                 >
                   Restart failed — Retry

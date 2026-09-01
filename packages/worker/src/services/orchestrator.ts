@@ -1,5 +1,5 @@
 import type { SessionThread } from '@valet/shared';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, notInArray } from 'drizzle-orm';
 import type { Env } from '../env.js';
 import * as db from '../lib/db.js';
 import type { AppDb } from '../lib/drizzle.js';
@@ -340,9 +340,10 @@ export async function onboardOrchestrator(
     });
   } else {
     // Route the update through updateOrchestratorIdentity (below) so a
-    // handle/name collision returns a structured 409 instead of a raw
-    // UNIQUE-constraint 500 from the DB write (TKAI-295). The create branch
-    // above already runs both checks; this branch used to skip them.
+    // collision returns a structured 409 (TKAI-295). This branch used to
+    // write with no checks: a handle collision hit the (orgId, handle)
+    // UNIQUE index and 500'd; name has no index, so a name collision
+    // silently succeeded. The create branch above already runs both checks.
     const update = await updateOrchestratorIdentity(appDb, userId, {
       name: params.name,
       handle: params.handle,
@@ -432,19 +433,32 @@ export async function updateOrchestratorIdentity(
 
   // A rename bakes into two derived surfaces that nothing else refreshes
   // until the next restart: the linked persona row and the live session
-  // title (TKAI-295). Best-effort — a sync failure must not undo or mask
-  // the identity update itself.
+  // title (TKAI-295). Each sync is best-effort in its own try/catch — a
+  // failure in one must not skip the other or undo the identity update.
   if (nameChanged && updated) {
-    try {
-      if (identity.personaId) {
+    if (identity.personaId) {
+      try {
         await updatePersona(database, identity.personaId, {
           name: `${updated.name} (Orchestrator)`,
         });
+      } catch (err) {
+        console.warn('[Orchestrator] Failed to sync persona name after rename:', err);
       }
+    }
+    try {
+      // Live session only (the same rule getCurrentOrchestratorSession
+      // encodes): retitling a terminated row would also bump its
+      // last_active_at and defer the dead-orchestrator recovery cron.
       const sessionRow = await database
         .select({ id: sessions.id })
         .from(sessions)
-        .where(and(eq(sessions.userId, userId), eq(sessions.isOrchestrator, true)))
+        .where(
+          and(
+            eq(sessions.userId, userId),
+            eq(sessions.isOrchestrator, true),
+            notInArray(sessions.status, [...TERMINAL_STATUSES]),
+          ),
+        )
         .orderBy(desc(sessions.createdAt))
         .limit(1)
         .get();
@@ -452,7 +466,7 @@ export async function updateOrchestratorIdentity(
         await db.updateSessionTitle(database, sessionRow.id, `${updated.name} (Orchestrator)`);
       }
     } catch (err) {
-      console.warn('[Orchestrator] Failed to sync persona/session title after rename:', err);
+      console.warn('[Orchestrator] Failed to sync session title after rename:', err);
     }
   }
 
