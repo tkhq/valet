@@ -53,6 +53,8 @@ import { nextFireAt } from "./schedule-service.js";
 // template-declared subscription and a hand-made one are held to one rule.
 // `trigger-service.ts` set the precedent for importing it from a service.
 import { validateSubscription } from "../routes/events.js";
+import { enforceMentionScope } from "../events/mention-scope.js";
+import type { SubscriptionFilter } from "../events/match.js";
 import { newWorkflowId, validateDefinitionInput, type WorkflowOwner } from "./service.js";
 import type {
   WorkflowTemplateInput,
@@ -897,7 +899,9 @@ export async function installWorkflowTemplate(
   // the reason the cron is: a subscription that cannot be armed must not
   // leave an installed workflow behind that nothing will ever call.
   const workflowId = newWorkflowId("wf");
-  const subscriptions: { name: string; eventKeys: string[]; filters: SubscriptionFilterRow[] }[] = [];
+  // `SubscriptionFilter`, not `SubscriptionFilterRow`: the mention-scope gate
+  // may append its injected user filter to the resolved template filters.
+  const subscriptions: { name: string; eventKeys: string[]; filters: SubscriptionFilter[] }[] = [];
   for (const event of events) {
     const filters: SubscriptionFilterRow[] = [];
     for (const filter of event.filters ?? []) {
@@ -954,7 +958,19 @@ export async function installWorkflowTemplate(
         errors: [invalid],
       };
     }
-    subscriptions.push({ name, eventKeys: event.eventKeys, filters });
+    // Mention scoping (TKAI-299): this insert path must hold the same rule
+    // the CRUD writers do, or a template becomes the unscoped back door. No
+    // template names `slack.app_mention` today; one that does needs a
+    // channel filter (an install input) and a Slack-linked installer.
+    const scoped = await enforceMentionScope(deps.db, deps.plugins, owner.userId, {
+      eventKeys: event.eventKeys,
+      filters,
+      anyChannel: false,
+    });
+    if (!scoped.ok) {
+      return { ok: false, code: "invalid_input", error: scoped.error, errors: [scoped.error] };
+    }
+    subscriptions.push({ name, eventKeys: event.eventKeys, filters: scoped.filters });
   }
 
   let workflowName = owned.template.name;

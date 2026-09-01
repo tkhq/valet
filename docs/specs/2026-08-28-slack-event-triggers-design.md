@@ -199,9 +199,10 @@ select `slack.app_mention` — the exact key or a trailing wildcard — is a
    mention subscription with no channel filter IS the any-channel state, and
    the UI derives the display from that.
 
-Both subscription writers share the gate: the subscriptions CRUD routes
-(`routes/events.ts`) and the workflow trigger service
-(`workflows/trigger-service.ts`). On PATCH the gate re-runs only when the
+Every subscription writer shares the gate: the subscriptions CRUD routes
+(`routes/events.ts`), the workflow trigger service
+(`workflows/trigger-service.ts`), and the template installer
+(`workflows/templates.ts`). On PATCH the gate re-runs only when the
 patch changes `filters` or `eventKeys`, and it keys to the row's CREATOR
 (`created_by`), not the caller — an enable/disable toggle still works after
 the creator unlinks Slack, and a colleague's edit of an org-owned row cannot
