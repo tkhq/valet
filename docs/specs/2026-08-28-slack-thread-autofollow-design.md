@@ -153,7 +153,38 @@ thread, the delivery path seeds the thread's earlier messages instead.
   read who said what, answer the addressed person by name, act on the request
   from the thread rather than asking for context it already holds.
 
-### 9. Agent-readable inbound messages
+### 9. Overheard-digest coalescing (TKAI-297)
+
+When the assistant is busy, follow-ups in one followed thread used to queue as
+separate overheard submissions. The assistant then drained them one by one,
+answering messages a later message had already resolved.
+
+Now the engine coalesces them (`Thread.submitPrompt`,
+`packages/engine/src/thread.ts`). After it admits an overheard signal
+(`origin.reply === "manual"`, followup mode), it merges the signal with every
+other queued overheard item that carries the same `origin.threadKey`. The merge
+reuses the collect-flush shape: admit one digest item, then settle each
+constituent `merged` pointing at it. Properties:
+
+- The digest body is a mini transcript: the header "Conversation in this thread
+  while you were working:" then one `Name: message` line per overheard message,
+  oldest first — the same line shape the first-turn seed uses. Pure builders
+  live in `packages/engine/src/submission.ts` (`overheardCoalesceKey`,
+  `buildOverheardDigest`).
+- The envelope drops the per-message `sender` attribute and gains
+  `digest="<N>"`. The origin (and `messageTs`) comes from the newest
+  constituent, so `react_to_origin` targets the latest message.
+- Constituents are never claimed, so they write no user entries, and a Slack
+  redelivery of a constituent's `dispatchId` dedups against its settled row.
+  A dedup replay never re-digests.
+- Coalescing is keyed on `reply: "manual"` + a shared `origin.threadKey`, so it
+  applies to any channel that produces overheard signals, and only within one
+  external thread. Addressed messages never coalesce; an addressed message in
+  the same thread queues normally and does not flush the digest.
+- The persona's `addressed="false"` guidance tells the model to read the digest
+  as the thread's current state and reply at most once.
+
+### 10. Agent-readable inbound messages
 
 The event->signal path used to hand the agent raw ids and Slack markup, while
 the transport path resolved them — so the agent saw `sender="U0AJ…"`, a machine

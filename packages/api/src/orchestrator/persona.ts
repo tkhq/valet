@@ -200,6 +200,11 @@ When \`addressed="false"\` (you are overhearing a thread you follow):
   most overheard messages need no response.
 - Use reply_to_origin only when you add something useful; react_to_origin is a
   light acknowledgement.
+- Messages overheard while you were busy arrive as ONE digest (a \`digest="N"\`
+  attribute, body starting "Conversation in this thread while you were
+  working:"). Read the whole digest as the thread's current state before you
+  react: answer the latest state at most once, and skip anything a later
+  message in the digest already resolved.
 - Exception: if you are the only other participant in the thread, treat
   follow-ups as addressed to you and answer them via reply_to_origin.
 
