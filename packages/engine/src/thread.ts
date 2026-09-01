@@ -180,6 +180,8 @@ export class Thread {
   private collectTimer: ReturnType<typeof setTimeout> | null = null;
   /** Guards against the in-process timer and the session sweep both flushing the same window. */
   private flushingCollect = false;
+  /** Serializes overheard-digest scans; concurrent admissions coalesce one at a time (TKAI-297). */
+  private overheardCoalesceChain: Promise<QueueItem | null> = Promise.resolve(null);
   private gates = new GateManager();
   /**
    * Serializes gate open/wait cycles for this thread. pi-agent-core runs a
@@ -403,11 +405,18 @@ export class Thread {
     // signal merges with any other queued overheard items of its origin
     // thread. Skipped on a dispatchId dedup replay (wasAdmitted false) so a
     // channel redelivery cannot re-digest content it already delivered.
+    // Scans are chained, not concurrent: two webhook deliveries admitting
+    // in parallel would otherwise each scan before the other's digest
+    // lands and produce two overlapping digests.
     let receiptItem = admitted;
     if (wasAdmitted && effectiveMode === "followup") {
       const coalesceKey = overheardCoalesceKey(prepared.content);
       if (coalesceKey !== undefined) {
-        receiptItem = (await this.coalesceQueuedOverheard(coalesceKey)) ?? admitted;
+        const run = this.overheardCoalesceChain.then(() =>
+          this.coalesceQueuedOverheard(coalesceKey),
+        );
+        this.overheardCoalesceChain = run.catch(() => null);
+        receiptItem = (await run) ?? admitted;
       }
     }
     await this.emitQueueState();

@@ -232,6 +232,44 @@ describe("overheard digest: queue coalescing", () => {
     faux.unregister();
   });
 
+  it("concurrent overheard submissions coalesce into ONE digest, not overlapping ones", async () => {
+    const faux = registerFauxProvider({ provider: "overheard-concurrent" });
+    faux.setResponses([]);
+
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+    const thread = session.thread(THREAD_KEY);
+    await thread.pause();
+
+    await thread.submitPrompt(overheardSignal({ body: "first", sender: "Alice" }), {
+      dispatchId: "e1",
+    });
+    await Promise.all([
+      thread.submitPrompt(overheardSignal({ body: "second", sender: "Bob" }), { dispatchId: "e2" }),
+      thread.submitPrompt(overheardSignal({ body: "third", sender: "Cara" }), { dispatchId: "e3" }),
+    ]);
+
+    // Exactly one live item survives, and it carries all three lines.
+    const unsettled = await store.listUnsettledSubmissions(session.id);
+    expect(unsettled).toHaveLength(1);
+    const content = unsettled[0].content;
+    if (typeof content !== "object" || content === null || !("kind" in content)) {
+      throw new Error("digest content is not a signal");
+    }
+    expect(content.attributes?.digest).toBe("3");
+    expect(content.body).toContain("Alice: first");
+    expect(content.body).toContain("Bob: second");
+    expect(content.body).toContain("Cara: third");
+
+    faux.unregister();
+  });
+
   it("a dispatchId redelivery after coalescing dedups against the merged constituent and does not re-digest", async () => {
     const faux = registerFauxProvider({ provider: "overheard-redelivery" });
     faux.setResponses([]);
