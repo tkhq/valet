@@ -188,6 +188,37 @@ export function splitForStream(text: string, maxLen: number): string[] {
   return pieces;
 }
 
+const UNFURL_IMAGE_MIME: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+};
+
+/** Guess an image mime from the URL path; Slack image derivatives are JPEG when unknown. */
+function imageMimeFromUrl(url: string): string {
+  const ext = /\.([A-Za-z0-9]+)(?:[?#]|$)/.exec(url)?.[1]?.toLowerCase() ?? "";
+  // hasOwn, not a bare index: "x.constructor" must not resolve through the
+  // Object prototype chain to a function-typed mime.
+  return Object.hasOwn(UNFURL_IMAGE_MIME, ext) ? UNFURL_IMAGE_MIME[ext] : "image/jpeg";
+}
+
+const SLACK_FILE_DOMAINS = ["slack.com", "slack-files.com", "slack-imgs.com", "slack-edge.com"];
+
+/**
+ * Only Slack-operated hosts may enter fileRefs: fetchMedia authenticates its
+ * download with the bot token, and a foreign host must not receive it.
+ */
+function isSlackFileHost(url: string): boolean {
+  try {
+    const host = new URL(url).hostname;
+    return SLACK_FILE_DOMAINS.some((domain) => host === domain || host.endsWith(`.${domain}`));
+  } catch {
+    return false;
+  }
+}
+
 interface SlackFileRef {
   urlPrivate: string;
   thumb?: string;
@@ -334,11 +365,20 @@ export class SlackTransport implements ChannelTransport {
     const conversationKey = conversationKeyFor(teamId, channel, threadTs);
     this.remember(this.lastTurn, conversationKey, threadTs);
 
-    const text = cleanSlackText(str(event.text) ?? "", this.botUserId);
-    const media = this.mediaOf(event);
+    // Forwarded messages arrive as message unfurls in event.attachments, not
+    // in event.text. Fold them in before the empty-turn drop below, or a
+    // comment-less forward vanishes without a reply.
+    const unfurls = this.unfurlsOf(event, channel, ts);
+    const ownText = cleanSlackText(str(event.text) ?? "", this.botUserId);
+    const unfurlText = cleanSlackText(unfurls.textParts.join("\n\n"), this.botUserId);
+    const text = [ownText, unfurlText].filter((part) => part !== "").join("\n\n");
+    const combinedMedia = [...(this.mediaOf(event) ?? []), ...unfurls.media];
+    const media = combinedMedia.length > 0 ? combinedMedia : undefined;
     if (text === "" && media === undefined) return null;
 
-    const linkCmd = text !== "" ? LINK_COMMAND_RE.exec(text) : null;
+    // Match the command against the user's own text: a forward riding along
+    // (its unfurl text is appended above) must not defeat the $ anchor.
+    const linkCmd = ownText !== "" ? LINK_COMMAND_RE.exec(ownText) : null;
     if (linkCmd) {
       const inbound: InboundChannelEvent = {
         dispatchId: `slack:${eventId}`,
@@ -424,6 +464,60 @@ export class SlackTransport implements ChannelTransport {
       },
       raw,
     };
+  }
+
+  /**
+   * Extract forwarded-message content. Slack's forward button does not put
+   * the forwarded body in `event.text`; it attaches a message unfurl — an
+   * `event.attachments` entry with `is_msg_unfurl` set. Ordinary link
+   * previews in the same array carry no flag and are skipped.
+   */
+  private unfurlsOf(
+    event: Record<string, unknown>,
+    channel: string,
+    ts: string,
+  ): { textParts: string[]; media: InboundChannelMedia[] } {
+    const attachments: unknown[] = Array.isArray(event.attachments) ? event.attachments : [];
+    const textParts: string[] = [];
+    const media: InboundChannelMedia[] = [];
+    for (const [index, item] of attachments.entries()) {
+      const att = rec(item);
+      if (!att?.is_msg_unfurl) continue;
+      const body = str(att.text) || str(att.fallback) || "";
+      const author = str(att.author_name);
+      const prefix = author ? `[Forwarded message from ${author}]` : "[Forwarded message]";
+      if (body !== "") textParts.push(`${prefix}:\n${body}`);
+
+      // A forwarded file_share carries its files inside the unfurl. These
+      // have real file ids, so they take the normal path and even survive an
+      // api restart via files.info.
+      const attFiles = this.mediaOf(att);
+      if (attFiles !== undefined) {
+        media.push(...attFiles);
+        if (body === "") textParts.push(`${prefix}: [file]`);
+        continue;
+      }
+
+      // An unfurl image is a bare URL with no Slack file id. Synthesize one
+      // so it rides the normal fileRefs → fetchMedia path; after an api
+      // restart the ref is gone and fetchMedia degrades to "unavailable".
+      const urls = [str(att.image_url), str(att.thumb_url)].filter((u): u is string => u !== undefined);
+      const imageUrl = urls.find(isSlackFileHost);
+      if (imageUrl !== undefined) {
+        // ts values are only unique per channel, so the channel is part of
+        // the key: a cross-channel ts collision must not swap images.
+        const fileId = `unfurl:${channel}:${ts}:${index}`;
+        const mimeType = imageMimeFromUrl(imageUrl);
+        this.remember(this.fileRefs, fileId, { urlPrivate: imageUrl, mimeType });
+        media.push({ kind: "photo", fileId, mimeType });
+      }
+      // Leave a marker when the message would otherwise not mention the
+      // image: no forwarded text, or the image was dropped as unfetchable.
+      if (urls.length > 0 && (imageUrl === undefined || body === "")) {
+        textParts.push(`${prefix}: [image]`);
+      }
+    }
+    return { textParts, media };
   }
 
   private mediaOf(event: Record<string, unknown>): InboundChannelMedia[] | undefined {
