@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { useTerminateSession } from '@/api/sessions';
 import { useOrchestratorInfo, useCreateOrchestrator } from '@/api/orchestrator';
 import {
@@ -28,6 +29,18 @@ export function RefreshOrchestratorDialog({
 
   const isPending = terminateSession.isPending || createOrchestrator.isPending;
   const error = (terminateSession.error ?? createOrchestrator.error) as Error | null;
+
+  // A closed dialog keeps this component mounted, so mutation state (a
+  // done terminate, a stale error) would leak into the next open and make
+  // the flow skip the terminate step. Reset on close so every open starts
+  // the flow fresh.
+  useEffect(() => {
+    if (!open) {
+      terminateSession.reset();
+      createOrchestrator.reset();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reset fns are stable
+  }, [open]);
 
   const handleRefresh = async () => {
     if (!orchInfo?.identity) return;
