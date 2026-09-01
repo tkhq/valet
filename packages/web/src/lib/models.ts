@@ -45,6 +45,16 @@ export const MODEL_CATALOG: readonly ModelOption[] = [
   },
 ];
 
+/**
+ * Compact model label for chips and message headers: strips a provider
+ * prefix ("anthropic/claude-haiku-4-5" → "claude-haiku-4-5"). Full id
+ * stays in the title tooltip.
+ */
+export function shortModelLabel(model: string): string {
+  const slash = model.indexOf("/");
+  return slash > 0 ? model.slice(slash + 1) : model;
+}
+
 export function findModel(id: string | undefined | null): ModelOption | undefined {
   if (!id) return undefined;
   return MODEL_CATALOG.find((m) => m.id === id);

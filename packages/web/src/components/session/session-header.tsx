@@ -29,6 +29,8 @@ import {
   useReplaceSandbox,
   useSetSessionModel,
   useSetSessionProfile,
+  useSetThreadModel,
+  useThreads,
 } from "~/api/queries";
 import { useMe, useOrg, useTeams } from "~/api/settings";
 import { useAssistants } from "~/api/assistants";
@@ -91,6 +93,12 @@ export function SessionHeader({
   const navigate = useNavigate();
   const del = useDeleteSession();
   const setModel = useSetSessionModel(session.id);
+  const setThreadModel = useSetThreadModel(session.id);
+  // The picker is thread-scoped (threads pin their model at creation —
+  // TKAI-201): it shows and PATCHes the ACTIVE THREAD's model. Legacy
+  // threads without a pin display, and keep tracking, the session default.
+  const threads = useThreads(session.id);
+  const activeThread = threads.data?.threads.find((t) => t.id === threadId);
   const pause = usePauseSession(session.id);
   const replace = useReplaceSandbox(session.id);
   const rename = useRenameSession(session.id);
@@ -401,12 +409,22 @@ export function SessionHeader({
       <div className="ml-auto flex items-center gap-1.5">
         {actionError && <span className="text-xs text-danger-500">{actionError}</span>}
         {canAdminister && (
-          <Tooltip content="Session-default model. Threads inherit unless overridden.">
+          <Tooltip
+            content={
+              activeThread
+                ? "Model for this thread (pinned at creation). New threads start on the session default."
+                : "Session-default model. New threads pin it at creation."
+            }
+          >
             <span>
               <ModelPicker
-                currentId={session.model}
-                onSelect={(id) => setModel.mutate(id)}
-                disabled={setModel.isPending}
+                currentId={activeThread ? (activeThread.model ?? session.model) : session.model}
+                onSelect={(id) =>
+                  activeThread
+                    ? setThreadModel.mutate({ threadId: activeThread.id, model: id })
+                    : setModel.mutate(id)
+                }
+                disabled={activeThread ? setThreadModel.isPending : setModel.isPending}
               />
             </span>
           </Tooltip>

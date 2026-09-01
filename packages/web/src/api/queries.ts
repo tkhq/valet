@@ -277,6 +277,21 @@ export function useSetSessionProfile(sessionId: string) {
   });
 }
 
+/** PATCH /threads/:id with a `model` — set the thread's pin (`null` clears
+ * it back to tracking the session default). Threads pin their model at
+ * creation, so this is the picker every existing chat uses; the session
+ * default only governs new threads. */
+export function useSetThreadModel(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<PatchThreadResponse, Error, { threadId: string; model: string | null }>({
+    mutationFn: ({ threadId, model }) => api.patchThread(sessionId, threadId, { model }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
+      qc.invalidateQueries({ queryKey: qk.session(sessionId) });
+    },
+  });
+}
+
 export function useSetThreadArchived(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<PatchThreadResponse, Error, { threadId: string; archived: boolean }>({
