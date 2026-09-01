@@ -482,8 +482,101 @@ describe("parseUpdate — forwarded messages (is_msg_unfurl)", () => {
     );
     expect(event?.text).toBe("[Forwarded message from Alice]: [image]");
     expect(event?.media).toEqual([
-      { kind: "photo", fileId: "unfurl:1700000000.000100:0", mimeType: "image/png" },
+      { kind: "photo", fileId: "unfurl:D100:1700000000.000100:0", mimeType: "image/png" },
     ]);
+  });
+
+  it("routes a forwarded file-share's att.files through the real file path", () => {
+    // A forwarded file_share message carries its files inside the unfurl
+    // attachment. Real file ids survive an api restart via files.info.
+    const transport = makeTransport();
+    const event = transport.parseUpdate(
+      envelope(
+        imMessage({
+          text: "",
+          attachments: [
+            {
+              is_msg_unfurl: true,
+              author_name: "Alice",
+              text: "",
+              files: [{ id: "F9", url_private: "https://files.slack.com/f9", mimetype: "application/pdf", name: "doc.pdf", size: 5 }],
+            },
+          ],
+        }),
+      ),
+    );
+    expect(event?.text).toBe("[Forwarded message from Alice]: [file]");
+    expect(event?.media).toEqual([
+      { kind: "document", fileId: "F9", mimeType: "application/pdf", fileName: "doc.pdf", fileSize: 5 },
+    ]);
+  });
+
+  it("keeps the link command when a forward rides along with it", () => {
+    const transport = makeTransport();
+    const event = transport.parseUpdate(
+      envelope(
+        imMessage({
+          text: "link AbC123xyz",
+          attachments: [{ is_msg_unfurl: true, author_name: "Alice", text: "forwarded body" }],
+        }),
+      ),
+    );
+    expect(event?.kind).toBe("command");
+    expect(event?.command).toEqual({ name: "start", args: "AbC123xyz" });
+  });
+
+  it("marks a dropped foreign-host image even when the forward has body text", () => {
+    const transport = makeTransport();
+    const event = transport.parseUpdate(
+      envelope(
+        imMessage({
+          text: "",
+          attachments: [
+            { is_msg_unfurl: true, author_name: "Eve", text: "some words", image_url: "https://evil.example.com/x.png" },
+          ],
+        }),
+      ),
+    );
+    expect(event?.media).toBeUndefined();
+    expect(event?.text).toBe("[Forwarded message from Eve]:\nsome words\n\n[Forwarded message from Eve]: [image]");
+  });
+
+  it("accepts Slack-operated CDN hosts and falls back to a fetchable thumb_url", () => {
+    const transport = makeTransport();
+    const proxied = transport.parseUpdate(
+      envelope(imMessage({ text: "", attachments: [{ is_msg_unfurl: true, text: "", image_url: "https://a.slack-imgs.com/i.png" }] }), "EvP"),
+    );
+    expect(proxied?.media).toHaveLength(1);
+    const thumbed = transport.parseUpdate(
+      envelope(
+        imMessage({
+          ts: "1700000000.000900",
+          text: "",
+          attachments: [
+            { is_msg_unfurl: true, text: "", image_url: "https://cdn.example.com/i.png", thumb_url: "https://files.slack.com/t.jpg" },
+          ],
+        }),
+        "EvT",
+      ),
+    );
+    expect(thumbed?.media).toEqual([
+      { kind: "photo", fileId: "unfurl:D100:1700000000.000900:0", mimeType: "image/jpeg" },
+    ]);
+  });
+
+  it("does not resolve a mime through the Object prototype chain", () => {
+    // A file named x.constructor must fall back to image/jpeg, not return
+    // Object's constructor function as the mimeType.
+    const transport = makeTransport();
+    const event = transport.parseUpdate(
+      envelope(
+        imMessage({
+          text: "",
+          attachments: [{ is_msg_unfurl: true, text: "", image_url: "https://files.slack.com/x.constructor" }],
+        }),
+      ),
+    );
+    expect(event?.media?.[0]?.mimeType).toBe("image/jpeg");
   });
 
   it("keeps a non-Slack image out of the authenticated media path", () => {
