@@ -71,6 +71,15 @@ export async function loadOwnedSession(c: Context<AppEnv>) {
   return row;
 }
 
+/**
+ * Wire timestamp for an entry. Typed `number` on `BaseEntry`, but rows
+ * persisted by older builds may hold an ISO string — coerce defensively.
+ */
+function wireCreatedAt(createdAt: number | string): number {
+  const created = typeof createdAt === "number" ? createdAt : Date.parse(createdAt);
+  return Number.isFinite(created) ? created : Date.now();
+}
+
 export function entryToMessage(e: SessionEntry, sessionId: string, threadId: string): Message | null {
   if (e.type === "command_result") {
     return commandResultEntryToMessage(e, sessionId, threadId);
@@ -80,8 +89,6 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
     // (thread-model-pinning and compaction design, decision 7). `content`
     // carries the summary so clients without a divider renderer still
     // degrade to readable text.
-    const created =
-      typeof e.createdAt === "number" ? e.createdAt : Date.parse(e.createdAt as unknown as string);
     return {
       id: e.id,
       sessionId,
@@ -89,7 +96,7 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
       role: "system",
       content: e.summary,
       parts: [],
-      createdAt: Number.isFinite(created) ? created : Date.now(),
+      createdAt: wireCreatedAt(e.createdAt),
       compaction: {
         summary: e.summary,
         tokensBefore: e.tokenCountBefore,
@@ -102,9 +109,6 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
   // Engine has 4 roles: user/assistant/tool/system. We forward as-is.
   const role: MessageRole = e.role;
   const parts: MessagePart[] = engineToWireParts(e.parts);
-  // Engine entries have createdAt as `string` (ISO-ish) per BaseEntry. Coerce
-  // to number for the wire.
-  const created = typeof e.createdAt === "number" ? e.createdAt : Date.parse(e.createdAt as unknown as string);
   // Project engine image attachments into the wire shape. The engine holds
   // either a `data:` URL or raw bytes; the wire ships one canonical
   // `data:` URL string. Skip entries missing both (nothing to render).
@@ -118,7 +122,7 @@ export function entryToMessage(e: SessionEntry, sessionId: string, threadId: str
     role,
     content: e.content,
     parts,
-    createdAt: Number.isFinite(created) ? created : Date.now(),
+    createdAt: wireCreatedAt(e.createdAt),
     queueItemId: e.queueItemId,
     signal: engineSignalToWire(e.signal),
     model: e.model,
