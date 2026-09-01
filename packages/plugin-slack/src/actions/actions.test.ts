@@ -845,4 +845,78 @@ describe('slack actions', () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain('Message not found');
   });
+
+  // ─── join_channel ─────────────────────────────────────────────────────
+  //
+  // The join action is the primitive the incident-webhook workflow (Grafana
+  // IRM → Valet → Slack) calls to auto-add Valet to an incident channel. It
+  // must be idempotent (already-joined re-runs succeed) and must surface
+  // Slack errors verbatim so the webhook can distinguish e.g. missing_scope
+  // (app needs reinstall) from channel_not_found (bad channel id).
+
+  it('join_channel posts conversations.join with the channel id and returns already_in=false on a fresh join', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+
+    const result = await action('slack.join_channel').execute(
+      { channel: 'C123' },
+      pluginCtx(),
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://slack.com/api/conversations.join');
+    expect(init.method).toBe('POST');
+    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer xoxb-test-token');
+    expect(JSON.parse(init.body as string)).toEqual({ channel: 'C123' });
+    expect(result).toEqual({ success: true, data: { channel: 'C123', already_in: false } });
+  });
+
+  it('join_channel returns already_in=true when Slack reports already_in_channel', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { ok: true, already_in_channel: true, channel: { id: 'C123' } }),
+    );
+
+    const result = await action('slack.join_channel').execute(
+      { channel: 'C123' },
+      pluginCtx(),
+    );
+
+    expect(result).toEqual({ success: true, data: { channel: 'C123', already_in: true } });
+  });
+
+  it('join_channel returns Missing bot_token when the credential is absent', async () => {
+    const result = await action('slack.join_channel').execute(
+      { channel: 'C123' },
+      pluginCtx({ credentials: makeCredentials(null) }),
+    );
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result).toEqual({ success: false, error: 'Missing bot_token' });
+  });
+
+  it('join_channel surfaces a Slack error (channel_not_found) without throwing', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { ok: false, error: 'channel_not_found' }),
+    );
+
+    const result = await action('slack.join_channel').execute(
+      { channel: 'C_missing' },
+      pluginCtx(),
+    );
+
+    expect(result).toEqual({ success: false, error: 'Slack API error: channel_not_found' });
+  });
+
+  it('join_channel surfaces missing_scope so a webhook caller can prompt for reinstall', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { ok: false, error: 'missing_scope' }),
+    );
+
+    const result = await action('slack.join_channel').execute(
+      { channel: 'C123' },
+      pluginCtx(),
+    );
+
+    expect(result).toEqual({ success: false, error: 'Slack API error: missing_scope' });
+  });
 });
