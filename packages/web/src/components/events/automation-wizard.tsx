@@ -28,6 +28,7 @@
  * rule needs no separate event-trigger endpoint.
  */
 import { useEffect, useRef, useState } from "react";
+import { useDebouncedValue } from "~/hooks/use-debounced-value";
 import {
   Button,
   Dialog,
@@ -652,7 +653,8 @@ function ChannelMultiSelect({
   disabled?: boolean;
 }) {
   const [query, setQuery] = useState("");
-  const [debounced, setDebounced] = useState("");
+  // Debounce ~200ms so a keystroke burst is one lookup.
+  const debounced = useDebouncedValue(query, 200);
   // The results are a popover, shown while the search input has focus — the
   // same pattern as the FilterEditor's single-value picker.
   const [open, setOpen] = useState(false);
@@ -661,11 +663,6 @@ function ChannelMultiSelect({
   // latch, each keystroke re-keys the query, `reason` blinks undefined while
   // the refetch is in flight, and the input remounts mid-typing.
   const [fallbackReason, setFallbackReason] = useState<string | null>(null);
-
-  useEffect(() => {
-    const t = setTimeout(() => setDebounced(query), 200);
-    return () => clearTimeout(t);
-  }, [query]);
 
   const optionsQ = useFilterOptions(
     { source: "slack.channels", q: debounced },
