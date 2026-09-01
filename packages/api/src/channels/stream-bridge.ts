@@ -110,6 +110,15 @@ export interface StreamTurn {
   /** Provider reply anchor for this turn (Slack `thread_ts`). */
   threadTs: string;
   orgId: string;
+  /**
+   * True once this turn streamed visible text in the current gate segment.
+   * The channel contract is one posted message per segment; a later
+   * message_start in the same segment must not open another stream (the
+   * discrete path suppresses it too — the persisted first message consumes
+   * the submission's slot). `closeForGate` resets it, so the post-approval
+   * segment streams again.
+   */
+  streamedText?: boolean;
 }
 
 export interface ChannelStreamBridgeDeps {
@@ -271,7 +280,11 @@ export class ChannelStreamBridge {
     if (!this.active.has(key)) return;
     await this.finish(key);
     const turn = this.pending.get(key);
-    if (turn) await this.setStatus(turn, "is waiting for your approval…");
+    if (turn) {
+      // The gate opens a new segment: let the post-approval text stream.
+      turn.streamedText = false;
+      await this.setStatus(turn, "is waiting for your approval…");
+    }
   }
 
   // ── Event intake ──────────────────────────────────────────────────
@@ -286,6 +299,12 @@ export class ChannelStreamBridge {
       if (e.role !== "assistant") return;
       const turn = this.pending.get(key);
       if (!turn || this.active.has(key)) return;
+      // One streamed message per gate segment: once this segment showed
+      // text, later messages stay off the channel (they are the agent's
+      // working notes; the reply-routing contract routes further output
+      // through reply_to_origin). Not marked streamed either — the discrete
+      // path's own per-submission slot already suppresses them.
+      if (turn.streamedText) return;
       // Register the stream state first. The marker below tells the host to
       // skip its own delivery of this message, so it may only be set once
       // this bridge owns the message and can deliver it by some route. A
@@ -506,6 +525,7 @@ export class ChannelStreamBridge {
       stream.buffer = remainder;
       stream.lastFlushAt = this.now();
       await transport.send(stream.turn.conversationKey, { markdown: chunk });
+      stream.turn.streamedText = true;
       if (stream.buffer !== "" && !force) this.scheduleFlush(stream);
       return "sent";
     }
@@ -519,6 +539,8 @@ export class ChannelStreamBridge {
     stream.buffer = remainder;
     stream.sentChars += chunk.length;
     stream.lastFlushAt = this.now();
+    // Visible text reached the reader: this segment's one message is used.
+    stream.turn.streamedText = true;
 
     if (stream.sentChars >= MAX_STREAM_CHARS && !stream.closed) {
       await this.rollover(stream);

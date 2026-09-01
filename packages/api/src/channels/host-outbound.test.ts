@@ -653,7 +653,8 @@ describe("ChannelHost outbound delivery", () => {
             toolName: "call_tool",
             status: "completed",
             args: { tool_id: "slack.reply_to_origin", params: { text: "explicit reply" } },
-            result: { text: "ok" },
+            // The engine stamps details.ok from the action's success flag.
+            result: { text: "ok", details: { ok: true } },
           },
         ],
       },
@@ -673,6 +674,154 @@ describe("ChannelHost outbound delivery", () => {
     // second copy. Absence check needs a real window.
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(fakeTransport.sent).toHaveLength(0);
+  });
+
+  it("does NOT stand down for a FAILED reply_to_origin — the safety net still posts", async () => {
+    // An action failure persists with part.status "completed" (the model
+    // reads the corrective text) but details.ok false. Treating it as "the
+    // turn replied" would leave the thread with nothing at all.
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    await engineStore.appendEntries(session.id, threadId, [
+      {
+        type: "message",
+        id: "failed-reply-msg-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant",
+        content: "The reply the reader must still get.",
+        queueItemId: "qi-failed-reply-1",
+        parts: [
+          { type: "text", text: "The reply the reader must still get." },
+          {
+            type: "tool_call",
+            callId: "tc-reply-fail",
+            toolName: "call_tool",
+            status: "completed",
+            args: { tool_id: "slack.reply_to_origin", params: { text: "never sent" } },
+            result: { text: "slack.reply_to_origin failed: no token", details: { ok: false } },
+          },
+        ],
+      },
+    ]);
+
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "failed-reply-msg-1", reason: "end_turn" },
+      },
+      `failed-reply-${randomUUID()}`,
+    );
+
+    await vi.waitFor(() => {
+      expect(fakeTransport.sent.some((s) => s.message.markdown.includes("must still get"))).toBe(true);
+    });
+  });
+
+  it("a resolved gate re-opens the submission's auto-post slot for the outcome", async () => {
+    // Pre-gate segment posts its first message; the reader approves; the
+    // post-approval outcome must reach that reader, not stay off-channel.
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    const base = {
+      type: "message" as const,
+      sessionId: session.id,
+      threadId,
+      parentId: null,
+      createdAt: Date.now(),
+      role: "assistant" as const,
+    };
+    await engineStore.appendEntries(session.id, threadId, [
+      { ...base, id: "seg1-msg-1", content: "About to do the risky thing.", queueItemId: "qi-gated-1" },
+    ]);
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "seg1-msg-1", reason: "end_turn" },
+      },
+      `seg1-${randomUUID()}`,
+    );
+    await vi.waitFor(() => {
+      expect(fakeTransport.sent.some((s) => s.message.markdown.includes("About to do"))).toBe(true);
+    });
+
+    const gate: DecisionGate = {
+      id: `gate-${randomUUID()}`,
+      sessionId: session.id,
+      threadId,
+      queueItemId: "qi-gated-1",
+      resumeKey: "rk-seg-1",
+      ordinal: 1,
+      type: "approval",
+      title: "Approve the thing?",
+      body: "do the thing",
+      actions: [{ id: "approve", label: "Approve", style: "primary" }],
+      status: "pending",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    await eventStream.append(
+      { sessionId: session.id, threadId, timestamp: Date.now(), event: { type: "decision_gate", threadId, gate } },
+      `seg-gate-${randomUUID()}`,
+    );
+    await vi.waitFor(() => {
+      expect(fakeTransport.gatePrompts).toHaveLength(1);
+    });
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: {
+          type: "decision_gate_resolved",
+          threadId,
+          gateId: gate.id,
+          resolution: { actionId: "approve", resolvedBy: USER_ID, resolvedAt: Date.now() },
+        },
+      },
+      `seg-resolve-${randomUUID()}`,
+    );
+    await vi.waitFor(() => {
+      expect(fakeTransport.gateEdits).toHaveLength(1);
+    });
+
+    // The post-approval segment's first message posts.
+    await engineStore.appendEntries(session.id, threadId, [
+      { ...base, id: "seg2-msg-1", content: "Done: the thing succeeded.", queueItemId: "qi-gated-1" },
+    ]);
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "seg2-msg-1", reason: "end_turn" },
+      },
+      `seg2-${randomUUID()}`,
+    );
+    await vi.waitFor(() => {
+      expect(fakeTransport.sent.some((s) => s.message.markdown.includes("Done: the thing succeeded."))).toBe(true);
+    });
+    // The re-opened slot is consumed: a THIRD text message stays off-channel.
+    await engineStore.appendEntries(session.id, threadId, [
+      { ...base, id: "seg2-msg-2", content: "Cleaning up quietly.", queueItemId: "qi-gated-1" },
+    ]);
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "seg2-msg-2", reason: "end_turn" },
+      },
+      `seg2b-${randomUUID()}`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(fakeTransport.sent.some((s) => s.message.markdown.includes("Cleaning up"))).toBe(false);
   });
 
   it("gate on a channel thread → sendGatePrompt; resolution → edit", async () => {

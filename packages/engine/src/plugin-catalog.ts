@@ -1355,17 +1355,20 @@ function actionResultToToolResult(
     return {
       text: `${toolId} failed: ${result.error ?? "unknown error"}`,
       attachments: attachments && attachments.length > 0 ? attachments : undefined,
+      ok: false,
     };
   }
   if (result.data === undefined) {
     return {
       text: `${toolId} ok`,
       attachments: attachments && attachments.length > 0 ? attachments : undefined,
+      ok: true,
     };
   }
   return {
     text: stableJson(result.data),
     attachments: attachments && attachments.length > 0 ? attachments : undefined,
+    ok: true,
   };
 }
 

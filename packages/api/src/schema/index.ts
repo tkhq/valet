@@ -561,6 +561,10 @@ export const childWatches = pgTable(
     orgId: text("org_id").notNull(),
     settled: boolean("settled").notNull().default(false),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    // The spawning submission's ChannelOrigin as JSON, inherited by the
+    // child.settled signal so the settlement turn can reach the channel
+    // that asked. Null for spawns from non-channel turns.
+    originJson: text("origin_json"),
     // Display-state only: a dismissed watch leaves the thread tree. The
     // child session row and its history stay reachable from Sessions.
     dismissedAt: bigint("dismissed_at", { mode: "number" }),

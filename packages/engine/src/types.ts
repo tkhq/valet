@@ -596,6 +596,15 @@ export interface ToolDef<TParams extends TSchema = TSchema> {
 export interface ToolResult {
   text: string;
   attachments?: ToolAttachment[];
+  /**
+   * Action-level outcome, set by action-backed tools (`call_tool`): `false`
+   * when the action reported failure without throwing. An action failure is
+   * NOT a tool error — the model must read the corrective text — so it
+   * persists with part.status "completed". Consumers that must tell a
+   * successful call from a completed-but-failed one (the channel auto-post
+   * stand-down) read this from the persisted result's `details.ok`.
+   */
+  ok?: boolean;
 }
 
 export type ToolAttachment =
@@ -2225,7 +2234,16 @@ export interface SpawnChildResult {
  */
 export type ChildSpawner = (
   req: SpawnChildRequest,
-  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; owner: Principal },
+  ctx: {
+    parentSessionId: string;
+    parentThreadId: string;
+    actorUserId: string;
+    owner: Principal;
+    /** The spawning submission's channel origin, so the child.settled
+     * signal can inherit it and the settlement turn can reach the channel
+     * that asked. */
+    origin?: ChannelOrigin;
+  },
 ) => Promise<SpawnChildResult>;
 
 /**

@@ -613,6 +613,25 @@ describe("the turn parks on an approval gate", () => {
     const second = h.transport.appends.filter((a) => a.messageId === "ts2");
     expect(second.map((a) => a.markdown).join("")).toContain("after the gate");
   });
+
+  it("streams only the first message of a segment — later messages stay off the channel", async () => {
+    // The channel contract is one posted message per gate segment. Once the
+    // first message streamed text, mid-turn narration must not open another
+    // stream (the discrete path suppresses those messages too).
+    const h = makeHarness();
+    h.bridge.noteInboundTurn(h.turn);
+    await h.emit(messageStart("m1"));
+    h.delta("the reply\n");
+    await h.emit(messageEnd("m1", "end_turn"));
+    await advance(FLUSH_INTERVAL_MS);
+
+    await h.emit(messageStart("m2"));
+    h.delta("working notes\n");
+    await advance(FLUSH_INTERVAL_MS);
+
+    expect(h.transport.started).toHaveLength(1);
+    expect(h.transport.appends.map((a) => a.markdown).join("")).not.toContain("working notes");
+  });
 });
 
 describe("the double-post guard", () => {

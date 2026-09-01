@@ -320,7 +320,8 @@ CREATE TABLE "child_watches" (
 	"dismissed_at" bigint,
 	"settled_at" bigint,
 	"sandbox_reclaimed_at" bigint,
-	"parked_sandbox_id" text
+	"parked_sandbox_id" text,
+	"origin_json" text
 );
 --> statement-breakpoint
 CREATE INDEX "child_watches_parent" ON "child_watches" ("parent_session_id");

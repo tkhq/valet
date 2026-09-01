@@ -22,6 +22,7 @@ import {
   PendingCapError,
   recordSandboxDestroyed,
   ValidationError as EngineValidationError,
+  type ChannelOrigin,
   type ChildReader,
   type ChildSender,
   type ChildSpawner,
@@ -205,7 +206,23 @@ function watchRowToArgs(row: ChildWatchRow): ArmArgs {
     parentThreadId: row.parentThreadId,
     actorUserId: row.actorUserId,
     orgId: row.orgId,
+    origin: parseOriginJson(row.originJson),
   };
+}
+
+/** Parses a watch row's stored ChannelOrigin. Null/garbage → undefined —
+ * an unreadable origin degrades to the pre-origin behavior, never a throw. */
+function parseOriginJson(raw: string | null): ChannelOrigin | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed !== null && typeof parsed === "object" && typeof (parsed as ChannelOrigin).threadKey === "string") {
+      return parsed as ChannelOrigin;
+    }
+  } catch {
+    // fall through
+  }
+  return undefined;
 }
 
 /**
@@ -218,7 +235,13 @@ function watchRowToArgs(row: ChildWatchRow): ArmArgs {
 export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): ChildSpawner {
   return async (
     req: SpawnChildRequest,
-    ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; owner: Principal },
+    ctx: {
+      parentSessionId: string;
+      parentThreadId: string;
+      actorUserId: string;
+      owner: Principal;
+      origin?: ChannelOrigin;
+    },
   ): Promise<SpawnChildResult> => {
     const parentData = await deps.engineStore.getSession(ctx.parentSessionId);
     if (!parentData) {
@@ -323,6 +346,9 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
         orgId,
         settled: false,
         createdAt: now,
+        // Durable: the settlement can arrive after a restart (rearm), and
+        // the child.settled signal must still inherit this origin.
+        originJson: ctx.origin !== undefined ? JSON.stringify(ctx.origin) : null,
       });
 
     watcher.arm({
@@ -332,6 +358,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
       parentThreadId: ctx.parentThreadId,
       actorUserId: ctx.actorUserId,
       orgId,
+      origin: ctx.origin,
     });
 
     return { childSessionId, queueItemId: receipt.queueItemId };
@@ -345,6 +372,8 @@ interface ArmArgs {
   parentThreadId: string;
   actorUserId: string;
   orgId: string;
+  /** The spawning submission's channel origin, inherited by child.settled. */
+  origin?: ChannelOrigin;
 }
 
 /**
@@ -590,6 +619,13 @@ export class ChildWatcher {
           outcome: result.outcome,
           ...(title !== undefined ? { title } : {}),
         },
+        // Inherited verbatim from the spawning submission: an addressed
+        // ("auto") origin lets the settlement turn's first message auto-post
+        // the child's result back to the thread that asked; an overheard
+        // ("manual") origin keeps the settlement explicit-only. Without it
+        // the settlement turn cannot reach the channel at all — neither the
+        // auto-post nor reply_to_origin has an origin to route by.
+        ...(watch.origin !== undefined ? { origin: watch.origin } : {}),
       },
       dispatchId: `settled:${watch.childSessionId}:${watch.queueItemId}`,
     });

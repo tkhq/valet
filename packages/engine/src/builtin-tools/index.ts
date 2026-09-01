@@ -668,6 +668,9 @@ export const taskTool = defineTool({
       parentThreadId: ctx.threadId,
       actorUserId: ctx.userId,
       owner,
+      // The spawning submission's channel origin rides to the watcher, so
+      // the child.settled signal can inherit it (see ChildWatcher).
+      ...(ctx.origin !== undefined ? { origin: ctx.origin } : {}),
     });
     return {
       text: `spawned child session ${result.childSessionId} (submission ${result.queueItemId}). Its result will arrive in this thread as a child.settled signal.`,
