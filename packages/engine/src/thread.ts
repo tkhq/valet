@@ -3228,11 +3228,15 @@ export class Thread {
     const cfg = this.session.options.compaction;
     const session = this.session;
     const store = session.providers.store;
-    // Compaction always runs inside a claimed turn (proactive after runAgent,
-    // reactive within it, manual via the in-turn command path), so
-    // `agent.state.model` is the resolved effective model for this thread
-    // (spec decision 4).
-    const effectiveModel = this.agent.state.model;
+    // Budget against the thread's effective model (spec decision 4). Inside
+    // a claimed turn (proactive after runAgent, reactive within it),
+    // `agent.state.model` is the resolved turn model — exact, including
+    // role overlays and resolver-only specs. A manual `/compact` can run
+    // outside a claim, where `agent.state.model` still holds the session
+    // baseline — resolve the pin leniently there instead.
+    const effectiveModel = this.runningItem
+      ? this.agent.state.model
+      : this.effectiveModelLenient();
     const model = cfg?.summarizerModel ?? effectiveModel;
 
     // Load full DAG for the thread.

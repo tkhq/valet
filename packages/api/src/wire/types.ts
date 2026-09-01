@@ -958,8 +958,10 @@ export type PatchThreadResponse = ThreadSummary;
 /**
  * Patch a session's settings. Send one field or both.
  *
- * `model` is the session default that threads inherit when they have no
- * override. `title` is the session name shown in the header and the lists;
+ * `model` is the session default. New threads pin it at creation (thread
+ * PATCH changes an existing thread's model); only legacy threads without a
+ * pin keep tracking it. `title` is the session name shown in the header and
+ * the lists;
  * a person sets it to correct what the auto-titler chose. A body with
  * neither field is rejected.
  */
