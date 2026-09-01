@@ -1,4 +1,4 @@
-import { completeSimple } from "@earendil-works/pi-ai/compat";
+import { completeSimple, isContextOverflow } from "@earendil-works/pi-ai/compat";
 import type { Message, Model } from "@earendil-works/pi-ai/compat";
 import { formatSenderLine } from "./submission.js";
 import type { CompactionConfig, SessionEntry } from "./types.js";
@@ -32,6 +32,13 @@ const TAIL_FRACTION = 0.25;
  * and image size; this only feeds offline budgeting.
  */
 const IMAGE_TOKEN_ESTIMATE = 1_500;
+
+/**
+ * Per-block ceiling on prose (user content, assistant text) fed to the
+ * summarizer. Generous — ~5k tokens — but bounded, so one giant pasted
+ * message cannot dominate the summarizer input (TKAI-306).
+ */
+const SUMMARY_PROSE_MAX_CHARS = 20_000;
 
 const DEFAULT_PROTECTED_TOOLS = new Set(["skill", "thread_read"]);
 
@@ -115,6 +122,36 @@ export function estimateContextTokens(
     }
   }
   return total;
+}
+
+/**
+ * Estimate of the live context anchored on provider-reported usage where
+ * available (Claude Code's `tokenCountWithEstimation` transplant, TKAI-306).
+ * The newest assistant message with real usage carries the exact context
+ * size of its request — system prompt and tool definitions included, which
+ * `estimateContextTokens` cannot see. Anchor there and estimate only the
+ * messages appended since; the anchor re-bases on every response, so
+ * nothing double counts. Rehydrated transcripts carry zeroed usage
+ * (`entriesToAgentMessages` fabricates it), so a restored thread falls back
+ * to the pure estimate until its first live response.
+ */
+export function estimateLiveContextTokens(
+  systemPrompt: string | undefined,
+  messages: readonly Message[],
+): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role !== "assistant") continue;
+    // Same fallback as the turn_end usage snapshot: some providers report
+    // the components but leave totalTokens 0.
+    const u = m.usage;
+    const total = u ? u.totalTokens || u.input + u.output + u.cacheRead + u.cacheWrite : 0;
+    if (total > 0) {
+      // The anchor's input already includes the system prompt — omit it.
+      return total + estimateContextTokens(undefined, messages.slice(i + 1));
+    }
+  }
+  return estimateContextTokens(systemPrompt, messages);
 }
 
 /**
@@ -460,13 +497,18 @@ function extractPath(args: unknown): string | undefined {
  * sections in this exact order and casing. OpenCode pioneered this layout;
  * we copy it verbatim because it works.
  */
-const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
+const SUMMARY_TEMPLATE = `First, draft your analysis inside <analysis> tags: walk the conversation chronologically and note the user's explicit requests, your approach, key decisions, files touched, errors and how you fixed them, and every piece of user feedback — especially where the user told you to do something differently. The analysis is a scratchpad; it is stripped before the summary is stored.
+
+After the analysis, output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
 <template>
 ## Goal
 - [single-sentence task summary]
 
 ## Constraints & Preferences
 - [user constraints, preferences, specs, or "(none)"]
+
+## User Messages
+- [every user message that is not a tool result, condensed but faithful — these carry feedback and changes of intent, or "(none)"]
 
 ## Progress
 ### Done
@@ -478,6 +520,9 @@ const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <te
 ### Blocked
 - [blockers or "(none)"]
 
+## Errors & Fixes
+- [error you hit: how you fixed it, plus any user feedback on the fix, or "(none)"]
+
 ## Key Decisions
 - [decision and why, or "(none)"]
 
@@ -488,7 +533,7 @@ const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <te
 - [tools, skills, or integrations in active use — name each and what it is being used for, or "(none)"]
 
 ## Next Steps
-- [ordered next actions or "(none)"]
+- [ordered next actions or "(none)"; for the immediate next step, include a verbatim quote from the most recent messages showing exactly where work left off, so there is no drift in task interpretation]
 
 ## Critical Context
 - [important technical facts, errors, open questions, or "(none)"]
@@ -501,6 +546,7 @@ Rules:
 - Keep every section, even when empty.
 - Use terse bullets, not prose paragraphs.
 - Preserve exact file paths, commands, error strings, and identifiers when known.
+- Next Steps must follow the user's most recent explicit requests — do not resurrect tangential or already-completed work.
 - Do not mention the summary process or that context was compacted.`;
 
 export interface SummarizeOptions {
@@ -540,6 +586,33 @@ export interface SummarizeResult {
   outputTokens: number;
 }
 
+/**
+ * The summarize completion itself overflowed the summarizer model's context.
+ * The orchestrator catches this and retries with a truncated head
+ * (Claude Code's prompt-too-long retry transplant, TKAI-306).
+ */
+export class SummarizeOverflowError extends Error {
+  constructor(message?: string) {
+    super(message ?? "summarizer completion overflowed the model context");
+    this.name = "SummarizeOverflowError";
+  }
+}
+
+/**
+ * Strip the <analysis> drafting scratchpad from the summarizer output. The
+ * scratchpad improves summary quality but has no value once the summary is
+ * written — storing it would bloat every post-compaction context.
+ */
+export function stripAnalysisScratchpad(text: string): string {
+  // Global: nothing stops the summarizer from emitting two analysis passes.
+  // An UNCLOSED block (output truncated mid-scratchpad) is stripped to the
+  // end — a partial scratchpad must never be persisted as the summary.
+  return text
+    .replace(/<analysis>[\s\S]*?<\/analysis>/g, "")
+    .replace(/<analysis>[\s\S]*$/, "")
+    .trim();
+}
+
 export async function summarize(opts: SummarizeOptions): Promise<SummarizeResult> {
   const messages = entriesToSummaryMessages(opts.headEntries, {
     toolOutputMaxChars: opts.toolOutputMaxChars ?? DEFAULTS.toolOutputMaxChars,
@@ -571,13 +644,41 @@ export async function summarize(opts: SummarizeOptions): Promise<SummarizeResult
     signal: opts.signal,
   });
 
+  // pi-ai returns API failures as an assistant message with stopReason
+  // "error", not a throw. Without this check an errored completion produced
+  // an empty summary that was silently persisted as the CompactionEntry.
+  // "length" fails too: a maxTokens-truncated summary is garbage (often an
+  // unclosed <analysis> block), and the caller can retry with less input.
+  // The contextWindow argument matches the reactive path's overflow check.
+  if (
+    result.stopReason === "error" ||
+    result.stopReason === "aborted" ||
+    result.stopReason === "length"
+  ) {
+    if (isContextOverflow(result, opts.model.contextWindow)) {
+      throw new SummarizeOverflowError(result.errorMessage);
+    }
+    throw new Error(
+      result.errorMessage ??
+        `The summarizer completion failed (${result.stopReason}). Run /compact to retry.`,
+    );
+  }
+
   const text = result.content
     .filter((b): b is { type: "text"; text: string } => b.type === "text")
     .map((b) => b.text)
     .join("");
 
+  const summary = stripAnalysisScratchpad(text);
+  if (summary.length === 0) {
+    // A blank summary would silently replace the whole head with nothing.
+    throw new Error(
+      "The summarizer returned no summary text. Run /compact to retry.",
+    );
+  }
+
   return {
-    summary: text.trim(),
+    summary,
     inputTokens: result.usage.input + result.usage.cacheRead,
     outputTokens: result.usage.output,
   };
@@ -593,6 +694,19 @@ export function entriesToSummaryMessages(
   opts: { toolOutputMaxChars: number; attributeAuthors?: boolean },
 ): Message[] {
   const out: Message[] = [];
+  // Every text field fed to the summarizer is capped. Tool results and args
+  // use the tight toolOutputMaxChars; prose gets a generous ceiling. Without
+  // caps, one giant pasted message or Write-args body can dominate the
+  // summarizer input, survive every overflow-retry slice, and make the
+  // thread permanently uncompactable.
+  const capTool = (raw: string): string =>
+    raw.length > opts.toolOutputMaxChars
+      ? raw.slice(0, opts.toolOutputMaxChars) + `…(truncated, ${raw.length - opts.toolOutputMaxChars} more chars)`
+      : raw;
+  const capProse = (raw: string): string =>
+    raw.length > SUMMARY_PROSE_MAX_CHARS
+      ? raw.slice(0, SUMMARY_PROSE_MAX_CHARS) + `…(truncated, ${raw.length - SUMMARY_PROSE_MAX_CHARS} more chars)`
+      : raw;
   for (const e of entries) {
     if (e.type !== "message") continue; // skip CompactionEntry, DecisionGateEntry, BranchSummary
     if (e.role === "user") {
@@ -601,9 +715,10 @@ export function entriesToSummaryMessages(
       // sender). Without it the summary loses who asked for what.
       const senderLine =
         opts.attributeAuthors && !e.signal ? formatSenderLine(e.author) : undefined;
+      const content = capProse(e.content);
       out.push({
         role: "user",
-        content: [{ type: "text", text: senderLine ? `${senderLine}\n\n${e.content}` : e.content }],
+        content: [{ type: "text", text: senderLine ? `${senderLine}\n\n${content}` : content }],
         timestamp: e.createdAt,
       });
       continue;
@@ -613,11 +728,11 @@ export function entriesToSummaryMessages(
       const parts = e.parts ?? [];
       const hadStructured = parts.length > 0;
       for (const p of parts) {
-        if (p.type === "text") blocks.push({ type: "text", text: p.text });
+        if (p.type === "text") blocks.push({ type: "text", text: capProse(p.text) });
         else if (p.type === "thinking") {
           // Drop thinking from summary input — it's redundant once we have the result.
         } else if (p.type === "tool_call") {
-          const argsStr = p.args ? JSON.stringify(p.args) : "";
+          const argsStr = p.args ? capTool(JSON.stringify(p.args)) : "";
           // Elided parts keep their stored text (elision only hides it from
           // the live context) — feed it to the summarizer so a pruned output
           // still contributes facts to the summary. Rows pruned before the
@@ -625,10 +740,7 @@ export function entriesToSummaryMessages(
           const raw = storedToolResultText(p);
           let resultStr = "";
           if (raw !== undefined) {
-            resultStr =
-              raw.length > opts.toolOutputMaxChars
-                ? raw.slice(0, opts.toolOutputMaxChars) + `…(truncated, ${raw.length - opts.toolOutputMaxChars} more chars)`
-                : raw;
+            resultStr = capTool(raw);
           } else if (p.elided) {
             resultStr = "[output elided to save context]";
           }
@@ -638,7 +750,7 @@ export function entriesToSummaryMessages(
           });
         }
       }
-      if (!hadStructured && e.content) blocks.push({ type: "text", text: e.content });
+      if (!hadStructured && e.content) blocks.push({ type: "text", text: capProse(e.content) });
       if (blocks.length === 0) continue;
       out.push({
         role: "assistant",

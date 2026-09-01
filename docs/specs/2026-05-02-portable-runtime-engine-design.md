@@ -976,12 +976,13 @@ Token-aware context compression with two complementary techniques. When a thread
 
 #### Triggers
 
-- **Proactive (auto)** — after each turn, if `estimateContextTokens(systemPrompt, messages) >= usable(model, cfg)` where
+- **Proactive (auto)** — after each turn, if `estimateLiveContextTokens(systemPrompt, messages) >= usable(model, cfg)` where
   ```
   usable = contextWindow − reserved
   reserved = cfg.reserveTokens ?? min(20_000, model.maxOutputTokens)
   ```
-  the engine queues a compaction pass to run before the next user turn would otherwise execute. The trigger uses the same char-based estimate (`estimateTokens`, ~4 chars/token) as the cut-point budget — never pi-ai's per-call `Usage`. Provider-reported totals include cache reads and system/tool overhead that compaction cannot reclaim, so a usage-based trigger compacts long cached threads that do not need it (TKAI-305). The estimate undercounts tool definitions; the reactive path backstops that.
+  the engine queues a compaction pass to run before the next user turn would otherwise execute. The measure is a hybrid (TKAI-306, transplanted from Claude Code): anchor on the newest assistant message with real provider usage — its total is the exact context of that request, system prompt and tool definitions included — and add the char-based estimate (`estimateTokens`, ~4 chars/token) only for messages appended since. The anchor re-bases per response, so nothing double counts. Rehydrated transcripts carry zeroed usage and fall back to the pure estimate until the first live response. Never compare a cumulative usage sum against the window (TKAI-305).
+- **Failure circuit breaker (TKAI-306)** — after 3 consecutive proactive passes that failed (`compaction_failed`) or reclaimed nothing (`compaction_noop`: the trigger fired but the recent turns already fit the tail budget, so the context is dominated by system overhead), the thread stops attempting proactive compaction and emits `compaction_circuit_open`. A compaction that persists a summary (manual `/compact` included) closes the breaker; prune-only passes count as progress and do not trip it. Reactive and manual paths are never gated. A failed reactive compaction emits `compaction_failed` and skips the retry; the turn keeps its recorded overflow error.
 - **Reactive (overflow)** — if a turn's assistant message returns `stopReason === 'error'` and pi-ai's `isContextOverflow(message)` matches the error, the engine compacts and retries the same turn. Reactive compaction strips media attachments from history before summarizing (some overflow is media-bytes, not token-count, so dropping images can be enough on its own).
 
 #### Tail preservation
@@ -1009,11 +1010,14 @@ When pruning isn't enough (or after `cfg.pruneMinimumTokens` worth of tool outpu
 3. If the thread already has a `CompactionEntry`, load its `summary` as `previousSummary`. The new summarization is iterative — the prompt asks the summarizer to *update* the prior summary with new facts rather than write a fresh one.
 4. Call a summarizer model (`cfg.summarizerModel ?? sessionModel`; typically a smaller cheaper model like Haiku) with a structured-markdown prompt:
    ```
-   ## Goal · ## Constraints & Preferences
-   ## Progress (Done / In Progress / Blocked) · ## Key Decisions
-   ## Agreed Approach · ## Active Tools & Skills
+   ## Goal · ## Constraints & Preferences · ## User Messages
+   ## Progress (Done / In Progress / Blocked) · ## Errors & Fixes
+   ## Key Decisions · ## Agreed Approach · ## Active Tools & Skills
    ## Next Steps · ## Critical Context · ## Relevant Files
    ```
+   The prompt also asks the summarizer to draft in an `<analysis>` scratchpad first (stripped before storage) and to quote the most recent messages verbatim in the immediate next step, so task interpretation cannot drift across the boundary (TKAI-306).
+
+   An errored summarizer completion throws instead of storing an empty summary. If the error is itself a context overflow, the engine drops the oldest half of the head input and retries, up to 3 attempts; the `CompactionEntry` still covers the full head, and the previous summary anchors what the truncated input loses (TKAI-306).
    This template is required, not advisory. The summary text is the source of truth for the LLM's view of pre-cut history; using a structured form prevents the summary from drifting into prose that crowds out specific facts (paths, error strings, identifiers).
 5. Persist a `CompactionEntry` in the DAG with:
    - `summary`: the markdown produced by step 4.
@@ -1031,7 +1035,7 @@ The engine's `convertToLlm` pipeline (the function fed to pi-agent-core's `Agent
 1. Load DAG entries for the thread.
 2. Find the most recent `CompactionEntry`. If none, pass entries through unchanged.
 3. Drop every entry whose id is in the active compaction's `coveredEntryIds`.
-4. Replace them with a single user message containing the summary text, framed as `<previous-context>{summary}</previous-context>`.
+4. Replace them with a single user message containing the summary text, framed as `<previous-context>{summary}</previous-context>`, followed by an escape-hatch line naming the `thread_read` tool and this thread's key — the DAG keeps every covered entry, so the model can re-read RECENT pre-compaction details on demand. `thread_read` returns the newest `limit` entries (max 200) with no paging, so the oldest covered entries on a long thread stay out of reach; the hint says "recent turns" for that reason (TKAI-306).
 5. Apply pruning's elision: any kept entry's tool-call parts with `elided === true` get a placeholder `[output elided to save context]` in the LLM-visible content; the stored result stays in the DAG.
 6. Yield the resulting `Message[]` to the agent loop.
 
