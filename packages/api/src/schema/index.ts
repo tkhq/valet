@@ -468,6 +468,12 @@ export const teams = pgTable(
      */
     externalId: text("external_id"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    /**
+     * Team default model for sessions this team owns (TKAI-255). Sits
+     * between the member's `users.default_model` and the org's
+     * `orgs.model_preferences` in the resolution chain. Null = no override.
+     */
+    defaultModel: text("default_model"),
   },
   (t) => [
     uniqueIndex("teams_org_name").on(t.orgId, t.name),

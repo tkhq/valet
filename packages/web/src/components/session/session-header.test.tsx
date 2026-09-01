@@ -390,7 +390,7 @@ describe("SessionHeader — Terminal and VS Code switch", () => {
           externalId: null,
           createdAt: 1,
           memberCount: 3,
-          callerRole: "member",
+          callerRole: "member", defaultModel: null,
         },
       ],
     };
@@ -542,6 +542,7 @@ describe("SessionHeader — team assistant", () => {
           createdAt: 1,
           memberCount: 3,
           callerRole,
+          defaultModel: null,
         },
       ],
     };

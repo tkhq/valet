@@ -132,4 +132,13 @@ describe("loadSessionMeta: target_dir persistence (spec decision 15)", () => {
     expect(meta.repos![0]?.targetDir).toBe("widgets");
     expect(meta.repos![1]?.targetDir).toBe("gadgets");
   });
+
+  it("team-owned row → ownerTeamId set; user-owned row → absent (TKAI-255)", async () => {
+    await insertSession(db, "s7");
+    const teamMeta = await loadSessionMeta(db, { ...src("s7"), ownerType: "team", ownerId: "team-1" });
+    expect(teamMeta.ownerTeamId).toBe("team-1");
+
+    const userMeta = await loadSessionMeta(db, { ...src("s7"), ownerType: "user", ownerId: USER });
+    expect(userMeta.ownerTeamId).toBeUndefined();
+  });
 });

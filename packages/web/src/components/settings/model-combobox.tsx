@@ -29,10 +29,15 @@ export function ModelCombobox({
   value,
   onSelect,
   onClear,
+  emptyLabel = "System default",
 }: {
   value: string | null;
   onSelect: (id: string) => void;
   onClear: () => void;
+  /** Names what the cleared state falls back to, for both the placeholder
+   * and the clear row — the fallback differs per surface (personal: team
+   * then org; team: the org preference list). */
+  emptyLabel?: string;
 }) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
@@ -70,7 +75,7 @@ export function ModelCombobox({
     <div className="relative">
       <Input
         value={open ? query : displayValue}
-        placeholder="System default"
+        placeholder={emptyLabel}
         onFocus={() => {
           setOpen(true);
           setQuery("");
@@ -102,7 +107,7 @@ export function ModelCombobox({
               onClick={clear}
               className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm text-muted hover:bg-ink-wash"
             >
-              System default
+              {emptyLabel}
             </button>
           )}
           {curatedMatches.map(({ m, curated }) => (
@@ -139,12 +144,18 @@ export function ModelCombobox({
               <span className="text-xs text-muted">{m.providerName}</span>
             </button>
           ))}
-          {!hasResults && (
-            <div className="px-3 py-1.5 text-sm text-muted">No matching models.</div>
-          )}
+          {!hasResults &&
+            (models.length === 0 && !modelsQ.isLoading ? (
+              <div className="px-3 py-1.5 text-sm text-muted">
+                No models available. Configure an LLM provider in the organization's Models
+                settings.
+              </div>
+            ) : (
+              <div className="px-3 py-1.5 text-sm text-muted">No matching models.</div>
+            ))}
         </div>
       )}
-      {value && !isKnownValue && !modelsQ.isLoading && (
+      {value && !isKnownValue && modelsQ.data !== undefined && (
         <p className="mt-1 text-xs text-danger-500">
           &quot;{value}&quot; isn&apos;t in the current model registry.
         </p>

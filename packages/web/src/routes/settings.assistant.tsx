@@ -23,7 +23,7 @@ export function AssistantPage() {
   const patchMe = usePatchMe();
 
   return (
-    <Section title="Assistant" description="Your assistant's name, personality, and default model.">
+    <Section title="Assistant" description="Your assistant's name and personality, and the default model for sessions you start.">
       {infoQ.isLoading && (
         <div className="flex items-center gap-2 py-4 text-sm text-muted">
           <Spinner size={14} /> Loading…
@@ -45,12 +45,13 @@ export function AssistantPage() {
 
       <FieldRow
         label="Default model"
-        hint="New conversations start on this model; you can still switch per-thread in the chat header."
+        hint="New sessions you start use this model; existing sessions keep theirs. You can switch the model per thread in the chat header. Shared team assistants do not use it."
       >
         <ModelCombobox
           value={meQ.data?.defaultModel ?? null}
           onSelect={(id) => patchMe.mutate({ defaultModel: id })}
           onClear={() => patchMe.mutate({ defaultModel: null })}
+          emptyLabel="Team or organization default"
         />
       </FieldRow>
     </Section>

@@ -215,6 +215,10 @@ export async function admitSignal(deps: AdmitSignalDeps, args: AdmitSignalArgs):
       userId: toData.userId,
       orgId: toData.orgId,
       workspace: toData.workspace,
+      // Owner threads through so a team-owned target that rebuilds on this
+      // first touch keeps the team tier of the model cascade.
+      ownerType: toData.owner.type,
+      ownerId: toData.owner.id,
     }),
   );
   const thread = await resolveThread(deps, args, session, toData);

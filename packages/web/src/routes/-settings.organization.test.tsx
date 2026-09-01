@@ -111,7 +111,7 @@ let meData: { orgRole: "admin" | "member" } = { orgRole: "admin" };
 // the panel render against a shape the API no longer sends.
 let teamsData: { teams: TeamSummary[] } = {
   teams: [
-    { id: "team_1", orgId: "org_1", name: "Platform", origin: "local", externalId: null, createdAt: 0, memberCount: 1, callerRole: "admin" },
+    { id: "team_1", orgId: "org_1", name: "Platform", origin: "local", externalId: null, createdAt: 0, memberCount: 1, callerRole: "admin", defaultModel: null },
   ],
 };
 
@@ -190,6 +190,9 @@ vi.mock("~/api/settings", async (importOriginal) => {
     useAddTeamMember: () => ({ mutate: addTeamMemberMutate, isPending: false, error: null }),
     useSetTeamMemberRole: () => ({ mutate: setTeamMemberRoleMutate, isPending: false, error: null }),
     useRemoveTeamMember: () => ({ mutate: removeTeamMemberMutate, isPending: false, error: null }),
+    usePatchTeam: () => ({ mutate: vi.fn(), isPending: false, error: null }),
+    // The team default-model combobox reads the catalog through this hook.
+    useModels: () => ({ data: { models: [] }, isLoading: false, error: null }),
   };
 });
 
@@ -282,7 +285,7 @@ beforeEach(() => {
   };
   teamsData = {
     teams: [
-      { id: "team_1", orgId: "org_1", name: "Platform", origin: "local", externalId: null, createdAt: 0, memberCount: 1, callerRole: "admin" },
+      { id: "team_1", orgId: "org_1", name: "Platform", origin: "local", externalId: null, createdAt: 0, memberCount: 1, callerRole: "admin", defaultModel: null },
     ],
   };
   teamMembersData = { members: [{ userId: "u1", role: "admin" }] };
@@ -571,6 +574,7 @@ describe("OrganizationTeamsPage", () => {
       createdAt: 0,
       memberCount: 1,
       callerRole: "admin",
+      defaultModel: null,
     };
 
     it("marks the team and offers no actions menu WHILE mirroring is on", () => {

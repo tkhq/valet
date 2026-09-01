@@ -534,6 +534,10 @@ export class ChildWatcher {
         userId: childData.userId,
         orgId: childData.orgId,
         workspace: childData.workspace,
+        // Engine SessionData carries the owner Principal — thread it so a
+        // team-owned child that rebuilds here keeps the team model tier.
+        ownerType: childData.owner.type,
+        ownerId: childData.owner.id,
         ...(shapeRow ? { profile: shapeRow.profile, docker: shapeRow.docker } : {}),
       }),
     );
@@ -1042,6 +1046,10 @@ export function buildChildSender(deps: ChildrenDeps, watcher: ChildWatcher): Chi
         profile: agentSessions.profile,
         docker: agentSessions.docker,
         status: agentSessions.status,
+        // Owner columns feed SessionMeta.ownerTeamId so a rebuild of a
+        // team-owned child keeps the team tier of the model cascade.
+        ownerType: agentSessions.ownerType,
+        ownerId: agentSessions.ownerId,
       })
       .from(agentSessions)
       .where(eq(agentSessions.id, req.childSessionId))

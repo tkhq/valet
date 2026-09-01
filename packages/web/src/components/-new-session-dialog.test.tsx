@@ -90,6 +90,7 @@ function team(id: string, name: string): TeamSummary {
     createdAt: 0,
     memberCount: 3,
     callerRole: "member",
+    defaultModel: null,
   };
 }
 

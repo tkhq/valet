@@ -75,6 +75,7 @@ function team(overrides: Partial<TeamSummary> = {}): TeamSummary {
     createdAt: 0,
     memberCount: 6,
     callerRole: "member",
+    defaultModel: null,
     ...overrides,
   };
 }

@@ -6,7 +6,7 @@
  * route layer's org-membership gating and error-code mapping on top of the
  * already-unit-tested service.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../src/integration/_setup.js";
 import {
@@ -647,15 +647,13 @@ describe("teams routes", () => {
       expect(del.status).toBe(200);
     });
 
-    it("has no rename route to leave unguarded", async () => {
-      // A tripwire, not a behaviour test. Renaming a mirrored team would put
-      // the row's name out of step with the group it mirrors, and the next
-      // sync would find the group by `external_id` and keep the stale name.
-      // There is no rename route today, so there is nothing to guard.
-      //
-      // If you add `PATCH /api/teams/:id`, this test fails. Replace it with
-      // one that proves the rename refuses on an `idp` team, exactly as the
-      // four mutations above do.
+    it("PATCH /:id refuses a rename on every team, mirrored ones included", async () => {
+      // Successor to the old "no rename route" tripwire. Renaming a mirrored
+      // team would put the row's name out of step with the group it mirrors,
+      // and the next sync would find the group by `external_id` and keep the
+      // stale name. `PATCH /api/teams/:id` exists now (TKAI-255), but its
+      // whitelist holds `defaultModel` only — `name` 400s as an unknown
+      // field before any origin check, so no rename path exists to guard.
       api = await bootTestApi();
       const { baseUrl } = api;
       const teamId = await seedIdpTeam("platform", "/platform");
@@ -665,7 +663,32 @@ describe("teams routes", () => {
         headers: HEADERS,
         body: JSON.stringify({ name: "renamed" }),
       });
-      expect(res.status).toBe(404);
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toMatch(/unknown field/);
+    });
+
+    it("PATCH /:id defaultModel works on a live idp mirror (Valet-local state, not synced)", async () => {
+      // Deliberately NOT origin-gated: the identity provider owns the
+      // team's membership; `default_model` is state no sync ever writes,
+      // so a local edit cannot be undone by the next sign-in.
+      vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
+      try {
+        api = await bootTestApi();
+        const { baseUrl } = api;
+        const teamId = await seedIdpTeam("platform", "/platform");
+
+        const res = await fetch(`${baseUrl}/api/teams/${teamId}`, {
+          method: "PATCH",
+          headers: HEADERS,
+          body: JSON.stringify({ defaultModel: "claude-haiku-4-5" }),
+        });
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as { team: { defaultModel: string | null } };
+        expect(body.team.defaultModel).toBe("claude-haiku-4-5");
+      } finally {
+        vi.unstubAllEnvs();
+      }
     });
   });
 

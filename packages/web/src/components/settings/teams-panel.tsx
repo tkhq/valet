@@ -30,12 +30,16 @@ import {
   useCreateTeam,
   useDeleteTeam,
   useMe,
+  useModels,
   useOrg,
+  usePatchTeam,
   useRemoveTeamMember,
   useSetTeamMemberRole,
   useTeamMembers,
   useTeams,
 } from "~/api/settings";
+import { ModelCombobox } from "~/components/settings/model-combobox";
+import { curatedForCatalogId } from "~/lib/models";
 
 /**
  * Says why a mirrored team has no controls, in the same words the API uses
@@ -332,12 +336,15 @@ function TeamRow({
       </div>
 
       {open && (
-        <TeamMembers
-          team={team}
-          orgMembers={orgMembers}
-          canMutate={canMutate}
-          mirroring={mirroring}
-        />
+        <div className="ml-6 mt-2 space-y-2 border-l border-line pl-4">
+          <TeamDefaultModel team={team} canMutate={canMutate} managed={managed} />
+          <TeamMembers
+            team={team}
+            orgMembers={orgMembers}
+            canMutate={canMutate}
+            mirroring={mirroring}
+          />
+        </div>
       )}
 
       <ConfirmDialog
@@ -351,6 +358,70 @@ function TeamRow({
         error={deleteTeam.error != null ? errorText(deleteTeam.error) : undefined}
         onConfirm={() => deleteTeam.mutate(team.id, { onSuccess: () => setConfirmDelete(false) })}
       />
+    </div>
+  );
+}
+
+/**
+ * The team default model (TKAI-255). Member-started sessions in this
+ * team's workspace start on it unless that member set a personal default;
+ * shared team sessions (assistant, workflow runs, children) skip the
+ * personal tier and start on it directly. A session's model persists, so
+ * the setting only shapes sessions built after the change. Null falls
+ * through to the org preference list. Editable by whoever can mutate the
+ * team (team admin or org admin) — same gate as the roster controls, and
+ * the API enforces it. NOT origin-gated: a mirrored team's membership
+ * belongs to the identity provider, but its default model is Valet-local
+ * state no sync rewrites.
+ */
+function TeamDefaultModel({
+  team,
+  canMutate,
+  managed,
+}: {
+  team: TeamSummary;
+  canMutate: boolean;
+  managed: boolean;
+}) {
+  const patchTeam = usePatchTeam();
+  // Same label chain as ModelCombobox (curated label, then catalog name,
+  // then raw id) so members and admins read the same words for one value.
+  const modelsQ = useModels();
+  const entry = modelsQ.data?.models.find((m) => m.id === team.defaultModel);
+  const readOnlyLabel =
+    curatedForCatalogId(team.defaultModel)?.label ??
+    entry?.name ??
+    team.defaultModel ??
+    "Organization default";
+
+  return (
+    <div>
+      <div className="flex flex-col gap-1 py-1 sm:flex-row sm:items-center sm:gap-3">
+        <span className="shrink-0 text-xs font-medium text-muted">Default model</span>
+        {canMutate ? (
+          <div className="w-full max-w-xs">
+            <ModelCombobox
+              value={team.defaultModel}
+              onSelect={(id) => patchTeam.mutate({ id: team.id, body: { defaultModel: id } })}
+              onClear={() => patchTeam.mutate({ id: team.id, body: { defaultModel: null } })}
+              emptyLabel="Organization default"
+            />
+          </div>
+        ) : (
+          <span className="min-w-0 truncate text-sm text-ink" title={team.defaultModel ?? undefined}>
+            {readOnlyLabel}
+          </span>
+        )}
+      </div>
+      <p className="text-xs text-muted">
+        New sessions started in this team's workspace use this model. A member's personal
+        default wins for sessions that member starts. Existing sessions keep their model,
+        including the team assistant if anyone has already opened it.
+        {managed && " The identity provider owns this team's membership; the default model is set here."}
+      </p>
+      {patchTeam.error != null && (
+        <p className="text-xs text-danger-500">{errorText(patchTeam.error)}</p>
+      )}
     </div>
   );
 }
@@ -382,7 +453,7 @@ function TeamMembers({
   const addable = orgMembers.filter((m) => !memberIds.has(m.userId));
 
   return (
-    <div className="ml-6 mt-2 space-y-2 border-l border-line pl-4">
+    <div className="space-y-2">
       {/* Sits above the roster, where the add/remove controls would be, so a
           reader finds the reason in the place they look for the control. The
           declared note sits in the same place although its controls stay:

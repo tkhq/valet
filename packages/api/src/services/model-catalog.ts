@@ -232,3 +232,28 @@ export function catalogValidIds(entries: CatalogEntry[]): Set<string> {
   }
   return ids;
 }
+
+/**
+ * Validates a default-model id against the org catalog. One definition for
+ * every route that writes a default-model field (`PATCH /api/me`,
+ * `PATCH /api/teams/:id`), so the accepted id set and the error wording
+ * cannot drift between them. Returns the error message to 400 with, or
+ * `null` when `value` is acceptable (`null` clears the override and is
+ * always acceptable).
+ */
+export async function validateDefaultModelId(
+  db: AppQueryable,
+  credentials: CredentialStore,
+  orgId: string,
+  value: unknown,
+): Promise<string | null> {
+  if (value === null) return null;
+  if (typeof value !== "string") {
+    return "defaultModel must be a model id from the model list (GET /api/models), or null to clear the override.";
+  }
+  const entries = await buildOrgCatalog(db, credentials, orgId);
+  if (!catalogValidIds(entries).has(value)) {
+    return `unknown model: ${value}. Pick a model from the model list (GET /api/models).`;
+  }
+  return null;
+}

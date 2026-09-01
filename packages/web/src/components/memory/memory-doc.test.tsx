@@ -429,6 +429,7 @@ describe("MemoryDoc team scope (TKAI-262)", () => {
           createdAt: 0,
           memberCount: 2,
           callerRole,
+          defaultModel: null,
         },
       ],
     };
