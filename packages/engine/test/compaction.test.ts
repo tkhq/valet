@@ -681,6 +681,20 @@ describe("compaction: proactive trigger rehydration (restart)", () => {
     expect(lastAssistant?.type === "message" && lastAssistant.content).toBe(
       "post-restart response",
     );
+    // The pre-turn pass runs BEFORE the user entry is appended: exactly one
+    // "third prompt" user entry exists, positioned after the compaction
+    // entry — a rebuild that captured the prompt would duplicate it in the
+    // LLM context.
+    const thirdPrompts = entries.filter(
+      (e) => e.type === "message" && e.role === "user" && e.content === "third prompt",
+    );
+    expect(thirdPrompts).toHaveLength(1);
+    expect(entries.indexOf(compactions[0])).toBeLessThan(entries.indexOf(thirdPrompts[0]));
+    // No synthetic auto-continue was queued for the pre-turn pass, and the
+    // post-turn check was not suppressed by it (no second compaction means
+    // it simply had nothing to do — the flag is only armed with a follow-up).
+    const unsettled = await store.listUnsettledSubmissions(session1.id);
+    expect(unsettled.filter((i) => i.metadata?.compaction_continue)).toHaveLength(0);
     faux.unregister();
   });
 

@@ -97,8 +97,18 @@ export function SessionHeader({
   // The picker is thread-scoped (threads pin their model at creation —
   // TKAI-201): it shows and PATCHes the ACTIVE THREAD's model. Legacy
   // threads without a pin display, and keep tracking, the session default.
+  //
+  // With a threadId in hand the picker NEVER falls back to the session
+  // PATCH: while the threads query is loading (or the id names an archived
+  // thread) a session-default write would silently not affect the pinned
+  // active thread — the exact wrong-scope switch pinning exists to prevent.
+  // The picker disables until the thread row resolves instead.
   const threads = useThreads(session.id);
   const activeThread = threads.data?.threads.find((t) => t.id === threadId);
+  const threadScoped = threadId !== undefined;
+  const pickerDisabled = threadScoped
+    ? !activeThread || setThreadModel.isPending
+    : setModel.isPending;
   const pause = usePauseSession(session.id);
   const replace = useReplaceSandbox(session.id);
   const rename = useRenameSession(session.id);
@@ -411,7 +421,7 @@ export function SessionHeader({
         {canAdminister && (
           <Tooltip
             content={
-              activeThread
+              threadScoped
                 ? "Model for this thread (pinned at creation). New threads start on the session default."
                 : "Session-default model. New threads pin it at creation."
             }
@@ -419,12 +429,18 @@ export function SessionHeader({
             <span>
               <ModelPicker
                 currentId={activeThread ? (activeThread.model ?? session.model) : session.model}
-                onSelect={(id) =>
-                  activeThread
-                    ? setThreadModel.mutate({ threadId: activeThread.id, model: id })
-                    : setModel.mutate(id)
-                }
-                disabled={activeThread ? setThreadModel.isPending : setModel.isPending}
+                onSelect={(id) => {
+                  if (threadScoped) {
+                    // Disabled until activeThread resolves; the guard is
+                    // belt-and-braces against a race on the same render.
+                    if (activeThread) {
+                      setThreadModel.mutate({ threadId: activeThread.id, model: id });
+                    }
+                    return;
+                  }
+                  setModel.mutate(id);
+                }}
+                disabled={pickerDisabled}
               />
             </span>
           </Tooltip>

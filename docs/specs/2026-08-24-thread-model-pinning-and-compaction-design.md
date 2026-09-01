@@ -43,10 +43,14 @@ created before this change have no pin and keep their old inherit behavior.
 
 Turn model resolution becomes: **item model → thread pin → session default**.
 `turnModelSpec` and both resolution paths take the running item. This makes
-the workflow session-node `model` field effective. `submitPrompt` validates
-`opts.model` at admission the same way `setModel` validates (resolver null →
-reject; `NoCredentialsError` → accept, a model is selectable before its key
-is configured). A role's frontmatter model still overlays the resolved turn
+the workflow session-node `model` field effective. One shared
+`validateModelSpec` serves `submitPrompt` admission and `setModel` (resolver
+null → reject; `NoCredentialsError` → accept, a model is selectable before
+its key is configured; a spec naming the session's own effective spec or the
+thread's current pin is valid by construction). A workflow node whose model
+fails admission settles that NODE `failed` — the interpreter's submission
+seam contains the `ValidationError` so a definition error cannot poison the
+whole run drive. A role's frontmatter model still overlays the resolved turn
 model for that one turn, unchanged.
 
 ### 3. A dead pin fails the turn loud
@@ -88,9 +92,13 @@ The seed needs its own consumer: the regular proactive check runs only
 post-turn, so a seed alone would never protect the first post-restart turn.
 `runItemInner` therefore runs a one-shot PRE-turn check when the seed is
 present — if the persisted usage already exceeds usable, the thread compacts
-before the turn's LLM call. This pre-turn pass suppresses the proactive
-auto-continue follow-up (its turn is about to run anyway; a synthetic
-continuation would duplicate work).
+before the turn's LLM call. Two ordering rules keep the pass correct: it
+runs BEFORE the turn's user entry is appended (compaction rebuilds the agent
+transcript from the DAG, so an already-persisted user entry would enter the
+rebuild AND be prompted again — the model would see it twice), and it
+suppresses both the proactive auto-continue follow-up and the
+`skipNextProactiveCheck` cool-down (there is no follow-up turn; arming the
+cool-down would eat the same turn's legitimate post-turn check).
 
 ### 6. `/compact` instructions reach the summarizer
 
@@ -101,9 +109,13 @@ summarizer prompt.
 ### 7. Compaction crosses the wire
 
 - `compaction_start` / `compaction_end` become `WireEvent` variants (threadId
-  only). The web stream store tracks a per-thread compacting flag and, on
-  `compaction_end`, bumps a nonce that invalidates the messages query so the
-  divider appears without a reload.
+  only). The engine balances the pair with a `finally` that spans the
+  summarizer AND the persist/rebuild steps, so a mid-compaction throw still
+  emits `compaction_end`. The web stream store tracks a per-thread
+  compacting flag and, on `compaction_end`, bumps a nonce that invalidates
+  the messages query so the divider appears without a reload. The flag is
+  transient: the `init` frame clears it on reconnect, because an api crash
+  between the two frames orphans the start with no end ever coming.
 - `entryToMessage` projects `CompactionEntry` as a `role: "system"` message
   with a `compaction` field: `{ summary, tokensBefore, tokensAfter,
   coveredEntryIds }`. `coveredEntryIds` is deliberately on the wire: it is

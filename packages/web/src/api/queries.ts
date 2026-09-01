@@ -286,8 +286,9 @@ export function useSetThreadModel(sessionId: string) {
   return useMutation<PatchThreadResponse, Error, { threadId: string; model: string | null }>({
     mutationFn: ({ threadId, model }) => api.patchThread(sessionId, threadId, { model }),
     onSuccess: () => {
+      // Thread PATCH touches only the thread row; the session detail (and
+      // its default model) is unchanged — no session invalidation.
       qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
-      qc.invalidateQueries({ queryKey: qk.session(sessionId) });
     },
   });
 }

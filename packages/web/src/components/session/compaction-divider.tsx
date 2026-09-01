@@ -2,6 +2,7 @@ import { useState } from "react";
 import { ChevronDown, ChevronRight, FoldVertical } from "lucide-react";
 import type { StreamMessage } from "~/stores/stream";
 import { Markdown } from "~/components/markdown";
+import { formatTokens } from "~/lib/format-usage";
 
 /**
  * Divider row for a compaction boundary (a wire message with `compaction`).
@@ -41,9 +42,4 @@ export function CompactionDivider({ message }: { message: StreamMessage }) {
       )}
     </div>
   );
-}
-
-function formatTokens(n: number): string {
-  if (n >= 1000) return `${(n / 1000).toFixed(n >= 10_000 ? 0 : 1)}k`;
-  return String(n);
 }

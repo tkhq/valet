@@ -379,26 +379,9 @@ export class Thread {
     // Validate a per-item model pin at admission, the same way setModel
     // validates a thread pin: an unknown spec is rejected here with the
     // submitter still on the line, instead of settling the turn `failed`
-    // later. NoCredentialsError is accepted — the model resolved; the key
-    // is configurable before the turn runs. A pin naming the session's own
-    // effective spec (or this thread's already-validated pin) skips the
-    // check: the live model object exists even when the spec is not in
-    // pi-ai's static registry (custom providers, test doubles).
-    const sessionSpec = this.session.options.modelSpec ?? this.session.options.model.id;
-    if (opts.model && opts.model !== sessionSpec && opts.model !== this.modelOverride) {
-      const resolver = this.session.options.resolveModel;
-      let resolved: ResolvedModel | PiModel | null | undefined;
-      try {
-        resolved = resolver ? await resolver(opts.model) : resolveModelId(opts.model);
-      } catch (err) {
-        if (!(err instanceof NoCredentialsError)) throw err;
-        resolved = { model: err.model };
-      }
-      if (!resolved) {
-        throw new ValidationError(
-          `unknown model id: ${opts.model}. Pick a model from the org catalog (GET /api/models).`,
-        );
-      }
+    // later.
+    if (opts.model) {
+      await this.validateModelSpec(opts.model);
     }
 
     if (effectiveMode === "collect") {
@@ -1661,24 +1644,9 @@ export class Thread {
     if (modelId === null) {
       this.modelOverride = undefined;
     } else {
-      // Resolve before assigning so an unknown id is rejected and the
-      // thread keeps its previous setting. With a host resolver present,
-      // validate through it (null → same throw as the internal resolver's
-      // undefined); absent → today's internal `resolveModelId` path.
-      // NoCredentialsError means the spec IS valid (the model resolved) but
-      // no key exists yet — accept it: a user must be able to select a model
-      // before configuring its key.
-      const resolver = this.session.options.resolveModel;
-      let resolved: ResolvedModel | PiModel | null | undefined;
-      try {
-        resolved = resolver ? await resolver(modelId) : resolveModelId(modelId);
-      } catch (err) {
-        if (!(err instanceof NoCredentialsError)) throw err;
-        resolved = { model: err.model };
-      }
-      if (!resolved) {
-        throw new Error(`unknown model id: ${modelId}`);
-      }
+      // Validate before assigning so an unknown id is rejected and the
+      // thread keeps its previous setting.
+      await this.validateModelSpec(modelId);
       this.modelOverride = modelId;
     }
     await this.session.providers.store.saveThread(this.session.id, this.toThreadData());
@@ -1693,6 +1661,34 @@ export class Thread {
       });
     }
     return { fromModel: before, toModel: after };
+  }
+
+  /**
+   * Validate a model spec the way admission (`submitPrompt`) and the thread
+   * pin (`setModel`) both require. A spec naming the session's own effective
+   * spec, or this thread's current pin, is valid by construction — the live
+   * model object exists even when the spec is not in pi-ai's static registry
+   * (custom providers, test doubles). Otherwise resolve through the host
+   * resolver when present, else the internal registry. NoCredentialsError is
+   * accepted: the model resolved; the key is configurable before a turn
+   * runs. Throws `ValidationError` on an unknown spec.
+   */
+  private async validateModelSpec(spec: string): Promise<void> {
+    const sessionSpec = this.session.options.modelSpec ?? this.session.options.model.id;
+    if (spec === sessionSpec || spec === this.modelOverride) return;
+    const resolver = this.session.options.resolveModel;
+    let resolved: ResolvedModel | PiModel | null | undefined;
+    try {
+      resolved = resolver ? await resolver(spec) : resolveModelId(spec);
+    } catch (err) {
+      if (!(err instanceof NoCredentialsError)) throw err;
+      resolved = { model: err.model };
+    }
+    if (!resolved) {
+      throw new ValidationError(
+        `unknown model id: ${spec}. Run /model to list the available models.`,
+      );
+    }
   }
 
   /** Layered resolution: item model → thread pin → session default. Returns
@@ -1774,8 +1770,14 @@ export class Thread {
         return resolved.model;
       }
       span.setAttribute("valet.model.key_source", "dead_pin");
+      // "Clear the pin" only helps when the pin diverges from the session
+      // default — when the DEFAULT itself is what died, clearing resolves
+      // the identical spec and fails again, so point at the admin fix.
+      const sessionSpec = this.session.options.modelSpec ?? this.session.options.model.id;
       throw new Error(
-        `Model '${spec}' is no longer available. Switch this thread's model with /model <id>, or clear the pin to use the session default.`,
+        spec === sessionSpec
+          ? `Model '${spec}' is no longer available. Switch this thread's model with /model <id>, or ask an admin to restore the model in the provider settings.`
+          : `Model '${spec}' is no longer available. Switch this thread's model with /model <id>, or clear the pin to use the session default.`,
       );
     });
   }
@@ -2909,20 +2911,11 @@ export class Thread {
       throw err;
     }
 
-    // Persist the user message entry (shared helper — the claim loop's
-    // credential-cap branch appends the same entry shape). Threading
-    // `attachments` through to `runAgent` is what keeps a turn-1 image in
-    // `agent.state.messages` across subsequent turns: the LLM sees the image
-    // on every downstream call, not just the turn it was uploaded on.
-    const { text, attachments } = await this.appendUserEntry(item);
-
-    // Build the AgentTool list with closures over this turn's ToolContext.
-    this.agent.state.tools = this.buildTools();
-
     // Apply the turn model (resolved above) BEFORE the role overlay so a
     // role's model frontmatter still wins for that one turn. The baseline is
     // captured here so we restore the right thing, not whatever the role
-    // overlaid.
+    // overlaid. Applied before the pre-turn compaction below so its budget
+    // math sees this turn's effective model.
     const baselineModel = this.agent.state.model;
     if (turnModel !== baselineModel) {
       this.agent.state.model = turnModel;
@@ -2934,6 +2927,11 @@ export class Thread {
     // check only runs post-turn and would let this turn hit the model with
     // an over-budget context. One-shot: consumed here whether or not it
     // triggers; every later turn is covered by the post-turn check.
+    //
+    // MUST run before appendUserEntry: compaction rebuilds
+    // agent.state.messages from the persisted DAG, so a user entry persisted
+    // first would enter the rebuilt transcript AND be prompted again by
+    // runAgent — the model would see the prompt twice.
     if (this.rehydratedUsageSeed) {
       this.rehydratedUsageSeed = false;
       if (this.shouldCompactProactive()) {
@@ -2947,6 +2945,16 @@ export class Thread {
         }
       }
     }
+
+    // Persist the user message entry (shared helper — the claim loop's
+    // credential-cap branch appends the same entry shape). Threading
+    // `attachments` through to `runAgent` is what keeps a turn-1 image in
+    // `agent.state.messages` across subsequent turns: the LLM sees the image
+    // on every downstream call, not just the turn it was uploaded on.
+    const { text, attachments } = await this.appendUserEntry(item);
+
+    // Build the AgentTool list with closures over this turn's ToolContext.
+    this.agent.state.tools = this.buildTools();
 
     // Repo AGENTS.md instructions overlay (agents-md spec, decision 4):
     // applied FIRST so the composition is base → systemContext → repo
@@ -3282,6 +3290,10 @@ export class Thread {
       { queueItemId: this.runningItem?.id },
     );
     let summaryResult: SummarizeResult;
+    // Everything between compaction_start and here MUST balance the pair —
+    // the wire contract promises "compaction_end fires on failure too", and
+    // the web store's compacting indicator only clears on the end frame. The
+    // finally covers the summarizer AND the persist/rebuild steps.
     try {
       const previousSummary = findMostRecentCompaction(entries)?.summary;
       summaryResult = await summarize({
@@ -3299,53 +3311,47 @@ export class Thread {
         // when no resolver is wired (env-fallback path) — behavior unchanged.
         apiKey: this.turnApiKey,
       });
-    } catch (err) {
+
+      // Step 4: persist CompactionEntry.
+      const compactionEntry: CompactionEntry = {
+        id: uid("c"),
+        sessionId: session.id,
+        threadId: this.id,
+        parentId: head[head.length - 1].id,
+        type: "compaction",
+        summary: summaryResult.summary,
+        coveredEntryIds: head.map((e) => e.id),
+        tokenCountBefore: estimateTotalTokens(head),
+        tokenCountAfter: estimateTokens(summaryResult.summary),
+        fileContext: extractFileContext(head),
+        createdAt: Date.now(),
+      };
+      span?.setAttributes({
+        "valet.compaction.tokens_before": compactionEntry.tokenCountBefore,
+        "valet.compaction.tokens_after": compactionEntry.tokenCountAfter,
+        "valet.compaction.entries_covered": compactionEntry.coveredEntryIds.length,
+      });
+      // Fenced under the current turn's attempt (compaction is always in-turn).
+      await store.appendEntries(session.id, this.id, [compactionEntry], this.fence);
+
+      // Step 5: rewrite agent.state.messages. The simplest and most
+      // correct path is to rebuild from the now-augmented DAG.
+      const updatedEntries = await store.getEntries(session.id, this.id);
+      this.agent.state.messages = entriesToAgentMessages(
+        updatedEntries,
+        {
+          api: effectiveModel.api,
+          provider: effectiveModel.provider,
+          id: effectiveModel.id,
+        },
+        { attributeAuthors: this.attributeAuthors },
+      );
+    } finally {
       await session.emit(
         { type: "compaction_end", threadId: this.id },
         { queueItemId: this.runningItem?.id },
       );
-      throw err;
     }
-
-    // Step 4: persist CompactionEntry.
-    const compactionEntry: CompactionEntry = {
-      id: uid("c"),
-      sessionId: session.id,
-      threadId: this.id,
-      parentId: head[head.length - 1].id,
-      type: "compaction",
-      summary: summaryResult.summary,
-      coveredEntryIds: head.map((e) => e.id),
-      tokenCountBefore: estimateTotalTokens(head),
-      tokenCountAfter: estimateTokens(summaryResult.summary),
-      fileContext: extractFileContext(head),
-      createdAt: Date.now(),
-    };
-    span?.setAttributes({
-      "valet.compaction.tokens_before": compactionEntry.tokenCountBefore,
-      "valet.compaction.tokens_after": compactionEntry.tokenCountAfter,
-      "valet.compaction.entries_covered": compactionEntry.coveredEntryIds.length,
-    });
-    // Fenced under the current turn's attempt (compaction is always in-turn).
-    await store.appendEntries(session.id, this.id, [compactionEntry], this.fence);
-
-    // Step 5: rewrite agent.state.messages. The simplest and most
-    // correct path is to rebuild from the now-augmented DAG.
-    const updatedEntries = await store.getEntries(session.id, this.id);
-    this.agent.state.messages = entriesToAgentMessages(
-      updatedEntries,
-      {
-        api: effectiveModel.api,
-        provider: effectiveModel.provider,
-        id: effectiveModel.id,
-      },
-      { attributeAuthors: this.attributeAuthors },
-    );
-
-    await session.emit(
-      { type: "compaction_end", threadId: this.id },
-      { queueItemId: this.runningItem?.id },
-    );
 
     // Step 5.5: compaction hooks (Phase 4 decision 9). Run in order, each
     // individually try/caught — a throwing hook is logged via emitError and
@@ -3383,7 +3389,12 @@ export class Thread {
 
     // Cool-down: skip the next proactive check so the auto-continue turn
     // doesn't immediately re-trigger compaction on a small-context model.
-    this.skipNextProactiveCheck = true;
+    // NOT armed for the pre-turn rehydration pass (autoContinue: false) —
+    // there is no follow-up turn there, and arming it would suppress the
+    // SAME turn's legitimate post-turn check.
+    if (opts.autoContinue !== false) {
+      this.skipNextProactiveCheck = true;
+    }
   }
 
   private applyElisionsToAgentMessages(plan: PruneResult): void {

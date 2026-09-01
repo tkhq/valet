@@ -55,6 +55,17 @@ export function shortModelLabel(model: string): string {
   return slash > 0 ? model.slice(slash + 1) : model;
 }
 
+/**
+ * Whether two model specs name the same model. Anthropic ids appear in both
+ * bare ("claude-haiku-4-5") and namespaced ("anthropic/claude-haiku-4-5")
+ * forms across the catalog and stored pins; both forms resolve identically,
+ * so UI divergence checks must not treat them as different models.
+ */
+export function sameModelSpec(a: string, b: string): boolean {
+  const bare = (id: string) => (id.startsWith("anthropic/") ? id.slice("anthropic/".length) : id);
+  return bare(a) === bare(b);
+}
+
 export function findModel(id: string | undefined | null): ModelOption | undefined {
   if (!id) return undefined;
   return MODEL_CATALOG.find((m) => m.id === id);

@@ -291,6 +291,11 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       next.errorByThread = {};
       next.sessionError = undefined;
       next.statusByThread = {};
+      // Compacting is transient too: the engine balances the start/end pair
+      // in-process, but an api crash mid-compaction orphans the start frame
+      // — without this reset the "Compacting context…" strip would survive
+      // every reconnect. A live compaction re-arms via durable replay.
+      next.compactingByThread = {};
       return next;
     }
 
@@ -914,17 +919,6 @@ export function useThreadLiveStatus(
  * session-level error (no threadId on the wire frame) which shows whatever
  * thread is active. Undefined when neither exists.
  */
-/** True while this thread is between `compaction_start` and `compaction_end`. */
-export function useCompactingForThread(
-  sessionId: string,
-  threadId: string | undefined,
-): boolean {
-  return useStreamStore((s) => {
-    if (!threadId) return false;
-    return s.bySession[sessionId]?.compactingByThread[threadId] ?? false;
-  });
-}
-
 export function useErrorForThread(
   sessionId: string,
   threadId: string | undefined,
@@ -933,6 +927,17 @@ export function useErrorForThread(
     const slice = s.bySession[sessionId];
     if (!slice) return undefined;
     return (threadId ? slice.errorByThread[threadId] : undefined) ?? slice.sessionError;
+  });
+}
+
+/** True while this thread is between `compaction_start` and `compaction_end`. */
+export function useCompactingForThread(
+  sessionId: string,
+  threadId: string | undefined,
+): boolean {
+  return useStreamStore((s) => {
+    if (!threadId) return false;
+    return s.bySession[sessionId]?.compactingByThread[threadId] ?? false;
   });
 }
 

@@ -154,11 +154,19 @@ describe("SessionHeader — thread-scoped model picker", () => {
     expect(trigger.textContent).toContain("Opus 4.7");
   });
 
-  it("falls back to the session default when no thread matches", () => {
+  it("disables the picker while the active thread is unresolved (never a session-scope write)", () => {
+    // threadId is set but the threads list has no match (query loading, or
+    // an archived thread): a session PATCH here would silently not affect
+    // the pinned active thread, so the picker must disable instead.
     renderHeader(undefined, "th-unknown");
-    // No crash, and the trigger still renders (session has no model set,
-    // so the picker shows its inherit label).
-    expect(screen.getByRole("button", { name: "Choose model" })).toBeTruthy();
+    const trigger = screen.getByRole("button", { name: "Choose model" }) as HTMLButtonElement;
+    expect(trigger.disabled).toBe(true);
+  });
+
+  it("stays session-scoped and enabled when no threadId is in play", () => {
+    renderHeader(undefined, undefined);
+    const trigger = screen.getByRole("button", { name: "Choose model" }) as HTMLButtonElement;
+    expect(trigger.disabled).toBe(false);
   });
 });
 

@@ -32,7 +32,7 @@ import {
 } from "~/components/primitives";
 import { formatWhen } from "~/lib/format-when";
 import { cn } from "~/lib/cn";
-import { shortModelLabel } from "~/lib/models";
+import { sameModelSpec, shortModelLabel } from "~/lib/models";
 
 /**
  * What an untitled thread is called.
@@ -458,8 +458,14 @@ function ThreadNode({
 }) {
   const label = thread.title ?? untitledThreadLabel(thread, index);
   // Pin chip: the thread runs on a model other than the session default.
+  // Requires a KNOWN session default — while the session query loads, and
+  // for non-live sessions (GET /sessions/:id omits `model` unless the
+  // engine session is materialized), divergence is unknowable and a chip on
+  // every stamped thread would be pure noise.
   const pinnedModel =
-    thread.model && thread.model !== sessionModel ? thread.model : undefined;
+    sessionModel && thread.model && !sameModelSpec(thread.model, sessionModel)
+      ? thread.model
+      : undefined;
 
   return (
     <div>
