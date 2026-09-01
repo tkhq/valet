@@ -835,6 +835,70 @@ describe("ChildWatcher", () => {
     expect(content.attributes?.outcome).toBe("completed");
   });
 
+  it("child.settled inherits the spawning submission's channel origin, across a rearm", async () => {
+    api = await bootTestApi();
+    const deps = childrenDeps(api);
+    const watcher = new ChildWatcher(deps);
+    const { engineHost, engineStore, db } = api.providers;
+
+    const parent = await engineHost.sessionFor("parent-o", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const parentThread = parent.thread("web:default");
+    await parent.pause();
+
+    const child = await engineHost.childSessionFor("child-o", {
+      parentSessionId: "parent-o",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+      owner: { type: "user", id: "local-user" },
+      workspace: "/tmp",
+    });
+    const childThread = child.thread("web:default");
+
+    const itemId = "qi-origin-settled-1";
+    await engineStore.admitSubmission("child-o", childThread.id, queuedItem(itemId, childThread.id, "work"));
+    await engineStore.settleUnclaimed("child-o", childThread.id, itemId, { outcome: "completed" });
+
+    // The row a spawn from a Slack-addressed turn writes: origin captured at
+    // spawn time, durable so the boot rearm() path inherits it too.
+    const origin = { channelType: "slack", threadKey: "slack:C1:1.2" };
+    await db.insert(childWatches).values({
+      childSessionId: "child-o",
+      queueItemId: itemId,
+      parentSessionId: "parent-o",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+      settled: false,
+      createdAt: Date.now(),
+      originJson: JSON.stringify(origin),
+    });
+
+    // rearm() reads the row back — the restart path must not lose the origin.
+    await watcher.rearm();
+
+    await waitFor(async () => {
+      const rows = await db.select().from(childWatches).where(eq(childWatches.childSessionId, "child-o")).limit(1);
+      return rows[0]?.settled === true;
+    });
+
+    const unsettled = await engineStore.listUnsettledSubmissions("parent-o");
+    const settledSignals = unsettled.filter(
+      (i) =>
+        typeof i.content === "object" &&
+        i.content !== null &&
+        "kind" in i.content &&
+        i.content.kind === "signal" &&
+        (i.content as SignalContent).signalType === "child.settled",
+    );
+    expect(settledSignals).toHaveLength(1);
+    expect((settledSignals[0]?.content as SignalContent).origin).toEqual(origin);
+  });
+
   it("leaves an un-diagnosable (retryable) failure UNSETTLED after exhausting in-process retries, relying on rearm() as the backstop", async () => {
     api = await bootTestApi();
     // Small budget so the test doesn't wait on the 30s production default.

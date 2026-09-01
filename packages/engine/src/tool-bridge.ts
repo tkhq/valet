@@ -81,7 +81,10 @@ function toAgentToolResult(result: ToolResult): AgentToolResult<unknown> {
     const block = attachmentToContent(att);
     if (block) content.push(block);
   }
-  return { content, details: undefined };
+  // The action-level outcome rides in details so it survives persistence:
+  // the channel host reads part.result.details.ok to tell a successful
+  // reply_to_origin from a completed-but-failed one.
+  return { content, details: result.ok === undefined ? undefined : { ok: result.ok } };
 }
 
 function attachmentToContent(att: ToolAttachment): TextContent | ImageContent | null {

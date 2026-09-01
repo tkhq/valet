@@ -30,6 +30,7 @@ import {
   type InboundChannelEvent,
   type PromptAttachment,
   type Session,
+  type SessionEntry,
   type SessionStore,
   type Unsubscribe,
   type ValetPlugin,
@@ -137,6 +138,44 @@ function chatIdFromKey(conversationKey: string): string {
   return idx === -1 ? conversationKey : conversationKey.slice(idx + 1);
 }
 
+/** True when the submission already replied through a channel's
+ * `….reply_to_origin` action: a SUCCESSFUL `call_tool` in any of the
+ * submission's assistant messages names such a tool id. The auto-post
+ * safety net stands down for that submission. Success means the persisted
+ * result carries `details.ok === true` — an action failure also persists
+ * with status "completed" (the model reads the corrective text), and a
+ * failed reply must NOT stand the safety net down, or the thread gets
+ * nothing at all. */
+function turnRepliedToOrigin(entries: SessionEntry[], queueItemId: string): boolean {
+  for (const e of entries) {
+    if (e.type !== "message" || e.role !== "assistant" || e.queueItemId !== queueItemId) continue;
+    for (const part of e.parts ?? []) {
+      if (part.type !== "tool_call" || part.status !== "completed") continue;
+      const args = part.args;
+      const toolId =
+        args !== null && typeof args === "object" ? (args as Record<string, unknown>).tool_id : undefined;
+      if (typeof toolId !== "string" || !toolId.endsWith(".reply_to_origin")) continue;
+      const result = part.result;
+      const details =
+        result !== null && typeof result === "object" ? (result as Record<string, unknown>).details : undefined;
+      const ok = details !== null && typeof details === "object" ? (details as Record<string, unknown>).ok : undefined;
+      if (ok === true) return true;
+    }
+  }
+  return false;
+}
+
+/** The submission's first assistant message that carries text or an
+ * attachment — the one the auto-post posts. Derived from the store rather
+ * than held in memory, so an api restart mid-submission cannot double-post. */
+function firstPostableEntry(entries: SessionEntry[], queueItemId: string): SessionEntry | undefined {
+  for (const e of entries) {
+    if (e.type !== "message" || e.role !== "assistant" || e.queueItemId !== queueItemId) continue;
+    if (e.content || (e.parts ?? []).some((part) => part.type === "attachment")) return e;
+  }
+  return undefined;
+}
+
 /** Feature-detects a transport that opens a direct conversation with one of
  * its users. A provider whose user id is not also a conversation id (Slack:
  * `U…` is a person, `D…` is the DM) needs the call before it can be addressed. */
@@ -171,6 +210,14 @@ export class ChannelHost {
    * card its tool call raised, and fire-and-forget handlers would let the
    * two race. An entry is removed once its chain drains. */
   private outboundChains = new Map<string, Promise<void>>();
+  /** gateId → the submission slot key (`${sessionId}:turn:${queueItemId}`)
+   * of the submission that raised it, recorded when the gate card is sent. */
+  private gateSlots = new Map<string, string>();
+  /** Submission slots re-opened by a gate resolution, each consumed by the
+   * next auto-post for that submission — the post-approval segment's first
+   * message reaches the reader who approved. Bounded FIFO (DEDUP_CAP). */
+  private reopenedSlots = new Set<string>();
+  private reopenedOrder: string[] = [];
   private delivered = new Set<string>();
   private deliveredOrder: string[] = [];
   /** Per-boot webhook secrets, keyed by channelType — kept only in memory
@@ -543,16 +590,13 @@ export class ChannelHost {
     // message_end fires with reason "end_turn" for every non-abort assistant
     // message, including a mid-turn message that stopped on a tool call
     // (those persist stopReason undefined; only the turn's last message
-    // persists "end_turn"). Deliver every message that carries text or an
-    // attachment, not just the turn-final one: a model can put its whole
-    // reply in the same message as its first tool call and end the turn on
-    // an empty message, so gating on stopReason "end_turn" drops that reply
-    // while the agent believes it answered. The per-message dedup below and
-    // the isStreamed marker prevent double-posting, and the streaming path
-    // already shows mid-turn text as it is produced. On a transport without
-    // streaming, a turn with several text-bearing messages posts one channel
-    // message per text round — deliberate, not spam: it mirrors what the
-    // streamed path shows.
+    // persists "end_turn"). Auto-post exactly ONE message per submission:
+    // the first that carries text or an attachment. A model often fronts
+    // its reply in the same message as its first tool call and ends the
+    // turn on an empty message, so a turn-final gate ghosts the reply —
+    // and posting every text round floods the thread with tool narration.
+    // Anything after the first message reaches the channel only through an
+    // explicit reply_to_origin; the persona teaches both halves.
     const hasAttachment = (entry.parts ?? []).some((part) => part.type === "attachment");
     if (!entry.content && !hasAttachment) return;
 
@@ -569,14 +613,44 @@ export class ChannelHost {
     // or, on the "events" thread an event delivery lands on, the submission's
     // own channel origin.
     const target = mapped ?? (origin ? this.channelTargetForOrigin(origin) : null);
-    if (!target) return;
+    if (!target) {
+      // No origin → a non-channel submission on the events thread: routine,
+      // not a drop. WITH an origin this is a swallowed reply (transport not
+      // running, or the key rebuild failed) — make it visible.
+      if (origin !== undefined) {
+        const orgId = this.orgId ?? (await this.deps.resolveOrgId());
+        await this.dropLog(orgId, "reply_target_unresolved", origin.threadKey, `channelType=${origin.channelType}`);
+      }
+      return;
+    }
 
     const dedupeKey = `${sessionId}:${messageId}`;
     if (this.delivered.has(dedupeKey)) return;
+    if (entry.queueItemId !== undefined) {
+      // An explicit, successful reply_to_origin in this submission IS the
+      // reply — the auto-post safety net stands down so the thread gets
+      // exactly one.
+      if (turnRepliedToOrigin(entries, entry.queueItemId)) return;
+      // One auto-post per gate-delimited segment: the submission's first
+      // text- or attachment-bearing message posts; later messages stay off
+      // the channel. Derived from the persisted entries (not memory), so an
+      // api restart mid-submission cannot double-post. A resolved gate
+      // re-opens the slot once, so the post-approval outcome reaches the
+      // reader who just approved it.
+      const slotKey = `${sessionId}:turn:${entry.queueItemId}`;
+      const first = firstPostableEntry(entries, entry.queueItemId);
+      if (first !== undefined && first.id !== entry.id && !this.reopenedSlots.delete(slotKey)) return;
+    }
     this.markDelivered(dedupeKey);
 
     const transport = this.transports.get(target.channelType);
-    if (!transport) return;
+    if (!transport) {
+      // An origin-bearing reply with no running transport is a swallowed
+      // reply, not a routine skip — surface it on the Problems tab.
+      const orgId = this.orgId ?? (await this.deps.resolveOrgId());
+      await this.dropLog(orgId, "reply_transport_missing", target.conversationKey, `channelType=${target.channelType}`);
+      return;
+    }
 
     try {
       if (entry.content) {
@@ -672,6 +746,12 @@ export class ChannelHost {
     // no defined order and the reader would sometimes see the card first.
     await this.streamBridge.closeForGate(sessionId, gate.threadId);
 
+    // Remember which submission this gate belongs to, so its resolution can
+    // re-open that submission's auto-post slot (the post-approval outcome
+    // must reach the thread even though the pre-gate segment already
+    // posted its first message).
+    this.gateSlots.set(gate.id, `${sessionId}:turn:${gate.queueItemId}`);
+
     // Digest before sending: a tool-approval gate's raw body is a
     // tool_id/args JSON dump; the card shows the summary plus labeled
     // fields instead, with a link for the full request.
@@ -718,6 +798,19 @@ export class ChannelHost {
 
   /** Rule 4: decision_gate_resolved → edit every prompt message with the outcome label, then clear all gate maps. */
   private async deliverGateResolution(gateId: string, resolution: DecisionResolution): Promise<void> {
+    // A resolved gate opens a new segment of its submission: re-open the
+    // auto-post slot so the post-approval outcome posts to the thread.
+    const slotKey = this.gateSlots.get(gateId);
+    if (slotKey !== undefined) {
+      this.gateSlots.delete(gateId);
+      this.reopenedSlots.add(slotKey);
+      this.reopenedOrder.push(slotKey);
+      if (this.reopenedOrder.length > DEDUP_CAP) {
+        const evict = this.reopenedOrder.shift();
+        if (evict !== undefined) this.reopenedSlots.delete(evict);
+      }
+    }
+
     // Remember the resolution BEFORE the refs check: a prompt still in
     // flight has no ref yet, and `sendAndRecordGatePrompt` reads this map to
     // backfill the edit when that send lands.

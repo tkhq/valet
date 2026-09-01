@@ -156,6 +156,14 @@ interface SchemaRepair {
  */
 const SCHEMA_REPAIRS: SchemaRepair[] = [
   {
+    // The spawning submission's channel origin, inherited by child.settled
+    // signals. Null on rows from before the column: those settlements just
+    // keep the old no-origin behavior.
+    describe: "child_watches.origin_json column",
+    probe: { kind: "column", table: "child_watches", column: "origin_json" },
+    sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "origin_json" text',
+  },
+  {
     // Records which person's GitHub credential a team skill source may use.
     // Null on every row written before the column existed, which the sync
     // reads as "no credential" rather than climbing to the org's App.
