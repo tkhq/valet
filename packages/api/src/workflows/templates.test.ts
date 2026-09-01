@@ -17,6 +17,7 @@ import type {
   CredentialStore,
   PluginAction,
   StoredCredential,
+  TriggerDef,
   ValetPlugin,
   WorkflowTemplate,
 } from "@valet/engine";
@@ -971,6 +972,126 @@ describe("installWorkflowTemplate", () => {
     expect(stored).toContain('"depth":3');
     expect(stored).not.toContain("trigger.data");
     expect(await db.select().from(workflowSchedules)).toHaveLength(1);
+  });
+
+  // Fix 3 (TKAI-302): a template that selects a channel-scoped key and
+  // carries no channel filter must set anyChannel: true, or the scope gate
+  // refuses the install.
+  it("installs a channel-scoped event template that sets anyChannel: true", async () => {
+    // A synthetic trigger that declares scope.channelField: "room".
+    const roomTriggerDef: TriggerDef = {
+      id: "roomfix.message",
+      service: "roomfix",
+      description: "",
+      verify: () => null,
+      toEvent: () => ({
+        key: "roomfix.message",
+        dedupeKey: "d",
+        occurredAt: new Date(0).toISOString(),
+        refs: {},
+        summary: "",
+        payload: {},
+      }),
+      catalog: [
+        {
+          key: "roomfix.message",
+          description: "",
+          scope: { channelField: "room" },
+          filters: [{ field: "room", path: "room", description: "" }],
+        },
+      ],
+    };
+    const anyChannelTemplate: WorkflowTemplate = {
+      id: "roomfix-any-channel",
+      name: "Room watcher",
+      description: "Watches all rooms.",
+      category: "Batch work",
+      apps: ["roomfix"],
+      steps: ["Watch"],
+      definition: definition(
+        [{ id: "start", type: "trigger" }],
+        [],
+      ),
+      events: [
+        {
+          name: "On room message",
+          eventKeys: ["roomfix.message"],
+          filters: [],
+          anyChannel: true,
+          description: "When a room message arrives",
+        },
+      ],
+    };
+    const roomPlugin: ValetPlugin = {
+      name: "roomfix",
+      version: "0",
+      triggers: [roomTriggerDef],
+      templates: [anyChannelTemplate],
+    };
+    const result = await installWorkflowTemplate(deps([roomPlugin]), OWNER, "roomfix-any-channel");
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error);
+    const subs = await db.select().from(eventSubscriptions);
+    expect(subs).toHaveLength(1);
+    // No channel filter stored — any-channel state.
+    expect(subs[0]!.filters).toEqual([]);
+  });
+
+  it("refuses a channel-scoped event template that has no channel filter and no anyChannel flag", async () => {
+    const roomTriggerDef: TriggerDef = {
+      id: "roomfix2.message",
+      service: "roomfix2",
+      description: "",
+      verify: () => null,
+      toEvent: () => ({
+        key: "roomfix2.message",
+        dedupeKey: "d",
+        occurredAt: new Date(0).toISOString(),
+        refs: {},
+        summary: "",
+        payload: {},
+      }),
+      catalog: [
+        {
+          key: "roomfix2.message",
+          description: "",
+          scope: { channelField: "room" },
+          filters: [{ field: "room", path: "room", description: "" }],
+        },
+      ],
+    };
+    const noFlagTemplate: WorkflowTemplate = {
+      id: "roomfix2-no-channel",
+      name: "Room watcher (no flag)",
+      description: "Watches all rooms but forgets the flag.",
+      category: "Batch work",
+      apps: ["roomfix2"],
+      steps: ["Watch"],
+      definition: definition(
+        [{ id: "start", type: "trigger" }],
+        [],
+      ),
+      events: [
+        {
+          name: "On room message",
+          eventKeys: ["roomfix2.message"],
+          filters: [],
+          description: "When a room message arrives",
+        },
+      ],
+    };
+    const room2Plugin: ValetPlugin = {
+      name: "roomfix2",
+      version: "0",
+      triggers: [roomTriggerDef],
+      templates: [noFlagTemplate],
+    };
+    const result = await installWorkflowTemplate(deps([room2Plugin]), OWNER, "roomfix2-no-channel");
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected a refusal");
+    expect(result.code).toBe("broken_template");
+    expect(await db.select().from(eventSubscriptions)).toHaveLength(0);
+    expect(await db.select().from(workflowDefinitions)).toHaveLength(0);
   });
 });
 

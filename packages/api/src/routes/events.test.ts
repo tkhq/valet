@@ -1459,7 +1459,7 @@ describe("mention scoping (slack.app_mention)", () => {
     });
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("own @-mentions");
+    expect(body.error).toContain("slack.app_mention");
   });
 
   it("refuses creation when the creator has no linked Slack account", async () => {
@@ -1780,5 +1780,75 @@ describe("message scoping (slack.message)", () => {
       body: JSON.stringify({ filters: [{ field: "text", op: "prefix", value: "!deploy" }] }),
     });
     expect(patch.status).toBe(200);
+  });
+});
+
+// ── Per-field channel scope regression (TKAI-302, Fix 1) ──────────────────
+//
+// When two selected entries declare different channelField names, constraining
+// one field must not satisfy the other. Both fields must be constrained
+// (or anyChannel must be set).
+
+describe("per-field channel scope with two different channelField names", () => {
+  // A synthetic plugin whose trigger declares channelField: "room", different
+  // from slack.message's channelField: "channel".
+  const roomPlugin: ValetPlugin = {
+    name: "room-fixture",
+    version: "0",
+    triggers: [
+      {
+        id: "room-fixture.message",
+        service: "room-fixture",
+        description: "",
+        verify: () => null,
+        toEvent: (e) => ({
+          key: "room-fixture.message",
+          dedupeKey: "d",
+          occurredAt: new Date(0).toISOString(),
+          refs: {},
+          summary: "",
+          payload: e.payload,
+        }),
+        catalog: [
+          {
+            key: "room-fixture.message",
+            description: "",
+            scope: { channelField: "room" },
+            filters: [{ field: "room", path: "room", description: "" }],
+          },
+        ],
+      },
+    ],
+  };
+
+  it("refuses when only one of two required channel fields is constrained, naming the unmet field", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin, roomPlugin] });
+    const a = api;
+    const res = await postSubscription(a.baseUrl, {
+      name: "multi-field test",
+      eventKeys: ["slack.message", "room-fixture.message"],
+      // channel is constrained, but room is not
+      filters: [{ field: "channel", op: "eq", value: "C1" }],
+      target: { kind: "orchestrator" },
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("channel filter");
+    expect(body.error).toContain("room");
+  });
+
+  it("accepts when both required channel fields are constrained", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin, roomPlugin] });
+    const a = api;
+    const res = await postSubscription(a.baseUrl, {
+      name: "multi-field test",
+      eventKeys: ["slack.message", "room-fixture.message"],
+      filters: [
+        { field: "channel", op: "eq", value: "C1" },
+        { field: "room", op: "eq", value: "R1" },
+      ],
+      target: { kind: "orchestrator" },
+    });
+    expect(res.status).toBe(201);
   });
 });
