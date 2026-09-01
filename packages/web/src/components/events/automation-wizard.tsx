@@ -55,7 +55,7 @@ import { useTeams } from "~/api/settings";
 import { errorText } from "~/lib/error-text";
 // The reply outcome always subscribes to this one event key, so the reader
 // never sees a raw event picker for it.
-import { SLACK_APP_MENTION } from "~/lib/slack-mention";
+import { SLACK_APP_MENTION } from "~/lib/subscription-scope";
 import { useActiveWorkspace } from "~/components/workspace-clause";
 
 /** One picked channel: the Slack id plus the display label the picker showed. */

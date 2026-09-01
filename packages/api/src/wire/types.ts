@@ -2313,6 +2313,12 @@ export interface WorkflowTriggerCatalogEntry {
   key: string;
   description: string;
   filters: { field: string; description: string }[];
+  /**
+   * Write-time scoping the subscription gate enforces for this key — the
+   * web derives its "Any channel" checkbox and copy from this, so client and
+   * server cannot drift. Mirrors `EventCatalogEntry.scope`.
+   */
+  scope?: { channelField?: string; creatorUserField?: string };
 }
 
 export interface GetWorkflowTriggerCatalogResponse {

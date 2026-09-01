@@ -39,7 +39,12 @@ export interface WorkflowTriggerSummary {
 
 export interface EventTypeCatalog {
   service: string;
-  entries: { key: string; description: string; filters: { field: string; description: string }[] }[];
+  entries: {
+    key: string;
+    description: string;
+    filters: { field: string; description: string }[];
+    scope?: { channelField?: string; creatorUserField?: string };
+  }[];
 }
 
 export function listEventTypes(plugins: ValetPlugin[]): EventTypeCatalog[] {
@@ -50,6 +55,7 @@ export function listEventTypes(plugins: ValetPlugin[]): EventTypeCatalog[] {
       key: e.key,
       description: e.description,
       filters: e.filters.map((f) => ({ field: f.field, description: f.description })),
+      ...(e.scope !== undefined ? { scope: e.scope } : {}),
     })),
   }));
 }

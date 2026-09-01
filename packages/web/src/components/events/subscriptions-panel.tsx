@@ -23,7 +23,7 @@ import {
 import { useMe, useOrg, useTeams } from "~/api/settings";
 import { useWorkflows } from "~/api/workflows";
 import { errorText } from "~/lib/error-text";
-import { selectsSlackMention } from "~/lib/slack-mention";
+import { selectsSlackMention } from "~/lib/subscription-scope";
 import { useListOwner } from "~/lib/use-list-owner";
 import { OwnerBadge } from "~/components/owner-badge";
 import { eligibleTeams } from "~/components/session/assistant-rail";
