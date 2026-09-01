@@ -63,10 +63,16 @@ CREATE TABLE "engine_entries" (
 	"usage" text,
 	"cost" text,
 	"attachments" text,
-	"created_at" bigint NOT NULL
+	"created_at" bigint NOT NULL,
+	-- Monotonic insertion counter. created_at is epoch-ms and two entries in one
+	-- turn are routinely written inside the same millisecond, so created_at alone
+	-- cannot order them; reads add seq as a deterministic tiebreaker (TKAI-303).
+	-- GENERATED ALWAYS: assigned on INSERT, preserved across updateEntry, so a
+	-- row keeps its insertion rank even after an in-place part re-persist.
+	"seq" bigint GENERATED ALWAYS AS IDENTITY NOT NULL
 );
 --> statement-breakpoint
-CREATE INDEX "engine_entries_thread" ON "engine_entries" ("session_id","thread_id","created_at");
+CREATE INDEX "engine_entries_thread" ON "engine_entries" ("session_id","thread_id","created_at","seq");
 --> statement-breakpoint
 CREATE INDEX "engine_entries_gate" ON "engine_entries" ("gate_id");
 --> statement-breakpoint
