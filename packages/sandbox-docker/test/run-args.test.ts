@@ -31,11 +31,29 @@ describe("buildDockerRunArgs (pure)", () => {
       "/workspace",
       "-v",
       "/tmp/valet-ws:/workspace",
+      "--add-host",
+      "host.docker.internal:host-gateway",
       "alpine:3.20",
       "sh",
       "-c",
       "tail -f /dev/null",
     ]);
+  });
+
+  // A bridge-network container reaches the api over `host.docker.internal`
+  // (see `resolveSandboxApiUrl` in the api package). Docker Desktop and
+  // colima publish that name; a Linux daemon needs the explicit mapping.
+  it("maps host.docker.internal to the host gateway on a bridge network", () => {
+    const args = buildDockerRunArgs(baseOpts);
+    const idx = args.indexOf("--add-host");
+    expect(idx).toBeGreaterThan(-1);
+    expect(args[idx + 1]).toBe("host.docker.internal:host-gateway");
+  });
+
+  it("omits the host alias when the container has no network of its own", () => {
+    for (const network of ["none", "host"]) {
+      expect(buildDockerRunArgs({ ...baseOpts, network })).not.toContain("--add-host");
+    }
   });
 
   it("headless (profile: 'headless' explicit) publishes no ports — byte-identical pin", () => {
@@ -61,6 +79,8 @@ describe("buildDockerRunArgs (pure)", () => {
       "/workspace",
       "-v",
       "/tmp/valet-ws:/workspace",
+      "--add-host",
+      "host.docker.internal:host-gateway",
       "-p",
       "127.0.0.1::9000",
       "alpine:3.20",
@@ -113,6 +133,8 @@ describe("buildDockerRunArgs (pure)", () => {
       "/workspace",
       "-v",
       "/tmp/valet-ws:/workspace",
+      "--add-host",
+      "host.docker.internal:host-gateway",
       "alpine:3.20",
       "sh",
       "-c",

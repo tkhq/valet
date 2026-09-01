@@ -18,6 +18,7 @@ import {
   resolveDefaultImage,
   resolveHibernatedRetentionMs,
   resolveIdleMinutes,
+  resolveSandboxApiUrl,
   resolveKubeConfig,
 } from "./sandbox-backend.js";
 
@@ -234,5 +235,53 @@ describe("resolveKubeConfig", () => {
     // pinned context must throw, never silently target prod. No env vars →
     // not in-cluster (KUBERNETES_SERVICE_HOST absent), no pinned context.
     expect(() => resolveKubeConfig({})).toThrow(/VALET_KUBE_CONTEXT is required/);
+  });
+});
+
+/**
+ * `VALET_API_URL` must be reachable FROM a sandbox. On the docker backend a
+ * loopback host names the sandbox itself, so every in-sandbox client
+ * (`git-credential-valet`, `valet-gh`, `valet-secrets`) fails to connect.
+ */
+describe("resolveSandboxApiUrl", () => {
+  const docker = { VALET_SANDBOX_BACKEND: "docker" } as NodeJS.ProcessEnv;
+
+  it("rewrites every loopback spelling to host.docker.internal on docker", () => {
+    for (const host of ["localhost", "127.0.0.1", "0.0.0.0"]) {
+      expect(resolveSandboxApiUrl(docker, `http://${host}:8788`)).toBe("http://host.docker.internal:8788");
+    }
+    expect(resolveSandboxApiUrl(docker, "http://[::1]:8788")).toBe("http://host.docker.internal:8788");
+  });
+
+  it("treats an unset backend as docker (the documented default)", () => {
+    expect(resolveSandboxApiUrl({}, "http://localhost:8788")).toBe("http://host.docker.internal:8788");
+  });
+
+  it("keeps the scheme, port, and path", () => {
+    expect(resolveSandboxApiUrl(docker, "https://localhost:9443/base")).toBe(
+      "https://host.docker.internal:9443/base",
+    );
+  });
+
+  it("does not append a trailing slash to a bare origin", () => {
+    expect(resolveSandboxApiUrl(docker, "http://localhost:8788")).not.toMatch(/\/$/);
+  });
+
+  it("leaves a routable host alone — the operator meant it", () => {
+    expect(resolveSandboxApiUrl(docker, "https://valet.example.com")).toBe("https://valet.example.com");
+  });
+
+  it("leaves other backends alone", () => {
+    for (const backend of ["kubernetes", "local"]) {
+      expect(resolveSandboxApiUrl({ VALET_SANDBOX_BACKEND: backend }, "http://localhost:8788")).toBe(
+        "http://localhost:8788",
+      );
+    }
+  });
+
+  it("passes through unset, empty, and unparseable values untouched", () => {
+    expect(resolveSandboxApiUrl(docker, undefined)).toBeUndefined();
+    expect(resolveSandboxApiUrl(docker, "")).toBe("");
+    expect(resolveSandboxApiUrl(docker, "not a url")).toBe("not a url");
   });
 });

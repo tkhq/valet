@@ -17,7 +17,7 @@ import { createApp, type AuthWiring } from "./app.js";
 import { selectServerAdapter } from "./server-adapter.js";
 import { buildNodeProviders, shouldSeedLocalIdentity } from "./providers/node.js";
 import { getAttachmentRefStore } from "./services/attachment-refs.js";
-import { parseSandboxBackend } from "./providers/sandbox-backend.js";
+import { parseSandboxBackend, resolveSandboxApiUrl } from "./providers/sandbox-backend.js";
 import { agentSessions } from "./schema/index.js";
 import { loadSessionMeta } from "./engine/session-meta.js";
 import type { Providers } from "./providers/types.js";
@@ -261,9 +261,17 @@ if (authConfig) {
 // dedicated env var for the pod-reachable value — the Helm chart sets it to
 // the api Service's in-cluster DNS name (see deploy/chart/valet). Falls
 // back to `authConfig.baseUrl` (the pre-existing behavior) when unset, so
-// deployments that haven't set the dedicated var yet (or don't need to,
-// e.g. sandbox-docker on localhost) keep working unchanged.
-const sandboxApiUrl = process.env.VALET_SANDBOX_API_URL ?? authConfig?.baseUrl;
+// deployments that haven't set the dedicated var yet keep working
+// unchanged. On the docker backend a loopback fallback names the
+// SANDBOX, not the host, so `resolveSandboxApiUrl` swaps it for
+// `host.docker.internal`.
+// Always a concrete value: with no auth configured (`VALET_LOCAL_AUTH=1`)
+// `authConfig` is null, and leaving this undefined drops EngineHost onto its
+// own loopback fallback — which a sandbox cannot reach on the docker backend.
+const sandboxApiUrl = resolveSandboxApiUrl(
+  process.env,
+  process.env.VALET_SANDBOX_API_URL ?? authConfig?.baseUrl ?? `http://localhost:${port}`,
+);
 
 // OTel bootstrap (env-gated: null without an OTLP endpoint). Registered
 // BEFORE providers/app construction so the global tracer + context manager

@@ -200,6 +200,48 @@ export function resolveSandboxCapacityWaitMs(env: NodeJS.ProcessEnv): number {
   return scaledEnvNumber(env.VALET_SANDBOX_CAPACITY_WAIT_MINUTES, 10 * 60_000, 60_000);
 }
 
+/** Hosts that name the current machine's own loopback interface. Inside a
+ * bridge-network container each of these resolves to the CONTAINER, not to
+ * the host running the api. */
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"]);
+
+/**
+ * The api URL injected into every sandbox as `VALET_API_URL`.
+ *
+ * On the `docker` backend a sandbox runs in its own network namespace, so a
+ * loopback host points the sandbox at itself and every in-sandbox client
+ * (`git-credential-valet`, `valet-gh`, `valet-secrets`) fails to connect.
+ * Docker publishes the host under `host.docker.internal`, so this swaps the
+ * host part and keeps the scheme, port, and path. `buildDockerRunArgs` adds
+ * the matching `--add-host` entry, which is what makes the name resolve on
+ * Linux.
+ *
+ * Only a loopback host is rewritten, and only for the docker backend. A
+ * routable address the operator configured deliberately is returned
+ * unchanged, as is every other backend (the k8s chart sets the api
+ * Service's in-cluster DNS name).
+ */
+export function resolveSandboxApiUrl(
+  env: NodeJS.ProcessEnv,
+  configured: string | undefined,
+): string | undefined {
+  if (configured === undefined || configured === "") return configured;
+  if (parseSandboxBackend(env.VALET_SANDBOX_BACKEND) !== "docker") return configured;
+  let url: URL;
+  try {
+    url = new URL(configured);
+  } catch {
+    // Not a parseable URL — hand it back untouched and let the consumer
+    // report the failure against the value the operator actually set.
+    return configured;
+  }
+  if (!LOOPBACK_HOSTS.has(url.hostname) && !LOOPBACK_HOSTS.has(`[${url.hostname}]`)) return configured;
+  url.hostname = "host.docker.internal";
+  // `URL.toString()` appends a trailing slash to an empty path; callers
+  // join paths onto this value, so keep the original's shape.
+  return url.toString().replace(/\/$/, "");
+}
+
 export interface BuildSandboxProviderDeps {
   /**
    * Injected `KubeConfig` for the `kubernetes` backend. Tests supply a
