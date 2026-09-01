@@ -63,7 +63,14 @@ export function OnePasswordPanel() {
               An admin can connect an organization 1Password token on this page.
             </p>
           )}
-          <ReferenceList isAdmin={isAdmin} />
+          <div className="mt-6 border-t border-line pt-4">
+            <h3 className="text-sm font-medium text-ink">Credentials backed by 1Password</h3>
+            <p className="mt-0.5 text-xs text-muted">
+              Each one names an item instead of holding a secret. Valet reads the value from
+              1Password when a run needs it.
+            </p>
+            <ReferenceList isAdmin={isAdmin} />
+          </div>
           <AddFromOnePassword
             allowPersonal={settingsQ.data.allowPersonal}
             orgTokenConnected={settingsQ.data.orgTokenConnected}
@@ -231,6 +238,28 @@ function TokenFields({
   );
 }
 
+/**
+ * `op://vault/item/field` as the three things a person looks for in
+ * 1Password. The raw reference stays in `title` because it is what is
+ * stored, and what someone pastes when reporting a problem.
+ */
+function ReferencePath({ reference }: { reference?: string }) {
+  const parts = (reference ?? "").replace(/^op:\/\//, "").split("/");
+  if (parts.length !== 3) {
+    return <span className="font-mono text-xs text-muted">{reference}</span>;
+  }
+  const [vault, item, field] = parts;
+  return (
+    <span className="text-sm text-ink" title={reference}>
+      <span className="text-muted">vault</span> <span>{vault}</span>
+      <span className="mx-1.5 text-muted">·</span>
+      <span className="text-muted">item</span> <span>{item}</span>
+      <span className="mx-1.5 text-muted">·</span>
+      <span className="text-muted">field</span> <span>{field}</span>
+    </span>
+  );
+}
+
 function isReference(c: CredentialSummary): boolean {
   return c.service !== "onepassword" && Boolean(c.onepasswordRef);
 }
@@ -294,11 +323,12 @@ function ReferenceRow({
   onRevoke: () => void;
 }) {
   return (
-    <FieldRow label={cred.service}>
+    <FieldRow
+      label={cred.service}
+      hint={scope === "org" ? "Everyone in the organization" : "Only you"}
+    >
       <div className="flex flex-wrap items-center gap-2">
-        <Badge variant="neutral">{cred.type}</Badge>
-        {scope === "org" && <Badge variant="neutral">Organization</Badge>}
-        <Badge variant="accent">{cred.onepasswordRef}</Badge>
+        <ReferencePath reference={cred.onepasswordRef} />
         <Button
           type="button"
           variant="ghost"

@@ -195,7 +195,12 @@ describe("OnePasswordPanel", () => {
     };
     render(<OnePasswordPanel />);
     expect(screen.getByText("linear")).toBeTruthy();
-    expect(screen.getByText("op://Vault One/Item One/credential")).toBeTruthy();
+    // The reference reads as the three things a person looks for in
+    // 1Password, with the raw `op://` string kept on `title` for copying.
+    expect(screen.getByText("Vault One")).toBeTruthy();
+    expect(screen.getByText("Item One")).toBeTruthy();
+    expect(screen.getByText("credential")).toBeTruthy();
+    expect(screen.getByTitle("op://Vault One/Item One/credential")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Revoke onepassword" })).toBeNull();
   });
 
