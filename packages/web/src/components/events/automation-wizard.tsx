@@ -830,7 +830,7 @@ function EventMatchStep({
   anyChannel: boolean;
   onAnyChannelChange: (v: boolean) => void;
 }) {
-  const entries: ScopedEntry[] = services.flatMap((s) => s.entries);
+  const entries = services.flatMap((s) => s.entries);
   const keysArr = [...keys];
   // Derived from catalog scope so the checkbox appears for any channel-scoped
   // key, not just slack.app_mention.
