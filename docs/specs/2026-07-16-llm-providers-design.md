@@ -97,6 +97,18 @@ pi-ai's env-key map). Deviations from the other known kinds:
   storage, env-fallback indicator, org-key-over-env precedence) is inherited
   unchanged from the known-kind machinery.
 
+## Extension: team default model (2026-09-01, TKAI-255)
+
+Teams gain a nullable `teams.default_model`, the team-tier analog of `users.default_model`. The new-session chain in `EngineHost.resolveModelForBuild` becomes:
+
+`overrideId ?? userDefaultModel ?? teamDefaultModel ?? firstActiveOrgPreference ?? this.opts.defaultModelId ?? "claude-haiku-4-5"`
+
+- **The team tier applies to team-owned sessions only.** A personal session never reads any team's preference: a user can belong to several teams, and none of them owns that session. The owning team reaches the resolver as `SessionMeta.ownerTeamId` (from the app row's `owner_type`/`owner_id` via `loadSessionMeta`), as the principal for team assistant sessions, and as `opts.owner` for child and workflow builds.
+- **User beats team.** The org sets the default; the team overrides the org; the member overrides both. Most-specific wins.
+- **Like the user tier, the team tier resolves straight through** — no active-provider walk. A team default on a disabled provider fails loudly at build, same as an explicit user default.
+- **Write path:** `PATCH /api/teams/:id { defaultModel }`, whitelist-strict like `PATCH /api/me`, validated against `catalogValidIds`, gated by `canAdministerTeam`. Not origin-gated: an IDP mirror's membership belongs to the identity provider, but `default_model` is Valet-local state no sync writes.
+- **Restore is unchanged:** the persisted session model always wins (restore-no-clobber).
+
 ## Non-goals
 
 - Per-user LLM keys (org + deployment env only this pass).
