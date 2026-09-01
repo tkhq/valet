@@ -1,0 +1,184 @@
+[
+  {
+    "id": "finding-001",
+    "level": "L0",
+    "description": "code-review: hardcoded password in config/db.yml",
+    "input": {
+      "file": "config/db.yml",
+      "line": 5,
+      "title": "Hardcoded password in database configuration",
+      "body": "The file `config/db.yml` line 5 contains a plaintext password: `password: SuperSecret123`. This violates the principle of least privilege and exposes the database to credential theft. Recommendation: use environment variables or a secrets manager (AWS Secrets Manager, HashiCorp Vault) to inject credentials at runtime."
+    },
+    "expected": {
+      "fingerprint": "5d72002d2026a84af2e5658e419cc20d59d0dac5"
+    }
+  },
+  {
+    "id": "finding-002",
+    "level": "L0",
+    "description": "sast: SQL injection in api.py",
+    "input": {
+      "file": "api.py",
+      "line": 45,
+      "title": "SQL injection in search endpoint",
+      "body": "The search endpoint at `api.py` line 45 constructs a SQL query by concatenating user input without parameterization: `query = \"SELECT * FROM users WHERE name = '\" + request.args.get('q') + \"'\"`. This allows an attacker to inject arbitrary SQL (`?q=' OR '1'='1`). Recommendation: use parameterized queries or an ORM."
+    },
+    "expected": {
+      "fingerprint": "2d7a9e23f83242ba957d8233d26e628898987dba"
+    }
+  },
+  {
+    "id": "finding-003",
+    "level": "L0",
+    "description": "sast: reflected XSS in views.py",
+    "input": {
+      "file": "views.py",
+      "line": 78,
+      "title": "Reflected XSS in error message",
+      "body": "The error handler at `views.py` line 78 reflects user input in the error message without escaping: `return f\"Error: {request.args.get('msg')}\"`. This allows an attacker to inject JavaScript (`?msg=<script>alert(1)</script>`). Recommendation: use a templating engine with autoescape=true."
+    },
+    "expected": {
+      "fingerprint": "10470d499b8e25f7413b65e0a25d266cd107a769"
+    }
+  },
+  {
+    "id": "finding-004",
+    "level": "L0",
+    "description": "dast: open redirect on /public/redirect",
+    "input": {
+      "file": "src/routes/public.py",
+      "line": 12,
+      "title": "Open redirect on /public/redirect",
+      "body": "GET /public/redirect?url=<attacker> returns 302 with Location: <attacker> unconditionally. No allow-list, no host check. An attacker crafts a phishing URL that lands on the target's trusted domain and then bounces to a malicious site."
+    },
+    "expected": {
+      "fingerprint": "3e8ec51022a45abfee1a009403d5aab8c8b9b5e8"
+    }
+  },
+  {
+    "id": "finding-005",
+    "level": "L0",
+    "description": "dast: missing CSP header",
+    "input": {
+      "file": "",
+      "line": null,
+      "title": "Missing Content-Security-Policy header",
+      "body": "Every HTTP response from api.example.com omits the Content-Security-Policy header. Without CSP, a reflected or stored XSS has no browser-side mitigation. Recommend a strict default-src 'self' policy with nonce-based script inclusion."
+    },
+    "expected": {
+      "fingerprint": "e64146266bf3d3b950972509375c2bf2408abd27"
+    }
+  },
+  {
+    "id": "finding-006",
+    "level": "L0",
+    "description": "dast: verbose error messages leak stack traces",
+    "input": {
+      "file": "",
+      "line": null,
+      "title": "Verbose error messages expose stack traces",
+      "body": "500-class error responses include a full Python stack trace. This reveals module layout, ORM types, and file paths, aiding reconnaissance. Recommendation: return a redacted error id in production; log the full trace server-side."
+    },
+    "expected": {
+      "fingerprint": "c2ca720a1d5654e699b1e844ad9f2663c08efea8"
+    }
+  },
+  {
+    "id": "finding-007",
+    "level": "L0",
+    "description": "fuzz: HTTP parameter pollution on /api/v1/payment",
+    "input": {
+      "file": "src/routes/payment.py",
+      "line": 22,
+      "title": "HTTP parameter pollution accepted on /api/v1/payment",
+      "body": "POST /api/v1/payment accepts duplicate keys (amount=1&amount=999) and processes the LAST occurrence for billing but the FIRST for authorization. An attacker charges $1 while authorizing $999."
+    },
+    "expected": {
+      "fingerprint": "a5d16b647a5b0b3d23c0a3ad9d2b9439678f6ed2"
+    }
+  },
+  {
+    "id": "finding-008",
+    "level": "L0",
+    "description": "fuzz: missing rate limit on /api/v1/payment",
+    "input": {
+      "file": "src/routes/payment.py",
+      "line": 22,
+      "title": "Missing rate limit on /api/v1/payment",
+      "body": "1,000 requests per second to /api/v1/payment are served without a rate limit or exponential backoff. Card testing, credential stuffing, and denial-of-wallet are all trivial. Recommendation: per-IP and per-account rate limiting with challenge-response."
+    },
+    "expected": {
+      "fingerprint": "5bcf57ad40d7912d819a1cb28cfdb9ec0aeb631f"
+    }
+  },
+  {
+    "id": "finding-009",
+    "level": "L0",
+    "description": "fuzz: CORS misconfiguration on /api/v1/payment",
+    "input": {
+      "file": "",
+      "line": null,
+      "title": "CORS misconfiguration on /api/v1/payment",
+      "body": "The response headers echo the Origin request header into Access-Control-Allow-Origin AND set Access-Control-Allow-Credentials: true. An attacker at https://evil.example reads payment responses from a victim's browser session."
+    },
+    "expected": {
+      "fingerprint": "fa1044be9111686a070b69966f0b01c358bccdb9"
+    }
+  },
+  {
+    "id": "finding-010",
+    "level": "L0",
+    "description": "dast (delta): IDOR on /admin/users",
+    "input": {
+      "file": "src/routes/admin.py",
+      "line": 45,
+      "title": "IDOR on /admin/users?id=",
+      "body": "GET /admin/users?id=<n> returns the target user's PII record when the caller holds any admin session. There is no tenant check, so one org admin reads users from another org. Reproduced with session s-human-1; id=1 returns admin@example.com's record."
+    },
+    "expected": {
+      "fingerprint": "0e72948271e16735f7f38ee326943b8e7541ec80"
+    }
+  },
+  {
+    "id": "finding-011",
+    "level": "L0",
+    "description": "dast (delta): staging API exposed on port 443",
+    "input": {
+      "file": "",
+      "line": null,
+      "title": "Staging API exposed on staging.example.com:443",
+      "body": "The staging API responds on staging.example.com:443 with the same routes as production, including /admin/*, and accepts a production admin session cookie. Staging accepts writes, so an attacker with an admin session mutates staging records. Scope expansion approved via scope-auto-include (IP 10.1.2.3 in 10.0.0.0/8)."
+    },
+    "expected": {
+      "fingerprint": "a4c132c29303b749b64cc0b11212b9727d1cf987"
+    }
+  },
+  {
+    "id": "finding-012",
+    "level": "L0",
+    "description": "fuzz (delta): payment bypass via malformed expiry",
+    "input": {
+      "file": "src/routes/payment.py",
+      "line": 60,
+      "title": "Payment bypass via malformed expiry date",
+      "body": "POST /api/v1/payment with expiry=99/99 short-circuits the card validator and returns 200 OK with a fake transaction id. The gateway is not called and no charge is created, but the ORDER is marked paid. An attacker completes checkout without paying."
+    },
+    "expected": {
+      "fingerprint": "e6f5eee8130e480562f3aa643cd53f8a82e49777"
+    }
+  },
+  {
+    "id": "finding-013",
+    "level": "L0",
+    "description": "fuzz (delta): integer overflow on payment amount",
+    "input": {
+      "file": "src/routes/payment.py",
+      "line": 84,
+      "title": "Integer overflow on payment amount field",
+      "body": "POST /api/v1/payment with amount=2147483648 wraps to -1 in a signed int32 cast, then to 0xFFFFFFFF in an unsigned convert. The gateway ignores the negative sign and charges 4.29 billion cents to the merchant's refund float. Repro with test card 4242424242424242."
+    },
+    "expected": {
+      "fingerprint": "0bdd00428dfe646e369ef7093fa6227764a71899"
+    }
+  }
+]

@@ -268,17 +268,44 @@ function parseConfigTools(raw: string | null): SecurityToolDeclWire[] | null {
   return decls;
 }
 
-/** Parse the engagement's `authorized_scope` JSON (`{ hosts: string[] }`) for
- * the wire (M-P4b). Null on absent, malformed, or an empty host list. */
-function parseAuthorizedScope(raw: string | null): { hosts: string[] } | null {
+/** Parse the engagement's `authorized_scope` JSON for the wire (M-P4b + v1
+ * Part 09). Null on absent, malformed, or an empty host list. Maps the
+ * plugin's snake_case (`login_url`, `signup_url`, `rate_limit_rps`) to the
+ * wire's camelCase; only non-empty subfields are emitted. */
+function parseAuthorizedScope(raw: string | null): {
+  hosts: string[];
+  cidrs?: string[];
+  loginUrl?: string;
+  signupUrl?: string;
+  rateLimitRps?: number;
+} | null {
   if (raw === null) return null;
   try {
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-      const hosts = (parsed as Record<string, unknown>).hosts;
+      const rec = parsed as Record<string, unknown>;
+      const hosts = rec.hosts;
       if (Array.isArray(hosts)) {
-        const clean = hosts.filter((h): h is string => typeof h === "string");
-        if (clean.length > 0) return { hosts: clean };
+        const cleanHosts = hosts.filter((h): h is string => typeof h === "string");
+        if (cleanHosts.length > 0) {
+          const wire: {
+            hosts: string[];
+            cidrs?: string[];
+            loginUrl?: string;
+            signupUrl?: string;
+            rateLimitRps?: number;
+          } = { hosts: cleanHosts };
+          if (Array.isArray(rec.cidrs)) {
+            const cidrs = rec.cidrs.filter((c): c is string => typeof c === "string");
+            if (cidrs.length > 0) wire.cidrs = cidrs;
+          }
+          if (typeof rec.login_url === "string" && rec.login_url !== "") wire.loginUrl = rec.login_url;
+          if (typeof rec.signup_url === "string" && rec.signup_url !== "") wire.signupUrl = rec.signup_url;
+          if (typeof rec.rate_limit_rps === "number" && Number.isInteger(rec.rate_limit_rps)) {
+            wire.rateLimitRps = rec.rate_limit_rps;
+          }
+          return wire;
+        }
       }
     }
   } catch {
@@ -499,6 +526,28 @@ securityRouter.get("/:id/security", async (c) => {
   // panel lists auto-resolved (informational) and needs-human items. Absent
   // when the engagement recorded no needs.
   const needs = await security.listNeeds(result.engagement.id);
+  // v1 Part 09 §Resume contract. `resumable` is true iff the engagement is
+  // terminal (completed | failed) AND has at least one open human-facing need
+  // OR at least one failed cell OR at least one pending cell that never
+  // dispatched. The panel renders a Resume banner on true.
+  const isTerminal =
+    result.engagement.status === "completed" || result.engagement.status === "failed";
+  let resumable: boolean | undefined;
+  let resumableStats:
+    | { openNeeds: number; failedCells: number; pendingCells: number }
+    | undefined;
+  if (isTerminal) {
+    const openNeeds = needs.filter((n) => n.status === "needs_human").length;
+    const failedCells = result.cells.filter((c) => c.status === "failed").length;
+    const pendingCells = result.cells.filter((c) => c.status === "pending").length;
+    if (openNeeds > 0 || failedCells > 0 || pendingCells > 0) {
+      resumable = true;
+      resumableStats = { openNeeds, failedCells, pendingCells };
+    } else {
+      resumable = false;
+      resumableStats = { openNeeds: 0, failedCells: 0, pendingCells: 0 };
+    }
+  }
   const body: GetSessionSecurityResponse = {
     engagement: engagementToWire(result.engagement),
     cells: result.cells.map((cell) => cellToWire(cell, progress)),
@@ -507,6 +556,8 @@ securityRouter.get("/:id/security", async (c) => {
     ...(diff ? { diff } : {}),
     report: report ? reportToWire(report) : null,
     ...(needs.length > 0 ? { needs: needs.map(needToWire) } : {}),
+    ...(resumable !== undefined ? { resumable } : {}),
+    ...(resumableStats ? { resumableStats } : {}),
   };
   return c.json(body);
 });
@@ -719,6 +770,15 @@ securityRouter.post("/security/preview", async (c) => {
     paths = body.paths.filter((p): p is string => typeof p === "string");
   }
   const ref = typeof body.ref === "string" && body.ref.trim() !== "" ? body.ref.trim() : undefined;
+  // "Include a written report at the end" (Part 08 §Setup Step 1). Absent
+  // means the seed falls to the preset's own default (`presetReportDefault`).
+  let includeReport: boolean | undefined;
+  if (body.includeReport !== undefined) {
+    if (typeof body.includeReport !== "boolean") {
+      return c.json({ error: "includeReport must be a boolean, or omit the field." }, 400);
+    }
+    includeReport = body.includeReport;
+  }
 
   const { db, engineCredentials, encryptionKey } = c.var.providers;
   const tokenDeps = { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) };
@@ -728,6 +788,7 @@ securityRouter.post("/security/preview", async (c) => {
     ...(ref ? { ref } : {}),
     presetId,
     ...(paths ? { paths } : {}),
+    ...(includeReport !== undefined ? { includeReport } : {}),
     tokenDeps,
     orgId: user.orgId,
   });
@@ -738,7 +799,16 @@ securityRouter.post("/security/preview", async (c) => {
       focus: seeded.focus,
       invariants: seeded.invariants,
       categories: seeded.categories,
-      authorizedScope: seeded.scope && seeded.scope.hosts.length > 0 ? { hosts: seeded.scope.hosts } : null,
+      authorizedScope:
+        seeded.scope && seeded.scope.hosts.length > 0
+          ? {
+              hosts: seeded.scope.hosts,
+              ...(seeded.scope.cidrs && seeded.scope.cidrs.length > 0 ? { cidrs: seeded.scope.cidrs } : {}),
+              ...(seeded.scope.login_url ? { loginUrl: seeded.scope.login_url } : {}),
+              ...(seeded.scope.signup_url ? { signupUrl: seeded.scope.signup_url } : {}),
+              ...(seeded.scope.rate_limit_rps !== undefined ? { rateLimitRps: seeded.scope.rate_limit_rps } : {}),
+            }
+          : null,
       configTools: seeded.tools && seeded.tools.length > 0 ? seeded.tools : null,
       hasRepoConfig: seeded.hasRepoConfig,
     },
@@ -2402,6 +2472,7 @@ securityRouter.post("/:id/security/needs/resolve", async (c) => {
     const response: SecurityResolveNeedsResponse = {
       answered: outcome.answered.map(needToWire),
       resetCellIds: outcome.resetCells.map((cell) => cell.id),
+      resumed: outcome.resumed,
     };
     return c.json(response);
   } catch (err) {
@@ -2483,6 +2554,52 @@ securityRouter.post("/:id/security/cancel", async (c) => {
     report: report ? reportToWire(report) : null,
   };
   return c.json(response);
+});
+
+/**
+ * POST /:id/security/resume — reopen a terminal engagement so the affected
+ * cells re-dispatch (v1 Part 09 §Resume contract). HUMAN action: same admin
+ * gate the cancel route uses. Refuses on cancelled engagements (INV-10) and
+ * on `planning | running` engagements (already in progress).
+ */
+securityRouter.post("/:id/security/resume", async (c) => {
+  const sessionId = c.req.param("id");
+  const resolved = await resolveHumanSession(c, sessionId, "administer");
+  if ("failure" in resolved) return resolved.failure;
+
+  const loaded = await loadEngagementOr404(c, sessionId);
+  if ("failure" in loaded) return loaded.failure;
+  const { security, result } = loaded;
+
+  let body: { cellIds?: unknown; reason?: unknown } = {};
+  try {
+    body = (await c.req.json()) as { cellIds?: unknown; reason?: unknown };
+  } catch {
+    // An empty body is fine — defaults to the union of failed + open-need cells.
+  }
+  const args: { cellIds?: string[]; reason?: string } = {};
+  if (body.cellIds !== undefined) {
+    if (
+      !Array.isArray(body.cellIds) ||
+      !body.cellIds.every((id): id is string => typeof id === "string" && id.trim().length > 0)
+    ) {
+      return c.json({ error: "cellIds must be a list of non-empty strings, or omit the field." }, 400);
+    }
+    args.cellIds = body.cellIds;
+  }
+  if (body.reason !== undefined) {
+    if (typeof body.reason !== "string") {
+      return c.json({ error: "reason must be a string, or omit the field." }, 400);
+    }
+    args.reason = body.reason;
+  }
+
+  try {
+    const outcome = await security.resumeEngagement(result.engagement.id, args);
+    return c.json(outcome);
+  } catch (err) {
+    return serviceError(c, err);
+  }
 });
 
 const EXPORT_FORMATS = {

@@ -82,11 +82,34 @@ export interface McpToolDecl {
 
 /** The authorized live-testing scope (M-P4b): the hosts the live personas may
  * hit, human-declared in `.valet/security.yml`. A live finding or action
- * outside these hosts is forbidden by the persona role and by the egress gate. */
+ * outside these hosts is forbidden by the persona role and by the egress gate.
+ *
+ * v1 (Part 09 §Config schema extensions) adds four optional subfields the
+ * setup page authors so live cells do not pause mid-run for input the user
+ * already has:
+ *   - `cidrs`: authorized IP ranges for `scope-auto-include` (Part 05 §5.5).
+ *   - `login_url`: the coordinator's resolve-mode login endpoint (Part 05).
+ *   - `signup_url`: the L4 `create-test-account` endpoint (Part 05 §5.9).
+ *   - `rate_limit_rps`: the compiled per-persona probe rate (Part 03).
+ */
 export interface SecurityScope {
   /** The authorized hosts (bare host or host:port; no scheme). A live persona
    * probes ONLY these. At least one host when `scope` is present. */
   hosts: string[];
+  /** Authorized IP ranges (CIDR strings). Feeds `scope-auto-include`
+   * (Part 05 §5.5): a scope-expansion need is auto-approved iff the
+   * discovered IP is in one of these ranges. Empty when unset. */
+  cidrs?: string[];
+  /** Login endpoint the pivot-coordinator resolve mode POSTs credentials to
+   * (Part 05 §5.3). Absent means the coordinator will surface a `session`
+   * need to the human instead of attempting to log in itself. */
+  login_url?: string;
+  /** Signup endpoint the L4 `create-test-account` pattern POSTs to
+   * (Part 05 §5.9). Absent means the L4 pattern falls to the human bucket. */
+  signup_url?: string;
+  /** Compiled per-persona probe rate the runtime applies. Integer 1..1000.
+   * Absent means the persona picks a conservative default. */
+  rate_limit_rps?: number;
 }
 
 const CORRECTIVE = "Fix .valet/security.yml and commit it, or remove it to use a preset.";
@@ -203,7 +226,35 @@ export function parseSecurityConfig(yaml: string, knownPersonas: readonly string
         `.valet/security.yml "scope.hosts" must name at least one authorized host. ${CORRECTIVE}`,
       );
     }
-    config.scope = { hosts: scopeHosts };
+    const scope: SecurityScope = { hosts: scopeHosts };
+    const scopeMap = map.scope as Record<string, unknown>;
+    if (scopeMap.cidrs !== undefined) {
+      if (!isStringArray(scopeMap.cidrs)) {
+        throw new Error(`.valet/security.yml "scope.cidrs" must be a list of CIDR strings. ${CORRECTIVE}`);
+      }
+      const cidrs = scopeMap.cidrs.map((c) => c.trim()).filter((c) => c !== "");
+      if (cidrs.length > 0) scope.cidrs = cidrs;
+    }
+    if (scopeMap.login_url !== undefined) {
+      if (typeof scopeMap.login_url !== "string" || scopeMap.login_url.trim() === "") {
+        throw new Error(`.valet/security.yml "scope.login_url" must be a non-empty URL string. ${CORRECTIVE}`);
+      }
+      scope.login_url = scopeMap.login_url.trim();
+    }
+    if (scopeMap.signup_url !== undefined) {
+      if (typeof scopeMap.signup_url !== "string" || scopeMap.signup_url.trim() === "") {
+        throw new Error(`.valet/security.yml "scope.signup_url" must be a non-empty URL string. ${CORRECTIVE}`);
+      }
+      scope.signup_url = scopeMap.signup_url.trim();
+    }
+    if (scopeMap.rate_limit_rps !== undefined) {
+      const raw = scopeMap.rate_limit_rps;
+      if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 1 || raw > 1000) {
+        throw new Error(`.valet/security.yml "scope.rate_limit_rps" must be an integer 1..1000. ${CORRECTIVE}`);
+      }
+      scope.rate_limit_rps = raw;
+    }
+    config.scope = scope;
   }
 
   if (map.tools !== undefined) {

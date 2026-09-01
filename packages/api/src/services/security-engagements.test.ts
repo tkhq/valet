@@ -235,11 +235,11 @@ describe("security engagement service", () => {
     expect(reparsed.cells).toHaveLength(12);
   });
 
-  it("materializes the full-pentest preset with the model personas (M-P2c)", async () => {
+  it("materializes the code-audit preset with the model personas (M-P2c)", async () => {
     const engagement = await svc.createEngagement({
       sessionId: `s_${Math.random().toString(36).slice(2)}`,
       repoFullName: "acme/api",
-      plan: presetPlan("full-pentest"),
+      plan: presetPlan("code-audit"),
     });
     const { cells } = await svc.startEngagement(engagement.id, { resolvedSha: SHA });
     // 1 recon + 1 threat-model + 4 triads (3 each) + 1 attack-tree + 1 verify +
@@ -263,11 +263,11 @@ describe("security engagement service", () => {
     expect(report?.review).toBe(false);
   });
 
-  it("full-pentest dispatch prompts name each cell's own playbook (M-P2c)", async () => {
+  it("code-audit dispatch prompts name each cell's own playbook (M-P2c)", async () => {
     const engagement = await svc.createEngagement({
       sessionId: `s_${Math.random().toString(36).slice(2)}`,
       repoFullName: "acme/api",
-      plan: presetPlan("full-pentest"),
+      plan: presetPlan("code-audit"),
     });
     const { cells } = await svc.startEngagement(engagement.id, { resolvedSha: SHA });
     // The dispatch prompt reads the EXPANDED plan (the materialized 17 cells),

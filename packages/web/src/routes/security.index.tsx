@@ -76,12 +76,23 @@ interface PresetChoice {
   phases: string[];
 }
 
+/** The phase labels above that map to a deterministic persona (sast / dast /
+ * fuzz / pivot-coordinator per plugin-security's DETERMINISTIC_PERSONA_IDS).
+ * A pill for one of these labels renders a bold monospace "D" prefix to
+ * signal reproducible output at a glance in the method card. */
+const DETERMINISTIC_PHASE_LABELS: ReadonlySet<string> = new Set([
+  "SAST",
+  "DAST",
+  "Fuzz",
+  "Pivot coordinator",
+]);
+
 const SECURITY_PRESETS: readonly PresetChoice[] = [
   {
     id: "code-review",
     label: "Full code review",
-    blurb: "The deep default. Every sweep is double-checked, then a written report.",
-    phases: ["Recon", "Access control", "Injection", "Secrets & config", "Verify", "Report"],
+    blurb: "The deep default. Every sweep is double-checked.",
+    phases: ["Recon", "Access control", "Injection", "Secrets & config", "Verify"],
   },
   {
     id: "access-injection",
@@ -96,10 +107,37 @@ const SECURITY_PRESETS: readonly PresetChoice[] = [
     phases: ["Recon", "Secrets & config", "Verify"],
   },
   {
-    id: "full-pentest",
-    label: "Full pentest",
-    blurb: "Threat model, SAST, attack tree, and a written report.",
-    phases: ["Recon", "Threat model", "Code review", "SAST", "Access", "Injection", "Attack tree", "Verify", "Report"],
+    id: "code-audit",
+    label: "Code audit",
+    blurb: "Threat model, code review, SAST, and attack tree analysis. Source-only, no active testing.",
+    phases: ["Recon", "Threat model", "Code review", "SAST", "Access", "Injection", "Attack tree", "Verify"],
+  },
+  {
+    id: "live-pentest",
+    label: "Live pentest",
+    blurb:
+      "DAST + fuzz + exploit against an authorized scope. Set the scope on the next step.",
+    phases: ["Recon", "Threat model", "DAST", "Fuzz", "Exploit", "Verify"],
+  },
+  {
+    id: "code-audit-plus-live",
+    label: "Code audit + live confirmation",
+    blurb:
+      "Every persona. Code audit plus live DAST, fuzz, exploit, and pivot coordination. Set the scope on the next step.",
+    phases: [
+      "Recon",
+      "Threat model",
+      "Code review",
+      "SAST",
+      "Access",
+      "Injection",
+      "DAST",
+      "Fuzz",
+      "Exploit",
+      "Pivot coordinator",
+      "Attack tree",
+      "Verify",
+    ],
   },
 ];
 
@@ -136,6 +174,13 @@ function NewReviewCard() {
   // so no mount-time-state sync is needed — each only changes on user input.
   const [preset, setPreset] = useState(SECURITY_PRESETS[0].id);
   const [pathsInput, setPathsInput] = useState("");
+  // "Include a written report at the end" checkbox (Part 08 §Setup Step 1).
+  // The preset gates the default — the wide presets (`code-review`,
+  // `code-audit`, `live-pentest`, `code-audit-plus-live`) default the box on;
+  // the narrow ones (`secrets-config`, `access-injection`) default off. Each
+  // preset selection resets the choice; a manual toggle sticks until the
+  // preset changes.
+  const [includeReport, setIncludeReport] = useState<boolean>(true);
 
   const repos = reposQ.data?.repos ?? [];
   const connected = reposQ.data?.connected ?? false;
@@ -168,6 +213,7 @@ function NewReviewCard() {
       cloneUrl: repo.cloneUrl,
       preset,
       model,
+      includeReport,
       ...(repo.ref.trim() ? { ref: repo.ref.trim() } : {}),
       ...(paths.length > 0 ? { paths: paths.join(",") } : {}),
       ...(scope.teamId !== undefined ? { teamId: scope.teamId } : {}),
@@ -287,14 +333,27 @@ function NewReviewCard() {
                 </div>
                 <span className="text-[11px] leading-snug text-muted">{p.blurb}</span>
                 <div className="flex flex-wrap gap-1">
-                  {p.phases.map((ph, i) => (
-                    <span
-                      key={ph}
-                      className="rounded bg-ink-wash px-1.5 py-0.5 text-[10px] text-muted"
-                    >
-                      {i + 1}. {ph}
-                    </span>
-                  ))}
+                  {p.phases.map((ph, i) => {
+                    const det = DETERMINISTIC_PHASE_LABELS.has(ph);
+                    return (
+                      <span
+                        key={ph}
+                        className="inline-flex items-center gap-1 rounded bg-ink-wash px-1.5 py-0.5 text-[10px] text-muted"
+                        title={det ? "Deterministic phase: scanner-driven or L0 decision" : undefined}
+                      >
+                        <span>{i + 1}.</span>
+                        <span>{ph}</span>
+                        {det && (
+                          <span
+                            className="font-mono font-bold text-danger-600"
+                            aria-label="Deterministic phase"
+                          >
+                            D
+                          </span>
+                        )}
+                      </span>
+                    );
+                  })}
                 </div>
               </button>
             );
@@ -332,6 +391,26 @@ function NewReviewCard() {
           />
           <p className="text-[11px] text-muted">Optional. Narrows the sweeps to these paths.</p>
         </div>
+      </div>
+
+      {/* Written-report checkbox (Part 08 §Setup Step 1 · Report is a user
+          choice, not preset-baked). Default on for every preset; uncheck to
+          skip the report cell. */}
+      <div className="grid gap-1.5">
+        <label className="flex items-center gap-2 text-xs text-ink">
+          <input
+            type="checkbox"
+            checked={includeReport}
+            onChange={(e) => setIncludeReport(e.target.checked)}
+            data-testid="review-include-report"
+            aria-label="Include a written report at the end"
+          />
+          Include a written report at the end
+        </label>
+        <p className="text-[11px] text-muted">
+          Adds a `report` cell after `verify` that composes the audience-graded
+          markdown and a JSON snapshot. Uncheck to skip.
+        </p>
       </div>
 
       <div className="flex items-center justify-end gap-3 border-t border-line pt-4">

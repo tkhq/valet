@@ -19,6 +19,30 @@ export interface SecurityPersona {
   label: string;
   /** The role markdown the host loads with loadRoleFromMarkdown. */
   roleMarkdown: string;
+  /** True when the persona's primary output is deterministic: identical
+   * inputs produce identical scanner findings or catalog outcomes. The
+   * scanner-heavy personas (sast, dast, fuzz) and the pivot-coordinator
+   * (pure L0 decision kernel per Part 05) are deterministic. Model-driven
+   * personas (code-review, threat-model, attack-tree, exploit, architect,
+   * verifier, report, reconcile) are not. The web renders a "D" chip on
+   * deterministic personas in the plan editor and step summary. */
+  deterministic: boolean;
+}
+
+/** The deterministic persona ids: their primary output is a scanner or a
+ * pure L0 decision, so two runs on the same input produce the same result.
+ * Sourced from `BUNDLED_PERSONAS[i].deterministic`; exposed here for the
+ * cases that need the set directly (e.g. the web mirror). */
+export const DETERMINISTIC_PERSONA_IDS: readonly string[] = [
+  "sast",
+  "dast",
+  "fuzz",
+  "pivot-coordinator",
+];
+
+/** True when the persona id is in the deterministic set. */
+export function isDeterministicPersona(persona: string): boolean {
+  return DETERMINISTIC_PERSONA_IDS.includes(persona);
 }
 
 /** The v1 persona id. Kept as a named export for call sites that reference it
@@ -83,6 +107,14 @@ export const FUZZ_PERSONA = "fuzz";
  * (M-P4b). Never runs destructive payloads; never acts outside scope. */
 export const EXPLOIT_PERSONA = "exploit";
 
+/** The pivot-coordinator persona id: aggregates needs from prior cells,
+ * auto-executes catalog patterns (scope-auto-include, propagate-session,
+ * rerun-with-existing-loot), surfaces one consolidated human ask for the
+ * rest, and (on resolve) computes delta_targets for re-dispatched personas
+ * (valet-security v1 spec, Part 05). Reports no findings; writes
+ * /pivot.yml and /human_setup_ask.md into the engagement tree. */
+export const PIVOT_COORDINATOR_PERSONA = "pivot-coordinator";
+
 /** The live personas (M-P4b): they operate against a running target within the
  * authorized scope, so their dispatch prompt carries the scope and the egress
  * gate applies. A cell whose persona is in this set is a "live" cell. */
@@ -105,56 +137,73 @@ export const BUNDLED_PERSONAS: readonly SecurityPersona[] = [
     id: CODE_REVIEW_PERSONA,
     label: "Code review",
     roleMarkdown: readFileSync(new URL("../../personas/code-review.md", import.meta.url), "utf8"),
+    deterministic: false,
   },
   {
     id: ARCHITECT_PERSONA,
     label: "Architect",
     roleMarkdown: readFileSync(new URL("../../personas/architect.md", import.meta.url), "utf8"),
+    deterministic: false,
   },
   {
     id: VERIFIER_PERSONA,
     label: "Verifier",
     roleMarkdown: readFileSync(new URL("../../personas/verifier.md", import.meta.url), "utf8"),
+    deterministic: false,
   },
   {
     id: THREAT_MODEL_PERSONA,
     label: "Threat model",
     roleMarkdown: readFileSync(new URL("../../personas/threat-model.md", import.meta.url), "utf8"),
+    deterministic: false,
   },
   {
     id: ATTACK_TREE_PERSONA,
     label: "Attack tree",
     roleMarkdown: readFileSync(new URL("../../personas/attack-tree.md", import.meta.url), "utf8"),
+    deterministic: false,
   },
   {
     id: SAST_PERSONA,
     label: "SAST",
     roleMarkdown: readFileSync(new URL("../../personas/sast.md", import.meta.url), "utf8"),
+    deterministic: true,
   },
   {
     id: REPORT_PERSONA,
     label: "Report",
     roleMarkdown: readFileSync(new URL("../../personas/report.md", import.meta.url), "utf8"),
+    deterministic: false,
   },
   {
     id: DAST_PERSONA,
     label: "DAST",
     roleMarkdown: readFileSync(new URL("../../personas/dast.md", import.meta.url), "utf8"),
+    deterministic: true,
   },
   {
     id: FUZZ_PERSONA,
     label: "Fuzz",
     roleMarkdown: readFileSync(new URL("../../personas/fuzz.md", import.meta.url), "utf8"),
+    deterministic: true,
   },
   {
     id: EXPLOIT_PERSONA,
     label: "Exploit",
     roleMarkdown: readFileSync(new URL("../../personas/exploit.md", import.meta.url), "utf8"),
+    deterministic: false,
   },
   {
     id: RECONCILE_PERSONA,
     label: "Reconcile",
     roleMarkdown: readFileSync(new URL("../../personas/reconcile.md", import.meta.url), "utf8"),
+    deterministic: false,
+  },
+  {
+    id: PIVOT_COORDINATOR_PERSONA,
+    label: "Pivot coordinator",
+    roleMarkdown: readFileSync(new URL("../../personas/pivot-coordinator.md", import.meta.url), "utf8"),
+    deterministic: true,
   },
 ];
 

@@ -163,6 +163,7 @@ export function useSecurityPreview(body: SecurityPreviewRequest, enabled: boolea
       body.preset,
       body.ref ?? "",
       (body.paths ?? []).join(","),
+      body.includeReport === undefined ? "default" : body.includeReport ? "with" : "without",
     ],
     queryFn: () => api.securityPreview(body),
     enabled,
@@ -258,6 +259,26 @@ export function useResolveNeeds(sessionId: string) {
     { needId: string; resolution: string; dismiss?: boolean }[]
   >({
     mutationFn: (answers) => api.resolveSecurityNeeds(sessionId, answers),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qkSecurity.engagement(sessionId) });
+    },
+  });
+}
+
+/**
+ * POST .../security/resume — reopen a terminal engagement so the affected
+ * cells re-dispatch (v1 Part 09 §Resume contract). `cellIds` defaults to the
+ * union of failed cells + cells with open needs; pass an explicit subset only
+ * from an advanced UI. Invalidates the engagement query.
+ */
+export function useResumeEngagement(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<
+    { status: "running"; resetCellIds: string[] },
+    Error,
+    { cellIds?: string[]; reason?: string } | undefined
+  >({
+    mutationFn: (args) => api.resumeSecurityReview(sessionId, args ?? {}),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: qkSecurity.engagement(sessionId) });
     },

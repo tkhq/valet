@@ -561,6 +561,18 @@ export const api = {
       `/sessions/${encodeURIComponent(id)}/security/needs/resolve`,
       { answers },
     ),
+  /** POST /sessions/:id/security/resume — reopen a terminal engagement so the
+   * affected cells re-dispatch (v1 Part 09). Session admin. Empty body =
+   * default affected set (failed + open-need cells). */
+  resumeSecurityReview: (
+    id: string,
+    body: { cellIds?: string[]; reason?: string },
+  ) =>
+    request<{ status: "running"; resetCellIds: string[] }>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/security/resume`,
+      body,
+    ),
   /** POST /sessions/security/preview — the setup page's read-only preview of
    * the config + plan a review would seed. Creates nothing. */
   securityPreview: (body: SecurityPreviewRequest) =>

@@ -9,6 +9,9 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import { useState } from "react";
 import type { SecurityPlanCellWire } from "@valet/api/wire";
 import {
+  BUNDLED_PERSONAS,
+  LIVE_PERSONA_IDS,
+  planHasLivePersona,
   PlanStepsEditor,
   draftToInput,
   wireToDraft,
@@ -77,6 +80,73 @@ describe("PlanStepsEditor", () => {
     const firstGoal = within(screen.getAllByTestId("plan-step")[0]).getByLabelText("Goal");
     fireEvent.change(firstGoal, { target: { value: "" } });
     expect(screen.getByTestId("plan-error")).toBeTruthy();
+  });
+
+  it("BUNDLED_PERSONAS lists every bundled persona incl. live and coordination", () => {
+    // Mirrors packages/plugin-security/src/lib/personas.ts BUNDLED_PERSONAS.
+    const ids = BUNDLED_PERSONAS.map((p) => p.id).sort();
+    expect(ids).toEqual([
+      "architect",
+      "attack-tree",
+      "code-review",
+      "dast",
+      "exploit",
+      "fuzz",
+      "pivot-coordinator",
+      "reconcile",
+      "report",
+      "sast",
+      "threat-model",
+      "verifier",
+    ]);
+    // Every persona carries a kind.
+    for (const p of BUNDLED_PERSONAS) {
+      expect(["source", "live", "coordination", "deliverable"]).toContain(p.kind);
+    }
+  });
+
+  it("LIVE_PERSONA_IDS names exactly the target-running personas", () => {
+    expect([...LIVE_PERSONA_IDS].sort()).toEqual(["dast", "exploit", "fuzz"]);
+  });
+
+  it("planHasLivePersona detects a live persona in the draft", () => {
+    expect(planHasLivePersona([{ persona: "code-review" }, { persona: "sast" }])).toBe(false);
+    expect(planHasLivePersona([{ persona: "code-review" }, { persona: "dast" }])).toBe(true);
+    expect(planHasLivePersona([{ persona: "fuzz" }])).toBe(true);
+    expect(planHasLivePersona([{ persona: "exploit" }])).toBe(true);
+    expect(planHasLivePersona([])).toBe(false);
+  });
+
+  it("persona dropdown groups options by kind under optgroups", () => {
+    render(<Host />);
+    const persona = screen.getAllByLabelText("Persona")[0] as HTMLSelectElement;
+    const groups = Array.from(persona.querySelectorAll("optgroup")).map((g) =>
+      g.getAttribute("label"),
+    );
+    // The groups render in order source, live, coordination, deliverable.
+    expect(groups.length).toBe(4);
+    expect(groups[0]).toMatch(/Source-only/);
+    expect(groups[1]).toMatch(/Live/);
+    expect(groups[2]).toMatch(/Coordination/);
+    expect(groups[3]).toMatch(/Deliverable/);
+    // Every bundled persona surfaces as an <option>.
+    const options = Array.from(persona.querySelectorAll("option")).map((o) => o.value);
+    expect(options).toEqual(
+      expect.arrayContaining([
+        "code-review",
+        "sast",
+        "threat-model",
+        "attack-tree",
+        "dast",
+        "fuzz",
+        "exploit",
+        "architect",
+        "verifier",
+        "pivot-coordinator",
+        "report",
+        "reconcile",
+      ]),
+    );
   });
 
   it("toggles the triad flag and it rides into the wire input", () => {

@@ -363,9 +363,51 @@ sessionsRouter.post("/", async (c) => {
       ) {
         return c.json({ error: "securityConfig.categories must be a list of strings." }, 400);
       }
+      if (sc.scope !== undefined && sc.scope !== null) {
+        const scope = sc.scope as {
+          hosts?: unknown;
+          cidrs?: unknown;
+          loginUrl?: unknown;
+          signupUrl?: unknown;
+          rateLimitRps?: unknown;
+        };
+        if (typeof scope !== "object" || scope === null || Array.isArray(scope)) {
+          return c.json({ error: "securityConfig.scope must be an object with hosts, or null." }, 400);
+        }
+        if (
+          !Array.isArray(scope.hosts) ||
+          scope.hosts.length === 0 ||
+          !scope.hosts.every((h): h is string => typeof h === "string" && h.trim().length > 0)
+        ) {
+          return c.json({ error: "securityConfig.scope.hosts must be a non-empty list of strings." }, 400);
+        }
+        if (scope.cidrs !== undefined) {
+          if (
+            !Array.isArray(scope.cidrs) ||
+            !scope.cidrs.every((c): c is string => typeof c === "string" && c.trim().length > 0)
+          ) {
+            return c.json({ error: "securityConfig.scope.cidrs must be a list of non-empty CIDR strings." }, 400);
+          }
+        }
+        if (scope.loginUrl !== undefined && (typeof scope.loginUrl !== "string" || scope.loginUrl.trim() === "")) {
+          return c.json({ error: "securityConfig.scope.loginUrl must be a non-empty URL string." }, 400);
+        }
+        if (scope.signupUrl !== undefined && (typeof scope.signupUrl !== "string" || scope.signupUrl.trim() === "")) {
+          return c.json({ error: "securityConfig.scope.signupUrl must be a non-empty URL string." }, 400);
+        }
+        if (scope.rateLimitRps !== undefined) {
+          const r = scope.rateLimitRps;
+          if (typeof r !== "number" || !Number.isInteger(r) || r < 1 || r > 1000) {
+            return c.json({ error: "securityConfig.scope.rateLimitRps must be an integer 1..1000." }, 400);
+          }
+        }
+      }
     }
     if (body.planCells !== undefined && (!Array.isArray(body.planCells) || body.planCells.length === 0)) {
       return c.json({ error: "planCells must be a non-empty list of plan steps, or omit the field." }, 400);
+    }
+    if (body.includeReport !== undefined && typeof body.includeReport !== "boolean") {
+      return c.json({ error: "includeReport must be a boolean, or omit the field." }, 400);
     }
   }
 
@@ -485,7 +527,13 @@ sessionsRouter.post("/", async (c) => {
   // override the seed. The repo-committed tools / scope / personas always come
   // from the seed — the user does not edit those. A re-scan that reuses the
   // prior plan skips the plan seed but still resolves the repo config context.
-  let securityPlan = kind === "security" ? presetPlan(presetId, { paths: body.paths }) : "";
+  let securityPlan =
+    kind === "security"
+      ? presetPlan(presetId, {
+          ...(body.paths ? { paths: body.paths } : {}),
+          ...(body.includeReport !== undefined ? { includeReport: body.includeReport } : {}),
+        })
+      : "";
   let engagementConfig: SecurityConfigContext | undefined;
   let engagementHasRepoConfig = false;
   if (kind === "security") {
@@ -498,6 +546,7 @@ sessionsRouter.post("/", async (c) => {
         ...(repos[0].ref ? { ref: repos[0].ref } : {}),
         presetId,
         ...(body.paths ? { paths: body.paths } : {}),
+        ...(body.includeReport !== undefined ? { includeReport: body.includeReport } : {}),
         tokenDeps,
         orgId: user.orgId,
       });
@@ -525,7 +574,32 @@ sessionsRouter.post("/", async (c) => {
         securityPlan = seeded.planYaml;
       }
 
-      engagementConfig = seededConfigContext(seeded, body.securityConfig);
+      // Translate the wire's scope (camelCase per JSON convention) to the
+      // plugin's SecurityScope (snake_case per .valet/security.yml convention)
+      // before passing through seededConfigContext.
+      const wireScope = body.securityConfig?.scope;
+      const overrides = body.securityConfig
+        ? {
+            ...(("focus" in body.securityConfig) ? { focus: body.securityConfig.focus ?? null } : {}),
+            ...(body.securityConfig.invariants !== undefined ? { invariants: body.securityConfig.invariants } : {}),
+            ...(body.securityConfig.categories !== undefined ? { categories: body.securityConfig.categories } : {}),
+            ...(("scope" in body.securityConfig)
+              ? {
+                  scope:
+                    wireScope === null || wireScope === undefined
+                      ? null
+                      : {
+                          hosts: wireScope.hosts,
+                          ...(wireScope.cidrs ? { cidrs: wireScope.cidrs } : {}),
+                          ...(wireScope.loginUrl ? { login_url: wireScope.loginUrl } : {}),
+                          ...(wireScope.signupUrl ? { signup_url: wireScope.signupUrl } : {}),
+                          ...(wireScope.rateLimitRps !== undefined ? { rate_limit_rps: wireScope.rateLimitRps } : {}),
+                        },
+                }
+              : {}),
+          }
+        : undefined;
+      engagementConfig = seededConfigContext(seeded, overrides);
     }
   }
 

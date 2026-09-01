@@ -93,7 +93,9 @@ describe("SECURITY_PRESETS + isKnownPreset", () => {
       "code-review",
       "secrets-config",
       "access-injection",
-      "full-pentest",
+      "code-audit",
+      "live-pentest",
+      "code-audit-plus-live",
     ]);
     for (const p of SECURITY_PRESETS) expect(isKnownPreset(p.id)).toBe(true);
     expect(isKnownPreset("nope")).toBe(false);
@@ -283,9 +285,9 @@ describe("securitySessionTitle", () => {
   });
 });
 
-describe("full-pentest preset (M-P2c)", () => {
+describe("code-audit preset (M-P2c)", () => {
   it("round-trips through parsePlan with the model personas in order", () => {
-    const plan = parsePlan(presetPlan("full-pentest"), KNOWN_PERSONAS);
+    const plan = parsePlan(presetPlan("code-audit"), KNOWN_PERSONAS);
     // Recon, threat-model, four sweeps, attack-tree, verify, report — 9
     // pre-expansion. The report cell (M-P3) is the final cell after verify.
     expect(plan.cells.map((c) => c.name)).toEqual([
@@ -334,7 +336,7 @@ describe("full-pentest preset (M-P2c)", () => {
   });
 
   it("marks the code-heavy sweeps as triads and the model cells as single", () => {
-    const plan = parsePlan(presetPlan("full-pentest"), KNOWN_PERSONAS);
+    const plan = parsePlan(presetPlan("code-audit"), KNOWN_PERSONAS);
     const byName = new Map(plan.cells.map((c) => [c.name, c]));
     // Model-only cells run single (no triad); code sweeps expand.
     expect(byName.get("threat-model")?.triad).toBeUndefined();
@@ -348,7 +350,7 @@ describe("full-pentest preset (M-P2c)", () => {
   });
 
   it("expands the four triads within MAX_PLAN_CELLS with the right persona ordering", () => {
-    const plan = parsePlan(presetPlan("full-pentest"), KNOWN_PERSONAS);
+    const plan = parsePlan(presetPlan("code-audit"), KNOWN_PERSONAS);
     const expanded = expandTriads(plan.cells);
     // 1 recon + 1 threat-model + 4*3 triad cells + 1 attack-tree + 1 verify +
     // 1 report (M-P3, the final cell).
@@ -427,5 +429,74 @@ describe("rescanPlan (re-scan v2)", () => {
 
   it("throws on an unknown preset id", () => {
     expect(() => rescanPlan("nope")).toThrow(/Unknown security preset/);
+  });
+});
+
+describe("live-pentest preset (v1 UX-flow spec Part 08)", () => {
+  it("round-trips through parsePlan with the live personas in order", () => {
+    const plan = parsePlan(presetPlan("live-pentest"), KNOWN_PERSONAS);
+    // Recon, threat-model, dast, fuzz, exploit, verify, report.
+    expect(plan.cells.map((c) => c.name)).toEqual([
+      "recon",
+      "threat-model",
+      "dast",
+      "fuzz",
+      "exploit",
+      "verify",
+      "report",
+    ]);
+    expect(plan.cells.map((c) => c.persona)).toEqual([
+      "code-review", // recon (source-only mapping cell)
+      "threat-model",
+      "dast",
+      "fuzz",
+      "exploit",
+      "code-review", // verify (the review cell)
+      "report",
+    ]);
+    // Each cell names its own playbook.
+    expect(plan.cells.map((c) => c.playbook)).toEqual([
+      "recon",
+      "threat-model",
+      "dast",
+      "fuzz",
+      "exploit",
+      "verify",
+      "report",
+    ]);
+  });
+
+  it("marks the live sweep worker cells as triads and exploit as single", () => {
+    const plan = parsePlan(presetPlan("live-pentest"), KNOWN_PERSONAS);
+    const byName = new Map(plan.cells.map((c) => [c.name, c]));
+    // dast and fuzz expand into architect -> worker -> verifier triads.
+    expect(byName.get("dast")?.triad).toBe(true);
+    expect(byName.get("fuzz")?.triad).toBe(true);
+    // Exploit is a single cell (its verifier lives inside the later verify cell).
+    expect(byName.get("exploit")?.triad).toBeUndefined();
+    // Model-only, source-only, verify, and report cells stay single.
+    expect(byName.get("recon")?.triad).toBeUndefined();
+    expect(byName.get("threat-model")?.triad).toBeUndefined();
+    expect(byName.get("verify")?.triad).toBeUndefined();
+    expect(byName.get("report")?.triad).toBeUndefined();
+  });
+
+  it("expands the two triads within MAX_PLAN_CELLS", () => {
+    const plan = parsePlan(presetPlan("live-pentest"), KNOWN_PERSONAS);
+    const expanded = expandTriads(plan.cells);
+    // 1 recon + 1 threat-model + 2*3 triad cells + 1 exploit + 1 verify + 1 report.
+    expect(expanded).toHaveLength(11);
+    expect(expanded.length).toBeLessThanOrEqual(MAX_PLAN_CELLS);
+    expanded.forEach((cell, i) => {
+      expect(cell.ordinal).toBe(i + 1);
+      for (const r of cell.reads) expect(r).toBeLessThan(cell.ordinal);
+    });
+  });
+
+  it("carries a report cell as the final ordinal", () => {
+    const plan = parsePlan(presetPlan("live-pentest"), KNOWN_PERSONAS);
+    const last = plan.cells[plan.cells.length - 1];
+    expect(last.persona).toBe("report");
+    expect(last.reads).toEqual(Array.from({ length: plan.cells.length - 1 }, (_, i) => i + 1));
   });
 });

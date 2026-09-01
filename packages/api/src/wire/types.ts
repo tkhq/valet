@@ -171,6 +171,22 @@ export interface CreateSessionRequest {
     focus?: string | null;
     invariants?: string[];
     categories?: string[];
+    /** Authorized live-testing scope (M-P4b). REQUIRED at submit time on the
+     * setup page when the plan carries any live persona (dast, fuzz, exploit);
+     * see Part 08 §Setup Step 1. `hosts` is a non-empty list of bare hosts
+     * (or `host:port`); `null` OR omit clears the override and falls back to
+     * the repo's `.valet/security.yml` scope.
+     *
+     * v1 (Part 09 §Config schema extensions): optional `cidrs`, `loginUrl`,
+     * `signupUrl`, `rateLimitRps` pre-supply what the live cells would
+     * otherwise pause mid-run to ask for. */
+    scope?: {
+      hosts: string[];
+      cidrs?: string[];
+      loginUrl?: string;
+      signupUrl?: string;
+      rateLimitRps?: number;
+    } | null;
   };
   /** Final plan steps from the `/security/new` setup page (dynamic-config
    * M-F2). When present on a security create, the server uses these verbatim
@@ -178,6 +194,12 @@ export interface CreateSessionRequest {
    * assigns dense ordinals 1..N in array order. Only a security session reads
    * it. */
   planCells?: SecurityPlanCellInput[];
+  /** "Include a written report at the end" (Part 08 §Setup Step 1). Threaded
+   * from the hub through the setup page. When present AND `planCells` is
+   * absent, the seed's preset plan appends or skips the report cell. Ignored
+   * when `planCells` is present (the edited plan is authoritative). Absent
+   * falls to the preset's own default per `presetReportDefault`. */
+  includeReport?: boolean;
 }
 
 export interface ListSessionsResponse {
@@ -237,7 +259,18 @@ export interface SecurityEngagementWire {
   /** The authorized live-testing scope (M-P4b): the hosts the live personas may
    * reach. Null when no live testing is authorized. The panel surfaces this
    * prominently — it is authorization-sensitive. */
-  authorizedScope: { hosts: string[] } | null;
+  authorizedScope: {
+    hosts: string[];
+    /** Authorized IP ranges. Empty/absent equals no auto-approve on scope
+     * expansion (Part 05 §5.5). */
+    cidrs?: string[];
+    /** Coordinator resolve-mode login endpoint (Part 05 §5.3). */
+    loginUrl?: string;
+    /** L4 create-test-account signup endpoint (Part 05 §5.9). */
+    signupUrl?: string;
+    /** Compiled probe rate the runtime applies. Integer 1..1000. */
+    rateLimitRps?: number;
+  } | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -357,6 +390,18 @@ export interface GetSessionSecurityResponse {
    * auto-resolved ones for the panel's informational list (M-P4c). Absent when
    * the engagement recorded no needs. */
   needs?: SecurityNeedWire[];
+  /** v1 Part 09 §Resume contract. True when the engagement is `completed |
+   * failed` AND has at least one open need OR at least one failed cell.
+   * Absent when the engagement is `planning | running | cancelled`. The panel
+   * uses this flag to render the Resume banner. */
+  resumable?: boolean;
+  /** Counts backing `resumable`, so the banner copy can name them. Absent
+   * when `resumable` is absent. */
+  resumableStats?: {
+    openNeeds: number;
+    failedCells: number;
+    pendingCells: number;
+  };
 }
 
 /** POST /api/sessions/security/preview — request body. A read-only preview of
@@ -374,6 +419,12 @@ export interface SecurityPreviewRequest {
   preset: string;
   /** Optional include globs that scope the preset sweeps. */
   paths?: string[];
+  /** "Include a written report at the end" (Part 08 §Setup Step 1). When
+   * present, the preview appends or skips the `report` cell in the seeded
+   * plan. When absent, the preview falls to the preset's own default per
+   * `presetReportDefault`. Ignored when a `.valet/security.yml` seed
+   * declares its own steps; those steps already decide. */
+  includeReport?: boolean;
 }
 
 /** POST /api/sessions/security/preview — response. The seeded config plus the
@@ -383,9 +434,23 @@ export interface SecurityPreviewResponse {
     focus: string | null;
     invariants: string[];
     categories: string[];
-    /** Repo-committed live-testing scope + declared tools (read-only, not
-     * editable in the setup page). Null when the config declares none. */
-    authorizedScope: { hosts: string[] } | null;
+    /** Live-testing scope + declared tools. Seeds the setup page's Scope
+     * section (Part 08 §Setup Step 1). The user MAY override on the setup
+     * page when the plan carries a live persona; the override rides on
+     * `CreateSessionRequest.securityConfig.scope`. Null when neither the
+     * repo config nor the preview seeded a scope. */
+    authorizedScope: {
+    hosts: string[];
+    /** Authorized IP ranges. Empty/absent equals no auto-approve on scope
+     * expansion (Part 05 §5.5). */
+    cidrs?: string[];
+    /** Coordinator resolve-mode login endpoint (Part 05 §5.3). */
+    loginUrl?: string;
+    /** L4 create-test-account signup endpoint (Part 05 §5.9). */
+    signupUrl?: string;
+    /** Compiled probe rate the runtime applies. Integer 1..1000. */
+    rateLimitRps?: number;
+  } | null;
     configTools: SecurityToolDeclWire[] | null;
     /** True when a valid `.valet/security.yml` seeded this preview. */
     hasRepoConfig: boolean;
@@ -530,6 +595,20 @@ export interface GetSecurityStatusResponse {
  * POST /api/sessions/:id/security/plan/cells (structured, dynamic-config M-F2). */
 export interface SecuritySetPlanResponse {
   cellCount: number;
+}
+
+/** POST /api/sessions/:id/security/resume — request body (v1 Part 09 §Resume).
+ * Absent `cellIds` defaults to failed cells + cells with open needs. */
+export interface SecurityResumeRequest {
+  cellIds?: string[];
+  reason?: string;
+}
+
+/** POST /api/sessions/:id/security/resume — response. Names the cells the
+ * service reset to `pending`. The engagement is `running` on success. */
+export interface SecurityResumeResponse {
+  status: "running";
+  resetCellIds: string[];
 }
 
 /** POST /api/sessions/:id/security/config — edit the engagement's focus, known
@@ -715,10 +794,14 @@ export interface ListSecurityNeedsResponse {
 
 /** POST /api/sessions/:id/security/needs/resolve — the human answer +
  * delta re-run (M-P4c). The needs the human answered and the cells the delta
- * re-run reset to pending — only the cells whose needs were answered. */
+ * re-run reset to pending — only the cells whose needs were answered. v1
+ * Part 09 §Late needs answer: `resumed` is true when the answer arrived on a
+ * terminal engagement and the service transparently reopened it before
+ * applying the answer; the client shows a "Reopened" toast when set. */
 export interface SecurityResolveNeedsResponse {
   answered: SecurityNeedWire[];
   resetCellIds: string[];
+  resumed: boolean;
 }
 
 /** POST /api/sessions/:id/pause — manual hibernation (sandbox hibernation

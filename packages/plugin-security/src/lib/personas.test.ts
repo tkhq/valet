@@ -11,6 +11,7 @@ import {
   FUZZ_PERSONA,
   isLivePersona,
   LIVE_PERSONAS,
+  PIVOT_COORDINATOR_PERSONA,
   RECONCILE_PERSONA,
   SAST_PERSONA,
   THREAT_MODEL_PERSONA,
@@ -30,6 +31,7 @@ describe("BUNDLED_PERSONAS", () => {
       "fuzz",
       "exploit",
       "reconcile",
+      "pivot-coordinator",
     ]);
   });
 
@@ -84,6 +86,31 @@ describe("BUNDLED_PERSONAS", () => {
     expect(bundledPersona("nope")).toBeNull();
     // A known one round-trips.
     expect(bundledPersona(CODE_REVIEW_PERSONA)?.id).toBe(CODE_REVIEW_PERSONA);
+  });
+});
+
+describe("pivot-coordinator persona (v1 spec, Part 05)", () => {
+  it("loads non-empty markdown, names discover and resolve modes, and forbids findings", () => {
+    const persona = bundledPersona(PIVOT_COORDINATOR_PERSONA);
+    expect(persona).not.toBeNull();
+    const md = persona!.roleMarkdown;
+    expect(md.length).toBeGreaterThan(400);
+    // Two modes.
+    expect(md).toMatch(/discover mode/i);
+    expect(md).toMatch(/resolve mode/i);
+    // Auto-catalog patterns it MAY execute (three L3 + two L4 named in the role).
+    expect(md).toContain("scope-auto-include");
+    expect(md).toContain("propagate-session");
+    expect(md).toContain("rerun-with-existing-loot");
+    // It reports NO findings; the role's Forbidden section lists that rule.
+    expect(md).toMatch(/emit(ting)? findings/i);
+    // The two virtual paths it writes.
+    expect(md).toContain("/pivot.yml");
+    expect(md).toContain("/human_setup_ask.md");
+  });
+
+  it("is not in LIVE_PERSONAS (it does not act against the target)", () => {
+    expect(isLivePersona(PIVOT_COORDINATOR_PERSONA)).toBe(false);
   });
 });
 

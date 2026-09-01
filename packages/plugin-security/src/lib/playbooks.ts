@@ -26,6 +26,7 @@ export const KNOWN_PLAYBOOKS = [
   "fuzz",
   "exploit",
   "reconcile",
+  "pivot-coordinator",
 ] as const;
 
 export type PlaybookName = (typeof KNOWN_PLAYBOOKS)[number];
@@ -69,6 +70,8 @@ function readPlaybook(name: PlaybookName): string {
       return readFileSync(new URL("../../playbooks/exploit.md", import.meta.url), "utf8");
     case "reconcile":
       return readFileSync(new URL("../../playbooks/reconcile.md", import.meta.url), "utf8");
+    case "pivot-coordinator":
+      return readFileSync(new URL("../../playbooks/pivot-coordinator.md", import.meta.url), "utf8");
   }
 }
 

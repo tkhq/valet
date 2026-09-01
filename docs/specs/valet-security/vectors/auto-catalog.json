@@ -1,0 +1,160 @@
+[
+  {
+    "id": "auto-catalog-001",
+    "level": "L3",
+    "description": "scope-auto-include success: IP in CIDR",
+    "input": {
+      "pattern": "scope-auto-include",
+      "need_id": "n-dast-scope-staging",
+      "params": {"host": "staging.example.com", "discovered_ip": "10.1.2.3"},
+      "ctx": {
+        "authorized_cidrs": ["10.0.0.0/8"],
+        "loot": {"sessions": [], "credentials": [], "test_data": [], "tool_auth": []}
+      }
+    },
+    "expected": {
+      "outcome": "ok",
+      "manifest_delta": {"authorized_hosts": ["staging.example.com"]},
+      "log_entry": {
+        "need_id": "n-dast-scope-staging",
+        "pattern": "scope-auto-include",
+        "outcome": "ok",
+        "matched_cidr": "10.0.0.0/8"
+      }
+    }
+  },
+  {
+    "id": "auto-catalog-002",
+    "level": "L3",
+    "description": "scope-auto-include failure: IP not in CIDR",
+    "input": {
+      "pattern": "scope-auto-include",
+      "need_id": "n-dast-scope-external",
+      "params": {"host": "competitor.com", "discovered_ip": "203.0.113.5"},
+      "ctx": {
+        "authorized_cidrs": ["10.0.0.0/8", "192.168.0.0/16"],
+        "loot": {"sessions": [], "credentials": [], "test_data": [], "tool_auth": []}
+      }
+    },
+    "expected": {
+      "outcome": "failed",
+      "reason": "IP not in authorized CIDRs",
+      "log_entry": {
+        "need_id": "n-dast-scope-external",
+        "pattern": "scope-auto-include",
+        "outcome": "failed",
+        "reason": "IP not in authorized CIDRs"
+      }
+    }
+  },
+  {
+    "id": "auto-catalog-003",
+    "level": "L3",
+    "description": "propagate-session success: session exists in loot",
+    "input": {
+      "pattern": "propagate-session",
+      "need_id": "n-fuzz-session",
+      "params": {"source_session_id": "s-human-1", "target_persona": "fuzz"},
+      "ctx": {
+        "authorized_cidrs": [],
+        "loot": {
+          "sessions": [{"id": "s-human-1", "host": "api.example.com", "cookie_jar": "loot/cookies-s-human-1.txt"}],
+          "credentials": [], "test_data": [], "tool_auth": []
+        }
+      }
+    },
+    "expected": {
+      "outcome": "ok",
+      "file_copied": {"source": "loot/cookies-s-human-1.txt", "target": "fuzz/loot/cookies-s-human-1.txt"},
+      "log_entry": {
+        "need_id": "n-fuzz-session",
+        "pattern": "propagate-session",
+        "outcome": "ok"
+      }
+    }
+  },
+  {
+    "id": "auto-catalog-004",
+    "level": "L3",
+    "description": "propagate-session failure: session not in loot",
+    "input": {
+      "pattern": "propagate-session",
+      "need_id": "n-fuzz-session",
+      "params": {"source_session_id": "s-nonexistent", "target_persona": "fuzz"},
+      "ctx": {
+        "authorized_cidrs": [],
+        "loot": {"sessions": [], "credentials": [], "test_data": [], "tool_auth": []}
+      }
+    },
+    "expected": {
+      "outcome": "failed",
+      "reason": "session not found",
+      "log_entry": {
+        "need_id": "n-fuzz-session",
+        "pattern": "propagate-session",
+        "outcome": "failed",
+        "reason": "session not found"
+      }
+    }
+  },
+  {
+    "id": "auto-catalog-005",
+    "level": "L3",
+    "description": "rerun-with-existing-loot success: derives https://<session.host>/* per Part 05 sec 5.7",
+    "input": {
+      "pattern": "rerun-with-existing-loot",
+      "need_id": "n-dast-rerun",
+      "params": {"persona": "dast", "loot_ids": ["s-human-1"]},
+      "ctx": {
+        "authorized_cidrs": [],
+        "loot": {
+          "sessions": [{"id": "s-human-1", "host": "api.example.com", "cookie_jar": "loot/cookies-s-human-1.txt"}],
+          "credentials": [], "test_data": [], "tool_auth": []
+        }
+      }
+    },
+    "expected": {
+      "outcome": "ok",
+      "rerun_plan_entry": {
+        "persona": "dast",
+        "mode": "post-pivot-delta",
+        "delta_targets": {
+          "authed_surface": ["https://api.example.com/*"],
+          "new_hosts": [],
+          "auth_scopes": [],
+          "test_data": [],
+          "tool_auth": []
+        }
+      },
+      "log_entry": {
+        "need_id": "n-dast-rerun",
+        "pattern": "rerun-with-existing-loot",
+        "outcome": "ok"
+      }
+    }
+  },
+  {
+    "id": "auto-catalog-006",
+    "level": "L3",
+    "description": "rerun-with-existing-loot failure: loot ids not in catalog",
+    "input": {
+      "pattern": "rerun-with-existing-loot",
+      "need_id": "n-dast-rerun",
+      "params": {"persona": "dast", "loot_ids": ["s-nonexistent"]},
+      "ctx": {
+        "authorized_cidrs": [],
+        "loot": {"sessions": [], "credentials": [], "test_data": [], "tool_auth": []}
+      }
+    },
+    "expected": {
+      "outcome": "failed",
+      "reason": "loot not found",
+      "log_entry": {
+        "need_id": "n-dast-rerun",
+        "pattern": "rerun-with-existing-loot",
+        "outcome": "failed",
+        "reason": "loot not found"
+      }
+    }
+  }
+]

@@ -12,23 +12,80 @@ import { Button, Input, Label } from "~/components/primitives";
  * step draft and stays selectable.
  */
 
+/** A persona kind groups the dropdown. See Part 08 §Persona kinds
+ * (docs/specs/valet-security/spec/08-ux-flow.md). */
+export type PersonaKind = "source" | "live" | "coordination" | "deliverable";
+
 /** Bundled personas, mirrored from plugin-security's `BUNDLED_PERSONAS`. The id
- * feeds the plan; the label shows in the picker. The server validates against
- * the real registry ∪ the repo's config personas. Keep the two in sync. */
-export const BUNDLED_PERSONAS: readonly { id: string; label: string }[] = [
-  { id: "code-review", label: "Code review" },
-  { id: "architect", label: "Architect" },
-  { id: "verifier", label: "Verifier" },
-  { id: "threat-model", label: "Threat model" },
-  { id: "attack-tree", label: "Attack tree" },
-  { id: "sast", label: "SAST" },
+ * feeds the plan; the label shows in the picker; the kind groups the dropdown;
+ * `deterministic` flags scanner-driven and pure-decision personas so the
+ * editor can badge them with a "D" chip (Part 08 §Persona kinds).
+ * The server validates against the real registry ∪ the repo's config personas.
+ * Keep this list in sync with `packages/plugin-security/src/lib/personas.ts`. */
+export const BUNDLED_PERSONAS: readonly {
+  id: string;
+  label: string;
+  kind: PersonaKind;
+  deterministic: boolean;
+}[] = [
+  // Source-only: reads the clone. No scope required.
+  { id: "code-review", label: "Code review", kind: "source", deterministic: false },
+  { id: "sast", label: "SAST", kind: "source", deterministic: true },
+  { id: "threat-model", label: "Threat model", kind: "source", deterministic: false },
+  { id: "attack-tree", label: "Attack tree", kind: "source", deterministic: false },
+  // Live: reaches an authorized target. Setup wizard blocks submit if scope is empty.
+  { id: "dast", label: "DAST", kind: "live", deterministic: true },
+  { id: "fuzz", label: "Fuzz", kind: "live", deterministic: true },
+  { id: "exploit", label: "Exploit", kind: "live", deterministic: false },
+  // Coordination: attached by other cells' plans; rarely end-user-authored.
+  { id: "architect", label: "Architect", kind: "coordination", deterministic: false },
+  { id: "verifier", label: "Verifier", kind: "coordination", deterministic: false },
+  { id: "pivot-coordinator", label: "Pivot coordinator", kind: "coordination", deterministic: true },
+  // Deliverable: terminal cells.
+  { id: "report", label: "Report", kind: "deliverable", deterministic: false },
+  { id: "reconcile", label: "Reconcile", kind: "deliverable", deterministic: false },
 ];
+
+/** Look up a persona's deterministic flag by id. Returns false for an id
+ * that is not in the bundled list (a repo-declared persona; the server has
+ * no marker for it, so the safe default is model-driven). */
+export function isPersonaDeterministic(id: string): boolean {
+  return BUNDLED_PERSONAS.find((p) => p.id === id)?.deterministic === true;
+}
 
 /** The bundled persona ids, for membership checks. */
 const BUNDLED_PERSONA_IDS: readonly string[] = BUNDLED_PERSONAS.map((p) => p.id);
 
+/** The live persona ids. When a plan carries any of these, the setup wizard
+ * MUST require an authorized scope. See Part 08 §Persona kinds. */
+export const LIVE_PERSONA_IDS: readonly string[] = BUNDLED_PERSONAS.filter(
+  (p) => p.kind === "live",
+).map((p) => p.id);
+
+/** True when a plan draft carries any live persona (`dast`, `fuzz`, `exploit`).
+ * The setup wizard uses this to gate the authorized-scope form. */
+export function planHasLivePersona(steps: readonly { persona: string }[]): boolean {
+  return steps.some((s) => LIVE_PERSONA_IDS.includes(s.persona));
+}
+
+/** The dropdown groups. Each group renders under an `<optgroup>`. */
+const PERSONA_KIND_LABELS: Record<PersonaKind, string> = {
+  source: "Source-only (reads the clone)",
+  live: "Live (needs authorized scope)",
+  coordination: "Coordination",
+  deliverable: "Deliverable",
+};
+
+const PERSONA_KIND_ORDER: readonly PersonaKind[] = [
+  "source",
+  "live",
+  "coordination",
+  "deliverable",
+];
+
 /** Known playbook ids, mirrored from plugin-security's `KNOWN_PLAYBOOKS`. The
- * server is the real gate; this only populates the optional picker. */
+ * server is the real gate; this only populates the optional picker. Keep in
+ * step with `packages/plugin-security/src/lib/playbooks.ts`. */
 const KNOWN_PLAYBOOKS: readonly string[] = [
   "recon",
   "authz",
@@ -38,6 +95,12 @@ const KNOWN_PLAYBOOKS: readonly string[] = [
   "threat-model",
   "attack-tree",
   "sast",
+  "report",
+  "dast",
+  "fuzz",
+  "exploit",
+  "reconcile",
+  "pivot-coordinator",
 ];
 
 /** The at-most step count the plan allows (mirrors `MAX_PLAN_CELLS`). */
@@ -261,7 +324,18 @@ function StepRow({
   return (
     <div className="rounded border border-line p-2" data-testid="plan-step">
       <div className="flex items-center justify-between">
-        <span className="text-[11px] font-medium text-muted">Step {index + 1}</span>
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] font-medium text-muted">Step {index + 1}</span>
+          {isPersonaDeterministic(step.persona) && (
+            <span
+              className="rounded bg-moss-500/15 px-1 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-moss-600"
+              title="Deterministic persona: scanner-driven or pure L0 decision. Two runs on the same input produce the same result."
+              data-testid={`step-deterministic-${index}`}
+            >
+              D
+            </span>
+          )}
+        </div>
         <div className="flex items-center gap-1">
           <Button
             type="button"
@@ -310,11 +384,24 @@ function StepRow({
               {!BUNDLED_PERSONA_IDS.includes(step.persona) && (
                 <option value={step.persona}>{step.persona}</option>
               )}
-              {BUNDLED_PERSONAS.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.label}
-                </option>
-              ))}
+              {/* Bundled personas group by kind so a user reading top-to-bottom
+                  sees the shape of a pentest (Part 08 §Persona kinds). A "D · "
+                  prefix in the option marks a deterministic persona (scanner
+                  or L0 decision), so the user can spot the reproducible steps
+                  at a glance in the dropdown itself. */}
+              {PERSONA_KIND_ORDER.map((kind) => {
+                const personas = BUNDLED_PERSONAS.filter((p) => p.kind === kind);
+                if (personas.length === 0) return null;
+                return (
+                  <optgroup key={kind} label={PERSONA_KIND_LABELS[kind]}>
+                    {personas.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.deterministic ? `D · ${p.label}` : p.label}
+                      </option>
+                    ))}
+                  </optgroup>
+                );
+              })}
             </select>
           </div>
           <div className="grid gap-1">

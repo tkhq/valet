@@ -293,10 +293,16 @@ export interface ResolveNeedsResult {
 
 /** The outcome of `resolveEngagementNeeds` (the human answer path, M-P4c). The
  * needs the human answered, and the cells the delta re-run reset to pending —
- * only the cells whose needs were answered, never the whole engagement. */
+ * only the cells whose needs were answered, never the whole engagement.
+ *
+ * `resumed: true` when the engagement was `completed | failed` at the time of
+ * the answer and the service flipped it back to `running` before applying the
+ * answer (v1 Part 09 §Late needs answer, INV-11). The client MAY show a
+ * "Reopened" toast when this flag is set. */
 export interface AnswerNeedsResult {
   answered: SecurityNeedRow[];
   resetCells: SecurityCellRow[];
+  resumed: boolean;
 }
 
 export interface EngagementManifest {
@@ -2488,11 +2494,29 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     engagementId: string,
     answers: { needId: string; resolution: string; dismiss?: boolean }[],
   ): Promise<AnswerNeedsResult> {
-    await loadEngagement(engagementId);
+    const engagement = await loadEngagement(engagementId);
     if (answers.length === 0) {
       throw new Error("Send at least one answer. Name the need id and its resolution.");
     }
+    // v1 Part 09 §Late needs answer. A cancelled engagement is unresumable
+    // (INV-10); a completed/failed engagement transparently reopens before
+    // the answer is applied so the runner picks up the reset cell.
+    if (engagement.status === "cancelled") {
+      throw new Error(
+        "This review was cancelled and cannot accept a needs answer. Start a new review to test again.",
+      );
+    }
+    const reopenBeforeAnswer = engagement.status === "completed" || engagement.status === "failed";
     return db.transaction(async (tx) => {
+      if (reopenBeforeAnswer) {
+        // Flip the engagement back to running before we reset cells; the runner
+        // driver only sweeps planning|running, and `dispatchCell` refuses on a
+        // non-running engagement. See Part 09 §Server-side steps.
+        await tx
+          .update(securityEngagements)
+          .set({ status: "running", updatedAt: now() })
+          .where(eq(securityEngagements.id, engagementId));
+      }
       const answered: SecurityNeedRow[] = [];
       const cellsToReset = new Set<string>();
       const ts = now();
@@ -2554,7 +2578,105 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
           .returning();
         if (updated[0]) resetCells.push(updated[0]);
       }
-      return { answered, resetCells };
+      return { answered, resetCells, resumed: reopenBeforeAnswer };
+    });
+  }
+
+  /**
+   * Reopen a terminal engagement (v1 Part 09 §Resume contract). Flips the
+   * engagement back to `running`, resets the target cells to `pending`, and
+   * clears their `settledAt`. The runner's `SecurityRunnerDriver` picks up the
+   * reopened engagement on its next tick and dispatches the pending cells.
+   *
+   * The affected set defaults to `failed` cells + cells with `needs_human`
+   * needs. A caller MAY pass an explicit subset; every id then MUST refer to a
+   * cell in this engagement whose current status is in the affected set.
+   *
+   * INV-8: never touches a `completed` cell that has no open need.
+   * INV-10: refuses on `cancelled` engagements.
+   */
+  async function resumeEngagement(
+    engagementId: string,
+    args?: { cellIds?: string[]; reason?: string },
+  ): Promise<{ status: "running"; resetCellIds: string[] }> {
+    const engagement = await loadEngagement(engagementId);
+    if (engagement.status === "planning" || engagement.status === "running") {
+      throw new Error(
+        "This review is already in progress; there is nothing to resume. Wait for it to settle first.",
+      );
+    }
+    if (engagement.status === "cancelled") {
+      throw new Error(
+        "This review was cancelled and cannot be resumed. Start a new review to test again.",
+      );
+    }
+    return db.transaction(async (tx) => {
+      // Compute the default affected set: failed cells + pending cells that
+      // never dispatched + cells with open human-facing needs. Pending cells
+      // are included so an engagement that reached a terminal status with
+      // undispatched steps can still be resumed.
+      const defaultAffected = await tx
+        .select({ id: securityCells.id, status: securityCells.status })
+        .from(securityCells)
+        .where(
+          and(
+            eq(securityCells.engagementId, engagementId),
+            or(
+              inArray(securityCells.status, ["failed", "pending"]),
+              inArray(
+                securityCells.id,
+                tx
+                  .select({ cellId: securityNeeds.cellId })
+                  .from(securityNeeds)
+                  .where(
+                    and(
+                      eq(securityNeeds.engagementId, engagementId),
+                      eq(securityNeeds.status, "needs_human"),
+                    ),
+                  ),
+              ),
+            ),
+          ),
+        );
+      const defaultIds = new Set(defaultAffected.map((c) => c.id));
+      // Cells already in `pending` stay pending (no status write needed); only
+      // failed cells need a reset to pending. Track which are which so the
+      // update loop can skip the no-op writes.
+      const needsReset = new Set(
+        defaultAffected.filter((c) => c.status !== "pending").map((c) => c.id),
+      );
+
+      let targetIds: string[];
+      if (args?.cellIds && args.cellIds.length > 0) {
+        for (const id of args.cellIds) {
+          if (!defaultIds.has(id)) {
+            throw new Error(
+              `Cell ${id} is not resumable: it must be failed, pending, or have an open needs_human need.`,
+            );
+          }
+        }
+        targetIds = args.cellIds;
+      } else {
+        targetIds = [...defaultIds];
+      }
+      if (targetIds.length === 0) {
+        throw new Error(
+          "Nothing to resume: no failed, pending, or open-need cell on this engagement.",
+        );
+      }
+      const ts = now();
+      await tx
+        .update(securityEngagements)
+        .set({ status: "running", updatedAt: ts })
+        .where(eq(securityEngagements.id, engagementId));
+      for (const cellId of targetIds) {
+        if (!needsReset.has(cellId)) continue;
+        await tx
+          .update(securityCells)
+          .set({ status: "pending", mode: "resume", settledAt: null })
+          .where(and(eq(securityCells.engagementId, engagementId), eq(securityCells.id, cellId)));
+      }
+      return { status: "running" as const, resetCellIds: targetIds };
     });
   }
 
@@ -2795,6 +2917,7 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
     reportNeed,
     resolveNeeds,
     resolveEngagementNeeds,
+    resumeEngagement,
     listNeeds,
     stampCellCompaction,
     getRunningCellProgress,
