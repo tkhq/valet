@@ -10,6 +10,7 @@ import type {
   ToolContext,
 } from '@valet/engine';
 import { slackPlugin } from './actions.js';
+import { SLACK_TEXT_LIMIT } from '../message-chunking.js';
 
 type FakeSandbox = Partial<Sandbox> & { id: string };
 
@@ -709,5 +710,139 @@ describe('slack actions', () => {
     );
 
     expect(result).toEqual({ success: false, error: 'Slack API error: channel_not_found' });
+  });
+
+  // ─── Guardrail: outbound send risk (TKAI-298) ──────────────────────────────
+
+  it('send_message is high risk so an explicit channel post requires approval', () => {
+    expect(action('slack.send_message').riskLevel).toBe('high');
+  });
+
+  it('reply_to_origin stays medium so continuing the addressed thread is not gated', () => {
+    expect(action('slack.reply_to_origin').riskLevel).toBe('medium');
+  });
+
+  // ─── update_message (TKAI-298) ─────────────────────────────────────────────
+
+  it('update_message edits a message via chat.update with parse=none and a blocks reset', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1', text: 'corrected' }),
+    );
+
+    const result = await action('slack.update_message').execute(
+      { channel: 'C1', ts: '123.456', text: 'corrected' },
+      pluginCtx(),
+    );
+
+    const [url, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(url).toBe('https://slack.com/api/chat.update');
+    expect(JSON.parse(init.body as string)).toEqual({
+      channel: 'C1',
+      ts: '123.456',
+      text: 'corrected',
+      parse: 'none',
+      blocks: [],
+    });
+    expect(result).toEqual({
+      success: true,
+      data: { ok: true, ts: '123.456', channel: 'C1', text: 'corrected' },
+    });
+  });
+
+  it('update_message is medium risk so the quick fix is not gated', () => {
+    expect(action('slack.update_message').riskLevel).toBe('medium');
+  });
+
+  it('update_message rebuilds blocks for long text instead of clearing them', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1', text: 'x' }));
+    const longText = 'a'.repeat(SLACK_TEXT_LIMIT + 100);
+
+    await action('slack.update_message').execute(
+      { channel: 'C1', ts: '123.456', text: longText },
+      pluginCtx(),
+    );
+
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as { blocks: unknown[]; text: string };
+    expect(Array.isArray(body.blocks)).toBe(true);
+    expect(body.blocks.length).toBeGreaterThan(0);
+    expect(body.text.length).toBeLessThanOrEqual(SLACK_TEXT_LIMIT);
+  });
+
+  it('update_message maps cant_update_message to a corrective error', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'cant_update_message' }));
+
+    const result = await action('slack.update_message').execute(
+      { channel: 'C1', ts: '1.2', text: 'x' },
+      pluginCtx(),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('cant_update_message');
+    expect(result.error).toContain('its own messages');
+  });
+
+  it('update_message maps message_not_found to a corrective error', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'message_not_found' }));
+
+    const result = await action('slack.update_message').execute(
+      { channel: 'C1', ts: '1.2', text: 'x' },
+      pluginCtx(),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Message not found');
+  });
+
+  // ─── delete_message (TKAI-298) ─────────────────────────────────────────────
+
+  it('delete_message removes a message via chat.delete', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '123.456', channel: 'C1' }));
+
+    const result = await action('slack.delete_message').execute(
+      { channel: 'C1', ts: '123.456' },
+      pluginCtx(),
+    );
+
+    const [url, init] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(url).toBe('https://slack.com/api/chat.delete');
+    expect(JSON.parse(init.body as string)).toEqual({ channel: 'C1', ts: '123.456' });
+    expect(result).toEqual({ success: true, data: { ok: true, ts: '123.456', channel: 'C1' } });
+  });
+
+  it('delete_message is high risk so a delete requires approval', () => {
+    expect(action('slack.delete_message').riskLevel).toBe('high');
+  });
+
+  it('delete_message maps cant_delete_message to a corrective error', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'cant_delete_message' }));
+
+    const result = await action('slack.delete_message').execute(
+      { channel: 'C1', ts: '1.2' },
+      pluginCtx(),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('cant_delete_message');
+    expect(result.error).toContain('its own messages');
+  });
+
+  it('delete_message maps message_not_found to a corrective error', async () => {
+    mockGuardAllowsPublicChannel(fetchMock);
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'message_not_found' }));
+
+    const result = await action('slack.delete_message').execute(
+      { channel: 'C1', ts: '1.2' },
+      pluginCtx(),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Message not found');
   });
 });

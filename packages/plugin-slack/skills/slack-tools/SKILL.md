@@ -46,6 +46,20 @@ Messages include `user_display` (e.g., `@handle <Display Name> (U123)`) and `bot
 
 Use `slack.get_reactions` when you need to know **who specifically** agreed or acknowledged something, not just the count.
 
+## Posting, Editing, and Deleting
+
+Pick the send tool by where the message goes:
+
+- **`slack.reply_to_origin`** -- reply in the thread this turn came from. This is the default for answering or following up. It needs no approval and cannot reach the wrong channel.
+- **`slack.send_message`** -- post to any other channel or thread by ID. This can ping a channel outside the current conversation, such as a customer channel, so it requires approval on every call. Prefer `reply_to_origin` when you are staying in the same thread.
+
+`send_message`, `reply_to_origin`, `dm_owner`, and `dm_user` return the message `ts` and `channel`. Save both. You need them to edit or delete the message later.
+
+Fix a mistake with your own message:
+
+- **`slack.update_message`** -- edit a message Valet sent. Pass the `channel` and `ts` from the send result and the full replacement `text`. To blank a message you cannot delete, send a single space. Slack rejects edits to messages Valet did not send.
+- **`slack.delete_message`** -- delete a message Valet sent. This requires approval and is irreversible. If the content only needs a correction, use `update_message` instead. Slack rejects deletes of messages Valet did not send.
+
 ## Private Channels
 
 Access is scoped to channels the session owner is a member of. If access is denied, tell the user rather than guessing at content.
