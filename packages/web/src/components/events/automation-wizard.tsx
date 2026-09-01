@@ -10,7 +10,7 @@
  *    following the thread" toggle. POSTs an event subscription on
  *    `slack.app_mention` with an orchestrator target that carries `follow`.
  *    The server scopes the rule to the creator's linked Slack user
- *    (TKAI-299, `events/mention-scope.ts`), so the step says so up front.
+ *    (TKAI-299, `events/subscription-scope.ts`), so the step says so up front.
  *  - Run a workflow on an event → the event picker, then a workflow target.
  *  - Send a notification → the event picker, then an orchestrator target.
  *  - Advanced / custom trigger → the raw event + filter + target flow.

@@ -898,7 +898,7 @@ export async function installWorkflowTemplate(
   // the reason the cron is: a subscription that cannot be armed must not
   // leave an installed workflow behind that nothing will ever call.
   const workflowId = newWorkflowId("wf");
-  // `SubscriptionFilter`, not `SubscriptionFilterRow`: the mention-scope gate
+  // `SubscriptionFilter`, not `SubscriptionFilterRow`: the scope gate
   // may append its injected user filter to the resolved template filters.
   const subscriptions: { name: string; eventKeys: string[]; filters: SubscriptionFilter[] }[] = [];
   for (const event of events) {
@@ -939,14 +939,14 @@ export async function installWorkflowTemplate(
     // tail keeps two installs of one template apart in the Triggers list —
     // the same suffix rule the schedule name uses.
     const name = `${event.name} (${workflowId.slice(-6)})`;
-    // One gate for validation AND mention scoping (TKAI-299): this insert
+    // One gate for validation AND scope enforcement (TKAI-299): this insert
     // path must hold the same rules the CRUD writers do, or a template
     // becomes the unscoped back door. A validation failure is worth refusing
     // loudly: the ingest matcher only reads the arriving event's own catalog
     // entry, so an undeclared filter field arms a subscription that matches
-    // nothing and reports nothing, forever. No template names
-    // `slack.app_mention` today; one that does needs a channel filter (an
-    // install input) and a Slack-linked installer.
+    // nothing and reports nothing, forever. No template names scope-required
+    // keys today; one that does needs the required filter (an install input)
+    // and a linked user where the scope gate requires it.
     const write = await validateSubscriptionWrite(
       deps.db,
       deps.plugins,

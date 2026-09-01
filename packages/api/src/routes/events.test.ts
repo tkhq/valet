@@ -1397,7 +1397,7 @@ describe("GET /api/events/filter-options", () => {
 //
 // A subscription selecting `slack.app_mention` must name channels (or set the
 // explicit `anyChannel` flag) and is force-filtered to its creator's linked
-// Slack user. See `events/mention-scope.ts`.
+// Slack user. See `events/subscription-scope.ts`.
 
 describe("mention scoping (slack.app_mention)", () => {
   async function bootSlack(): Promise<TestApi> {

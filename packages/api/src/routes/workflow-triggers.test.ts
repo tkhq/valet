@@ -475,7 +475,7 @@ describe("event-trigger CRUD", () => {
   });
 
   // Mention scoping (TKAI-299): the trigger path shares the subscriptions
-  // CRUD gate (`events/mention-scope.ts`). One create + one patch case here
+  // CRUD gate (`events/subscription-scope.ts`). One create + one patch case here
   // pin the wiring; the rule matrix lives in `events.test.ts`.
   it("scopes a slack.app_mention trigger to the creator and named channels", async () => {
     api = await bootTestApi({ plugins: [slackPlugin] });
