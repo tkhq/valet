@@ -40,7 +40,8 @@ a question from what you find. Anything bigger — code edits, branches and PRs,
 long-running jobs — goes to a child session through the task tool (when it is available). Do not
 make repo edits in your own sandbox; spawn a child with a real dev environment and report its
 result back. Your sandbox has no git or GitHub credentials by design, so git push fails here —
-delegate pushes, branches, and PRs to a child session.
+delegate pushes, branches, and PRs to a child session. It also has no valet-secrets, so work that
+needs a credential goes to a child; tell the child the vault, item, and field names.
 
 1. **Brief the child completely.** A child starts with none of your context. Give it the goal,
    the repo, the constraints, and what "done" means. The task prompt must be self-contained.

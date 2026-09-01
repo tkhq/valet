@@ -2817,8 +2817,17 @@ export interface ListOpItemsResponse {
 
 /** POST /api/sandbox-secrets/resolve — the sandbox CLI's broker call. */
 export interface ResolveSandboxSecretsResponse {
-  /** reference -> value. Only references that resolved appear. */
-  resolved: Record<string, string>;
+  /** reference -> base64 of the value's UTF-8 bytes. Only references that
+   * resolved appear.
+   *
+   * Base64, not the raw value: the caller is a POSIX shell script with no
+   * JSON parser, and a byte-level extractor cut every value at its first
+   * `"` and never unescaped `\\`, `\n`, or `\t`. A private key or a
+   * password containing a quote arrived corrupted but plausible, which is
+   * the worst way for a credential to fail. The base64 alphabet contains
+   * no JSON metacharacter, so the shell can cut the field safely and
+   * `base64 -d` restores the exact bytes. */
+  resolvedBase64: Record<string, string>;
   /** References nothing could resolve, by name and without a reason: the
    * reason would describe someone else's vault. */
   unresolved: string[];

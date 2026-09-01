@@ -15,7 +15,9 @@
 import type { SecretsProvider, SecretListEntry } from "./secrets.js";
 
 interface ResolveResponse {
-  resolved: Record<string, string>;
+  /** reference -> base64 of the value's UTF-8 bytes. See
+   * `ResolveSandboxSecretsResponse` in the api package for why. */
+  resolvedBase64: Record<string, string>;
   unresolved: string[];
 }
 
@@ -59,8 +61,8 @@ export class BrokerProvider implements SecretsProvider {
       throw new Error(`broker refused the reference (HTTP ${res.status})`);
     }
     const body = (await res.json()) as ResolveResponse;
-    const value = body.resolved[reference];
-    if (value === undefined) throw new Error(`no secret found for ${reference}`);
-    return value;
+    const encoded = body.resolvedBase64?.[reference];
+    if (encoded === undefined) throw new Error(`no secret found for ${reference}`);
+    return Buffer.from(encoded, "base64").toString("utf8");
   }
 }

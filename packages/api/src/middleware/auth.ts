@@ -24,7 +24,10 @@ export interface AuthUser {
  *     integration plan, Task 8).
  * A valid sandbox token against any other path 403s rather than reaching a
  * handler that unconditionally reads `c.var.user`. */
-const SANDBOX_ALLOWED_PATH_PREFIXES = ["/api/memory", "/api/sandbox"];
+// Exact prefixes, each ending at a path separator. A bare "/api/sandbox"
+// also matched "/api/sandbox-secrets/resolve", which let a sandbox token
+// through to a handler this list was written to keep it away from.
+const SANDBOX_ALLOWED_PATH_PREFIXES = ["/api/memory", "/api/sandbox/", "/api/sandbox-secrets/"];
 
 /** Narrows better-auth's loosely-typed (`type: "string"`) `role`
  * additional field down to our real enum. The db column is declared

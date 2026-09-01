@@ -7,9 +7,10 @@
  * process's environment. The value crosses this boundary once, into a process
  * the model does not read, and never enters the transcript.
  *
- * No bespoke auth: the ladder in `middleware/auth.ts` already accepts the
- * `x-valet-sandbox` token every sandbox is started with, and derives the
- * principal from the token rather than from headers. So the credential is
+ * No bespoke auth: the ladder in `middleware/auth.ts` accepts the
+ * `x-valet-sandbox` token every sandbox is started with and sets
+ * `c.var.sandbox`. This route requires that principal and reads the org and
+ * user from it, never from a header or a cookie. So the credential is
  * agent-scoped and time-boxed by construction — a leaked token is worth its
  * remaining lifetime, for one session's principal, and nothing else.
  */
@@ -37,7 +38,22 @@ const MAX_REFERENCES = 25;
 
 sandboxSecretsRouter.post("/resolve", async (c) => {
   const { onePassword } = c.var.providers;
-  const user = c.var.user;
+  // The SANDBOX principal, never `c.var.user`. The sandbox rung of the auth
+  // ladder sets only `c.var.sandbox`, so reading `c.var.user` threw on every
+  // request the CLI actually makes. It also answered a plain signed-in
+  // caller, which turned a session-scoped broker into a plaintext read of
+  // the org vault for anyone with a cookie — the sibling browse route
+  // deliberately strips values for exactly that reason.
+  const sandbox = c.var.sandbox;
+  if (!sandbox) {
+    return c.json(
+      {
+        error:
+          "this endpoint answers a sandbox only. Run valet-secrets inside a session, or send the session's x-valet-sandbox token.",
+      },
+      401,
+    );
+  }
 
   let body: { references?: unknown };
   try {
@@ -52,12 +68,20 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
   if (references.length > MAX_REFERENCES) {
     return c.json({ error: `at most ${MAX_REFERENCES} references per request` }, 400);
   }
-  const unsupported = (references as string[]).find((r) => !REFERENCE.test(r));
-  if (unsupported) {
-    return c.json({ error: `not a supported secret reference: ${unsupported}` }, 400);
+  // Every bad reference, not the first: the CLI rejects the whole batch on
+  // this error, and naming one of several sent the reader to debug a
+  // reference that was fine.
+  const unsupported = (references as string[]).filter((r) => !REFERENCE.test(r));
+  if (unsupported.length > 0) {
+    return c.json(
+      {
+        error: `not a supported secret reference: ${unsupported.join(", ")}. Use op://vault/item/field.`,
+      },
+      400,
+    );
   }
 
-  const ctx = { orgId: user.orgId, userId: user.id };
+  const ctx = { orgId: sandbox.orgId, userId: sandbox.userId };
   const resolved: Record<string, string> = {};
   for (const reference of new Set(references as string[])) {
     // Org scope first: a shared service account is the configured path. A
@@ -75,7 +99,14 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
   }
 
   const resp: ResolveSandboxSecretsResponse = {
-    resolved,
+    // Base64 so a shell can extract the field without a JSON parser. See
+    // `ResolveSandboxSecretsResponse`.
+    resolvedBase64: Object.fromEntries(
+      Object.entries(resolved).map(([reference, value]) => [
+        reference,
+        Buffer.from(value, "utf8").toString("base64"),
+      ]),
+    ),
     // Named, not thrown: the CLI decides whether a missing one is fatal, and
     // says WHICH reference failed rather than "the run failed".
     unresolved: [...new Set(references as string[])].filter((r) => !(r in resolved)),

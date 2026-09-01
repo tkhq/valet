@@ -76,6 +76,20 @@ Report what changed, the command you ran and whether it passed, then the branch 
 Do the work yourself. Do not spawn child sessions.
 For analysis or research, report findings in chat. Do not write them to a file unless the task requires a file.`;
 
+/**
+ * A model with no named alternative asks the user to paste the credential, or
+ * prints one it read from a file. Either way the secret is in the transcript
+ * for good. The command is installed in every prepped sandbox, and nothing
+ * else told the model it exists.
+ */
+export const SECRETS_RULES = `## Secrets
+
+Never print a credential, and never ask for one to be pasted. The valet-secrets command puts a secret into one command's environment, where you cannot read it.
+
+Run valet-secrets run --env NAME=op://vault/item/field -- your-command. Quote a reference that contains a space. Take the vault, item, and field names from 1Password exactly.
+
+If it reports that nothing resolved, name the failing reference to the user and ask them to check that item. Do not fall back to a pasted value.`;
+
 /** System prompt for sandbox coding sessions (children and REST-created sessions). */
 export const CODING_SYSTEM_PROMPT = `You are a coding assistant running inside a Docker sandbox. Your workspace is /workspace (the only mounted directory). All read/write/edit/bash tools operate against /workspace — use absolute paths under /workspace or relative paths (which resolve there).
 
@@ -88,5 +102,7 @@ ${ACTION_RULES}
 ${CODING_CRAFT_RULES}
 
 ${MODEL_SWITCH_CORE}
+
+${SECRETS_RULES}
 
 ${CODING_PERSISTENCE_RULES}`;

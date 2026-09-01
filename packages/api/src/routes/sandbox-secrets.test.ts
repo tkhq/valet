@@ -5,6 +5,7 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { mintSandboxToken } from "../auth/sandbox-tokens.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 
 let api: TestApi | undefined;
@@ -34,12 +35,32 @@ function fakeOnePassword(): OnePasswordService {
 
 const HEADERS = { "Content-Type": "application/json" };
 
-async function resolve(references: unknown) {
+/** The CLI's real credential. The route derives org and user from this token,
+ * so a suite that omitted it exercised a rung the CLI never uses. */
+async function mintToken(sessionId = "sess-secrets-1"): Promise<string> {
+  const { token } = await mintSandboxToken(api!.providers.db, {
+    sessionId,
+    userId: "local-user",
+    orgId: "local-org",
+  });
+  return token;
+}
+
+async function resolve(references: unknown, token?: string) {
+  const headers: Record<string, string> = { ...HEADERS };
+  const sandboxToken = token ?? (await mintToken());
+  headers["x-valet-sandbox"] = sandboxToken;
   return fetch(`${api!.baseUrl}/api/sandbox-secrets/resolve`, {
     method: "POST",
-    headers: HEADERS,
+    headers,
     body: JSON.stringify({ references }),
   });
+}
+
+/** Base64 in, plain text out — the shape the shell CLI decodes. */
+function decode(body: { resolvedBase64: Record<string, string> }, reference: string): string | undefined {
+  const encoded = body.resolvedBase64[reference];
+  return encoded === undefined ? undefined : Buffer.from(encoded, "base64").toString("utf8");
 }
 
 describe("POST /api/sandbox-secrets/resolve", () => {
@@ -49,15 +70,15 @@ describe("POST /api/sandbox-secrets/resolve", () => {
 
     const res = await resolve(["op://ok/item/field", "op://nope/item/field"]);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { resolved: Record<string, string>; unresolved: string[] };
+    const body = (await res.json()) as { resolvedBase64: Record<string, string>; unresolved: string[] };
 
-    expect(body.resolved["op://ok/item/field"]).toBe("secret-for-op://ok/item/field");
+    expect(decode(body, "op://ok/item/field")).toBe("secret-for-op://ok/item/field");
     // Named, not thrown: the CLI decides whether a miss is fatal, and can say
     // WHICH reference failed.
     expect(body.unresolved).toEqual(["op://nope/item/field"]);
     // A reference nobody resolved carries no value and no reason — the reason
     // would describe someone else's vault.
-    expect(body.resolved["op://nope/item/field"]).toBeUndefined();
+    expect(decode(body, "op://nope/item/field")).toBeUndefined();
   });
 
   it("refuses anything that is not a secret reference", async () => {
@@ -79,8 +100,8 @@ describe("POST /api/sandbox-secrets/resolve", () => {
     // rejected every reference into a vault with a space in its title.
     const res = await resolve(["op://ok/JumpCloud Login/password"]);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { resolved: Record<string, string> };
-    expect(body.resolved["op://ok/JumpCloud Login/password"]).toBeTruthy();
+    const body = (await res.json()) as { resolvedBase64: Record<string, string> };
+    expect(decode(body, "op://ok/JumpCloud Login/password")).toBeTruthy();
   });
 
   it("bounds one request", async () => {
@@ -96,5 +117,62 @@ describe("POST /api/sandbox-secrets/resolve", () => {
     api.providers.onePassword = fakeOnePassword();
     expect((await resolve("op://ok/item/field")).status).toBe(400);
     expect((await resolve([1, 2])).status).toBe(400);
+  });
+  // The CLI's only credential is the sandbox token. The route used to read
+  // `c.var.user`, which the sandbox rung never sets: every real CLI call
+  // threw, and the CLI reported it as "nothing resolved".
+  it("answers a sandbox token, and the principal comes from that token", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = fakeOnePassword();
+
+    const res = await resolve(["op://ok/item/field"], await mintToken());
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { resolvedBase64: Record<string, string> };
+    expect(decode(body, "op://ok/item/field")).toBe("secret-for-op://ok/item/field");
+  });
+
+  it("refuses a caller with no sandbox token, and names the fix", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = fakeOnePassword();
+
+    // A signed-in browser session must not read plaintext org secrets here —
+    // the sibling browse route strips values for that reason.
+    const res = await fetch(`${api.baseUrl}/api/sandbox-secrets/resolve`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ references: ["op://ok/item/field"] }),
+    });
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("valet-secrets");
+  });
+
+  it("names every unsupported reference, not just the first", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = fakeOnePassword();
+
+    // The CLI aborts the whole run on this error. Naming one of two sent the
+    // reader to debug a reference that was fine.
+    const res = await resolve(["op://ok/item/field", "/etc/passwd", "HOME"]);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("/etc/passwd");
+    expect(body.error).toContain("HOME");
+  });
+
+  it("base64 survives a value containing a quote, a backslash, and a newline", async () => {
+    api = await bootTestApi();
+    const nasty = 'pa"ss\\word\nsecond line\n';
+    api.providers.onePassword = {
+      ...fakeOnePassword(),
+      resolveReference: async () => nasty,
+    } as unknown as typeof api.providers.onePassword;
+
+    const res = await resolve(["op://ok/item/field"]);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { resolvedBase64: Record<string, string> };
+    // The old byte-level extractor cut this at the first quote and never
+    // unescaped, so a private key arrived corrupted but plausible.
+    expect(decode(body, "op://ok/item/field")).toBe(nasty);
   });
 });
