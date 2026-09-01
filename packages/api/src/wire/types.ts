@@ -3836,6 +3836,32 @@ export interface ActionPolicyWire {
   updatedAt: number;
 }
 
+/**
+ * One existing subscription a candidate write would fire alongside (TKAI-294,
+ * `events/collisions.ts`). `relation` is from the candidate's point of view:
+ * `superset` means the candidate covers everything this subscription covers
+ * on the shared keys.
+ */
+export interface EventSubscriptionCollisionWire {
+  subscription: EventSubscriptionWire;
+  relation: "equal" | "superset" | "subset" | "partial";
+  sharedKeys: string[];
+}
+
+/** `blocking` rejects the write with 409 unless the request sets
+ * `allowCollision`; `overlapping` commits and rides back as a warning. */
+export interface EventSubscriptionCollisionsWire {
+  blocking: EventSubscriptionCollisionWire[];
+  overlapping: EventSubscriptionCollisionWire[];
+}
+
+/** The 409 body of a blocked subscription write. `errorText` still reads
+ * `error`; the collision list lets the UI name what the rule steps on. */
+export interface EventSubscriptionCollisionErrorWire {
+  error: string;
+  collisions: EventSubscriptionCollisionsWire;
+}
+
 export interface CreateEventSubscriptionRequest {
   name: string;
   eventKeys: string[];
@@ -3847,9 +3873,17 @@ export interface CreateEventSubscriptionRequest {
    * Not persisted: a stored mention subscription with no channel filter is
    * the any-channel state. */
   anyChannel?: boolean;
+  /** Commit even when the write collides with existing subscriptions
+   * (`collisions.blocking` non-empty). The override is logged. */
+  allowCollision?: boolean;
 }
 
-export type CreateEventSubscriptionResponse = EventSubscriptionWire;
+export type CreateEventSubscriptionResponse = EventSubscriptionWire & {
+  /** Present when the committed write still collides with existing enabled
+   * subscriptions — every `overlapping` entry, plus any `blocking` entries an
+   * `allowCollision` override pushed through. */
+  collisions?: EventSubscriptionCollisionsWire;
+};
 
 export interface ListEventSubscriptionsResponse {
   subscriptions: EventSubscriptionWire[];
@@ -3863,9 +3897,14 @@ export interface PatchEventSubscriptionRequest {
   /** See `CreateEventSubscriptionRequest.anyChannel`. Only consulted when
    * the patch changes `filters` or `eventKeys`. */
   anyChannel?: boolean;
+  /** See `CreateEventSubscriptionRequest.allowCollision`. */
+  allowCollision?: boolean;
 }
 
-export type PatchEventSubscriptionResponse = EventSubscriptionWire;
+export type PatchEventSubscriptionResponse = EventSubscriptionWire & {
+  /** See `CreateEventSubscriptionResponse.collisions`. */
+  collisions?: EventSubscriptionCollisionsWire;
+};
 
 /** Feed item — payload deliberately excluded (fetch `/api/events/:id`). */
 export interface EventSummaryWire {

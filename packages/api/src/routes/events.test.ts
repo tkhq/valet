@@ -26,6 +26,7 @@ import {
 import type {
   CreateEventSubscriptionRequest,
   CreateEventSubscriptionResponse,
+  EventSubscriptionCollisionErrorWire,
   EventSubscriptionFilterWire,
   EventSubscriptionTargetWire,
   GetEventCatalogResponse,
@@ -1663,5 +1664,165 @@ describe("mention scoping (slack.app_mention)", () => {
       body: JSON.stringify({ enabled: false }),
     });
     expect(res.status).toBe(200);
+  });
+});
+
+describe("subscription collision gate (TKAI-294)", () => {
+  /** The existing narrow rule the candidates below step on: same event key
+   * as VALID_BODY, scoped to one repo. */
+  async function seedNarrowRule(a: TestApi, over: SeedSubscriptionOpts = {}): Promise<void> {
+    await seedSubscriptionRow(a, "sub_narrow", "local-org", {
+      name: "narrow repo rule",
+      eventKeys: ["github.pull_request.opened"],
+      filters: [{ field: "repo", op: "eq", value: "acme/widgets" }],
+      ...over,
+    });
+  }
+
+  it("409s a create that covers an existing rule, naming it in the payload", async () => {
+    const a = await boot();
+    await seedNarrowRule(a);
+
+    const res = await postSubscription(a.baseUrl, { ...VALID_BODY, filters: [] });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as EventSubscriptionCollisionErrorWire;
+    expect(body.error).toContain("narrow repo rule");
+    expect(body.collisions.blocking).toHaveLength(1);
+    expect(body.collisions.blocking[0].subscription.id).toBe("sub_narrow");
+    expect(body.collisions.blocking[0].relation).toBe("superset");
+    expect(body.collisions.blocking[0].sharedKeys).toEqual(["github.pull_request.opened"]);
+
+    // The blocked write left no row behind.
+    const rows = await a.providers.db.select().from(eventSubscriptions);
+    expect(rows).toHaveLength(1);
+  });
+
+  it("allowCollision commits the blocked write and reports what it stepped on", async () => {
+    const a = await boot();
+    await seedNarrowRule(a);
+
+    const res = await postSubscription(a.baseUrl, {
+      ...VALID_BODY,
+      filters: [],
+      allowCollision: true,
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateEventSubscriptionResponse;
+    expect(body.collisions?.blocking.map((b) => b.subscription.id)).toEqual(["sub_narrow"]);
+  });
+
+  it("201s an overlapping (non-containing) create with a warning payload", async () => {
+    const a = await boot();
+    await seedNarrowRule(a, {
+      filters: [{ field: "repo", op: "in", value: ["acme/widgets", "acme/gadgets"] }],
+    });
+
+    // VALID_BODY's repo eq is a strict subset of the seeded `in` list.
+    const res = await postSubscription(a.baseUrl, VALID_BODY);
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateEventSubscriptionResponse;
+    expect(body.collisions?.blocking).toEqual([]);
+    expect(body.collisions?.overlapping.map((o) => o.subscription.id)).toEqual(["sub_narrow"]);
+    expect(body.collisions?.overlapping[0].relation).toBe("subset");
+  });
+
+  it("ignores disabled rules — an unarmed rule cannot collide", async () => {
+    const a = await boot();
+    await seedNarrowRule(a, { enabled: false });
+
+    const res = await postSubscription(a.baseUrl, { ...VALID_BODY, filters: [] });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateEventSubscriptionResponse;
+    expect(body.collisions).toBeUndefined();
+  });
+
+  it("ignores disjoint rules — a different repo is no collision", async () => {
+    const a = await boot();
+    await seedNarrowRule(a, {
+      filters: [{ field: "repo", op: "eq", value: "beta/things" }],
+    });
+
+    // VALID_BODY is scoped to acme/widgets; the seeded rule to beta/things.
+    const res = await postSubscription(a.baseUrl, VALID_BODY);
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateEventSubscriptionResponse;
+    expect(body.collisions).toBeUndefined();
+  });
+
+  it("never compares against another org's rules (no cross-org leak)", async () => {
+    const a = await boot();
+    await seedNarrowRule(a, {});
+    // Same coverage, other org — must not appear in any payload.
+    await seedSubscriptionRow(a, "sub_foreign", "other-org", {
+      eventKeys: ["github.pull_request.opened"],
+      filters: [{ field: "repo", op: "eq", value: "acme/widgets" }],
+    });
+
+    const res = await postSubscription(a.baseUrl, { ...VALID_BODY, filters: [] });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as EventSubscriptionCollisionErrorWire;
+    const ids = [
+      ...body.collisions.blocking.map((b) => b.subscription.id),
+      ...body.collisions.overlapping.map((o) => o.subscription.id),
+    ];
+    expect(ids).toEqual(["sub_narrow"]);
+  });
+
+  it("409s a PATCH that widens a rule over an existing one; allowCollision overrides", async () => {
+    const a = await boot();
+    const created = (await (
+      await postSubscription(a.baseUrl, VALID_BODY)
+    ).json()) as CreateEventSubscriptionResponse;
+    await seedNarrowRule(a, {
+      filters: [{ field: "repo", op: "eq", value: "acme/gadgets" }],
+    });
+
+    const patch = (extra: Record<string, unknown>) =>
+      fetch(`${a.baseUrl}/api/event-subscriptions/${created.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filters: [], ...extra }),
+      });
+
+    const blocked = await patch({});
+    expect(blocked.status).toBe(409);
+    const blockedBody = (await blocked.json()) as EventSubscriptionCollisionErrorWire;
+    expect(blockedBody.collisions.blocking[0].subscription.id).toBe("sub_narrow");
+    // The refused patch changed nothing.
+    const rows = await a.providers.db
+      .select()
+      .from(eventSubscriptions)
+      .where(eq(eventSubscriptions.id, created.id));
+    expect(rows[0].filters).toEqual(VALID_BODY.filters);
+
+    const overridden = await patch({ allowCollision: true });
+    expect(overridden.status).toBe(200);
+    const body = (await overridden.json()) as PatchEventSubscriptionResponse;
+    expect(body.collisions?.blocking.map((b) => b.subscription.id)).toEqual(["sub_narrow"]);
+  });
+
+  it("a disabled create skips the gate; enabling it later runs it", async () => {
+    const a = await boot();
+    await seedNarrowRule(a);
+
+    const created = (await (
+      await postSubscription(a.baseUrl, { ...VALID_BODY, filters: [], enabled: false })
+    ).json()) as CreateEventSubscriptionResponse;
+    expect(created.collisions).toBeUndefined();
+
+    const arm = await fetch(`${a.baseUrl}/api/event-subscriptions/${created.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: true }),
+    });
+    expect(arm.status).toBe(409);
+
+    // A patch that leaves the rule disabled stays uncheckable — nothing fires.
+    const rename = await fetch(`${a.baseUrl}/api/event-subscriptions/${created.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "still parked" }),
+    });
+    expect(rename.status).toBe(200);
   });
 });

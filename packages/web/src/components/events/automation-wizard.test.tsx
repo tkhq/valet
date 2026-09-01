@@ -90,6 +90,7 @@ vi.mock("~/lib/workspace-scope", async (importOriginal) => {
 });
 
 import { AutomationWizard } from "./automation-wizard";
+import { ApiError } from "~/api/client";
 
 beforeEach(() => {
   createSubscription.mockReset();
@@ -293,5 +294,103 @@ describe("AutomationWizard", () => {
     expect((screen.getByRole("button", { name: /^Next$/ }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole("checkbox", { name: /github\.pr\.opened/ }));
     expect((screen.getByRole("button", { name: /^Next$/ }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  // ── Collision gate (TKAI-294) ─────────────────────────────────────────────
+
+  /** A collision payload naming one existing rule, as the server builds it. */
+  function collisionPayload(kind: "blocking" | "overlapping") {
+    const entry = {
+      subscription: {
+        id: "sub_existing",
+        name: "Eng channel replies",
+        ownerType: "user",
+        ownerId: "u1",
+        eventKeys: ["slack.app_mention"],
+        filters: [{ field: "channel", op: "eq", value: "C123", label: "#eng" }],
+        target: { kind: "orchestrator" },
+        enabled: true,
+        createdBy: "u1",
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      relation: kind === "blocking" ? "superset" : "subset",
+      sharedKeys: ["slack.app_mention"],
+    };
+    return {
+      blocking: kind === "blocking" ? [entry] : [],
+      overlapping: kind === "overlapping" ? [entry] : [],
+    };
+  }
+
+  /** Walks the reply flow to Review and presses Create. */
+  function createReplyRule(name: string) {
+    clickNext(); // What: reply
+    addReplyChannel("C123");
+    clickNext(); // Reply → Review
+    fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: name } });
+    fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+  }
+
+  it("a 409 collision renders the colliding rule and Create anyway resubmits with allowCollision", () => {
+    const onOpenChange = vi.fn();
+    createSubscription.mockImplementation(
+      (_body: unknown, handlers: { onError: (err: Error) => void }) => {
+        handlers.onError(
+          new ApiError(409, "collision", {
+            error: "collides",
+            collisions: collisionPayload("blocking"),
+          }),
+        );
+      },
+    );
+    render(<AutomationWizard open onOpenChange={onOpenChange} />);
+    createReplyRule("Wide net");
+
+    // The colliding rule is named inline; the dialog stays open.
+    expect(screen.getByText("Eng channel replies")).toBeTruthy();
+    expect(screen.getByText("Would replace")).toBeTruthy();
+    expect(onOpenChange).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Create anyway$/ }));
+    expect(createSubscription).toHaveBeenCalledTimes(2);
+    const first = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
+    expect(first.allowCollision).toBeUndefined();
+    const retry = createSubscription.mock.calls[1][0] as CreateEventSubscriptionRequest;
+    expect(retry.allowCollision).toBe(true);
+  });
+
+  it("a committed overlap shows the warning and Done closes the dialog", () => {
+    const onOpenChange = vi.fn();
+    createSubscription.mockImplementation(
+      (_body: unknown, handlers: { onSuccess: (resp: { collisions?: unknown }) => void }) => {
+        handlers.onSuccess({ collisions: collisionPayload("overlapping") });
+      },
+    );
+    render(<AutomationWizard open onOpenChange={onOpenChange} />);
+    createReplyRule("Narrow rule");
+
+    // Saved, but the overlap warning holds the dialog open until Done.
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByText("Overlaps")).toBeTruthy();
+    expect(screen.getByText("Eng channel replies")).toBeTruthy();
+    // The refusal-only actions are gone.
+    expect(screen.queryByRole("button", { name: /Create anyway/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Create automation/ })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Done$/ }));
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("a clean create still closes the dialog", () => {
+    const onOpenChange = vi.fn();
+    createSubscription.mockImplementation(
+      (_body: unknown, handlers: { onSuccess: (resp: object) => void }) => {
+        handlers.onSuccess({ id: "sub_new" });
+      },
+    );
+    render(<AutomationWizard open onOpenChange={onOpenChange} />);
+    createReplyRule("Clean rule");
+    expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 });

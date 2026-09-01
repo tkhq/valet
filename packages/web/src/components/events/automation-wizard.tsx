@@ -39,7 +39,11 @@ import {
   Label,
   LoadingRow,
 } from "~/components/primitives";
-import type { EventSubscriptionFilterWire } from "@valet/api/wire";
+import type {
+  EventSubscriptionCollisionsWire,
+  EventSubscriptionFilterWire,
+} from "@valet/api/wire";
+import { CollisionNotice, collisionsFromError } from "~/components/events/collision-notice";
 import {
   FilterEditor,
   incompleteFilterRow,
@@ -133,6 +137,14 @@ export function AutomationWizard({
   const [anyChannel, setAnyChannel] = useState(false);
   const [follow, setFollow] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // The collision report of the last create attempt (TKAI-294).
+  // `committed: false` — the server refused (409): show the colliding rules
+  // and offer an explicit "Create anyway". `committed: true` — the rule was
+  // saved but overlaps existing ones: show the warning, then Done.
+  const [collisions, setCollisions] = useState<{
+    report: EventSubscriptionCollisionsWire;
+    committed: boolean;
+  } | null>(null);
 
   // A checked "Any channel" (or picked channels) must not ride into a
   // different outcome's flow, so an outcome switch resets both.
@@ -227,10 +239,12 @@ export function AutomationWizard({
 
   function next() {
     setError(null);
+    setCollisions(null);
     setStep((s) => (Math.min(s + 1, plan.count) as Step));
   }
   function back() {
     setError(null);
+    setCollisions(null);
     setStep((s) => (Math.max(s - 1, 1) as Step));
   }
 
@@ -240,9 +254,31 @@ export function AutomationWizard({
     return t.kind === "orchestrator" ? t : { kind: "orchestrator", orchestrator: "user" };
   }
 
-  function submit() {
+  function submit(allowCollision = false) {
     if (!canCreate) return;
     setError(null);
+
+    // Shared by both subscription branches: a 409 collision renders the
+    // colliding rules with a "Create anyway" path; a committed write that
+    // still overlaps renders the warning before the dialog closes.
+    const subscriptionHandlers = {
+      onSuccess: (resp: { collisions?: EventSubscriptionCollisionsWire }) => {
+        if (resp.collisions !== undefined) {
+          setCollisions({ report: resp.collisions, committed: true });
+          return;
+        }
+        onOpenChange(false);
+      },
+      onError: (err: Error) => {
+        const report = collisionsFromError(err);
+        if (report !== null) {
+          setCollisions({ report, committed: false });
+          return;
+        }
+        setCollisions(null);
+        setError(errorText(err));
+      },
+    };
 
     if (outcome === "reply") {
       // One channel → `eq` with its display label; several → `in` with the
@@ -267,11 +303,9 @@ export function AutomationWizard({
           filters: channelFilters,
           target: { ...orchestratorTargetFrom(target), follow },
           ...(anyChannel ? { anyChannel: true } : {}),
+          ...(allowCollision ? { allowCollision: true } : {}),
         },
-        {
-          onSuccess: () => onOpenChange(false),
-          onError: (err) => setError(errorText(err)),
-        },
+        subscriptionHandlers,
       );
       return;
     }
@@ -296,11 +330,9 @@ export function AutomationWizard({
           // The raw picker can select `slack.app_mention` too; the flag only
           // means anything there, and the server ignores it elsewhere.
           ...(anyChannel && keys.has(SLACK_APP_MENTION) ? { anyChannel: true } : {}),
+          ...(allowCollision ? { allowCollision: true } : {}),
         },
-        {
-          onSuccess: () => onOpenChange(false),
-          onError: (err) => setError(errorText(err)),
-        },
+        subscriptionHandlers,
       );
       return;
     }
@@ -423,24 +455,47 @@ export function AutomationWizard({
             />
           )}
 
+          {collisions !== null && (
+            <CollisionNotice report={collisions.report} committed={collisions.committed} />
+          )}
           {error && <p className="text-xs text-danger-500">{error}</p>}
         </div>
 
         <DialogFooter>
-          {step > 1 && (
-            <Button type="button" variant="secondary" onClick={back} disabled={isPending}>
-              Back
+          {collisions?.committed === true ? (
+            // The rule was saved; the notice above is the last word. No Back
+            // — resubmitting the same form would create a duplicate.
+            <Button type="button" onClick={() => onOpenChange(false)}>
+              Done
             </Button>
-          )}
-          {!isLastStep && (
-            <Button type="button" onClick={next} disabled={!canAdvance()}>
-              Next
-            </Button>
-          )}
-          {isLastStep && (
-            <Button type="button" onClick={submit} disabled={!canCreate}>
-              {isPending ? "Creating…" : "Create automation"}
-            </Button>
+          ) : (
+            <>
+              {step > 1 && (
+                <Button type="button" variant="secondary" onClick={back} disabled={isPending}>
+                  Back
+                </Button>
+              )}
+              {!isLastStep && (
+                <Button type="button" onClick={next} disabled={!canAdvance()}>
+                  Next
+                </Button>
+              )}
+              {isLastStep && (
+                <Button type="button" onClick={() => submit()} disabled={!canCreate}>
+                  {isPending ? "Creating…" : "Create automation"}
+                </Button>
+              )}
+              {isLastStep && collisions !== null && collisions.report.blocking.length > 0 && (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={() => submit(true)}
+                  disabled={!canCreate}
+                >
+                  Create anyway
+                </Button>
+              )}
+            </>
           )}
         </DialogFooter>
       </DialogContent>
