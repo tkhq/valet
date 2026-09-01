@@ -56,6 +56,7 @@ import { errorText } from "~/lib/error-text";
 // The reply outcome always subscribes to this one event key, so the reader
 // never sees a raw event picker for it.
 import {
+  keySelected,
   pinnedToCreator,
   requiresChannelScope,
   SLACK_APP_MENTION,
@@ -843,7 +844,7 @@ function EventMatchStep({
     entries.some(
       (e) =>
         e.scope?.channelField !== undefined &&
-        keysArr.some((k) => k === e.key) &&
+        keySelected(e.key, keysArr) &&
         (e.filters ?? []).some((f) => f.field === "text"),
     );
 

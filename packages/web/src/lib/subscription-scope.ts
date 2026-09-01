@@ -19,7 +19,7 @@ export interface ScopedEntry {
 
 /** Whether one eventKeys pattern selects `key` — the exact key or a trailing
  * wildcard, mirroring the server's `eventKeyMatches`. */
-function keySelected(key: string, eventKeys: string[]): boolean {
+export function keySelected(key: string, eventKeys: string[]): boolean {
   return eventKeys.some((k) => k === key || (k.endsWith(".*") && key.startsWith(k.slice(0, -1))));
 }
 
