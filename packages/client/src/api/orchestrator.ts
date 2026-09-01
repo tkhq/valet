@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from './client';
+import { personaKeys } from './personas';
 import type { OrchestratorIdentity, MemoryFile, MemoryFileListing, MemoryFileSearchResult, AgentSession, MailboxMessage, UserNotificationPreference, UserIdentityLink, UserTelegramConfig } from './types';
 
 export const orchestratorKeys = {
@@ -103,6 +104,9 @@ export function useUpdateOrchestratorIdentity() {
       ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: orchestratorKeys.all });
+      // A rename also renames the linked persona row server-side; the
+      // personas list does not poll, so invalidate it too.
+      queryClient.invalidateQueries({ queryKey: personaKeys.all });
     },
   });
 }
