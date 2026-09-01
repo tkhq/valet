@@ -589,6 +589,92 @@ describe("ChannelHost outbound delivery", () => {
     expect(keyedTransport.sent).toHaveLength(0);
   });
 
+  it("auto-posts only the first text-bearing message of a submission", async () => {
+    // One auto-post per turn: the first message is the reply, later text
+    // rounds are working notes. A new submission gets its own slot.
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    const base = {
+      type: "message" as const,
+      sessionId: session.id,
+      threadId,
+      parentId: null,
+      createdAt: Date.now(),
+      role: "assistant" as const,
+    };
+    await engineStore.appendEntries(session.id, threadId, [
+      { ...base, id: "turn1-msg-1", content: "I'll dig into the v1 implementation first.", queueItemId: "qi-turn-1" },
+      { ...base, id: "turn1-msg-2", content: "Let me look at the repo directly.", queueItemId: "qi-turn-1" },
+      { ...base, id: "turn2-msg-1", content: "Second turn reply.", queueItemId: "qi-turn-2" },
+    ]);
+
+    for (const messageId of ["turn1-msg-1", "turn1-msg-2", "turn2-msg-1"]) {
+      await eventStream.append(
+        {
+          sessionId: session.id,
+          threadId,
+          timestamp: Date.now(),
+          event: { type: "message_end", threadId, messageId, reason: "end_turn" },
+        },
+        `first-only-${messageId}-${randomUUID()}`,
+      );
+    }
+
+    await vi.waitFor(() => {
+      expect(fakeTransport.sent.some((s) => s.message.markdown.includes("Second turn reply."))).toBe(true);
+    });
+    // Deliveries are serialized per thread, so once the last message landed
+    // the earlier ones have settled: turn 1 posted exactly its first text.
+    expect(fakeTransport.sent.map((s) => s.message.markdown)).toEqual([
+      "I'll dig into the v1 implementation first.",
+      "Second turn reply.",
+    ]);
+  });
+
+  it("stands down when the submission already replied through reply_to_origin", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    await engineStore.appendEntries(session.id, threadId, [
+      {
+        type: "message",
+        id: "acted-msg-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant",
+        content: "Replied in the thread.",
+        queueItemId: "qi-acted-1",
+        parts: [
+          { type: "text", text: "Replied in the thread." },
+          {
+            type: "tool_call",
+            callId: "tc-reply-1",
+            toolName: "call_tool",
+            status: "completed",
+            args: { tool_id: "slack.reply_to_origin", params: { text: "explicit reply" } },
+            result: { text: "ok" },
+          },
+        ],
+      },
+    ]);
+
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "acted-msg-1", reason: "end_turn" },
+      },
+      `acted-${randomUUID()}`,
+    );
+
+    // The explicit reply IS the turn's reply; the auto-post must not add a
+    // second copy. Absence check needs a real window.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(fakeTransport.sent).toHaveLength(0);
+  });
+
   it("gate on a channel thread → sendGatePrompt; resolution → edit", async () => {
     // A named user row makes the resolution label an audit fact ("by …").
     await testDb.appDb
