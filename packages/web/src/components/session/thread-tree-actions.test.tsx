@@ -39,6 +39,9 @@ vi.mock("~/api/queries", async (importOriginal) => {
   return {
     ...actual,
     useThreads: () => ({ data: { threads }, isLoading: false, error: null }),
+    // Session default model for the pin chip; undefined keeps chips off
+    // unless a fixture sets a thread model explicitly.
+    useSession: () => ({ data: undefined, isLoading: false, error: null }),
     useArchivedThreads: (_id: string, opts?: { enabled?: boolean }) => ({
       data: opts?.enabled === false ? undefined : { threads: archivedThreads },
       isLoading: false,
