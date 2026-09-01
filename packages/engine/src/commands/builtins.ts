@@ -171,7 +171,10 @@ async function modelCommand(
 
 async function compactCommand(args: string[], thread: Thread): Promise<BuiltinResult> {
   const instructions = args.join(" ").trim();
-  await thread.compactThread({ mode: "manual" });
+  await thread.compactThread({
+    mode: "manual",
+    ...(instructions ? { instructions } : {}),
+  });
   return {
     ok: true,
     output: instructions

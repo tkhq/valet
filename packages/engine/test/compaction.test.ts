@@ -12,6 +12,7 @@ import {
   type CompactionEntry,
   type ResolvedModel,
 } from "../src/index.js";
+import { summarize } from "../src/compaction.js";
 
 function makeEngine() {
   const store = new InMemorySessionStore();
@@ -530,6 +531,235 @@ describe("compaction: pruning persists via updateEntry", () => {
       }
     }
 
+    faux.unregister();
+  });
+});
+
+const SUMMARY_RESPONSE =
+  "## Goal\n- test\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n### Done\n- prior turns\n\n### In Progress\n- (none)\n\n### Blocked\n- (none)\n\n## Key Decisions\n- (none)\n\n## Next Steps\n- (none)\n\n## Critical Context\n- (none)\n\n## Relevant Files\n- (none)";
+
+describe("compaction: /compact instructions", () => {
+  it("passes user instructions through to the summarizer prompt", async () => {
+    const captured: string[] = [];
+    const faux = registerFauxProvider({
+      provider: "compact-instr",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 100_000, maxTokens: 1000 }],
+    });
+    faux.setResponses([
+      (ctx: { messages: Array<{ content: unknown }> }) => {
+        captured.push(JSON.stringify(ctx.messages));
+        return fauxAssistantMessage(SUMMARY_RESPONSE);
+      },
+    ]);
+    const result = await summarize({
+      headEntries: [
+        {
+          id: "e-1",
+          sessionId: "s",
+          threadId: "t",
+          parentId: null,
+          type: "message",
+          role: "user",
+          content: "please refactor the parser",
+          createdAt: 1,
+        },
+      ],
+      model: faux.getModel("tiny")!,
+      instructions: "keep the exact file names",
+    });
+    expect(result.summary).toContain("## Goal");
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain("keep the exact file names");
+    faux.unregister();
+  });
+});
+
+describe("compaction: proactive trigger rehydration (restart)", () => {
+  it("seeds the trigger from the newest persisted assistant usage and compacts BEFORE the first post-restart turn", async () => {
+    // usable = contextWindow - min(reserveCap, maxTokens) = 100000 - 5; the
+    // persisted usage total (1,000,000) exceeds it, so the restored thread
+    // must compact before its first turn hits the model. The window is big
+    // enough that the turn's own (estimated) usage stays far under usable —
+    // any compaction observed here is the rehydration seed's doing.
+    const faux = registerFauxProvider({
+      provider: "compact-restart",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 100_000, maxTokens: 5 }],
+    });
+    const store = new InMemorySessionStore();
+    const bus = new InMemoryEventStream();
+    const sandboxProvider = new VirtualSandboxProvider();
+    const events: BusEvent[] = [];
+    bus.subscribe({}, (e) => events.push(e));
+    const model = faux.getModel("tiny")!;
+    const options = {
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model,
+      compaction: { tailTurns: 1 },
+    };
+
+    const engine1 = new Engine({ providers: { store, stream: bus, sandboxProvider } });
+    const session1 = await engine1.createSession(options);
+    const thread1 = session1.thread();
+    await store.appendEntries(session1.id, thread1.id, [
+      {
+        id: "e-1",
+        sessionId: session1.id,
+        threadId: thread1.id,
+        parentId: null,
+        type: "message",
+        role: "user",
+        content: "first prompt",
+        createdAt: 1,
+      },
+      {
+        id: "e-2",
+        sessionId: session1.id,
+        threadId: thread1.id,
+        parentId: "e-1",
+        type: "message",
+        role: "assistant",
+        content: "first response",
+        usage: { input: 900_000, output: 100_000, cacheRead: 0, cacheWrite: 0, total: 1_000_000 },
+        createdAt: 2,
+      },
+      {
+        id: "e-3",
+        sessionId: session1.id,
+        threadId: thread1.id,
+        parentId: "e-2",
+        type: "message",
+        role: "user",
+        content: "second prompt",
+        createdAt: 3,
+      },
+      {
+        id: "e-4",
+        sessionId: session1.id,
+        threadId: thread1.id,
+        parentId: "e-3",
+        type: "message",
+        role: "assistant",
+        content: "second response",
+        usage: { input: 950_000, output: 50_000, cacheRead: 0, cacheWrite: 0, total: 1_000_000 },
+        createdAt: 4,
+      },
+    ]);
+
+    // "Restart": a fresh Engine over the same providers rehydrates the
+    // session from the store. Response order proves the sequencing — the
+    // summarizer consumes the FIRST faux response, the turn the SECOND.
+    faux.setResponses([
+      fauxAssistantMessage(SUMMARY_RESPONSE),
+      fauxAssistantMessage("post-restart response"),
+    ]);
+    const engine2 = new Engine({ providers: { store, stream: bus, sandboxProvider } });
+    const restored = await engine2.restoreSession({ sessionId: session1.id, options });
+    const receipt = await restored.prompt("third prompt");
+    await waitFor(
+      () =>
+        events.some(
+          (e) => e.event.type === "compaction_end" && e.event.threadId === receipt.threadId,
+        ),
+    );
+    await waitFor(() =>
+      events.some(
+        (e) => e.event.type === "turn_end" && e.event.threadId === receipt.threadId,
+      ),
+    );
+
+    const entries = await store.getEntries(session1.id, receipt.threadId);
+    const compactions = entries.filter((e): e is CompactionEntry => e.type === "compaction");
+    expect(compactions).toHaveLength(1);
+    // The turn's reply is the SECOND faux response — the summarizer ran
+    // first, i.e. compaction protected the turn instead of following it.
+    const lastAssistant = [...entries]
+      .reverse()
+      .find((e) => e.type === "message" && e.role === "assistant");
+    expect(lastAssistant?.type === "message" && lastAssistant.content).toBe(
+      "post-restart response",
+    );
+    faux.unregister();
+  });
+
+  it("skips the seed when a compaction entry follows the newest assistant usage", async () => {
+    const faux = registerFauxProvider({
+      provider: "compact-restart-skip",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 100_000, maxTokens: 5 }],
+    });
+    const store = new InMemorySessionStore();
+    const bus = new InMemoryEventStream();
+    const sandboxProvider = new VirtualSandboxProvider();
+    const events: BusEvent[] = [];
+    bus.subscribe({}, (e) => events.push(e));
+    const model = faux.getModel("tiny")!;
+    const options = {
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model,
+      compaction: { tailTurns: 1 },
+    };
+
+    const engine1 = new Engine({ providers: { store, stream: bus, sandboxProvider } });
+    const session1 = await engine1.createSession(options);
+    const thread1 = session1.thread();
+    await store.appendEntries(session1.id, thread1.id, [
+      {
+        id: "e-1",
+        sessionId: session1.id,
+        threadId: thread1.id,
+        parentId: null,
+        type: "message",
+        role: "user",
+        content: "first prompt",
+        createdAt: 1,
+      },
+      {
+        id: "e-2",
+        sessionId: session1.id,
+        threadId: thread1.id,
+        parentId: "e-1",
+        type: "message",
+        role: "assistant",
+        content: "first response",
+        usage: { input: 950_000, output: 50_000, cacheRead: 0, cacheWrite: 0, total: 1_000_000 },
+        createdAt: 2,
+      },
+      {
+        // The usage above predates this compaction — it no longer
+        // describes the live context, so the restored thread must NOT
+        // seed from it (a seed would trigger a spurious pre-turn pass).
+        id: "c-1",
+        sessionId: session1.id,
+        threadId: thread1.id,
+        parentId: "e-2",
+        type: "compaction",
+        summary: "prior summary",
+        coveredEntryIds: ["e-1", "e-2"],
+        tokenCountBefore: 100,
+        tokenCountAfter: 10,
+        createdAt: 3,
+      },
+    ]);
+
+    faux.setResponses([fauxAssistantMessage("post-restart response")]);
+    const engine2 = new Engine({ providers: { store, stream: bus, sandboxProvider } });
+    const restored = await engine2.restoreSession({ sessionId: session1.id, options });
+    const receipt = await restored.prompt("second prompt");
+    await waitFor(() =>
+      events.some(
+        (e) => e.event.type === "turn_end" && e.event.threadId === receipt.threadId,
+      ),
+    );
+
+    const compactionEvents = events.filter((e) => e.event.type === "compaction_start");
+    expect(compactionEvents).toHaveLength(0);
+    const entries = await store.getEntries(session1.id, receipt.threadId);
+    expect(entries.filter((e) => e.type === "compaction")).toHaveLength(1); // only c-1
     faux.unregister();
   });
 });

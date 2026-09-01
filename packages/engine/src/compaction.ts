@@ -431,6 +431,11 @@ export interface SummarizeOptions {
    * summarizer to update this rather than write a fresh one.
    */
   previousSummary?: string;
+  /**
+   * Free-text steer from the user (manual `/compact <text>`). Appended to
+   * the summarizer prompt so the user can direct what the summary keeps.
+   */
+  instructions?: string;
   /** Optional API key override (forwarded to pi-ai). */
   apiKey?: string;
   /** Optional abort signal. */
@@ -465,7 +470,10 @@ export async function summarize(opts: SummarizeOptions): Promise<SummarizeResult
         "</previous-summary>",
       ].join("\n")
     : "Create a new anchored summary from the conversation history above.";
-  const prompt = `${anchor}\n\n${SUMMARY_TEMPLATE}`;
+  const steer = opts.instructions
+    ? `\n\nThe user gave these instructions for this compaction — follow them when deciding what to keep:\n${opts.instructions}`
+    : "";
+  const prompt = `${anchor}\n\n${SUMMARY_TEMPLATE}${steer}`;
 
   const result = await completeSimple(opts.model, {
     systemPrompt:
