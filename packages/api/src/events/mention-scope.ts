@@ -33,10 +33,14 @@ export function selectsSlackMention(eventKeys: string[]): boolean {
   return eventKeyMatches(SLACK_MENTION_KEY, eventKeys);
 }
 
-/** True when the filter constrains the channel to a fixed set. `prefix`,
- * `contains` and `regex` do not count: "starts with C" is the whole workspace. */
+/** True when the filter constrains the channel to a non-empty fixed set.
+ * `prefix`, `contains` and `regex` do not count: "starts with C" is the whole
+ * workspace. An empty `in` list does not count either — it matches nothing,
+ * which is not a channel selection. */
 function isChannelScopeFilter(f: SubscriptionFilter): boolean {
-  return f.field === "channel" && (f.op === "eq" || f.op === "in");
+  if (f.field !== "channel") return false;
+  if (f.op === "eq") return true;
+  return f.op === "in" && Array.isArray(f.value) && f.value.length > 0;
 }
 
 function isCreatorUserFilter(f: SubscriptionFilter, slackUserId: string): boolean {
