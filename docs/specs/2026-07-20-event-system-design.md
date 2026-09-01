@@ -270,6 +270,17 @@ New `linear-connect` routes (mirroring `github-connect` / `github-app`):
   subscription-builder UI.
 - `POST/GET/PATCH/DELETE /api/event-subscriptions` — CRUD; validates event
   keys and filter fields against the catalog.
+- Collision gate (TKAI-294, `events/collisions.ts`): a create, a match edit,
+  or an enable is compared against the org's enabled subscriptions. The
+  comparison is symbolic — "filter A implies filter B" over `eq`, `in`,
+  `prefix`, `contains`; `regex` proves nothing and can only warn. A write
+  that covers an existing rule on a shared event key (equal or superset)
+  answers 409 with the colliding rules in the payload; `allowCollision: true`
+  commits it anyway and logs the override. A partial overlap or subset
+  commits and returns the collision list as a warning on the response. Two
+  workflow targets on different workflows never collide (intentional
+  fan-out); a workflow↔orchestrator pair warns but never blocks. Disabled
+  rows are skipped — they cannot fire — and enabling one re-runs the gate.
 - Workflow editor: an "event" trigger node type whose save/update syncs an
   `event_subscriptions` row.
 
@@ -292,6 +303,12 @@ first UI over this system. Two tabs:
 
 Subscription filters are API-only for now: a row shows its filter count,
 and the create dialog does not build filters yet.
+
+The creation wizard renders the collision gate's answer inline
+(`components/events/collision-notice.tsx`): a blocked create lists the rules
+it would cover, each with name, owner, target kind, and filter summary, and
+offers an explicit "Create anyway"; a committed overlap shows the same list
+as a warning before the dialog closes.
 
 ## Error handling
 

@@ -20,6 +20,7 @@ import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, eventDropLog, events, eventSubscriptions } from "../schema/index.js";
 import { readOwnerFilter } from "./_owner-filter.js";
+import { computeCollisions, type CollisionReport } from "../events/collisions.js";
 import { allCatalogEntries, catalogForService } from "../events/ingest.js";
 import { subscriptionMatchesEvent, type SubscriptionFilter } from "../events/match.js";
 import { storedAnyChannelState } from "../events/mention-scope.js";
@@ -29,6 +30,8 @@ import { isTeamMember } from "../services/teams.js";
 import type {
   CreateEventSubscriptionRequest,
   CreateEventSubscriptionResponse,
+  EventSubscriptionCollisionErrorWire,
+  EventSubscriptionCollisionsWire,
   EventSubscriptionFilterWire,
   EventSubscriptionTargetWire,
   EventSubscriptionWire,
@@ -114,6 +117,66 @@ function rowToEventSummary(row: typeof events.$inferSelect): EventSummaryWire {
     occurredAt: row.occurredAt,
     receivedAt: row.receivedAt,
   };
+}
+
+/** A stored row with its jsonb columns narrowed to the shapes the one write
+ * gate (`validateSubscriptionWrite`) persists — what `computeCollisions`
+ * compares against. */
+type NarrowedSubscriptionRow = Omit<
+  typeof eventSubscriptions.$inferSelect,
+  "eventKeys" | "filters" | "target"
+> & {
+  eventKeys: string[];
+  filters: SubscriptionFilter[];
+  target: EventSubscriptionTargetWire;
+};
+
+/**
+ * The collision report for one candidate write (TKAI-294): the candidate
+ * compared against every ENABLED subscription in the org, minus the row
+ * being edited. Disabled rows do not fire, so they cannot collide; enabling
+ * one later re-runs this check (see the PATCH route).
+ */
+async function collisionsForWrite(
+  db: AppDb,
+  plugins: ValetPlugin[],
+  orgId: string,
+  candidate: { eventKeys: string[]; filters: SubscriptionFilter[]; target: EventSubscriptionTargetWire },
+  excludeId?: string,
+): Promise<CollisionReport<NarrowedSubscriptionRow>> {
+  const rows = await db
+    .select()
+    .from(eventSubscriptions)
+    .where(and(eq(eventSubscriptions.orgId, orgId), eq(eventSubscriptions.enabled, true)));
+  const existing: NarrowedSubscriptionRow[] = rows
+    .filter((r) => r.id !== excludeId)
+    .map((r) => ({
+      ...r,
+      eventKeys: r.eventKeys as string[],
+      filters: r.filters as SubscriptionFilter[],
+      target: r.target as EventSubscriptionTargetWire,
+    }));
+  return computeCollisions(candidate, existing, allCatalogEntries(plugins));
+}
+
+function collisionsToWire(report: CollisionReport<NarrowedSubscriptionRow>): EventSubscriptionCollisionsWire {
+  const toWire = (c: CollisionReport<NarrowedSubscriptionRow>["blocking"][number]) => ({
+    subscription: rowToSubscription(c.subscription),
+    relation: c.relation,
+    sharedKeys: c.sharedKeys,
+  });
+  return { blocking: report.blocking.map(toWire), overlapping: report.overlapping.map(toWire) };
+}
+
+/** The 409 headline for a blocked write. Names the rules it steps on and the
+ * two ways out, since `errorText` may be all a caller renders. */
+function collisionBlockMessage(report: CollisionReport<NarrowedSubscriptionRow>): string {
+  const names = report.blocking.map((c) => `"${c.subscription.name}"`).join(", ");
+  return (
+    `This rule covers everything ${names} already ${report.blocking.length === 1 ? "handles" : "handle"} ` +
+    `on the same events, so both would fire together. Narrow its filters, or save again with ` +
+    `"create anyway" to take over.`
+  );
 }
 
 // ── Catalog ─────────────────────────────────────────────────────────────────
@@ -512,6 +575,38 @@ eventsRouter.post("/event-subscriptions", async (c) => {
     }
   }
 
+  // Collision gate (TKAI-294). Checked over the FINAL filters (after the
+  // mention gate's injected user filter), so two users' mention rules
+  // compare as the disjoint rules they are. A disabled create skips the
+  // check — the row cannot fire, and enabling it later re-runs it.
+  const enabled = body.enabled ?? true;
+  let collisions: EventSubscriptionCollisionsWire | undefined;
+  if (enabled) {
+    const report = await collisionsForWrite(db, plugins, user.orgId, {
+      eventKeys: body.eventKeys,
+      filters,
+      target: body.target,
+    });
+    if (report.blocking.length > 0 && body.allowCollision !== true) {
+      const resp: EventSubscriptionCollisionErrorWire = {
+        error: collisionBlockMessage(report),
+        collisions: collisionsToWire(report),
+      };
+      return c.json(resp, 409);
+    }
+    if (report.blocking.length > 0) {
+      // The audit trail for a knowing override — a doubled delivery later
+      // should be traceable to who accepted it and over which rules.
+      console.warn(
+        `[events] collision override: user ${user.id} created a subscription over ` +
+          report.blocking.map((b) => b.subscription.id).join(", "),
+      );
+    }
+    if (report.blocking.length > 0 || report.overlapping.length > 0) {
+      collisions = collisionsToWire(report);
+    }
+  }
+
   const now = Date.now();
   const id = randomUUID();
   const inserted = await db
@@ -525,14 +620,17 @@ eventsRouter.post("/event-subscriptions", async (c) => {
       eventKeys: body.eventKeys,
       filters,
       target: body.target,
-      enabled: body.enabled ?? true,
+      enabled,
       createdBy: user.id,
       createdAt: now,
       updatedAt: now,
     })
     .returning();
 
-  const resp: CreateEventSubscriptionResponse = rowToSubscription(inserted[0]);
+  const resp: CreateEventSubscriptionResponse = {
+    ...rowToSubscription(inserted[0]),
+    ...(collisions !== undefined ? { collisions } : {}),
+  };
   return c.json(resp, 201);
 });
 
@@ -628,19 +726,61 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   if (!write.ok) return c.json({ error: write.error }, 400);
   const filters = write.filters;
 
+  // Collision gate (TKAI-294), against the row as it would exist after the
+  // patch, minus itself. Runs when the result can fire AND the patch changes
+  // what it fires on — a match edit, or flipping enabled on (the create-time
+  // check said nothing about a row born disabled). A rename of a live
+  // colliding row stays unchecked: the collision predates the patch.
+  const willBeEnabled = body.enabled ?? row.enabled;
+  const matchChanged = body.filters !== undefined || body.eventKeys !== undefined;
+  const arming = body.enabled === true && !row.enabled;
+  let collisions: EventSubscriptionCollisionsWire | undefined;
+  if (willBeEnabled && (matchChanged || arming)) {
+    const report = await collisionsForWrite(
+      db,
+      plugins,
+      user.orgId,
+      {
+        eventKeys: merged.eventKeys as string[],
+        filters,
+        target: row.target as EventSubscriptionTargetWire,
+      },
+      id,
+    );
+    if (report.blocking.length > 0 && body.allowCollision !== true) {
+      const resp: EventSubscriptionCollisionErrorWire = {
+        error: collisionBlockMessage(report),
+        collisions: collisionsToWire(report),
+      };
+      return c.json(resp, 409);
+    }
+    if (report.blocking.length > 0) {
+      console.warn(
+        `[events] collision override: user ${user.id} updated subscription ${id} over ` +
+          report.blocking.map((b) => b.subscription.id).join(", "),
+      );
+    }
+    if (report.blocking.length > 0 || report.overlapping.length > 0) {
+      collisions = collisionsToWire(report);
+    }
+  }
+
   const updated = await db
     .update(eventSubscriptions)
     .set({
       name: merged.name,
       eventKeys: merged.eventKeys,
       filters,
-      enabled: body.enabled ?? row.enabled,
+      enabled: willBeEnabled,
       updatedAt: Date.now(),
     })
     .where(eq(eventSubscriptions.id, id))
     .returning();
 
-  const resp: PatchEventSubscriptionResponse = rowToSubscription(updated[0]);
+  const resp: PatchEventSubscriptionResponse = {
+    ...rowToSubscription(updated[0]),
+    ...(collisions !== undefined ? { collisions } : {}),
+  };
   return c.json(resp);
 });
 
