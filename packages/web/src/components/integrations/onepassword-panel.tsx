@@ -9,6 +9,7 @@ import { FieldRow } from "~/components/settings/field-row";
 import { OnePasswordPicker, type OnePasswordComposedReference } from "~/components/settings/onepassword-picker";
 import { Section } from "~/components/settings/section";
 import { ServiceIcon } from "~/components/service-icon";
+import { displayName } from "./display-name";
 
 /**
  * 1Password on `/integrations`. One home for the org token, the personal
@@ -64,10 +65,11 @@ export function OnePasswordPanel() {
             </p>
           )}
           <div className="mt-6 border-t border-line pt-4">
-            <h3 className="text-sm font-medium text-ink">Credentials backed by 1Password</h3>
+            <h3 className="text-sm font-medium text-ink">Integrations using 1Password</h3>
             <p className="mt-0.5 text-xs text-muted">
-              Valet stores a pointer, never the secret. When something needs one of these
-              credentials, the value is read from 1Password at that moment.
+              On the left, the integration the credential is for. On the right, the 1Password
+              item it comes from. Valet stores the pointer, never the secret, and reads the
+              value at the moment something needs it.
             </p>
             <ReferenceList isAdmin={isAdmin} />
           </div>
@@ -334,7 +336,7 @@ function ReferenceRow({
 }) {
   return (
     <FieldRow
-      label={cred.service}
+      label={displayName(cred.service)}
       hint={`${CREDENTIAL_KIND_LABEL[cred.type] ?? cred.type} · ${
         scope === "org" ? "everyone in the organization" : "only you"
       }`}

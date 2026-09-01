@@ -194,7 +194,9 @@ describe("OnePasswordPanel", () => {
       ],
     };
     render(<OnePasswordPanel />);
-    expect(screen.getByText("linear")).toBeTruthy();
+    // Rendered as the product name: the left column is the integration, not
+    // anything in 1Password.
+    expect(screen.getByText("Linear")).toBeTruthy();
     // The reference reads as the three things a person looks for in
     // 1Password, with the raw `op://` string kept on `title` for copying.
     expect(screen.getByText("Vault One")).toBeTruthy();
