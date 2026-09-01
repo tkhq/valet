@@ -53,11 +53,16 @@ export function mentionChannelScope(sub: EventSubscriptionWire): string | null {
   const names: string[] = [];
   for (const f of sub.filters) {
     if (f.field !== "channel" || (f.op !== "eq" && f.op !== "in")) continue;
-    if (Array.isArray(f.value)) names.push(...f.value);
-    else names.push(f.label ?? f.value);
+    if (Array.isArray(f.value)) {
+      // Prefer the aligned display labels; fall back to raw ids per entry.
+      names.push(...f.value.map((v, i) => f.labels?.[i] ?? v));
+    } else {
+      names.push(f.label ?? f.value);
+    }
   }
   if (names.length === 0) return "any channel";
   if (names.length === 1) return `only ${names[0]}`;
+  if (names.length === 2) return `only ${names[0]} and ${names[1]}`;
   return `${names.length} channels`;
 }
 

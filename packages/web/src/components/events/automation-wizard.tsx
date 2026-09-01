@@ -244,14 +244,21 @@ export function AutomationWizard({
     setError(null);
 
     if (outcome === "reply") {
-      // One channel → `eq` with its display label; several → `in` (the wire
-      // label field is single-valued, so a list carries ids only). The server
-      // adds the creator's Slack user filter itself.
+      // One channel → `eq` with its display label; several → `in` with the
+      // labels carried alongside, so later surfaces show channel names, not
+      // raw C… ids. The server adds the creator's Slack user filter itself.
       const channelFilters: EventSubscriptionFilterWire[] = anyChannel
         ? []
         : replyChannels.length === 1
           ? [{ field: "channel", op: "eq", value: replyChannels[0].id, label: replyChannels[0].label }]
-          : [{ field: "channel", op: "in", value: replyChannels.map((ch) => ch.id) }];
+          : [
+              {
+                field: "channel",
+                op: "in",
+                value: replyChannels.map((ch) => ch.id),
+                labels: replyChannels.map((ch) => ch.label),
+              },
+            ];
       createSubscription.mutate(
         {
           name: name.trim(),

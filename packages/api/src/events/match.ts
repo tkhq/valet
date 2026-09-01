@@ -109,10 +109,21 @@ export function subscriptionMatchesEvent(
   payload: unknown,
   catalog: EventCatalogEntry[],
 ): boolean {
-  return (
-    eventKeyMatches(eventKey, sub.eventKeys as string[]) &&
-    filtersMatch(payload, eventKey, sub.filters as SubscriptionFilter[], catalog)
-  );
+  if (!eventKeyMatches(eventKey, sub.eventKeys as string[])) return false;
+  // The match-time arm of the mention-scope rule (events/mention-scope.ts,
+  // TKAI-299). A `slack.app_mention` subscription with no user filter
+  // predates the write-time gate and would fire for EVERY user's mentions.
+  // It fails closed here — the miss is drop-logged as `filter_excluded`, so
+  // the owner sees the rule stopped matching, edits it, and the write gate
+  // scopes it. The key is duplicated from mention-scope.ts because this
+  // module stays pure (mention-scope imports it).
+  if (
+    eventKey === "slack.app_mention" &&
+    !(sub.filters as SubscriptionFilter[]).some((f) => f.field === "user")
+  ) {
+    return false;
+  }
+  return filtersMatch(payload, eventKey, sub.filters as SubscriptionFilter[], catalog);
 }
 
 /**

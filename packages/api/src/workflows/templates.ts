@@ -52,8 +52,7 @@ import { nextFireAt } from "./schedule-service.js";
 // Same validator the Triggers UI posts through (`routes/events.ts`), so a
 // template-declared subscription and a hand-made one are held to one rule.
 // `trigger-service.ts` set the precedent for importing it from a service.
-import { validateSubscription } from "../routes/events.js";
-import { enforceMentionScope } from "../events/mention-scope.js";
+import { validateSubscriptionWrite } from "../events/subscription-write.js";
 import type { SubscriptionFilter } from "../events/match.js";
 import { newWorkflowId, validateDefinitionInput, type WorkflowOwner } from "./service.js";
 import type {
@@ -940,37 +939,29 @@ export async function installWorkflowTemplate(
     // tail keeps two installs of one template apart in the Triggers list —
     // the same suffix rule the schedule name uses.
     const name = `${event.name} (${workflowId.slice(-6)})`;
-    const invalid = validateSubscription(deps.plugins, {
-      name,
-      eventKeys: event.eventKeys,
-      filters,
-      target: { kind: "workflow", workflowId },
-    });
-    if (invalid !== null) {
-      // A filter field the selected keys do not declare lands here. That
-      // is worth refusing loudly: the ingest matcher only reads the
-      // arriving event's own catalog entry, so an undeclared field arms a
-      // subscription that matches nothing and reports nothing, forever.
+    // One gate for validation AND mention scoping (TKAI-299): this insert
+    // path must hold the same rules the CRUD writers do, or a template
+    // becomes the unscoped back door. A validation failure is worth refusing
+    // loudly: the ingest matcher only reads the arriving event's own catalog
+    // entry, so an undeclared filter field arms a subscription that matches
+    // nothing and reports nothing, forever. No template names
+    // `slack.app_mention` today; one that does needs a channel filter (an
+    // install input) and a Slack-linked installer.
+    const write = await validateSubscriptionWrite(
+      deps.db,
+      deps.plugins,
+      { name, eventKeys: event.eventKeys, filters, target: { kind: "workflow", workflowId } },
+      { creatorUserId: owner.userId, anyChannel: false, matchChanged: true },
+    );
+    if (!write.ok) {
       return {
         ok: false,
         code: "broken_template",
         error: `Template "${templateId}" from "${owned.pluginName}" declares an event trigger that cannot be armed, so it cannot be installed. Report the template id.`,
-        errors: [invalid],
+        errors: [write.error],
       };
     }
-    // Mention scoping (TKAI-299): this insert path must hold the same rule
-    // the CRUD writers do, or a template becomes the unscoped back door. No
-    // template names `slack.app_mention` today; one that does needs a
-    // channel filter (an install input) and a Slack-linked installer.
-    const scoped = await enforceMentionScope(deps.db, deps.plugins, owner.userId, {
-      eventKeys: event.eventKeys,
-      filters,
-      anyChannel: false,
-    });
-    if (!scoped.ok) {
-      return { ok: false, code: "invalid_input", error: scoped.error, errors: [scoped.error] };
-    }
-    subscriptions.push({ name, eventKeys: event.eventKeys, filters: scoped.filters });
+    subscriptions.push({ name, eventKeys: event.eventKeys, filters: write.filters });
   }
 
   let workflowName = owned.template.name;

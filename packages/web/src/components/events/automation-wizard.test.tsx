@@ -166,7 +166,11 @@ describe("AutomationWizard", () => {
     fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
 
     const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
-    expect(body.filters).toEqual([{ field: "channel", op: "in", value: ["C123", "C456"] }]);
+    // The free-text fallback labels a typed id with itself; the picker path
+    // would carry channel names here instead.
+    expect(body.filters).toEqual([
+      { field: "channel", op: "in", value: ["C123", "C456"], labels: ["C123", "C456"] },
+    ]);
   });
 
   it("reply outcome with Any channel posts no channel filter and the anyChannel flag", () => {

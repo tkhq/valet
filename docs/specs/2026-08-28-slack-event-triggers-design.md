@@ -203,14 +203,25 @@ select `slack.app_mention` — the exact key or a trailing wildcard — is a
    itself, so an edit that leaves channel scope alone needs no flag; only a
    patch that strips an existing channel filter must assert `anyChannel`.
 
-Every subscription writer shares the gate: the subscriptions CRUD routes
-(`routes/events.ts`), the workflow trigger service
+Every subscription writer goes through ONE gate:
+`validateSubscriptionWrite` (`events/subscription-write.ts`), which runs the
+catalog validation and the mention rules together. The writers are the
+subscriptions CRUD routes (`routes/events.ts`), the workflow trigger service
 (`workflows/trigger-service.ts`), and the template installer
-(`workflows/templates.ts`). On PATCH the gate re-runs only when the
-patch changes `filters` or `eventKeys`, and it keys to the row's CREATOR
-(`created_by`), not the caller — an enable/disable toggle still works after
-the creator unlinks Slack, and a colleague's edit of an org-owned row cannot
-re-point the scope at themselves.
+(`workflows/templates.ts`). A future writer that calls the gate gets the
+scoping for free; there is no separate validate-only entry point to call by
+mistake. On PATCH the mention rules re-run only when the patch changes
+`filters` or `eventKeys`, and they key to the row's CREATOR (`created_by`),
+not the caller — an enable/disable toggle still works after the creator
+unlinks Slack, and a colleague's edit of an org-owned row cannot re-point the
+scope at themselves.
+
+The matcher carries one arm of the rule too: `subscriptionMatchesEvent`
+(`events/match.ts`) fails closed on a mention subscription that has no `user`
+filter. A row created before this gate therefore stops firing instead of
+leaking other users' mentions; the miss is drop-logged as `filter_excluded`,
+so its owner sees the stop in the Problems tab, edits the row, and the write
+gate scopes it.
 
 One consequence: because filters apply to every key a subscription selects, a
 mention subscription cannot mix in ANY other key. The injected user filter
@@ -228,8 +239,10 @@ selection (or the explicit "Any channel" checkbox, off by default) and states
 that only the creator's own mentions fire the rule; the raw event picker and
 the workflow TriggerDialog show the same checkbox when `slack.app_mention` is
 selected; the subscriptions list labels each mention row "only #channel",
-"N channels", or "any channel". Rows created before this change are
-untouched until their filters are next edited.
+"N channels", or "any channel" (multi-channel `in` filters carry aligned
+display `labels` on the wire, so the list shows names, not raw ids).
+`slack.message` scoping is deliberately out of scope here — TKAI-302 tracks
+that product decision.
 
 ## Custom slash commands that route to triggers or assistants
 

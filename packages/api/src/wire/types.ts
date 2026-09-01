@@ -3732,6 +3732,11 @@ export interface EventSubscriptionFilterWire {
    * it. Persisted verbatim in the `filters` jsonb.
    */
   label?: string;
+  /**
+   * Optional display labels for an `in` list, aligned with `value` by index
+   * (a channel id list shown as "#eng, #ops"). Matching ignores it.
+   */
+  labels?: string[];
 }
 
 /** One provider-populated choice for a filter value (a Slack user, a repo). */

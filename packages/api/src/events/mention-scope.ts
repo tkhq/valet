@@ -14,15 +14,16 @@
  *    `anyChannel` is not persisted: after this gate, a stored mention
  *    subscription with no channel filter IS the any-channel state.
  *
- * Both subscription writers call this after `validateSubscription` — the
- * events CRUD routes (`routes/events.ts`) and the workflow trigger service
- * (`workflows/trigger-service.ts`) — so the rule cannot be evaded through
- * either surface. Enforcement is write-time only: the ingest matcher applies
- * the stored filters unchanged.
+ * Every writer reaches this through `validateSubscriptionWrite`
+ * (`events/subscription-write.ts`), the one gate in front of every
+ * `event_subscriptions` write. The matcher also carries one arm of the rule:
+ * `subscriptionMatchesEvent` fails closed on a mention subscription with no
+ * user filter, so a row from before this gate cannot keep firing unscoped.
  */
 import type { ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { identityForUser } from "../channels/identity-links.js";
+import { allCatalogEntries } from "./ingest.js";
 import { eventKeyMatches, type SubscriptionFilter } from "./match.js";
 
 export const SLACK_MENTION_KEY = "slack.app_mention";
@@ -53,10 +54,7 @@ function isCreatorUserFilter(f: SubscriptionFilter, slackUserId: string): boolea
 
 /** Catalog entries the eventKeys patterns select, across every plugin. */
 function selectedEntries(plugins: ValetPlugin[], eventKeys: string[]) {
-  return plugins
-    .flatMap((p) => p.triggers ?? [])
-    .flatMap((t) => t.catalog)
-    .filter((e) => eventKeyMatches(e.key, eventKeys));
+  return allCatalogEntries(plugins).filter((e) => eventKeyMatches(e.key, eventKeys));
 }
 
 /**
