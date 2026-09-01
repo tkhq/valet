@@ -673,6 +673,75 @@ describe("ChannelHost outbound delivery", () => {
     ]);
   });
 
+  it("does NOT auto-post the final message when the agent replied via reply_to_origin mid-turn", async () => {
+    // The agent stays in control: an explicit successful reply IS the
+    // result, so the mechanical final-message post stands down. Only the
+    // ack (posted before the action ran) reaches the thread from the
+    // safety net.
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    const base = {
+      type: "message" as const,
+      sessionId: session.id,
+      threadId,
+      parentId: null,
+      createdAt: Date.now(),
+      role: "assistant" as const,
+      queueItemId: "qi-explicit-1",
+    };
+    await engineStore.appendEntries(session.id, threadId, [
+      { ...base, id: "ex-msg-1", content: "On it — checking now." },
+    ]);
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "ex-msg-1", reason: "end_turn" },
+      },
+      `explicit-ack-${randomUUID()}`,
+    );
+    await vi.waitFor(() => {
+      expect(fakeTransport.sent.some((s) => s.message.markdown.includes("On it"))).toBe(true);
+    });
+
+    // Mid-turn: the agent replies explicitly (successful call persisted),
+    // then ends the turn with a wrap-up message.
+    await engineStore.appendEntries(session.id, threadId, [
+      {
+        ...base,
+        id: "ex-msg-2",
+        content: "",
+        parts: [
+          {
+            type: "tool_call",
+            callId: "tc-explicit-reply",
+            toolName: "call_tool",
+            status: "completed",
+            args: { tool_id: "slack.reply_to_origin", params: { text: "Here is the formatted answer." } },
+            result: { text: "ok", details: { ok: true } },
+          },
+        ],
+      },
+      { ...base, id: "ex-msg-3", content: "Wrapping up my notes.", stopReason: "end_turn" },
+    ]);
+    for (const messageId of ["ex-msg-2", "ex-msg-3"]) {
+      await eventStream.append(
+        {
+          sessionId: session.id,
+          threadId,
+          timestamp: Date.now(),
+          event: { type: "message_end", threadId, messageId, reason: "end_turn" },
+        },
+        `explicit-${messageId}-${randomUUID()}`,
+      );
+    }
+
+    // The final message must NOT post — the explicit reply already did.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(fakeTransport.sent.map((s) => s.message.markdown)).toEqual(["On it — checking now."]);
+  });
+
   it("stands down when the submission already replied through reply_to_origin", async () => {
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("fake:99").id;
