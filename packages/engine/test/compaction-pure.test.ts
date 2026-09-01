@@ -5,12 +5,14 @@ import {
   entriesToAgentMessages,
   entriesToSummaryMessages,
   estimateContextTokens,
+  estimateLiveContextTokens,
   estimateTokens,
   estimateEntryTokens,
   extractFileContext,
   planPrune,
   selectCutPoint,
   storedToolResultText,
+  stripAnalysisScratchpad,
   tailBudget,
   turns,
   usableTokens,
@@ -453,6 +455,61 @@ describe("compaction: estimateContextTokens", () => {
   });
 });
 
+describe("compaction: estimateLiveContextTokens (TKAI-306)", () => {
+  const assistantMsg = (usageTotal: number, text = ""): Message => ({
+    role: "assistant",
+    content: text ? [{ type: "text", text }] : [],
+    api: "anthropic-messages",
+    provider: "anthropic",
+    model: "m",
+    usage: {
+      input: usageTotal, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: usageTotal,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "stop",
+    timestamp: 1,
+  });
+
+  it("anchors on the newest assistant usage and estimates only later messages", () => {
+    const messages: Message[] = [
+      { role: "user", content: "ignored by the anchor", timestamp: 1 },
+      assistantMsg(1_000),
+      { role: "user", content: "x".repeat(40), timestamp: 2 }, // 10 estimated tokens
+    ];
+    // System prompt is inside the anchor's input — must not be re-added.
+    expect(estimateLiveContextTokens("s".repeat(400), messages)).toBe(1_010);
+  });
+
+  it("falls back to the pure estimate when no message carries real usage", () => {
+    const messages: Message[] = [
+      { role: "user", content: "x".repeat(40), timestamp: 1 },
+      assistantMsg(0, "y".repeat(40)), // rehydrated: fabricated zero usage
+    ];
+    // 10 (system) + 10 (user) + 10 (assistant text)
+    expect(estimateLiveContextTokens("s".repeat(40), messages)).toBe(30);
+  });
+
+  it("skips zero-usage assistant messages when an older anchor exists", () => {
+    const messages: Message[] = [
+      assistantMsg(500),
+      { role: "user", content: "x".repeat(40), timestamp: 2 }, // 10
+      assistantMsg(0, "y".repeat(40)), // 10
+    ];
+    expect(estimateLiveContextTokens(undefined, messages)).toBe(520);
+  });
+});
+
+describe("compaction: stripAnalysisScratchpad (TKAI-306)", () => {
+  it("removes the analysis block and keeps the summary", () => {
+    const raw = "<analysis>\ndraft notes\n</analysis>\n\n## Goal\n- ship it";
+    expect(stripAnalysisScratchpad(raw)).toBe("## Goal\n- ship it");
+  });
+
+  it("passes through output without an analysis block", () => {
+    expect(stripAnalysisScratchpad("## Goal\n- x")).toBe("## Goal\n- x");
+  });
+});
+
 describe("compaction: storedToolResultText", () => {
   it("returns the stored string or JSON", () => {
     expect(storedToolResultText({ result: "out" })).toBe("out");
@@ -462,6 +519,45 @@ describe("compaction: storedToolResultText", () => {
   it("returns undefined for missing results and legacy prune placeholders", () => {
     expect(storedToolResultText({})).toBeUndefined();
     expect(storedToolResultText({ result: { elided: true, reason: "pruned" } })).toBeUndefined();
+  });
+});
+
+describe("compaction: thread_read escape hatch (TKAI-306)", () => {
+  const fixture: SessionEntry[] = [
+    user("u1", "old prompt"),
+    {
+      id: "c1",
+      sessionId: "s",
+      threadId: "t",
+      parentId: "u1",
+      type: "compaction",
+      summary: "## Goal\n- resumed",
+      coveredEntryIds: ["u1"],
+      tokenCountBefore: 100,
+      tokenCountAfter: 10,
+      createdAt: 2,
+    },
+    user("u2", "new prompt"),
+  ];
+  const modelHint = { api: "anthropic-messages", provider: "anthropic", id: "m" };
+
+  it("the summary wrapper names thread_read and the thread key when given", () => {
+    const messages = entriesToAgentMessages(fixture, modelHint, { threadKey: "web:default" });
+    const first = messages[0];
+    if (first.role !== "user" || typeof first.content === "string") throw new Error("expected block user message");
+    const text = first.content[0];
+    if (text.type !== "text") throw new Error("expected text block");
+    expect(text.text).toContain("thread_read");
+    expect(text.text).toContain('"web:default"');
+  });
+
+  it("no hint without a thread key", () => {
+    const messages = entriesToAgentMessages(fixture, modelHint);
+    const first = messages[0];
+    if (first.role !== "user" || typeof first.content === "string") throw new Error("expected block user message");
+    const text = first.content[0];
+    if (text.type !== "text") throw new Error("expected text block");
+    expect(text.text).not.toContain("thread_read");
   });
 });
 

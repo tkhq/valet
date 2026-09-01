@@ -56,13 +56,14 @@ import { Compile } from "typebox/compile";
 import type { TSchema } from "typebox";
 import {
   applyPrune,
-  estimateContextTokens,
+  estimateLiveContextTokens,
   estimateTokens,
   estimateTotalTokens,
   extractFileContext,
   planPrune,
   selectCutPoint,
   summarize,
+  SummarizeOverflowError,
   usableTokens,
   type PruneResult,
   type SummarizeResult,
@@ -134,6 +135,18 @@ const CREDENTIAL_RELEASE_BACKOFF_MS = 4_000;
 
 const AUTO_CONTINUE_PROMPT =
   "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.";
+
+/** Proactive compaction stops retrying after this many consecutive failures (TKAI-306). */
+const MAX_CONSECUTIVE_COMPACTION_FAILURES = 3;
+
+/**
+ * The summarize call itself can overflow the summarizer model. Each retry
+ * drops the oldest half of the head entries fed to the summarizer (the
+ * CompactionEntry still covers the full head — the previous summary anchors
+ * what the truncated input loses). Bounded like Claude Code's
+ * prompt-too-long retry (TKAI-306).
+ */
+const MAX_SUMMARIZE_OVERFLOW_RETRIES = 3;
 
 let nextId = 1;
 function uid(prefix: string): string {
@@ -270,6 +283,15 @@ export class Thread {
    * still exceeds usable on a small-context model).
    */
   private skipNextProactiveCheck = false;
+  /**
+   * Consecutive proactive-compaction failures (TKAI-306). At
+   * MAX_CONSECUTIVE_COMPACTION_FAILURES the proactive trigger opens the
+   * circuit and stops retrying; any successful compaction (manual /compact
+   * included) resets it. Claude Code's telemetry motivated the cap: sessions
+   * with irrecoverably oversized context retried a doomed summarizer call on
+   * every turn.
+   */
+  private consecutiveCompactionFailures = 0;
   /**
    * True when a transcript was rehydrated from persisted entries (spec
    * decision 5). The next `runItemInner` consumes it: a pre-turn proactive
@@ -1573,6 +1595,7 @@ export class Thread {
   rehydrateTranscript(entries: SessionEntry[]): void {
     this.agent.state.messages = entriesToAgentMessages(entries, this.effectiveModelLenient(), {
       attributeAuthors: this.attributeAuthors,
+      threadKey: this.key,
     });
     // Arm the pre-turn proactive check (spec decision 5) so the first
     // post-restart turn is protected. The trigger estimates the rehydrated
@@ -2629,7 +2652,7 @@ export class Thread {
           provider: resumeModel.provider,
           id: resumeModel.id,
         },
-        { attributeAuthors: this.attributeAuthors },
+        { attributeAuthors: this.attributeAuthors, threadKey: this.key },
       );
       this.agent.state.tools = this.buildTools();
 
@@ -2924,10 +2947,7 @@ export class Thread {
         try {
           await this.compactThread({ mode: "proactive", autoContinue: false });
         } catch (err) {
-          this.emitError(
-            "compaction_failed",
-            err instanceof Error ? err.message : String(err),
-          );
+          this.recordProactiveCompactionFailure(err);
         }
       }
     }
@@ -2980,10 +3000,7 @@ export class Thread {
         try {
           await this.compactThread({ mode: "proactive" });
         } catch (err) {
-          this.emitError(
-            "compaction_failed",
-            err instanceof Error ? err.message : String(err),
-          );
+          this.recordProactiveCompactionFailure(err);
         }
       }
     } finally {
@@ -3163,6 +3180,26 @@ export class Thread {
     }
   }
 
+  /**
+   * Count a failed proactive compaction toward the circuit breaker and emit
+   * the failure. At the cap, emit a distinct event so clients can tell the
+   * user proactive compaction gave up (a plain compaction_failed looks like
+   * a one-off).
+   */
+  private recordProactiveCompactionFailure(err: unknown): void {
+    this.consecutiveCompactionFailures++;
+    this.emitError(
+      "compaction_failed",
+      err instanceof Error ? err.message : String(err),
+    );
+    if (this.consecutiveCompactionFailures === MAX_CONSECUTIVE_COMPACTION_FAILURES) {
+      this.emitError(
+        "compaction_circuit_open",
+        `Automatic compaction stopped after ${MAX_CONSECUTIVE_COMPACTION_FAILURES} consecutive failures. Run /compact to retry manually.`,
+      );
+    }
+  }
+
   private shouldCompactProactive(): boolean {
     if (this.skipNextProactiveCheck) {
       this.skipNextProactiveCheck = false;
@@ -3170,25 +3207,31 @@ export class Thread {
     }
     const cfg = this.session.options.compaction;
     if (cfg?.enabled === false) return false;
+    // Circuit breaker (TKAI-306): a thread whose proactive compaction keeps
+    // failing must not hammer the summarizer on every turn. A successful
+    // compaction (including manual /compact) closes the breaker again.
+    if (this.consecutiveCompactionFailures >= MAX_CONSECUTIVE_COMPACTION_FAILURES) {
+      return false;
+    }
     // Budget against the turn's effective model (spec decision 4):
     // shouldCompactProactive only runs from runItem's try block, before the
     // finally restores the baseline, so `agent.state.model` is the resolved
     // turn model — including resolver-only specs `resolveModelId` can't see.
     const usable = usableTokens(this.agent.state.model, cfg);
     if (usable === 0) return false;
-    // Trigger on the same char-based estimate the cut-point budget uses —
-    // never on provider-reported usage. Reported totals include cache reads
-    // and system/tool overhead that compaction cannot reclaim, so a
-    // usage-based trigger compacts long cached threads that do not need it
-    // (TKAI-305). This runs before the turn's finally-block restores the
-    // baseline prompt, so the estimate sees the overlays the turn used.
+    // Trigger on the usage-anchored estimate (TKAI-306): the last real
+    // response's reported total is the exact context of that request
+    // (system prompt and tool definitions included), and only messages
+    // appended since are estimated with the cut-point budget's char ruler.
+    // This runs before the turn's finally-block restores the baseline
+    // prompt, so the fallback estimate sees the overlays the turn used.
     // Same role filter as `convertToLlm` — custom AgentMessage kinds never
     // reach the LLM, so they must not count toward the context estimate.
     const llmMessages = this.agent.state.messages.filter(
       (m): m is Message =>
         m.role === "user" || m.role === "assistant" || m.role === "toolResult",
     );
-    const estimated = estimateContextTokens(this.agent.state.systemPrompt, llmMessages);
+    const estimated = estimateLiveContextTokens(this.agent.state.systemPrompt, llmMessages);
     return estimated >= usable;
   }
 
@@ -3293,21 +3336,40 @@ export class Thread {
     // finally covers the summarizer AND the persist/rebuild steps.
     try {
       const previousSummary = findMostRecentCompaction(entries)?.summary;
-      summaryResult = await summarize({
-        headEntries: head,
-        model,
-        toolOutputMaxChars: cfg?.toolOutputMaxChars,
-        attributeAuthors: this.attributeAuthors,
-        previousSummary,
-        instructions: opts.instructions,
-        // Reactive compaction fires WITHIN a claimed turn (and proactive
-        // just after runAgent, still before the turn's finally clears it),
-        // so `turnApiKey` is live here. Without this, a BYO-key session
-        // whose only key comes from the host `resolveModel` seam would fail
-        // the summarizer completion on first context overflow. Undefined
-        // when no resolver is wired (env-fallback path) — behavior unchanged.
-        apiKey: this.turnApiKey,
-      });
+      // Overflow retry (TKAI-306): if the summarize call itself blows the
+      // summarizer model's context, drop the oldest half of the head input
+      // and try again. The CompactionEntry below still covers the FULL head
+      // — under overflow duress losing the oldest detail from the summary
+      // beats failing the compaction outright, and `previousSummary` still
+      // anchors facts from earlier compactions.
+      let headForSummary = head;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          summaryResult = await summarize({
+            headEntries: headForSummary,
+            model,
+            toolOutputMaxChars: cfg?.toolOutputMaxChars,
+            attributeAuthors: this.attributeAuthors,
+            previousSummary,
+            instructions: opts.instructions,
+            // Reactive compaction fires WITHIN a claimed turn (and proactive
+            // just after runAgent, still before the turn's finally clears it),
+            // so `turnApiKey` is live here. Without this, a BYO-key session
+            // whose only key comes from the host `resolveModel` seam would fail
+            // the summarizer completion on first context overflow. Undefined
+            // when no resolver is wired (env-fallback path) — behavior unchanged.
+            apiKey: this.turnApiKey,
+          });
+          break;
+        } catch (err) {
+          if (!(err instanceof SummarizeOverflowError)) throw err;
+          const truncated = headForSummary.slice(Math.floor(headForSummary.length / 2));
+          if (attempt + 1 >= MAX_SUMMARIZE_OVERFLOW_RETRIES || truncated.length === 0 || truncated.length === headForSummary.length) {
+            throw err;
+          }
+          headForSummary = truncated;
+        }
+      }
 
       // Step 4: persist CompactionEntry.
       const compactionEntry: CompactionEntry = {
@@ -3330,6 +3392,9 @@ export class Thread {
       });
       // Fenced under the current turn's attempt (compaction is always in-turn).
       await store.appendEntries(session.id, this.id, [compactionEntry], this.fence);
+      // A persisted summary closes the failure circuit breaker — any mode's
+      // success proves the summarizer works again (manual /compact included).
+      this.consecutiveCompactionFailures = 0;
 
       // Step 5: rewrite agent.state.messages. The simplest and most
       // correct path is to rebuild from the now-augmented DAG.
@@ -3341,7 +3406,7 @@ export class Thread {
           provider: effectiveModel.provider,
           id: effectiveModel.id,
         },
-        { attributeAuthors: this.attributeAuthors },
+        { attributeAuthors: this.attributeAuthors, threadKey: this.key },
       );
     } finally {
       await session.emit(
@@ -4376,6 +4441,14 @@ export function entriesToAgentMessages(
      * entries are exempt — their envelope already names the sender.
      */
     attributeAuthors?: boolean;
+    /**
+     * This thread's key. When set and a compaction is active, the
+     * <previous-context> wrapper tells the model the covered entries are
+     * still readable via thread_read (the DAG keeps everything; only the
+     * live context drops it). Claude Code's transcript-path escape hatch,
+     * adapted (TKAI-306).
+     */
+    threadKey?: string;
   },
 ): AgentMessage[] {
   // 1. Find the most recent CompactionEntry. Everything in its coveredEntryIds is dropped.
@@ -4390,12 +4463,15 @@ export function entriesToAgentMessages(
 
   const out: AgentMessage[] = [];
   if (activeCompaction) {
+    const escapeHatch = opts?.threadKey
+      ? `\n\nIf you need specific details from before this summary (exact code, error text, tool output), read them with the thread_read tool: key "${opts.threadKey}", includeCompacted true.`
+      : "";
     out.push({
       role: "user",
       content: [
         {
           type: "text",
-          text: `<previous-context>\n${activeCompaction.summary}\n</previous-context>`,
+          text: `<previous-context>\n${activeCompaction.summary}\n</previous-context>${escapeHatch}`,
         },
       ],
       timestamp: 0,

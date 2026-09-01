@@ -647,6 +647,180 @@ describe("compaction: summarizer input (TKAI-305)", () => {
   });
 });
 
+describe("compaction: summarizer failure handling (TKAI-306)", () => {
+  it("summarize rejects on an errored completion instead of storing an empty summary", async () => {
+    const faux = registerFauxProvider({
+      provider: "compact-summ-error",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    faux.setResponses([
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "provider exploded" }),
+    ]);
+    await expect(
+      summarize({
+        headEntries: [
+          { id: "u-1", sessionId: "s", threadId: "t", parentId: null, type: "message", role: "user", content: "hi", createdAt: 1 },
+        ],
+        model: faux.getModel("tiny")!,
+      }),
+    ).rejects.toThrow("provider exploded");
+    faux.unregister();
+  });
+
+  it("summarize strips the <analysis> scratchpad from the stored summary", async () => {
+    const faux = registerFauxProvider({
+      provider: "compact-summ-analysis",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    faux.setResponses([
+      fauxAssistantMessage("<analysis>\nchronological notes\n</analysis>\n\n## Goal\n- ship"),
+    ]);
+    const result = await summarize({
+      headEntries: [
+        { id: "u-1", sessionId: "s", threadId: "t", parentId: null, type: "message", role: "user", content: "hi", createdAt: 1 },
+      ],
+      model: faux.getModel("tiny")!,
+    });
+    expect(result.summary).toBe("## Goal\n- ship");
+    expect(result.summary).not.toContain("chronological notes");
+    faux.unregister();
+  });
+
+  it("an overflowing summarize call retries with a truncated head and still compacts", async () => {
+    const inputSizes: number[] = [];
+    const faux = registerFauxProvider({
+      provider: "compact-summ-overflow",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+    });
+    faux.setResponses([
+      // The triggering turn's assistant response.
+      fauxAssistantMessage("trigger response"),
+      // Summarizer attempt 1: context overflow (Anthropic's error shape).
+      (ctx: { messages: unknown[] }) => {
+        inputSizes.push(ctx.messages.length);
+        return fauxAssistantMessage("", {
+          stopReason: "error",
+          errorMessage: "prompt is too long: 100 tokens > 50 maximum",
+        });
+      },
+      // Summarizer attempt 2: succeeds on the truncated head.
+      (ctx: { messages: unknown[] }) => {
+        inputSizes.push(ctx.messages.length);
+        return fauxAssistantMessage(SUMMARY_RESPONSE);
+      },
+    ]);
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel("tiny")!,
+      compaction: { tailTurns: 1, autoContinue: false },
+    });
+    const thread = session.thread();
+    await store.appendEntries(session.id, thread.id, [
+      { id: "e-1", sessionId: session.id, threadId: thread.id, parentId: null, type: "message", role: "user", content: "first prompt", createdAt: 1 },
+      { id: "e-2", sessionId: session.id, threadId: thread.id, parentId: "e-1", type: "message", role: "assistant", content: "first response", createdAt: 2 },
+      { id: "e-3", sessionId: session.id, threadId: thread.id, parentId: "e-2", type: "message", role: "user", content: "second prompt", createdAt: 3 },
+      { id: "e-4", sessionId: session.id, threadId: thread.id, parentId: "e-3", type: "message", role: "assistant", content: "second response", createdAt: 4 },
+    ]);
+
+    const receipt = await session.prompt(OVER_BUDGET_PROMPT);
+    await waitFor(
+      () =>
+        events.some(
+          (e) => e.event.type === "compaction_end" && e.event.threadId === receipt.threadId,
+        ),
+    );
+
+    const entries = await store.getEntries(session.id, thread.id);
+    const compactions = entries.filter((e): e is CompactionEntry => e.type === "compaction");
+    expect(compactions).toHaveLength(1);
+    // The CompactionEntry still covers the FULL head even though the retry
+    // summarized a truncated slice.
+    expect(compactions[0].coveredEntryIds).toContain("e-1");
+    // The retry fed the summarizer strictly less input than the first attempt.
+    expect(inputSizes).toHaveLength(2);
+    expect(inputSizes[1]).toBeLessThan(inputSizes[0]);
+    faux.unregister();
+  });
+
+  it("proactive compaction opens the circuit breaker after 3 consecutive failures; a manual success closes it", async () => {
+    const faux = registerFauxProvider({
+      provider: "compact-breaker",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 50, maxTokens: 5 }],
+    });
+    const summarizerError = () =>
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "summarizer down" });
+    faux.setResponses([
+      fauxAssistantMessage("r1"), summarizerError, // turn 1: compaction failure 1
+      fauxAssistantMessage("r2"), summarizerError, // turn 2: failure 2
+      fauxAssistantMessage("r3"), summarizerError, // turn 3: failure 3 → breaker opens
+      fauxAssistantMessage("r4"),                  // turn 4: NO summarizer call queued
+    ]);
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel("tiny")!,
+      compaction: { tailTurns: 1, autoContinue: false },
+    });
+    const thread = session.thread();
+    await store.appendEntries(session.id, thread.id, [
+      { id: "e-1", sessionId: session.id, threadId: thread.id, parentId: null, type: "message", role: "user", content: "first prompt", createdAt: 1 },
+      { id: "e-2", sessionId: session.id, threadId: thread.id, parentId: "e-1", type: "message", role: "assistant", content: "first response", createdAt: 2 },
+    ]);
+
+    for (let turn = 1; turn <= 4; turn++) {
+      const receipt = await session.prompt(OVER_BUDGET_PROMPT);
+      await waitFor(
+        () =>
+          events.filter(
+            (e) => e.event.type === "turn_end" && e.event.threadId === receipt.threadId,
+          ).length >= turn,
+      );
+    }
+
+    // Three attempts ran; the fourth turn skipped compaction entirely.
+    const starts = events.filter((e) => e.event.type === "compaction_start");
+    expect(starts).toHaveLength(3);
+    // The breaker announced itself with a distinct error code.
+    const circuitEvents = events.filter(
+      (e) => e.event.type === "error" && e.event.code === "compaction_circuit_open",
+    );
+    expect(circuitEvents).toHaveLength(1);
+    // If the fourth turn had tried to compact, this response would be consumed.
+    expect(faux.getPendingResponseCount()).toBe(0);
+
+    // A successful manual /compact closes the breaker …
+    faux.appendResponses([fauxAssistantMessage(SUMMARY_RESPONSE)]);
+    await thread.compactThread({ mode: "manual" });
+    // … and after the manual pass's one-turn cool-down
+    // (skipNextProactiveCheck), over-budget turns compact proactively again.
+    faux.appendResponses([
+      fauxAssistantMessage("r5"), // cool-down turn: no compaction attempt
+      fauxAssistantMessage("r6"),
+      fauxAssistantMessage(SUMMARY_RESPONSE),
+    ]);
+    for (let turn = 5; turn <= 6; turn++) {
+      const receipt = await session.prompt(OVER_BUDGET_PROMPT);
+      await waitFor(
+        () =>
+          events.filter(
+            (e) => e.event.type === "turn_end" && e.event.threadId === receipt.threadId,
+          ).length >= turn,
+      );
+    }
+    const startsAfter = events.filter((e) => e.event.type === "compaction_start");
+    expect(startsAfter.length).toBeGreaterThanOrEqual(5); // 3 failures + manual + resumed proactive
+    expect(faux.getPendingResponseCount()).toBe(0);
+    faux.unregister();
+  });
+});
+
 describe("compaction: proactive trigger rehydration (restart)", () => {
   it("compacts BEFORE the first post-restart turn when the rehydrated transcript exceeds usable", async () => {
     // usable = contextWindow - min(reserveCap, maxTokens) = 100000 - 5. The
