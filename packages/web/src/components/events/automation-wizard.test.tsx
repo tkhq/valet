@@ -29,6 +29,26 @@ const catalogData = {
         },
       ],
     },
+    {
+      service: "slack",
+      entries: [
+        {
+          key: "slack.app_mention",
+          description: "App mentioned in Slack",
+          filters: [{ field: "channel", description: "Channel" }],
+          scope: { channelField: "channel", creatorUserField: "user" },
+        },
+        {
+          key: "slack.message",
+          description: "Message posted in Slack",
+          filters: [
+            { field: "channel", description: "Channel" },
+            { field: "text", description: "Message text" },
+          ],
+          scope: { channelField: "channel" },
+        },
+      ],
+    },
   ],
 };
 
@@ -293,5 +313,42 @@ describe("AutomationWizard", () => {
     expect((screen.getByRole("button", { name: /^Next$/ }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole("checkbox", { name: /github\.pr\.opened/ }));
     expect((screen.getByRole("button", { name: /^Next$/ }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("shows Any channel checkbox when slack.message is selected and posts anyChannel when checked", () => {
+    render(<AutomationWizard open onOpenChange={() => {}} />);
+    pickOutcome(/Advanced \/ custom trigger/);
+    clickNext(); // What → Match
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /slack\.message/ }));
+    // The checkbox must appear for this channel-scoped key.
+    expect(screen.getByRole("checkbox", { name: /Any channel/ })).toBeTruthy();
+
+    // Check "Any channel" and verify the tip renders (slack.message has a text filter and is not pinned).
+    fireEvent.click(screen.getByRole("checkbox", { name: /Any channel/ }));
+    expect(
+      screen.getByText(/Tip: add a text filter/),
+    ).toBeTruthy();
+
+    clickNext(); // Match → Then
+    clickNext(); // Then → Review
+    fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "Message watch" } });
+    fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+
+    const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
+    expect(body.eventKeys).toEqual(["slack.message"]);
+    expect(body.anyChannel).toBe(true);
+  });
+
+  it("does not show the tip for slack.app_mention (pinned) when Any channel is checked", () => {
+    render(<AutomationWizard open onOpenChange={() => {}} />);
+    pickOutcome(/Advanced \/ custom trigger/);
+    clickNext(); // What → Match
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /slack\.app_mention/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /Any channel/ }));
+
+    // Pinned (mention-specific) copy — no tip.
+    expect(screen.queryByText(/Tip: add a text filter/)).toBeNull();
   });
 });

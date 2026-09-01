@@ -15,6 +15,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import type { EventSubscriptionWire } from "@valet/api/wire";
 import type { OwnerFilter } from "~/api/client";
 import { TooltipProvider } from "~/components/primitives";
+import { subscriptionChannelScope } from "./subscriptions-panel";
 
 function subscription(over: Partial<EventSubscriptionWire> = {}): EventSubscriptionWire {
   return {
@@ -39,15 +40,6 @@ let subscriptionsData: { subscriptions: EventSubscriptionWire[] } = {
   subscriptions: [subscription()],
 };
 
-const catalogData = {
-  services: [
-    {
-      service: "github",
-      entries: [{ key: "github.pr.opened", description: "A pull request was opened", filters: [] }],
-    },
-  ],
-};
-
 const eventsData = { events: [] };
 
 /** The owner each hook was last called with. `undefined` is a real answer
@@ -63,7 +55,20 @@ let subscriptionsEnabled: boolean | undefined;
 const feedRefetch = vi.fn();
 
 vi.mock("~/api/events", () => ({
-  useEventCatalog: () => ({ data: catalogData, isLoading: false, error: null }),
+  useEventCatalog: () => ({
+    data: {
+      services: [
+        {
+          service: "slack",
+          entries: [
+            { key: "slack.app_mention", scope: { channelField: "channel", creatorUserField: "user" } },
+          ],
+        },
+      ],
+    },
+    isLoading: false,
+    error: null,
+  }),
   useEvents: (_params: unknown, owner?: OwnerFilter, opts?: { enabled?: boolean }) => {
     feedOwner = owner;
     feedCalls += 1;
@@ -357,5 +362,53 @@ describe("EventFeed scope control", () => {
     expect(refresh.disabled).toBe(false);
     fireEvent.click(refresh);
     expect(feedRefetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── subscriptionChannelScope unit tests ────────────────────────────────────
+
+const SCOPED_ENTRIES = [
+  { key: "slack.app_mention", scope: { channelField: "channel", creatorUserField: "user" } },
+  { key: "slack.message", scope: { channelField: "channel" } },
+  { key: "slack.channel_archive" },
+];
+
+function makeSub(over: Partial<EventSubscriptionWire> = {}): EventSubscriptionWire {
+  return subscription(over);
+}
+
+describe("subscriptionChannelScope", () => {
+  it("describes a slack.app_mention subscription with a named channel", () => {
+    const sub = makeSub({
+      eventKeys: ["slack.app_mention"],
+      filters: [{ field: "channel", op: "eq", value: "C1", label: "#eng" }],
+    });
+    expect(subscriptionChannelScope(sub, SCOPED_ENTRIES)).toBe("only #eng");
+  });
+
+  it("describes a stored any-channel slack.app_mention subscription", () => {
+    const sub = makeSub({
+      eventKeys: ["slack.app_mention"],
+      filters: [{ field: "user", op: "eq", value: "U1" }],
+    });
+    expect(subscriptionChannelScope(sub, SCOPED_ENTRIES)).toBe("any channel");
+  });
+
+  it("describes a slack.message subscription's channel scope", () => {
+    const sub = makeSub({
+      eventKeys: ["slack.message"],
+      filters: [{ field: "channel", op: "eq", value: "C1", label: "#support" }],
+    });
+    expect(subscriptionChannelScope(sub, SCOPED_ENTRIES)).toBe("only #support");
+  });
+
+  it("describes a stored any-channel slack.message subscription", () => {
+    const sub = makeSub({ eventKeys: ["slack.message"], filters: [] });
+    expect(subscriptionChannelScope(sub, SCOPED_ENTRIES)).toBe("any channel");
+  });
+
+  it("returns null for an unscoped key", () => {
+    const sub = makeSub({ eventKeys: ["slack.channel_archive"], filters: [] });
+    expect(subscriptionChannelScope(sub, SCOPED_ENTRIES)).toBeNull();
   });
 });
