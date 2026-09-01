@@ -37,6 +37,10 @@ class FakeOnePasswordService implements OnePasswordService {
     if (this.failWith) throw this.failWith;
     return "resolved-secret";
   }
+  async findCredentialForService(): Promise<string | null> {
+    return null;
+  }
+
   async resolveCredential(row: Parameters<OnePasswordService["resolveCredential"]>[0]) {
     return row;
   }

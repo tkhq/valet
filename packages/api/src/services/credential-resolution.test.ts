@@ -46,6 +46,7 @@ function fakeOnePassword(
     listItems: unused,
     getItem: unused,
     resolveReference: unused,
+    findCredentialForService: async () => null,
     resolveCredential,
   };
 }
@@ -332,5 +333,71 @@ describe("resolveOrgCredentialRead", () => {
     const result = await resolveOrgCredentialRead({ credentials, onePassword }, { orgId }, "nope");
 
     expect(result).toBeNull();
+  });
+});
+
+// The point of connecting a token: an agent asking for a credential nobody
+// configured gets the one already in the vaults.
+describe("vault lookup when no row exists", () => {
+  const orgId = "org-1";
+  const userId = "user-1";
+
+  function fakeWithLookup(secret: string | null) {
+    const unused = () => {
+      throw new Error("not exercised by this suite");
+    };
+    return {
+      tokenConnected: unused,
+      listVaults: unused,
+      listItems: unused,
+      getItem: unused,
+      resolveReference: unused,
+      findCredentialForService: async () => secret,
+      resolveCredential: async (row: StoredCredential) => row,
+    } as unknown as OnePasswordService;
+  }
+
+  it("resolves a service with no user or org row from the vaults", async () => {
+    const credentials = fakeCredentialStore();
+    const onePassword = fakeWithLookup("vault-secret");
+
+    const result = await resolveUserCredentialRead(
+      { credentials, onePassword },
+      { orgId, userId },
+      "linear",
+      "reference-only",
+    );
+
+    expect(result?.apiKey).toBe("vault-secret");
+  });
+
+  it("returns null when nothing in the vaults matches", async () => {
+    const credentials = fakeCredentialStore();
+    const onePassword = fakeWithLookup(null);
+
+    const result = await resolveUserCredentialRead(
+      { credentials, onePassword },
+      { orgId, userId },
+      "linear",
+      "reference-only",
+    );
+
+    expect(result).toBeNull();
+  });
+
+  it("a stored row still wins: the vaults are the fallback, not the source", async () => {
+    const credentials = fakeCredentialStore();
+    const userRow: StoredCredential = { type: "api_key", apiKey: "my-own-key" };
+    await credentials.save({ type: "user", id: userId }, "linear", userRow);
+    const onePassword = fakeWithLookup("vault-secret");
+
+    const result = await resolveUserCredentialRead(
+      { credentials, onePassword },
+      { orgId, userId },
+      "linear",
+      "reference-only",
+    );
+
+    expect(result?.apiKey).toBe("my-own-key");
   });
 });

@@ -112,19 +112,59 @@ export async function resolveUserCredentialRead(
   if (isDeniedCredentialService(service)) return null;
   const userRow = await deps.credentials.get({ type: "user", id: ctx.userId }, service);
   if (userRow) return resolveRow(deps, userRow, ctx);
-  if (orgFallback === "none") return null;
+  if (orgFallback === "none") return lookupInOnePassword(deps, ctx, service);
   // Skip the org read entirely when only a reference could qualify and no
   // 1Password service is wired. `CredentialStore.get` is NOT side-effect free:
   // `OAuthRefreshingCredentialStore` refreshes on read and writes the result
   // back under the owner it read, so an org read is an org write.
   if (orgFallback === "reference-only" && !deps.onePassword) return null;
+  // Falls through to the vault lookup below when no row answers.
   const orgRow = await deps.credentials.get({ type: "org", id: ctx.orgId }, service);
-  if (!orgRow) return null;
+  if (!orgRow) return lookupInOnePassword(deps, ctx, service);
   // A plain org row stays invisible. An org-owned `linear` row carries
   // `metadata.webhookSecret` (`routes/linear-connect.ts`), so returning the
   // whole row to every member's session would hand out the webhook HMAC.
-  if (orgFallback === "reference-only" && !onePasswordMeta(orgRow)) return null;
+  if (orgFallback === "reference-only" && !onePasswordMeta(orgRow)) {
+    return lookupInOnePassword(deps, ctx, service);
+  }
   return resolveRow(deps, orgRow, ctx);
+}
+
+/**
+ * The secret for `service` from 1Password, when Valet holds no row for it.
+ *
+ * This is the point of connecting a token: an agent or subagent asking for a
+ * credential nobody configured gets the one already sitting in the vaults,
+ * rather than a null and a hidden tool. Nothing is written — the value is
+ * read at the moment it is needed, the same as a stored reference.
+ *
+ * The match is on the item title, so whoever can name items in a granted
+ * vault decides what an integration authenticates as. That is why the vaults
+ * a service account may read are the security boundary here, and why the
+ * token should be scoped to vaults chosen for this.
+ */
+async function lookupInOnePassword(
+  deps: CredentialReadDeps,
+  ctx: CredentialReadCtx,
+  service: string,
+): Promise<StoredCredential | null> {
+  if (!deps.onePassword) return null;
+  // Org first: a shared token is the configured path for a whole org. A
+  // personal token only answers for the person it belongs to.
+  for (const scope of ["org", "personal"] as const) {
+    if (scope === "personal" && !ctx.userId) continue;
+    try {
+      const secret = await deps.onePassword.findCredentialForService(scope, {
+        orgId: ctx.orgId,
+        userId: ctx.userId ?? "",
+      }, service);
+      if (secret) return { type: "api_key", apiKey: secret };
+    } catch {
+      // No token for this scope, or 1Password refused. Neither is an error
+      // for a credential read: it just means this scope has no answer.
+    }
+  }
+  return null;
 }
 
 /**

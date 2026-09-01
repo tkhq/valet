@@ -44,6 +44,7 @@ function fakeOnePassword(
     listItems: unused,
     getItem: unused,
     resolveReference: unused,
+    findCredentialForService: async () => null,
     resolveCredential,
   };
 }

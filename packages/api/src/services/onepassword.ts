@@ -96,6 +96,19 @@ export interface OnePasswordService {
   resolveReference(scope: OnePasswordScope, ctx: OnePasswordCtx, reference: string): Promise<string>;
   /** The resolver-seam entry: fills the secret into a reference-carrying row. */
   resolveCredential(row: StoredCredential, ctx: OnePasswordCtx): Promise<StoredCredential>;
+  /**
+   * The secret for `service`, found by name in the vaults the token can read.
+   *
+   * This is what makes connecting a token enough: an agent asking for a
+   * credential Valet has no row for gets the one sitting in 1Password, with
+   * no per-service setup. `null` when nothing matches, which reads as "not
+   * connected" upstream.
+   */
+  findCredentialForService(
+    scope: OnePasswordScope,
+    ctx: OnePasswordCtx,
+    service: string,
+  ): Promise<string | null>;
 }
 
 // ── 1Password reference metadata on a StoredCredential ──────────────────
@@ -262,6 +275,31 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
     return resolved;
   }
 
+  /**
+   * service -> reference, or null for "looked and found nothing". Cached on
+   * the same TTL as a resolve: a credential miss must not walk every vault on
+   * every tool call, and a negative answer is worth caching too, since the
+   * common case for an unconnected service is that nothing matches.
+   */
+  const lookupCache = new Map<string, { reference: string | null; at: number }>();
+
+  /**
+   * Whether an item title names a service. Word-boundary and
+   * case-insensitive, so "Linear API Key" names `linear` and "Linearity" does
+   * not. Narrow on purpose: this picks the secret an agent authenticates
+   * with, and a loose match points it at the wrong one.
+   */
+  function titleNamesService(title: string, service: string): boolean {
+    const needle = service.replace(/[-_]/g, "[-_ ]?").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(^|[^a-z0-9])${needle}([^a-z0-9]|$)`, "i").test(title);
+  }
+
+  /** The field most likely to hold the secret, by title then by concealment. */
+  function credentialField(fields: { id: string; title: string; fieldType: string }[]) {
+    const named = fields.find((f) => /^(credential|api[ _-]?key|token|secret|password)$/i.test(f.title));
+    return named ?? fields.find((f) => f.fieldType === "Concealed") ?? null;
+  }
+
   return {
     async tokenConnected(scope, ctx) {
       const owner = tokenOwner(scope, ctx);
@@ -294,5 +332,41 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
     },
     resolveReference,
     resolveCredential,
+
+    async findCredentialForService(scope, ctx, service) {
+      const owner = tokenOwner(scope, ctx);
+      const cacheKey = `${scope}:${owner.id}:${service}`;
+      const cached = lookupCache.get(cacheKey);
+      const nowMs = now();
+      if (cached && nowMs - cached.at < RESOLVE_TTL_MS) {
+        return cached.reference === null ? null : resolveReference(scope, ctx, cached.reference);
+      }
+
+      // The SDK client directly: these are the same three reads the list
+      // routes make, and going through `this` would tie the lookup to how the
+      // object is called.
+      const client = await clientFor(scope, ctx);
+      let reference: string | null = null;
+      for (const vault of await client.vaults.list()) {
+        let items;
+        try {
+          items = await client.items.list(vault.id);
+        } catch {
+          // A vault this token cannot read is not an error for a lookup: the
+          // secret may well be in the next one.
+          continue;
+        }
+        const item = items.find((i) => titleNamesService(i.title, service));
+        if (!item) continue;
+        const detail = await client.items.get(vault.id, item.id);
+        const field = credentialField(detail.fields);
+        if (!field) continue;
+        reference = `op://${vault.title}/${item.title}/${field.title}`;
+        break;
+      }
+
+      lookupCache.set(cacheKey, { reference, at: nowMs });
+      return reference === null ? null : resolveReference(scope, ctx, reference);
+    },
   };
 }

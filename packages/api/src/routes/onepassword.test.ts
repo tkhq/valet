@@ -68,6 +68,10 @@ class FakeOnePasswordService implements OnePasswordService {
   async resolveReference(): Promise<string> {
     return "resolved-secret";
   }
+  async findCredentialForService(): Promise<string | null> {
+    return null;
+  }
+
   async resolveCredential(row: Parameters<OnePasswordService["resolveCredential"]>[0]) {
     return row;
   }
