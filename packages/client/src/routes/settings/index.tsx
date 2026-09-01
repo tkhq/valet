@@ -3,7 +3,7 @@ import { createFileRoute, Link, useNavigate } from '@tanstack/react-router';
 import { PageContainer, PageHeader } from '@/components/layout/page-container';
 import { useAuthStore } from '@/stores/auth';
 import { useLogout, useUpdateProfile } from '@/api/auth';
-import { useOrchestratorInfo, useUpdateOrchestratorIdentity, useCheckHandle, useNotificationPreferences, useUpdateNotificationPreferences, useIdentityLinks, useDeleteIdentityLink, useUploadAvatar, useDeleteAvatar } from '@/api/orchestrator';
+import { useOrchestratorInfo, useUpdateOrchestratorIdentity, useCheckHandle, useCheckName, useNotificationPreferences, useUpdateNotificationPreferences, useIdentityLinks, useDeleteIdentityLink, useUploadAvatar, useDeleteAvatar } from '@/api/orchestrator';
 import { useAvailableModels } from '@/api/sessions';
 import type { ProviderModels } from '@/api/sessions';
 import type { QueueMode } from '@valet/shared';
@@ -744,6 +744,14 @@ function OrchestratorIdentitySection() {
   const handleCheck = useCheckHandle(handleChanged ? debouncedHandle : '');
   const handleTaken = handleChanged && debouncedHandle.length >= 2 && handleCheck.data?.available === false;
 
+  // Mirror of the handle check: the backend 409s a name collision
+  // (case-insensitive), so block Save up front instead of letting the
+  // save fail with a generic error (TKAI-295).
+  const debouncedName = useDebounced(name, 400);
+  const nameChanged = name !== (orchInfo?.identity?.name ?? '');
+  const nameCheck = useCheckName(nameChanged ? debouncedName : '');
+  const nameTaken = nameChanged && debouncedName.length >= 2 && nameCheck.data?.available === false;
+
   React.useEffect(() => {
     if (orchInfo?.identity) {
       setName(orchInfo.identity.name);
@@ -760,7 +768,7 @@ function OrchestratorIdentitySection() {
     customInstructions !== (orchInfo.identity?.customInstructions ?? '');
 
   function handleSave() {
-    if (handleTaken) return;
+    if (handleTaken || nameTaken) return;
     updateIdentity.mutate(
       {
         name: name || undefined,
@@ -846,8 +854,17 @@ function OrchestratorIdentitySection() {
             type="text"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            className="mt-1 block w-full max-w-md rounded-md border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 placeholder:text-neutral-400 focus:border-neutral-500 focus:outline-none focus:ring-1 focus:ring-neutral-500 dark:border-neutral-600 dark:bg-neutral-900 dark:text-neutral-100 dark:placeholder:text-neutral-500 dark:focus:border-neutral-400 dark:focus:ring-neutral-400"
+            className={`mt-1 block w-full max-w-md rounded-md border bg-white px-3 py-2 text-sm text-neutral-900 placeholder:text-neutral-400 focus:outline-none focus:ring-1 dark:bg-neutral-900 dark:text-neutral-100 dark:placeholder:text-neutral-500 ${
+              nameTaken
+                ? 'border-red-400 focus:border-red-500 focus:ring-red-500 dark:border-red-500 dark:focus:border-red-400 dark:focus:ring-red-400'
+                : 'border-neutral-300 focus:border-neutral-500 focus:ring-neutral-500 dark:border-neutral-600 dark:focus:border-neutral-400 dark:focus:ring-neutral-400'
+            }`}
           />
+          {nameTaken && (
+            <p className="mt-1 text-xs text-red-500 dark:text-red-400">
+              Name "{debouncedName}" is already taken
+            </p>
+          )}
         </div>
         <div>
           <label htmlFor="orch-handle" className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
@@ -884,12 +901,14 @@ function OrchestratorIdentitySection() {
           />
         </div>
         <div className="flex items-center gap-3">
-          <Button onClick={handleSave} disabled={!hasChanges || handleTaken || updateIdentity.isPending}>
+          <Button onClick={handleSave} disabled={!hasChanges || handleTaken || nameTaken || updateIdentity.isPending}>
             {updateIdentity.isPending ? 'Saving...' : 'Save'}
           </Button>
           {saved && <span className="text-sm text-green-600 dark:text-green-400">Saved</span>}
           {updateIdentity.isError && (
-            <span className="text-sm text-red-600 dark:text-red-400">Failed to save</span>
+            <span className="text-sm text-red-600 dark:text-red-400">
+              {(updateIdentity.error as Error).message || 'Failed to save'}
+            </span>
           )}
         </div>
       </div>

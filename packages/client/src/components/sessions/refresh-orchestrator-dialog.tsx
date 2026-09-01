@@ -27,13 +27,18 @@ export function RefreshOrchestratorDialog({
   const { data: orchInfo } = useOrchestratorInfo();
 
   const isPending = terminateSession.isPending || createOrchestrator.isPending;
+  const error = (terminateSession.error ?? createOrchestrator.error) as Error | null;
 
   const handleRefresh = async () => {
     if (!orchInfo?.identity) return;
 
     try {
-      // Terminate the current session
-      await terminateSession.mutateAsync(sessionId);
+      // Terminate the current session. Skipped on retry when it already
+      // succeeded — the session is gone, and terminating it again fails
+      // and blocks the restart (TKAI-295).
+      if (!terminateSession.isSuccess) {
+        await terminateSession.mutateAsync(sessionId);
+      }
 
       // Re-create with the same identity
       await createOrchestrator.mutateAsync({
@@ -45,7 +50,10 @@ export function RefreshOrchestratorDialog({
       // Navigate to the new session (full reload to clear stale WS connections & chat state)
       window.location.href = '/sessions/orchestrator';
     } catch {
-      // Errors are handled by the mutations
+      // The failed mutation's error renders inside the dialog, which stays
+      // open so the failure is visible and Retry is available (TKAI-295).
+      // Swallowing it here used to close the dialog with the session
+      // already terminated and no restart — the "mega stuck" state.
     }
   };
 
@@ -60,17 +68,30 @@ export function RefreshOrchestratorDialog({
             session history will be cleared.
           </AlertDialogDescription>
         </AlertDialogHeader>
+        {error && (
+          <p className="text-sm text-red-600 dark:text-red-400">
+            Restart failed: {error.message}. Retry, or check Settings if the name or handle is
+            already taken.
+          </p>
+        )}
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>
           <AlertDialogAction
-            onClick={handleRefresh}
+            onClick={(e) => {
+              // AlertDialogAction closes the dialog on click by default;
+              // keep it open so a failure has somewhere to render.
+              e.preventDefault();
+              void handleRefresh();
+            }}
             disabled={isPending}
           >
             {terminateSession.isPending
               ? 'Stopping...'
               : createOrchestrator.isPending
                 ? 'Restarting...'
-                : 'Refresh'}
+                : error
+                  ? 'Retry'
+                  : 'Refresh'}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

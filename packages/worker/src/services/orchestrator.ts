@@ -1,11 +1,13 @@
 import type { SessionThread } from '@valet/shared';
+import { and, desc, eq } from 'drizzle-orm';
 import type { Env } from '../env.js';
 import * as db from '../lib/db.js';
 import type { AppDb } from '../lib/drizzle.js';
 import { getDb } from '../lib/drizzle.js';
 import { buildDoWebSocketUrl } from '../lib/do-ws-url.js';
 import { buildOrchestratorPersonaFiles } from '../lib/orchestrator-persona.js';
-import { createPersona, upsertPersonaFile } from '../lib/db/personas.js';
+import { createPersona, upsertPersonaFile, updatePersona } from '../lib/db/personas.js';
+import { sessions } from '../lib/schema/index.js';
 import { generateRunnerToken, assembleProviderEnv, assembleCredentialEnv } from '../lib/env-assembly.js';
 import { ensureTodayJournal } from '../lib/db/memory-files.js';
 import { loadMemorySnapshot, formatMemorySnapshot } from '../lib/memory-snapshot.js';
@@ -337,12 +339,25 @@ export async function onboardOrchestrator(
       personaId,
     });
   } else {
-    await db.updateOrchestratorIdentity(appDb, identity.id, {
+    // Route the update through updateOrchestratorIdentity (below) so a
+    // handle/name collision returns a structured 409 instead of a raw
+    // UNIQUE-constraint 500 from the DB write (TKAI-295). The create branch
+    // above already runs both checks; this branch used to skip them.
+    const update = await updateOrchestratorIdentity(appDb, userId, {
       name: params.name,
       handle: params.handle,
       customInstructions: params.customInstructions,
     });
-    identity = (await db.getOrchestratorIdentity(appDb, userId))!;
+    if (!update.ok) {
+      if (update.error === 'handle_taken') return { ok: false, reason: 'handle_taken' };
+      if (update.error === 'name_taken') return { ok: false, reason: 'name_taken' };
+      // 'not_found' is unreachable: the identity was loaded above.
+      throw new Error(`Failed to update orchestrator identity: ${update.error}`);
+    }
+    identity = update.identity;
+    if (!identity) {
+      throw new Error('Orchestrator identity missing after update.');
+    }
   }
 
   const result = await restartOrchestratorSession(env, userId, userEmail, identity, requestUrl);
@@ -396,20 +411,51 @@ export async function updateOrchestratorIdentity(
 
   if (updates.handle && updates.handle !== identity.handle) {
     const handleTaken = await db.getOrchestratorIdentityByHandle(database, updates.handle);
-    if (handleTaken) {
+    if (handleTaken && handleTaken.id !== identity.id) {
       return { ok: false, error: 'handle_taken' };
     }
   }
 
-  if (updates.name && updates.name !== identity.name) {
+  const nameChanged = !!updates.name && updates.name !== identity.name;
+  if (updates.name && nameChanged) {
+    // The name lookup is case-insensitive, so a case-only rename of your
+    // own orchestrator finds your own row — exclude it, the same rule the
+    // check-name route applies.
     const nameTaken = await db.getOrchestratorIdentityByName(database, updates.name);
-    if (nameTaken) {
+    if (nameTaken && nameTaken.id !== identity.id) {
       return { ok: false, error: 'name_taken' };
     }
   }
 
   await db.updateOrchestratorIdentity(database, identity.id, updates);
   const updated = await db.getOrchestratorIdentity(database, userId);
+
+  // A rename bakes into two derived surfaces that nothing else refreshes
+  // until the next restart: the linked persona row and the live session
+  // title (TKAI-295). Best-effort — a sync failure must not undo or mask
+  // the identity update itself.
+  if (nameChanged && updated) {
+    try {
+      if (identity.personaId) {
+        await updatePersona(database, identity.personaId, {
+          name: `${updated.name} (Orchestrator)`,
+        });
+      }
+      const sessionRow = await database
+        .select({ id: sessions.id })
+        .from(sessions)
+        .where(and(eq(sessions.userId, userId), eq(sessions.isOrchestrator, true)))
+        .orderBy(desc(sessions.createdAt))
+        .limit(1)
+        .get();
+      if (sessionRow) {
+        await db.updateSessionTitle(database, sessionRow.id, `${updated.name} (Orchestrator)`);
+      }
+    } catch (err) {
+      console.warn('[Orchestrator] Failed to sync persona/session title after rename:', err);
+    }
+  }
+
   return { ok: true, identity: updated };
 }
 
