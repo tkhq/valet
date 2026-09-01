@@ -1,7 +1,7 @@
 /**
  * The ONE gate in front of every `event_subscriptions` write. It validates
- * the body against the merged plugin catalog and applies the mention-scope
- * rules (TKAI-299, `mention-scope.ts`). Writers must call
+ * the body against the merged plugin catalog and applies the catalog-declared
+ * scope rules (TKAI-299/TKAI-302, `subscription-scope.ts`). Writers must call
  * `validateSubscriptionWrite` — never `validateSubscription` alone — so a new
  * writer cannot ship the unscoped back door this gate exists to close.
  * Current writers: the subscriptions CRUD routes (`routes/events.ts`), the
@@ -12,7 +12,7 @@ import type { EventCatalogEntry, ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { allCatalogEntries } from "./ingest.js";
 import { validateRegexPattern, type SubscriptionFilter } from "./match.js";
-import { enforceMentionScope } from "./mention-scope.js";
+import { enforceSubscriptionScope } from "./subscription-scope.js";
 
 const FILTER_OPS = ["eq", "in", "prefix", "contains", "regex"] as const;
 // `signal` (wake parked workflow runs) is deliberately NOT accepted yet:
@@ -137,7 +137,7 @@ export interface SubscriptionWriteScope {
   anyChannel: boolean;
   /** Whether this write changes what the subscription matches. Creates always
    * pass true. Patches pass whether `eventKeys` or `filters` were provided —
-   * false skips the mention gate, so a rename or an enable toggle is not
+   * false skips the scope gate, so a rename or an enable toggle is not
    * blocked by a creator who unlinked Slack after the row was scoped. */
   matchChanged: boolean;
   /** Patches only: the row's derived any-channel state
@@ -162,7 +162,7 @@ export async function validateSubscriptionWrite(
   if (error) return { ok: false, error };
   const filters = body.filters as SubscriptionFilter[];
   if (!scope.matchChanged) return { ok: true, filters };
-  return enforceMentionScope(db, plugins, scope.creatorUserId, {
+  return enforceSubscriptionScope(db, plugins, scope.creatorUserId, {
     eventKeys: body.eventKeys as string[],
     filters,
     anyChannel: scope.anyChannel,

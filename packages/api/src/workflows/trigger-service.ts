@@ -14,7 +14,7 @@ import type { ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventSubscriptions } from "../schema/index.js";
 import { catalogForService } from "../events/ingest.js";
-import { storedAnyChannelState } from "../events/mention-scope.js";
+import { storedAnyChannelState } from "../events/subscription-scope.js";
 import { validateSubscriptionWrite } from "../events/subscription-write.js";
 import type { SubscriptionFilter } from "../events/match.js";
 import {
@@ -221,6 +221,7 @@ export async function updateWorkflowTrigger(
       anyChannel: patch.anyChannel === true,
       matchChanged: patch.filters !== undefined || patch.eventKeys !== undefined,
       storedAnyChannel: storedAnyChannelState(
+        plugins,
         current.eventKeys,
         current.filters as SubscriptionFilter[],
       ),

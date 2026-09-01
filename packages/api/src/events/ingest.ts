@@ -32,6 +32,17 @@ export function allCatalogEntries(plugins: ValetPlugin[]): EventCatalogEntry[] {
   return plugins.flatMap((p) => p.triggers ?? []).flatMap((t) => t.catalog);
 }
 
+/** The merged catalog with each entry's owning service — the scope gate
+ * needs the service to resolve the creator's linked identity
+ * (`identityForUser`). */
+export function allCatalogEntriesWithService(
+  plugins: ValetPlugin[],
+): { service: string; entry: EventCatalogEntry }[] {
+  return plugins
+    .flatMap((p) => p.triggers ?? [])
+    .flatMap((t) => t.catalog.map((entry) => ({ service: t.service, entry })));
+}
+
 export interface IngestResult {
   eventId: string;
   duplicate: boolean;

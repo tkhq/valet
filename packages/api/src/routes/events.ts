@@ -22,7 +22,7 @@ import { eventDeliveries, eventDropLog, events, eventSubscriptions } from "../sc
 import { readOwnerFilter } from "./_owner-filter.js";
 import { allCatalogEntries, catalogForService } from "../events/ingest.js";
 import { subscriptionMatchesEvent, type SubscriptionFilter } from "../events/match.js";
-import { storedAnyChannelState } from "../events/mention-scope.js";
+import { storedAnyChannelState } from "../events/subscription-scope.js";
 import { validateSubscriptionWrite } from "../events/subscription-write.js";
 import { ownedDefinitionRow } from "../workflows/service.js";
 import { isTeamMember } from "../services/teams.js";
@@ -621,6 +621,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
     anyChannel: body.anyChannel === true,
     matchChanged: body.filters !== undefined || body.eventKeys !== undefined,
     storedAnyChannel: storedAnyChannelState(
+      plugins,
       row.eventKeys as string[],
       row.filters as SubscriptionFilter[],
     ),

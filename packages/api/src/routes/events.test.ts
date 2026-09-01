@@ -1561,8 +1561,8 @@ describe("mention scoping (slack.app_mention)", () => {
   it("leaves non-mention slack subscriptions unscoped", async () => {
     const a = await bootSlack();
     const res = await postSubscription(a.baseUrl, {
-      name: "all channel messages",
-      eventKeys: ["slack.message"],
+      name: "channel archived",
+      eventKeys: ["slack.channel_archive"],
       filters: [],
       target: { kind: "orchestrator" },
     });
@@ -1679,5 +1679,106 @@ describe("mention scoping (slack.app_mention)", () => {
       body: JSON.stringify({ enabled: false }),
     });
     expect(res.status).toBe(200);
+  });
+});
+
+// A subscription selecting `slack.message` must name channels or set the
+// explicit anyChannel flag — but is NOT pinned to its creator: channel
+// watchers must see messages from everyone (TKAI-302,
+// events/subscription-scope.ts).
+describe("message scoping (slack.message)", () => {
+  const MESSAGE_BODY: CreateEventSubscriptionRequest = {
+    name: "watch support",
+    eventKeys: ["slack.message"],
+    filters: [],
+    target: { kind: "orchestrator" },
+  };
+
+  it("refuses a channel-less slack.message subscription", async () => {
+    const a = await bootTestApi({ plugins: [slackPlugin] });
+    api = a;
+    const res = await postSubscription(a.baseUrl, MESSAGE_BODY);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("channel filter");
+  });
+
+  it("accepts a channel filter and injects no user filter", async () => {
+    const a = await bootTestApi({ plugins: [slackPlugin] });
+    api = a;
+    const res = await postSubscription(a.baseUrl, {
+      ...MESSAGE_BODY,
+      filters: [{ field: "channel", op: "eq", value: "C123" }],
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateEventSubscriptionResponse;
+    expect(body.filters).toEqual([{ field: "channel", op: "eq", value: "C123" }]);
+  });
+
+  it("does not require a linked Slack account", async () => {
+    // No linkSlack call — a slack.message watcher is not pinned to anyone.
+    const a = await bootTestApi({ plugins: [slackPlugin] });
+    api = a;
+    const res = await postSubscription(a.baseUrl, {
+      ...MESSAGE_BODY,
+      filters: [{ field: "channel", op: "in", value: ["C1", "C2"] }],
+    });
+    expect(res.status).toBe(201);
+  });
+
+  it("anyChannel: true permits a channel-less slack.message subscription", async () => {
+    const a = await bootTestApi({ plugins: [slackPlugin] });
+    api = a;
+    const res = await postSubscription(a.baseUrl, { ...MESSAGE_BODY, anyChannel: true });
+    expect(res.status).toBe(201);
+  });
+
+  it("refuses anyChannel alongside a channel filter", async () => {
+    const a = await bootTestApi({ plugins: [slackPlugin] });
+    api = a;
+    const res = await postSubscription(a.baseUrl, {
+      ...MESSAGE_BODY,
+      anyChannel: true,
+      filters: [{ field: "channel", op: "eq", value: "C123" }],
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("refuses a required channel filter on a mixed subscription with a channel-less key", async () => {
+    const a = await bootTestApi({ plugins: [slackPlugin, githubPlugin] });
+    api = a;
+    const res = await postSubscription(a.baseUrl, {
+      ...MESSAGE_BODY,
+      eventKeys: ["slack.message", "github.push"],
+      filters: [{ field: "channel", op: "eq", value: "C123" }],
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("separate subscription");
+  });
+
+  it("allows the mixed subscription under anyChannel (no channel filter stored)", async () => {
+    const a = await bootTestApi({ plugins: [slackPlugin, githubPlugin] });
+    api = a;
+    const res = await postSubscription(a.baseUrl, {
+      ...MESSAGE_BODY,
+      eventKeys: ["slack.message", "github.push"],
+      anyChannel: true,
+    });
+    expect(res.status).toBe(201);
+  });
+
+  it("a patch that leaves channel scope alone keeps the any-channel state", async () => {
+    const a = await bootTestApi({ plugins: [slackPlugin] });
+    api = a;
+    const created = await postSubscription(a.baseUrl, { ...MESSAGE_BODY, anyChannel: true });
+    expect(created.status).toBe(201);
+    const row = (await created.json()) as CreateEventSubscriptionResponse;
+    const patch = await fetch(`${a.baseUrl}/api/event-subscriptions/${row.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filters: [{ field: "text", op: "prefix", value: "!deploy" }] }),
+    });
+    expect(patch.status).toBe(200);
   });
 });
