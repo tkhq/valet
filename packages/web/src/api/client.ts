@@ -135,6 +135,7 @@ import type {
   MeResponse,
   OnePasswordSettingsResponse,
   OpItemDetailResponse,
+  OpSuggestionsResponse,
   OrgDirectoryResponse,
   OrgMembersResponse,
   OrgPluginsResponse,
@@ -1124,6 +1125,8 @@ export const api = {
     request<OnePasswordSettingsResponse>("PUT", "/onepassword/settings", body),
   listOpVaults: (scope: "org" | "personal") =>
     request<ListOpVaultsResponse>("GET", `/onepassword/vaults?scope=${scope}`),
+  listOpSuggestions: (scope: "org" | "personal") =>
+    request<OpSuggestionsResponse>("GET", `/onepassword/suggestions?scope=${scope}`),
   listOpItems: (scope: "org" | "personal", vaultId: string, cursor?: string) =>
     request<ListOpItemsResponse>(
       "GET",

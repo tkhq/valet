@@ -2815,6 +2815,20 @@ export interface ListOpItemsResponse {
   nextCursor?: string;
 }
 
+export interface OpSuggestionsResponse {
+  suggestions: {
+    /** The integration the credential would be for. */
+    service: string;
+    /** The 1Password item whose title matched it. */
+    vaultId: string;
+    vaultTitle: string;
+    itemId: string;
+    itemTitle: string;
+  }[];
+  /** Vaults the scan could not read, by title, so a partial answer says so. */
+  unreadableVaults: string[];
+}
+
 export interface OpItemDetailResponse {
   id: string;
   title: string;

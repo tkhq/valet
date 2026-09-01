@@ -8,6 +8,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import linearPlugin from "@valet/plugin-linear/plugin";
 import { orgMembers, users } from "../schema/index.js";
 import { OnePasswordAuthError, type OnePasswordCtx, type OnePasswordScope, type OnePasswordService } from "../services/onepassword.js";
 import type {
@@ -40,7 +41,17 @@ class FakeOnePasswordService implements OnePasswordService {
   }
   /** Item count is settable so the pagination cases have something to page. */
   itemCount = 1;
-  async listItems() {
+  /** Explicit titles, for the suggestion cases that match on them. */
+  itemTitles: string[] | undefined;
+  /** Vault ids whose listing throws, for the partial-scan case. */
+  unreadableVaultIds = new Set<string>();
+  async listItems(_scope: unknown, _ctx: unknown, vaultId?: string) {
+    if (vaultId && this.unreadableVaultIds.has(vaultId)) {
+      throw new OnePasswordAuthError("cannot read this vault");
+    }
+    if (this.itemTitles) {
+      return this.itemTitles.map((title, i) => ({ id: `item${i + 1}`, title, vaultId: "vault1" }));
+    }
     return Array.from({ length: this.itemCount }, (_, i) => ({
       id: `item${i + 1}`,
       title: i === 0 ? "Prod DB" : `Item ${i + 1}`,
@@ -320,5 +331,49 @@ describe("GET /api/onepassword/vaults/:vaultId/items — pagination", () => {
     const api = await bootWithItems(10);
     const res = await fetch(`${api.baseUrl}/api/onepassword/vaults/vault1/items?scope=org&limit=abc`);
     expect(res.status).toBe(400);
+  });
+});
+
+// Connecting a token and then hand-typing a service name per credential is
+// work the registry plus the vault listing can do. These pin that the match
+// is narrow and that a partial scan says so.
+describe("GET /api/onepassword/suggestions", () => {
+  it("suggests an unconnected service whose name an item title carries", async () => {
+    // The registry is what makes a suggestion possible: it names the
+    // services that declare a credential.
+    api = await bootTestApi({ plugins: [linearPlugin] });
+    const fake = new FakeOnePasswordService();
+    fake.orgToken = true;
+    fake.itemTitles = ["Linear API Key", "Unrelated note", "Linearity Pro"];
+    api.providers.onePassword = fake;
+
+    const res = await fetch(`${api.baseUrl}/api/onepassword/suggestions?scope=org`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      suggestions: { service: string; itemTitle: string }[];
+      unreadableVaults: string[];
+    };
+    const linear = body.suggestions.filter((s) => s.service === "linear");
+    expect(linear).toHaveLength(1);
+    expect(linear[0].itemTitle).toBe("Linear API Key");
+    // "Linearity Pro" contains "linear" as a prefix, not as a word.
+    expect(body.suggestions.some((s) => s.itemTitle === "Linearity Pro")).toBe(false);
+    expect(body.unreadableVaults).toEqual([]);
+  });
+
+  it("names a vault it could not read instead of dropping it", async () => {
+    // The registry is what makes a suggestion possible: it names the
+    // services that declare a credential.
+    api = await bootTestApi({ plugins: [linearPlugin] });
+    const fake = new FakeOnePasswordService();
+    fake.orgToken = true;
+    fake.itemTitles = ["Linear API Key"];
+    fake.unreadableVaultIds = new Set(["vault1"]);
+    api.providers.onePassword = fake;
+
+    const res = await fetch(`${api.baseUrl}/api/onepassword/suggestions?scope=org`);
+    const body = (await res.json()) as { suggestions: unknown[]; unreadableVaults: string[] };
+    expect(body.unreadableVaults).toEqual(["Engineering"]);
+    expect(body.suggestions).toEqual([]);
   });
 });

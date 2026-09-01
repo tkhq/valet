@@ -11,6 +11,7 @@ import {
   type UseQueryOptions,
 } from "@tanstack/react-query";
 import type {
+  OpSuggestionsResponse,
   ListOpItemsResponse,
   ListOpVaultsResponse,
   OnePasswordSettingsResponse,
@@ -94,5 +95,18 @@ export function useOpItemDetail(
     queryFn: () => api.getOpItemDetail(scope, vaultId as string, itemId as string),
     enabled: !!vaultId && !!itemId,
     ...opts,
+  });
+}
+
+/**
+ * Items that look like credentials for integrations with none stored yet.
+ * Only fetched when a token for `scope` is connected — there is nothing to
+ * scan otherwise, and asking would 400.
+ */
+export function useOpSuggestions(scope: OnePasswordTokenScope, enabled: boolean) {
+  return useQuery<OpSuggestionsResponse>({
+    queryKey: ["onepassword", "suggestions", scope],
+    queryFn: () => api.listOpSuggestions(scope),
+    enabled,
   });
 }

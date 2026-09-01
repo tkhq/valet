@@ -1,8 +1,16 @@
 import { useState } from "react";
-import type { CredentialKind, CredentialSummary } from "@valet/api/wire";
+import type { CredentialKind, CredentialSummary, OpSuggestionsResponse } from "@valet/api/wire";
+
+/** One row of the suggestion scan. */
+type OpSuggestion = OpSuggestionsResponse["suggestions"][number];
 import { apiErrorMessage } from "~/api/client";
 import { useConnectCredential, useCredentials, useDisconnectCredential } from "~/api/integrations";
-import { useOnePasswordSettings, usePutOnePasswordSettings } from "~/api/onepassword";
+import {
+  useOnePasswordSettings,
+  useOpSuggestions,
+  usePutOnePasswordSettings,
+  type OnePasswordTokenScope,
+} from "~/api/onepassword";
 import { useOrg } from "~/api/settings";
 import { Badge, Button, Input, Label, Spinner, Switch } from "~/components/primitives";
 import { FieldRow } from "~/components/settings/field-row";
@@ -64,6 +72,10 @@ export function OnePasswordPanel() {
               An admin can connect an organization 1Password token on this page.
             </p>
           )}
+          <Suggestions
+            orgTokenConnected={settingsQ.data.orgTokenConnected}
+            personalTokenConnected={settingsQ.data.personalTokenConnected}
+          />
           <div className="mt-6 border-t border-line pt-4">
             <h3 className="text-sm font-medium text-ink">Integrations using 1Password</h3>
             <p className="mt-0.5 text-xs text-muted">
@@ -215,26 +227,131 @@ function TokenFields({
   onRemove: () => void;
   removeLabel: string;
 }) {
+  // A connected token is state, not a form. Two always-visible password
+  // boxes with the same placeholder read as "paste your token twice"; the
+  // input now appears only when there is a reason to type into one.
+  const [entering, setEntering] = useState(!connected);
+
+  if (connected && !entering) {
+    return (
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge variant="success">Connected</Badge>
+        <Button type="button" variant="ghost" size="sm" onClick={() => setEntering(true)}>
+          Replace
+        </Button>
+        <Button type="button" variant="ghost" size="sm" disabled={removing} onClick={onRemove}>
+          {removing ? "Removing…" : removeLabel}
+        </Button>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-2">
-      {connected && <Badge variant="success">Connected</Badge>}
       <div className="flex gap-2">
         <Input
           type="password"
           aria-label={inputLabel}
           value={token}
           onChange={(e) => onTokenChange(e.target.value)}
-          placeholder="1Password service account token"
+          placeholder="ops_…"
         />
         <Button type="button" size="sm" disabled={saving || !token.trim()} onClick={onSave}>
-          {saving ? "Saving…" : connected ? "Rotate" : "Save"}
+          {saving ? "Saving…" : "Connect"}
         </Button>
       </div>
       {error && <p className="text-xs text-danger-500">{error}</p>}
       {connected && (
-        <Button type="button" variant="ghost" size="sm" disabled={removing} onClick={onRemove}>
-          {removing ? "Removing…" : removeLabel}
+        <Button type="button" variant="ghost" size="sm" onClick={() => setEntering(false)}>
+          Cancel
         </Button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Items that look like credentials for integrations with nothing stored yet.
+ *
+ * Connecting a token and then hand-typing a service name for every credential
+ * is work Valet can do: it knows which integrations want a credential and
+ * what the vaults hold. Every suggestion is confirmed by a person — the match
+ * is on an item title, which is a hint, not proof.
+ */
+function Suggestions({
+  orgTokenConnected,
+  personalTokenConnected,
+}: {
+  orgTokenConnected: boolean;
+  personalTokenConnected: boolean;
+}) {
+  const scope: OnePasswordTokenScope = orgTokenConnected ? "org" : "personal";
+  const enabled = orgTokenConnected || personalTokenConnected;
+  const q = useOpSuggestions(scope, enabled);
+  const connect = useConnectCredential();
+  const [dismissed, setDismissed] = useState<Set<string>>(new Set());
+  const [error, setError] = useState<string | null>(null);
+
+  if (!enabled || q.isLoading) return null;
+  const found: OpSuggestion[] = (q.data?.suggestions ?? []).filter(
+    (s: OpSuggestion) => !dismissed.has(`${s.service}:${s.itemId}`),
+  );
+  const unreadable = q.data?.unreadableVaults ?? [];
+  if (found.length === 0 && unreadable.length === 0) return null;
+
+  async function accept(s: OpSuggestion, field: string) {
+    setError(null);
+    try {
+      await connect.mutateAsync({
+        service: s.service,
+        body: {
+          type: "api_key",
+          scope: scope === "org" ? "org" : "user",
+          onepassword: {
+            reference: `op://${s.vaultTitle}/${s.itemTitle}/${field}`,
+            tokenScope: scope,
+          },
+        },
+      });
+      setDismissed((prev) => new Set(prev).add(`${s.service}:${s.itemId}`));
+    } catch (err) {
+      setError(apiErrorMessage(err, `Couldn't connect ${displayName(s.service)}.`));
+    }
+  }
+
+  return (
+    <div className="mt-6 border-t border-line pt-4">
+      <h3 className="text-sm font-medium text-ink">Found in your vaults</h3>
+      <p className="mt-0.5 text-xs text-muted">
+        Items whose name matches an integration that has no credential yet. Check the field is
+        the right one before connecting.
+      </p>
+      {found.map((s) => (
+        <FieldRow key={`${s.service}:${s.itemId}`} label={displayName(s.service)} hint={s.vaultTitle}>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm text-muted">
+              <span className="text-ink">{s.itemTitle}</span>
+            </span>
+            <Button type="button" size="sm" disabled={connect.isPending} onClick={() => void accept(s, "credential")}>
+              Connect
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => setDismissed((prev) => new Set(prev).add(`${s.service}:${s.itemId}`))}
+            >
+              Dismiss
+            </Button>
+          </div>
+        </FieldRow>
+      ))}
+      {error && <p className="py-2 text-xs text-danger-500">{error}</p>}
+      {unreadable.length > 0 && (
+        <p className="py-2 text-xs text-muted">
+          Could not read {unreadable.join(", ")}. Grant the service account access to see items
+          there.
+        </p>
       )}
     </div>
   );

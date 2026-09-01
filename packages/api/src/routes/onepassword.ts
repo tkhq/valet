@@ -30,10 +30,11 @@ import { Hono, type Context } from "hono";
 import { decodePageCursor, encodePageCursor, readLimit } from "../lib/page-cursor.js";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
-import { OnePasswordAuthError, type OnePasswordScope } from "../services/onepassword.js";
+import { ONEPASSWORD_SERVICE, OnePasswordAuthError, type OnePasswordScope } from "../services/onepassword.js";
 import { getAllowPersonalOnePassword, setOrgFeatures } from "../services/org.js";
 import type {
   ListOpItemsResponse,
+  OpSuggestionsResponse,
   ListOpVaultsResponse,
   OnePasswordSettingsResponse,
   OpItemDetailResponse,
@@ -186,6 +187,88 @@ function readItemOffset(raw: string): number | undefined {
   const fields = decodePageCursor(raw);
   const after = fields?.after;
   return typeof after === "number" && Number.isInteger(after) && after >= 0 ? after : undefined;
+}
+
+/**
+ * Items that look like credentials for integrations this org has not
+ * connected yet.
+ *
+ * Connecting a token and then hand-typing a service name for every
+ * credential is work Valet can do itself: it knows which services declare a
+ * credential (the plugin registry), which of those are already connected,
+ * and what the vaults hold. The match is on the item title, deliberately
+ * simple — a suggestion the person confirms, never an automatic write.
+ *
+ * A vault the token cannot read is reported by name rather than dropped, so
+ * a partial answer does not read as "nothing found".
+ */
+onePasswordRouter.get("/suggestions", async (c) => {
+  const { onePassword, plugins, engineCredentials } = c.var.providers;
+  const user = c.var.user;
+  const scope = scopeFromQuery(c);
+
+  const forbidden = await requireScopeAccess(c, scope);
+  if (forbidden) return forbidden;
+
+  const owner = scope === "org" ? { type: "org" as const, id: user.orgId } : { type: "user" as const, id: user.id };
+  const ctx = { orgId: user.orgId, userId: user.id };
+
+  try {
+    // Services that declare a credential and have none stored yet. A service
+    // already connected needs no suggestion.
+    const declared = new Set<string>();
+    for (const plugin of plugins) {
+      for (const decl of plugin.credentials ?? []) declared.add(decl.service ?? plugin.name);
+    }
+    declared.delete(ONEPASSWORD_SERVICE);
+    const wanted: string[] = [];
+    for (const service of declared) {
+      if ((await engineCredentials.get(owner, service)) === null) wanted.push(service);
+    }
+    if (wanted.length === 0) {
+      return c.json({ suggestions: [], unreadableVaults: [] } satisfies OpSuggestionsResponse);
+    }
+
+    const suggestions: OpSuggestionsResponse["suggestions"] = [];
+    const unreadableVaults: string[] = [];
+    for (const vault of await onePassword.listVaults(scope, ctx)) {
+      let items;
+      try {
+        items = await onePassword.listItems(scope, ctx, vault.id);
+      } catch {
+        // One unreadable vault must not fail the whole scan.
+        unreadableVaults.push(vault.title);
+        continue;
+      }
+      for (const item of items) {
+        const service = wanted.find((s) => titleNamesService(item.title, s));
+        if (!service) continue;
+        suggestions.push({
+          service,
+          vaultId: vault.id,
+          vaultTitle: vault.title,
+          itemId: item.id,
+          itemTitle: item.title,
+        });
+      }
+    }
+    return c.json({ suggestions, unreadableVaults } satisfies OpSuggestionsResponse);
+  } catch (err) {
+    return mapServiceError(c, err);
+  }
+});
+
+/**
+ * Whether an item title names a service. Word-boundary, case-insensitive, on
+ * the service id with separators loosened: "Linear", "Linear API Key" and
+ * "linear-prod" all name `linear`, while "Linearity" does not.
+ *
+ * Deliberately narrow. A suggestion the person rejects costs them a glance;
+ * one they accept without noticing points an integration at the wrong secret.
+ */
+function titleNamesService(title: string, service: string): boolean {
+  const needle = service.replace(/[-_]/g, "[-_ ]?").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^a-z0-9])${needle}([^a-z0-9]|$)`, "i").test(title);
 }
 
 onePasswordRouter.get("/vaults/:vaultId/items/:itemId", async (c) => {

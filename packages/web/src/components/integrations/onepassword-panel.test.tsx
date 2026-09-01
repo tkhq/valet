@@ -42,8 +42,14 @@ vi.mock("~/api/settings", () => ({
   useOrg: () => ({ data: orgData, isLoading: false, error: null }),
 }));
 
+let suggestionsData: { suggestions: unknown[]; unreadableVaults: string[] } | undefined = {
+  suggestions: [],
+  unreadableVaults: [],
+};
+
 vi.mock("~/api/onepassword", () => ({
   useOnePasswordSettings: () => ({ data: settingsData, isLoading: false, error: null }),
+  useOpSuggestions: () => ({ data: suggestionsData, isLoading: false, error: null }),
   usePutOnePasswordSettings: () => ({ mutate: putSettingsMutate, isPending: false, error: null }),
   useOpVaults: () => ({ data: vaultsData, isLoading: false, error: null }),
   useOpItems: (_scope: string, vaultId: string | undefined) => ({
@@ -119,14 +125,17 @@ describe("OnePasswordPanel", () => {
     settingsData = { allowPersonal: false, orgTokenConnected: true, personalTokenConnected: false };
     render(<OnePasswordPanel />);
     expect(screen.getByText("Connected")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Rotate" })).toBeTruthy();
+    // A connected token is state, not a form. The input appears behind
+    // Replace, so two identical password boxes are never on screen at once.
+    expect(screen.queryByLabelText("Organization 1Password token")).toBeNull();
+    expect(screen.getByRole("button", { name: "Replace" })).toBeTruthy();
   });
 
   it("saving the org token fires the connect mutation with scope: org", async () => {
     const user = userEvent.setup();
     render(<OnePasswordPanel />);
     await user.type(screen.getByLabelText("Organization 1Password token"), "op-token-123");
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(screen.getByRole("button", { name: "Connect" }));
 
     await waitFor(() =>
       expect(connectMutateAsync).toHaveBeenCalledWith({
@@ -143,7 +152,7 @@ describe("OnePasswordPanel", () => {
     const user = userEvent.setup();
     render(<OnePasswordPanel />);
     await user.type(screen.getByLabelText("Organization 1Password token"), "bad-token");
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(screen.getByRole("button", { name: "Connect" }));
 
     expect(await screen.findByText("1Password resolution failed")).toBeTruthy();
   });
@@ -171,7 +180,7 @@ describe("OnePasswordPanel", () => {
     const user = userEvent.setup();
     render(<OnePasswordPanel />);
     await user.type(screen.getByLabelText("1Password personal token"), "op-personal-token");
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(screen.getByRole("button", { name: "Connect" }));
 
     await waitFor(() =>
       expect(connectMutateAsync).toHaveBeenCalledWith({
