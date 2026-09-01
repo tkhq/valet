@@ -32,7 +32,6 @@ export const DOUBLE_CAST_ALLOWLIST: Record<string, number> = {
   "packages/api/src/providers/blob-fs.ts": 1,
   "packages/api/src/prebuilds/service.ts": 1,
   "packages/api/src/engine/bridge.test.ts": 1,
-  "packages/api/src/routes/messages.ts": 1,
   "packages/engine/test/model-switching.test.ts": 2,
   "packages/engine/test/list-threads-tool.test.ts": 2,
 };

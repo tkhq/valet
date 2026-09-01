@@ -402,11 +402,18 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
         },
       ];
 
-    // Out of agent-loop v1 scope — silently dropped. Future plans:
-    // compaction events, child-task events, thread lifecycle.
-    case "thread_start":
     case "compaction_start":
     case "compaction_end":
+      return [
+        {
+          type: e.type,
+          threadId: e.threadId,
+        },
+      ];
+
+    // Out of agent-loop v1 scope — silently dropped. Future plans:
+    // child-task events, thread lifecycle.
+    case "thread_start":
     case "task_start":
     case "task_end":
     // submission_stuck is an attention signal routed in Phase 4; no wire mapping yet.

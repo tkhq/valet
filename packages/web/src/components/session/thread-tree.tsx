@@ -6,6 +6,7 @@ import {
   useArchivedThreads,
   useCreateThread,
   useReplaceSandbox,
+  useSession,
   useSetThreadArchived,
   useThreads,
 } from "~/api/queries";
@@ -31,6 +32,7 @@ import {
 } from "~/components/primitives";
 import { formatWhen } from "~/lib/format-when";
 import { cn } from "~/lib/cn";
+import { sameModelSpec, shortModelLabel } from "~/lib/models";
 
 /**
  * What an untitled thread is called.
@@ -181,6 +183,11 @@ export interface ThreadTreeProps {
 
 function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showChildren: boolean }) {
   const threadsQ = useThreads(sessionId);
+  // Session default model, for the pin chip: a chip renders only on threads
+  // whose pin DIVERGES from it (every new thread pins at creation, so an
+  // always-on chip would just be noise).
+  const sessionQ = useSession(sessionId);
+  const sessionModel = sessionQ.data?.model;
   const childrenQ = useOrchestratorChildren(sessionId, {
     refetchInterval: CHILDREN_POLL_MS,
     enabled: showChildren,
@@ -355,6 +362,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
               key={t.id}
               thread={t}
               index={threads.indexOf(t)}
+              sessionModel={sessionModel}
               active={t.id === activeThreadId}
               hasPendingGate={gatedThreadIds.has(t.id)}
               childSessions={grouped.get(t.id) ?? []}
@@ -426,6 +434,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
 function ThreadNode({
   thread,
   index,
+  sessionModel,
   active,
   hasPendingGate,
   childSessions,
@@ -436,6 +445,8 @@ function ThreadNode({
 }: {
   thread: ThreadSummary;
   index: number;
+  /** Session default model — the pin chip shows only when the thread's pin diverges from it. */
+  sessionModel?: string;
   active: boolean;
   /** The thread holds a pending decision gate — show the needs-you dot. */
   hasPendingGate: boolean;
@@ -446,6 +457,15 @@ function ThreadNode({
   onDismissChild: (childSessionId: string) => void;
 }) {
   const label = thread.title ?? untitledThreadLabel(thread, index);
+  // Pin chip: the thread runs on a model other than the session default.
+  // Requires a KNOWN session default — while the session query loads, and
+  // for non-live sessions (GET /sessions/:id omits `model` unless the
+  // engine session is materialized), divergence is unknowable and a chip on
+  // every stamped thread would be pure noise.
+  const pinnedModel =
+    sessionModel && thread.model && !sameModelSpec(thread.model, sessionModel)
+      ? thread.model
+      : undefined;
 
   return (
     <div>
@@ -477,6 +497,14 @@ function ThreadNode({
             )}
           >
             <span className="flex-1 truncate">{label}</span>
+            {pinnedModel && (
+              <span
+                title={pinnedModel}
+                className="ml-2 shrink-0 rounded-sm bg-ink-wash px-1 py-0.5 font-mono text-[9px] text-muted"
+              >
+                {shortModelLabel(pinnedModel)}
+              </span>
+            )}
             {hasPendingGate && (
               // Amber = blocked on a person, the same vocabulary as the
               // sessions-list "Needs you" chip. Static on purpose: pulse is

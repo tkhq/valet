@@ -9,7 +9,7 @@
  * attachments — the field is dropped for those.
  */
 import { describe, expect, it } from "vitest";
-import type { MessageEntry } from "@valet/engine";
+import type { CompactionEntry, MessageEntry } from "@valet/engine";
 import { entryToMessage } from "./messages.js";
 
 function baseEntry(overrides: Partial<MessageEntry> = {}): MessageEntry {
@@ -249,6 +249,38 @@ describe("entryToMessage — skill invocation projection", () => {
     expect(entryToMessage(assistant, "sess", "th")?.skill).toBeUndefined();
     const badType = baseEntry({ metadata: { skill: 42 } });
     expect(entryToMessage(badType, "sess", "th")?.skill).toBeUndefined();
+  });
+});
+
+describe("entryToMessage — compaction projection", () => {
+  const compaction: CompactionEntry = {
+    id: "c_1",
+    sessionId: "sess",
+    threadId: "th",
+    parentId: "e_9",
+    type: "compaction",
+    summary: "## Goal\n- keep going",
+    coveredEntryIds: ["e_1", "e_2", "e_9"],
+    tokenCountBefore: 12000,
+    tokenCountAfter: 300,
+    createdAt: Date.parse("2024-01-01T00:00:00.000Z"),
+  };
+
+  it("projects a CompactionEntry as a system message with a compaction field", () => {
+    const msg = entryToMessage(compaction, "sess", "th");
+    expect(msg).not.toBeNull();
+    expect(msg?.role).toBe("system");
+    // Content degrades to the summary for clients without a divider renderer.
+    expect(msg?.content).toBe("## Goal\n- keep going");
+    expect(msg?.parts).toEqual([]);
+    expect(msg?.compaction).toEqual({
+      summary: "## Goal\n- keep going",
+      tokensBefore: 12000,
+      tokensAfter: 300,
+      // The DAG seam: a future explorer rolls back/forward across this
+      // boundary via the covered ids.
+      coveredEntryIds: ["e_1", "e_2", "e_9"],
+    });
   });
 });
 

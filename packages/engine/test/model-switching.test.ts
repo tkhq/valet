@@ -89,7 +89,8 @@ describe("engine: model switching", () => {
       model: baseModel,
     });
     const thread = await session.ensureDefaultThread();
-    expect(thread.modelId()).toBeUndefined();
+    // Threads pin the session's effective model at creation (TKAI-201).
+    expect(thread.modelId()).toBe(HAIKU);
 
     const r = await thread.setModel(OPUS);
     expect(r.fromModel).toBe(HAIKU);
@@ -126,7 +127,8 @@ describe("engine: model switching", () => {
     await expect(thread.setModel("nonexistent-model-9999")).rejects.toThrow(
       /unknown model id/,
     );
-    expect(thread.modelId()).toBeUndefined();
+    // The rejected switch left the creation-time pin (TKAI-201) untouched.
+    expect(thread.modelId()).toBe(HAIKU);
     await expect(session.setModel("nonexistent-model-9999")).rejects.toThrow(
       /unknown model id/,
     );
@@ -189,6 +191,83 @@ describe("engine: model switching", () => {
       failingCtx,
     );
     expect((r2 as { text: string }).text).toContain("switch_model failed");
+  });
+
+  it("threads pin the session model at creation; a session default change only affects new threads", async () => {
+    const { engine, store, baseModel } = setup();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: baseModel,
+    });
+    const first = await session.ensureDefaultThread();
+    expect(first.modelId()).toBe(HAIKU);
+    const persisted = await store.getThread(session.id, first.id);
+    expect(persisted?.model).toBe(HAIKU);
+
+    await session.setModel(OPUS);
+    // The existing chat keeps the model it started with.
+    expect(first.modelId()).toBe(HAIKU);
+    // A NEW thread pins the new default.
+    const second = session.thread("web:second");
+    expect(second.modelId()).toBe(OPUS);
+  });
+
+  it("QueueItem.model outranks the thread pin; a dead item pin fails loud", async () => {
+    const { engine, baseModel } = setup();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: baseModel,
+    });
+    const thread = await session.ensureDefaultThread();
+    expect(thread.modelId()).toBe(HAIKU);
+
+    const item = (model: string) => ({
+      id: "q-test",
+      threadId: thread.id,
+      content: "hi",
+      model,
+      status: "queued" as const,
+      attemptCount: 0,
+      maxAttempts: 10,
+      timeoutAt: Date.now() + 3_600_000,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    // Item pin wins over the thread pin.
+    expect(thread.resolveTurnModel(item(OPUS)).id).toBe(OPUS);
+    // No item pin → thread pin.
+    expect(thread.resolveTurnModel().id).toBe(HAIKU);
+    // A divergent pin that no longer resolves fails the turn loud, and the
+    // error names the corrective action.
+    expect(() => thread.resolveTurnModel(item("gone-model-9999"))).toThrow(
+      /no longer available.*\/model/,
+    );
+  });
+
+  it("submitPrompt rejects an unknown per-item model at admission", async () => {
+    const { engine, baseModel } = setup();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: baseModel,
+    });
+    const thread = await session.ensureDefaultThread();
+    await expect(
+      thread.submitPrompt("hi", { model: "gone-model-9999" }),
+    ).rejects.toThrow(/unknown model id/);
+    // A pin naming the session's own spec is accepted without registry
+    // resolution (custom providers / test doubles are not in the registry).
+    const receipt = await thread.submitPrompt("hi", { model: HAIKU });
+    expect(receipt.queueItemId).toBeTruthy();
   });
 
   it("switch_model is registered in builtinTools", () => {

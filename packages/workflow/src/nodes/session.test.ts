@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { SubmissionResult } from '@valet/engine';
+import { ValidationError } from '@valet/engine';
 
 import type { SessionNode } from '../dag/nodes.js';
 import type { WorkflowDefinition } from '../dag/shape.js';
@@ -401,6 +402,35 @@ describe('executeSession: non-completed outcome fails the node', () => {
     const byNode = new Map((await store.getCheckpoints('run-9')).map((cp) => [cp.nodeId, cp]));
     expect(byNode.get('s')?.status).toBe('failed');
     expect(byNode.get('s')?.error).toBe('cancelled by user');
+  });
+});
+
+// ─── 9b. a ValidationError at dispatch fails the NODE, not the drive ─────────
+//
+// The engine validates the per-item model pin at admission (thread-model-
+// pinning design, decision 2), so `engine.prompt` can now reject with a
+// deterministic ValidationError for an unknown `node.model`. Rethrowing
+// would poison the drive (abandon lease → re-drive → same throw, until the
+// poisoned-run cap fails the whole run with no per-node error).
+
+describe('executeSession: ValidationError at dispatch fails the node', () => {
+  it('settles the node failed with the admission error instead of throwing out of the drive', async () => {
+    const store = new InMemoryWorkflowStore();
+    const clock = makeClock();
+    const { engine } = makeEngine();
+    engine.prompt = async () => {
+      throw new ValidationError('unknown model id: gone-model-9999. Run /model to list the available models.');
+    };
+
+    await store.createRun('run-9b', runParams(), sessionDefinition({ model: 'gone-model-9999' }), 'v1');
+    const attempt = await claimAttempt(store, 'run-9b');
+    const park = await driveUntilPark('run-9b', attempt, { store, engine, clock: clock.now });
+    expect(park.status).toBe('settled');
+    expect(park.outcome).toBe('failed');
+
+    const byNode = new Map((await store.getCheckpoints('run-9b')).map((cp) => [cp.nodeId, cp]));
+    expect(byNode.get('s')?.status).toBe('failed');
+    expect(byNode.get('s')?.error).toMatch(/unknown model id: gone-model-9999/);
   });
 });
 

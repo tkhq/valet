@@ -15,6 +15,11 @@ import type { ListAssistantsResponse, ListTeamsResponse, SessionDetail } from "@
 
 const deleteMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const setModelMutate = vi.fn();
+const setThreadModelMutate = vi.fn();
+/** Threads for the header's thread-scoped model picker. Empty by default:
+ * the picker then falls back to the session default (legacy behavior). */
+let headerThreads: Array<{ id: string; sessionId: string; createdAt: number; model?: string }> =
+  [];
 let pauseMutateAsync = vi.fn().mockResolvedValue({ status: "hibernated" });
 let pauseIsPending = false;
 let replaceMutateAsync = vi.fn().mockResolvedValue({ ok: true });
@@ -47,6 +52,8 @@ vi.mock("~/api/queries", async (importOriginal) => {
     ...actual,
     useDeleteSession: () => ({ isPending: false, mutateAsync: deleteMutateAsync }),
     useSetSessionModel: () => ({ isPending: false, mutate: setModelMutate }),
+    useSetThreadModel: () => ({ isPending: false, mutate: setThreadModelMutate }),
+    useThreads: () => ({ data: { threads: headerThreads }, isLoading: false, error: null }),
     usePauseSession: () => ({ isPending: pauseIsPending, mutateAsync: pauseMutateAsync }),
     useReplaceSandbox: () => ({ isPending: false, mutateAsync: replaceMutateAsync }),
     useRenameSession: () => ({ isPending: false, mutateAsync: renameMutateAsync }),
@@ -97,10 +104,16 @@ function baseSession(): SessionDetail {
   };
 }
 
-function renderHeader(sandbox?: { state: string; epoch: number }) {
+function renderHeader(sandbox?: { state: string; epoch: number }, threadId?: string) {
   return render(
     <TooltipProvider>
-      <SessionHeader session={baseSession()} agentStatus="idle" conn="open" sandbox={sandbox} />
+      <SessionHeader
+        session={baseSession()}
+        agentStatus="idle"
+        conn="open"
+        sandbox={sandbox}
+        threadId={threadId}
+      />
     </TooltipProvider>,
   );
 }
@@ -108,6 +121,8 @@ function renderHeader(sandbox?: { state: string; epoch: number }) {
 beforeEach(() => {
   deleteMutateAsync.mockClear();
   setModelMutate.mockClear();
+  setThreadModelMutate.mockClear();
+  headerThreads = [];
   pauseMutateAsync = vi.fn().mockResolvedValue({ status: "hibernated" });
   pauseIsPending = false;
   replaceMutateAsync = vi.fn().mockResolvedValue({ ok: true });
@@ -126,6 +141,32 @@ describe("SandboxChip — suspended state", () => {
       </TooltipProvider>,
     );
     expect(screen.getByLabelText("sleeping — will wake on message")).toBeTruthy();
+  });
+});
+
+describe("SessionHeader — thread-scoped model picker", () => {
+  it("shows the ACTIVE THREAD's pinned model, not the session default", () => {
+    headerThreads = [
+      { id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-opus-4-7" },
+    ];
+    renderHeader(undefined, "th-1");
+    const trigger = screen.getByRole("button", { name: "Choose model" });
+    expect(trigger.textContent).toContain("Opus 4.7");
+  });
+
+  it("disables the picker while the active thread is unresolved (never a session-scope write)", () => {
+    // threadId is set but the threads list has no match (query loading, or
+    // an archived thread): a session PATCH here would silently not affect
+    // the pinned active thread, so the picker must disable instead.
+    renderHeader(undefined, "th-unknown");
+    const trigger = screen.getByRole("button", { name: "Choose model" }) as HTMLButtonElement;
+    expect(trigger.disabled).toBe(true);
+  });
+
+  it("stays session-scoped and enabled when no threadId is in play", () => {
+    renderHeader(undefined, undefined);
+    const trigger = screen.getByRole("button", { name: "Choose model" }) as HTMLButtonElement;
+    expect(trigger.disabled).toBe(false);
   });
 });
 

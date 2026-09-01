@@ -132,6 +132,19 @@ export interface SessionStreamState {
    */
   modelSwitchNonce: number;
   /**
+   * True while a thread is compacting (between `compaction_start` and
+   * `compaction_end` wire frames). Drives a transient indicator; a thread
+   * with no entry is not compacting.
+   */
+  compactingByThread: Record<string, boolean>;
+  /**
+   * Bumps on every `compaction_end` wire event. The session-view hook
+   * watches it and refetches the messages query so the persisted
+   * compaction divider appears without a reload (REST stays the
+   * authoritative history source).
+   */
+  compactionNonce: number;
+  /**
    * Last wire error per thread. Wire `error` frames carry the originating
    * threadId; keying by it keeps thread B's failure banner off thread A's
    * view. Cleared per thread when that thread streams a new message or the
@@ -234,6 +247,8 @@ const EMPTY: SessionStreamState = {
   pendingGates: {},
   queueByThread: {},
   modelSwitchNonce: 0,
+  compactingByThread: {},
+  compactionNonce: 0,
 };
 
 function ensure(state: StreamStore, sessionId: string): SessionStreamState {
@@ -276,6 +291,11 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       next.errorByThread = {};
       next.sessionError = undefined;
       next.statusByThread = {};
+      // Compacting is transient too: the engine balances the start/end pair
+      // in-process, but an api crash mid-compaction orphans the start frame
+      // — without this reset the "Compacting context…" strip would survive
+      // every reconnect. A live compaction re-arms via durable replay.
+      next.compactingByThread = {};
       return next;
     }
 
@@ -514,6 +534,21 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       // through this event — without the bump the header shows a stale model
       // until a manual reload.
       next.modelSwitchNonce = slice.modelSwitchNonce + 1;
+      return next;
+    }
+
+    case "compaction_start": {
+      next.compactingByThread = { ...slice.compactingByThread, [ev.threadId]: true };
+      return next;
+    }
+
+    case "compaction_end": {
+      // `compaction_end` fires on failure too (the engine balances the
+      // pair), so the flag always clears. The nonce bump cues the
+      // messages refetch that surfaces the persisted divider.
+      const { [ev.threadId]: _, ...rest } = slice.compactingByThread;
+      next.compactingByThread = rest;
+      next.compactionNonce = slice.compactionNonce + 1;
       return next;
     }
 
@@ -892,6 +927,17 @@ export function useErrorForThread(
     const slice = s.bySession[sessionId];
     if (!slice) return undefined;
     return (threadId ? slice.errorByThread[threadId] : undefined) ?? slice.sessionError;
+  });
+}
+
+/** True while this thread is between `compaction_start` and `compaction_end`. */
+export function useCompactingForThread(
+  sessionId: string,
+  threadId: string | undefined,
+): boolean {
+  return useStreamStore((s) => {
+    if (!threadId) return false;
+    return s.bySession[sessionId]?.compactingByThread[threadId] ?? false;
   });
 }
 

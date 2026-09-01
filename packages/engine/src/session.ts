@@ -677,6 +677,12 @@ export class Session {
       key: k,
       status: "active",
       queueMode: this.options.queueMode ?? "followup",
+      // Pin the session's effective model at creation (TKAI-201): one chat
+      // keeps the model it started with, and a later session-default change
+      // affects only future threads. This is the single creation seam —
+      // default/channel/workflow threads all funnel through here; rehydrate
+      // constructs Thread from persisted data and never re-stamps.
+      model: this.options.modelSpec ?? this.options.model.id,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };

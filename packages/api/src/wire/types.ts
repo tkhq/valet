@@ -958,8 +958,10 @@ export type PatchThreadResponse = ThreadSummary;
 /**
  * Patch a session's settings. Send one field or both.
  *
- * `model` is the session default that threads inherit when they have no
- * override. `title` is the session name shown in the header and the lists;
+ * `model` is the session default. New threads pin it at creation (thread
+ * PATCH changes an existing thread's model); only legacy threads without a
+ * pin keep tracking it. `title` is the session name shown in the header and
+ * the lists;
  * a person sets it to correct what the auto-titler chose. A body with
  * neither field is rejected.
  */
@@ -1042,6 +1044,19 @@ export interface MessageCommand {
 }
 
 /**
+ * Projection of an engine `CompactionEntry` (thread-model-pinning and
+ * compaction design, decision 7). Renders as a divider in the transcript.
+ * `coveredEntryIds` is deliberately shipped: it is the seam a future DAG
+ * explorer needs to roll a thread back to (or forward from) this boundary.
+ */
+export interface MessageCompaction {
+  summary: string;
+  tokensBefore: number;
+  tokensAfter: number;
+  coveredEntryIds: string[];
+}
+
+/**
  * Present on a user message that is a skill invocation: a slash-command
  * expansion (stamped as submission metadata at dispatch) or a host-invoked
  * `Thread.skill()` submission. `args` is the raw text the user typed after
@@ -1097,6 +1112,12 @@ export interface Message {
    * The renderer uses `ok` to show success/failure styling.
    */
   command?: MessageCommand;
+  /**
+   * Present when this message projects a `CompactionEntry` (role is
+   * `system`, `content` carries the summary). The client renders a
+   * compaction divider, never a chat bubble.
+   */
+  compaction?: MessageCompaction;
   /**
    * Present on a user message that is a skill invocation (see
    * `MessageSkillInvocation`). Projected from the persisted entry's
@@ -1356,6 +1377,20 @@ export type WireEvent =
       fromModel: string;
       toModel: string;
       reason: string;
+    }
+  | {
+      /**
+       * Compaction lifecycle (thread-model-pinning and compaction design,
+       * decision 7). `compaction_start` shows a transient "compacting"
+       * indicator; `compaction_end` tells the client to refetch messages so
+       * the persisted divider appears (REST stays the authoritative history
+       * source). `compaction_end` fires on failure too — the pair always
+       * balances.
+       */
+      seq: number;
+      ts: number; offset?: string;
+      type: "compaction_start" | "compaction_end";
+      threadId: string;
     }
   | { seq: number; ts: number; offset?: string; type: "decision_gate"; threadId: string; gate: DecisionGate }
   | {
