@@ -24,6 +24,7 @@ import {
   buildOverheardDigest,
   deriveQueueState,
   formatSenderLine,
+  isOverheardDigestMeta,
   isSignalContent,
   MAX_PENDING_PER_THREAD,
   namespaceInternalDispatchId,
@@ -479,6 +480,42 @@ export class Thread {
       if (settled) await this.emitSettled(constituent.id, { outcome: "merged" });
     }
     return admittedMerged;
+  }
+
+  /**
+   * Crash repair for overheard digests (TKAI-297). `coalesceQueuedOverheard`
+   * admits the digest first and settles constituents after — a crash between
+   * the two leaves the digest AND its constituents queued, so the thread
+   * would deliver the same messages twice. This repair exists for that crash
+   * window (the sanctioned auto-repair exception: violations expected across
+   * crashes): for every queued digest, re-settle its still-queued
+   * constituents `merged`. The settleUnclaimed CAS makes it idempotent, and
+   * a constituent that was claimed in the meantime is left alone. Called
+   * from the session sweep and from restore-time reconcile, both before
+   * their kicks, so a repairable constituent settles before it can be
+   * claimed.
+   */
+  async repairOverheardDigests(): Promise<void> {
+    const store = this.session.providers.store;
+    const items = await store.listUnsettledSubmissions(this.session.id);
+    const mine = items.filter((i) => i.threadId === this.id);
+    for (const digest of mine) {
+      if (digest.status !== "queued" || digest.supersededByItemId !== undefined) continue;
+      const meta = digest.metadata?.overheardDigest;
+      if (!isOverheardDigestMeta(meta)) continue;
+      for (const constituentId of meta.constituentIds) {
+        const constituent = mine.find((i) => i.id === constituentId && i.status === "queued");
+        if (!constituent) continue;
+        const settled = await store.settleUnclaimed(
+          this.session.id,
+          this.id,
+          constituentId,
+          { outcome: "merged" },
+          { mergedIntoItemId: digest.id },
+        );
+        if (settled) await this.emitSettled(constituentId, { outcome: "merged" });
+      }
+    }
   }
 
   /**

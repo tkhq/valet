@@ -183,6 +183,13 @@ constituent `merged` pointing at it. Properties:
   the same thread queues normally and does not flush the digest.
 - The persona's `addressed="false"` guidance tells the model to read the digest
   as the thread's current state and reply at most once.
+- A crash between the digest admission and the constituent settlements leaves
+  both queued. `Thread.repairOverheardDigests` (run by the session sweep and by
+  restore-time reconcile, before their kicks) re-settles the leftover
+  constituents — the sanctioned crash-window auto-repair.
+- The coalesce scan is serialized per thread in-process. Like the collect-window
+  flush, it has no cross-process guard; the engine's single-owner session
+  contract is what prevents two replicas from scanning one thread.
 
 ### 10. Agent-readable inbound messages
 

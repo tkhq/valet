@@ -84,7 +84,7 @@ export interface OverheardDigestMeta {
   lines: string[];
 }
 
-function isOverheardDigestMeta(value: unknown): value is OverheardDigestMeta {
+export function isOverheardDigestMeta(value: unknown): value is OverheardDigestMeta {
   if (typeof value !== "object" || value === null) return false;
   const rec = value as Record<string, unknown>; // narrowed to object above; field checks follow
   return Array.isArray(rec.constituentIds) && Array.isArray(rec.lines);

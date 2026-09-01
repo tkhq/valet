@@ -270,6 +270,48 @@ describe("overheard digest: queue coalescing", () => {
     faux.unregister();
   });
 
+  it("the sweep repairs a crashed coalesce: leftover queued constituents settle merged into the digest", async () => {
+    const faux = registerFauxProvider({ provider: "overheard-crash-repair" });
+    faux.setResponses([]);
+
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+    });
+    const thread = session.thread(THREAD_KEY);
+    await thread.pause();
+
+    // Simulate the crash window: digest admitted, constituents NEVER settled.
+    const a = queueItemOf(overheardSignal({ body: "first", sender: "Alice" }), "qa", Date.now());
+    const b = queueItemOf(overheardSignal({ body: "second", sender: "Bob" }), "qb", Date.now() + 1);
+    const withThread = (item: QueueItem): QueueItem => ({ ...item, threadId: thread.id });
+    await store.admitSubmission(session.id, thread.id, withThread(a));
+    await store.admitSubmission(session.id, thread.id, withThread(b));
+    const { content, digest } = buildOverheardDigest([withThread(a), withThread(b)]);
+    const digestItem: QueueItem = {
+      ...queueItemOf(content, "qd", Date.now() + 2),
+      threadId: thread.id,
+      metadata: { overheardDigest: digest },
+    };
+    await store.admitSubmission(session.id, thread.id, digestItem);
+
+    await session.sweepOnce();
+
+    const repairedA = await store.getQueueItem(session.id, "qa");
+    const repairedB = await store.getQueueItem(session.id, "qb");
+    expect(repairedA?.outcome).toEqual({ outcome: "merged" });
+    expect(repairedA?.mergedIntoItemId).toBe("qd");
+    expect(repairedB?.outcome).toEqual({ outcome: "merged" });
+    expect(repairedB?.mergedIntoItemId).toBe("qd");
+    expect((await store.getQueueItem(session.id, "qd"))?.status).toBe("queued");
+
+    faux.unregister();
+  });
+
   it("a dispatchId redelivery after coalescing dedups against the merged constituent and does not re-digest", async () => {
     const faux = registerFauxProvider({ provider: "overheard-redelivery" });
     faux.setResponses([]);
