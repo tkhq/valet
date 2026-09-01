@@ -130,11 +130,25 @@ that can run the command.
 
 Orchestrator and workflow sessions are sandbox-less by design (`host.ts`, the
 `warmSandboxOnClaim: false` paths) and run no prep, so they do not have the
-command. The orchestrator persona says to delegate credential work to a child,
-next to the existing sentence about git and GitHub credentials. Workflow session
-nodes receive `CODING_SYSTEM_PROMPT` without prep, so they are told about a
-command they do not have; the paragraph's failure mode there is a
+command. Workflow session nodes receive `CODING_SYSTEM_PROMPT` without prep, so
+they are told about a command they do not have; the failure mode there is a
 command-not-found, not a leaked secret.
+
+The orchestrator needs its own rule, and one sentence inside the Delegation
+section was not enough. Asked for a 1Password value, it ran `op read` — the
+vendor CLI it knows from training — got zero bytes, and told the user their
+vault and item names were wrong when they were correct. The rule it needed
+named `valet-secrets`, a command that session does not have, and never named
+1Password or a secret, so nothing matched the words a person writes. Naming the
+command without forbidding it produced the next failure: the orchestrator ran
+`valet-secrets` in its own sandbox, got "not found", and told the user to look
+the value up by hand.
+
+So the persona now carries a `## Secrets` section, reached from a Decision-flow
+step keyed to the trigger words (1Password, a vault, a credential, a token, an
+`op://` reference). It states that no secrets command exists in that sandbox,
+forbids running one to find out, and makes spawning a child the action rather
+than a fallback. `persona.test.ts` pins each of those properties.
 
 ## Testing
 

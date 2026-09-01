@@ -99,4 +99,23 @@ describe("orchestratorPersona", () => {
     expect(orchestratorPersona({ type: "team", id: "t1" })).toContain("shared assistant for a team");
     expect(orchestratorPersona({ type: "org", id: "o1" })).toContain("chief of staff");
   });
+  // Asked for a 1Password value, the orchestrator ran `op read`, got zero
+  // bytes, and told the user their vault and item names were wrong. The rule
+  // it needed named a tool it does not have and never named 1Password, so
+  // nothing matched the words the person used.
+  it("routes a credential request to a child instead of a vendor CLI", () => {
+    for (const owner of OWNERS) {
+      const persona = orchestratorPersona(owner);
+      // Keyed to what a person writes, not to the tool that would serve it.
+      expect(persona).toContain("1Password");
+      expect(persona).toContain("op://");
+      // The failure mode, named so a zero-byte result is not read as a wrong vault.
+      expect(persona).toContain("Do not run a secrets command");
+      expect(persona).toContain("Do not tell the user to look the secret up themselves");
+      expect(persona).toContain("valet-secrets");
+      // The section has to be reachable from the router, not only defined.
+      expect(persona.indexOf("## Secrets")).toBeGreaterThan(-1);
+      expect(persona).toContain("never ask anyone to paste one");
+    }
+  });
 });
