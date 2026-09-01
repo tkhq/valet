@@ -15,6 +15,8 @@ import type { AppDb } from "../lib/drizzle.js";
 import { eventSubscriptions } from "../schema/index.js";
 import { validateSubscription } from "../routes/events.js";
 import { catalogForService } from "../events/ingest.js";
+import { enforceMentionScope } from "../events/mention-scope.js";
+import type { SubscriptionFilter } from "../events/match.js";
 import {
   canAccessTriggerRow,
   canAccessTriggerRowInScope,
@@ -69,10 +71,10 @@ export async function createWorkflowTrigger(
   db: AppDb,
   plugins: ValetPlugin[],
   user: { id: string; orgId: string },
-  input: { workflowId: string; name: string; eventKeys: string[]; filters?: unknown[] },
+  input: { workflowId: string; name: string; eventKeys: string[]; filters?: unknown[]; anyChannel?: boolean },
 ): Promise<{ ok: true; trigger: WorkflowTriggerSummary } | { ok: false; error: string }> {
   const target = { kind: "workflow" as const, workflowId: input.workflowId };
-  const filters = input.filters ?? [];
+  let filters = input.filters ?? [];
   const error = validateSubscription(plugins, {
     name: input.name,
     eventKeys: input.eventKeys,
@@ -80,6 +82,17 @@ export async function createWorkflowTrigger(
     target,
   });
   if (error) return { ok: false, error };
+
+  // A `slack.app_mention` trigger is scoped to its creator and to named
+  // channels (TKAI-299) — same gate as the subscriptions CRUD routes. The
+  // cast narrows the filters `validateSubscription` just validated.
+  const scoped = await enforceMentionScope(db, plugins, user.id, {
+    eventKeys: input.eventKeys,
+    filters: filters as SubscriptionFilter[],
+    anyChannel: input.anyChannel === true,
+  });
+  if (!scoped.ok) return { ok: false, error: scoped.error };
+  filters = scoped.filters;
 
   // Owner-scoped, not just org-scoped: checking only `orgId` let any org
   // member wire event-driven automation onto a workflow they don't own.
@@ -183,6 +196,7 @@ export interface WorkflowTriggerPatch {
   eventKeys?: string[];
   filters?: unknown[];
   enabled?: boolean;
+  anyChannel?: boolean;
 }
 
 export async function updateWorkflowTrigger(
@@ -201,7 +215,7 @@ export async function updateWorkflowTrigger(
 
   const name = patch.name ?? current.name;
   const eventKeys = patch.eventKeys ?? current.eventKeys;
-  const filters = patch.filters ?? current.filters;
+  let filters = patch.filters ?? current.filters;
   const error = validateSubscription(plugins, {
     name,
     eventKeys,
@@ -209,6 +223,19 @@ export async function updateWorkflowTrigger(
     target: { kind: "workflow", workflowId: current.workflowId },
   });
   if (error) return { ok: false, status: 400, error };
+
+  // Mention scoping (TKAI-299) re-applies only when the patch changes what is
+  // matched, keyed to the row's creator — same rule as the subscriptions
+  // PATCH route. An enabled-only or name-only patch skips it.
+  if (patch.filters !== undefined || patch.eventKeys !== undefined) {
+    const scoped = await enforceMentionScope(db, plugins, accessible.row.createdBy, {
+      eventKeys,
+      filters: filters as SubscriptionFilter[],
+      anyChannel: patch.anyChannel === true,
+    });
+    if (!scoped.ok) return { ok: false, status: 400, error: scoped.error };
+    filters = scoped.filters;
+  }
 
   const updated = await db
     .update(eventSubscriptions)

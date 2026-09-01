@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import githubPlugin from "@valet/plugin-github/plugin";
 import linearPlugin from "@valet/plugin-linear/plugin";
+import slackPlugin from "@valet/plugin-slack/plugin";
 import type { ValetPlugin } from "@valet/engine";
 import type { RunHost } from "@valet/workflow";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
@@ -19,6 +20,7 @@ import {
   eventSubscriptions,
   teamMembers,
   teams,
+  userIdentityLinks,
   workflowDefinitions,
 } from "../schema/index.js";
 import type {
@@ -1372,5 +1374,225 @@ describe("GET /api/events/filter-options", () => {
     const a = await bootFixture();
     const res = await fetch(`${a.baseUrl}/api/events/filter-options`);
     expect(res.status).toBe(400);
+  });
+});
+
+// ── Mention scoping (TKAI-299) ─────────────────────────────────────────────
+//
+// A subscription selecting `slack.app_mention` must name channels (or set the
+// explicit `anyChannel` flag) and is force-filtered to its creator's linked
+// Slack user. See `events/mention-scope.ts`.
+
+describe("mention scoping (slack.app_mention)", () => {
+  async function bootSlack(): Promise<TestApi> {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    return api;
+  }
+
+  /** Links a Valet user to a Slack user id, as the connect flow would. */
+  async function linkSlack(a: TestApi, userId: string, externalId: string): Promise<void> {
+    await a.providers.db.insert(userIdentityLinks).values({
+      id: `uil-${userId}`,
+      provider: "slack",
+      externalId,
+      userId,
+      createdAt: Date.now(),
+      notifyAttention: true,
+    });
+  }
+
+  const MENTION_BODY: CreateEventSubscriptionRequest = {
+    name: "my mentions",
+    eventKeys: ["slack.app_mention"],
+    filters: [{ field: "channel", op: "eq", value: "C123", label: "#eng" }],
+    target: { kind: "orchestrator" },
+  };
+
+  it("injects the creator's linked Slack user filter on create", async () => {
+    const a = await bootSlack();
+    await linkSlack(a, "local-user", "U_LOCAL");
+    const res = await postSubscription(a.baseUrl, MENTION_BODY);
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateEventSubscriptionResponse;
+    expect(body.filters).toEqual([
+      { field: "channel", op: "eq", value: "C123", label: "#eng" },
+      { field: "user", op: "eq", value: "U_LOCAL" },
+    ]);
+    const rows = await a.providers.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.id, body.id));
+    expect(rows[0].filters).toEqual(body.filters);
+  });
+
+  it("keeps a user filter that already names the creator, without duplicating it", async () => {
+    const a = await bootSlack();
+    await linkSlack(a, "local-user", "U_LOCAL");
+    const res = await postSubscription(a.baseUrl, {
+      ...MENTION_BODY,
+      filters: [...MENTION_BODY.filters!, { field: "user", op: "eq", value: "U_LOCAL" }],
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateEventSubscriptionResponse;
+    expect(body.filters!.filter((f) => f.field === "user")).toHaveLength(1);
+  });
+
+  it("refuses a user filter naming someone else", async () => {
+    const a = await bootSlack();
+    await linkSlack(a, "local-user", "U_LOCAL");
+    const res = await postSubscription(a.baseUrl, {
+      ...MENTION_BODY,
+      filters: [...MENTION_BODY.filters!, { field: "user", op: "eq", value: "U_OTHER" }],
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("own @-mentions");
+  });
+
+  it("refuses creation when the creator has no linked Slack account", async () => {
+    const a = await bootSlack();
+    const res = await postSubscription(a.baseUrl, MENTION_BODY);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("Link your Slack account");
+  });
+
+  it("refuses creation without a channel filter unless anyChannel is set", async () => {
+    const a = await bootSlack();
+    await linkSlack(a, "local-user", "U_LOCAL");
+    const res = await postSubscription(a.baseUrl, { ...MENTION_BODY, filters: [] });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("at least one channel");
+  });
+
+  it("a prefix channel filter does not satisfy the channel requirement", async () => {
+    const a = await bootSlack();
+    await linkSlack(a, "local-user", "U_LOCAL");
+    const res = await postSubscription(a.baseUrl, {
+      ...MENTION_BODY,
+      filters: [{ field: "channel", op: "prefix", value: "C" }],
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("accepts multiple channels via an in filter", async () => {
+    const a = await bootSlack();
+    await linkSlack(a, "local-user", "U_LOCAL");
+    const res = await postSubscription(a.baseUrl, {
+      ...MENTION_BODY,
+      filters: [{ field: "channel", op: "in", value: ["C123", "C456"] }],
+    });
+    expect(res.status).toBe(201);
+  });
+
+  it("anyChannel: true permits a channel-less mention subscription", async () => {
+    const a = await bootSlack();
+    await linkSlack(a, "local-user", "U_LOCAL");
+    const res = await postSubscription(a.baseUrl, { ...MENTION_BODY, filters: [], anyChannel: true });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateEventSubscriptionResponse;
+    expect(body.filters).toEqual([{ field: "user", op: "eq", value: "U_LOCAL" }]);
+  });
+
+  it("refuses anyChannel combined with channel filters", async () => {
+    const a = await bootSlack();
+    await linkSlack(a, "local-user", "U_LOCAL");
+    const res = await postSubscription(a.baseUrl, { ...MENTION_BODY, anyChannel: true });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("Any channel");
+  });
+
+  it("refuses mixing app_mention with a key that has no user field", async () => {
+    const a = await bootSlack();
+    await linkSlack(a, "local-user", "U_LOCAL");
+    const res = await postSubscription(a.baseUrl, {
+      ...MENTION_BODY,
+      eventKeys: ["slack.app_mention", "slack.channel_archive"],
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("slack.channel_archive");
+  });
+
+  it("a slack.* wildcard cannot widen around the gate", async () => {
+    const a = await bootSlack();
+    await linkSlack(a, "local-user", "U_LOCAL");
+    const res = await postSubscription(a.baseUrl, { ...MENTION_BODY, eventKeys: ["slack.*"] });
+    // The wildcard selects app_mention, so scoping applies — and the wildcard
+    // also selects user-less keys, which the mix rule refuses.
+    expect(res.status).toBe(400);
+  });
+
+  it("leaves non-mention slack subscriptions unscoped", async () => {
+    const a = await bootSlack();
+    const res = await postSubscription(a.baseUrl, {
+      name: "all channel messages",
+      eventKeys: ["slack.message"],
+      filters: [],
+      target: { kind: "orchestrator" },
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateEventSubscriptionResponse;
+    expect(body.filters).toEqual([]);
+  });
+
+  it("PATCH re-applies scoping keyed to the creator when filters change", async () => {
+    const a = await bootSlack();
+    // Row created by `someone` (linked), owned by the caller so it is mutable.
+    await linkSlack(a, "someone", "U_SOMEONE");
+    await seedSubscriptionRow(a, "sub_m1", "local-org", {
+      eventKeys: ["slack.app_mention"],
+      filters: [
+        { field: "channel", op: "eq", value: "C123" },
+        { field: "user", op: "eq", value: "U_SOMEONE" },
+      ],
+      ownerType: "user",
+      ownerId: "local-user",
+    });
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions/sub_m1`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filters: [], anyChannel: true }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as PatchEventSubscriptionResponse;
+    // The injected filter names the CREATOR's Slack user, not the caller's.
+    expect(body.filters).toEqual([{ field: "user", op: "eq", value: "U_SOMEONE" }]);
+  });
+
+  it("PATCH cannot strip the channel scope without anyChannel", async () => {
+    const a = await bootSlack();
+    await linkSlack(a, "someone", "U_SOMEONE");
+    await seedSubscriptionRow(a, "sub_m2", "local-org", {
+      eventKeys: ["slack.app_mention"],
+      filters: [
+        { field: "channel", op: "eq", value: "C123" },
+        { field: "user", op: "eq", value: "U_SOMEONE" },
+      ],
+      ownerType: "user",
+      ownerId: "local-user",
+    });
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions/sub_m2`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filters: [{ field: "user", op: "eq", value: "U_SOMEONE" }] }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("an enabled-only PATCH skips scoping, even when the creator is unlinked", async () => {
+    const a = await bootSlack();
+    // No link for `someone`: a toggle must still work on an old row.
+    await seedSubscriptionRow(a, "sub_m3", "local-org", {
+      eventKeys: ["slack.app_mention"],
+      filters: [{ field: "channel", op: "eq", value: "C123" }],
+      ownerType: "user",
+      ownerId: "local-user",
+    });
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions/sub_m3`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: false }),
+    });
+    expect(res.status).toBe(200);
   });
 });

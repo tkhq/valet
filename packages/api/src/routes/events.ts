@@ -21,7 +21,8 @@ import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, eventDropLog, events, eventSubscriptions } from "../schema/index.js";
 import { readOwnerFilter } from "./_owner-filter.js";
 import { catalogForService } from "../events/ingest.js";
-import { subscriptionMatchesEvent, validateRegexPattern } from "../events/match.js";
+import { subscriptionMatchesEvent, validateRegexPattern, type SubscriptionFilter } from "../events/match.js";
+import { enforceMentionScope } from "../events/mention-scope.js";
 import { ownedDefinitionRow } from "../workflows/service.js";
 import { isTeamMember } from "../services/teams.js";
 import type {
@@ -581,9 +582,19 @@ eventsRouter.post("/event-subscriptions", async (c) => {
     return c.json({ error: "invalid JSON body" }, 400);
   }
 
-  const filters = body.filters ?? [];
+  let filters = body.filters ?? [];
   const error = validateSubscription(plugins, { ...body, filters });
   if (error) return c.json({ error }, 400);
+
+  // A `slack.app_mention` subscription is scoped to its creator and to named
+  // channels (TKAI-299) — see events/mention-scope.ts.
+  const scoped = await enforceMentionScope(db, plugins, user.id, {
+    eventKeys: body.eventKeys,
+    filters,
+    anyChannel: body.anyChannel === true,
+  });
+  if (!scoped.ok) return c.json({ error: scoped.error }, 400);
+  filters = scoped.filters;
 
   // A workflow target must be OWNED by the caller, not only exist in their
   // org: org scope alone lets any member wire automation onto another's.
@@ -725,12 +736,28 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   const error = validateSubscription(plugins, merged);
   if (error) return c.json({ error }, 400);
 
+  // Mention scoping (TKAI-299) re-applies only when the patch changes what is
+  // matched, keyed to the CREATOR — so an enabled-only or name-only patch
+  // still works after the creator unlinks Slack, and a colleague's patch of
+  // an org-owned row cannot re-point the scope at themselves. The casts
+  // narrow validated jsonb, same as `rowToSubscription`.
+  let filters = merged.filters;
+  if (body.filters !== undefined || body.eventKeys !== undefined) {
+    const scoped = await enforceMentionScope(db, plugins, row.createdBy, {
+      eventKeys: merged.eventKeys as string[],
+      filters: merged.filters as SubscriptionFilter[],
+      anyChannel: body.anyChannel === true,
+    });
+    if (!scoped.ok) return c.json({ error: scoped.error }, 400);
+    filters = scoped.filters;
+  }
+
   const updated = await db
     .update(eventSubscriptions)
     .set({
       name: merged.name,
       eventKeys: merged.eventKeys,
-      filters: merged.filters,
+      filters,
       enabled: body.enabled ?? row.enabled,
       updatedAt: Date.now(),
     })

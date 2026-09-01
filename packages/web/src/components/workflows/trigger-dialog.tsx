@@ -47,6 +47,20 @@ import {
 type TriggerKind = "schedule" | "event";
 type TargetKind = "workflow" | "orchestrator";
 
+const SLACK_APP_MENTION = "slack.app_mention";
+
+/** A stored mention trigger with no eq/in channel filter IS the any-channel
+ * state (the server refuses the unscoped default, TKAI-299) — seed the
+ * checkbox from that, so an edit round-trips without re-checking it. */
+function storedAnyChannel(eventKeys: string[], filters: unknown[]): boolean {
+  if (!eventKeys.includes(SLACK_APP_MENTION)) return false;
+  return !filters.some((f) => {
+    if (typeof f !== "object" || f === null) return false;
+    const r = f as Record<string, unknown>;
+    return r.field === "channel" && (r.op === "eq" || r.op === "in");
+  });
+}
+
 function defaultTimezone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone;
 }
@@ -83,6 +97,9 @@ export function TriggerDialog({
   // ── event fields ───────────────────────────────────────────────────────
   const [eventKey, setEventKey] = useState("");
   const [filterRows, setFilterRows] = useState<UiFilterRow[]>([]);
+  // Explicit opt-out of the channel requirement on a `slack.app_mention`
+  // trigger (TKAI-299). Off by default; only rendered for that event.
+  const [anyChannel, setAnyChannel] = useState(false);
 
   // ── form error (client-side validation) ────────────────────────────────
   const [formError, setFormError] = useState<string | null>(null);
@@ -125,6 +142,7 @@ export function TriggerDialog({
       } else {
         setEventKey(editing.detail.eventKeys[0] ?? "");
         setFilterRows(fromWireFilters(editing.detail.filters));
+        setAnyChannel(storedAnyChannel(editing.detail.eventKeys, editing.detail.filters));
         setSelectedWorkflowId(editing.workflowId ?? workflowId ?? "");
       }
     } else {
@@ -140,6 +158,7 @@ export function TriggerDialog({
       setInputJsonError(null);
       setEventKey("");
       setFilterRows([]);
+      setAnyChannel(false);
       setFormError(null);
       setServerError(null);
     }
@@ -257,6 +276,7 @@ export function TriggerDialog({
             name?: string;
             eventKeys?: string[];
             filters?: unknown[];
+            anyChannel?: boolean;
           };
           const body: EventUpdate = {};
           if (name !== orig.name) body.name = name;
@@ -268,6 +288,15 @@ export function TriggerDialog({
           if (JSON.stringify(filters) !== JSON.stringify(orig.detail.filters)) {
             body.filters = filters;
           }
+          // The server re-checks mention scoping when the match changes, so
+          // the opt-out must ride along then.
+          if (
+            (body.filters !== undefined || body.eventKeys !== undefined) &&
+            eventKey === SLACK_APP_MENTION &&
+            anyChannel
+          ) {
+            body.anyChannel = true;
+          }
           await updateEvent.mutateAsync({ id: orig.id, body });
         } else {
           const wfId = workflowId ?? selectedWorkflowId;
@@ -276,6 +305,7 @@ export function TriggerDialog({
             name,
             eventKeys: [eventKey],
             filters,
+            ...(eventKey === SLACK_APP_MENTION && anyChannel ? { anyChannel: true } : {}),
           });
         }
       }
@@ -512,6 +542,28 @@ export function TriggerDialog({
                     <p className="text-xs text-muted">
                       A trigger fires only when every filter matches. Add none to match every event of this type.
                     </p>
+                    {/* Mention scoping (TKAI-299): the server requires a
+                        channel filter on this event unless the explicit
+                        opt-out is set, and pins the rule to your own
+                        @-mentions either way. */}
+                    {selectedEntry.key === SLACK_APP_MENTION && (
+                      <label className="flex items-start gap-2 text-sm text-ink">
+                        <input
+                          type="checkbox"
+                          className="mt-0.5"
+                          checked={anyChannel}
+                          onChange={(e) => setAnyChannel(e.target.checked)}
+                        />
+                        <span>
+                          Any channel
+                          <span className="block text-xs text-muted">
+                            A mention trigger fires only for your own @-mentions and needs a
+                            channel filter. Check this to listen in every channel the app can see
+                            instead.
+                          </span>
+                        </span>
+                      </label>
+                    )}
                   </>
                 ) : (
                   <p className="text-xs text-muted">Select an event to add filters.</p>

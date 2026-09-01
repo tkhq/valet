@@ -178,6 +178,49 @@ high-volume key like `slack.message` that is every message in the workspace, so
 logging it would re-flood the drop-log the privacy design keeps small. The "last
 event received" signal covers that case instead.
 
+## Mention scoping (TKAI-299, added 2026-09-01)
+
+A `slack.app_mention` subscription started with unsafe defaults: no user
+filter (anyone's mention fired it) and no channel filter (it listened across
+the whole workspace). Both defaults are now closed at write time
+(`packages/api/src/events/mention-scope.ts`). A subscription whose event keys
+select `slack.app_mention` — the exact key or a trailing wildcard — is a
+**mention subscription**, and every write to one passes two gates:
+
+1. **User scope.** The stored filters must carry a `user` filter equal to the
+   creator's linked Slack user id (`user_identity_links`). The server injects
+   the filter when it is absent, and refuses a filter that names anyone else.
+   A creator with no linked Slack account cannot create one; the error names
+   the corrective action (Settings → Connected accounts).
+2. **Channel scope.** The stored filters must carry at least one `channel`
+   filter with op `eq` or `in` (`prefix`/`contains`/`regex` do not count — a
+   prefix is still the whole workspace). The explicit `anyChannel: true`
+   request flag waives the requirement. The flag is not persisted: a stored
+   mention subscription with no channel filter IS the any-channel state, and
+   the UI derives the display from that.
+
+Both subscription writers share the gate: the subscriptions CRUD routes
+(`routes/events.ts`) and the workflow trigger service
+(`workflows/trigger-service.ts`). On PATCH the gate re-runs only when the
+patch changes `filters` or `eventKeys`, and it keys to the row's CREATOR
+(`created_by`), not the caller — an enable/disable toggle still works after
+the creator unlinks Slack, and a colleague's edit of an org-owned row cannot
+re-point the scope at themselves.
+
+One consequence: because filters apply to every key a subscription selects, a
+mention subscription cannot mix in a key whose catalog entry declares no
+`user` field (for example `slack.channel_created`) — the injected filter
+would never match it. The gate refuses the mix and tells the author to
+create a separate subscription. This also covers `slack.*` wildcards.
+
+Surfaces: the AutomationWizard's reply step requires a multi-channel
+selection (or the explicit "Any channel" checkbox, off by default) and states
+that only the creator's own mentions fire the rule; the raw event picker and
+the workflow TriggerDialog show the same checkbox when `slack.app_mention` is
+selected; the subscriptions list labels each mention row "only #channel",
+"N channels", or "any channel". Rows created before this change are
+untouched until their filters are next edited.
+
 ## Custom slash commands that route to triggers or assistants
 
 This was an investigation request alongside the issue. Two distinct systems

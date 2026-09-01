@@ -5,9 +5,12 @@
  * The wizard is outcome-first. Step 1 asks what should happen, not which
  * primitive to build. The outcome then picks the steps and the store:
  *
- *  - Reply to Slack mentions → a channel picker, which assistant answers, and
- *    a "Keep following the thread" toggle. POSTs an event subscription on
+ *  - Reply to Slack mentions → a required multi-channel picker (or the
+ *    explicit "Any channel" opt-out), which assistant answers, and a "Keep
+ *    following the thread" toggle. POSTs an event subscription on
  *    `slack.app_mention` with an orchestrator target that carries `follow`.
+ *    The server scopes the rule to the creator's linked Slack user
+ *    (TKAI-299, `events/mention-scope.ts`), so the step says so up front.
  *  - Run a workflow on an event → the event picker, then a workflow target.
  *  - Send a notification → the event picker, then an orchestrator target.
  *  - Advanced / custom trigger → the raw event + filter + target flow.
@@ -35,6 +38,7 @@ import {
   Label,
   LoadingRow,
 } from "~/components/primitives";
+import type { EventSubscriptionFilterWire } from "@valet/api/wire";
 import {
   FilterEditor,
   incompleteFilterRow,
@@ -43,7 +47,8 @@ import {
   type FilterField,
   type UiFilterRow,
 } from "~/components/events/filter-editor";
-import { useCreateEventSubscription, useEventCatalog } from "~/api/events";
+import { useCreateEventSubscription, useEventCatalog, useFilterOptions } from "~/api/events";
+import { useIdentityLinks } from "~/api/queries";
 import { useCreateSchedule, useWorkflows } from "~/api/workflows";
 import { useTeams } from "~/api/settings";
 import { errorText } from "~/lib/error-text";
@@ -53,13 +58,11 @@ import { useActiveWorkspace } from "~/components/workspace-clause";
  * never sees a raw event picker for it. */
 const SLACK_APP_MENTION = "slack.app_mention";
 
-/** The channel filter the `slack.app_mention` event declares. Its options
- * source populates the same channel-name picker the FilterEditor uses. */
-const SLACK_CHANNEL_FIELD: FilterField = {
-  field: "channel",
-  description: "Slack channel id where the mention happened",
-  options: { source: "slack.channels" },
-};
+/** One picked channel: the Slack id plus the display label the picker showed. */
+interface SelectedChannel {
+  id: string;
+  label: string;
+}
 
 /** The outcome the reader picks first. It decides the steps and the store. */
 type Outcome = "reply" | "workflow" | "notify" | "advanced" | "schedule";
@@ -121,9 +124,13 @@ export function AutomationWizard({
   // Seeded from the active workspace at mount, then resynced when the
   // workspace changes (below) unless the reader already picked a target.
   const [target, setTarget] = useState<TargetChoice>(() => initialTarget(scopedTeamId));
-  // The reply outcome's own channel picker and follow toggle. Held apart from
-  // `filterRows` so the raw-filter machinery stays owned by the other outcomes.
-  const [replyChannel, setReplyChannel] = useState<UiFilterRow[]>([]);
+  // The reply outcome's own channel selection and follow toggle. Held apart
+  // from `filterRows` so the raw-filter machinery stays owned by the other
+  // outcomes. `anyChannel` is the explicit opt-out of the channel requirement
+  // a mention rule carries (off by default) — shared with the event outcomes,
+  // where the same flag rides a raw `slack.app_mention` selection.
+  const [replyChannels, setReplyChannels] = useState<SelectedChannel[]>([]);
+  const [anyChannel, setAnyChannel] = useState(false);
   const [follow, setFollow] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -192,9 +199,9 @@ export function AutomationWizard({
   function canAdvance(): boolean {
     if (step === 1) return true; // An outcome always has a value.
     if (outcome === "reply") {
-      // Reply step: the channel is optional and the assistant target is always
-      // set, so there is nothing to block.
-      return step === 2;
+      // Reply step: a mention rule must name channels unless "Any channel"
+      // was chosen explicitly — the same rule the server enforces.
+      return step === 2 && (anyChannel || replyChannels.length > 0);
     }
     if (step === 2) {
       return isSchedule ? cron.trim().length > 0 : keys.size > 0;
@@ -204,7 +211,8 @@ export function AutomationWizard({
   }
 
   const isLastStep = step === plan.count;
-  const canCreate = name.trim().length > 0 && targetReady && !isPending;
+  const replyScoped = outcome !== "reply" || anyChannel || replyChannels.length > 0;
+  const canCreate = name.trim().length > 0 && targetReady && replyScoped && !isPending;
 
   function next() {
     setError(null);
@@ -226,13 +234,21 @@ export function AutomationWizard({
     setError(null);
 
     if (outcome === "reply") {
-      const channelFilters = toWireFilters(replyChannel);
+      // One channel → `eq` with its display label; several → `in` (the wire
+      // label field is single-valued, so a list carries ids only). The server
+      // adds the creator's Slack user filter itself.
+      const channelFilters: EventSubscriptionFilterWire[] = anyChannel
+        ? []
+        : replyChannels.length === 1
+          ? [{ field: "channel", op: "eq", value: replyChannels[0].id, label: replyChannels[0].label }]
+          : [{ field: "channel", op: "in", value: replyChannels.map((ch) => ch.id) }];
       createSubscription.mutate(
         {
           name: name.trim(),
           eventKeys: [SLACK_APP_MENTION],
           filters: channelFilters,
           target: { ...orchestratorTargetFrom(target), follow },
+          ...(anyChannel ? { anyChannel: true } : {}),
         },
         {
           onSuccess: () => onOpenChange(false),
@@ -259,6 +275,9 @@ export function AutomationWizard({
           eventKeys: [...keys],
           filters: toWireFilters(filterRows),
           target: eventTarget,
+          // The raw picker can select `slack.app_mention` too; the flag only
+          // means anything there, and the server ignores it elsewhere.
+          ...(anyChannel && keys.has(SLACK_APP_MENTION) ? { anyChannel: true } : {}),
         },
         {
           onSuccess: () => onOpenChange(false),
@@ -314,8 +333,10 @@ export function AutomationWizard({
 
           {step === 2 && outcome === "reply" && (
             <ReplyStep
-              channelRows={replyChannel}
-              onChannelChange={setReplyChannel}
+              channels={replyChannels}
+              onChannelsChange={setReplyChannels}
+              anyChannel={anyChannel}
+              onAnyChannelChange={setAnyChannel}
               target={orchestratorTargetFrom(target)}
               onTargetChange={chooseTarget}
               scopedTeam={scopedTeam}
@@ -335,6 +356,8 @@ export function AutomationWizard({
               filterRows={filterRows}
               onFilterChange={setFilterRows}
               singleEvent={outcome !== "advanced"}
+              anyChannel={anyChannel}
+              onAnyChannelChange={setAnyChannel}
             />
           )}
 
@@ -368,7 +391,9 @@ export function AutomationWizard({
               summary={summarize({
                 outcome,
                 keys,
-                filterRows: outcome === "reply" ? replyChannel : filterRows,
+                filterRows,
+                replyChannels,
+                anyChannel,
                 cron,
                 timezone,
                 target,
@@ -469,39 +494,73 @@ function OutcomeStep({ outcome, onChange }: { outcome: Outcome; onChange: (o: Ou
 }
 
 /**
- * The reply outcome's one config step: an optional channel, which assistant
- * answers, and the follow toggle. No raw event key is shown — the event is
- * always `slack.app_mention`.
+ * The reply outcome's one config step: the channels to reply in (required,
+ * unless "Any channel" is chosen), which assistant answers, and the follow
+ * toggle. No raw event key is shown — the event is always
+ * `slack.app_mention`. The server also scopes the rule to the creator's
+ * linked Slack user, so the step says so and warns when no link exists.
  */
 function ReplyStep({
-  channelRows,
-  onChannelChange,
+  channels,
+  onChannelsChange,
+  anyChannel,
+  onAnyChannelChange,
   target,
   onTargetChange,
   scopedTeam,
   follow,
   onFollowChange,
 }: {
-  channelRows: UiFilterRow[];
-  onChannelChange: (rows: UiFilterRow[]) => void;
+  channels: SelectedChannel[];
+  onChannelsChange: (channels: SelectedChannel[]) => void;
+  anyChannel: boolean;
+  onAnyChannelChange: (v: boolean) => void;
   target: OrchestratorChoice;
   onTargetChange: (t: TargetChoice) => void;
   scopedTeam: { id: string; name: string } | undefined;
   follow: boolean;
   onFollowChange: (v: boolean) => void;
 }) {
-  // Reuse the FilterEditor's channel-name picker, locked to the one channel
-  // field. It shows channel names, not ids, from the `slack.channels` source.
-  const channelFields = useMemo(() => [SLACK_CHANNEL_FIELD], []);
+  // The server refuses a mention rule from a creator with no linked Slack
+  // account, so warn here instead of at the failed create.
+  const linksQ = useIdentityLinks();
+  const slackLink = linksQ.data?.links.find((l) => l.provider === "slack");
+  const slackUnlinked = slackLink !== undefined && !slackLink.linked;
   return (
     <div className="space-y-4">
-      <div>
-        <p className="mb-1.5 text-xs font-medium text-muted">Channel (optional)</p>
-        <FilterEditor fields={channelFields} rows={channelRows} onChange={onChannelChange} />
-        <p className="mt-1.5 text-xs text-muted">
-          Leave empty to reply in every channel the app can see. Add one channel to reply there
-          only.
+      <p className="text-xs text-muted">
+        This rule fires only when <span className="text-ink">you</span> @-mention the app.
+        Mentions by other people do not reach your assistant.
+      </p>
+      {slackUnlinked && (
+        <p className="text-xs text-danger-500">
+          Your Slack account is not linked, so this rule cannot fire for you yet. Link it in
+          Settings → Connected accounts, then create the rule.
         </p>
+      )}
+
+      <div>
+        <p className="mb-1.5 text-xs font-medium text-muted">Channels</p>
+        <ChannelMultiSelect channels={channels} onChange={onChannelsChange} disabled={anyChannel} />
+        {!anyChannel && (
+          <p className="mt-1.5 text-xs text-muted">
+            Select one or more channels. The rule replies only there.
+          </p>
+        )}
+        <label className="mt-2 flex items-start gap-2 text-sm text-ink">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={anyChannel}
+            onChange={(e) => onAnyChannelChange(e.target.checked)}
+          />
+          <span>
+            Any channel
+            <span className="block text-xs text-muted">
+              Reply wherever you @-mention the app, in every channel it can see.
+            </span>
+          </span>
+        </label>
       </div>
 
       <div>
@@ -560,6 +619,153 @@ function ReplyStep({
   );
 }
 
+/**
+ * A searchable multi-select over the `slack.channels` option source. Picked
+ * channels render as removable chips below the search input. When the source
+ * cannot resolve (Slack not connected, provider error), it falls back to a
+ * free-text channel-id input so the rule stays creatable.
+ */
+function ChannelMultiSelect({
+  channels,
+  onChange,
+  disabled,
+}: {
+  channels: SelectedChannel[];
+  onChange: (channels: SelectedChannel[]) => void;
+  disabled?: boolean;
+}) {
+  const [query, setQuery] = useState("");
+  const [debounced, setDebounced] = useState("");
+  // The results are a popover, shown while the search input has focus — the
+  // same pattern as the FilterEditor's single-value picker.
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(query), 200);
+    return () => clearTimeout(t);
+  }, [query]);
+
+  const optionsQ = useFilterOptions(
+    { source: "slack.channels", q: debounced },
+    { enabled: disabled !== true },
+  );
+  const reason = optionsQ.data?.reason;
+  const options = optionsQ.data?.options ?? [];
+
+  function toggle(id: string, label: string) {
+    if (channels.some((c) => c.id === id)) onChange(channels.filter((c) => c.id !== id));
+    else onChange([...channels, { id, label }]);
+  }
+
+  const chips = channels.length > 0 && (
+    <div className="mt-1.5 flex flex-wrap gap-1.5">
+      {channels.map((c) => (
+        <span
+          key={c.id}
+          className="inline-flex items-center gap-1 rounded-full border border-line bg-ink-wash/40 px-2 py-0.5 text-xs text-ink"
+        >
+          {c.label}
+          {!disabled && (
+            <button
+              type="button"
+              aria-label={`Remove ${c.label}`}
+              onClick={() => onChange(channels.filter((x) => x.id !== c.id))}
+              className="text-muted hover:text-ink"
+            >
+              ✕
+            </button>
+          )}
+        </span>
+      ))}
+    </div>
+  );
+
+  if (reason !== undefined && disabled !== true) {
+    return (
+      <div>
+        <div className="flex items-center gap-2">
+          <Input
+            aria-label="Channel id"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="C0123456789"
+            className="min-w-0 flex-1"
+          />
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            disabled={query.trim().length === 0}
+            onClick={() => {
+              const id = query.trim();
+              if (id && !channels.some((c) => c.id === id)) onChange([...channels, { id, label: id }]);
+              setQuery("");
+            }}
+          >
+            Add channel
+          </Button>
+        </div>
+        <p className="mt-1 text-xs text-muted">{reason}</p>
+        {chips}
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative">
+      <Input
+        aria-label="Channel search"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        onFocus={() => setOpen(true)}
+        // Delay the close so a click on an option registers first.
+        onBlur={() => setTimeout(() => setOpen(false), 120)}
+        placeholder={channels.length > 0 ? "Add another channel…" : "Search channels…"}
+        disabled={disabled}
+        className="w-full min-w-0"
+      />
+      {open && !disabled && (
+        <div
+          role="listbox"
+          aria-label="Channel options"
+          className="absolute z-20 mt-1 max-h-52 w-full overflow-auto rounded-md border border-line bg-paper py-1 shadow-lg"
+        >
+          {optionsQ.isLoading && <p className="px-2 py-1 text-xs text-muted">Loading…</p>}
+          {!optionsQ.isLoading && options.length === 0 && (
+            <p className="px-2 py-1 text-xs text-muted">No matches</p>
+          )}
+          {options.map((o) => {
+            const picked = channels.some((c) => c.id === o.id);
+            return (
+              <button
+                key={o.id}
+                type="button"
+                role="option"
+                aria-selected={picked}
+                // Keep the input focused through the click so onBlur does not
+                // close the popover before onClick fires.
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  toggle(o.id, o.label);
+                  setQuery("");
+                }}
+                className={`block w-full px-2 py-1 text-left text-sm text-ink hover:bg-hover ${
+                  picked ? "bg-hover" : ""
+                }`}
+              >
+                {picked ? "✓ " : ""}
+                {o.label}
+                {o.hint && <span className="ml-1 text-xs text-muted">{o.hint}</span>}
+              </button>
+            );
+          })}
+        </div>
+      )}
+      {chips}
+    </div>
+  );
+}
+
 interface CatalogService {
   service: string;
   entries: { key: string; description: string; filters?: FilterField[] }[];
@@ -575,6 +781,8 @@ function EventMatchStep({
   filterRows,
   onFilterChange,
   singleEvent,
+  anyChannel,
+  onAnyChannelChange,
 }: {
   services: CatalogService[];
   catalogLoading: boolean;
@@ -585,6 +793,8 @@ function EventMatchStep({
   filterRows: UiFilterRow[];
   onFilterChange: (rows: UiFilterRow[]) => void;
   singleEvent: boolean;
+  anyChannel: boolean;
+  onAnyChannelChange: (v: boolean) => void;
 }) {
   return (
     <div className="space-y-4">
@@ -642,6 +852,26 @@ function EventMatchStep({
           <p className="mt-1.5 text-xs text-muted">
             A rule matches only when every filter matches. Add none to match every selected event.
           </p>
+          {/* A `slack.app_mention` rule is scoped to the creator's own
+              mentions and needs a channel filter, unless this explicit
+              opt-out is set — the same rule the server enforces. */}
+          {keys.has(SLACK_APP_MENTION) && (
+            <label className="mt-2 flex items-start gap-2 text-sm text-ink">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={anyChannel}
+                onChange={(e) => onAnyChannelChange(e.target.checked)}
+              />
+              <span>
+                Any channel
+                <span className="block text-xs text-muted">
+                  A mention rule fires only for your own @-mentions and needs a channel filter.
+                  Check this to listen in every channel the app can see instead.
+                </span>
+              </span>
+            </label>
+          )}
         </div>
       )}
     </div>
@@ -888,6 +1118,8 @@ export function summarize(args: {
   outcome: Outcome;
   keys: Set<string>;
   filterRows: UiFilterRow[];
+  replyChannels: SelectedChannel[];
+  anyChannel: boolean;
   cron: string;
   timezone: string;
   target: TargetChoice;
@@ -899,10 +1131,14 @@ export function summarize(args: {
   const then = describeTarget(args.target, args.workflows, args.teams, args.scopedTeam);
 
   if (args.outcome === "reply") {
-    const filters = describeFilters(args.filterRows);
-    const where = filters ? ` in ${filters}` : "";
+    const names = args.replyChannels.map((c) => c.label);
+    const where = args.anyChannel
+      ? " in any channel the app can see"
+      : names.length > 0
+        ? ` in ${names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} or ${names[names.length - 1]}`}`
+        : "";
     const trailing = args.follow ? " Later thread messages reach the assistant too." : "";
-    return `When the app is @-mentioned${where}, ${then}.${trailing}`;
+    return `When you @-mention the app${where}, ${then}. Mentions by other people do not fire it.${trailing}`;
   }
 
   if (args.outcome === "schedule") {

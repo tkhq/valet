@@ -41,6 +41,29 @@ export function canMutate(
   return sub.ownerId === userId;
 }
 
+/**
+ * The channel scope of a `slack.app_mention` subscription, or null for any
+ * other subscription. A mention rule with no channel filter IS the explicit
+ * any-channel state (the server refuses the unscoped default, TKAI-299), so
+ * the row must say which one the reader is looking at. The wildcard arm
+ * mirrors the server's `selectsSlackMention`.
+ */
+export function mentionChannelScope(sub: EventSubscriptionWire): string | null {
+  const selectsMention = sub.eventKeys.some(
+    (k) => k === "slack.app_mention" || (k.endsWith(".*") && "slack.app_mention".startsWith(k.slice(0, -1))),
+  );
+  if (!selectsMention) return null;
+  const names: string[] = [];
+  for (const f of sub.filters) {
+    if (f.field !== "channel" || (f.op !== "eq" && f.op !== "in")) continue;
+    if (Array.isArray(f.value)) names.push(...f.value);
+    else names.push(f.label ?? f.value);
+  }
+  if (names.length === 0) return "any channel";
+  if (names.length === 1) return `only ${names[0]}`;
+  return `${names.length} channels`;
+}
+
 function describeTarget(
   target: EventSubscriptionTargetWire,
   workflowNames: Map<string, string>,
@@ -209,6 +232,9 @@ function SubscriptionRow({
           <span className="text-xs text-muted">
             → {describeTarget(sub.target, workflowNames, teamNames)}
           </span>
+          {mentionChannelScope(sub) && (
+            <span className="text-xs text-muted">· {mentionChannelScope(sub)}</span>
+          )}
           {sub.filters.length > 0 && (
             <span className="text-xs text-muted">
               · {sub.filters.length} filter{sub.filters.length === 1 ? "" : "s"}

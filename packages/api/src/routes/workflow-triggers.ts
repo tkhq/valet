@@ -234,6 +234,7 @@ workflowTriggersRouter.post("/event-triggers", async (c) => {
     name: body.name,
     eventKeys: body.eventKeys,
     filters: body.filters,
+    anyChannel: body.anyChannel,
   });
   if (!result.ok) return c.json({ error: result.error }, 400);
   const resp: WorkflowEventTriggerResponse = { trigger: result.trigger };
