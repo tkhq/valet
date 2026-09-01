@@ -53,8 +53,8 @@ const securityPlugin: OrgPluginWire = {
 };
 
 const teams: TeamSummary[] = [
-  { id: "team_1", orgId: "org_1", name: "Platform", origin: "local", externalId: null, createdAt: 0, memberCount: 2, callerRole: "admin" },
-  { id: "team_2", orgId: "org_1", name: "Growth", origin: "local", externalId: null, createdAt: 0, memberCount: 1, callerRole: null },
+  { id: "team_1", orgId: "org_1", name: "Platform", origin: "local", externalId: null, createdAt: 0, memberCount: 2, callerRole: "admin", defaultModel: null },
+  { id: "team_2", orgId: "org_1", name: "Growth", origin: "local", externalId: null, createdAt: 0, memberCount: 1, callerRole: null, defaultModel: null },
 ];
 
 beforeEach(() => {

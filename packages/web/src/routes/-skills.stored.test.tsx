@@ -189,7 +189,7 @@ describe("SkillsIndexPage with stored skills", () => {
           externalId: null,
           createdAt: 1,
           memberCount: 2,
-          callerRole: "member",
+          callerRole: "member", defaultModel: null,
         },
       ],
     };

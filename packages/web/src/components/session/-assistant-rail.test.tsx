@@ -145,6 +145,7 @@ function team(over: Partial<TeamSummary> = {}): TeamSummary {
     createdAt: 1,
     memberCount: 3,
     callerRole: "member",
+    defaultModel: null,
     ...over,
   };
 }

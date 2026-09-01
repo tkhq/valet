@@ -123,6 +123,7 @@ function makeTeam(overrides: Partial<TeamSummary> = {}): TeamSummary {
     createdAt: 1000,
     memberCount: 3,
     callerRole: "member",
+    defaultModel: null,
     ...overrides,
   };
 }
