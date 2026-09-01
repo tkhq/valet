@@ -380,6 +380,140 @@ describe("parseUpdate — the agent surface events", () => {
   });
 });
 
+describe("parseUpdate — forwarded messages (is_msg_unfurl)", () => {
+  it("extracts forwarded content from an is_msg_unfurl attachment", () => {
+    const transport = makeTransport();
+    const event = transport.parseUpdate(
+      envelope(
+        imMessage({
+          text: "",
+          attachments: [
+            { is_msg_unfurl: true, author_name: "Alice", text: "the original message content", fallback: "fb" },
+          ],
+        }),
+      ),
+    );
+    expect(event).not.toBeNull();
+    expect(event?.text).toBe("[Forwarded message from Alice]:\nthe original message content");
+  });
+
+  it("does not drop a comment-less forward at the empty-text check", () => {
+    // A forward without a typed comment has empty event.text and no files.
+    // Before unfurl extraction this returned null and the agent never woke.
+    const transport = makeTransport();
+    const event = transport.parseUpdate(
+      envelope(imMessage({ text: "", attachments: [{ is_msg_unfurl: true, text: "forwarded body" }] })),
+    );
+    expect(event).toMatchObject({ kind: "message", text: "[Forwarded message]:\nforwarded body" });
+  });
+
+  it("preserves the user's comment alongside the forward", () => {
+    const transport = makeTransport();
+    const event = transport.parseUpdate(
+      envelope(
+        imMessage({
+          text: "check this out",
+          attachments: [{ is_msg_unfurl: true, author_name: "Bob", text: "forwarded content here" }],
+        }),
+      ),
+    );
+    expect(event?.text).toBe("check this out\n\n[Forwarded message from Bob]:\nforwarded content here");
+  });
+
+  it("falls back to the attachment's fallback text when text is empty", () => {
+    const transport = makeTransport();
+    const event = transport.parseUpdate(
+      envelope(
+        imMessage({
+          text: "",
+          attachments: [{ is_msg_unfurl: true, text: "", fallback: "fallback content from forwarded message" }],
+        }),
+      ),
+    );
+    expect(event?.text).toBe("[Forwarded message]:\nfallback content from forwarded message");
+  });
+
+  it("handles multiple forwarded messages in one event", () => {
+    const transport = makeTransport();
+    const event = transport.parseUpdate(
+      envelope(
+        imMessage({
+          text: "",
+          attachments: [
+            { is_msg_unfurl: true, author_name: "Alice", text: "first message" },
+            { is_msg_unfurl: true, author_name: "Bob", text: "second message" },
+          ],
+        }),
+      ),
+    );
+    expect(event?.text).toContain("[Forwarded message from Alice]:\nfirst message");
+    expect(event?.text).toContain("[Forwarded message from Bob]:\nsecond message");
+  });
+
+  it("ignores link-preview attachments that are not message unfurls", () => {
+    const transport = makeTransport();
+    const event = transport.parseUpdate(
+      envelope(
+        imMessage({
+          text: "see https://example.com",
+          attachments: [{ title: "Example", text: "A link preview, not a forward" }],
+        }),
+      ),
+    );
+    expect(event?.text).toBe("see https://example.com");
+  });
+
+  it("routes a forwarded image into the media path", () => {
+    const transport = makeTransport();
+    const event = transport.parseUpdate(
+      envelope(
+        imMessage({
+          text: "",
+          attachments: [
+            {
+              is_msg_unfurl: true,
+              author_name: "Alice",
+              text: "",
+              image_url: "https://files.slack.com/files-pri/T123-F456/photo.png",
+            },
+          ],
+        }),
+      ),
+    );
+    expect(event?.text).toBe("[Forwarded message from Alice]: [image]");
+    expect(event?.media).toEqual([
+      { kind: "photo", fileId: "unfurl:1700000000.000100:0", mimeType: "image/png" },
+    ]);
+  });
+
+  it("keeps a non-Slack image out of the authenticated media path", () => {
+    // fetchMedia sends the bot token as a bearer header; a foreign host must
+    // not receive it. The forward still surfaces as an [image] marker.
+    const transport = makeTransport();
+    const event = transport.parseUpdate(
+      envelope(
+        imMessage({
+          text: "",
+          attachments: [
+            { is_msg_unfurl: true, author_name: "Mallory", text: "", image_url: "https://evil.example.com/x.png" },
+          ],
+        }),
+      ),
+    );
+    expect(event?.text).toBe("[Forwarded message from Mallory]: [image]");
+    expect(event?.media).toBeUndefined();
+  });
+
+  it("drops an attachments-only event with no unfurl content", () => {
+    // A bare link preview with no user text still has nothing for the agent.
+    const transport = makeTransport();
+    const event = transport.parseUpdate(
+      envelope(imMessage({ text: "", attachments: [{ title: "Example", text: "preview" }] })),
+    );
+    expect(event).toBeNull();
+  });
+});
+
 describe("parseUpdate — gate callbacks", () => {
   const blockActions = {
     type: "block_actions",
