@@ -52,21 +52,41 @@ broker; per-session reference allowlists; write access of any kind.
    (`/api/onepassword/items`) deliberately strips field values; a route that
    returns them must not be reachable by a cookie.
 
-4. **Values cross as base64.** The caller is a POSIX shell with no JSON parser.
+4. **Values cross as base64, in a positional array.** The response carries
+   `values`, one entry per requested reference in request order, plus
+   `resolvedBase64` keyed by reference for the runner's provider. The shell
+   reads the positional array: an extractor that keyed by reference built its
+   search key from the raw text while the body carried the JSON-escaped form,
+   so a vault title containing a quote never matched and a resolved secret was
+   reported as missing. `null` also separates "nothing resolved it" from "the
+   field is blank", which an empty-string test conflated.
+
+5. **Base64 itself.** The caller is a POSIX shell with no JSON parser.
    A byte-level extractor cut every value at its first `"` and never unescaped
    a backslash or a newline, so a password containing a quote and every private
    key arrived corrupted but plausible — the worst way for a credential to
    fail. The base64 alphabet contains no JSON metacharacter, so the shell can
    cut the field safely and `base64 -d` restores the exact bytes.
 
-5. **A generated script, not a runner or an image layer.** `git-credential-valet`
+6. **A generated script, not a runner or an image layer.** `git-credential-valet`
    set the precedent. The sandbox already carries `VALET_SANDBOX_TOKEN` and
    `VALET_API_URL`, and the prep step already installs generated scripts, so
    the CLI needs no image change and no new process.
 
-6. **The token does not reach the child.** `VALET_SANDBOX_TOKEN` resolves every
+7. **The token is removed from the child's environment.** `VALET_SANDBOX_TOKEN` resolves every
    reference the broker will answer. A command given one secret must not
-   inherit the key to the rest, so the script unsets it before `exec`.
+   inherit the key to the rest, so the script unsets it before `exec`. This
+   narrows the environment path only. On a backend with a creds mount the
+   token is also a file at `/etc/valet/creds/token`, which the child can still
+   read — a shell script cannot take a filesystem away from a process it
+   execs. Treat the child as trusted code that should not be handed extra
+   credentials, not as a sandbox boundary.
+
+8. **A team-owned session gets the org scope only.** The sandbox token carries
+   the actor frozen onto the session at creation, not whoever is prompting it
+   now. Every member of a team can prompt a team-owned session, so consulting
+   that one person's personal vault would hand their private items to their
+   teammates.
 
 ## Flow
 
@@ -91,6 +111,8 @@ Every failure names a corrective action, per the repo rule.
 | Bad variable name | 2 | Refused before any shell sees the pair. The shell's own error for a bad identifier quotes the value next to the name. |
 | Malformed arguments | 2 | Usage, including how to quote a reference containing a space. |
 | Reference nothing resolved | 3 | Names the reference and what to check in 1Password. |
+| Reference resolved to a blank field | 3 | Named separately — a blank field needs a different fix from a wrong name. |
+| Broker slower than 30 seconds | 4 | Named as a timeout, not as an unreachable api. |
 | Broker refused or was unreachable | 4 | Reports the API's own message. |
 
 `curl` runs without `-f` and the status is checked separately: `-f` discards
@@ -117,7 +139,9 @@ command-not-found, not a leaked secret.
 - `packages/api/src/routes/sandbox-secrets.test.ts` — resolves and names
   misses, requires a sandbox token and names the fix without one, names every
   unsupported reference, and round-trips a value containing a quote, a
-  backslash, and a newline.
+  backslash, and a newline; refuses the personal scope on a team-owned session
+  while keeping it for a user-owned one; and returns positional `values` with
+  `null` for a miss.
 - `packages/api/src/engine/prompt-rules.test.ts` — the composed prompt names
   the command and the reference shape.
 - `packages/api/src/engine/sandbox-spec.test.ts` — golden spec hashes cover the
@@ -125,7 +149,9 @@ command-not-found, not a leaked secret.
 - Verified by hand against a real vault, in a real docker sandbox, with a real
   sandbox token: the secret reaches the child, `VALET_SANDBOX_TOKEN` does not,
   nothing is printed, and a coding session given only vault, item, and field
-  names in prose chose the command on its own.
+  names in prose chose the command on its own. An ed25519 private key served
+  through the CLI arrives byte-identical to the original and `ssh-keygen -y`
+  derives the same public key.
 
 ## Known limits
 
@@ -133,12 +159,16 @@ command-not-found, not a leaked secret.
   a shared service account, and it is the same reach the api-side resolver
   already has, but this route returns plaintext values with no admin gate, no
   rate limit, and no audit record. An audit trail is the first thing to add.
+- The child can still read the sandbox token from the creds mount, so
+  `valet-secrets` limits what a command is *given*, not what it *can reach*.
 - The token is passed on `curl`'s argv, so a same-uid process in the sandbox can
   read it from `/proc` during the request. This is shared with
   `git-credential-valet`, but the broker raises what the token is worth from one
   repo's git token to every vault the org service account can read.
 - The injected value is visible in the child's `/proc/<pid>/environ` to a
-  same-uid process. Environment delivery is the CLI's contract, not a defect,
-  but it is not the same claim as "never leaves the process".
+  same-uid process, and the command the agent chooses runs with the variable
+  set, so an agent that writes `echo $TOKEN` would print it. The prompt says
+  not to. The claim is that the value does not pass through the reply, not
+  that the agent is unable to read it.
 - `base64` must exist in the sandbox image. The script names the fix when it
   does not.

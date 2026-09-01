@@ -15,7 +15,9 @@
  * remaining lifetime, for one session's principal, and nothing else.
  */
 import { Hono } from "hono";
+import { eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
+import { agentSessions } from "../schema/index.js";
 import type { ResolveSandboxSecretsResponse } from "../wire/types.js";
 
 export const sandboxSecretsRouter = new Hono<AppEnv>();
@@ -30,14 +32,14 @@ export const sandboxSecretsRouter = new Hono<AppEnv>();
  * matters: a path, an env var name or a URL, any of which would turn the
  * broker into a general read primitive.
  */
-const REFERENCE = /^op:\/\/[^/\n\r]+\/[^/\n\r]+\/[^/\n\r]+$/;
+const REFERENCE = /^op:\/\/[^/\u0000-\u001f]+\/[^/\u0000-\u001f]+\/[^/\u0000-\u001f]+$/;
 
 /** One `run` injecting hundreds of secrets is a mistake, and each reference
  * costs a round trip. */
 const MAX_REFERENCES = 25;
 
 sandboxSecretsRouter.post("/resolve", async (c) => {
-  const { onePassword } = c.var.providers;
+  const { onePassword, db } = c.var.providers;
   // The SANDBOX principal, never `c.var.user`. The sandbox rung of the auth
   // ladder sets only `c.var.sandbox`, so reading `c.var.user` threw on every
   // request the CLI actually makes. It also answered a plain signed-in
@@ -82,11 +84,24 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
   }
 
   const ctx = { orgId: sandbox.orgId, userId: sandbox.userId };
+
+  // `sandbox.userId` is the actor frozen onto the session when it was
+  // created, not whoever is prompting it now. Every member of a team can
+  // prompt a team-owned session, so consulting that one person's PERSONAL
+  // vault would hand their private items to their teammates. A team-owned
+  // session gets the org service account and nothing else.
+  const rows = await db
+    .select({ ownerType: agentSessions.ownerType })
+    .from(agentSessions)
+    .where(eq(agentSessions.id, sandbox.sessionId))
+    .limit(1);
+  const scopes = rows[0]?.ownerType === "team" ? (["org"] as const) : (["org", "personal"] as const);
+
   const resolved: Record<string, string> = {};
   for (const reference of new Set(references as string[])) {
     // Org scope first: a shared service account is the configured path. A
     // personal token answers only for the user this session runs as.
-    for (const scope of ["org", "personal"] as const) {
+    for (const scope of scopes) {
       try {
         resolved[reference] = await onePassword.resolveReference(scope, ctx, reference);
         break;
@@ -99,6 +114,10 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
   }
 
   const resp: ResolveSandboxSecretsResponse = {
+    // Positional, for the shell CLI. See `ResolveSandboxSecretsResponse`.
+    values: (references as string[]).map((reference) =>
+      reference in resolved ? Buffer.from(resolved[reference], "utf8").toString("base64") : null,
+    ),
     // Base64 so a shell can extract the field without a JSON parser. See
     // `ResolveSandboxSecretsResponse`.
     resolvedBase64: Object.fromEntries(

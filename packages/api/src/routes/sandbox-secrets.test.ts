@@ -6,6 +6,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
+import { agentSessions } from "../schema/index.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 
 let api: TestApi | undefined;
@@ -174,5 +175,90 @@ describe("POST /api/sandbox-secrets/resolve", () => {
     // The old byte-level extractor cut this at the first quote and never
     // unescaped, so a private key arrived corrupted but plausible.
     expect(decode(body, "op://ok/item/field")).toBe(nasty);
+  });
+  // `sandbox.userId` is the actor frozen onto the session at creation, not
+  // whoever is prompting now. Every member of a team can prompt a team-owned
+  // session, so consulting that one person's personal vault would hand their
+  // private items to their teammates.
+  it("a team-owned session never reaches the frozen actor's personal vault", async () => {
+    api = await bootTestApi();
+    const scopesTried: string[] = [];
+    api.providers.onePassword = {
+      ...fakeOnePassword(),
+      resolveReference: async (scope: string, _ctx: unknown, reference: string) => {
+        scopesTried.push(scope);
+        if (scope === "personal") return "PERSONAL-VAULT-VALUE";
+        throw new Error("no org token");
+      },
+    } as unknown as typeof api.providers.onePassword;
+
+    await api.providers.db.insert(agentSessions).values({
+      id: "sess-team-1",
+      userId: "user-a",
+      orgId: "local-org",
+      workspace: "/workspace",
+      ownerType: "team",
+      ownerId: "team-1",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const { token } = await mintSandboxToken(api.providers.db, {
+      sessionId: "sess-team-1",
+      userId: "user-a",
+      orgId: "local-org",
+    });
+
+    const res = await resolve(["op://ok/item/field"], token);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { resolvedBase64: Record<string, string>; unresolved: string[] };
+    expect(scopesTried).toEqual(["org"]);
+    expect(decode(body, "op://ok/item/field")).toBeUndefined();
+    expect(body.unresolved).toEqual(["op://ok/item/field"]);
+  });
+
+  it("a user-owned session still reaches that user's personal vault", async () => {
+    api = await bootTestApi();
+    const scopesTried: string[] = [];
+    api.providers.onePassword = {
+      ...fakeOnePassword(),
+      resolveReference: async (scope: string) => {
+        scopesTried.push(scope);
+        if (scope === "personal") return "PERSONAL-VAULT-VALUE";
+        throw new Error("no org token");
+      },
+    } as unknown as typeof api.providers.onePassword;
+
+    await api.providers.db.insert(agentSessions).values({
+      id: "sess-user-1",
+      userId: "user-a",
+      orgId: "local-org",
+      workspace: "/workspace",
+      ownerType: "user",
+      ownerId: "user-a",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const { token } = await mintSandboxToken(api.providers.db, {
+      sessionId: "sess-user-1",
+      userId: "user-a",
+      orgId: "local-org",
+    });
+
+    const res = await resolve(["op://ok/item/field"], token);
+    const body = (await res.json()) as { resolvedBase64: Record<string, string> };
+    expect(scopesTried).toEqual(["org", "personal"]);
+    expect(decode(body, "op://ok/item/field")).toBe("PERSONAL-VAULT-VALUE");
+  });
+
+  it("values are positional, with null for a reference nothing resolved", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = fakeOnePassword();
+
+    // The shell CLI reads this array by position. Keying by reference meant a
+    // vault title containing a quote never matched its own JSON-escaped form.
+    const res = await resolve(["op://nope/a/b", "op://ok/c/d"]);
+    const body = (await res.json()) as { values: (string | null)[] };
+    expect(body.values[0]).toBeNull();
+    expect(Buffer.from(body.values[1] as string, "base64").toString("utf8")).toBe("secret-for-op://ok/c/d");
   });
 });

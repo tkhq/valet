@@ -2828,6 +2828,18 @@ export interface ResolveSandboxSecretsResponse {
    * no JSON metacharacter, so the shell can cut the field safely and
    * `base64 -d` restores the exact bytes. */
   resolvedBase64: Record<string, string>;
+  /** One entry per requested reference, in request order: the base64 value,
+   * or `null` when nothing resolved it.
+   *
+   * Positional, because the shell CLI cannot key by reference. Its extractor
+   * built a search key from the raw reference while the body carried the
+   * JSON-escaped form, so a vault or item title containing a quote or a
+   * backslash never matched and was reported as unresolved even though it
+   * had resolved. A base64 string and `null` contain no JSON metacharacter,
+   * so the shell can split this array on commas safely. `null` also
+   * separates "nothing resolved it" from "the field is empty", which an
+   * empty-string test conflated. */
+  values: (string | null)[];
   /** References nothing could resolve, by name and without a reason: the
    * reason would describe someone else's vault. */
   unresolved: string[];
