@@ -32,6 +32,8 @@ import type {
   CreateSessionResponse,
   CreateTeamRequest,
   CreateTeamResponse,
+  PatchTeamRequest,
+  PatchTeamResponse,
   CreateInviteRequest,
   CreateInviteResponse,
   CreateThreadRequest,
@@ -1052,6 +1054,8 @@ export const api = {
   listTeams: () => request<ListTeamsResponse>("GET", "/teams"),
   createTeam: (body: CreateTeamRequest) =>
     request<CreateTeamResponse>("POST", "/teams", body),
+  patchTeam: (id: string, body: PatchTeamRequest) =>
+    request<PatchTeamResponse>("PATCH", `/teams/${encodeURIComponent(id)}`, body),
   deleteTeam: (id: string) =>
     request<{ ok: true }>("DELETE", `/teams/${encodeURIComponent(id)}`),
   listTeamMembers: (id: string) =>

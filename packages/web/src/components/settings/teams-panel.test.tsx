@@ -40,6 +40,7 @@ vi.mock("@tanstack/react-router", () => ({
 
 /** Shared across renders so the add-member tests can assert on the call. */
 const addMemberMutate = vi.fn();
+const patchTeamMutate = vi.fn();
 let addMemberError: Error | null = null;
 let addMemberPending = false;
 
@@ -60,9 +61,11 @@ const teamsData = () => ({
       createdAt: 1,
       memberCount: 2,
       callerRole,
+      defaultModel: teamDefaultModel,
     },
   ],
 });
+let teamDefaultModel: string | null = null;
 
 // The Assistant link points at the team's DEFAULT assistant, whose id only
 // the assistants list carries.
@@ -115,6 +118,24 @@ vi.mock("~/api/settings", () => ({
   }),
   useRemoveTeamMember: () => ({ mutate: vi.fn(), isPending: false }),
   useSetTeamMemberRole: () => ({ mutate: vi.fn(), isPending: false }),
+  usePatchTeam: () => ({ mutate: patchTeamMutate, isPending: false, error: null }),
+  // The default-model combobox reads the org catalog through this hook.
+  useModels: () => ({
+    data: {
+      models: [
+        {
+          id: "anthropic/claude-sonnet-4-5",
+          name: "Claude Sonnet 4.5",
+          providerId: "anthropic",
+          providerKind: "anthropic",
+          providerName: "Anthropic",
+          active: true,
+        },
+      ],
+    },
+    isLoading: false,
+    error: null,
+  }),
 }));
 
 import { TeamsPanel } from "./teams-panel";
@@ -169,6 +190,42 @@ describe("TeamsPanel — mirrored teams follow the team-sync gate", () => {
     expect(screen.getByText(/team sync is off/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Platform actions" })).toBeTruthy();
     expect(screen.getByRole("button", { name: /Add member/ })).toBeTruthy();
+  });
+});
+
+describe("TeamsPanel — team default model (TKAI-255)", () => {
+  beforeEach(() => {
+    patchTeamMutate.mockClear();
+    teamDefaultModel = null;
+  });
+
+  it("team admin picks a model → PATCH with the catalog id", () => {
+    callerRole = "admin";
+    orgRole = "member";
+    openTeam();
+    const combobox = screen.getByRole("combobox", { name: "Default model" });
+    fireEvent.focus(combobox);
+    fireEvent.click(screen.getByText("Sonnet 4.5"));
+    expect(patchTeamMutate).toHaveBeenCalledWith({
+      id: "team_1",
+      body: { defaultModel: "anthropic/claude-sonnet-4-5" },
+    });
+  });
+
+  it("plain member sees the value read-only, no combobox", () => {
+    callerRole = "member";
+    orgRole = "member";
+    teamDefaultModel = "anthropic/claude-sonnet-4-5";
+    openTeam();
+    expect(screen.queryByRole("combobox", { name: "Default model" })).toBeNull();
+    expect(screen.getByText("anthropic/claude-sonnet-4-5")).toBeTruthy();
+  });
+
+  it("plain member with no team override reads 'Organization default'", () => {
+    callerRole = "member";
+    orgRole = "member";
+    openTeam();
+    expect(screen.getByText("Organization default")).toBeTruthy();
   });
 });
 

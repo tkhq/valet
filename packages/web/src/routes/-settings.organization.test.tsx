@@ -190,6 +190,9 @@ vi.mock("~/api/settings", async (importOriginal) => {
     useAddTeamMember: () => ({ mutate: addTeamMemberMutate, isPending: false, error: null }),
     useSetTeamMemberRole: () => ({ mutate: setTeamMemberRoleMutate, isPending: false, error: null }),
     useRemoveTeamMember: () => ({ mutate: removeTeamMemberMutate, isPending: false, error: null }),
+    usePatchTeam: () => ({ mutate: vi.fn(), isPending: false, error: null }),
+    // The team default-model combobox reads the catalog through this hook.
+    useModels: () => ({ data: { models: [] }, isLoading: false, error: null }),
   };
 });
 

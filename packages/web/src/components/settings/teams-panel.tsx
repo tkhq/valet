@@ -31,11 +31,13 @@ import {
   useDeleteTeam,
   useMe,
   useOrg,
+  usePatchTeam,
   useRemoveTeamMember,
   useSetTeamMemberRole,
   useTeamMembers,
   useTeams,
 } from "~/api/settings";
+import { ModelCombobox } from "~/components/settings/model-combobox";
 
 /**
  * Says why a mirrored team has no controls, in the same words the API uses
@@ -332,12 +334,15 @@ function TeamRow({
       </div>
 
       {open && (
-        <TeamMembers
-          team={team}
-          orgMembers={orgMembers}
-          canMutate={canMutate}
-          mirroring={mirroring}
-        />
+        <>
+          <TeamDefaultModel team={team} canMutate={canMutate} />
+          <TeamMembers
+            team={team}
+            orgMembers={orgMembers}
+            canMutate={canMutate}
+            mirroring={mirroring}
+          />
+        </>
       )}
 
       <ConfirmDialog
@@ -351,6 +356,46 @@ function TeamRow({
         error={deleteTeam.error != null ? errorText(deleteTeam.error) : undefined}
         onConfirm={() => deleteTeam.mutate(team.id, { onSuccess: () => setConfirmDelete(false) })}
       />
+    </div>
+  );
+}
+
+/**
+ * The team default model (TKAI-255). Sessions this team owns start on it
+ * unless the member set a personal default; null falls through to the org
+ * preference list. Editable by whoever can mutate the team (team admin or
+ * org admin) — same gate as the roster controls, and the API enforces it.
+ * NOT origin-gated: a mirrored team's membership belongs to the identity
+ * provider, but its default model is Valet-local state no sync rewrites.
+ */
+function TeamDefaultModel({ team, canMutate }: { team: TeamSummary; canMutate: boolean }) {
+  const patchTeam = usePatchTeam();
+
+  return (
+    <div className="ml-6 mt-2 border-l border-line pl-4">
+      <div className="flex flex-col gap-1 py-1 sm:flex-row sm:items-center sm:gap-3">
+        <span className="shrink-0 text-xs font-medium text-muted">Default model</span>
+        {canMutate ? (
+          <div className="w-full max-w-xs">
+            <ModelCombobox
+              value={team.defaultModel}
+              onSelect={(id) => patchTeam.mutate({ id: team.id, body: { defaultModel: id } })}
+              onClear={() => patchTeam.mutate({ id: team.id, body: { defaultModel: null } })}
+            />
+          </div>
+        ) : (
+          <span className="text-sm text-ink">{team.defaultModel ?? "Organization default"}</span>
+        )}
+      </div>
+      {canMutate && (
+        <p className="text-xs text-muted">
+          Sessions in this team's workspace start on this model. A member's personal default
+          still wins for that member.
+        </p>
+      )}
+      {patchTeam.error != null && (
+        <p className="text-xs text-danger-500">{errorText(patchTeam.error)}</p>
+      )}
     </div>
   );
 }

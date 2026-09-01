@@ -18,6 +18,8 @@ import type {
   CreateLlmProviderResponse,
   CreateTeamRequest,
   CreateTeamResponse,
+  PatchTeamRequest,
+  PatchTeamResponse,
   DeleteCredentialResponse,
   GetGithubAppResponse,
   GetLlmProviderPreferencesResponse,
@@ -392,6 +394,16 @@ export function useCreateTeam() {
   const qc = useQueryClient();
   return useMutation<CreateTeamResponse, Error, CreateTeamRequest>({
     mutationFn: (body) => api.createTeam(body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkSettings.teams() });
+    },
+  });
+}
+
+export function usePatchTeam() {
+  const qc = useQueryClient();
+  return useMutation<PatchTeamResponse, Error, { id: string; body: PatchTeamRequest }>({
+    mutationFn: ({ id, body }) => api.patchTeam(id, body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.teams() });
     },
