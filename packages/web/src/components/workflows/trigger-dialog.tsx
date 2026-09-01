@@ -16,7 +16,7 @@
  * Server errors are rendered verbatim — server messages carry the corrective
  * action (e.g. "Use 5 fields, for example '0 9 * * 1-5'").
  */
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import type { WorkflowTriggerItem } from "@valet/api/wire";
 import {
   useCreateEventTrigger,
@@ -92,6 +92,10 @@ export function TriggerDialog({
   // (TKAI-302). Off by default; only rendered when the selected event
   // declares a channelField in its catalog scope.
   const [anyChannel, setAnyChannel] = useState(false);
+  // Tracks whether the user has manually toggled the checkbox since the
+  // dialog opened. A manual touch wins over the catalog-arrival re-seed
+  // below (see "Mount-time state from props" in CLAUDE.md).
+  const anyChannelTouched = useRef(false);
 
   // ── form error (client-side validation) ────────────────────────────────
   const [formError, setFormError] = useState<string | null>(null);
@@ -122,6 +126,7 @@ export function TriggerDialog({
   // Populate fields when editing.
   useEffect(() => {
     if (!open) return;
+    anyChannelTouched.current = false;
     if (editing) {
       setKind(editing.kind);
       setName(editing.name);
@@ -159,7 +164,21 @@ export function TriggerDialog({
       setFormError(null);
       setServerError(null);
     }
-  }, [open, editing, workflowId, lockedKind]);
+  }, [open, editing, workflowId, lockedKind]); // catalogEntries intentionally omitted — see narrow re-seed below
+
+  // Narrow re-seed: if the catalog arrives after the dialog opened while
+  // editing an event trigger, re-seed anyChannel from storedAnyChannel. This
+  // fixes the stale-closure bug where catalogEntries is [] at open time and
+  // the main effect does not re-fire when data lands. Skipped if the user
+  // has already touched the checkbox — their override wins.
+  useEffect(() => {
+    if (
+      !open ||
+      editing?.kind !== "event" ||
+      anyChannelTouched.current
+    ) return;
+    setAnyChannel(storedAnyChannel(catalogEntries, editing.detail.eventKeys, editing.detail.filters));
+  }, [open, editing, catalogQ.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Parse a JSON textarea. Empty input returns undefined (the caller picks
    * the default); a parse failure sets the field error and returns null. */
@@ -568,7 +587,10 @@ export function TriggerDialog({
                           type="checkbox"
                           className="mt-0.5"
                           checked={anyChannel}
-                          onChange={(e) => setAnyChannel(e.target.checked)}
+                          onChange={(e) => {
+                            anyChannelTouched.current = true;
+                            setAnyChannel(e.target.checked);
+                          }}
                         />
                         <span>
                           Any channel
@@ -579,7 +601,7 @@ export function TriggerDialog({
                           </span>
                           {anyChannel &&
                             selectedEntry.scope?.creatorUserField === undefined &&
-                            selectedEntry.filters?.some((f) => f.field === "text") && (
+                            selectedEntry.filters.some((f) => f.field === "text") && (
                               <span className="block text-xs text-muted">
                                 Tip: add a text filter (for example a command prefix) so the rule fires only on
                                 messages addressed to it.
