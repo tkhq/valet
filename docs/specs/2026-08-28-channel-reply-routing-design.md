@@ -115,14 +115,14 @@ second, DM-style conversation door for channel mentions.
 **Auto-reply (safety net).** Extend `deliverAssistantMessage`
 (`channels/host.ts:474`). Today it maps `thread.key → conversationKey` and skips
 when the map fails. Add: if the finishing submission carries `origin`, resolve
-`origin.threadKey → conversationKey` and post the turn's messages there, even
-though the `"events"` thread key does not map. The existing guards hold (skip
-if already streamed, skip empty messages). Delivery is per assistant message,
-not turn-final only: a model can put its whole reply in the same message as its
-first tool call and end the turn on an empty message, so a turn-final gate
-would drop that reply (see the Telegram design's deviation 2). A post failure
-is drop-logged (`event_drop_log`), never swallowed, so the Problems tab shows
-it.
+`origin.threadKey → conversationKey` and post there, even though the `"events"`
+thread key does not map. The existing guards hold (skip if already streamed,
+skip empty messages). The safety net posts ONE message per submission: the
+first that carries text or an attachment. A turn-final gate would drop a reply
+the model fronts into its first tool-call message, and posting every text round
+floods the thread with narration (see the Telegram design's deviation 2). Later
+output reaches the thread only through `reply_to_origin`. A post failure is
+drop-logged (`event_drop_log`), never swallowed, so the Problems tab shows it.
 
 **Reply action (contract).** Add a `reply_to_origin` action. It reads the
 current submission's origin and posts to that thread with no channel/thread
@@ -130,12 +130,13 @@ argument to guess. The team persona instructs the assistant to use it when it
 answers a channel-originated message. The action is the primary path; the model
 should reply through it.
 
-**No double post.** The two mechanisms split by `origin.reply`, so exactly one
-is active per turn. An addressed turn (`reply: "auto"`, the default) auto-posts
-the assistant's text-bearing messages, and `slack.reply_to_origin` refuses with
-a corrective error. An overheard turn (`reply: "manual"`) never auto-posts, and
-the action is the only reply path. (The design originally called for turn-level
-"already replied" state; the mode split replaces it — see Deviations.)
+**No double post.** An addressed turn (`reply: "auto"`, the default) auto-posts
+only its first text-bearing message; when the submission already replied
+through `reply_to_origin`, the auto-post stands down (`turnRepliedToOrigin`
+scans the submission's completed tool calls). An overheard turn
+(`reply: "manual"`) never auto-posts, and the action is the only reply path.
+Either way at most one reply is machine-posted per submission; anything more is
+the agent's explicit choice through the action.
 
 #### 1.5 Identity: team name and sender
 
@@ -265,13 +266,16 @@ turn that produces no reply at all is a reportable miss, not a silent drop.
 
 ## Deviations (Part 1, as built)
 
-- **`reply_to_origin` shipped with a mode guard, not suppression state.** The
-  design's turn-level "already replied through the action" recording was never
-  built. Instead the action refuses on an addressed turn
-  (`origin.reply !== "manual"`), where the auto-post already delivers the
-  message text; on an overheard turn the auto-post is suppressed and the
-  action is the only path. The mode split makes the two reply mechanisms
-  mutually exclusive without cross-turn state.
+- **Auto-reply posts the submission's FIRST message, not its final one.** The
+  design assumed the final turn message was the reply. In practice the model
+  fronts the reply into its first message (often beside its first tool call)
+  and narrates every round after; posting the final message ghosts the reply
+  and posting every round floods the thread. The safety net now posts the
+  first text-bearing message per submission. The "already replied" state is
+  not a new store — `deliverAssistantMessage` scans the submission's entries
+  for a completed `….reply_to_origin` call and stands down when it finds one.
+  The action itself is allowed on addressed turns; it is the sanctioned path
+  for any output after the first message.
 - **Sender name is a handle, not a resolved display name.** The dispatcher sets
   the signal's `sender` attribute from `event.actor` (`login` or `externalId`).
   For a Slack `app_mention` this is the raw Slack user id, because the event

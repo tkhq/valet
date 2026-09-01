@@ -29,6 +29,7 @@ import {
   type GatePromptRef,
   type InboundChannelEvent,
   type PromptAttachment,
+  type SessionEntry,
   type SessionStore,
   type Unsubscribe,
   type ValetPlugin,
@@ -129,6 +130,24 @@ function hasGetMe(transport: ChannelTransport): transport is ChannelTransport & 
 function chatIdFromKey(conversationKey: string): string {
   const idx = conversationKey.lastIndexOf(":");
   return idx === -1 ? conversationKey : conversationKey.slice(idx + 1);
+}
+
+/** True when the submission already replied through a channel's
+ * `….reply_to_origin` action: a completed `call_tool` in any of the
+ * submission's assistant messages names such a tool id. The auto-post
+ * safety net stands down for that submission. */
+function turnRepliedToOrigin(entries: SessionEntry[], queueItemId: string): boolean {
+  for (const e of entries) {
+    if (e.type !== "message" || e.role !== "assistant" || e.queueItemId !== queueItemId) continue;
+    for (const part of e.parts ?? []) {
+      if (part.type !== "tool_call" || part.status !== "completed") continue;
+      const args = part.args;
+      const toolId =
+        args !== null && typeof args === "object" ? (args as Record<string, unknown>).tool_id : undefined;
+      if (typeof toolId === "string" && toolId.endsWith(".reply_to_origin")) return true;
+    }
+  }
+  return false;
 }
 
 /** Feature-detects a transport that opens a direct conversation with one of
@@ -537,16 +556,13 @@ export class ChannelHost {
     // message_end fires with reason "end_turn" for every non-abort assistant
     // message, including a mid-turn message that stopped on a tool call
     // (those persist stopReason undefined; only the turn's last message
-    // persists "end_turn"). Deliver every message that carries text or an
-    // attachment, not just the turn-final one: a model can put its whole
-    // reply in the same message as its first tool call and end the turn on
-    // an empty message, so gating on stopReason "end_turn" drops that reply
-    // while the agent believes it answered. The per-message dedup below and
-    // the isStreamed marker prevent double-posting, and the streaming path
-    // already shows mid-turn text as it is produced. On a transport without
-    // streaming, a turn with several text-bearing messages posts one channel
-    // message per text round — deliberate, not spam: it mirrors what the
-    // streamed path shows.
+    // persists "end_turn"). Auto-post exactly ONE message per submission:
+    // the first that carries text or an attachment. A model often fronts
+    // its reply in the same message as its first tool call and ends the
+    // turn on an empty message, so a turn-final gate ghosts the reply —
+    // and posting every text round floods the thread with tool narration.
+    // Anything after the first message reaches the channel only through an
+    // explicit reply_to_origin; the persona teaches both halves.
     const hasAttachment = (entry.parts ?? []).some((part) => part.type === "attachment");
     if (!entry.content && !hasAttachment) return;
 
@@ -567,7 +583,17 @@ export class ChannelHost {
 
     const dedupeKey = `${sessionId}:${messageId}`;
     if (this.delivered.has(dedupeKey)) return;
+    // The one-auto-post-per-submission gate. A second text-bearing message
+    // in the same turn stays off the channel. Safe against races: outbound
+    // events for one thread are serialized, so the turn mark below cannot
+    // be beaten by a sibling delivery.
+    const turnKey = entry.queueItemId !== undefined ? `${sessionId}:turn:${entry.queueItemId}` : undefined;
+    if (turnKey !== undefined && this.delivered.has(turnKey)) return;
+    // An explicit reply_to_origin in this submission IS the reply — the
+    // auto-post safety net stands down so the thread gets exactly one.
+    if (entry.queueItemId !== undefined && turnRepliedToOrigin(entries, entry.queueItemId)) return;
     this.markDelivered(dedupeKey);
+    if (turnKey !== undefined) this.markDelivered(turnKey);
 
     const transport = this.transports.get(target.channelType);
     if (!transport) return;
