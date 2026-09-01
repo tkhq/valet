@@ -21,10 +21,14 @@ import {
 } from "./decision-gate.js";
 import { renderTemplate } from "./roles-skills/index.js";
 import {
+  buildOverheardDigest,
   deriveQueueState,
   formatSenderLine,
+  isOverheardDigestMeta,
+  isSignalContent,
   MAX_PENDING_PER_THREAD,
   namespaceInternalDispatchId,
+  overheardCoalesceKey,
   renderSignalEnvelope,
   resolvePartialSubmissionText,
   resolveSubmissionText,
@@ -177,6 +181,8 @@ export class Thread {
   private collectTimer: ReturnType<typeof setTimeout> | null = null;
   /** Guards against the in-process timer and the session sweep both flushing the same window. */
   private flushingCollect = false;
+  /** Serializes overheard-digest scans; concurrent admissions coalesce one at a time (TKAI-297). */
+  private overheardCoalesceChain: Promise<QueueItem | null> = Promise.resolve(null);
   private gates = new GateManager();
   /**
    * Serializes gate open/wait cycles for this thread. pi-agent-core runs a
@@ -387,7 +393,7 @@ export class Thread {
     // separate pre-check, so concurrent admissions can't race past it.
     const store = this.session.providers.store;
     const cap = this.session.options.maxPendingPerThread ?? MAX_PENDING_PER_THREAD;
-    const { item: admitted, supersededItemIds } = await store.admitSubmission(
+    const { item: admitted, admitted: wasAdmitted, supersededItemIds } = await store.admitSubmission(
       this.session.id,
       this.id,
       item,
@@ -396,14 +402,120 @@ export class Thread {
     if (supersededItemIds.length > 0) {
       await this.handleSteerSupersession(supersededItemIds);
     }
+    // Overheard-digest coalescing (TKAI-297): a freshly admitted overheard
+    // signal merges with any other queued overheard items of its origin
+    // thread. Skipped on a dispatchId dedup replay (wasAdmitted false) so a
+    // channel redelivery cannot re-digest content it already delivered.
+    // Scans are chained, not concurrent: two webhook deliveries admitting
+    // in parallel would otherwise each scan before the other's digest
+    // lands and produce two overlapping digests.
+    let receiptItem = admitted;
+    if (wasAdmitted && effectiveMode === "followup") {
+      const coalesceKey = overheardCoalesceKey(prepared.content);
+      if (coalesceKey !== undefined) {
+        const run = this.overheardCoalesceChain.then(() =>
+          this.coalesceQueuedOverheard(coalesceKey),
+        );
+        this.overheardCoalesceChain = run.catch(() => null);
+        receiptItem = (await run) ?? admitted;
+      }
+    }
     await this.emitQueueState();
     void this.kick();
     return {
       sessionId: this.session.id,
       threadId: this.id,
-      queueItemId: admitted.id,
-      status: receiptStatus(admitted.status),
+      queueItemId: receiptItem.id,
+      status: receiptStatus(receiptItem.status),
     };
+  }
+
+  /**
+   * Overheard-digest coalescing (TKAI-297): merge every queued overheard
+   * item of one origin thread into a single digest item, so a busy thread
+   * drains one "here is what you missed" turn instead of N stale catch-up
+   * turns (and the model never answers a question a later message already
+   * resolved). Same merge shape as the collect-window flush: admit the
+   * digest, then settle each constituent `merged` pointing at it.
+   * Constituents are never claimed, so they write no user entries; a
+   * redelivery of a constituent's dispatchId still dedups against its
+   * settled row. A constituent claimed between the list and the CAS settle
+   * keeps running — its line then also appears in the digest, which is
+   * duplicated ambient context on an optional-reply turn, not a lost or
+   * doubled submission. Returns the digest item, or null when there was
+   * nothing to merge with.
+   */
+  private async coalesceQueuedOverheard(coalesceKey: string): Promise<QueueItem | null> {
+    const store = this.session.providers.store;
+    const items = await store.listUnsettledSubmissions(this.session.id);
+    const coalescible = items
+      .filter(
+        (i) =>
+          i.threadId === this.id &&
+          i.status === "queued" &&
+          i.supersededByItemId === undefined &&
+          i.abortRequestedAt === undefined &&
+          overheardCoalesceKey(i.content) === coalesceKey,
+      )
+      .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    if (coalescible.length < 2) return null;
+    const { content, digest } = buildOverheardDigest(coalescible);
+    const newest = coalescible[coalescible.length - 1];
+    const merged = this.buildQueueItem(content, {
+      channel: newest.channel,
+      replyTarget: newest.replyTarget,
+      model: newest.model,
+      role: newest.role,
+      metadata: { overheardDigest: digest },
+    });
+    const { item: admittedMerged } = await store.admitSubmission(this.session.id, this.id, merged);
+    for (const constituent of coalescible) {
+      const settled = await store.settleUnclaimed(
+        this.session.id,
+        this.id,
+        constituent.id,
+        { outcome: "merged" },
+        { mergedIntoItemId: admittedMerged.id },
+      );
+      if (settled) await this.emitSettled(constituent.id, { outcome: "merged" });
+    }
+    return admittedMerged;
+  }
+
+  /**
+   * Crash repair for overheard digests (TKAI-297). `coalesceQueuedOverheard`
+   * admits the digest first and settles constituents after — a crash between
+   * the two leaves the digest AND its constituents queued, so the thread
+   * would deliver the same messages twice. This repair exists for that crash
+   * window (the sanctioned auto-repair exception: violations expected across
+   * crashes): for every queued digest, re-settle its still-queued
+   * constituents `merged`. The settleUnclaimed CAS makes it idempotent, and
+   * a constituent that was claimed in the meantime is left alone. Called
+   * from the session sweep and from restore-time reconcile, both before
+   * their kicks, so a repairable constituent settles before it can be
+   * claimed.
+   */
+  async repairOverheardDigests(): Promise<void> {
+    const store = this.session.providers.store;
+    const items = await store.listUnsettledSubmissions(this.session.id);
+    const mine = items.filter((i) => i.threadId === this.id);
+    for (const digest of mine) {
+      if (digest.status !== "queued" || digest.supersededByItemId !== undefined) continue;
+      const meta = digest.metadata?.overheardDigest;
+      if (!isOverheardDigestMeta(meta)) continue;
+      for (const constituentId of meta.constituentIds) {
+        const constituent = mine.find((i) => i.id === constituentId && i.status === "queued");
+        if (!constituent) continue;
+        const settled = await store.settleUnclaimed(
+          this.session.id,
+          this.id,
+          constituentId,
+          { outcome: "merged" },
+          { mergedIntoItemId: digest.id },
+        );
+        if (settled) await this.emitSettled(constituentId, { outcome: "merged" });
+      }
+    }
   }
 
   /**
@@ -3886,10 +3998,6 @@ function promptText(content: PromptContent): string {
   if (typeof content === "string") return content;
   if (isSignalContent(content)) return content.body;
   return content.text ?? "";
-}
-
-function isSignalContent(content: PromptContent): content is SignalContent {
-  return typeof content === "object" && content !== null && "kind" in content && content.kind === "signal";
 }
 
 /** Stamped internal-sender identity carried through `QueueItem.metadata.signalStamp` (no dedicated QueueItem field). */

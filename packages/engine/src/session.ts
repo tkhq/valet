@@ -434,6 +434,7 @@ export class Session {
       // expired gate terminalizes and unblocks the thread's queued work.
       await t.sweepExpiredGates();
       await t.checkCollectDeadline();
+      await t.repairOverheardDigests();
       await t.kick();
     }
   }
@@ -515,6 +516,11 @@ export class Session {
     // drive is asynchronous (same contract as submitPrompt's kick); the kick
     // itself arms the timers on claim, so the 5s sweep takes over as the
     // retry backoff.
+    // Settle a crashed coalesce's leftover constituents BEFORE the kick below
+    // can claim one (see Thread.repairOverheardDigests).
+    for (const t of this.threads.values()) {
+      await t.repairOverheardDigests();
+    }
     const remaining = await this.providers.store.listUnsettledSubmissions(this.id);
     const queuedThreadIds = new Set(
       remaining

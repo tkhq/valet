@@ -2,11 +2,13 @@ import type {
   ChannelOrigin,
   MessageEntry,
   PromptAuthor,
+  PromptContent,
   QueueItem,
   QueueMode,
   QueueState,
   QueueStatus,
   SessionEntry,
+  SignalContent,
   SubmissionOutcome,
   SuspendedTurnState,
 } from "./types.js";
@@ -47,6 +49,90 @@ export function validateSignalAttributeKeys(attributes: Record<string, string> |
       );
     }
   }
+}
+
+/** Type guard: a `PromptContent` that is a `SignalContent`. */
+export function isSignalContent(content: PromptContent): content is SignalContent {
+  return typeof content === "object" && content !== null && "kind" in content && content.kind === "signal";
+}
+
+/**
+ * The coalesce key for a queued overheard signal, or `undefined` when the
+ * content does not coalesce. Only a channel signal with `reply: "manual"` —
+ * an overheard message in a followed thread, the `addressed="false"`
+ * envelope — coalesces. The key is the origin thread key, so only messages
+ * overheard in the SAME external thread merge into one digest (TKAI-297).
+ */
+export function overheardCoalesceKey(content: PromptContent): string | undefined {
+  if (!isSignalContent(content)) return undefined;
+  if (content.origin?.reply !== "manual") return undefined;
+  return content.origin.threadKey;
+}
+
+/** First line of an overheard digest body. The persona text references it, so keep them in sync. */
+export const OVERHEARD_DIGEST_HEADER = "Conversation in this thread while you were working:";
+
+/** Digest bookkeeping carried on the merged item's `metadata.overheardDigest`. */
+export interface OverheardDigestMeta {
+  /** Ids of the queue items this digest replaced (each settled `merged` into it). */
+  constituentIds: string[];
+  /**
+   * One transcript line per overheard message, oldest first. A re-merge
+   * (a third message arriving while the digest is still queued) reads these
+   * back instead of re-parsing the rendered body.
+   */
+  lines: string[];
+}
+
+export function isOverheardDigestMeta(value: unknown): value is OverheardDigestMeta {
+  if (typeof value !== "object" || value === null) return false;
+  const rec = value as Record<string, unknown>; // narrowed to object above; field checks follow
+  return Array.isArray(rec.constituentIds) && Array.isArray(rec.lines);
+}
+
+/** The digest transcript lines one queued item contributes: its own prior digest lines, or one "Name: message" line. */
+function overheardLines(item: QueueItem): string[] {
+  const meta = item.metadata?.overheardDigest;
+  if (isOverheardDigestMeta(meta)) return meta.lines;
+  if (!isSignalContent(item.content)) return [];
+  const sender = item.content.attributes?.sender;
+  return [sender ? `${sender}: ${item.content.body}` : item.content.body];
+}
+
+/**
+ * PURE — merge one origin thread's queued overheard items (oldest first,
+ * every `content` a `SignalContent`) into the digest item's content and
+ * metadata. The body reads as a mini transcript under
+ * `OVERHEARD_DIGEST_HEADER`, one "Name: message" line per overheard message
+ * — the same line shape the "Conversation so far in this thread" seed uses.
+ * Attributes drop the per-message `sender` (a digest spans senders) and gain
+ * `digest="<N>"` so the envelope tells the model it is a batch. The origin
+ * comes from the NEWEST constituent, so `react_to_origin` (which targets
+ * `origin.messageTs`) lands on the latest message.
+ */
+export function buildOverheardDigest(items: QueueItem[]): {
+  content: SignalContent;
+  digest: OverheardDigestMeta;
+} {
+  const newest = items[items.length - 1];
+  if (!newest || !isSignalContent(newest.content)) {
+    throw new ValidationError("buildOverheardDigest requires at least one signal-content item");
+  }
+  const lines = items.flatMap(overheardLines);
+  const attributes: Record<string, string> = { ...(newest.content.attributes ?? {}) };
+  delete attributes.sender;
+  attributes.digest = String(lines.length);
+  return {
+    content: {
+      kind: "signal",
+      signalType: newest.content.signalType,
+      tagName: newest.content.tagName,
+      body: `${OVERHEARD_DIGEST_HEADER}\n${lines.join("\n")}`,
+      attributes,
+      origin: newest.content.origin,
+    },
+    digest: { constituentIds: items.map((i) => i.id), lines },
+  };
 }
 
 function escapeXml(value: string): string {
