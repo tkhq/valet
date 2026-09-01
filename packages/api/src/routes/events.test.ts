@@ -177,6 +177,22 @@ describe("GET /api/events/catalog", () => {
     // Non-actioned family appears as a bare key.
     expect(github!.entries.some((e) => e.key === "github.push")).toBe(true);
   });
+
+  it("catalog ships scope declarations for the scoped slack keys", async () => {
+    const a = await bootTestApi({ plugins: [slackPlugin] });
+    api = a;
+    const res = await fetch(`${a.baseUrl}/api/events/catalog`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as GetEventCatalogResponse;
+    const slack = body.services.find((s) => s.service === "slack");
+    const entries = slack?.entries ?? [];
+    const mention = entries.find((e) => e.key === "slack.app_mention");
+    const message = entries.find((e) => e.key === "slack.message");
+    expect(mention?.scope).toEqual({ channelField: "channel", creatorUserField: "user" });
+    expect(message?.scope).toEqual({ channelField: "channel" });
+    const archive = entries.find((e) => e.key === "slack.channel_archive");
+    expect(archive?.scope).toBeUndefined();
+  });
 });
 
 describe("POST /api/event-subscriptions", () => {

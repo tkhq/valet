@@ -3715,6 +3715,13 @@ export interface EventCatalogEntryWire {
     /** When set, the value is chosen from a provider-populated list (see `GET /api/events/filter-options`). */
     options?: { source: string; dependsOn?: string[] };
   }[];
+  /**
+   * Write-time scoping the subscription gate enforces for this key — the
+   * web derives its channel pickers, "Any channel" checkboxes, and copy from
+   * this, so client and server cannot drift. Mirrors
+   * `EventCatalogEntry.scope`.
+   */
+  scope?: { channelField?: string; creatorUserField?: string };
 }
 
 export interface GetEventCatalogResponse {
