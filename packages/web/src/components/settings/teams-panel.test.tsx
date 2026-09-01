@@ -228,6 +228,9 @@ describe("TeamsPanel — team default model (TKAI-255)", () => {
     expect(screen.queryByRole("combobox", { name: "Default model" })).toBeNull();
     // Curated catalog entry → friendly label, not the raw id.
     expect(screen.getByText("Sonnet 4.5")).toBeTruthy();
+    // The hint reaches members too — they are the ones whose sessions the
+    // setting shapes, and whose personal default wins.
+    expect(screen.getByText(/personal\s+default wins/)).toBeTruthy();
   });
 
   it("plain member sees the catalog name for a non-curated model, not the raw id", () => {

@@ -111,7 +111,7 @@ meRouter.patch("/", async (c) => {
     const defaultModel = raw.defaultModel;
     if (defaultModel !== null && typeof defaultModel !== "string") {
       return c.json(
-        { error: "defaultModel must be a model id from GET /api/models, or null to clear the override." },
+        { error: "defaultModel must be a model id from the model list (GET /api/models), or null to clear the override." },
         400,
       );
     }

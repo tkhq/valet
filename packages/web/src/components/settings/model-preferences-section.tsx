@@ -59,7 +59,7 @@ export function ModelPreferencesSection() {
   return (
     <Section
       title="Model preferences"
-      description="Order the models sessions choose from. The first is the org default."
+      description="Order the models sessions fall back to. The first is the organization default. A team's default and a member's personal default override it for their own sessions."
     >
       {(modelsQ.isLoading || prefsQ.isLoading) && (
         <div className="flex items-center gap-2 py-4 text-sm text-muted">

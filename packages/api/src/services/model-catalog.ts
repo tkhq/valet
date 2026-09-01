@@ -249,11 +249,11 @@ export async function validateDefaultModelId(
 ): Promise<string | null> {
   if (value === null) return null;
   if (typeof value !== "string") {
-    return "defaultModel must be a model id from GET /api/models, or null to clear the override.";
+    return "defaultModel must be a model id from the model list (GET /api/models), or null to clear the override.";
   }
   const entries = await buildOrgCatalog(db, credentials, orgId);
   if (!catalogValidIds(entries).has(value)) {
-    return `unknown model: ${value}. Send a model id from GET /api/models.`;
+    return `unknown model: ${value}. Pick a model from the model list (GET /api/models).`;
   }
   return null;
 }

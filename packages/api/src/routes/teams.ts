@@ -25,13 +25,13 @@
  *
  * Origin-gated: DELETE /:id and the three /members routes refuse a team
  * whose `origin` is `idp` WHILE the org's `ssoTeamSync` feature gate is on.
- * PATCH /:id is deliberately NOT origin-gated: the identity provider owns
- * membership and `valet.yaml` declares members, but `default_model` is
- * Valet-local state neither source ever writes, so no sync can undo it. Such a team
- * mirrors an identity-provider group, and the login-time sync owns it. With
- * the gate off no sync runs, so the same team is a dormant mirror and the
- * four routes work on it again — see `isLiveIdpMirror`
- * (`services/teams.ts`).
+ * Such a team mirrors an identity-provider group, and the login-time sync
+ * owns it. With the gate off no sync runs, so the same team is a dormant
+ * mirror and the four routes work on it again — see `isLiveIdpMirror`
+ * (`services/teams.ts`). PATCH /:id is deliberately NOT origin-gated: the
+ * identity provider owns membership and `valet.yaml` declares members, but
+ * `default_model` is Valet-local state neither source ever writes, so no
+ * sync can undo it.
  *
  * A `config` team — declared in `valet.yaml` — is gated for DELETE only. The
  * file asserts its declared members at each boot but never removes anybody,
@@ -444,7 +444,7 @@ teamsRouter.patch("/:id", async (c) => {
     const defaultModel = raw.defaultModel;
     if (defaultModel !== null && typeof defaultModel !== "string") {
       return c.json(
-        { error: "defaultModel must be a model id from GET /api/models, or null to clear the override." },
+        { error: "defaultModel must be a model id from the model list (GET /api/models), or null to clear the override." },
         400,
       );
     }

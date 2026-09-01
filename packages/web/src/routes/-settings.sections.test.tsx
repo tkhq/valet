@@ -209,7 +209,7 @@ describe("AssistantPage", () => {
     expect(screen.getByLabelText(/Personality/)).toBeTruthy();
     expect(
       screen.getByText(
-        "New conversations start on this model; you can still switch per-thread in the chat header.",
+        "New sessions you start use this model; existing sessions keep theirs. You can switch the model per thread in the chat header. Shared team assistants do not use it.",
       ),
     ).toBeTruthy();
   });
@@ -236,13 +236,16 @@ describe("AssistantPage", () => {
     expect(patchMeMutate).toHaveBeenCalledWith({ defaultModel: "claude-sonnet-4-5" });
   });
 
-  it("shows a 'System default' clear row and clears with defaultModel: null", () => {
+  it("shows a clear row naming the fallback tiers and clears with defaultModel: null", () => {
     meData = { ...meData!, defaultModel: "claude-sonnet-4-5" };
     render(<AssistantPage />);
     const input = screen.getByLabelText("Default model");
     fireEvent.focus(input);
 
-    fireEvent.click(screen.getByText("System default"));
+    // "Team or organization default", not "System default": clearing the
+    // personal tier falls to the team default (team workspace) or the org
+    // preference list, not to a fixed product-wide model.
+    fireEvent.click(screen.getByText("Team or organization default"));
     expect(patchMeMutate).toHaveBeenCalledWith({ defaultModel: null });
   });
 
