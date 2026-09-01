@@ -1261,14 +1261,12 @@ describe("IntegrationsPage — the search box", () => {
     expect(screen.queryByRole("heading", { name: "1Password" })).toBeNull();
   });
 
-  it("shows the 1Password section when the query is empty or names it", () => {
+  // 1Password moved to Organization · 1Password, beside GitHub and Slack.
+  // This page answers "what can the assistant reach"; a token form and a
+  // credential table are provider setup, which is what the settings rail is
+  // for.
+  it("does not carry the 1Password panel", () => {
     render(<IntegrationsPage />);
-    expect(screen.getByRole("heading", { name: "1Password" })).toBeTruthy();
-  });
-
-  it("shows the 1Password section when the query names it", () => {
-    searchParams = { q: "vault" };
-    render(<IntegrationsPage />);
-    expect(screen.getByRole("heading", { name: "1Password" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "1Password" })).toBeNull();
   });
 });
