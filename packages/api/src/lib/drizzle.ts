@@ -789,6 +789,28 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     probe: { kind: "index", index: "security_needs_cell" },
     sql: 'CREATE INDEX IF NOT EXISTS "security_needs_cell" ON "security_needs" ("cell_id")',
   },
+  {
+    // engine_entries.seq — the message-order tiebreaker (TKAI-303). engine_meta
+    // tracks the engine schema, but its version check is fail-loud, not
+    // self-repairing: bumping ENGINE_SCHEMA_VERSION would make every deployed
+    // database refuse to boot and demand a wipe, which would destroy thread
+    // history. This additive column does not touch CAS correctness, so it does
+    // not need that guard — the version stays put and the column arrives here
+    // instead. The IDENTITY backfills existing rows in PHYSICAL (heap) order,
+    // which equals insertion order only for rows never updated in place: a row
+    // rewritten by an earlier updateEntry sits at a later heap position, so its
+    // backfilled seq can fall out of insertion order. So this repair makes an
+    // existing thread's order STABLE across reads (no more plan-dependent
+    // flicker), but it does not retroactively correct a same-millisecond tie
+    // that was already reordered before the ALTER — that true order is the data
+    // the bug never recorded. Every entry written after the column exists gets
+    // a correct tie order. This is the one repair that rewrites its table
+    // (IDENTITY is a volatile default), so it takes an ACCESS EXCLUSIVE lock the
+    // first and only time it runs; the probe keeps every later boot lock-free.
+    describe: "engine_entries.seq column",
+    probe: { kind: "column", table: "engine_entries", column: "seq" },
+    sql: 'ALTER TABLE "engine_entries" ADD COLUMN IF NOT EXISTS "seq" bigint GENERATED ALWAYS AS IDENTITY NOT NULL',
+  },
 ];
 
 /** The repairs this database still lacks, by catalog probe — one query per
