@@ -94,9 +94,11 @@ broker; per-session reference allowlists; write access of any kind.
 2. The script reads the token from `/etc/valet/creds/token`, or from
    `VALET_SANDBOX_TOKEN` when no creds mount exists.
 3. It POSTs every reference in one request to `/api/sandbox-secrets/resolve`.
-4. The route resolves each reference through `OnePasswordService`, org scope
-   first, then the personal scope of the user the session runs as.
-5. The response carries `resolvedBase64` and `unresolved`.
+4. The route resolves each reference through `OnePasswordService`: the org
+   scope first, then the personal scope of the user the session runs as — and
+   the org scope only, when the session is team-owned.
+5. The response carries `values` (positional), `resolvedBase64` (keyed), and
+   `unresolved`.
 6. The script decodes each value, unsets the sandbox token, exports the
    variables, and `exec`s the command.
 
