@@ -22,7 +22,7 @@ import { eventDeliveries, eventDropLog, events, eventSubscriptions } from "../sc
 import { readOwnerFilter } from "./_owner-filter.js";
 import { catalogForService } from "../events/ingest.js";
 import { subscriptionMatchesEvent, validateRegexPattern, type SubscriptionFilter } from "../events/match.js";
-import { enforceMentionScope } from "../events/mention-scope.js";
+import { enforceMentionScope, storedAnyChannelState } from "../events/mention-scope.js";
 import { ownedDefinitionRow } from "../workflows/service.js";
 import { isTeamMember } from "../services/teams.js";
 import type {
@@ -747,6 +747,12 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
       eventKeys: merged.eventKeys as string[],
       filters: merged.filters as SubscriptionFilter[],
       anyChannel: body.anyChannel === true,
+      // The row's own any-channel state rides along, so a patch that leaves
+      // channel scope alone is not refused for omitting a non-persisted flag.
+      storedAnyChannel: storedAnyChannelState(
+        row.eventKeys as string[],
+        row.filters as SubscriptionFilter[],
+      ),
     });
     if (!scoped.ok) return c.json({ error: scoped.error }, 400);
     filters = scoped.filters;

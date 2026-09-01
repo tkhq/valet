@@ -23,6 +23,7 @@ import {
 import { useMe, useOrg, useTeams } from "~/api/settings";
 import { useWorkflows } from "~/api/workflows";
 import { errorText } from "~/lib/error-text";
+import { selectsSlackMention } from "~/lib/slack-mention";
 import { useListOwner } from "~/lib/use-list-owner";
 import { OwnerBadge } from "~/components/owner-badge";
 import { eligibleTeams } from "~/components/session/assistant-rail";
@@ -45,14 +46,10 @@ export function canMutate(
  * The channel scope of a `slack.app_mention` subscription, or null for any
  * other subscription. A mention rule with no channel filter IS the explicit
  * any-channel state (the server refuses the unscoped default, TKAI-299), so
- * the row must say which one the reader is looking at. The wildcard arm
- * mirrors the server's `selectsSlackMention`.
+ * the row must say which one the reader is looking at.
  */
 export function mentionChannelScope(sub: EventSubscriptionWire): string | null {
-  const selectsMention = sub.eventKeys.some(
-    (k) => k === "slack.app_mention" || (k.endsWith(".*") && "slack.app_mention".startsWith(k.slice(0, -1))),
-  );
-  if (!selectsMention) return null;
+  if (!selectsSlackMention(sub.eventKeys)) return null;
   const names: string[] = [];
   for (const f of sub.filters) {
     if (f.field !== "channel" || (f.op !== "eq" && f.op !== "in")) continue;
@@ -196,6 +193,7 @@ function SubscriptionRow({
   const del = useDeleteEventSubscription();
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [toggleError, setToggleError] = useState<string | null>(null);
+  const channelScope = mentionChannelScope(sub);
 
   return (
     <div className="flex items-center gap-3 py-3">
@@ -232,9 +230,7 @@ function SubscriptionRow({
           <span className="text-xs text-muted">
             → {describeTarget(sub.target, workflowNames, teamNames)}
           </span>
-          {mentionChannelScope(sub) && (
-            <span className="text-xs text-muted">· {mentionChannelScope(sub)}</span>
-          )}
+          {channelScope && <span className="text-xs text-muted">· {channelScope}</span>}
           {sub.filters.length > 0 && (
             <span className="text-xs text-muted">
               · {sub.filters.length} filter{sub.filters.length === 1 ? "" : "s"}

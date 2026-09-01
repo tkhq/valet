@@ -15,7 +15,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import { eventSubscriptions } from "../schema/index.js";
 import { validateSubscription } from "../routes/events.js";
 import { catalogForService } from "../events/ingest.js";
-import { enforceMentionScope } from "../events/mention-scope.js";
+import { enforceMentionScope, storedAnyChannelState } from "../events/mention-scope.js";
 import type { SubscriptionFilter } from "../events/match.js";
 import {
   canAccessTriggerRow,
@@ -226,12 +226,18 @@ export async function updateWorkflowTrigger(
 
   // Mention scoping (TKAI-299) re-applies only when the patch changes what is
   // matched, keyed to the row's creator — same rule as the subscriptions
-  // PATCH route. An enabled-only or name-only patch skips it.
+  // PATCH route. An enabled-only or name-only patch skips it. The casts
+  // narrow filters `validateSubscription` accepted, on this patch or on the
+  // write that stored `current.filters`.
   if (patch.filters !== undefined || patch.eventKeys !== undefined) {
     const scoped = await enforceMentionScope(db, plugins, accessible.row.createdBy, {
       eventKeys,
       filters: filters as SubscriptionFilter[],
       anyChannel: patch.anyChannel === true,
+      storedAnyChannel: storedAnyChannelState(
+        current.eventKeys,
+        current.filters as SubscriptionFilter[],
+      ),
     });
     if (!scoped.ok) return { ok: false, status: 400, error: scoped.error };
     filters = scoped.filters;

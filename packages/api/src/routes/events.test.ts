@@ -1451,7 +1451,7 @@ describe("mention scoping (slack.app_mention)", () => {
     const res = await postSubscription(a.baseUrl, MENTION_BODY);
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("Link your Slack account");
+    expect(body.error).toContain("Connected accounts");
   });
 
   it("refuses creation without a channel filter unless anyChannel is set", async () => {
@@ -1501,16 +1501,36 @@ describe("mention scoping (slack.app_mention)", () => {
     expect(body.error).toContain("Any channel");
   });
 
-  it("refuses mixing app_mention with a key that has no user field", async () => {
+  it("refuses mixing app_mention with any other key", async () => {
+    const a = await bootSlack();
+    await linkSlack(a, "local-user", "U_LOCAL");
+    const noUserField = await postSubscription(a.baseUrl, {
+      ...MENTION_BODY,
+      eventKeys: ["slack.app_mention", "slack.channel_archive"],
+    });
+    expect(noUserField.status).toBe(400);
+    expect(((await noUserField.json()) as { error: string }).error).toContain("slack.channel_archive");
+
+    // A key WITH a user field is refused too: the injected creator filter
+    // would silently narrow it to the creator's own events.
+    const withUserField = await postSubscription(a.baseUrl, {
+      ...MENTION_BODY,
+      eventKeys: ["slack.app_mention", "slack.message"],
+    });
+    expect(withUserField.status).toBe(400);
+    expect(((await withUserField.json()) as { error: string }).error).toContain("slack.message");
+  });
+
+  it("refuses an empty channel in list instead of storing a dead filter", async () => {
     const a = await bootSlack();
     await linkSlack(a, "local-user", "U_LOCAL");
     const res = await postSubscription(a.baseUrl, {
       ...MENTION_BODY,
-      eventKeys: ["slack.app_mention", "slack.channel_archive"],
+      filters: [{ field: "channel", op: "in", value: [] }],
     });
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("slack.channel_archive");
+    expect(body.error).toContain("empty list");
   });
 
   it("a slack.* wildcard cannot widen around the gate", async () => {
@@ -1557,6 +1577,55 @@ describe("mention scoping (slack.app_mention)", () => {
     const body = (await res.json()) as PatchEventSubscriptionResponse;
     // The injected filter names the CREATOR's Slack user, not the caller's.
     expect(body.filters).toEqual([{ field: "user", op: "eq", value: "U_SOMEONE" }]);
+  });
+
+  it("PATCH of a stored any-channel row keeps working without re-sending the flag", async () => {
+    const a = await bootSlack();
+    await linkSlack(a, "someone", "U_SOMEONE");
+    // Stored any-channel state: mention key, no channel filter.
+    await seedSubscriptionRow(a, "sub_m4", "local-org", {
+      eventKeys: ["slack.app_mention"],
+      filters: [{ field: "user", op: "eq", value: "U_SOMEONE" }],
+      ownerType: "user",
+      ownerId: "local-user",
+    });
+    // The patch tunes a text filter and never touches channel scope. The
+    // server derives the row's any-channel state, so no flag is needed.
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions/sub_m4`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        filters: [
+          { field: "user", op: "eq", value: "U_SOMEONE" },
+          { field: "text", op: "contains", value: "deploy" },
+        ],
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as PatchEventSubscriptionResponse;
+    expect(body.filters.some((f) => f.field === "text")).toBe(true);
+  });
+
+  it("PATCH can narrow a stored any-channel row to named channels", async () => {
+    const a = await bootSlack();
+    await linkSlack(a, "someone", "U_SOMEONE");
+    await seedSubscriptionRow(a, "sub_m5", "local-org", {
+      eventKeys: ["slack.app_mention"],
+      filters: [{ field: "user", op: "eq", value: "U_SOMEONE" }],
+      ownerType: "user",
+      ownerId: "local-user",
+    });
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions/sub_m5`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        filters: [
+          { field: "user", op: "eq", value: "U_SOMEONE" },
+          { field: "channel", op: "eq", value: "C999" },
+        ],
+      }),
+    });
+    expect(res.status).toBe(200);
   });
 
   it("PATCH cannot strip the channel scope without anyChannel", async () => {

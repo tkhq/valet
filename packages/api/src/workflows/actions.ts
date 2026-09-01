@@ -741,6 +741,13 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
           }),
         ),
       ),
+      any_channel: Type.Optional(
+        Type.Boolean({
+          description:
+            "slack.app_mention only: listen in every channel the app can see, instead of a " +
+            "required channel filter.",
+        }),
+      ),
     }),
   )({
     id: "workflows.create_trigger",
@@ -751,7 +758,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "{{trigger.data.payload...}} plus {{trigger.data.key}}/{{trigger.data.refs...}}. " +
       "Returns { triggerId }.",
     riskLevel: "medium",
-    execute: async ({ workflow_id, name, event_keys, filters }, ctx) => {
+    execute: async ({ workflow_id, name, event_keys, filters, any_channel }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const deps = getDeps();
@@ -759,7 +766,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
         deps.db,
         deps.plugins ?? [],
         { id: owner.userId, orgId: owner.orgId },
-        { workflowId: workflow_id, name, eventKeys: event_keys, filters },
+        { workflowId: workflow_id, name, eventKeys: event_keys, filters, anyChannel: any_channel },
       );
       if (!result.ok) return { success: false, error: result.error };
       return { success: true, data: result.trigger };
@@ -940,6 +947,13 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
         ),
       ),
       enabled: Type.Optional(Type.Boolean()),
+      any_channel: Type.Optional(
+        Type.Boolean({
+          description:
+            "slack.app_mention only: listen in every channel the app can see, instead of a " +
+            "required channel filter.",
+        }),
+      ),
     }),
   )({
     id: "workflows.update_trigger",
@@ -948,7 +962,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
       "Update a workflow event trigger by id. All fields are optional; only supplied fields change. " +
       "Changing event_keys or filters re-validates against the event catalog.",
     riskLevel: "medium",
-    execute: async ({ trigger_id, name, event_keys, filters, enabled }, ctx) => {
+    execute: async ({ trigger_id, name, event_keys, filters, enabled, any_channel }, ctx) => {
       const owner = ownerFromContext(ctx);
       if (!owner) return NO_OWNER;
       const deps = getDeps();
@@ -957,7 +971,7 @@ export function workflowsActionPlugin(getDeps: () => WorkflowServiceDeps): Actio
         deps.plugins ?? [],
         owner,
         trigger_id,
-        { name, eventKeys: event_keys, filters, enabled },
+        { name, eventKeys: event_keys, filters, enabled, anyChannel: any_channel },
       );
       if (!result.ok) return { success: false, error: result.error };
       return { success: true, data: result.trigger };

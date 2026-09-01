@@ -43,22 +43,16 @@ import {
   toWireFilters,
   type UiFilterRow,
 } from "~/components/events/filter-editor";
+import { hasChannelScopeFilter, selectsSlackMention, SLACK_APP_MENTION } from "~/lib/slack-mention";
 
 type TriggerKind = "schedule" | "event";
 type TargetKind = "workflow" | "orchestrator";
 
-const SLACK_APP_MENTION = "slack.app_mention";
-
-/** A stored mention trigger with no eq/in channel filter IS the any-channel
+/** A stored mention trigger with no channel-scope filter IS the any-channel
  * state (the server refuses the unscoped default, TKAI-299) — seed the
  * checkbox from that, so an edit round-trips without re-checking it. */
 function storedAnyChannel(eventKeys: string[], filters: unknown[]): boolean {
-  if (!eventKeys.includes(SLACK_APP_MENTION)) return false;
-  return !filters.some((f) => {
-    if (typeof f !== "object" || f === null) return false;
-    const r = f as Record<string, unknown>;
-    return r.field === "channel" && (r.op === "eq" || r.op === "in");
-  });
+  return selectsSlackMention(eventKeys) && !hasChannelScopeFilter(filters);
 }
 
 function defaultTimezone(): string {
@@ -268,6 +262,14 @@ export function TriggerDialog({
           return;
         }
         const filters = toWireFilters(filterRows);
+        // Mirror the server's mention channel rule (TKAI-299) so the form
+        // names the gap before a round trip.
+        if (eventKey === SLACK_APP_MENTION && !anyChannel && !hasChannelScopeFilter(filters)) {
+          setFormError(
+            'A mention trigger needs a channel filter (equals, or is one of). Add one, or check "Any channel".',
+          );
+          return;
+        }
 
         if (isEditing) {
           // editing.kind matches `kind` (set in the open-reset effect); TS can't narrow through useState
@@ -286,6 +288,16 @@ export function TriggerDialog({
           // Filters are what the rows say now. Send them only when they differ
           // from what was stored, including an empty set that clears them.
           if (JSON.stringify(filters) !== JSON.stringify(orig.detail.filters)) {
+            body.filters = filters;
+          }
+          // A toggle of "Any channel" alone must still produce a write, or
+          // the save is a silent no-op — send the (unchanged) filters so the
+          // server re-runs the mention gate against the new flag.
+          if (
+            eventKey === SLACK_APP_MENTION &&
+            anyChannel !== storedAnyChannel(orig.detail.eventKeys, orig.detail.filters) &&
+            body.filters === undefined
+          ) {
             body.filters = filters;
           }
           // The server re-checks mention scoping when the match changes, so

@@ -27,7 +27,7 @@
  * workflow kind (`EventSubscriptionTargetWire`), so a workflow-targeted event
  * rule needs no separate event-trigger endpoint.
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Button,
   Dialog,
@@ -52,11 +52,10 @@ import { useIdentityLinks } from "~/api/queries";
 import { useCreateSchedule, useWorkflows } from "~/api/workflows";
 import { useTeams } from "~/api/settings";
 import { errorText } from "~/lib/error-text";
+// The reply outcome always subscribes to this one event key, so the reader
+// never sees a raw event picker for it.
+import { SLACK_APP_MENTION } from "~/lib/slack-mention";
 import { useActiveWorkspace } from "~/components/workspace-clause";
-
-/** The reply outcome always subscribes to this one event key, so the reader
- * never sees a raw event picker for it. */
-const SLACK_APP_MENTION = "slack.app_mention";
 
 /** One picked channel: the Slack id plus the display label the picker showed. */
 interface SelectedChannel {
@@ -134,6 +133,14 @@ export function AutomationWizard({
   const [follow, setFollow] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // A checked "Any channel" (or picked channels) must not ride into a
+  // different outcome's flow, so an outcome switch resets both.
+  function chooseOutcome(next: Outcome) {
+    setOutcome(next);
+    setAnyChannel(false);
+    setReplyChannels([]);
+  }
+
   // A manual target choice wins: once the reader picks a target, a later
   // workspace switch must not overwrite it. The default target seeds from the
   // active workspace, so it must follow a workspace change until then (see
@@ -196,12 +203,15 @@ export function AutomationWizard({
 
   // Which step the reader is on decides whether Next is allowed. Each gate
   // matches what the step collects, so the reader cannot skip an empty field.
+  // A mention rule must name channels unless "Any channel" was chosen
+  // explicitly — the same rule the server enforces. One predicate for the
+  // Next gate and the Create gate, so the two cannot drift.
+  const replyScoped = anyChannel || replyChannels.length > 0;
+
   function canAdvance(): boolean {
     if (step === 1) return true; // An outcome always has a value.
     if (outcome === "reply") {
-      // Reply step: a mention rule must name channels unless "Any channel"
-      // was chosen explicitly — the same rule the server enforces.
-      return step === 2 && (anyChannel || replyChannels.length > 0);
+      return step === 2 && replyScoped;
     }
     if (step === 2) {
       return isSchedule ? cron.trim().length > 0 : keys.size > 0;
@@ -211,8 +221,8 @@ export function AutomationWizard({
   }
 
   const isLastStep = step === plan.count;
-  const replyScoped = outcome !== "reply" || anyChannel || replyChannels.length > 0;
-  const canCreate = name.trim().length > 0 && targetReady && replyScoped && !isPending;
+  const canCreate =
+    name.trim().length > 0 && targetReady && (outcome !== "reply" || replyScoped) && !isPending;
 
   function next() {
     setError(null);
@@ -329,7 +339,7 @@ export function AutomationWizard({
         <StepHeader step={step} plan={plan} />
 
         <div className="space-y-4">
-          {step === 1 && <OutcomeStep outcome={outcome} onChange={setOutcome} />}
+          {step === 1 && <OutcomeStep outcome={outcome} onChange={chooseOutcome} />}
 
           {step === 2 && outcome === "reply" && (
             <ReplyStep
@@ -639,6 +649,11 @@ function ChannelMultiSelect({
   // The results are a popover, shown while the search input has focus — the
   // same pattern as the FilterEditor's single-value picker.
   const [open, setOpen] = useState(false);
+  // Once the source reports it cannot resolve (Slack not connected, provider
+  // error), latch into the free-text fallback and stop querying. Without the
+  // latch, each keystroke re-keys the query, `reason` blinks undefined while
+  // the refetch is in flight, and the input remounts mid-typing.
+  const [fallbackReason, setFallbackReason] = useState<string | null>(null);
 
   useEffect(() => {
     const t = setTimeout(() => setDebounced(query), 200);
@@ -647,9 +662,12 @@ function ChannelMultiSelect({
 
   const optionsQ = useFilterOptions(
     { source: "slack.channels", q: debounced },
-    { enabled: disabled !== true },
+    { enabled: disabled !== true && fallbackReason === null },
   );
   const reason = optionsQ.data?.reason;
+  useEffect(() => {
+    if (reason !== undefined) setFallbackReason(reason);
+  }, [reason]);
   const options = optionsQ.data?.options ?? [];
 
   function toggle(id: string, label: string) {
@@ -680,7 +698,7 @@ function ChannelMultiSelect({
     </div>
   );
 
-  if (reason !== undefined && disabled !== true) {
+  if (fallbackReason !== null && disabled !== true) {
     return (
       <div>
         <div className="flex items-center gap-2">
@@ -705,7 +723,7 @@ function ChannelMultiSelect({
             Add channel
           </Button>
         </div>
-        <p className="mt-1 text-xs text-muted">{reason}</p>
+        <p className="mt-1 text-xs text-muted">{fallbackReason}</p>
         {chips}
       </div>
     );

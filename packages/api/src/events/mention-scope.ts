@@ -3,7 +3,7 @@
  *
  * A subscription whose event keys select `slack.app_mention` is a "mention
  * subscription". At write time it is scoped two ways, so it cannot collect
- * other users' mentions or silently listen across the whole workspace:
+ * other users' mentions or silently listen across the whole Slack workspace:
  *
  * 1. **User scope.** The filters must carry a `user` filter equal to the
  *    creator's linked Slack user id. Absent, the server injects it; present
@@ -35,7 +35,8 @@ export function selectsSlackMention(eventKeys: string[]): boolean {
 
 /** True when the filter constrains the channel to a non-empty fixed set.
  * `prefix`, `contains` and `regex` do not count: "starts with C" is the whole
- * workspace. An empty `in` list does not count either — it matches nothing,
+ * Slack workspace. An empty `in` list does not count either — it matches
+ * nothing,
  * which is not a channel selection. */
 function isChannelScopeFilter(f: SubscriptionFilter): boolean {
   if (f.field !== "channel") return false;
@@ -58,6 +59,18 @@ function selectedEntries(plugins: ValetPlugin[], eventKeys: string[]) {
     .filter((e) => eventKeyMatches(e.key, eventKeys));
 }
 
+/**
+ * Whether a STORED mention subscription is in the any-channel state: it
+ * selects `slack.app_mention` and carries no channel-scope filter. The
+ * `anyChannel` request flag is deliberately not persisted, so this derivation
+ * is the stored state. The PATCH paths feed it back as `storedAnyChannel` so
+ * an edit that does not touch channel scope is not refused for lacking a flag
+ * the server never stored.
+ */
+export function storedAnyChannelState(eventKeys: string[], filters: SubscriptionFilter[]): boolean {
+  return selectsSlackMention(eventKeys) && !filters.some(isChannelScopeFilter);
+}
+
 export type MentionScopeResult =
   | { ok: true; filters: SubscriptionFilter[] }
   | { ok: false; error: string };
@@ -71,6 +84,12 @@ export type MentionScopeResult =
  * caller: an org-owned mention subscription patched by a colleague stays
  * scoped to the user who armed it.
  *
+ * `storedAnyChannel` (PATCH paths only) carries the row's derived any-channel
+ * state, so a patch that leaves channel scope alone passes without the
+ * caller re-asserting the flag. The explicit `anyChannel` flag alone trips
+ * the contradiction check, so a stored any-channel row can still be narrowed
+ * to named channels by just sending channel filters.
+ *
  * Non-mention subscriptions pass through unchanged; `anyChannel` has no
  * meaning for them and is ignored.
  */
@@ -78,24 +97,41 @@ export async function enforceMentionScope(
   db: AppDb,
   plugins: ValetPlugin[],
   creatorUserId: string,
-  args: { eventKeys: string[]; filters: SubscriptionFilter[]; anyChannel: boolean },
+  args: {
+    eventKeys: string[];
+    filters: SubscriptionFilter[];
+    anyChannel: boolean;
+    storedAnyChannel?: boolean;
+  },
 ): Promise<MentionScopeResult> {
   if (!selectsSlackMention(args.eventKeys)) return { ok: true, filters: args.filters };
 
   // The injected user filter applies to EVERY event the subscription matches
-  // (filters are per-subscription, not per-key). A selected key whose catalog
-  // entry declares no `user` field would never match again, so refuse the mix
-  // instead of storing a silently dead subscription.
+  // (filters are per-subscription, not per-key), so a second key would be
+  // silently narrowed to the creator's own events — or, for a key with no
+  // user field, never match again. Refuse the mix instead of storing either
+  // surprise.
   for (const entry of selectedEntries(plugins, args.eventKeys)) {
     if (entry.key === SLACK_MENTION_KEY) continue;
-    if (!entry.filters.some((f) => f.field === "user")) {
-      return {
-        ok: false,
-        error:
-          `slack.app_mention is scoped to your Slack user, and that user filter can never match ` +
-          `${entry.key}, which has no user field. Create a separate subscription for ${entry.key}.`,
-      };
-    }
+    return {
+      ok: false,
+      error:
+        `A mention subscription is scoped to your own @-mentions, so it cannot also subscribe ` +
+        `to ${entry.key}. Create a separate subscription for ${entry.key}.`,
+    };
+  }
+
+  // An empty `in` list matches nothing, ever — refuse it rather than store a
+  // dead filter the UI would have to explain.
+  if (
+    args.filters.some(
+      (f) => f.field === "channel" && f.op === "in" && Array.isArray(f.value) && f.value.length === 0,
+    )
+  ) {
+    return {
+      ok: false,
+      error: "A channel filter has an empty list. Add channels to it, or remove the filter.",
+    };
   }
 
   const hasChannelScope = args.filters.some(isChannelScopeFilter);
@@ -105,11 +141,11 @@ export async function enforceMentionScope(
       error: `"Any channel" removes the channel restriction. Remove the channel filters, or turn "Any channel" off.`,
     };
   }
-  if (!args.anyChannel && !hasChannelScope) {
+  if (!args.anyChannel && !hasChannelScope && args.storedAnyChannel !== true) {
     return {
       ok: false,
       error:
-        "A mention subscription needs at least one channel. " +
+        "A mention subscription needs at least one channel filter (equals, or is one of). " +
         'Select channels, or choose "Any channel" to listen in every channel the app can see.',
     };
   }
@@ -119,8 +155,8 @@ export async function enforceMentionScope(
     return {
       ok: false,
       error:
-        "A mention subscription fires only for the creator's own @-mentions, which needs a linked Slack account. " +
-        "Link your Slack account in Settings → Connected accounts, then try again.",
+        "A mention subscription fires only for its creator's own @-mentions, so the creator must link " +
+        "their Slack account in Settings → Connected accounts first.",
     };
   }
 
