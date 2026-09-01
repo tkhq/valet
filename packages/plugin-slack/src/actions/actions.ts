@@ -807,8 +807,8 @@ const sendMessage = action(Type.Object({
   }))({
   id: 'slack.send_message',
   name: 'Send Message',
-  description: 'Post a message to a Slack channel or thread. Use this to send to any channel the bot has joined — for arbitrary channel posts and threaded replies. Use channel_reply instead only when replying on the specific channel a user wrote from. Returns ts (message timestamp) and channel — save ts to thread follow-up messages under this one via thread_ts.',
-  riskLevel: 'medium',
+  description: 'Post a message to an arbitrary Slack channel or thread the bot has joined. This requires approval on every call, because it can post outside the current conversation — for example into a customer channel. To answer or follow up in the thread this turn came from, use reply_to_origin instead: it needs no approval and cannot reach a wrong channel. Returns ts (message timestamp) and channel — save ts to thread a follow-up under this message via thread_ts, or to edit or delete this message later with update_message / delete_message.',
+  riskLevel: 'high',
   execute: async (args, ctx) => {
     const p = args;
     const cred = await ctx.credentials.get();
@@ -972,6 +972,85 @@ const reactToOrigin = action(Type.Object({
   },
 });
 
+const updateMessage = action(Type.Object({
+    channel: Type.String({ description: 'Channel ID (C..., or D... for DMs) returned when the message was sent. Channel names are not accepted — use the ID from the send result.' }),
+    ts: Type.String({ description: 'Timestamp (ts) of the message to edit, as returned by send_message / reply_to_origin / dm_owner / dm_user (e.g. "1780887543.189519").' }),
+    text: Type.String({ description: 'New message body — fully replaces the previous content. Supports Slack mrkdwn (bold: *text*, italic: _text_, code: `code`, links: <url|label>). Send a single space to blank a message you cannot delete.' }),
+  }))({
+  id: 'slack.update_message',
+  name: 'Update Message',
+  description: "Edit a message Valet previously posted, for example to correct or blank a message sent by mistake. Only works on Valet's own messages — Slack rejects bot edits to anyone else's messages. Use the channel and ts returned by send_message / reply_to_origin / dm_owner / dm_user. The new text fully replaces the previous content.",
+  riskLevel: 'medium',
+  execute: async (args, ctx) => {
+    const cred = await ctx.credentials.get();
+    const token = cred?.accessToken;
+    if (!token) return { success: false, error: 'Missing bot_token' };
+
+    const denied = await guardPrivateChannel(token, args.channel, ownerSlackUserId(cred));
+    if (denied) return denied;
+
+    // chat.update defaults to parse:'client' (unlike chat.postMessage's 'none'),
+    // which would mangle <url|label> markup on every edit — pin 'none'. It also
+    // keeps a message's existing blocks unless the field is sent, so always send
+    // blocks: rebuilt content for long text, an explicit [] otherwise. Editing a
+    // previously block-formatted (long) message down to short text must not leave
+    // the stale blocks rendering.
+    const body: Record<string, unknown> = { channel: args.channel, ts: args.ts, text: args.text, parse: 'none' };
+    if (args.text.length > SLACK_TEXT_LIMIT) {
+      body.blocks = buildContentBlocks(args.text, args.text);
+      body.text = args.text.slice(0, SLACK_TEXT_LIMIT);
+    } else {
+      body.blocks = [];
+    }
+
+    const res = await slackFetch('chat.update', token, body);
+    if (!res.ok) return slackError(res);
+    const data = (await res.json()) as { ok: boolean; error?: string; ts?: string; channel?: string; text?: string };
+    if (!data.ok) {
+      if (data.error === 'cant_update_message') {
+        return { success: false, error: 'Slack rejected the edit (cant_update_message): Valet can only edit its own messages. Check that ts belongs to a message Valet sent.' };
+      }
+      if (data.error === 'message_not_found') {
+        return { success: false, error: 'Message not found — check the channel and ts (the message may have been deleted).' };
+      }
+      return slackError(res, data);
+    }
+    return { success: true, data: { ok: true, ts: data.ts, channel: data.channel, text: data.text } };
+  },
+});
+
+const deleteMessage = action(Type.Object({
+    channel: Type.String({ description: 'Channel ID (C..., or D... for DMs) the message was posted to.' }),
+    ts: Type.String({ description: 'Timestamp (ts) of the message to delete, as returned by send_message / reply_to_origin / dm_owner / dm_user.' }),
+  }))({
+  id: 'slack.delete_message',
+  name: 'Delete Message',
+  description: "Delete a message Valet previously posted, for example to remove a message sent by mistake. Only works on Valet's own messages — Slack rejects bot deletes of anyone else's messages. Irreversible: prefer update_message when the content just needs correcting.",
+  riskLevel: 'high',
+  execute: async (args, ctx) => {
+    const cred = await ctx.credentials.get();
+    const token = cred?.accessToken;
+    if (!token) return { success: false, error: 'Missing bot_token' };
+
+    const denied = await guardPrivateChannel(token, args.channel, ownerSlackUserId(cred));
+    if (denied) return denied;
+
+    const res = await slackFetch('chat.delete', token, { channel: args.channel, ts: args.ts });
+    if (!res.ok) return slackError(res);
+    const data = (await res.json()) as { ok: boolean; error?: string; ts?: string; channel?: string };
+    if (!data.ok) {
+      if (data.error === 'cant_delete_message') {
+        return { success: false, error: 'Slack rejected the delete (cant_delete_message): Valet can only delete its own messages.' };
+      }
+      if (data.error === 'message_not_found') {
+        return { success: false, error: 'Message not found — check the channel and ts (it may already be deleted).' };
+      }
+      return slackError(res, data);
+    }
+    return { success: true, data: { ok: true, ts: data.ts, channel: data.channel } };
+  },
+});
+
 export const slackPlugin: ActionPlugin = {
   service: 'slack',
   description: 'Slack integration for messages, channels, and users',
@@ -990,5 +1069,7 @@ export const slackPlugin: ActionPlugin = {
     sendMessage,
     replyToOrigin,
     reactToOrigin,
+    updateMessage,
+    deleteMessage,
   ],
 };
