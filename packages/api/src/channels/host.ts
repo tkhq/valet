@@ -777,7 +777,10 @@ export class ChannelHost {
           signalType: "channel.reply_dropped",
           body: args.body,
           attributes: { feedback: "reply_dropped" },
-          origin: { ...origin, reply: "manual" },
+          // Normalized origin — no messageTs. The dispatchId dedup compares
+          // CONTENT: a per-message ts would make the once-per-thread repeat a
+          // content conflict (a logged error) instead of a clean dedup.
+          origin: { channelType: origin.channelType, threadKey: origin.threadKey, reply: "manual" },
         },
         { dispatchId: args.dispatchId },
       );

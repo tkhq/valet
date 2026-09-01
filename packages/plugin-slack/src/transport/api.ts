@@ -338,9 +338,21 @@ export class SlackApi {
   }
 
   /** conversations.replies → the thread's messages (parent first). Empty when
-   *  the thread is gone or the bot cannot read the channel. */
-  async conversationsReplies(channel: string, threadTs: string, limit = 100): Promise<Record<string, unknown>[]> {
-    const res = await this.get("conversations.replies", { channel, ts: threadTs, limit });
+   *  the thread is gone or the bot cannot read the channel. `oldest` bounds the
+   *  page to messages at/after that ts, so a gap window near the end of a long
+   *  thread is not cut off by the oldest-first `limit`. */
+  async conversationsReplies(
+    channel: string,
+    threadTs: string,
+    limit = 100,
+    oldest?: string,
+  ): Promise<Record<string, unknown>[]> {
+    const res = await this.get("conversations.replies", {
+      channel,
+      ts: threadTs,
+      limit,
+      ...(oldest !== undefined ? { oldest } : {}),
+    });
     return Array.isArray(res.messages) ? (res.messages as Record<string, unknown>[]) : [];
   }
 

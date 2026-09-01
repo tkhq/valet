@@ -70,13 +70,16 @@ export async function fetchThreadTranscript(
     beforeTs?: string;
   },
 ): Promise<string | null> {
+  const windowed = opts.afterTs !== undefined && opts.beforeTs !== undefined;
   let messages: Record<string, unknown>[];
   try {
-    messages = await api.conversationsReplies(opts.channelId, opts.threadTs, opts.limit ?? 100);
+    // A windowed fetch passes `oldest`: `conversations.replies` pages oldest
+    // first, so without the bound a long thread's recent gap would fall
+    // outside the first page entirely.
+    messages = await api.conversationsReplies(opts.channelId, opts.threadTs, opts.limit ?? 100, opts.afterTs);
   } catch {
     return null; // thread gone, or the bot cannot read the channel — hydrate nothing.
   }
-  const windowed = opts.afterTs !== undefined && opts.beforeTs !== undefined;
   if (windowed) {
     // Numeric compare, not lexicographic: a Slack ts is `seconds.micros` and
     // the seconds part could change digit count.

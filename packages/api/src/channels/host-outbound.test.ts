@@ -700,7 +700,8 @@ describe("ChannelHost outbound delivery", () => {
         parts: [
           {
             type: "tool_call",
-            id: "tc-1",
+            callId: "tc-1",
+            toolName: "call_tool",
             status: "completed",
             args: { tool_id: "keyed.reply_to_origin", params: { text: "hi" } },
             result: { details: { ok: true } },
