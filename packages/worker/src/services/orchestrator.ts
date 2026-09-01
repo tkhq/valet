@@ -1,11 +1,11 @@
-import type { SessionThread } from '@valet/shared';
+import type { SessionThread, OrchestratorIdentity, AgentSession } from '@valet/shared';
 import type { Env } from '../env.js';
 import * as db from '../lib/db.js';
 import type { AppDb } from '../lib/drizzle.js';
 import { getDb } from '../lib/drizzle.js';
 import { buildDoWebSocketUrl } from '../lib/do-ws-url.js';
 import { buildOrchestratorPersonaFiles } from '../lib/orchestrator-persona.js';
-import { createPersona, upsertPersonaFile } from '../lib/db/personas.js';
+import { createPersona, upsertPersonaFile, deletePersona } from '../lib/db/personas.js';
 import { generateRunnerToken, assembleProviderEnv, assembleCredentialEnv } from '../lib/env-assembly.js';
 import { ensureTodayJournal } from '../lib/db/memory-files.js';
 import { loadMemorySnapshot, formatMemorySnapshot } from '../lib/memory-snapshot.js';
@@ -48,8 +48,15 @@ async function stopOldOrchestratorSession(
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
+const CLAIM_INVALIDATED = 'Orchestrator session claim was invalidated. Retry the request.';
 const TERMINAL_STATUSES = new Set(['terminated', 'archived', 'error']);
 const ORCHESTRATOR_UNAVAILABLE_STATUSES = new Set(['terminated', 'archived', 'error']);
+
+async function currentOrchestratorSessionId(appDb: AppDb, userId: string): Promise<string> {
+  const live = await db.getLiveOrchestratorSession(appDb, userId);
+  if (live) return live.id;
+  throw new Error(CLAIM_INVALIDATED);
+}
 
 // ─── Restart Orchestrator Session ───────────────────────────────────────────
 
@@ -60,24 +67,50 @@ export async function restartOrchestratorSession(
   identity: { id: string; name: string; handle: string; customInstructions?: string | null; personaId?: string | null },
   requestUrl?: string
 ): Promise<{ sessionId: string }> {
+  return startOrchestratorSession(env, userId, userEmail, identity, requestUrl, { rotate: true });
+}
+
+export async function ensureOrchestratorSession(
+  env: Env,
+  userId: string,
+  userEmail: string,
+  identity: { id: string; name: string; handle: string; customInstructions?: string | null; personaId?: string | null },
+  requestUrl?: string
+): Promise<{ sessionId: string }> {
+  return startOrchestratorSession(env, userId, userEmail, identity, requestUrl, { rotate: false });
+}
+
+async function startOrchestratorSession(
+  env: Env,
+  userId: string,
+  userEmail: string,
+  identity: { id: string; name: string; handle: string; customInstructions?: string | null; personaId?: string | null },
+  requestUrl: string | undefined,
+  opts: { rotate: boolean },
+): Promise<{ sessionId: string }> {
   const appDb = getDb(env.DB);
 
-  // ── Stop the old orchestrator session (if any) before creating a new one ──
-  // Without this, the old DO + sandbox + Runner keep running in parallel,
-  // causing duplicate steering messages to child sessions.
-  const oldSession = await db.getOrchestratorSession(env.DB, userId);
-  if (oldSession && !TERMINAL_STATUSES.has(oldSession.status)) {
-    console.log(`[restartOrchestrator] Stopping old session ${oldSession.id} (status=${oldSession.status}) before restart`);
-    await stopOldOrchestratorSession(env, appDb, oldSession.id);
-  }
+  if (!opts.rotate) {
+    const live = await db.getLiveOrchestratorSession(appDb, userId);
+    if (live) return { sessionId: live.id };
+  } else {
+    // Invalidate in-flight /start for the previous live row before we stop it.
+    await db.bumpOrchestratorSessionGeneration(appDb, userId);
 
-  // ── Duplicate guard: re-check after stop to prevent TOCTOU races ──
-  // If another concurrent restart already created a healthy session while we were
-  // stopping the old one, bail out to avoid spawning a second parallel sandbox.
-  const recheckSession = await db.getOrchestratorSession(env.DB, userId);
-  if (recheckSession && !TERMINAL_STATUSES.has(recheckSession.status) && recheckSession.id !== oldSession?.id) {
-    console.log(`[restartOrchestrator] Another restart already created session ${recheckSession.id}, skipping`);
-    return { sessionId: recheckSession.id };
+    // Stop the old orchestrator session (if any) before creating a new one.
+    // Without this, the old DO + sandbox + Runner keep running in parallel,
+    // causing duplicate steering messages to child sessions.
+    const oldSession = await db.getOccupyingOrchestratorSession(appDb, userId);
+    if (oldSession) {
+      console.log(`[restartOrchestrator] Stopping old session ${oldSession.id} (status=${oldSession.status}) before restart`);
+      await stopOldOrchestratorSession(env, appDb, oldSession.id);
+    }
+
+    const recheckSession = await db.getLiveOrchestratorSession(appDb, userId);
+    if (recheckSession && recheckSession.id !== oldSession?.id) {
+      console.log(`[restartOrchestrator] Another restart already created session ${recheckSession.id}, skipping`);
+      return { sessionId: recheckSession.id };
+    }
   }
 
   // Backfill: create persona for orchestrators that predate persona support
@@ -109,7 +142,7 @@ export async function restartOrchestratorSession(
     }
   }
 
-  const personaFiles = buildOrchestratorPersonaFiles(identity as any);
+  const personaFiles = buildOrchestratorPersonaFiles(identity);
 
   // Ensure today's journal exists and load memory snapshot
   await ensureTodayJournal(env.DB, userId);
@@ -125,15 +158,20 @@ export async function restartOrchestratorSession(
   const sessionId = `orchestrator:${userId}:${crypto.randomUUID()}`;
   const runnerToken = generateRunnerToken();
 
-  await db.createSession(appDb, {
+  const claimed = await db.insertLiveOrchestratorSession(appDb, {
     id: sessionId,
     userId,
-    workspace: 'orchestrator',
     title: `${identity.name} (Orchestrator)`,
-    isOrchestrator: true,
-    purpose: 'orchestrator',
     personaId: identity.personaId ?? undefined,
   });
+  if (!claimed.inserted) {
+    if (await db.isOrchestratorSpawnClaimHeld(appDb, claimed.session.id)) {
+      console.log(`[orchestrator] Session claim lost for userId=${userId}, using ${claimed.session.id}`);
+      return { sessionId: claimed.session.id };
+    }
+    console.log(`[orchestrator] Occupying session ${claimed.session.id} is generation-stale`);
+    return { sessionId: await currentOrchestratorSessionId(appDb, userId) };
+  }
 
   // Migrate channel bindings from ALL previous orchestrator sessions to the new one.
   // This covers both terminal sessions and sessions whose D1 status hasn't caught up
@@ -232,8 +270,13 @@ export async function restartOrchestratorSession(
   const doId = env.SESSIONS.idFromName(sessionId);
   const sessionDO = env.SESSIONS.get(doId);
 
+  if (!(await db.isOrchestratorSpawnClaimHeld(appDb, sessionId))) {
+    console.log(`[orchestrator] Claim invalidated before /start for ${sessionId}`);
+    return { sessionId: await currentOrchestratorSessionId(appDb, userId) };
+  }
+
   try {
-    await sessionDO.fetch(new Request('http://do/start', {
+    const startRes = await sessionDO.fetch(new Request('http://do/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -251,6 +294,13 @@ export async function restartOrchestratorSession(
         initialModel,
       }),
     }));
+    if (startRes.status === 409) {
+      console.log(`[orchestrator] /start rejected stale claim ${sessionId}`);
+      return { sessionId: await currentOrchestratorSessionId(appDb, userId) };
+    }
+    if (!startRes.ok) {
+      throw new Error(`orchestrator /start returned ${startRes.status}`);
+    }
   } catch (err) {
     console.error('Failed to initialize orchestrator DO:', err);
     await db.updateSessionStatus(appDb, sessionId, 'error', undefined,
@@ -271,7 +321,7 @@ export interface OnboardOrchestratorParams {
 }
 
 export type OnboardOrchestratorResult =
-  | { ok: true; sessionId: string; identity: any; session: any }
+  | { ok: true; sessionId: string; identity: OrchestratorIdentity; session: AgentSession | null }
   | { ok: false; reason: 'already_exists' }
   | { ok: false; reason: 'handle_taken' }
   | { ok: false; reason: 'name_taken' };
@@ -285,15 +335,16 @@ export async function onboardOrchestrator(
 ): Promise<OnboardOrchestratorResult> {
   const appDb = getDb(env.DB);
   let identity = await db.getOrchestratorIdentity(appDb, userId);
-  const existingSession = await db.getOrchestratorSession(env.DB, userId);
+  const liveSession = await db.getLiveOrchestratorSession(appDb, userId);
 
-  if (identity && existingSession && !TERMINAL_STATUSES.has(existingSession.status)) {
+  if (identity && liveSession) {
     return { ok: false, reason: 'already_exists' };
   }
 
   // Ensure user exists in DB
   await db.getOrCreateUser(appDb, { id: userId, email: userEmail });
 
+  // If identity exists, reuse it. Only check for conflicts when creating NEW identity.
   if (!identity) {
     const handleTaken = await db.getOrchestratorIdentityByHandle(appDb, params.handle);
     if (handleTaken) {
@@ -327,7 +378,7 @@ export async function onboardOrchestrator(
       });
     }
 
-    identity = await db.createOrchestratorIdentity(appDb, {
+    const created = await db.createOrchestratorIdentity(appDb, {
       id: identityId,
       userId,
       name: params.name,
@@ -336,16 +387,36 @@ export async function onboardOrchestrator(
       customInstructions: params.customInstructions,
       personaId,
     });
-  } else {
+    if (!created.ok || created.identity.id !== identityId) {
+      try {
+        await deletePersona(appDb, personaId);
+      } catch (err) {
+        console.warn(`[onboardOrchestrator] Failed to delete unused persona ${personaId}:`, err);
+      }
+    }
+    if (!created.ok) return created;
+    identity = created.identity;
+  }
+
+  // Identity exists (looked up, just created, or reused after a same-user race):
+  // update properties and ensure one live session. Concurrent onboard does not
+  // stop a winner; the unique live-orchestrator index is the claim.
+  try {
     await db.updateOrchestratorIdentity(appDb, identity.id, {
       name: params.name,
       handle: params.handle,
       customInstructions: params.customInstructions,
     });
-    identity = (await db.getOrchestratorIdentity(appDb, userId))!;
+  } catch (err) {
+    const handleOwner = await db.getOrchestratorIdentityByHandle(appDb, params.handle);
+    if (handleOwner && handleOwner.id !== identity.id) {
+      return { ok: false, reason: 'handle_taken' };
+    }
+    throw err;
   }
+  identity = (await db.getOrchestratorIdentity(appDb, userId))!;
 
-  const result = await restartOrchestratorSession(env, userId, userEmail, identity, requestUrl);
+  const result = await ensureOrchestratorSession(env, userId, userEmail, identity, requestUrl);
   const session = await db.getSession(appDb, result.sessionId);
   return { ok: true, sessionId: result.sessionId, identity, session };
 }

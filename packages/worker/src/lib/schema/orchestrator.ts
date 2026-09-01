@@ -1,4 +1,4 @@
-import { sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, uniqueIndex } from 'drizzle-orm/sqlite-core';
 import { sql } from 'drizzle-orm';
 import { users } from './users.js';
 
@@ -12,6 +12,7 @@ export const orchestratorIdentities = sqliteTable('orchestrator_identities', {
   avatar: text(),
   customInstructions: text(),
   personaId: text(),
+  sessionGeneration: integer().notNull().default(0),
   createdAt: text().notNull().default(sql`(datetime('now'))`),
   updatedAt: text().notNull().default(sql`(datetime('now'))`),
 }, (table) => [

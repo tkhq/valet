@@ -1,7 +1,7 @@
 import type { Env } from '../env.js';
 import type { AppDb } from '../lib/drizzle.js';
 import { getDb } from '../lib/drizzle.js';
-import { updateSessionStatus, updateSessionMetrics, addActiveSeconds, updateSessionGitState, upsertSessionFileChanged, updateSessionTitle, getSession, getSessionGitState, getChildSessions, listUserChannelBindings, getUserById, getUsersByIds, createMailboxMessage, getOrgSettings, isNotificationWebEnabled, batchInsertAnalyticsEvents, batchUpsertMessages, updateUserDiscoveredModels, setCatalogCache, updateThread, incrementThreadMessageCount, getThreadOriginChannel } from '../lib/db.js';
+import { updateSessionStatus, updateSessionMetrics, addActiveSeconds, updateSessionGitState, upsertSessionFileChanged, updateSessionTitle, getSession, getSessionGitState, getChildSessions, listUserChannelBindings, getUserById, getUsersByIds, createMailboxMessage, getOrgSettings, isNotificationWebEnabled, batchInsertAnalyticsEvents, batchUpsertMessages, updateUserDiscoveredModels, setCatalogCache, updateThread, incrementThreadMessageCount, getThreadOriginChannel, isOrchestratorSpawnClaimHeld } from '../lib/db.js';
 import { getCredential, type CredentialResult } from '../services/credentials.js';
 import { memRead, memWrite, memPatch, memRm, memSearch } from '../services/session-memory.js';
 import { getSlackBotToken } from '../services/slack.js';
@@ -3708,6 +3708,12 @@ export class SessionAgentDO {
       collectDebounceMs?: number;
     };
 
+    if (body.sessionId?.startsWith('orchestrator:') &&
+        !(await isOrchestratorSpawnClaimHeld(this.appDb, body.sessionId))) {
+      console.log(`[SessionAgentDO] Rejecting /start for invalidated orchestrator claim ${body.sessionId}`);
+      return Response.json({ success: false, reason: 'claim_invalidated' }, { status: 409 });
+    }
+
     // Clear old session data (messages, queue, audit log, followups) for a fresh start.
     // This is important for well-known DOs (orchestrators) that get reused.
     this.messageStore.reset();
@@ -3786,9 +3792,24 @@ export class SessionAgentDO {
   ): Promise<void> {
     const sessionId = this.sessionState.sessionId;
     try {
+      if (sessionId?.startsWith('orchestrator:') &&
+          !(await isOrchestratorSpawnClaimHeld(this.appDb, sessionId))) {
+        console.log(`[SessionAgentDO] Dropping sandbox spawn for invalidated claim ${sessionId}`);
+        return;
+      }
+
       this.sessionState.sandboxWakeStartedAt = Date.now();
 
       const result = await this.lifecycle.spawnSandbox(backendUrl, spawnRequest);
+
+      if (sessionId?.startsWith('orchestrator:') &&
+          !(await isOrchestratorSpawnClaimHeld(this.appDb, sessionId))) {
+        console.log(`[SessionAgentDO] Claim lost after spawn for ${sessionId}; terminating sandbox ${result.sandboxId}`);
+        this.sessionState.sandboxId = result.sandboxId;
+        await this.lifecycle.terminateSandbox();
+        await updateSessionStatus(this.appDb, sessionId, 'terminated');
+        return;
+      }
 
       this.emitEvent('sandbox_wake', { durationMs: result.durationMs });
 

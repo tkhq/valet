@@ -22,6 +22,7 @@ export const sessions = sqliteTable('sessions', {
   personaId: text(),
   isOrchestrator: integer({ mode: 'boolean' }).notNull().default(false),
   purpose: text().notNull().default('interactive'),
+  orchestratorGeneration: integer(),
   createdAt: text().default(sql`(datetime('now'))`),
   lastActiveAt: text().default(sql`(datetime('now'))`),
 }, (table) => [
@@ -33,6 +34,9 @@ export const sessions = sqliteTable('sessions', {
   index('idx_sessions_workspace_created_at').on(table.workspace, table.createdAt),
   index('idx_sessions_status_last_active_at').on(table.status, table.lastActiveAt),
   index('idx_sessions_purpose_user_status').on(table.purpose, table.userId, table.status),
+  uniqueIndex('idx_sessions_one_live_orchestrator').on(table.userId).where(
+    sql`${table.isOrchestrator} = 1 AND ${table.status} NOT IN ('terminated', 'archived', 'error')`,
+  ),
 ]);
 
 export const messages = sqliteTable('messages', {
