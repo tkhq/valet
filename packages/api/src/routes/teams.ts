@@ -3,6 +3,7 @@
  *
  *   GET    /api/teams                       → list teams the caller belongs to
  *   POST   /api/teams                       → create a team (caller auto-admitted as admin)
+ *   PATCH  /api/teams/:id                   → update team settings (default model, TKAI-255)
  *   DELETE /api/teams/:id                   → delete a team (409s while it owns any workflow)
  *   POST   /api/teams/:id/members           → add/update a member
  *   PATCH  /api/teams/:id/members/:userId   → change a member's role
@@ -13,8 +14,8 @@
  * caller's org (`c.var.user.orgId`) — cross-org teams 404 rather than 403,
  * so a caller can't distinguish "not your org" from "doesn't exist".
  *
- * Mutation-gated: DELETE /:id and the three /members routes additionally
- * require the caller to be a team admin of *that* team, or an org admin
+ * Mutation-gated: PATCH /:id, DELETE /:id and the three /members routes
+ * additionally require the caller to be a team admin of *that* team, or an org admin
  * (a deliberate recovery path so org admins can always untangle a team even
  * if they're not on it). That rule lives in `canAdministerTeam`
  * (`services/teams.ts`), which also gates administration of the resources a
@@ -22,8 +23,11 @@
  * 404, same as a caller outside the org — existence-hiding applies to
  * authz, not just org membership.
  *
- * Origin-gated: those same four routes refuse a team whose `origin` is
- * `idp` WHILE the org's `ssoTeamSync` feature gate is on. Such a team
+ * Origin-gated: DELETE /:id and the three /members routes refuse a team
+ * whose `origin` is `idp` WHILE the org's `ssoTeamSync` feature gate is on.
+ * PATCH /:id is deliberately NOT origin-gated: the identity provider owns
+ * membership and `valet.yaml` declares members, but `default_model` is
+ * Valet-local state neither source ever writes, so no sync can undo it. Such a team
  * mirrors an identity-provider group, and the login-time sync owns it. With
  * the gate off no sync runs, so the same team is a dormant mirror and the
  * four routes work on it again — see `isLiveIdpMirror`
@@ -54,6 +58,7 @@ import {
   type TeamRow,
 } from "../schema/index.js";
 import { isOrgAdmin } from "../services/org.js";
+import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
 import { ensureDefaultAssistantSession, listAssistantsForOwners } from "../assistants/service.js";
 import {
   addMember,
@@ -85,6 +90,7 @@ import type {
   TeamChildSummary,
   ListTeamMembersResponse,
   ListTeamsResponse,
+  PatchTeamResponse,
   SetTeamMemberRoleRequest,
   TeamRole,
   TeamSummary,
@@ -109,6 +115,7 @@ async function rowToSummary(
     memberCount: members.length,
     // null = the caller is not on this team (they see it as an org admin).
     callerRole: mine?.role ?? null,
+    defaultModel: row.defaultModel,
   };
 }
 
@@ -389,6 +396,60 @@ teamsRouter.post("/", async (c) => {
     if (mapped) return c.json(mapped.body, mapped.status);
     throw err;
   }
+});
+
+// ── Update ────────────────────────────────────────────────────────────────
+
+const PATCH_TEAM_FIELDS = new Set(["defaultModel"]);
+
+/**
+ * Team settings (TKAI-255). Strict whitelist, same shape as `PATCH /api/me`:
+ * an unknown field 400s rather than silently no-oping, and a non-null
+ * `defaultModel` must be an id the org catalog reports as valid — the same
+ * set `GET /api/models` shows the picker.
+ */
+teamsRouter.patch("/:id", async (c) => {
+  const { db, engineCredentials } = c.var.providers;
+  const user = c.var.user;
+  const id = c.req.param("id");
+
+  const team = await loadTeamInOrg(db, id, user.orgId);
+  if (!team) return c.json({ error: "team not found" }, 404);
+  if (!(await canAdministerTeam(db, id, user.id))) return c.json({ error: "team not found" }, 404);
+
+  let raw: Record<string, unknown>;
+  try {
+    raw = (await c.req.json()) as Record<string, unknown>;
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  const unknownFields = Object.keys(raw).filter((k) => !PATCH_TEAM_FIELDS.has(k));
+  if (unknownFields.length > 0) {
+    return c.json({ error: `unknown field(s): ${unknownFields.join(", ")}` }, 400);
+  }
+
+  if ("defaultModel" in raw) {
+    const defaultModel = raw.defaultModel;
+    if (defaultModel !== null && typeof defaultModel !== "string") {
+      return c.json(
+        { error: "defaultModel must be a model id from GET /api/models, or null to clear the override." },
+        400,
+      );
+    }
+    if (defaultModel !== null) {
+      const entries = await buildOrgCatalog(db, engineCredentials, user.orgId);
+      if (!catalogValidIds(entries).has(defaultModel)) {
+        return c.json({ error: `unknown model: ${defaultModel}. Send a model id from GET /api/models.` }, 400);
+      }
+    }
+    await db.update(teams).set({ defaultModel }).where(eq(teams.id, id));
+  }
+
+  const rows = await db.select().from(teams).where(eq(teams.id, id)).limit(1);
+  const fresh = rows[0];
+  if (!fresh) return c.json({ error: "team not found" }, 404);
+  const resp: PatchTeamResponse = { team: await rowToSummary(db, fresh, user.id) };
+  return c.json(resp);
 });
 
 // ── Delete ────────────────────────────────────────────────────────────────

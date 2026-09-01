@@ -1531,6 +1531,12 @@ export interface TeamSummary {
    * (org admins see every team in the org). The UI gates admin-only
    * controls on this plus the caller's org role. */
   callerRole: "admin" | "member" | null;
+  /**
+   * Team default model (TKAI-255). Sessions this team owns start on it
+   * unless the member set a personal default. Null = no team override —
+   * resolution falls through to the org preference list.
+   */
+  defaultModel: string | null;
 }
 
 export interface TeamMemberSummary {
@@ -1551,6 +1557,16 @@ export interface CreateTeamRequest {
 }
 
 export interface CreateTeamResponse {
+  team: TeamSummary;
+}
+
+/** `PATCH /api/teams/:id` — team settings. `defaultModel: null` clears the
+ * override back to the org preference list. */
+export interface PatchTeamRequest {
+  defaultModel?: string | null;
+}
+
+export interface PatchTeamResponse {
   team: TeamSummary;
 }
 
