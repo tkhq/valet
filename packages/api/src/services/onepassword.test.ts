@@ -30,6 +30,7 @@ function fakeClient(overrides?: Partial<OpClient>): OpClient {
     vaults: { list: async () => [{ id: "v1", title: "Vault One" }] },
     items: {
       list: async () => [{ id: "i1", title: "Item One", vaultId: "v1" }],
+      getWithSecrets: async () => ({ title: "Item One", fields: [] }),
       get: async () => ({
         id: "i1",
         title: "Item One",
@@ -321,6 +322,7 @@ describe("createOnePasswordService", () => {
       createClient: async () =>
         fakeClient({
           items: {
+            getWithSecrets: async () => ({ title: "", fields: [] }),
             list: async () => {
               throw new OnePasswordAuthError("already typed, do not wrap again");
             },

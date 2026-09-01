@@ -35,6 +35,17 @@ export async function getConfiguredProviders(): Promise<SecretsProvider[]> {
 
   const providers: SecretsProvider[] = [];
 
+  // The broker first: a sandbox that can reach the API should never also
+  // hold a vault credential. `OP_SERVICE_ACCOUNT_TOKEN` stays supported for
+  // a runner started outside a session, but it is the fallback now, not the
+  // path.
+  if (process.env.VALET_API_URL && process.env.VALET_SANDBOX_TOKEN) {
+    const { BrokerProvider } = await import("./broker-provider.js");
+    const provider = new BrokerProvider();
+    await provider.initialize();
+    providers.push(provider);
+  }
+
   if (process.env.OP_SERVICE_ACCOUNT_TOKEN) {
     const { OnePasswordProvider } = await import("./onepassword-provider.js");
     const provider = new OnePasswordProvider();

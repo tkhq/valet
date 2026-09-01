@@ -2815,6 +2815,15 @@ export interface ListOpItemsResponse {
   nextCursor?: string;
 }
 
+/** POST /api/sandbox-secrets/resolve — the sandbox CLI's broker call. */
+export interface ResolveSandboxSecretsResponse {
+  /** reference -> value. Only references that resolved appear. */
+  resolved: Record<string, string>;
+  /** References nothing could resolve, by name and without a reason: the
+   * reason would describe someone else's vault. */
+  unresolved: string[];
+}
+
 export interface OpSuggestionsResponse {
   suggestions: {
     /** The integration the credential would be for. */

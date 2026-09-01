@@ -55,6 +55,24 @@ export interface OpItemDetail {
   fields: OpItemField[];
 }
 
+/**
+ * The SDK's full item, as the vault lookup reads it.
+ *
+ * Separate from `OpItemDetail` on purpose: that shape omits `value` so the
+ * item-detail route cannot return a secret, and it must keep omitting it.
+ * Only the lookup, which resolves a value by design, sees this one.
+ */
+export interface SdkItem {
+  title: string;
+  notes?: string;
+  fields: {
+    title: string;
+    fieldType: string;
+    value?: string;
+    details?: { type: string; content?: { code?: string } };
+  }[];
+}
+
 /** Narrow view of @1password/sdk's client — the only shape this module needs. */
 export interface OpClient {
   secrets: { resolve(reference: string): Promise<string> };
@@ -62,6 +80,15 @@ export interface OpClient {
   items: {
     list(vaultId: string): Promise<OpItem[]>;
     get(vaultId: string, itemId: string): Promise<OpItemDetail>;
+    /**
+     * The item WITH its secret material, for the vault lookup alone.
+     *
+     * `get` above strips field values on purpose: it backs a browse-and-pick
+     * UI that must never carry a secret. The lookup's whole job is to resolve
+     * one, so it needs a separate door rather than a widened `get` that every
+     * caller would inherit.
+     */
+    getWithSecrets(vaultId: string, itemId: string): Promise<SdkItem>;
   };
 }
 
@@ -164,6 +191,19 @@ async function defaultCreateClient(token: string): Promise<OpClient> {
           // Strip field VALUES — this detail view is used for the
           // browse-and-pick UX and must never carry secret material.
           fields: item.fields.map((f) => ({ id: f.id, title: f.title, fieldType: f.fieldType })),
+        };
+      },
+      getWithSecrets: async (vaultId: string, itemId: string) => {
+        const item = await client.items.get(vaultId, itemId);
+        return {
+          title: item.title,
+          notes: item.notes,
+          fields: item.fields.map((f) => ({
+            title: f.title,
+            fieldType: f.fieldType,
+            value: f.value,
+            details: f.details as SdkItem["fields"][number]["details"],
+          })),
         };
       },
     },
@@ -281,7 +321,7 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
    * every tool call, and a negative answer is worth caching too, since the
    * common case for an unconnected service is that nothing matches.
    */
-  const lookupCache = new Map<string, { reference: string | null; at: number }>();
+  const lookupCache = new Map<string, { secret: string | null; at: number }>();
 
   /**
    * Whether an item title names a service. Word-boundary and
@@ -294,10 +334,37 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
     return new RegExp(`(^|[^a-z0-9])${needle}([^a-z0-9]|$)`, "i").test(title);
   }
 
-  /** The field most likely to hold the secret, by title then by concealment. */
-  function credentialField(fields: { id: string; title: string; fieldType: string }[]) {
-    const named = fields.find((f) => /^(credential|api[ _-]?key|token|secret|password)$/i.test(f.title));
-    return named ?? fields.find((f) => f.fieldType === "Concealed") ?? null;
+  /**
+   * The secret an item holds, as a value rather than a reference.
+   *
+   * Three shapes, in the order they are worth having:
+   *
+   *  - a field named for a credential, or any concealed one — the common
+   *    Login case, and the only one a plain `op://` reference reaches;
+   *  - a Totp field, where the useful value is the code the SDK COMPUTES
+   *    (`details.content.code`), never the seed in `field.value`. Handing an
+   *    integration the seed would give it the power to mint codes forever;
+   *  - the note body, for a SecureNote. That is where an API key usually
+   *    lives, and such an item carries no fields at all.
+   *
+   * Returns the value and how it was found, so the caller can say which.
+   */
+  function itemSecret(item: SdkItem): { value: string; via: string } | null {
+    const named = item.fields.find((f) =>
+      /^(credential|api[ _-]?key|token|secret|password)$/i.test(f.title),
+    );
+    const concealed = item.fields.find((f) => f.fieldType === "Concealed");
+    const plain = named ?? concealed;
+    if (plain?.value) return { value: plain.value, via: `field ${plain.title}` };
+
+    const totp = item.fields.find((f) => f.fieldType === "Totp");
+    const code = totp?.details?.type === "Otp" ? totp.details.content?.code : undefined;
+    if (code) return { value: code, via: `one-time code from ${totp!.title}` };
+
+    const notes = item.notes?.trim();
+    if (notes) return { value: notes, via: "the note body" };
+
+    return null;
   }
 
   return {
@@ -338,15 +405,15 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
       const cacheKey = `${scope}:${owner.id}:${service}`;
       const cached = lookupCache.get(cacheKey);
       const nowMs = now();
-      if (cached && nowMs - cached.at < RESOLVE_TTL_MS) {
-        return cached.reference === null ? null : resolveReference(scope, ctx, cached.reference);
-      }
+      // A one-time code expires, so the cache holds it only as long as any
+      // resolve is held — the same TTL, for the same reason.
+      if (cached && nowMs - cached.at < RESOLVE_TTL_MS) return cached.secret;
 
       // The SDK client directly: these are the same three reads the list
       // routes make, and going through `this` would tie the lookup to how the
       // object is called.
       const client = await clientFor(scope, ctx);
-      let reference: string | null = null;
+      let found: string | null = null;
       for (const vault of await client.vaults.list()) {
         let items;
         try {
@@ -358,15 +425,17 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
         }
         const item = items.find((i) => titleNamesService(i.title, service));
         if (!item) continue;
-        const detail = await client.items.get(vault.id, item.id);
-        const field = credentialField(detail.fields);
-        if (!field) continue;
-        reference = `op://${vault.title}/${item.title}/${field.title}`;
+        const detail = await client.items.getWithSecrets(vault.id, item.id);
+        const secret = itemSecret(detail);
+        if (!secret) continue;
+        // The VALUE, not a reference: a note body and a computed one-time
+        // code have no `op://` address, so a reference cannot express them.
+        found = secret.value;
         break;
       }
 
-      lookupCache.set(cacheKey, { reference, at: nowMs });
-      return reference === null ? null : resolveReference(scope, ctx, reference);
+      lookupCache.set(cacheKey, { secret: found, at: nowMs });
+      return found;
     },
   };
 }

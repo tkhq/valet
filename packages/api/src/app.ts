@@ -37,6 +37,7 @@ import { templatesRouter } from "./routes/templates.js";
 import { skillsRouter } from "./routes/skills.js";
 import { credentialsRouter } from "./routes/credentials.js";
 import { onePasswordRouter } from "./routes/onepassword.js";
+import { sandboxSecretsRouter } from "./routes/sandbox-secrets.js";
 import { credentialConnectRouter } from "./routes/credential-connect.js";
 import { identityLinksRouter } from "./routes/identity-links.js";
 import { meRouter } from "./routes/me.js";
@@ -300,6 +301,7 @@ export function createApp(
   app.route("/api/credentials", credentialConnectRouter);
   app.route("/api/credentials", credentialsRouter);
   app.route("/api/onepassword", onePasswordRouter);
+  app.route("/api/sandbox-secrets", sandboxSecretsRouter);
   // Mounted BEFORE /api/me — defensive ordering only: meRouter today
   // registers just GET / and PATCH / (no wildcard/param routes), so there is
   // no actual collision to lose. Revisit this ordering if /api/me ever grows
