@@ -209,6 +209,7 @@ const triggerSpecs: TriggerSpec[] = [
           },
           { field: "text", path: "text", description: "Message text, for a slash command or a pattern match" },
         ],
+        scope: { channelField: "channel", creatorUserField: "user" },
       },
     ],
   },
@@ -236,6 +237,10 @@ const triggerSpecs: TriggerSpec[] = [
           },
           { field: "text", path: "text", description: "Message text, for a slash command or a pattern match" },
         ],
+        // Channel scope only — no creator pinning. A channel watcher (a team
+        // workflow on #support, an org assistant in #help) must see messages
+        // from everyone, so the gate requires WHERE, not WHO (TKAI-302).
+        scope: { channelField: "channel" },
       },
     ],
   },

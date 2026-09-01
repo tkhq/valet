@@ -178,57 +178,66 @@ high-volume key like `slack.message` that is every message in the workspace, so
 logging it would re-flood the drop-log the privacy design keeps small. The "last
 event received" signal covers that case instead.
 
-## Mention scoping (TKAI-299, added 2026-09-01)
+## Subscription scope gate (TKAI-299 + TKAI-302, updated 2026-09-01)
 
-A `slack.app_mention` subscription started with unsafe defaults: no user
-filter (anyone's mention fired it) and no channel filter (it listened across
-the whole Slack workspace). Both defaults are now closed at write time
-(`packages/api/src/events/mention-scope.ts`). A subscription whose event keys
-select `slack.app_mention` — the exact key or a trailing wildcard — is a
-**mention subscription**, and every write to one passes two gates:
+A catalog entry opts into write-time scoping through `EventCatalogEntry.scope`
+(`packages/api/src/events/subscription-scope.ts`). The gate runs on every
+`event_subscriptions` write via `validateSubscriptionWrite`. Two scope kinds
+are supported:
 
-1. **User scope.** The stored filters must carry a `user` filter equal to the
-   creator's linked Slack user id (`user_identity_links`). The server injects
-   the filter when it is absent, and refuses a filter that names anyone else.
-   A creator with no linked Slack account cannot create one; the error names
-   the corrective action (Settings → Connected accounts).
-2. **Channel scope.** The stored filters must carry at least one `channel`
-   filter with op `eq`, or op `in` with a non-empty list
-   (`prefix`/`contains`/`regex` do not count — a prefix is still the whole
-   Slack workspace; an empty `in` list is refused outright, because it
-   matches nothing). The explicit `anyChannel: true` request flag waives the
-   requirement. The flag is not persisted: a stored mention subscription with
-   no channel filter IS the any-channel state, and the UI derives the display
-   from that. On PATCH the server derives the row's stored any-channel state
-   itself, so an edit that leaves channel scope alone needs no flag; only a
-   patch that strips an existing channel filter must assert `anyChannel`.
+**Creator pinning** (`scope.creatorUserField` — `slack.app_mention`). The
+stored filters must carry a filter on that field equal to the creator's linked
+identity on the owning plugin's service. The server injects the filter when it
+is absent, and refuses a filter that names anyone else. A creator with no
+linked account cannot create a pinned subscription; the error names the
+corrective action (Settings → Connected accounts). A pinned key stands alone:
+filters are per-subscription (not per-key), so the injected filter would
+silently narrow any sibling key to the creator's events, or kill a key with no
+such field. The gate refuses the mix and tells the author to create a separate
+subscription. This covers `slack.*` wildcards.
+
+**Channel scope** (`scope.channelField` — `slack.app_mention`,
+`slack.message`). The rule is per-field: for each selected entry that declares
+`scope.channelField`, that specific field must be constrained to a non-empty
+fixed set (`eq`, or `in` with values). `prefix`/`contains`/`regex` do not
+count — a prefix is still the whole workspace. An empty `in` list is refused
+outright, because it matches nothing. The explicit `anyChannel: true` request
+flag waives the requirement. The flag is not persisted: a stored subscription
+with no channel filter IS the any-channel state, and the UI derives the
+display from that. On PATCH the server derives the stored any-channel state
+itself, so an edit that leaves channel scope alone needs no flag; only a patch
+that strips an existing channel filter must assert `anyChannel`. When a
+channel filter is required and stored, every selected key must declare
+`channelField` — otherwise the filter kills the keys that lack the field, and
+the gate refuses the mix instead.
+
+`slack.app_mention` declares both `channelField: "channel"` and
+`creatorUserField: "user"`. `slack.message` declares `channelField: "channel"`
+only: a channel watcher must see messages from everyone, so no creator pinning
+applies.
+
+Two deliberate gaps:
+
+- Text filters (`prefix`, `contains`, `regex`) do not satisfy the channel
+  scope requirement. They are the encouraged companion to any-channel (e.g.
+  "watch any channel for messages starting with !deploy"), surfaced as a UI
+  hint alongside the "Any channel" checkbox.
+- Channel scope has no match-time arm. A stored row with no channel filter is
+  indistinguishable from the legitimate any-channel state, so rows from before
+  this gate keep firing. Creator pinning keeps its match-time arm:
+  `subscriptionMatchesEvent` fails closed on a pinned key with no filter on
+  the pinned field, so pre-gate rows stop firing instead of leaking.
 
 Every subscription writer goes through ONE gate:
 `validateSubscriptionWrite` (`events/subscription-write.ts`), which runs the
-catalog validation and the mention rules together. The writers are the
+catalog validation and the scope rules together. The writers are the
 subscriptions CRUD routes (`routes/events.ts`), the workflow trigger service
 (`workflows/trigger-service.ts`), and the template installer
-(`workflows/templates.ts`). A future writer that calls the gate gets the
-scoping for free; there is no separate validate-only entry point to call by
-mistake. On PATCH the mention rules re-run only when the patch changes
-`filters` or `eventKeys`, and they key to the row's CREATOR (`created_by`),
-not the caller — an enable/disable toggle still works after the creator
-unlinks Slack, and a colleague's edit of an org-owned row cannot re-point the
-scope at themselves.
-
-The matcher carries one arm of the rule too: `subscriptionMatchesEvent`
-(`events/match.ts`) fails closed on a mention subscription that has no `user`
-filter. A row created before this gate therefore stops firing instead of
-leaking other users' mentions; the miss is drop-logged as `filter_excluded`,
-so its owner sees the stop in the Problems tab, edits the row, and the write
-gate scopes it.
-
-One consequence: because filters apply to every key a subscription selects, a
-mention subscription cannot mix in ANY other key. The injected user filter
-would silently narrow a sibling key like `slack.message` to the creator's own
-events, or kill a key with no user field entirely. The gate refuses the mix
-and tells the author to create a separate subscription. This also covers
-`slack.*` wildcards.
+(`workflows/templates.ts`). On PATCH the scope rules re-run only when the
+patch changes `filters` or `eventKeys`, and they key to the row's CREATOR
+(`created_by`), not the caller — an enable/disable toggle still works after
+the creator unlinks Slack, and a colleague's edit of an org-owned row cannot
+re-point the scope at themselves.
 
 The orchestrator's `workflows.create_trigger` and `workflows.update_trigger`
 actions carry the flag as `any_channel`, so an agent can express the same
@@ -236,13 +245,12 @@ opt-out the UI can.
 
 Surfaces: the AutomationWizard's reply step requires a multi-channel
 selection (or the explicit "Any channel" checkbox, off by default) and states
-that only the creator's own mentions fire the rule; the raw event picker and
-the workflow TriggerDialog show the same checkbox when `slack.app_mention` is
-selected; the subscriptions list labels each mention row "only #channel",
-"N channels", or "any channel" (multi-channel `in` filters carry aligned
-display `labels` on the wire, so the list shows names, not raw ids).
-`slack.message` scoping is deliberately out of scope here — TKAI-302 tracks
-that product decision.
+that only the creator's own mentions fire the mention rule; the raw event
+picker and the workflow TriggerDialog show the same checkbox when
+`slack.app_mention` or `slack.message` is selected; the subscriptions list
+labels each scoped row "only #channel", "N channels", or "any channel"
+(multi-channel `in` filters carry aligned display `labels` on the wire, so
+the list shows names, not raw ids).
 
 ## Custom slash commands that route to triggers or assistants
 

@@ -129,6 +129,25 @@ export interface EventCatalogEntry {
      */
     options?: { source: string; dependsOn?: string[] };
   }[];
+  /**
+   * Write-time scoping the subscription gate enforces for this key
+   * (`packages/api/src/events/subscription-scope.ts`). Absent, the key is
+   * unscoped: any filters, including none, are accepted.
+   */
+  scope?: {
+    /**
+     * Name of the filter field that must constrain this key to a fixed set
+     * of conversations (`eq`, or `in` with values). The write is refused
+     * without it, unless the request sets the explicit `anyChannel` flag.
+     */
+    channelField?: string;
+    /**
+     * Name of the filter field the gate pins to the creator's linked
+     * identity on the owning plugin's service. Absent from the write, the
+     * gate injects it; present with another value, the write is refused.
+     */
+    creatorUserField?: string;
+  };
 }
 
 /** An option a filter value can take: a named id the picker shows and stores. */

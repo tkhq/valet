@@ -26,10 +26,21 @@ export function catalogForService(plugins: ValetPlugin[], service: string): Even
 }
 
 /** The merged catalog across every plugin and service. The one traversal the
- * subscription validator, the mention-scope gate, and the filter-options
+ * subscription validator, the scope gate, and the filter-options
  * lookup all share, so a catalog-shape change lands in one place. */
 export function allCatalogEntries(plugins: ValetPlugin[]): EventCatalogEntry[] {
   return plugins.flatMap((p) => p.triggers ?? []).flatMap((t) => t.catalog);
+}
+
+/** The merged catalog with each entry's owning service — the scope gate
+ * needs the service to resolve the creator's linked identity
+ * (`identityForUser`). */
+export function allCatalogEntriesWithService(
+  plugins: ValetPlugin[],
+): { service: string; entry: EventCatalogEntry }[] {
+  return plugins
+    .flatMap((p) => p.triggers ?? [])
+    .flatMap((t) => t.catalog.map((entry) => ({ service: t.service, entry })));
 }
 
 export interface IngestResult {

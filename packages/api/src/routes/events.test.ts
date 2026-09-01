@@ -177,6 +177,22 @@ describe("GET /api/events/catalog", () => {
     // Non-actioned family appears as a bare key.
     expect(github!.entries.some((e) => e.key === "github.push")).toBe(true);
   });
+
+  it("catalog ships scope declarations for the scoped slack keys", async () => {
+    const a = await bootTestApi({ plugins: [slackPlugin] });
+    api = a;
+    const res = await fetch(`${a.baseUrl}/api/events/catalog`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as GetEventCatalogResponse;
+    const slack = body.services.find((s) => s.service === "slack");
+    const entries = slack?.entries ?? [];
+    const mention = entries.find((e) => e.key === "slack.app_mention");
+    const message = entries.find((e) => e.key === "slack.message");
+    expect(mention?.scope).toEqual({ channelField: "channel", creatorUserField: "user" });
+    expect(message?.scope).toEqual({ channelField: "channel" });
+    const archive = entries.find((e) => e.key === "slack.channel_archive");
+    expect(archive?.scope).toBeUndefined();
+  });
 });
 
 describe("POST /api/event-subscriptions", () => {
@@ -1381,7 +1397,7 @@ describe("GET /api/events/filter-options", () => {
 //
 // A subscription selecting `slack.app_mention` must name channels (or set the
 // explicit `anyChannel` flag) and is force-filtered to its creator's linked
-// Slack user. See `events/mention-scope.ts`.
+// Slack user. See `events/subscription-scope.ts`.
 
 describe("mention scoping (slack.app_mention)", () => {
   async function bootSlack(): Promise<TestApi> {
@@ -1443,7 +1459,7 @@ describe("mention scoping (slack.app_mention)", () => {
     });
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("own @-mentions");
+    expect(body.error).toContain("slack.app_mention");
   });
 
   it("refuses creation when the creator has no linked Slack account", async () => {
@@ -1545,8 +1561,8 @@ describe("mention scoping (slack.app_mention)", () => {
   it("leaves non-mention slack subscriptions unscoped", async () => {
     const a = await bootSlack();
     const res = await postSubscription(a.baseUrl, {
-      name: "all channel messages",
-      eventKeys: ["slack.message"],
+      name: "channel archived",
+      eventKeys: ["slack.channel_archive"],
       filters: [],
       target: { kind: "orchestrator" },
     });
@@ -1663,5 +1679,176 @@ describe("mention scoping (slack.app_mention)", () => {
       body: JSON.stringify({ enabled: false }),
     });
     expect(res.status).toBe(200);
+  });
+});
+
+// A subscription selecting `slack.message` must name channels or set the
+// explicit anyChannel flag — but is NOT pinned to its creator: channel
+// watchers must see messages from everyone (TKAI-302,
+// events/subscription-scope.ts).
+describe("message scoping (slack.message)", () => {
+  const MESSAGE_BODY: CreateEventSubscriptionRequest = {
+    name: "watch support",
+    eventKeys: ["slack.message"],
+    filters: [],
+    target: { kind: "orchestrator" },
+  };
+
+  it("refuses a channel-less slack.message subscription", async () => {
+    const a = await bootTestApi({ plugins: [slackPlugin] });
+    api = a;
+    const res = await postSubscription(a.baseUrl, MESSAGE_BODY);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("channel filter");
+  });
+
+  it("accepts a channel filter and injects no user filter", async () => {
+    const a = await bootTestApi({ plugins: [slackPlugin] });
+    api = a;
+    const res = await postSubscription(a.baseUrl, {
+      ...MESSAGE_BODY,
+      filters: [{ field: "channel", op: "eq", value: "C123" }],
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as CreateEventSubscriptionResponse;
+    expect(body.filters).toEqual([{ field: "channel", op: "eq", value: "C123" }]);
+  });
+
+  it("does not require a linked Slack account", async () => {
+    // No linkSlack call — a slack.message watcher is not pinned to anyone.
+    const a = await bootTestApi({ plugins: [slackPlugin] });
+    api = a;
+    const res = await postSubscription(a.baseUrl, {
+      ...MESSAGE_BODY,
+      filters: [{ field: "channel", op: "in", value: ["C1", "C2"] }],
+    });
+    expect(res.status).toBe(201);
+  });
+
+  it("anyChannel: true permits a channel-less slack.message subscription", async () => {
+    const a = await bootTestApi({ plugins: [slackPlugin] });
+    api = a;
+    const res = await postSubscription(a.baseUrl, { ...MESSAGE_BODY, anyChannel: true });
+    expect(res.status).toBe(201);
+  });
+
+  it("refuses anyChannel alongside a channel filter", async () => {
+    const a = await bootTestApi({ plugins: [slackPlugin] });
+    api = a;
+    const res = await postSubscription(a.baseUrl, {
+      ...MESSAGE_BODY,
+      anyChannel: true,
+      filters: [{ field: "channel", op: "eq", value: "C123" }],
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("refuses a required channel filter on a mixed subscription with a channel-less key", async () => {
+    const a = await bootTestApi({ plugins: [slackPlugin, githubPlugin] });
+    api = a;
+    const res = await postSubscription(a.baseUrl, {
+      ...MESSAGE_BODY,
+      eventKeys: ["slack.message", "github.push"],
+      filters: [{ field: "channel", op: "eq", value: "C123" }],
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("separate subscription");
+  });
+
+  it("allows the mixed subscription under anyChannel (no channel filter stored)", async () => {
+    const a = await bootTestApi({ plugins: [slackPlugin, githubPlugin] });
+    api = a;
+    const res = await postSubscription(a.baseUrl, {
+      ...MESSAGE_BODY,
+      eventKeys: ["slack.message", "github.push"],
+      anyChannel: true,
+    });
+    expect(res.status).toBe(201);
+  });
+
+  it("a patch that leaves channel scope alone keeps the any-channel state", async () => {
+    const a = await bootTestApi({ plugins: [slackPlugin] });
+    api = a;
+    const created = await postSubscription(a.baseUrl, { ...MESSAGE_BODY, anyChannel: true });
+    expect(created.status).toBe(201);
+    const row = (await created.json()) as CreateEventSubscriptionResponse;
+    const patch = await fetch(`${a.baseUrl}/api/event-subscriptions/${row.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filters: [{ field: "text", op: "prefix", value: "!deploy" }] }),
+    });
+    expect(patch.status).toBe(200);
+  });
+});
+
+// ── Per-field channel scope regression (TKAI-302, Fix 1) ──────────────────
+//
+// When two selected entries declare different channelField names, constraining
+// one field must not satisfy the other. Both fields must be constrained
+// (or anyChannel must be set).
+
+describe("per-field channel scope with two different channelField names", () => {
+  // A synthetic plugin whose trigger declares channelField: "room", different
+  // from slack.message's channelField: "channel".
+  const roomPlugin: ValetPlugin = {
+    name: "room-fixture",
+    version: "0",
+    triggers: [
+      {
+        id: "room-fixture.message",
+        service: "room-fixture",
+        description: "",
+        verify: () => null,
+        toEvent: (e) => ({
+          key: "room-fixture.message",
+          dedupeKey: "d",
+          occurredAt: new Date(0).toISOString(),
+          refs: {},
+          summary: "",
+          payload: e.payload,
+        }),
+        catalog: [
+          {
+            key: "room-fixture.message",
+            description: "",
+            scope: { channelField: "room" },
+            filters: [{ field: "room", path: "room", description: "" }],
+          },
+        ],
+      },
+    ],
+  };
+
+  it("refuses when only one of two required channel fields is constrained, naming the unmet field", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin, roomPlugin] });
+    const a = api;
+    const res = await postSubscription(a.baseUrl, {
+      name: "multi-field test",
+      eventKeys: ["slack.message", "room-fixture.message"],
+      // channel is constrained, but room is not
+      filters: [{ field: "channel", op: "eq", value: "C1" }],
+      target: { kind: "orchestrator" },
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("channel filter");
+    expect(body.error).toContain("room");
+  });
+
+  it("accepts when both required channel fields are constrained", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin, roomPlugin] });
+    const a = api;
+    const res = await postSubscription(a.baseUrl, {
+      name: "multi-field test",
+      eventKeys: ["slack.message", "room-fixture.message"],
+      filters: [
+        { field: "channel", op: "eq", value: "C1" },
+        { field: "room", op: "eq", value: "R1" },
+      ],
+      target: { kind: "orchestrator" },
+    });
+    expect(res.status).toBe(201);
   });
 });

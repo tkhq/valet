@@ -898,7 +898,7 @@ export async function installWorkflowTemplate(
   // the reason the cron is: a subscription that cannot be armed must not
   // leave an installed workflow behind that nothing will ever call.
   const workflowId = newWorkflowId("wf");
-  // `SubscriptionFilter`, not `SubscriptionFilterRow`: the mention-scope gate
+  // `SubscriptionFilter`, not `SubscriptionFilterRow`: the scope gate
   // may append its injected user filter to the resolved template filters.
   const subscriptions: { name: string; eventKeys: string[]; filters: SubscriptionFilter[] }[] = [];
   for (const event of events) {
@@ -939,19 +939,31 @@ export async function installWorkflowTemplate(
     // tail keeps two installs of one template apart in the Triggers list —
     // the same suffix rule the schedule name uses.
     const name = `${event.name} (${workflowId.slice(-6)})`;
-    // One gate for validation AND mention scoping (TKAI-299): this insert
-    // path must hold the same rules the CRUD writers do, or a template
-    // becomes the unscoped back door. A validation failure is worth refusing
-    // loudly: the ingest matcher only reads the arriving event's own catalog
-    // entry, so an undeclared filter field arms a subscription that matches
-    // nothing and reports nothing, forever. No template names
-    // `slack.app_mention` today; one that does needs a channel filter (an
-    // install input) and a Slack-linked installer.
+    // A template may declare `anyChannel: true` to opt out of the channel
+    // requirement for keys that declare `scope.channelField`. A non-boolean
+    // value is a broken template.
+    if (event.anyChannel !== undefined && typeof event.anyChannel !== "boolean") {
+      return {
+        ok: false,
+        code: "broken_template",
+        error: `Template "${templateId}" from "${owned.pluginName}" declares an event trigger that cannot be armed, so it cannot be installed. Report the template id.`,
+        errors: [`Event trigger "${event.name}" has a non-boolean anyChannel value. Set it to true or remove it.`],
+      };
+    }
+    // One gate for validation AND scope enforcement (TKAI-299 + TKAI-302):
+    // this insert path must hold the same rules the CRUD writers do, or a
+    // template becomes the unscoped back door. A validation failure is worth
+    // refusing loudly: the ingest matcher only reads the arriving event's own
+    // catalog entry, so an undeclared filter field arms a subscription that
+    // matches nothing and reports nothing, forever. A template that selects a
+    // channel-scoped key and carries no channel filter must set anyChannel: true,
+    // or supply the required filter (an install input). A pinned key also
+    // requires a linked user for the creator.
     const write = await validateSubscriptionWrite(
       deps.db,
       deps.plugins,
       { name, eventKeys: event.eventKeys, filters, target: { kind: "workflow", workflowId } },
-      { creatorUserId: owner.userId, anyChannel: false, matchChanged: true },
+      { creatorUserId: owner.userId, anyChannel: event.anyChannel === true, matchChanged: true },
     );
     if (!write.ok) {
       return {

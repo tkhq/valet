@@ -22,7 +22,7 @@ import { eventDeliveries, eventDropLog, events, eventSubscriptions } from "../sc
 import { readOwnerFilter } from "./_owner-filter.js";
 import { allCatalogEntries, catalogForService } from "../events/ingest.js";
 import { subscriptionMatchesEvent, type SubscriptionFilter } from "../events/match.js";
-import { storedAnyChannelState } from "../events/mention-scope.js";
+import { storedAnyChannelState } from "../events/subscription-scope.js";
 import { validateSubscriptionWrite } from "../events/subscription-write.js";
 import { ownedDefinitionRow } from "../workflows/service.js";
 import { isTeamMember } from "../services/teams.js";
@@ -611,7 +611,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
     filters: body.filters ?? row.filters,
     target: row.target,
   };
-  // Mention scoping is keyed to the CREATOR and skipped for a patch that
+  // Scope enforcement is keyed to the CREATOR and skipped for a patch that
   // does not change the match — so an enabled-only or name-only patch still
   // works after the creator unlinks Slack, and a colleague's patch of an
   // org-owned row cannot re-point the scope at themselves. The casts narrow
@@ -621,6 +621,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
     anyChannel: body.anyChannel === true,
     matchChanged: body.filters !== undefined || body.eventKeys !== undefined,
     storedAnyChannel: storedAnyChannelState(
+      plugins,
       row.eventKeys as string[],
       row.filters as SubscriptionFilter[],
     ),

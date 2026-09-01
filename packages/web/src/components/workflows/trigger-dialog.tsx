@@ -16,7 +16,7 @@
  * Server errors are rendered verbatim — server messages carry the corrective
  * action (e.g. "Use 5 fields, for example '0 9 * * 1-5'").
  */
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import type { WorkflowTriggerItem } from "@valet/api/wire";
 import {
   useCreateEventTrigger,
@@ -43,17 +43,14 @@ import {
   toWireFilters,
   type UiFilterRow,
 } from "~/components/events/filter-editor";
-import { hasChannelScopeFilter, selectsSlackMention, SLACK_APP_MENTION } from "~/lib/slack-mention";
+import {
+  channelScopeFields,
+  hasChannelScopeFilter,
+  storedAnyChannel,
+} from "~/lib/subscription-scope";
 
 type TriggerKind = "schedule" | "event";
 type TargetKind = "workflow" | "orchestrator";
-
-/** A stored mention trigger with no channel-scope filter IS the any-channel
- * state (the server refuses the unscoped default, TKAI-299) — seed the
- * checkbox from that, so an edit round-trips without re-checking it. */
-function storedAnyChannel(eventKeys: string[], filters: unknown[]): boolean {
-  return selectsSlackMention(eventKeys) && !hasChannelScopeFilter(filters);
-}
 
 function defaultTimezone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -91,9 +88,14 @@ export function TriggerDialog({
   // ── event fields ───────────────────────────────────────────────────────
   const [eventKey, setEventKey] = useState("");
   const [filterRows, setFilterRows] = useState<UiFilterRow[]>([]);
-  // Explicit opt-out of the channel requirement on a `slack.app_mention`
-  // trigger (TKAI-299). Off by default; only rendered for that event.
+  // Explicit opt-out of the channel requirement for scope-required events
+  // (TKAI-302). Off by default; only rendered when the selected event
+  // declares a channelField in its catalog scope.
   const [anyChannel, setAnyChannel] = useState(false);
+  // Tracks whether the user has manually toggled the checkbox since the
+  // dialog opened. A manual touch wins over the catalog-arrival re-seed
+  // below (see "Mount-time state from props" in CLAUDE.md).
+  const anyChannelTouched = useRef(false);
 
   // ── form error (client-side validation) ────────────────────────────────
   const [formError, setFormError] = useState<string | null>(null);
@@ -112,13 +114,19 @@ export function TriggerDialog({
   // each entry's filter fields so the Filters box can show which fields the
   // selected event actually declares.
   const catalogEntries = (catalogQ.data?.catalog ?? []).flatMap((svc) =>
-    svc.entries.map((e) => ({ key: e.key, label: `${e.key} — ${e.description}`, filters: e.filters })),
+    svc.entries.map((e) => ({
+      key: e.key,
+      label: `${e.key} — ${e.description}`,
+      filters: e.filters,
+      scope: e.scope,
+    })),
   );
   const selectedEntry = catalogEntries.find((e) => e.key === eventKey);
 
   // Populate fields when editing.
   useEffect(() => {
     if (!open) return;
+    anyChannelTouched.current = false;
     if (editing) {
       setKind(editing.kind);
       setName(editing.name);
@@ -136,7 +144,7 @@ export function TriggerDialog({
       } else {
         setEventKey(editing.detail.eventKeys[0] ?? "");
         setFilterRows(fromWireFilters(editing.detail.filters));
-        setAnyChannel(storedAnyChannel(editing.detail.eventKeys, editing.detail.filters));
+        setAnyChannel(storedAnyChannel(catalogEntries, editing.detail.eventKeys, editing.detail.filters));
         setSelectedWorkflowId(editing.workflowId ?? workflowId ?? "");
       }
     } else {
@@ -156,7 +164,21 @@ export function TriggerDialog({
       setFormError(null);
       setServerError(null);
     }
-  }, [open, editing, workflowId, lockedKind]);
+  }, [open, editing, workflowId, lockedKind]); // catalogEntries intentionally omitted — see narrow re-seed below
+
+  // Narrow re-seed: if the catalog arrives after the dialog opened while
+  // editing an event trigger, re-seed anyChannel from storedAnyChannel. This
+  // fixes the stale-closure bug where catalogEntries is [] at open time and
+  // the main effect does not re-fire when data lands. Skipped if the user
+  // has already touched the checkbox — their override wins.
+  useEffect(() => {
+    if (
+      !open ||
+      editing?.kind !== "event" ||
+      anyChannelTouched.current
+    ) return;
+    setAnyChannel(storedAnyChannel(catalogEntries, editing.detail.eventKeys, editing.detail.filters));
+  }, [open, editing, catalogQ.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Parse a JSON textarea. Empty input returns undefined (the caller picks
    * the default); a parse failure sets the field error and returns null. */
@@ -182,6 +204,10 @@ export function TriggerDialog({
     updateSchedule.isPending ||
     createEvent.isPending ||
     updateEvent.isPending;
+
+  // Disable the submit button while the event catalog loads, so the user
+  // cannot fire the form before selectedEntry can be resolved.
+  const catalogLoading = kind === "event" && (catalogQ.isLoading || catalogQ.data === undefined);
 
   async function submit() {
     setServerError(null);
@@ -256,17 +282,25 @@ export function TriggerDialog({
         }
       } else {
         // Event trigger.
+        // Block submit while the catalog is still loading: selectedEntry would
+        // be undefined for any key, so the channel-scope check below would
+        // silently pass and the server 400s instead.
+        if (catalogQ.isLoading || catalogQ.data === undefined) {
+          setFormError("The event catalog is still loading. Wait for it to load, then save again.");
+          return;
+        }
         const incomplete = incompleteFilterRow(filterRows);
         if (incomplete) {
           setFormError(`Enter a value for the "${incomplete}" filter, or remove the row.`);
           return;
         }
         const filters = toWireFilters(filterRows);
-        // Mirror the server's mention channel rule (TKAI-299) so the form
-        // names the gap before a round trip.
-        if (eventKey === SLACK_APP_MENTION && !anyChannel && !hasChannelScopeFilter(filters)) {
+        // Mirror the server's scope gate (TKAI-302) so the form names the gap
+        // before a round trip.
+        const scoped = selectedEntry !== undefined && selectedEntry.scope?.channelField !== undefined;
+        if (scoped && !anyChannel && !hasChannelScopeFilter(filters, channelScopeFields([selectedEntry!], [eventKey]))) {
           setFormError(
-            'A mention trigger needs a channel filter (equals, or is one of). Add one, or check "Any channel".',
+            'This event needs a channel filter (equals, or is one of). Add one, or check "Any channel".',
           );
           return;
         }
@@ -292,19 +326,19 @@ export function TriggerDialog({
           }
           // A toggle of "Any channel" alone must still produce a write, or
           // the save is a silent no-op — send the (unchanged) filters so the
-          // server re-runs the mention gate against the new flag.
+          // server re-runs the scope gate against the new flag.
           if (
-            eventKey === SLACK_APP_MENTION &&
-            anyChannel !== storedAnyChannel(orig.detail.eventKeys, orig.detail.filters) &&
+            selectedEntry?.scope?.channelField !== undefined &&
+            anyChannel !== storedAnyChannel(catalogEntries, orig.detail.eventKeys, orig.detail.filters) &&
             body.filters === undefined
           ) {
             body.filters = filters;
           }
-          // The server re-checks mention scoping when the match changes, so
+          // The server re-checks channel scoping when the match changes, so
           // the opt-out must ride along then.
           if (
             (body.filters !== undefined || body.eventKeys !== undefined) &&
-            eventKey === SLACK_APP_MENTION &&
+            selectedEntry?.scope?.channelField !== undefined &&
             anyChannel
           ) {
             body.anyChannel = true;
@@ -317,7 +351,7 @@ export function TriggerDialog({
             name,
             eventKeys: [eventKey],
             filters,
-            ...(eventKey === SLACK_APP_MENTION && anyChannel ? { anyChannel: true } : {}),
+            ...(selectedEntry?.scope?.channelField !== undefined && anyChannel ? { anyChannel: true } : {}),
           });
         }
       }
@@ -554,25 +588,36 @@ export function TriggerDialog({
                     <p className="text-xs text-muted">
                       A trigger fires only when every filter matches. Add none to match every event of this type.
                     </p>
-                    {/* Mention scoping (TKAI-299): the server requires a
-                        channel filter on this event unless the explicit
-                        opt-out is set, and pins the rule to your own
-                        @-mentions either way. */}
-                    {selectedEntry.key === SLACK_APP_MENTION && (
+                    {/* Channel scope (TKAI-302): the server requires a channel
+                        filter on this event unless the explicit opt-out is
+                        set. Copy splits on whether the entry also pins the
+                        rule to the creator's identity. */}
+                    {selectedEntry.scope?.channelField !== undefined && (
                       <label className="flex items-start gap-2 text-sm text-ink">
                         <input
                           type="checkbox"
                           className="mt-0.5"
                           checked={anyChannel}
-                          onChange={(e) => setAnyChannel(e.target.checked)}
+                          onChange={(e) => {
+                            anyChannelTouched.current = true;
+                            setAnyChannel(e.target.checked);
+                          }}
                         />
                         <span>
                           Any channel
                           <span className="block text-xs text-muted">
-                            A mention trigger fires only for your own @-mentions and needs a
-                            channel filter. Check this to listen in every channel the app can see
-                            instead.
+                            {selectedEntry.scope?.creatorUserField !== undefined
+                              ? "A mention trigger fires only for your own @-mentions and needs a channel filter. Check this to listen in every channel the app can see instead."
+                              : "This event needs a channel filter. Check this to listen in every channel the app can see instead."}
                           </span>
+                          {anyChannel &&
+                            selectedEntry.scope?.creatorUserField === undefined &&
+                            selectedEntry.filters.some((f) => f.field === "text") && (
+                              <span className="block text-xs text-muted">
+                                Tip: add a text filter (for example a command prefix) so the rule fires only on
+                                messages addressed to it.
+                              </span>
+                            )}
                         </span>
                       </label>
                     )}
@@ -607,7 +652,7 @@ export function TriggerDialog({
           >
             Cancel
           </Button>
-          <Button onClick={() => void submit()} disabled={isPending}>
+          <Button onClick={() => void submit()} disabled={isPending || catalogLoading}>
             {isPending ? (isEditing ? "Saving…" : "Creating…") : isEditing ? "Save" : "Create"}
           </Button>
         </DialogFooter>

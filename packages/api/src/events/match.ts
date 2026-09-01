@@ -110,16 +110,18 @@ export function subscriptionMatchesEvent(
   catalog: EventCatalogEntry[],
 ): boolean {
   if (!eventKeyMatches(eventKey, sub.eventKeys as string[])) return false;
-  // The match-time arm of the mention-scope rule (events/mention-scope.ts,
-  // TKAI-299). A `slack.app_mention` subscription with no user filter
-  // predates the write-time gate and would fire for EVERY user's mentions.
-  // It fails closed here — the miss is drop-logged as `filter_excluded`, so
-  // the owner sees the rule stopped matching, edits it, and the write gate
-  // scopes it. The key is duplicated from mention-scope.ts because this
-  // module stays pure (mention-scope imports it).
+  // The match-time arm of the creator-pinning rule (events/subscription-scope.ts,
+  // TKAI-299/TKAI-302). A subscription on a pinned key with no filter on the
+  // pinned field predates the write-time gate and would fire for EVERY
+  // user's events. It fails closed here — the miss is drop-logged as
+  // `filter_excluded`, so the owner sees the rule stopped matching, edits
+  // it, and the write gate scopes it. Channel scope has no such arm: a row
+  // with no channel filter is indistinguishable from the legitimate
+  // any-channel state.
+  const pinField = catalog.find((e) => e.key === eventKey)?.scope?.creatorUserField;
   if (
-    eventKey === "slack.app_mention" &&
-    !(sub.filters as SubscriptionFilter[]).some((f) => f.field === "user")
+    pinField !== undefined &&
+    !(sub.filters as SubscriptionFilter[]).some((f) => f.field === pinField)
   ) {
     return false;
   }

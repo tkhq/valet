@@ -17,13 +17,18 @@ import {
 } from "~/components/primitives";
 import {
   useDeleteEventSubscription,
+  useEventCatalog,
   useEventSubscriptions,
   usePatchEventSubscription,
 } from "~/api/events";
 import { useMe, useOrg, useTeams } from "~/api/settings";
 import { useWorkflows } from "~/api/workflows";
 import { errorText } from "~/lib/error-text";
-import { selectsSlackMention } from "~/lib/slack-mention";
+import {
+  channelScopeFields,
+  requiresChannelScope,
+  type ScopedEntry,
+} from "~/lib/subscription-scope";
 import { useListOwner } from "~/lib/use-list-owner";
 import { OwnerBadge } from "~/components/owner-badge";
 import { eligibleTeams } from "~/components/session/assistant-rail";
@@ -43,16 +48,21 @@ export function canMutate(
 }
 
 /**
- * The channel scope of a `slack.app_mention` subscription, or null for any
- * other subscription. A mention rule with no channel filter IS the explicit
- * any-channel state (the server refuses the unscoped default, TKAI-299), so
- * the row must say which one the reader is looking at.
+ * The channel scope badge text for a subscription, or null for subscriptions
+ * that subscribe to no channel-scoped event key. A scoped subscription with
+ * no channel filter IS the explicit any-channel state (the server refuses the
+ * unscoped default), so the row must say which one the reader is looking at.
+ * Covers every channel-scoped key, not just `slack.app_mention`.
  */
-export function mentionChannelScope(sub: EventSubscriptionWire): string | null {
-  if (!selectsSlackMention(sub.eventKeys)) return null;
+export function subscriptionChannelScope(
+  sub: EventSubscriptionWire,
+  entries: ScopedEntry[],
+): string | null {
+  if (!requiresChannelScope(entries, sub.eventKeys)) return null;
+  const fields = channelScopeFields(entries, sub.eventKeys);
   const names: string[] = [];
   for (const f of sub.filters) {
-    if (f.field !== "channel" || (f.op !== "eq" && f.op !== "in")) continue;
+    if (!fields.has(f.field) || (f.op !== "eq" && f.op !== "in")) continue;
     if (Array.isArray(f.value)) {
       // Prefer the aligned display labels; fall back to raw ids per entry.
       names.push(...f.value.map((v, i) => f.labels?.[i] ?? v));
@@ -106,6 +116,10 @@ export function SubscriptionsPanel() {
   });
   const workflowsQ = useWorkflows();
   const teamsQ = useTeams();
+  const catalogQ = useEventCatalog();
+  // Flatten to entries once; while the catalog loads, pass [] — the badge is
+  // cosmetic and appears on the next render.
+  const catalogEntries: ScopedEntry[] = (catalogQ.data?.services ?? []).flatMap((s) => s.entries);
   const [creating, setCreating] = useState(false);
 
   const workflowNames = useMemo(
@@ -161,6 +175,7 @@ export function SubscriptionsPanel() {
             <SubscriptionRow
               key={sub.id}
               sub={sub}
+              entries={catalogEntries}
               workflowNames={workflowNames}
               teamNames={teamNames}
               viewerId={meQ.data?.id}
@@ -181,12 +196,14 @@ export function SubscriptionsPanel() {
 
 function SubscriptionRow({
   sub,
+  entries,
   workflowNames,
   teamNames,
   viewerId,
   mutable,
 }: {
   sub: EventSubscriptionWire;
+  entries: ScopedEntry[];
   workflowNames: Map<string, string>;
   teamNames: Map<string, string>;
   /** The caller's user id; undefined while `useMe` loads. */
@@ -198,7 +215,7 @@ function SubscriptionRow({
   const del = useDeleteEventSubscription();
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [toggleError, setToggleError] = useState<string | null>(null);
-  const channelScope = mentionChannelScope(sub);
+  const channelScope = subscriptionChannelScope(sub, entries);
 
   return (
     <div className="flex items-center gap-3 py-3">

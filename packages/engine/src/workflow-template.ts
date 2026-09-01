@@ -82,6 +82,13 @@ export interface WorkflowTemplateEventTrigger {
   /** Catalog event keys. A trailing ".*" wildcard is allowed. */
   eventKeys: string[];
   filters?: WorkflowTemplateEventFilter[];
+  /**
+   * Opt out of the channel requirement for keys that declare
+   * `scope.channelField`. Set this when the template intentionally listens
+   * in every channel the app can see and provides no channel filter. A
+   * non-boolean value is a broken template and the install is refused.
+   */
+  anyChannel?: boolean;
   /** One line of card copy, e.g. "When a pull request opens or is marked ready". */
   description: string;
 }

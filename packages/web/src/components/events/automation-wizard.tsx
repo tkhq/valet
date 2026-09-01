@@ -10,7 +10,7 @@
  *    following the thread" toggle. POSTs an event subscription on
  *    `slack.app_mention` with an orchestrator target that carries `follow`.
  *    The server scopes the rule to the creator's linked Slack user
- *    (TKAI-299, `events/mention-scope.ts`), so the step says so up front.
+ *    (TKAI-299, `events/subscription-scope.ts`), so the step says so up front.
  *  - Run a workflow on an event → the event picker, then a workflow target.
  *  - Send a notification → the event picker, then an orchestrator target.
  *  - Advanced / custom trigger → the raw event + filter + target flow.
@@ -55,7 +55,13 @@ import { useTeams } from "~/api/settings";
 import { errorText } from "~/lib/error-text";
 // The reply outcome always subscribes to this one event key, so the reader
 // never sees a raw event picker for it.
-import { SLACK_APP_MENTION } from "~/lib/slack-mention";
+import {
+  keySelected,
+  pinnedToCreator,
+  requiresChannelScope,
+  SLACK_APP_MENTION,
+  type ScopedEntry,
+} from "~/lib/subscription-scope";
 import { useActiveWorkspace } from "~/components/workspace-clause";
 
 /** One picked channel: the Slack id plus the display label the picker showed. */
@@ -287,15 +293,16 @@ export function AutomationWizard({
         outcome === "notify"
           ? { ...orchestratorTargetFrom(target), follow: false }
           : target;
+      const eventEntries: ScopedEntry[] = services.flatMap((s) => s.entries);
       createSubscription.mutate(
         {
           name: name.trim(),
           eventKeys: [...keys],
           filters: toWireFilters(filterRows),
           target: eventTarget,
-          // The raw picker can select `slack.app_mention` too; the flag only
-          // means anything there, and the server ignores it elsewhere.
-          ...(anyChannel && keys.has(SLACK_APP_MENTION) ? { anyChannel: true } : {}),
+          // Only include the flag when the selected keys actually require
+          // channel scope; the server ignores it for unscoped keys.
+          ...(anyChannel && requiresChannelScope(eventEntries, [...keys]) ? { anyChannel: true } : {}),
         },
         {
           onSuccess: () => onOpenChange(false),
@@ -790,7 +797,12 @@ function ChannelMultiSelect({
 
 interface CatalogService {
   service: string;
-  entries: { key: string; description: string; filters?: FilterField[] }[];
+  entries: {
+    key: string;
+    description: string;
+    filters?: FilterField[];
+    scope?: { channelField?: string; creatorUserField?: string };
+  }[];
 }
 
 function EventMatchStep({
@@ -818,6 +830,24 @@ function EventMatchStep({
   anyChannel: boolean;
   onAnyChannelChange: (v: boolean) => void;
 }) {
+  const entries = services.flatMap((s) => s.entries);
+  const keysArr = [...keys];
+  // Derived from catalog scope so the checkbox appears for any channel-scoped
+  // key, not just slack.app_mention.
+  const needsChannelScope = requiresChannelScope(entries, keysArr);
+  const pinned = pinnedToCreator(entries, keysArr);
+  // Whether any selected scoped entry declares a text filter field — used to
+  // decide whether the tip line renders when "Any channel" is checked.
+  const hasScopedTextFilter =
+    needsChannelScope &&
+    !pinned &&
+    entries.some(
+      (e) =>
+        e.scope?.channelField !== undefined &&
+        keySelected(e.key, keysArr) &&
+        (e.filters ?? []).some((f) => f.field === "text"),
+    );
+
   return (
     <div className="space-y-4">
       <div>
@@ -874,10 +904,9 @@ function EventMatchStep({
           <p className="mt-1.5 text-xs text-muted">
             A rule matches only when every filter matches. Add none to match every selected event.
           </p>
-          {/* A `slack.app_mention` rule is scoped to the creator's own
-              mentions and needs a channel filter, unless this explicit
-              opt-out is set — the same rule the server enforces. */}
-          {keys.has(SLACK_APP_MENTION) && (
+          {/* A catalog-scoped event requires a channel filter, unless this
+              explicit opt-out is set — the same rule the server enforces. */}
+          {needsChannelScope && (
             <label className="mt-2 flex items-start gap-2 text-sm text-ink">
               <input
                 type="checkbox"
@@ -888,9 +917,16 @@ function EventMatchStep({
               <span>
                 Any channel
                 <span className="block text-xs text-muted">
-                  A mention rule fires only for your own @-mentions and needs a channel filter.
-                  Check this to listen in every channel the app can see instead.
+                  {pinned
+                    ? "A mention rule fires only for your own @-mentions and needs a channel filter. Check this to listen in every channel the app can see instead."
+                    : "This event needs a channel filter. Check this to listen in every channel the app can see instead."}
                 </span>
+                {anyChannel && hasScopedTextFilter && (
+                  <span className="block text-xs text-muted">
+                    Tip: add a text filter (for example a command prefix) so the rule fires only on
+                    messages addressed to it.
+                  </span>
+                )}
               </span>
             </label>
           )}
