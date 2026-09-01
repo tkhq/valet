@@ -43,6 +43,15 @@ export interface SessionMetaSource {
   /** Request a rootless docker daemon inside the sandbox (docker-in-sandbox).
    * Omitted by orchestrator/child callers. */
   docker?: boolean;
+  /**
+   * Principal ownership from the app row. When `ownerType` is `"team"`,
+   * the loader emits `SessionMeta.ownerTeamId` so the build consults the
+   * team's default model (TKAI-255). Omitted by orchestrator/child callers
+   * — those builders receive the owner explicitly and never come through
+   * `buildSession`.
+   */
+  ownerType?: string;
+  ownerId?: string;
 }
 
 /**
@@ -100,6 +109,7 @@ export async function loadSessionMeta(db: AppDb, src: SessionMetaSource): Promis
     workspace: src.workspace,
     ...(src.profile !== undefined ? { profile: src.profile } : {}),
     ...(src.docker !== undefined ? { docker: src.docker } : {}),
+    ...(src.ownerType === "team" && src.ownerId ? { ownerTeamId: src.ownerId } : {}),
     repos: reposWithDirs,
     userName: userRows[0]?.name,
     userEmail: userRows[0]?.email,

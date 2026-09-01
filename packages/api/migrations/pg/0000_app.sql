@@ -268,7 +268,8 @@ CREATE TABLE "teams" (
 	"name" text NOT NULL,
 	"origin" text DEFAULT 'local' NOT NULL,
 	"external_id" text,
-	"created_at" bigint NOT NULL
+	"created_at" bigint NOT NULL,
+	"default_model" text
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "teams_org_name" ON "teams" ("org_id","name");

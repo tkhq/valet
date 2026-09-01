@@ -180,6 +180,14 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "sso_team_groups" jsonb',
   },
   {
+    // Team default model (TKAI-255). Null on rows from before the column:
+    // those teams keep the old behavior — resolution falls through to the
+    // org preference list.
+    describe: "teams.default_model column",
+    probe: { kind: "column", table: "teams", column: "default_model" },
+    sql: 'ALTER TABLE "teams" ADD COLUMN IF NOT EXISTS "default_model" text',
+  },
+  {
     // Artifact-sharing opt-in (artifacts design). The DEFAULT backfills
     // every pre-existing org row to `false` — anonymous sharing stays off
     // until an admin opts in, the same answer a fresh database gets.

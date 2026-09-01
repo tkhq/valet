@@ -393,7 +393,8 @@ sessionsRouter.post("/", async (c) => {
   // The session-default model. A security session with no explicit model uses
   // a capable default instead of the haiku floor `resolveModelForBuild` would
   // otherwise reach. A code session with no model keeps normal resolution
-  // (undefined → user default → org preferred → hardcoded default).
+  // (undefined → user default → owning team's default → org preferred →
+  // hardcoded default).
   const effectiveModel = body.model ?? (kind === "security" ? SECURITY_DEFAULT_MODEL : undefined);
 
   // An explicit `teamId: null` from a client that always sends the field is

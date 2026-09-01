@@ -19,9 +19,10 @@ import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
-import { orgs, users, type LlmProviderModel } from "../schema/index.js";
+import { orgs, teams, users, type LlmProviderModel } from "../schema/index.js";
 import { createLlmProvider, updateLlmProvider } from "../services/llm-providers.js";
 import { setOrgModelPreferences } from "../services/org.js";
+import { createTeam } from "../services/teams.js";
 import { NoCredentialsError } from "@valet/engine";
 import { resolveModelSpec } from "../services/model-resolution.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
@@ -472,6 +473,67 @@ describe("EngineHost model resolution wiring", () => {
       { actorUserId: "local-user", orgId: "local-org" },
     );
     expect(session.options.model.id).toBe("claude-haiku-4-5");
+  });
+
+  it("new-session precedence: owning team's default beats orgPreferences[0] (TKAI-255)", async () => {
+    api = await bootTestApi();
+    const { db, engineHost } = api.providers;
+    const team = await createTeam(db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    await db.update(teams).set({ defaultModel: "anthropic/claude-sonnet-4-5" }).where(eq(teams.id, team.id));
+    await setOrgModelPreferences(db, "local-org", ["anthropic/claude-haiku-4-5"]);
+
+    const session = await engineHost.sessionFor("team-owned-1", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+      ownerTeamId: team.id,
+    });
+    expect(session.options.model.id).toBe("anthropic/claude-sonnet-4-5");
+  });
+
+  it("new-session precedence: user default wins over the owning team's default (TKAI-255)", async () => {
+    api = await bootTestApi();
+    const { db, engineHost } = api.providers;
+    const team = await createTeam(db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    await db.update(teams).set({ defaultModel: "anthropic/claude-sonnet-4-5" }).where(eq(teams.id, team.id));
+    await db.update(users).set({ defaultModel: "claude-opus-4-5" }).where(eq(users.id, "local-user"));
+
+    const session = await engineHost.sessionFor("team-owned-2", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+      ownerTeamId: team.id,
+    });
+    expect(session.options.model.id).toBe("claude-opus-4-5");
+  });
+
+  it("new-session precedence: a personal session never reads a team's default (TKAI-255)", async () => {
+    api = await bootTestApi();
+    const { db, engineHost } = api.providers;
+    // The user is a member (creator) of a team with a default, but the
+    // session is user-owned — no ownerTeamId — so the team tier is skipped.
+    const team = await createTeam(db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    await db.update(teams).set({ defaultModel: "anthropic/claude-sonnet-4-5" }).where(eq(teams.id, team.id));
+
+    const session = await engineHost.sessionFor("personal-1", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    expect(session.options.model.id).toBe("claude-haiku-4-5");
+  });
+
+  it("new-session precedence: a team assistant session uses the team's default (TKAI-255)", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+    const team = await createTeam(db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
+    await db.update(teams).set({ defaultModel: "anthropic/claude-sonnet-4-5" }).where(eq(teams.id, team.id));
+
+    const session = await defaultAssistantSessionFor(api.providers,
+      { type: "team", id: team.id },
+      { actorUserId: "local-user", orgId: "local-org" },
+    );
+    expect(session.options.model.id).toBe("anthropic/claude-sonnet-4-5");
   });
 
   it("restore still throws when the persisted model's provider was disabled after the fact", async () => {
