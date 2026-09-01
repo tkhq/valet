@@ -243,6 +243,9 @@ export class EventDispatcher {
               ownerType: sub.ownerType,
               ownerId: sub.ownerId,
               createdBy: sub.createdBy,
+              // The mention itself is the last message the assistant has seen,
+              // so the follow-router's gap re-hydration starts right after it.
+              lastSeenTs: origin.messageTs,
             });
           }
         }

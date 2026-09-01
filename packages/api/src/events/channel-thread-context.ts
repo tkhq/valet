@@ -11,6 +11,7 @@ import type { ChannelOrigin } from "@valet/engine";
 interface TransportRegistry {
   transportFor(channelType: string): {
     fetchThreadContext?(channelId: string, threadTs: string): Promise<string | null>;
+    fetchThreadWindow?(channelId: string, threadTs: string, afterTs: string, beforeTs: string): Promise<string | null>;
   } | null;
 }
 
@@ -40,5 +41,21 @@ export function channelThreadContextFetcher(
     const parsed = parseOriginThreadKey(origin.channelType, origin.threadKey);
     if (!parsed) return null;
     return transport.fetchThreadContext(parsed.channelId, parsed.threadTs).catch(() => null);
+  };
+}
+
+/**
+ * The follow-router's gap re-hydration seam, parallel to
+ * `channelThreadContextFetcher`: the thread's messages strictly between two
+ * provider ts values, or `null` when the window is empty or the transport has
+ * no thread history.
+ */
+export function channelThreadWindowFetcher(
+  registry: TransportRegistry,
+): (service: string, args: { channelId: string; threadTs: string; afterTs: string; beforeTs: string }) => Promise<string | null> {
+  return async (service, args) => {
+    const transport = registry.transportFor(service);
+    if (!transport?.fetchThreadWindow) return null;
+    return transport.fetchThreadWindow(args.channelId, args.threadTs, args.afterTs, args.beforeTs).catch(() => null);
   };
 }

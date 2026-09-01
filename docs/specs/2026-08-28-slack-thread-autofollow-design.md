@@ -214,10 +214,48 @@ follow the persona's "answer by name". These fixes make one inbound view:
   marker for a file-only message, attributes the bot's own prior posts as "You",
   and preserves the thread's opening message when it trims a long thread.
 
-Deferred (tracked separately): re-hydrating an overheard message after a gap
-(needs a last-seen ts on the follow row), a feedback signal when an overheard or
-addressed reply is dropped, and hardening the first-turn seed against two rapid
-mentions on one new thread.
+### Gap re-hydration (TKAI-284, added 2026-09-01)
+
+`followed_threads.last_seen_ts` records the provider ts of the last message
+delivered through the follow (seeded with the binding mention's ts; advanced by
+`touchFollowedThread` after each delivery; never rewound by a re-mention). On
+each overheard delivery, the follow-router fetches the thread window STRICTLY
+BETWEEN `last_seen_ts` and the new message's ts (`fetchThreadWindow` on the
+transport) and prepends it to the signal body when it is non-empty. The window
+excludes the bot's own posts — the agent holds its own replies as tool calls.
+In live traffic the window is empty (every human message was itself delivered);
+it fills after api downtime and around other bots' posts, which never route.
+A null `last_seen_ts` (a pre-column row) starts tracking at the next delivery
+instead of guessing a window.
+
+### Dropped-reply feedback (TKAI-284, added 2026-09-01)
+
+Two feedback paths in `ChannelHost.deliverAssistantMessage`, both submitting a
+`channel.reply_dropped` signal onto the turn's own thread with
+`attributes.feedback` set and a manual-reply origin:
+
+- An overheard turn whose final message was swallowed, when the turn took no
+  origin action (no successful `reply_to_origin`/`react_to_origin`): one note
+  per thread (durable dispatchId `feedback:overheard-dropped:{threadId}`), so a
+  dropped reply is recoverable but a deliberately silent assistant is not
+  nagged into over-participation (TKAI-293).
+- An addressed auto-post that threw: one note per failed message
+  (`feedback:reply-failed:{messageId}`), naming the error and the corrective
+  action.
+
+Loop guard: a feedback-triggered turn never generates further feedback
+(`turnPromptIsFeedback` reads the prompt's `attributes.feedback`), the manual
+origin keeps the recovery turn off the auto-post path, and the engine's
+overheard-digest coalescing skips feedback signals so the guard cannot be
+buried in a digest.
+
+### First-turn seed hardening (TKAI-284, added 2026-09-01)
+
+`deliverToAssistantThread` serializes deliveries per assistant thread with an
+in-process promise chain (single-replica api), and the seed gate requires the
+thread to have no entries AND no unsettled submissions — an admitted-but-
+unclaimed submission has written no entry yet, and covers a restart between
+admit and claim. Two rapid mentions on one new thread seed the transcript once.
 
 ## Invariants (alert, do not auto-repair)
 

@@ -23,6 +23,15 @@ export interface FollowRouterDeps {
     service: string,
     msg: { userId?: string; text: string },
   ) => Promise<{ senderName?: string; text: string }>;
+  /**
+   * The thread's messages strictly between the follow's last delivered ts and
+   * the current message's ts, to re-hydrate a gap (api downtime, another bot's
+   * posts). Wired from `channelThreadWindowFetcher`. Absent → no re-hydration.
+   */
+  fetchThreadWindow?: (
+    service: string,
+    args: { channelId: string; threadTs: string; afterTs: string; beforeTs: string },
+  ) => Promise<string | null>;
 }
 
 interface SlackMessageFields {
@@ -86,6 +95,24 @@ export async function handleFollowedMessage(
   const attributes: Record<string, string> = { channel: f.channel };
   const sender = normalized.senderName ?? f.user;
   if (sender) attributes.sender = sender;
+  let body = normalized.text === "" ? "(message)" : normalized.text;
+  // Gap re-hydration: messages between the follow's last delivered ts and this
+  // one (another bot's posts, or human messages missed during api downtime)
+  // never reached the assistant — prepend them so the overheard line lands
+  // with its context. A null follow.lastSeenTs (a pre-column row) starts
+  // tracking at this delivery instead of guessing a window.
+  // Numeric ts compare — a Slack ts is `seconds.micros`, not a fixed-width string.
+  if (deps.fetchThreadWindow && follow.lastSeenTs !== null && Number.parseFloat(follow.lastSeenTs) < Number.parseFloat(f.ts)) {
+    const missed = await deps.fetchThreadWindow("slack", {
+      channelId: f.channel,
+      threadTs: f.threadTs,
+      afterTs: follow.lastSeenTs,
+      beforeTs: f.ts,
+    });
+    if (missed !== null) {
+      body = `Messages in this thread since you last saw it:\n${missed}\n\n---\n\n${body}`;
+    }
+  }
   await deliverToAssistantThread(deps, {
     orgId: args.orgId,
     owner: { type: follow.ownerType, id: follow.ownerId },
@@ -94,7 +121,7 @@ export async function handleFollowedMessage(
     signal: {
       kind: "signal",
       signalType: "slack.message",
-      body: normalized.text === "" ? "(message)" : normalized.text,
+      body,
       attributes,
       // Overheard: the assistant observes it and replies only if it acts.
       origin: { channelType: "slack", threadKey, reply: "manual", messageTs: f.ts },
@@ -102,5 +129,5 @@ export async function handleFollowedMessage(
     dispatchId: `slack:follow:${f.eventId}`,
     mismatchReason: "followed_target_mismatch",
   });
-  await touchFollowedThread(deps.db, follow.id);
+  await touchFollowedThread(deps.db, follow.id, f.ts);
 }

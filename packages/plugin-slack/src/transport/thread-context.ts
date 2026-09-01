@@ -17,6 +17,7 @@ interface RawReply {
   bot_profile?: unknown;
   text?: unknown;
   files?: unknown;
+  ts?: unknown;
 }
 
 function str(v: unknown): string | undefined {
@@ -57,7 +58,17 @@ export type ThreadContextApi = Pick<SlackApi, "conversationsReplies" | "usersInf
 
 export async function fetchThreadTranscript(
   api: ThreadContextApi,
-  opts: { channelId: string; threadTs: string; selfUserId?: string; limit?: number },
+  opts: {
+    channelId: string;
+    threadTs: string;
+    selfUserId?: string;
+    limit?: number;
+    /** With `beforeTs`: keep only messages STRICTLY BETWEEN the two ts values
+     * (the follow-router's gap window), and drop the bot's own posts — the
+     * agent already holds its own replies as tool calls. */
+    afterTs?: string;
+    beforeTs?: string;
+  },
 ): Promise<string | null> {
   let messages: Record<string, unknown>[];
   try {
@@ -65,9 +76,23 @@ export async function fetchThreadTranscript(
   } catch {
     return null; // thread gone, or the bot cannot read the channel — hydrate nothing.
   }
+  const windowed = opts.afterTs !== undefined && opts.beforeTs !== undefined;
+  if (windowed) {
+    // Numeric compare, not lexicographic: a Slack ts is `seconds.micros` and
+    // the seconds part could change digit count.
+    const after = Number.parseFloat(opts.afterTs ?? "");
+    const before = Number.parseFloat(opts.beforeTs ?? "");
+    messages = messages.filter((m) => {
+      const raw = m as RawReply;
+      const ts = Number.parseFloat(str(raw.ts) ?? "");
+      if (!Number.isFinite(ts) || ts <= after || ts >= before) return false;
+      return !(opts.selfUserId !== undefined && str(raw.user) === opts.selfUserId);
+    });
+    if (messages.length === 0) return null;
+  }
   // `conversations.replies` includes the trigger message itself. One message
   // means a fresh top-level mention with no prior replies — nothing to seed.
-  if (messages.length <= 1) return null;
+  if (!windowed && messages.length <= 1) return null;
 
   // Resolve each human author once. Best-effort: a failed lookup falls back to
   // the raw id so one dead user never blanks the transcript. Shares the client

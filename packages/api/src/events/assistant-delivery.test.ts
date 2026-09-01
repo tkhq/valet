@@ -120,4 +120,60 @@ describe("deliverToAssistantThread — thread-context hydration", () => {
     );
     expect(fetchThreadContext).not.toHaveBeenCalled();
   });
+
+  it("two racing deliveries on one new thread seed the transcript exactly once (TKAI-284)", async () => {
+    // A slow transcript fetch is the race window: without per-thread
+    // serialization, both deliveries pass the empty-thread check during the
+    // other's fetch and both prepend.
+    const fetchThreadContext = vi.fn(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+      return "Brian: earlier context";
+    });
+    await Promise.all([
+      deliverToAssistantThread(
+        { db: testDb.appDb, engineHost, fetchThreadContext },
+        {
+          orgId: ORG,
+          owner: OWNER,
+          actorUserId: USER,
+          threadKey: "slack:C1:1.2",
+          signal: channelSignal("mention one"),
+          dispatchId: "d1",
+          mismatchReason: "event_target_mismatch",
+        },
+      ),
+      deliverToAssistantThread(
+        { db: testDb.appDb, engineHost, fetchThreadContext },
+        {
+          orgId: ORG,
+          owner: OWNER,
+          actorUserId: USER,
+          threadKey: "slack:C1:1.2",
+          signal: channelSignal("mention two"),
+          dispatchId: "d2",
+          mismatchReason: "event_target_mismatch",
+        },
+      ),
+    ]);
+    expect(fetchThreadContext).toHaveBeenCalledOnce();
+
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, OWNER, {
+      actorUserId: USER,
+      orgId: ORG,
+    });
+    const threadId = session.thread("slack:C1:1.2").id;
+    let seeded: string[] = [];
+    for (let i = 0; i < 100; i++) {
+      const entries = await session.providers.store.getEntries(session.id, threadId);
+      const userBodies = entries
+        .filter((e): e is MessageEntry => e.type === "message" && e.role === "user")
+        .map((e) => e.content ?? "");
+      if (userBodies.length >= 2) {
+        seeded = userBodies.filter((b) => b.includes("Conversation so far in this thread:"));
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(seeded).toHaveLength(1);
+  });
 });

@@ -62,10 +62,15 @@ export function isSignalContent(content: PromptContent): content is SignalConten
  * an overheard message in a followed thread, the `addressed="false"`
  * envelope — coalesces. The key is the origin thread key, so only messages
  * overheard in the SAME external thread merge into one digest (TKAI-297).
+ * A delivery-feedback signal (`attributes.feedback`, e.g. "your reply was not
+ * posted") never coalesces: it is a correction addressed to the agent, not an
+ * overheard line, and merging it into a digest would hide it AND defeat the
+ * feedback loop guard that reads the turn's prompt signalType.
  */
 export function overheardCoalesceKey(content: PromptContent): string | undefined {
   if (!isSignalContent(content)) return undefined;
   if (content.origin?.reply !== "manual") return undefined;
+  if (content.attributes?.feedback !== undefined) return undefined;
   return content.origin.threadKey;
 }
 

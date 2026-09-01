@@ -589,6 +589,242 @@ describe("ChannelHost outbound delivery", () => {
     expect(keyedTransport.sent).toHaveLength(0);
   });
 
+  it("overheard final with no origin action gets ONE reply-dropped note per thread (TKAI-284)", async () => {
+    faux.setResponses([fauxAssistantMessage("(noted)"), fauxAssistantMessage("(noted)")]);
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("events").id;
+    const overheardTurn = (n: number) => [
+      {
+        type: "message" as const,
+        id: `od-user-${n}`,
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "user" as const,
+        content: "a passing remark",
+        queueItemId: `qi-od-${n}`,
+        signal: {
+          signalType: "keyed.message",
+          tagName: "signal",
+          origin: { channelType: "keyed", threadKey: "keyed:D100", reply: "manual" as const },
+        },
+      },
+      {
+        type: "message" as const,
+        id: `od-final-${n}`,
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant" as const,
+        content: "here is my answer to that remark",
+        queueItemId: `qi-od-${n}`,
+        stopReason: "end_turn" as const,
+      },
+    ];
+    await engineStore.appendEntries(session.id, threadId, overheardTurn(1));
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "od-final-1", reason: "end_turn" },
+      },
+      `od-final-1-${randomUUID()}`,
+    );
+
+    const feedbackEntries = async () => {
+      const entries = await engineStore.getEntries(session.id, threadId);
+      return entries.filter(
+        (e) => e.type === "message" && e.role === "user" && e.signal?.signalType === "channel.reply_dropped",
+      );
+    };
+    await vi.waitFor(async () => {
+      const found = await feedbackEntries();
+      expect(found).toHaveLength(1);
+      expect((found[0] as { content?: string }).content).toContain("NOT posted");
+      expect(found[0].type === "message" && found[0].signal?.origin?.reply).toBe("manual");
+    });
+    // Nothing auto-posted: the note is a signal to the agent, not a channel send.
+    expect(keyedTransport.sent).toHaveLength(0);
+
+    // A second swallowed overheard final on the SAME thread: the durable
+    // dispatchId dedup keeps it at one note.
+    await engineStore.appendEntries(session.id, threadId, overheardTurn(2));
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "od-final-2", reason: "end_turn" },
+      },
+      `od-final-2-${randomUUID()}`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(await feedbackEntries()).toHaveLength(1);
+  });
+
+  it("a turn that acted on its origin, and a feedback-triggered turn, get no reply-dropped note", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("events").id;
+    await engineStore.appendEntries(session.id, threadId, [
+      // Turn A: overheard, but the agent replied via reply_to_origin — the
+      // swallowed wrap-up is expected, no note.
+      {
+        type: "message",
+        id: "acted-user-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "user",
+        content: "a remark",
+        queueItemId: "qi-acted-1",
+        signal: {
+          signalType: "keyed.message",
+          tagName: "signal",
+          origin: { channelType: "keyed", threadKey: "keyed:D100", reply: "manual" },
+        },
+      },
+      {
+        type: "message",
+        id: "acted-mid-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant",
+        content: "replying properly",
+        queueItemId: "qi-acted-1",
+        parts: [
+          {
+            type: "tool_call",
+            id: "tc-1",
+            status: "completed",
+            args: { tool_id: "keyed.reply_to_origin", params: { text: "hi" } },
+            result: { details: { ok: true } },
+          },
+        ],
+      },
+      {
+        type: "message",
+        id: "acted-final-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant",
+        content: "done, replied in thread",
+        queueItemId: "qi-acted-1",
+        stopReason: "end_turn",
+      },
+      // Turn B: the prompt IS a feedback note — the loop guard stands down.
+      {
+        type: "message",
+        id: "fb-user-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "user",
+        content: "your reply was not posted",
+        queueItemId: "qi-fb-1",
+        signal: {
+          signalType: "channel.reply_dropped",
+          tagName: "signal",
+          attributes: { feedback: "reply_dropped" },
+          origin: { channelType: "keyed", threadKey: "keyed:D100", reply: "manual" },
+        },
+      },
+      {
+        type: "message",
+        id: "fb-final-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant",
+        content: "understood, staying silent",
+        queueItemId: "qi-fb-1",
+        stopReason: "end_turn",
+      },
+    ]);
+    for (const messageId of ["acted-final-1", "fb-final-1"]) {
+      await eventStream.append(
+        {
+          sessionId: session.id,
+          threadId,
+          timestamp: Date.now(),
+          event: { type: "message_end", threadId, messageId, reason: "end_turn" },
+        },
+        `${messageId}-${randomUUID()}`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const entries = await engineStore.getEntries(session.id, threadId);
+    const notes = entries.filter(
+      (e) => e.type === "message" && e.role === "user" && e.signal?.attributes?.feedback !== undefined,
+    );
+    // Only the hand-written fb-user-1 — the host generated no new note.
+    expect(notes.map((e) => e.id)).toEqual(["fb-user-1"]);
+  });
+
+  it("a failed addressed auto-post feeds the error back to the agent (TKAI-284)", async () => {
+    faux.setResponses([fauxAssistantMessage("(noted)")]);
+    vi.spyOn(keyedTransport, "send").mockRejectedValue(new Error("channel_archived"));
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("events").id;
+    await engineStore.appendEntries(session.id, threadId, [
+      {
+        type: "message",
+        id: "fail-user-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "user",
+        content: "who are you",
+        queueItemId: "qi-fail-1",
+        signal: {
+          signalType: "keyed.app_mention",
+          tagName: "signal",
+          origin: { channelType: "keyed", threadKey: "keyed:D100", reply: "auto" },
+        },
+      },
+      {
+        type: "message",
+        id: "fail-final-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant",
+        content: "I am the assistant",
+        queueItemId: "qi-fail-1",
+        stopReason: "end_turn",
+      },
+    ]);
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "fail-final-1", reason: "end_turn" },
+      },
+      `fail-final-${randomUUID()}`,
+    );
+    await vi.waitFor(async () => {
+      const entries = await engineStore.getEntries(session.id, threadId);
+      const note = entries.find(
+        (e) => e.type === "message" && e.role === "user" && e.signal?.signalType === "channel.reply_dropped",
+      );
+      expect(note).toBeDefined();
+      expect((note as { content?: string }).content).toContain("channel_archived");
+      expect((note as { content?: string }).content).toContain("reply_to_origin");
+    });
+  });
+
   it("auto-posts only the first text-bearing message of a submission", async () => {
     // One auto-post per turn: the first message is the reply, later text
     // rounds are working notes. A new submission gets its own slot.

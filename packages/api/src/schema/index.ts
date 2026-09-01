@@ -1633,6 +1633,11 @@ export const followedThreads = pgTable(
     createdBy: text("created_by").notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     lastActivityAt: bigint("last_activity_at", { mode: "number" }).notNull(),
+    /** Provider ts of the last message delivered through this follow. The
+     * follow-router hydrates the gap between this and a new message, so an
+     * overheard line after downtime arrives with the missed context. Null on
+     * rows from before the column: the first delivery starts tracking. */
+    lastSeenTs: text("last_seen_ts"),
   },
   (t) => [uniqueIndex("followed_threads_key").on(t.orgId, t.channelType, t.channelId, t.threadTs)],
 );

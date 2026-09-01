@@ -146,7 +146,7 @@ function chatIdFromKey(conversationKey: string): string {
  * with status "completed" (the model reads the corrective text), and a
  * failed reply must NOT stand the safety net down, or the thread gets
  * nothing at all. */
-function turnRepliedToOrigin(entries: SessionEntry[], queueItemId: string): boolean {
+function turnCalledOriginTool(entries: SessionEntry[], queueItemId: string, suffixes: string[]): boolean {
   for (const e of entries) {
     if (e.type !== "message" || e.role !== "assistant" || e.queueItemId !== queueItemId) continue;
     for (const part of e.parts ?? []) {
@@ -154,7 +154,7 @@ function turnRepliedToOrigin(entries: SessionEntry[], queueItemId: string): bool
       const args = part.args;
       const toolId =
         args !== null && typeof args === "object" ? (args as Record<string, unknown>).tool_id : undefined;
-      if (typeof toolId !== "string" || !toolId.endsWith(".reply_to_origin")) continue;
+      if (typeof toolId !== "string" || !suffixes.some((s) => toolId.endsWith(s))) continue;
       const result = part.result;
       const details =
         result !== null && typeof result === "object" ? (result as Record<string, unknown>).details : undefined;
@@ -163,6 +163,30 @@ function turnRepliedToOrigin(entries: SessionEntry[], queueItemId: string): bool
     }
   }
   return false;
+}
+
+function turnRepliedToOrigin(entries: SessionEntry[], queueItemId: string): boolean {
+  return turnCalledOriginTool(entries, queueItemId, [".reply_to_origin"]);
+}
+
+/** True when the submission acted on its origin at all — replied or reacted.
+ * The dropped-reply feedback stands down for a turn that acted: the agent
+ * already chose its channel response. */
+function turnActedOnOrigin(entries: SessionEntry[], queueItemId: string): boolean {
+  return turnCalledOriginTool(entries, queueItemId, [".reply_to_origin", ".react_to_origin"]);
+}
+
+/** True when the submission's own prompt IS a delivery-feedback signal
+ * (`attributes.feedback`). The loop guard: a feedback-triggered turn never
+ * generates further feedback, so the exchange terminates after one note. */
+function turnPromptIsFeedback(entries: SessionEntry[], queueItemId: string): boolean {
+  return entries.some(
+    (e) =>
+      e.type === "message" &&
+      e.role === "user" &&
+      e.queueItemId === queueItemId &&
+      e.signal?.attributes?.feedback !== undefined,
+  );
 }
 
 /** The submission's first assistant message that carries text or an
@@ -607,8 +631,30 @@ export class ChannelHost {
     const origin = entry.queueItemId ? originFromEntries(entries, entry.queueItemId) : undefined;
     // An overheard turn (a message in a followed thread the assistant did not
     // choose to answer here) does not auto-post; the assistant replies only
-    // through reply_to_origin / react_to_origin, or stays silent.
-    if (origin?.reply === "manual") return;
+    // through reply_to_origin / react_to_origin, or stays silent. If the turn
+    // took NO origin action, the agent may believe this swallowed message was
+    // its reply — tell it once per thread (durable dispatchId dedup), so a
+    // dropped reply is recoverable but a deliberately silent assistant is not
+    // nagged into over-participation on every turn (TKAI-284 / TKAI-293).
+    if (origin?.reply === "manual") {
+      if (
+        entry.queueItemId !== undefined &&
+        entry.stopReason === "end_turn" &&
+        !turnActedOnOrigin(entries, entry.queueItemId) &&
+        !turnPromptIsFeedback(entries, entry.queueItemId)
+      ) {
+        await this.submitReplyFeedback(sessionId, thread.key, origin, {
+          dispatchId: `feedback:overheard-dropped:${threadId}`,
+          body:
+            `Heads up: your message was NOT posted to the channel thread (${origin.threadKey}). ` +
+            "This turn was overheard, so a normal message stays off the channel. " +
+            "If you meant to reply, call reply_to_origin with the text. " +
+            "If you meant to stay silent, do nothing — that is the default here. " +
+            "This reminder is sent once per thread.",
+        });
+      }
+      return;
+    }
 
     // Delivery target: the thread's own channel key (a DM or channel thread),
     // or, on the "events" thread an event delivery lands on, the submission's
@@ -688,6 +734,55 @@ export class ChannelHost {
       console.error("[channels] channel reply delivery failed", err);
       const orgId = this.orgId ?? (await this.deps.resolveOrgId());
       await this.dropLog(orgId, "channel_reply_failed", target.conversationKey, String(err));
+      // Tell the agent its reply never landed, so it can retry or route around
+      // the failure instead of believing it answered (TKAI-284). Only for an
+      // origin-bearing turn: reply_to_origin needs an origin to post through.
+      // Once per failed message (the dispatchId), and the feedback signal's
+      // manual origin keeps the recovery turn off the auto-post path, so a
+      // still-broken transport cannot loop.
+      if (origin !== undefined && entry.queueItemId !== undefined) {
+        await this.submitReplyFeedback(sessionId, thread.key, origin, {
+          dispatchId: `feedback:reply-failed:${messageId}`,
+          body:
+            `Your reply was NOT posted to the channel thread (${origin.threadKey}): ${String(err)}. ` +
+            "Retry with reply_to_origin, or tell the user through another channel you have.",
+        });
+      }
+    }
+  }
+
+  /**
+   * Submit a delivery-feedback signal onto the turn's own thread, so the agent
+   * learns a reply of its was dropped or failed and can recover with
+   * reply_to_origin (TKAI-284). Best-effort: feedback about a delivery problem
+   * must never fail the delivery path itself. The signal carries
+   * `attributes.feedback` — the loop guard `turnPromptIsFeedback` and the
+   * engine's digest coalescing both key on it — and a manual-reply origin, so
+   * the recovery turn's own final message never auto-posts.
+   */
+  private async submitReplyFeedback(
+    sessionId: string,
+    threadKey: string,
+    origin: ChannelOrigin,
+    args: { dispatchId: string; body: string },
+  ): Promise<void> {
+    try {
+      const session = this.deps.engineHost.liveSession(sessionId);
+      // The bus event that led here came from a live session; a miss means it
+      // was evicted in between — drop the feedback rather than re-waking it.
+      if (!session) return;
+      await session.thread(threadKey).submitPrompt(
+        {
+          kind: "signal",
+          signalType: "channel.reply_dropped",
+          body: args.body,
+          attributes: { feedback: "reply_dropped" },
+          origin: { ...origin, reply: "manual" },
+        },
+        { dispatchId: args.dispatchId },
+      );
+    } catch (err) {
+      console.error("[channels] reply-dropped feedback failed", err);
     }
   }
 
