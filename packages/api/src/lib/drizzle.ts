@@ -164,6 +164,14 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "origin_json" text',
   },
   {
+    // The last delivered message ts on a followed thread, read by the
+    // follow-router's gap re-hydration. Null on rows from before the column:
+    // the next delivery starts tracking, with no back-hydration.
+    describe: "followed_threads.last_seen_ts column",
+    probe: { kind: "column", table: "followed_threads", column: "last_seen_ts" },
+    sql: 'ALTER TABLE "followed_threads" ADD COLUMN IF NOT EXISTS "last_seen_ts" text',
+  },
+  {
     // Records which person's GitHub credential a team skill source may use.
     // Null on every row written before the column existed, which the sync
     // reads as "no credential" rather than climbing to the org's App.

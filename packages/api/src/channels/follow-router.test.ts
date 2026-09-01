@@ -7,7 +7,7 @@ import { EngineHost } from "../engine/host.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
-import { upsertFollowedThread } from "../events/followed-threads.js";
+import { findFollowedThread, upsertFollowedThread } from "../events/followed-threads.js";
 import { handleFollowedMessage, slackMessageFields } from "./follow-router.js";
 
 const ORG = "org-1";
@@ -111,6 +111,138 @@ describe("handleFollowedMessage", () => {
       reply: "manual",
       messageTs: "1.7",
     });
+  });
+
+  it("prepends the missed window and advances last_seen_ts", async () => {
+    await upsertFollowedThread(testDb.appDb, {
+      orgId: ORG,
+      channelType: "slack",
+      channelId: "C1",
+      threadTs: "1.2",
+      ownerType: "org",
+      ownerId: ORG,
+      createdBy: USER,
+      lastSeenTs: "1.3",
+    });
+
+    const windowCalls: { afterTs: string; beforeTs: string }[] = [];
+    await handleFollowedMessage(
+      {
+        db: testDb.appDb,
+        engineHost,
+        fetchThreadWindow: async (_service, args) => {
+          windowCalls.push({ afterTs: args.afterTs, beforeTs: args.beforeTs });
+          return "workflow-bot: deploy finished";
+        },
+      },
+      { orgId: ORG, raw: envelope({ type: "message", channel: "C1", thread_ts: "1.2", ts: "1.7", user: "U9", text: "any update?" }) },
+    );
+
+    expect(windowCalls).toEqual([{ afterTs: "1.3", beforeTs: "1.7" }]);
+    const session = await defaultAssistantSessionFor(
+      { db: testDb.appDb, engineHost },
+      { type: "org", id: ORG },
+      { actorUserId: USER, orgId: ORG },
+    );
+    const threadId = session.thread("slack:C1:1.2").id;
+    let userEntry: MessageEntry | undefined;
+    for (let i = 0; i < 100; i++) {
+      const entries = await session.providers.store.getEntries(session.id, threadId);
+      userEntry = entries.find((e) => e.type === "message" && e.role === "user") as MessageEntry | undefined;
+      if (userEntry) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(userEntry?.content).toBe(
+      "Messages in this thread since you last saw it:\nworkflow-bot: deploy finished\n\n---\n\nany update?",
+    );
+    const row = await findFollowedThread(testDb.appDb, {
+      orgId: ORG,
+      channelType: "slack",
+      channelId: "C1",
+      threadTs: "1.2",
+    });
+    expect(row?.lastSeenTs).toBe("1.7");
+
+    // A Slack retry of the same event now recomputes WITHOUT the hydration
+    // prefix (the cursor advanced): the dispatchId content mismatch is a
+    // swallowed no-op, not a thrown ConflictError, and no second entry lands.
+    await handleFollowedMessage(
+      { db: testDb.appDb, engineHost, fetchThreadWindow: async () => null },
+      { orgId: ORG, raw: envelope({ type: "message", channel: "C1", thread_ts: "1.2", ts: "1.7", user: "U9", text: "any update?" }) },
+    );
+    const entries = await session.providers.store.getEntries(session.id, threadId);
+    expect(entries.filter((e) => e.type === "message" && e.role === "user")).toHaveLength(1);
+  });
+
+  it("delivers the bare message when the window is empty, and skips the fetch with no last_seen_ts", async () => {
+    await upsertFollowedThread(testDb.appDb, {
+      orgId: ORG,
+      channelType: "slack",
+      channelId: "C1",
+      threadTs: "2.2",
+      ownerType: "org",
+      ownerId: ORG,
+      createdBy: USER,
+      // No lastSeenTs: a pre-column row. The fetch must not run.
+    });
+    let called = 0;
+    await handleFollowedMessage(
+      {
+        db: testDb.appDb,
+        engineHost,
+        fetchThreadWindow: async () => {
+          called += 1;
+          return null;
+        },
+      },
+      { orgId: ORG, raw: envelope({ type: "message", channel: "C1", thread_ts: "2.2", ts: "2.5", user: "U9", text: "first" }, "Ev2") },
+    );
+    expect(called).toBe(0);
+    const session0 = await defaultAssistantSessionFor(
+      { db: testDb.appDb, engineHost },
+      { type: "org", id: ORG },
+      { actorUserId: USER, orgId: ORG },
+    );
+    // Wait for the first delivery's entry before the second, so the two
+    // overheard signals cannot coalesce into a digest (TKAI-297) and each
+    // writes its own user entry.
+    const threadId0 = session0.thread("slack:C1:2.2").id;
+    for (let i = 0; i < 100; i++) {
+      const entries = await session0.providers.store.getEntries(session0.id, threadId0);
+      if (entries.some((e) => e.type === "message" && e.role === "user")) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    // Tracking starts at this delivery; the next gap fetch runs but an empty
+    // window (null) delivers the bare message.
+    await handleFollowedMessage(
+      {
+        db: testDb.appDb,
+        engineHost,
+        fetchThreadWindow: async () => {
+          called += 1;
+          return null;
+        },
+      },
+      { orgId: ORG, raw: envelope({ type: "message", channel: "C1", thread_ts: "2.2", ts: "2.9", user: "U9", text: "second" }, "Ev3") },
+    );
+    expect(called).toBe(1);
+    const session = await defaultAssistantSessionFor(
+      { db: testDb.appDb, engineHost },
+      { type: "org", id: ORG },
+      { actorUserId: USER, orgId: ORG },
+    );
+    const threadId = session.thread("slack:C1:2.2").id;
+    let entries: Awaited<ReturnType<typeof session.providers.store.getEntries>> = [];
+    for (let i = 0; i < 100; i++) {
+      entries = await session.providers.store.getEntries(session.id, threadId);
+      if (entries.filter((e) => e.type === "message" && e.role === "user").length >= 2) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const bodies = entries
+      .filter((e): e is MessageEntry => e.type === "message" && e.role === "user")
+      .map((e) => e.content);
+    expect(bodies).toContain("second");
+    expect(bodies.some((b) => typeof b === "string" && b.includes("since you last saw it"))).toBe(false);
   });
 
   it("ignores a message on an unfollowed thread (no delivery)", async () => {

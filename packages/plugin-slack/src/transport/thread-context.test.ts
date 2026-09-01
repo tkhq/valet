@@ -54,6 +54,45 @@ describe("fetchThreadTranscript", () => {
     expect(await fetchThreadTranscript(api, { channelId: "C1", threadTs: "1.0", selfUserId: "UBOT" })).toBeNull();
   });
 
+  it("windowed: keeps only messages strictly between afterTs and beforeTs, minus the bot's own", async () => {
+    const api = fakeApi(
+      [
+        { user: "U1", text: "the mention", ts: "1.0" },
+        { user: "UBOT", text: "my reply", ts: "1.5" },
+        { user: "U2", text: "missed while down", ts: "2.0" },
+        { username: "Deploybot", text: "shipped v2", ts: "2.5" },
+        { user: "U1", text: "the new message", ts: "3.0" },
+      ],
+      { U1: "Brian", U2: "Conner" },
+    );
+    const out = await fetchThreadTranscript(api, {
+      channelId: "C1",
+      threadTs: "1.0",
+      selfUserId: "UBOT",
+      afterTs: "1.0",
+      beforeTs: "3.0",
+    });
+    expect(out).toBe("Conner: missed while down\nDeploybot: shipped v2");
+  });
+
+  it("windowed: returns null when nothing falls inside the window", async () => {
+    const api = fakeApi([
+      { user: "U1", text: "old", ts: "1.0" },
+      { user: "U1", text: "current", ts: "2.0" },
+    ]);
+    expect(
+      await fetchThreadTranscript(api, { channelId: "C1", threadTs: "1.0", afterTs: "1.0", beforeTs: "2.0" }),
+    ).toBeNull();
+  });
+
+  it("windowed: compares ts numerically, not lexicographically", async () => {
+    // "10.0" < "9.0" as strings; numerically it is inside (9, 11).
+    const api = fakeApi([{ user: "U1", text: "in window", ts: "10.0" }], { U1: "Brian" });
+    expect(
+      await fetchThreadTranscript(api, { channelId: "C1", threadTs: "1.0", afterTs: "9.0", beforeTs: "11.0" }),
+    ).toBe("Brian: in window");
+  });
+
   it("returns null for an empty or unreadable thread", async () => {
     expect(await fetchThreadTranscript(fakeApi([]), { channelId: "C1", threadTs: "1.0" })).toBeNull();
     expect(

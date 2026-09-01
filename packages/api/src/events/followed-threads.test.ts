@@ -38,4 +38,31 @@ describe("followed_threads store", () => {
     const after = await findFollowedThread(tdb.appDb, KEY);
     expect(after!.lastActivityAt).toBeGreaterThanOrEqual(before!.lastActivityAt);
   });
+
+  it("seeds last_seen_ts on insert and advances it on touch", async () => {
+    await upsertFollowedThread(tdb.appDb, { ...KEY, ownerType: "team", ownerId: "team-x", createdBy: "u1", lastSeenTs: "1.3" });
+    const bound = await findFollowedThread(tdb.appDb, KEY);
+    expect(bound?.lastSeenTs).toBe("1.3");
+    await touchFollowedThread(tdb.appDb, bound!.id, "1.9");
+    const after = await findFollowedThread(tdb.appDb, KEY);
+    expect(after?.lastSeenTs).toBe("1.9");
+  });
+
+  it("a re-upsert does not rewind last_seen_ts", async () => {
+    await upsertFollowedThread(tdb.appDb, { ...KEY, ownerType: "team", ownerId: "team-x", createdBy: "u1", lastSeenTs: "1.3" });
+    const bound = await findFollowedThread(tdb.appDb, KEY);
+    await touchFollowedThread(tdb.appDb, bound!.id, "1.9");
+    // A re-mention on the already-followed thread carries its own (older) ts.
+    await upsertFollowedThread(tdb.appDb, { ...KEY, ownerType: "team", ownerId: "team-x", createdBy: "u1", lastSeenTs: "1.5" });
+    const after = await findFollowedThread(tdb.appDb, KEY);
+    expect(after?.lastSeenTs).toBe("1.9");
+  });
+
+  it("touch without a ts leaves last_seen_ts alone", async () => {
+    await upsertFollowedThread(tdb.appDb, { ...KEY, ownerType: "team", ownerId: "team-x", createdBy: "u1", lastSeenTs: "1.3" });
+    const bound = await findFollowedThread(tdb.appDb, KEY);
+    await touchFollowedThread(tdb.appDb, bound!.id);
+    const after = await findFollowedThread(tdb.appDb, KEY);
+    expect(after?.lastSeenTs).toBe("1.3");
+  });
 });

@@ -60,6 +60,13 @@ describe("overheard digest: pure helpers", () => {
     expect(overheardCoalesceKey(addressed)).toBeUndefined();
     const originless: SignalContent = { kind: "signal", signalType: "timer.fired", body: "tick" };
     expect(overheardCoalesceKey(originless)).toBeUndefined();
+    // A delivery-feedback signal (TKAI-284) is addressed to the agent, not
+    // overheard chatter — it never merges into a digest.
+    const feedback: SignalContent = {
+      ...overheardSignal({ body: "your reply was not posted" }),
+      attributes: { feedback: "reply_dropped" },
+    };
+    expect(overheardCoalesceKey(feedback)).toBeUndefined();
   });
 
   it("buildOverheardDigest renders one 'Name: message' line per item under the header", () => {

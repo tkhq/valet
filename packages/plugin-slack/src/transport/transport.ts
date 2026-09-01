@@ -920,6 +920,12 @@ export class SlackTransport implements ChannelTransport {
     return fetchThreadTranscript(this.api, { channelId, threadTs, selfUserId: this.botUserId });
   }
 
+  /** The thread's messages strictly between two ts values, minus the bot's own
+   *  posts — the follow-router's gap re-hydration. See `ChannelTransport`. */
+  async fetchThreadWindow(channelId: string, threadTs: string, afterTs: string, beforeTs: string): Promise<string | null> {
+    return fetchThreadTranscript(this.api, { channelId, threadTs, selfUserId: this.botUserId, afterTs, beforeTs });
+  }
+
   /** Normalize an inbound message for an agent — see `ChannelTransport`. Resolves
    *  the sender's name and cleans the text so the model never sees raw ids or
    *  Slack markup. */

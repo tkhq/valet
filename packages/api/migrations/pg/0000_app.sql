@@ -882,7 +882,8 @@ CREATE TABLE "followed_threads" (
 	"owner_id" text NOT NULL,
 	"created_by" text NOT NULL,
 	"created_at" bigint NOT NULL,
-	"last_activity_at" bigint NOT NULL
+	"last_activity_at" bigint NOT NULL,
+	"last_seen_ts" text
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "followed_threads_key" ON "followed_threads" ("org_id","channel_type","channel_id","thread_ts");

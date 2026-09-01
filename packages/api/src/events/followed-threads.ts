@@ -20,6 +20,10 @@ export interface FollowedThreadRow extends FollowedThreadKey {
   ownerType: "user" | "team" | "org";
   ownerId: string;
   createdBy: string;
+  /** Provider ts of the message that bound the follow (the mention), so the
+   * router's gap re-hydration has a starting point before the first overheard
+   * delivery. Absent → tracking starts at the first delivery. */
+  lastSeenTs?: string;
 }
 
 /** Bind a thread to an owner's assistant. Idempotent on `(org, channel, thread)`. */
@@ -38,6 +42,7 @@ export async function upsertFollowedThread(db: AppDb, row: FollowedThreadRow): P
       createdBy: row.createdBy,
       createdAt: now,
       lastActivityAt: now,
+      lastSeenTs: row.lastSeenTs ?? null,
     })
     .onConflictDoUpdate({
       target: [
@@ -48,7 +53,9 @@ export async function upsertFollowedThread(db: AppDb, row: FollowedThreadRow): P
       ],
       // `createdBy` too: it is the actor the follow-router runs the assistant
       // session as, so a re-bind by a different owner must carry the new
-      // binder's actor, not the first one's.
+      // binder's actor, not the first one's. `lastSeenTs` is deliberately NOT
+      // in the update set: a re-mention on an already-followed thread must not
+      // rewind the router's gap tracking.
       set: { ownerType: row.ownerType, ownerId: row.ownerId, createdBy: row.createdBy, lastActivityAt: now },
     });
 }
@@ -70,7 +77,11 @@ export async function findFollowedThread(db: AppDb, key: FollowedThreadKey) {
   return rows[0] ?? null;
 }
 
-/** Record that a followed thread just saw activity. */
-export async function touchFollowedThread(db: AppDb, id: string): Promise<void> {
-  await db.update(followedThreads).set({ lastActivityAt: Date.now() }).where(eq(followedThreads.id, id));
+/** Record that a followed thread just saw activity. `lastSeenTs`, when given,
+ * advances the router's gap-tracking cursor to the delivered message. */
+export async function touchFollowedThread(db: AppDb, id: string, lastSeenTs?: string): Promise<void> {
+  await db
+    .update(followedThreads)
+    .set({ lastActivityAt: Date.now(), ...(lastSeenTs !== undefined ? { lastSeenTs } : {}) })
+    .where(eq(followedThreads.id, id));
 }
