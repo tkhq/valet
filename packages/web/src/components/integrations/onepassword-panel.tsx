@@ -66,8 +66,8 @@ export function OnePasswordPanel() {
           <div className="mt-6 border-t border-line pt-4">
             <h3 className="text-sm font-medium text-ink">Credentials backed by 1Password</h3>
             <p className="mt-0.5 text-xs text-muted">
-              Each one names an item instead of holding a secret. Valet reads the value from
-              1Password when a run needs it.
+              Valet stores a pointer, never the secret. When something needs one of these
+              credentials, the value is read from 1Password at that moment.
             </p>
             <ReferenceList isAdmin={isAdmin} />
           </div>
@@ -238,24 +238,34 @@ function TokenFields({
   );
 }
 
+/** The stored credential kind, in the words a person would use for it. */
+const CREDENTIAL_KIND_LABEL: Record<string, string> = {
+  api_key: "API key",
+  oauth2: "OAuth token",
+  bot_token: "Bot token",
+  service_account: "Service account",
+};
+
 /**
- * `op://vault/item/field` as the three things a person looks for in
- * 1Password. The raw reference stays in `title` because it is what is
- * stored, and what someone pastes when reporting a problem.
+ * Where the secret comes from, as a sentence.
+ *
+ * An earlier version printed `vault X · item Y · field Z`, which named
+ * 1Password's data model rather than answering the reader's question. The
+ * question is "where does this secret come from", and the answer is a place
+ * you can go and look. The raw `op://` reference stays in `title`: it is
+ * what is stored, and what someone pastes when reporting a problem.
  */
-function ReferencePath({ reference }: { reference?: string }) {
+function ReferenceSource({ reference }: { reference?: string }) {
   const parts = (reference ?? "").replace(/^op:\/\//, "").split("/");
   if (parts.length !== 3) {
     return <span className="font-mono text-xs text-muted">{reference}</span>;
   }
   const [vault, item, field] = parts;
   return (
-    <span className="text-sm text-ink" title={reference}>
-      <span className="text-muted">vault</span> <span>{vault}</span>
-      <span className="mx-1.5 text-muted">·</span>
-      <span className="text-muted">item</span> <span>{item}</span>
-      <span className="mx-1.5 text-muted">·</span>
-      <span className="text-muted">field</span> <span>{field}</span>
+    <span className="text-sm text-muted" title={reference}>
+      Reads <span className="text-ink">{field}</span> from{" "}
+      <span className="text-ink">{item}</span>, in your{" "}
+      <span className="text-ink">{vault}</span> vault.
     </span>
   );
 }
@@ -325,10 +335,12 @@ function ReferenceRow({
   return (
     <FieldRow
       label={cred.service}
-      hint={scope === "org" ? "Everyone in the organization" : "Only you"}
+      hint={`${CREDENTIAL_KIND_LABEL[cred.type] ?? cred.type} · ${
+        scope === "org" ? "everyone in the organization" : "only you"
+      }`}
     >
       <div className="flex flex-wrap items-center gap-2">
-        <ReferencePath reference={cred.onepasswordRef} />
+        <ReferenceSource reference={cred.onepasswordRef} />
         <Button
           type="button"
           variant="ghost"
