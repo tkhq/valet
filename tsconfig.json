@@ -17,7 +17,6 @@
   "references": [
     { "path": "./packages/shared" },
     { "path": "./packages/engine" },
-    { "path": "./packages/eval" },
     { "path": "./packages/workflow" },
     { "path": "./packages/store-postgres" },
     { "path": "./packages/sandbox-local" },
@@ -49,6 +48,14 @@
     { "path": "./packages/plugin-memory" },
     { "path": "./packages/plugin-security" },
     { "path": "./packages/sandbox-gateway" },
-    { "path": "./packages/api" }
+    { "path": "./packages/api" },
+    // Deliberately LAST, after api and every plugin-*: about fifteen
+    // packages export only dist, the api has no project references of its
+    // own, and root reference ORDER is what builds them before their
+    // importers on a fresh clone (see the ci.yml Test job comment). eval
+    // references api, so an earlier position drags the api build ahead of
+    // the plugins and fails fresh-clone typechecks with TS2307 on
+    // dist-exporting plugins.
+    { "path": "./packages/eval" }
   ]
 }
