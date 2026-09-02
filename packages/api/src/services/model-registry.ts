@@ -79,15 +79,34 @@ const REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
 const FETCH_TIMEOUT_MS = 10_000;
 
 /**
- * Base URL of the upstream registry. Each provider's catalog is read from
- * `{base}/{providerId}.json`, matching the layout pi-ai generates into
- * `providers/data/`. Unset means the runtime fetch is OFF and every read
- * answers from the bundled catalog, which is the correct default for a
- * deployment that has not chosen a registry to trust.
+ * Base URL of the upstream registry. pi operates the catalog service at
+ * `https://pi.dev`, so that is the default: a deployment gets fresh model
+ * metadata with no configuration, and the bundled catalog stays the floor.
+ */
+export const DEFAULT_MODEL_REGISTRY_URL = "https://pi.dev";
+
+/**
+ * The registry base URL, or `undefined` when the fetch is off.
+ *
+ * `VALET_MODEL_REGISTRY_URL` overrides the host. Set it to an EMPTY string
+ * to turn the fetch off, which an air-gapped deployment needs. An UNSET
+ * variable takes the default, so the zero-config path fetches.
  */
 export function modelRegistryUrl(): string | undefined {
-  const raw = process.env.VALET_MODEL_REGISTRY_URL?.trim();
-  return raw ? raw.replace(/\/+$/, "") : undefined;
+  const raw = process.env.VALET_MODEL_REGISTRY_URL;
+  if (raw === undefined) return DEFAULT_MODEL_REGISTRY_URL;
+  const trimmed = raw.trim();
+  return trimmed ? trimmed.replace(/\/+$/, "") : undefined;
+}
+
+/**
+ * URL of one provider's catalog. pi serves each provider at
+ * `/api/models/providers/{id}`. pi's own client for this service is
+ * `withRemoteCatalog` in `packages/coding-agent/src/core/remote-catalog-provider.ts`;
+ * the path here matches it, so a base URL that works for pi works here.
+ */
+export function providerCatalogUrl(base: string, providerId: string): string {
+  return new URL(`/api/models/providers/${encodeURIComponent(providerId)}`, base).toString();
 }
 
 /** The bundled compile-time catalog for one provider — the fallback floor.
@@ -207,7 +226,7 @@ export class ModelRegistry {
       if (stored?.etag) headers["if-none-match"] = stored.etag;
       else if (stored?.lastModified) headers["if-modified-since"] = new Date(stored.lastModified).toUTCString();
 
-      const res = await fetch(`${base}/${providerId}.json`, {
+      const res = await fetch(providerCatalogUrl(base, providerId), {
         headers,
         signal: AbortSignal.any([signal, AbortSignal.timeout(FETCH_TIMEOUT_MS)]),
       });
@@ -224,7 +243,24 @@ export class ModelRegistry {
         return keepStored();
       }
 
+      // The registry has no catalog for this provider, and a later check
+      // will not find one. Clear the validators so the entry stops sending
+      // a conditional request against a body that never arrives. A
+      // transient failure below keeps them, because there the cached body
+      // is still valid and revalidation is the cheap path.
+      if (res.status === 404 || res.status === 501) {
+        await this.store.write(
+          providerId,
+          { models: [], checkedAt: Date.now() },
+          { clearValidators: true },
+        );
+        this.recordError(providerId, `upstream has no catalog for this provider (HTTP ${res.status})`);
+        return keepStored();
+      }
+
       if (!res.ok) {
+        // Transient: keep the cached body AND its validators, so the next
+        // check revalidates instead of downloading the catalog again.
         this.recordError(providerId, `upstream returned HTTP ${res.status}`);
         return keepStored();
       }
