@@ -74,6 +74,7 @@ async function main(): Promise<number> {
     dockerAvailable: hasDocker,
     fullSandboxProvider: () => new DockerSandboxProvider(),
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+    ...(opts.runsOverride !== undefined ? { runsOverride: opts.runsOverride } : {}),
     saveBaselines: opts.saveBaseline,
     onCaseStart: (evalCase, index, total) => {
       if (!opts.json) console.error(`[eval] (${index + 1}/${total}) ${evalCase.id}`);

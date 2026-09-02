@@ -210,6 +210,21 @@ export interface EvalCase {
   model?: string;
   /** Per-case timeout. Absent → the suite default. */
   timeout_ms?: number;
+  /**
+   * Samples per scorecard row (pass@k). Each run is an independent fresh
+   * session. Default 1. The CLI's `--runs` overrides for the whole suite.
+   */
+  runs?: number;
+  /**
+   * Fraction of runs that must pass for the case to PASS (0 to 1].
+   * Default 1 (every run must pass) — flaky is a failure by default.
+   */
+  pass_threshold?: number;
+  /**
+   * Sampling temperature for the model under test. Some models reject
+   * non-default values; leave unset for the provider default.
+   */
+  temperature?: number;
   /** Restrict the agent to these tool names. Absent → all profile tools. */
   tools?: string[];
   /** `orchestrator` sets up the full orchestrator environment. */
@@ -224,20 +239,40 @@ export interface EvalCase {
 
 // ── Scorecard ───────────────────────────────────────────────────────────────
 
-/** Result of one case run, as the scorecard reports it. */
+/** Per-run sampling statistics for a multi-run (pass@k) case. */
+export interface SamplingStats {
+  /** Runs executed. */
+  runs: number;
+  /** Runs where every check passed. */
+  passes: number;
+  /** Pass threshold the status was computed against. */
+  threshold: number;
+  /** Per-run recursive token totals, in run order. */
+  tokensPerRun: number[];
+  tokensMean: number;
+  /** Population standard deviation of tokensPerRun. 0 for a single run. */
+  tokensStd: number;
+  /** Per-run recursive cost totals; absent when unpriced. */
+  costPerRun?: number[];
+}
+
+/** Result of one case (one or more runs), as the scorecard reports it. */
 export interface ScorecardEntry {
   caseId: string;
   status: "pass" | "fail" | "skip";
   /** Why the case was skipped (e.g. a missing credential). */
   skipReason?: string;
   durationMs: number;
-  /** Total USD cost of the case run. Absent when the model is unpriced. */
+  /** Total USD cost across ALL runs (children included). Absent when unpriced. */
   costUsd?: number;
-  /** Total tokens across all turns. */
+  /** Mean recursive tokens per run (children included). */
   totalTokens?: number;
+  /** Check results of the reported run (first failing run, else the last). */
   checkResults: CheckResult[];
-  /** The extracted trajectory, for baselines and verbose output. */
+  /** Trajectory of the reported run, for baselines and verbose output. */
   trajectory?: Trajectory;
-  /** Error that aborted the case before checks could run. */
+  /** Error that aborted the reported run before checks could complete. */
   error?: string;
+  /** Present when the case ran more than once. */
+  sampling?: SamplingStats;
 }

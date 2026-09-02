@@ -251,12 +251,24 @@ export function parseEvalCase(raw: unknown, source: string): EvalCase {
   const description = optionalString(raw, "description", source);
   const model = optionalString(raw, "model", source);
   const timeoutMs = optionalNumber(raw, "timeout_ms", source);
+  const runs = optionalNumber(raw, "runs", source);
+  if (runs !== undefined && (!Number.isInteger(runs) || runs < 1 || runs > 25)) {
+    throw new CaseValidationError(source, "`runs` must be an integer from 1 to 25");
+  }
+  const passThreshold = optionalNumber(raw, "pass_threshold", source);
+  if (passThreshold !== undefined && (passThreshold <= 0 || passThreshold > 1)) {
+    throw new CaseValidationError(source, "`pass_threshold` must be in (0, 1]");
+  }
+  const temperature = optionalNumber(raw, "temperature", source);
   const tools = optionalStringArray(raw, "tools", source);
   const requiredCredentials = optionalStringArray(raw, "required_credentials", source);
   const mockTools = parseMockTools(raw, source);
   if (description !== undefined) evalCase.description = description;
   if (model !== undefined) evalCase.model = model;
   if (timeoutMs !== undefined) evalCase.timeout_ms = timeoutMs;
+  if (runs !== undefined) evalCase.runs = runs;
+  if (passThreshold !== undefined) evalCase.pass_threshold = passThreshold;
+  if (temperature !== undefined) evalCase.temperature = temperature;
   if (tools !== undefined) evalCase.tools = tools;
   if (sessionType !== undefined) evalCase.session_type = sessionType as EvalCase["session_type"];
   if (profile !== undefined) evalCase.profile = profile as EvalCase["profile"];

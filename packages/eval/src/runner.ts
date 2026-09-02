@@ -282,6 +282,7 @@ async function runCaseInner(evalCase: EvalCase, opts: RunnerOptions): Promise<Ca
     builtinTools: restricted.filter((t) => builtinNames.has(t.name)),
     tools: restricted.filter((t) => !builtinNames.has(t.name)),
     warmSandboxOnClaim: false,
+    ...(evalCase.temperature !== undefined ? { sampling: { temperature: evalCase.temperature } } : {}),
     systemPrompt: opts.systemPrompt ?? (isOrchestrator ? EVAL_PERSONA : undefined),
     ...(isOrchestrator ? { toolConfig: { childSpawner } } : {}),
     // Evals are unattended, but retries would blur cost/duration numbers —
