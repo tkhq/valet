@@ -883,10 +883,10 @@ export class ChannelHost {
    *
    * Same surface rule as the auto-post (TKAI-323): the entry's `channel`
    * mark says the command came from that surface; without it the command
-   * was typed in the web UI and its result stays there. Today every engine
-   * command arrives via the web REST route (`session.prompt` is its only
-   * caller), so this rule is dormant until a transport routes slash
-   * commands through `session.prompt` with `channel` set.
+   * was typed in the web UI and its result stays there. Channel messages
+   * route through `session.prompt` (TKAI-339), which stamps `channel` on
+   * both the echo and the result entry, so this path fires for every
+   * channel-originated slash command.
    */
   private async deliverCommandResult(
     sessionId: string,
@@ -1245,9 +1245,16 @@ export class ChannelHost {
       }
     }
 
-    const receipt = await thread.submitPrompt(
+    // Route through `session.prompt()`, not `thread.submitPrompt()`, so
+    // slash commands (`/model`, `/status`, `/help`, etc.) dispatch through
+    // the same command registry the web UI uses (TKAI-339). The `channel`
+    // option flows through to `executeCommand` → `persistCommandResult`,
+    // and the outbound `deliverCommandResult` handler posts the result back
+    // to the channel. Plain messages pass through unchanged.
+    const receipt = await session.prompt(
       { text: text === "" ? "(media message)" : text, attachments },
       {
+        threadId: thread.id,
         dispatchId: event.dispatchId,
         author: { id: userId, name: event.sender.displayName, externalId: event.sender.externalId },
         // Stamp the surface this prompt came from. A channel thread keeps its
