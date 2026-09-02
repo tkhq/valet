@@ -1,7 +1,7 @@
 {
   "caseId": "hard-date-math",
   "model": "anthropic/claude-haiku-4-5",
-  "savedAt": "2026-09-02T19:18:36.018Z",
+  "savedAt": "2026-09-02T22:25:18.883Z",
   "status": "fail",
   "trajectory": {
     "caseId": "hard-date-math",
@@ -23,7 +23,8 @@
           "cacheRead": 0,
           "cacheWrite": 0,
           "total": 0.002631
-        }
+        },
+        "queueItemId": "q-mtknzpar-1o"
       }
     ],
     "toolCalls": [],
@@ -42,7 +43,7 @@
       "cacheWrite": 0,
       "total": 0.002631
     },
-    "durationMs": 611,
+    "durationMs": 592,
     "stopReason": "end_turn"
   }
 }

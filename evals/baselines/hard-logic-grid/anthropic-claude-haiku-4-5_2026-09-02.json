@@ -1,7 +1,7 @@
 {
   "caseId": "hard-logic-grid",
   "model": "anthropic/claude-haiku-4-5",
-  "savedAt": "2026-09-02T19:18:46.839Z",
+  "savedAt": "2026-09-02T22:25:32.870Z",
   "status": "pass",
   "trajectory": {
     "caseId": "hard-logic-grid",
@@ -12,37 +12,38 @@
         "index": 0,
         "usage": {
           "input": 2677,
-          "output": 496,
+          "output": 504,
           "cacheRead": 0,
           "cacheWrite": 0,
-          "total": 3173
+          "total": 3181
         },
         "cost": {
           "input": 0.0026769999999999997,
-          "output": 0.00248,
+          "output": 0.00252,
           "cacheRead": 0,
           "cacheWrite": 0,
-          "total": 0.005157
-        }
+          "total": 0.005197
+        },
+        "queueItemId": "q-mtknzwrg-26"
       }
     ],
     "toolCalls": [],
-    "finalOutput": "I need to solve this step-by-step using the clues.\n\nLet me denote the positions 1-5 (first to last).\n\nFrom clue (1): Ben finished immediately after Ema, so they're consecutive: Ema-Ben\n\nFrom clue (2): Cleo is not in position 1 or 5.\n\nFrom clue (3): Dev finished before Ana but after Cleo, so: Cleo < Dev < Ana\n\nFrom clue (4): Exactly one runner finished between Ema and Cleo.\n\nLet me work through this:\n\nSince Ema-Ben are consecutive, the possible positions for this pair are:\n- Positions 1-2\n- Positions 2-3\n- Positions 3-4\n- Positions 4-5\n\nFrom clue (4), exactly one runner is between Ema and Cleo. This means |position(Ema) - position(Cleo)| = 2.\n\nLet me try Ema-Ben in positions 1-2:\n- If Ema=1, Ben=2, then Cleo must be at position 3 (one runner between them, which is Ben)\n- From clue (3): Cleo < Dev < Ana, so Cleo=3 means Dev and Ana must be in positions 4,5\n- So: Ema(1), Ben(2), Cleo(3), Dev(4), Ana(5) ✓\n- Check clue (2): Cleo not first or last ✓\n\nLet me verify all clues:\n1. Ben immediately after Ema: Ben(2) after Ema(1) ✓\n2. Cleo neither first nor last: Cleo(3) ✓\n3. Dev before Ana but after Cleo: Cleo(3) < Dev(4) < Ana(5) ✓\n4. Exactly one runner between Ema and Cleo: Between positions 1 and 3 is position 2 (Ben) - exactly one ✓\n\nEma, Ben, Cleo, Dev, Ana",
+    "finalOutput": "I need to solve this step-by-step using the given clues.\n\nLet me denote the positions 1-5 (first to last) and work through the constraints:\n\n**Clue 1**: Ben finished immediately after Ema\n- This means Ema and Ben are consecutive, with Ben right after Ema\n- Possible positions: Ema-Ben could be at (1,2), (2,3), (3,4), or (4,5)\n\n**Clue 2**: Cleo was neither first nor last\n- Cleo is at position 2, 3, or 4\n\n**Clue 3**: Dev finished before Ana but after Cleo\n- Order: Cleo < Dev < Ana\n\n**Clue 4**: Exactly one runner finished between Ema and Cleo\n- If Ema is at position i and Cleo is at position j, then |i - j| = 2\n\nLet me work through this systematically:\n\nFrom Clue 4: Ema and Cleo are exactly 2 positions apart.\nFrom Clue 1: Ema-Ben are consecutive.\n\nIf Ema is at position 1, Ben is at 2, and Cleo is at 3.\n- From Clue 3: Dev < Ana, and Cleo(3) < Dev\n- So Dev and Ana are at positions 4,5 with Dev at 4, Ana at 5. ✓\n- Order: Ema, Ben, Cleo, Dev, Ana\n- Check Clue 2: Cleo at 3 (not first/last) ✓\n\nLet me verify this solution against all clues:\n1. Ben (2) immediately after Ema (1) ✓\n2. Cleo at position 3 (not first or last) ✓\n3. Dev (4) before Ana (5), after Cleo (3) ✓\n4. Between Ema (1) and Cleo (3): Ben is at 2 - exactly one runner ✓\n\n**Ema, Ben, Cleo, Dev, Ana**",
     "usage": {
       "input": 2677,
-      "output": 496,
+      "output": 504,
       "cacheRead": 0,
       "cacheWrite": 0,
-      "total": 3173
+      "total": 3181
     },
     "cost": {
       "input": 0.0026769999999999997,
-      "output": 0.00248,
+      "output": 0.00252,
       "cacheRead": 0,
       "cacheWrite": 0,
-      "total": 0.005157
+      "total": 0.005197
     },
-    "durationMs": 3578,
+    "durationMs": 4906,
     "stopReason": "end_turn"
   }
 }

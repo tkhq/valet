@@ -5,7 +5,7 @@
 import { parseArgs } from "node:util";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { EvalCase } from "./types.js";
+import { REASONING_LEVELS, type EvalCase, type ReasoningLevel } from "./types.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -30,6 +30,8 @@ export interface CliOptions {
   allowLiveBaselines: boolean;
   /** Prune baselines instead of running: keep this many per case+model. */
   pruneBaselinesKeep?: number;
+  /** Suite-level reasoning effort for the model under test. */
+  reasoning?: ReasoningLevel;
 }
 
 /** Parse argv (no process side effects; throws on invalid input). */
@@ -50,8 +52,13 @@ export function parseCliArgs(argv: string[]): CliOptions {
       runs: { type: "string" },
       "allow-live-baselines": { type: "boolean", default: false },
       "prune-baselines": { type: "string" },
+      reasoning: { type: "string" },
     },
   });
+  const reasoning = values.reasoning;
+  if (reasoning !== undefined && !(REASONING_LEVELS as readonly string[]).includes(reasoning)) {
+    throw new Error(`--reasoning must be one of ${REASONING_LEVELS.join(", ")}, got \`${reasoning}\``);
+  }
   let pruneBaselinesKeep: number | undefined;
   if (values["prune-baselines"] !== undefined) {
     pruneBaselinesKeep = Number.parseInt(values["prune-baselines"], 10);
@@ -91,6 +98,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
     ...(runsOverride !== undefined ? { runsOverride } : {}),
     allowLiveBaselines: values["allow-live-baselines"],
     ...(pruneBaselinesKeep !== undefined ? { pruneBaselinesKeep } : {}),
+    ...(reasoning !== undefined ? { reasoning: reasoning as ReasoningLevel } : {}),
   };
 }
 

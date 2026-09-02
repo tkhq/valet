@@ -3878,6 +3878,7 @@ export class Thread {
           // Host sampling defaults (eval reproducibility seam). Same
           // defaults-not-overrides rule: anything pi-agent-core forwards wins.
           temperature: options?.temperature ?? this.session.options.sampling?.temperature,
+          reasoning: options?.reasoning ?? this.session.options.sampling?.reasoning,
           samplingParams: options?.samplingParams ?? this.session.options.sampling?.params,
         }),
       // Filter out custom AgentMessage types (decision_gate, compaction, etc.)

@@ -1,7 +1,7 @@
 {
   "caseId": "hard-arithmetic-chain",
   "model": "anthropic/claude-haiku-4-5",
-  "savedAt": "2026-09-02T19:18:29.556Z",
+  "savedAt": "2026-09-02T22:25:13.480Z",
   "status": "pass",
   "trajectory": {
     "caseId": "hard-arithmetic-chain",
@@ -23,7 +23,8 @@
           "cacheRead": 0,
           "cacheWrite": 0,
           "total": 0.003116
-        }
+        },
+        "queueItemId": "q-mtknzkj2-18"
       }
     ],
     "toolCalls": [],
@@ -42,7 +43,7 @@
       "cacheWrite": 0,
       "total": 0.003116
     },
-    "durationMs": 1763,
+    "durationMs": 1370,
     "stopReason": "end_turn"
   }
 }

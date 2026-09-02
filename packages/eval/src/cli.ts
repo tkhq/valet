@@ -86,6 +86,7 @@ async function main(): Promise<number> {
     fullSandboxProvider: () => new DockerSandboxProvider(),
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
     ...(opts.runsOverride !== undefined ? { runsOverride: opts.runsOverride } : {}),
+    ...(opts.reasoning !== undefined ? { reasoning: opts.reasoning } : {}),
     saveBaselines: opts.saveBaseline,
     allowLiveBaselines: opts.allowLiveBaselines,
     onCaseStart: (evalCase, index, total) => {

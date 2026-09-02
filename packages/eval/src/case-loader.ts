@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { parse } from "yaml";
 import {
   CHECK_TYPES,
+  REASONING_LEVELS,
   type Check,
   type EvalCase,
   type EvalTurn,
@@ -352,6 +353,10 @@ export function parseEvalCase(raw: unknown, source: string): EvalCase {
     throw new CaseValidationError(source, "`pass_threshold` must be in (0, 1]");
   }
   const temperature = optionalNumber(raw, "temperature", source);
+  const reasoning = optionalString(raw, "reasoning", source);
+  if (reasoning !== undefined && !(REASONING_LEVELS as readonly string[]).includes(reasoning)) {
+    throw new CaseValidationError(source, `\`reasoning\` must be one of: ${REASONING_LEVELS.join(", ")}`);
+  }
   const tools = optionalStringArray(raw, "tools", source);
   const requiredCredentials = optionalStringArray(raw, "required_credentials", source);
   const mockTools = parseMockTools(raw, source);
@@ -361,6 +366,7 @@ export function parseEvalCase(raw: unknown, source: string): EvalCase {
   if (runs !== undefined) evalCase.runs = runs;
   if (passThreshold !== undefined) evalCase.pass_threshold = passThreshold;
   if (temperature !== undefined) evalCase.temperature = temperature;
+  if (reasoning !== undefined) evalCase.reasoning = reasoning as EvalCase["reasoning"];
   if (tools !== undefined) evalCase.tools = tools;
   if (sessionType !== undefined) evalCase.session_type = sessionType as EvalCase["session_type"];
   if (drive !== undefined) evalCase.drive = drive;
