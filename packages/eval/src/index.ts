@@ -23,6 +23,7 @@ export { jsonSubsetMatches, runDeterministicCheck } from "./checks/deterministic
 export {
   compareToBaseline,
   loadLatestBaseline,
+  pruneBaselines,
   saveBaseline,
   type BaselineComparison,
   type BaselineRecord,
@@ -31,6 +32,8 @@ export { formatScorecard } from "./scorecard.js";
 export { runSuite, type SuiteOptions, type SuiteResult } from "./suite.js";
 export { DEFAULT_MODEL, filterCases, parseCliArgs, type CliOptions } from "./cli-args.js";
 export {
+  flaggedBaselineRecords,
+  flaggedCaseScaffold,
   flaggedPullFile,
   pullFlagged,
   type FlaggedPullFile,

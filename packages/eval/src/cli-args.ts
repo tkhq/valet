@@ -26,6 +26,10 @@ export interface CliOptions {
   pullRating: "positive" | "negative";
   /** Override every case's `runs` (pass@k sample count). */
   runsOverride?: number;
+  /** Permit saving integration/full baselines (live API responses). */
+  allowLiveBaselines: boolean;
+  /** Prune baselines instead of running: keep this many per case+model. */
+  pruneBaselinesKeep?: number;
 }
 
 /** Parse argv (no process side effects; throws on invalid input). */
@@ -44,8 +48,17 @@ export function parseCliArgs(argv: string[]): CliOptions {
       "pull-flagged": { type: "boolean", default: false },
       rating: { type: "string" },
       runs: { type: "string" },
+      "allow-live-baselines": { type: "boolean", default: false },
+      "prune-baselines": { type: "string" },
     },
   });
+  let pruneBaselinesKeep: number | undefined;
+  if (values["prune-baselines"] !== undefined) {
+    pruneBaselinesKeep = Number.parseInt(values["prune-baselines"], 10);
+    if (!Number.isInteger(pruneBaselinesKeep) || pruneBaselinesKeep < 1) {
+      throw new Error(`--prune-baselines must be a positive integer (records to keep), got \`${values["prune-baselines"]}\``);
+    }
+  }
   let runsOverride: number | undefined;
   if (values.runs !== undefined) {
     runsOverride = Number.parseInt(values.runs, 10);
@@ -76,6 +89,8 @@ export function parseCliArgs(argv: string[]): CliOptions {
     pullFlagged: values["pull-flagged"],
     pullRating,
     ...(runsOverride !== undefined ? { runsOverride } : {}),
+    allowLiveBaselines: values["allow-live-baselines"],
+    ...(pruneBaselinesKeep !== undefined ? { pruneBaselinesKeep } : {}),
   };
 }
 
