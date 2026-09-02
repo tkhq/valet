@@ -8,7 +8,12 @@
  * round-trips on the next read within the page's lifetime. Reads that fail
  * outright fall back to the schema default; no exception escapes.
  */
-import { safeLocalStorage, type StorageReader, type StorageWriter } from "./safe-storage";
+import {
+  safeLocalStorage,
+  type StorageReader,
+  type StorageRemover,
+  type StorageWriter,
+} from "./safe-storage";
 
 /**
  * Default policy applied to a tool card at mount and across status
@@ -49,10 +54,12 @@ export function getSubconversationsCollapsed(
 export function setSubconversationsCollapsed(
   parentThreadId: string,
   collapsed: boolean,
-  storage: StorageWriter = safeLocalStorage(),
+  storage: StorageWriter & StorageRemover = safeLocalStorage(),
 ): void {
   try {
-    storage.setItem(collapsedSubconversationKey(parentThreadId), collapsed ? "1" : "0");
+    const key = collapsedSubconversationKey(parentThreadId);
+    if (collapsed) storage.setItem(key, "1");
+    else storage.removeItem(key);
   } catch {
     /* Best-effort persistence; the caller's UI state stands. */
   }

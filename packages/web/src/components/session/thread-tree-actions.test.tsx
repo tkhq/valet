@@ -229,7 +229,10 @@ describe("ThreadTree — collapsible subconversations", () => {
     view.unmount();
     renderTree();
     expect(screen.queryByText("child one")).toBeNull();
-    expect(screen.getByRole("button", { name: /expand subconversations/i })).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: /expand subconversations/i }));
+    expect(screen.getByText("child one")).toBeTruthy();
+    expect(window.localStorage.getItem("valet:subconversations-collapsed:thread-1")).toBeNull();
   });
 
   it("keeps each parent's state independent", async () => {
