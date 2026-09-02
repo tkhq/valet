@@ -237,6 +237,14 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "artifacts_owner_path_unique" ON "artifacts" ("owner_type","owner_id","source_memory_path")',
   },
   {
+    // Model size tiers (TKAI-285). Nullable — null means "use built-in
+    // defaults". Null backfills every pre-existing org row, which reads as
+    // "defaults" in getOrgTierMap, no change in behavior.
+    describe: "orgs.model_tiers column",
+    probe: { kind: "column", table: "orgs", column: "model_tiers" },
+    sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "model_tiers" jsonb',
+  },
+  {
     // The runtime model-registry cache (TKAI-327). An empty table degrades
     // the model catalog to the bundled compile-time list, so a deployment
     // that boots before the repair runs still serves models.
