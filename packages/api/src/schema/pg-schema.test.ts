@@ -698,6 +698,7 @@ describe("pg app schema + migrations", () => {
           'DROP COLUMN "cache_read_tokens", DROP COLUMN "cache_write_tokens", DROP COLUMN "total_tokens", ' +
           'DROP COLUMN "cost_total", DROP COLUMN "priced"',
       );
+      await db.query('DROP INDEX "engine_entries_usage_window"');
       await db.query(OLD_COST_ENTRIES_VIEW);
       await db.query(
         `INSERT INTO engine_entries (id, session_id, thread_id, entry_type, usage, cost, created_at)
@@ -718,6 +719,53 @@ describe("pg app schema + migrations", () => {
         "SELECT total_tokens::int AS total FROM engine_entries WHERE id = 'gen-backfill'",
       );
       expect(backfilled.rows[0]).toEqual({ total: 5 });
+    });
+
+    // A database migrated before the proxy commits has NO llm_proxy_requests
+    // table and a cost_entries view with no proxy arm. The view repair
+    // reads that table, so the table repair must run first (list order) —
+    // without it, the view repair throws 42P01 and the api crash-loops.
+    it("repairs a pre-proxy database: table lands before the view repair reads it", async () => {
+      const PRE_PROXY_VIEW = `CREATE VIEW "cost_entries" AS
+        SELECT
+          e."id" AS "entry_id", e."session_id" AS "session_id", e."created_at" AS "created_at", e."model" AS "model",
+          COALESCE(s."org_id", d."org_id") AS "org_id",
+          CASE WHEN s."id" IS NOT NULL THEN s."user_id"
+               WHEN r."owner_type" = 'user' THEN NULLIF(r."owner_id", '') END AS "user_id",
+          COALESCE(s."owner_type", r."owner_type") AS "owner_type",
+          NULLIF(COALESCE(s."owner_id", r."owner_id"), '') AS "owner_id",
+          r."workflow_id" AS "workflow_id", r."id" AS "workflow_run_id",
+          COALESCE((e."usage"::jsonb->>'input')::bigint, 0) AS "input_tokens",
+          COALESCE((e."usage"::jsonb->>'output')::bigint, 0) AS "output_tokens",
+          COALESCE((e."usage"::jsonb->>'cacheRead')::bigint, 0) AS "cache_read_tokens",
+          COALESCE((e."usage"::jsonb->>'cacheWrite')::bigint, 0) AS "cache_write_tokens",
+          COALESCE((e."usage"::jsonb->>'total')::bigint, 0) AS "total_tokens",
+          (e."cost"::jsonb->>'total')::float8 AS "cost_total",
+          ((e."cost"::jsonb->>'total') IS NOT NULL) AS "priced",
+          CASE WHEN e."session_id" LIKE 'orchestrator:%' THEN 'orchestrator'
+               WHEN e."session_id" LIKE 'wf:%' THEN 'workflow'
+               ELSE 'session' END AS "use_case"
+        FROM "engine_entries" e
+        LEFT JOIN "agent_sessions" s ON s."id" = e."session_id"
+        LEFT JOIN "workflow_runs" r ON e."session_id" LIKE 'wf:%' AND r."id" = split_part(e."session_id", ':', 2)
+        LEFT JOIN "workflow_definitions" d ON d."id" = r."workflow_id"
+        WHERE e."usage" IS NOT NULL AND COALESCE(s."org_id", d."org_id") IS NOT NULL`;
+
+      await db.query('DROP VIEW "cost_entries"');
+      await db.query('DROP TABLE "llm_proxy_requests"');
+      await db.query(PRE_PROXY_VIEW);
+
+      const missing = (await missingSchemaRepairs(db)).map((r) => r.describe);
+      expect(missing).toContain("llm_proxy_requests table");
+      expect(missing).toContain("cost_entries view over generated columns");
+      expect(missing.indexOf("llm_proxy_requests table")).toBeLessThan(
+        missing.indexOf("cost_entries view over generated columns"),
+      );
+
+      await applyAppMigrations(db);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+      const proxyRows = await db.query("SELECT COUNT(*)::int AS n FROM llm_proxy_requests");
+      expect(proxyRows.rows[0]).toEqual({ n: 0 });
     });
 
     // The repair path's lock_timeout handling rides this store-postgres

@@ -256,12 +256,64 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'ALTER TABLE "mcp_oauth_clients" ADD COLUMN IF NOT EXISTS "scopes_supported" jsonb',
   },
   {
+    // The proxy request log (llm-proxy-mitm design). The cost_entries view
+    // repair below reads this table, so a database migrated before the
+    // proxy commits MUST get the table first — keep this entry (and its
+    // index entries) ABOVE the view repair; list order is execution order.
+    describe: "llm_proxy_requests table",
+    probe: { kind: "table", table: "llm_proxy_requests" },
+    sql: `CREATE TABLE IF NOT EXISTS "llm_proxy_requests" (
+      "id" text PRIMARY KEY NOT NULL,
+      "created_at" bigint NOT NULL,
+      "org_id" text NOT NULL,
+      "user_id" text NOT NULL,
+      "api_key_id" text NOT NULL,
+      "provider_kind" text NOT NULL,
+      "model" text,
+      "harness" text,
+      "endpoint" text NOT NULL,
+      "provider_response_id" text,
+      "previous_response_id" text,
+      "stream" boolean NOT NULL,
+      "status_code" integer NOT NULL,
+      "request_body" text NOT NULL,
+      "response_body" text,
+      "input_tokens" bigint NOT NULL DEFAULT 0,
+      "output_tokens" bigint NOT NULL DEFAULT 0,
+      "cache_read_tokens" bigint NOT NULL DEFAULT 0,
+      "cache_write_tokens" bigint NOT NULL DEFAULT 0,
+      "total_tokens" bigint NOT NULL DEFAULT 0,
+      "cost_usd" double precision,
+      "latency_ms" integer,
+      "error" text,
+      "parsed" jsonb,
+      "parse_version" integer,
+      "parse_error" text
+    )`,
+  },
+  {
+    describe: "llm_proxy_requests_org_created index",
+    probe: { kind: "index", index: "llm_proxy_requests_org_created" },
+    sql: 'CREATE INDEX IF NOT EXISTS "llm_proxy_requests_org_created" ON "llm_proxy_requests" ("org_id", "created_at")',
+  },
+  {
+    describe: "llm_proxy_requests_user_created index",
+    probe: { kind: "index", index: "llm_proxy_requests_user_created" },
+    sql: 'CREATE INDEX IF NOT EXISTS "llm_proxy_requests_user_created" ON "llm_proxy_requests" ("user_id", "created_at")',
+  },
+  {
     // Parsed-once token/cost numbers for cost attribution — see the column
     // comments in 0000_engine.sql (keep the expressions in lockstep). This
     // is an engine-table repair on the app side because the engine tracker
     // skips an already-applied 0000_engine.sql, same as the app tracker.
-    // Adding STORED generated columns rewrites the table; the rewrite
-    // backfills every existing row, which is the point.
+    //
+    // Adding STORED generated columns REWRITES engine_entries — the whole
+    // thread history — under ACCESS EXCLUSIVE. The rewrite backfills every
+    // existing row, which is the point, but lock_timeout only bounds lock
+    // ACQUISITION, not the rewrite itself: writes block for the duration
+    // (roughly seconds per million rows). On a rolling update the old pod's
+    // traffic can also starve the lock (TKAI-244 shape) — if the rollout
+    // sticks, delete the old pod and re-apply, per the dev-v2 runbook.
     describe: "engine_entries generated cost columns",
     probe: { kind: "column", table: "engine_entries", column: "input_tokens" },
     sql: `ALTER TABLE "engine_entries"
@@ -272,6 +324,16 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
       ADD COLUMN IF NOT EXISTS "total_tokens" bigint GENERATED ALWAYS AS (COALESCE(("usage"::jsonb->>'total')::bigint, 0)) STORED,
       ADD COLUMN IF NOT EXISTS "cost_total" double precision GENERATED ALWAYS AS (("cost"::jsonb->>'total')::float8) STORED,
       ADD COLUMN IF NOT EXISTS "priced" boolean GENERATED ALWAYS AS ((("cost"::jsonb->>'total') IS NOT NULL)) STORED`,
+  },
+  {
+    // The window index for cost attribution (0000_engine.sql) — the engine
+    // tracker never ships it to an already-migrated database, and without
+    // it every usage aggregate seq-scans all of engine_entries. Plain
+    // CREATE INDEX (no CONCURRENTLY — repairs run in a transaction) blocks
+    // writes while it builds; the partial predicate keeps it small.
+    describe: "engine_entries_usage_window index",
+    probe: { kind: "index", index: "engine_entries_usage_window" },
+    sql: 'CREATE INDEX IF NOT EXISTS "engine_entries_usage_window" ON "engine_entries" ("created_at") WHERE "usage" IS NOT NULL',
   },
   {
     // The view must read those generated columns instead of re-casting the
