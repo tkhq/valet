@@ -42,17 +42,36 @@ export function jsonSubsetMatches(subset: unknown, actual: unknown): boolean {
   return Object.entries(subset).every(([k, v]) => jsonSubsetMatches(v, actualRecord[k]));
 }
 
+/** A call matches a check's `tool` by its tool name or its plugin action id. */
+function callMatches(call: TrajectoryToolCall, tool: string): boolean {
+  return call.toolName === tool || call.actionId === tool;
+}
+
+/**
+ * The args a check compares against. A `call_tool` call matched via its
+ * action id compares the nested `params` — that is what the action received.
+ */
+function argsForMatch(call: TrajectoryToolCall, tool: string): unknown {
+  if (call.toolName === "call_tool" && call.actionId === tool) {
+    if (typeof call.args === "object" && call.args !== null) {
+      return (call.args as Record<string, unknown>).params ?? {};
+    }
+    return {};
+  }
+  return call.args;
+}
+
 /** Run one deterministic check against a trajectory. */
 export function runDeterministicCheck(check: DeterministicCheck, trajectory: Trajectory): CheckResult {
   const calls = trajectory.toolCalls;
-  const named = (tool: string): TrajectoryToolCall[] => calls.filter((c) => c.toolName === tool);
+  const named = (tool: string): TrajectoryToolCall[] => calls.filter((c) => callMatches(c, tool));
 
   switch (check.type) {
     case "tool_called": {
       let candidates = named(check.tool);
       let scope = "";
       if (check.after !== undefined) {
-        const anchor = calls.find((c) => c.toolName === check.after);
+        const anchor = calls.find((c) => callMatches(c, check.after ?? ""));
         if (!anchor) {
           return fail(
             check,
@@ -128,11 +147,11 @@ export function runDeterministicCheck(check: DeterministicCheck, trajectory: Tra
       if (matches.length === 0) {
         return fail(check, `expected \`${check.tool}\` to be called with matching args, but it was never called.`);
       }
-      if (!matches.some((c) => jsonSubsetMatches(check.args, c.args))) {
+      if (!matches.some((c) => jsonSubsetMatches(check.args, argsForMatch(c, check.tool)))) {
         return fail(
           check,
           `no \`${check.tool}\` call matched args subset ${JSON.stringify(check.args)}. Actual args: ${matches
-            .map((c) => JSON.stringify(c.args))
+            .map((c) => JSON.stringify(argsForMatch(c, check.tool)))
             .join(" | ")}`,
         );
       }

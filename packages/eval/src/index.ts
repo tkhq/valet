@@ -9,6 +9,7 @@ export {
   type RunnerOptions,
 } from "./runner.js";
 export { EvalMemoryStore, buildEvalMemoryTools } from "./memory-tools.js";
+export { buildMockCatalogTools } from "./mock-catalog.js";
 export { runCheck, runChecks, type CheckContext, type JudgeRunner } from "./checks/index.js";
 export { jsonSubsetMatches, runDeterministicCheck } from "./checks/deterministic.js";
 export {

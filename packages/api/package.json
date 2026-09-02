@@ -16,6 +16,10 @@
     "./memory-links": {
       "types": "./src/lib/memory-links.ts",
       "import": "./src/lib/memory-links.ts"
+    },
+    "./plugins": {
+      "types": "./src/plugins/registry.gen.ts",
+      "import": "./src/plugins/registry.gen.ts"
     }
   },
   "scripts": {

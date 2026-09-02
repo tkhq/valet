@@ -25,6 +25,14 @@ export interface TrajectoryToolCall {
   error?: string;
   /** 0-based order across the whole trajectory. */
   index: number;
+  /**
+   * Fully-qualified plugin action id when this call went through the plugin
+   * catalog: `call_tool` calls carry their `tool_id` argument here, and
+   * pinned tools (`service__action`) carry the dotted form. Deterministic
+   * tool checks match on `toolName` OR `actionId`, so a case can say
+   * `tool: github.list_pull_requests` regardless of the invocation route.
+   */
+  actionId?: string;
 }
 
 /** One agent turn (one assistant message cycle) with its reported usage. */

@@ -13,6 +13,7 @@
  *
  * Exits 0 when every run case passes, 1 otherwise.
  */
+import { bundledPlugins } from "@valet/api/plugins";
 import { loadCases } from "./case-loader.js";
 import { filterCases, parseCliArgs } from "./cli-args.js";
 import { buildJudgeRunner } from "./checks/judge.js";
@@ -36,6 +37,7 @@ async function main(): Promise<number> {
     model: opts.model,
     baselinesDir: opts.baselinesDir,
     judge: buildJudgeRunner(),
+    mockPlugins: bundledPlugins,
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
     saveBaselines: opts.saveBaseline,
     onCaseStart: (evalCase, index, total) => {

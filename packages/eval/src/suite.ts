@@ -3,7 +3,7 @@
  * runner, score each trajectory, compare to baselines, and optionally save
  * new baselines. `cli.ts` is a thin argv wrapper around `runSuite`.
  */
-import type { Model } from "@valet/engine";
+import type { Model, ValetPlugin } from "@valet/engine";
 import {
   compareToBaseline,
   loadLatestBaseline,
@@ -15,8 +15,8 @@ import { runChecks, type JudgeRunner } from "./checks/index.js";
 import { runCase } from "./runner.js";
 import type { EvalCase, ScorecardEntry } from "./types.js";
 
-/** Profiles the suite can run today. mock lands in TKAI-335, integration/full in TKAI-336. */
-const SUPPORTED_PROFILES = new Set(["unit"]);
+/** Profiles the suite can run today. integration/full land in TKAI-336. */
+const SUPPORTED_PROFILES = new Set(["unit", "mock"]);
 
 export interface SuiteOptions {
   /** Default model for cases without a pin. */
@@ -25,6 +25,8 @@ export interface SuiteOptions {
   baselinesDir: string;
   /** Judge for judge_* checks. Absent → judge checks fail with a config detail. */
   judge?: JudgeRunner;
+  /** Real plugin manifests backing `profile: mock` cases. */
+  mockPlugins?: ValetPlugin[];
   /** Override every case's timeout. */
   timeoutMs?: number;
   /** Save each finished case's trajectory as a new baseline. */
@@ -58,7 +60,7 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
       entries.push({
         caseId: evalCase.id,
         status: "skip",
-        skipReason: `profile ${profile} is not supported yet (mock: TKAI-335, integration/full: TKAI-336)`,
+        skipReason: `profile ${profile} is not supported yet (integration/full: TKAI-336)`,
         durationMs: 0,
         checkResults: [],
       });
@@ -78,6 +80,7 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
       const result = await runCase(caseForRun, {
         model: evalCase.model ?? opts.model,
         ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+        ...(opts.mockPlugins !== undefined ? { mockPlugins: opts.mockPlugins } : {}),
       });
 
       const checkResults = await runChecks(evalCase.checks, result.trajectory, {
