@@ -127,6 +127,10 @@ interface SpawnedChild {
   prompt: string;
   /** Set once the child settles and its child.settled signal is delivered. */
   signaled: boolean;
+  /** Wall-clock spawn time; with settledAt it bounds the child's duration. */
+  spawnedAt: number;
+  /** Set when the child's submission settles. */
+  settledAt?: number;
 }
 
 /** Filter the session toolset to an eval case's `tools:` pin. */
@@ -243,7 +247,13 @@ async function runCaseInner(evalCase: EvalCase, opts: RunnerOptions): Promise<Ca
       owner: ctx.owner,
     });
     const receipt = await child.prompt(req.prompt);
-    children.push({ session: child, queueItemId: receipt.queueItemId, prompt: req.prompt, signaled: false });
+    children.push({
+      session: child,
+      queueItemId: receipt.queueItemId,
+      prompt: req.prompt,
+      signaled: false,
+      spawnedAt: Date.now(),
+    });
     return { childSessionId: child.id, queueItemId: receipt.queueItemId };
   };
 
@@ -316,6 +326,7 @@ async function runCaseInner(evalCase: EvalCase, opts: RunnerOptions): Promise<Ca
       let childOutcome: string;
       try {
         const res = await next.session.thread().awaitResult(next.queueItemId, { timeoutMs: remaining() });
+        next.settledAt = Date.now();
         childOutcome = res.outcome;
         body =
           res.outcome === "failed" || res.outcome === "aborted"
@@ -370,7 +381,9 @@ async function runCaseInner(evalCase: EvalCase, opts: RunnerOptions): Promise<Ca
       caseId: `${evalCase.id}#child-${i}`,
       prompt: child.prompt,
       model: modelSpec,
-      durationMs: 0,
+      // Spawn-to-settle wall time. Children run concurrently with the
+      // parent, so these durations overlap and must not be summed.
+      durationMs: (child.settledAt ?? Date.now()) - child.spawnedAt,
       entries: childEntries,
     });
     const spawnCall = findSpawnCall(entries, child.session.id);

@@ -72,6 +72,37 @@ function addCost(sum: MessageCost, c: MessageCost): void {
   sum.total += c.total;
 }
 
+/**
+ * Recursive totals across a trajectory and all its children — what a
+ * scorecard reports for a case's real spend. `cost` is present when ANY
+ * level was priced (unpriced levels contribute zero, which understates —
+ * a mixed run's total is a floor, never an exact figure).
+ */
+export function aggregateUsage(trajectory: Trajectory): {
+  usage: MessageUsage;
+  cost?: MessageCost;
+  toolCallCount: number;
+  turnCount: number;
+} {
+  const usage: MessageUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+  const cost: MessageCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+  let anyCost = false;
+  let toolCallCount = 0;
+  let turnCount = 0;
+  const walk = (t: Trajectory): void => {
+    addUsage(usage, t.usage);
+    if (t.cost) {
+      addCost(cost, t.cost);
+      anyCost = true;
+    }
+    toolCallCount += t.toolCalls.length;
+    turnCount += t.turns.length;
+    for (const child of t.children ?? []) walk(child);
+  };
+  walk(trajectory);
+  return { usage, ...(anyCost ? { cost } : {}), toolCallCount, turnCount };
+}
+
 export interface ExtractTrajectoryInput {
   caseId: string;
   /** The first user turn's content. */
@@ -109,6 +140,7 @@ export function extractTrajectory(input: ExtractTrajectoryInput): Trajectory {
       addCost(cost, entry.cost);
       anyCost = true;
     }
+    if (entry.queueItemId !== undefined) turn.queueItemId = entry.queueItemId;
     turns.push(turn);
 
     for (const part of entry.parts ?? []) {
@@ -123,6 +155,7 @@ export function extractTrajectory(input: ExtractTrajectoryInput): Trajectory {
         ...(part.error !== undefined ? { error: part.error } : {}),
         index: toolIndex++,
         ...(actionId !== undefined ? { actionId } : {}),
+        ...(part.elided === true ? { elided: true } : {}),
       });
     }
 
