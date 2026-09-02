@@ -769,7 +769,7 @@ export interface CredentialProvider {
 }
 
 export interface CredentialOwner {
-  type: "user" | "org" | "session";
+  type: "user" | "org" | "team" | "session";
   id: string;
 }
 
