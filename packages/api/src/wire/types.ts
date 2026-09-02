@@ -958,8 +958,10 @@ export type PatchThreadResponse = ThreadSummary;
 /**
  * Patch a session's settings. Send one field or both.
  *
- * `model` is the session default that threads inherit when they have no
- * override. `title` is the session name shown in the header and the lists;
+ * `model` is the session default. New threads pin it at creation (thread
+ * PATCH changes an existing thread's model); only legacy threads without a
+ * pin keep tracking it. `title` is the session name shown in the header and
+ * the lists;
  * a person sets it to correct what the auto-titler chose. A body with
  * neither field is rejected.
  */
@@ -1042,6 +1044,19 @@ export interface MessageCommand {
 }
 
 /**
+ * Projection of an engine `CompactionEntry` (thread-model-pinning and
+ * compaction design, decision 7). Renders as a divider in the transcript.
+ * `coveredEntryIds` is deliberately shipped: it is the seam a future DAG
+ * explorer needs to roll a thread back to (or forward from) this boundary.
+ */
+export interface MessageCompaction {
+  summary: string;
+  tokensBefore: number;
+  tokensAfter: number;
+  coveredEntryIds: string[];
+}
+
+/**
  * Present on a user message that is a skill invocation: a slash-command
  * expansion (stamped as submission metadata at dispatch) or a host-invoked
  * `Thread.skill()` submission. `args` is the raw text the user typed after
@@ -1097,6 +1112,12 @@ export interface Message {
    * The renderer uses `ok` to show success/failure styling.
    */
   command?: MessageCommand;
+  /**
+   * Present when this message projects a `CompactionEntry` (role is
+   * `system`, `content` carries the summary). The client renders a
+   * compaction divider, never a chat bubble.
+   */
+  compaction?: MessageCompaction;
   /**
    * Present on a user message that is a skill invocation (see
    * `MessageSkillInvocation`). Projected from the persisted entry's
@@ -1357,6 +1378,20 @@ export type WireEvent =
       toModel: string;
       reason: string;
     }
+  | {
+      /**
+       * Compaction lifecycle (thread-model-pinning and compaction design,
+       * decision 7). `compaction_start` shows a transient "compacting"
+       * indicator; `compaction_end` tells the client to refetch messages so
+       * the persisted divider appears (REST stays the authoritative history
+       * source). `compaction_end` fires on failure too — the pair always
+       * balances.
+       */
+      seq: number;
+      ts: number; offset?: string;
+      type: "compaction_start" | "compaction_end";
+      threadId: string;
+    }
   | { seq: number; ts: number; offset?: string; type: "decision_gate"; threadId: string; gate: DecisionGate }
   | {
       seq: number;
@@ -1531,6 +1566,12 @@ export interface TeamSummary {
    * (org admins see every team in the org). The UI gates admin-only
    * controls on this plus the caller's org role. */
   callerRole: "admin" | "member" | null;
+  /**
+   * Team default model (TKAI-255). Sessions this team owns start on it
+   * unless the member set a personal default. Null = no team override —
+   * resolution falls through to the org preference list.
+   */
+  defaultModel: string | null;
 }
 
 export interface TeamMemberSummary {
@@ -1551,6 +1592,16 @@ export interface CreateTeamRequest {
 }
 
 export interface CreateTeamResponse {
+  team: TeamSummary;
+}
+
+/** `PATCH /api/teams/:id` — team settings. `defaultModel: null` clears the
+ * override back to the org preference list. */
+export interface PatchTeamRequest {
+  defaultModel?: string | null;
+}
+
+export interface PatchTeamResponse {
   team: TeamSummary;
 }
 
@@ -2281,6 +2332,11 @@ export interface CreateWorkflowEventTriggerRequest {
   name: string;
   eventKeys: string[];
   filters?: unknown[];
+  /** Explicit opt-out of the channel requirement on a `slack.app_mention`
+   * subscription (see `events/mention-scope.ts`). Ignored for other keys.
+   * Not persisted: a stored mention subscription with no channel filter is
+   * the any-channel state. */
+  anyChannel?: boolean;
 }
 
 export interface UpdateWorkflowEventTriggerRequest {
@@ -2288,6 +2344,9 @@ export interface UpdateWorkflowEventTriggerRequest {
   eventKeys?: string[];
   filters?: unknown[];
   enabled?: boolean;
+  /** See `CreateWorkflowEventTriggerRequest.anyChannel`. Only consulted when
+   * the patch changes `filters` or `eventKeys`. */
+  anyChannel?: boolean;
 }
 
 export interface WorkflowEventTriggerResponse {
@@ -3788,6 +3847,11 @@ export interface EventSubscriptionFilterWire {
    * it. Persisted verbatim in the `filters` jsonb.
    */
   label?: string;
+  /**
+   * Optional display labels for an `in` list, aligned with `value` by index
+   * (a channel id list shown as "#eng, #ops"). Matching ignores it.
+   */
+  labels?: string[];
 }
 
 /** One provider-populated choice for a filter value (a Slack user, a repo). */
@@ -3871,15 +3935,54 @@ export interface ActionPolicyWire {
   updatedAt: number;
 }
 
+/**
+ * One existing subscription a candidate write would fire alongside (TKAI-294,
+ * `events/collisions.ts`). `relation` is from the candidate's point of view:
+ * `superset` means the candidate covers everything this subscription covers
+ * on the shared keys.
+ */
+export interface EventSubscriptionCollisionWire {
+  subscription: EventSubscriptionWire;
+  relation: "equal" | "superset" | "subset" | "partial";
+  sharedKeys: string[];
+}
+
+/** `blocking` rejects the write with 409 unless the request sets
+ * `allowCollision`; `overlapping` commits and rides back as a warning. */
+export interface EventSubscriptionCollisionsWire {
+  blocking: EventSubscriptionCollisionWire[];
+  overlapping: EventSubscriptionCollisionWire[];
+}
+
+/** The 409 body of a blocked subscription write. `errorText` still reads
+ * `error`; the collision list lets the UI name what the rule steps on. */
+export interface EventSubscriptionCollisionErrorWire {
+  error: string;
+  collisions: EventSubscriptionCollisionsWire;
+}
+
 export interface CreateEventSubscriptionRequest {
   name: string;
   eventKeys: string[];
   filters?: EventSubscriptionFilterWire[];
   target: EventSubscriptionTargetWire;
   enabled?: boolean;
+  /** Explicit opt-out of the channel requirement on a `slack.app_mention`
+   * subscription (see `events/mention-scope.ts`). Ignored for other keys.
+   * Not persisted: a stored mention subscription with no channel filter is
+   * the any-channel state. */
+  anyChannel?: boolean;
+  /** Commit even when the write collides with existing subscriptions
+   * (`collisions.blocking` non-empty). The override is logged. */
+  allowCollision?: boolean;
 }
 
-export type CreateEventSubscriptionResponse = EventSubscriptionWire;
+export type CreateEventSubscriptionResponse = EventSubscriptionWire & {
+  /** Present when the committed write still collides with existing enabled
+   * subscriptions — every `overlapping` entry, plus any `blocking` entries an
+   * `allowCollision` override pushed through. */
+  collisions?: EventSubscriptionCollisionsWire;
+};
 
 export interface ListEventSubscriptionsResponse {
   subscriptions: EventSubscriptionWire[];
@@ -3890,9 +3993,17 @@ export interface PatchEventSubscriptionRequest {
   eventKeys?: string[];
   filters?: EventSubscriptionFilterWire[];
   enabled?: boolean;
+  /** See `CreateEventSubscriptionRequest.anyChannel`. Only consulted when
+   * the patch changes `filters` or `eventKeys`. */
+  anyChannel?: boolean;
+  /** See `CreateEventSubscriptionRequest.allowCollision`. */
+  allowCollision?: boolean;
 }
 
-export type PatchEventSubscriptionResponse = EventSubscriptionWire;
+export type PatchEventSubscriptionResponse = EventSubscriptionWire & {
+  /** See `CreateEventSubscriptionResponse.collisions`. */
+  collisions?: EventSubscriptionCollisionsWire;
+};
 
 /** Feed item — payload deliberately excluded (fetch `/api/events/:id`). */
 export interface EventSummaryWire {

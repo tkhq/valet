@@ -78,7 +78,11 @@ import {
   users,
   type SecurityCellRow,
 } from "../schema/index.js";
-import { loadAssistant } from "../assistants/service.js";
+import {
+  ArchivedAssistantError,
+  loadAssistant,
+  loadAssistantBySessionId,
+} from "../assistants/service.js";
 import { applyBehaviorToPlugins, filterSkillSources, parseAssistantBehavior } from "../assistants/behavior.js";
 import { personaPrefixText } from "../assistants/persona.js";
 import { internalToken } from "../lib/internal-auth.js";
@@ -395,6 +399,13 @@ export interface SessionMeta {
    */
   userName?: string;
   userEmail?: string;
+  /**
+   * The owning team when the session lives in a team workspace
+   * (`agent_sessions.owner_type = 'team'`), else absent. Feeds the
+   * team tier of `resolveModelForBuild`'s preference cascade (TKAI-255).
+   * `loadSessionMeta` supplies it from the app row.
+   */
+  ownerTeamId?: string;
 }
 
 /** A session build's model pair: the wire-ready pi-ai model object plus the
@@ -778,6 +789,31 @@ export class EngineHost {
     const pending = this.inflight.get(sessionId);
     if (pending) return pending;
 
+    // Cold build only: the prefix parse above cannot recognize rows
+    // migrated from orchestrator_identities, whose assistants row keeps a
+    // legacy `orchestrator:*` session id — the assistants table is the
+    // authority (`assistants_session` unique index). Without this lookup a
+    // legacy assistant wakes through the generic build below: no persona,
+    // no memory, and no archived-wake refusal. Cache hits above stay
+    // query-free — an assistant session cached via `assistantSessionFor`
+    // lands in the same maps under the same key.
+    if (this.opts.db) {
+      const assistant = await loadAssistantBySessionId(this.opts.db, sessionId);
+      if (assistant) {
+        return this.assistantSessionFor(
+          assistant.id,
+          { actorUserId: meta.userId, orgId: meta.orgId },
+          { sessionId: assistant.sessionId },
+        );
+      }
+      // The awaited lookup opened a gap since the cache/inflight checks
+      // above — re-check, or two concurrent cold wakes both start a build.
+      const cachedAfter = this.cache.get(sessionId);
+      if (cachedAfter) return cachedAfter.session;
+      const pendingAfter = this.inflight.get(sessionId);
+      if (pendingAfter) return pendingAfter;
+    }
+
     const promise = this.buildSession(sessionId, meta).finally(() => {
       this.inflight.delete(sessionId);
     });
@@ -814,11 +850,12 @@ export class EngineHost {
       : personaCell
         ? securityProvisioning.mcpPlugins
         : [];
-    // `SessionMeta` carries no principal, and this builder passes no `owner`
-    // to the engine either — `Session`'s constructor then defaults the
-    // principal to `{ type: "user", id: options.userId }`. So the acting
-    // user IS this session's owner, and the same `{ user, meta.userId }`
-    // scope the session's credentials already use is the honest one here.
+    // `SessionMeta` carries no principal (`ownerTeamId` only feeds the
+    // model-preference cascade), and this builder passes no `owner` to the
+    // engine either — `Session`'s constructor then defaults the principal
+    // to `{ type: "user", id: options.userId }`. So the acting user IS this
+    // session's owner, and the same `{ user, meta.userId }` scope the
+    // session's credentials already use is the honest one here.
     const extras = await this.sessionExtras({ type: "user", id: meta.userId }, meta.orgId, [], extraPlugins);
     const skillsProvider = this.skillsProviderFor({ type: "user", id: meta.userId }, meta.orgId, extraPlugins);
 
@@ -833,7 +870,13 @@ export class EngineHost {
     });
 
     const existing = await this.opts.engineStore.getSession(sessionId);
-    const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, meta.userId, meta.orgId);
+    // `userId` stays in the cascade even for a team-owned row: this
+    // builder makes member-started sessions, and the starting member's
+    // personal default wins over the team's for their own session.
+    const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, meta.orgId, {
+      userId: meta.userId,
+      ownerTeamId: meta.ownerTeamId,
+    });
     const resolveModel = this.makeResolveModel(meta.orgId);
     const profile = meta.profile ?? "headless";
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
@@ -1981,6 +2024,14 @@ export class EngineHost {
           `or resolve the owner's default with resolveDefaultAssistant, before waking its session.`,
       );
     }
+    // A retired/archived assistant must not wake (TKAI-296). Every
+    // resurrect path funnels through this build — a message POST on the
+    // soft-deleted session, a stale channel gate card, a workflow receipt
+    // — and a rebuild would run a ghost session in parallel with the
+    // owner's next default.
+    if (assistant.archivedAt !== null) {
+      throw new ArchivedAssistantError();
+    }
     // The OWNER, not the assistant: memory, journal and skills belong to the
     // principal and are shared by every assistant it owns. Only the
     // workspace directory below is per-assistant.
@@ -2007,7 +2058,14 @@ export class EngineHost {
     }
 
     const existing = await this.opts.engineStore.getSession(sessionId);
-    const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, meta.actorUserId, meta.orgId);
+    // A team/org assistant session is SHARED: whoever happens to wake it
+    // first is not its owner, so their personal default must not persist
+    // onto every other member — only a user-principal assistant reads the
+    // actor's own default (TKAI-255 review round).
+    const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, meta.orgId, {
+      userId: principal.type === "user" ? meta.actorUserId : undefined,
+      ownerTeamId: principal.type === "team" ? principal.id : undefined,
+    });
     const queueMode: "steer" | "followup" = principal.type === "user" ? "steer" : "followup";
     // `principal`, not `meta.actorUserId`: an assistant session belongs to
     // the principal and is shared by everyone who can reach it, exactly like
@@ -2201,7 +2259,24 @@ export class EngineHost {
    */
   async destroy(sessionId: string): Promise<void> {
     const entry = this.cache.get(sessionId);
-    if (!entry) return;
+    if (!entry) {
+      // Cold session: nothing cached in this process, but every caller of
+      // destroy() means "this session is being deleted", and the durable
+      // engine rows and live grants/tokens must not outlive that. The
+      // sandbox, if one exists, is reclaimed by the reconcile sweep — its
+      // orphan rule keys on the engine session row being gone, which is
+      // exactly what this delete produces.
+      await this.opts.engineStore.deleteSession(sessionId);
+      if (this.opts.db) {
+        await revokeSandboxTokens(this.opts.db, sessionId);
+        try {
+          await revokeSessionGrants(this.opts.db, sessionId);
+        } catch (err) {
+          console.error(`EngineHost: revoking session grants for ${sessionId} failed:`, err);
+        }
+      }
+      return;
+    }
     try {
       await entry.session.destroy();
     } finally {
@@ -2644,7 +2719,19 @@ export class EngineHost {
   private async orgPreferredModel(orgId: string): Promise<string | undefined> {
     if (!this.opts.db) return undefined;
     const prefs = await getOrgModelPreferences(this.opts.db, orgId);
-    if (prefs.length === 0) return undefined;
+    return this.firstActivePreference(orgId, prefs);
+  }
+
+  /**
+   * The first entry of `prefs` whose provider is active, or `undefined`.
+   * Shared by the org tier and the team tier of the cascade — both are
+   * defaults imposed on people who did not pick them, so both must fall
+   * through past an inactive provider instead of failing every build
+   * (llm-providers design decision 6). Only the user's own explicit
+   * default resolves straight through and fails loudly.
+   */
+  private async firstActivePreference(orgId: string, prefs: string[]): Promise<string | undefined> {
+    if (!this.opts.db || prefs.length === 0) return undefined;
     const rows = await listLlmProviders(this.opts.db, orgId);
     for (const pref of prefs) {
       const { namespace } = parseModelId(pref);
@@ -2681,6 +2768,29 @@ export class EngineHost {
   }
 
   /**
+   * `teams.default_model` for the team that owns the session being built,
+   * filtered through the same active-provider walk as the org tier — a
+   * team default whose provider was later disabled falls through to the
+   * org preference list instead of failing every member's session build
+   * (members did not pick it and cannot clear it). `undefined` when unset,
+   * inactive, or the host has no `db`. Consulted only for team-owned
+   * sessions (TKAI-255) — a personal session never reads any team's
+   * preference, because a user can belong to several teams and none of
+   * them owns that session. Uncached, same as `userDefaultModel`.
+   */
+  private async teamDefaultModel(orgId: string, teamId: string): Promise<string | undefined> {
+    if (!this.opts.db) return undefined;
+    const rows = await this.opts.db
+      .select({ defaultModel: teams.defaultModel })
+      .from(teams)
+      .where(eq(teams.id, teamId))
+      .limit(1);
+    const pref = rows[0]?.defaultModel;
+    if (!pref) return undefined;
+    return this.firstActivePreference(orgId, [pref]);
+  }
+
+  /**
    * Resolve the `Model` to build/restore a session with. Spec-pinned
    * restore-no-clobber constraint: `Session.rehydrate`
    * (`packages/engine/src/session.ts`) always takes `options.model` as
@@ -2693,19 +2803,27 @@ export class EngineHost {
    * (`existing` present), the *persisted* model always wins over both
    * `overrideId` and the user default — that persisted value already
    * reflects whatever `setModel` (or the original create-time model) set.
-   * Only on create does `overrideId ?? userDefault ?? hardcoded-default`
-   * apply.
+   * Only on create does the preference cascade apply (TKAI-255):
+   * `overrideId ?? userDefault ?? teamDefault ?? orgPreferred ?? hardcoded`
+   * — most-specific wins. The tiers are opt-in via `prefs`:
+   *
+   * - `userId` names the person whose personal default may apply. Callers
+   *   building a SHARED principal-owned session (team/org assistant, a
+   *   team-owned workflow or child) must omit it: the first member to
+   *   touch a shared session must not freeze their personal preference
+   *   onto everyone (the resolved model persists, restore-no-clobber).
+   * - `ownerTeamId` opts into the team tier for team-owned sessions.
    */
   private async resolveModelForBuild(
     existing: SessionData | null,
-    userId: string,
     orgId: string,
-    overrideId?: string,
+    prefs: { userId?: string; overrideId?: string; ownerTeamId?: string },
   ): Promise<BuildModel> {
     if (existing?.model) return this.resolveModelObject(orgId, existing.model);
     const id =
-      overrideId ??
-      (await this.userDefaultModel(userId)) ??
+      prefs.overrideId ??
+      (prefs.userId ? await this.userDefaultModel(prefs.userId) : undefined) ??
+      (prefs.ownerTeamId ? await this.teamDefaultModel(orgId, prefs.ownerTeamId) : undefined) ??
       (await this.orgPreferredModel(orgId)) ??
       this.opts.defaultModelId ??
       "claude-haiku-4-5";
@@ -2802,7 +2920,13 @@ export class EngineHost {
       : provisionedExtras.roles;
 
     const existing = await this.opts.engineStore.getSession(childSessionId);
-    const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, opts.actorUserId, opts.orgId, opts.modelId);
+    // Team- and org-owned builds are shared: omit `userId` so the acting
+    // member's personal default cannot freeze onto the shared session.
+    const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, opts.orgId, {
+      userId: opts.owner.type === "user" ? opts.actorUserId : undefined,
+      overrideId: opts.modelId,
+      ownerTeamId: opts.owner.type === "team" ? opts.owner.id : undefined,
+    });
 
     const profile = opts.profile ?? "headless";
     const sandboxMint = await this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId, profile);
@@ -2981,7 +3105,13 @@ export class EngineHost {
     const skillsProvider = this.skillsProviderFor(opts.owner, opts.orgId);
 
     const existing = await this.opts.engineStore.getSession(sessionId);
-    const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, opts.actorUserId, opts.orgId, opts.modelId);
+    // Team- and org-owned builds are shared: omit `userId` so the acting
+    // member's personal default cannot freeze onto the shared session.
+    const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, opts.orgId, {
+      userId: opts.owner.type === "user" ? opts.actorUserId : undefined,
+      overrideId: opts.modelId,
+      ownerTeamId: opts.owner.type === "team" ? opts.owner.id : undefined,
+    });
 
     const sandboxMint = await this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId, "headless");
     const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId, opts.owner.type);

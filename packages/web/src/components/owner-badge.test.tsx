@@ -74,6 +74,7 @@ function team(over: Partial<ListTeamsResponse["teams"][number]> = {}) {
     createdAt: 1,
     memberCount: 3,
     callerRole: "member" as const,
+    defaultModel: null,
     ...over,
   };
 }

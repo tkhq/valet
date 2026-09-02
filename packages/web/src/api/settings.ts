@@ -18,6 +18,8 @@ import type {
   CreateLlmProviderResponse,
   CreateTeamRequest,
   CreateTeamResponse,
+  PatchTeamRequest,
+  PatchTeamResponse,
   DeleteCredentialResponse,
   GetGithubAppResponse,
   GetLlmProviderPreferencesResponse,
@@ -393,6 +395,41 @@ export function useCreateTeam() {
   return useMutation<CreateTeamResponse, Error, CreateTeamRequest>({
     mutationFn: (body) => api.createTeam(body),
     onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkSettings.teams() });
+    },
+  });
+}
+
+export function usePatchTeam() {
+  const qc = useQueryClient();
+  return useMutation<
+    PatchTeamResponse,
+    Error,
+    { id: string; body: PatchTeamRequest },
+    { previous: ListTeamsResponse | undefined }
+  >({
+    mutationFn: ({ id, body }) => api.patchTeam(id, body),
+    // Optimistic, like useSetOrgMemberRole: the combobox reads the teams
+    // cache, so without this the input shows the OLD model for the whole
+    // PATCH round trip and a save looks like it did not take.
+    onMutate: async ({ id, body }) => {
+      await qc.cancelQueries({ queryKey: qkSettings.teams() });
+      const previous = qc.getQueryData<ListTeamsResponse>(qkSettings.teams());
+      if (previous && body.defaultModel !== undefined) {
+        qc.setQueryData<ListTeamsResponse>(qkSettings.teams(), {
+          teams: previous.teams.map((t) =>
+            t.id === id ? { ...t, defaultModel: body.defaultModel ?? null } : t,
+          ),
+        });
+      }
+      return { previous };
+    },
+    onError: (_err, _vars, context) => {
+      if (context?.previous) {
+        qc.setQueryData(qkSettings.teams(), context.previous);
+      }
+    },
+    onSettled: () => {
       qc.invalidateQueries({ queryKey: qkSettings.teams() });
     },
   });

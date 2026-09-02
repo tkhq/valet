@@ -29,6 +29,8 @@ import {
   useReplaceSandbox,
   useSetSessionModel,
   useSetSessionProfile,
+  useSetThreadModel,
+  useThreads,
 } from "~/api/queries";
 import { useMe, useOrg, useTeams } from "~/api/settings";
 import { useAssistants } from "~/api/assistants";
@@ -91,6 +93,22 @@ export function SessionHeader({
   const navigate = useNavigate();
   const del = useDeleteSession();
   const setModel = useSetSessionModel(session.id);
+  const setThreadModel = useSetThreadModel(session.id);
+  // The picker is thread-scoped (threads pin their model at creation —
+  // TKAI-201): it shows and PATCHes the ACTIVE THREAD's model. Legacy
+  // threads without a pin display, and keep tracking, the session default.
+  //
+  // With a threadId in hand the picker NEVER falls back to the session
+  // PATCH: while the threads query is loading (or the id names an archived
+  // thread) a session-default write would silently not affect the pinned
+  // active thread — the exact wrong-scope switch pinning exists to prevent.
+  // The picker disables until the thread row resolves instead.
+  const threads = useThreads(session.id);
+  const activeThread = threads.data?.threads.find((t) => t.id === threadId);
+  const threadScoped = threadId !== undefined;
+  const pickerDisabled = threadScoped
+    ? !activeThread || setThreadModel.isPending
+    : setModel.isPending;
   const pause = usePauseSession(session.id);
   const replace = useReplaceSandbox(session.id);
   const rename = useRenameSession(session.id);
@@ -122,19 +140,21 @@ export function SessionHeader({
     // STANDALONE session (reachable since "Move to workspace…") is still a
     // session — its prompt keeps the sandbox/child-session warning and adds
     // who else loses it. A personal session keeps the original warning.
+    // The user's own assistant never reaches here: `canDelete` hides the
+    // menu item (TKAI-253).
     const teamNote = `Everyone on ${team?.name ?? "the team"} loses`;
-    const prompt =
-      isAssistantSession && teamId !== null
-        ? `Delete ${title}? ${teamNote} this conversation and its threads.`
-        : teamId !== null
-          ? `Delete this session permanently? ${teamNote} it. This deletes all threads, history, and child sessions, and tears down the sandbox.`
-          : "Delete this session permanently? This deletes all threads, history, and child sessions, and tears down the sandbox.";
+    const prompt = isTeamAssistant
+      ? `Delete ${title}? ${teamNote} this conversation and its threads.`
+      : teamId !== null
+        ? `Delete this session permanently? ${teamNote} it. This deletes all threads, history, and child sessions, and tears down the sandbox.`
+        : "Delete this session permanently? This deletes all threads, history, and child sessions, and tears down the sandbox.";
     if (!confirm(prompt)) return;
+    setActionError(null);
     try {
       await del.mutateAsync(session.id);
       navigate({ to: "/" });
     } catch (err) {
-      console.error("delete failed:", err);
+      setActionError(extractActionError(err, "Failed to delete the session. Try again."));
     }
   }
 
@@ -280,6 +300,22 @@ export function SessionHeader({
   // own name instead, which is renamed on the assistants surface — an edit
   // box here would store a string nobody ever sees.
   const canRename = canAdminister && !isAssistantSession;
+  // A team's assistant is the one assistant kind this header may delete —
+  // one name for the predicate the gate, the item label, and destroy()'s
+  // prompt all share.
+  const isTeamAssistant = isAssistantSession && teamId !== null;
+  // Delete never renders on the user's own assistant page (TKAI-253): the
+  // v1 holdover deleted the orchestrator and every thread with it, and
+  // Replace sandbox covers the reset. Fail closed while the assistants
+  // list or the orchestrator probe is still loading — in that window every
+  // session looks like a plain session, and the one destructive action
+  // here must not flash on an assistant page. The API refuses these
+  // deletes too; hiding the item keeps the menu honest.
+  const canDelete =
+    canAdminister &&
+    assistants.data !== undefined &&
+    orchInfo.data !== undefined &&
+    (!isAssistantSession || isTeamAssistant);
 
   // The edit box replaces the title cluster. The right-hand side keeps the
   // read-only signals — sandbox, connection, agent status — and the error
@@ -383,12 +419,28 @@ export function SessionHeader({
       <div className="ml-auto flex items-center gap-1.5">
         {actionError && <span className="text-xs text-danger-500">{actionError}</span>}
         {canAdminister && (
-          <Tooltip content="Session-default model. Threads inherit unless overridden.">
+          <Tooltip
+            content={
+              threadScoped
+                ? "Model for this thread (pinned at creation). New threads start on the session default."
+                : "Session-default model. New threads pin it at creation."
+            }
+          >
             <span>
               <ModelPicker
-                currentId={session.model}
-                onSelect={(id) => setModel.mutate(id)}
-                disabled={setModel.isPending}
+                currentId={activeThread ? (activeThread.model ?? session.model) : session.model}
+                onSelect={(id) => {
+                  if (threadScoped) {
+                    // Disabled until activeThread resolves; the guard is
+                    // belt-and-braces against a race on the same render.
+                    if (activeThread) {
+                      setThreadModel.mutate({ threadId: activeThread.id, model: id });
+                    }
+                    return;
+                  }
+                  setModel.mutate(id);
+                }}
+                disabled={pickerDisabled}
               />
             </span>
           </Tooltip>
@@ -462,19 +514,24 @@ export function SessionHeader({
                     Move to workspace…
                   </DropdownMenuItem>
                 )}
-                <DropdownMenuItem
-                  className="text-danger-500"
-                  disabled={del.isPending}
-                  onSelect={() => void destroy()}
-                >
-                  <Trash2 className="h-3.5 w-3.5 mr-2" aria-hidden />
-                  {/* Only an assistant session IS the team's assistant. A
-                      team-owned standalone session is a session; calling it
-                      the assistant would threaten the wrong thing. */}
-                  {isAssistantSession && teamId !== null
-                    ? "Delete this team's assistant…"
-                    : "Delete session…"}
-                </DropdownMenuItem>
+                {/* Never on the user's own assistant page — see `canDelete`.
+                    A team admin keeps delete for the team's assistant. Note
+                    the item deletes the assistant's SESSION (threads and
+                    history); the assistant row itself is archived on the
+                    assistants surface. */}
+                {canDelete && (
+                  <DropdownMenuItem
+                    className="text-danger-500"
+                    disabled={del.isPending}
+                    onSelect={() => void destroy()}
+                  >
+                    <Trash2 className="h-3.5 w-3.5 mr-2" aria-hidden />
+                    {/* Only an assistant session IS the team's assistant. A
+                        team-owned standalone session is a session; calling it
+                        the assistant would threaten the wrong thing. */}
+                    {isTeamAssistant ? "Delete this team's assistant…" : "Delete session…"}
+                  </DropdownMenuItem>
+                )}
               </DropdownMenuContent>
             </DropdownMenu>
           </>

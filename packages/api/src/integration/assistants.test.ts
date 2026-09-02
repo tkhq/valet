@@ -19,6 +19,12 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "./_setup.js";
 import { assistants, teamMembers, teams } from "../schema/index.js";
+import {
+  ArchivedAssistantError,
+  loadAssistant,
+  patchAssistant,
+  retireAssistant,
+} from "../assistants/service.js";
 import type {
   AssistantSummary,
   CreateAssistantResponse,
@@ -665,5 +671,77 @@ describe("personality and behavior config", () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     expect(body.error).toContain("limited to 500 characters");
+  });
+});
+
+/**
+ * TKAI-296 — retire (session delete) interactions. Retire archives a row
+ * that may be the default, so the two paths that used to assume "a default
+ * is never archived" get explicit pins: a racing promote is refused, and a
+ * wake on the retired assistant is refused at the build choke point.
+ */
+describe("retireAssistant interactions", () => {
+  it("a promote racing a retire is refused instead of minting an archived default", async () => {
+    api = await bootTestApi();
+    const { db } = api.providers;
+    const first = await create(api, { name: "Research" });
+    const second = await create(api, { name: "Triage" });
+
+    // Model the race: the PATCH route loaded `second` while it was live...
+    const stale = await loadAssistant(db, second.id);
+    if (!stale) throw new Error("seeded assistant missing");
+    // ...then a session delete retired it before the PATCH's transaction.
+    await retireAssistant(db, second.id);
+
+    await expect(patchAssistant(db, stale, { isDefault: true })).rejects.toBeInstanceOf(
+      ArchivedAssistantError,
+    );
+    // The refusal rolled back the demote: the previous default still holds.
+    const rows = await db.select().from(assistants).where(eq(assistants.ownerId, "local-user"));
+    expect(rows.filter((r) => r.isDefault).map((r) => r.id)).toEqual([first.id]);
+  });
+
+  it("a retired assistant's session refuses to wake", async () => {
+    api = await bootTestApi();
+    const { db, engineHost } = api.providers;
+    const created = await create(api, { name: "Research" });
+    await retireAssistant(db, created.id);
+
+    await expect(
+      engineHost.assistantSessionFor(created.id, {
+        actorUserId: "local-user",
+        orgId: "local-org",
+      }),
+    ).rejects.toBeInstanceOf(ArchivedAssistantError);
+  });
+
+  // Migrated rows keep legacy `orchestrator:*` session ids that sessionFor's
+  // prefix parse cannot recognize — the column-lookup fallback must route
+  // them to the assistant build, where the archived refusal applies.
+  it("a retired migrated assistant refuses to wake through the generic sessionFor path", async () => {
+    api = await bootTestApi();
+    const { db, engineHost } = api.providers;
+    await db.insert(assistants).values({
+      id: "asst_legacy_wake",
+      orgId: "local-org",
+      ownerType: "user",
+      ownerId: "local-user",
+      name: null,
+      personality: null,
+      behavior: null,
+      sessionId: "orchestrator:user:local-user",
+      isDefault: true,
+      createdAt: Date.now(),
+      archivedAt: null,
+    });
+    await retireAssistant(db, "asst_legacy_wake");
+
+    await expect(
+      engineHost.sessionFor("orchestrator:user:local-user", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp/legacy-wake",
+      }),
+    ).rejects.toBeInstanceOf(ArchivedAssistantError);
   });
 });

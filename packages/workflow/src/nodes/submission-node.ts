@@ -23,6 +23,7 @@
  */
 
 import type { SubmissionResult } from '@valet/engine';
+import { ValidationError } from '@valet/engine';
 
 import type { WorkflowPromptReceipt, WorkflowEngineDeps } from '../engine-deps.js';
 import type { NodeCheckpoint, WorkflowRun, WorkflowStore } from '../store.js';
@@ -95,7 +96,31 @@ export async function executeSubmissionNode<TDispatched, TSettled>(
       });
     }
 
-    const dispatch = await hooks.dispatch(hooks.dispatchId);
+    // A `ValidationError` from admission (e.g. an unknown `node.model` spec —
+    // the engine now validates the per-item model pin at submit) is a
+    // workflow DEFINITION error and deterministic: rethrowing would poison
+    // the drive (abandon lease → re-drive → same throw, until the poisoned-
+    // run cap fails the WHOLE run with no per-node error). Settle THIS node
+    // `failed` instead. Infrastructure throws (fence errors, store failures)
+    // keep propagating for the drive's retry semantics.
+    let dispatch: SubmissionDispatch;
+    try {
+      dispatch = await hooks.dispatch(hooks.dispatchId);
+    } catch (err) {
+      if (!(err instanceof ValidationError)) throw err;
+      const error = err.message;
+      await store.completeCheckpoint(run.runId, nodeId, iteration, attempt, {
+        runId: run.runId,
+        nodeId,
+        iteration,
+        status: 'failed',
+        error,
+        effects: hooks.initialEffects,
+        attempt,
+        createdAt: clock(),
+      });
+      return { status: 'failed', error };
+    }
 
     await store.putIntent({
       runId: run.runId,
@@ -225,7 +250,26 @@ async function handleOutcome<TDispatched, TSettled>(
   // validation failure fails the node instead of repairing forever.
   const schema = hooks.outputSchema;
   const repairText = buildRepairPrompt(schema, result.error);
-  const repairReceipt = await hooks.dispatchRepair(`${hooks.dispatchId}:repair`, repairText, sessionId);
+  // Same ValidationError containment as the primary dispatch: a definition
+  // error settles the node, never poisons the drive.
+  let repairReceipt: WorkflowPromptReceipt;
+  try {
+    repairReceipt = await hooks.dispatchRepair(`${hooks.dispatchId}:repair`, repairText, sessionId);
+  } catch (err) {
+    if (!(err instanceof ValidationError)) throw err;
+    const error = err.message;
+    await store.completeCheckpoint(run.runId, nodeId, iteration, attempt, {
+      runId: run.runId,
+      nodeId,
+      iteration,
+      status: 'failed',
+      error,
+      effects: effectsToRecord({ sessionId, receipt, repairAttempted }),
+      attempt,
+      createdAt: clock(),
+    });
+    return { status: 'failed', error };
+  }
   await store.putIntent({
     runId: run.runId,
     nodeId,

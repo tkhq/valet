@@ -268,7 +268,8 @@ CREATE TABLE "teams" (
 	"name" text NOT NULL,
 	"origin" text DEFAULT 'local' NOT NULL,
 	"external_id" text,
-	"created_at" bigint NOT NULL
+	"created_at" bigint NOT NULL,
+	"default_model" text
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "teams_org_name" ON "teams" ("org_id","name");
@@ -320,7 +321,8 @@ CREATE TABLE "child_watches" (
 	"dismissed_at" bigint,
 	"settled_at" bigint,
 	"sandbox_reclaimed_at" bigint,
-	"parked_sandbox_id" text
+	"parked_sandbox_id" text,
+	"origin_json" text
 );
 --> statement-breakpoint
 CREATE INDEX "child_watches_parent" ON "child_watches" ("parent_session_id");
@@ -880,7 +882,8 @@ CREATE TABLE "followed_threads" (
 	"owner_id" text NOT NULL,
 	"created_by" text NOT NULL,
 	"created_at" bigint NOT NULL,
-	"last_activity_at" bigint NOT NULL
+	"last_activity_at" bigint NOT NULL,
+	"last_seen_ts" text
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "followed_threads_key" ON "followed_threads" ("org_id","channel_type","channel_id","thread_ts");

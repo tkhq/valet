@@ -6,9 +6,16 @@
  * route layer's org-membership gating and error-code mapping on top of the
  * already-unit-tested service.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../src/integration/_setup.js";
-import { teamMembers, teams } from "../src/schema/index.js";
+import {
+  agentSessions,
+  assistants,
+  teamMembers,
+  teams,
+  workflowDefinitions,
+} from "../src/schema/index.js";
 import { setOrgFeatures } from "../src/services/org.js";
 import type { CreateTeamResponse, ListTeamMembersResponse, ListTeamsResponse } from "../src/wire/types.js";
 
@@ -109,6 +116,110 @@ describe("teams routes", () => {
     const listRes = await fetch(`${baseUrl}/api/teams`, { headers: HEADERS });
     const { teams } = (await listRes.json()) as ListTeamsResponse;
     expect(teams.map((t) => t.id)).not.toContain(team.id);
+  });
+
+  // TKAI-296: with the membership rows gone, nobody can view or administer
+  // the team's assistant, so a surviving row and session are unreachable
+  // orphans. Team delete retires the assistant and soft-deletes its session.
+  it("deleting a team retires its assistant and deletes the assistant's session", async () => {
+    api = await bootTestApi();
+    const { baseUrl, providers } = api;
+    const { db } = providers;
+
+    const createRes = await createTeam(baseUrl, "Platform");
+    const { team } = (await createRes.json()) as CreateTeamResponse;
+
+    await db.insert(assistants).values({
+      id: "asst_team_del",
+      orgId: "local-org",
+      ownerType: "team",
+      ownerId: team.id,
+      name: null,
+      personality: null,
+      behavior: null,
+      sessionId: "assistant:asst_team_del",
+      isDefault: true,
+      createdAt: Date.now(),
+      archivedAt: null,
+    });
+    await db.insert(agentSessions).values({
+      id: "assistant:asst_team_del",
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp/team-del",
+      status: "active",
+      ownerType: "team",
+      ownerId: team.id,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    const delRes = await fetch(`${baseUrl}/api/teams/${team.id}`, {
+      method: "DELETE",
+      headers: HEADERS,
+    });
+    expect(delRes.status).toBe(200);
+
+    const row = (
+      await db.select().from(assistants).where(eq(assistants.id, "asst_team_del"))
+    )[0];
+    expect(row?.archivedAt).not.toBeNull();
+    expect(row?.isDefault).toBe(false);
+    const sess = (
+      await db
+        .select()
+        .from(agentSessions)
+        .where(eq(agentSessions.id, "assistant:asst_team_del"))
+    )[0];
+    expect(sess?.status).toBe("deleted");
+  });
+
+  // The workflow refusal must land BEFORE the assistant teardown: a refused
+  // delete that had already destroyed the assistants' engine sessions would
+  // erase their history on a request that reports 409 and changes nothing.
+  it("refuses a workflow-owning team before touching its assistants", async () => {
+    api = await bootTestApi();
+    const { baseUrl, providers } = api;
+    const { db } = providers;
+
+    const createRes = await createTeam(baseUrl, "Platform");
+    const { team } = (await createRes.json()) as CreateTeamResponse;
+
+    await db.insert(workflowDefinitions).values({
+      id: "wf_team_del",
+      orgId: "local-org",
+      ownerType: "team",
+      ownerId: team.id,
+      name: "Nightly",
+      definition: { nodes: [], edges: [] },
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await db.insert(assistants).values({
+      id: "asst_wf_team",
+      orgId: "local-org",
+      ownerType: "team",
+      ownerId: team.id,
+      name: null,
+      personality: null,
+      behavior: null,
+      sessionId: "assistant:asst_wf_team",
+      isDefault: true,
+      createdAt: Date.now(),
+      archivedAt: null,
+    });
+
+    const delRes = await fetch(`${baseUrl}/api/teams/${team.id}`, {
+      method: "DELETE",
+      headers: HEADERS,
+    });
+    expect(delRes.status).toBe(409);
+
+    const row = (
+      await db.select().from(assistants).where(eq(assistants.id, "asst_wf_team"))
+    )[0];
+    expect(row?.archivedAt).toBeNull();
+    expect(row?.isDefault).toBe(true);
   });
 
   it("404s on a team id that doesn't exist (or belongs to another org)", async () => {
@@ -536,15 +647,13 @@ describe("teams routes", () => {
       expect(del.status).toBe(200);
     });
 
-    it("has no rename route to leave unguarded", async () => {
-      // A tripwire, not a behaviour test. Renaming a mirrored team would put
-      // the row's name out of step with the group it mirrors, and the next
-      // sync would find the group by `external_id` and keep the stale name.
-      // There is no rename route today, so there is nothing to guard.
-      //
-      // If you add `PATCH /api/teams/:id`, this test fails. Replace it with
-      // one that proves the rename refuses on an `idp` team, exactly as the
-      // four mutations above do.
+    it("PATCH /:id refuses a rename on every team, mirrored ones included", async () => {
+      // Successor to the old "no rename route" tripwire. Renaming a mirrored
+      // team would put the row's name out of step with the group it mirrors,
+      // and the next sync would find the group by `external_id` and keep the
+      // stale name. `PATCH /api/teams/:id` exists now (TKAI-255), but its
+      // whitelist holds `defaultModel` only — `name` 400s as an unknown
+      // field before any origin check, so no rename path exists to guard.
       api = await bootTestApi();
       const { baseUrl } = api;
       const teamId = await seedIdpTeam("platform", "/platform");
@@ -554,7 +663,32 @@ describe("teams routes", () => {
         headers: HEADERS,
         body: JSON.stringify({ name: "renamed" }),
       });
-      expect(res.status).toBe(404);
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toMatch(/unknown field/);
+    });
+
+    it("PATCH /:id defaultModel works on a live idp mirror (Valet-local state, not synced)", async () => {
+      // Deliberately NOT origin-gated: the identity provider owns the
+      // team's membership; `default_model` is state no sync ever writes,
+      // so a local edit cannot be undone by the next sign-in.
+      vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
+      try {
+        api = await bootTestApi();
+        const { baseUrl } = api;
+        const teamId = await seedIdpTeam("platform", "/platform");
+
+        const res = await fetch(`${baseUrl}/api/teams/${teamId}`, {
+          method: "PATCH",
+          headers: HEADERS,
+          body: JSON.stringify({ defaultModel: "claude-haiku-4-5" }),
+        });
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as { team: { defaultModel: string | null } };
+        expect(body.team.defaultModel).toBe("claude-haiku-4-5");
+      } finally {
+        vi.unstubAllEnvs();
+      }
     });
   });
 

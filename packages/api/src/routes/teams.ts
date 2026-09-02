@@ -3,6 +3,7 @@
  *
  *   GET    /api/teams                       → list teams the caller belongs to
  *   POST   /api/teams                       → create a team (caller auto-admitted as admin)
+ *   PATCH  /api/teams/:id                   → update team settings (default model, TKAI-255)
  *   DELETE /api/teams/:id                   → delete a team (409s while it owns any workflow)
  *   POST   /api/teams/:id/members           → add/update a member
  *   PATCH  /api/teams/:id/members/:userId   → change a member's role
@@ -13,8 +14,8 @@
  * caller's org (`c.var.user.orgId`) — cross-org teams 404 rather than 403,
  * so a caller can't distinguish "not your org" from "doesn't exist".
  *
- * Mutation-gated: DELETE /:id and the three /members routes additionally
- * require the caller to be a team admin of *that* team, or an org admin
+ * Mutation-gated: PATCH /:id, DELETE /:id and the three /members routes
+ * additionally require the caller to be a team admin of *that* team, or an org admin
  * (a deliberate recovery path so org admins can always untangle a team even
  * if they're not on it). That rule lives in `canAdministerTeam`
  * (`services/teams.ts`), which also gates administration of the resources a
@@ -22,12 +23,15 @@
  * 404, same as a caller outside the org — existence-hiding applies to
  * authz, not just org membership.
  *
- * Origin-gated: those same four routes refuse a team whose `origin` is
- * `idp` WHILE the org's `ssoTeamSync` feature gate is on. Such a team
- * mirrors an identity-provider group, and the login-time sync owns it. With
- * the gate off no sync runs, so the same team is a dormant mirror and the
- * four routes work on it again — see `isLiveIdpMirror`
- * (`services/teams.ts`).
+ * Origin-gated: DELETE /:id and the three /members routes refuse a team
+ * whose `origin` is `idp` WHILE the org's `ssoTeamSync` feature gate is on.
+ * Such a team mirrors an identity-provider group, and the login-time sync
+ * owns it. With the gate off no sync runs, so the same team is a dormant
+ * mirror and the four routes work on it again — see `isLiveIdpMirror`
+ * (`services/teams.ts`). PATCH /:id is deliberately NOT origin-gated: the
+ * identity provider owns membership and `valet.yaml` declares members, but
+ * `default_model` is Valet-local state neither source ever writes, so no
+ * sync can undo it.
  *
  * A `config` team — declared in `valet.yaml` — is gated for DELETE only. The
  * file asserts its declared members at each boot but never removes anybody,
@@ -45,11 +49,20 @@ import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { NotFoundError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import type { AuthUser } from "../middleware/auth.js";
-import { agentSessions, childWatches, teamMembers, teams, type TeamRow } from "../schema/index.js";
+import {
+  agentSessions,
+  assistants,
+  childWatches,
+  teamMembers,
+  teams,
+  type TeamRow,
+} from "../schema/index.js";
 import { isOrgAdmin } from "../services/org.js";
+import { validateDefaultModelId } from "../services/model-catalog.js";
 import { ensureDefaultAssistantSession, listAssistantsForOwners } from "../assistants/service.js";
 import {
   addMember,
+  assertNoTeamOwnedWorkflows,
   canAdministerTeam,
   ConfigManagedTeamError,
   createTeam,
@@ -77,6 +90,7 @@ import type {
   TeamChildSummary,
   ListTeamMembersResponse,
   ListTeamsResponse,
+  PatchTeamResponse,
   SetTeamMemberRoleRequest,
   TeamRole,
   TeamSummary,
@@ -101,6 +115,7 @@ async function rowToSummary(
     memberCount: members.length,
     // null = the caller is not on this team (they see it as an org admin).
     callerRole: mine?.role ?? null,
+    defaultModel: row.defaultModel,
   };
 }
 
@@ -383,10 +398,72 @@ teamsRouter.post("/", async (c) => {
   }
 });
 
+// ── Update ────────────────────────────────────────────────────────────────
+
+const PATCH_TEAM_FIELDS = new Set(["defaultModel"]);
+
+/**
+ * Team settings (TKAI-255). Strict whitelist, same shape as `PATCH /api/me`:
+ * an unknown field 400s rather than silently no-oping, and a non-null
+ * `defaultModel` must be an id the org catalog reports as valid — the same
+ * set `GET /api/models` shows the picker.
+ */
+teamsRouter.patch("/:id", async (c) => {
+  const { db, engineCredentials } = c.var.providers;
+  const user = c.var.user;
+  const id = c.req.param("id");
+
+  const team = await loadTeamInOrg(db, id, user.orgId);
+  if (!team) return c.json({ error: "team not found" }, 404);
+  if (!(await canAdministerTeam(db, id, user.id))) return c.json({ error: "team not found" }, 404);
+
+  let parsed: unknown;
+  try {
+    parsed = await c.req.json();
+  } catch {
+    return c.json({ error: "invalid JSON body. Send a JSON object, e.g. {\"defaultModel\": null}." }, 400);
+  }
+  // `JSON.parse` accepts `null`/numbers/strings, which `Object.keys` and the
+  // `in` operator below would throw on — reject anything but a plain object.
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return c.json({ error: "invalid JSON body. Send a JSON object, e.g. {\"defaultModel\": null}." }, 400);
+  }
+  const raw = parsed as Record<string, unknown>;
+  const unknownFields = Object.keys(raw).filter((k) => !PATCH_TEAM_FIELDS.has(k));
+  if (unknownFields.length > 0) {
+    return c.json(
+      { error: `unknown field(s): ${unknownFields.join(", ")}. Send only defaultModel.` },
+      400,
+    );
+  }
+
+  // `team` from `loadTeamInOrg` above is fresh within this request; the
+  // write branch swaps it for the UPDATE's own returned row, so no re-read.
+  let fresh: TeamRow = team;
+  if ("defaultModel" in raw) {
+    const defaultModel = raw.defaultModel;
+    if (defaultModel !== null && typeof defaultModel !== "string") {
+      return c.json(
+        { error: "defaultModel must be a model id from the model list (GET /api/models), or null to clear the override." },
+        400,
+      );
+    }
+    const invalid = await validateDefaultModelId(db, engineCredentials, user.orgId, defaultModel);
+    if (invalid) return c.json({ error: invalid }, 400);
+    const updated = await db.update(teams).set({ defaultModel }).where(eq(teams.id, id)).returning();
+    // Zero rows = the team was deleted between the gate and the write.
+    if (!updated[0]) return c.json({ error: "team not found" }, 404);
+    fresh = updated[0];
+  }
+
+  const resp: PatchTeamResponse = { team: await rowToSummary(db, fresh, user.id) };
+  return c.json(resp);
+});
+
 // ── Delete ────────────────────────────────────────────────────────────────
 
 teamsRouter.delete("/:id", async (c) => {
-  const { db } = c.var.providers;
+  const { db, engineHost } = c.var.providers;
   const user = c.var.user;
   const id = c.req.param("id");
 
@@ -397,8 +474,45 @@ teamsRouter.delete("/:id", async (c) => {
   const refusal = (await idpManagedRefusal(db, team, "delete")) ?? configManagedDeleteRefusal(team);
   if (refusal) return c.json(refusal, 409);
 
+  // Refuse for owned workflows BEFORE the destroy loop below. deleteTeam
+  // re-checks inside its transaction (authoritative under the ownership
+  // lock), but a refusal there would land after the assistants' engine
+  // sessions were already destroyed — turning a refused, no-op-looking
+  // delete into permanent history loss.
+  try {
+    await assertNoTeamOwnedWorkflows(db, id);
+  } catch (err) {
+    const mapped = handleServiceError(err);
+    if (mapped) return c.json(mapped.body, mapped.status);
+    throw err;
+  }
+
+  // A team's assistants die with it (TKAI-296). Tear down their engine
+  // sessions and sandboxes first — the same order DELETE /api/sessions/:id
+  // uses — then deleteTeam retires the rows and soft-deletes the sessions
+  // in its transaction. Archived assistants included: an archived
+  // non-default's session can still be live.
+  const teamAssistants = await db
+    .select({ sessionId: assistants.sessionId })
+    .from(assistants)
+    .where(and(eq(assistants.ownerType, "team"), eq(assistants.ownerId, id)));
+  for (const row of teamAssistants) {
+    await engineHost.destroy(row.sessionId).catch((err) => {
+      console.error(`engineHost.destroy(${row.sessionId}) failed:`, err);
+    });
+  }
+
   try {
     await deleteTeam(db, { teamId: id });
+    // Destroy again after the commit: a wake racing the window between the
+    // first destroy and the retire can re-cache a rebuilt session, and
+    // cache hits bypass the archived-wake guard. Now the rows are retired,
+    // so a torn-down ghost cannot rebuild.
+    for (const row of teamAssistants) {
+      await engineHost.destroy(row.sessionId).catch((err) => {
+        console.error(`engineHost.destroy(${row.sessionId}) failed:`, err);
+      });
+    }
     return c.json({ ok: true });
   } catch (err) {
     const mapped = handleServiceError(err);

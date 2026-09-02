@@ -70,6 +70,7 @@ import type { ChannelHost } from "../channels/host.js";
 import type { EngineHost } from "../engine/host.js";
 import { handleFollowedMessage } from "../channels/follow-router.js";
 import { channelMessageNormalizer } from "../events/channel-origin.js";
+import { channelThreadWindowFetcher } from "../events/channel-thread-context.js";
 
 /**
  * Slack updates are small JSON; files arrive by reference, never inline. The
@@ -177,6 +178,7 @@ async function fanOutUpdate(deps: FanOutDeps, raw: RawChannelUpdate): Promise<vo
         db: deps.db,
         engineHost: deps.engineHost,
         normalizeChannelMessage: channelMessageNormalizer(deps.channelHost),
+        fetchThreadWindow: channelThreadWindowFetcher(deps.channelHost),
       },
       { orgId: deps.orgId, raw },
     );

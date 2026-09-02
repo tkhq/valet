@@ -15,6 +15,11 @@ import type { ListAssistantsResponse, ListTeamsResponse, SessionDetail } from "@
 
 const deleteMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const setModelMutate = vi.fn();
+const setThreadModelMutate = vi.fn();
+/** Threads for the header's thread-scoped model picker. Empty by default:
+ * the picker then falls back to the session default (legacy behavior). */
+let headerThreads: Array<{ id: string; sessionId: string; createdAt: number; model?: string }> =
+  [];
 let pauseMutateAsync = vi.fn().mockResolvedValue({ status: "hibernated" });
 let pauseIsPending = false;
 let replaceMutateAsync = vi.fn().mockResolvedValue({ ok: true });
@@ -22,11 +27,17 @@ let renameMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 let setProfileMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 /** The header resolves a team assistant's title and its admin controls from
  * these two lists: the assistant says who owns the session, the team says
- * what that owner is called and what the caller may do. Both empty by
- * default so the pause/delete cases below keep exercising a plain personal
- * session. */
+ * what that owner is called and what the caller may do. Empty-but-RESOLVED
+ * by default so the pause/delete cases below exercise a plain personal
+ * session: the delete item fails closed until both the assistants list and
+ * the orchestrator probe have data (TKAI-253). Set either to `undefined`
+ * to model its query still in flight. */
 let teamsData: ListTeamsResponse = { teams: [] };
-let assistantsData: ListAssistantsResponse = { assistants: [] };
+let assistantsData: ListAssistantsResponse | undefined = { assistants: [] };
+/** The viewer's own orchestrator probe — the header matches its sessionId
+ * against `session.id`. Defaults to a non-matching id so ordinary sessions
+ * read as ordinary. */
+let orchInfoData: { sessionId: string; name: string | null } | undefined = undefined;
 
 // importOriginal, not a bare replacement: vitest.config.ts sets
 // `isolate: false` to share the module registry across test files in a
@@ -41,6 +52,8 @@ vi.mock("~/api/queries", async (importOriginal) => {
     ...actual,
     useDeleteSession: () => ({ isPending: false, mutateAsync: deleteMutateAsync }),
     useSetSessionModel: () => ({ isPending: false, mutate: setModelMutate }),
+    useSetThreadModel: () => ({ isPending: false, mutate: setThreadModelMutate }),
+    useThreads: () => ({ data: { threads: headerThreads }, isLoading: false, error: null }),
     usePauseSession: () => ({ isPending: pauseIsPending, mutateAsync: pauseMutateAsync }),
     useReplaceSandbox: () => ({ isPending: false, mutateAsync: replaceMutateAsync }),
     useRenameSession: () => ({ isPending: false, mutateAsync: renameMutateAsync }),
@@ -56,7 +69,7 @@ vi.mock("~/api/settings", () => ({
 }));
 
 vi.mock("~/api/orchestrator", () => ({
-  useOrchestratorInfo: () => ({ data: undefined, isLoading: false, error: null }),
+  useOrchestratorInfo: () => ({ data: orchInfoData, isLoading: false, error: null }),
 }));
 
 vi.mock("~/api/assistants", async (importOriginal) => {
@@ -91,10 +104,16 @@ function baseSession(): SessionDetail {
   };
 }
 
-function renderHeader(sandbox?: { state: string; epoch: number }) {
+function renderHeader(sandbox?: { state: string; epoch: number }, threadId?: string) {
   return render(
     <TooltipProvider>
-      <SessionHeader session={baseSession()} agentStatus="idle" conn="open" sandbox={sandbox} />
+      <SessionHeader
+        session={baseSession()}
+        agentStatus="idle"
+        conn="open"
+        sandbox={sandbox}
+        threadId={threadId}
+      />
     </TooltipProvider>,
   );
 }
@@ -102,6 +121,8 @@ function renderHeader(sandbox?: { state: string; epoch: number }) {
 beforeEach(() => {
   deleteMutateAsync.mockClear();
   setModelMutate.mockClear();
+  setThreadModelMutate.mockClear();
+  headerThreads = [];
   pauseMutateAsync = vi.fn().mockResolvedValue({ status: "hibernated" });
   pauseIsPending = false;
   replaceMutateAsync = vi.fn().mockResolvedValue({ ok: true });
@@ -109,6 +130,7 @@ beforeEach(() => {
   setProfileMutateAsync = vi.fn().mockResolvedValue({ ok: true });
   teamsData = { teams: [] };
   assistantsData = { assistants: [] };
+  orchInfoData = { sessionId: "assistant:asst_viewer_default", name: null };
 });
 
 describe("SandboxChip — suspended state", () => {
@@ -119,6 +141,32 @@ describe("SandboxChip — suspended state", () => {
       </TooltipProvider>,
     );
     expect(screen.getByLabelText("sleeping — will wake on message")).toBeTruthy();
+  });
+});
+
+describe("SessionHeader — thread-scoped model picker", () => {
+  it("shows the ACTIVE THREAD's pinned model, not the session default", () => {
+    headerThreads = [
+      { id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-opus-4-7" },
+    ];
+    renderHeader(undefined, "th-1");
+    const trigger = screen.getByRole("button", { name: "Choose model" });
+    expect(trigger.textContent).toContain("Opus 4.7");
+  });
+
+  it("disables the picker while the active thread is unresolved (never a session-scope write)", () => {
+    // threadId is set but the threads list has no match (query loading, or
+    // an archived thread): a session PATCH here would silently not affect
+    // the pinned active thread, so the picker must disable instead.
+    renderHeader(undefined, "th-unknown");
+    const trigger = screen.getByRole("button", { name: "Choose model" }) as HTMLButtonElement;
+    expect(trigger.disabled).toBe(true);
+  });
+
+  it("stays session-scoped and enabled when no threadId is in play", () => {
+    renderHeader(undefined, undefined);
+    const trigger = screen.getByRole("button", { name: "Choose model" }) as HTMLButtonElement;
+    expect(trigger.disabled).toBe(false);
   });
 });
 
@@ -221,6 +269,80 @@ describe("SessionHeader — overflow menu", () => {
 });
 
 /**
+ * TKAI-253 — the user's own assistant page must not offer Delete session.
+ * The v1 holdover deleted the orchestrator and all of its threads; Replace
+ * sandbox covers the reset. The item also FAILS CLOSED while the assistants
+ * list or the orchestrator probe is still loading — in that window every
+ * session looks like a plain session, and the gate must not flash the one
+ * destructive action on an assistant page. The team-assistant delete keeps
+ * working; see the team assistant describe below.
+ */
+describe("SessionHeader — no delete on the user's own assistant", () => {
+  it("hides Delete session on the orchestrator page, keeps Replace sandbox", async () => {
+    orchInfoData = { sessionId: "sess-1", name: "Aurora" };
+    const user = userEvent.setup();
+    renderHeader({ state: "ready", epoch: 1 });
+
+    await user.click(screen.getByRole("button", { name: "Session menu" }));
+    expect(screen.getByRole("menuitem", { name: /replace sandbox/i })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: /delete/i })).toBeNull();
+  });
+
+  it("hides delete on a personal assistant from the assistants list", async () => {
+    assistantsData = {
+      assistants: [
+        {
+          id: "asst_me",
+          owner: { type: "user", id: "u1" },
+          sessionId: "sess-1",
+          isDefault: true,
+          createdAt: 1,
+        },
+      ],
+    };
+    const user = userEvent.setup();
+    renderHeader({ state: "ready", epoch: 1 });
+
+    await user.click(screen.getByRole("button", { name: "Session menu" }));
+    expect(screen.getByRole("menuitem", { name: /replace sandbox/i })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: /delete/i })).toBeNull();
+  });
+
+  it("fails closed while the assistants list is loading", async () => {
+    assistantsData = undefined;
+    const user = userEvent.setup();
+    renderHeader({ state: "ready", epoch: 1 });
+
+    await user.click(screen.getByRole("button", { name: "Session menu" }));
+    expect(screen.getByRole("menuitem", { name: /replace sandbox/i })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: /delete/i })).toBeNull();
+  });
+
+  it("fails closed while the orchestrator probe is loading", async () => {
+    orchInfoData = undefined;
+    const user = userEvent.setup();
+    renderHeader({ state: "ready", epoch: 1 });
+
+    await user.click(screen.getByRole("button", { name: "Session menu" }));
+    expect(screen.getByRole("menuitem", { name: /replace sandbox/i })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: /delete/i })).toBeNull();
+  });
+
+  it("surfaces a failed delete's error text instead of swallowing it", async () => {
+    deleteMutateAsync.mockRejectedValueOnce(new Error("a turn is running"));
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const user = userEvent.setup();
+    renderHeader({ state: "ready", epoch: 1 });
+
+    await user.click(screen.getByRole("button", { name: "Session menu" }));
+    await user.click(screen.getByRole("menuitem", { name: /delete session/i }));
+
+    await waitFor(() => expect(screen.getByText("a turn is running")).toBeTruthy());
+    confirmSpy.mockRestore();
+  });
+});
+
+/**
  * V1 port #2 — Terminal and VS Code on any session. `SandboxTabs` shows the
  * tab strip only for a `full` profile, and the profile was frozen at
  * creation, so an assistant session could never reach it. The switch lives
@@ -309,7 +431,7 @@ describe("SessionHeader — Terminal and VS Code switch", () => {
           externalId: null,
           createdAt: 1,
           memberCount: 3,
-          callerRole: "member",
+          callerRole: "member", defaultModel: null,
         },
       ],
     };
@@ -461,6 +583,7 @@ describe("SessionHeader — team assistant", () => {
           createdAt: 1,
           memberCount: 3,
           callerRole,
+          defaultModel: null,
         },
       ],
     };
@@ -561,6 +684,19 @@ describe("SessionHeader — team assistant", () => {
     renderTeamHeader();
     expect(screen.getByRole("button", { name: /pause/i })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Session menu" })).toBeTruthy();
+  });
+
+  // TKAI-253 removed delete for the user's OWN assistant only. A team's
+  // assistant keeps it: this menu is a team admin's only delete surface.
+  it("keeps the team-assistant delete for a team admin", async () => {
+    withTeam("admin");
+    const user = userEvent.setup();
+    renderTeamHeader();
+
+    await user.click(screen.getByRole("button", { name: "Session menu" }));
+    expect(
+      screen.getByRole("menuitem", { name: /delete this team's assistant/i }),
+    ).toBeTruthy();
   });
 
   it("keeps the controls on a personal session", () => {

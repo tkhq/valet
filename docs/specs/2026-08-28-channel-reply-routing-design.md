@@ -115,9 +115,19 @@ second, DM-style conversation door for channel mentions.
 **Auto-reply (safety net).** Extend `deliverAssistantMessage`
 (`channels/host.ts:474`). Today it maps `thread.key → conversationKey` and skips
 when the map fails. Add: if the finishing submission carries `origin`, resolve
-`origin.threadKey → conversationKey` and post the final `end_turn` message
-there, even though the `"events"` thread key does not map. The existing guards
-hold (end_turn only, skip if already streamed). A post failure is drop-logged
+`origin.threadKey → conversationKey` and post there, even though the `"events"`
+thread key does not map. The existing guards hold (skip if already streamed,
+skip empty messages). The safety net posts the submission's
+acknowledgement AND its result: each gate segment's first text- or
+attachment-bearing message, plus the turn-final message (the only one
+persisted with stopReason "end_turn"). A turn-final gate
+would drop a reply the model fronts into its first tool-call message, and
+posting every text round floods the thread with narration (see the Telegram
+design's deviation 2). The slot is derived from the persisted entries, not
+held in memory, so an api restart mid-submission cannot double-post. A
+resolved decision gate re-opens the slot: the post-approval outcome reaches
+the reader who approved it. The rounds between stay off the channel; an extra
+mid-turn update reaches the thread only through `reply_to_origin`. A failed or unroutable post is drop-logged
 (`event_drop_log`), never swallowed, so the Problems tab shows it.
 
 **Reply action (contract).** Add a `reply_to_origin` action. It reads the
@@ -126,9 +136,15 @@ argument to guess. The team persona instructs the assistant to use it when it
 answers a channel-originated message. The action is the primary path; the model
 should reply through it.
 
-**No double post.** The turn records whether the assistant already replied to
-origin (through the action). If it did, auto-reply skips. If the model never
-replied, auto-reply posts the final turn. One reply reaches Slack, always.
+**No double post.** An addressed turn (`reply: "auto"`, the default) auto-posts
+each segment's first text-bearing message and the turn-final one; when the submission already
+replied through `reply_to_origin`, the auto-post stands down
+(`turnRepliedToOrigin` scans the submission's tool calls for a SUCCESSFUL
+reply — `details.ok === true` on the persisted result). A failed reply must
+not stand the net down: the action failure text goes to the model, and the
+safety net still posts. An overheard turn (`reply: "manual"`) never
+auto-posts, and the action is the only reply path. The streamed path obeys
+the same contract: one streamed message per gate segment.
 
 #### 1.5 Identity: team name and sender
 
@@ -258,13 +274,49 @@ turn that produces no reply at all is a reportable miss, not a silent drop.
 
 ## Deviations (Part 1, as built)
 
-- **Explicit `reply_to_origin` action deferred.** The design named both an
-  auto-reply safety net and an explicit reply action. Part 1 ships the
-  auto-reply plus a persona instruction. A standalone action posts to Slack
-  directly, so it would double-post against the safety net unless new
-  cross-turn suppression state is threaded between the engine action and the
-  host bridge. The safety net already guarantees delivery, so the action is
-  deferred until that suppression is worth building.
+- **Auto-reply posts the ack AND the result, never the narration.** The
+  design assumed the final turn message was the reply. Three field failures
+  refined the rule: posting only the final message ghosts a reply the model
+  fronts beside its first tool call; posting every round floods the thread
+  (18 posts for one investigation turn); posting only the first message
+  drops the final answer, because the model cannot be relied on to call
+  `reply_to_origin` (and the channel-message path gives the action no
+  origin at all). The safety net now posts each gate segment's first
+  text-bearing message plus the turn-final message, derived from the
+  persisted entries (restart-safe, no delivery-state store). The "already
+  replied" check scans the submission's entries for a SUCCESSFUL
+  `….reply_to_origin` call (`details.ok === true`).
+- **`child.settled` inherits the spawning submission's origin.** The spawn
+  captures the running submission's `ChannelOrigin` (task builtin →
+  `ChildSpawner` ctx) into `child_watches.origin_json`, durable across the
+  boot `rearm()`. The settlement signal carries it verbatim, so the
+  "ack → spawn child → report back" flow reaches the thread that asked: an
+  `auto` origin auto-posts the report's first message, a `manual` origin
+  keeps the report explicit-only.
+- **Deferred: a channel-generic reply action.** Telegram has no
+  `reply_to_origin`, so a Telegram-origin turn cannot send output after its
+  segment's first message. A per-plugin action needs org-scope credential
+  access that the action context does not have today (Slack's action uses
+  the user integration token; Telegram only has the org bot token). The
+  right shape is one host-level reply mechanism that resolves the origin's
+  running transport — pair it with the engine-owned reply concept below.
+- **Deferred: agent-visible delivery feedback.** A failed auto-post is
+  drop-logged for operators; the agent never learns and can claim it
+  replied. An injected "delivery failed" signal risks a failure loop (the
+  failure turn's own reply also fails), so it needs a bounded design —
+  one signal per submission, `reply: "manual"`.
+- **Deferred: progress signal on the discrete path.** After the segment's
+  first message, a long turn is silent: `sendTyping` fires once at submit
+  and Slack has no bot-typing API for channel threads (`setStatus` covers
+  only assistant DM threads). Accepted gap; the child.settled inheritance
+  above removes the worst case (results that never arrive at all).
+- **Follow-up: an engine-owned reply concept.** "Which message is the
+  reply" has now been host-side heuristic three times (turn-final → every
+  message → first per segment). A first-class reply marker (an entry flag
+  the model or engine sets, or a capability flag on ActionPlugin manifests
+  replacing the `….reply_to_origin` name convention) would let delivery
+  read intent instead of inferring it. Do this before the next change to
+  this subsystem.
 - **Sender name is a handle, not a resolved display name.** The dispatcher sets
   the signal's `sender` attribute from `event.actor` (`login` or `externalId`).
   For a Slack `app_mention` this is the raw Slack user id, because the event

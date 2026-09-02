@@ -355,6 +355,37 @@ async function requestApprovalDecision(
 }
 
 /**
+ * The typed view of the context `approvalGateRequest` stamps on a tool
+ * approval gate. `DecisionGate.context` is an untyped record in the store,
+ * so readers (the api's channel gate digest) narrow through
+ * {@link toolApprovalGateContext} instead of sniffing raw keys — writer and
+ * reader then share this one definition and cannot silently drift.
+ */
+export interface ToolApprovalGateContext {
+  toolId: string;
+  riskLevel?: string;
+  service?: string;
+  args?: Record<string, unknown>;
+  summary?: string;
+}
+
+/** Narrow a gate's context to {@link ToolApprovalGateContext}; `null` when
+ * the gate is not a tool approval (e.g. `ask_approval`, question gates). */
+export function toolApprovalGateContext(
+  context: Record<string, unknown> | undefined,
+): ToolApprovalGateContext | null {
+  if (!context || typeof context.tool_id !== "string") return null;
+  const args = context.args;
+  return {
+    toolId: context.tool_id,
+    riskLevel: typeof context.riskLevel === "string" ? context.riskLevel : undefined,
+    service: typeof context.service === "string" ? context.service : undefined,
+    args: args !== null && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, unknown>) : undefined,
+    summary: typeof context.summary === "string" ? context.summary : undefined,
+  };
+}
+
+/**
  * The shared head of the approval-gate request both invokeAction paths open.
  * `dedupeKey` is the qualified tool id: terminal outcomes stick per tool id,
  * not per (tool id, args) — a re-issued call with tweaked args must not
@@ -379,6 +410,9 @@ function approvalGateRequest(
       service: entry.service,
       tool_id: actionId,
       args,
+      // The one-line human summary, separate from the machine-readable body
+      // above. Channel deliverers render it instead of the tool_id/args dump.
+      summary,
     },
   };
 }
@@ -1321,17 +1355,20 @@ function actionResultToToolResult(
     return {
       text: `${toolId} failed: ${result.error ?? "unknown error"}`,
       attachments: attachments && attachments.length > 0 ? attachments : undefined,
+      ok: false,
     };
   }
   if (result.data === undefined) {
     return {
       text: `${toolId} ok`,
       attachments: attachments && attachments.length > 0 ? attachments : undefined,
+      ok: true,
     };
   }
   return {
     text: stableJson(result.data),
     attachments: attachments && attachments.length > 0 ? attachments : undefined,
+    ok: true,
   };
 }
 

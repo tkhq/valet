@@ -272,13 +272,23 @@ export interface ChannelGatePrompt {
   gateId: string;
   title: string;
   body?: string;
+  /**
+   * Labeled key parameters of the gated action, pre-digested by the host so
+   * every transport renders the same facts natively (Slack: section fields;
+   * Telegram: label/value lines) instead of a raw JSON dump. Values are
+   * standard markdown; long values arrive already truncated. Absent when the
+   * gate has no structured context — `body` then carries everything.
+   */
+  fields?: Array<{ label: string; value: string }>;
   actions: Array<{ id: string; label: string; style?: "primary" | "danger" }>;
 }
 
 export interface ChannelGateResolution {
   actionId?: string;
-  /** Human-readable outcome line, e.g. "✅ Approved". */
+  /** Human-readable outcome line, e.g. "✅ Approved by Conner". */
   label: string;
+  /** Epoch ms of the resolution, for transports that render timestamps. */
+  resolvedAtMs?: number;
 }
 
 export interface FetchedChannelMedia {
@@ -396,6 +406,16 @@ export interface ChannelTransport {
    * providers without threads omit it.
    */
   fetchThreadContext?(channelId: string, threadTs: string): Promise<string | null>;
+  /**
+   * The thread's messages STRICTLY BETWEEN two provider timestamps, as the same
+   * attributed transcript shape as `fetchThreadContext`. The follow-router uses
+   * it to re-hydrate the gap between a follow's last delivered message and a
+   * new one, so an overheard line after downtime carries the missed context.
+   * The bot's own posts are excluded — the agent already has its own replies.
+   * `null` when the window is empty or the thread is unreadable. Optional:
+   * providers without thread history omit it.
+   */
+  fetchThreadWindow?(channelId: string, threadTs: string, afterTs: string, beforeTs: string): Promise<string | null>;
   /**
    * Normalize an inbound message into what an agent should read: the sender's
    * display name (not a raw id) and the message text with the bot's own mention

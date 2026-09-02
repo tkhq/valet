@@ -12,6 +12,7 @@ import {
   type CompactionEntry,
   type ResolvedModel,
 } from "../src/index.js";
+import { summarize } from "../src/compaction.js";
 
 function makeEngine() {
   const store = new InMemorySessionStore();
@@ -31,10 +32,16 @@ async function waitFor(predicate: () => boolean, timeoutMs = 4000): Promise<void
   }
 }
 
+// Long enough that the live transcript's char-based estimate exceeds the
+// tiny fixtures' usable budget (contextWindow 50 → usable 45 tokens ≈ 180
+// chars). The proactive trigger measures the transcript estimate, not
+// provider-reported usage (TKAI-305).
+const OVER_BUDGET_PROMPT = "third prompt " + "x".repeat(400);
+
 describe("compaction: proactive (token threshold)", () => {
-  it("after a turn that pushes usage past usable, runs compaction and inserts a CompactionEntry", async () => {
+  it("after a turn that pushes the context estimate past usable, runs compaction and inserts a CompactionEntry", async () => {
     // Tiny model dimensions: usable = contextWindow - min(reserveCap, maxTokens) = 50 - 5 = 45.
-    // Faux's prompt-length estimator + a small prompt easily exceeds 45 tokens.
+    // OVER_BUDGET_PROMPT alone pushes the live transcript estimate past 45 tokens.
     const faux2 = registerFauxProvider({
       provider: "compact-proactive",
       models: [
@@ -112,7 +119,7 @@ describe("compaction: proactive (token threshold)", () => {
 
     // Trigger the third turn — its response reports high usage, kicking
     // off compaction.
-    const receipt = await session2.prompt("third prompt");
+    const receipt = await session2.prompt(OVER_BUDGET_PROMPT);
     await waitFor(
       () =>
         events2.some(
@@ -186,7 +193,7 @@ describe("compaction: proactive (token threshold)", () => {
       { id: "e-4", sessionId: session.id, threadId: thread.id, parentId: "e-3", type: "message", role: "assistant", content: "second response", createdAt: 4 },
     ]);
 
-    const receipt = await session.prompt("third prompt");
+    const receipt = await session.prompt(OVER_BUDGET_PROMPT);
     await waitFor(() =>
       events.some(
         (e) => e.event.type === "compaction_end" && e.event.threadId === receipt.threadId,
@@ -315,7 +322,7 @@ describe("compaction: auto-continue", () => {
       },
     ]);
 
-    const receipt = await session.prompt("third prompt");
+    const receipt = await session.prompt(OVER_BUDGET_PROMPT);
     // Wait for two turn_ends after the prompt: the original third turn,
     // then the auto-continue turn.
     await waitFor(
@@ -392,7 +399,7 @@ describe("compaction: auto-continue", () => {
       },
     ]);
 
-    const receipt = await session.prompt("third prompt");
+    const receipt = await session.prompt(OVER_BUDGET_PROMPT);
     await waitFor(
       () =>
         events.some(
@@ -508,7 +515,7 @@ describe("compaction: pruning persists via updateEntry", () => {
       },
     ]);
 
-    const receipt = await session.prompt("third prompt");
+    const receipt = await session.prompt(OVER_BUDGET_PROMPT);
     await waitFor(
       () =>
         events.some(
@@ -517,7 +524,9 @@ describe("compaction: pruning persists via updateEntry", () => {
         ),
     );
 
-    // Re-load entries from the store and verify a-1's tool_call.result is elided.
+    // Re-load entries from the store and verify a-1's tool_call is elided —
+    // and that the stored result text survived (TKAI-305: elision applies at
+    // render time; the summarizer still needs the text).
     const entries = await store.getEntries(session.id, thread.id);
     const a1 = entries.find((e) => e.id === "a-1");
     expect(a1?.type).toBe("message");
@@ -526,10 +535,314 @@ describe("compaction: pruning persists via updateEntry", () => {
       expect(tc?.type).toBe("tool_call");
       if (tc?.type === "tool_call") {
         expect(tc.elided).toBe(true);
-        expect(tc.result).toEqual({ elided: true, reason: "pruned" });
+        expect(tc.result).toBe(bigOutput);
       }
     }
 
+    faux.unregister();
+  });
+});
+
+const SUMMARY_RESPONSE =
+  "## Goal\n- test\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n### Done\n- prior turns\n\n### In Progress\n- (none)\n\n### Blocked\n- (none)\n\n## Key Decisions\n- (none)\n\n## Next Steps\n- (none)\n\n## Critical Context\n- (none)\n\n## Relevant Files\n- (none)";
+
+describe("compaction: /compact instructions", () => {
+  it("passes user instructions through to the summarizer prompt", async () => {
+    const captured: string[] = [];
+    const faux = registerFauxProvider({
+      provider: "compact-instr",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 100_000, maxTokens: 1000 }],
+    });
+    faux.setResponses([
+      (ctx: { messages: Array<{ content: unknown }> }) => {
+        captured.push(JSON.stringify(ctx.messages));
+        return fauxAssistantMessage(SUMMARY_RESPONSE);
+      },
+    ]);
+    const result = await summarize({
+      headEntries: [
+        {
+          id: "e-1",
+          sessionId: "s",
+          threadId: "t",
+          parentId: null,
+          type: "message",
+          role: "user",
+          content: "please refactor the parser",
+          createdAt: 1,
+        },
+      ],
+      model: faux.getModel("tiny")!,
+      instructions: "keep the exact file names",
+    });
+    expect(result.summary).toContain("## Goal");
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain("keep the exact file names");
+    faux.unregister();
+  });
+});
+
+describe("compaction: summarizer input (TKAI-305)", () => {
+  const SUMMARY_WITH_NEW_SECTIONS =
+    "## Goal\n- t\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n### Done\n- (none)\n\n### In Progress\n- (none)\n\n### Blocked\n- (none)\n\n## Key Decisions\n- (none)\n\n## Agreed Approach\n- (none)\n\n## Active Tools & Skills\n- (none)\n\n## Next Steps\n- (none)\n\n## Critical Context\n- (none)\n\n## Relevant Files\n- (none)";
+
+  it("a pruned tool result still reaches the summarizer; the template carries the new sections", async () => {
+    const captured: string[] = [];
+    const faux = registerFauxProvider({
+      provider: "compact-elided-summary",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    faux.setResponses([
+      (ctx: { messages: Array<{ content: unknown }> }) => {
+        captured.push(JSON.stringify(ctx.messages));
+        return fauxAssistantMessage(SUMMARY_WITH_NEW_SECTIONS);
+      },
+    ]);
+    const result = await summarize({
+      headEntries: [
+        {
+          id: "u-1",
+          sessionId: "s",
+          threadId: "t",
+          parentId: null,
+          type: "message",
+          role: "user",
+          content: "load the deploy skill and plan the rollout",
+          createdAt: 1,
+        },
+        {
+          id: "a-1",
+          sessionId: "s",
+          threadId: "t",
+          parentId: "u-1",
+          type: "message",
+          role: "assistant",
+          content: "",
+          parts: [
+            {
+              type: "tool_call",
+              callId: "tc-1",
+              toolName: "bash",
+              status: "completed",
+              args: { command: "cat plan.md" },
+              // Elided by an earlier prune pass — the stored text survives.
+              result: "the settled plan is blue-green deploys",
+              elided: true,
+            },
+          ],
+          createdAt: 2,
+        },
+      ],
+      model: faux.getModel("tiny")!,
+    });
+    expect(result.summary).toContain("## Agreed Approach");
+    expect(captured).toHaveLength(1);
+    // The pruned output's text was fed to the summarizer, not the marker.
+    expect(captured[0]).toContain("the settled plan is blue-green deploys");
+    expect(captured[0]).not.toContain("[output elided to save context]");
+    // The prompt instructs the summarizer to keep approach + tool awareness.
+    expect(captured[0]).toContain("## Agreed Approach");
+    expect(captured[0]).toContain("## Active Tools & Skills");
+    faux.unregister();
+  });
+});
+
+describe("compaction: proactive trigger rehydration (restart)", () => {
+  it("compacts BEFORE the first post-restart turn when the rehydrated transcript exceeds usable", async () => {
+    // usable = contextWindow - min(reserveCap, maxTokens) = 100000 - 5. The
+    // persisted transcript estimates to ~112k tokens (450k chars / 4), so
+    // the restored thread must compact before its first turn hits the
+    // model. Any compaction observed here is the pre-turn check's doing.
+    const faux = registerFauxProvider({
+      provider: "compact-restart",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 100_000, maxTokens: 5 }],
+    });
+    const store = new InMemorySessionStore();
+    const bus = new InMemoryEventStream();
+    const sandboxProvider = new VirtualSandboxProvider();
+    const events: BusEvent[] = [];
+    bus.subscribe({}, (e) => events.push(e));
+    const model = faux.getModel("tiny")!;
+    const options = {
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model,
+      compaction: { tailTurns: 1 },
+    };
+
+    const engine1 = new Engine({ providers: { store, stream: bus, sandboxProvider } });
+    const session1 = await engine1.createSession(options);
+    const thread1 = session1.thread();
+    await store.appendEntries(session1.id, thread1.id, [
+      {
+        id: "e-1",
+        sessionId: session1.id,
+        threadId: thread1.id,
+        parentId: null,
+        type: "message",
+        role: "user",
+        content: "first prompt",
+        createdAt: 1,
+      },
+      {
+        id: "e-2",
+        sessionId: session1.id,
+        threadId: thread1.id,
+        parentId: "e-1",
+        type: "message",
+        role: "assistant",
+        content: "x".repeat(300_000), // ~75k estimated tokens
+        createdAt: 2,
+      },
+      {
+        id: "e-3",
+        sessionId: session1.id,
+        threadId: thread1.id,
+        parentId: "e-2",
+        type: "message",
+        role: "user",
+        content: "second prompt",
+        createdAt: 3,
+      },
+      {
+        id: "e-4",
+        sessionId: session1.id,
+        threadId: thread1.id,
+        parentId: "e-3",
+        type: "message",
+        role: "assistant",
+        content: "y".repeat(150_000), // ~37.5k estimated tokens
+        createdAt: 4,
+      },
+    ]);
+
+    // "Restart": a fresh Engine over the same providers rehydrates the
+    // session from the store. Response order proves the sequencing — the
+    // summarizer consumes the FIRST faux response, the turn the SECOND.
+    faux.setResponses([
+      fauxAssistantMessage(SUMMARY_RESPONSE),
+      fauxAssistantMessage("post-restart response"),
+    ]);
+    const engine2 = new Engine({ providers: { store, stream: bus, sandboxProvider } });
+    const restored = await engine2.restoreSession({ sessionId: session1.id, options });
+    const receipt = await restored.prompt("third prompt");
+    await waitFor(
+      () =>
+        events.some(
+          (e) => e.event.type === "compaction_end" && e.event.threadId === receipt.threadId,
+        ),
+    );
+    await waitFor(() =>
+      events.some(
+        (e) => e.event.type === "turn_end" && e.event.threadId === receipt.threadId,
+      ),
+    );
+
+    const entries = await store.getEntries(session1.id, receipt.threadId);
+    const compactions = entries.filter((e): e is CompactionEntry => e.type === "compaction");
+    expect(compactions).toHaveLength(1);
+    // The turn's reply is the SECOND faux response — the summarizer ran
+    // first, i.e. compaction protected the turn instead of following it.
+    const lastAssistant = [...entries]
+      .reverse()
+      .find((e) => e.type === "message" && e.role === "assistant");
+    expect(lastAssistant?.type === "message" && lastAssistant.content).toBe(
+      "post-restart response",
+    );
+    // The pre-turn pass runs BEFORE the user entry is appended: exactly one
+    // "third prompt" user entry exists, positioned after the compaction
+    // entry — a rebuild that captured the prompt would duplicate it in the
+    // LLM context.
+    const thirdPrompts = entries.filter(
+      (e) => e.type === "message" && e.role === "user" && e.content === "third prompt",
+    );
+    expect(thirdPrompts).toHaveLength(1);
+    expect(entries.indexOf(compactions[0])).toBeLessThan(entries.indexOf(thirdPrompts[0]));
+    // No synthetic auto-continue was queued for the pre-turn pass, and the
+    // post-turn check was not suppressed by it (no second compaction means
+    // it simply had nothing to do — the flag is only armed with a follow-up).
+    const unsettled = await store.listUnsettledSubmissions(session1.id);
+    expect(unsettled.filter((i) => i.metadata?.compaction_continue)).toHaveLength(0);
+    faux.unregister();
+  });
+
+  it("does not compact after restart when a prior compaction already covers the transcript", async () => {
+    const faux = registerFauxProvider({
+      provider: "compact-restart-skip",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 100_000, maxTokens: 5 }],
+    });
+    const store = new InMemorySessionStore();
+    const bus = new InMemoryEventStream();
+    const sandboxProvider = new VirtualSandboxProvider();
+    const events: BusEvent[] = [];
+    bus.subscribe({}, (e) => events.push(e));
+    const model = faux.getModel("tiny")!;
+    const options = {
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model,
+      compaction: { tailTurns: 1 },
+    };
+
+    const engine1 = new Engine({ providers: { store, stream: bus, sandboxProvider } });
+    const session1 = await engine1.createSession(options);
+    const thread1 = session1.thread();
+    await store.appendEntries(session1.id, thread1.id, [
+      {
+        id: "e-1",
+        sessionId: session1.id,
+        threadId: thread1.id,
+        parentId: null,
+        type: "message",
+        role: "user",
+        content: "first prompt",
+        createdAt: 1,
+      },
+      {
+        id: "e-2",
+        sessionId: session1.id,
+        threadId: thread1.id,
+        parentId: "e-1",
+        type: "message",
+        role: "assistant",
+        content: "x".repeat(500_000), // huge, but covered by c-1 below
+        createdAt: 2,
+      },
+      {
+        // The rehydrated transcript replaces the covered entries with the
+        // short summary, so the pre-turn estimate stays far under usable —
+        // the restored thread must NOT run a spurious pre-turn pass.
+        id: "c-1",
+        sessionId: session1.id,
+        threadId: thread1.id,
+        parentId: "e-2",
+        type: "compaction",
+        summary: "prior summary",
+        coveredEntryIds: ["e-1", "e-2"],
+        tokenCountBefore: 100,
+        tokenCountAfter: 10,
+        createdAt: 3,
+      },
+    ]);
+
+    faux.setResponses([fauxAssistantMessage("post-restart response")]);
+    const engine2 = new Engine({ providers: { store, stream: bus, sandboxProvider } });
+    const restored = await engine2.restoreSession({ sessionId: session1.id, options });
+    const receipt = await restored.prompt("second prompt");
+    await waitFor(() =>
+      events.some(
+        (e) => e.event.type === "turn_end" && e.event.threadId === receipt.threadId,
+      ),
+    );
+
+    const compactionEvents = events.filter((e) => e.event.type === "compaction_start");
+    expect(compactionEvents).toHaveLength(0);
+    const entries = await store.getEntries(session1.id, receipt.threadId);
+    expect(entries.filter((e) => e.type === "compaction")).toHaveLength(1); // only c-1
     faux.unregister();
   });
 });

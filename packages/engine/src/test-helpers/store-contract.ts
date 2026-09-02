@@ -112,6 +112,31 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       expect(loaded[1]).toMatchObject({ id: "e-2", type: "message", role: "assistant" });
     });
 
+    it("getEntries breaks a same-millisecond tie by insertion order (TKAI-303)", async () => {
+      // Two entries in one turn are frequently written inside the same
+      // millisecond (a tool result and the assistant reply that follows it).
+      // created_at alone cannot order them, so the read needs a tiebreaker
+      // that is monotonic in insertion order.
+      //
+      // A later updateEntry on the FIRST row is what makes the bug bite on a
+      // real backend: an in-place update rewrites the row to a new physical
+      // location, so a created_at-only read can return the rewritten first
+      // entry AFTER the untouched second one. The parts of an assistant entry
+      // are re-persisted this way after message_end, so this is the exact
+      // production path, not a contrived one. The read must still return the
+      // pair in insertion order.
+      await store.saveSession(newSession());
+      await store.saveThread("sess-1", newThread("sess-1"));
+      await store.appendEntries("sess-1", "th-1", [
+        msg("e-first", "user", "first", 1000),
+        msg("e-second", "assistant", "second", 1000),
+      ]);
+      await store.updateEntry("sess-1", "th-1", msg("e-first", "user", "first (edited)", 1000));
+      const loaded = await store.getEntries("sess-1", "th-1");
+      expect(loaded.map((e) => e.id)).toEqual(["e-first", "e-second"]);
+      expect(loaded[0]).toMatchObject({ id: "e-first", content: "first (edited)" });
+    });
+
     it("updateEntry replaces an existing entry in place", async () => {
       await store.saveSession(newSession());
       await store.saveThread("sess-1", newThread("sess-1"));

@@ -15,18 +15,23 @@
 import { Hono } from "hono";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, exists, gte, or, sql, type SQL } from "drizzle-orm";
-import type { EventCatalogEntry, FilterOption, FilterOptionResolver, ValetPlugin } from "@valet/engine";
+import type { FilterOption, FilterOptionResolver, ValetPlugin } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { eventDeliveries, eventDropLog, events, eventSubscriptions } from "../schema/index.js";
 import { readOwnerFilter } from "./_owner-filter.js";
-import { catalogForService } from "../events/ingest.js";
-import { subscriptionMatchesEvent, validateRegexPattern } from "../events/match.js";
+import { computeCollisions, type CollisionReport } from "../events/collisions.js";
+import { allCatalogEntries, catalogForService } from "../events/ingest.js";
+import { subscriptionMatchesEvent, type SubscriptionFilter } from "../events/match.js";
+import { storedAnyChannelState } from "../events/mention-scope.js";
+import { validateSubscriptionWrite } from "../events/subscription-write.js";
 import { ownedDefinitionRow } from "../workflows/service.js";
 import { isTeamMember } from "../services/teams.js";
 import type {
   CreateEventSubscriptionRequest,
   CreateEventSubscriptionResponse,
+  EventSubscriptionCollisionErrorWire,
+  EventSubscriptionCollisionsWire,
   EventSubscriptionFilterWire,
   EventSubscriptionTargetWire,
   EventSubscriptionWire,
@@ -64,13 +69,6 @@ async function canMutateSubscription(
   return row.ownerId === userId;
 }
 
-const FILTER_OPS = ["eq", "in", "prefix", "contains", "regex"] as const;
-// `signal` (wake parked workflow runs) is deliberately NOT accepted yet:
-// no workflow node parks on the `event:{key}` signal shape the dispatcher
-// would emit, so a signal-target subscription would validate and then
-// silently never fire. Re-add once a waitForEvent node exists.
-const TARGET_KINDS = ["workflow", "orchestrator"] as const;
-
 const FEED_DEFAULT_LIMIT = 50;
 const FEED_MAX_LIMIT = 100;
 
@@ -87,120 +85,9 @@ const FEED_MAX_LIMIT = 100;
  */
 const OWNER_FEED_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
-function allCatalogEntries(plugins: ValetPlugin[]): EventCatalogEntry[] {
-  return plugins.flatMap((p) => p.triggers ?? []).flatMap((t) => t.catalog);
-}
-
-/**
- * Validates a subscription body against the merged plugin catalog. Returns a
- * human-readable error naming the offending key/field/op, or `null` when
- * valid. Shared by POST (full body) and PATCH (existing row merged with the
- * patch, so partial updates re-validate in context). Workflow-target org
- * ownership is checked separately by the POST handler (needs the db).
- */
-export function validateSubscription(
-  plugins: ValetPlugin[],
-  body: {
-    name: unknown;
-    eventKeys: unknown;
-    filters: unknown;
-    target: unknown;
-  },
-): string | null {
-  const entries = allCatalogEntries(plugins);
-
-  if (typeof body.name !== "string" || body.name.length === 0) {
-    return "name must be a non-empty string";
-  }
-
-  if (!Array.isArray(body.eventKeys) || body.eventKeys.length === 0) {
-    return "eventKeys must be a non-empty array";
-  }
-  // Catalog entries actually selected by the eventKeys patterns — filter
-  // fields are validated against THESE, not the union across all services,
-  // because the ingest matcher (`match.ts` filtersMatch) only consults the
-  // arriving event's own entry. Validating against the union would accept
-  // e.g. a GitHub-only `repo` filter on a `linear.issue.*` subscription,
-  // which then silently never matches anything.
-  const selectedEntries: EventCatalogEntry[] = [];
-  for (const pattern of body.eventKeys) {
-    if (typeof pattern !== "string" || pattern.length === 0) {
-      return "eventKeys entries must be non-empty strings";
-    }
-    const matches = pattern.endsWith(".*")
-      ? entries.filter((e) => e.key.startsWith(pattern.slice(0, -1)))
-      : entries.filter((e) => e.key === pattern);
-    if (matches.length === 0) return `unknown event key: ${pattern}`;
-    selectedEntries.push(...matches);
-  }
-
-  if (!Array.isArray(body.filters)) {
-    return "filters must be an array";
-  }
-  for (const raw of body.filters) {
-    if (typeof raw !== "object" || raw === null) return "filters entries must be objects";
-    const f = raw as Record<string, unknown>;
-    if (typeof f.field !== "string" || f.field.length === 0) {
-      return "filter field must be a non-empty string";
-    }
-    if (typeof f.op !== "string" || !(FILTER_OPS as readonly string[]).includes(f.op)) {
-      return `unknown filter op: ${String(f.op)}`;
-    }
-    if (f.op === "in") {
-      if (
-        !Array.isArray(f.value) ||
-        (f.value as unknown[]).some((v) => typeof v !== "string")
-      ) {
-        return `filter value invalid for op in on field ${f.field}`;
-      }
-    } else {
-      // eq / prefix / contains / regex — value must be a non-empty string
-      if (typeof f.value !== "string" || f.value.length === 0) {
-        return `filter value invalid for op ${f.op} on field ${f.field}`;
-      }
-      // A regex runs on every event, so refuse an invalid, oversized, or
-      // catastrophic-backtracking pattern at write time (see match.ts).
-      if (f.op === "regex") {
-        const regexError = validateRegexPattern(f.value);
-        if (regexError) return regexError;
-      }
-    }
-    if (!selectedEntries.some((e) => e.filters.some((cf) => cf.field === f.field))) {
-      return `filter field ${f.field} is not declared by any event selected by eventKeys`;
-    }
-  }
-
-  if (typeof body.target !== "object" || body.target === null) {
-    return "target must be an object";
-  }
-  const target = body.target as Record<string, unknown>;
-  if (typeof target.kind !== "string" || !(TARGET_KINDS as readonly string[]).includes(target.kind)) {
-    return `unknown target kind: ${String(target.kind)}`;
-  }
-  if (target.kind === "workflow" && (typeof target.workflowId !== "string" || target.workflowId.length === 0)) {
-    return "workflow target requires workflowId";
-  }
-  if (target.kind === "orchestrator") {
-    const who = target.orchestrator;
-    if (who !== undefined && who !== "user" && who !== "team" && who !== "org") {
-      return `unknown target orchestrator: ${String(who)}`;
-    }
-    // `orchestrator` and `teamId` are one choice expressed in two fields, so
-    // each is refused without the other. A team target with no id names no
-    // team; a teamId on a user or org target names a team the delivery would
-    // never reach, and would read as if it did.
-    if (who === "team" && (typeof target.teamId !== "string" || target.teamId.length === 0)) {
-      return "team orchestrator target requires teamId";
-    }
-    if (who !== "team" && target.teamId !== undefined) {
-      return "teamId is only valid when orchestrator is team";
-    }
-  }
-  return null;
-}
-
 /** The jsonb columns come back `unknown`; their shapes are owned by
- * `validateSubscription` above, which gates every write to this table. */
+ * `validateSubscriptionWrite` (`events/subscription-write.ts`), the one gate
+ * in front of every write to this table. */
 function rowToSubscription(row: typeof eventSubscriptions.$inferSelect): EventSubscriptionWire {
   return {
     id: row.id,
@@ -230,6 +117,66 @@ function rowToEventSummary(row: typeof events.$inferSelect): EventSummaryWire {
     occurredAt: row.occurredAt,
     receivedAt: row.receivedAt,
   };
+}
+
+/** A stored row with its jsonb columns narrowed to the shapes the one write
+ * gate (`validateSubscriptionWrite`) persists — what `computeCollisions`
+ * compares against. */
+type NarrowedSubscriptionRow = Omit<
+  typeof eventSubscriptions.$inferSelect,
+  "eventKeys" | "filters" | "target"
+> & {
+  eventKeys: string[];
+  filters: SubscriptionFilter[];
+  target: EventSubscriptionTargetWire;
+};
+
+/**
+ * The collision report for one candidate write (TKAI-294): the candidate
+ * compared against every ENABLED subscription in the org, minus the row
+ * being edited. Disabled rows do not fire, so they cannot collide; enabling
+ * one later re-runs this check (see the PATCH route).
+ */
+async function collisionsForWrite(
+  db: AppDb,
+  plugins: ValetPlugin[],
+  orgId: string,
+  candidate: { eventKeys: string[]; filters: SubscriptionFilter[]; target: EventSubscriptionTargetWire },
+  excludeId?: string,
+): Promise<CollisionReport<NarrowedSubscriptionRow>> {
+  const rows = await db
+    .select()
+    .from(eventSubscriptions)
+    .where(and(eq(eventSubscriptions.orgId, orgId), eq(eventSubscriptions.enabled, true)));
+  const existing: NarrowedSubscriptionRow[] = rows
+    .filter((r) => r.id !== excludeId)
+    .map((r) => ({
+      ...r,
+      eventKeys: r.eventKeys as string[],
+      filters: r.filters as SubscriptionFilter[],
+      target: r.target as EventSubscriptionTargetWire,
+    }));
+  return computeCollisions(candidate, existing, allCatalogEntries(plugins));
+}
+
+function collisionsToWire(report: CollisionReport<NarrowedSubscriptionRow>): EventSubscriptionCollisionsWire {
+  const toWire = (c: CollisionReport<NarrowedSubscriptionRow>["blocking"][number]) => ({
+    subscription: rowToSubscription(c.subscription),
+    relation: c.relation,
+    sharedKeys: c.sharedKeys,
+  });
+  return { blocking: report.blocking.map(toWire), overlapping: report.overlapping.map(toWire) };
+}
+
+/** The 409 headline for a blocked write. Names the rules it steps on and the
+ * two ways out, since `errorText` may be all a caller renders. */
+function collisionBlockMessage(report: CollisionReport<NarrowedSubscriptionRow>): string {
+  const names = report.blocking.map((c) => `"${c.subscription.name}"`).join(", ");
+  return (
+    `This rule covers everything ${names} already ${report.blocking.length === 1 ? "handles" : "handle"} ` +
+    `on the same events, so both would fire together. Narrow its filters, or save again with ` +
+    `"create anyway" to take over.`
+  );
 }
 
 // ── Catalog ─────────────────────────────────────────────────────────────────
@@ -581,9 +528,14 @@ eventsRouter.post("/event-subscriptions", async (c) => {
     return c.json({ error: "invalid JSON body" }, 400);
   }
 
-  const filters = body.filters ?? [];
-  const error = validateSubscription(plugins, { ...body, filters });
-  if (error) return c.json({ error }, 400);
+  const write = await validateSubscriptionWrite(
+    db,
+    plugins,
+    { ...body, filters: body.filters ?? [] },
+    { creatorUserId: user.id, anyChannel: body.anyChannel === true, matchChanged: true },
+  );
+  if (!write.ok) return c.json({ error: write.error }, 400);
+  const filters = write.filters;
 
   // A workflow target must be OWNED by the caller, not only exist in their
   // org: org scope alone lets any member wire automation onto another's.
@@ -623,6 +575,38 @@ eventsRouter.post("/event-subscriptions", async (c) => {
     }
   }
 
+  // Collision gate (TKAI-294). Checked over the FINAL filters (after the
+  // mention gate's injected user filter), so two users' mention rules
+  // compare as the disjoint rules they are. A disabled create skips the
+  // check — the row cannot fire, and enabling it later re-runs it.
+  const enabled = body.enabled ?? true;
+  let collisions: EventSubscriptionCollisionsWire | undefined;
+  if (enabled) {
+    const report = await collisionsForWrite(db, plugins, user.orgId, {
+      eventKeys: body.eventKeys,
+      filters,
+      target: body.target,
+    });
+    if (report.blocking.length > 0 && body.allowCollision !== true) {
+      const resp: EventSubscriptionCollisionErrorWire = {
+        error: collisionBlockMessage(report),
+        collisions: collisionsToWire(report),
+      };
+      return c.json(resp, 409);
+    }
+    if (report.blocking.length > 0) {
+      // The audit trail for a knowing override — a doubled delivery later
+      // should be traceable to who accepted it and over which rules.
+      console.warn(
+        `[events] collision override: user ${user.id} created a subscription over ` +
+          report.blocking.map((b) => b.subscription.id).join(", "),
+      );
+    }
+    if (report.blocking.length > 0 || report.overlapping.length > 0) {
+      collisions = collisionsToWire(report);
+    }
+  }
+
   const now = Date.now();
   const id = randomUUID();
   const inserted = await db
@@ -636,14 +620,17 @@ eventsRouter.post("/event-subscriptions", async (c) => {
       eventKeys: body.eventKeys,
       filters,
       target: body.target,
-      enabled: body.enabled ?? true,
+      enabled,
       createdBy: user.id,
       createdAt: now,
       updatedAt: now,
     })
     .returning();
 
-  const resp: CreateEventSubscriptionResponse = rowToSubscription(inserted[0]);
+  const resp: CreateEventSubscriptionResponse = {
+    ...rowToSubscription(inserted[0]),
+    ...(collisions !== undefined ? { collisions } : {}),
+  };
   return c.json(resp, 201);
 });
 
@@ -722,22 +709,78 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
     filters: body.filters ?? row.filters,
     target: row.target,
   };
-  const error = validateSubscription(plugins, merged);
-  if (error) return c.json({ error }, 400);
+  // Mention scoping is keyed to the CREATOR and skipped for a patch that
+  // does not change the match — so an enabled-only or name-only patch still
+  // works after the creator unlinks Slack, and a colleague's patch of an
+  // org-owned row cannot re-point the scope at themselves. The casts narrow
+  // validated jsonb, same as `rowToSubscription`.
+  const write = await validateSubscriptionWrite(db, plugins, merged, {
+    creatorUserId: row.createdBy,
+    anyChannel: body.anyChannel === true,
+    matchChanged: body.filters !== undefined || body.eventKeys !== undefined,
+    storedAnyChannel: storedAnyChannelState(
+      row.eventKeys as string[],
+      row.filters as SubscriptionFilter[],
+    ),
+  });
+  if (!write.ok) return c.json({ error: write.error }, 400);
+  const filters = write.filters;
+
+  // Collision gate (TKAI-294), against the row as it would exist after the
+  // patch, minus itself. Runs when the result can fire AND the patch changes
+  // what it fires on — a match edit, or flipping enabled on (the create-time
+  // check said nothing about a row born disabled). A rename of a live
+  // colliding row stays unchecked: the collision predates the patch.
+  const willBeEnabled = body.enabled ?? row.enabled;
+  const matchChanged = body.filters !== undefined || body.eventKeys !== undefined;
+  const arming = body.enabled === true && !row.enabled;
+  let collisions: EventSubscriptionCollisionsWire | undefined;
+  if (willBeEnabled && (matchChanged || arming)) {
+    const report = await collisionsForWrite(
+      db,
+      plugins,
+      user.orgId,
+      {
+        eventKeys: merged.eventKeys as string[],
+        filters,
+        target: row.target as EventSubscriptionTargetWire,
+      },
+      id,
+    );
+    if (report.blocking.length > 0 && body.allowCollision !== true) {
+      const resp: EventSubscriptionCollisionErrorWire = {
+        error: collisionBlockMessage(report),
+        collisions: collisionsToWire(report),
+      };
+      return c.json(resp, 409);
+    }
+    if (report.blocking.length > 0) {
+      console.warn(
+        `[events] collision override: user ${user.id} updated subscription ${id} over ` +
+          report.blocking.map((b) => b.subscription.id).join(", "),
+      );
+    }
+    if (report.blocking.length > 0 || report.overlapping.length > 0) {
+      collisions = collisionsToWire(report);
+    }
+  }
 
   const updated = await db
     .update(eventSubscriptions)
     .set({
       name: merged.name,
       eventKeys: merged.eventKeys,
-      filters: merged.filters,
-      enabled: body.enabled ?? row.enabled,
+      filters,
+      enabled: willBeEnabled,
       updatedAt: Date.now(),
     })
     .where(eq(eventSubscriptions.id, id))
     .returning();
 
-  const resp: PatchEventSubscriptionResponse = rowToSubscription(updated[0]);
+  const resp: PatchEventSubscriptionResponse = {
+    ...rowToSubscription(updated[0]),
+    ...(collisions !== undefined ? { collisions } : {}),
+  };
   return c.json(resp);
 });
 

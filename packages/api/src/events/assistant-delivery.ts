@@ -14,7 +14,38 @@ import type { EngineHost } from "../engine/host.js";
 import { ensureDefaultAssistantSession } from "../assistants/service.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 
+/**
+ * Per-thread delivery serialization (TKAI-284 item 3). The first-turn seed
+ * check reads the thread, then fetches a transcript (a slow provider call),
+ * then submits — two rapid mentions on one brand-new thread could both pass
+ * the empty check during the other's fetch and both prepend the transcript.
+ * Chaining deliveries per assistant thread closes that window. In-process
+ * state is sufficient: the api runs single-replica (see the issue), and a
+ * restart between the two deliveries is covered by the unsettled-submission
+ * arm of the seed gate below.
+ */
+const deliveryChains = new Map<string, Promise<void>>();
+
 export async function deliverToAssistantThread(
+  deps: Parameters<typeof deliverToAssistantThreadInner>[0],
+  args: Parameters<typeof deliverToAssistantThreadInner>[1],
+): Promise<void> {
+  const key = `${args.orgId}:${args.owner.type}:${args.owner.id}:${args.threadKey}`;
+  const prior = deliveryChains.get(key) ?? Promise.resolve();
+  const run = prior.then(() => deliverToAssistantThreadInner(deps, args));
+  // The stored tail swallows the failure (the caller gets it from `run`) and
+  // removes itself once it is still the tail, so the map does not keep one
+  // settled promise per thread ever delivered to.
+  const tail: Promise<void> = run
+    .catch(() => undefined)
+    .then(() => {
+      if (deliveryChains.get(key) === tail) deliveryChains.delete(key);
+    });
+  deliveryChains.set(key, tail);
+  return run;
+}
+
+async function deliverToAssistantThreadInner(
   deps: {
     db: AppDb;
     engineHost: EngineHost;
@@ -56,12 +87,21 @@ export async function deliverToAssistantThread(
   // earlier messages so it participates in the group conversation with full
   // context instead of the lone trigger message. Later messages already stream
   // in on the same thread, so a thread that already has entries never re-seeds.
+  // "First" is entries AND unsettled submissions both empty: an admitted-but-
+  // unclaimed submission has written no entry yet, and a second mention racing
+  // it must not seed the transcript a second time. (In-process ordering is
+  // handled by the per-thread chain in `deliverToAssistantThread`; the
+  // submission check covers an api restart between admit and claim.)
   if (deps.fetchThreadContext && signal.origin) {
-    const existing = await session.providers.store.getEntries(session.id, thread.id);
+    const store = session.providers.store;
+    const existing = await store.getEntries(session.id, thread.id);
     if (existing.length === 0) {
-      const transcript = await deps.fetchThreadContext(signal.origin);
-      if (transcript) {
-        signal = { ...signal, body: `Conversation so far in this thread:\n${transcript}\n\n---\n\n${signal.body}` };
+      const unsettled = await store.listUnsettledSubmissions(session.id);
+      if (!unsettled.some((item) => item.threadId === thread.id)) {
+        const transcript = await deps.fetchThreadContext(signal.origin);
+        if (transcript) {
+          signal = { ...signal, body: `Conversation so far in this thread:\n${transcript}\n\n---\n\n${signal.body}` };
+        }
       }
     }
   }

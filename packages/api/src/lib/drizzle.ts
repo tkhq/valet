@@ -156,6 +156,22 @@ interface SchemaRepair {
  */
 const SCHEMA_REPAIRS: SchemaRepair[] = [
   {
+    // The spawning submission's channel origin, inherited by child.settled
+    // signals. Null on rows from before the column: those settlements just
+    // keep the old no-origin behavior.
+    describe: "child_watches.origin_json column",
+    probe: { kind: "column", table: "child_watches", column: "origin_json" },
+    sql: 'ALTER TABLE "child_watches" ADD COLUMN IF NOT EXISTS "origin_json" text',
+  },
+  {
+    // The last delivered message ts on a followed thread, read by the
+    // follow-router's gap re-hydration. Null on rows from before the column:
+    // the next delivery starts tracking, with no back-hydration.
+    describe: "followed_threads.last_seen_ts column",
+    probe: { kind: "column", table: "followed_threads", column: "last_seen_ts" },
+    sql: 'ALTER TABLE "followed_threads" ADD COLUMN IF NOT EXISTS "last_seen_ts" text',
+  },
+  {
     // Records which person's GitHub credential a team skill source may use.
     // Null on every row written before the column existed, which the sync
     // reads as "no credential" rather than climbing to the org's App.
@@ -170,6 +186,14 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     describe: "orgs.sso_team_groups column",
     probe: { kind: "column", table: "orgs", column: "sso_team_groups" },
     sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "sso_team_groups" jsonb',
+  },
+  {
+    // Team default model (TKAI-255). Null on rows from before the column:
+    // those teams keep the old behavior — resolution falls through to the
+    // org preference list.
+    describe: "teams.default_model column",
+    probe: { kind: "column", table: "teams", column: "default_model" },
+    sql: 'ALTER TABLE "teams" ADD COLUMN IF NOT EXISTS "default_model" text',
   },
   {
     // Artifact-sharing opt-in (artifacts design). The DEFAULT backfills
@@ -780,6 +804,28 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     describe: "security_needs_cell index",
     probe: { kind: "index", index: "security_needs_cell" },
     sql: 'CREATE INDEX IF NOT EXISTS "security_needs_cell" ON "security_needs" ("cell_id")',
+  },
+  {
+    // engine_entries.seq — the message-order tiebreaker (TKAI-303). engine_meta
+    // tracks the engine schema, but its version check is fail-loud, not
+    // self-repairing: bumping ENGINE_SCHEMA_VERSION would make every deployed
+    // database refuse to boot and demand a wipe, which would destroy thread
+    // history. This additive column does not touch CAS correctness, so it does
+    // not need that guard — the version stays put and the column arrives here
+    // instead. The IDENTITY backfills existing rows in PHYSICAL (heap) order,
+    // which equals insertion order only for rows never updated in place: a row
+    // rewritten by an earlier updateEntry sits at a later heap position, so its
+    // backfilled seq can fall out of insertion order. So this repair makes an
+    // existing thread's order STABLE across reads (no more plan-dependent
+    // flicker), but it does not retroactively correct a same-millisecond tie
+    // that was already reordered before the ALTER — that true order is the data
+    // the bug never recorded. Every entry written after the column exists gets
+    // a correct tie order. This is the one repair that rewrites its table
+    // (IDENTITY is a volatile default), so it takes an ACCESS EXCLUSIVE lock the
+    // first and only time it runs; the probe keeps every later boot lock-free.
+    describe: "engine_entries.seq column",
+    probe: { kind: "column", table: "engine_entries", column: "seq" },
+    sql: 'ALTER TABLE "engine_entries" ADD COLUMN IF NOT EXISTS "seq" bigint GENERATED ALWAYS AS IDENTITY NOT NULL',
   },
 ];
 

@@ -28,6 +28,7 @@ function team(id: string, name = id, callerRole: "admin" | "member" | null = "me
     createdAt: 0,
     memberCount: 2,
     callerRole,
+    defaultModel: null,
   };
 }
 

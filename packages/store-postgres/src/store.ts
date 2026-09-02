@@ -642,8 +642,12 @@ export class PgSessionStore implements SessionStore {
   }
 
   async getEntries(sessionId: string, threadId: string, opts?: MessageQuery): Promise<SessionEntry[]> {
+    // created_at (epoch-ms) is the primary sort, but same-millisecond ties are
+    // routine within one turn, so seq — a monotonic insertion counter — breaks
+    // them in insertion order (TKAI-303). Without it Postgres may return a tie
+    // in any order, which surfaced as chat bubbles rendering out of sequence.
     const result = await this.db.query(
-      "SELECT * FROM engine_entries WHERE session_id = $1 AND thread_id = $2 ORDER BY created_at ASC",
+      "SELECT * FROM engine_entries WHERE session_id = $1 AND thread_id = $2 ORDER BY created_at ASC, seq ASC",
       [sessionId, threadId],
     );
     let rows = result.rows.map(rawToEntryRow);

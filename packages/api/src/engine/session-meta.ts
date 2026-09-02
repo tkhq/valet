@@ -43,9 +43,15 @@ export interface SessionMetaSource {
   /** Request a rootless docker daemon inside the sandbox (docker-in-sandbox).
    * Omitted by orchestrator/child callers. */
   docker?: boolean;
-  /** `agent_sessions.owner_type`: user, team, or org. Decides which 1Password
-   * scopes the session's credential reads may consult (`onePasswordScopesFor`). */
+  /**
+   * Principal ownership, from the app row's `owner_type`/`owner_id` or from
+   * an engine `SessionData.owner`. When `ownerType` is `"team"`, the loader
+   * emits `SessionMeta.ownerTeamId` so the build consults the team's
+   * default model (TKAI-255). Every `sessionFor` caller should supply it —
+   * a caller that omits it silently skips the team tier on a first build.
+   */
   ownerType?: string;
+  ownerId?: string;
 }
 
 /**
@@ -104,6 +110,7 @@ export async function loadSessionMeta(db: AppDb, src: SessionMetaSource): Promis
     ...(src.profile !== undefined ? { profile: src.profile } : {}),
     ...(src.docker !== undefined ? { docker: src.docker } : {}),
     ...(src.ownerType !== undefined ? { ownerType: src.ownerType } : {}),
+    ...(src.ownerType === "team" && src.ownerId ? { ownerTeamId: src.ownerId } : {}),
     repos: reposWithDirs,
     userName: userRows[0]?.name,
     userEmail: userRows[0]?.email,

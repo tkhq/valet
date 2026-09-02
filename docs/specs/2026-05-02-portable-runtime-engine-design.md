@@ -976,27 +976,27 @@ Token-aware context compression with two complementary techniques. When a thread
 
 #### Triggers
 
-- **Proactive (auto)** — after each turn, if `tokens.total >= usable(model, cfg)` where
+- **Proactive (auto)** — after each turn, if `estimateContextTokens(systemPrompt, messages) >= usable(model, cfg)` where
   ```
   usable = contextWindow − reserved
   reserved = cfg.reserveTokens ?? min(20_000, model.maxOutputTokens)
   ```
-  the engine queues a compaction pass to run before the next user turn would otherwise execute. Token usage comes from pi-ai's per-call `Usage`; we do not estimate independently in this path.
+  the engine queues a compaction pass to run before the next user turn would otherwise execute. The trigger uses the same char-based estimate (`estimateTokens`, ~4 chars/token) as the cut-point budget — never pi-ai's per-call `Usage`. Provider-reported totals include cache reads and system/tool overhead that compaction cannot reclaim, so a usage-based trigger compacts long cached threads that do not need it (TKAI-305). The estimate undercounts tool definitions; the reactive path backstops that.
 - **Reactive (overflow)** — if a turn's assistant message returns `stopReason === 'error'` and pi-ai's `isContextOverflow(message)` matches the error, the engine compacts and retries the same turn. Reactive compaction strips media attachments from history before summarizing (some overflow is media-bytes, not token-count, so dropping images can be enough on its own).
 
 #### Tail preservation
 
 Compaction never touches the most recent turns. A "turn" is the segment from one user message up to (but not including) the next user message, including the assistant's tool calls and tool results.
 
-- Default keep: the last `cfg.tailTurns ?? 2` turns.
-- Tail token budget: `clamp(usable * 0.25, cfg.minPreserveRecentTokens ?? 2_000, cfg.maxPreserveRecentTokens ?? 8_000)`.
+- Default keep: at most the last `cfg.tailTurns ?? 8` turns; the token budget decides how many fit.
+- Tail token budget: `max(usable * 0.25 [capped at cfg.maxPreserveRecentTokens when set], cfg.minPreserveRecentTokens ?? 2_000)`. There is no default ceiling — the budget scales with the model. A fixed 8k ceiling bound on every production model and left ~86% of a 200k window unused after compaction (TKAI-305).
 - If the last `tailTurns` turns exceed the budget, the engine walks them oldest → newest and drops whole turns from the head of that window until the rest fits. If a single turn alone exceeds the budget, the engine splits it at the first message boundary that fits, summarizing the prefix into the compaction and keeping the suffix in the tail.
 
 #### Pruning (cheap path, no LLM)
 
 Walk messages newest → oldest. Track cumulative tool-output token estimate. Once the cumulative count exceeds `cfg.pruneProtectTokens ?? 40_000`, mark every older `tool_call`-result text as `elided`. Skip protected tools (the engine ships with `skill` and `thread_read` protected by default; per-tool opt-in via `ToolDef.protectedFromPruning`).
 
-The DAG entry is updated in place via `SessionStore.updateEntry` — `MessagePart` of type `tool_call` keeps `callId`, `toolName`, `args`, and `status`, but its `result` field is replaced with a placeholder `{ elided: true, reason: 'pruned' }` and `elided: true` is set on the part. LLM-context assembly skips elided results. The persistence is atomic per entry, not per part: the entire `MessageEntry` row is rewritten with the same id. Pruning only commits if it'd save at least `cfg.pruneMinimumTokens ?? 20_000` tokens; otherwise it's a no-op.
+The DAG entry is updated in place via `SessionStore.updateEntry` — `MessagePart` of type `tool_call` gains `elided: true` and keeps everything else, including `result`. Elision is a render-time transformation: LLM-context assembly replaces the result with a short placeholder, but the stored text stays readable by the summarizer, `thread_read`, and the UI. (Rows pruned before this rule carry a `{ elided: true, reason: 'pruned' }` placeholder as `result`; their original output is gone.) The persistence is atomic per entry, not per part: the entire `MessageEntry` row is rewritten with the same id. Pruning only commits if it'd save at least `cfg.pruneMinimumTokens ?? 20_000` tokens; otherwise it's a no-op.
 
 Pruning runs before compaction on the proactive path. Often pruning alone is enough.
 
@@ -1011,6 +1011,7 @@ When pruning isn't enough (or after `cfg.pruneMinimumTokens` worth of tool outpu
    ```
    ## Goal · ## Constraints & Preferences
    ## Progress (Done / In Progress / Blocked) · ## Key Decisions
+   ## Agreed Approach · ## Active Tools & Skills
    ## Next Steps · ## Critical Context · ## Relevant Files
    ```
    This template is required, not advisory. The summary text is the source of truth for the LLM's view of pre-cut history; using a structured form prevents the summary from drifting into prose that crowds out specific facts (paths, error strings, identifiers).
@@ -1031,7 +1032,7 @@ The engine's `convertToLlm` pipeline (the function fed to pi-agent-core's `Agent
 2. Find the most recent `CompactionEntry`. If none, pass entries through unchanged.
 3. Drop every entry whose id is in the active compaction's `coveredEntryIds`.
 4. Replace them with a single user message containing the summary text, framed as `<previous-context>{summary}</previous-context>`.
-5. Apply pruning's elision: any kept entry's tool-call parts whose `result.elided === true` get a placeholder `[output elided to save context]` in the LLM-visible content.
+5. Apply pruning's elision: any kept entry's tool-call parts with `elided === true` get a placeholder `[output elided to save context]` in the LLM-visible content; the stored result stays in the DAG.
 6. Yield the resulting `Message[]` to the agent loop.
 
 This is also the rehydration path on `restoreSession` — there is no separate "rebuild context after compaction" code path.
@@ -1076,9 +1077,9 @@ Hooks are registered via `CreateSessionOptions` (`compactionHooks?: CompactionHo
 |---|---|---|
 | `cfg.compactionEnabled` | `true` | per-thread switch |
 | `cfg.reserveTokens` | `min(20_000, maxOutput)` | head-room subtracted from contextWindow |
-| `cfg.tailTurns` | `2` | last N turns never touched |
+| `cfg.tailTurns` | `8` | at most this many recent turns kept verbatim; the token budget binds first |
 | `cfg.minPreserveRecentTokens` | `2_000` | floor on tail token budget |
-| `cfg.maxPreserveRecentTokens` | `8_000` | ceiling on tail token budget |
+| `cfg.maxPreserveRecentTokens` | none | optional ceiling on tail token budget; unset scales with the model |
 | `cfg.pruneProtectTokens` | `40_000` | recent tool-output bytes never pruned |
 | `cfg.pruneMinimumTokens` | `20_000` | only commit prune if it saves ≥ this much |
 | `cfg.toolOutputMaxChars` | `2_000` | when feeding head to summarizer |

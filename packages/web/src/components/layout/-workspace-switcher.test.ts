@@ -24,6 +24,7 @@ function team(id: string, name = id): TeamSummary {
     createdAt: 0,
     memberCount: 2,
     callerRole: "member",
+    defaultModel: null,
   };
 }
 

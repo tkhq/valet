@@ -7,8 +7,9 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import githubPlugin from "@valet/plugin-github/plugin";
+import slackPlugin from "@valet/plugin-slack/plugin";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { eventSubscriptions, teamMembers, teams, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
+import { eventSubscriptions, teamMembers, teams, userIdentityLinks, workflowDefinitions, workflowRuns, workflowSchedules } from "../schema/index.js";
 import type {
   CreateWorkflowEventTriggerRequest,
   CreateWorkflowScheduleRequest,
@@ -471,6 +472,72 @@ describe("event-trigger CRUD", () => {
     expect(badRes.status).toBe(400);
     const badBody = (await badRes.json()) as { error: string };
     expect(badBody.error).toContain("github.does.not.exist");
+  });
+
+  // Mention scoping (TKAI-299): the trigger path shares the subscriptions
+  // CRUD gate (`events/mention-scope.ts`). One create + one patch case here
+  // pin the wiring; the rule matrix lives in `events.test.ts`.
+  it("scopes a slack.app_mention trigger to the creator and named channels", async () => {
+    api = await bootTestApi({ plugins: [slackPlugin] });
+    const a = api;
+    const wfId = await createWorkflow(a.baseUrl, "wf_mention");
+
+    // No channel filter and no anyChannel → refused.
+    const bare = await fetch(`${a.baseUrl}/api/workflows/event-triggers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workflowId: wfId,
+        name: "on mention",
+        eventKeys: ["slack.app_mention"],
+        filters: [],
+      } satisfies CreateWorkflowEventTriggerRequest),
+    });
+    expect(bare.status).toBe(400);
+    expect(((await bare.json()) as { error: string }).error).toContain("at least one channel");
+
+    // Channel named + creator linked → created with the injected user filter.
+    await a.providers.db.insert(userIdentityLinks).values({
+      id: "uil-local",
+      provider: "slack",
+      externalId: "U_LOCAL",
+      userId: "local-user",
+      createdAt: Date.now(),
+      notifyAttention: true,
+    });
+    const createRes = await fetch(`${a.baseUrl}/api/workflows/event-triggers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        workflowId: wfId,
+        name: "on mention",
+        eventKeys: ["slack.app_mention"],
+        filters: [{ field: "channel", op: "eq", value: "C123" }],
+      } satisfies CreateWorkflowEventTriggerRequest),
+    });
+    expect(createRes.status).toBe(201);
+    const created = (await createRes.json()) as WorkflowEventTriggerResponse;
+    expect(created.trigger.filters).toEqual([
+      { field: "channel", op: "eq", value: "C123" },
+      { field: "user", op: "eq", value: "U_LOCAL" },
+    ]);
+
+    // A filters patch that drops the channel scope is refused without
+    // anyChannel, and accepted with it.
+    const stripRes = await fetch(`${a.baseUrl}/api/workflows/event-triggers/${created.trigger.triggerId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filters: [] }),
+    });
+    expect(stripRes.status).toBe(400);
+    const anyRes = await fetch(`${a.baseUrl}/api/workflows/event-triggers/${created.trigger.triggerId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filters: [], anyChannel: true }),
+    });
+    expect(anyRes.status).toBe(200);
+    const patched = (await anyRes.json()) as WorkflowEventTriggerResponse;
+    expect(patched.trigger.filters).toEqual([{ field: "user", op: "eq", value: "U_LOCAL" }]);
   });
 });
 

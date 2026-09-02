@@ -18,6 +18,7 @@ import {
   useQueueStateForThread,
   useThreadLiveStatus,
   useErrorForThread,
+  useCompactingForThread,
 } from "~/stores/stream";
 import { Composer } from "~/components/session/composer";
 import {
@@ -32,6 +33,7 @@ import { SandboxTabs, type SandboxTabId } from "~/components/session/sandbox-tab
 import { SessionHeader } from "~/components/session/session-header";
 import { useMe } from "~/api/settings";
 import { useInvalidateSessionOnModelSwitch } from "~/hooks/use-invalidate-session-on-model-switch";
+import { useInvalidateMessagesOnCompaction } from "~/hooks/use-invalidate-messages-on-compaction";
 import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
 import { Button, Spinner } from "~/components/primitives";
 
@@ -97,6 +99,10 @@ export function SessionView({
   // Keep the header's model picker honest for switches this client did not
   // make itself (/model command, other tabs, direct API).
   useInvalidateSessionOnModelSwitch(sessionId);
+  // Surface the compaction divider as soon as a compaction lands: the
+  // engine persists the CompactionEntry before emitting `compaction_end`,
+  // and this refetch is what pulls it into the transcript.
+  useInvalidateMessagesOnCompaction(sessionId);
   const [localTab, setLocalTab] = useState<SandboxTabId>("chat");
   const tab = activeTab ?? localTab;
   const setTab = onTabChange ?? setLocalTab;
@@ -130,6 +136,7 @@ export function SessionView({
 
   const pendingGate = usePendingGateForThread(sessionId, effectiveThreadId);
   const threadError = useErrorForThread(sessionId, effectiveThreadId);
+  const compacting = useCompactingForThread(sessionId, effectiveThreadId);
 
   // "Agent is busy" for the header badge and the transcript indicator, from
   // the same two signals the composer's Stop/Escape affordance uses: the
@@ -278,6 +285,11 @@ export function SessionView({
             pendingIds={threadQueueState?.pendingIds}
             viewerId={me.data?.id}
           />
+          {compacting && (
+            <div className="border-t border-[--border] px-4 py-1.5 text-[11px] text-muted">
+              Compacting context…
+            </div>
+          )}
           {threadError && (
             <div className="border-t border-danger-500/30 bg-danger-500/5 px-4 py-2 text-xs text-danger-600">
               <span className="font-medium">{threadError.code}:</span> {threadError.message}

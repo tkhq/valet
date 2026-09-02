@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { Type } from "typebox";
 import {
   fauxAssistantMessage,
+  fauxText,
   fauxToolCall,
   registerFauxProvider,
   type FauxProviderRegistration,
@@ -21,7 +22,7 @@ import {
   type ValetPlugin,
 } from "@valet/engine";
 import { PgSessionStore, PgEventStream } from "@valet/store-postgres";
-import { agentSessions, teamMembers, teams } from "../schema/index.js";
+import { agentSessions, teamMembers, teams, users } from "../schema/index.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost } from "../engine/host.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
@@ -35,7 +36,9 @@ const ORG_ID = "local-org";
 const USER_ID = "local-user";
 
 class FakeTransport implements ChannelTransport {
-  readonly channelType = "fake";
+  readonly channelType: string = "fake";
+  /** Artificial latency on send(), to make delivery-order races observable. */
+  sendDelayMs = 0;
   sent: Array<{ conversationKey: string; message: OutboundChannelMessage }> = [];
   media: Array<{ conversationKey: string; attachment: OutboundChannelAttachment }> = [];
   gatePrompts: Array<{ conversationKey: string; prompt: ChannelGatePrompt; messageId: string }> = [];
@@ -50,6 +53,7 @@ class FakeTransport implements ChannelTransport {
     return null;
   }
   async send(conversationKey: string, message: OutboundChannelMessage) {
+    if (this.sendDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.sendDelayMs));
     this.sent.push({ conversationKey, message });
     return { conversationKey, messageId: String(this.nextMessageId++) };
   }
@@ -70,6 +74,16 @@ class FakeTransport implements ChannelTransport {
   }
 }
 
+/** A transport that owns its conversationKey rebuild, like Slack: the thread
+ * key alone is not the address. Exercises origin-routed (events-thread)
+ * delivery, which must rebuild the key through the transport. */
+class KeyedTransport extends FakeTransport {
+  override readonly channelType: string = "keyed";
+  conversationKeyFromThreadKey(threadKey: string): string | null {
+    return threadKey.startsWith("keyed:") ? `keyed:R1:${threadKey.slice("keyed:".length)}` : null;
+  }
+}
+
 function inbound(overrides: Partial<InboundChannelEvent> = {}): InboundChannelEvent {
   return {
     dispatchId: `fake:${Math.floor(Math.random() * 1e9)}`,
@@ -87,6 +101,7 @@ describe("ChannelHost outbound delivery", () => {
   let engineHost: EngineHost;
   let host: ChannelHost;
   let fakeTransport: FakeTransport;
+  let keyedTransport: KeyedTransport;
   let faux: FauxProviderRegistration;
   let eventStream: PgEventStream;
   let engineStore: PgSessionStore;
@@ -112,10 +127,14 @@ describe("ChannelHost outbound delivery", () => {
     const engineCredentials = new PgCredentialStore(pgdb, deriveSecretKey("test-key"));
 
     fakeTransport = new FakeTransport();
+    keyedTransport = new KeyedTransport();
     const fakePlugin: ValetPlugin = {
       name: "fake",
       version: "0",
-      transports: [{ channelType: "fake", create: () => fakeTransport }],
+      transports: [
+        { channelType: "fake", create: () => fakeTransport },
+        { channelType: "keyed", create: () => keyedTransport },
+      ],
       actions: [
         {
           service: "fake",
@@ -128,6 +147,14 @@ describe("ChannelHost outbound delivery", () => {
               parameters: Type.Object({}),
               execute: async () => ({ success: true, data: "done" }),
             },
+            {
+              id: "fake.lookup",
+              name: "Lookup",
+              description: "a low-risk action that runs without approval",
+              riskLevel: "low",
+              parameters: Type.Object({}),
+              execute: async () => ({ success: true, data: "found" }),
+            },
           ],
         },
       ],
@@ -136,6 +163,10 @@ describe("ChannelHost outbound delivery", () => {
     await engineCredentials.save({ type: "org", id: ORG_ID }, "fake", {
       type: "bot_token",
       accessToken: "fake-bot-token",
+    });
+    await engineCredentials.save({ type: "org", id: ORG_ID }, "keyed", {
+      type: "bot_token",
+      accessToken: "keyed-bot-token",
     });
 
     engineHost = new EngineHost({
@@ -295,13 +326,11 @@ describe("ChannelHost outbound delivery", () => {
     expect(fakeTransport.sent.filter((s) => s.message.markdown.includes("web-only result"))).toHaveLength(0);
   });
 
-  it("skips mid-turn assistant messages (message_end fires per-message, not just at turn end)", async () => {
-    // message_end fires with reason "end_turn" for every non-abort assistant
-    // message the engine persists, including mid-turn narration before a
-    // tool call — only the turn's genuine final message persists
-    // stopReason "end_turn" on the entry itself. A mid-turn entry (no
-    // stopReason) paired with a message_end("end_turn") event must not be
-    // delivered.
+  it("delivers a mid-turn assistant message that carries text", async () => {
+    // A model can put its whole reply in the same message as its first tool
+    // call (persisted stopReason undefined) and end the turn on an empty
+    // message. Gating delivery on stopReason "end_turn" drops that reply,
+    // so mid-turn messages with text must deliver.
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("fake:99").id;
     await engineStore.appendEntries(session.id, threadId, [
@@ -313,9 +342,8 @@ describe("ChannelHost outbound delivery", () => {
         parentId: null,
         createdAt: Date.now(),
         role: "assistant",
-        content: "Let me check.",
-        // No stopReason: this is a mid-turn narration message, not the
-        // turn's final one.
+        content: "Hi Carly — noting that down.",
+        // No stopReason: this message stopped on a tool call, mid-turn.
       },
     ]);
 
@@ -329,13 +357,828 @@ describe("ChannelHost outbound delivery", () => {
       `mid-turn-${randomUUID()}`,
     );
 
+    await vi.waitFor(() => {
+      expect(fakeTransport.sent.some((s) => s.message.markdown.includes("Hi Carly"))).toBe(true);
+    });
+  });
+
+  it("skips an assistant message with no text and no attachments", async () => {
+    // The empty turn-final message that follows a reply-then-tool-calls turn
+    // must not produce an empty channel message.
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    await engineStore.appendEntries(session.id, threadId, [
+      {
+        type: "message",
+        id: "empty-final-msg-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant",
+        content: "",
+        stopReason: "end_turn",
+      },
+    ]);
+
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "empty-final-msg-1", reason: "end_turn" },
+      },
+      `empty-final-${randomUUID()}`,
+    );
+
     // Give the (would-be, buggy) delivery a real window to happen before
     // asserting its absence.
     await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(fakeTransport.sent.some((s) => s.message.markdown.includes("Let me check."))).toBe(false);
+    expect(fakeTransport.sent).toHaveLength(0);
+  });
+
+  it("delivers the reply from a text+tool-call message when the turn ends on an empty message", async () => {
+    // Regression: the whole reply rides in the same message as the first
+    // tool call (stopReason toolUse → persisted undefined), then the turn
+    // ends with an empty message (persisted stopReason "end_turn"). The
+    // reply must reach the channel exactly once.
+    faux.setResponses([
+      fauxAssistantMessage(
+        [
+          fauxText("Hi Carly — I'm the team's assistant."),
+          fauxToolCall("call_tool", { tool_id: "fake.lookup", params: {}, summary: "look something up" }, { id: "tc-mid" }),
+        ],
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage(""),
+    ]);
+
+    await host.handleUpdate("fake", inbound({ dispatchId: `fake:${randomUUID()}`, text: "introduce yourself" }));
+
+    await vi.waitFor(
+      () => {
+        expect(fakeTransport.sent.some((s) => s.message.markdown.includes("Hi Carly"))).toBe(true);
+      },
+      { timeout: 3000 },
+    );
+    // Let the turn settle, then assert the reply landed exactly once and the
+    // empty final message produced nothing.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(fakeTransport.sent.filter((s) => s.message.markdown.includes("Hi Carly"))).toHaveLength(1);
+    expect(fakeTransport.sent.filter((s) => s.message.markdown.trim() === "")).toHaveLength(0);
+  });
+
+  it("posts a mid-turn text message before the gate card its tool call raised", async () => {
+    // deliverAssistantMessage and deliverGatePrompt each await transport
+    // calls. Without per-thread serialization in startOutbound, the gate
+    // card (fast send) can land before the slower text send that preceded
+    // it. The artificial send delay makes that race deterministic.
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    await engineStore.appendEntries(session.id, threadId, [
+      {
+        type: "message",
+        id: "order-msg-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant",
+        content: "About to ask for approval.",
+      },
+    ]);
+    fakeTransport.sendDelayMs = 100;
+
+    const gate: DecisionGate = {
+      id: `gate-${randomUUID()}`,
+      sessionId: session.id,
+      threadId,
+      queueItemId: "qi-order-1",
+      resumeKey: "rk-order-1",
+      ordinal: 1,
+      type: "approval",
+      title: "Approve the thing?",
+      body: "do the thing",
+      actions: [{ id: "approve", label: "Approve", style: "primary" }],
+      status: "pending",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "order-msg-1", reason: "end_turn" },
+      },
+      `order-msg-${randomUUID()}`,
+    );
+    await eventStream.append(
+      { sessionId: session.id, threadId, timestamp: Date.now(), event: { type: "decision_gate", threadId, gate } },
+      `order-gate-${randomUUID()}`,
+    );
+
+    await vi.waitFor(() => {
+      expect(fakeTransport.gatePrompts).toHaveLength(1);
+    });
+    // The text must already be on the channel when the card lands.
+    expect(fakeTransport.sent.some((s) => s.message.markdown.includes("About to ask for approval."))).toBe(true);
+  });
+
+  it("routes a mid-turn message on the events thread to its submission's origin", async () => {
+    // The "events" thread key does not decode to a channel; delivery must
+    // resolve the submission's origin and rebuild the conversationKey
+    // through the transport — for a MID-TURN message, not just a turn-final
+    // one.
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("events").id;
+    await engineStore.appendEntries(session.id, threadId, [
+      {
+        type: "message",
+        id: "origin-user-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "user",
+        content: "who are you",
+        queueItemId: "qi-origin-1",
+        signal: {
+          signalType: "keyed.app_mention",
+          tagName: "signal",
+          origin: { channelType: "keyed", threadKey: "keyed:D100" },
+        },
+      },
+      {
+        type: "message",
+        id: "origin-mid-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant",
+        content: "routed by origin",
+        queueItemId: "qi-origin-1",
+        // No stopReason: mid-turn.
+      },
+    ]);
+
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "origin-mid-1", reason: "end_turn" },
+      },
+      `origin-mid-${randomUUID()}`,
+    );
+
+    await vi.waitFor(() => {
+      expect(keyedTransport.sent).toEqual([
+        { conversationKey: "keyed:R1:D100", message: { markdown: "routed by origin" } },
+      ]);
+    });
+  });
+
+  it("keeps an overheard submission's mid-turn text off the channel (reply manual)", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("events").id;
+    await engineStore.appendEntries(session.id, threadId, [
+      {
+        type: "message",
+        id: "manual-user-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "user",
+        content: "a passing remark",
+        queueItemId: "qi-manual-1",
+        signal: {
+          signalType: "keyed.message",
+          tagName: "signal",
+          origin: { channelType: "keyed", threadKey: "keyed:D100", reply: "manual" },
+        },
+      },
+      {
+        type: "message",
+        id: "manual-mid-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant",
+        content: "thinking out loud",
+        queueItemId: "qi-manual-1",
+      },
+    ]);
+
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "manual-mid-1", reason: "end_turn" },
+      },
+      `manual-mid-${randomUUID()}`,
+    );
+
+    // Give the (would-be, buggy) delivery a real window before asserting
+    // its absence.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(keyedTransport.sent).toHaveLength(0);
+  });
+
+  it("overheard final with no origin action gets ONE reply-dropped note per thread (TKAI-284)", async () => {
+    faux.setResponses([fauxAssistantMessage("(noted)"), fauxAssistantMessage("(noted)")]);
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("events").id;
+    const overheardTurn = (n: number) => [
+      {
+        type: "message" as const,
+        id: `od-user-${n}`,
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "user" as const,
+        content: "a passing remark",
+        queueItemId: `qi-od-${n}`,
+        signal: {
+          signalType: "keyed.message",
+          tagName: "signal",
+          origin: { channelType: "keyed", threadKey: "keyed:D100", reply: "manual" as const },
+        },
+      },
+      {
+        type: "message" as const,
+        id: `od-final-${n}`,
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant" as const,
+        content: "here is my answer to that remark",
+        queueItemId: `qi-od-${n}`,
+        stopReason: "end_turn" as const,
+      },
+    ];
+    await engineStore.appendEntries(session.id, threadId, overheardTurn(1));
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "od-final-1", reason: "end_turn" },
+      },
+      `od-final-1-${randomUUID()}`,
+    );
+
+    const feedbackEntries = async () => {
+      const entries = await engineStore.getEntries(session.id, threadId);
+      return entries.filter(
+        (e) => e.type === "message" && e.role === "user" && e.signal?.signalType === "channel.reply_dropped",
+      );
+    };
+    await vi.waitFor(async () => {
+      const found = await feedbackEntries();
+      expect(found).toHaveLength(1);
+      expect((found[0] as { content?: string }).content).toContain("NOT posted");
+      expect(found[0].type === "message" && found[0].signal?.origin?.reply).toBe("manual");
+    });
+    // Nothing auto-posted: the note is a signal to the agent, not a channel send.
+    expect(keyedTransport.sent).toHaveLength(0);
+
+    // A second swallowed overheard final on the SAME thread: the durable
+    // dispatchId dedup keeps it at one note.
+    await engineStore.appendEntries(session.id, threadId, overheardTurn(2));
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "od-final-2", reason: "end_turn" },
+      },
+      `od-final-2-${randomUUID()}`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(await feedbackEntries()).toHaveLength(1);
+  });
+
+  it("a turn that acted on its origin, and a feedback-triggered turn, get no reply-dropped note", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("events").id;
+    await engineStore.appendEntries(session.id, threadId, [
+      // Turn A: overheard, but the agent posted via send_message (not the
+      // origin actions) — it still acted, so the swallowed wrap-up is
+      // expected and gets no note.
+      {
+        type: "message",
+        id: "acted-user-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "user",
+        content: "a remark",
+        queueItemId: "qi-acted-1",
+        signal: {
+          signalType: "keyed.message",
+          tagName: "signal",
+          origin: { channelType: "keyed", threadKey: "keyed:D100", reply: "manual" },
+        },
+      },
+      {
+        type: "message",
+        id: "acted-mid-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant",
+        content: "replying properly",
+        queueItemId: "qi-acted-1",
+        parts: [
+          {
+            type: "tool_call",
+            callId: "tc-1",
+            toolName: "call_tool",
+            status: "completed",
+            args: { tool_id: "keyed.send_message", params: { text: "hi" } },
+            result: { details: { ok: true } },
+          },
+        ],
+      },
+      {
+        type: "message",
+        id: "acted-final-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant",
+        content: "done, replied in thread",
+        queueItemId: "qi-acted-1",
+        stopReason: "end_turn",
+      },
+      // Turn B: the prompt IS a feedback note — the loop guard stands down.
+      {
+        type: "message",
+        id: "fb-user-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "user",
+        content: "your reply was not posted",
+        queueItemId: "qi-fb-1",
+        signal: {
+          signalType: "channel.reply_dropped",
+          tagName: "signal",
+          attributes: { feedback: "reply_dropped" },
+          origin: { channelType: "keyed", threadKey: "keyed:D100", reply: "manual" },
+        },
+      },
+      {
+        type: "message",
+        id: "fb-final-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant",
+        content: "understood, staying silent",
+        queueItemId: "qi-fb-1",
+        stopReason: "end_turn",
+      },
+    ]);
+    for (const messageId of ["acted-final-1", "fb-final-1"]) {
+      await eventStream.append(
+        {
+          sessionId: session.id,
+          threadId,
+          timestamp: Date.now(),
+          event: { type: "message_end", threadId, messageId, reason: "end_turn" },
+        },
+        `${messageId}-${randomUUID()}`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const entries = await engineStore.getEntries(session.id, threadId);
+    const notes = entries.filter(
+      (e) => e.type === "message" && e.role === "user" && e.signal?.attributes?.feedback !== undefined,
+    );
+    // Only the hand-written fb-user-1 — the host generated no new note.
+    expect(notes.map((e) => e.id)).toEqual(["fb-user-1"]);
+  });
+
+  it("a failed addressed auto-post feeds the error back to the agent (TKAI-284)", async () => {
+    faux.setResponses([fauxAssistantMessage("(noted)")]);
+    vi.spyOn(keyedTransport, "send").mockRejectedValue(new Error("channel_archived"));
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("events").id;
+    await engineStore.appendEntries(session.id, threadId, [
+      {
+        type: "message",
+        id: "fail-user-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "user",
+        content: "who are you",
+        queueItemId: "qi-fail-1",
+        signal: {
+          signalType: "keyed.app_mention",
+          tagName: "signal",
+          origin: { channelType: "keyed", threadKey: "keyed:D100", reply: "auto" },
+        },
+      },
+      {
+        type: "message",
+        id: "fail-final-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant",
+        content: "I am the assistant",
+        queueItemId: "qi-fail-1",
+        stopReason: "end_turn",
+      },
+    ]);
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "fail-final-1", reason: "end_turn" },
+      },
+      `fail-final-${randomUUID()}`,
+    );
+    await vi.waitFor(async () => {
+      const entries = await engineStore.getEntries(session.id, threadId);
+      const note = entries.find(
+        (e) => e.type === "message" && e.role === "user" && e.signal?.signalType === "channel.reply_dropped",
+      );
+      expect(note).toBeDefined();
+      expect((note as { content?: string }).content).toContain("channel_archived");
+      expect((note as { content?: string }).content).toContain("reply_to_origin");
+    });
+  });
+
+  it("auto-posts only the first text-bearing message of a submission", async () => {
+    // One auto-post per turn: the first message is the reply, later text
+    // rounds are working notes. A new submission gets its own slot.
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    const base = {
+      type: "message" as const,
+      sessionId: session.id,
+      threadId,
+      parentId: null,
+      createdAt: Date.now(),
+      role: "assistant" as const,
+    };
+    await engineStore.appendEntries(session.id, threadId, [
+      { ...base, id: "turn1-msg-1", content: "I'll dig into the v1 implementation first.", queueItemId: "qi-turn-1" },
+      { ...base, id: "turn1-msg-2", content: "Let me look at the repo directly.", queueItemId: "qi-turn-1" },
+      { ...base, id: "turn2-msg-1", content: "Second turn reply.", queueItemId: "qi-turn-2" },
+    ]);
+
+    for (const messageId of ["turn1-msg-1", "turn1-msg-2", "turn2-msg-1"]) {
+      await eventStream.append(
+        {
+          sessionId: session.id,
+          threadId,
+          timestamp: Date.now(),
+          event: { type: "message_end", threadId, messageId, reason: "end_turn" },
+        },
+        `first-only-${messageId}-${randomUUID()}`,
+      );
+    }
+
+    await vi.waitFor(() => {
+      expect(fakeTransport.sent.some((s) => s.message.markdown.includes("Second turn reply."))).toBe(true);
+    });
+    // Deliveries are serialized per thread, so once the last message landed
+    // the earlier ones have settled: turn 1 posted exactly its first text.
+    expect(fakeTransport.sent.map((s) => s.message.markdown)).toEqual([
+      "I'll dig into the v1 implementation first.",
+      "Second turn reply.",
+    ]);
+  });
+
+  it("posts the ack AND the turn-final answer; the narration between stays off the channel", async () => {
+    // The field failure this pins: the model acks, works for 14 rounds, and
+    // ends the turn on the real answer. The reader must get the ack and the
+    // answer with no model cooperation — not just the ack.
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    const base = {
+      type: "message" as const,
+      sessionId: session.id,
+      threadId,
+      parentId: null,
+      createdAt: Date.now(),
+      role: "assistant" as const,
+      queueItemId: "qi-ackfinal-1",
+    };
+    await engineStore.appendEntries(session.id, threadId, [
+      { ...base, id: "af-msg-1", content: "I'll check the code for how the key flows." },
+      { ...base, id: "af-msg-2", content: "Found the single injection point. Reading it fully." },
+      { ...base, id: "af-msg-3", content: "No. The key never enters the sandbox.", stopReason: "end_turn" },
+    ]);
+
+    for (const messageId of ["af-msg-1", "af-msg-2", "af-msg-3"]) {
+      await eventStream.append(
+        {
+          sessionId: session.id,
+          threadId,
+          timestamp: Date.now(),
+          event: { type: "message_end", threadId, messageId, reason: "end_turn" },
+        },
+        `ackfinal-${messageId}-${randomUUID()}`,
+      );
+    }
+
+    await vi.waitFor(() => {
+      expect(fakeTransport.sent.some((s) => s.message.markdown.includes("never enters the sandbox"))).toBe(true);
+    });
+    expect(fakeTransport.sent.map((s) => s.message.markdown)).toEqual([
+      "I'll check the code for how the key flows.",
+      "No. The key never enters the sandbox.",
+    ]);
+  });
+
+  it("does NOT auto-post the final message when the agent replied via reply_to_origin mid-turn", async () => {
+    // The agent stays in control: an explicit successful reply IS the
+    // result, so the mechanical final-message post stands down. Only the
+    // ack (posted before the action ran) reaches the thread from the
+    // safety net.
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    const base = {
+      type: "message" as const,
+      sessionId: session.id,
+      threadId,
+      parentId: null,
+      createdAt: Date.now(),
+      role: "assistant" as const,
+      queueItemId: "qi-explicit-1",
+    };
+    await engineStore.appendEntries(session.id, threadId, [
+      { ...base, id: "ex-msg-1", content: "On it — checking now." },
+    ]);
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "ex-msg-1", reason: "end_turn" },
+      },
+      `explicit-ack-${randomUUID()}`,
+    );
+    await vi.waitFor(() => {
+      expect(fakeTransport.sent.some((s) => s.message.markdown.includes("On it"))).toBe(true);
+    });
+
+    // Mid-turn: the agent replies explicitly (successful call persisted),
+    // then ends the turn with a wrap-up message.
+    await engineStore.appendEntries(session.id, threadId, [
+      {
+        ...base,
+        id: "ex-msg-2",
+        content: "",
+        parts: [
+          {
+            type: "tool_call",
+            callId: "tc-explicit-reply",
+            toolName: "call_tool",
+            status: "completed",
+            args: { tool_id: "slack.reply_to_origin", params: { text: "Here is the formatted answer." } },
+            result: { text: "ok", details: { ok: true } },
+          },
+        ],
+      },
+      { ...base, id: "ex-msg-3", content: "Wrapping up my notes.", stopReason: "end_turn" },
+    ]);
+    for (const messageId of ["ex-msg-2", "ex-msg-3"]) {
+      await eventStream.append(
+        {
+          sessionId: session.id,
+          threadId,
+          timestamp: Date.now(),
+          event: { type: "message_end", threadId, messageId, reason: "end_turn" },
+        },
+        `explicit-${messageId}-${randomUUID()}`,
+      );
+    }
+
+    // The final message must NOT post — the explicit reply already did.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(fakeTransport.sent.map((s) => s.message.markdown)).toEqual(["On it — checking now."]);
+  });
+
+  it("stands down when the submission already replied through reply_to_origin", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    await engineStore.appendEntries(session.id, threadId, [
+      {
+        type: "message",
+        id: "acted-msg-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant",
+        content: "Replied in the thread.",
+        queueItemId: "qi-acted-1",
+        parts: [
+          { type: "text", text: "Replied in the thread." },
+          {
+            type: "tool_call",
+            callId: "tc-reply-1",
+            toolName: "call_tool",
+            status: "completed",
+            args: { tool_id: "slack.reply_to_origin", params: { text: "explicit reply" } },
+            // The engine stamps details.ok from the action's success flag.
+            result: { text: "ok", details: { ok: true } },
+          },
+        ],
+      },
+    ]);
+
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "acted-msg-1", reason: "end_turn" },
+      },
+      `acted-${randomUUID()}`,
+    );
+
+    // The explicit reply IS the turn's reply; the auto-post must not add a
+    // second copy. Absence check needs a real window.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(fakeTransport.sent).toHaveLength(0);
+  });
+
+  it("does NOT stand down for a FAILED reply_to_origin — the safety net still posts", async () => {
+    // An action failure persists with part.status "completed" (the model
+    // reads the corrective text) but details.ok false. Treating it as "the
+    // turn replied" would leave the thread with nothing at all.
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    await engineStore.appendEntries(session.id, threadId, [
+      {
+        type: "message",
+        id: "failed-reply-msg-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant",
+        content: "The reply the reader must still get.",
+        queueItemId: "qi-failed-reply-1",
+        parts: [
+          { type: "text", text: "The reply the reader must still get." },
+          {
+            type: "tool_call",
+            callId: "tc-reply-fail",
+            toolName: "call_tool",
+            status: "completed",
+            args: { tool_id: "slack.reply_to_origin", params: { text: "never sent" } },
+            result: { text: "slack.reply_to_origin failed: no token", details: { ok: false } },
+          },
+        ],
+      },
+    ]);
+
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "failed-reply-msg-1", reason: "end_turn" },
+      },
+      `failed-reply-${randomUUID()}`,
+    );
+
+    await vi.waitFor(() => {
+      expect(fakeTransport.sent.some((s) => s.message.markdown.includes("must still get"))).toBe(true);
+    });
+  });
+
+  it("a resolved gate re-opens the submission's auto-post slot for the outcome", async () => {
+    // Pre-gate segment posts its first message; the reader approves; the
+    // post-approval outcome must reach that reader, not stay off-channel.
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    const base = {
+      type: "message" as const,
+      sessionId: session.id,
+      threadId,
+      parentId: null,
+      createdAt: Date.now(),
+      role: "assistant" as const,
+    };
+    await engineStore.appendEntries(session.id, threadId, [
+      { ...base, id: "seg1-msg-1", content: "About to do the risky thing.", queueItemId: "qi-gated-1" },
+    ]);
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "seg1-msg-1", reason: "end_turn" },
+      },
+      `seg1-${randomUUID()}`,
+    );
+    await vi.waitFor(() => {
+      expect(fakeTransport.sent.some((s) => s.message.markdown.includes("About to do"))).toBe(true);
+    });
+
+    const gate: DecisionGate = {
+      id: `gate-${randomUUID()}`,
+      sessionId: session.id,
+      threadId,
+      queueItemId: "qi-gated-1",
+      resumeKey: "rk-seg-1",
+      ordinal: 1,
+      type: "approval",
+      title: "Approve the thing?",
+      body: "do the thing",
+      actions: [{ id: "approve", label: "Approve", style: "primary" }],
+      status: "pending",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    await eventStream.append(
+      { sessionId: session.id, threadId, timestamp: Date.now(), event: { type: "decision_gate", threadId, gate } },
+      `seg-gate-${randomUUID()}`,
+    );
+    await vi.waitFor(() => {
+      expect(fakeTransport.gatePrompts).toHaveLength(1);
+    });
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: {
+          type: "decision_gate_resolved",
+          threadId,
+          gateId: gate.id,
+          resolution: { actionId: "approve", resolvedBy: USER_ID, resolvedAt: Date.now() },
+        },
+      },
+      `seg-resolve-${randomUUID()}`,
+    );
+    await vi.waitFor(() => {
+      expect(fakeTransport.gateEdits).toHaveLength(1);
+    });
+
+    // The post-approval segment's first message posts.
+    await engineStore.appendEntries(session.id, threadId, [
+      { ...base, id: "seg2-msg-1", content: "Done: the thing succeeded.", queueItemId: "qi-gated-1" },
+    ]);
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "seg2-msg-1", reason: "end_turn" },
+      },
+      `seg2-${randomUUID()}`,
+    );
+    await vi.waitFor(() => {
+      expect(fakeTransport.sent.some((s) => s.message.markdown.includes("Done: the thing succeeded."))).toBe(true);
+    });
+    // The re-opened slot is consumed: a THIRD text message stays off-channel.
+    await engineStore.appendEntries(session.id, threadId, [
+      { ...base, id: "seg2-msg-2", content: "Cleaning up quietly.", queueItemId: "qi-gated-1" },
+    ]);
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "seg2-msg-2", reason: "end_turn" },
+      },
+      `seg2b-${randomUUID()}`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(fakeTransport.sent.some((s) => s.message.markdown.includes("Cleaning up"))).toBe(false);
   });
 
   it("gate on a channel thread → sendGatePrompt; resolution → edit", async () => {
+    // A named user row makes the resolution label an audit fact ("by …").
+    await testDb.appDb
+      .insert(users)
+      .values({ id: USER_ID, name: "Test Resolver", email: "resolver@example.com" })
+      .onConflictDoNothing();
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("fake:99").id;
 
@@ -348,11 +1191,18 @@ describe("ChannelHost outbound delivery", () => {
       ordinal: 1,
       type: "approval",
       title: "Approve the thing?",
-      body: "please confirm",
+      body: 'do the thing\n\ntool_id=fake.do_thing\nargs={"target":"prod"}',
       actions: [
         { id: "approve", label: "Approve", style: "primary" },
         { id: "deny", label: "Deny", style: "danger" },
       ],
+      context: {
+        riskLevel: "high",
+        service: "fake",
+        tool_id: "fake.do_thing",
+        args: { target: "prod" },
+        summary: "do the thing",
+      },
       status: "pending",
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -367,6 +1217,16 @@ describe("ChannelHost outbound delivery", () => {
       expect(fakeTransport.gatePrompts).toHaveLength(1);
     });
     expect(fakeTransport.gatePrompts[0]?.prompt).toMatchObject({ gateId: gate.id, title: gate.title });
+
+    // The card is digested: summary body plus labeled fields, no raw JSON dump.
+    const sentPrompt = fakeTransport.gatePrompts[0]?.prompt;
+    expect(sentPrompt?.body).toContain("do the thing");
+    expect(sentPrompt?.body).not.toContain("args=");
+    expect(sentPrompt?.fields).toEqual([
+      { label: "Tool", value: "`fake.do_thing`" },
+      { label: "Risk", value: "high" },
+      { label: "target", value: "prod" },
+    ]);
 
     const ref = fakeTransport.gatePrompts[0]
       ? { conversationKey: fakeTransport.gatePrompts[0].conversationKey, messageId: fakeTransport.gatePrompts[0].messageId }
@@ -397,6 +1257,10 @@ describe("ChannelHost outbound delivery", () => {
     });
     expect(fakeTransport.gateEdits[0]?.resolution.label).toContain("✅");
     expect(fakeTransport.gateEdits[0]?.resolution.label).toContain("Approve");
+    // The edit names the resolver and carries the timestamp, so the settled
+    // message can show who decided and when.
+    expect(fakeTransport.gateEdits[0]?.resolution.label).toContain("by Test Resolver");
+    expect(fakeTransport.gateEdits[0]?.resolution.resolvedAtMs).toBeTypeOf("number");
 
     // All three gate maps must be cleared after the edit.
     expect(ref ? host.gateForRef(ref) : null).toBeNull();
@@ -819,13 +1683,20 @@ describe("ChannelHost.attentionDeliverer", () => {
         kind: "approval",
         sessionId: "sess-foreign",
         href: "/sessions/sess-foreign",
-        gate: { id: "gate-foreign", actions: [{ id: "approve", label: "Approve" }] },
+        gate: {
+          id: "gate-foreign",
+          actions: [{ id: "approve", label: "Approve" }],
+          fields: [{ label: "Tool", value: "`fake.do_thing`" }],
+        },
       }),
     );
 
     expect(fakeTransport.gatePrompts).toHaveLength(0);
     expect(fakeTransport.sent).toHaveLength(1);
     expect(fakeTransport.sent[0]?.message.markdown).toContain("Open in Valet");
+    // The plain summary still names WHAT was requested — the digested body
+    // alone no longer carries the tool id.
+    expect(fakeTransport.sent[0]?.message.markdown).toContain("**Tool:** `fake.do_thing`");
   });
 
   it("a prompt recorded AFTER its gate settled is edited immediately, not left with live buttons", async () => {

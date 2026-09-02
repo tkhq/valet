@@ -61,7 +61,12 @@ export interface AttentionEvent {
    * instead of a plain link; deliverers without that ability ignore this
    * field. The gate lives on `sessionId`.
    */
-  gate?: { id: string; actions: DecisionAction[] };
+  gate?: {
+    id: string;
+    actions: DecisionAction[];
+    /** Pre-digested key parameters of the gated action (see `gate-digest.ts`). */
+    fields?: Array<{ label: string; value: string }>;
+  };
 }
 
 /**

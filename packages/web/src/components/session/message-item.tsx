@@ -16,6 +16,7 @@ import { ToolBody } from "./tool-renderers/tool-shell";
 import { Thinking } from "./tool-renderers/thinking";
 import { extractSkillInvocation, type SkillBlock } from "./tool-renderers/skill";
 import { cn } from "~/lib/cn";
+import { shortModelLabel } from "~/lib/models";
 import { userInitials } from "~/lib/user-initials";
 
 export function MessageItem({
@@ -365,12 +366,3 @@ function formatTime(ts: number): string {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
-/**
- * Compact model label for the message header: strips a provider prefix
- * ("anthropic/claude-haiku-4-5" → "claude-haiku-4-5"). Full id stays in the
- * title tooltip.
- */
-function shortModelLabel(model: string): string {
-  const slash = model.indexOf("/");
-  return slash > 0 ? model.slice(slash + 1) : model;
-}

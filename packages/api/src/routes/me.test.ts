@@ -167,6 +167,19 @@ describe("PATCH /api/me", () => {
     }
   });
 
+  it("rejects JSON-valid non-object bodies with 400, not 500", async () => {
+    api = await bootTestApi();
+
+    for (const body of ["null", "42", '"x"', "[]"]) {
+      const res = await fetch(`${api.baseUrl}/api/me`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body,
+      });
+      expect(res.status).toBe(400);
+    }
+  });
+
   it("rejects unknown fields with 400", async () => {
     api = await bootTestApi();
 

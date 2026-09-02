@@ -468,6 +468,12 @@ export const teams = pgTable(
      */
     externalId: text("external_id"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    /**
+     * Team default model for sessions this team owns (TKAI-255). Sits
+     * between the member's `users.default_model` and the org's
+     * `orgs.model_preferences` in the resolution chain. Null = no override.
+     */
+    defaultModel: text("default_model"),
   },
   (t) => [
     uniqueIndex("teams_org_name").on(t.orgId, t.name),
@@ -561,6 +567,10 @@ export const childWatches = pgTable(
     orgId: text("org_id").notNull(),
     settled: boolean("settled").notNull().default(false),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    // The spawning submission's ChannelOrigin as JSON, inherited by the
+    // child.settled signal so the settlement turn can reach the channel
+    // that asked. Null for spawns from non-channel turns.
+    originJson: text("origin_json"),
     // Display-state only: a dismissed watch leaves the thread tree. The
     // child session row and its history stay reachable from Sessions.
     dismissedAt: bigint("dismissed_at", { mode: "number" }),
@@ -1623,6 +1633,11 @@ export const followedThreads = pgTable(
     createdBy: text("created_by").notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     lastActivityAt: bigint("last_activity_at", { mode: "number" }).notNull(),
+    /** Provider ts of the last message delivered through this follow. The
+     * follow-router hydrates the gap between this and a new message, so an
+     * overheard line after downtime arrives with the missed context. Null on
+     * rows from before the column: the first delivery starts tracking. */
+    lastSeenTs: text("last_seen_ts"),
   },
   (t) => [uniqueIndex("followed_threads_key").on(t.orgId, t.channelType, t.channelId, t.threadTs)],
 );

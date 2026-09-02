@@ -373,7 +373,13 @@ export type MessagePart =
       args?: unknown;
       result?: unknown;
       error?: string;
-      /** Set by the pruner. When true, `result` has been replaced with a placeholder; the original output is no longer available. */
+      /**
+       * Set by the pruner. When true, LLM-context assembly renders a short
+       * placeholder instead of `result`. The stored `result` text is kept so
+       * the summarizer and the UI can still read it. Rows pruned before this
+       * rule may carry a `{ elided: true, reason: "pruned" }` placeholder as
+       * `result` — their original output is gone.
+       */
       elided?: boolean;
     }
   | { type: "attachment"; attachment: ToolAttachment }
@@ -596,6 +602,15 @@ export interface ToolDef<TParams extends TSchema = TSchema> {
 export interface ToolResult {
   text: string;
   attachments?: ToolAttachment[];
+  /**
+   * Action-level outcome, set by action-backed tools (`call_tool`): `false`
+   * when the action reported failure without throwing. An action failure is
+   * NOT a tool error — the model must read the corrective text — so it
+   * persists with part.status "completed". Consumers that must tell a
+   * successful call from a completed-but-failed one (the channel auto-post
+   * stand-down) read this from the persisted result's `details.ok`.
+   */
+  ok?: boolean;
 }
 
 export type ToolAttachment =
@@ -2160,11 +2175,11 @@ export interface CompactionConfig {
   enabled?: boolean;
   /** Subtract from contextWindow when computing usable space. Default: min(20_000, model.maxOutputTokens). */
   reserveTokens?: number;
-  /** Last N turns are never compacted. Default: 2. */
+  /** At most the last N turns are kept verbatim; the tail token budget decides how many fit. Default: 8. */
   tailTurns?: number;
   /** Floor for tail token budget. Default: 2_000. */
   minPreserveRecentTokens?: number;
-  /** Ceiling for tail token budget. Default: 8_000. */
+  /** Optional ceiling for tail token budget. Default: none — the budget scales as 25% of usable context. */
   maxPreserveRecentTokens?: number;
   /** Recent tool-output bytes never pruned. Default: 40_000 (estimated tokens). */
   pruneProtectTokens?: number;
@@ -2225,7 +2240,16 @@ export interface SpawnChildResult {
  */
 export type ChildSpawner = (
   req: SpawnChildRequest,
-  ctx: { parentSessionId: string; parentThreadId: string; actorUserId: string; owner: Principal },
+  ctx: {
+    parentSessionId: string;
+    parentThreadId: string;
+    actorUserId: string;
+    owner: Principal;
+    /** The spawning submission's channel origin, so the child.settled
+     * signal can inherit it and the settlement turn can reach the channel
+     * that asked. */
+    origin?: ChannelOrigin;
+  },
 ) => Promise<SpawnChildResult>;
 
 /**

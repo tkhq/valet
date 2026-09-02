@@ -66,6 +66,8 @@ const WIRE_EVENT_TYPES: Record<WireEventType, true> = {
   turn_end: true,
   error: true,
   model_switched: true,
+  compaction_start: true,
+  compaction_end: true,
   decision_gate: true,
   decision_gate_resolved: true,
   decision_gate_expired: true,

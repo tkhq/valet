@@ -42,6 +42,18 @@ export function neutralizeSlackMentions(text: string): string {
 }
 
 /**
+ * The load-bearing mrkdwn escape: `&`/`<` render every control sequence
+ * (mass pings, targeted pings, spoofed `<url|label>` links) inert, because
+ * each one requires a literal `<`. `>` stays untouched so blockquotes still
+ * render. Exported so every path that writes raw text into an mrkdwn field
+ * (gate cards, resolution edits) applies the SAME rule — a second copy of
+ * this chain is how an escape rule silently goes stale.
+ */
+export function escapeMrkdwn(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+}
+
+/**
  * Convert standard Markdown to Slack's mrkdwn format.
  * Ported verbatim from legacy `src/channels/format.ts` (origin/main).
  * Handles: fenced code blocks, inline code, bold, italic, links, blockquotes.
@@ -78,7 +90,7 @@ export function markdownToSlackMrkdwn(text: string): string {
   // is parsed as mrkdwn by default, so this is load-bearing for security. The
   // link transform below re-introduces the ONLY legitimate `<…>` sequences,
   // built from controlled [text](url) markdown after this escape.
-  result = result.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  result = escapeMrkdwn(result);
 
   // Convert bold to placeholders first (so italic pass doesn't re-match)
   // **bold** or __bold__ → placeholder

@@ -34,6 +34,7 @@ import { parseAssistantSessionId } from "@valet/engine";
 import type { DeliveredBusEvent, EventStream, SessionStore } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { agentSessions } from "../schema/index.js";
+import { digestGate } from "../channels/gate-digest.js";
 import {
   markGateNotificationsRead,
   routeAttention,
@@ -70,7 +71,7 @@ async function sessionLabel(db: AppDb, sessionId: string): Promise<string> {
  *
  * Everything else is an ordinary session and keeps the direct link.
  */
-function attentionHref(sessionId: string): string {
+export function attentionHref(sessionId: string): string {
   const assistantId = parseAssistantSessionId(sessionId);
   return assistantId === null
     ? `/sessions/${encodeURIComponent(sessionId)}`
@@ -118,16 +119,21 @@ async function handleDecisionGate(deps: AttentionWiringDeps, delivered: Delivere
     if (parentData) owner = parentData.owner;
   }
 
+  // Digest the gate for delivery: a tool-approval gate's raw body is a
+  // machine-oriented tool_id/args dump, and neither the notification row nor
+  // a channel DM should show that. The digest keeps the one-line summary and
+  // hands the key parameters over as labeled fields.
+  const digest = digestGate(gate);
   await routeAttention(deps, {
     kind: "approval",
     urgency: "high",
     owner,
     sessionId,
-    title: gate.title,
-    body: gate.body,
+    title: digest.title,
+    body: digest.body,
     href: attentionHref(sessionId),
     dedupeKey: gate.id,
-    gate: { id: gate.id, actions: gate.actions },
+    gate: { id: gate.id, actions: gate.actions, fields: digest.fields },
   });
 }
 

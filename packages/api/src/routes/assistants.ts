@@ -205,8 +205,10 @@ assistantsRouter.post("/:id/session", async (c) => {
     return c.json({ error: "assistant not found" }, 404);
   }
   if (row.archivedAt !== null) {
+    // The same wording as ArchivedAssistantError: no restore path exists,
+    // so the corrective action a user CAN take is creating a new assistant.
     return c.json(
-      { error: "This assistant is archived. Restore it before opening the conversation." },
+      { error: "This assistant is archived. Create a new assistant instead." },
       409,
     );
   }

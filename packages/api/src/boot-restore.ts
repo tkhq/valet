@@ -32,6 +32,11 @@ export interface RestoreSessionMeta {
   repos?: (RepoBinding & { targetDir: string })[];
   userName?: string;
   userEmail?: string;
+  /** Owning team for a team-owned session (TKAI-255) — must survive
+   * restore or a rebuilt session with no persisted model would skip the
+   * team tier of the model cascade (flows structurally from
+   * `loadSessionMeta`; declared so the type matches). */
+  ownerTeamId?: string;
 }
 
 /**

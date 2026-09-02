@@ -29,6 +29,8 @@ import {
   type GatePromptRef,
   type InboundChannelEvent,
   type PromptAttachment,
+  type Session,
+  type SessionEntry,
   type SessionStore,
   type StoredCredential,
   type Unsubscribe,
@@ -36,8 +38,13 @@ import {
 } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
-import { agentSessions, assistants } from "../schema/index.js";
-import { ensureDefaultAssistantSession, loadAssistant } from "../assistants/service.js";
+import { agentSessions, users } from "../schema/index.js";
+import {
+  ArchivedAssistantError,
+  ensureDefaultAssistantSession,
+  loadAssistant,
+  loadAssistantBySessionId,
+} from "../assistants/service.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { canApplyAlwaysAllow, GATE_ACTION_ALWAYS_ALLOW } from "../policies/service.js";
 import { canResolveSessionGate } from "../services/session-access.js";
@@ -46,6 +53,8 @@ import { EVENTS_THREAD_KEY } from "../events/orchestrator-target.js";
 import type { AttentionChannelDeliverer, AttentionEvent } from "../orchestrator/attention.js";
 import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
 import { OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
+import { attentionHref } from "../orchestrator/attention-wiring.js";
+import { digestGate } from "./gate-digest.js";
 import { consumeLinkCode, identityForExternal, identityForUser, linkIdentity } from "./identity-links.js";
 import { DbActiveStreamStore, type ActiveStreamStore } from "./active-streams.js";
 import { ChannelStreamBridge } from "./stream-bridge.js";
@@ -80,17 +89,24 @@ const UNLINKED_REPLY_COOLDOWN_MS = 60 * 60_000;
 const DELIVERED_CAP = 2048;
 const VERIFY_FAILED_LOG_COOLDOWN_MS = 60_000;
 
-/** Rule 4's label: ✅ for approve/primary, ❌ for deny/danger, else a neutral ☑️. */
-function gateResolutionLabel(actions: DecisionAction[], resolution: DecisionResolution): string {
+/** Rule 4's label: ✅ for approve/primary, ❌ for deny/danger, else a neutral ☑️.
+ * `resolvedByName` (the resolver's display name, when known) turns the line
+ * into an audit fact: "✅ Approved by Conner". */
+function gateResolutionLabel(
+  actions: DecisionAction[],
+  resolution: DecisionResolution,
+  resolvedByName?: string,
+): string {
   const action = actions.find((a) => a.id === resolution.actionId);
   const actionLabel = action?.label;
+  const by = resolvedByName !== undefined ? ` by ${resolvedByName}` : "";
   if (resolution.actionId === "approve" || action?.style === "primary") {
-    return `✅ ${actionLabel ?? resolution.actionId ?? "Resolved"}`;
+    return `✅ ${actionLabel ?? resolution.actionId ?? "Resolved"}${by}`;
   }
   if (resolution.actionId === "deny" || action?.style === "danger") {
-    return `❌ ${actionLabel ?? resolution.actionId ?? "Resolved"}`;
+    return `❌ ${actionLabel ?? resolution.actionId ?? "Resolved"}${by}`;
   }
-  return `☑️ ${actionLabel ?? resolution.value ?? "Resolved"}`;
+  return `☑️ ${actionLabel ?? resolution.value ?? "Resolved"}${by}`;
 }
 
 const LOCALDEV_SUFFIX = ".localdev";
@@ -134,6 +150,76 @@ function chatIdFromKey(conversationKey: string): string {
   return idx === -1 ? conversationKey : conversationKey.slice(idx + 1);
 }
 
+/** True when the submission already replied through a channel's
+ * `….reply_to_origin` action: a SUCCESSFUL `call_tool` in any of the
+ * submission's assistant messages names such a tool id. The auto-post
+ * safety net stands down for that submission. Success means the persisted
+ * result carries `details.ok === true` — an action failure also persists
+ * with status "completed" (the model reads the corrective text), and a
+ * failed reply must NOT stand the safety net down, or the thread gets
+ * nothing at all. */
+function turnCalledOriginTool(entries: SessionEntry[], queueItemId: string, suffixes: string[]): boolean {
+  for (const e of entries) {
+    if (e.type !== "message" || e.role !== "assistant" || e.queueItemId !== queueItemId) continue;
+    for (const part of e.parts ?? []) {
+      if (part.type !== "tool_call" || part.status !== "completed") continue;
+      const args = part.args;
+      const toolId =
+        args !== null && typeof args === "object" ? (args as Record<string, unknown>).tool_id : undefined;
+      if (typeof toolId !== "string" || !suffixes.some((s) => toolId.endsWith(s))) continue;
+      const result = part.result;
+      const details =
+        result !== null && typeof result === "object" ? (result as Record<string, unknown>).details : undefined;
+      const ok = details !== null && typeof details === "object" ? (details as Record<string, unknown>).ok : undefined;
+      if (ok === true) return true;
+    }
+  }
+  return false;
+}
+
+function turnRepliedToOrigin(entries: SessionEntry[], queueItemId: string): boolean {
+  return turnCalledOriginTool(entries, queueItemId, [".reply_to_origin"]);
+}
+
+/** True when the submission delivered a channel response some way — the origin
+ * actions, a direct channel post, or a DM. The dropped-reply feedback stands
+ * down for such a turn: nagging "call reply_to_origin" at an agent that
+ * answered via send_message (or deliberately went private via dm_*) would
+ * invite a duplicate reply. */
+function turnActedOnOrigin(entries: SessionEntry[], queueItemId: string): boolean {
+  return turnCalledOriginTool(entries, queueItemId, [
+    ".reply_to_origin",
+    ".react_to_origin",
+    ".send_message",
+    ".dm_owner",
+    ".dm_user",
+  ]);
+}
+
+/** True when the submission's own prompt IS a delivery-feedback signal
+ * (`attributes.feedback`). The loop guard: a feedback-triggered turn never
+ * generates further feedback, so the exchange terminates after one note. */
+function turnPromptIsFeedback(entries: SessionEntry[], queueItemId: string): boolean {
+  return entries.some(
+    (e) =>
+      e.type === "message" &&
+      e.role === "user" &&
+      e.queueItemId === queueItemId &&
+      e.signal?.attributes?.feedback !== undefined,
+  );
+}
+
+/** The submission's first assistant message that carries text or an
+ * attachment — the one the auto-post posts. Derived from the store rather
+ * than held in memory, so an api restart mid-submission cannot double-post. */
+function firstPostableEntry(entries: SessionEntry[], queueItemId: string): SessionEntry | undefined {
+  for (const e of entries) {
+    if (e.type !== "message" || e.role !== "assistant" || e.queueItemId !== queueItemId) continue;
+    if (e.content || (e.parts ?? []).some((part) => part.type === "attachment")) return e;
+  }
+  return undefined;
+}
+
 /** Feature-detects a transport that opens a direct conversation with one of
  * its users. A provider whose user id is not also a conversation id (Slack:
  * `U…` is a person, `D…` is the DM) needs the call before it can be addressed. */
@@ -163,6 +249,19 @@ export class ChannelHost {
   private settledOrder: string[] = [];
   private orgId: string | null = null;
   private outboundUnsub: Unsubscribe | null = null;
+  /** Per-(session, thread) outbound delivery chains. Events for one thread
+   * run in arrival order: a mid-turn text message must post before the gate
+   * card its tool call raised, and fire-and-forget handlers would let the
+   * two race. An entry is removed once its chain drains. */
+  private outboundChains = new Map<string, Promise<void>>();
+  /** gateId → the submission slot key (`${sessionId}:turn:${queueItemId}`)
+   * of the submission that raised it, recorded when the gate card is sent. */
+  private gateSlots = new Map<string, string>();
+  /** Submission slots re-opened by a gate resolution, each consumed by the
+   * next auto-post for that submission — the post-approval segment's first
+   * message reaches the reader who approved. Bounded FIFO (DEDUP_CAP). */
+  private reopenedSlots = new Set<string>();
+  private reopenedOrder: string[] = [];
   private delivered = new Set<string>();
   private deliveredOrder: string[] = [];
   /** Per-boot webhook secrets, keyed by channelType — kept only in memory
@@ -437,7 +536,26 @@ export class ChannelHost {
     this.outboundUnsub = this.deps.eventStream.subscribe(
       { eventTypes: ["message_end", "decision_gate", "decision_gate_resolved", "command_result"] },
       (event) => {
-        void this.handleOutboundEvent(event);
+        // Serialize per (session, thread): each handler awaits transport
+        // sends, and two concurrent handlers can land out of order — the
+        // reader would see the approval card before the text that led to it.
+        // An event without a threadId has no thread to order against.
+        const e = event.event;
+        const threadId = "threadId" in e ? e.threadId : undefined;
+        if (threadId === undefined) {
+          void this.handleOutboundEvent(event);
+          return;
+        }
+        const key = `${event.sessionId}\u0000${threadId}`;
+        const tail = (this.outboundChains.get(key) ?? Promise.resolve()).then(() =>
+          this.handleOutboundEvent(event),
+        );
+        this.outboundChains.set(key, tail);
+        // handleOutboundEvent never throws (its body is try/caught), so the
+        // chain cannot reject; finally is only bookkeeping.
+        void tail.finally(() => {
+          if (this.outboundChains.get(key) === tail) this.outboundChains.delete(key);
+        });
       },
     );
   }
@@ -445,6 +563,7 @@ export class ChannelHost {
   stopOutbound(): void {
     this.outboundUnsub?.();
     this.outboundUnsub = null;
+    this.outboundChains.clear();
   }
 
   /** Rule 5: every callback body try/caught — errors logged, never thrown into the stream. */
@@ -502,7 +621,8 @@ export class ChannelHost {
     }
   }
 
-  /** Rule 2: message_end (end_turn only) → resolve the entry, dedup, send text + media attachments. */
+  /** Rule 2: message_end → deliver any assistant message that carries text or
+   * an attachment (mid-turn ones included), dedup per message. */
   private async deliverAssistantMessage(
     sessionId: string,
     threadId: string,
@@ -529,11 +649,18 @@ export class ChannelHost {
     const entry = entries.find((e) => e.id === messageId && e.type === "message" && e.role === "assistant");
     if (!entry || entry.type !== "message") return;
     // message_end fires with reason "end_turn" for every non-abort assistant
-    // message, including mid-turn narration before a tool call. Only the
-    // turn's genuine final message persists stopReason "end_turn" — mid-turn
-    // messages persist with stopReason undefined. Without this check a turn
-    // like "Let me check." + tool call + final answer double-delivers.
-    if (entry.stopReason !== "end_turn") return;
+    // message, including a mid-turn message that stopped on a tool call
+    // (those persist stopReason undefined; only the turn's last message
+    // persists "end_turn"). Auto-post TWO messages per submission: the
+    // first that carries text or an attachment (the acknowledgement) and
+    // the turn-final one (the result). The rounds between are tool
+    // narration and stay off the channel. First-only proved insufficient in
+    // the field: a model acks, works for minutes, and ends the turn on the
+    // real answer — which must reach the thread without relying on the
+    // model to call reply_to_origin (and the channel-message path gives the
+    // action no origin to post through anyway).
+    const hasAttachment = (entry.parts ?? []).some((part) => part.type === "attachment");
+    if (!entry.content && !hasAttachment) return;
 
     // The submission's channel origin (from its user signal entry). Used both to
     // pick a delivery target when the thread key does not map, and to decide
@@ -541,25 +668,84 @@ export class ChannelHost {
     const origin = entry.queueItemId ? originFromEntries(entries, entry.queueItemId) : undefined;
     // An overheard turn (a message in a followed thread the assistant did not
     // choose to answer here) does not auto-post; the assistant replies only
-    // through reply_to_origin / react_to_origin, or stays silent.
-    if (origin?.reply === "manual") return;
+    // through reply_to_origin / react_to_origin, or stays silent. If the turn
+    // took NO origin action, the agent may believe this swallowed message was
+    // its reply — tell it once per thread (durable dispatchId dedup), so a
+    // dropped reply is recoverable but a deliberately silent assistant is not
+    // nagged into over-participation on every turn (TKAI-284 / TKAI-293).
+    if (origin?.reply === "manual") {
+      if (
+        entry.queueItemId !== undefined &&
+        entry.stopReason === "end_turn" &&
+        !turnActedOnOrigin(entries, entry.queueItemId) &&
+        !turnPromptIsFeedback(entries, entry.queueItemId)
+      ) {
+        await this.submitReplyFeedback(sessionId, thread.key, origin, {
+          dispatchId: `feedback:overheard-dropped:${threadId}`,
+          body:
+            `Heads up: your message was NOT posted to the channel thread (${origin.threadKey}). ` +
+            "This turn was overheard, so a normal message stays off the channel. " +
+            "If you meant to reply, call reply_to_origin with the text. " +
+            "If you meant to stay silent, do nothing — that is the default here. " +
+            "This reminder is sent once per thread.",
+        });
+      }
+      return;
+    }
 
     // Delivery target: the thread's own channel key (a DM or channel thread),
     // or, on the "events" thread an event delivery lands on, the submission's
     // own channel origin.
     const target = mapped ?? (origin ? this.channelTargetForOrigin(origin) : null);
-    if (!target) return;
+    if (!target) {
+      // No origin → a non-channel submission on the events thread: routine,
+      // not a drop. WITH an origin this is a swallowed reply (transport not
+      // running, or the key rebuild failed) — make it visible.
+      if (origin !== undefined) {
+        const orgId = this.orgId ?? (await this.deps.resolveOrgId());
+        await this.dropLog(orgId, "reply_target_unresolved", origin.threadKey, `channelType=${origin.channelType}`);
+      }
+      return;
+    }
 
     const dedupeKey = `${sessionId}:${messageId}`;
     if (this.delivered.has(dedupeKey)) return;
+    if (entry.queueItemId !== undefined) {
+      // An explicit, successful reply_to_origin in this submission IS the
+      // reply — the auto-post safety net stands down so the thread gets
+      // exactly one.
+      if (turnRepliedToOrigin(entries, entry.queueItemId)) return;
+      // Ack + result, narration suppressed: the segment's first postable
+      // message and the turn-final message (the only one persisted with
+      // stopReason "end_turn") post; the rounds between stay off the
+      // channel. Derived from the persisted entries (not memory), so an api
+      // restart mid-submission cannot double-post. A resolved gate re-opens
+      // the slot once, so a post-approval ack also reaches the reader who
+      // just approved (the final result posts regardless, via isFinal).
+      const slotKey = `${sessionId}:turn:${entry.queueItemId}`;
+      const first = firstPostableEntry(entries, entry.queueItemId);
+      const isFirst = first === undefined || first.id === entry.id;
+      const isFinal = entry.stopReason === "end_turn";
+      if (!isFirst && !isFinal && !this.reopenedSlots.delete(slotKey)) return;
+    }
     this.markDelivered(dedupeKey);
 
     const transport = this.transports.get(target.channelType);
-    if (!transport) return;
+    if (!transport) {
+      // An origin-bearing reply with no running transport is a swallowed
+      // reply, not a routine skip — surface it on the Problems tab.
+      const orgId = this.orgId ?? (await this.deps.resolveOrgId());
+      await this.dropLog(orgId, "reply_transport_missing", target.conversationKey, `channelType=${target.channelType}`);
+      return;
+    }
 
+    // Whether the reply's TEXT landed on the channel, so a later attachment
+    // failure does not produce a false "your reply was NOT posted" note.
+    let textPosted = false;
     try {
       if (entry.content) {
         await transport.send(target.conversationKey, { markdown: entry.content });
+        textPosted = true;
       }
       for (const part of entry.parts ?? []) {
         if (part.type !== "attachment") continue;
@@ -589,6 +775,64 @@ export class ChannelHost {
       console.error("[channels] channel reply delivery failed", err);
       const orgId = this.orgId ?? (await this.deps.resolveOrgId());
       await this.dropLog(orgId, "channel_reply_failed", target.conversationKey, String(err));
+      // Tell the agent its reply never landed, so it can retry or route around
+      // the failure instead of believing it answered (TKAI-284). Only for an
+      // origin-bearing turn: reply_to_origin needs an origin to post through.
+      // Only when the TEXT never posted — a partial failure (text landed, an
+      // attachment did not) must not invite a duplicate reply. Once per failed
+      // message (the dispatchId), and the feedback signal's manual origin
+      // keeps the recovery turn off the auto-post path, so a still-broken
+      // transport cannot loop.
+      if (!textPosted && origin !== undefined && entry.queueItemId !== undefined) {
+        await this.submitReplyFeedback(sessionId, thread.key, origin, {
+          dispatchId: `feedback:reply-failed:${messageId}`,
+          body:
+            `Your reply was NOT posted to the channel thread (${origin.threadKey}): ${String(err)}. ` +
+            "Retry with reply_to_origin, or tell the user through another channel you have.",
+        });
+      }
+    }
+  }
+
+  /**
+   * Submit a delivery-feedback signal onto the turn's own thread, so the agent
+   * learns a reply of its was dropped or failed and can recover with
+   * reply_to_origin (TKAI-284). Best-effort: feedback about a delivery problem
+   * must never fail the delivery path itself. The signal carries
+   * `attributes.feedback` — the loop guard `turnPromptIsFeedback` and the
+   * engine's digest coalescing both key on it — and a manual-reply origin, so
+   * the recovery turn's own final message never auto-posts.
+   */
+  private async submitReplyFeedback(
+    sessionId: string,
+    threadKey: string,
+    origin: ChannelOrigin,
+    args: { dispatchId: string; body: string },
+  ): Promise<void> {
+    try {
+      const session = this.deps.engineHost.liveSession(sessionId);
+      // The bus event that led here came from a live session; a miss means it
+      // was evicted in between — drop the feedback rather than re-waking it.
+      if (!session) return;
+      await session.thread(threadKey).submitPrompt(
+        {
+          kind: "signal",
+          signalType: "channel.reply_dropped",
+          body: args.body,
+          // Its own envelope tag: the manual origin renders addressed="false",
+          // and the persona reads that as ignorable overheard chatter — this
+          // note is a correction the agent must weigh (persona names the tag).
+          tagName: "delivery_failure",
+          attributes: { feedback: "reply_dropped" },
+          // Normalized origin — no messageTs. The dispatchId dedup compares
+          // CONTENT: a per-message ts would make the once-per-thread repeat a
+          // content conflict (a logged error) instead of a clean dedup.
+          origin: { channelType: origin.channelType, threadKey: origin.threadKey, reply: "manual" },
+        },
+        { dispatchId: args.dispatchId },
+      );
+    } catch (err) {
+      console.error("[channels] reply-dropped feedback failed", err);
     }
   }
 
@@ -651,10 +895,23 @@ export class ChannelHost {
     // no defined order and the reader would sometimes see the card first.
     await this.streamBridge.closeForGate(sessionId, gate.threadId);
 
+    // Remember which submission this gate belongs to, so its resolution can
+    // re-open that submission's auto-post slot (the post-approval outcome
+    // must reach the thread even though the pre-gate segment already
+    // posted its first message).
+    this.gateSlots.set(gate.id, `${sessionId}:turn:${gate.queueItemId}`);
+
+    // Digest before sending: a tool-approval gate's raw body is a
+    // tool_id/args JSON dump; the card shows the summary plus labeled
+    // fields instead, with a link for the full request.
+    const digest = digestGate(gate);
+    const link = this.openInValetLink(attentionHref(sessionId));
+    const body =
+      link === undefined ? digest.body : digest.body === undefined ? link : `${digest.body}\n\n${link}`;
     await this.sendAndRecordGatePrompt(
       transport,
       mapped.conversationKey,
-      { gateId: gate.id, title: gate.title, body: gate.body, actions: gate.actions },
+      { gateId: gate.id, title: digest.title, body, fields: digest.fields, actions: gate.actions },
       sessionId,
     );
   }
@@ -670,7 +927,13 @@ export class ChannelHost {
   private async sendAndRecordGatePrompt(
     transport: ChannelTransport,
     conversationKey: string,
-    prompt: { gateId: string; title: string; body?: string; actions: DecisionAction[] },
+    prompt: {
+      gateId: string;
+      title: string;
+      body?: string;
+      fields?: Array<{ label: string; value: string }>;
+      actions: DecisionAction[];
+    },
     sessionId: string,
   ): Promise<void> {
     const ref = await transport.sendGatePrompt(conversationKey, prompt);
@@ -684,6 +947,19 @@ export class ChannelHost {
 
   /** Rule 4: decision_gate_resolved → edit every prompt message with the outcome label, then clear all gate maps. */
   private async deliverGateResolution(gateId: string, resolution: DecisionResolution): Promise<void> {
+    // A resolved gate opens a new segment of its submission: re-open the
+    // auto-post slot so the post-approval outcome posts to the thread.
+    const slotKey = this.gateSlots.get(gateId);
+    if (slotKey !== undefined) {
+      this.gateSlots.delete(gateId);
+      this.reopenedSlots.add(slotKey);
+      this.reopenedOrder.push(slotKey);
+      if (this.reopenedOrder.length > DEDUP_CAP) {
+        const evict = this.reopenedOrder.shift();
+        if (evict !== undefined) this.reopenedSlots.delete(evict);
+      }
+    }
+
     // Remember the resolution BEFORE the refs check: a prompt still in
     // flight has no ref yet, and `sendAndRecordGatePrompt` reads this map to
     // backfill the edit when that send lands.
@@ -697,14 +973,18 @@ export class ChannelHost {
     const refs = this.gatePrompts.get(gateId);
     if (!refs || refs.length === 0) return;
     const actions = this.gateActions.get(gateId) ?? [];
-    const label = gateResolutionLabel(actions, resolution);
+    const label = gateResolutionLabel(actions, resolution, await this.userName(resolution.resolvedBy));
 
     for (const ref of refs) {
       const channelType = ref.conversationKey.slice(0, ref.conversationKey.indexOf(":"));
       const transport = this.transports.get(channelType);
       if (transport) {
         try {
-          await transport.updateGatePrompt(ref, { actionId: resolution.actionId, label });
+          await transport.updateGatePrompt(ref, {
+            actionId: resolution.actionId,
+            label,
+            resolvedAtMs: resolution.resolvedAt,
+          });
         } catch (err) {
           // One stale message (deleted DM, revoked scope) must not keep the
           // other copies of the same prompt un-updated.
@@ -716,6 +996,28 @@ export class ChannelHost {
 
     this.gatePrompts.delete(gateId);
     this.gateActions.delete(gateId);
+  }
+
+  /**
+   * Display name for a resolver's user id, for the resolution edit.
+   * `undefined` when the id names no user row (engine-internal resolvers,
+   * e.g. an expiry) — the label then omits the "by …" clause.
+   */
+  private async userName(userId: string): Promise<string | undefined> {
+    if (!userId) return undefined;
+    try {
+      const rows = await this.deps.db
+        .select({ name: users.name })
+        .from(users)
+        .where(eq(users.id, userId))
+        .limit(1);
+      return rows[0]?.name || undefined;
+    } catch (err) {
+      // Best-effort: the name is decoration on the edit. A lookup failure
+      // must not stop the buttons from clearing on every prompt message.
+      console.error("[channels] resolver name lookup failed", err);
+      return undefined;
+    }
   }
 
   /** Rule 1: in-memory LRU dedup, cap `DEDUP_CAP`, FIFO eviction. */
@@ -976,14 +1278,27 @@ export class ChannelHost {
     // cached under that id would serve later assistant wakes without persona
     // or memory. The assistants table is the authority on which ids those
     // are (`assistants_session` unique index).
-    const assistantRows = await this.deps.db
-      .select({ id: assistants.id })
-      .from(assistants)
-      .where(eq(assistants.sessionId, mapped.sessionId))
-      .limit(1);
-    const session = assistantRows[0]
-      ? await this.deps.engineHost.assistantSessionFor(assistantRows[0].id, { actorUserId: userId, orgId })
-      : await this.deps.engineHost.sessionFor(mapped.sessionId, await loadSessionMeta(this.deps.db, sessionRow));
+    // The wake can refuse: a retired/archived assistant throws
+    // ArchivedAssistantError from the build (TKAI-296). Every rejection
+    // branch in this handler answers the callback — an unanswered one
+    // leaves the clicker's channel UI spinning forever — so the wake
+    // failure must answer too, not escape to handleUpdate's log-only catch.
+    let session: Session;
+    try {
+      const assistant = await loadAssistantBySessionId(this.deps.db, mapped.sessionId);
+      session = assistant
+        ? await this.deps.engineHost.assistantSessionFor(assistant.id, { actorUserId: userId, orgId })
+        : await this.deps.engineHost.sessionFor(mapped.sessionId, await loadSessionMeta(this.deps.db, sessionRow));
+    } catch (err) {
+      console.error("[channels] gate resolve wake failed", err);
+      await transport?.answerCallback?.(
+        gateCallback.callbackId,
+        err instanceof ArchivedAssistantError
+          ? "This assistant was deleted. The approval no longer applies."
+          : "Valet could not process this approval. Open the session in Valet to resolve it.",
+      );
+      return;
+    }
     try {
       await session.resolveDecision(mapped.gateId, {
         actionId: gateCallback.actionId,
@@ -1051,6 +1366,7 @@ export class ChannelHost {
                     gateId: event.gate.id,
                     title: event.title,
                     body: this.attentionBody(event),
+                    fields: event.gate.fields,
                     actions: event.gate.actions,
                   },
                   event.sessionId,
@@ -1071,17 +1387,31 @@ export class ChannelHost {
     };
   }
 
+  /** The one composer of the web deep link, shared by every outbound path. */
+  private openInValetLink(href: string): string | undefined {
+    return this.deps.publicUrl ? `[Open in Valet](${this.deps.publicUrl}${href})` : undefined;
+  }
+
   /** Body-only markdown (no title) for gate prompts, which render the title themselves. */
   private attentionBody(event: AttentionEvent): string | undefined {
     let markdown = event.body ?? "";
-    if (event.href && this.deps.publicUrl) {
-      markdown += `${markdown ? "\n\n" : ""}[Open in Valet](${this.deps.publicUrl}${event.href})`;
-    }
+    const link = event.href ? this.openInValetLink(event.href) : undefined;
+    if (link) markdown += `${markdown ? "\n\n" : ""}${link}`;
     return markdown === "" ? undefined : markdown;
   }
 
+  /**
+   * Plain-summary rendering, for events delivered without an interactive
+   * prompt. A gate event's digested fields ride along here too: the
+   * audience for this path (a recipient who cannot resolve the gate) still
+   * needs to see WHAT was requested, and the digested body alone no longer
+   * carries the tool id or args.
+   */
   private attentionMarkdown(event: AttentionEvent): string {
+    const fields = event.gate?.fields?.length
+      ? event.gate.fields.map((f) => `**${f.label}:** ${f.value}`).join("\n")
+      : undefined;
     const rest = this.attentionBody(event);
-    return rest === undefined ? `**${event.title}**` : `**${event.title}**\n\n${rest}`;
+    return [`**${event.title}**`, fields, rest].filter((part) => part !== undefined).join("\n\n");
   }
 }

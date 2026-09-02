@@ -21,10 +21,14 @@ import {
 } from "./decision-gate.js";
 import { renderTemplate } from "./roles-skills/index.js";
 import {
+  buildOverheardDigest,
   deriveQueueState,
   formatSenderLine,
+  isOverheardDigestMeta,
+  isSignalContent,
   MAX_PENDING_PER_THREAD,
   namespaceInternalDispatchId,
+  overheardCoalesceKey,
   renderSignalEnvelope,
   resolvePartialSubmissionText,
   resolveSubmissionText,
@@ -52,6 +56,7 @@ import { Compile } from "typebox/compile";
 import type { TSchema } from "typebox";
 import {
   applyPrune,
+  estimateContextTokens,
   estimateTokens,
   estimateTotalTokens,
   extractFileContext,
@@ -177,6 +182,8 @@ export class Thread {
   private collectTimer: ReturnType<typeof setTimeout> | null = null;
   /** Guards against the in-process timer and the session sweep both flushing the same window. */
   private flushingCollect = false;
+  /** Serializes overheard-digest scans; concurrent admissions coalesce one at a time (TKAI-297). */
+  private overheardCoalesceChain: Promise<QueueItem | null> = Promise.resolve(null);
   private gates = new GateManager();
   /**
    * Serializes gate open/wait cycles for this thread. pi-agent-core runs a
@@ -263,6 +270,14 @@ export class Thread {
    * still exceeds usable on a small-context model).
    */
   private skipNextProactiveCheck = false;
+  /**
+   * True when a transcript was rehydrated from persisted entries (spec
+   * decision 5). The next `runItemInner` consumes it: a pre-turn proactive
+   * check protects the first post-restart turn — the regular check only
+   * runs post-turn, so without this the first turn after a restart would
+   * hit the model with an over-budget context.
+   */
+  private rehydratedCheckPending = false;
   /**
    * Per-thread model override (id string, e.g. "claude-opus-4-7"). When set,
    * overlays the session-default at turn start and is restored after.
@@ -362,6 +377,14 @@ export class Thread {
     }
     const effectiveMode: QueueMode = opts.queueMode ?? this.mode;
 
+    // Validate a per-item model pin at admission, the same way setModel
+    // validates a thread pin: an unknown spec is rejected here with the
+    // submitter still on the line, instead of settling the turn `failed`
+    // later.
+    if (opts.model) {
+      await this.validateModelSpec(opts.model);
+    }
+
     if (effectiveMode === "collect") {
       return this.submitCollect(content, opts);
     }
@@ -387,7 +410,7 @@ export class Thread {
     // separate pre-check, so concurrent admissions can't race past it.
     const store = this.session.providers.store;
     const cap = this.session.options.maxPendingPerThread ?? MAX_PENDING_PER_THREAD;
-    const { item: admitted, supersededItemIds } = await store.admitSubmission(
+    const { item: admitted, admitted: wasAdmitted, supersededItemIds } = await store.admitSubmission(
       this.session.id,
       this.id,
       item,
@@ -396,14 +419,120 @@ export class Thread {
     if (supersededItemIds.length > 0) {
       await this.handleSteerSupersession(supersededItemIds);
     }
+    // Overheard-digest coalescing (TKAI-297): a freshly admitted overheard
+    // signal merges with any other queued overheard items of its origin
+    // thread. Skipped on a dispatchId dedup replay (wasAdmitted false) so a
+    // channel redelivery cannot re-digest content it already delivered.
+    // Scans are chained, not concurrent: two webhook deliveries admitting
+    // in parallel would otherwise each scan before the other's digest
+    // lands and produce two overlapping digests.
+    let receiptItem = admitted;
+    if (wasAdmitted && effectiveMode === "followup") {
+      const coalesceKey = overheardCoalesceKey(prepared.content);
+      if (coalesceKey !== undefined) {
+        const run = this.overheardCoalesceChain.then(() =>
+          this.coalesceQueuedOverheard(coalesceKey),
+        );
+        this.overheardCoalesceChain = run.catch(() => null);
+        receiptItem = (await run) ?? admitted;
+      }
+    }
     await this.emitQueueState();
     void this.kick();
     return {
       sessionId: this.session.id,
       threadId: this.id,
-      queueItemId: admitted.id,
-      status: receiptStatus(admitted.status),
+      queueItemId: receiptItem.id,
+      status: receiptStatus(receiptItem.status),
     };
+  }
+
+  /**
+   * Overheard-digest coalescing (TKAI-297): merge every queued overheard
+   * item of one origin thread into a single digest item, so a busy thread
+   * drains one "here is what you missed" turn instead of N stale catch-up
+   * turns (and the model never answers a question a later message already
+   * resolved). Same merge shape as the collect-window flush: admit the
+   * digest, then settle each constituent `merged` pointing at it.
+   * Constituents are never claimed, so they write no user entries; a
+   * redelivery of a constituent's dispatchId still dedups against its
+   * settled row. A constituent claimed between the list and the CAS settle
+   * keeps running — its line then also appears in the digest, which is
+   * duplicated ambient context on an optional-reply turn, not a lost or
+   * doubled submission. Returns the digest item, or null when there was
+   * nothing to merge with.
+   */
+  private async coalesceQueuedOverheard(coalesceKey: string): Promise<QueueItem | null> {
+    const store = this.session.providers.store;
+    const items = await store.listUnsettledSubmissions(this.session.id);
+    const coalescible = items
+      .filter(
+        (i) =>
+          i.threadId === this.id &&
+          i.status === "queued" &&
+          i.supersededByItemId === undefined &&
+          i.abortRequestedAt === undefined &&
+          overheardCoalesceKey(i.content) === coalesceKey,
+      )
+      .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    if (coalescible.length < 2) return null;
+    const { content, digest } = buildOverheardDigest(coalescible);
+    const newest = coalescible[coalescible.length - 1];
+    const merged = this.buildQueueItem(content, {
+      channel: newest.channel,
+      replyTarget: newest.replyTarget,
+      model: newest.model,
+      role: newest.role,
+      metadata: { overheardDigest: digest },
+    });
+    const { item: admittedMerged } = await store.admitSubmission(this.session.id, this.id, merged);
+    for (const constituent of coalescible) {
+      const settled = await store.settleUnclaimed(
+        this.session.id,
+        this.id,
+        constituent.id,
+        { outcome: "merged" },
+        { mergedIntoItemId: admittedMerged.id },
+      );
+      if (settled) await this.emitSettled(constituent.id, { outcome: "merged" });
+    }
+    return admittedMerged;
+  }
+
+  /**
+   * Crash repair for overheard digests (TKAI-297). `coalesceQueuedOverheard`
+   * admits the digest first and settles constituents after — a crash between
+   * the two leaves the digest AND its constituents queued, so the thread
+   * would deliver the same messages twice. This repair exists for that crash
+   * window (the sanctioned auto-repair exception: violations expected across
+   * crashes): for every queued digest, re-settle its still-queued
+   * constituents `merged`. The settleUnclaimed CAS makes it idempotent, and
+   * a constituent that was claimed in the meantime is left alone. Called
+   * from the session sweep and from restore-time reconcile, both before
+   * their kicks, so a repairable constituent settles before it can be
+   * claimed.
+   */
+  async repairOverheardDigests(): Promise<void> {
+    const store = this.session.providers.store;
+    const items = await store.listUnsettledSubmissions(this.session.id);
+    const mine = items.filter((i) => i.threadId === this.id);
+    for (const digest of mine) {
+      if (digest.status !== "queued" || digest.supersededByItemId !== undefined) continue;
+      const meta = digest.metadata?.overheardDigest;
+      if (!isOverheardDigestMeta(meta)) continue;
+      for (const constituentId of meta.constituentIds) {
+        const constituent = mine.find((i) => i.id === constituentId && i.status === "queued");
+        if (!constituent) continue;
+        const settled = await store.settleUnclaimed(
+          this.session.id,
+          this.id,
+          constituentId,
+          { outcome: "merged" },
+          { mergedIntoItemId: digest.id },
+        );
+        if (settled) await this.emitSettled(constituentId, { outcome: "merged" });
+      }
+    }
   }
 
   /**
@@ -897,7 +1026,7 @@ export class Thread {
     try {
       // Host resolver (if any) delivers this resumed turn's per-turn key
       // before the continuation LLM call; no-op when absent.
-      await this.applyResolvedKeyForResume();
+      await this.applyResolvedKeyForResume(this.runningItem ?? undefined);
       await this.agent.continue();
       await this.agent.waitForIdle();
     } catch (err) {
@@ -1442,9 +1571,15 @@ export class Thread {
    * the toolResult message before continuing.
    */
   rehydrateTranscript(entries: SessionEntry[]): void {
-    this.agent.state.messages = entriesToAgentMessages(entries, this.session.options.model, {
+    this.agent.state.messages = entriesToAgentMessages(entries, this.effectiveModelLenient(), {
       attributeAuthors: this.attributeAuthors,
     });
+    // Arm the pre-turn proactive check (spec decision 5) so the first
+    // post-restart turn is protected. The trigger estimates the rehydrated
+    // transcript directly (TKAI-305), so no usage seeding is needed and a
+    // trailing CompactionEntry needs no special case — the estimate already
+    // reflects it.
+    this.rehydratedCheckPending = this.agent.state.messages.length > 0;
   }
 
   /**
@@ -1495,24 +1630,9 @@ export class Thread {
     if (modelId === null) {
       this.modelOverride = undefined;
     } else {
-      // Resolve before assigning so an unknown id is rejected and the
-      // thread keeps its previous setting. With a host resolver present,
-      // validate through it (null → same throw as the internal resolver's
-      // undefined); absent → today's internal `resolveModelId` path.
-      // NoCredentialsError means the spec IS valid (the model resolved) but
-      // no key exists yet — accept it: a user must be able to select a model
-      // before configuring its key.
-      const resolver = this.session.options.resolveModel;
-      let resolved: ResolvedModel | PiModel | null | undefined;
-      try {
-        resolved = resolver ? await resolver(modelId) : resolveModelId(modelId);
-      } catch (err) {
-        if (!(err instanceof NoCredentialsError)) throw err;
-        resolved = { model: err.model };
-      }
-      if (!resolved) {
-        throw new Error(`unknown model id: ${modelId}`);
-      }
+      // Validate before assigning so an unknown id is rejected and the
+      // thread keeps its previous setting.
+      await this.validateModelSpec(modelId);
       this.modelOverride = modelId;
     }
     await this.session.providers.store.saveThread(this.session.id, this.toThreadData());
@@ -1529,22 +1649,82 @@ export class Thread {
     return { fromModel: before, toModel: after };
   }
 
-  /** Layered resolution: thread override → session default. Returns the
-   *  live pi-ai Model to use for the next LLM call. */
-  resolveTurnModel(): PiModel {
-    if (this.modelOverride) {
-      const m = resolveModelId(this.modelOverride);
+  /**
+   * Validate a model spec the way admission (`submitPrompt`) and the thread
+   * pin (`setModel`) both require. A spec naming the session's own effective
+   * spec, or this thread's current pin, is valid by construction — the live
+   * model object exists even when the spec is not in pi-ai's static registry
+   * (custom providers, test doubles). Otherwise resolve through the host
+   * resolver when present, else the internal registry. NoCredentialsError is
+   * accepted: the model resolved; the key is configurable before a turn
+   * runs. Throws `ValidationError` on an unknown spec.
+   */
+  private async validateModelSpec(spec: string): Promise<void> {
+    const sessionSpec = this.session.options.modelSpec ?? this.session.options.model.id;
+    if (spec === sessionSpec || spec === this.modelOverride) return;
+    const resolver = this.session.options.resolveModel;
+    let resolved: ResolvedModel | PiModel | null | undefined;
+    try {
+      resolved = resolver ? await resolver(spec) : resolveModelId(spec);
+    } catch (err) {
+      if (!(err instanceof NoCredentialsError)) throw err;
+      resolved = { model: err.model };
+    }
+    if (!resolved) {
+      throw new ValidationError(
+        `unknown model id: ${spec}. Run /model to list the available models.`,
+      );
+    }
+  }
+
+  /** Layered resolution: item model → thread pin → session default. Returns
+   *  the live pi-ai Model to use for the next LLM call.
+   *
+   *  A pin that stops resolving FAILS THE TURN LOUD (spec decision 3) —
+   *  silently falling back to the session default ran the turn on a model
+   *  the user never chose, with no event and no transcript evidence. */
+  resolveTurnModel(item?: QueueItem): PiModel {
+    const sessionSpec = this.session.options.modelSpec ?? this.session.options.model.id;
+    const pin = item?.model ?? this.modelOverride;
+    // A pin that names the session's own effective spec resolves to the live
+    // session model object — the session already holds it, and it may not be
+    // in pi-ai's static registry at all (custom providers, test doubles).
+    // Only a DIVERGENT pin needs its own resolution.
+    if (pin && pin !== sessionSpec) {
+      const m = resolveModelId(pin);
       if (m) return m;
-      // Stored override no longer resolvable; fall back to session default.
+      throw new Error(
+        `Model '${pin}' is no longer available. Switch this thread's model with /model <id>, or clear the pin to use the session default.`,
+      );
     }
     return this.session.options.model;
   }
 
-  /** Effective model spec string for this turn: thread override → session
-   *  default spec (`modelSpec` — the canonical form; `model.id` is the wire
-   *  id and only coincides for bare/internal resolution). */
-  private turnModelSpec(): string {
-    return this.modelOverride ?? this.session.options.modelSpec ?? this.session.options.model.id;
+  /** Effective model spec string for this turn: item model → thread pin →
+   *  session default spec (`modelSpec` — the canonical form; `model.id` is
+   *  the wire id and only coincides for bare/internal resolution). */
+  private turnModelSpec(item?: QueueItem): string {
+    return (
+      item?.model ??
+      this.modelOverride ??
+      this.session.options.modelSpec ??
+      this.session.options.model.id
+    );
+  }
+
+  /**
+   * Best-effort effective model for NON-TURN sites that must not throw
+   * (transcript rehydration, budget math outside a live turn). Unresolvable
+   * pins fall back to the session default here — the turn path has already
+   * failed loud for those; these sites only need a sane context-window
+   * approximation.
+   */
+  private effectiveModelLenient(): PiModel {
+    if (this.modelOverride) {
+      const m = resolveModelId(this.modelOverride);
+      if (m) return m;
+    }
+    return this.session.options.model;
   }
 
   /**
@@ -1553,14 +1733,15 @@ export class Thread {
    * existing synchronous `resolveTurnModel()` path, no key touched
    * (byte-identical). Present resolver: resolve the effective spec through it
    * and hold `{ model, apiKey }` for this turn only. If the resolver can't
-   * resolve the (setModel-validated) spec at turn time, fall back to internal
-   * resolution + env-key path, mirroring `resolveTurnModel`'s stale-override
-   * fallback.
+   * resolve the (setModel-validated) spec at turn time, FAIL THE TURN LOUD
+   * (spec decision 3) — same contract as `applyResolvedKeyForResume`.
+   * Silently proceeding on internal resolution + env keys ran the turn on a
+   * model and credentials the user never chose.
    */
-  private async resolveTurnModelForTurn(): Promise<PiModel> {
+  private async resolveTurnModelForTurn(item?: QueueItem): Promise<PiModel> {
     const resolver = this.session.options.resolveModel;
-    if (!resolver) return this.resolveTurnModel();
-    const spec = this.turnModelSpec();
+    if (!resolver) return this.resolveTurnModel(item);
+    const spec = this.turnModelSpec(item);
     return withSpan("model.resolve", { "valet.model.spec": spec }, async (span) => {
       const resolved = await resolver(spec);
       if (resolved) {
@@ -1574,8 +1755,16 @@ export class Thread {
         this.turnApiKey = resolved.apiKey;
         return resolved.model;
       }
-      span.setAttribute("valet.model.key_source", "internal_fallback");
-      return this.resolveTurnModel();
+      span.setAttribute("valet.model.key_source", "dead_pin");
+      // "Clear the pin" only helps when the pin diverges from the session
+      // default — when the DEFAULT itself is what died, clearing resolves
+      // the identical spec and fails again, so point at the admin fix.
+      const sessionSpec = this.session.options.modelSpec ?? this.session.options.model.id;
+      throw new Error(
+        spec === sessionSpec
+          ? `Model '${spec}' is no longer available. Switch this thread's model with /model <id>, or ask an admin to restore the model in the provider settings.`
+          : `Model '${spec}' is no longer available. Switch this thread's model with /model <id>, or clear the pin to use the session default.`,
+      );
     });
   }
 
@@ -1594,10 +1783,10 @@ export class Thread {
    * turn failure (the continuation settles `failed`; claim cleaned, no
    * wedge).
    */
-  private async applyResolvedKeyForResume(): Promise<void> {
+  private async applyResolvedKeyForResume(item?: QueueItem): Promise<void> {
     const resolver = this.session.options.resolveModel;
     if (!resolver) return;
-    const spec = this.turnModelSpec();
+    const spec = this.turnModelSpec(item);
     const resolved = await resolver(spec);
     if (resolved === null) {
       // Unknown spec — e.g. an admin deleted the custom provider row while
@@ -2432,12 +2621,13 @@ export class Thread {
       // separate synthetic append: entriesToAgentMessages is the single owner
       // of toolResult emission (no callId is ever answered twice).
       const entries = await store.getEntries(this.session.id, this.id);
+      const resumeModel = this.effectiveModelLenient();
       this.agent.state.messages = entriesToAgentMessages(
         entries,
         {
-          api: this.session.options.model.api,
-          provider: this.session.options.model.provider,
-          id: this.session.options.model.id,
+          api: resumeModel.api,
+          provider: resumeModel.provider,
+          id: resumeModel.id,
         },
         { attributeAuthors: this.attributeAuthors },
       );
@@ -2445,7 +2635,7 @@ export class Thread {
 
       // Host resolver (if any) delivers this resumed turn's per-turn key before
       // the continuation LLM call; no-op when absent.
-      await this.applyResolvedKeyForResume();
+      await this.applyResolvedKeyForResume(item);
       await this.agent.continue();
       await this.agent.waitForIdle();
     } catch (err) {
@@ -2685,19 +2875,19 @@ export class Thread {
       this.session.attachment.warm();
     }
 
-    // Layered model resolution (thread override → session default), BEFORE
-    // the user-entry append and buildTools. A host resolver that throws
+    // Layered model resolution (item model → thread pin → session default),
+    // BEFORE the user-entry append and buildTools. A host resolver that throws
     // NoCredentialsError means the turn cannot reach the model at all: flag
     // it for the claim loop's release path and return with NO user entry
     // appended, NO agent run, and NO assistant error entry — so bounded
     // credential retries never duplicate entries. Any OTHER resolver throw
-    // (disabled provider, model not active, unknown provider) settles the
-    // turn `failed`: append the user entry FIRST so the prompt is still in
-    // the transcript when the failure surfaces, then rethrow with an
-    // identical failure surface.
+    // (disabled provider, model not active, unknown provider, dead pin)
+    // settles the turn `failed`: append the user entry FIRST so the prompt
+    // is still in the transcript when the failure surfaces, then rethrow
+    // with an identical failure surface.
     let turnModel: PiModel;
     try {
-      turnModel = await this.resolveTurnModelForTurn();
+      turnModel = await this.resolveTurnModelForTurn(item);
     } catch (err) {
       if (err instanceof NoCredentialsError) {
         this.credentialError = err;
@@ -2705,6 +2895,41 @@ export class Thread {
       }
       await this.appendUserEntry(item);
       throw err;
+    }
+
+    // Apply the turn model (resolved above) BEFORE the role overlay so a
+    // role's model frontmatter still wins for that one turn. The baseline is
+    // captured here so we restore the right thing, not whatever the role
+    // overlaid. Applied before the pre-turn compaction below so its budget
+    // math sees this turn's effective model.
+    const baselineModel = this.agent.state.model;
+    if (turnModel !== baselineModel) {
+      this.agent.state.model = turnModel;
+    }
+
+    // Pre-turn protection for the first post-restart turn (spec decision 5):
+    // when the rehydrate seed says the persisted context already exceeds
+    // usable, compact BEFORE this turn's LLM call — the regular proactive
+    // check only runs post-turn and would let this turn hit the model with
+    // an over-budget context. One-shot: consumed here whether or not it
+    // triggers; every later turn is covered by the post-turn check.
+    //
+    // MUST run before appendUserEntry: compaction rebuilds
+    // agent.state.messages from the persisted DAG, so a user entry persisted
+    // first would enter the rebuilt transcript AND be prompted again by
+    // runAgent — the model would see the prompt twice.
+    if (this.rehydratedCheckPending) {
+      this.rehydratedCheckPending = false;
+      if (this.shouldCompactProactive()) {
+        try {
+          await this.compactThread({ mode: "proactive", autoContinue: false });
+        } catch (err) {
+          this.emitError(
+            "compaction_failed",
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+      }
     }
 
     // Persist the user message entry (shared helper — the claim loop's
@@ -2716,15 +2941,6 @@ export class Thread {
 
     // Build the AgentTool list with closures over this turn's ToolContext.
     this.agent.state.tools = this.buildTools();
-
-    // Apply the turn model (resolved above) BEFORE the role overlay so a
-    // role's model frontmatter still wins for that one turn. The baseline is
-    // captured here so we restore the right thing, not whatever the role
-    // overlaid.
-    const baselineModel = this.agent.state.model;
-    if (turnModel !== baselineModel) {
-      this.agent.state.model = turnModel;
-    }
 
     // Repo AGENTS.md instructions overlay (agents-md spec, decision 4):
     // applied FIRST so the composition is base → systemContext → repo
@@ -2926,7 +3142,9 @@ export class Thread {
       last &&
       last.role === "assistant" &&
       last.stopReason === "error" &&
-      isContextOverflow(last, this.session.options.model.contextWindow)
+      // The turn's effective model, not the session default — a thread pinned
+      // to a smaller-context model must detect ITS overflow (spec decision 4).
+      isContextOverflow(last, this.agent.state.model.contextWindow)
     ) {
       this.overflowRetryInProgress = true;
       try {
@@ -2952,11 +3170,26 @@ export class Thread {
     }
     const cfg = this.session.options.compaction;
     if (cfg?.enabled === false) return false;
-    const usage = this.lastAssistantUsage;
-    if (!usage) return false;
-    const usable = usableTokens(this.session.options.model, cfg);
+    // Budget against the turn's effective model (spec decision 4):
+    // shouldCompactProactive only runs from runItem's try block, before the
+    // finally restores the baseline, so `agent.state.model` is the resolved
+    // turn model — including resolver-only specs `resolveModelId` can't see.
+    const usable = usableTokens(this.agent.state.model, cfg);
     if (usable === 0) return false;
-    return usage.total >= usable;
+    // Trigger on the same char-based estimate the cut-point budget uses —
+    // never on provider-reported usage. Reported totals include cache reads
+    // and system/tool overhead that compaction cannot reclaim, so a
+    // usage-based trigger compacts long cached threads that do not need it
+    // (TKAI-305). This runs before the turn's finally-block restores the
+    // baseline prompt, so the estimate sees the overlays the turn used.
+    // Same role filter as `convertToLlm` — custom AgentMessage kinds never
+    // reach the LLM, so they must not count toward the context estimate.
+    const llmMessages = this.agent.state.messages.filter(
+      (m): m is Message =>
+        m.role === "user" || m.role === "assistant" || m.role === "toolResult",
+    );
+    const estimated = estimateContextTokens(this.agent.state.systemPrompt, llmMessages);
+    return estimated >= usable;
   }
 
   /**
@@ -2965,7 +3198,17 @@ export class Thread {
    * CompactionEntry. Persist DAG updates and rewrite agent.state.messages
    * so the next turn sees a smaller context.
    */
-  async compactThread(opts: { mode: "proactive" | "reactive" | "manual" }): Promise<void> {
+  async compactThread(opts: {
+    mode: "proactive" | "reactive" | "manual";
+    /** Free-text steer for the summarizer (manual `/compact <text>`). */
+    instructions?: string;
+    /**
+     * Force-suppress the proactive auto-continue follow-up. Set by the
+     * pre-turn rehydration pass — its turn is about to run anyway, so a
+     * synthetic continuation would duplicate work.
+     */
+    autoContinue?: false;
+  }): Promise<void> {
     const cfg = this.session.options.compaction;
     if (cfg?.enabled === false) return;
     return withSpan(
@@ -2980,13 +3223,26 @@ export class Thread {
   }
 
   private async compactThreadInner(
-    opts: { mode: "proactive" | "reactive" | "manual" },
+    opts: {
+      mode: "proactive" | "reactive" | "manual";
+      instructions?: string;
+      autoContinue?: false;
+    },
     span?: Span,
   ): Promise<void> {
     const cfg = this.session.options.compaction;
     const session = this.session;
     const store = session.providers.store;
-    const model = cfg?.summarizerModel ?? session.options.model;
+    // Budget against the thread's effective model (spec decision 4). Inside
+    // a claimed turn (proactive after runAgent, reactive within it),
+    // `agent.state.model` is the resolved turn model — exact, including
+    // role overlays and resolver-only specs. A manual `/compact` can run
+    // outside a claim, where `agent.state.model` still holds the session
+    // baseline — resolve the pin leniently there instead.
+    const effectiveModel = this.runningItem
+      ? this.agent.state.model
+      : this.effectiveModelLenient();
+    const model = cfg?.summarizerModel ?? effectiveModel;
 
     // Load full DAG for the thread.
     const entries = await store.getEntries(session.id, this.id);
@@ -3014,7 +3270,7 @@ export class Thread {
     }
 
     // Step 2: cut-point selection.
-    const cut = selectCutPoint({ entries, model: session.options.model, cfg });
+    const cut = selectCutPoint({ entries, model: effectiveModel, cfg });
     if (cut.cutIndex === 0 || cut.cutIndex === entries.length) {
       // Nothing to compact: either the tail already fits everything, or
       // there's no tail to preserve. The pruning pass above may have been
@@ -3031,6 +3287,10 @@ export class Thread {
       { queueItemId: this.runningItem?.id },
     );
     let summaryResult: SummarizeResult;
+    // Everything between compaction_start and here MUST balance the pair —
+    // the wire contract promises "compaction_end fires on failure too", and
+    // the web store's compacting indicator only clears on the end frame. The
+    // finally covers the summarizer AND the persist/rebuild steps.
     try {
       const previousSummary = findMostRecentCompaction(entries)?.summary;
       summaryResult = await summarize({
@@ -3039,6 +3299,7 @@ export class Thread {
         toolOutputMaxChars: cfg?.toolOutputMaxChars,
         attributeAuthors: this.attributeAuthors,
         previousSummary,
+        instructions: opts.instructions,
         // Reactive compaction fires WITHIN a claimed turn (and proactive
         // just after runAgent, still before the turn's finally clears it),
         // so `turnApiKey` is live here. Without this, a BYO-key session
@@ -3047,53 +3308,47 @@ export class Thread {
         // when no resolver is wired (env-fallback path) — behavior unchanged.
         apiKey: this.turnApiKey,
       });
-    } catch (err) {
+
+      // Step 4: persist CompactionEntry.
+      const compactionEntry: CompactionEntry = {
+        id: uid("c"),
+        sessionId: session.id,
+        threadId: this.id,
+        parentId: head[head.length - 1].id,
+        type: "compaction",
+        summary: summaryResult.summary,
+        coveredEntryIds: head.map((e) => e.id),
+        tokenCountBefore: estimateTotalTokens(head),
+        tokenCountAfter: estimateTokens(summaryResult.summary),
+        fileContext: extractFileContext(head),
+        createdAt: Date.now(),
+      };
+      span?.setAttributes({
+        "valet.compaction.tokens_before": compactionEntry.tokenCountBefore,
+        "valet.compaction.tokens_after": compactionEntry.tokenCountAfter,
+        "valet.compaction.entries_covered": compactionEntry.coveredEntryIds.length,
+      });
+      // Fenced under the current turn's attempt (compaction is always in-turn).
+      await store.appendEntries(session.id, this.id, [compactionEntry], this.fence);
+
+      // Step 5: rewrite agent.state.messages. The simplest and most
+      // correct path is to rebuild from the now-augmented DAG.
+      const updatedEntries = await store.getEntries(session.id, this.id);
+      this.agent.state.messages = entriesToAgentMessages(
+        updatedEntries,
+        {
+          api: effectiveModel.api,
+          provider: effectiveModel.provider,
+          id: effectiveModel.id,
+        },
+        { attributeAuthors: this.attributeAuthors },
+      );
+    } finally {
       await session.emit(
         { type: "compaction_end", threadId: this.id },
         { queueItemId: this.runningItem?.id },
       );
-      throw err;
     }
-
-    // Step 4: persist CompactionEntry.
-    const compactionEntry: CompactionEntry = {
-      id: uid("c"),
-      sessionId: session.id,
-      threadId: this.id,
-      parentId: head[head.length - 1].id,
-      type: "compaction",
-      summary: summaryResult.summary,
-      coveredEntryIds: head.map((e) => e.id),
-      tokenCountBefore: estimateTotalTokens(head),
-      tokenCountAfter: estimateTokens(summaryResult.summary),
-      fileContext: extractFileContext(head),
-      createdAt: Date.now(),
-    };
-    span?.setAttributes({
-      "valet.compaction.tokens_before": compactionEntry.tokenCountBefore,
-      "valet.compaction.tokens_after": compactionEntry.tokenCountAfter,
-      "valet.compaction.entries_covered": compactionEntry.coveredEntryIds.length,
-    });
-    // Fenced under the current turn's attempt (compaction is always in-turn).
-    await store.appendEntries(session.id, this.id, [compactionEntry], this.fence);
-
-    // Step 5: rewrite agent.state.messages. The simplest and most
-    // correct path is to rebuild from the now-augmented DAG.
-    const updatedEntries = await store.getEntries(session.id, this.id);
-    this.agent.state.messages = entriesToAgentMessages(
-      updatedEntries,
-      {
-        api: session.options.model.api,
-        provider: session.options.model.provider,
-        id: session.options.model.id,
-      },
-      { attributeAuthors: this.attributeAuthors },
-    );
-
-    await session.emit(
-      { type: "compaction_end", threadId: this.id },
-      { queueItemId: this.runningItem?.id },
-    );
 
     // Step 5.5: compaction hooks (Phase 4 decision 9). Run in order, each
     // individually try/caught — a throwing hook is logged via emitError and
@@ -3119,7 +3374,7 @@ export class Thread {
     // message tagged with metadata.compaction_continue so client UIs can
     // hide it. Admitted as a durable submission so the claim loop picks it up
     // after the current turn settles.
-    if (opts.mode === "proactive" && cfg?.autoContinue !== false) {
+    if (opts.mode === "proactive" && opts.autoContinue !== false && cfg?.autoContinue !== false) {
       // Durable admission: the claim loop picks this up after the current turn
       // settles. metadata flags let client UIs hide the synthetic continuation.
       const followUp = this.buildQueueItem(AUTO_CONTINUE_PROMPT, {
@@ -3131,7 +3386,12 @@ export class Thread {
 
     // Cool-down: skip the next proactive check so the auto-continue turn
     // doesn't immediately re-trigger compaction on a small-context model.
-    this.skipNextProactiveCheck = true;
+    // NOT armed for the pre-turn rehydration pass (autoContinue: false) —
+    // there is no follow-up turn there, and arming it would suppress the
+    // SAME turn's legitimate post-turn check.
+    if (opts.autoContinue !== false) {
+      this.skipNextProactiveCheck = true;
+    }
   }
 
   private applyElisionsToAgentMessages(plan: PruneResult): void {
@@ -3888,10 +4148,6 @@ function promptText(content: PromptContent): string {
   return content.text ?? "";
 }
 
-function isSignalContent(content: PromptContent): content is SignalContent {
-  return typeof content === "object" && content !== null && "kind" in content && content.kind === "signal";
-}
-
 /** Stamped internal-sender identity carried through `QueueItem.metadata.signalStamp` (no dedicated QueueItem field). */
 interface SignalStamp {
   senderSessionId: string;
@@ -4215,7 +4471,16 @@ export function entriesToAgentMessages(
           toolCallId: p.callId,
           toolName: p.toolName,
           content: [
-            { type: "text", text: isError ? p.error ?? "tool call failed" : toolResultText(p.result) },
+            {
+              type: "text",
+              // Elided parts keep their stored result for the summarizer and
+              // the UI; the LIVE context is where the elision applies.
+              text: isError
+                ? p.error ?? "tool call failed"
+                : p.elided
+                  ? "[output elided to save context]"
+                  : toolResultText(p.result),
+            },
           ],
           isError,
           timestamp: e.createdAt,

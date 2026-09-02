@@ -35,10 +35,29 @@ const catalogData = {
 vi.mock("~/api/events", () => ({
   useEventCatalog: () => ({ data: catalogData, isLoading: false, error: null }),
   useCreateEventSubscription: () => ({ mutate: createSubscription, isPending: false }),
-  // The reply outcome's channel picker calls this. No slack channel field is
-  // in the catalog mock, so the source cannot resolve — return a reason so the
-  // picker falls back to a free-text input the test never needs to fill.
+  // The reply outcome's channel multi-select calls this. The source cannot
+  // resolve here — return a reason so it falls back to the free-text
+  // channel-id input the reply tests type into.
   useFilterOptions: () => ({ data: { options: [], reason: "Connect Slack first." }, isLoading: false }),
+}));
+
+// The reply step warns when the caller's Slack account is not linked.
+vi.mock("~/api/queries", () => ({
+  useIdentityLinks: () => ({
+    data: {
+      links: [
+        {
+          provider: "slack",
+          linked: true,
+          channelReady: true,
+          codeDelivery: true,
+          memberSearch: true,
+        },
+      ],
+    },
+    isLoading: false,
+    error: null,
+  }),
 }));
 
 let workflowsData: { workflows: { id: string; name: string }[] } = { workflows: [] };
@@ -71,6 +90,7 @@ vi.mock("~/lib/workspace-scope", async (importOriginal) => {
 });
 
 import { AutomationWizard } from "./automation-wizard";
+import { ApiError } from "~/api/client";
 
 beforeEach(() => {
   createSubscription.mockReset();
@@ -92,7 +112,14 @@ function pickOutcome(label: RegExp) {
 }
 
 describe("AutomationWizard", () => {
-  it("reply outcome posts slack.app_mention with a team assistant and follow ON", () => {
+  /** Adds a channel through the reply step's free-text fallback (the mocked
+   * options source returns a reason, so no picker list renders). */
+  function addReplyChannel(id: string) {
+    fireEvent.change(screen.getByLabelText("Channel id"), { target: { value: id } });
+    fireEvent.click(screen.getByRole("button", { name: /^Add channel$/ }));
+  }
+
+  it("reply outcome posts slack.app_mention with the picked channel and follow ON", () => {
     // A team workspace, so the team-assistant option appears.
     scopeTeamId = "t_platform";
     render(<AutomationWizard open onOpenChange={() => {}} />);
@@ -100,7 +127,9 @@ describe("AutomationWizard", () => {
     // Step 1 — What: reply is the default. Next.
     clickNext();
 
-    // Step 2 — Reply: pick the team's assistant, leave follow ON (default).
+    // Step 2 — Reply: channels are required now, so add one, then pick the
+    // team's assistant and leave follow ON (default).
+    addReplyChannel("C123");
     fireEvent.click(screen.getByLabelText(/Platform's assistant/));
     // Follow is a checkbox, default checked.
     const follow = screen.getByRole("checkbox", { name: /Keep following the thread/ });
@@ -116,6 +145,8 @@ describe("AutomationWizard", () => {
     const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
     expect(body.name).toBe("Slack replies");
     expect(body.eventKeys).toEqual(["slack.app_mention"]);
+    expect(body.filters).toEqual([{ field: "channel", op: "eq", value: "C123", label: "C123" }]);
+    expect(body.anyChannel).toBeUndefined();
     expect(body.target).toEqual({
       kind: "orchestrator",
       orchestrator: "team",
@@ -124,12 +155,32 @@ describe("AutomationWizard", () => {
     });
   });
 
-  it("reply outcome with follow toggled OFF posts follow: false", () => {
+  it("reply outcome posts several channels as one in filter", () => {
+    render(<AutomationWizard open onOpenChange={() => {}} />);
+
+    clickNext(); // What: reply
+    addReplyChannel("C123");
+    addReplyChannel("C456");
+    clickNext();
+
+    fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "Two rooms" } });
+    fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+
+    const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
+    // The free-text fallback labels a typed id with itself; the picker path
+    // would carry channel names here instead.
+    expect(body.filters).toEqual([
+      { field: "channel", op: "in", value: ["C123", "C456"], labels: ["C123", "C456"] },
+    ]);
+  });
+
+  it("reply outcome with Any channel posts no channel filter and the anyChannel flag", () => {
     render(<AutomationWizard open onOpenChange={() => {}} />);
 
     clickNext(); // What: reply
 
-    // Step 2 — Reply: turn follow off.
+    // Step 2 — Reply: opt out of the channel requirement, turn follow off.
+    fireEvent.click(screen.getByRole("checkbox", { name: /Any channel/ }));
     fireEvent.click(screen.getByRole("checkbox", { name: /Keep following the thread/ }));
     clickNext();
 
@@ -138,8 +189,18 @@ describe("AutomationWizard", () => {
 
     const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
     expect(body.eventKeys).toEqual(["slack.app_mention"]);
+    expect(body.filters).toEqual([]);
+    expect(body.anyChannel).toBe(true);
     // Personal workspace, so the default target is the user's assistant.
     expect(body.target).toEqual({ kind: "orchestrator", orchestrator: "user", follow: false });
+  });
+
+  it("blocks Next on the reply step until a channel is picked or Any channel is set", () => {
+    render(<AutomationWizard open onOpenChange={() => {}} />);
+    clickNext(); // What → Reply
+    expect((screen.getByRole("button", { name: /^Next$/ }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox", { name: /Any channel/ }));
+    expect((screen.getByRole("button", { name: /^Next$/ }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("workflow outcome posts a subscription with a workflow target", () => {
@@ -233,5 +294,103 @@ describe("AutomationWizard", () => {
     expect((screen.getByRole("button", { name: /^Next$/ }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole("checkbox", { name: /github\.pr\.opened/ }));
     expect((screen.getByRole("button", { name: /^Next$/ }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  // ── Collision gate (TKAI-294) ─────────────────────────────────────────────
+
+  /** A collision payload naming one existing rule, as the server builds it. */
+  function collisionPayload(kind: "blocking" | "overlapping") {
+    const entry = {
+      subscription: {
+        id: "sub_existing",
+        name: "Eng channel replies",
+        ownerType: "user",
+        ownerId: "u1",
+        eventKeys: ["slack.app_mention"],
+        filters: [{ field: "channel", op: "eq", value: "C123", label: "#eng" }],
+        target: { kind: "orchestrator" },
+        enabled: true,
+        createdBy: "u1",
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      relation: kind === "blocking" ? "superset" : "subset",
+      sharedKeys: ["slack.app_mention"],
+    };
+    return {
+      blocking: kind === "blocking" ? [entry] : [],
+      overlapping: kind === "overlapping" ? [entry] : [],
+    };
+  }
+
+  /** Walks the reply flow to Review and presses Create. */
+  function createReplyRule(name: string) {
+    clickNext(); // What: reply
+    addReplyChannel("C123");
+    clickNext(); // Reply → Review
+    fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: name } });
+    fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+  }
+
+  it("a 409 collision renders the colliding rule and Create anyway resubmits with allowCollision", () => {
+    const onOpenChange = vi.fn();
+    createSubscription.mockImplementation(
+      (_body: unknown, handlers: { onError: (err: Error) => void }) => {
+        handlers.onError(
+          new ApiError(409, "collision", {
+            error: "collides",
+            collisions: collisionPayload("blocking"),
+          }),
+        );
+      },
+    );
+    render(<AutomationWizard open onOpenChange={onOpenChange} />);
+    createReplyRule("Wide net");
+
+    // The colliding rule is named inline; the dialog stays open.
+    expect(screen.getByText("Eng channel replies")).toBeTruthy();
+    expect(screen.getByText("Would replace")).toBeTruthy();
+    expect(onOpenChange).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Create anyway$/ }));
+    expect(createSubscription).toHaveBeenCalledTimes(2);
+    const first = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
+    expect(first.allowCollision).toBeUndefined();
+    const retry = createSubscription.mock.calls[1][0] as CreateEventSubscriptionRequest;
+    expect(retry.allowCollision).toBe(true);
+  });
+
+  it("a committed overlap shows the warning and Done closes the dialog", () => {
+    const onOpenChange = vi.fn();
+    createSubscription.mockImplementation(
+      (_body: unknown, handlers: { onSuccess: (resp: { collisions?: unknown }) => void }) => {
+        handlers.onSuccess({ collisions: collisionPayload("overlapping") });
+      },
+    );
+    render(<AutomationWizard open onOpenChange={onOpenChange} />);
+    createReplyRule("Narrow rule");
+
+    // Saved, but the overlap warning holds the dialog open until Done.
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByText("Overlaps")).toBeTruthy();
+    expect(screen.getByText("Eng channel replies")).toBeTruthy();
+    // The refusal-only actions are gone.
+    expect(screen.queryByRole("button", { name: /Create anyway/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Create automation/ })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Done$/ }));
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("a clean create still closes the dialog", () => {
+    const onOpenChange = vi.fn();
+    createSubscription.mockImplementation(
+      (_body: unknown, handlers: { onSuccess: (resp: object) => void }) => {
+        handlers.onSuccess({ id: "sub_new" });
+      },
+    );
+    render(<AutomationWizard open onOpenChange={onOpenChange} />);
+    createReplyRule("Clean rule");
+    expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 });
