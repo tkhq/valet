@@ -70,11 +70,11 @@ CREATE TABLE "engine_entries" (
 	-- those scans the slowest queries in the app. The engine never writes or
 	-- reads these columns. Keep the expressions in lockstep with the
 	-- SCHEMA_REPAIRS entry in packages/api/src/lib/drizzle.ts.
-	"input_tokens" bigint GENERATED ALWAYS AS (COALESCE(("usage"::jsonb->>'input')::bigint, 0)) STORED,
-	"output_tokens" bigint GENERATED ALWAYS AS (COALESCE(("usage"::jsonb->>'output')::bigint, 0)) STORED,
-	"cache_read_tokens" bigint GENERATED ALWAYS AS (COALESCE(("usage"::jsonb->>'cacheRead')::bigint, 0)) STORED,
-	"cache_write_tokens" bigint GENERATED ALWAYS AS (COALESCE(("usage"::jsonb->>'cacheWrite')::bigint, 0)) STORED,
-	"total_tokens" bigint GENERATED ALWAYS AS (COALESCE(("usage"::jsonb->>'total')::bigint, 0)) STORED,
+	"input_tokens" bigint GENERATED ALWAYS AS (COALESCE(floor(("usage"::jsonb->>'input')::numeric)::bigint, 0)) STORED,
+	"output_tokens" bigint GENERATED ALWAYS AS (COALESCE(floor(("usage"::jsonb->>'output')::numeric)::bigint, 0)) STORED,
+	"cache_read_tokens" bigint GENERATED ALWAYS AS (COALESCE(floor(("usage"::jsonb->>'cacheRead')::numeric)::bigint, 0)) STORED,
+	"cache_write_tokens" bigint GENERATED ALWAYS AS (COALESCE(floor(("usage"::jsonb->>'cacheWrite')::numeric)::bigint, 0)) STORED,
+	"total_tokens" bigint GENERATED ALWAYS AS (COALESCE(floor(("usage"::jsonb->>'total')::numeric)::bigint, 0)) STORED,
 	"cost_total" double precision GENERATED ALWAYS AS (("cost"::jsonb->>'total')::float8) STORED,
 	"priced" boolean GENERATED ALWAYS AS ((("cost"::jsonb->>'total') IS NOT NULL)) STORED
 );

@@ -161,6 +161,21 @@ describe("pg app schema + migrations", () => {
       ]);
     });
 
+    it("tolerates fractional token counts instead of failing the write", async () => {
+      // A provider reporting a non-integral counter must not abort message
+      // persistence (or wedge the repair backfill): '1.5'::bigint raises
+      // 22P02, so the expressions go through numeric + floor.
+      await db.query(
+        `INSERT INTO engine_entries (id, session_id, thread_id, entry_type, usage, cost, created_at)
+         VALUES ('gen-frac', 's-gen', 't', 'message',
+                 '{"input":1.5,"output":2.9,"cacheRead":0,"cacheWrite":0,"total":4.4}', '{"total":0.1}', 1)`,
+      );
+      const result = await db.query(
+        "SELECT input_tokens::int AS input, output_tokens::int AS output, total_tokens::int AS total FROM engine_entries WHERE id = 'gen-frac'",
+      );
+      expect(result.rows[0]).toEqual({ input: 1, output: 2, total: 4 });
+    });
+
     it("cost_entries reads the generated columns, never re-casting JSON per row", async () => {
       const result = await db.query("SELECT definition FROM pg_views WHERE viewname = 'cost_entries'");
       expect(String(result.rows[0]?.["definition"])).not.toContain("::jsonb");
