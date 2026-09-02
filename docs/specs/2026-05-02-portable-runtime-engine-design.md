@@ -1098,6 +1098,13 @@ Hooks are registered via `CreateSessionOptions` (`compactionHooks?: CompactionHo
 | `cfg.protectedTools` | `['skill', 'thread_read']` | per-tool opt-out from pruning; `ToolDef.protectedFromPruning` adds to this set |
 | `cfg.autoContinue` | `true` | inject the auto-continue prompt after proactive compaction |
 
+### Provider-call resilience (TKAI-319)
+
+Two retry layers, both bounded and visible:
+
+- **Transport** — every turn LLM call passes an explicit retry policy to pi-ai (`maxRetries: 2`, `maxRetryDelayMs: 30s`, `timeoutMs: 10min`), as defaults that upstream-supplied options override, never as pins. Kept at SDK-default parity deliberately: the turn-level layer multiplies with it. Side calls (the compaction summarizer) fail fast instead: `maxRetries: 1`, 15s delay cap — nobody waits on a summarizer during a capacity event, and the compaction failure paths own recovery.
+- **Turn-level** — when a turn settles with a transient provider error (pi-ai's `isRetryableAssistantError` taxonomy — the engine deliberately does not fork it), unattended sessions (purpose orchestrator, workflow, or child; `purpose` survives restarts via `Session.rehydrate`) drop the failed assistant message and call `agent.continue()` — never a re-prompt, which would duplicate the user content in live context. Backoff is [10s, 30s], 2 attempts by default (`CreateSessionOptions.turnRetry` overrides), chunked: `this.aborted` is checked every second and the durable queue item every 5s plus once at the end, so an abort or steer during the wait stands the retry down instead of racing its successor. Each retry emits `turn_transient_retry`. Interactive sessions never auto-retry: a human is present to decide.
+
 ### Per-Thread Prompt Queue
 
 Each thread owns its own prompt queue. Threads execute independently and concurrently within a session.

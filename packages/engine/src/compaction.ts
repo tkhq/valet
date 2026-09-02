@@ -642,6 +642,11 @@ export async function summarize(opts: SummarizeOptions): Promise<SummarizeResult
   }, {
     apiKey: opts.apiKey,
     signal: opts.signal,
+    // Side calls fail fast (TKAI-319): one transport retry, short delay
+    // cap. Nobody waits on a summarizer during a capacity event — the
+    // compaction failure paths (breaker, overflow retry) own recovery.
+    maxRetries: 1,
+    maxRetryDelayMs: 15_000,
   });
 
   // pi-ai returns API failures as an assistant message with stopReason
