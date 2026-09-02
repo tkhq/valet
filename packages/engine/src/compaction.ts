@@ -181,6 +181,30 @@ export function usableTokens(model: Model<any>, cfg?: CompactionConfig): number 
   return Math.max(0, context - reserve);
 }
 
+/** Fraction of usable context above which one inbound message spills to a file. */
+const DEFAULT_SPILL_FRACTION = 0.6;
+
+/**
+ * Token threshold above which one inbound user message is spilled to a sandbox
+ * file instead of placed in context. `cfg.maxInputTokens` overrides the
+ * default; a configured `0` (or less) disables spilling (returns Infinity). A
+ * model with no usable budget also disables it, since the fraction would be 0.
+ *
+ * The spill exists because compaction can never shrink the newest turn: it
+ * summarizes older turns and keeps the tail verbatim. A single message larger
+ * than the window is therefore un-compactable and, left in context, loops
+ * overflow -> compact-head -> overflow. Diverting it to a file keeps the
+ * content reachable (the agent pages over the file) without the loop.
+ */
+export function inputSpillThreshold(model: Model<any>, cfg?: CompactionConfig): number {
+  if (cfg?.maxInputTokens !== undefined) {
+    return cfg.maxInputTokens <= 0 ? Number.POSITIVE_INFINITY : cfg.maxInputTokens;
+  }
+  const usable = usableTokens(model, cfg);
+  if (usable <= 0) return Number.POSITIVE_INFINITY;
+  return Math.floor(usable * DEFAULT_SPILL_FRACTION);
+}
+
 export function tailBudget(usable: number, cfg?: CompactionConfig): number {
   const min = cfg?.minPreserveRecentTokens ?? DEFAULTS.minPreserveRecentTokens;
   const target = Math.floor(usable * TAIL_FRACTION);

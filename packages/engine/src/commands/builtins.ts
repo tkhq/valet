@@ -190,6 +190,13 @@ async function compactCommand(args: string[], thread: Thread): Promise<BuiltinRe
       output: "Pruned old tool outputs; the transcript was small enough that no summary was needed.",
     };
   }
+  if (outcome === "insufficient") {
+    return {
+      ok: true,
+      output:
+        "Could not compact: the newest turn alone is larger than the model's usable context, and compaction keeps the newest turn verbatim. Shorten the last message, split it across turns, or attach it as a file.",
+    };
+  }
   return {
     ok: true,
     output: instructions
