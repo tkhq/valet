@@ -1,4 +1,4 @@
-# Part 04: Needs Schema and Classification
+# Part 04: Needs schema and classification
 
 *Depends on: Part 00, Part 01. Conformance: L2.*
 

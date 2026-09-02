@@ -1,4 +1,4 @@
-# Part 07: Anti-Fabrication and Anti-Cap Checks
+# Part 07: Anti-fabrication and anti-cap checks
 
 *Depends on: Part 00, Part 01, Part 02, Part 05. Conformance: L4.*
 

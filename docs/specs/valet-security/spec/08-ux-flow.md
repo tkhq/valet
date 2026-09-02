@@ -1,4 +1,4 @@
-# Part 08: User Experience and Web Flow
+# Part 08: User experience and web flow
 
 *Depends on: Part 00, Part 01, Part 03, Part 04, Part 05. Conformance: L1+ (server-side surfaces stay usable at every level from L1 up).*
 

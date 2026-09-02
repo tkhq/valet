@@ -1,4 +1,4 @@
-# Appendix D: Test Vectors
+# Appendix D: Test vectors
 
 *Normative. Conformance: L0+.*
 

@@ -1,4 +1,4 @@
-# Appendix C: Non-Goals
+# Appendix C: Non-goals
 
 *Normative.*
 

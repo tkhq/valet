@@ -1,4 +1,4 @@
-# Part 11: Runtime Execution via API-Side Tool
+# Part 11: Runtime execution via API-side tool
 
 *Depends on: Part 00, Part 01, Part 04, Part 05, Part 07, Part 09, Part 10. Conformance: L1+ (server-side gates and tool wiring); L3 dispatches runtime-verify cells; L4 pulls in multi-step verify plans.*
 

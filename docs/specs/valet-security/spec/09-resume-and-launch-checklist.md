@@ -1,4 +1,4 @@
-# Part 09: Resume from Terminal and Pre-Launch Checklist
+# Part 09: Resume from terminal and pre-launch checklist
 
 *Depends on: Part 00, Part 01, Part 04, Part 05, Part 06, Part 08. Conformance: L1+ (server-side gates and route behavior); L3 pulls in the pivot round.*
 

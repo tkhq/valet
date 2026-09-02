@@ -1,4 +1,4 @@
-# Appendix A: Acceptance Scenario
+# Appendix A: Acceptance scenario
 
 *Normative. Conformance: L4.*
 

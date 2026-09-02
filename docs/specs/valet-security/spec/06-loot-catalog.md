@@ -1,4 +1,4 @@
-# Part 06: Loot Catalog
+# Part 06: Loot catalog
 
 *Depends on: Part 00, Part 05. Conformance: L3.*
 

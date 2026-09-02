@@ -1,4 +1,4 @@
-# Part 10: Per-Engagement Credential Vault
+# Part 10: Per-engagement credential vault
 
 *Depends on: Part 00, Part 01, Part 04, Part 05, Part 06, Part 07, Part 09. Conformance: L1+ (server-side gates, redaction, and route behavior); L3 delivers cells to sandboxes.*
 

@@ -1,4 +1,4 @@
-# Appendix B: Threat Model
+# Appendix B: Threat model
 
 *Normative.*
 

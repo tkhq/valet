@@ -1,4 +1,4 @@
-# Part 03: Tool Provisioning and Coverage
+# Part 03: Tool provisioning and coverage
 
 *Depends on: Part 00, Part 01. Conformance: L1.*
 

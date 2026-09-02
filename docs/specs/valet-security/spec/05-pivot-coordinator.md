@@ -1,4 +1,4 @@
-# Part 05: Pivot Coordinator and Delta Re-runs
+# Part 05: Pivot coordinator and delta re-runs
 
 *Depends on: Part 00, Part 01, Part 04. Conformance: L3 (L4 for `create-test-account`, `tool-auth-reuse`).*
 
