@@ -208,21 +208,6 @@ export function buildSpilledInputMarker(args: {
 }
 
 /**
- * Fail-safe when the sandbox is unavailable to spill an oversized message:
- * keep a head slice that fits the token budget and append a truncation note.
- * `maxTokens` is the same spill threshold; ~4 chars per token drives the slice.
- */
-export function truncateInputWithMarker(text: string, maxTokens: number): string {
-  const keepChars = Math.max(0, Math.floor(maxTokens * 4));
-  if (text.length <= keepChars) return text;
-  const dropped = text.length - keepChars;
-  return (
-    text.slice(0, keepChars) +
-    `\n\n[Input truncated: ${dropped} characters dropped. The sandbox was not available to save the full text to a file.]`
-  );
-}
-
-/**
  * The summarize call itself can overflow the summarizer model. Each retry
  * drops the oldest half of the head entries fed to the summarizer (the
  * CompactionEntry still covers the full head — the previous summary anchors
@@ -2899,13 +2884,20 @@ export class Thread {
         e.type === "message" && e.role === "user" && e.queueItemId === item.id,
     );
     if (existingUserEntry) {
-      // A spilled entry's persisted content is the file pointer, not the
-      // original paste. Return that so a replayed turn re-prompts the pointer
-      // (which fits the window), not the oversized text the spill removed.
-      const wasSpilled =
-        typeof existingUserEntry.metadata?.[SPILLED_INPUT_PATH_KEY] === "string";
+      // A spilled entry keeps the FULL paste in `content` (durable, REST-
+      // visible) and carries the file path in metadata. Reconstruct the
+      // pointer for the LLM so a replayed turn re-prompts what fits the window,
+      // not the oversized text — matching what entriesToAgentMessages renders.
+      const spillPath = existingUserEntry.metadata?.[SPILLED_INPUT_PATH_KEY];
       return {
-        text: wasSpilled ? existingUserEntry.content : text,
+        text:
+          typeof spillPath === "string"
+            ? buildSpilledInputMarker({
+                path: spillPath,
+                tokens: estimateTokens(existingUserEntry.content),
+                chars: existingUserEntry.content.length,
+              })
+            : text,
         attachments: existingUserEntry.attachments,
       };
     }
@@ -2913,8 +2905,10 @@ export class Thread {
     // Divert an oversized paste to a sandbox file before it enters context.
     // Signals are exempt: they are bounded and their XML envelope must render
     // verbatim. Compaction never shrinks the newest turn, so a single message
-    // larger than the window is un-compactable; spilling it keeps the content
-    // reachable (the agent pages the file) without the overflow loop.
+    // larger than the window is un-compactable; spilling keeps the content
+    // reachable (the agent pages the file) without the overflow loop. The full
+    // text stays in `entryContent` (persisted, REST-visible); only the LLM
+    // `text` becomes the pointer — so nothing the user pasted is discarded.
     const entryId = uid("e");
     let spilledInputPath: string | undefined;
     if (signalMeta === undefined) {
@@ -2923,10 +2917,16 @@ export class Thread {
         this.session.options.compaction,
       );
       if (estimateTokens(entryContent) > threshold) {
-        const spill = await this.spillOversizedInput(entryId, entryContent, threshold);
-        entryContent = spill.content;
-        text = spill.content;
-        spilledInputPath = spill.path;
+        spilledInputPath = await this.spillOversizedInput(entryId, entryContent);
+        if (spilledInputPath !== undefined) {
+          text = buildSpilledInputMarker({
+            path: spilledInputPath,
+            tokens: estimateTokens(entryContent),
+            chars: entryContent.length,
+          });
+        }
+        // On spill failure `text` stays the full content; the compaction
+        // fail-safe surfaces a clear error if it overflows, no data lost.
       }
     }
 
@@ -2966,40 +2966,34 @@ export class Thread {
   }
 
   /**
-   * Write an oversized inbound message to a file in the sandbox and return the
-   * pointer that replaces it in context. On sandbox failure, fall back to
-   * truncation so the turn still fits the window. The file lives under the
-   * workspace so the agent can page over it with the read/bash tools.
+   * Write an oversized inbound message to a file in the sandbox for the agent
+   * to page over, and return its path (undefined on failure). The full text
+   * stays in the persisted entry either way — the path only drives what the
+   * LLM sees (a pointer via `buildSpilledInputMarker`), so nothing the user
+   * pasted is ever discarded. The file lives under the workspace so the read
+   * and bash tools reach it. On failure the full content stays in context and
+   * the compaction fail-safe surfaces a clear error if it still overflows —
+   * that beats silently truncating the user's words.
    */
   private async spillOversizedInput(
     entryId: string,
     content: string,
-    threshold: number,
-  ): Promise<{ content: string; path?: string }> {
+  ): Promise<string | undefined> {
     const root = this.session.options.workspace.replace(/\/+$/, "");
     const dir = `${root}/.valet/large-inputs`;
     const path = `${dir}/${entryId}.txt`;
     try {
       await this.session.sandbox.mkdir(dir);
       await this.session.sandbox.writeFile(path, content);
-      return {
-        content: buildSpilledInputMarker({
-          path,
-          tokens: estimateTokens(content),
-          chars: content.length,
-        }),
-        path,
-      };
+      return path;
     } catch (err) {
-      // No sandbox to hold the file (provisioning failed, or a sandbox-less
-      // session). Truncate so the prompt fits instead of looping on overflow.
       this.emitError(
         "input_spill_failed",
         `Could not save an oversized message to the sandbox (${
           err instanceof Error ? err.message : String(err)
-        }); truncated it to fit the context window.`,
+        }); keeping the full message in context, which may overflow and surface a clear error.`,
       );
-      return { content: truncateInputWithMarker(content, threshold) };
+      return undefined;
     }
   }
 
@@ -3458,8 +3452,19 @@ export class Thread {
    * looks like a one-off).
    */
   private recordProactiveCompactionFailure(code: string, message: string): void {
-    this.consecutiveCompactionFailures++;
     this.emitError(code, message);
+    this.bumpCompactionFailureBreaker();
+  }
+
+  /**
+   * Count one proactive-compaction failure toward the circuit breaker and open
+   * it at the threshold. Split from `recordProactiveCompactionFailure` so a
+   * caller that already emitted the failure error (the "insufficient" outcome,
+   * emitted inside compactThreadInner) can feed the breaker WITHOUT emitting a
+   * second, duplicate error for the same pass.
+   */
+  private bumpCompactionFailureBreaker(): void {
+    this.consecutiveCompactionFailures++;
     if (this.consecutiveCompactionFailures === MAX_CONSECUTIVE_COMPACTION_FAILURES) {
       this.emitError(
         "compaction_circuit_open",
@@ -3487,12 +3492,10 @@ export class Thread {
         );
       } else if (outcome === "insufficient") {
         // The newest turn alone exceeds the window; compaction cannot help.
-        // compactThreadInner emitted the actionable error already — feed the
-        // breaker so the trigger stops re-firing every turn.
-        this.recordProactiveCompactionFailure(
-          "context_overflow_unrecoverable",
-          "The newest turn is larger than the model's usable context and compaction keeps it verbatim. Shorten the last message, split it across turns, or attach it as a file.",
-        );
+        // compactThreadInner ALREADY emitted context_overflow_unrecoverable —
+        // feed the breaker without re-emitting, so the trigger stops re-firing
+        // without surfacing the same error twice for one pass.
+        this.bumpCompactionFailureBreaker();
       }
     } catch (err) {
       this.recordProactiveCompactionFailure(
@@ -3597,6 +3600,10 @@ export class Thread {
     for (const t of [...session.builtinTools, ...(session.options.tools ?? [])]) {
       if (t.protectedFromPruning) protectedTools.add(t.name);
     }
+    // Reflects the prune pass: after a commit this is the elided view, so
+    // downstream size math (the fail-safe below) sees post-prune tokens, not
+    // the un-mutated `entries`.
+    let effectiveEntries: readonly SessionEntry[] = entries;
     const prunePlan = planPrune({ entries, cfg, protectedTools });
     if (prunePlan.willCommit) {
       const mutable = entries.map((e) => structuredClone(e)) as SessionEntry[];
@@ -3612,6 +3619,7 @@ export class Thread {
       }
       // Apply to the live agent transcript:
       this.applyElisionsToAgentMessages(prunePlan);
+      effectiveEntries = mutable;
     }
 
     // Step 2: cut-point selection.
@@ -3637,11 +3645,12 @@ export class Thread {
     // an un-compactable newest turn, such as a paste too large to spill or an
     // oversized tool result. Report it as an actionable error instead of a
     // false success the reactive path retries forever. The `fallbackToFloor`
-    // gate is what keeps this off the normal small-model path, where the tail
-    // budget floor legitimately exceeds usable. Recent tail entries stay within
-    // the prune protect window, so `entries` gives an accurate tail estimate.
+    // gate keeps this off the normal small-model path, where the tail-budget
+    // floor legitimately exceeds usable. The estimate MUST use the post-prune
+    // view: an oversized tool result the prune pass just elided is fittable
+    // now, and counting it at full size would wrongly abandon the turn.
     const usable = usableTokens(effectiveModel, cfg);
-    const tailTokens = estimateTotalTokens(entries.slice(cut.cutIndex));
+    const tailTokens = estimateTotalTokens(effectiveEntries.slice(cut.cutIndex));
     if (cut.fallbackToFloor && usable > 0 && tailTokens > usable) {
       this.emitError(
         "context_overflow_unrecoverable",
@@ -4890,7 +4899,21 @@ export function entriesToAgentMessages(
     if (activeCompaction?.covered.has(e.id)) continue;
 
     if (e.role === "user") {
-      const text = e.signal ? renderSignalEnvelope(e.signal, e.content) : e.content;
+      // A spilled entry keeps the full paste in `content` but must reach the
+      // LLM as the pointer, so a rehydrated transcript agrees with the hot
+      // path and does not re-overflow on the oversized text. Signals never
+      // spill, so the two branches never collide.
+      const spillPath = e.metadata?.[SPILLED_INPUT_PATH_KEY];
+      const text =
+        typeof spillPath === "string"
+          ? buildSpilledInputMarker({
+              path: spillPath,
+              tokens: estimateTokens(e.content),
+              chars: e.content.length,
+            })
+          : e.signal
+          ? renderSignalEnvelope(e.signal, e.content)
+          : e.content;
       const sender = opts?.attributeAuthors && !e.signal ? e.author : undefined;
       const contentBlocks = userContentBlocks(text, e.attachments, sender);
       out.push({

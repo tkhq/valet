@@ -249,7 +249,6 @@ export {
 export {
   entriesToAgentMessages,
   buildSpilledInputMarker,
-  truncateInputWithMarker,
   type CompactionOutcome,
 } from "./thread.js";
 export { classifyCacheBreak, type CacheBreakCause, type CacheTurnSnapshot } from "./cache-telemetry.js";

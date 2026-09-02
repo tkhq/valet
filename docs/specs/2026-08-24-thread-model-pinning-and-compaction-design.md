@@ -150,25 +150,29 @@ Two layers fix it:
 - **Spill (primary).** When one inbound user message exceeds
   `compaction.maxInputTokens` (default 60% of usable context; `0` disables),
   `appendUserEntry` writes the full text to `<workspace>/.valet/large-inputs/
-  <entryId>.txt` in the sandbox and persists the entry with a pointer instead.
-  The model reads the pointer and pages the file with the read/bash tools. The
-  giant text never enters context, so the loop never starts, and the content is
-  not lost. The persisted entry carries the file path in metadata
-  (`valetSpilledInputPath`) so a replayed turn re-prompts the pointer, not the
-  paste. Signals are exempt (bounded, and their XML envelope must render
-  verbatim). If the sandbox is unavailable, the message truncates to a head
-  slice with a note instead, so the turn still fits.
-- **Fail-safe (defense in depth).** For a tail that slips through spilling (an
-  oversized tool result, or a spill that fell back to truncation but still does
-  not fit), `compactThreadInner` checks the kept tail after cut-point
-  selection. When `selectCutPoint` returns `fallbackToFloor` (it could not fit
-  even the last turn in the tail budget) AND that tail exceeds usable context,
-  compaction cannot help. It returns the new `"insufficient"` outcome and emits
-  a `context_overflow_unrecoverable` error naming the size and the fix (shorten,
+  <entryId>.txt` in the sandbox. The persisted entry keeps the FULL text in
+  `content` (durable, REST-visible, so the transcript still shows what the user
+  said) plus the file path in metadata (`valetSpilledInputPath`). Only the LLM
+  view becomes a pointer: `runAgent` prompts a marker, and
+  `entriesToAgentMessages` renders the same marker on reload, so hot and cold
+  transcripts agree and neither re-overflows on the paste. The model pages the
+  file with the read and bash tools. Signals are exempt (bounded, and their XML
+  envelope must render verbatim). If the sandbox write fails, the full text
+  stays in context (nothing is truncated or dropped) and the fail-safe below
+  surfaces a clear error if it overflows.
+- **Fail-safe (defense in depth).** For a tail that still exceeds the window
+  (an oversized tool result, or a spill that could not write), `compactThreadInner`
+  checks the kept tail after cut-point selection. It measures the POST-prune
+  view: a tool result the prune pass just elided is fittable now, so counting
+  it at full size would wrongly abandon the turn. When `selectCutPoint` returns
+  `fallbackToFloor` (it could not fit even the last turn in the tail budget)
+  AND that post-prune tail still exceeds usable context, compaction cannot
+  help. It returns the new `"insufficient"` outcome and emits one
+  `context_overflow_unrecoverable` error naming the size and the fix (shorten,
   split across turns, or attach as a file). The reactive path stops instead of
-  retrying; the proactive path feeds the circuit breaker so the trigger stops
-  re-firing. The `fallbackToFloor` gate keeps this off the normal small-model
-  path, where the tail-budget floor legitimately exceeds a tiny usable window.
+  retrying; the proactive path feeds the circuit breaker without re-emitting.
+  The `fallbackToFloor` gate keeps this off the normal small-model path, where
+  the tail-budget floor legitimately exceeds a tiny usable window.
 
 ## Out of scope
 

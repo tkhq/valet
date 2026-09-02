@@ -6,8 +6,8 @@ import {
   InMemorySessionStore,
   VirtualSandboxProvider,
   buildSpilledInputMarker,
+  entriesToAgentMessages,
   inputSpillThreshold,
-  truncateInputWithMarker,
   type BusEvent,
   type MessageEntry,
 } from "../src/index.js";
@@ -86,18 +86,6 @@ describe("marker helpers", () => {
     expect(marker).toContain("sed -n '1,400p'");
     expect(marker.length).toBeLessThan(600); // the pointer is small, not the paste
   });
-
-  it("truncateInputWithMarker keeps a head slice and appends a note", () => {
-    const text = "x".repeat(10_000);
-    const out = truncateInputWithMarker(text, 100); // 100 tokens -> ~400 chars kept
-    expect(out.length).toBeLessThan(text.length);
-    expect(out.startsWith("x".repeat(400))).toBe(true);
-    expect(out).toContain("Input truncated");
-  });
-
-  it("truncateInputWithMarker leaves short text untouched", () => {
-    expect(truncateInputWithMarker("short", 100)).toBe("short");
-  });
 });
 
 describe("oversized input spill (integration)", () => {
@@ -123,15 +111,30 @@ describe("oversized input spill (integration)", () => {
     const messages = entries.filter((e): e is MessageEntry => e.type === "message");
     const userEntry = messages.find((m) => m.role === "user")!;
 
-    // The persisted user entry holds the pointer, not the paste.
-    expect(userEntry.content).not.toBe(bigPaste);
-    expect(userEntry.content).toContain("/workspace/.valet/large-inputs/");
-    expect(userEntry.content).toContain("Large input saved to a file");
-    expect(userEntry.content.length).toBeLessThan(bigPaste.length);
+    // The persisted entry keeps the FULL paste (durable, REST-visible), with
+    // the file path recorded in metadata.
+    expect(userEntry.content).toBe(bigPaste);
+    const path = String(userEntry.metadata?.valetSpilledInputPath ?? "");
+    expect(path).toMatch(/\/workspace\/\.valet\/large-inputs\/.+\.txt$/);
 
-    // The full paste is in the sandbox at the pointed path.
-    const path = userEntry.content.match(/(\/workspace\/\.valet\/large-inputs\/[^\s]+\.txt)/)![1];
+    // The full paste is also in the sandbox at that path for the agent to page.
     expect(await session.sandbox.readFile(path)).toBe(bigPaste);
+
+    // But the LLM view (hot and cold) is the small pointer, not the paste.
+    const llm = entriesToAgentMessages(
+      entries,
+      { api: "a", provider: "spill1", id: "m" },
+      {},
+    );
+    const llmUser = llm.find((m) => m.role === "user")!;
+    const llmText = (llmUser.content as Array<{ type: string; text?: string }>)
+      .filter((b) => b.type === "text")
+      .map((b) => b.text)
+      .join("");
+    expect(llmText).toContain("Large input saved to a file");
+    expect(llmText).toContain(path);
+    expect(llmText).not.toContain(bigPaste);
+    expect(llmText.length).toBeLessThan(bigPaste.length);
 
     // The turn completed normally (no overflow loop).
     const assistant = messages.find((m) => m.role === "assistant");
@@ -229,6 +232,93 @@ describe("compaction fail-safe: newest turn larger than the window", () => {
 
     const outcome = await thread.compactThread({ mode: "manual" });
     expect(outcome).toBe("insufficient");
+
+    faux.unregister();
+  });
+
+  it("does not report 'insufficient' when the prune pass elides the oversized tail", async () => {
+    const faux = registerFauxProvider({
+      provider: "insufficient2",
+      models: [{ id: "mid", name: "mid", contextWindow: 100_000, maxTokens: 5 }],
+    });
+    // One summarizer response for the head; the tail is elided, not summarized.
+    faux.setResponses([
+      fauxAssistantMessage(
+        "## Goal\n- t\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n### Done\n- x\n\n### In Progress\n- (none)\n\n### Blocked\n- (none)\n\n## Key Decisions\n- (none)\n\n## Next Steps\n- (none)\n\n## Critical Context\n- (none)\n\n## Relevant Files\n- (none)",
+      ),
+    ]);
+
+    const { engine, store } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel("mid")!,
+      compaction: { tailTurns: 1 },
+    });
+
+    const thread = session.thread();
+    // usable ~= 99_995. The newest turn holds a ~120k-token tool result: over
+    // usable pre-prune (would wrongly trip the fail-safe on the un-pruned view)
+    // but the prune pass elides it (over pruneProtectTokens 40k), so the real
+    // tail is tiny and compaction should proceed.
+    await store.appendEntries(session.id, thread.id, [
+      {
+        id: "e-1",
+        sessionId: session.id,
+        threadId: thread.id,
+        parentId: null,
+        type: "message",
+        role: "user",
+        content: "first question",
+        createdAt: 1,
+      },
+      {
+        id: "e-2",
+        sessionId: session.id,
+        threadId: thread.id,
+        parentId: "e-1",
+        type: "message",
+        role: "assistant",
+        content: "first answer",
+        createdAt: 2,
+      },
+      {
+        id: "e-3",
+        sessionId: session.id,
+        threadId: thread.id,
+        parentId: "e-2",
+        type: "message",
+        role: "user",
+        content: "second question",
+        createdAt: 3,
+      },
+      {
+        id: "e-4",
+        sessionId: session.id,
+        threadId: thread.id,
+        parentId: "e-3",
+        type: "message",
+        role: "assistant",
+        content: "",
+        parts: [
+          {
+            type: "tool_call",
+            callId: "c1",
+            toolName: "read",
+            status: "completed",
+            args: { path: "/big.log" },
+            result: "Z".repeat(480_000), // ~120k tokens, elidable by prune
+          },
+        ],
+        createdAt: 4,
+      },
+    ]);
+
+    const outcome = await thread.compactThread({ mode: "manual" });
+    expect(outcome).not.toBe("insufficient");
+    expect(outcome).toBe("compacted");
 
     faux.unregister();
   });
