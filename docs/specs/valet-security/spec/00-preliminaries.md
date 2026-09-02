@@ -73,11 +73,12 @@ Running the same auto-catalog pattern twice with the same inputs writes the same
 **INV-5 (Loot catalog atomicity).**
 A write to `/loot/catalog.yml` is atomic. Partial writes are not observable. Two mechanisms exist: (a) v1 writes through `sec_fs_write`, which is a single-transaction insert into `security_files`, so a crashed coordinator either committed a new revision or did not (no half-row is observable), (b) the coordinator writes to `/loot/catalog.yml.tmp` first and moves to `/loot/catalog.yml` in a second `sec_fs_write` when it wants a two-phase commit for a multi-file update. See Part 06 §6.4.
 
-**INV-6 (Tool version pinning).**
-Every install command in the tool inventory pins an exact version. APT commands use `nmap=7.94-1`, not `nmap`. GitHub release commands use a tag (`v3.2.0`) and an SHA-256 checksum. `go install` uses a tag or commit hash. The preflight probe records the installed version in the coverage-report YAML. The verifier persona reads the coverage report and audits versions against the pinned set. See Part 03 §3.1 and Part 07 §7.3.
-
-**INV-7 (No cross-engagement tool state).**
+**INV-6 (No cross-engagement tool state).**
 Tools write outputs under a persona-scoped path in the sandbox (e.g. `/workspace/tool-out/<engagement>/<cell>/*`). Two sandboxes never share a writable volume. A persona MUST NOT read a path outside its sandbox. See Appendix B §T-14.
+
+## Tool version pinning (recommended)
+
+Implementations SHOULD pin exact versions for every tool install command. APT commands SHOULD use `nmap=7.94-1`, not `nmap`. GitHub release commands SHOULD use a tag (`v3.2.0`) and an SHA-256 checksum. `go install` SHOULD use a tag or commit hash. The preflight probe records the installed version in the coverage-report YAML. The verifier persona reads the coverage report and audits versions against the pinned set (Part 07 §7.3). Version drift does not block settlement but SHOULD emit an informational finding noting the mismatch. Human judgment on version drift is the correct response; pinning is a quality signal, not a gate.
 
 ## Conformance levels
 
