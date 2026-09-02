@@ -36,8 +36,12 @@ export function formatScorecard(
     }
     const passed = entry.checkResults.filter((r) => r.pass).length;
     const checks = `${passed}/${entry.checkResults.length}`;
+    const sampling =
+      entry.sampling !== undefined
+        ? `  runs ${entry.sampling.passes}/${entry.sampling.runs} (±${Math.round(entry.sampling.tokensStd)} tok)`
+        : "";
     lines.push(
-      `  ${statusLabel(entry)} ${entry.caseId.padEnd(idWidth)}  ${fmtDuration(entry.durationMs).padStart(7)}  ${fmtCost(entry.costUsd).padStart(9)}  checks ${checks}`,
+      `  ${statusLabel(entry)} ${entry.caseId.padEnd(idWidth)}  ${fmtDuration(entry.durationMs).padStart(7)}  ${fmtCost(entry.costUsd).padStart(9)}  checks ${checks}${sampling}`,
     );
     if (entry.error !== undefined) {
       lines.push(`       ! ${entry.error}`);
@@ -92,7 +96,18 @@ function formatComparison(c: BaselineComparison): string {
   );
   if (c.tokenDeltaPct !== undefined && c.baselineTokens !== undefined && c.currentTokens !== undefined) {
     const sign = c.tokenDeltaPct >= 0 ? "+" : "";
-    parts.push(`tokens ${sign}${c.tokenDeltaPct.toFixed(1)}% (${fmtTokens(c.baselineTokens)} -> ${fmtTokens(c.currentTokens)})`);
+    const significance =
+      c.tokenDeltaSignificance === "within_noise"
+        ? " [within noise]"
+        : c.tokenDeltaSignificance === "significant"
+          ? " [significant]"
+          : "";
+    parts.push(
+      `tokens ${sign}${c.tokenDeltaPct.toFixed(1)}% (${fmtTokens(c.baselineTokens)} -> ${fmtTokens(c.currentTokens)})${significance}`,
+    );
+  }
+  if (c.baselinePassRate !== undefined && c.currentPassRate !== undefined) {
+    parts.push(`pass rate ${(c.baselinePassRate * 100).toFixed(0)}% -> ${(c.currentPassRate * 100).toFixed(0)}%`);
   }
   if (c.costDeltaUsd !== undefined) {
     const sign = c.costDeltaUsd >= 0 ? "+" : "-";

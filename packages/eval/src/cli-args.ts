@@ -24,6 +24,8 @@ export interface CliOptions {
   pullFlagged: boolean;
   /** Rating to pull with --pull-flagged. Default positive. */
   pullRating: "positive" | "negative";
+  /** Override every case's `runs` (pass@k sample count). */
+  runsOverride?: number;
 }
 
 /** Parse argv (no process side effects; throws on invalid input). */
@@ -41,8 +43,16 @@ export function parseCliArgs(argv: string[]): CliOptions {
       baselines: { type: "string" },
       "pull-flagged": { type: "boolean", default: false },
       rating: { type: "string" },
+      runs: { type: "string" },
     },
   });
+  let runsOverride: number | undefined;
+  if (values.runs !== undefined) {
+    runsOverride = Number.parseInt(values.runs, 10);
+    if (!Number.isInteger(runsOverride) || runsOverride < 1 || runsOverride > 25) {
+      throw new Error(`--runs must be an integer from 1 to 25, got \`${values.runs}\``);
+    }
+  }
   const pullRating = values.rating ?? "positive";
   if (pullRating !== "positive" && pullRating !== "negative") {
     throw new Error(`--rating must be "positive" or "negative", got \`${values.rating}\``);
@@ -65,6 +75,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
     baselinesDir: resolve(values.baselines ?? resolve(REPO_ROOT, "evals/baselines")),
     pullFlagged: values["pull-flagged"],
     pullRating,
+    ...(runsOverride !== undefined ? { runsOverride } : {}),
   };
 }
 

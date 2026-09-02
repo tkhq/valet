@@ -10,7 +10,7 @@
  */
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { ScorecardEntry, Trajectory } from "./types.js";
+import type { SamplingStats, ScorecardEntry, Trajectory } from "./types.js";
 
 /** One persisted baseline file. */
 export interface BaselineRecord {
@@ -20,6 +20,8 @@ export interface BaselineRecord {
   savedAt: string;
   status: "pass" | "fail";
   trajectory: Trajectory;
+  /** Multi-run stats from a pass@k run, when the case ran more than once. */
+  sampling?: SamplingStats;
 }
 
 /** Comparison of one case run against its baseline. */
@@ -33,6 +35,17 @@ export interface BaselineComparison {
   tokenDeltaPct?: number;
   baselineTokens?: number;
   currentTokens?: number;
+  /**
+   * Whether the token delta clears the sampling noise band. Present only
+   * when at least one side carries multi-run stats: "significant" means
+   * |delta| > 2x the larger recorded std; "within_noise" means it does
+   * not. Single-run-to-single-run comparisons stay unlabeled — there is
+   * no variance estimate to judge them against.
+   */
+  tokenDeltaSignificance?: "significant" | "within_noise";
+  /** Pass-rate movement, when either side ran pass@k. */
+  baselinePassRate?: number;
+  currentPassRate?: number;
   /** USD cost delta (current - baseline). Absent when either side is unpriced. */
   costDeltaUsd?: number;
   /** True when the tool call sequences differ. */
@@ -140,12 +153,38 @@ export function compareToBaseline(entry: ScorecardEntry, baseline: BaselineRecor
   comparison.toolSequenceChanged =
     comparison.baselineToolSequence.join("→") !== comparison.currentToolSequence.join("→");
 
-  const baseTokens = baseline.trajectory.usage.total;
-  const curTokens = entry.trajectory?.usage.total ?? entry.totalTokens;
+  // Means when multi-run stats exist, single-run totals otherwise.
+  const baseTokens = baseline.sampling?.tokensMean ?? baseline.trajectory.usage.total;
+  const curTokens = entry.sampling?.tokensMean ?? entry.trajectory?.usage.total ?? entry.totalTokens;
   if (baseTokens > 0 && curTokens !== undefined && curTokens > 0) {
-    comparison.baselineTokens = baseTokens;
-    comparison.currentTokens = curTokens;
+    comparison.baselineTokens = Math.round(baseTokens);
+    comparison.currentTokens = Math.round(curTokens);
     comparison.tokenDeltaPct = ((curTokens - baseTokens) / baseTokens) * 100;
+    // Noise band: 2x the larger recorded per-run std. Only computable when
+    // at least one side ran pass@k and measured its own variance.
+    const stds = [baseline.sampling?.tokensStd, entry.sampling?.tokensStd].filter(
+      (v): v is number => v !== undefined,
+    );
+    if (stds.length > 0) {
+      const band = 2 * Math.max(...stds);
+      comparison.tokenDeltaSignificance =
+        Math.abs(curTokens - baseTokens) > band ? "significant" : "within_noise";
+    }
+  }
+
+  if (baseline.sampling !== undefined || entry.sampling !== undefined) {
+    comparison.baselinePassRate =
+      baseline.sampling !== undefined
+        ? baseline.sampling.passes / baseline.sampling.runs
+        : baseline.status === "pass"
+          ? 1
+          : 0;
+    comparison.currentPassRate =
+      entry.sampling !== undefined
+        ? entry.sampling.passes / entry.sampling.runs
+        : currentStatus === "pass"
+          ? 1
+          : 0;
   }
 
   const baseCost = baseline.trajectory.cost?.total;

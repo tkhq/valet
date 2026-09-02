@@ -37,6 +37,8 @@ export interface SuiteOptions {
   fullSandboxProvider?: () => SandboxProvider;
   /** Override every case's timeout. */
   timeoutMs?: number;
+  /** Override every case's `runs` (pass@k sample count). */
+  runsOverride?: number;
   /** Save each finished case's trajectory as a new baseline. */
   saveBaselines?: boolean;
   /** Clock seam for tests. */
@@ -95,36 +97,83 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
 
       const caseForRun =
         opts.timeoutMs !== undefined ? { ...evalCase, timeout_ms: opts.timeoutMs } : evalCase;
-      const result = await runCase(caseForRun, {
-        model: evalCase.model ?? opts.model,
-        ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
-        ...(opts.mockPlugins !== undefined ? { mockPlugins: opts.mockPlugins } : {}),
-        ...(opts.realPlugins !== undefined ? { realPlugins: opts.realPlugins } : {}),
-        ...(opts.credentials !== undefined ? { credentials: opts.credentials } : {}),
-        ...(profile === "full" && opts.fullSandboxProvider !== undefined
-          ? { sandboxProvider: opts.fullSandboxProvider() }
-          : {}),
-      });
+      const runCount = Math.max(1, opts.runsOverride ?? evalCase.runs ?? 1);
+      const threshold = evalCase.pass_threshold ?? 1;
 
-      const checkResults = await runChecks(evalCase.checks, result.trajectory, {
-        ...(opts.judge !== undefined ? { judge: opts.judge } : {}),
-        ...(baseline !== null ? { baseline: baseline.trajectory } : {}),
-      });
+      interface RunOutcome {
+        pass: boolean;
+        checkResults: Awaited<ReturnType<typeof runChecks>>;
+        trajectory: NonNullable<ScorecardEntry["trajectory"]>;
+        tokens: number;
+        cost?: number;
+        durationMs: number;
+        error?: string;
+      }
+      const runOutcomes: RunOutcome[] = [];
+      for (let runIndex = 0; runIndex < runCount; runIndex++) {
+        const result = await runCase(caseForRun, {
+          model: evalCase.model ?? opts.model,
+          ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+          ...(opts.mockPlugins !== undefined ? { mockPlugins: opts.mockPlugins } : {}),
+          ...(opts.realPlugins !== undefined ? { realPlugins: opts.realPlugins } : {}),
+          ...(opts.credentials !== undefined ? { credentials: opts.credentials } : {}),
+          ...(profile === "full" && opts.fullSandboxProvider !== undefined
+            ? { sandboxProvider: opts.fullSandboxProvider() }
+            : {}),
+        });
+        const checkResults = await runChecks(evalCase.checks, result.trajectory, {
+          ...(opts.judge !== undefined ? { judge: opts.judge } : {}),
+          ...(baseline !== null ? { baseline: baseline.trajectory } : {}),
+        });
+        // Recursive totals: an orchestrator case's spend includes every
+        // child session it spawned, not just the parent thread.
+        const totals = aggregateUsage(result.trajectory);
+        runOutcomes.push({
+          pass: result.outcome === "completed" && checkResults.every((r) => r.pass),
+          checkResults,
+          trajectory: result.trajectory,
+          tokens: totals.usage.total,
+          ...(totals.cost !== undefined ? { cost: totals.cost.total } : {}),
+          durationMs: result.trajectory.durationMs,
+          ...(result.error !== undefined ? { error: result.error } : {}),
+        });
+      }
 
-      const completed = result.outcome === "completed";
-      const allChecksPass = checkResults.every((r) => r.pass);
-      // Recursive totals: an orchestrator case's spend includes every child
-      // session it spawned, not just the parent thread.
-      const totals = aggregateUsage(result.trajectory);
+      const passes = runOutcomes.filter((r) => r.pass).length;
+      const status: ScorecardEntry["status"] = passes / runCount >= threshold ? "pass" : "fail";
+      // Report the first failing run when any failed (the one to debug),
+      // else the last run.
+      const reported = runOutcomes.find((r) => !r.pass) ?? runOutcomes[runOutcomes.length - 1];
+      const tokensPerRun = runOutcomes.map((r) => r.tokens);
+      const tokensMean = tokensPerRun.reduce((a, b) => a + b, 0) / runCount;
+      const tokensStd = Math.sqrt(
+        tokensPerRun.reduce((a, b) => a + (b - tokensMean) ** 2, 0) / runCount,
+      );
+      const anyCost = runOutcomes.some((r) => r.cost !== undefined);
+      const totalCost = runOutcomes.reduce((a, r) => a + (r.cost ?? 0), 0);
+
       entry = {
         caseId: evalCase.id,
-        status: completed && allChecksPass ? "pass" : "fail",
-        durationMs: result.trajectory.durationMs,
-        ...(totals.cost !== undefined ? { costUsd: totals.cost.total } : {}),
-        totalTokens: totals.usage.total,
-        checkResults,
-        trajectory: result.trajectory,
-        ...(result.error !== undefined ? { error: result.error } : {}),
+        status,
+        durationMs: reported.durationMs,
+        ...(anyCost ? { costUsd: totalCost } : {}),
+        totalTokens: Math.round(tokensMean),
+        checkResults: reported.checkResults,
+        trajectory: reported.trajectory,
+        ...(reported.error !== undefined ? { error: reported.error } : {}),
+        ...(runCount > 1
+          ? {
+              sampling: {
+                runs: runCount,
+                passes,
+                threshold,
+                tokensPerRun,
+                tokensMean,
+                tokensStd,
+                ...(anyCost ? { costPerRun: runOutcomes.map((r) => r.cost ?? 0) } : {}),
+              },
+            }
+          : {}),
       };
     } catch (err) {
       entry = {
@@ -149,6 +198,7 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
           savedAt: now().toISOString(),
           status: entry.status === "pass" ? "pass" : "fail",
           trajectory: entry.trajectory,
+          ...(entry.sampling !== undefined ? { sampling: entry.sampling } : {}),
         }),
       );
     }

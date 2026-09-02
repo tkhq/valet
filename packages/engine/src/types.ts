@@ -2070,6 +2070,19 @@ export interface CreateSessionOptions {
     backoffMs?: number[];
   };
   /**
+   * Session-default sampling knobs, forwarded to pi-ai per turn as
+   * defaults-not-overrides (same rule as the retry/cache knobs in
+   * `Thread.buildAgent`). Hosts that need reproducible-ish runs (evals)
+   * set `temperature: 0`. Caveat: some models reject non-default
+   * temperature values (pi-ai's Model metadata tracks which); leave unset
+   * for provider defaults.
+   */
+  sampling?: {
+    temperature?: number;
+    /** Extra provider sampling params (e.g. top_p, seed where supported). */
+    params?: Record<string, unknown>;
+  };
+  /**
    * Prompt-cache retention preference forwarded to pi-ai (TKAI-320).
    * Default: "long" for orchestrator sessions (they idle between wake-ups,
    * outliving the short TTL), "short" otherwise. Providers map the value
