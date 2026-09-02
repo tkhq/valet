@@ -50,7 +50,10 @@ import {
   type ToolDecl,
 } from "@valet/plugin-security";
 import type { AppDb } from "../lib/drizzle.js";
+import { agentSessions } from "../schema/index.js";
+import { createEngagementVault, type CredentialKind } from "./security-vault.js";
 import {
+  engagementCredentials,
   securityCells,
   securityCoverage,
   securityEngagements,
@@ -303,6 +306,29 @@ export interface AnswerNeedsResult {
   answered: SecurityNeedRow[];
   resetCells: SecurityCellRow[];
   resumed: boolean;
+}
+
+/**
+ * One answer to a needs_human need. Non-credential kinds send `resolution`
+ * (free text). Credential kinds send `credentialInput` (the vault write is
+ * server-side). Dismissal sends `dismiss: true` with an optional note.
+ * A cred-typed need with a plain `resolution` is rejected (INV-12).
+ */
+export interface NeedAnswerInput {
+  needId: string;
+  /** Free-text answer for decision/scope/tool/dependency kinds and for
+   * dismissal notes. MUST be absent for cred-typed non-dismissal answers. */
+  resolution?: string;
+  dismiss?: boolean;
+  /** Vault credential to write for a cred-typed non-dismissal answer.
+   * MUST be present for cred-typed non-dismissal answers and absent
+   * otherwise. */
+  credentialInput?: {
+    label: string;
+    kind: CredentialKind;
+    meta?: Record<string, unknown>;
+    value: string;
+  };
 }
 
 export interface EngagementManifest {
@@ -624,11 +650,27 @@ function playbooksInPlan(planYaml: string): string[] {
 export interface SecurityEngagementServiceDeps {
   db: AppDb;
   now?: () => number;
+  /** AES-256 key for the credential vault (Part 10). When set with `kekId`,
+   * `resolveEngagementNeeds` routes credential-typed answers through
+   * `EngagementVault.writeCredential` instead of storing plaintext in
+   * `security_needs.resolution`. Absent in tests that don't exercise the
+   * vault path. */
+  vaultKey?: Buffer;
+  vaultKekId?: string;
 }
 
 export function createSecurityEngagementService(deps: SecurityEngagementServiceDeps) {
   const { db } = deps;
   const now = deps.now ?? Date.now;
+  const vault =
+    deps.vaultKey && deps.vaultKekId
+      ? createEngagementVault({
+          db,
+          key: deps.vaultKey,
+          kekId: deps.vaultKekId,
+          now,
+        })
+      : undefined;
 
   async function loadEngagement(engagementId: string): Promise<SecurityEngagementRow> {
     const rows = await db
@@ -1173,11 +1215,11 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
         // always — buildDispatchPrompt gates on the persona.
         scopeHosts: parseAuthorizedScopeHosts(engagement.authorizedScope),
       },
-      answeredNeeds.map((need) => ({
-        kind: narrowNeedKind(need.kind),
-        description: need.description,
-        resolution: need.resolution ?? "",
-      })),
+      // Part 10 vault: a credential-typed need's raw resolution is NOT what
+      // the persona sees. The value lives in the vault; the persona reads
+      // the file path. Look up every cred-typed need's credential row here
+      // so the dispatch prompt renders the file path, not the plaintext.
+      await projectResolutionsForVault(db, answeredNeeds),
     );
 
     let childSessionId: string;
@@ -2492,7 +2534,7 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
    */
   async function resolveEngagementNeeds(
     engagementId: string,
-    answers: { needId: string; resolution: string; dismiss?: boolean }[],
+    answers: NeedAnswerInput[],
   ): Promise<AnswerNeedsResult> {
     const engagement = await loadEngagement(engagementId);
     if (answers.length === 0) {
@@ -2507,6 +2549,24 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
       );
     }
     const reopenBeforeAnswer = engagement.status === "completed" || engagement.status === "failed";
+    // Vault ownership. When any cred-typed answer carries credentialInput,
+    // we route through the vault; the owner is the engagement's session's
+    // user (INV-15). One lookup up front avoids N joins later.
+    const needsVault = answers.some((a) => a.credentialInput != null);
+    let ownerUserId: string | null = null;
+    if (needsVault) {
+      if (!vault) {
+        throw new Error(
+          "This deployment is not configured for vault credential answers. Set VALET_ENCRYPTION_KEY on the api and restart.",
+        );
+      }
+      ownerUserId = await ownerUserIdForEngagement(db, engagementId);
+      if (!ownerUserId) {
+        throw new Error(
+          `No engagement ${engagementId}. Check the id with sec_status.`,
+        );
+      }
+    }
     return db.transaction(async (tx) => {
       if (reopenBeforeAnswer) {
         // Flip the engagement back to running before we reset cells; the runner
@@ -2538,29 +2598,71 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
           );
         }
         const dismiss = answer.dismiss === true;
-        const resolution = answer.resolution.trim();
-        if (!dismiss && resolution === "") {
+        const kind = narrowNeedKind(need.kind);
+        // Part 10 vault routing:
+        //   - cred-typed + credentialInput → write vault, set credential_id, resolution NULL
+        //   - cred-typed + free-text resolution → refuse (INV-12; the value would land in DB plaintext)
+        //   - non-cred + credentialInput → refuse
+        //   - dismiss on either → free-text path (dismissal note is not a secret)
+        const inputRes = (answer.resolution ?? "").trim();
+        if (!dismiss && kind === "credential" && !answer.credentialInput && inputRes === "") {
+          throw new Error(
+            `Need ${need.id} is a credential need. Send credentialInput { label, kind, value }, not a free-text resolution.`,
+          );
+        }
+        if (!dismiss && kind !== "credential" && answer.credentialInput) {
+          throw new Error(
+            `Need ${need.id} is not a credential need. Answer with resolution text, not credentialInput.`,
+          );
+        }
+        if (!dismiss && answer.credentialInput && inputRes !== "") {
+          throw new Error(
+            `Need ${need.id} accepts credentialInput OR resolution, not both. Send credentialInput only.`,
+          );
+        }
+        if (!dismiss && !answer.credentialInput && inputRes === "") {
           throw new Error(
             `Need ${need.id} needs an answer. Give the credential, decision, or scope, or dismiss it.`,
           );
         }
-        if (resolution.length > MAX_NEED_RESOLUTION_CHARS) {
+        if (inputRes.length > MAX_NEED_RESOLUTION_CHARS) {
           throw new Error(
             `A need resolution is at most ${MAX_NEED_RESOLUTION_CHARS} characters. Give the answer, not a report.`,
           );
         }
+
+        let credentialId: string | null = null;
+        let storedResolution: string | null;
+        if (dismiss) {
+          storedResolution = inputRes !== "" ? inputRes : "Dismissed by the reviewer.";
+        } else if (answer.credentialInput && vault && ownerUserId) {
+          const summary = await vault.writeCredential({
+            engagementId,
+            ownerUserId,
+            label: answer.credentialInput.label,
+            kind: answer.credentialInput.kind,
+            meta: answer.credentialInput.meta,
+            value: answer.credentialInput.value,
+          });
+          credentialId = summary.id;
+          storedResolution = null; // INV-12: no plaintext in security_needs.resolution
+        } else {
+          storedResolution = inputRes;
+        }
+
         const updated = await tx
           .update(securityNeeds)
           .set({
             status: dismiss ? "dismissed" : "answered",
-            resolution: dismiss ? (resolution !== "" ? resolution : "Dismissed by the reviewer.") : resolution,
+            resolution: storedResolution,
+            credentialId,
             resolvedAt: ts,
           })
           .where(eq(securityNeeds.id, need.id))
           .returning();
         answered.push(updated[0]);
         // A delta re-run resets only an ANSWERED need's cell; a dismissal does
-        // not — the human ruled the block is not worth pursuing.
+        // not (the human ruled the block is not worth pursuing).
         if (!dismiss) cellsToReset.add(need.cellId);
       }
 
@@ -3101,6 +3203,96 @@ const NEED_KINDS: readonly NeedKind[] = ["credential", "dependency", "scope", "d
  * unexpected value, so a bad column never auto-resolves. */
 function narrowNeedKind(value: string): NeedKind {
   return (NEED_KINDS as readonly string[]).includes(value) ? (value as NeedKind) : "decision";
+}
+
+/**
+ * Part 10 vault. Cred-typed answered needs carry `credential_id` and NULL
+ * (or a marker) `resolution`. The dispatch prompt MUST NOT render the raw
+ * plaintext; instead it names the file path the persona reads inside the
+ * sandbox (`/etc/valet/creds/vault-<safe-label>.<ext>`). Every other need
+ * kind projects with the raw resolution unchanged (decision, dependency,
+ * scope, tool answers stay free-text).
+ *
+ * Falls back to `"[vault credential unavailable]"` when the referenced
+ * credential row was deleted or the column is null. A missing credential
+ * is a diagnostic the persona surfaces via a fresh needs_human need.
+ */
+async function projectResolutionsForVault(
+  db: AppDb,
+  needs: SecurityNeedRow[],
+): Promise<{ kind: NeedKind; description: string; resolution: string }[]> {
+  const credIds = needs
+    .filter((n) => n.kind === "credential" && n.credentialId)
+    .map((n) => n.credentialId as string);
+  const credMap = new Map<string, { label: string; kind: string }>();
+  if (credIds.length > 0) {
+    const rows = await db
+      .select({
+        id: engagementCredentials.id,
+        label: engagementCredentials.label,
+        kind: engagementCredentials.kind,
+      })
+      .from(engagementCredentials)
+      .where(inArray(engagementCredentials.id, credIds));
+    for (const r of rows) credMap.set(r.id, { label: r.label, kind: r.kind });
+  }
+  return needs.map((need) => {
+    const kind = narrowNeedKind(need.kind);
+    if (kind === "credential") {
+      const info = need.credentialId ? credMap.get(need.credentialId) : undefined;
+      if (info) {
+        return {
+          kind,
+          description: need.description,
+          resolution: `available at ${vaultFilePath(info.label, info.kind)} (kind=${info.kind})`,
+        };
+      }
+      // Backward-compat: pre-vault callers stored the credential as
+      // plaintext in `security_needs.resolution`. Until every caller
+      // migrates to `credentialInput`, we fall back to the plaintext so
+      // an in-flight engagement keeps working. New callers get vault
+      // protection.
+      return {
+        kind,
+        description: need.description,
+        resolution: need.resolution ?? "[vault credential unavailable]",
+      };
+    }
+    return {
+      kind,
+      description: need.description,
+      resolution: need.resolution ?? "",
+    };
+  });
+}
+
+/** JOIN through security_engagements → agent_sessions.user_id. The vault's
+ * ownership rule (INV-15) names this user; nobody else can write vault
+ * rows through the resolve path. */
+async function ownerUserIdForEngagement(
+  db: AppDb,
+  engagementId: string,
+): Promise<string | null> {
+  const rows = await db
+    .select({ userId: agentSessions.userId })
+    .from(securityEngagements)
+    .innerJoin(agentSessions, eq(agentSessions.id, securityEngagements.sessionId))
+    .where(eq(securityEngagements.id, engagementId))
+    .limit(1);
+  return rows[0]?.userId ?? null;
+}
+
+/** Mirror of the vault's `filePathFor`; kept as a single-line helper here
+ * so the prompt-builder does not need to construct a vault. */
+function vaultFilePath(label: string, kind: string): string {
+  const safe = label.replace(/[^A-Za-z0-9_.-]+/g, "_");
+  const ext =
+    kind === "mtls" || kind === "signingKey"
+      ? ".pem"
+      : kind === "session"
+        ? ".txt"
+        : ".json";
+  return `/etc/valet/creds/vault-${safe}${ext}`;
 }
 
 /** The engagement's authorized scope globs (pivot-coordinator, M-P4c): every

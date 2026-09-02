@@ -4,6 +4,13 @@ import { Check } from "lucide-react";
 import type { CreateSessionRequest } from "@valet/api/wire";
 import { useCreateSession } from "~/api/queries";
 import { useSecurityPreview } from "~/api/security";
+import { api } from "~/api/client";
+import {
+  VaultStep,
+  emptyVaultDraft,
+  vaultDraftsForSubmit,
+  type VaultDraftRow,
+} from "~/components/security/vault-step";
 import { workspaceForRepo } from "~/components/repo-combobox";
 import { Button, Label, Spinner } from "~/components/primitives";
 import { cn } from "~/lib/cn";
@@ -52,6 +59,9 @@ function planLabel(step: StepDraft): string {
 const WIZARD_STEPS = [
   { id: "focus", label: "Focus" },
   { id: "plan", label: "Plan" },
+  // v1 Part 10: optional vault step between Plan and Launch. Users may
+  // preload credentials so live-persona cells do not pause mid-run.
+  { id: "vault", label: "Vault" },
   // v1 Part 09: the passive "Review" step is now an active launch checklist.
   { id: "review", label: "Launch" },
 ] as const;
@@ -142,6 +152,9 @@ export function SecurityNewPage() {
   // server also stamps `authorized_at` on the create as an audit trail.
   const [authorizationConfirmed, setAuthorizationConfirmed] = useState(false);
   const [steps, setSteps] = useState<StepDraft[]>([]);
+  // Part 10 vault: drafts live in React state only. On Start, we post to
+  // /security/vault after the session exists and then clear the drafts.
+  const [vaultDrafts, setVaultDrafts] = useState<VaultDraftRow[]>(emptyVaultDraft());
   const paths = splitPaths(search.paths);
 
   // The preview is a query, not a mount-fired mutation: it self-settles and
@@ -247,8 +260,29 @@ export function SecurityNewPage() {
     // keeps the audit trail consistent.
     if (search.includeReport !== undefined) body.includeReport = search.includeReport;
     create.mutate(body, {
-      onSuccess: (created) =>
-        void navigate({ to: "/sessions/$sessionId", params: { sessionId: created.id } }),
+      onSuccess: async (created) => {
+        // Part 10 vault: post the drafts AFTER the session lands. A vault
+        // write failure logs but never blocks the navigate — the user
+        // still sees the running review; missing credentials surface as
+        // needs_human. The draft plaintext is discarded here.
+        const drafts = vaultDraftsForSubmit(vaultDrafts);
+        if (drafts.length > 0) {
+          try {
+            await api.writeSecurityVault(created.id, {
+              credentials: drafts.map((row) => ({
+                label: row.label.trim(),
+                kind: row.kind,
+                value: row.value,
+                ...(Object.keys(row.meta).length > 0 ? { meta: row.meta } : {}),
+              })),
+            });
+          } catch (err) {
+            console.error("vault write failed after session create:", err);
+          }
+          setVaultDrafts(emptyVaultDraft());
+        }
+        void navigate({ to: "/sessions/$sessionId", params: { sessionId: created.id } });
+      },
     });
   }
 
@@ -325,6 +359,14 @@ export function SecurityNewPage() {
               )}
 
               {step === "plan" && <PlanStepsEditor value={steps} onChange={setSteps} />}
+
+              {step === "vault" && (
+                <VaultStep
+                  value={vaultDrafts}
+                  onChange={setVaultDrafts}
+                  hasLivePersona={hasLivePersona}
+                />
+              )}
 
               {step === "review" && (
                 <ReviewStep

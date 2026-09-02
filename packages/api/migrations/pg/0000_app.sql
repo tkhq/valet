@@ -1175,6 +1175,7 @@ CREATE TABLE "security_needs" (
 	"description" text NOT NULL,
 	"status" text DEFAULT 'open' NOT NULL,
 	"resolution" text,
+	"credential_id" text,
 	"created_at" bigint NOT NULL,
 	"resolved_at" bigint
 );
@@ -1182,6 +1183,73 @@ CREATE TABLE "security_needs" (
 CREATE INDEX "security_needs_engagement" ON "security_needs" ("engagement_id");
 --> statement-breakpoint
 CREATE INDEX "security_needs_cell" ON "security_needs" ("cell_id");
+--> statement-breakpoint
+-- Vault (Part 10). engagement_credentials stores every user-provided secret
+-- for a security engagement as ciphertext keyed off VALET_ENCRYPTION_KEY,
+-- with a fingerprint the tripwire scans for. owner_user_id names the ONLY
+-- reader; a session admin who is not the owner sees the vault count only.
+-- kek_id is env-stamped so a restore into a mismatched environment refuses
+-- to decrypt. label is unique per engagement so the persona can address a
+-- credential by name.
+CREATE TABLE "engagement_credentials" (
+	"id" text PRIMARY KEY NOT NULL,
+	"engagement_id" text NOT NULL,
+	"owner_user_id" text NOT NULL,
+	"label" text NOT NULL,
+	"kind" text NOT NULL,
+	"meta_json" text DEFAULT '{}' NOT NULL,
+	"ciphertext" text NOT NULL,
+	"kek_id" text NOT NULL,
+	"fingerprint" text NOT NULL,
+	"created_at" bigint NOT NULL,
+	"last_used_at" bigint,
+	"dead_at" bigint,
+	"dead_reason" text,
+	"expires_at" bigint
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "engagement_credentials_engagement_label_unique" ON "engagement_credentials" ("engagement_id", "label");
+--> statement-breakpoint
+CREATE INDEX "engagement_credentials_owner" ON "engagement_credentials" ("owner_user_id");
+--> statement-breakpoint
+CREATE INDEX "engagement_credentials_engagement" ON "engagement_credentials" ("engagement_id");
+--> statement-breakpoint
+-- Per-materialize audit row. Stamped by vault.materialize before the sandbox
+-- boots the cell; released_at is set when the sandbox closes. No value, no
+-- fingerprint, no url — the credential id + cell id are enough to answer
+-- "who used my token, when, and for what step".
+CREATE TABLE "engagement_credential_access" (
+	"id" text PRIMARY KEY NOT NULL,
+	"credential_id" text NOT NULL,
+	"engagement_id" text NOT NULL,
+	"cell_id" text NOT NULL,
+	"sandbox_id" text,
+	"dispatched_at" bigint NOT NULL,
+	"released_at" bigint
+);
+--> statement-breakpoint
+CREATE INDEX "engagement_credential_access_credential" ON "engagement_credential_access" ("credential_id");
+--> statement-breakpoint
+CREATE INDEX "engagement_credential_access_engagement" ON "engagement_credential_access" ("engagement_id");
+--> statement-breakpoint
+-- Tripwire hits (Part 10 §Redaction). A credential value substring detected
+-- on persist / send / egress writes one row and hard-fails the cell. No
+-- value substring is stored — only the label, the seam, and the entry id
+-- so a reviewer can inspect the entry after redaction.
+CREATE TABLE "security_incidents" (
+	"id" text PRIMARY KEY NOT NULL,
+	"engagement_id" text NOT NULL,
+	"cell_id" text,
+	"credential_id" text,
+	"credential_label" text,
+	"seam" text NOT NULL,
+	"quarantined_entry_id" text,
+	"detected_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "security_incidents_engagement" ON "security_incidents" ("engagement_id");
+--> statement-breakpoint
+CREATE INDEX "security_incidents_cell" ON "security_incidents" ("cell_id");
 --> statement-breakpoint
 -- ── cost_entries ──────────────────────────────────────────────────────────
 --

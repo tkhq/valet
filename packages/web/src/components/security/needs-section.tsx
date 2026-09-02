@@ -91,7 +91,26 @@ function NeedsHumanItem({
   canAdminister: boolean;
 }) {
   const [answer, setAnswer] = useState("");
+  // Part 10: a cred-typed need routes through the vault. State is a mini
+  // credential draft (label, kind, value); values are discarded from React
+  // state as soon as the mutation lands.
+  const [credLabel, setCredLabel] = useState("");
+  const [credKind, setCredKind] = useState<
+    | "password"
+    | "session"
+    | "headerToken"
+    | "mtls"
+    | "signingKey"
+    | "toolAuth"
+    | "testData"
+  >("headerToken");
+  const [credValue, setCredValue] = useState("");
   const resolve = useResolveNeeds(sessionId);
+  const isCredKind = need.kind === "credential";
+
+  const canSubmit = isCredKind
+    ? credLabel.trim() !== "" && credValue !== ""
+    : answer.trim() !== "";
 
   return (
     <li className="rounded border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-[11px] text-ink">
@@ -101,26 +120,103 @@ function NeedsHumanItem({
       </div>
       {canAdminister && (
         <div className="mt-1.5 space-y-1.5">
-          <Textarea
-            rows={2}
-            value={answer}
-            onChange={(e) => setAnswer(e.target.value)}
-            placeholder={
-              need.kind === "decision"
-                ? "Your decision…"
-                : "The credential, scope, or dependency the persona needs…"
-            }
-            className="text-[11px]"
-          />
+          {isCredKind ? (
+            <div
+              className="space-y-1.5 rounded border border-line/60 p-2"
+              data-testid="needs-cred-form"
+            >
+              <div className="grid grid-cols-2 gap-1.5">
+                <div>
+                  <label className="text-[10px] text-muted">Label</label>
+                  <input
+                    className="block w-full rounded border border-line bg-transparent px-1.5 py-1 text-[11px]"
+                    value={credLabel}
+                    placeholder="admin"
+                    onChange={(e) => setCredLabel(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] text-muted">Kind</label>
+                  <select
+                    className="block w-full rounded border border-line bg-transparent px-1.5 py-1 text-[11px]"
+                    value={credKind}
+                    onChange={(e) =>
+                      setCredKind(
+                        e.target.value as
+                          | "password"
+                          | "session"
+                          | "headerToken"
+                          | "mtls"
+                          | "signingKey"
+                          | "toolAuth"
+                          | "testData",
+                      )
+                    }
+                  >
+                    <option value="headerToken">Header token</option>
+                    <option value="password">Password login</option>
+                    <option value="session">Session jar</option>
+                    <option value="mtls">mTLS cert+key</option>
+                    <option value="signingKey">Signing key</option>
+                    <option value="toolAuth">Tool auth blob</option>
+                    <option value="testData">Test data</option>
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label className="text-[10px] text-muted">Value (secret)</label>
+                <input
+                  type="password"
+                  className="block w-full rounded border border-line bg-transparent px-1.5 py-1 text-[11px]"
+                  value={credValue}
+                  onChange={(e) => setCredValue(e.target.value)}
+                  placeholder="The plaintext value the persona needs."
+                />
+              </div>
+              <p className="text-[10px] text-muted">
+                Encrypted at rest. Delivered to the persona at
+                {" "}
+                <code>/etc/valet/creds/vault-&lt;label&gt;.&lt;ext&gt;</code>.
+              </p>
+            </div>
+          ) : (
+            <Textarea
+              rows={2}
+              value={answer}
+              onChange={(e) => setAnswer(e.target.value)}
+              placeholder={
+                need.kind === "decision"
+                  ? "Your decision…"
+                  : "The scope, dependency, or decision the persona needs…"
+              }
+              className="text-[11px]"
+            />
+          )}
           <div className="flex items-center gap-2">
             <Button
               size="sm"
-              disabled={answer.trim() === "" || resolve.isPending}
-              onClick={() =>
-                resolve.mutate([{ needId: need.id, resolution: answer }], {
-                  onSuccess: () => setAnswer(""),
-                })
-              }
+              disabled={!canSubmit || resolve.isPending}
+              onClick={() => {
+                const payload = isCredKind
+                  ? [
+                      {
+                        needId: need.id,
+                        credentialInput: {
+                          label: credLabel.trim(),
+                          kind: credKind,
+                          value: credValue,
+                        },
+                      },
+                    ]
+                  : [{ needId: need.id, resolution: answer }];
+                resolve.mutate(payload, {
+                  onSuccess: () => {
+                    setAnswer("");
+                    setCredLabel("");
+                    setCredValue("");
+                  },
+                });
+              }}
             >
               Resolve &amp; continue
             </Button>

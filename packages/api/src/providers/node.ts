@@ -56,7 +56,7 @@ import { buildRunSettledAttention } from "../workflows/run-attention.js";
 import { WorkflowSandboxReclaimer } from "../workflows/sandbox-reclaim.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
 import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
-import { deriveSecretKey } from "../lib/secret-crypto.js";
+import { deriveKekId, deriveSecretKey } from "../lib/secret-crypto.js";
 import { resolveOrgId } from "../lib/org.js";
 import { ChannelHost, publicUrlFromEnv } from "../channels/host.js";
 import { EventDispatcher } from "../events/dispatcher.js";
@@ -431,6 +431,13 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     // (same `key` `engineCredentials`/the workflow invoker/the sandbox
     // credential route derive theirs from) instead of a raw credential read.
     githubTokenDeps: { key: deriveSecretKey(opts.encryptionKey) },
+    // Part 10 vault. `derivedSecretKey` is the same AES-256 key
+    // `encryptSecret`/`decryptSecret` consume for the GitHub token cache
+    // and every other secret. `kekId` is env-stamped: a restore into a
+    // mismatched environment refuses to decrypt (INV-16). Derive it from
+    // a short hash of the key itself so no additional env is required.
+    derivedSecretKey: deriveSecretKey(opts.encryptionKey),
+    kekId: deriveKekId(opts.encryptionKey),
     childSpawner: (req, ctx) => {
       if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
       return spawnerRef(req, ctx);

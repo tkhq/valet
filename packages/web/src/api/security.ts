@@ -62,6 +62,9 @@ export const qkSecurity = {
       filters.cellId ?? "",
       filters.path ?? "",
     ] as const,
+  /** Vault (Part 10): owner sees credentials + count; non-owner sees the
+   * count only. Every write and delete invalidates this key. */
+  vault: (sessionId: string) => ["sessions", sessionId, "security", "vault"] as const,
 };
 
 /** `GET /api/sessions?kind=security` — the hub's engagement list. `owner`
@@ -251,16 +254,44 @@ export function useCancelEngagement(sessionId: string) {
  * resets only the affected cells to pending. Invalidates the engagement query so
  * the panel re-reads the needs list and the reset cells.
  */
+/** Body shape for one answer accepted by `POST /security/needs/resolve`.
+ * `credentialInput` is Part 10's cred-typed answer: server writes the
+ * value to the vault and stores only the `credential_id` on the need. */
+export interface ResolveNeedAnswer {
+  needId: string;
+  resolution?: string;
+  dismiss?: boolean;
+  credentialInput?: {
+    label: string;
+    kind:
+      | "password"
+      | "session"
+      | "headerToken"
+      | "mtls"
+      | "signingKey"
+      | "toolAuth"
+      | "testData";
+    value: string;
+    meta?: Record<string, unknown>;
+  };
+}
+
 export function useResolveNeeds(sessionId: string) {
   const qc = useQueryClient();
-  return useMutation<
-    SecurityResolveNeedsResponse,
-    Error,
-    { needId: string; resolution: string; dismiss?: boolean }[]
-  >({
-    mutationFn: (answers) => api.resolveSecurityNeeds(sessionId, answers),
+  return useMutation<SecurityResolveNeedsResponse, Error, ResolveNeedAnswer[]>({
+    mutationFn: (answers) =>
+      // `api.resolveSecurityNeeds` types `answers` as
+      // `{needId, resolution, dismiss?}[]` for backward compat with the
+      // v0 pre-vault callers. Cast here so cred-typed answers ride
+      // through the same route body.
+      api.resolveSecurityNeeds(sessionId, answers as unknown as {
+        needId: string;
+        resolution: string;
+        dismiss?: boolean;
+      }[]),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: qkSecurity.engagement(sessionId) });
+      void qc.invalidateQueries({ queryKey: qkSecurity.vault(sessionId) });
     },
   });
 }
@@ -462,4 +493,79 @@ export async function downloadSecurityReport(
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 0);
   return filename;
+}
+
+// ── Vault (Part 10) ──────────────────────────────────────────────────────
+
+/** One credential the vault returns to an owner. Values NEVER appear. */
+export interface VaultCredentialSummary {
+  id: string;
+  label: string;
+  kind: string;
+  meta: Record<string, unknown>;
+  createdAt: number;
+  lastUsedAt: number | null;
+  deadAt: number | null;
+  deadReason: string | null;
+  expiresAt: number | null;
+}
+
+export interface VaultView {
+  owner: { userId: string } | null;
+  count: number;
+  credentials?: VaultCredentialSummary[];
+}
+
+export interface VaultWriteInput {
+  label: string;
+  kind:
+    | "password"
+    | "session"
+    | "headerToken"
+    | "mtls"
+    | "signingKey"
+    | "toolAuth"
+    | "testData";
+  value: string;
+  meta?: Record<string, unknown>;
+}
+
+/** GET .../security/vault. Owner sees credentials + count; non-owner sees
+ * count only. Server always returns { owner, count }; `credentials` is
+ * present only for the owner. */
+export function useSecurityVault(sessionId: string) {
+  return useQuery<VaultView, Error>({
+    queryKey: qkSecurity.vault(sessionId),
+    queryFn: () => api.listSecurityVault(sessionId),
+    enabled: sessionId !== "",
+  });
+}
+
+/** POST .../security/vault — write one or more credentials. Owner-only.
+ * Values leave React state on submit and are never persisted client-side.
+ * Invalidates the vault query on success. */
+export function useWriteSecurityVault(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<
+    { credentials: VaultCredentialSummary[] },
+    Error,
+    { credentials: VaultWriteInput[] }
+  >({
+    mutationFn: (body) => api.writeSecurityVault(sessionId, body),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qkSecurity.vault(sessionId) });
+      void qc.invalidateQueries({ queryKey: qkSecurity.engagement(sessionId) });
+    },
+  });
+}
+
+/** DELETE .../security/vault/:credentialId — owner-only crypto-shred. */
+export function useDeleteSecurityVaultCredential(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<null, Error, string>({
+    mutationFn: (credentialId) => api.deleteSecurityVaultCredential(sessionId, credentialId),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: qkSecurity.vault(sessionId) });
+    },
+  });
 }

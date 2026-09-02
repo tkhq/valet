@@ -41,6 +41,35 @@ export interface SecurityConfig {
    * live testing is authorized — the dispatch prompt says so, and a live
    * persona has no target. */
   scope?: SecurityScope;
+  /** Vault credentials the config seeds at engagement create (Part 10
+   * §Config schema). Values are read from `env` names on the api's process
+   * environment at load time; the YAML never holds the plaintext. Absent
+   * means the wizard's Vault step is the only source of vault credentials. */
+  credentials?: SecurityConfigCredentialDecl[];
+}
+
+/**
+ * One credential the config seeds. Names its label, its kind, its meta
+ * (non-value fields, kind-specific), and the env var that carries the
+ * plaintext value. The plaintext lives ONLY in the process environment;
+ * a checked-in `.valet/security.yml` is safe.
+ */
+export interface SecurityConfigCredentialDecl {
+  /** Per-engagement handle a persona references. Unique per engagement. */
+  label: string;
+  /** One of the vault's seven variants (Part 10 §Credential shape). */
+  kind:
+    | "password"
+    | "session"
+    | "headerToken"
+    | "mtls"
+    | "signingKey"
+    | "toolAuth"
+    | "testData";
+  /** Env var carrying the plaintext value the api reads at seed time. */
+  env: string;
+  /** Non-value fields (host, algo, scheme, tool, format, role, ...). */
+  meta?: Record<string, unknown>;
 }
 
 /**
@@ -259,6 +288,65 @@ export function parseSecurityConfig(yaml: string, knownPersonas: readonly string
 
   if (map.tools !== undefined) {
     config.tools = parseToolDecls(map.tools, scopeHosts);
+  }
+
+  if (map.credentials !== undefined) {
+    if (!Array.isArray(map.credentials)) {
+      throw new Error(
+        `.valet/security.yml "credentials" must be a list of { label, kind, env, meta? } entries. ${CORRECTIVE}`,
+      );
+    }
+    const credentials: SecurityConfigCredentialDecl[] = [];
+    const seenLabels = new Set<string>();
+    const CRED_KINDS = new Set([
+      "password",
+      "session",
+      "headerToken",
+      "mtls",
+      "signingKey",
+      "toolAuth",
+      "testData",
+    ]);
+    for (const [i, raw] of map.credentials.entries()) {
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+        throw new Error(
+          `.valet/security.yml credentials[${i}] must be a { label, kind, env, meta? } map. ${CORRECTIVE}`,
+        );
+      }
+      const rec = raw as Record<string, unknown>;
+      if (typeof rec.label !== "string" || rec.label.trim() === "") {
+        throw new Error(
+          `.valet/security.yml credentials[${i}] needs a non-empty label. ${CORRECTIVE}`,
+        );
+      }
+      if (typeof rec.kind !== "string" || !CRED_KINDS.has(rec.kind)) {
+        throw new Error(
+          `.valet/security.yml credentials[${i}] "kind" must be one of ${[...CRED_KINDS].join(", ")}. ${CORRECTIVE}`,
+        );
+      }
+      if (typeof rec.env !== "string" || rec.env.trim() === "") {
+        throw new Error(
+          `.valet/security.yml credentials[${i}] needs "env" (the env var name that carries the value). ${CORRECTIVE}`,
+        );
+      }
+      if (seenLabels.has(rec.label)) {
+        throw new Error(
+          `.valet/security.yml credentials[${i}] label "${rec.label}" is duplicated. ${CORRECTIVE}`,
+        );
+      }
+      seenLabels.add(rec.label);
+      const meta =
+        rec.meta && typeof rec.meta === "object" && !Array.isArray(rec.meta)
+          ? (rec.meta as Record<string, unknown>)
+          : undefined;
+      credentials.push({
+        label: rec.label,
+        kind: rec.kind as SecurityConfigCredentialDecl["kind"],
+        env: rec.env,
+        ...(meta ? { meta } : {}),
+      });
+    }
+    config.credentials = credentials;
   }
 
   let personaKeys: string[] = [];

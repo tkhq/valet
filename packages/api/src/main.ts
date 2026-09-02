@@ -45,11 +45,13 @@ import { ensureEnvProviders } from "./proxy/upstream.js";
 import { resolveOrgId } from "./lib/org.js";
 import { webDistPath } from "./assets/base.js";
 import { startRotateSweep, type RotateSweepHandle } from "./engine/rotate-sweep.js";
+import { startVaultSweep, type VaultSweepHandle } from "./services/vault-sweep.js";
+import { createEngagementVault } from "./services/security-vault.js";
 import {
   startInstallationSweep,
   type InstallationSweepHandle,
 } from "./services/github-installation-sweep.js";
-import { deriveSecretKey } from "./lib/secret-crypto.js";
+import { deriveKekId, deriveSecretKey } from "./lib/secret-crypto.js";
 
 /** Handle returned by `startServer`: a graceful `close()` plus the resolved
  * values the boot actually used. */
@@ -358,6 +360,7 @@ getAttachmentRefStore().startSweep();
 let closed = false;
 let bootReady = false;
 let rotateSweep: RotateSweepHandle | undefined;
+let vaultSweep: VaultSweepHandle | undefined;
 let installationSweep: InstallationSweepHandle | undefined;
 
 // `startServer` from createApp is renamed at the destructure so it can't
@@ -623,6 +626,18 @@ async function runBootChain(): Promise<void> {
     key: deriveSecretKey(encryptionKey),
     publicUrl: publicUrlFromEnv(process.env),
   });
+
+  // Credential vault TTL sweep (Part 10 §Operations). Deletes vault rows
+  // whose `expires_at` has passed. Default interval 1 h, matches the
+  // spec's DEFAULT_TTL_MS lifetime cadence. One indexed DELETE per pass;
+  // no per-row work.
+  vaultSweep = startVaultSweep({
+    vault: createEngagementVault({
+      db: providers.db,
+      key: deriveSecretKey(encryptionKey),
+      kekId: deriveKekId(encryptionKey),
+    }),
+  });
 }
 
 // Kick the chain off the listener's critical path. An unexpected rejection
@@ -681,6 +696,11 @@ async function close(): Promise<void> {
     rotateSweep?.stop();
   } catch (err) {
     console.error("rotateSweep.stop failed:", err);
+  }
+  try {
+    vaultSweep?.stop();
+  } catch (err) {
+    console.error("vaultSweep.stop failed:", err);
   }
   try {
     // Awaited, unlike the sweeps above it: a pass in flight holds a database

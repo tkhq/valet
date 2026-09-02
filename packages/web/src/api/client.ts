@@ -561,6 +561,64 @@ export const api = {
       `/sessions/${encodeURIComponent(id)}/security/needs/resolve`,
       { answers },
     ),
+  /** POST /sessions/:id/security/vault — write one or more credentials to
+   * the engagement's vault (Part 10). Owner-only. Values never returned. */
+  writeSecurityVault: (
+    id: string,
+    body: {
+      credentials: {
+        label: string;
+        kind:
+          | "password"
+          | "session"
+          | "headerToken"
+          | "mtls"
+          | "signingKey"
+          | "toolAuth"
+          | "testData";
+        value: string;
+        meta?: Record<string, unknown>;
+      }[];
+    },
+  ) =>
+    request<{
+      credentials: {
+        id: string;
+        label: string;
+        kind: string;
+        meta: Record<string, unknown>;
+        createdAt: number;
+        lastUsedAt: number | null;
+        deadAt: number | null;
+        deadReason: string | null;
+        expiresAt: number | null;
+      }[];
+    }>("POST", `/sessions/${encodeURIComponent(id)}/security/vault`, body),
+  /** GET /sessions/:id/security/vault — owner sees labels + count; non-owner
+   * sees the count only. Values NEVER appear. */
+  listSecurityVault: (id: string) =>
+    request<{
+      owner: { userId: string } | null;
+      count: number;
+      credentials?: {
+        id: string;
+        label: string;
+        kind: string;
+        meta: Record<string, unknown>;
+        createdAt: number;
+        lastUsedAt: number | null;
+        deadAt: number | null;
+        deadReason: string | null;
+        expiresAt: number | null;
+      }[];
+    }>("GET", `/sessions/${encodeURIComponent(id)}/security/vault`),
+  /** DELETE /sessions/:id/security/vault/:credentialId — owner-only
+   * crypto-shred. Access log rows persist. */
+  deleteSecurityVaultCredential: (id: string, credentialId: string) =>
+    request<null>(
+      "DELETE",
+      `/sessions/${encodeURIComponent(id)}/security/vault/${encodeURIComponent(credentialId)}`,
+    ),
   /** POST /sessions/:id/security/resume — reopen a terminal engagement so the
    * affected cells re-dispatch (v1 Part 09). Session admin. Empty body =
    * default affected set (failed + open-need cells). */

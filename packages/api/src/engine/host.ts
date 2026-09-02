@@ -68,6 +68,7 @@ import { listLlmProviders, parseModelId, providerNamespace } from "../services/l
 import type { AppDb } from "../lib/drizzle.js";
 import {
   agentSessions,
+  engagementCredentials as engagementCredentialsTable,
   orgs,
   securityCells,
   securityEngagements,
@@ -87,6 +88,9 @@ import {
   revokeSandboxTokens,
 } from "../auth/sandbox-tokens.js";
 import securityPlugin from "@valet/plugin-security/plugin";
+import { isLivePersona } from "@valet/plugin-security";
+import { createEngagementVault, type Materialization } from "../services/security-vault.js";
+import { buildPersistTripwire } from "./persist-tripwire.js";
 import { CODING_SYSTEM_PROMPT } from "./prompt-rules.js";
 import { orchestratorPersona } from "../orchestrator/persona.js";
 import { buildMemoryTools } from "../orchestrator/memory-tools.js";
@@ -194,6 +198,20 @@ export interface EngineHostOpts {
    * degrade gracefully to no sandbox env injection.
    */
   db?: AppDb;
+  /**
+   * AES-256 key for `encryptSecret`/`decryptSecret`, derived from
+   * `VALET_ENCRYPTION_KEY`. Consumed by the per-engagement credential vault
+   * (Part 10) at cell dispatch to materialize credentials into the child
+   * sandbox. Optional so tests that don't need vault materialization can
+   * omit it; when absent, `mintVaultCreds` returns an empty result.
+   */
+  derivedSecretKey?: Buffer;
+  /**
+   * Env-stamped identifier of the vault key material. Every vault row
+   * stores this; a decrypt refuses when the row's kekId does not match
+   * (INV-16 in the vault spec). Absent when `derivedSecretKey` is absent.
+   */
+  kekId?: string;
   /**
    * This process's own base URL (e.g. `http://127.0.0.1:${port}`), handed
    * to orchestrator sessions as `toolConfig.apiBaseUrl` so the `mem_*`
@@ -1250,6 +1268,70 @@ export class EngineHost {
       },
       credsFiles: { token },
     };
+  }
+
+  /**
+   * Materialize the engagement's vault credentials for a persona child that
+   * is entitled to see them (Part 10 §Dispatch). Returns undefined when the
+   * cell's persona is source-only (no live traffic, no credential needed),
+   * when the api's encryption key is unwired (tests), or when no vault
+   * exists.
+   *
+   * The returned `credsFiles` is a `Record<filename, string>` compatible
+   * with `SandboxCreateOpts.credsFiles`. The vault dispose handle zeros
+   * every plaintext Buffer AND stamps `released_at` on the access log.
+   * Call `dispose()` in a `finally` on the caller.
+   *
+   * Persona entitlement: only live personas (dast, fuzz, exploit) and the
+   * pivot-coordinator (which uses credentials for propagate-session and
+   * create-test-account) get the mount. Every other persona sees no vault
+   * files even if the vault has credentials.
+   */
+  private async mintVaultCreds(cell: SecurityCellRow): Promise<
+    | { credsFiles: Record<string, string>; materialization: Materialization }
+    | undefined
+  > {
+    const db = this.opts.db;
+    const key = this.opts.derivedSecretKey;
+    const kekId = this.opts.kekId;
+    if (!db || !key || !kekId) return undefined;
+    const persona = cell.persona;
+    const entitled = isLivePersona(persona) || persona === "pivot-coordinator";
+    if (!entitled) return undefined;
+    const vault = createEngagementVault({ db, key, kekId });
+    // Look up every label the engagement owns; the vault filters by
+    // dead/expired at query time. Persona-scoped filtering (a static
+    // per-persona expectation map) is a future hardening pass; for v1 an
+    // entitled persona sees the whole vault.
+    const labels = await this.vaultLabelsForEngagement(cell.engagementId);
+    if (labels.length === 0) return undefined;
+    const materialization = await vault.materialize({
+      engagementId: cell.engagementId,
+      cellId: cell.id,
+      labels,
+    });
+    if (materialization.entries.length === 0) {
+      await materialization.dispose();
+      return undefined;
+    }
+    const credsFiles: Record<string, string> = {};
+    for (const entry of materialization.entries) {
+      // The value transits as a JS string ONLY here, for one hop into the
+      // sandbox provider's Secret/host-dir write. We accept this bounded
+      // hop; the vault's own storage stays as ciphertext.
+      credsFiles[entry.credsFileName] = entry.body.toString("utf8");
+    }
+    return { credsFiles, materialization };
+  }
+
+  private async vaultLabelsForEngagement(engagementId: string): Promise<string[]> {
+    const db = this.opts.db;
+    if (!db) return [];
+    const rows = await db
+      .select({ label: engagementCredentialsTable.label })
+      .from(engagementCredentialsTable)
+      .where(eq(engagementCredentialsTable.engagementId, engagementId));
+    return rows.map((r) => r.label);
   }
 
   /**
@@ -2767,6 +2849,12 @@ export class EngineHost {
 
     const profile = opts.profile ?? "headless";
     const sandboxMint = await this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId, profile);
+    // Part 10 vault materialization: an entitled persona child (live persona
+    // or pivot-coordinator) sees the engagement's vault credentials at
+    // /etc/valet/creds/vault-<label>.<ext>. Source-only personas see no vault
+    // even if the vault has credentials. The dispose handle zeros the
+    // decrypted buffers and stamps `released_at` on the access-log rows.
+    const vaultMint = personaCell ? await this.mintVaultCreds(personaCell) : undefined;
     const credentialResolver = this.buildCredentialResolver(childSessionId, opts.actorUserId, opts.orgId);
     const policyResolver = this.getPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
@@ -2839,7 +2927,14 @@ export class EngineHost {
             : sandboxMint?.env,
         profile,
         ...(opts.docker ? { docker: true } : {}),
-        ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
+        ...(sandboxMint || vaultMint
+          ? {
+              credsFiles: {
+                ...(sandboxMint?.credsFiles ?? {}),
+                ...(vaultMint?.credsFiles ?? {}),
+              },
+            }
+          : {}),
       },
       model,
       modelSpec,
@@ -2861,6 +2956,21 @@ export class EngineHost {
             // `buildSession`. Db guard narrows the type only (the claim
             // lookup already required one).
             ...(this.opts.db ? { compactionHooks: [securityCompactionHook(this.opts.db)] } : {}),
+            // Part 10 §Redaction persist seam. Scans every entry against
+            // the engagement's vault fingerprint index before it lands in
+            // engine_entries. Present only for persona children whose
+            // engagement is known and whose api has vault key material.
+            ...(this.opts.db && this.opts.derivedSecretKey && this.opts.kekId
+              ? {
+                  beforeEntryPersist: buildPersistTripwire({
+                    db: this.opts.db,
+                    key: this.opts.derivedSecretKey,
+                    kekId: this.opts.kekId,
+                    engagementId: personaCell.engagementId,
+                    cellId: personaCell.id,
+                  }).hook,
+                }
+              : {}),
           }
         : {}),
       ...(skillsProvider ? { skillsProvider } : {}),
@@ -2878,9 +2988,18 @@ export class EngineHost {
       },
     });
 
-    const session = existing
-      ? await engine.restoreSession({ sessionId: childSessionId, options: sessionOptions })
-      : await engine.createSession({ id: childSessionId, ...sessionOptions });
+    let session: Session;
+    try {
+      session = existing
+        ? await engine.restoreSession({ sessionId: childSessionId, options: sessionOptions })
+        : await engine.createSession({ id: childSessionId, ...sessionOptions });
+    } finally {
+      // Zero the vault plaintext buffers as soon as the sandbox provider
+      // has consumed the credsFiles (createSession triggers provisioning).
+      // A throw during createSession still zeros — the finally guarantees
+      // we do not leave decrypted bytes in the api heap.
+      if (vaultMint) await vaultMint.materialization.dispose();
+    }
 
     builtSession = session;
     this.cache.set(childSessionId, { engine, session });

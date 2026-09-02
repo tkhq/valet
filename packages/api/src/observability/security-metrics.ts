@@ -16,6 +16,10 @@ let compactionStaleCounter: Counter | null = null;
 let runnerStalledCounter: Counter | null = null;
 let cellExhaustedCounter: Counter | null = null;
 let bootRestoreTimeoutCounter: Counter | null = null;
+let vaultMaterializedCounter: Counter | null = null;
+let vaultTripwireHitCounter: Counter | null = null;
+let vaultShredCounter: Counter | null = null;
+let vaultCredentialsWrittenCounter: Counter | null = null;
 
 /** Cells materialized by startEngagement. */
 export function recordSecurityCellsCreated(count: number): void {
@@ -103,4 +107,72 @@ export function recordBootRestoreTimeout(): void {
       });
   }
   bootRestoreTimeoutCounter.add(1);
+}
+
+// ── Credential vault (Part 10) ───────────────────────────────────────────
+
+/**
+ * A credential materialized into a persona-child sandbox via `credsMount`.
+ * Tagged by kind so we can see which credential shapes personas rely on.
+ * The count answers "how often does the vault actually deliver". A zero
+ * count on a run with `verification.enabled = true` is a signal the vault
+ * wired wrong.
+ */
+export function recordVaultCredentialMaterialized(kind: string): void {
+  if (!vaultMaterializedCounter) {
+    vaultMaterializedCounter = metrics
+      .getMeter("@valet/api")
+      .createCounter("valet.security.vault.materialized", {
+        description: "Vault credentials materialized into a persona child sandbox, by kind",
+      });
+  }
+  vaultMaterializedCounter.add(1, { kind });
+}
+
+/**
+ * The tripwire detected a credential value on the wire (send seam) or in a
+ * persisted entry (persist seam). Tagged by seam so a spike on one channel
+ * points to the source. A non-zero count is not benign; it means a persona
+ * or upstream code path echoed a stored credential.
+ */
+export function recordVaultTripwireHit(seam: "persist" | "send" | "egress"): void {
+  if (!vaultTripwireHitCounter) {
+    vaultTripwireHitCounter = metrics
+      .getMeter("@valet/api")
+      .createCounter("valet.security.vault.tripwire.hits", {
+        description: "Credential-value bytes detected on a redaction seam, by seam",
+      });
+  }
+  vaultTripwireHitCounter.add(1, { seam });
+}
+
+/**
+ * A vault row was crypto-shredded (row DELETE). Tagged by reason so we can
+ * separate scheduled TTL cleanup from user-driven deletes and engagement
+ * purge on cancel.
+ */
+export function recordVaultShred(reason: "ttl" | "manual" | "cancel" | "rotation"): void {
+  if (!vaultShredCounter) {
+    vaultShredCounter = metrics
+      .getMeter("@valet/api")
+      .createCounter("valet.security.vault.shred", {
+        description: "Vault credential rows deleted, by reason",
+      });
+  }
+  vaultShredCounter.add(1, { reason });
+}
+
+/**
+ * A credential was written to the vault (a create). Tagged by kind so we
+ * can see which shapes users rely on across the fleet.
+ */
+export function recordVaultCredentialWritten(kind: string): void {
+  if (!vaultCredentialsWrittenCounter) {
+    vaultCredentialsWrittenCounter = metrics
+      .getMeter("@valet/api")
+      .createCounter("valet.security.vault.written", {
+        description: "Vault credentials written, by kind",
+      });
+  }
+  vaultCredentialsWrittenCounter.add(1, { kind });
 }

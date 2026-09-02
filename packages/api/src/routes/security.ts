@@ -73,7 +73,6 @@ import type { Principal } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { isValidInternalToken } from "../lib/internal-auth.js";
-import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { requireUser, type AuthUser } from "../middleware/auth.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { buildActionInvoker } from "../plugins/action-invoker.js";
@@ -110,10 +109,23 @@ import {
   type CellProgress,
   type FindingSeverity,
   type FindingStatus,
+  type NeedAnswerInput,
   type SecurityReport,
   type NeedKind,
   type SpawnCellChild,
 } from "../services/security-engagements.js";
+import {
+  createEngagementVault,
+  CREDENTIAL_KINDS,
+  type CredentialKind,
+  type CredentialSummary,
+  VaultCredentialNotFoundError,
+  VaultKekMismatchError,
+  VaultLabelDuplicateError,
+  VaultOwnerViolationError,
+  VaultValueTooLargeError,
+} from "../services/security-vault.js";
+import { deriveKekId, deriveSecretKey } from "../lib/secret-crypto.js";
 import {
   buildJsonExport,
   buildMarkdownReport,
@@ -987,8 +999,12 @@ async function readJsonBody(c: Context<AppEnv>): Promise<Record<string, unknown>
 }
 
 async function loadEngagementOr404(c: Context<AppEnv>, sessionId: string) {
-  const { db } = c.var.providers;
-  const security = createSecurityEngagementService({ db });
+  const { db, encryptionKey } = c.var.providers;
+  const security = createSecurityEngagementService({
+    db,
+    vaultKey: deriveSecretKey(encryptionKey),
+    vaultKekId: deriveKekId(encryptionKey),
+  });
   const result = await security.getEngagementBySession(sessionId);
   if (!result) return { security, failure: c.json({ error: NO_ENGAGEMENT }, 404) };
   return { security, result };
@@ -2445,26 +2461,37 @@ securityRouter.post("/:id/security/needs/resolve", async (c) => {
 
   const body = await readJsonBody(c);
   if (!Array.isArray(body.answers) || body.answers.length === 0) {
-    return c.json({ error: "Send { answers: [{ needId, resolution }] } with at least one answer." }, 400);
+    return c.json({ error: "Send { answers: [{ needId, resolution | credentialInput }] } with at least one answer." }, 400);
   }
-  const answers: { needId: string; resolution: string; dismiss?: boolean }[] = [];
+  const answers: NeedAnswerInput[] = [];
   for (const raw of body.answers) {
     if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-      return c.json({ error: "Each answer is { needId, resolution, dismiss? }." }, 400);
+      return c.json({ error: "Each answer is { needId, resolution | credentialInput, dismiss? }." }, 400);
     }
     const rec = raw as Record<string, unknown>;
     if (typeof rec.needId !== "string" || rec.needId === "") {
       return c.json({ error: "Each answer needs a needId." }, 400);
     }
     const dismiss = rec.dismiss === true;
-    if (!dismiss && (typeof rec.resolution !== "string" || rec.resolution.trim() === "")) {
-      return c.json({ error: `Answer for ${rec.needId} needs a resolution, or set dismiss: true.` }, 400);
+    const credentialInput = parseCredentialInput(rec.credentialInput);
+    if (credentialInput === "invalid") {
+      return c.json(
+        {
+          error: `Answer for ${rec.needId}: credentialInput must be { label, kind, value } with kind in ${CREDENTIAL_KINDS.join(", ")}.`,
+        },
+        400,
+      );
     }
-    answers.push({
+    if (!dismiss && !credentialInput && (typeof rec.resolution !== "string" || rec.resolution.trim() === "")) {
+      return c.json({ error: `Answer for ${rec.needId} needs a resolution or credentialInput, or set dismiss: true.` }, 400);
+    }
+    const answer: NeedAnswerInput = {
       needId: rec.needId,
-      resolution: typeof rec.resolution === "string" ? rec.resolution : "",
       dismiss,
-    });
+      ...(typeof rec.resolution === "string" ? { resolution: rec.resolution } : {}),
+      ...(credentialInput ? { credentialInput } : {}),
+    };
+    answers.push(answer);
   }
 
   try {
@@ -2852,5 +2879,227 @@ securityRouter.post("/:id/security/issues/digest", async (c) => {
     return c.json(response);
   } catch (err) {
     return issueError(c, err);
+  }
+});
+
+// ── Vault (Part 10) ──────────────────────────────────────────────────────
+
+/** Narrow one incoming credentialInput. Returns `"invalid"` on shape
+ * violations; the caller renders a 400. `undefined` means "not present". */
+function parseCredentialInput(
+  value: unknown,
+):
+  | { label: string; kind: CredentialKind; meta?: Record<string, unknown>; value: string }
+  | "invalid"
+  | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "object" || Array.isArray(value)) return "invalid";
+  const rec = value as Record<string, unknown>;
+  const label = typeof rec.label === "string" ? rec.label : undefined;
+  const kind = typeof rec.kind === "string" ? rec.kind : undefined;
+  const val = typeof rec.value === "string" ? rec.value : undefined;
+  if (!label || !kind || val === undefined) return "invalid";
+  if (!(CREDENTIAL_KINDS as readonly string[]).includes(kind)) return "invalid";
+  const meta =
+    rec.meta && typeof rec.meta === "object" && !Array.isArray(rec.meta)
+      ? (rec.meta as Record<string, unknown>)
+      : undefined;
+  return { label, kind: kind as CredentialKind, ...(meta ? { meta } : {}), value: val };
+}
+
+/** Vault error → HTTP status. Owner violations are 403; not-found is 404;
+ * everything else is 400 with the corrective error message. */
+function vaultError(c: Context<AppEnv>, err: unknown) {
+  const message = err instanceof Error ? err.message : String(err);
+  if (err instanceof VaultOwnerViolationError) return c.json({ error: message }, 403);
+  if (err instanceof VaultCredentialNotFoundError) return c.json({ error: message }, 404);
+  if (err instanceof VaultLabelDuplicateError) return c.json({ error: message }, 409);
+  if (err instanceof VaultKekMismatchError) return c.json({ error: message }, 409);
+  if (err instanceof VaultValueTooLargeError) return c.json({ error: message }, 413);
+  return c.json({ error: message }, 400);
+}
+
+function projectCredentialSummary(c: CredentialSummary) {
+  return {
+    id: c.id,
+    label: c.label,
+    kind: c.kind,
+    meta: c.meta,
+    createdAt: c.createdAt,
+    lastUsedAt: c.lastUsedAt,
+    deadAt: c.deadAt,
+    deadReason: c.deadReason,
+    expiresAt: c.expiresAt,
+  };
+}
+
+/**
+ * POST /:id/security/vault — write one or more credentials to the
+ * engagement's vault. Owner-only (INV-15). Values encrypt at rest; the
+ * response NEVER returns them.
+ */
+securityRouter.post("/:id/security/vault", async (c) => {
+  const sessionId = c.req.param("id");
+  const resolved = await resolveHumanSession(c, sessionId, "administer");
+  if ("failure" in resolved) return resolved.failure;
+  const loaded = await loadEngagementOr404(c, sessionId);
+  if ("failure" in loaded) return loaded.failure;
+  const { result } = loaded;
+
+  const body = await readJsonBody(c);
+  if (!Array.isArray(body.credentials) || body.credentials.length === 0) {
+    return c.json({ error: "Send { credentials: [{ label, kind, value, meta? }] } with at least one entry." }, 400);
+  }
+  const parsed: {
+    label: string;
+    kind: CredentialKind;
+    meta?: Record<string, unknown>;
+    value: string;
+  }[] = [];
+  for (const raw of body.credentials) {
+    const ci = parseCredentialInput(raw);
+    if (ci === "invalid" || ci === undefined) {
+      return c.json(
+        { error: `Each credential is { label, kind, value, meta? } with kind in ${CREDENTIAL_KINDS.join(", ")}.` },
+        400,
+      );
+    }
+    parsed.push(ci);
+  }
+
+  const { db, encryptionKey } = c.var.providers;
+  const vault = createEngagementVault({
+    db,
+    key: deriveSecretKey(encryptionKey),
+    kekId: deriveKekId(encryptionKey),
+  });
+  const ownerUserId = await vault.ownerOf(result.engagement.id);
+  if (!ownerUserId) return c.json({ error: NO_ENGAGEMENT }, 404);
+  const requesterId = c.var.user?.id;
+  if (!requesterId || requesterId !== ownerUserId) {
+    return c.json(
+      { error: `Only the engagement's creator can add credentials to its vault.` },
+      403,
+    );
+  }
+
+  try {
+    const written: CredentialSummary[] = [];
+    for (const ci of parsed) {
+      const summary = await vault.writeCredential({
+        engagementId: result.engagement.id,
+        ownerUserId,
+        label: ci.label,
+        kind: ci.kind,
+        meta: ci.meta,
+        value: ci.value,
+      });
+      written.push(summary);
+    }
+    return c.json({ credentials: written.map(projectCredentialSummary) });
+  } catch (err) {
+    return vaultError(c, err);
+  }
+});
+
+/**
+ * GET /:id/security/vault — list the engagement's vault. Owner sees the
+ * label + kind + meta of every row; non-owner sees the count only. Values
+ * NEVER appear.
+ */
+securityRouter.get("/:id/security/vault", async (c) => {
+  const sessionId = c.req.param("id");
+  const row = await resolveViewableSession(c, sessionId);
+  if (!row) return c.json({ error: "session not found" }, 404);
+  const loaded = await loadEngagementOr404(c, sessionId);
+  if ("failure" in loaded) return loaded.failure;
+  const { result } = loaded;
+
+  const { db, encryptionKey } = c.var.providers;
+  const vault = createEngagementVault({
+    db,
+    key: deriveSecretKey(encryptionKey),
+    kekId: deriveKekId(encryptionKey),
+  });
+  const ownerUserId = await vault.ownerOf(result.engagement.id);
+  const requesterId = c.var.user?.id;
+  const isOwner = ownerUserId != null && requesterId === ownerUserId;
+  const count = await vault.countCredentials(result.engagement.id);
+  if (!isOwner) {
+    return c.json({
+      owner: ownerUserId ? { userId: ownerUserId } : null,
+      count,
+    });
+  }
+  try {
+    const credentials = await vault.listCredentials(result.engagement.id, requesterId!);
+    return c.json({
+      owner: { userId: ownerUserId },
+      count,
+      credentials: credentials.map(projectCredentialSummary),
+    });
+  } catch (err) {
+    return vaultError(c, err);
+  }
+});
+
+/**
+ * DELETE /:id/security/vault/:credentialId — owner-only crypto-shred by
+ * hard delete. Access log rows persist as an audit fact.
+ */
+securityRouter.delete("/:id/security/vault/:credentialId", async (c) => {
+  const sessionId = c.req.param("id");
+  const credentialId = c.req.param("credentialId");
+  const resolved = await resolveHumanSession(c, sessionId, "administer");
+  if ("failure" in resolved) return resolved.failure;
+
+  const { db, encryptionKey } = c.var.providers;
+  const vault = createEngagementVault({
+    db,
+    key: deriveSecretKey(encryptionKey),
+    kekId: deriveKekId(encryptionKey),
+  });
+  const requesterId = c.var.user?.id;
+  if (!requesterId) return c.json({ error: "authentication required" }, 401);
+  try {
+    await vault.deleteCredential(credentialId, requesterId);
+    return c.body(null, 204);
+  } catch (err) {
+    return vaultError(c, err);
+  }
+});
+
+/**
+ * GET /:id/security/vault/:credentialId/access — owner-only access log for
+ * one credential. Answers "who used my token, when, for what cell". No
+ * value, no fingerprint.
+ */
+securityRouter.get("/:id/security/vault/:credentialId/access", async (c) => {
+  const sessionId = c.req.param("id");
+  const credentialId = c.req.param("credentialId");
+  const resolved = await resolveHumanSession(c, sessionId, "administer");
+  if ("failure" in resolved) return resolved.failure;
+
+  const { db, encryptionKey } = c.var.providers;
+  const vault = createEngagementVault({
+    db,
+    key: deriveSecretKey(encryptionKey),
+    kekId: deriveKekId(encryptionKey),
+  });
+  const requesterId = c.var.user?.id;
+  if (!requesterId) return c.json({ error: "authentication required" }, 401);
+  try {
+    const rows = await vault.listAccess(credentialId, requesterId);
+    return c.json({
+      access: rows.map((r) => ({
+        id: r.id,
+        cellId: r.cellId,
+        sandboxId: r.sandboxId,
+        dispatchedAt: r.dispatchedAt,
+        releasedAt: r.releasedAt,
+      })),
+    });
+  } catch (err) {
+    return vaultError(c, err);
   }
 });

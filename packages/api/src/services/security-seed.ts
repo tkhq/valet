@@ -23,6 +23,7 @@ import {
   parseSecurityConfig,
   presetPlan,
   type SecurityConfig,
+  type SecurityConfigCredentialDecl,
   type SecurityScope,
   type ToolDecl,
 } from "@valet/plugin-security";
@@ -69,6 +70,9 @@ export interface SeededSecurityReview {
   tools: ToolDecl[] | null;
   /** The authorized live-testing scope (M-P4b). Null when absent. */
   scope: SecurityScope | null;
+  /** Vault credential decls from `.valet/security.yml.credentials` (Part 10
+   * §Config schema). Null when the block is absent or empty. */
+  credentials: SecurityConfigCredentialDecl[] | null;
   /** True when a valid `.valet/security.yml` seeded this review. */
   hasRepoConfig: boolean;
 }
@@ -94,6 +98,7 @@ export async function seedSecurityReview(args: SeedSecurityReviewArgs): Promise<
     configPersonaMarkdown: null,
     tools: null,
     scope: null,
+    credentials: null,
     hasRepoConfig: false,
   };
 
@@ -110,6 +115,8 @@ export async function seedSecurityReview(args: SeedSecurityReviewArgs): Promise<
     result.personas = config.personas ?? null;
     result.tools = config.tools ?? null;
     result.scope = config.scope ?? null;
+    result.credentials =
+      config.credentials && config.credentials.length > 0 ? config.credentials : null;
 
     // A config with steps seeds the plan; a config with no steps keeps the
     // preset plan but still carries the config context above.

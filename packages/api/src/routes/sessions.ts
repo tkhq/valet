@@ -35,7 +35,9 @@ import {
   securitySessionTitle,
   serializePlan,
 } from "@valet/plugin-security";
-import { deriveSecretKey } from "../lib/secret-crypto.js";
+import { deriveKekId, deriveSecretKey } from "../lib/secret-crypto.js";
+import { createEngagementVault } from "../services/security-vault.js";
+import type { SecurityConfigCredentialDecl } from "@valet/plugin-security";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import {
@@ -536,6 +538,9 @@ sessionsRouter.post("/", async (c) => {
       : "";
   let engagementConfig: SecurityConfigContext | undefined;
   let engagementHasRepoConfig = false;
+  // Part 10 §Config seed. Captured here so it survives the create tx and
+  // rides into the vault write after the engagement id lands.
+  let seededVaultCredentials: SecurityConfigCredentialDecl[] | null = null;
   if (kind === "security") {
     const [owner, repo] = repos[0].fullName.split("/");
     if (owner && repo) {
@@ -551,6 +556,7 @@ sessionsRouter.post("/", async (c) => {
         orgId: user.orgId,
       });
       engagementHasRepoConfig = seeded.hasRepoConfig;
+      seededVaultCredentials = seeded.credentials;
 
       // The plan: the re-scan v2 plan (recon → reconcile → sweeps → verify →
       // report), the setup page's edited plan, or the seeded plan (config steps
@@ -692,6 +698,44 @@ sessionsRouter.post("/", async (c) => {
       securityEngagementId = engagement.id;
     }
   });
+
+  // Part 10 §Config seed. A repo-committed `.valet/security.yml` may name
+  // credentials whose values live in the api's environment. Read each env
+  // and write the resolved value to the engagement's vault as its owner.
+  // A missing env var logs a warning and skips (the persona surfaces it as
+  // a fresh needs_human); a duplicate label rejection also warns and skips
+  // (unlikely because the vault is empty at create).
+  if (kind === "security" && securityEngagementId && seededVaultCredentials) {
+    const vault = createEngagementVault({
+      db,
+      key: deriveSecretKey(encryptionKey),
+      kekId: deriveKekId(encryptionKey),
+    });
+    for (const decl of seededVaultCredentials) {
+      const value = process.env[decl.env];
+      if (value === undefined || value === "") {
+        console.warn(
+          `security seed: vault credential "${decl.label}" needs env "${decl.env}"; skipping (persona will raise a fresh need).`,
+        );
+        continue;
+      }
+      try {
+        await vault.writeCredential({
+          engagementId: securityEngagementId,
+          ownerUserId: user.id,
+          label: decl.label,
+          kind: decl.kind,
+          meta: decl.meta,
+          value,
+        });
+      } catch (err) {
+        console.warn(
+          `security seed: vault write for "${decl.label}" failed:`,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
+  }
 
   // Zero-config generation (spec decision 13): after the bindings land,
   // upsert each repo's image source + touch its `last_bound_at` and kick a

@@ -2076,13 +2076,123 @@ export const securityNeeds = pgTable(
       .notNull()
       .default("open"),
     // The auto-resolution note or the human answer. Null while open/needs_human.
+    // For kind='credential', this column MUST stay NULL — the value routes
+    // through engagement_credentials via credentialId. Enforced at service
+    // level; a Postgres CHECK constraint may follow at 1.0.
     resolution: text("resolution"),
+    // For kind='credential', names the engagement_credentials row that
+    // carries the ciphertext. Null on every other need kind.
+    credentialId: text("credential_id"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     resolvedAt: bigint("resolved_at", { mode: "number" }),
   },
   (t) => [
     index("security_needs_engagement").on(t.engagementId),
     index("security_needs_cell").on(t.cellId),
+  ],
+);
+
+// Vault (Part 10). One row per credential a user provisions for an
+// engagement, at rest as v1:{iv}:{tag}:{ct} keyed off VALET_ENCRYPTION_KEY.
+// owner_user_id names the sole reader; every read stamps
+// engagement_credential_access. fingerprint (SHA-256(value)[0:16] base64url)
+// backs the tripwire index; the tripwire never sees the value plaintext.
+export const engagementCredentials = pgTable(
+  "engagement_credentials",
+  {
+    id: text("id").primaryKey(),
+    engagementId: text("engagement_id").notNull(),
+    // The session's user (agent_sessions.user_id). Only this user can list,
+    // decrypt, or delete this row. A session admin who is not the owner sees
+    // the vault count only.
+    ownerUserId: text("owner_user_id").notNull(),
+    // User-assigned per-engagement handle. Personas reference credentials by
+    // label; the label lands in prompts, the value never does.
+    label: text("label").notNull(),
+    kind: text("kind", {
+      enum: [
+        "password",
+        "session",
+        "headerToken",
+        "mtls",
+        "signingKey",
+        "toolAuth",
+        "testData",
+      ],
+    }).notNull(),
+    // Non-value metadata as JSON (host, algo, scheme, tool, format, role, ...).
+    // The tool composes outbound requests from these fields plus the decrypted
+    // value; the value stays in ciphertext.
+    metaJson: text("meta_json").notNull().default("{}"),
+    // v1:{iv}:{tag}:{ct} produced by encryptSecret against deriveSecretKey(VALET_ENCRYPTION_KEY).
+    ciphertext: text("ciphertext").notNull(),
+    // Env-stamped key id (INV-16). A restore into a mismatched environment
+    // refuses to decrypt because the row's kekId no longer matches.
+    kekId: text("kek_id").notNull(),
+    // sha256(value)[0:16] base64url. Backs the tripwire; never returned to a
+    // route. A hit on a stored engine entry / WS frame maps back to this row.
+    fingerprint: text("fingerprint").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    // Stamped at every materialize. Backs the 14-day TTL sweep.
+    lastUsedAt: bigint("last_used_at", { mode: "number" }),
+    // Set when the target rejects (401/403) or after crypto-shred marks the
+    // row unusable. The vault refuses to materialize a dead credential.
+    deadAt: bigint("dead_at", { mode: "number" }),
+    deadReason: text("dead_reason"),
+    // Optional per-credential TTL. The sweep DELETEs when past.
+    expiresAt: bigint("expires_at", { mode: "number" }),
+  },
+  (t) => [
+    uniqueIndex("engagement_credentials_engagement_label_unique").on(
+      t.engagementId,
+      t.label,
+    ),
+    index("engagement_credentials_owner").on(t.ownerUserId),
+    index("engagement_credentials_engagement").on(t.engagementId),
+  ],
+);
+
+// Audit row per materialize (Part 10 §Audit). Answers the owner's question
+// "who used my token in the last hour, and against what cell". No value,
+// no fingerprint, no url — the credential id + cell id are enough.
+export const engagementCredentialAccess = pgTable(
+  "engagement_credential_access",
+  {
+    id: text("id").primaryKey(),
+    credentialId: text("credential_id").notNull(),
+    engagementId: text("engagement_id").notNull(),
+    cellId: text("cell_id").notNull(),
+    sandboxId: text("sandbox_id"),
+    dispatchedAt: bigint("dispatched_at", { mode: "number" }).notNull(),
+    releasedAt: bigint("released_at", { mode: "number" }),
+  },
+  (t) => [
+    index("engagement_credential_access_credential").on(t.credentialId),
+    index("engagement_credential_access_engagement").on(t.engagementId),
+  ],
+);
+
+// Tripwire hits. A row here means a credential-value substring reached one
+// of the three seams (persist / send / egress); the cell was hard-failed,
+// the entry quarantined. No value is stored — only the label, the seam,
+// and enough context for a reviewer to inspect the entry after redaction.
+export const securityIncidents = pgTable(
+  "security_incidents",
+  {
+    id: text("id").primaryKey(),
+    engagementId: text("engagement_id").notNull(),
+    cellId: text("cell_id"),
+    credentialId: text("credential_id"),
+    credentialLabel: text("credential_label"),
+    seam: text("seam", {
+      enum: ["persist", "send", "egress"],
+    }).notNull(),
+    quarantinedEntryId: text("quarantined_entry_id"),
+    detectedAt: bigint("detected_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    index("security_incidents_engagement").on(t.engagementId),
+    index("security_incidents_cell").on(t.cellId),
   ],
 );
 
@@ -2095,3 +2205,6 @@ export type SecurityHandoffRow = typeof securityHandoffs.$inferSelect;
 export type SecurityFindingCommentRow = typeof securityFindingComments.$inferSelect;
 export type SecurityCoverageRow = typeof securityCoverage.$inferSelect;
 export type SecurityNeedRow = typeof securityNeeds.$inferSelect;
+export type EngagementCredentialRow = typeof engagementCredentials.$inferSelect;
+export type EngagementCredentialAccessRow = typeof engagementCredentialAccess.$inferSelect;
+export type SecurityIncidentRow = typeof securityIncidents.$inferSelect;

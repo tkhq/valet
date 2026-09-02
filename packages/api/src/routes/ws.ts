@@ -23,13 +23,20 @@ import type { Hono } from "hono";
 import type { UpgradeWebSocket } from "hono/ws";
 import { eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
-import { agentSessions } from "../schema/index.js";
+import { agentSessions, securityEngagements } from "../schema/index.js";
 import { busEventToWire, queueStateToWire, type WireEventDraft } from "../engine/bridge.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 import { deriveRunFields } from "../sessions/run-state.js";
 import { canViewSession } from "../services/session-access.js";
 import type { AssistantOwner, ClientFrame, SessionStatus, WireEvent } from "../wire/types.js";
 import type { DeliveredBusEvent } from "@valet/engine";
+import {
+  createEngagementVault,
+  type EngagementVault,
+  type TripwireIndexSnapshot,
+} from "../services/security-vault.js";
+import { recordTripwireHits, scanAndRedactWireEvent } from "../engine/tripwire.js";
+import { deriveKekId, deriveSecretKey } from "../lib/secret-crypto.js";
 
 const PING_INTERVAL_MS = 30_000;
 /** Page size for durable replay reads on resume. */
@@ -57,6 +64,14 @@ export function registerWsRoutes(
       // Track the most recent assistant messageId per thread so text_delta
       // events can be tagged with a real id (engine emits deltas without one).
       const activeMessageByThread = new Map<string, string>();
+      // Part 10 credential vault: per-connection tripwire snapshot. Loaded
+      // once at open when the session is bound to a security engagement AND
+      // the api has vault key material wired. Scans outbound frames for
+      // credential-value substrings; a hit redacts in place and records a
+      // security_incidents row.
+      let tripwire: TripwireIndexSnapshot | null = null;
+      let tripwireVault: EngagementVault | null = null;
+      let tripwireEngagementId: string | null = null;
 
       const send = (ws: { send: (data: string) => void }, draftEvent: WireEventDraft) => {
         const ev = { ...draftEvent, seq: ++seq, ts: Date.now() } as WireEvent;
@@ -153,6 +168,27 @@ export function registerWsRoutes(
               }
             }
 
+            // Load the credential tripwire index for this session's engagement
+            // (Part 10 §Redaction). No-op when the session is not bound to a
+            // security engagement or when vault key material is unwired.
+            if (providers.encryptionKey) {
+              const engRows = await providers.db
+                .select({ id: securityEngagements.id })
+                .from(securityEngagements)
+                .where(eq(securityEngagements.sessionId, sessionId))
+                .limit(1);
+              const engagementId = engRows[0]?.id;
+              if (engagementId) {
+                tripwireVault = createEngagementVault({
+                  db: providers.db,
+                  key: deriveSecretKey(providers.encryptionKey),
+                  kekId: deriveKekId(providers.encryptionKey),
+                });
+                tripwire = await tripwireVault.tripwireIndex(engagementId);
+                tripwireEngagementId = engagementId;
+              }
+            }
+
             // Map one bus event → wire frames and push them. Durable events
             // carry `offset`; we stamp it onto each frame so clients can
             // resume. Ephemeral frames (text_delta) have no offset.
@@ -167,6 +203,23 @@ export function registerWsRoutes(
                   if (filled) draft.messageId = filled;
                 }
                 if (busEvent.offset !== undefined) draft.offset = busEvent.offset;
+                if (tripwire && tripwireVault && tripwireEngagementId) {
+                  const hits = scanAndRedactWireEvent(draft, tripwire);
+                  if (hits.length > 0) {
+                    // Fire-and-forget: recording an incident MUST NOT delay
+                    // the frame delivery (the frame is ALREADY redacted at
+                    // this point). We log any recording failure but keep
+                    // the socket alive.
+                    void recordTripwireHits(
+                      tripwireVault,
+                      { engagementId: tripwireEngagementId },
+                      tripwire,
+                      hits,
+                    ).catch((err) => {
+                      console.error("ws tripwire: recordIncident failed:", err);
+                    });
+                  }
+                }
                 send(ws, draft);
               }
             };
@@ -256,6 +309,7 @@ export function registerWsRoutes(
         onClose() {
           if (pingTimer) clearInterval(pingTimer);
           if (unsubscribe) unsubscribe();
+          if (tripwire) tripwire.dispose();
         },
 
         onError(err) {

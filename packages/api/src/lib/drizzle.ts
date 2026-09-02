@@ -781,6 +781,105 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     probe: { kind: "index", index: "security_needs_cell" },
     sql: 'CREATE INDEX IF NOT EXISTS "security_needs_cell" ON "security_needs" ("cell_id")',
   },
+  {
+    // Vault (Part 10): the credential_id back-reference on a credential-typed
+    // need. Null on every non-credential need. Wired here so a deployed DB
+    // that predates the vault ships gets the column on its next boot.
+    describe: "security_needs.credential_id column",
+    probe: { kind: "column", table: "security_needs", column: "credential_id" },
+    sql: 'ALTER TABLE "security_needs" ADD COLUMN IF NOT EXISTS "credential_id" text',
+  },
+  {
+    describe: "engagement_credentials table",
+    probe: { kind: "table", table: "engagement_credentials" },
+    sql: `CREATE TABLE IF NOT EXISTS "engagement_credentials" (
+      "id" text PRIMARY KEY NOT NULL,
+      "engagement_id" text NOT NULL,
+      "owner_user_id" text NOT NULL,
+      "label" text NOT NULL,
+      "kind" text NOT NULL,
+      "meta_json" text DEFAULT '{}' NOT NULL,
+      "ciphertext" text NOT NULL,
+      "kek_id" text NOT NULL,
+      "fingerprint" text NOT NULL,
+      "created_at" bigint NOT NULL,
+      "last_used_at" bigint,
+      "dead_at" bigint,
+      "dead_reason" text,
+      "expires_at" bigint
+    )`,
+  },
+  {
+    describe: "engagement_credentials_engagement_label_unique index",
+    probe: {
+      kind: "index",
+      index: "engagement_credentials_engagement_label_unique",
+    },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "engagement_credentials_engagement_label_unique" ON "engagement_credentials" ("engagement_id", "label")',
+  },
+  {
+    describe: "engagement_credentials_owner index",
+    probe: { kind: "index", index: "engagement_credentials_owner" },
+    sql: 'CREATE INDEX IF NOT EXISTS "engagement_credentials_owner" ON "engagement_credentials" ("owner_user_id")',
+  },
+  {
+    describe: "engagement_credentials_engagement index",
+    probe: { kind: "index", index: "engagement_credentials_engagement" },
+    sql: 'CREATE INDEX IF NOT EXISTS "engagement_credentials_engagement" ON "engagement_credentials" ("engagement_id")',
+  },
+  {
+    describe: "engagement_credential_access table",
+    probe: { kind: "table", table: "engagement_credential_access" },
+    sql: `CREATE TABLE IF NOT EXISTS "engagement_credential_access" (
+      "id" text PRIMARY KEY NOT NULL,
+      "credential_id" text NOT NULL,
+      "engagement_id" text NOT NULL,
+      "cell_id" text NOT NULL,
+      "sandbox_id" text,
+      "dispatched_at" bigint NOT NULL,
+      "released_at" bigint
+    )`,
+  },
+  {
+    describe: "engagement_credential_access_credential index",
+    probe: {
+      kind: "index",
+      index: "engagement_credential_access_credential",
+    },
+    sql: 'CREATE INDEX IF NOT EXISTS "engagement_credential_access_credential" ON "engagement_credential_access" ("credential_id")',
+  },
+  {
+    describe: "engagement_credential_access_engagement index",
+    probe: {
+      kind: "index",
+      index: "engagement_credential_access_engagement",
+    },
+    sql: 'CREATE INDEX IF NOT EXISTS "engagement_credential_access_engagement" ON "engagement_credential_access" ("engagement_id")',
+  },
+  {
+    describe: "security_incidents table",
+    probe: { kind: "table", table: "security_incidents" },
+    sql: `CREATE TABLE IF NOT EXISTS "security_incidents" (
+      "id" text PRIMARY KEY NOT NULL,
+      "engagement_id" text NOT NULL,
+      "cell_id" text,
+      "credential_id" text,
+      "credential_label" text,
+      "seam" text NOT NULL,
+      "quarantined_entry_id" text,
+      "detected_at" bigint NOT NULL
+    )`,
+  },
+  {
+    describe: "security_incidents_engagement index",
+    probe: { kind: "index", index: "security_incidents_engagement" },
+    sql: 'CREATE INDEX IF NOT EXISTS "security_incidents_engagement" ON "security_incidents" ("engagement_id")',
+  },
+  {
+    describe: "security_incidents_cell index",
+    probe: { kind: "index", index: "security_incidents_cell" },
+    sql: 'CREATE INDEX IF NOT EXISTS "security_incidents_cell" ON "security_incidents" ("cell_id")',
+  },
 ];
 
 /** The repairs this database still lacks, by catalog probe — one query per
