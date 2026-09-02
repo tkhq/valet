@@ -20,6 +20,10 @@
     "./plugins": {
       "types": "./src/plugins/registry.gen.ts",
       "import": "./src/plugins/registry.gen.ts"
+    },
+    "./eval-flagged": {
+      "types": "./src/lib/eval-flagged.ts",
+      "import": "./src/lib/eval-flagged.ts"
     }
   },
   "scripts": {

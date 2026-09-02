@@ -20,6 +20,10 @@ export interface CliOptions {
   timeoutMs?: number;
   casesDir: string;
   baselinesDir: string;
+  /** Pull thumbs-rated sessions into the corpus instead of running cases. */
+  pullFlagged: boolean;
+  /** Rating to pull with --pull-flagged. Default positive. */
+  pullRating: "positive" | "negative";
 }
 
 /** Parse argv (no process side effects; throws on invalid input). */
@@ -35,8 +39,14 @@ export function parseCliArgs(argv: string[]): CliOptions {
       timeout: { type: "string" },
       cases: { type: "string" },
       baselines: { type: "string" },
+      "pull-flagged": { type: "boolean", default: false },
+      rating: { type: "string" },
     },
   });
+  const pullRating = values.rating ?? "positive";
+  if (pullRating !== "positive" && pullRating !== "negative") {
+    throw new Error(`--rating must be "positive" or "negative", got \`${values.rating}\``);
+  }
   let timeoutMs: number | undefined;
   if (values.timeout !== undefined) {
     timeoutMs = Number.parseInt(values.timeout, 10);
@@ -53,6 +63,8 @@ export function parseCliArgs(argv: string[]): CliOptions {
     ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     casesDir: resolve(values.cases ?? resolve(REPO_ROOT, "evals/cases")),
     baselinesDir: resolve(values.baselines ?? resolve(REPO_ROOT, "evals/baselines")),
+    pullFlagged: values["pull-flagged"],
+    pullRating,
   };
 }
 

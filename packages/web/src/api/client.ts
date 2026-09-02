@@ -155,6 +155,9 @@ import type {
   PatchSessionRequest,
   PatchSessionResponse,
   PauseSessionResponse,
+  GetSessionRatingsResponse,
+  PutRatingRequest,
+  PutRatingResponse,
   SessionKind,
   PatchThreadRequest,
   PatchThreadResponse,
@@ -585,6 +588,16 @@ export const api = {
     request<{ ok: true }>("DELETE", `/sessions/${encodeURIComponent(id)}`),
   patchSession: (id: string, body: PatchSessionRequest) =>
     request<PatchSessionResponse>("PATCH", `/sessions/${encodeURIComponent(id)}`, body),
+  getSessionRatings: (id: string) =>
+    request<GetSessionRatingsResponse>("GET", `/sessions/${encodeURIComponent(id)}/ratings`),
+  rateSession: (id: string, body: PutRatingRequest) =>
+    request<PutRatingResponse>("POST", `/sessions/${encodeURIComponent(id)}/rating`, body),
+  rateMessage: (sessionId: string, entryId: string, body: PutRatingRequest) =>
+    request<PutRatingResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(entryId)}/rating`,
+      body,
+    ),
   mintSandboxJwt: (id: string) =>
     request<SandboxJwtResponse>("POST", `/sessions/${encodeURIComponent(id)}/sandbox-jwt`),
   pauseSession: (id: string) =>

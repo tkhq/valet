@@ -1281,3 +1281,21 @@ FROM "llm_proxy_requests" p
 -- non-completion passthroughs (0 tokens), which would otherwise inflate
 -- `/api/usage` turn counts.
 WHERE p."total_tokens" > 0;
+--> statement-breakpoint
+CREATE TABLE "ratings" (
+	"id" text PRIMARY KEY NOT NULL,
+	"user_id" text NOT NULL,
+	"target_type" text NOT NULL,
+	"target_id" text NOT NULL,
+	"session_id" text NOT NULL,
+	"thread_id" text,
+	"rating" text NOT NULL,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "ratings_user_target" ON "ratings" ("user_id","target_type","target_id");
+--> statement-breakpoint
+CREATE INDEX "ratings_session" ON "ratings" ("session_id");
+--> statement-breakpoint
+CREATE INDEX "ratings_type_rating" ON "ratings" ("target_type","rating");

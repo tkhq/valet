@@ -12,7 +12,28 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import type { StreamMessage } from "~/stores/stream";
+
+// The rating hooks need a QueryClient these renders don't mount; spread the
+// real module so every other export stays present (see session-header.test.tsx).
+vi.mock("~/api/queries", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/queries")>();
+  return {
+    ...actual,
+    useSessionRatings: () => ({ data: { session: null, entries: {} }, isLoading: false, error: null }),
+    useRateMessage: () => ({ isPending: false, mutate: vi.fn() }),
+  };
+});
+
+import { TooltipProvider } from "~/components/primitives";
 import { MessageItem } from "./message-item";
+
+function renderItem(message: StreamMessage) {
+  return render(
+    <TooltipProvider>
+      <MessageItem message={message} />
+    </TooltipProvider>,
+  );
+}
 
 function msg(over: Partial<StreamMessage> = {}): StreamMessage {
   return {
@@ -31,7 +52,7 @@ describe("MessageItem copy button", () => {
   it("copies the message text", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.assign(navigator, { clipboard: { writeText } });
-    render(<MessageItem message={msg({ parts: [{ kind: "text", text: "The answer is 42" }] })} />);
+    renderItem(msg({ parts: [{ kind: "text", text: "The answer is 42" }] }));
 
     fireEvent.click(screen.getByRole("button", { name: "Copy message" }));
     await Promise.resolve();
@@ -41,7 +62,7 @@ describe("MessageItem copy button", () => {
   it("copies a user message too", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.assign(navigator, { clipboard: { writeText } });
-    render(<MessageItem message={msg({ role: "user", content: "run the migration" })} />);
+    renderItem(msg({ role: "user", content: "run the migration" }));
 
     fireEvent.click(screen.getByRole("button", { name: "Copy message" }));
     await Promise.resolve();
@@ -51,20 +72,18 @@ describe("MessageItem copy button", () => {
   it("shows no button on a message with no text to copy", () => {
     // A tool-only assistant turn. Each tool card carries its own copy
     // button, so a message-level one here would copy an empty string.
-    render(
-      <MessageItem
-        message={msg({
-          parts: [
-            {
-              kind: "tool_call",
-              callId: "c1",
-              toolName: "bash",
-              args: { command: "ls" },
-              status: "completed",
-            },
-          ],
-        })}
-      />,
+    renderItem(
+      msg({
+        parts: [
+          {
+            kind: "tool_call",
+            callId: "c1",
+            toolName: "bash",
+            args: { command: "ls" },
+            status: "completed",
+          },
+        ],
+      }),
     );
     expect(screen.queryByRole("button", { name: "Copy message" })).toBeNull();
   });
