@@ -1053,3 +1053,9 @@ FROM "llm_proxy_requests" p
 -- non-completion passthroughs (0 tokens), which would otherwise inflate
 -- `/api/usage` turn counts.
 WHERE p."total_tokens" > 0;
+--> statement-breakpoint
+-- The view's version stamp. SCHEMA_REPAIRS (packages/api/src/lib/drizzle.ts)
+-- probes this comment to decide whether an already-migrated database still
+-- runs an old definition. Bump the version here AND in both cost_entries
+-- repair entries on EVERY edit to the view above.
+COMMENT ON VIEW "cost_entries" IS '2';

@@ -144,10 +144,14 @@ interface SchemaRepair {
     | { kind: "table"; table: string }
     | { kind: "index"; index: string }
     // A view whose DEFINITION changed in place: the view exists on every
-    // database, so presence alone proves nothing. `marker` is a substring
-    // that only the new definition's decompiled form (pg_views.definition)
-    // contains — its absence means the old definition is still live.
-    | { kind: "view"; view: string; marker: string };
+    // database, so presence alone proves nothing. The probe compares a
+    // version stamp stored as COMMENT ON VIEW — a database whose comment
+    // differs (or whose view is missing) needs the repair. Every in-place
+    // edit to the view MUST bump the version in three places: here, the
+    // COMMENT repair entry, and the COMMENT statement in 0000_app.sql.
+    // (A definition-substring marker was rejected: a future edit that
+    // happens to keep the substring would silently never deploy.)
+    | { kind: "view"; view: string; version: string };
   sql: string;
 }
 
@@ -338,10 +342,11 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
   {
     // The view must read those generated columns instead of re-casting the
     // JSON per row. Runs after the column repair above (list order). Keep
-    // the definition in lockstep with 0000_app.sql. The marker only appears
-    // once the engine arm selects the generated column directly.
+    // the definition in lockstep with 0000_app.sql, and bump the version
+    // (here, in the stamp entry below, and in 0000_app.sql's COMMENT) on
+    // every definition edit.
     describe: "cost_entries view over generated columns",
-    probe: { kind: "view", view: "cost_entries", marker: "e.input_tokens" },
+    probe: { kind: "view", view: "cost_entries", version: "2" },
     sql: `CREATE OR REPLACE VIEW "cost_entries" AS
       SELECT
         e."id" AS "entry_id", e."session_id" AS "session_id", e."created_at" AS "created_at", e."model" AS "model",
@@ -373,6 +378,15 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
         p."total_tokens", p."cost_usd", (p."cost_usd" IS NOT NULL), 'proxy'
       FROM "llm_proxy_requests" p
       WHERE p."total_tokens" > 0`,
+  },
+  {
+    // The stamp that tells the probe the definition above is live. A
+    // separate entry because a repair runs ONE statement; sharing the
+    // probe with the view entry means a crash between the two re-runs
+    // both (idempotent) on the next boot.
+    describe: "cost_entries view version stamp",
+    probe: { kind: "view", view: "cost_entries", version: "2" },
+    sql: `COMMENT ON VIEW "cost_entries" IS '2'`,
   },
 ];
 
@@ -421,21 +435,27 @@ export async function missingSchemaRepairs(db: PgDb): Promise<SchemaRepair[]> {
     (row) => `index:${String(row["indexname"])}`,
   );
 
-  // View definitions need a per-probe marker check, so they cannot ride the
-  // generic name-presence collector above.
-  const viewDefs = new Map<string, string>();
+  // View versions need a per-probe value comparison, so they cannot ride
+  // the generic name-presence collector above. The stamp lives in the
+  // view's COMMENT (pg_description, objsubid 0 = the relation itself).
+  const viewVersions = new Map<string, string | null>();
   if (viewNames.length > 0) {
     const result = await db.query(
-      `SELECT viewname, definition FROM pg_views
-       WHERE schemaname = current_schema()
-         AND viewname IN (SELECT jsonb_array_elements_text($1::jsonb))`,
+      `SELECT c.relname AS viewname, d.description
+       FROM pg_class c
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       LEFT JOIN pg_description d ON d.objoid = c.oid AND d.objsubid = 0
+       WHERE n.nspname = current_schema() AND c.relkind = 'v'
+         AND c.relname IN (SELECT jsonb_array_elements_text($1::jsonb))`,
       [JSON.stringify(viewNames)],
     );
-    for (const row of result.rows) viewDefs.set(String(row["viewname"]), String(row["definition"]));
+    for (const row of result.rows) {
+      viewVersions.set(String(row["viewname"]), row["description"] === null ? null : String(row["description"]));
+    }
   }
 
   return SCHEMA_REPAIRS.filter(({ probe: p }) => {
-    if (p.kind === "view") return !(viewDefs.get(p.view)?.includes(p.marker) ?? false);
+    if (p.kind === "view") return viewVersions.get(p.view) !== p.version;
     const key = p.kind === "column" ? `column:${p.table}.${p.column}` : p.kind === "table" ? `table:${p.table}` : `index:${p.index}`;
     return !present.has(key);
   });

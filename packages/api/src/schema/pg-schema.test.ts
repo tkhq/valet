@@ -736,6 +736,19 @@ describe("pg app schema + migrations", () => {
       expect(backfilled.rows[0]).toEqual({ total: 5 });
     });
 
+    // The view probe must key on the version stamp (COMMENT ON VIEW), not on
+    // definition text: a substring marker silently rots when a future edit
+    // keeps the substring, stranding deployed databases on the old body.
+    it("re-fires the view repair when the version stamp is stale, regardless of definition text", async () => {
+      await db.query(`COMMENT ON VIEW "cost_entries" IS 'v0-stale'`);
+      const missing = (await missingSchemaRepairs(db)).map((r) => r.describe);
+      expect(missing).toContain("cost_entries view over generated columns");
+      expect(missing).toContain("cost_entries view version stamp");
+
+      await applyAppMigrations(db);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+    });
+
     // A database migrated before the proxy commits has NO llm_proxy_requests
     // table and a cost_entries view with no proxy arm. The view repair
     // reads that table, so the table repair must run first (list order) —
