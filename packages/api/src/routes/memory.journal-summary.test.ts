@@ -19,6 +19,7 @@ interface JournalSummaryResponse {
   date: string;
   summary: string | null;
   pending?: boolean;
+  failed?: boolean;
 }
 
 let api: TestApi | undefined;
@@ -92,11 +93,74 @@ describe("GET /api/memory/journal-summary", () => {
     expect(first.pending).toBe(true);
 
     // Once the background call has failed, polling must settle (no pending),
-    // or the card would poll and re-call the model forever.
+    // or the card would poll and re-call the model forever. `failed` lets
+    // the card say the summary is unavailable instead of claiming there is
+    // no journal entry.
     await vi.waitFor(async () => {
       const later = await getJournalSummary(api!);
       expect(later.summary).toBeNull();
       expect(later.pending).toBeUndefined();
+      expect(later.failed).toBe(true);
+    });
+  });
+
+  it("retries a failed generation after the failure memo expires", async () => {
+    faux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
+    let calls = 0;
+    faux.setResponses([
+      () => {
+        calls++;
+        throw new Error("transient 429");
+      },
+      () => {
+        calls++;
+        return fauxAssistantMessage("Recovered after the blip.");
+      },
+    ]);
+    vi.stubEnv("ANTHROPIC_API_KEY", "faux-key");
+    api = await bootTestApi();
+    await putJournal(api, "A journal whose first generation hits a transient error.");
+
+    await getJournalSummary(api);
+    await vi.waitFor(async () => {
+      expect((await getJournalSummary(api!)).failed).toBe(true);
+    });
+    expect(calls).toBe(1);
+
+    // A transient failure must not suppress the summary for the rest of the
+    // day: once the memo expires, the next poll generates again.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + 6 * 60_000);
+      const retry = await getJournalSummary(api);
+      expect(retry.pending).toBe(true);
+      await vi.waitFor(async () => {
+        expect((await getJournalSummary(api!)).summary).toBe("Recovered after the blip.");
+      });
+      expect(calls).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("times out a hung model call and settles the client as failed", async () => {
+    faux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
+    faux.setResponses([
+      // Never resolves — a wedged upstream stream.
+      () => new Promise<never>(() => {}),
+    ]);
+    vi.stubEnv("ANTHROPIC_API_KEY", "faux-key");
+    vi.stubEnv("VALET_JOURNAL_SUMMARY_TIMEOUT_MS", "100");
+    api = await bootTestApi();
+    await putJournal(api, "A journal whose generation hangs forever.");
+
+    const first = await getJournalSummary(api);
+    expect(first.pending).toBe(true);
+
+    await vi.waitFor(async () => {
+      const later = await getJournalSummary(api!);
+      expect(later.pending).toBeUndefined();
+      expect(later.failed).toBe(true);
     });
   });
 });

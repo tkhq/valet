@@ -246,12 +246,21 @@ memoryRouter.get("/", async (c) => {
  * The model call takes seconds, so it never runs on the request path: a
  * cache miss answers `pending: true` immediately and generates in the
  * background; the client polls and picks the result up from the cache.
- * A failed generation is remembered per content-hash (edit the journal to
- * retry), so a polling client cannot re-call the model in a loop.
+ * A failed generation is remembered per content-hash (value = failure
+ * time) so a polling client cannot re-call the model in a loop; the memo
+ * expires after `JOURNAL_FAILURE_TTL_MS` so a transient provider error
+ * does not suppress the summary for the rest of the day. While the memo
+ * is fresh the response carries `failed: true`, never `pending`.
  */
 const journalSummaryCache = new Map<string, string>();
-const journalSummaryFailed = new Map<string, true>();
+const journalSummaryFailed = new Map<string, number>();
 const journalSummaryInFlight = new Set<string>();
+const JOURNAL_FAILURE_TTL_MS = 5 * 60_000;
+/** Bounds the model call; a wedged stream must settle the polling client. */
+function journalSummaryTimeoutMs(): number {
+  const fromEnv = Number(process.env.VALET_JOURNAL_SUMMARY_TIMEOUT_MS);
+  return Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : 30_000;
+}
 /** Keys carry a date + content hash, so stale entries accumulate forever
  * on a long-lived process — evict oldest-inserted past this bound. */
 const JOURNAL_CACHE_MAX = 512;
@@ -267,13 +276,15 @@ function boundedPut<V>(map: Map<string, V>, key: string, value: V): void {
 /** The background half of `/journal-summary`: one Haiku call, result into
  * the cache (or the failure memo). Never throws — nothing awaits it. */
 async function generateJournalSummary(cacheKey: string, content: string): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
   try {
     const model = getModel("anthropic", "claude-haiku-4-5");
     if (!model) {
-      boundedPut(journalSummaryFailed, cacheKey, true);
+      boundedPut(journalSummaryFailed, cacheKey, Date.now());
       return;
     }
-    const result = await completeSimple(
+    const timeoutMs = journalSummaryTimeoutMs();
+    const call = completeSimple(
       model,
       {
         systemPrompt:
@@ -284,19 +295,32 @@ async function generateJournalSummary(cacheKey: string, content: string): Promis
           { role: "user", content: [{ type: "text", text: content.slice(0, 12_000) }], timestamp: Date.now() },
         ],
       },
-      { temperature: 0.3, maxTokens: 80 },
+      // `timeoutMs` bounds the provider HTTP call and stream idleness; the
+      // outer race below also covers drivers that ignore the option, so a
+      // wedged call cannot pin `pending` (and the client's 2s poll) forever.
+      { temperature: 0.3, maxTokens: 80, timeoutMs },
     );
+    const result = await Promise.race([
+      call,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`journal-summary model call timed out after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+      }),
+    ]);
     const summary = result.content
       .filter((b): b is { type: "text"; text: string } => b.type === "text")
       .map((b) => b.text)
       .join("")
       .trim();
     if (summary) boundedPut(journalSummaryCache, cacheKey, summary);
-    else boundedPut(journalSummaryFailed, cacheKey, true);
+    else boundedPut(journalSummaryFailed, cacheKey, Date.now());
   } catch (err) {
     console.error("journal-summary generation failed:", err);
-    boundedPut(journalSummaryFailed, cacheKey, true);
+    boundedPut(journalSummaryFailed, cacheKey, Date.now());
   } finally {
+    if (timer !== undefined) clearTimeout(timer);
     journalSummaryInFlight.delete(cacheKey);
   }
 }
@@ -336,7 +360,11 @@ memoryRouter.get("/journal-summary", async (c) => {
   const cacheKey = `${scope.owner.type}:${scope.owner.id}:${date}:${djb2(content)}`;
   const cached = journalSummaryCache.get(cacheKey);
   if (cached) return c.json({ date, summary: cached });
-  if (journalSummaryFailed.has(cacheKey)) return c.json({ date, summary: null });
+  const failedAt = journalSummaryFailed.get(cacheKey);
+  if (failedAt !== undefined) {
+    if (Date.now() - failedAt < JOURNAL_FAILURE_TTL_MS) return c.json({ date, summary: null, failed: true });
+    journalSummaryFailed.delete(cacheKey);
+  }
 
   if (!journalSummaryInFlight.has(cacheKey)) {
     journalSummaryInFlight.add(cacheKey);

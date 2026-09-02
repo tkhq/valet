@@ -135,7 +135,10 @@ export function MemoryCard() {
                   {summaryQ.data.summary}
                 </Link>
               )}
-              {!summaryQ.isLoading && !summaryQ.data?.pending && !summaryQ.data?.summary && (
+              {!summaryQ.isLoading && summaryQ.data?.failed && (
+                <p className="text-xs text-muted">Summary unavailable right now. It retries automatically.</p>
+              )}
+              {!summaryQ.isLoading && !summaryQ.data?.pending && !summaryQ.data?.failed && !summaryQ.data?.summary && (
                 <p className="text-xs text-muted">No journal entry yet today.</p>
               )}
             </div>
