@@ -322,7 +322,9 @@ describe("compaction: auto-continue", () => {
       },
     ]);
 
-    const receipt = await session.prompt(OVER_BUDGET_PROMPT);
+    const receipt = await session.prompt(OVER_BUDGET_PROMPT, {
+      channel: { channelType: "slack", channelId: "slack:T1:D1" },
+    });
     // Wait for two turn_ends after the prompt: the original third turn,
     // then the auto-continue turn.
     await waitFor(
@@ -343,6 +345,10 @@ describe("compaction: auto-continue", () => {
     expect(autoContinue).toBeDefined();
     if (autoContinue?.type === "message") {
       expect(autoContinue.content).toContain("Continue if you have next steps");
+      // The continuation answers the same reader as the turn it continues:
+      // it inherits the interrupted item's channel mark, so the outbound
+      // channel path does not classify it as a web prompt (TKAI-323).
+      expect(autoContinue.channel).toEqual({ channelType: "slack", channelId: "slack:T1:D1" });
     }
     // And the assistant's continuation response should follow it.
     const lastAssistant = entries

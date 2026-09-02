@@ -305,10 +305,12 @@ export function entryToRow(entry: SessionEntry): EntryInsertRow {
       };
     case "command_result":
       // command, source, ok, and output stored in metadata as opaque JSON
-      // per Task 8 design (no dedicated columns needed).
+      // per Task 8 design (no dedicated columns needed). `channel` uses the
+      // shared column so the surface mark survives reload (TKAI-323).
       return {
         ...base,
         content: entry.output,
+        channel: jsonOrNull(entry.channel),
         metadata: JSON.stringify({
           ...(entry.metadata ?? {}),
           command: entry.command,
@@ -414,6 +416,7 @@ export function rowToEntry(row: EntryRow): SessionEntry {
         source: asCommandSource(source),
         ok: ok ?? false,
         output: row.content ?? "",
+        channel: parseJson(row.channel),
         metadata: Object.keys(userMeta).length > 0 ? (userMeta as Record<string, unknown>) : undefined,
         createdAt: row.createdAt,
         queueItemId: row.queueItemId ?? undefined,
