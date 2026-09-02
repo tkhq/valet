@@ -204,6 +204,37 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "allow_public_artifacts" boolean NOT NULL DEFAULT false',
   },
   {
+    // Thumbs up/down feedback (TKAI-334) — the eval-seeding signal.
+    describe: "ratings table",
+    probe: { kind: "table", table: "ratings" },
+    sql: `CREATE TABLE IF NOT EXISTS "ratings" (
+      "id" text PRIMARY KEY NOT NULL,
+      "user_id" text NOT NULL,
+      "target_type" text NOT NULL,
+      "target_id" text NOT NULL,
+      "session_id" text NOT NULL,
+      "thread_id" text,
+      "rating" text NOT NULL,
+      "created_at" bigint NOT NULL,
+      "updated_at" bigint NOT NULL
+    )`,
+  },
+  {
+    describe: "ratings_user_target index",
+    probe: { kind: "index", index: "ratings_user_target" },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "ratings_user_target" ON "ratings" ("user_id","target_type","target_id")',
+  },
+  {
+    describe: "ratings_session index",
+    probe: { kind: "index", index: "ratings_session" },
+    sql: 'CREATE INDEX IF NOT EXISTS "ratings_session" ON "ratings" ("session_id")',
+  },
+  {
+    describe: "ratings_type_rating index",
+    probe: { kind: "index", index: "ratings_type_rating" },
+    sql: 'CREATE INDEX IF NOT EXISTS "ratings_type_rating" ON "ratings" ("target_type","rating")',
+  },
+  {
     // The artifacts table itself (artifacts design) — a whole-table sibling
     // of the column repairs, for the same reason.
     describe: "artifacts table",

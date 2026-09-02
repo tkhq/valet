@@ -18,6 +18,31 @@ import { extractSkillInvocation, type SkillBlock } from "./tool-renderers/skill"
 import { cn } from "~/lib/cn";
 import { shortModelLabel } from "~/lib/models";
 import { userInitials } from "~/lib/user-initials";
+import { useRateMessage, useSessionRatings } from "~/api/queries";
+import { RatingButtons } from "./rating-buttons";
+
+/**
+ * Per-message 👍/👎 (TKAI-334): finer-grained than the session-level rating
+ * in the header — "turn 3 was bad" data, not the primary eval signal.
+ * Hidden until hover unless a rating is set (mirrors the copy button).
+ */
+function MessageRating({ message }: { message: StreamMessage }) {
+  const ratings = useSessionRatings(message.sessionId);
+  const rate = useRateMessage(message.sessionId);
+  const value = ratings.data?.entries[message.id] ?? null;
+  return (
+    <RatingButtons
+      subject="reply"
+      value={value}
+      disabled={rate.isPending}
+      onRate={(rating) => rate.mutate({ entryId: message.id, threadId: message.threadId, rating })}
+      className={cn(
+        "opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity",
+        value !== null && "opacity-100",
+      )}
+    />
+  );
+}
 
 export function MessageItem({
   message,
@@ -79,13 +104,16 @@ export function MessageItem({
               </span>
             )}
             {message.settledOutcome && <SettledBadge outcome={message.settledOutcome} />}
-            {copyText && (
-              <CopyButton
-                getText={() => copyText}
-                label="Copy message"
-                className="ml-auto opacity-0 group-hover:opacity-100"
-              />
-            )}
+            <div className="ml-auto flex items-center gap-1">
+              {message.role === "assistant" && <MessageRating message={message} />}
+              {copyText && (
+                <CopyButton
+                  getText={() => copyText}
+                  label="Copy message"
+                  className="opacity-0 group-hover:opacity-100"
+                />
+              )}
+            </div>
           </div>
           <div className="space-y-2">
             {isUser && message.attachments && message.attachments.length > 0 && (

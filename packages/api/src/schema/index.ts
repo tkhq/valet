@@ -2145,3 +2145,32 @@ export type SecurityHandoffRow = typeof securityHandoffs.$inferSelect;
 export type SecurityFindingCommentRow = typeof securityFindingComments.$inferSelect;
 export type SecurityCoverageRow = typeof securityCoverage.$inferSelect;
 export type SecurityNeedRow = typeof securityNeeds.$inferSelect;
+
+// ── Ratings (TKAI-334) ─────────────────────────────────────────────────────
+// Thumbs up/down feedback. One table, polymorphic target: a session-level
+// rating (`target_type = 'session'`, target_id = session id) is the primary
+// eval-seeding signal; an entry-level rating (`target_type = 'entry'`,
+// target_id = engine entry id) is finer-grained debugging data. One rating
+// per (user, target); re-rating updates the row, null clears it.
+export const ratings = pgTable(
+  "ratings",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    targetType: text("target_type", { enum: ["session", "entry"] }).notNull(),
+    targetId: text("target_id").notNull(),
+    sessionId: text("session_id").notNull(),
+    // Engine thread holding the rated entry. Null for session-level rows.
+    threadId: text("thread_id"),
+    rating: text("rating", { enum: ["positive", "negative"] }).notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    uniqueIndex("ratings_user_target").on(t.userId, t.targetType, t.targetId),
+    index("ratings_session").on(t.sessionId),
+    index("ratings_type_rating").on(t.targetType, t.rating),
+  ],
+);
+
+export type RatingRow = typeof ratings.$inferSelect;

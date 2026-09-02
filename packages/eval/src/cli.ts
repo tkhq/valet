@@ -13,7 +13,8 @@
  *
  * Exits 0 when every run case passes, 1 otherwise.
  */
-import { dirname, resolve } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { bundledPlugins } from "@valet/api/plugins";
 import { DockerSandboxProvider } from "@valet/sandbox-docker";
@@ -21,6 +22,7 @@ import { loadCases } from "./case-loader.js";
 import { filterCases, parseCliArgs } from "./cli-args.js";
 import { buildJudgeRunner } from "./checks/judge.js";
 import { dockerAvailable, loadEvalCredentials } from "./integration.js";
+import { pullFlagged } from "./pull-flagged.js";
 import { formatScorecard } from "./scorecard.js";
 import { runSuite } from "./suite.js";
 
@@ -28,6 +30,25 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
 async function main(): Promise<number> {
   const opts = parseCliArgs(process.argv.slice(2));
+
+  if (opts.pullFlagged) {
+    // Reads the database directly. On PGlite, the api must be stopped first
+    // (single-owner data dir) — run `make dev-stop` before pulling.
+    const dataDir = process.env.VALET_DATA_DIR ?? join(homedir(), ".valet");
+    const result = await pullFlagged({
+      ...(process.env.DATABASE_URL !== undefined ? { databaseUrl: process.env.DATABASE_URL } : {}),
+      pgDataDir: resolve(dataDir, "pg"),
+      rating: opts.pullRating,
+      baselinesDir: opts.baselinesDir,
+    });
+    process.stdout.write(
+      result.files.length > 0
+        ? `pulled ${result.files.length} ${opts.pullRating}-rated session(s):\n${result.files.join("\n")}\n`
+        : `no ${opts.pullRating}-rated sessions found. Rate sessions with 👍/👎 in the web UI first.\n`,
+    );
+    return 0;
+  }
+
   const allCases = await loadCases(opts.casesDir);
   const cases = filterCases(allCases, opts.filter);
   if (cases.length === 0) {

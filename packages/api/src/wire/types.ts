@@ -4552,3 +4552,39 @@ export interface PostSessionFileUploadResponse {
   /** PDF metadata. Present only when the upload is a PDF. */
   pdf?: PostSessionFileUploadPdfInfo;
 }
+
+// ── Ratings (TKAI-334) ─────────────────────────────────────────────────────
+
+export type RatingValue = "positive" | "negative";
+
+/** `rating: null` clears the caller's rating on the target. */
+export interface PutRatingRequest {
+  rating: RatingValue | null;
+  /** Entry ratings only: the engine thread holding the rated entry. */
+  threadId?: string;
+}
+
+export interface PutRatingResponse {
+  rating: RatingValue | null;
+}
+
+/** The caller's ratings inside one session, for rendering persisted state. */
+export interface GetSessionRatingsResponse {
+  session: RatingValue | null;
+  /** Entry-level ratings keyed by entry id. */
+  entries: Record<string, RatingValue>;
+}
+
+export interface FlaggedSessionWire {
+  sessionId: string;
+  rating: RatingValue;
+  title: string | null;
+  /** Rating timestamps (ms epoch). */
+  ratedAt: number;
+}
+
+export interface ListFlaggedResponse {
+  flagged: FlaggedSessionWire[];
+  /** Present when more rows exist; pass back as ?cursor=. */
+  nextCursor?: string;
+}
