@@ -10,6 +10,7 @@ import type {
 import { slackFetch, slackGet } from "./api.js";
 import { checkPrivateChannelAccess } from "./channel-access.js";
 import { buildContentBlocks, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS } from "../message-chunking.js";
+import { SlackApi } from "../transport/api.js";
 
 /**
  * Curried action builder. The first call binds T from the parameters
@@ -1051,6 +1052,25 @@ const deleteMessage = action(Type.Object({
   },
 });
 
+const joinChannel = action(Type.Object({
+    channel: Type.String({ description: 'Channel ID (C...) to join' }),
+  }))({
+  id: 'slack.join_channel',
+  name: 'Join Channel',
+  description:
+    'Adds Valet as a member of a public Slack channel via conversations.join. Idempotent: a channel the bot already belongs to returns already_in=true instead of an error. Private channels are not supported; the bot must be invited to those.',
+  riskLevel: 'high',
+  execute: async (args, ctx) => {
+    const cred = await ctx.credentials.get();
+    const token = cred?.accessToken ?? '';
+    if (!token) return { success: false, error: 'Missing bot_token' };
+    const api = new SlackApi(token);
+    const res = await api.joinChannel(args.channel);
+    if (!res.ok) return { success: false, error: `Slack API error: ${res.error}` };
+    return { success: true, data: { channel: args.channel, already_in: res.alreadyIn } };
+  },
+});
+
 export const slackPlugin: ActionPlugin = {
   service: 'slack',
   description: 'Slack integration for messages, channels, and users',
@@ -1071,5 +1091,6 @@ export const slackPlugin: ActionPlugin = {
     reactToOrigin,
     updateMessage,
     deleteMessage,
+    joinChannel,
   ],
 };
