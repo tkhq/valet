@@ -80,8 +80,17 @@ toModel, reason}`. The web client stores it per thread
 (`failoverByThread`, `packages/web/src/stores/stream.ts`) and renders a
 neutral info strip under the transcript — not an error banner, and no
 thread-status flip: the turn is recovering, not failing. The notice
-survives the recovered turn's streaming and clears on the user's next
-prompt, which runs on the original model again.
+survives the recovered turn's streaming; it retires when the next turn
+starts streaming (`turn_end` arms it, the next `message_start` clears it)
+or when the user sends the next prompt. Unattended sessions never type
+into the composer, so a prompt-only clear would leave the notice up
+forever.
+
+The failing model is tracked as the turn's ACTIVE spec
+(`turnActiveModelSpec` in `thread.ts`): a role's model frontmatter
+overrides the streaming model without touching the layered resolution, and
+failover must exclude the provider that is really failing, not the
+default's.
 
 ## Deferred (multi-sprint scope from TKAI-326)
 

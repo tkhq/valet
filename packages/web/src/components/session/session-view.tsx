@@ -296,7 +296,7 @@ export function SessionView({
             <div className="border-t border-[--border] px-4 py-1.5 text-[11px] text-muted">
               Switched this turn to <span className="font-medium">{failover.toModel}</span> because{" "}
               <span className="font-medium">{failover.fromModel}</span> kept failing (
-              {failover.reason}). Your next message uses{" "}
+              {failover.reason}). The next turn uses{" "}
               <span className="font-medium">{failover.fromModel}</span> again.
             </div>
           )}

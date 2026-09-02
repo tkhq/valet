@@ -156,10 +156,17 @@ export interface SessionStreamState {
    * the retry loop ran one turn on an equivalent model because the primary
    * provider kept failing. Informational, not an error — the notice
    * survives the recovered turn's streaming (message_start must NOT clear
-   * it: the failover continue streams immediately) and clears when the
-   * user sends the next prompt, which runs on the original model again.
+   * it: the failover continue streams immediately). `turnEnded` flips on
+   * that turn's `turn_end`; the FIRST `message_start` after it means a new
+   * turn is running on the original model, so the notice retires then —
+   * unattended sessions (the failover population) never type into the
+   * composer, so clearing only on `addUserMessage` left the notice up
+   * forever. A composer send still clears it immediately.
    */
-  failoverByThread: Record<string, { fromModel: string; toModel: string; reason: string }>;
+  failoverByThread: Record<
+    string,
+    { fromModel: string; toModel: string; reason: string; turnEnded: boolean }
+  >;
   /**
    * A wire error with no threadId (e.g. `ws_open_failed`) — a session-level
    * failure, shown whatever thread is active.
@@ -318,6 +325,13 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       if (slice.errorByThread[ev.threadId]) {
         const { [ev.threadId]: _, ...rest } = slice.errorByThread;
         next.errorByThread = rest;
+      }
+      // A failover notice whose turn already ended is retired by the next
+      // turn's first stream — this message proves a new turn is running on
+      // the re-resolved (original) model (TKAI-326).
+      if (slice.failoverByThread[ev.threadId]?.turnEnded) {
+        const { [ev.threadId]: _, ...rest } = slice.failoverByThread;
+        next.failoverByThread = rest;
       }
       // Any part still `streaming` on this thread belongs to a dead attempt
       // (zombie deltas from a superseded run are unfenced and can arrive
@@ -514,6 +528,17 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       // The error clears when this thread streams a new message
       // (`message_start`) or the user sends it a new prompt
       // (`addUserMessage`).
+      //
+      // A failover notice stays visible too, but arms for retirement: the
+      // failover turn is over, so the NEXT message_start on this thread
+      // belongs to a new turn on the original model (TKAI-326).
+      const failover = slice.failoverByThread[ev.threadId];
+      if (failover && !failover.turnEnded) {
+        next.failoverByThread = {
+          ...slice.failoverByThread,
+          [ev.threadId]: { ...failover, turnEnded: true },
+        };
+      }
       return next;
     }
 
@@ -541,11 +566,16 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
     case "turn_failover": {
       // Informational: one turn ran on an equivalent model because the
       // primary provider kept failing (TKAI-326). No status flip, no error
-      // banner — the turn is still running. Cleared on the user's next
-      // prompt (addUserMessage), which runs on the original model again.
+      // banner — the turn is still running. Retired when the NEXT turn
+      // streams (see the field doc) or on the user's next prompt.
       next.failoverByThread = {
         ...slice.failoverByThread,
-        [ev.threadId]: { fromModel: ev.fromModel, toModel: ev.toModel, reason: ev.reason },
+        [ev.threadId]: {
+          fromModel: ev.fromModel,
+          toModel: ev.toModel,
+          reason: ev.reason,
+          turnEnded: false,
+        },
       };
       return next;
     }

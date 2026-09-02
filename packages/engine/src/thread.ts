@@ -367,6 +367,15 @@ export class Thread {
    * `getApiKey` in that case, so this is never read).
    */
   private turnApiKey?: string;
+  /**
+   * Canonical spec of the model THIS turn actually streams against. Set at
+   * turn start from the layered resolution, then overwritten when a role's
+   * model frontmatter overrides the turn model — `turnModelSpec` cannot see
+   * that overlay, and provider failover (TKAI-326) must exclude the
+   * provider that is REALLY failing, not the layered default's. Cleared in
+   * `runItem`'s finally with the rest of the per-turn state.
+   */
+  private turnActiveModelSpec?: string;
   private readonly threadCreatedAt: number;
 
   constructor(session: Session, data: ThreadData) {
@@ -2982,6 +2991,7 @@ export class Thread {
     if (turnModel !== baselineModel) {
       this.agent.state.model = turnModel;
     }
+    this.turnActiveModelSpec = this.turnModelSpec(item);
 
     // Pre-turn protection for the first post-restart turn (spec decision 5):
     // when the rehydrate seed says the persisted context already exceeds
@@ -3059,6 +3069,7 @@ export class Thread {
       // Per-turn key is turn-scoped only — clear it so the next turn re-resolves
       // (rotation applies next turn; a resolver-less session never set it).
       this.turnApiKey = undefined;
+      this.turnActiveModelSpec = undefined;
     }
   }
 
@@ -3147,6 +3158,9 @@ export class Thread {
         if (next) {
           priorModel = this.agent.state.model;
           this.agent.state.model = next;
+          // The role's model is what this turn now streams against —
+          // failover must reason about IT, not the layered default.
+          this.turnActiveModelSpec = role.model;
         }
       } catch (err) {
         this.emitError(
@@ -3329,7 +3343,7 @@ export class Thread {
     const resolve = this.session.options.resolveFailoverModels;
     if (!resolve) return [];
     try {
-      return await resolve(this.turnModelSpec(item));
+      return await resolve(this.turnActiveModelSpec ?? this.turnModelSpec(item));
     } catch (err) {
       this.emitError(
         "failover_lookup_failed",
@@ -3370,7 +3384,7 @@ export class Thread {
       // is unusable right now. Skip it; the caller tries the next one.
       return false;
     }
-    const fromModel = this.turnModelSpec(item);
+    const fromModel = this.turnActiveModelSpec ?? this.turnModelSpec(item);
     this.turnApiKey = resolved.apiKey;
     this.agent.state.model = resolved.model;
     // Same best-effort-delivery rationale as emitError: leave a host-process

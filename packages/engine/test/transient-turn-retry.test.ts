@@ -6,6 +6,7 @@
 import { describe, it, expect } from "vitest";
 import {
   fauxAssistantMessage,
+  getModel,
   registerFauxProvider,
 } from "@earendil-works/pi-ai/compat";
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
@@ -299,6 +300,68 @@ describe("turn-level transient retry (TKAI-319)", () => {
       "failover-skip-backup/bm",
     );
     primary.unregister();
+    backup.unregister();
+  });
+
+  it("failover reasons about a role's model override, not the layered default", async () => {
+    // A role's model frontmatter mutates the streaming model directly —
+    // `turnModelSpec` cannot see it. Failover must ask for equivalents of
+    // the model that is REALLY failing (the role's), or it can hand the
+    // turn back to the melting-down provider. Shadow the role model's api
+    // with a scripted faux so the builtin registry model streams our
+    // responses (a later registerApiProvider registration wins).
+    const roleModel = getModel("openai", "gpt-4.1")!;
+    const shadow = registerFauxProvider({ api: roleModel.api, provider: "openai" });
+    const err = () =>
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error: Overloaded" });
+    shadow.setResponses([err, err]); // role-model call + attempt-1 retry
+    const sessionDefault = registerFauxProvider({
+      provider: "failover-role-primary",
+      models: [{ id: "pm", name: "pm", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    const backup = registerFauxProvider({
+      provider: "failover-role-backup",
+      models: [{ id: "bm", name: "bm", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    backup.setResponses([fauxAssistantMessage("role failover response")]);
+    const specsSeen: string[] = [];
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model: sessionDefault.getModel("pm")!,
+      modelSpec: "failover-role-primary/pm",
+      purpose: "child",
+      turnRetry: { maxAttempts: 2, backoffMs: [1, 1] },
+      roles: [{ name: "cheap", content: "Prefer the cheap model.", model: "openai/gpt-4.1" }],
+      resolveModel: async (spec) => {
+        if (spec === "failover-role-primary/pm")
+          return { model: sessionDefault.getModel("pm")!, canonicalId: spec };
+        if (spec === "failover-role-backup/bm")
+          return { model: backup.getModel("bm")!, canonicalId: spec };
+        return null;
+      },
+      resolveFailoverModels: async (spec) => {
+        specsSeen.push(spec);
+        return ["failover-role-backup/bm"];
+      },
+    });
+    const receipt = await session.prompt("do the thing", { role: "cheap" });
+    await waitFor(() => backup.getPendingResponseCount() === 0);
+    await waitFor(() =>
+      events.some((e) => e.event.type === "turn_failover" && e.event.threadId === receipt.threadId),
+    );
+    // The candidate lookup and the event both name the role's model — the
+    // one that actually failed — not the session default.
+    expect(specsSeen).toEqual(["openai/gpt-4.1"]);
+    const failover = events.find((e) => e.event.type === "turn_failover");
+    expect(failover?.event.type === "turn_failover" && failover.event.fromModel).toBe(
+      "openai/gpt-4.1",
+    );
+    shadow.unregister();
+    sessionDefault.unregister();
     backup.unregister();
   });
 
