@@ -33,7 +33,7 @@ import { buildRealCatalogTools } from "./integration.js";
 import { EvalMemoryStore, buildEvalMemoryTools } from "./memory-tools.js";
 import { buildMockCatalogTools } from "./mock-catalog.js";
 import { extractTrajectory, findSpawnCallId } from "./trajectory.js";
-import type { EvalCase, Trajectory } from "./types.js";
+import type { EvalCase, Trajectory, VerificationResult } from "./types.js";
 
 const DEFAULT_TIMEOUT_MS = 300_000;
 const EVAL_USER_ID = "eval-user";
@@ -400,6 +400,38 @@ async function runCaseInner(evalCase: EvalCase, opts: RunnerOptions): Promise<Ca
     entries,
     children: childTrajectories,
   });
+
+  // Harness-run verifications (builder cases): execute each verify_command
+  // in the sandbox the agent just built in, BEFORE teardown. These run
+  // outside the agent loop against the produced codebase, so the agent
+  // cannot fake them. Run even after a failed/timed-out case — the check
+  // details then show what state the build actually reached.
+  const verifyChecks = evalCase.checks.filter((c) => c.type === "verify_command");
+  if (verifyChecks.length > 0) {
+    const verifications: VerificationResult[] = [];
+    for (const check of verifyChecks) {
+      try {
+        // No cwd override: every provider defaults exec to its own
+        // workspace root (the same default the bash tool gets).
+        const result = await session.sandbox.exec(check.command, {
+          timeout: (check.timeout_s ?? 120) * 1000,
+        });
+        verifications.push({
+          command: check.command,
+          exitCode: result.exitCode,
+          output: [result.stdout, result.stderr].filter((s) => s.length > 0).join("\n"),
+          ...(result.timedOut === true ? { timedOut: true } : {}),
+        });
+      } catch (err) {
+        verifications.push({
+          command: check.command,
+          exitCode: -1,
+          output: `verification exec failed: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      }
+    }
+    trajectory.verifications = verifications;
+  }
 
   // A real sandbox (Docker) holds a container; tear it down now that the
   // entries are extracted. Virtual sandboxes make this a cheap no-op.

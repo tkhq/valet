@@ -1,0 +1,38 @@
+# Builder case: multi-file codebase with its own test suite, harness-run.
+# The harness executes the produced tests via node --test; the agent cannot
+# game the exit code. Needs Docker (profile: full).
+id: builder-node-library
+description: Build a small multi-file library plus tests; the harness runs node --test.
+profile: full
+turns:
+  - role: user
+    content: >-
+      Build a small Node library under /workspace/statlib with this exact
+      layout: src/stats.js exporting mean(numbers), median(numbers), and
+      mode(numbers) as ESM named exports (add "type": "module" in
+      /workspace/statlib/package.json); and test/stats.test.js covering all
+      three functions with node:test and node:assert, including an
+      even-length median case and a mode tie broken by the smaller value.
+      mean/median/mode must throw a TypeError on an empty array. Use only
+      the Node standard library. Reply "done" when everything is written.
+timeout_ms: 420000
+checks:
+  - type: tool_called
+    tool: write
+    min: 3
+  - type: verify_command
+    command: cd /workspace/statlib && node --test
+    expect_output: "pass [1-9]"
+    timeout_s: 120
+  - type: verify_command
+    command: >-
+      node -e "import('/workspace/statlib/src/stats.js').then((m) =>
+      console.log(m.mean([1,2,3,4]), m.median([1,2,3,4]), m.mode([2,2,1,1])))"
+    expect_output: "^2\\.5 2\\.5 1"
+  - type: verify_command
+    command: >-
+      node -e "import('/workspace/statlib/src/stats.js').then((m) => {
+      try { m.mean([]); console.log('no-throw'); } catch (e) {
+      console.log(e.constructor.name); } })"
+    expect_output: "^TypeError"
+  - type: no_errors
