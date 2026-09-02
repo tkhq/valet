@@ -35,7 +35,9 @@ function MessageRating({ message }: { message: StreamMessage }) {
       subject="reply"
       value={value}
       disabled={rate.isPending}
-      onRate={(rating) => rate.mutate({ entryId: message.id, threadId: message.threadId, rating })}
+      onRate={(rating) =>
+        rate.mutate({ entryId: message.id, threadId: message.threadId ?? undefined, rating })
+      }
       className={cn(
         "opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity",
         value !== null && "opacity-100",
