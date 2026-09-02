@@ -171,7 +171,17 @@ function parseCheck(raw: unknown, i: number, source: string): Check {
     case "all_terminal":
     case "no_errors":
       return { type };
-    case "max_turns":
+    case "max_turns": {
+      const perSubmission = raw.per_submission;
+      if (perSubmission !== undefined && typeof perSubmission !== "boolean") {
+        throw new CaseValidationError(source, `\`${at}.per_submission\` must be a boolean`);
+      }
+      return {
+        type,
+        value: requireNumber("value"),
+        ...(perSubmission === true ? { per_submission: true } : {}),
+      };
+    }
     case "max_tokens":
     case "max_cost":
     case "max_duration":
@@ -220,6 +230,32 @@ function parseMockTools(
   return out;
 }
 
+/**
+ * Expand a document's `variants:` into sibling cases (anti-contamination,
+ * adversarial-review finding 11). Each variant is `{suffix, ...overrides}`;
+ * the expanded case is the base fields with the overrides applied and the
+ * id suffixed. A document with variants emits ONLY the variants — the base
+ * is a template. Interchangeable variants mean a memorized single answer
+ * no longer passes the group; add variants to any case whose static answer
+ * could enter training data.
+ */
+export function expandVariants(raw: Record<string, unknown>, source: string): Array<Record<string, unknown>> {
+  const variants = raw.variants;
+  if (variants === undefined || variants === null) return [raw];
+  if (!Array.isArray(variants) || variants.length === 0) {
+    throw new CaseValidationError(source, "`variants` must be a non-empty array");
+  }
+  const { variants: _dropped, ...base } = raw;
+  return variants.map((v, i) => {
+    if (!isRecord(v)) throw new CaseValidationError(source, `\`variants[${i}]\` must be an object`);
+    const { suffix, ...overrides } = v;
+    if (typeof suffix !== "string" || !/^[a-z0-9][a-z0-9-]*$/.test(suffix)) {
+      throw new CaseValidationError(source, `\`variants[${i}].suffix\` is required and must be kebab-case`);
+    }
+    return { ...base, ...overrides, id: `${String(base.id)}-${suffix}` };
+  });
+}
+
 /** Validate one parsed YAML document as an `EvalCase`. Throws `CaseValidationError`. */
 export function parseEvalCase(raw: unknown, source: string): EvalCase {
   if (!isRecord(raw)) throw new CaseValidationError(source, "the document must be a YAML mapping");
@@ -237,6 +273,27 @@ export function parseEvalCase(raw: unknown, source: string): EvalCase {
   const sessionType = optionalString(raw, "session_type", source);
   if (sessionType !== undefined && !(SESSION_TYPES as readonly string[]).includes(sessionType)) {
     throw new CaseValidationError(source, `\`session_type\` must be one of: ${SESSION_TYPES.join(", ")}`);
+  }
+  const drive = optionalString(raw, "drive", source);
+  if (drive !== undefined && drive !== "engine" && drive !== "product") {
+    throw new CaseValidationError(source, '`drive` must be "engine" or "product"');
+  }
+  if (drive === "product" && sessionType !== "orchestrator") {
+    throw new CaseValidationError(
+      source,
+      "`drive: product` requires `session_type: orchestrator` (the production agent surface)",
+    );
+  }
+  const allowedActions = optionalStringArray(raw, "allowed_actions", source);
+  if (allowedActions !== undefined) {
+    for (const id of allowedActions) {
+      if (!/^[a-z0-9_-]+\.[a-z0-9_]+$/.test(id)) {
+        throw new CaseValidationError(
+          source,
+          `\`allowed_actions\` entries must be fully-qualified action ids (service.action); got \`${id}\``,
+        );
+      }
+    }
   }
   const profile = optionalString(raw, "profile", source);
   if (profile !== undefined && !(PROFILES as readonly string[]).includes(profile)) {
@@ -271,6 +328,8 @@ export function parseEvalCase(raw: unknown, source: string): EvalCase {
   if (temperature !== undefined) evalCase.temperature = temperature;
   if (tools !== undefined) evalCase.tools = tools;
   if (sessionType !== undefined) evalCase.session_type = sessionType as EvalCase["session_type"];
+  if (drive !== undefined) evalCase.drive = drive;
+  if (allowedActions !== undefined) evalCase.allowed_actions = allowedActions;
   if (profile !== undefined) evalCase.profile = profile as EvalCase["profile"];
   if (mockTools !== undefined) evalCase.mock_tools = mockTools;
   if (requiredCredentials !== undefined) evalCase.required_credentials = requiredCredentials;
@@ -300,13 +359,16 @@ export async function loadCases(dir: string): Promise<EvalCase[]> {
     } catch (err) {
       throw new CaseValidationError(file, `YAML parse error: ${err instanceof Error ? err.message : String(err)}`);
     }
-    const evalCase = parseEvalCase(doc, file);
-    const prior = seen.get(evalCase.id);
-    if (prior !== undefined) {
-      throw new CaseValidationError(file, `duplicate case id \`${evalCase.id}\` (also defined in ${prior})`);
+    if (!isRecord(doc)) throw new CaseValidationError(file, "the document must be a YAML mapping");
+    for (const expanded of expandVariants(doc, file)) {
+      const evalCase = parseEvalCase(expanded, file);
+      const prior = seen.get(evalCase.id);
+      if (prior !== undefined) {
+        throw new CaseValidationError(file, `duplicate case id \`${evalCase.id}\` (also defined in ${prior})`);
+      }
+      seen.set(evalCase.id, file);
+      cases.push(evalCase);
     }
-    seen.set(evalCase.id, file);
-    cases.push(evalCase);
   }
   return cases;
 }

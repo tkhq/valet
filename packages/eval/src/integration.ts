@@ -108,22 +108,27 @@ export function envKeyForService(service: string): string | undefined {
 export function buildRealCatalogTools(
   plugins: ValetPlugin[],
   profile: "integration" | "full",
+  /** Restrict the catalog to these action ids (see EvalCase.allowed_actions). */
+  allowedActions?: string[],
 ): ToolDef[] {
+  const allowed = allowedActions !== undefined ? new Set(allowedActions) : undefined;
   const actionPlugins: ActionPlugin[] = plugins
     .flatMap((p) => p.actions ?? [])
     .map((plugin) => {
+      const byRisk =
+        profile === "integration"
+          ? plugin.actions.filter((a) => a.riskLevel === "low")
+          : plugin.actions;
       const filtered: ActionPlugin = {
         ...plugin,
         defaultApprovalMode: "allow" as const,
-        actions:
-          profile === "integration"
-            ? plugin.actions.filter((a) => a.riskLevel === "low")
-            : plugin.actions,
+        actions: allowed !== undefined ? byRisk.filter((a) => allowed.has(a.id)) : byRisk,
       };
       // Dynamic discovery (resolveActions) can surface actions the static
-      // filter never saw — including mutations. The integration profile
-      // must stay read-only, so it drops the seam entirely.
-      if (profile === "integration") delete filtered.resolveActions;
+      // filters never saw — including mutations. The integration profile
+      // must stay read-only, and an allowed_actions pin must be airtight,
+      // so both drop the seam entirely.
+      if (profile === "integration" || allowed !== undefined) delete filtered.resolveActions;
       return filtered;
     })
     .filter((plugin) => plugin.actions.length > 0);

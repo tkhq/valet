@@ -1,0 +1,25 @@
+# Product-drive case: measures the REAL orchestrator (production persona,
+# HTTP mem_* against the booted api, real plugin catalog and policy), not
+# the engine-drive lab stand-ins. Boots a scratch api per run; needs
+# ANTHROPIC_API_KEY, SKIPs otherwise.
+id: product-memory-roundtrip
+description: Real orchestrator stores a fact in real memory and reads it back.
+drive: product
+session_type: orchestrator
+turns:
+  - role: user
+    content: >-
+      Remember this fact in your memory: the standup moved to 9:30 on
+      Tuesdays. Then read the memory file you wrote and repeat the stored
+      fact back to me verbatim.
+timeout_ms: 300000
+checks:
+  - type: tool_called
+    tool: mem_write
+  - type: tool_called
+    tool: mem_read
+    after: mem_write
+  - type: output_contains
+    pattern: "9:30"
+  - type: all_terminal
+  - type: no_errors

@@ -103,6 +103,18 @@ export function aggregateUsage(trajectory: Trajectory): {
   return { usage, ...(anyCost ? { cost } : {}), toolCallCount, turnCount };
 }
 
+/** Find the callId of the `task` tool call whose result names this child session. */
+export function findSpawnCallId(entries: SessionEntry[], childSessionId: string): string | undefined {
+  for (const entry of entries) {
+    if (entry.type !== "message" || entry.role !== "assistant") continue;
+    for (const part of entry.parts ?? []) {
+      if (part.type !== "tool_call" || part.toolName !== "task") continue;
+      if (toolResultText(part.result).includes(childSessionId)) return part.callId;
+    }
+  }
+  return undefined;
+}
+
 export interface ExtractTrajectoryInput {
   caseId: string;
   /** The first user turn's content. */

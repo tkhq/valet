@@ -33,6 +33,8 @@ function actionPlugins(plugins: ValetPlugin[]): ActionPlugin[] {
 export function buildMockCatalogTools(
   mockTools: Record<string, MockToolSpec>,
   plugins: ValetPlugin[],
+  /** Restrict the catalog to these action ids (see EvalCase.allowed_actions). */
+  allowedActions?: string[],
 ): ToolDef[] {
   const real = actionPlugins(plugins);
   const actionsById = new Map<string, { service: string; action: PluginAction }>();
@@ -58,6 +60,7 @@ export function buildMockCatalogTools(
     mockedServices.add(entry.service);
   }
 
+  const allowed = allowedActions !== undefined ? new Set(allowedActions) : undefined;
   const wrapped: ActionPlugin[] = real
     .filter((plugin) => mockedServices.has(plugin.service))
     .map((plugin) => ({
@@ -66,7 +69,10 @@ export function buildMockCatalogTools(
       // No credentials exist in a mock run, and an approval gate would
       // stall an unattended eval — every mocked action is auto-allowed.
       defaultApprovalMode: "allow",
-      actions: plugin.actions.map((action) => ({
+      actions: (allowed !== undefined
+        ? plugin.actions.filter((a) => allowed.has(a.id))
+        : plugin.actions
+      ).map((action) => ({
         id: action.id,
         name: action.name,
         description: action.description,
@@ -85,5 +91,5 @@ export function buildMockCatalogTools(
       })),
     }));
 
-  return pluginCatalogTools({ plugins: wrapped });
+  return pluginCatalogTools({ plugins: wrapped.filter((p) => p.actions.length > 0) });
 }

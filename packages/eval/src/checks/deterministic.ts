@@ -203,6 +203,21 @@ export function runDeterministicCheck(check: DeterministicCheck, trajectory: Tra
     }
 
     case "max_turns": {
+      if (check.per_submission === true) {
+        const bySubmission = new Map<string, number>();
+        for (const turn of trajectory.turns) {
+          const key = turn.queueItemId ?? "(unlinked)";
+          bySubmission.set(key, (bySubmission.get(key) ?? 0) + 1);
+        }
+        const worst = [...bySubmission.entries()].sort((a, b) => b[1] - a[1])[0];
+        if (worst !== undefined && worst[1] > check.value) {
+          return fail(
+            check,
+            `expected at most ${check.value} turn(s) per submission, but submission ${worst[0]} used ${worst[1]}.`,
+          );
+        }
+        return pass(check);
+      }
       const n = trajectory.turns.length;
       if (n > check.value) return fail(check, `expected at most ${check.value} turn(s), got ${n}.`);
       return pass(check);
