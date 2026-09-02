@@ -108,8 +108,14 @@ export function resolveEvalModel(spec: string): Model<string> | undefined {
   if (extra === undefined) return undefined;
   const base = resolveModelId(extra.cloneOf);
   if (!base) return undefined;
-  const { cost: _droppedCost, ...rest } = base as Model<string> & { cost?: unknown };
-  return { ...rest, id: extra.id } as Model<string>;
+  // Zeroed cost, not a deleted one: pi-ai's usage accounting reads
+  // model.cost unguarded, and the engine's cost-is-null-not-zero rule
+  // turns an all-zero cost into "unpriced" on every surface downstream.
+  return {
+    ...(base as Model<string>),
+    id: extra.id,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  } as Model<string>;
 }
 
 export interface CaseRunResult {

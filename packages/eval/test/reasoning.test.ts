@@ -73,12 +73,15 @@ describe("reasoning threading", () => {
 });
 
 describe("extra-models fallback", () => {
-  it("resolves claude-fable-5-1 as an unpriced clone with the right wire id", () => {
+  it("resolves claude-fable-5-1 as a zero-cost clone with the right wire id", () => {
     const m = resolveEvalModel("anthropic/claude-fable-5-1");
     expect(m).toBeDefined();
     expect(m?.id).toBe("claude-fable-5-1");
     expect(m?.provider).toBe("anthropic");
-    expect((m as { cost?: unknown }).cost).toBeUndefined();
+    // Zeroed, not deleted: pi-ai reads model.cost unguarded, and the
+    // engine renders an all-zero cost as "unpriced" downstream.
+    const cost = (m as { cost?: { input: number; output: number } }).cost;
+    expect(cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
   });
 
   it("still resolves catalog specs and rejects unknowns", () => {
