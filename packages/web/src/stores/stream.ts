@@ -154,18 +154,27 @@ export interface SessionStreamState {
   /**
    * Last provider failover per thread (wire `turn_failover`, TKAI-326):
    * the retry loop ran one turn on an equivalent model because the primary
-   * provider kept failing. Informational, not an error — the notice
-   * survives the recovered turn's streaming (message_start must NOT clear
-   * it: the failover continue streams immediately). `turnEnded` flips on
-   * that turn's `turn_end`; the FIRST `message_start` after it means a new
-   * turn is running on the original model, so the notice retires then —
-   * unattended sessions (the failover population) never type into the
-   * composer, so clearing only on `addUserMessage` left the notice up
-   * forever. A composer send still clears it immediately.
+   * provider kept failing. Informational, not an error — the notice must
+   * survive the whole failover turn's streaming, INCLUDING its tool
+   * rounds (`turn_end` fires per LLM round, so it cannot arm retirement).
+   * `settled` flips on the failover queue item's `submission.settled` —
+   * the one per-item terminal signal. After that, the next
+   * `message_start` (a new turn streaming on the re-resolved original
+   * model) or a later item's settle (a next turn that died before
+   * streaming) retires the notice — unattended sessions (the failover
+   * population) never type into the composer, so clearing only on
+   * `addUserMessage` would leave it up forever. A composer send still
+   * clears it immediately.
    */
   failoverByThread: Record<
     string,
-    { fromModel: string; toModel: string; reason: string; turnEnded: boolean }
+    {
+      /** What the UI renders. A stable reference — the selector returns it
+       * directly, so the reducer must never recreate it when only the
+       * wrapper's bookkeeping changes. */
+      notice: { fromModel: string; toModel: string; reason: string };
+      settled: boolean;
+    }
   >;
   /**
    * A wire error with no threadId (e.g. `ws_open_failed`) — a session-level
@@ -326,10 +335,10 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
         const { [ev.threadId]: _, ...rest } = slice.errorByThread;
         next.errorByThread = rest;
       }
-      // A failover notice whose turn already ended is retired by the next
-      // turn's first stream — this message proves a new turn is running on
-      // the re-resolved (original) model (TKAI-326).
-      if (slice.failoverByThread[ev.threadId]?.turnEnded) {
+      // A failover notice whose queue item already settled is retired by
+      // the next turn's first stream — this message proves a new turn is
+      // running on the re-resolved (original) model (TKAI-326).
+      if (slice.failoverByThread[ev.threadId]?.settled) {
         const { [ev.threadId]: _, ...rest } = slice.failoverByThread;
         next.failoverByThread = rest;
       }
@@ -527,18 +536,10 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       // turn (exhausted credits, bad key) looked like a silent empty reply.
       // The error clears when this thread streams a new message
       // (`message_start`) or the user sends it a new prompt
-      // (`addUserMessage`).
-      //
-      // A failover notice stays visible too, but arms for retirement: the
-      // failover turn is over, so the NEXT message_start on this thread
-      // belongs to a new turn on the original model (TKAI-326).
-      const failover = slice.failoverByThread[ev.threadId];
-      if (failover && !failover.turnEnded) {
-        next.failoverByThread = {
-          ...slice.failoverByThread,
-          [ev.threadId]: { ...failover, turnEnded: true },
-        };
-      }
+      // (`addUserMessage`). The failover notice deliberately does NOT arm
+      // here: turn_end fires per LLM round, and a failover turn's tool
+      // rounds must not retire the notice mid-turn — arming happens on
+      // `submission.settled`, the per-item terminal signal.
       return next;
     }
 
@@ -571,10 +572,8 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       next.failoverByThread = {
         ...slice.failoverByThread,
         [ev.threadId]: {
-          fromModel: ev.fromModel,
-          toModel: ev.toModel,
-          reason: ev.reason,
-          turnEnded: false,
+          notice: { fromModel: ev.fromModel, toModel: ev.toModel, reason: ev.reason },
+          settled: false,
         },
       };
       return next;
@@ -631,6 +630,24 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
     }
 
     case "submission.settled": {
+      // Failover notice lifecycle (TKAI-326): the FIRST settle after a
+      // turn_failover is the failover item's own — arm the notice for
+      // retirement. A LATER settle while armed means a next item ran and
+      // died before streaming (no message_start will come) — the "next
+      // turn uses X again" promise is stale, so retire it now.
+      const failover = slice.failoverByThread[ev.threadId];
+      if (failover) {
+        if (failover.settled) {
+          const { [ev.threadId]: _, ...rest } = slice.failoverByThread;
+          next.failoverByThread = rest;
+        } else {
+          // Keep the inner notice reference intact — see the field doc.
+          next.failoverByThread = {
+            ...slice.failoverByThread,
+            [ev.threadId]: { notice: failover.notice, settled: true },
+          };
+        }
+      }
       // Mark the originating user message with a terminal badge.
       //
       // Matching: prefer an exact `queueItemId` match — REST rows carry the
@@ -1006,7 +1023,10 @@ export function useFailoverForThread(
 ): { fromModel: string; toModel: string; reason: string } | undefined {
   return useStreamStore((s) => {
     if (!threadId) return undefined;
-    return s.bySession[sessionId]?.failoverByThread[threadId];
+    // The inner notice only — the wrapper's `settled` bit is reducer
+    // bookkeeping, and the notice reference is stable across arming so
+    // zustand's identity check does not re-render on unrelated changes.
+    return s.bySession[sessionId]?.failoverByThread[threadId]?.notice;
   });
 }
 

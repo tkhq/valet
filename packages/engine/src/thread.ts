@@ -1747,10 +1747,9 @@ export class Thread {
   private async validateModelSpec(spec: string): Promise<void> {
     const sessionSpec = this.session.options.modelSpec ?? this.session.options.model.id;
     if (spec === sessionSpec || spec === this.modelOverride) return;
-    const resolver = this.session.options.resolveModel;
-    let resolved: ResolvedModel | PiModel | null | undefined;
+    let resolved: ResolvedModel | null;
     try {
-      resolved = resolver ? await resolver(spec) : resolveModelId(spec);
+      resolved = await this.resolveSpecEither(spec);
     } catch (err) {
       if (!(err instanceof NoCredentialsError)) throw err;
       resolved = { model: err.model };
@@ -3041,7 +3040,7 @@ export class Thread {
       this.attributeAuthors && !isSignalContent(item.content) ? item.author : undefined;
     try {
       try {
-        await this.runAgent(text, attachments, sender, item);
+        await this.runAgent(text, attachments, sender);
       } catch (err) {
         // Record the throw for settlement: a stream failing before its first
         // message_start leaves no assistant message this turn, and
@@ -3159,8 +3158,15 @@ export class Thread {
           priorModel = this.agent.state.model;
           this.agent.state.model = next;
           // The role's model is what this turn now streams against —
-          // failover must reason about IT, not the layered default.
-          this.turnActiveModelSpec = role.model;
+          // failover must reason about IT, not the layered default. Store
+          // the CANONICAL namespaced spec: the engine resolves a bare id
+          // by trying anthropic → openai → google, while the api's
+          // `parseModelId` hard-codes bare = anthropic, so a bare
+          // "gpt-4.1" passed through verbatim would make the candidate
+          // walk exclude the wrong provider.
+          this.turnActiveModelSpec = role.model.includes("/")
+            ? role.model
+            : `${next.provider}/${next.id}`;
         }
       } catch (err) {
         this.emitError(
@@ -3203,7 +3209,6 @@ export class Thread {
     text: string,
     attachments?: MessageEntry["attachments"],
     sender?: PromptAuthor,
-    item?: QueueItem,
   ): Promise<void> {
     const content = userContentBlocks(text, attachments, sender);
     await this.agent.prompt({
@@ -3252,7 +3257,7 @@ export class Thread {
       return;
     }
 
-    await this.retryTransientTurnError(item);
+    await this.retryTransientTurnError();
   }
 
   /**
@@ -3266,7 +3271,7 @@ export class Thread {
    * twice. The transport layer already retried underneath; this catches the
    * failures that exhausted it (long rate-limit windows, capacity events).
    */
-  private async retryTransientTurnError(item?: QueueItem): Promise<void> {
+  private async retryTransientTurnError(): Promise<void> {
     const cfgd = this.session.options.turnRetry;
     const purpose = this.session.options.purpose;
     const unattended = purpose === "orchestrator" || purpose === "workflow" || purpose === "child";
@@ -3280,6 +3285,9 @@ export class Thread {
     // retry cycle and consumed left to right — a candidate that fails to
     // resolve (credentials died, provider disabled) is skipped, and one
     // that resolved but then failed its own retry is not re-tried.
+    // `originalSpec` snapshots the model the turn started on so the cycle
+    // can restore it when candidates run out.
+    const originalSpec = this.turnActiveModelSpec;
     let candidates: string[] | undefined;
     let candidateIdx = 0;
 
@@ -3294,32 +3302,43 @@ export class Thread {
         return;
       }
       const errBrief = (last.errorMessage ?? "provider error").slice(0, 200);
+      const waitMs = backoff[Math.min(attempt - 1, backoff.length - 1)] ?? 0;
+      this.emitError(
+        "turn_transient_retry",
+        `Provider error looks transient (${errBrief}). Retrying in ${Math.round(waitMs / 1000)}s (attempt ${attempt}/${maxAttempts}).`,
+      );
+      // Backoff BEFORE any failover decision: the wait is the failing
+      // provider's recovery window (a capacity blip often clears within
+      // it), and it puts the abort/supersession check ahead of any switch
+      // side effects — an aborted item must not broadcast a switch that
+      // never runs.
+      if ((await this.backoffOrStandDown(waitMs)) === "stand-down") return;
 
-      // Attempt 1 retries the same model — most capacity blips clear within
-      // one backoff. From attempt 2 on, the primary has failed the original
-      // call AND a same-model retry: switch this turn to an equivalent model
-      // on another provider when the host wired one up (TKAI-326).
-      let switched = false;
-      if (attempt >= 2) {
-        candidates ??= await this.failoverCandidates(item);
+      // Attempt 1 retries the same model. From attempt 2 on, the failing
+      // provider has burned the original call AND a full backoff'd retry:
+      // switch this turn to an equivalent model on another provider when
+      // the host wired one up (TKAI-326).
+      if (attempt >= 2 && originalSpec !== undefined) {
+        candidates ??= await this.failoverCandidates(originalSpec);
+        let switched = false;
         while (candidateIdx < candidates.length && !switched) {
-          switched = await this.applyFailoverModel(candidates[candidateIdx++]!, item, errBrief);
+          if (this.aborted) return;
+          switched = await this.applyFailoverModel(
+            candidates[candidateIdx++]!,
+            this.turnActiveModelSpec ?? originalSpec,
+            errBrief,
+          );
+        }
+        // Candidates exhausted while a failover model is still stamped:
+        // restore the original for the remaining same-model retries. The
+        // primary may have recovered during the backoffs, and leaving the
+        // last failed candidate active would silently retry the provider
+        // that just failed.
+        if (!switched && this.turnActiveModelSpec !== originalSpec) {
+          await this.restoreOriginalModelForRetry(originalSpec);
         }
       }
-
-      if (switched) {
-        // The alternate provider is not the one melting down — skip the
-        // backoff, but still run the stand-down checks so an aborted or
-        // superseded item cannot spawn a zombie retry.
-        if ((await this.backoffOrStandDown(0)) === "stand-down") return;
-      } else {
-        const waitMs = backoff[Math.min(attempt - 1, backoff.length - 1)] ?? 0;
-        this.emitError(
-          "turn_transient_retry",
-          `Provider error looks transient (${errBrief}). Retrying in ${Math.round(waitMs / 1000)}s (attempt ${attempt}/${maxAttempts}).`,
-        );
-        if ((await this.backoffOrStandDown(waitMs)) === "stand-down") return;
-      }
+      if (this.aborted) return;
       // Drop the failed assistant message; the transcript now ends on the
       // user/tool-result message, which is exactly Agent.continue()'s
       // contract for re-running the turn without duplicating the prompt.
@@ -3333,60 +3352,76 @@ export class Thread {
   }
 
   /**
+   * Resolve a model spec through the host `resolveModel` seam when present,
+   * else the internal registry (no key — pi-ai's env fallback applies).
+   * Null when the spec is unknown; resolver throws propagate. Shared by
+   * spec validation, the failover switch, and the failover restore so the
+   * resolver-vs-registry branch exists once.
+   */
+  private async resolveSpecEither(spec: string): Promise<ResolvedModel | null> {
+    const resolver = this.session.options.resolveModel;
+    if (resolver) return resolver(spec);
+    const m = resolveModelId(spec);
+    return m ? { model: m } : null;
+  }
+
+  /**
    * Ordered equivalent-model specs for this turn's model (TKAI-326), from
    * the host's `resolveFailoverModels` seam. Empty when failover is off for
    * this session, the seam is absent, or the lookup fails — a broken lookup
-   * must degrade to the plain same-model retry, never fail the turn.
+   * must degrade to the plain same-model retry, never fail the turn. The
+   * degrade is logged, not emitted as an error event: the retry banner is
+   * already up, and the same-model retry may well succeed.
    */
-  private async failoverCandidates(item?: QueueItem): Promise<string[]> {
+  private async failoverCandidates(spec: string): Promise<string[]> {
     if (this.session.options.allowProviderFailover === false) return [];
     const resolve = this.session.options.resolveFailoverModels;
     if (!resolve) return [];
     try {
-      return await resolve(this.turnActiveModelSpec ?? this.turnModelSpec(item));
+      return await resolve(spec);
     } catch (err) {
-      this.emitError(
-        "failover_lookup_failed",
-        err instanceof Error ? err.message : String(err),
+      console.error(
+        `[engine] thread failover lookup failed session=${this.session.id} thread=${this.id}: ${err instanceof Error ? err.message : String(err)}`,
       );
       return [];
     }
   }
 
   /**
-   * Switch THIS turn to a failover candidate (TKAI-326): resolve the spec
-   * (host resolver when present, else the internal registry), stamp the
-   * agent model + per-turn key, and emit `turn_failover`. Returns false —
-   * candidate skipped, no state touched — when the spec does not resolve or
-   * has no usable credentials right now. The switch is turn-scoped by
-   * construction: `runItem`'s finally restores the baseline model and
-   * clears `turnApiKey`, and the next turn re-resolves the persisted spec.
+   * Switch THIS turn to a failover candidate (TKAI-326): resolve the spec,
+   * stamp the agent model + per-turn key + active spec, and emit
+   * `turn_failover`. Returns false — candidate skipped, no state touched —
+   * when the spec does not resolve or has no usable credentials right now;
+   * every skip is logged, because during an outage this trace is the only
+   * signal that failover was attempted and could not engage. The switch is
+   * turn-scoped by construction: `runItem`'s finally restores the baseline
+   * model and clears the per-turn state, and the next turn re-resolves the
+   * persisted spec.
    */
   private async applyFailoverModel(
     spec: string,
-    item: QueueItem | undefined,
+    fromModel: string,
     errBrief: string,
   ): Promise<boolean> {
-    const resolver = this.session.options.resolveModel;
-    let resolved: ResolvedModel;
+    let resolved: ResolvedModel | null;
     try {
-      if (resolver) {
-        const r = await resolver(spec);
-        if (!r) return false;
-        resolved = r;
-      } else {
-        const m = resolveModelId(spec);
-        if (!m) return false;
-        resolved = { model: m };
-      }
-    } catch {
-      // NoCredentialsError, disabled provider, deleted row — the candidate
-      // is unusable right now. Skip it; the caller tries the next one.
+      resolved = await this.resolveSpecEither(spec);
+    } catch (err) {
+      // NoCredentialsError, disabled provider, deleted row — but also any
+      // systemic resolver failure (host DB down). Both skip the candidate.
+      console.error(
+        `[engine] thread failover candidate skipped session=${this.session.id} thread=${this.id} ${spec}: ${err instanceof Error ? err.message : String(err)}`,
+      );
       return false;
     }
-    const fromModel = this.turnActiveModelSpec ?? this.turnModelSpec(item);
+    if (!resolved) return false;
+    if (this.aborted) return false;
     this.turnApiKey = resolved.apiKey;
     this.agent.state.model = resolved.model;
+    // Keep the active spec current so a SECOND failover in this cycle
+    // attributes the failure to the candidate that actually produced it,
+    // not the original model.
+    this.turnActiveModelSpec = spec;
     // Same best-effort-delivery rationale as emitError: leave a host-process
     // trace even when no client is listening.
     console.error(
@@ -3400,6 +3435,30 @@ export class Thread {
       reason: errBrief,
     });
     return true;
+  }
+
+  /**
+   * Put the retry cycle back on the turn's original model after the
+   * failover candidates ran out (TKAI-326). Best-effort: when the original
+   * cannot be resolved right now (revoked key mid-incident), the cycle
+   * stays on the last candidate rather than failing — the retry itself
+   * will surface the real error.
+   */
+  private async restoreOriginalModelForRetry(spec: string): Promise<void> {
+    try {
+      const resolved = await this.resolveSpecEither(spec);
+      if (!resolved) return;
+      this.turnApiKey = resolved.apiKey;
+      this.agent.state.model = resolved.model;
+      this.turnActiveModelSpec = spec;
+      console.error(
+        `[engine] thread failover restore session=${this.session.id} thread=${this.id} -> ${spec}`,
+      );
+    } catch (err) {
+      console.error(
+        `[engine] thread failover restore failed session=${this.session.id} thread=${this.id} ${spec}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /**

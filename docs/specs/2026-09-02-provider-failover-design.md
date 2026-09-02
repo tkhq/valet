@@ -17,15 +17,31 @@ The transient turn retry in `Thread.retryTransientTurnError`
 
 1. Attempt 1 retries the same model after the first backoff (10s default).
 2. Attempt 2 and later switch the turn to an equivalent model on another
-   provider, when the host supplies one. The engine emits a `turn_failover`
-   event and skips the backoff — the alternate provider is not the one
-   melting down. When no candidate is usable, the retry stays on the same
-   model, as before.
+   provider, when the host supplies one. Every attempt still emits
+   `turn_transient_retry` and waits its full backoff FIRST — the wait is
+   the failing provider's recovery window, and it puts the
+   abort/supersession check ahead of the switch, so an aborted item never
+   broadcasts a switch that does not run. A successful switch then emits
+   `turn_failover`. When no candidate is usable, the retry stays on the
+   same model, as before.
+
+Within one retry cycle: a second switch attributes the failure to the
+candidate that actually produced it (the active spec updates on every
+switch), and when the candidate list runs out the cycle restores the
+original model for the remaining same-model retries — the primary may
+have recovered during the backoffs. Candidate resolution failures and a
+failed candidate lookup are logged to the host process (never a red
+banner: the turn is still recovering) and degrade to the same-model
+retry.
 
 The switch is per-turn only. `runItem` restores the baseline model and
-clears the per-turn key in its `finally` block, and the next turn
+clears the per-turn state in its `finally` block, and the next turn
 re-resolves the persisted spec. Sticky failover would change the user's
-model choice behind their back.
+model choice behind their back. The failing spec is tracked as the turn's
+ACTIVE spec (`turnActiveModelSpec`): a role's model frontmatter overrides
+the streaming model without touching the layered resolution, and a bare
+role id is canonicalized to `provider/id` — the engine resolves bare ids
+across providers while the api's `parseModelId` reads bare as Anthropic.
 
 Failover only runs where the retry runs: unattended sessions
 (orchestrator, workflow, child) or sessions with an explicit `turnRetry`
@@ -51,23 +67,34 @@ unknown spec) is skipped, never fatal. A failed candidate lookup emits
 
 ## API policy (`packages/api/src/services/model-failover.ts`)
 
-Equivalence = same capability tier. Tiers are S/M/L, classified from the
-model id's family name (haiku/mini/nano/lite → S, opus/pro/o1 → L,
-sonnet/flash/gpt/gemini → M), then an output-price band for unknown ids,
-then M. This is a static policy map (TKAI-326 decision 4), not
-configuration.
+Equivalence = same capability tier. Tiers are S/M/L, classified from
+distinct family markers first (haiku/mini/nano/lite → S, opus/pro/o1 →
+L), then the catalog's output price ("gpt" and "gemini" span three orders
+of magnitude of price, so a broad vendor word must not pre-empt a known
+price), then M. This is a static policy map (TKAI-326 decision 4), not
+configuration. A test asserts every `TIER_DEFAULTS` id is
+catalog-resolvable and classifies as its declared tier, so registry churn
+fails a test instead of silently shrinking coverage.
 
 Candidate order derives from existing config (decision 2 — no new schema):
 
-1. Org model preferences (`orgs.model_preferences`), most-preferred first:
-   entries on another provider, same tier, active in the org catalog.
-2. Static per-kind defaults (`TIER_DEFAULTS`), known kinds in fixed order
-   (anthropic, openai, google), filtered against the live catalog.
+1. Org model preferences (`orgs.model_preferences`), most-preferred first,
+   matched via model-catalog's `preferenceIndex` (the single encoding of
+   the bare-id-means-Anthropic rule): entries on another vendor, same
+   tier, active in the org catalog.
+2. Static per-kind defaults (`TIER_DEFAULTS`), known kinds
+   (model-catalog's exported `KNOWN_KINDS`) in fixed order, filtered
+   against the live catalog.
 
-One candidate per provider; at most 3. The catalog's `active` flag already
-encodes "enabled row + usable key", so credential checks never duplicate.
-The L defaults avoid the ultra-priced "pro" reasoning models — a failover
-turn must not become a cost spike.
+Exclusion is by upstream VENDOR, not provider row: a custom
+openai_compatible proxy fronting OpenAI (inferred from the model family)
+and an OpenRouter selection of an Anthropic model (vendor prefix of the
+model id) both count as their upstream vendor, so a failover can never
+land on the vendor that is melting down. One candidate per vendor; at
+most 3. The catalog's `active` flag already encodes "enabled row + usable
+key", so credential checks never duplicate. The L defaults avoid the
+ultra-priced "pro" reasoning models — a failover turn must not become a
+cost spike.
 
 `EngineHost` wires the seam per session build (`makeResolveFailoverModels`,
 `packages/api/src/engine/host.ts`). `VALET_DISABLE_PROVIDER_FAILOVER=1` is
@@ -79,18 +106,21 @@ New `EngineEvent`/wire event `turn_failover` `{threadId, fromModel,
 toModel, reason}`. The web client stores it per thread
 (`failoverByThread`, `packages/web/src/stores/stream.ts`) and renders a
 neutral info strip under the transcript — not an error banner, and no
-thread-status flip: the turn is recovering, not failing. The notice
-survives the recovered turn's streaming; it retires when the next turn
-starts streaming (`turn_end` arms it, the next `message_start` clears it)
-or when the user sends the next prompt. Unattended sessions never type
-into the composer, so a prompt-only clear would leave the notice up
-forever.
+thread-status flip: the turn is recovering, not failing. Lifecycle: the
+notice survives the whole failover turn, including its tool rounds
+(`turn_end` fires per LLM round, so it cannot drive retirement). The
+failover item's `submission.settled` arms it; the next `message_start` (a
+new turn streaming on the original model) or a later item's settle (a
+next turn that died before streaming) retires it; a composer send clears
+it immediately. The notice is live-only by design: a reload re-seeds from
+REST history, which does not carry the event — the same contract as the
+error banner.
 
-The failing model is tracked as the turn's ACTIVE spec
-(`turnActiveModelSpec` in `thread.ts`): a role's model frontmatter
-overrides the streaming model without touching the layered resolution, and
-failover must exclude the provider that is really failing, not the
-default's.
+Channel surfaces disclose the switch too: the channel stream bridge
+appends a footer note to the streamed reply when its stream closes
+(`packages/api/src/channels/stream-bridge.ts`), and the CLI `chat`/`send`
+renderers print a `[failover]` line. Non-streaming channel transports get
+no disclosure yet — a known gap.
 
 ## Deferred (multi-sprint scope from TKAI-326)
 
@@ -104,7 +134,11 @@ default's.
 ## Validation
 
 - `pnpm --filter @valet/engine test transient-turn-retry` — failover
-  switch, per-turn restore, opt-out, unusable-candidate skip.
-- `pnpm --filter @valet/api test model-failover` — tier classifier and
-  candidate walk (env keys stubbed; ambient keys change catalog activity).
+  switch, per-turn restore, restore-on-exhaustion, second-switch
+  attribution, role-override and bare-role-spec canonicalization, opt-out,
+  unusable-candidate skip.
+- `pnpm --filter @valet/api test model-failover` — tier classifier,
+  candidate walk, vendor exclusion, and the `TIER_DEFAULTS`
+  self-consistency check (env keys stubbed; ambient keys change catalog
+  activity).
 - `pnpm --filter @valet/api test bridge` — wire mapping.

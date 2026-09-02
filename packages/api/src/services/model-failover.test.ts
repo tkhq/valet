@@ -13,7 +13,8 @@ import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { orgs } from "../schema/index.js";
 import { setOrgModelPreferences } from "./org.js";
 import { createLlmProvider, updateLlmProvider } from "./llm-providers.js";
-import { classifyModelTier, failoverCandidates } from "./model-failover.js";
+import { classifyModelTier, failoverCandidates, TIER_DEFAULTS } from "./model-failover.js";
+import { buildOrgCatalog } from "./model-catalog.js";
 
 const orgId = "org1";
 
@@ -31,6 +32,15 @@ describe("classifyModelTier", () => {
     expect(classifyModelTier("gpt-5-pro")).toBe("L");
     expect(classifyModelTier("gemini-2.5-pro")).toBe("L");
     expect(classifyModelTier("o1")).toBe("L");
+  });
+
+  it("lets a known price override broad family words", () => {
+    // "gpt"/"gemini" span three orders of magnitude of price — the price
+    // band must win over the vendor word (this module's own openai L
+    // default, gpt-5.5, would otherwise classify M).
+    expect(classifyModelTier("gpt-5.5", 30)).toBe("L");
+    expect(classifyModelTier("gpt-oss-20b", 0.2)).toBe("S");
+    expect(classifyModelTier("gemini-2.5-flash", 2.5)).toBe("M");
   });
 
   it("falls back to output-price bands, then M, for unknown ids", () => {
@@ -136,5 +146,70 @@ describe("failoverCandidates", () => {
 
   it("returns nothing without an app db", async () => {
     expect(await failoverCandidates(undefined, credentials, orgId, "anthropic/claude-opus-4-8")).toEqual([]);
+  });
+
+  it("excludes the failing model's upstream VENDOR, not just its provider row", async () => {
+    // A custom openai_compatible proxy serving an OpenAI model fails: the
+    // direct openai provider fronts the same melting-down vendor and must
+    // not be a candidate.
+    const proxy = await createLlmProvider(db, {
+      orgId,
+      kind: "openai_compatible",
+      name: "myproxy",
+      baseUrl: "https://proxy.example.com/v1",
+      models: [{ id: "gpt-5.4", name: "GPT 5.4 via proxy" }],
+    });
+    await credentials.save({ type: "org", id: orgId }, `llm:${proxy.id}`, {
+      type: "api_key",
+      apiKey: "sk-proxy-test",
+    });
+    await addKeyedProvider("openai");
+    await addKeyedProvider("anthropic");
+
+    const candidates = await failoverCandidates(db, credentials, orgId, `${proxy.id}/gpt-5.4`);
+    expect(candidates).toEqual(["anthropic/claude-sonnet-4-6"]);
+  });
+
+  it("excludes an openrouter preference that fronts the failing vendor", async () => {
+    const openrouter = await createLlmProvider(db, {
+      orgId,
+      kind: "openrouter",
+      name: "OpenRouter",
+      models: [{ id: "anthropic/claude-sonnet-4-6", name: "Sonnet via OpenRouter" }],
+    });
+    await credentials.save({ type: "org", id: orgId }, `llm:${openrouter.id}`, {
+      type: "api_key",
+      apiKey: "sk-or-test",
+    });
+    await addKeyedProvider("anthropic");
+    await setOrgModelPreferences(db, orgId, ["openrouter/anthropic/claude-sonnet-4-6"]);
+
+    // Anthropic (direct) is failing; the OpenRouter selection still runs
+    // on Anthropic's backend, so no candidate remains.
+    expect(await failoverCandidates(db, credentials, orgId, "anthropic/claude-sonnet-4-6")).toEqual(
+      [],
+    );
+  });
+
+  it("TIER_DEFAULTS ids are catalog-resolvable and classify as their declared tier", async () => {
+    await addKeyedProvider("anthropic");
+    await addKeyedProvider("openai");
+    await addKeyedProvider("google");
+    const catalog = await buildOrgCatalog(db, credentials, orgId);
+    const byId = new Map(catalog.filter((e) => e.active).map((e) => [e.id, e]));
+
+    for (const [kind, tiers] of Object.entries(TIER_DEFAULTS)) {
+      for (const [tier, ids] of Object.entries(tiers)) {
+        for (const id of ids) {
+          const entry = byId.get(`${kind}/${id}`);
+          // A stale id would silently shrink failover coverage — prune it.
+          expect(entry, `${kind}/${id} missing from the registry catalog`).toBeDefined();
+          expect(
+            classifyModelTier(id, entry?.pricing?.output),
+            `${kind}/${id} does not classify as its declared tier`,
+          ).toBe(tier);
+        }
+      }
+    }
   });
 });

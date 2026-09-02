@@ -45,10 +45,12 @@ export type CatalogEntry = ModelInfo & { resolvable: boolean };
  * catalog — deliberately narrower than `LlmProviderKind`: `openrouter` is
  * registry-backed too but its ~274 models would flood pickers, so it goes
  * through a curated-selection branch below; `openai_compatible` has no
- * pi-ai registry / env fallback at all. */
-type KnownCatalogKind = "anthropic" | "openai" | "google";
+ * pi-ai registry / env fallback at all. Exported so failover's static
+ * tier tables key off the same list (a new kind then fails the type
+ * check there instead of silently never failing over). */
+export type KnownCatalogKind = "anthropic" | "openai" | "google";
 
-const KNOWN_KINDS: readonly KnownCatalogKind[] = ["anthropic", "openai", "google"];
+export const KNOWN_KINDS: readonly KnownCatalogKind[] = ["anthropic", "openai", "google"];
 
 const KNOWN_KIND_LABEL: Record<KnownCatalogKind, string> = {
   anthropic: "Anthropic",
@@ -95,8 +97,9 @@ function knownKindEntries(
  * preference ids are back-compat and mean Anthropic (`parseModelId`,
  * shared with `services/llm-providers.ts`'s delete-guard/preferences
  * logic, is the single source of truth for that rule). Returns the
- * matching index in `modelPreferences`, or -1 when unmatched. */
-function preferenceIndex(entry: CatalogEntry, modelPreferences: string[]): number {
+ * matching index in `modelPreferences`, or -1 when unmatched. Exported so
+ * failover's preference pass reuses the exact same matching rule. */
+export function preferenceIndex(entry: CatalogEntry, modelPreferences: string[]): number {
   const namespacedIdx = modelPreferences.indexOf(entry.id);
   if (namespacedIdx !== -1) return namespacedIdx;
   const { namespace, modelId } = parseModelId(entry.id);

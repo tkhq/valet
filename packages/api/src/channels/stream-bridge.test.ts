@@ -733,3 +733,47 @@ describe("splitForFlush", () => {
     expect(keep).toBe("");
   });
 });
+
+describe("provider-failover disclosure (TKAI-326)", () => {
+  const failover = (): EngineEvent => ({
+    type: "turn_failover",
+    threadId: THREAD_ID,
+    fromModel: "anthropic/claude-opus-4-8",
+    toModel: "openai/gpt-5.5",
+    reason: "overloaded_error: Overloaded",
+  });
+
+  it("appends the failover note as a footer when the streamed reply closes", async () => {
+    const h = makeHarness();
+    h.bridge.noteInboundTurn(h.turn);
+    await h.emit(failover());
+    await h.emit(messageStart("m1"));
+    h.delta("recovered answer\n");
+    await advance(FLUSH_INTERVAL_MS);
+    await h.emit(messageEnd("m1", "end_turn"));
+    await advance(FLUSH_INTERVAL_MS);
+
+    const text = h.transport.streamedText();
+    expect(text).toContain("recovered answer");
+    expect(text).toContain(
+      "this reply ran on openai/gpt-5.5 because anthropic/claude-opus-4-8 kept failing",
+    );
+  });
+
+  it("drops an unconsumed note on turn_end so it cannot leak into a later reply", async () => {
+    const h = makeHarness();
+    // No stream opens for the failover turn (nothing pending): the
+    // disclosure has nowhere to go and must die with the turn.
+    await h.emit(failover());
+    await h.emit({ type: "turn_end", threadId: THREAD_ID, reason: "end_turn" });
+
+    h.bridge.noteInboundTurn(h.turn);
+    await h.emit(messageStart("m2"));
+    h.delta("a later, unrelated reply\n");
+    await advance(FLUSH_INTERVAL_MS);
+    await h.emit(messageEnd("m2", "end_turn"));
+    await advance(FLUSH_INTERVAL_MS);
+
+    expect(h.transport.streamedText()).not.toContain("kept failing");
+  });
+});

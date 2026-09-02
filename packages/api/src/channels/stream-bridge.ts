@@ -200,6 +200,15 @@ export function splitForFlush(buffer: string, opts: { force: boolean }): { send:
 export class ChannelStreamBridge {
   private active = new Map<string, ActiveStream>();
   private pending = new Map<string, StreamTurn>();
+  /**
+   * Provider-failover disclosure per (session, thread) key (TKAI-326): a
+   * channel reader must learn their content ran on another provider (data
+   * residency is the stated reason the feature has an opt-out). Set on
+   * `turn_failover`, appended as a footer when the reply's stream closes,
+   * and dropped unconsumed on a turn_end with no open stream so a
+   * non-streaming transport cannot leak the note into a later turn.
+   */
+  private failoverNotes = new Map<string, string>();
   private streamed = new Set<string>();
   private streamedOrder: string[] = [];
   private unsubscribe: Unsubscribe | null = null;
@@ -214,7 +223,7 @@ export class ChannelStreamBridge {
   start(): void {
     if (this.unsubscribe) return;
     this.unsubscribe = this.deps.eventStream.subscribe(
-      { eventTypes: ["message_start", "text_delta", "message_end", "error", "turn_end"] },
+      { eventTypes: ["message_start", "text_delta", "message_end", "error", "turn_end", "turn_failover"] },
       (event) => this.onBusEvent(event),
     );
     this.sweepTimer = setInterval(() => {
@@ -238,6 +247,7 @@ export class ChannelStreamBridge {
       ),
     );
     this.pending.clear();
+    this.failoverNotes.clear();
   }
 
   /**
@@ -340,6 +350,14 @@ export class ChannelStreamBridge {
       return;
     }
 
+    if (e.type === "turn_failover") {
+      this.failoverNotes.set(
+        key,
+        `Note: this reply ran on ${e.toModel} because ${e.fromModel} kept failing. The next turn uses ${e.fromModel} again.`,
+      );
+      return;
+    }
+
     if (e.type === "error") {
       if (!this.active.has(key)) return;
       // The engine's own error text is the useful half; the corrective action
@@ -357,6 +375,10 @@ export class ChannelStreamBridge {
       // message_end always arrives.
       if (this.active.has(key)) {
         void this.guard("finish", () => this.finish(key));
+      } else {
+        // No stream to carry the disclosure — drop it so it cannot attach
+        // to a later, unrelated reply on this thread.
+        this.failoverNotes.delete(key);
       }
       if (turn) void this.setStatus(turn, "");
     }
@@ -643,8 +665,14 @@ export class ChannelStreamBridge {
     this.active.delete(key);
     if (stream.timer) clearTimeout(stream.timer);
     stream.timer = null;
-    if (note !== undefined && note !== "") {
-      stream.buffer += (stream.buffer === "" ? "" : "\n\n") + note;
+    // Failover disclosure first (chronological: the switch happened, then
+    // the outcome), then the caller's own note (abort/error text).
+    const failoverNote = this.failoverNotes.get(key);
+    this.failoverNotes.delete(key);
+    for (const part of [failoverNote, note]) {
+      if (part !== undefined && part !== "") {
+        stream.buffer += (stream.buffer === "" ? "" : "\n\n") + part;
+      }
     }
     try {
       await this.flush(stream, true);

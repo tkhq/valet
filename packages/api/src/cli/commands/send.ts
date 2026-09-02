@@ -160,6 +160,14 @@ export async function consumeSend(deps: Omit<SendDeps, "client">, ctx: ConsumeCt
         case "tool_end":
           if (ev.threadId === ctx.threadId) printLine(renderToolEnd(ev.toolName, ev.isError));
           break;
+        case "turn_failover":
+          // Cross-provider disclosure (TKAI-326).
+          if (ev.threadId === ctx.threadId) {
+            printLine(
+              `[failover] this turn runs on ${ev.toModel} because ${ev.fromModel} kept failing; the next turn uses ${ev.fromModel} again`,
+            );
+          }
+          break;
         case "error":
           printErr(`error: ${ev.message}`);
           break;

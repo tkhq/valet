@@ -280,7 +280,11 @@ interface CreateSessionOptions {
   roles?: RoleSpec[];
   skills?: SkillSource[];
   model: string;
-  modelFailover?: string[];
+  // Provider failover (TKAI-326): ordered equivalent-model specs for the
+  // transient turn retry, plus a per-session opt-out. See
+  // docs/specs/2026-09-02-provider-failover-design.md.
+  resolveFailoverModels?: (spec: string) => Promise<string[]>;
+  allowProviderFailover?: boolean;
   queueMode?: QueueMode;
   /**
    * Ordered system-context fragments injected after the base system prompt
@@ -1104,6 +1108,7 @@ Two retry layers, both bounded and visible:
 
 - **Transport** — every turn LLM call passes an explicit retry policy to pi-ai (`maxRetries: 2`, `maxRetryDelayMs: 30s`, `timeoutMs: 10min`), as defaults that upstream-supplied options override, never as pins. Kept at SDK-default parity deliberately: the turn-level layer multiplies with it. Side calls (the compaction summarizer) fail fast instead: `maxRetries: 1`, 15s delay cap — nobody waits on a summarizer during a capacity event, and the compaction failure paths own recovery.
 - **Turn-level** — when a turn settles with a transient provider error (pi-ai's `isRetryableAssistantError` taxonomy — the engine deliberately does not fork it), unattended sessions (purpose orchestrator, workflow, or child; `purpose` survives restarts via `Session.rehydrate`) drop the failed assistant message and call `agent.continue()` — never a re-prompt, which would duplicate the user content in live context. Backoff is [10s, 30s], 2 attempts by default (`CreateSessionOptions.turnRetry` overrides), chunked: `this.aborted` is checked every second and the durable queue item every 5s plus once at the end, so an abort or steer during the wait stands the retry down instead of racing its successor. Each retry emits `turn_transient_retry`. Interactive sessions never auto-retry: a human is present to decide.
+- **Provider failover (TKAI-326)** — from the second retry attempt on, after that attempt's backoff, the retry can switch the turn to an equivalent model on another provider through the host's `resolveFailoverModels` seam. A switch emits `turn_failover` in addition to the attempt's `turn_transient_retry`. Per-turn only; candidates that fail resolve are skipped; when candidates run out the cycle restores the original model. Details: `docs/specs/2026-09-02-provider-failover-design.md`.
 
 ### Prompt-cache discipline (TKAI-320)
 

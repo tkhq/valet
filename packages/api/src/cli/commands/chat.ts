@@ -187,6 +187,15 @@ export async function chatTurn(deps: ChatTurnDeps, input: ChatTurnInput): Promis
       case "tool_end":
         if (ev.threadId === threadId) deps.write(`${renderToolEnd(ev.toolName, ev.isError)}\n`);
         break;
+      case "turn_failover":
+        // Cross-provider disclosure (TKAI-326): the reader must learn this
+        // turn ran on another provider's model.
+        if (ev.threadId === threadId) {
+          deps.write(
+            `\n[failover] this turn runs on ${ev.toModel} because ${ev.fromModel} kept failing; the next turn uses ${ev.fromModel} again\n`,
+          );
+        }
+        break;
       case "decision_gate": {
         if (ev.threadId !== threadId) break;
         deps.write(`\n${renderGatePrompt(ev.gate)}\n`);

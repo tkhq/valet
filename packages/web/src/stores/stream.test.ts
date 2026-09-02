@@ -1085,3 +1085,87 @@ describe("queueBusy", () => {
     expect(queueBusy({ ...base, status: "paused" })).toBe(false);
   });
 });
+
+describe("provider-failover notice lifecycle (TKAI-326)", () => {
+  beforeEach(reset);
+
+  function failoverEvent(off: number): WireEvent {
+    return {
+      seq: off,
+      ts: Date.now(),
+      offset: offset(off),
+      type: "turn_failover",
+      threadId: THREAD,
+      fromModel: "anthropic/claude-opus-4-8",
+      toModel: "openai/gpt-5.5",
+      reason: "overloaded_error: Overloaded",
+    };
+  }
+
+  function turnEnd(off: number): WireEvent {
+    return {
+      seq: off,
+      ts: Date.now(),
+      offset: offset(off),
+      type: "turn_end",
+      threadId: THREAD,
+      reason: "end_turn",
+    };
+  }
+
+  function settled(off: number, queueItemId: string): WireEvent {
+    return {
+      seq: off,
+      ts: Date.now(),
+      offset: offset(off),
+      type: "submission.settled",
+      sessionId: SESSION,
+      threadId: THREAD,
+      queueItemId,
+      outcome: "completed",
+    };
+  }
+
+  const notice = () =>
+    useStreamStore.getState().bySession[SESSION]?.failoverByThread[THREAD];
+
+  it("survives the failover turn's tool rounds and retires when the NEXT turn streams", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, failoverEvent(1));
+    expect(notice()).toBeDefined();
+
+    // turn_end fires per LLM round: a tool round's end + the post-tool
+    // round's message_start must NOT retire the notice mid-turn.
+    ingest(SESSION, turnEnd(2));
+    ingest(SESSION, messageStart("m-post-tool", 3));
+    expect(notice()).toBeDefined();
+
+    // The failover item settles — the notice stays visible, armed.
+    ingest(SESSION, settled(4, "q-failover"));
+    expect(notice()).toBeDefined();
+
+    // The next turn streams on the re-resolved original model: retire.
+    ingest(SESSION, messageStart("m-next-turn", 5));
+    expect(notice()).toBeUndefined();
+  });
+
+  it("retires when the next item settles without ever streaming", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, failoverEvent(1));
+    ingest(SESSION, settled(2, "q-failover"));
+    expect(notice()).toBeDefined();
+
+    // A later item dies before message_start (e.g. NoCredentialsError at
+    // turn start) — the "next turn uses X again" promise is stale.
+    ingest(SESSION, settled(3, "q-next"));
+    expect(notice()).toBeUndefined();
+  });
+
+  it("clears immediately on the user's next prompt", () => {
+    const { ingest, addUserMessage } = useStreamStore.getState();
+    ingest(SESSION, failoverEvent(1));
+    expect(notice()).toBeDefined();
+    addUserMessage(SESSION, "carry on", THREAD);
+    expect(notice()).toBeUndefined();
+  });
+});

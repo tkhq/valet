@@ -197,10 +197,11 @@ describe("turn-level transient retry (TKAI-319)", () => {
       fromModel: "failover-primary/pm",
       toModel: "failover-backup/bm",
     });
-    // Attempt 1 was still a same-model retry.
+    // Both attempts announce themselves; the switch happens after attempt
+    // 2's backoff (the failing provider's recovery window comes first).
     expect(
       events.filter((e) => e.event.type === "error" && e.event.code === "turn_transient_retry"),
-    ).toHaveLength(1);
+    ).toHaveLength(2);
 
     // Per-turn only: the NEXT turn resolves the original spec and runs on
     // the primary again (its queue holds the only pending response).
@@ -303,6 +304,117 @@ describe("turn-level transient retry (TKAI-319)", () => {
     backup.unregister();
   });
 
+  it("restores the original model for retries after candidates are exhausted", async () => {
+    const primary = registerFauxProvider({
+      provider: "failover-restore-primary",
+      models: [{ id: "pm", name: "pm", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    const backup = registerFauxProvider({
+      provider: "failover-restore-backup",
+      models: [{ id: "bm", name: "bm", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    const err = () =>
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error: Overloaded" });
+    // Initial + attempt-1 retry fail, then the attempt-3 restored-primary
+    // retry succeeds. The backup's single response is attempt 2's failure.
+    primary.setResponses([err, err, fauxAssistantMessage("primary recovered")]);
+    backup.setResponses([err]);
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model: primary.getModel("pm")!,
+      modelSpec: "failover-restore-primary/pm",
+      purpose: "child",
+      turnRetry: { maxAttempts: 3, backoffMs: [1, 1, 1] },
+      resolveModel: async (spec) => {
+        if (spec === "failover-restore-primary/pm")
+          return { model: primary.getModel("pm")!, canonicalId: spec };
+        if (spec === "failover-restore-backup/bm")
+          return { model: backup.getModel("bm")!, canonicalId: spec };
+        return null;
+      },
+      resolveFailoverModels: async () => ["failover-restore-backup/bm"],
+    });
+    const receipt = await session.prompt("do the thing");
+    await waitFor(() => primary.getPendingResponseCount() === 0, 8000);
+    await waitFor(
+      () =>
+        events.filter((e) => e.event.type === "turn_end" && e.event.threadId === receipt.threadId)
+          .length >= 4,
+      8000,
+    );
+    const entries = await store.getEntries(session.id, receipt.threadId);
+    const lastAssistant = [...entries]
+      .reverse()
+      .find((e) => e.type === "message" && e.role === "assistant");
+    expect(lastAssistant?.type === "message" && lastAssistant.content).toBe("primary recovered");
+    expect(backup.getPendingResponseCount()).toBe(0);
+    primary.unregister();
+    backup.unregister();
+  });
+
+  it("a second failover in one cycle attributes the failure to the candidate that produced it", async () => {
+    const primary = registerFauxProvider({
+      provider: "failover-attr-primary",
+      models: [{ id: "pm", name: "pm", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    const c1 = registerFauxProvider({
+      provider: "failover-attr-c1",
+      models: [{ id: "m1", name: "m1", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    const c2 = registerFauxProvider({
+      provider: "failover-attr-c2",
+      models: [{ id: "m2", name: "m2", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    const err = () =>
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error: Overloaded" });
+    primary.setResponses([err, err]);
+    c1.setResponses([err]);
+    c2.setResponses([fauxAssistantMessage("c2 response")]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model: primary.getModel("pm")!,
+      modelSpec: "failover-attr-primary/pm",
+      purpose: "child",
+      turnRetry: { maxAttempts: 3, backoffMs: [1, 1, 1] },
+      resolveModel: async (spec) => {
+        if (spec === "failover-attr-primary/pm")
+          return { model: primary.getModel("pm")!, canonicalId: spec };
+        if (spec === "failover-attr-c1/m1") return { model: c1.getModel("m1")!, canonicalId: spec };
+        if (spec === "failover-attr-c2/m2") return { model: c2.getModel("m2")!, canonicalId: spec };
+        return null;
+      },
+      resolveFailoverModels: async () => ["failover-attr-c1/m1", "failover-attr-c2/m2"],
+    });
+    await session.prompt("do the thing");
+    await waitFor(() => c2.getPendingResponseCount() === 0, 8000);
+    await waitFor(
+      () => events.filter((e) => e.event.type === "turn_failover").length >= 2,
+      8000,
+    );
+    const failovers = events.filter((e) => e.event.type === "turn_failover");
+    expect(failovers[0]!.event).toMatchObject({
+      fromModel: "failover-attr-primary/pm",
+      toModel: "failover-attr-c1/m1",
+    });
+    // The second switch names C1 — the model that actually failed — not
+    // the original primary.
+    expect(failovers[1]!.event).toMatchObject({
+      fromModel: "failover-attr-c1/m1",
+      toModel: "failover-attr-c2/m2",
+    });
+    primary.unregister();
+    c1.unregister();
+    c2.unregister();
+  });
+
   it("failover reasons about a role's model override, not the layered default", async () => {
     // A role's model frontmatter mutates the streaming model directly —
     // `turnModelSpec` cannot see it. Failover must ask for equivalents of
@@ -360,6 +472,60 @@ describe("turn-level transient retry (TKAI-319)", () => {
     expect(failover?.event.type === "turn_failover" && failover.event.fromModel).toBe(
       "openai/gpt-4.1",
     );
+    shadow.unregister();
+    sessionDefault.unregister();
+    backup.unregister();
+  });
+
+  it("canonicalizes a BARE role model spec before the failover lookup", async () => {
+    // The engine resolves a bare id by trying anthropic → openai → google,
+    // but the api's parseModelId hard-codes bare = anthropic. A bare
+    // "gpt-4.1" role must reach the failover seam as "openai/gpt-4.1" or
+    // the candidate walk excludes the wrong provider.
+    const roleModel = getModel("openai", "gpt-4.1")!;
+    const shadow = registerFauxProvider({ api: roleModel.api, provider: "openai" });
+    const err = () =>
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error: Overloaded" });
+    shadow.setResponses([err, err]);
+    const sessionDefault = registerFauxProvider({
+      provider: "failover-bare-primary",
+      models: [{ id: "pm", name: "pm", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    const backup = registerFauxProvider({
+      provider: "failover-bare-backup",
+      models: [{ id: "bm", name: "bm", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    backup.setResponses([fauxAssistantMessage("bare role failover response")]);
+    const specsSeen: string[] = [];
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model: sessionDefault.getModel("pm")!,
+      modelSpec: "failover-bare-primary/pm",
+      purpose: "child",
+      turnRetry: { maxAttempts: 2, backoffMs: [1, 1] },
+      roles: [{ name: "cheap", content: "Prefer the cheap model.", model: "gpt-4.1" }],
+      resolveModel: async (spec) => {
+        if (spec === "failover-bare-primary/pm")
+          return { model: sessionDefault.getModel("pm")!, canonicalId: spec };
+        if (spec === "failover-bare-backup/bm")
+          return { model: backup.getModel("bm")!, canonicalId: spec };
+        return null;
+      },
+      resolveFailoverModels: async (spec) => {
+        specsSeen.push(spec);
+        return ["failover-bare-backup/bm"];
+      },
+    });
+    const receipt = await session.prompt("do the thing", { role: "cheap" });
+    await waitFor(() => backup.getPendingResponseCount() === 0);
+    await waitFor(() =>
+      events.some((e) => e.event.type === "turn_failover" && e.event.threadId === receipt.threadId),
+    );
+    expect(specsSeen).toEqual(["openai/gpt-4.1"]);
     shadow.unregister();
     sessionDefault.unregister();
     backup.unregister();
