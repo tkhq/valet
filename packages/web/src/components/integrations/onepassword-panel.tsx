@@ -1,28 +1,18 @@
-import { useState } from "react";
-import type { CredentialKind, CredentialSummary, OpSuggestionsResponse } from "@valet/api/wire";
-
-/** One row of the suggestion scan. */
-type OpSuggestion = OpSuggestionsResponse["suggestions"][number];
-import { apiErrorMessage } from "~/api/client";
-import { useConnectCredential, useCredentials, useDisconnectCredential } from "~/api/integrations";
-import {
-  useOnePasswordSettings,
-  useOpSuggestions,
-  usePutOnePasswordSettings,
-  type OnePasswordTokenScope,
-} from "~/api/onepassword";
+import { useEffect, useState } from "react";
+import { errorText } from "~/lib/error-text";
+import { useConnectCredential, useDisconnectCredential } from "~/api/integrations";
+import { useOnePasswordSettings, usePutOnePasswordSettings } from "~/api/onepassword";
 import { useOrg } from "~/api/settings";
-import { Badge, Button, Input, Label, Spinner, Switch } from "~/components/primitives";
+import { Badge, Button, Input, Spinner, Switch } from "~/components/primitives";
 import { FieldRow } from "~/components/settings/field-row";
-import { OnePasswordPicker, type OnePasswordComposedReference } from "~/components/settings/onepassword-picker";
 import { Section } from "~/components/settings/section";
 import { ServiceIcon } from "~/components/service-icon";
-import { displayName } from "./display-name";
 
 /**
- * 1Password on `/integrations`. One home for the org token, the personal
- * token, and `op://` reference credentials. Organization · 1Password and
- * You · Connected accounts no longer carry this UI.
+ * Organization · 1Password: the org service-account token (admin), the
+ * allow-personal toggle (admin), and the personal token (when allowed).
+ * Reference credentials are resolved from the vaults by item title, so
+ * there is nothing to list here.
  */
 export function OnePasswordPanel() {
   const orgQ = useOrg();
@@ -89,7 +79,7 @@ function AllowPersonalSwitch({ checked }: { checked: boolean }) {
       />
       {putSettings.error && (
         <p className="mt-1 text-xs text-danger-500">
-          {apiErrorMessage(putSettings.error, "Couldn't save the setting.")}
+          {errorText(putSettings.error, "Couldn't save the setting.")}
         </p>
       )}
     </>
@@ -113,7 +103,7 @@ function OrgTokenRow({ connected }: { connected: boolean }) {
       });
       setToken("");
     } catch (err) {
-      setTokenError(apiErrorMessage(err, "Couldn't save the organization token."));
+      setTokenError(errorText(err, "Couldn't save the organization token."));
     }
   }
 
@@ -158,7 +148,7 @@ function PersonalTokenRow({ connected }: { connected: boolean }) {
       });
       setToken("");
     } catch (err) {
-      setTokenError(apiErrorMessage(err, "Couldn't save the 1Password token."));
+      setTokenError(errorText(err, "Couldn't save the 1Password token."));
     }
   }
 
@@ -213,6 +203,11 @@ function TokenFields({
   // boxes with the same placeholder read as "paste your token twice"; the
   // input now appears only when there is a reason to type into one.
   const [entering, setEntering] = useState(!connected);
+  // `connected` flips after a save or a remove; the mount value alone would
+  // leave the form open after connecting, or the badge up after removing.
+  useEffect(() => {
+    setEntering(!connected);
+  }, [connected]);
 
   if (connected && !entering) {
     return (

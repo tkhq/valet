@@ -30,7 +30,8 @@ import { Hono, type Context } from "hono";
 import { decodePageCursor, encodePageCursor, readLimit } from "../lib/page-cursor.js";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
-import { ONEPASSWORD_SERVICE, OnePasswordAuthError, type OnePasswordScope } from "../services/onepassword.js";
+import { ONEPASSWORD_SERVICE, titleNamesService, type OnePasswordScope } from "../services/onepassword.js";
+import { PERSONAL_DISABLED, mapOnePasswordError } from "./_onepassword-errors.js";
 import { getAllowPersonalOnePassword, setOrgFeatures } from "../services/org.js";
 import type {
   ListOpItemsResponse,
@@ -47,8 +48,6 @@ const OP_ITEMS_MAX_LIMIT = 500;
 
 export const onePasswordRouter = new Hono<AppEnv>();
 
-const PERSONAL_DISABLED = { error: "personal 1Password tokens are disabled by your organization" } as const;
-const REQUEST_FAILED = { error: "1Password request failed" } as const;
 
 function scopeFromQuery(c: Context<AppEnv>): OnePasswordScope {
   return c.req.query("scope") === "org" ? "org" : "personal";
@@ -74,13 +73,6 @@ async function requireScopeAccess(c: Context<AppEnv>, scope: OnePasswordScope) {
   return undefined;
 }
 
-/** Maps a rejection from `OnePasswordService` to the route's error response. */
-function mapServiceError(c: Context<AppEnv>, err: unknown) {
-  if (err instanceof OnePasswordAuthError) {
-    return c.json({ error: err.message }, 400);
-  }
-  return c.json(REQUEST_FAILED, 502);
-}
 
 onePasswordRouter.get("/settings", async (c) => {
   const { db, onePassword } = c.var.providers;
@@ -142,7 +134,7 @@ onePasswordRouter.get("/vaults", async (c) => {
     const resp: ListOpVaultsResponse = { vaults };
     return c.json(resp);
   } catch (err) {
-    return mapServiceError(c, err);
+    return mapOnePasswordError(c, err);
   }
 });
 
@@ -178,7 +170,7 @@ onePasswordRouter.get("/vaults/:vaultId/items", async (c) => {
     };
     return c.json(resp);
   } catch (err) {
-    return mapServiceError(c, err);
+    return mapOnePasswordError(c, err);
   }
 });
 
@@ -221,22 +213,30 @@ onePasswordRouter.get("/suggestions", async (c) => {
       for (const decl of plugin.credentials ?? []) declared.add(decl.service ?? plugin.name);
     }
     declared.delete(ONEPASSWORD_SERVICE);
-    const wanted: string[] = [];
-    for (const service of declared) {
-      if ((await engineCredentials.get(owner, service)) === null) wanted.push(service);
-    }
+    // One list, not one get per service: `get` may refresh an OAuth row and
+    // write it back, and a suggestion scan should read, not write.
+    const connected = new Set((await engineCredentials.list(owner)).map((c) => c.service));
+    const wanted = [...declared].filter((service) => !connected.has(service));
     if (wanted.length === 0) {
       return c.json({ suggestions: [], unreadableVaults: [] } satisfies OpSuggestionsResponse);
     }
 
     const suggestions: OpSuggestionsResponse["suggestions"] = [];
     const unreadableVaults: string[] = [];
-    for (const vault of await onePassword.listVaults(scope, ctx)) {
-      let items;
-      try {
-        items = await onePassword.listItems(scope, ctx, vault.id);
-      } catch {
-        // One unreadable vault must not fail the whole scan.
+    // Vaults in parallel, results in vault order so the page is stable.
+    const vaults = await onePassword.listVaults(scope, ctx);
+    const scans = await Promise.all(
+      vaults.map(async (vault) => {
+        try {
+          return { vault, items: await onePassword.listItems(scope, ctx, vault.id) };
+        } catch {
+          // One unreadable vault must not fail the whole scan.
+          return { vault, items: null };
+        }
+      }),
+    );
+    for (const { vault, items } of scans) {
+      if (items === null) {
         unreadableVaults.push(vault.title);
         continue;
       }
@@ -254,22 +254,9 @@ onePasswordRouter.get("/suggestions", async (c) => {
     }
     return c.json({ suggestions, unreadableVaults } satisfies OpSuggestionsResponse);
   } catch (err) {
-    return mapServiceError(c, err);
+    return mapOnePasswordError(c, err);
   }
 });
-
-/**
- * Whether an item title names a service. Word-boundary, case-insensitive, on
- * the service id with separators loosened: "Linear", "Linear API Key" and
- * "linear-prod" all name `linear`, while "Linearity" does not.
- *
- * Deliberately narrow. A suggestion the person rejects costs them a glance;
- * one they accept without noticing points an integration at the wrong secret.
- */
-function titleNamesService(title: string, service: string): boolean {
-  const needle = service.replace(/[-_]/g, "[-_ ]?").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`(^|[^a-z0-9])${needle}([^a-z0-9]|$)`, "i").test(title);
-}
 
 onePasswordRouter.get("/vaults/:vaultId/items/:itemId", async (c) => {
   const { onePassword } = c.var.providers;
@@ -286,6 +273,6 @@ onePasswordRouter.get("/vaults/:vaultId/items/:itemId", async (c) => {
     const resp: OpItemDetailResponse = item;
     return c.json(resp);
   } catch (err) {
-    return mapServiceError(c, err);
+    return mapOnePasswordError(c, err);
   }
 });

@@ -7,6 +7,7 @@ import {
   ONEPASSWORD_SERVICE,
   type OpClient,
   type OnePasswordCtx,
+  titleNamesService,
 } from "./onepassword.js";
 
 function memStore(): CredentialStore {
@@ -372,5 +373,127 @@ describe("createOnePasswordService", () => {
     } finally {
       log.mockRestore();
     }
+  });
+});
+
+
+describe("titleNamesService", () => {
+  // Escape first, then loosen. The other order escaped the class it had just
+  // inserted, so no id with a separator ever matched its own item.
+  it("matches ids with separators against titles with spaces", () => {
+    expect(titleNamesService("Google Calendar", "google_calendar")).toBe(true);
+    expect(titleNamesService("Slack User", "slack-user")).toBe(true);
+    expect(titleNamesService("google-docs prod", "google-docs")).toBe(true);
+  });
+  it("stays on word boundaries", () => {
+    expect(titleNamesService("GitHub token", "github")).toBe(true);
+    expect(titleNamesService("Linearity", "linear")).toBe(false);
+  });
+});
+
+describe("findCredentialForService", () => {
+  function inventoryClient(calls: string[], overrides?: Partial<OpClient>): OpClient {
+    return fakeClient({
+      vaults: {
+        list: async () => {
+          calls.push("vaults.list");
+          return [{ id: "v1", title: "Vault One" }];
+        },
+      },
+      items: {
+        list: async () => {
+          calls.push("items.list");
+          return [{ id: "i1", title: "Google Calendar", vaultId: "v1" }];
+        },
+        getWithSecrets: async () => {
+          calls.push("getWithSecrets");
+          return { title: "Google Calendar", fields: [{ id: "f1", title: "credential", fieldType: "Concealed", value: "k-123" }] };
+        },
+        get: async () => ({ id: "i1", title: "Google Calendar", fields: [] }),
+      },
+      ...overrides,
+    });
+  }
+  async function withOrgToken() {
+    const credentials = memStore();
+    await credentials.save({ type: "org", id: ctx.orgId }, ONEPASSWORD_SERVICE, { type: "service_account", apiKey: "org-token" });
+    return credentials;
+  }
+
+  it("finds the secret by item title through a concealed field", async () => {
+    const calls: string[] = [];
+    const svc = createOnePasswordService({
+      credentials: await withOrgToken(),
+      getAllowPersonal: async () => true,
+      createClient: async () => inventoryClient(calls),
+    });
+    expect(await svc.findCredentialForService("org", ctx, "google_calendar")).toBe("k-123");
+  });
+
+  it("walks the vaults once for many services", async () => {
+    const calls: string[] = [];
+    const svc = createOnePasswordService({
+      credentials: await withOrgToken(),
+      getAllowPersonal: async () => true,
+      createClient: async () => inventoryClient(calls),
+    });
+    await svc.findCredentialForService("org", ctx, "google_calendar");
+    await svc.findCredentialForService("org", ctx, "linear");
+    await svc.findCredentialForService("org", ctx, "slack");
+    expect(calls.filter((c) => c === "vaults.list")).toHaveLength(1);
+    expect(calls.filter((c) => c === "items.list")).toHaveLength(1);
+  });
+
+  // The gate runs before the cache: a hit must not outlive the toggle.
+  it("re-checks the personal toggle on every call, cache or not", async () => {
+    let allowed = true;
+    const credentials = memStore();
+    await credentials.save({ type: "user", id: ctx.userId }, ONEPASSWORD_SERVICE, { type: "service_account", apiKey: "me" });
+    const svc = createOnePasswordService({
+      credentials,
+      getAllowPersonal: async () => allowed,
+      createClient: async () => inventoryClient([]),
+    });
+    expect(await svc.findCredentialForService("personal", ctx, "google_calendar")).toBe("k-123");
+    allowed = false;
+    await expect(svc.findCredentialForService("personal", ctx, "google_calendar")).rejects.toMatchObject({ kind: "disabled" });
+  });
+
+  // A one-time code is good for about thirty seconds; caching it for five
+  // minutes hands out expired codes with a valid shape.
+  it("does not cache a one-time code", async () => {
+    const calls: string[] = [];
+    let code = 0;
+    const client = inventoryClient(calls, {
+      items: {
+        list: async () => [{ id: "i1", title: "Acme", vaultId: "v1" }],
+        getWithSecrets: async () => {
+          calls.push("getWithSecrets");
+          code += 1;
+          return { title: "Acme", fields: [{ id: "t", title: "one-time password", fieldType: "Totp", details: { type: "Otp", content: { code: `00000${code}` } } }] };
+        },
+        get: async () => ({ id: "i1", title: "Acme", fields: [] }),
+      },
+    });
+    const svc = createOnePasswordService({
+      credentials: await withOrgToken(),
+      getAllowPersonal: async () => true,
+      createClient: async () => client,
+    });
+    expect(await svc.findCredentialForService("org", ctx, "acme")).toBe("000001");
+    expect(await svc.findCredentialForService("org", ctx, "acme")).toBe("000002");
+  });
+
+  // A scope with no token is the common case for a service that is not in
+  // 1Password. It fails at the token read, before any vault is listed.
+  it("a missing token fails before any vault is touched", async () => {
+    const calls: string[] = [];
+    const svc = createOnePasswordService({
+      credentials: memStore(),
+      getAllowPersonal: async () => true,
+      createClient: async () => inventoryClient(calls),
+    });
+    await expect(svc.findCredentialForService("org", ctx, "linear")).rejects.toMatchObject({ kind: "no_token" });
+    expect(calls).toEqual([]);
   });
 });

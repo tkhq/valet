@@ -56,6 +56,7 @@ import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { createOnePasswordService } from "../services/onepassword.js";
 import { getAllowPersonalOnePassword } from "../services/org.js";
+import type { OnePasswordService } from "../services/onepassword.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
 import { orgMembers, orgs, users, workflowDefinitions } from "../schema/index.js";
@@ -80,6 +81,10 @@ export interface TestApi {
 }
 
 export interface BootTestApiOpts {
+  /** Replace the 1Password service the EngineHost captures at boot. A swap on
+   * `api.providers.onePassword` after boot never reaches a session's
+   * credential provider, which closed over the boot-time instance. */
+  onePassword?: OnePasswordService;
   /** Override the default `VirtualSandboxProvider` — e.g. a create-counting
    * wrapper that proves a code path never provisions a sandbox. */
   sandboxProvider?: SandboxProvider;
@@ -323,10 +328,12 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // that don't need to observe the hooks directly. `opts.on*` overrides
   // take precedence for tests that do (e.g. asserting call order/count).
   const defaultHibernationHooks = buildHibernationHooks(db);
-  const onePassword = createOnePasswordService({
-    credentials: engineCredentials,
-    getAllowPersonal: (orgId) => getAllowPersonalOnePassword(db, orgId),
-  });
+  const onePassword =
+    opts.onePassword ??
+    createOnePasswordService({
+      credentials: engineCredentials,
+      getAllowPersonal: (orgId) => getAllowPersonalOnePassword(db, orgId),
+    });
   const engineHost = new EngineHost({
     engineStore,
     sandboxProvider,

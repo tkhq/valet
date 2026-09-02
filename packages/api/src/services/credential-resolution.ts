@@ -33,7 +33,7 @@
  */
 import type { CredentialStore, StoredCredential, ValetPlugin } from "@valet/engine";
 import { findCredentialDeclaration } from "./integration-availability.js";
-import { ONEPASSWORD_SERVICE, onePasswordMeta, type OnePasswordService } from "./onepassword.js";
+import { ONEPASSWORD_SERVICE, onePasswordMeta, type OnePasswordService, OnePasswordScope } from "./onepassword.js";
 
 /** Internal services that must never surface as ordinary session/workflow
  * credentials. `onepassword` rows are the service-account tokens themselves;
@@ -51,7 +51,28 @@ export interface CredentialReadDeps {
 export interface CredentialReadCtx {
   orgId: string;
   userId?: string;
+  /** Which 1Password token scopes a vault lookup may consult. Absent means
+   * both, which is right only for a read made on behalf of the user
+   * themselves. Session-bound readers pass `onePasswordScopesFor(ownerType)`. */
+  scopes?: readonly OnePasswordScope[];
 }
+
+/**
+ * The 1Password scopes a session's reads may consult, from who owns it.
+ *
+ * The user id on a session is the actor frozen onto it at creation, not
+ * whoever is prompting it now. A team- or org-owned session can be prompted
+ * by anyone in that group, so consulting the frozen actor's PERSONAL vault
+ * would hand their private items to their colleagues. Only a user-owned
+ * session reaches the personal scope; an unknown owner gets the org scope
+ * alone, which is the safe side of the mistake.
+ */
+export function onePasswordScopesFor(ownerType: string | undefined): readonly OnePasswordScope[] {
+  return ownerType === "user" ? ["org", "personal"] : ["org"];
+}
+
+/** A read made as a specific user: `orgId` and `userId` known, scopes optional. */
+export type UserReadCtx = Required<Pick<CredentialReadCtx, "orgId" | "userId">> & Pick<CredentialReadCtx, "scopes">;
 
 /**
  * Resolves a raw store row through 1Password when applicable. `onePassword`
@@ -70,17 +91,6 @@ async function resolveRow(
   return deps.onePassword.resolveCredential(row, ctx);
 }
 
-/**
- * User->org precedence read for ALL credential kinds, plus 1Password
- * reference resolution. `ctx.userId` is required (`Required<CredentialReadCtx>`)
- * — this is the "acting as a specific user" half of the contract; a
- * personal-tokenScope reference on either row resolves against that user id.
- *
- * Precedence: the `{ type: "user", id: ctx.userId }` row wins outright when
- * present (any kind, reference or plain) — the org row is never even read in
- * that case. Only on a user-row MISS does this fall back to the
- * `{ type: "org", id: ctx.orgId }` row for the same service.
- */
 /**
  * How far a user-owner read may escalate when the user has no row of their own.
  *
@@ -103,16 +113,27 @@ export function orgFallbackPolicy(plugins: ValetPlugin[] | undefined, service: s
     : "reference-only";
 }
 
+/**
+ * User-then-org precedence read for every credential kind, plus 1Password
+ * reference resolution. `ctx.userId` is required: this is the "acting as a
+ * specific user" half of the contract, and a personal-scope reference on
+ * either row resolves against that user.
+ *
+ * The user row wins outright when present, reference or plain, and the org
+ * row is not read. On a user-row miss the org row is consulted only as far
+ * as `orgFallback` allows, and the vaults only when the caller has a row
+ * for nothing.
+ */
 export async function resolveUserCredentialRead(
   deps: CredentialReadDeps,
-  ctx: Required<CredentialReadCtx>,
+  ctx: UserReadCtx,
   service: string,
   orgFallback: OrgFallback,
 ): Promise<StoredCredential | null> {
   if (isDeniedCredentialService(service)) return null;
   const userRow = await deps.credentials.get({ type: "user", id: ctx.userId }, service);
   if (userRow) return resolveRow(deps, userRow, ctx);
-  if (orgFallback === "none") return lookupInOnePassword(deps, ctx, service);
+  if (orgFallback === "none") return null;
   // Skip the org read entirely when only a reference could qualify and no
   // 1Password service is wired. `CredentialStore.get` is NOT side-effect free:
   // `OAuthRefreshingCredentialStore` refreshes on read and writes the result
@@ -145,18 +166,18 @@ export async function resolveUserCredentialRead(
  */
 async function lookupInOnePassword(
   deps: CredentialReadDeps,
-  ctx: CredentialReadCtx,
+  ctx: UserReadCtx,
   service: string,
 ): Promise<StoredCredential | null> {
   if (!deps.onePassword) return null;
   // Org first: a shared token is the configured path for a whole org. A
-  // personal token only answers for the person it belongs to.
-  for (const scope of ["org", "personal"] as const) {
-    if (scope === "personal" && !ctx.userId) continue;
+  // personal token only answers for the person it belongs to, and only when
+  // the session is theirs (`onePasswordScopesFor`).
+  for (const scope of ctx.scopes ?? (["org", "personal"] as const)) {
     try {
       const secret = await deps.onePassword.findCredentialForService(scope, {
         orgId: ctx.orgId,
-        userId: ctx.userId ?? "",
+        userId: ctx.userId,
       }, service);
       if (secret) return { type: "api_key", apiKey: secret };
     } catch {

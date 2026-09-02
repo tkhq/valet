@@ -148,6 +148,15 @@ export type ActionInvoker = (
  * concurrently with the same `invocationId` — the durable table is the
  * source of truth for "did this already happen," not any in-process cache.
  */
+/**
+ * The plugin registry a declaration lookup scans. A caller that wires only
+ * the action map still gets declaration-driven behavior from the plugins
+ * behind it, rather than silently losing it.
+ */
+function registryOf(opts: Pick<ActionInvokerOpts, "plugins" | "actionPluginByService">): ValetPlugin[] {
+  return opts.plugins ?? [...new Set([...opts.actionPluginByService.values()].map((e) => e.plugin))];
+}
+
 export function buildActionInvoker(opts: ActionInvokerOpts): ActionInvoker {
   const clock = opts.clock ?? Date.now;
 
@@ -234,7 +243,7 @@ async function computeResult(
   // the corrective action named. Scans the full registry (see
   // `ActionInvokerOpts.plugins`) because the declaration can live on a
   // different plugin than the action's owner.
-  const registry = opts.plugins ?? [...new Set([...opts.actionPluginByService.values()].map((e) => e.plugin))];
+  const registry = registryOf(opts);
   const declared = findCredentialDeclaration(registry, credentialService);
   if (declared) {
     const mode = await connectModeFor({
@@ -580,7 +589,7 @@ function buildCredentialProvider(
       // wires only the action map still gets declaration-driven escalation
       // rather than silently losing it.
       const registry =
-        opts.plugins ?? [...new Set([...opts.actionPluginByService.values()].map((e) => e.plugin))];
+        registryOf(opts);
       const fallback = svc === defaultService ? orgFallbackPolicy(registry, svc) : "none";
       const stored =
         owner.type === "user"

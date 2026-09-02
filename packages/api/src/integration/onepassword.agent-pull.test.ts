@@ -13,7 +13,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "./_setup.js";
-import { createOnePasswordService, ONEPASSWORD_SERVICE } from "../services/onepassword.js";
+import { ONEPASSWORD_SERVICE } from "../services/onepassword.js";
 import linearPlugin from "@valet/plugin-linear/plugin";
 
 const TOKEN = process.env.OP_SERVICE_ACCOUNT_TOKEN;
@@ -24,12 +24,11 @@ const describeIfLive = TOKEN && SERVICE ? describe : describe.skip;
 describeIfLive("api integration: an agent pulls a credential from 1Password", () => {
   it("resolves a service with no stored row, through the session's own provider", async () => {
     if (!TOKEN || !SERVICE) throw new Error("unreachable: gated above");
+    // The boot-time service is the one a session's credential provider
+    // closes over; replacing `api.providers.onePassword` afterwards changes
+    // nothing a session sees. Boot builds a real service with the same deps.
     const api: TestApi = await bootTestApi({ plugins: [linearPlugin] });
     try {
-      api.providers.onePassword = createOnePasswordService({
-        credentials: api.providers.engineCredentials,
-        getAllowPersonal: async () => true,
-      });
       // Only the 1Password token is stored. Nothing maps SERVICE to anything.
       await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, ONEPASSWORD_SERVICE, {
         type: "service_account",

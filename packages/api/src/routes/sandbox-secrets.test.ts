@@ -7,7 +7,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { mintSandboxToken } from "../auth/sandbox-tokens.js";
 import { agentSessions } from "../schema/index.js";
-import type { OnePasswordService } from "../services/onepassword.js";
+import { OnePasswordAuthError, type OnePasswordService } from "../services/onepassword.js";
+import type { StoredCredential } from "@valet/engine";
 
 let api: TestApi | undefined;
 afterEach(async () => {
@@ -15,9 +16,9 @@ afterEach(async () => {
   api = undefined;
 });
 
-/** Resolves anything under `op://ok/`, refuses the rest. */
+/** Resolves anything under `op://ok/`, refuses the rest with "no token here". */
 function fakeOnePassword(): OnePasswordService {
-  const unused = () => {
+  const unused = (): never => {
     throw new Error("not exercised by this suite");
   };
   return {
@@ -26,12 +27,12 @@ function fakeOnePassword(): OnePasswordService {
     listItems: unused,
     getItem: unused,
     findCredentialForService: async () => null,
-    resolveCredential: async (row: unknown) => row,
-    resolveReference: async (_scope: string, _ctx: unknown, reference: string) => {
-      if (!reference.startsWith("op://ok/")) throw new Error("no such item");
+    resolveCredential: async (row: StoredCredential) => row,
+    resolveReference: async (_scope, _ctx, reference) => {
+      if (!reference.startsWith("op://ok/")) throw new OnePasswordAuthError("no such item", "no_token");
       return `secret-for-${reference}`;
     },
-  } as unknown as OnePasswordService;
+  };
 }
 
 const HEADERS = { "Content-Type": "application/json" };
@@ -59,10 +60,10 @@ async function resolve(references: unknown, token?: string) {
 }
 
 /** Base64 in, plain text out — the shape the shell CLI decodes. */
-function decode(body: { resolvedBase64: Record<string, string> }, reference: string): string | undefined {
-  const encoded = body.resolvedBase64[reference];
-  return encoded === undefined ? undefined : Buffer.from(encoded, "base64").toString("utf8");
+function decode(value: string | null): string | null {
+  return value === null ? null : Buffer.from(value, "base64").toString("utf8");
 }
+type Resp = { values: (string | null)[]; unresolved: string[] };
 
 describe("POST /api/sandbox-secrets/resolve", () => {
   it("resolves the references it can and names the ones it cannot", async () => {
@@ -71,15 +72,15 @@ describe("POST /api/sandbox-secrets/resolve", () => {
 
     const res = await resolve(["op://ok/item/field", "op://nope/item/field"]);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { resolvedBase64: Record<string, string>; unresolved: string[] };
+    const body = (await res.json()) as Resp;
 
-    expect(decode(body, "op://ok/item/field")).toBe("secret-for-op://ok/item/field");
+    expect(decode(body.values[0])).toBe("secret-for-op://ok/item/field");
     // Named, not thrown: the CLI decides whether a miss is fatal, and can say
     // WHICH reference failed.
     expect(body.unresolved).toEqual(["op://nope/item/field"]);
     // A reference nobody resolved carries no value and no reason — the reason
     // would describe someone else's vault.
-    expect(decode(body, "op://nope/item/field")).toBeUndefined();
+    expect(body.values[1]).toBeNull();
   });
 
   it("refuses anything that is not a secret reference", async () => {
@@ -101,8 +102,8 @@ describe("POST /api/sandbox-secrets/resolve", () => {
     // rejected every reference into a vault with a space in its title.
     const res = await resolve(["op://ok/JumpCloud Login/password"]);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { resolvedBase64: Record<string, string> };
-    expect(decode(body, "op://ok/JumpCloud Login/password")).toBeTruthy();
+    const body = (await res.json()) as Resp;
+    expect(decode(body.values[0])).toBeTruthy();
   });
 
   it("bounds one request", async () => {
@@ -128,8 +129,8 @@ describe("POST /api/sandbox-secrets/resolve", () => {
 
     const res = await resolve(["op://ok/item/field"], await mintToken());
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { resolvedBase64: Record<string, string> };
-    expect(decode(body, "op://ok/item/field")).toBe("secret-for-op://ok/item/field");
+    const body = (await res.json()) as Resp;
+    expect(decode(body.values[0])).toBe("secret-for-op://ok/item/field");
   });
 
   it("refuses a caller with no sandbox token, and names the fix", async () => {
@@ -167,14 +168,14 @@ describe("POST /api/sandbox-secrets/resolve", () => {
     api.providers.onePassword = {
       ...fakeOnePassword(),
       resolveReference: async () => nasty,
-    } as unknown as typeof api.providers.onePassword;
+    };
 
     const res = await resolve(["op://ok/item/field"]);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { resolvedBase64: Record<string, string> };
+    const body = (await res.json()) as Resp;
     // The old byte-level extractor cut this at the first quote and never
     // unescaped, so a private key arrived corrupted but plausible.
-    expect(decode(body, "op://ok/item/field")).toBe(nasty);
+    expect(decode(body.values[0])).toBe(nasty);
   });
   // `sandbox.userId` is the actor frozen onto the session at creation, not
   // whoever is prompting now. Every member of a team can prompt a team-owned
@@ -190,7 +191,7 @@ describe("POST /api/sandbox-secrets/resolve", () => {
         if (scope === "personal") return "PERSONAL-VAULT-VALUE";
         throw new Error("no org token");
       },
-    } as unknown as typeof api.providers.onePassword;
+    };
 
     await api.providers.db.insert(agentSessions).values({
       id: "sess-team-1",
@@ -210,9 +211,9 @@ describe("POST /api/sandbox-secrets/resolve", () => {
 
     const res = await resolve(["op://ok/item/field"], token);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { resolvedBase64: Record<string, string>; unresolved: string[] };
+    const body = (await res.json()) as Resp;
     expect(scopesTried).toEqual(["org"]);
-    expect(decode(body, "op://ok/item/field")).toBeUndefined();
+    expect(body.values[0]).toBeNull();
     expect(body.unresolved).toEqual(["op://ok/item/field"]);
   });
 
@@ -226,7 +227,7 @@ describe("POST /api/sandbox-secrets/resolve", () => {
         if (scope === "personal") return "PERSONAL-VAULT-VALUE";
         throw new Error("no org token");
       },
-    } as unknown as typeof api.providers.onePassword;
+    };
 
     await api.providers.db.insert(agentSessions).values({
       id: "sess-user-1",
@@ -245,9 +246,9 @@ describe("POST /api/sandbox-secrets/resolve", () => {
     });
 
     const res = await resolve(["op://ok/item/field"], token);
-    const body = (await res.json()) as { resolvedBase64: Record<string, string> };
+    const body = (await res.json()) as Resp;
     expect(scopesTried).toEqual(["org", "personal"]);
-    expect(decode(body, "op://ok/item/field")).toBe("PERSONAL-VAULT-VALUE");
+    expect(decode(body.values[0])).toBe("PERSONAL-VAULT-VALUE");
   });
 
   it("values are positional, with null for a reference nothing resolved", async () => {
@@ -257,8 +258,78 @@ describe("POST /api/sandbox-secrets/resolve", () => {
     // The shell CLI reads this array by position. Keying by reference meant a
     // vault title containing a quote never matched its own JSON-escaped form.
     const res = await resolve(["op://nope/a/b", "op://ok/c/d"]);
-    const body = (await res.json()) as { values: (string | null)[] };
+    const body = (await res.json()) as Resp;
     expect(body.values[0]).toBeNull();
-    expect(Buffer.from(body.values[1] as string, "base64").toString("utf8")).toBe("secret-for-op://ok/c/d");
+    expect(decode(body.values[1])).toBe("secret-for-op://ok/c/d");
+  });
+  // `ownerType` is user, team, or org. Personal scope belongs to a user-owned
+  // session alone; every other owner can be prompted by people other than the
+  // frozen actor, so their reads stay on the org token.
+  it("an org-owned session never reaches the frozen actor's personal vault", async () => {
+    api = await bootTestApi();
+    const scopesTried: string[] = [];
+    api.providers.onePassword = {
+      ...fakeOnePassword(),
+      resolveReference: async (scope) => {
+        scopesTried.push(scope);
+        if (scope === "personal") return "PERSONAL-VAULT-VALUE";
+        throw new OnePasswordAuthError("no org token", "no_token");
+      },
+    };
+    await api.providers.db.insert(agentSessions).values({
+      id: "sess-org-1",
+      userId: "user-a",
+      orgId: "local-org",
+      workspace: "/workspace",
+      ownerType: "org",
+      ownerId: "local-org",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const { token } = await mintSandboxToken(api.providers.db, { sessionId: "sess-org-1", userId: "user-a", orgId: "local-org" });
+    const res = await resolve(["op://ok/item/field"], token);
+    const body = (await res.json()) as Resp;
+    expect(scopesTried).toEqual(["org"]);
+    expect(body.values[0]).toBeNull();
+  });
+
+  it("a token for a session with no row gets the org scope only", async () => {
+    api = await bootTestApi();
+    const scopesTried: string[] = [];
+    api.providers.onePassword = {
+      ...fakeOnePassword(),
+      resolveReference: async (scope) => {
+        scopesTried.push(scope);
+        throw new OnePasswordAuthError("no token", "no_token");
+      },
+    };
+    // `mintToken()` names a session id no row was written for.
+    await resolve(["op://ok/item/field"]);
+    expect(scopesTried).toEqual(["org"]);
+  });
+
+  it("accepts the four-segment section form the SDK accepts", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = fakeOnePassword();
+    const res = await resolve(["op://ok/GitHub/Tokens/pat"]);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Resp;
+    expect(decode(body.values[0])).toBe("secret-for-op://ok/GitHub/Tokens/pat");
+  });
+
+  // A token that exists and is refused is not "nothing resolved": reporting it
+  // that way sent the reader to check vault names that were correct.
+  it("surfaces a 1Password refusal instead of reporting the reference as missing", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = {
+      ...fakeOnePassword(),
+      resolveReference: async () => {
+        throw new OnePasswordAuthError("1Password request failed", "sdk");
+      },
+    };
+    const res = await resolve(["op://ok/item/field"]);
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("Check the service account token");
   });
 });

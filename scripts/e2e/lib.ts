@@ -139,6 +139,8 @@ export const DEDICATED_INTEGRATION_FILES = [
   "src/integration/prebuilds.e2e.test.ts",
   "src/integration/oidc-keycloak.e2e.test.ts",
   "src/integration/onepassword.live.test.ts",
+  "src/integration/onepassword.live-server.test.ts",
+  "src/integration/onepassword.agent-pull.test.ts",
 ];
 export const INTEGRATION_LIST_FILES = { core: INTEGRATION_CORE_FILES, agent: INTEGRATION_AGENT_FILES };
 
@@ -219,7 +221,18 @@ export const STEPS: StepDef[] = [
   { id: "telegram", group: "live", title: "live Telegram outbound", command: apiTest("src/integration/telegram.e2e.test.ts"), needs: ["telegram"], timeoutMs: 10 * MIN },
   { id: "github-live", group: "live", title: "live GitHub App", command: apiTest("src/integration/github-repo.e2e.test.ts"), needs: ["githubLive"], timeoutMs: 10 * MIN },
   { id: "openai", group: "live", title: "OpenAI provider path", command: apiTest("src/integration/llm-providers.e2e.test.ts"), needs: ["openai"], timeoutMs: 10 * MIN },
-  { id: "onepassword", group: "live", title: "live 1Password SDK", command: apiTest("src/integration/onepassword.live.test.ts"), needs: ["onepassword"], timeoutMs: 5 * MIN },
+  {
+    id: "onepassword",
+    group: "live",
+    title: "live 1Password SDK",
+    command: apiTest(
+      "src/integration/onepassword.live.test.ts",
+      "src/integration/onepassword.live-server.test.ts",
+      "src/integration/onepassword.agent-pull.test.ts",
+    ),
+    needs: ["onepassword"],
+    timeoutMs: 10 * MIN,
+  },
 ];
 
 export interface Waves {

@@ -505,6 +505,7 @@ export class ChildWatcher {
         userId: childData.userId,
         orgId: childData.orgId,
         workspace: childData.workspace,
+        ownerType: childData.owner.type,
         ...(shapeRow ? { profile: shapeRow.profile, docker: shapeRow.docker } : {}),
       }),
     );

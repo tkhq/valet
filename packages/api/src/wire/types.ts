@@ -2817,28 +2817,11 @@ export interface ListOpItemsResponse {
 
 /** POST /api/sandbox-secrets/resolve — the sandbox CLI's broker call. */
 export interface ResolveSandboxSecretsResponse {
-  /** reference -> base64 of the value's UTF-8 bytes. Only references that
-   * resolved appear.
-   *
-   * Base64, not the raw value: the caller is a POSIX shell script with no
-   * JSON parser, and a byte-level extractor cut every value at its first
-   * `"` and never unescaped `\\`, `\n`, or `\t`. A private key or a
-   * password containing a quote arrived corrupted but plausible, which is
-   * the worst way for a credential to fail. The base64 alphabet contains
-   * no JSON metacharacter, so the shell can cut the field safely and
-   * `base64 -d` restores the exact bytes. */
-  resolvedBase64: Record<string, string>;
-  /** One entry per requested reference, in request order: the base64 value,
-   * or `null` when nothing resolved it.
-   *
-   * Positional, because the shell CLI cannot key by reference. Its extractor
-   * built a search key from the raw reference while the body carried the
-   * JSON-escaped form, so a vault or item title containing a quote or a
-   * backslash never matched and was reported as unresolved even though it
-   * had resolved. A base64 string and `null` contain no JSON metacharacter,
-   * so the shell can split this array on commas safely. `null` also
-   * separates "nothing resolved it" from "the field is empty", which an
-   * empty-string test conflated. */
+  /** One entry per requested reference, in request order: the base64 of the
+   * value's UTF-8 bytes, or `null` when nothing resolved it. Base64 so a
+   * POSIX shell can cut the field without a JSON parser and restore the
+   * exact bytes; positional so it needs no key. `null` is distinct from an
+   * empty value. */
   values: (string | null)[];
   /** References nothing could resolve, by name and without a reason: the
    * reason would describe someone else's vault. */

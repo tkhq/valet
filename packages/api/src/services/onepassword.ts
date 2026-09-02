@@ -99,7 +99,16 @@ export interface OnePasswordCtx {
   userId: string;
 }
 
-export class OnePasswordAuthError extends Error {}
+/** Why a 1Password call could not answer. `no_token` and `disabled` mean this
+ * scope has nothing to offer and a caller may try the next one; `sdk` means
+ * the token exists and 1Password refused, which a caller must surface. */
+export type OnePasswordErrorKind = "no_token" | "disabled" | "sdk";
+
+export class OnePasswordAuthError extends Error {
+  constructor(message: string, readonly kind: OnePasswordErrorKind = "sdk") {
+    super(message);
+  }
+}
 
 export interface OnePasswordDeps {
   credentials: CredentialStore;
@@ -210,6 +219,21 @@ async function defaultCreateClient(token: string): Promise<OpClient> {
   };
 }
 
+/**
+ * Whether an item title names a service. Word-boundary and case-insensitive,
+ * with `-` and `_` in the id matching `-`, `_`, a space, or nothing: "Linear
+ * API Key" names `linear`, "Google Calendar" names `google_calendar`, and
+ * "Linearity" names neither. Narrow on purpose: this picks the secret an agent
+ * authenticates with, and a loose match points it at the wrong one.
+ *
+ * Escape first, then loosen. The other order escapes the class it just
+ * inserted, and no id containing a separator ever matches.
+ */
+export function titleNamesService(title: string, service: string): boolean {
+  const needle = service.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/[-_]/g, "[-_ ]?");
+  return new RegExp(`(^|[^a-z0-9])${needle}([^a-z0-9]|$)`, "i").test(title);
+}
+
 // ── Service factory ───────────────────────────────────────────────────────
 
 function tokenOwner(scope: OnePasswordScope, ctx: OnePasswordCtx): CredentialOwner {
@@ -229,7 +253,7 @@ const SDK_REQUEST_FAILED = "1Password request failed";
 function wrapSdkError(err: unknown, context: string): OnePasswordAuthError {
   if (err instanceof OnePasswordAuthError) return err;
   console.error(`onepassword: ${context}:`, err);
-  return new OnePasswordAuthError(SDK_REQUEST_FAILED);
+  return new OnePasswordAuthError(SDK_REQUEST_FAILED, "sdk");
 }
 
 export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordService {
@@ -248,6 +272,7 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
       const kind = scope === "org" ? "organization" : "personal";
       throw new OnePasswordAuthError(
         `This org has no ${kind} 1Password service account token connected.`,
+        "no_token",
       );
     }
     return row.apiKey;
@@ -259,6 +284,7 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
       if (!allowed) {
         throw new OnePasswordAuthError(
           "Personal 1Password tokens are disabled by your organization.",
+          "disabled",
         );
       }
     }
@@ -322,17 +348,8 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
    * common case for an unconnected service is that nothing matches.
    */
   const lookupCache = new Map<string, { secret: string | null; at: number }>();
-
-  /**
-   * Whether an item title names a service. Word-boundary and
-   * case-insensitive, so "Linear API Key" names `linear` and "Linearity" does
-   * not. Narrow on purpose: this picks the secret an agent authenticates
-   * with, and a loose match points it at the wrong one.
-   */
-  function titleNamesService(title: string, service: string): boolean {
-    const needle = service.replace(/[-_]/g, "[-_ ]?").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    return new RegExp(`(^|[^a-z0-9])${needle}([^a-z0-9]|$)`, "i").test(title);
-  }
+  // Keyed by `${scope}:${ownerId}`: item titles for every vault the token can read.
+  const inventoryCache = new Map<string, { items: { vaultId: string; id: string; title: string }[]; at: number }>();
 
   /**
    * The secret an item holds, as a value rather than a reference.
@@ -349,20 +366,20 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
    *
    * Returns the value and how it was found, so the caller can say which.
    */
-  function itemSecret(item: SdkItem): { value: string; via: string } | null {
+  function itemSecret(item: SdkItem): { value: string; via: string; kind: "field" | "totp" | "note" } | null {
     const named = item.fields.find((f) =>
       /^(credential|api[ _-]?key|token|secret|password)$/i.test(f.title),
     );
     const concealed = item.fields.find((f) => f.fieldType === "Concealed");
     const plain = named ?? concealed;
-    if (plain?.value) return { value: plain.value, via: `field ${plain.title}` };
+    if (plain?.value) return { value: plain.value, via: `field ${plain.title}`, kind: "field" };
 
     const totp = item.fields.find((f) => f.fieldType === "Totp");
     const code = totp?.details?.type === "Otp" ? totp.details.content?.code : undefined;
-    if (code) return { value: code, via: `one-time code from ${totp!.title}` };
+    if (code) return { value: code, via: `one-time code from ${totp!.title}`, kind: "totp" };
 
     const notes = item.notes?.trim();
-    if (notes) return { value: notes, via: "the note body" };
+    if (notes) return { value: notes, via: "the note body", kind: "note" };
 
     return null;
   }
@@ -401,41 +418,64 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
     resolveCredential,
 
     async findCredentialForService(scope, ctx, service) {
+      // The gate runs before the cache, as in `resolveReference`: a hit must
+      // not outlive the personal toggle or the token row that allowed it. A
+      // scope with no token throws here, before any vault is touched.
+      const client = await clientFor(scope, ctx);
       const owner = tokenOwner(scope, ctx);
       const cacheKey = `${scope}:${owner.id}:${service}`;
-      const cached = lookupCache.get(cacheKey);
       const nowMs = now();
-      // A one-time code expires, so the cache holds it only as long as any
-      // resolve is held — the same TTL, for the same reason.
+      const cached = lookupCache.get(cacheKey);
       if (cached && nowMs - cached.at < RESOLVE_TTL_MS) return cached.secret;
 
-      // The SDK client directly: these are the same three reads the list
-      // routes make, and going through `this` would tie the lookup to how the
-      // object is called.
-      const client = await clientFor(scope, ctx);
-      let found: string | null = null;
-      for (const vault of await client.vaults.list()) {
-        let items;
+      // Titles only, fetched once per scope: N services asking in one turn
+      // must not walk the vaults N times.
+      const inventoryKey = `${scope}:${owner.id}`;
+      let inventory = inventoryCache.get(inventoryKey);
+      if (!inventory || nowMs - inventory.at < 0 || nowMs - inventory.at >= RESOLVE_TTL_MS) {
+        const items: { vaultId: string; id: string; title: string }[] = [];
+        let vaults;
         try {
-          items = await client.items.list(vault.id);
-        } catch {
-          // A vault this token cannot read is not an error for a lookup: the
-          // secret may well be in the next one.
-          continue;
+          vaults = await client.vaults.list();
+        } catch (err) {
+          throw wrapSdkError(err, "vault listing failed");
         }
-        const item = items.find((i) => titleNamesService(i.title, service));
-        if (!item) continue;
-        const detail = await client.items.getWithSecrets(vault.id, item.id);
-        const secret = itemSecret(detail);
-        if (!secret) continue;
-        // The VALUE, not a reference: a note body and a computed one-time
-        // code have no `op://` address, so a reference cannot express them.
-        found = secret.value;
-        break;
+        for (const vault of vaults) {
+          try {
+            for (const item of await client.items.list(vault.id)) {
+              items.push({ vaultId: vault.id, id: item.id, title: item.title });
+            }
+          } catch {
+            // A vault this token cannot read is not an error for a lookup:
+            // the secret may well be in the next one.
+          }
+        }
+        inventory = { items, at: nowMs };
+        inventoryCache.set(inventoryKey, inventory);
       }
 
-      lookupCache.set(cacheKey, { secret: found, at: nowMs });
-      return found;
+      const match = inventory.items.find((i) => titleNamesService(i.title, service));
+      if (!match) {
+        lookupCache.set(cacheKey, { secret: null, at: nowMs });
+        return null;
+      }
+      let detail: SdkItem;
+      try {
+        detail = await client.items.getWithSecrets(match.vaultId, match.id);
+      } catch (err) {
+        throw wrapSdkError(err, "item read failed");
+      }
+      const secret = itemSecret(detail);
+      if (!secret) {
+        lookupCache.set(cacheKey, { secret: null, at: nowMs });
+        return null;
+      }
+      // A one-time code is good for about thirty seconds; caching it for
+      // five minutes hands out expired codes with a valid shape.
+      if (secret.kind !== "totp") lookupCache.set(cacheKey, { secret: secret.value, at: nowMs });
+      // The VALUE, not a reference: a note body and a computed one-time
+      // code have no `op://` address, so a reference cannot express them.
+      return secret.value;
     },
   };
 }

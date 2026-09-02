@@ -17,6 +17,7 @@ import type {
   PutCredentialResponse,
 } from "@valet/api/wire";
 import { api } from "./client";
+import { onePasswordKeys } from "./onepassword";
 
 export const qkIntegrations = {
   plugins: () => ["plugins"] as const,
@@ -57,6 +58,8 @@ export function useConnectCredential() {
       qc.invalidateQueries({ queryKey: qkIntegrations.plugins() });
       qc.invalidateQueries({ queryKey: qkIntegrations.credentials("user") });
       qc.invalidateQueries({ queryKey: qkIntegrations.credentials("org") });
+      // The 1Password panel's Connected state reads its own settings query.
+      qc.invalidateQueries({ queryKey: onePasswordKeys.settings() });
     },
   });
 }
@@ -69,6 +72,8 @@ export function useDisconnectCredential() {
       qc.invalidateQueries({ queryKey: qkIntegrations.plugins() });
       qc.invalidateQueries({ queryKey: qkIntegrations.credentials("user") });
       qc.invalidateQueries({ queryKey: qkIntegrations.credentials("org") });
+      // The 1Password panel's Connected state reads its own settings query.
+      qc.invalidateQueries({ queryKey: onePasswordKeys.settings() });
     },
   });
 }

@@ -60,7 +60,7 @@ import { computeSpec, specHash } from "./sandbox-spec.js";
 import { buildPrepSteps } from "./prep-steps.js";
 import { securityToolPrepSteps } from "./security-bootstrap.js";
 import type { OnePasswordService } from "../services/onepassword.js";
-import { orgFallbackPolicy, resolveUserCredentialRead } from "../services/credential-resolution.js";
+import { orgFallbackPolicy, resolveUserCredentialRead, onePasswordScopesFor } from "../services/credential-resolution.js";
 import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
 import { getOrgModelPreferences } from "../services/org.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
@@ -89,7 +89,7 @@ import {
   revokeSandboxTokens,
 } from "../auth/sandbox-tokens.js";
 import securityPlugin from "@valet/plugin-security/plugin";
-import { CODING_SYSTEM_PROMPT } from "./prompt-rules.js";
+import { codingSystemPrompt } from "./prompt-rules.js";
 import { orchestratorPersona } from "../orchestrator/persona.js";
 import { buildMemoryTools } from "../orchestrator/memory-tools.js";
 import { buildSecurityPersonaTools, buildSecurityRunnerTools } from "./security-tools.js";
@@ -366,6 +366,9 @@ export interface SessionMeta {
   userId: string;
   orgId: string;
   workspace: string;
+  /** `agent_sessions.owner_type`. Absent means unknown, which reads as "not
+   * a user-owned session" for credential scope decisions. */
+  ownerType?: string;
   /** Interactive-service profile (sandbox auth gateway plan, Task 5).
    * Defaults to "headless" when omitted. */
   profile?: "headless" | "full";
@@ -415,7 +418,6 @@ function pinnedIdSet(pins: readonly PinnedActionSpec[]): ReadonlySet<string> {
   return new Set(pins.map((p) => p.actionId));
 }
 
-const SYSTEM_PROMPT = CODING_SYSTEM_PROMPT;
 
 /**
  * Size ceiling for the line-count read in `readSandboxFileMeta` (Valet Security
@@ -865,7 +867,7 @@ export class EngineHost {
       });
     };
     const specProvider = await this.buildSpecProvider(sessionId, meta, onStartRef, personaCell != null);
-    const credentialResolver = this.buildCredentialResolver(sessionId, meta.userId, meta.orgId);
+    const credentialResolver = this.buildCredentialResolver(sessionId, meta.userId, meta.orgId, meta.ownerType);
     // Slash-command options (Task 10). The workspace-skills provider's sandbox
     // accessor closes over `builtSession` — resolved lazily, so it is safe that
     // the session doesn't exist yet at this point. `hasPrep` is true only when
@@ -967,7 +969,7 @@ export class EngineHost {
             model,
             modelSpec,
             resolveModel,
-            systemPrompt: SYSTEM_PROMPT,
+            systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
             tools: sessionTools.length ? sessionTools : undefined,
             skills: extras.skills.length ? extras.skills : undefined,
             roles: sessionRoles.length ? sessionRoles : undefined,
@@ -990,7 +992,7 @@ export class EngineHost {
           model,
           modelSpec,
           resolveModel,
-          systemPrompt: SYSTEM_PROMPT,
+          systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
           tools: sessionTools.length ? sessionTools : undefined,
           skills: extras.skills.length ? extras.skills : undefined,
           roles: sessionRoles.length ? sessionRoles : undefined,
@@ -1405,12 +1407,12 @@ export class EngineHost {
    *    behavior above. Rows without 1Password reference metadata (or with no
    *    `onePassword` wired) pass through unchanged (same object, no clone).
    *
-   *    Member sessions now gain read access to PLAIN org-owned credential
-   *    rows on a user-row miss, not just 1Password reference rows — e.g. an
-   *    admin-pasted org-wide Linear API key is now session-visible. See
-   *    `credential-resolution.ts`'s module doc for the full rationale (same
-   *    trust model as the org 1Password token; mirrors `github`'s user→org
-   *    tiering precedent).
+   *    On a user-row miss the org row is read only as far as
+   *    `orgFallbackPolicy(plugins, service)` allows: `org-provided` when a
+   *    plugin declares `requires.orgCredential` (the row is the configured
+   *    credential for everyone), otherwise `reference-only` (an admin's
+   *    1Password pointer is a deliberate act of sharing; a plain org row
+   *    stays invisible to member sessions).
    *
    * DEVIATION (for T12): workflow tool-node invocations
    * (`workflows/engine-deps.ts`'s `invokeAction`) carry no `sessionId`, so
@@ -1465,6 +1467,7 @@ export class EngineHost {
     sessionId: string,
     userId: string,
     orgId: string,
+    ownerType: string | undefined,
   ): ((owner: CredentialOwner, service: string) => Promise<StoredCredential | null>) | undefined {
     const tokenDeps = this.opts.githubTokenDeps;
     const db = this.opts.db;
@@ -1496,19 +1499,12 @@ export class EngineHost {
         );
         return token === null ? null : { type: "app_install", accessToken: token };
       }
-      if (service === "openai") {
+      if (service === "openai" && db) {
         // plugin-openai's key probe: org OpenAI LLM-provider key → stored
         // "openai" credential (owner-precedence + 1Password) → OPENAI_API_KEY
         // env. `null` keeps the openai tools hidden in list_tools
-        // (requiresCredential gating).
-        if (!db) {
-          return resolveUserCredentialRead(
-            { credentials, onePassword },
-            { orgId, userId },
-            service,
-            orgFallbackPolicy(this.opts.plugins, service),
-          );
-        }
+        // (requiresCredential gating). Without a db the generic read below
+        // is the same call this branch used to make.
         return resolveOpenAiCredential(db, credentials, { orgId, userId }, process.env, onePassword);
       }
       if (service === "github" && tokenDeps && db) {
@@ -1541,7 +1537,7 @@ export class EngineHost {
       const fallback = orgFallbackPolicy(this.opts.plugins, service);
       const stored = await resolveUserCredentialRead(
         { credentials, onePassword },
-        { orgId, userId },
+        { orgId, userId, scopes: onePasswordScopesFor(ownerType) },
         service,
         fallback,
       );
@@ -2041,7 +2037,7 @@ export class EngineHost {
     // to. See `PATCH /api/sessions/:id`.
     const profile = await this.storedProfile(sessionId);
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.actorUserId, meta.orgId, profile);
-    const credentialResolver = this.buildCredentialResolver(sessionId, meta.actorUserId, meta.orgId);
+    const credentialResolver = this.buildCredentialResolver(sessionId, meta.actorUserId, meta.orgId, principal.type);
     // Slash-command options: same wiring as the interactive path, so the
     // orchestrator answers /model and /sessions instead of the no-context
     // fallback. The getter closes over `builtSession`, assigned below.
@@ -2810,7 +2806,7 @@ export class EngineHost {
 
     const profile = opts.profile ?? "headless";
     const sandboxMint = await this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId, profile);
-    const credentialResolver = this.buildCredentialResolver(childSessionId, opts.actorUserId, opts.orgId);
+    const credentialResolver = this.buildCredentialResolver(childSessionId, opts.actorUserId, opts.orgId, opts.owner.type);
     const policyResolver = this.getPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
     // A child spawned with a repo binding (the spawner inserts the
@@ -2831,6 +2827,7 @@ export class EngineHost {
           userId: opts.actorUserId,
           orgId: opts.orgId,
           workspace: opts.workspace,
+          ownerType: opts.owner.type,
           profile,
           ...(opts.docker !== undefined ? { docker: opts.docker } : {}),
         })
@@ -2887,7 +2884,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
-      systemPrompt: SYSTEM_PROMPT,
+      systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
       tools: childTools.length ? childTools : undefined,
       skills: provisionedExtras.skills.length ? provisionedExtras.skills : undefined,
       roles: childRoles.length ? childRoles : undefined,
@@ -2987,7 +2984,7 @@ export class EngineHost {
     const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, opts.actorUserId, opts.orgId, opts.modelId);
 
     const sandboxMint = await this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId, "headless");
-    const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId);
+    const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId, opts.owner.type);
     const policyResolver = this.getPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
     const sessionOptions = {
@@ -3018,7 +3015,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
-      systemPrompt: SYSTEM_PROMPT,
+      systemPrompt: codingSystemPrompt({ secretsCli: false }),
       tools: extras.tools.length ? extras.tools : undefined,
       skills: extras.skills.length ? extras.skills : undefined,
       roles: extras.roles.length ? extras.roles : undefined,

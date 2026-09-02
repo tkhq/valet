@@ -7,6 +7,7 @@
  */
 import { describe, expect, it } from "vitest";
 import type { CredentialOwner, CredentialStore, StoredCredential } from "@valet/engine";
+import { InMemoryCredentialStore } from "@valet/engine";
 import { OnePasswordAuthError, type OnePasswordCtx, type OnePasswordService } from "./onepassword.js";
 import { resolveOrgCredentialRead, resolveUserCredentialRead } from "./credential-resolution.js";
 
@@ -14,24 +15,7 @@ const orgId = "cr-org";
 const userId = "cr-user";
 
 /** Minimal in-memory `CredentialStore` — keyed by `${owner.type}:${owner.id}:${service}`. */
-function fakeCredentialStore(): CredentialStore {
-  const rows = new Map<string, StoredCredential>();
-  const key = (owner: CredentialOwner, service: string) => `${owner.type}:${owner.id}:${service}`;
-  return {
-    async get(owner, service) {
-      return rows.get(key(owner, service)) ?? null;
-    },
-    async save(owner, service, credential) {
-      rows.set(key(owner, service), credential);
-    },
-    async delete(owner, service) {
-      rows.delete(key(owner, service));
-    },
-    async list() {
-      return [];
-    },
-  };
-}
+const fakeCredentialStore = (): CredentialStore => new InMemoryCredentialStore();
 
 /** Fake `OnePasswordService` — only `resolveCredential` is exercised by this helper. */
 function fakeOnePassword(
@@ -342,8 +326,8 @@ describe("vault lookup when no row exists", () => {
   const orgId = "org-1";
   const userId = "user-1";
 
-  function fakeWithLookup(secret: string | null) {
-    const unused = () => {
+  function fakeWithLookup(secret: string | null, onLookup?: (scope: string) => void): OnePasswordService {
+    const unused = (): never => {
       throw new Error("not exercised by this suite");
     };
     return {
@@ -352,9 +336,12 @@ describe("vault lookup when no row exists", () => {
       listItems: unused,
       getItem: unused,
       resolveReference: unused,
-      findCredentialForService: async () => secret,
+      findCredentialForService: async (scope) => {
+        onLookup?.(scope);
+        return secret;
+      },
       resolveCredential: async (row: StoredCredential) => row,
-    } as unknown as OnePasswordService;
+    };
   }
 
   it("resolves a service with no user or org row from the vaults", async () => {
@@ -399,5 +386,29 @@ describe("vault lookup when no row exists", () => {
     );
 
     expect(result?.apiKey).toBe("my-own-key");
+  });
+  // The scope set is decided from the session owner, once, and honored here.
+  it("with scopes [org] never consults the personal vault", async () => {
+    const tried: string[] = [];
+    const credentials = fakeCredentialStore();
+    const onePassword = fakeWithLookup("ACTOR-PRIVATE", (scope) => tried.push(scope));
+    const got = await resolveUserCredentialRead(
+      { credentials, onePassword },
+      { orgId, userId, scopes: ["org"] },
+      "linear",
+      "reference-only",
+    );
+    expect(tried).toEqual(["org"]);
+    expect(got?.apiKey).toBe("ACTOR-PRIVATE");
+  });
+
+  // "none" means no escalation at all; a vault lookup is an escalation.
+  it("orgFallback none returns null without a vault lookup", async () => {
+    const tried: string[] = [];
+    const credentials = fakeCredentialStore();
+    const onePassword = fakeWithLookup("SHOULD-NOT-BE-READ", (scope) => tried.push(scope));
+    const got = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "linear", "none");
+    expect(got).toBeNull();
+    expect(tried).toEqual([]);
   });
 });

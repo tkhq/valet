@@ -43,6 +43,9 @@ export interface SessionMetaSource {
   /** Request a rootless docker daemon inside the sandbox (docker-in-sandbox).
    * Omitted by orchestrator/child callers. */
   docker?: boolean;
+  /** `agent_sessions.owner_type`: user, team, or org. Decides which 1Password
+   * scopes the session's credential reads may consult (`onePasswordScopesFor`). */
+  ownerType?: string;
 }
 
 /**
@@ -100,6 +103,7 @@ export async function loadSessionMeta(db: AppDb, src: SessionMetaSource): Promis
     workspace: src.workspace,
     ...(src.profile !== undefined ? { profile: src.profile } : {}),
     ...(src.docker !== undefined ? { docker: src.docker } : {}),
+    ...(src.ownerType !== undefined ? { ownerType: src.ownerType } : {}),
     repos: reposWithDirs,
     userName: userRows[0]?.name,
     userEmail: userRows[0]?.email,

@@ -215,6 +215,7 @@ export async function admitSignal(deps: AdmitSignalDeps, args: AdmitSignalArgs):
       userId: toData.userId,
       orgId: toData.orgId,
       workspace: toData.workspace,
+      ownerType: toData.owner.type,
     }),
   );
   const thread = await resolveThread(deps, args, session, toData);

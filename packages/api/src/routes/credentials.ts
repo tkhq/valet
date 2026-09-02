@@ -42,13 +42,14 @@
  * against Slack and records the workspace identity. See
  * `services/slack-connect.ts`.
  */
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import type { CredentialOwner, StoredCredential } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
 import { requiredScopeError, verifySlackBotToken } from "../services/slack-connect.js";
 import { connectModeFor, findCredentialDeclaration } from "../services/integration-availability.js";
 import { ONEPASSWORD_SERVICE, OnePasswordAuthError, onePasswordMeta } from "../services/onepassword.js";
+import { PERSONAL_DISABLED, mapOnePasswordError } from "./_onepassword-errors.js";
 import { getAllowPersonalOnePassword } from "../services/org.js";
 import type {
   CredentialSummary,
@@ -62,8 +63,6 @@ export const credentialsRouter = new Hono<AppEnv>();
 
 const CREDENTIAL_TYPES: PutCredentialRequest["type"][] = ["oauth2", "api_key", "bot_token", "service_account"];
 
-const PERSONAL_DISABLED = { error: "personal 1Password tokens are disabled by your organization" } as const;
-const ONEPASSWORD_REQUEST_FAILED = { error: "1Password request failed" } as const;
 const ONEPASSWORD_REFERENCE_TYPES: PutCredentialRequest["type"][] = ["api_key", "oauth2"];
 
 function ownerFor(user: { id: string; orgId: string }, scope: "user" | "org"): CredentialOwner {
@@ -89,6 +88,47 @@ function parseOnePasswordField(
     return { ok: false, error: "onepassword.tokenScope must be org or personal" };
   }
   return { ok: true, reference, tokenScope };
+}
+
+/**
+ * The org Slack credential drives the agent surface, so it is checked against
+ * Slack before it is stored. Every failure this catches is otherwise
+ * invisible: a wrong signing secret only shows up as 401s on an
+ * unauthenticated webhook, and a missing scope only shows up hours later on
+ * one API call. The check also records the workspace identity the rest of
+ * the integration depends on. Returns the rejection to send, or `undefined`
+ * when the credential may be saved. A user-scoped Slack credential is a
+ * personal token for the action plugin and is not checked.
+ */
+async function verifyOrgSlackCredential(
+  c: Context<AppEnv>,
+  credential: StoredCredential,
+  token: string,
+): Promise<Response | undefined> {
+  const webhookSecret = credential.metadata?.webhookSecret;
+  if (typeof webhookSecret !== "string" || webhookSecret === "") {
+    return c.json(
+      { error: "Slack needs metadata.webhookSecret. Copy the Signing Secret from Basic Information in your Slack app settings." },
+      400,
+    );
+  }
+  const check = await verifySlackBotToken(token);
+  if (!check.ok) return c.json({ error: check.error }, 400);
+  const scopeError = requiredScopeError(check.identity.grantedScopes);
+  if (scopeError) return c.json({ error: scopeError }, 400);
+  credential.metadata = {
+    ...credential.metadata,
+    // The webhook route answers this workspace and drops every other one.
+    // A shared app's signing secret is valid for every workspace that
+    // installs the app, so this id is the workspace boundary.
+    teamId: check.identity.teamId,
+    teamName: check.identity.teamName,
+    botUserId: check.identity.botUserId,
+  };
+  // Recorded so the setup route can report missing optional scopes without
+  // calling Slack again. `undefined` when Slack sent no scope header.
+  credential.scopes = check.identity.grantedScopes ?? undefined;
+  return undefined;
 }
 
 credentialsRouter.get("/", async (c) => {
@@ -244,20 +284,23 @@ credentialsRouter.put("/:service", async (c) => {
       }
     }
 
+    let resolved: string;
     try {
-      await onePassword.resolveReference(tokenScope, { orgId: user.orgId, userId: user.id }, reference);
+      resolved = await onePassword.resolveReference(tokenScope, { orgId: user.orgId, userId: user.id }, reference);
     } catch (err) {
-      if (err instanceof OnePasswordAuthError) {
-        return c.json({ error: err.message }, 400);
-      }
-      console.error("onepassword: resolveReference failed:", err);
-      return c.json(ONEPASSWORD_REQUEST_FAILED, 502);
+      return mapOnePasswordError(c, err);
     }
 
     const credential: StoredCredential = {
       type: body.type,
       metadata: { ...body.metadata, onepassword: { reference, tokenScope } },
     };
+    // A reference-backed Slack org credential drives the same agent surface
+    // as a pasted one, so it passes the same check before it is stored.
+    if (service === "slack" && scope === "org") {
+      const rejected = await verifyOrgSlackCredential(c, credential, resolved);
+      if (rejected) return rejected;
+    }
     await engineCredentials.save(owner, service, credential);
     const resp: PutCredentialResponse = { ok: true };
     return c.json(resp);
@@ -295,41 +338,9 @@ credentialsRouter.put("/:service", async (c) => {
     metadata: body.metadata,
   };
 
-  // The org Slack credential drives the agent surface, so it is checked
-  // against Slack before it is stored. Every failure this catches is
-  // otherwise invisible: a wrong signing secret only shows up as 401s on an
-  // unauthenticated webhook, and a missing scope only shows up hours later
-  // on one API call. The check also records the workspace identity the rest
-  // of the integration depends on. A user-scoped Slack credential is a
-  // personal token for the action plugin and is not checked here.
   if (service === "slack" && scope === "org") {
-    const webhookSecret = credential.metadata?.webhookSecret;
-    if (typeof webhookSecret !== "string" || webhookSecret === "") {
-      return c.json(
-        { error: "Slack needs metadata.webhookSecret. Copy the Signing Secret from Basic Information in your Slack app settings." },
-        400,
-      );
-    }
-    // `accessToken` and `apiKey` are already known to be exactly one of the
-    // two at this point.
-    const token = accessToken ?? apiKey ?? "";
-    const check = await verifySlackBotToken(token);
-    if (!check.ok) return c.json({ error: check.error }, 400);
-    const scopeError = requiredScopeError(check.identity.grantedScopes);
-    if (scopeError) return c.json({ error: scopeError }, 400);
-
-    credential.metadata = {
-      ...credential.metadata,
-      // The webhook route answers this workspace and drops every other one.
-      // A shared app's signing secret is valid for every workspace that
-      // installs the app, so this id is the workspace boundary.
-      teamId: check.identity.teamId,
-      teamName: check.identity.teamName,
-      botUserId: check.identity.botUserId,
-    };
-    // Recorded so the setup route can report missing optional scopes without
-    // calling Slack again. `undefined` when Slack sent no scope header.
-    credential.scopes = check.identity.grantedScopes ?? undefined;
+    const rejected = await verifyOrgSlackCredential(c, credential, accessToken ?? apiKey ?? "");
+    if (rejected) return rejected;
   }
 
   await engineCredentials.save(owner, service, credential);
