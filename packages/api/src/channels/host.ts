@@ -364,7 +364,7 @@ export class ChannelHost {
         try {
           credential = await resolveOrgCredentialRead(
             { credentials: this.deps.engineCredentials, onePassword: this.deps.onePassword },
-            { orgId },
+            { orgId, scopes: ["org"] },
             factory.channelType,
           );
         } catch (err) {

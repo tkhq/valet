@@ -63,7 +63,9 @@ export const credentialsRouter = new Hono<AppEnv>();
 
 const CREDENTIAL_TYPES: PutCredentialRequest["type"][] = ["oauth2", "api_key", "bot_token", "service_account"];
 
-const ONEPASSWORD_REFERENCE_TYPES: PutCredentialRequest["type"][] = ["api_key", "oauth2"];
+// The row types a reference may carry. `service_account` is the reserved
+// 1Password token itself and never a reference.
+const ONEPASSWORD_REFERENCE_TYPES: PutCredentialRequest["type"][] = ["api_key", "oauth2", "bot_token"];
 
 function ownerFor(user: { id: string; orgId: string }, scope: "user" | "org"): CredentialOwner {
   return scope === "org" ? { type: "org", id: user.orgId } : { type: "user", id: user.id };
@@ -171,7 +173,7 @@ credentialsRouter.get("/", async (c) => {
 });
 
 credentialsRouter.put("/:service", async (c) => {
-  const { engineCredentials, onePassword, db } = c.var.providers;
+  const { engineCredentials, onePassword, db, plugins } = c.var.providers;
   const user = c.var.user;
   const service = c.req.param("service");
 
@@ -195,10 +197,10 @@ credentialsRouter.put("/:service", async (c) => {
   // saves stay open (an admin's org save IS the configuration step), and
   // services with no declaration stay accepted per the note above.
   if (scope === "user") {
-    const declared = findCredentialDeclaration(c.var.providers.plugins, service);
+    const declared = findCredentialDeclaration(plugins, service);
     if (declared) {
       const mode = await connectModeFor({
-        plugins: c.var.providers.plugins,
+        plugins: plugins,
         decl: declared,
         service,
         orgId: user.orgId,
@@ -270,6 +272,18 @@ credentialsRouter.put("/:service", async (c) => {
     }
     const parsed = parseOnePasswordField(body.onepassword);
     if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    // The row's type decides which field the resolved secret lands in, and the
+    // consumer reads one fixed field. A Slack bot token saved as `api_key`
+    // verified against Slack and then never started the transport, which
+    // reads `accessToken`. The plugin declares the type it consumes; hold the
+    // reference to it.
+    const declared = findCredentialDeclaration(plugins, service);
+    if (declared && declared.type !== body.type) {
+      return c.json(
+        { error: `${service} credentials are ${declared.type}. Set type to ${declared.type} for this reference.` },
+        400,
+      );
+    }
     if (scope === "org" && parsed.tokenScope === "personal") {
       return c.json(
         { error: "An org-scoped credential cannot use a personal 1Password token. Set tokenScope to org." },

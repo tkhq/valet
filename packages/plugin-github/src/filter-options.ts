@@ -1,4 +1,5 @@
 import type { FilterOption, FilterOptionContext, FilterOptionResolver } from "@valet/engine";
+import { credentialSecret } from "@valet/engine";
 import { Octokit } from "octokit";
 import { resolveGithubApiUrl } from "./actions/api.js";
 
@@ -24,7 +25,7 @@ const MAX_OPTIONS = 100;
 /** Reads the usable token from the org's stored GitHub credential. Returns
  * null when the org has no credential or no token. */
 function tokenFrom(ctx: FilterOptionContext): string | null {
-  const token = ctx.credential?.accessToken;
+  const token = credentialSecret(ctx.credential);
   return typeof token === "string" && token.length > 0 ? token : null;
 }
 

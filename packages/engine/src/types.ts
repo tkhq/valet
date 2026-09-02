@@ -758,6 +758,21 @@ export interface StoredCredential {
   metadata?: Record<string, unknown>;
 }
 
+/**
+ * The one secret a credential row carries, whichever slot holds it.
+ *
+ * A row has two slots, `accessToken` and `apiKey`, and the writer picks one
+ * by a rule the reader never sees: the row type for a 1Password reference,
+ * the request field for a pasted value. A reader that names a slot works
+ * until a writer picks the other; a Slack bot token stored under `apiKey`
+ * verified against Slack and then never started the transport. Read through
+ * this instead. Empty means no secret.
+ */
+export function credentialSecret(credential: StoredCredential | null | undefined): string | undefined {
+  const value = credential?.accessToken ?? credential?.apiKey;
+  return value === "" ? undefined : value;
+}
+
 export interface CredentialStore {
   get(owner: CredentialOwner, service: string): Promise<StoredCredential | null>;
   save(owner: CredentialOwner, service: string, credential: StoredCredential): Promise<void>;

@@ -13,6 +13,7 @@ import type {
   SendRef,
   TransportContext,
 } from "@valet/engine";
+import { credentialSecret } from "@valet/engine";
 import { TelegramApi } from "./api.js";
 import { escapeTelegramHtml, markdownToTelegramHtml } from "./format.js";
 
@@ -284,7 +285,7 @@ export class TelegramTransport implements ChannelTransport {
 export const telegramTransportFactory: ChannelTransportFactory = {
   channelType: "telegram",
   create(ctx: TransportContext): ChannelTransport {
-    const token = ctx.credential.accessToken ?? ctx.credential.apiKey;
+    const token = credentialSecret(ctx.credential);
     if (!token) throw new Error("telegram transport requires a bot token credential");
     return new TelegramTransport(new TelegramApi(token, ctx.config.apiBaseUrl));
   },

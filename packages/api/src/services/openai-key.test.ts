@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { CredentialOwner } from "@valet/engine";
+import type { CredentialOwner, StoredCredential } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
@@ -7,10 +7,11 @@ import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { orgs } from "../schema/index.js";
 import { createLlmProvider, updateLlmProvider } from "./llm-providers.js";
 import { resolveOpenAiCredential } from "./openai-key.js";
+import type { OnePasswordService } from "./onepassword.js";
 
 const orgId = "org1";
 const userId = "u1";
-const ctx = { orgId, userId };
+const ctx = { orgId, userId, scopes: ["org", "personal"] as const };
 const orgOwner: CredentialOwner = { type: "org", id: orgId };
 const userOwner: CredentialOwner = { type: "user", id: userId };
 
@@ -78,5 +79,29 @@ describe("resolveOpenAiCredential", () => {
       OPENAI_API_KEY: "   ",
     });
     expect(cred).toBeNull();
+  });
+  // The openai probe runs for every session. A team- or org-owned session
+  // must not title-search the frozen actor's personal vault for an OpenAI key.
+  it("honors the caller's scopes when it falls through to the vault lookup", async () => {
+    const tried: string[] = [];
+    const onePassword = {
+      tokenConnected: async () => true,
+      listVaults: async () => [],
+      resolveReference: async () => "",
+      resolveCredential: async (row: StoredCredential) => row,
+      findCredentialForService: async (scope: string) => {
+        tried.push(scope);
+        return null;
+      },
+    } satisfies OnePasswordService;
+    const got = await resolveOpenAiCredential(
+      db,
+      credentials,
+      { orgId: "o1", userId: "u1", scopes: ["org"] },
+      {},
+      onePassword,
+    );
+    expect(got).toBeNull();
+    expect(tried).toEqual(["org"]);
   });
 });

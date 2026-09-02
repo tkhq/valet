@@ -9,7 +9,7 @@ import { describe, expect, it } from "vitest";
 import type { CredentialOwner, CredentialStore, StoredCredential } from "@valet/engine";
 import { InMemoryCredentialStore } from "@valet/engine";
 import { OnePasswordAuthError, type OnePasswordCtx, type OnePasswordService } from "./onepassword.js";
-import { resolveOrgCredentialRead, resolveUserCredentialRead } from "./credential-resolution.js";
+import { resolveOrgCredentialRead, resolveUserCredentialRead, onePasswordScopesFor } from "./credential-resolution.js";
 
 const orgId = "cr-org";
 const userId = "cr-user";
@@ -50,7 +50,7 @@ describe("internal-service deny list", () => {
       throw new Error("must not resolve — reserved service");
     });
 
-    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "onepassword", "org-provided");
+    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId, scopes: ["org", "personal"] }, "onepassword", "org-provided");
 
     expect(result).toBeNull();
   });
@@ -80,7 +80,7 @@ describe("internal-service deny list", () => {
       throw new Error("must not resolve — denied service");
     });
 
-    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "github_app", "org-provided");
+    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId, scopes: ["org", "personal"] }, "github_app", "org-provided");
 
     expect(result).toBeNull();
   });
@@ -110,7 +110,7 @@ describe("internal-service deny list", () => {
       throw new Error("must not resolve — denied service");
     });
 
-    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "llm:prov_1", "org-provided");
+    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId, scopes: ["org", "personal"] }, "llm:prov_1", "org-provided");
 
     expect(result).toBeNull();
   });
@@ -126,7 +126,7 @@ describe("resolveUserCredentialRead", () => {
       throw new Error("must not resolve — plain row");
     });
 
-    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "linear", "org-provided");
+    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId, scopes: ["org", "personal"] }, "linear", "org-provided");
 
     expect(result).toBe(userRow);
   });
@@ -148,7 +148,7 @@ describe("resolveUserCredentialRead", () => {
       return { type: row.type, metadata: row.metadata, apiKey: `resolved-for-${ctx.userId}` };
     });
 
-    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "acme", "org-provided");
+    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId, scopes: ["org", "personal"] }, "acme", "org-provided");
 
     expect(sawRow).toBe(userRow);
     expect(result?.apiKey).toBe(`resolved-for-${userId}`);
@@ -162,7 +162,7 @@ describe("resolveUserCredentialRead", () => {
       throw new Error("must not resolve — plain row");
     });
 
-    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "telegram", "org-provided");
+    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId, scopes: ["org", "personal"] }, "telegram", "org-provided");
 
     expect(result).toBe(orgRow);
   });
@@ -185,7 +185,7 @@ describe("resolveUserCredentialRead", () => {
 
     const result = await resolveUserCredentialRead(
       { credentials, onePassword },
-      { orgId, userId },
+      { orgId, userId, scopes: ["org", "personal"] },
       "linear",
       "reference-only",
     );
@@ -205,7 +205,7 @@ describe("resolveUserCredentialRead", () => {
 
     const result = await resolveUserCredentialRead(
       { credentials, onePassword },
-      { orgId, userId },
+      { orgId, userId, scopes: ["org", "personal"] },
       "acme",
       "none",
     );
@@ -226,7 +226,7 @@ describe("resolveUserCredentialRead", () => {
       return { type: row.type, metadata: row.metadata, apiKey: `org-secret-for-${ctx.userId}` };
     });
 
-    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "acme", "org-provided");
+    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId, scopes: ["org", "personal"] }, "acme", "org-provided");
 
     expect(sawRow).toBe(orgRow);
     expect(result?.apiKey).toBe(`org-secret-for-${userId}`);
@@ -238,7 +238,7 @@ describe("resolveUserCredentialRead", () => {
       throw new Error("must not resolve — nothing stored");
     });
 
-    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "nope", "org-provided");
+    const result = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId, scopes: ["org", "personal"] }, "nope", "org-provided");
 
     expect(result).toBeNull();
   });
@@ -251,7 +251,7 @@ describe("resolveUserCredentialRead", () => {
     };
     await credentials.save({ type: "user", id: userId }, "acme", userRow);
 
-    const result = await resolveUserCredentialRead({ credentials }, { orgId, userId }, "acme", "org-provided");
+    const result = await resolveUserCredentialRead({ credentials }, { orgId, userId, scopes: ["org", "personal"] }, "acme", "org-provided");
 
     expect(result).toBe(userRow);
   });
@@ -274,7 +274,7 @@ describe("resolveOrgCredentialRead", () => {
     const result = await resolveOrgCredentialRead({ credentials, onePassword }, { orgId }, "telegram");
 
     expect(result?.apiKey).toBe("resolved-bot-token");
-    expect(sawCtx).toEqual({ orgId, userId: "" });
+    expect(sawCtx).toEqual({ orgId, userId: "", scopes: ["org"] });
   });
 
   it("org row carrying a personal-tokenScope reference throws the typed OnePasswordAuthError when ctx has no userId", async () => {
@@ -346,7 +346,7 @@ describe("vault lookup when no row exists", () => {
 
     const result = await resolveUserCredentialRead(
       { credentials, onePassword },
-      { orgId, userId },
+      { orgId, userId, scopes: ["org", "personal"] },
       "linear",
       "reference-only",
     );
@@ -360,7 +360,7 @@ describe("vault lookup when no row exists", () => {
 
     const result = await resolveUserCredentialRead(
       { credentials, onePassword },
-      { orgId, userId },
+      { orgId, userId, scopes: ["org", "personal"] },
       "linear",
       "reference-only",
     );
@@ -376,7 +376,7 @@ describe("vault lookup when no row exists", () => {
 
     const result = await resolveUserCredentialRead(
       { credentials, onePassword },
-      { orgId, userId },
+      { orgId, userId, scopes: ["org", "personal"] },
       "linear",
       "reference-only",
     );
@@ -403,8 +403,55 @@ describe("vault lookup when no row exists", () => {
     const tried: string[] = [];
     const credentials = fakeCredentialStore();
     const onePassword = fakeWithLookup("SHOULD-NOT-BE-READ", (scope) => tried.push(scope));
-    const got = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId }, "linear", "none");
+    const got = await resolveUserCredentialRead({ credentials, onePassword }, { orgId, userId, scopes: ["org", "personal"] }, "linear", "none");
     expect(got).toBeNull();
     expect(tried).toEqual([]);
+  });
+  // The stored-row path is the one the vault-title search does not cover: a
+  // user row carrying a personal-scope reference must not resolve for a
+  // session whose owner rule excludes the personal scope.
+  it("a personal-scope user row reads as absent when scopes exclude personal", async () => {
+    const tried: string[] = [];
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "user", id: userId }, "linear", {
+      type: "api_key",
+      metadata: { onepassword: { reference: "op://Private/Linear/token", tokenScope: "personal" } },
+    });
+    const onePassword: OnePasswordService = {
+      ...fakeWithLookup(null, (scope) => tried.push(`lookup:${scope}`)),
+      resolveCredential: async (row: StoredCredential) => {
+        tried.push("resolveCredential");
+        return { ...row, apiKey: "ACTOR-PRIVATE" };
+      },
+    };
+    const got = await resolveUserCredentialRead(
+      { credentials, onePassword },
+      { orgId, userId, scopes: ["org"] },
+      "linear",
+      "reference-only",
+    );
+    // Not resolved through the personal token; the read falls through to the
+    // org row (none) and the org-scope vault lookup (nothing), and answers null.
+    expect(tried).toEqual(["lookup:org"]);
+    expect(got).toBeNull();
+  });
+
+  it("the same row resolves for a user-owned session", async () => {
+    const credentials = fakeCredentialStore();
+    await credentials.save({ type: "user", id: userId }, "linear", {
+      type: "api_key",
+      metadata: { onepassword: { reference: "op://Private/Linear/token", tokenScope: "personal" } },
+    });
+    const onePassword: OnePasswordService = {
+      ...fakeWithLookup(null),
+      resolveCredential: async (row: StoredCredential) => ({ ...row, apiKey: "ACTOR-PRIVATE" }),
+    };
+    const got = await resolveUserCredentialRead(
+      { credentials, onePassword },
+      { orgId, userId, scopes: onePasswordScopesFor("user") },
+      "linear",
+      "reference-only",
+    );
+    expect(got?.apiKey).toBe("ACTOR-PRIVATE");
   });
 });

@@ -253,7 +253,7 @@ describe("buildActionInvoker", () => {
     );
 
     expect(result).toEqual({ ok: true, result: { echoed: "hi", hasCredential: true } });
-    expect(sawCtx).toEqual({ orgId: "org1", userId: "u1" });
+    expect(sawCtx).toEqual({ orgId: "org1", userId: "u1", scopes: ["org", "personal"] });
   });
 
   it("owner-precedence contract (Task 6): an org-owned run resolves the org row's 1Password reference through onePassword", async () => {
@@ -277,7 +277,7 @@ describe("buildActionInvoker", () => {
     );
 
     expect(result).toEqual({ ok: true, result: { echoed: "hi", hasCredential: true } });
-    expect(sawCtx).toEqual({ orgId: "org1", userId: "u1" });
+    expect(sawCtx).toEqual({ orgId: "org1", userId: "u1", scopes: ["org"] });
   });
 
   it("team-owned run: unsupported owner type returns a deterministic {ok:false} and never invokes execute", async () => {

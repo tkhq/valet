@@ -265,6 +265,32 @@ code as of the implementing commits:
   browse hooks, the item and suggestion routes, and the value-stripping
   `OpClient.items.get` were then removed as dead code. `GET /vaults` stays as
   the token probe and the vehicle for `onepassword.live-server.test.ts`.
+- **The owner rule is enforced where every stored row passes.** Review found
+  two paths around `onePasswordScopesFor`: the stored-row path resolved a
+  row through its own `tokenScope` with no scope check, and the openai branch
+  passed no scopes at all, so a team- or org-owned session reached the frozen
+  actor's personal vault. `UserReadCtx.scopes` is now required (the compiler
+  makes every reader decide), and `resolveRow` enforces it: a user read skips
+  a row whose scope its session may not use and falls through to the org row
+  and the vaults; an org read resolves the row and lets the typed error
+  surface, the fail-loud contract `resolveOrgCredentialRead` documents.
+- **A reference's type is held to the plugin's declared type.** A row's type
+  decides which field the resolved secret lands in (`api_key` -> `apiKey`,
+  otherwise `accessToken`), and a transport reads one fixed field. A Slack bot
+  token saved as an `api_key` reference verified against Slack and then never
+  started the transport. `PUT /api/credentials/:service` now rejects a
+  reference whose type differs from `CredentialDeclaration.type`, names the
+  type to set, and accepts `bot_token`. `resolveCredential` carries `scopes`
+  through so a reference row and a pasted row hand consumers the same shape.
+- **One accessor for the secret.** `credentialSecret(row)` in `@valet/engine`
+  reads whichever slot holds the value. The Slack, Telegram, Linear, and
+  GitHub transports and filter-option resolvers, the session and invoker
+  folds, and the tool-count label read through it. The filter-options route
+  (`routes/events.ts`) resolves the org row through `resolveOrgCredentialRead`
+  instead of reading it raw, so a reference-backed Slack row lists channels.
+  The tool-count label reads through the accessor but does not resolve
+  references: it has no org in scope and falls back to its static text by
+  design.
 - **Reference rows can still be created by the API** (`PUT
   /api/credentials/:service` with `body.onepassword`) but no UI lists or
   revokes them. Either restore that list or reject the field; open.

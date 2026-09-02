@@ -143,7 +143,9 @@ describe("EngineHost session 1Password credential resolution", () => {
     });
     const h = makeHost(credentials, { onePassword });
 
-    const session = await h.sessionFor("sess-op-error", { userId, orgId, workspace: "/tmp" });
+    // A user-owned session: the row is the user's own personal-scope reference,
+    // so the owner rule lets the read reach it and the service's error surfaces.
+    const session = await h.sessionFor("sess-op-error", { userId, orgId, workspace: "/tmp", ownerType: "user" });
 
     await expect(session.credentialProvider().get("acme-service")).rejects.toBe(authError);
   });

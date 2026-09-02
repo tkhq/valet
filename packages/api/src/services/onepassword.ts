@@ -293,7 +293,12 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
     const meta = onePasswordMeta(row);
     if (!meta) return row;
     const secret = await resolveReference(meta.tokenScope, ctx, meta.reference);
+    // The row's type decides the field, and `PUT /api/credentials/:service`
+    // holds that type to the plugin's declaration, so the consumer finds the
+    // secret where it reads. `scopes` rides along: the Slack setup route
+    // reports missing optional scopes from it without calling Slack again.
     const resolved: StoredCredential = { type: row.type, metadata: row.metadata };
+    if (row.scopes) resolved.scopes = row.scopes;
     if (row.type === "api_key") {
       resolved.apiKey = secret;
     } else {

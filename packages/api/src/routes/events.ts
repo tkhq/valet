@@ -13,6 +13,9 @@
  * `event_keys`/`filters` jsonb shapes this file writes.
  */
 import { Hono } from "hono";
+import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
+import { OnePasswordAuthError } from "../services/onepassword.js";
+import type { StoredCredential } from "@valet/engine";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, exists, gte, or, sql, type SQL } from "drizzle-orm";
 import type { FilterOption, FilterOptionResolver, ValetPlugin } from "@valet/engine";
@@ -229,7 +232,7 @@ const filterOptionsCache = new Map<string, { options: FilterOption[]; expiresAt:
  */
 eventsRouter.get("/events/filter-options", async (c) => {
   const user = c.var.user;
-  const { plugins, engineCredentials } = c.var.providers;
+  const { plugins, engineCredentials, onePassword } = c.var.providers;
   const source = c.req.query("source");
   if (!source) return c.json({ error: "source query parameter is required" }, 400);
 
@@ -253,7 +256,22 @@ eventsRouter.get("/events/filter-options", async (c) => {
   }
 
   // The plugin name is its credential service (slack/github/linear).
-  const credential = (await engineCredentials.get({ type: "org", id: user.orgId }, found.plugin.name)) ?? null;
+  // Through the resolver, not the raw row: an admin's 1Password reference
+  // carries no secret until it is resolved, and a raw read handed the
+  // resolver an empty credential and returned no options. A missing or
+  // unresolvable credential is a normal outcome here (empty options), so a
+  // typed 1Password failure reads as none.
+  let credential: StoredCredential | null;
+  try {
+    credential = await resolveOrgCredentialRead(
+      { credentials: engineCredentials, onePassword },
+      { orgId: user.orgId, scopes: ["org"] },
+      found.plugin.name,
+    );
+  } catch (err) {
+    if (!(err instanceof OnePasswordAuthError)) throw err;
+    credential = null;
+  }
 
   let options: FilterOption[] = [];
   let reason: string | undefined;

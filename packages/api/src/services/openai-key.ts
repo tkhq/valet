@@ -2,7 +2,7 @@ import type { CredentialStore, StoredCredential } from "@valet/engine";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { resolveUserCredentialRead } from "./credential-resolution.js";
 import { listLlmProviders } from "./llm-providers.js";
-import type { OnePasswordService } from "./onepassword.js";
+import type { OnePasswordService, OnePasswordScope } from "./onepassword.js";
 
 /**
  * Resolve the OpenAI API key for the `"openai"` credential service — the
@@ -20,7 +20,7 @@ import type { OnePasswordService } from "./onepassword.js";
 export async function resolveOpenAiCredential(
   db: AppQueryable,
   credentials: CredentialStore,
-  ctx: { orgId: string; userId: string },
+  ctx: { orgId: string; userId: string; scopes: readonly OnePasswordScope[] },
   env: Record<string, string | undefined> = process.env,
   onePassword?: OnePasswordService,
 ): Promise<StoredCredential | null> {
@@ -33,7 +33,7 @@ export async function resolveOpenAiCredential(
   }
   const direct = await resolveUserCredentialRead(
     { credentials, onePassword },
-    { orgId: ctx.orgId, userId: ctx.userId },
+    { orgId: ctx.orgId, userId: ctx.userId, scopes: ctx.scopes },
     "openai",
     // The org LLM-provider key above is the org-wide path for this service;
     // a plain org `openai` row is not a second one. A reference still passes.

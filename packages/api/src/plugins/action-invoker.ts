@@ -38,6 +38,7 @@ import {
   type RiskLevel,
   type Sandbox,
   type ValetPlugin,
+  credentialSecret,
 } from "@valet/engine";
 import type { WorkflowInvokeActionRequest, WorkflowInvokeActionResult } from "@valet/workflow";
 import type { Static } from "typebox";
@@ -51,7 +52,7 @@ import {
   resolveInstallationApiToken,
   type GitHubTokenDeps,
 } from "../services/github-tokens.js";
-import { orgFallbackPolicy, resolveOrgCredentialRead, resolveUserCredentialRead } from "../services/credential-resolution.js";
+import { orgFallbackPolicy, resolveOrgCredentialRead, resolveUserCredentialRead, onePasswordScopesFor } from "../services/credential-resolution.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
 import { persistInvocationAudit, resolveActionPolicy, updateInvocationOutcome } from "../policies/service.js";
@@ -593,10 +594,15 @@ function buildCredentialProvider(
       const fallback = svc === defaultService ? orgFallbackPolicy(registry, svc) : "none";
       const stored =
         owner.type === "user"
-          ? await resolveUserCredentialRead(deps, { orgId: ctx.orgId, userId: owner.id }, svc, fallback)
-          : await resolveOrgCredentialRead(deps, { orgId: ctx.orgId, userId: ctx.userId }, svc);
+          ? await resolveUserCredentialRead(
+              deps,
+              { orgId: ctx.orgId, userId: owner.id, scopes: onePasswordScopesFor("user") },
+              svc,
+              fallback,
+            )
+          : await resolveOrgCredentialRead(deps, { orgId: ctx.orgId, userId: ctx.userId, scopes: ["org"] }, svc);
       if (!stored) return null;
-      const accessToken = stored.accessToken ?? stored.apiKey ?? "";
+      const accessToken = credentialSecret(stored) ?? "";
       if (accessToken === "") return null;
       return {
         accessToken,

@@ -71,8 +71,10 @@ export function onePasswordScopesFor(ownerType: string | undefined): readonly On
   return ownerType === "user" ? ["org", "personal"] : ["org"];
 }
 
-/** A read made as a specific user: `orgId` and `userId` known, scopes optional. */
-export type UserReadCtx = Required<Pick<CredentialReadCtx, "orgId" | "userId">> & Pick<CredentialReadCtx, "scopes">;
+/** A read made as a specific user: `orgId`, `userId`, and the scopes the
+ * session's owner allows (`onePasswordScopesFor`). Required, so no caller can
+ * reach the personal vault by forgetting to decide. */
+export type UserReadCtx = Required<Pick<CredentialReadCtx, "orgId" | "userId" | "scopes">>;
 
 /**
  * Resolves a raw store row through 1Password when applicable. `onePassword`
@@ -80,14 +82,27 @@ export type UserReadCtx = Required<Pick<CredentialReadCtx, "orgId" | "userId">> 
  * returned UNCHANGED (same object reference, no clone) so a non-1Password
  * deployment/row is byte-identical to a plain `CredentialStore.get` read.
  * `OnePasswordAuthError` from `resolveCredential` propagates unchanged.
+ *
+ * This is the one door every stored row passes through, so the owner rule
+ * holds here for the user row, the org row, and the channel host alike: a
+ * caller cannot reach a personal vault through a row it could not reach
+ * through the vault lookup. `excluded` is the reader's choice for a row
+ * whose `tokenScope` its scopes leave out. A user read skips it, so the read
+ * falls through to the org row and the vaults as if the row were absent. An
+ * org read resolves it, and `resolveCredential` throws the typed
+ * `OnePasswordAuthError` for a personal reference with no user, which is the
+ * fail-loud contract `resolveOrgCredentialRead` documents.
  */
 async function resolveRow(
   deps: CredentialReadDeps,
   row: StoredCredential | null,
-  ctx: { orgId: string; userId: string },
+  ctx: { orgId: string; userId: string; scopes: readonly OnePasswordScope[] },
+  excluded: "skip" | "resolve",
 ): Promise<StoredCredential | null> {
   if (!row) return null;
-  if (!deps.onePassword || !onePasswordMeta(row)) return row;
+  const meta = onePasswordMeta(row);
+  if (!deps.onePassword || !meta) return row;
+  if (excluded === "skip" && !ctx.scopes.includes(meta.tokenScope)) return null;
   return deps.onePassword.resolveCredential(row, ctx);
 }
 
@@ -132,7 +147,8 @@ export async function resolveUserCredentialRead(
 ): Promise<StoredCredential | null> {
   if (isDeniedCredentialService(service)) return null;
   const userRow = await deps.credentials.get({ type: "user", id: ctx.userId }, service);
-  if (userRow) return resolveRow(deps, userRow, ctx);
+  const fromUser = await resolveRow(deps, userRow, ctx, "skip");
+  if (fromUser) return fromUser;
   if (orgFallback === "none") return null;
   // Skip the org read entirely when only a reference could qualify and no
   // 1Password service is wired. `CredentialStore.get` is NOT side-effect free:
@@ -148,7 +164,7 @@ export async function resolveUserCredentialRead(
   if (orgFallback === "reference-only" && !onePasswordMeta(orgRow)) {
     return lookupInOnePassword(deps, ctx, service);
   }
-  return resolveRow(deps, orgRow, ctx);
+  return resolveRow(deps, orgRow, ctx, "skip");
 }
 
 /**
@@ -173,7 +189,7 @@ async function lookupInOnePassword(
   // Org first: a shared token is the configured path for a whole org. A
   // personal token only answers for the person it belongs to, and only when
   // the session is theirs (`onePasswordScopesFor`).
-  for (const scope of ctx.scopes ?? (["org", "personal"] as const)) {
+  for (const scope of ctx.scopes) {
     try {
       const secret = await deps.onePassword.findCredentialForService(scope, {
         orgId: ctx.orgId,
@@ -204,5 +220,5 @@ export async function resolveOrgCredentialRead(
 ): Promise<StoredCredential | null> {
   if (isDeniedCredentialService(service)) return null;
   const orgRow = await deps.credentials.get({ type: "org", id: ctx.orgId }, service);
-  return resolveRow(deps, orgRow, { orgId: ctx.orgId, userId: ctx.userId ?? "" });
+  return resolveRow(deps, orgRow, { orgId: ctx.orgId, userId: ctx.userId ?? "", scopes: ctx.scopes ?? ["org"] }, "resolve");
 }

@@ -1548,7 +1548,13 @@ export class EngineHost {
         // env. `null` keeps the openai tools hidden in list_tools
         // (requiresCredential gating). Without a db the generic read below
         // is the same call this branch used to make.
-        return resolveOpenAiCredential(db, credentials, { orgId, userId }, process.env, onePassword);
+        return resolveOpenAiCredential(
+          db,
+          credentials,
+          { orgId, userId, scopes: onePasswordScopesFor(ownerType) },
+          process.env,
+          onePassword,
+        );
       }
       if (service === "github" && tokenDeps && db) {
         const resolved = await resolveSessionGitHubToken(

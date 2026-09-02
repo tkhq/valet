@@ -87,7 +87,10 @@ broker; per-session reference allowlists; write access of any kind.
    that group, so consulting the frozen actor's personal vault would hand
    their private items to colleagues. `onePasswordScopesFor(ownerType)` in
    `credential-resolution.ts` decides this once, for the broker and for the
-   api-side resolver, and an unknown owner gets the org scope alone.
+   api-side resolver, and an unknown owner gets the org scope alone. On the
+   api side the rule is enforced in `resolveRow`, the one door every stored
+   row passes through, and `UserReadCtx.scopes` is required so no reader can
+   skip the decision.
 
 ## Flow
 

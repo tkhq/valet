@@ -690,6 +690,46 @@ describe("PUT /api/credentials/:service — onepassword reference extension", ()
       error: "personal 1Password tokens are disabled by your organization",
     });
   });
+  // The row's type decides which field the resolved secret lands in, and a
+  // plugin's transport reads one fixed field. The declaration names the type
+  // it consumes; a reference of another type verified green and then never
+  // started the transport at boot.
+  it("rejects a reference whose type differs from the plugin's declared type, naming the right one", async () => {
+    const botPlugin: ValetPlugin = {
+      name: "fakebot",
+      version: "0",
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], connectLabel: "Connect", requires: { orgCredential: true } }],
+    };
+    api = await bootTestApi({ plugins: [botPlugin] });
+    api.providers.onePassword = new FakeOnePasswordService();
+    const put = await fetch(`${api.baseUrl}/api/credentials/fakebot`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ type: "api_key", scope: "org", onepassword: { reference: "op://vault/item/field", tokenScope: "org" } }),
+    });
+    expect(put.status).toBe(400);
+    const body = (await put.json()) as { error: string };
+    expect(body.error).toContain("bot_token");
+    expect(await api.providers.engineCredentials.get({ type: "org", id: "local-org" }, "fakebot")).toBeNull();
+  });
+
+  it("accepts a bot_token reference for a plugin that declares bot_token", async () => {
+    const botPlugin: ValetPlugin = {
+      name: "fakebot",
+      version: "0",
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], connectLabel: "Connect", requires: { orgCredential: true } }],
+    };
+    api = await bootTestApi({ plugins: [botPlugin] });
+    api.providers.onePassword = new FakeOnePasswordService();
+    const put = await fetch(`${api.baseUrl}/api/credentials/fakebot`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ type: "bot_token", scope: "org", onepassword: { reference: "op://vault/item/field", tokenScope: "org" } }),
+    });
+    expect(put.status).toBe(200);
+    const stored = await api.providers.engineCredentials.get({ type: "org", id: "local-org" }, "fakebot");
+    expect(stored?.type).toBe("bot_token");
+  });
 });
 
 describe("GET /api/credentials — onepasswordRef summary", () => {
