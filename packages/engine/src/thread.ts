@@ -6,6 +6,8 @@ import { getModel, isContextOverflow, streamSimple } from "@earendil-works/pi-ai
 // provider-maintained retryable/permanent taxonomy (incl. the quota
 // blacklist) — a hand-rolled copy would drift on every pi-ai upgrade.
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
+import { classifyCacheBreak, type CacheTurnSnapshot } from "./cache-telemetry.js";
+import { recordCacheBreak } from "./metrics.js";
 import type { Api, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
 
 type PiModel = Model<Api>;
@@ -341,6 +343,8 @@ export class Thread {
    * conservative behavior we want — the sandbox may have been rebuilt.
    */
   private readonly fileReadHashes = new Map<string, string>();
+  /** Previous turn's cache snapshot for break classification (TKAI-320). */
+  private prevCacheSnapshot: CacheTurnSnapshot | undefined;
   /**
    * True when a transcript was rehydrated from persisted entries (spec
    * decision 5). The next `runItemInner` consumes it: a pre-turn proactive
@@ -3278,6 +3282,9 @@ export class Thread {
       // user/tool-result message, which is exactly Agent.continue()'s
       // contract for re-running the turn without duplicating the prompt.
       this.agent.state.messages = this.agent.state.messages.slice(0, -1);
+      // The retry rewinds the transcript, so the next response's cache reads
+      // are expected to differ — do not count that as a break (TKAI-320).
+      this.prevCacheSnapshot = undefined;
       await this.agent.continue();
       await this.agent.waitForIdle();
     }
@@ -3587,6 +3594,10 @@ export class Thread {
         },
         { attributeAuthors: this.attributeAuthors, threadKey: this.key },
       );
+      // Compaction legitimately rewrites the prefix — the next turn's cache
+      // reads SHOULD drop. Reset the break-detector baseline so the expected
+      // drop is not counted as a break (TKAI-320).
+      this.prevCacheSnapshot = undefined;
     } finally {
       await session.emit(
         { type: "compaction_end", threadId: this.id },
@@ -3681,6 +3692,17 @@ export class Thread {
           maxRetries: options?.maxRetries ?? TURN_STREAM_MAX_RETRIES,
           maxRetryDelayMs: options?.maxRetryDelayMs ?? TURN_STREAM_MAX_RETRY_DELAY_MS,
           timeoutMs: options?.timeoutMs ?? TURN_STREAM_TIMEOUT_MS,
+          // Cache wiring (TKAI-320): a stable per-thread session id gives
+          // providers with session-affinity caching a routing key (threads
+          // have divergent transcripts, so the key is thread-scoped).
+          // Retention defaults long for orchestrators — they idle between
+          // wake-ups, outliving the short TTL. Same defaults-not-overrides
+          // rule as the retry knobs above.
+          sessionId: options?.sessionId ?? `${this.session.id}/${this.id}`,
+          cacheRetention:
+            options?.cacheRetention ??
+            this.session.options.cacheRetention ??
+            (this.session.options.purpose === "orchestrator" ? "long" : "short"),
         }),
       // Filter out custom AgentMessage types (decision_gate, compaction, etc.)
       // before the LLM sees them. They live in the engine DAG, not in LLM context.
@@ -4088,6 +4110,31 @@ export class Thread {
           // "no usage reported" — omit, mirroring the cost-is-null rule.
           if (this.lastAssistantUsage.total > 0) turnUsage = { ...this.lastAssistantUsage };
           turnModel = event.message.model;
+          // Cache-break telemetry (TKAI-320): compare against the previous
+          // turn's snapshot and count breaks by cause. Alert-only — nothing
+          // here changes behavior.
+          if (this.lastAssistantUsage.total > 0) {
+            const snapshot: CacheTurnSnapshot = {
+              promptTokens: u.input + u.cacheRead + u.cacheWrite,
+              cacheRead: u.cacheRead,
+              modelId: event.message.model,
+              systemPromptLength: this.agent.state.systemPrompt.length,
+              toolCount: this.agent.state.tools.length,
+            };
+            // prev.cacheRead > 0 proves this provider reports cache usage
+            // at all — OpenAI-compatible/custom providers that never do
+            // would otherwise trip the detector on every turn forever.
+            if (this.prevCacheSnapshot && this.prevCacheSnapshot.cacheRead > 0) {
+              const cause = classifyCacheBreak(this.prevCacheSnapshot, snapshot);
+              if (cause) {
+                recordCacheBreak(cause, snapshot.modelId);
+                console.error(
+                  `[engine] cache break session=${this.session.id} thread=${this.id} cause=${cause} expected_read≈${this.prevCacheSnapshot.promptTokens} got=${snapshot.cacheRead}`,
+                );
+              }
+            }
+            this.prevCacheSnapshot = snapshot;
+          }
           // Cost is null, not zero: unpriced models (custom providers, dev
           // fakes) omit the field entirely — a missing value reads
           // "unpriced", never "$0".

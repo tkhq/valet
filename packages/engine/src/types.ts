@@ -2060,6 +2060,13 @@ export interface CreateSessionOptions {
     backoffMs?: number[];
   };
   /**
+   * Prompt-cache retention preference forwarded to pi-ai (TKAI-320).
+   * Default: "long" for orchestrator sessions (they idle between wake-ups,
+   * outliving the short TTL), "short" otherwise. Providers map the value
+   * to their supported retentions.
+   */
+  cacheRetention?: "none" | "short" | "long";
+  /**
    * Max time (ms) a tool op will wait for the sandbox attachment to become
    * ready before failing with WorkspaceProvisioningError. Default: 60_000
    * (SANDBOX_READY_TIMEOUT_MS, defined in sandbox/policy.ts).
