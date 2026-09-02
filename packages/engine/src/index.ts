@@ -1,4 +1,8 @@
 export * from "./types.js";
+// The pi-ai Model type, re-exported so downstream packages (e.g. @valet/eval)
+// can type model handles without their own pi-ai dependency edge (which pnpm
+// may peer-fork into a second instance — see CLAUDE.md, "Node & workspace traps").
+export type { Model } from "@earendil-works/pi-ai/compat";
 export {
   NotFoundError,
   NoCredentialsError,
@@ -249,6 +253,7 @@ export {
 export {
   entriesToAgentMessages,
   buildSpilledInputMarker,
+  resolveModelId,
   type CompactionOutcome,
 } from "./thread.js";
 export { classifyCacheBreak, type CacheBreakCause, type CacheTurnSnapshot } from "./cache-telemetry.js";
