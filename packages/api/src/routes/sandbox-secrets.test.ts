@@ -96,8 +96,7 @@ describe("POST /api/sandbox-secrets/resolve", () => {
   it("accepts a reference whose vault or item name contains spaces", async () => {
     api = await bootTestApi();
     api.providers.onePassword = fakeOnePassword();
-    // "ProDex Labs" is an ordinary vault name. An earlier `[^\s]+` pattern
-    // rejected every reference into a vault with a space in its title.
+    // "ProDex Labs" is an ordinary vault name: a reference may contain spaces.
     const res = await resolve(["op://ok/JumpCloud Login/password"]);
     expect(res.status).toBe(200);
     const body = (await res.json()) as Resp;
@@ -118,9 +117,8 @@ describe("POST /api/sandbox-secrets/resolve", () => {
     expect((await resolve("op://ok/item/field")).status).toBe(400);
     expect((await resolve([1, 2])).status).toBe(400);
   });
-  // The CLI's only credential is the sandbox token. The route used to read
-  // `c.var.user`, which the sandbox rung never sets: every real CLI call
-  // threw, and the CLI reported it as "nothing resolved".
+  // The CLI's only credential is the sandbox token, and the sandbox rung sets
+  // `c.var.sandbox`, never `c.var.user`.
   it("answers a sandbox token, and the principal comes from that token", async () => {
     api = await bootTestApi();
     api.providers.onePassword = fakeOnePassword();
