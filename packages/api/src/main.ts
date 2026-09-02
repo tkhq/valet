@@ -623,6 +623,7 @@ async function runBootChain(): Promise<void> {
     key: deriveSecretKey(encryptionKey),
     publicUrl: publicUrlFromEnv(process.env),
   });
+
 }
 
 // Kick the chain off the listener's critical path. An unexpected rejection

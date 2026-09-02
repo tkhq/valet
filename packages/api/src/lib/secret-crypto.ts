@@ -3,7 +3,7 @@
  * (plugin-system-v2 Task 3). Ciphertext format: `v1:{ivB64}:{tagB64}:{ctB64}`.
  *
  * `deriveSecretKey` turns an arbitrary passphrase (e.g. `VALET_ENCRYPTION_KEY`)
- * into a fixed 32-byte AES-256 key via SHA-256 — callers never need to
+ * into a fixed 32-byte AES-256 key via SHA-256; callers never need to
  * manage key material directly.
  */
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";

@@ -2613,9 +2613,14 @@ export class Thread {
       queueItemId: item.id,
       createdAt: Date.now(),
     };
-    await this.fencedWrite(() =>
-      this.session.providers.store.appendEntries(this.session.id, this.id, [userEntry], this.fence),
-    );
+    {
+      const transformed = await this.applyBeforePersist(userEntry, "append");
+      if (transformed) {
+        await this.fencedWrite(() =>
+          this.session.providers.store.appendEntries(this.session.id, this.id, [transformed], this.fence),
+        );
+      }
+    }
     return { text, attachments };
   }
 
@@ -3453,13 +3458,17 @@ export class Thread {
             stopReason,
             createdAt: Date.now(),
           };
-          await this.fencedWrite(() =>
-            this.session.providers.store.appendEntries(this.session.id, this.id, [entry], this.fence),
-          );
-          // Hold a reference so tool_execution_end can re-persist as each
-          // tool completes (`parts` is shared by reference; mutating a
-          // tool_call's status flows through to this entry's parts array).
-          this.currentAssistantEntry = entry;
+          {
+            const transformed = await this.applyBeforePersist(entry, "append");
+            if (transformed) {
+              await this.fencedWrite(() =>
+                this.session.providers.store.appendEntries(this.session.id, this.id, [transformed], this.fence),
+              );
+              // Hold a reference to the (possibly-mutated) entry so
+              // tool_execution_end and turn_end can update it in place.
+              this.currentAssistantEntry = transformed;
+            }
+          }
           await this.fencedEmit(
             {
               type: "message_end",
@@ -3523,9 +3532,15 @@ export class Thread {
         // result; on reload the chat shows tool cards stuck mid-execution.
         if (this.currentAssistantEntry) {
           const entry = this.currentAssistantEntry;
-          await this.fencedWrite(() =>
-            this.session.providers.store.updateEntry(this.session.id, this.id, entry, this.fence),
-          );
+          const transformed = await this.applyBeforePersist(entry, "update");
+          if (transformed) {
+            // Keep the reference pointed at the transformed entry so later
+            // updates start from the redacted parts, not the original.
+            this.currentAssistantEntry = transformed;
+            await this.fencedWrite(() =>
+              this.session.providers.store.updateEntry(this.session.id, this.id, transformed, this.fence),
+            );
+          }
         }
         await this.fencedEmit(
           {
@@ -3581,9 +3596,13 @@ export class Thread {
             const entry = this.currentAssistantEntry;
             entry.usage = turnUsage;
             if (turnCost) entry.cost = turnCost;
-            await this.fencedWrite(() =>
-              this.session.providers.store.updateEntry(this.session.id, this.id, entry, this.fence),
-            );
+            const transformed = await this.applyBeforePersist(entry, "update");
+            if (transformed) {
+              this.currentAssistantEntry = transformed;
+              await this.fencedWrite(() =>
+                this.session.providers.store.updateEntry(this.session.id, this.id, transformed, this.fence),
+              );
+            }
           }
           // Metrics: same snapshot the entry/span get (no-op without a
           // registered MeterProvider).
@@ -3693,6 +3712,38 @@ export class Thread {
         return;
       }
       throw err;
+    }
+  }
+
+  /**
+   * Run the session's `beforeEntryPersist` hook against an entry before it
+   * lands in the store (Part 10 §Redaction). Returns the possibly-mutated
+   * entry when the hook returns a value, the original entry when the hook
+   * returns `void`, or `null` when the hook threw (fail-closed: the caller
+   * skips the write and logs).
+   */
+  private async applyBeforePersist<T extends SessionEntry>(
+    entry: T,
+    op: "append" | "update",
+  ): Promise<T | null> {
+    const hook = this.session.options.beforeEntryPersist;
+    if (!hook) return entry;
+    try {
+      const result = await hook(entry, {
+        sessionId: this.session.id,
+        threadId: this.id,
+        op,
+      });
+      // The hook narrows to `SessionEntry | void`. We return `T` because
+      // the hook contract is "mutate parts, keep the shape"; a hook that
+      // returns a different discriminant is a caller bug.
+      return (result as T | undefined) ?? entry;
+    } catch (err) {
+      this.emitError(
+        "entry_persist_hook_failed",
+        `beforeEntryPersist threw for entry ${entry.id}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
     }
   }
 

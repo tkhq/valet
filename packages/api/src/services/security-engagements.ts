@@ -305,6 +305,18 @@ export interface AnswerNeedsResult {
   resumed: boolean;
 }
 
+/**
+ * One answer to a needs_human need. Every kind sends `resolution` (free
+ * text) or `dismiss`. Cred-typed answers land here as `op://` reference
+ * strings; Part 12's follow-up shape-checks them and drives the broker
+ * allowlist. This PR keeps the pre-vault shape while Part 10 is torn out.
+ */
+export interface NeedAnswerInput {
+  needId: string;
+  resolution?: string;
+  dismiss?: boolean;
+}
+
 export interface EngagementManifest {
   engagementId: string;
   status: "completed" | "failed";
@@ -1173,10 +1185,13 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
         // always — buildDispatchPrompt gates on the persona.
         scopeHosts: parseAuthorizedScopeHosts(engagement.authorizedScope),
       },
-      answeredNeeds.map((need) => ({
-        kind: narrowNeedKind(need.kind),
-        description: need.description,
-        resolution: need.resolution ?? "",
+      // Part 12: cred-typed needs carry an op:// ref as their resolution.
+      // Follow-up PR wires shape validation + the broker allowlist; today
+      // the ref rides through as free text like any other resolution.
+      answeredNeeds.map((n) => ({
+        kind: narrowNeedKind(n.kind),
+        description: n.description,
+        resolution: n.resolution ?? "",
       })),
     );
 
@@ -2492,7 +2507,7 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
    */
   async function resolveEngagementNeeds(
     engagementId: string,
-    answers: { needId: string; resolution: string; dismiss?: boolean }[],
+    answers: NeedAnswerInput[],
   ): Promise<AnswerNeedsResult> {
     const engagement = await loadEngagement(engagementId);
     if (answers.length === 0) {
@@ -2538,29 +2553,36 @@ export function createSecurityEngagementService(deps: SecurityEngagementServiceD
           );
         }
         const dismiss = answer.dismiss === true;
-        const resolution = answer.resolution.trim();
-        if (!dismiss && resolution === "") {
+        const inputRes = (answer.resolution ?? "").trim();
+        if (!dismiss && inputRes === "") {
           throw new Error(
-            `Need ${need.id} needs an answer. Give the credential, decision, or scope, or dismiss it.`,
+            `Need ${need.id} needs an answer. Give the credential ref, decision, or scope, or dismiss it.`,
           );
         }
-        if (resolution.length > MAX_NEED_RESOLUTION_CHARS) {
+        if (inputRes.length > MAX_NEED_RESOLUTION_CHARS) {
           throw new Error(
             `A need resolution is at most ${MAX_NEED_RESOLUTION_CHARS} characters. Give the answer, not a report.`,
           );
         }
+
+        const storedResolution = dismiss
+          ? inputRes !== ""
+            ? inputRes
+            : "Dismissed by the reviewer."
+          : inputRes;
+
         const updated = await tx
           .update(securityNeeds)
           .set({
             status: dismiss ? "dismissed" : "answered",
-            resolution: dismiss ? (resolution !== "" ? resolution : "Dismissed by the reviewer.") : resolution,
+            resolution: storedResolution,
             resolvedAt: ts,
           })
           .where(eq(securityNeeds.id, need.id))
           .returning();
         answered.push(updated[0]);
         // A delta re-run resets only an ANSWERED need's cell; a dismissal does
-        // not — the human ruled the block is not worth pursuing.
+        // not (the human ruled the block is not worth pursuing).
         if (!dismiss) cellsToReset.add(need.cellId);
       }
 

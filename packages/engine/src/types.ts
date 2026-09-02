@@ -2060,6 +2060,23 @@ export interface CreateSessionOptions {
    */
   compactionHooks?: CompactionHook[];
   /**
+   * Pre-persist entry transform (Valet Security Part 10 §Redaction). Runs
+   * against every `SessionEntry` before it lands in the store via
+   * `appendEntries` / `updateEntry`. The hook MAY:
+   *   - return a mutated `SessionEntry` (its `.parts` will be persisted),
+   *   - return the entry as-is,
+   *   - return `void` / `undefined` to keep the original.
+   *
+   * Fail-closed: a THROWING hook drops the entire persist for that entry,
+   * so a scanner that trips its own bug never leaks unredacted bytes. The
+   * caller logs and skips the write; the engine surfaces the error via the
+   * error bus so operators see it.
+   *
+   * The api wires this hook to scan for stored credential values against
+   * the per-engagement fingerprint index; a hit redacts bytes in place.
+   */
+  beforeEntryPersist?: BeforeEntryPersist;
+  /**
    * Whether `Thread.runTurn` fire-and-forgets `session.attachment.warm()` at
    * the start of every claimed turn (spec decision 5's default warm-on-claim
    * behavior). Default: true. Set to false for sessions that must stay
@@ -2154,6 +2171,18 @@ export type CompactionHook = (args: {
   mode: "proactive" | "reactive" | "manual";
   summary: string;
 }) => Promise<void>;
+
+/**
+ * Pre-persist entry transform (Part 10 §Redaction). Runs before a
+ * `SessionEntry` reaches the store. Return the mutated entry (its `.parts`
+ * are persisted), the entry as-is, or `void`/`undefined` to keep the
+ * original. Throwing DROPS the persist for that entry (fail-closed): a
+ * broken scanner never lets raw bytes through.
+ */
+export type BeforeEntryPersist = (
+  entry: SessionEntry,
+  meta: { sessionId: string; threadId: string; op: "append" | "update" },
+) => Promise<SessionEntry | void>;
 
 export interface CompactionConfig {
   /** Master switch. Default: true. */

@@ -92,6 +92,7 @@ function NeedsHumanItem({
 }) {
   const [answer, setAnswer] = useState("");
   const resolve = useResolveNeeds(sessionId);
+  const isCredKind = need.kind === "credential";
 
   return (
     <li className="rounded border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-[11px] text-ink">
@@ -106,9 +107,11 @@ function NeedsHumanItem({
             value={answer}
             onChange={(e) => setAnswer(e.target.value)}
             placeholder={
-              need.kind === "decision"
-                ? "Your decision…"
-                : "The credential, scope, or dependency the persona needs…"
+              isCredKind
+                ? "Paste an op://vault/item/field reference. Values never leave 1Password."
+                : need.kind === "decision"
+                  ? "Your decision…"
+                  : "The scope, dependency, or decision the persona needs…"
             }
             className="text-[11px]"
           />
