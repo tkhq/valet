@@ -180,27 +180,21 @@ export function hashFileContent(text: string): string {
 }
 
 /**
- * Read-before-write staleness gate (TKAI-318, from Claude Code's
- * readFileState). Returns corrective text when the mutation must not
- * proceed, undefined when it may. Content-hash comparison catches bash-side
- * and human edits that timestamps cannot. Inert when the host wires no
- * `fileReads` (tests, minimal hosts).
+ * Normalize a model-supplied path into the fileReads map key: absolute
+ * against `cwd`, `.`/`..` segments resolved lexically. Without this,
+ * "src/app.ts" and "/workspace/src/app.ts" record under different keys and
+ * spuriously trip the gate. Deliberately not node:path — the engine barrel
+ * must stay browser-safe.
  */
-function staleWriteGate(
-  ctx: ToolContext,
-  path: string,
-  currentContent: string | undefined,
-): string | undefined {
-  if (!ctx.fileReads) return undefined;
-  if (currentContent === undefined) return undefined; // new file — nothing to protect
-  const known = ctx.fileReads.get(path);
-  if (known === undefined) {
-    return `${path} exists but has not been read this session. Read it before writing to it.`;
+export function normalizeGatePath(path: string, cwd: string | undefined): string {
+  const joined = path.startsWith("/") ? path : `${cwd ?? "/workspace"}/${path}`;
+  const parts: string[] = [];
+  for (const seg of joined.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") parts.pop();
+    else parts.push(seg);
   }
-  if (known !== hashFileContent(currentContent)) {
-    return `${path} changed since you read it (another process or person edited it). Read it again before writing to it.`;
-  }
-  return undefined;
+  return "/" + parts.join("/");
 }
 
 export const readTool = defineTool({
@@ -210,7 +204,7 @@ export const readTool = defineTool({
   concurrencySafe: true,
   execute: async (args, ctx) => {
     const text = await ctx.sandbox.readFile(args.path);
-    ctx.fileReads?.record(args.path, hashFileContent(text));
+    ctx.fileReads?.record(normalizeGatePath(args.path, ctx.cwd), hashFileContent(text));
     return { text };
   },
 });
@@ -220,16 +214,32 @@ export const writeTool = defineTool({
   description: "Write contents to a file in the sandbox (creates or overwrites).",
   parameters: Type.Object({ path: Type.String(), content: Type.String() }),
   execute: async (args, ctx) => {
-    let existing: string | undefined;
-    try {
-      existing = await ctx.sandbox.readFile(args.path);
-    } catch {
-      // Unreadable or absent — treat as a create; the gate has nothing to protect.
+    // Staleness gate (TKAI-318), write flavor: block ONLY when the model
+    // read this file earlier and it changed since — that protects the
+    // read-modify-write flow against concurrent human/bash edits. A
+    // never-read overwrite is allowed: `write` replaces content wholesale
+    // by declared intent, and gating it would force reads of large or
+    // binary files just to regenerate them. No recorded hash → no
+    // pre-read at all, so regenerating a 100MB artifact costs one write.
+    const key = normalizeGatePath(args.path, ctx.cwd);
+    const known = ctx.fileReads?.get(key);
+    if (known !== undefined) {
+      let current: string | undefined;
+      try {
+        current = await ctx.sandbox.readFile(args.path);
+      } catch {
+        // Deleted or unreadable since the read — the recorded state is
+        // moot either way; the write proceeds and re-records.
+      }
+      if (current !== undefined && known !== hashFileContent(current)) {
+        return {
+          text: `${args.path} changed since you read it (another process or person edited it). Read it again before writing to it.`,
+          ok: false,
+        };
+      }
     }
-    const stale = staleWriteGate(ctx, args.path, existing);
-    if (stale) return { text: stale, ok: false };
     await ctx.sandbox.writeFile(args.path, args.content);
-    ctx.fileReads?.record(args.path, hashFileContent(args.content));
+    ctx.fileReads?.record(key, hashFileContent(args.content));
     return { text: `wrote ${args.path}` };
   },
 });
@@ -244,14 +254,32 @@ export const editTool = defineTool({
   }),
   execute: async (args, ctx) => {
     const before = await ctx.sandbox.readFile(args.path);
-    const stale = staleWriteGate(ctx, args.path, before);
-    if (stale) return { text: stale, ok: false };
+    // Staleness gate (TKAI-318), edit flavor: an edit is by definition a
+    // read-modify-write, so both blocks apply — never-read and
+    // changed-since-read. Content hashing catches bash-side and human
+    // edits that timestamps cannot. Inert when the host wires no fileReads.
+    const key = normalizeGatePath(args.path, ctx.cwd);
+    if (ctx.fileReads) {
+      const known = ctx.fileReads.get(key);
+      if (known === undefined) {
+        return {
+          text: `${args.path} exists but has not been read this session. Read it before editing it.`,
+          ok: false,
+        };
+      }
+      if (known !== hashFileContent(before)) {
+        return {
+          text: `${args.path} changed since you read it (another process or person edited it). Read it again before editing it.`,
+          ok: false,
+        };
+      }
+    }
     if (!before.includes(args.oldString)) {
       return { text: `no match for old_string in ${args.path}` };
     }
     const after = before.split(args.oldString).join(args.newString);
     await ctx.sandbox.writeFile(args.path, after);
-    ctx.fileReads?.record(args.path, hashFileContent(after));
+    ctx.fileReads?.record(key, hashFileContent(after));
     return { text: `edited ${args.path}` };
   },
 });

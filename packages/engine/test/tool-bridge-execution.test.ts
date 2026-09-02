@@ -51,6 +51,21 @@ describe("tool bridge: execution mode (TKAI-318)", () => {
     expect(tool.executionMode).toBe("sequential");
   });
 
+  it("an approval-capable tool is sequential even when marked concurrencySafe", () => {
+    const tool = toAgentTool(
+      defineTool({
+        name: "gated-reader",
+        description: "reads things behind an approval",
+        parameters: Type.Object({}),
+        concurrencySafe: true,
+        requiresApproval: true,
+        execute: async () => ({ text: "ok" }),
+      }),
+      buildCtx,
+    );
+    expect(tool.executionMode).toBe("sequential");
+  });
+
   it("maps concurrencySafe to parallel", () => {
     const tool = toAgentTool(
       defineTool({

@@ -29,15 +29,19 @@ const stubCredentials: CredentialProvider = {
 
 function makeCtx(files: Map<string, string>): { ctx: ToolContext; files: Map<string, string> } {
   const reads = new Map<string, string>();
+  // Real sandboxes resolve relative paths against the working directory —
+  // the stub mirrors that so the key-normalization test exercises the gate,
+  // not a fixture quirk.
+  const resolve = (path: string) => (path.startsWith("/") ? path : `/workspace/${path}`);
   const sandbox: FakeSandbox = {
     id: "sb-gate",
     readFile: async (path: string) => {
-      const content = files.get(path);
+      const content = files.get(resolve(path));
       if (content === undefined) throw new Error(`ENOENT: ${path}`);
       return content;
     },
     writeFile: async (path: string, content: string) => {
-      files.set(path, content);
+      files.set(resolve(path), content);
     },
   };
   const ctx: ToolContext = {
@@ -100,11 +104,34 @@ describe("read-before-write staleness gate (TKAI-318)", () => {
     expect(retry.text).toBe("edited /a.txt");
   });
 
-  it("blocks overwriting an existing file that was never read", async () => {
-    const { ctx } = makeCtx(new Map([["/a.txt", "precious"]]));
-    const result = await writeTool.execute({ path: "/a.txt", content: "clobber" }, ctx);
+  it("allows a never-read overwrite (declared wholesale replacement) without pre-reading", async () => {
+    // Regenerating an existing artifact must not require reading it first —
+    // that would force large/binary content through the context window.
+    const { ctx, files } = makeCtx(new Map([["/dist/bundle.js", "old build output"]]));
+    const result = await writeTool.execute({ path: "/dist/bundle.js", content: "new build" }, ctx);
+    expect(result.text).toBe("wrote /dist/bundle.js");
+    expect(files.get("/dist/bundle.js")).toBe("new build");
+  });
+
+  it("blocks a write when the file changed after the model read it", async () => {
+    const { ctx, files } = makeCtx(new Map([["/a.txt", "v1"]]));
+    await readTool.execute({ path: "/a.txt" }, ctx);
+    files.set("/a.txt", "v2 from a human");
+    const result = await writeTool.execute({ path: "/a.txt", content: "model clobber" }, ctx);
     expect(result.ok).toBe(false);
-    expect(result.text).toContain("has not been read");
+    expect(result.text).toContain("changed since you read it");
+    expect(files.get("/a.txt")).toBe("v2 from a human");
+  });
+
+  it("gate keys normalize, so relative and absolute spellings hit the same record", async () => {
+    const { ctx } = makeCtx(new Map([["/workspace/src/app.ts", "code"]]));
+    const relCtx = { ...ctx, cwd: "/workspace" } as typeof ctx;
+    await readTool.execute({ path: "src/app.ts" }, relCtx);
+    const result = await editTool.execute(
+      { path: "/workspace/src/app.ts", oldString: "code", newString: "code2" },
+      relCtx,
+    );
+    expect(result.text).toBe("edited /workspace/src/app.ts");
   });
 
   it("allows creating a new file without a prior read", async () => {

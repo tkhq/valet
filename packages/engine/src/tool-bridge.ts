@@ -29,8 +29,12 @@ export function toAgentTool<TParams extends import("typebox").TSchema>(
     // Sequential unless the tool opts in (TKAI-318). One sequential tool
     // serializes its whole batch in pi-agent-core, so a response mixing a
     // read with a write runs fully in model order — mutations never race
-    // and approval gates surface in execution order.
-    executionMode: def.concurrencySafe ? "parallel" : "sequential",
+    // and approval gates surface in execution order. An approval-capable
+    // tool is forced sequential even when marked concurrencySafe: a
+    // parallel approval gate is exactly the out-of-order bug this exists
+    // to prevent, and the flag must not be able to resurrect it.
+    executionMode:
+      def.concurrencySafe && !def.requiresApproval ? "parallel" : "sequential",
     execute: async (toolCallId, params, signal) => {
       const ctx = buildContext({
         signal: signal ?? new AbortController().signal,
