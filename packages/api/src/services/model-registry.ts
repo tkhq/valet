@@ -178,15 +178,17 @@ export class ModelRegistry {
   /**
    * Fetch one provider's catalog from upstream.
    *
-   * Every failure path returns the STORED catalog, never an empty list.
-   * `createProvider` persists whatever this resolves to, so returning `[]`
-   * after a failed check would overwrite a good cached catalog with an
-   * empty one and throw away models an earlier refresh won. Returning the
-   * stored list makes a failed check a no-op instead.
+   * Every failure path returns the STORED catalog rather than an empty
+   * list. `createProvider` persists whatever this resolves to, so returning
+   * `[]` after a failed check would overwrite a good cached catalog and
+   * throw away models an earlier refresh won. Returning the stored list
+   * makes a failed check a no-op instead.
    *
-   * When nothing is stored either, the empty result leaves pi-ai's static
-   * baseline — the bundled compile-time catalog — as the answer. So the
-   * served list degrades stored → bundled, and never to nothing.
+   * When nothing valid is stored, the result IS empty. That is the correct
+   * answer: an empty overlay leaves pi-ai's static baseline, the bundled
+   * compile-time catalog, as what the collection serves. `PgModelsStore`
+   * also refuses to overwrite a stored catalog with an empty one, so the
+   * served list degrades stored, then bundled, and never to nothing.
    */
   private async fetchProviderModels(
     providerId: RegistryProvider,

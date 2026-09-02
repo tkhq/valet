@@ -89,6 +89,18 @@ describe("PgModelsStore", () => {
     expect(await store.read("anthropic")).toBeUndefined();
   });
 
+  it("refuses to overwrite a stored catalog with an empty one", async () => {
+    await store.write("anthropic", { models: [validModel()], etag: '"v1"' });
+    // pi-ai calls write directly, so an all-malformed payload must not erase
+    // the good cache. The check still happened, so checkedAt advances.
+    await store.write("anthropic", { models: [{ id: "truncated" }] as never, checkedAt: 123 });
+
+    const entry = await store.read("anthropic");
+    expect(entry?.models.map((m) => m.id)).toEqual(["claude-brand-new"]);
+    expect(entry?.etag).toBe('"v1"');
+    expect(entry?.checkedAt).toBe(123);
+  });
+
   it("filters malformed models injected into an existing row", async () => {
     const now = Date.now();
     await db.insert(modelRegistryCache).values({

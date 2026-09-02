@@ -79,17 +79,23 @@ export class PgModelsStore implements ModelsStore {
   /**
    * Upsert a provider's catalog.
    *
-   * `etag` and `lastModified` are written only when the entry carries them.
-   * pi-ai's own `createProvider` persists `{ models, checkedAt }` with no
-   * validators right after `fetchModels` resolves, so clearing the columns
-   * on an entry that omits them would erase the ETag the fetch just
-   * captured and make every later check unconditional. Keeping the stored
-   * validator is what preserves the 304.
+   * Two rules keep a bad write from destroying a good cache:
+   *
+   * 1. An entry with no well-formed model does not touch the models column.
+   *    pi-ai calls `write` directly, so this method cannot assume the
+   *    registry service already screened the payload.
+   * 2. `etag` and `lastModified` are written only when the entry carries
+   *    them. pi-ai's `createProvider` persists `{ models, checkedAt }` with
+   *    no validators right after `fetchModels` resolves. Clearing the
+   *    columns there would erase the ETag the fetch just captured and make
+   *    every later check unconditional.
+   *
+   * Omitting a key from the `onConflictDoUpdate` set leaves that column at
+   * its stored value, which is how both rules are expressed below.
    */
   async write(providerId: string, entry: ModelsStoreEntry): Promise<void> {
-    // Keep only well-formed models. A partly-valid payload still caches its
-    // good entries; a fully invalid one writes an empty list, which `read`
-    // reports as "nothing stored" and the caller answers from the bundle.
+    // Keep only well-formed models, so a half-built record never reaches the
+    // model picker.
     const models = entry.models.filter((m): m is RegistryModel => isRegistryModel(m));
     const now = this.now();
     const etag = entry.etag ?? null;
@@ -102,8 +108,10 @@ export class PgModelsStore implements ModelsStore {
         .onConflictDoUpdate({
           target: modelRegistryCache.providerId,
           set: {
-            models,
-            // COALESCE keeps the stored validator when this write has none.
+            // Rule 1: an empty result keeps the stored catalog. The check
+            // still happened, so `checkedAt` advances either way.
+            ...(models.length === 0 ? {} : { models }),
+            // Rule 2: keep the stored validators when this write has none.
             ...(etag === null ? {} : { etag }),
             ...(lastModified === null ? {} : { lastModified }),
             checkedAt,
