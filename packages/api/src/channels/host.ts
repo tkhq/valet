@@ -198,20 +198,33 @@ function turnPromptIsFeedback(entries: SessionEntry[], queueItemId: string): boo
 }
 
 /**
- * True when a channel message started this submission.
+ * True when this submission is a plain web-UI prompt, the one kind of
+ * submission whose output stays off a bound channel (TKAI-323).
  *
- * Two inbound paths reach a bound thread. A signal-bearing path (the event
- * dispatcher, the follow-router) carries `signal.origin`, which
- * `originFromEntries` reads. The direct-message path (`handleMessage`)
- * submits a plain prompt, which has no signal, and marks the surface on
- * `MessageEntry.channel` instead. A web-UI prompt sets neither, so it is the
- * only submission both checks miss — which is what keeps its answer off the
- * channel (TKAI-323).
+ * The single classifier for the submission's surface — the mute checks in
+ * `deliverAssistantMessage` and `deliverGatePrompt` both read it. A
+ * submission is NOT a web prompt when any of its user entries carries:
+ *
+ * - `channel` — the direct-message path (`handleMessage`) stamps it, and the
+ *   engine's compaction auto-continue inherits it from the interrupted item.
+ * - `signal` — every engine-routed admission: the event dispatcher and the
+ *   follow-router (which also set `signal.origin`), child settlement,
+ *   agent-to-agent messages. These posted on a mapped thread before the
+ *   surface check existed, and muting them would silently swallow, e.g., a
+ *   task's settlement report on the Slack thread that asked for the task.
+ *
+ * A submission with no user entry at all is not classified (returns false):
+ * that is a pre-submission path, and the safe default is the pre-existing
+ * deliver-by-binding behavior. The failure mode of this classifier is
+ * silent muting, so every branch defaults to "not web".
  */
-function submissionFromChannel(entries: SessionEntry[], queueItemId: string): boolean {
-  return entries.some(
-    (e) => e.type === "message" && e.role === "user" && e.queueItemId === queueItemId && e.channel !== undefined,
+function submissionIsWebPrompt(entries: SessionEntry[], queueItemId: string): boolean {
+  const prompts = entries.filter(
+    (e): e is Extract<SessionEntry, { type: "message" }> =>
+      e.type === "message" && e.role === "user" && e.queueItemId === queueItemId,
   );
+  if (prompts.length === 0) return false;
+  return prompts.every((e) => e.channel === undefined && e.signal === undefined);
 }
 
 /** The submission's first assistant message that carries text or an
@@ -652,32 +665,28 @@ export class ChannelHost {
 
     // The submission's channel origin (from its user signal entry). Used both to
     // pick a delivery target when the thread key does not map, and to decide
-    // whether this turn auto-posts at all.
+    // how an overheard turn behaves below.
     const origin = entry.queueItemId ? originFromEntries(entries, entry.queueItemId) : undefined;
     // The auto-post belongs to the channel MESSAGE being answered, not to the
     // thread it landed on. A Slack-bound thread stays bound after the reader
     // moves to the web UI, so the thread key alone says nothing about where
-    // this turn came from. A submission with a queueItemId and no channel
-    // origin is a web-UI prompt: answer it in the UI and stay off the channel
-    // (TKAI-323). The submission still reaches the channel when the agent
-    // calls reply_to_origin, which is a deliberate cross-post.
+    // this turn came from. A web-UI prompt answers in the UI and stays off
+    // the channel (TKAI-323). The submission still reaches the channel when
+    // the agent calls reply_to_origin, which is a deliberate cross-post.
     //
-    // A gate approved from the UI does NOT change the submission's origin:
-    // the entries still carry the Slack signal that started it, so the
-    // post-approval outcome posts to Slack through the reopened slot below.
+    // A gate approved from the UI does NOT change the submission's surface:
+    // the entries still carry the mark that started it, so the post-approval
+    // outcome posts to the channel through the reopened slot below.
     //
     // `queueItemId === undefined` keeps the pre-submission paths (an entry
-    // written outside a queue item) on their existing behavior — the origin
-    // lookup needs a submission to read.
-    if (
-      mapped &&
-      entry.queueItemId !== undefined &&
-      origin === undefined &&
-      !submissionFromChannel(entries, entry.queueItemId)
-    ) {
-      // Release any stream registration a parked channel turn left on this
-      // thread, so the NEXT message of this web turn opens no stream either.
-      this.streamBridge.clearInboundTurn(sessionId, threadId);
+    // written outside a queue item) on their existing behavior — the surface
+    // classifier needs a submission to read. The debug line is the only
+    // record of the mute: an inbound path that forgets to mark its surface
+    // fails as a silent non-answer, and this line is how that gets found.
+    if (mapped && entry.queueItemId !== undefined && submissionIsWebPrompt(entries, entry.queueItemId)) {
+      console.debug(
+        `[channels] web-origin turn stays off ${mapped.channelType} (session=${sessionId} queueItem=${entry.queueItemId})`,
+      );
       return;
     }
     // An overheard turn (a message in a followed thread the assistant did not
@@ -871,6 +880,13 @@ export class ChannelHost {
    * command came from. A slash command sent from Telegram or Slack must
    * answer there — the web UI reads the same entry over REST/WS. Dedup on
    * the entry id, same LRU as assistant messages.
+   *
+   * Same surface rule as the auto-post (TKAI-323): the entry's `channel`
+   * mark says the command came from that surface; without it the command
+   * was typed in the web UI and its result stays there. Today every engine
+   * command arrives via the web REST route (`session.prompt` is its only
+   * caller), so this rule is dormant until a transport routes slash
+   * commands through `session.prompt` with `channel` set.
    */
   private async deliverCommandResult(
     sessionId: string,
@@ -878,6 +894,7 @@ export class ChannelHost {
     entry: CommandResultEntry,
   ): Promise<void> {
     if (!threadId) return;
+    if (entry.channel === undefined) return;
     const thread = await this.deps.engineStore.getThread(sessionId, threadId);
     if (!thread) return;
     const mapped = this.channelThreadFor(thread.key);
@@ -902,6 +919,20 @@ export class ChannelHost {
     if (!mapped) return;
     const transport = this.transports.get(mapped.channelType);
     if (!transport) return;
+
+    // Same surface rule as the auto-post (TKAI-323): a web-UI submission's
+    // gate resolves in the web UI. With the submission's text muted on the
+    // channel, its card would be a live approve/deny button with zero
+    // surrounding context — an invitation to approve an action the channel
+    // reader never saw described. Returning before `gateSlots.set` also
+    // means the resolution re-opens no auto-post slot for this submission.
+    const entries = await this.deps.engineStore.getEntries(sessionId, gate.threadId);
+    if (submissionIsWebPrompt(entries, gate.queueItemId)) {
+      console.debug(
+        `[channels] web-origin gate stays off ${mapped.channelType} (session=${sessionId} gate=${gate.id})`,
+      );
+      return;
+    }
 
     // Close any open stream FIRST, so the approval card lands after the text
     // that led to it. Sequenced here rather than from the bridge's own
@@ -1185,16 +1216,17 @@ export class ChannelHost {
     // turn that parks on an approval gate before writing any text must not
     // leave an empty stream on screen. Transports without a reply anchor
     // (Telegram) supply no threadTs and never stream.
-    if (event.threadTs !== undefined) {
-      this.streamBridge.noteInboundTurn({
-        channelType,
-        conversationKey: event.conversationKey,
-        sessionId: session.id,
-        threadId: thread.id,
-        threadTs: event.threadTs,
-        orgId,
-      });
-    }
+    const streamTurn =
+      event.threadTs !== undefined
+        ? this.streamBridge.noteInboundTurn({
+            channelType,
+            conversationKey: event.conversationKey,
+            sessionId: session.id,
+            threadId: thread.id,
+            threadTs: event.threadTs,
+            orgId,
+          })
+        : undefined;
 
     let text = event.text ?? "";
     const attachments: PromptAttachment[] = [];
@@ -1213,7 +1245,7 @@ export class ChannelHost {
       }
     }
 
-    await thread.submitPrompt(
+    const receipt = await thread.submitPrompt(
       { text: text === "" ? "(media message)" : text, attachments },
       {
         dispatchId: event.dispatchId,
@@ -1227,6 +1259,15 @@ export class ChannelHost {
         channel: { channelType, channelId: event.conversationKey },
       },
     );
+
+    // Tie the stream registration to the admitted submission, so only THIS
+    // submission's `message_start` opens a stream. Without the binding, a
+    // registration outlives its turn (a queued item superseded before it is
+    // claimed, a turn parked on a gate) and the next turn on the thread —
+    // possibly a web one — would stream into it (TKAI-323).
+    if (streamTurn !== undefined) {
+      this.streamBridge.bindInboundTurn(streamTurn, receipt.queueItemId);
+    }
 
     try {
       await transport?.sendTyping?.(event.conversationKey);

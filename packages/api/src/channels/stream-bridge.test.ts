@@ -122,7 +122,7 @@ interface Harness {
   eventStream: InMemoryEventStream;
   delivered: string[];
   aborted: Array<{ sessionId: string; threadId: string }>;
-  emit(event: EngineEvent): Promise<void>;
+  emit(event: EngineEvent, queueItemId?: string): Promise<void>;
   delta(text: string): void;
   turn: StreamTurn;
 }
@@ -183,8 +183,11 @@ function makeHarness(
     delivered,
     aborted,
     turn,
-    emit: async (event) => {
-      await eventStream.append(busEvent(event), `ev${seq++}`);
+    emit: async (event, queueItemId) => {
+      await eventStream.append(
+        { ...busEvent(event), ...(queueItemId !== undefined ? { queueItemId } : {}) },
+        `ev${seq++}`,
+      );
       await Promise.resolve();
     },
     delta: (text) => {
@@ -684,23 +687,46 @@ describe("the double-post guard", () => {
     expect(h.transport.appends).toHaveLength(0);
   });
 
-  it("opens no stream after the host clears the turn for a web submission (TKAI-323)", async () => {
-    // A turn parked on an approval gate keeps its registration on purpose, so
-    // the post-approval segment can stream. If the reader answers from the web
-    // UI instead, the host clears that registration, and the web turn must not
-    // open a channel stream.
+  it("opens no stream for a message from a different submission (TKAI-323)", async () => {
+    // A registration is bound to ONE submission. A turn parked on an approval
+    // gate keeps its registration on purpose, so the post-approval segment
+    // can stream — but a web-UI turn that runs on the same thread carries a
+    // different queueItemId and must not stream into it.
     const h = makeHarness();
-    h.bridge.noteInboundTurn(h.turn);
-    h.bridge.clearInboundTurn(SESSION_ID, THREAD_ID);
+    const registered = h.bridge.noteInboundTurn(h.turn);
+    expect(registered).toBeDefined();
+    if (registered) h.bridge.bindInboundTurn(registered, "qi-channel");
 
-    await h.emit(messageStart("m1"));
+    await h.emit(messageStart("m1"), "qi-web");
     h.delta("this answer belongs in the UI\n");
     await advance(FLUSH_INTERVAL_MS);
 
     expect(h.transport.started).toHaveLength(0);
     expect(h.transport.appends).toHaveLength(0);
-    // Unmarked, so the host's own discrete path still owns the message.
+    // Unmarked, so the host's own discrete path still owns the message —
+    // and its surface check decides whether it posts at all.
     expect(h.bridge.isStreamed(SESSION_ID, "m1")).toBe(false);
+
+    // The registration survived: the bound submission's own message streams.
+    await h.emit(messageStart("m2"), "qi-channel");
+    expect(h.bridge.isStreamed(SESSION_ID, "m2")).toBe(true);
+  });
+
+  it("bindInboundTurn is a no-op once a newer inbound message replaced the registration", async () => {
+    // Two channel messages race: the first one's submitPrompt is still in
+    // flight when the second registers. The late bind must not stamp the
+    // FIRST submission's id onto the second message's registration, or the
+    // second turn would never stream.
+    const h = makeHarness();
+    const first = h.bridge.noteInboundTurn(h.turn);
+    const second = h.bridge.noteInboundTurn({ ...h.turn });
+    expect(first).toBeDefined();
+    expect(second).toBeDefined();
+    if (first) h.bridge.bindInboundTurn(first, "qi-1");
+
+    // The second registration is still unbound, so its turn's message streams.
+    await h.emit(messageStart("m1"), "qi-2");
+    expect(h.bridge.isStreamed(SESSION_ID, "m1")).toBe(true);
   });
 });
 

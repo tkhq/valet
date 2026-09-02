@@ -86,19 +86,20 @@ class KeyedTransport extends FakeTransport {
 }
 
 /**
- * The user entry a channel message writes when it starts a submission.
+ * The user entry a submission writes, marked with the surface it came from.
  *
  * The auto-post reads the SUBMISSION's surface, not the thread's binding, so
  * a fixture that appends only assistant entries describes a submission from
- * nowhere and never posts. `channel` is the mark the direct-message path
- * stamps (`ChannelHost.handleMessage`). The signal-bearing paths carry
- * `signal.origin` instead, and those fixtures build it inline.
+ * nowhere and never posts. One builder owns the entry shape; the wrappers
+ * below pick the surface, which is the whole variable under test (TKAI-323).
  */
-function channelUserEntry(args: {
+function userEntry(args: {
   sessionId: string;
   threadId: string;
   queueItemId: string;
   text?: string;
+  channel?: { channelType: string; channelId: string };
+  signal?: { signalType: string; tagName: string };
 }): SessionEntry {
   return {
     type: "message",
@@ -110,8 +111,29 @@ function channelUserEntry(args: {
     role: "user",
     content: args.text ?? "do the thing",
     queueItemId: args.queueItemId,
-    channel: { channelType: "fake", channelId: "fake:dm:99" },
+    channel: args.channel,
+    signal: args.signal,
   };
+}
+
+/** `channel` is the mark the direct-message path stamps (`ChannelHost.handleMessage`). */
+function channelUserEntry(args: {
+  sessionId: string;
+  threadId: string;
+  queueItemId: string;
+  text?: string;
+}): SessionEntry {
+  return userEntry({ ...args, channel: { channelType: "fake", channelId: "fake:dm:99" } });
+}
+
+/** A web-UI prompt: no `channel`, no `signal` — the one surface that stays off the channel. */
+function webUserEntry(args: {
+  sessionId: string;
+  threadId: string;
+  queueItemId: string;
+  text?: string;
+}): SessionEntry {
+  return userEntry(args);
 }
 
 function inbound(overrides: Partial<InboundChannelEvent> = {}): InboundChannelEvent {
@@ -304,6 +326,9 @@ describe("ChannelHost outbound delivery", () => {
       source: "builtin" as const,
       ok: true,
       output: "**Queue** idle (0 pending)",
+      // The engine stamps the surface the command came from; only a
+      // channel-typed command posts back to the channel (TKAI-323).
+      channel: { channelType: "fake", channelId: "fake:dm:99" },
     };
     const event: BusEvent = {
       sessionId,
@@ -354,6 +379,69 @@ describe("ChannelHost outbound delivery", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(fakeTransport.sent.filter((s) => s.message.markdown.includes("web-only result"))).toHaveLength(0);
+  });
+
+  it("a web-typed command's result stays off a channel-bound thread (TKAI-323)", async () => {
+    // The entry carries no `channel` mark: the command was typed in the web
+    // UI, so its result answers there even though the thread is bound.
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const sessionId = session.id;
+    const threadId = session.thread("fake:99").id;
+
+    const event: BusEvent = {
+      sessionId,
+      threadId,
+      timestamp: Date.now(),
+      event: {
+        type: "command_result",
+        threadId,
+        entry: {
+          type: "command_result",
+          id: "cmd-res-web-bound",
+          sessionId,
+          threadId,
+          parentId: null,
+          createdAt: Date.now(),
+          command: "/status",
+          source: "builtin",
+          ok: true,
+          output: "web-typed result",
+        },
+      },
+    };
+    await eventStream.append(event, `cmd-web-bound-${randomUUID()}`);
+
+    // Sentinel on the same thread: its delivery proves the command event was
+    // handled, so the absence assertion is deterministic.
+    await engineStore.appendEntries(sessionId, threadId, [
+      channelUserEntry({ sessionId, threadId, queueItemId: "qi-cmd-sentinel" }),
+      {
+        type: "message",
+        id: "cmd-sentinel-1",
+        sessionId,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant",
+        content: "Sentinel answer.",
+        queueItemId: "qi-cmd-sentinel",
+        stopReason: "end_turn",
+      },
+    ]);
+    await eventStream.append(
+      {
+        sessionId,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "cmd-sentinel-1", reason: "end_turn" },
+      },
+      `cmd-sentinel-${randomUUID()}`,
+    );
+
+    await vi.waitFor(() => {
+      expect(fakeTransport.sent.some((s) => s.message.markdown.includes("Sentinel answer."))).toBe(true);
+    });
+    expect(fakeTransport.sent.filter((s) => s.message.markdown.includes("web-typed result"))).toHaveLength(0);
   });
 
   it("delivers a mid-turn assistant message that carries text", async () => {
@@ -918,24 +1006,24 @@ describe("ChannelHost outbound delivery", () => {
       queueItemId: "qi-web-1",
     };
     await engineStore.appendEntries(session.id, threadId, [
-      // A web submission: a user entry with neither `channel` nor
-      // `signal.origin`.
-      {
-        type: "message",
-        id: "web-user-1",
-        sessionId: session.id,
-        threadId,
-        parentId: null,
-        createdAt: Date.now(),
-        role: "user",
-        content: "asked from the web UI",
-        queueItemId: "qi-web-1",
-      },
+      // A web submission: a user entry with neither `channel` nor `signal`.
+      webUserEntry({ sessionId: session.id, threadId, queueItemId: "qi-web-1", text: "asked from the web UI" }),
       { ...base, id: "web-msg-1", content: "The ack that must stay in the UI." },
       { ...base, id: "web-msg-2", content: "The answer that must stay in the UI.", stopReason: "end_turn" },
+      // A channel-originated sentinel turn AFTER the web turn. Deliveries are
+      // serialized per thread, so the sentinel landing proves the web turn's
+      // deliveries settled — a deterministic absence check, no timer.
+      channelUserEntry({ sessionId: session.id, threadId, queueItemId: "qi-web-sentinel" }),
+      {
+        ...base,
+        id: "web-sentinel-1",
+        queueItemId: "qi-web-sentinel",
+        content: "Sentinel answer.",
+        stopReason: "end_turn" as const,
+      },
     ]);
 
-    for (const messageId of ["web-msg-1", "web-msg-2"]) {
+    for (const messageId of ["web-msg-1", "web-msg-2", "web-sentinel-1"]) {
       await eventStream.append(
         {
           sessionId: session.id,
@@ -947,9 +1035,10 @@ describe("ChannelHost outbound delivery", () => {
       );
     }
 
-    // Absence needs a real window: the delivery is asynchronous.
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(fakeTransport.sent).toHaveLength(0);
+    await vi.waitFor(() => {
+      expect(fakeTransport.sent.some((s) => s.message.markdown.includes("Sentinel answer."))).toBe(true);
+    });
+    expect(fakeTransport.sent.map((s) => s.message.markdown)).toEqual(["Sentinel answer."]);
   });
 
   it("alternating UI and channel turns each answer on their own surface (TKAI-323)", async () => {
@@ -969,28 +1058,21 @@ describe("ChannelHost outbound delivery", () => {
       queueItemId,
       stopReason: "end_turn" as const,
     });
-    const webUser = (id: string, queueItemId: string): SessionEntry => ({
-      type: "message",
-      id,
-      sessionId: session.id,
-      threadId,
-      parentId: null,
-      createdAt: Date.now(),
-      role: "user",
-      content: "from the web UI",
-      queueItemId,
-    });
-
     await engineStore.appendEntries(session.id, threadId, [
-      webUser("alt-user-1", "qi-alt-1"),
+      webUserEntry({ sessionId: session.id, threadId, queueItemId: "qi-alt-1", text: "from the web UI" }),
       assistant("alt-msg-1", "UI answer one.", "qi-alt-1"),
       channelUserEntry({ sessionId: session.id, threadId, queueItemId: "qi-alt-2" }),
       assistant("alt-msg-2", "Channel answer.", "qi-alt-2"),
-      webUser("alt-user-3", "qi-alt-3"),
+      webUserEntry({ sessionId: session.id, threadId, queueItemId: "qi-alt-3", text: "from the web UI" }),
       assistant("alt-msg-3", "UI answer two.", "qi-alt-3"),
+      // A channel-originated sentinel LAST. Deliveries are serialized per
+      // thread, so the sentinel landing proves every earlier turn settled —
+      // the waitFor below is a real barrier, not a timing window.
+      channelUserEntry({ sessionId: session.id, threadId, queueItemId: "qi-alt-4" }),
+      assistant("alt-msg-4", "Sentinel answer.", "qi-alt-4"),
     ]);
 
-    for (const messageId of ["alt-msg-1", "alt-msg-2", "alt-msg-3"]) {
+    for (const messageId of ["alt-msg-1", "alt-msg-2", "alt-msg-3", "alt-msg-4"]) {
       await eventStream.append(
         {
           sessionId: session.id,
@@ -1003,12 +1085,118 @@ describe("ChannelHost outbound delivery", () => {
     }
 
     await vi.waitFor(() => {
-      expect(fakeTransport.sent.some((s) => s.message.markdown.includes("Channel answer."))).toBe(true);
+      expect(fakeTransport.sent.some((s) => s.message.markdown.includes("Sentinel answer."))).toBe(true);
     });
-    // Deliveries are serialized per thread, so the last one landing means the
-    // others settled. Only the channel turn reached the channel.
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    expect(fakeTransport.sent.map((s) => s.message.markdown)).toEqual(["Channel answer."]);
+    // Only the channel turns reached the channel; neither UI turn leaked.
+    expect(fakeTransport.sent.map((s) => s.message.markdown)).toEqual(["Channel answer.", "Sentinel answer."]);
+  });
+
+  it("a signal submission without an origin still posts on a bound thread (TKAI-323)", async () => {
+    // The engine-routed admissions — child settlement, agent-to-agent
+    // messages — carry `signal` but not always `signal.origin`. A task
+    // spawned from a channel DM settles exactly this way, and the reader who
+    // asked for the task must get the report. Only a plain web prompt (no
+    // mark at all) stays off the channel.
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    await engineStore.appendEntries(session.id, threadId, [
+      userEntry({
+        sessionId: session.id,
+        threadId,
+        queueItemId: "qi-settled-1",
+        text: "task child-1 settled: done",
+        signal: { signalType: "child.settled", tagName: "signal" },
+      }),
+      {
+        type: "message",
+        id: "settled-msg-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant",
+        content: "The task finished: all tests pass.",
+        queueItemId: "qi-settled-1",
+        stopReason: "end_turn",
+      },
+    ]);
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "settled-msg-1", reason: "end_turn" },
+      },
+      `settled-${randomUUID()}`,
+    );
+
+    await vi.waitFor(() => {
+      expect(fakeTransport.sent.some((s) => s.message.markdown.includes("The task finished"))).toBe(true);
+    });
+  });
+
+  it("a web-UI submission's gate card stays off the channel (TKAI-323)", async () => {
+    // With the web turn's text muted on the channel, its approval card would
+    // be a live button with zero context. The card belongs where the
+    // submission runs: the web UI.
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    await engineStore.appendEntries(session.id, threadId, [
+      webUserEntry({ sessionId: session.id, threadId, queueItemId: "qi-webgate-1" }),
+    ]);
+
+    const gate: DecisionGate = {
+      id: `gate-${randomUUID()}`,
+      sessionId: session.id,
+      threadId,
+      queueItemId: "qi-webgate-1",
+      resumeKey: "rk-webgate-1",
+      ordinal: 1,
+      type: "approval",
+      title: "Approve the thing?",
+      body: "do the thing",
+      actions: [{ id: "approve", label: "Approve", style: "primary" }],
+      status: "pending",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    await eventStream.append(
+      { sessionId: session.id, threadId, timestamp: Date.now(), event: { type: "decision_gate", threadId, gate } },
+      `webgate-${randomUUID()}`,
+    );
+
+    // Sentinel channel turn on the same thread: gate delivery shares the
+    // per-thread chain, so the sentinel landing proves the gate event was
+    // handled.
+    await engineStore.appendEntries(session.id, threadId, [
+      channelUserEntry({ sessionId: session.id, threadId, queueItemId: "qi-webgate-sentinel" }),
+      {
+        type: "message",
+        id: "webgate-sentinel-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant",
+        content: "Sentinel answer.",
+        queueItemId: "qi-webgate-sentinel",
+        stopReason: "end_turn",
+      },
+    ]);
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "webgate-sentinel-1", reason: "end_turn" },
+      },
+      `webgate-sentinel-${randomUUID()}`,
+    );
+
+    await vi.waitFor(() => {
+      expect(fakeTransport.sent.some((s) => s.message.markdown.includes("Sentinel answer."))).toBe(true);
+    });
+    expect(fakeTransport.gatePrompts).toHaveLength(0);
   });
 
   it("a gate approved from the UI still posts the outcome of a channel submission (TKAI-323)", async () => {
