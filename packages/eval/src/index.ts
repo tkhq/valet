@@ -9,3 +9,5 @@ export {
   type RunnerOptions,
 } from "./runner.js";
 export { EvalMemoryStore, buildEvalMemoryTools } from "./memory-tools.js";
+export { runCheck, runChecks, type CheckContext, type JudgeRunner } from "./checks/index.js";
+export { jsonSubsetMatches, runDeterministicCheck } from "./checks/deterministic.js";
