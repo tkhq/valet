@@ -136,6 +136,37 @@ describe("pg app schema + migrations", () => {
     expect(result.rows).toHaveLength(1);
   });
 
+  // Usage aggregates scan every window row, so parsing `usage`/`cost` JSON
+  // per row per query was the dominant cost of /api/usage/*. The parse now
+  // happens ONCE, at write time, into stored generated columns; the view
+  // must read those columns, never re-cast the JSON.
+  describe("engine_entries generated cost columns", () => {
+    it("stores parsed token/cost values as generated columns", async () => {
+      await db.query(
+        `INSERT INTO engine_entries (id, session_id, thread_id, entry_type, usage, cost, created_at)
+         VALUES ('gen-priced', 's-gen', 't', 'message',
+                 '{"input":7,"output":3,"cacheRead":11,"cacheWrite":2,"total":23}', '{"total":0.5}', 1),
+                ('gen-unpriced', 's-gen', 't', 'message',
+                 '{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"total":2}', NULL, 1)`,
+      );
+      const result = await db.query(
+        `SELECT id, input_tokens::int AS input, output_tokens::int AS output,
+                cache_read_tokens::int AS cache_read, cache_write_tokens::int AS cache_write,
+                total_tokens::int AS total, cost_total, priced
+         FROM engine_entries WHERE session_id = 's-gen' ORDER BY id`,
+      );
+      expect(result.rows).toEqual([
+        { id: "gen-priced", input: 7, output: 3, cache_read: 11, cache_write: 2, total: 23, cost_total: 0.5, priced: true },
+        { id: "gen-unpriced", input: 1, output: 1, cache_read: 0, cache_write: 0, total: 2, cost_total: null, priced: false },
+      ]);
+    });
+
+    it("cost_entries reads the generated columns, never re-casting JSON per row", async () => {
+      const result = await db.query("SELECT definition FROM pg_views WHERE viewname = 'cost_entries'");
+      expect(String(result.rows[0]?.["definition"])).not.toContain("::jsonb");
+    });
+  });
+
   it("workflow_signals.id is a generated-always identity column", async () => {
     const col = await db.query(
       "SELECT is_identity, identity_generation FROM information_schema.columns " +
@@ -621,6 +652,72 @@ describe("pg app schema + migrations", () => {
 
       await applyAppMigrations(db);
       expect(await missingSchemaRepairs(db)).toEqual([]);
+    });
+
+    // The deployed database predates the generated cost columns: its
+    // engine_entries carries no token columns and its cost_entries view
+    // still casts JSON per row. Simulate exactly that state, then verify
+    // the repair pass converges it — columns first (backfilling existing
+    // rows), then the view.
+    it("repairs a database from before the generated cost columns", async () => {
+      const OLD_COST_ENTRIES_VIEW = `CREATE VIEW "cost_entries" AS
+        SELECT
+          e."id" AS "entry_id", e."session_id" AS "session_id", e."created_at" AS "created_at", e."model" AS "model",
+          COALESCE(s."org_id", d."org_id") AS "org_id",
+          CASE WHEN s."id" IS NOT NULL THEN s."user_id"
+               WHEN r."owner_type" = 'user' THEN NULLIF(r."owner_id", '') END AS "user_id",
+          COALESCE(s."owner_type", r."owner_type") AS "owner_type",
+          NULLIF(COALESCE(s."owner_id", r."owner_id"), '') AS "owner_id",
+          r."workflow_id" AS "workflow_id", r."id" AS "workflow_run_id",
+          COALESCE((e."usage"::jsonb->>'input')::bigint, 0) AS "input_tokens",
+          COALESCE((e."usage"::jsonb->>'output')::bigint, 0) AS "output_tokens",
+          COALESCE((e."usage"::jsonb->>'cacheRead')::bigint, 0) AS "cache_read_tokens",
+          COALESCE((e."usage"::jsonb->>'cacheWrite')::bigint, 0) AS "cache_write_tokens",
+          COALESCE((e."usage"::jsonb->>'total')::bigint, 0) AS "total_tokens",
+          (e."cost"::jsonb->>'total')::float8 AS "cost_total",
+          ((e."cost"::jsonb->>'total') IS NOT NULL) AS "priced",
+          CASE WHEN e."session_id" LIKE 'orchestrator:%' THEN 'orchestrator'
+               WHEN e."session_id" LIKE 'wf:%' THEN 'workflow'
+               ELSE 'session' END AS "use_case"
+        FROM "engine_entries" e
+        LEFT JOIN "agent_sessions" s ON s."id" = e."session_id"
+        LEFT JOIN "workflow_runs" r ON e."session_id" LIKE 'wf:%' AND r."id" = split_part(e."session_id", ':', 2)
+        LEFT JOIN "workflow_definitions" d ON d."id" = r."workflow_id"
+        WHERE e."usage" IS NOT NULL AND COALESCE(s."org_id", d."org_id") IS NOT NULL
+        UNION ALL
+        SELECT
+          p."id", NULL, p."created_at", p."model", p."org_id", p."user_id", 'user', p."user_id",
+          NULL, NULL, p."input_tokens", p."output_tokens", p."cache_read_tokens", p."cache_write_tokens",
+          p."total_tokens", p."cost_usd", (p."cost_usd" IS NOT NULL), 'proxy'
+        FROM "llm_proxy_requests" p
+        WHERE p."total_tokens" > 0`;
+
+      await db.query('DROP VIEW "cost_entries"');
+      await db.query(
+        'ALTER TABLE "engine_entries" DROP COLUMN "input_tokens", DROP COLUMN "output_tokens", ' +
+          'DROP COLUMN "cache_read_tokens", DROP COLUMN "cache_write_tokens", DROP COLUMN "total_tokens", ' +
+          'DROP COLUMN "cost_total", DROP COLUMN "priced"',
+      );
+      await db.query(OLD_COST_ENTRIES_VIEW);
+      await db.query(
+        `INSERT INTO engine_entries (id, session_id, thread_id, entry_type, usage, cost, created_at)
+         VALUES ('gen-backfill', 's-backfill', 't', 'message',
+                 '{"input":5,"output":0,"cacheRead":0,"cacheWrite":0,"total":5}', NULL, 1)`,
+      );
+
+      const missing = (await missingSchemaRepairs(db)).map((r) => r.describe);
+      expect(missing).toContain("engine_entries generated cost columns");
+      expect(missing).toContain("cost_entries view over generated columns");
+
+      await applyAppMigrations(db);
+      expect(await missingSchemaRepairs(db)).toEqual([]);
+      const def = await db.query("SELECT definition FROM pg_views WHERE viewname = 'cost_entries'");
+      expect(String(def.rows[0]?.["definition"])).not.toContain("::jsonb");
+      // ADD COLUMN ... GENERATED backfills rows written before the repair ran.
+      const backfilled = await db.query(
+        "SELECT total_tokens::int AS total FROM engine_entries WHERE id = 'gen-backfill'",
+      );
+      expect(backfilled.rows[0]).toEqual({ total: 5 });
     });
 
     // The repair path's lock_timeout handling rides this store-postgres

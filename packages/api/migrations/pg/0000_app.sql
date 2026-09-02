@@ -1011,13 +1011,18 @@ SELECT
 	NULLIF(COALESCE(s."owner_id", r."owner_id"), '')           AS "owner_id",
 	r."workflow_id"                                            AS "workflow_id",
 	r."id"                                                     AS "workflow_run_id",
-	COALESCE((e."usage"::jsonb->>'input')::bigint, 0)          AS "input_tokens",
-	COALESCE((e."usage"::jsonb->>'output')::bigint, 0)         AS "output_tokens",
-	COALESCE((e."usage"::jsonb->>'cacheRead')::bigint, 0)      AS "cache_read_tokens",
-	COALESCE((e."usage"::jsonb->>'cacheWrite')::bigint, 0)     AS "cache_write_tokens",
-	COALESCE((e."usage"::jsonb->>'total')::bigint, 0)          AS "total_tokens",
-	(e."cost"::jsonb->>'total')::float8                        AS "cost_total",
-	((e."cost"::jsonb->>'total') IS NOT NULL)                  AS "priced",
+	-- Token/cost numbers come from engine_entries' stored generated columns
+	-- (parsed once at write time), never from per-row JSON casts — aggregate
+	-- scans over the view were the slowest queries in the app before this.
+	-- Keep this in lockstep with the cost_entries SCHEMA_REPAIRS entry in
+	-- packages/api/src/lib/drizzle.ts.
+	e."input_tokens"                                           AS "input_tokens",
+	e."output_tokens"                                          AS "output_tokens",
+	e."cache_read_tokens"                                      AS "cache_read_tokens",
+	e."cache_write_tokens"                                     AS "cache_write_tokens",
+	e."total_tokens"                                           AS "total_tokens",
+	e."cost_total"                                             AS "cost_total",
+	e."priced"                                                 AS "priced",
 	-- Valet use case, derived from the session id shape so the one cost
 	-- definition can be broken down by activity kind (usage dashboard).
 	CASE

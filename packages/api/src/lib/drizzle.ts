@@ -142,7 +142,12 @@ interface SchemaRepair {
   probe:
     | { kind: "column"; table: string; column: string }
     | { kind: "table"; table: string }
-    | { kind: "index"; index: string };
+    | { kind: "index"; index: string }
+    // A view whose DEFINITION changed in place: the view exists on every
+    // database, so presence alone proves nothing. `marker` is a substring
+    // that only the new definition's decompiled form (pg_views.definition)
+    // contains — its absence means the old definition is still live.
+    | { kind: "view"; view: string; marker: string };
   sql: string;
 }
 
@@ -250,6 +255,63 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     probe: { kind: "column", table: "mcp_oauth_clients", column: "scopes_supported" },
     sql: 'ALTER TABLE "mcp_oauth_clients" ADD COLUMN IF NOT EXISTS "scopes_supported" jsonb',
   },
+  {
+    // Parsed-once token/cost numbers for cost attribution — see the column
+    // comments in 0000_engine.sql (keep the expressions in lockstep). This
+    // is an engine-table repair on the app side because the engine tracker
+    // skips an already-applied 0000_engine.sql, same as the app tracker.
+    // Adding STORED generated columns rewrites the table; the rewrite
+    // backfills every existing row, which is the point.
+    describe: "engine_entries generated cost columns",
+    probe: { kind: "column", table: "engine_entries", column: "input_tokens" },
+    sql: `ALTER TABLE "engine_entries"
+      ADD COLUMN IF NOT EXISTS "input_tokens" bigint GENERATED ALWAYS AS (COALESCE(("usage"::jsonb->>'input')::bigint, 0)) STORED,
+      ADD COLUMN IF NOT EXISTS "output_tokens" bigint GENERATED ALWAYS AS (COALESCE(("usage"::jsonb->>'output')::bigint, 0)) STORED,
+      ADD COLUMN IF NOT EXISTS "cache_read_tokens" bigint GENERATED ALWAYS AS (COALESCE(("usage"::jsonb->>'cacheRead')::bigint, 0)) STORED,
+      ADD COLUMN IF NOT EXISTS "cache_write_tokens" bigint GENERATED ALWAYS AS (COALESCE(("usage"::jsonb->>'cacheWrite')::bigint, 0)) STORED,
+      ADD COLUMN IF NOT EXISTS "total_tokens" bigint GENERATED ALWAYS AS (COALESCE(("usage"::jsonb->>'total')::bigint, 0)) STORED,
+      ADD COLUMN IF NOT EXISTS "cost_total" double precision GENERATED ALWAYS AS (("cost"::jsonb->>'total')::float8) STORED,
+      ADD COLUMN IF NOT EXISTS "priced" boolean GENERATED ALWAYS AS ((("cost"::jsonb->>'total') IS NOT NULL)) STORED`,
+  },
+  {
+    // The view must read those generated columns instead of re-casting the
+    // JSON per row. Runs after the column repair above (list order). Keep
+    // the definition in lockstep with 0000_app.sql. The marker only appears
+    // once the engine arm selects the generated column directly.
+    describe: "cost_entries view over generated columns",
+    probe: { kind: "view", view: "cost_entries", marker: "e.input_tokens" },
+    sql: `CREATE OR REPLACE VIEW "cost_entries" AS
+      SELECT
+        e."id" AS "entry_id", e."session_id" AS "session_id", e."created_at" AS "created_at", e."model" AS "model",
+        COALESCE(s."org_id", d."org_id") AS "org_id",
+        CASE WHEN s."id" IS NOT NULL THEN s."user_id"
+             WHEN r."owner_type" = 'user' THEN NULLIF(r."owner_id", '') END AS "user_id",
+        COALESCE(s."owner_type", r."owner_type") AS "owner_type",
+        NULLIF(COALESCE(s."owner_id", r."owner_id"), '') AS "owner_id",
+        r."workflow_id" AS "workflow_id", r."id" AS "workflow_run_id",
+        e."input_tokens" AS "input_tokens",
+        e."output_tokens" AS "output_tokens",
+        e."cache_read_tokens" AS "cache_read_tokens",
+        e."cache_write_tokens" AS "cache_write_tokens",
+        e."total_tokens" AS "total_tokens",
+        e."cost_total" AS "cost_total",
+        e."priced" AS "priced",
+        CASE WHEN e."session_id" LIKE 'orchestrator:%' THEN 'orchestrator'
+             WHEN e."session_id" LIKE 'wf:%' THEN 'workflow'
+             ELSE 'session' END AS "use_case"
+      FROM "engine_entries" e
+      LEFT JOIN "agent_sessions" s ON s."id" = e."session_id"
+      LEFT JOIN "workflow_runs" r ON e."session_id" LIKE 'wf:%' AND r."id" = split_part(e."session_id", ':', 2)
+      LEFT JOIN "workflow_definitions" d ON d."id" = r."workflow_id"
+      WHERE e."usage" IS NOT NULL AND COALESCE(s."org_id", d."org_id") IS NOT NULL
+      UNION ALL
+      SELECT
+        p."id", NULL, p."created_at", p."model", p."org_id", p."user_id", 'user', p."user_id",
+        NULL, NULL, p."input_tokens", p."output_tokens", p."cache_read_tokens", p."cache_write_tokens",
+        p."total_tokens", p."cost_usd", (p."cost_usd" IS NOT NULL), 'proxy'
+      FROM "llm_proxy_requests" p
+      WHERE p."total_tokens" > 0`,
+  },
 ];
 
 /** The repairs this database still lacks, by catalog probe — one query per
@@ -261,9 +323,11 @@ export async function missingSchemaRepairs(db: PgDb): Promise<SchemaRepair[]> {
   const columnTables = new Set<string>();
   const tableNames: string[] = [];
   const indexNames: string[] = [];
+  const viewNames: string[] = [];
   for (const { probe } of SCHEMA_REPAIRS) {
     if (probe.kind === "column") columnTables.add(probe.table);
     else if (probe.kind === "table") tableNames.push(probe.table);
+    else if (probe.kind === "view") viewNames.push(probe.view);
     else indexNames.push(probe.index);
   }
 
@@ -295,7 +359,21 @@ export async function missingSchemaRepairs(db: PgDb): Promise<SchemaRepair[]> {
     (row) => `index:${String(row["indexname"])}`,
   );
 
+  // View definitions need a per-probe marker check, so they cannot ride the
+  // generic name-presence collector above.
+  const viewDefs = new Map<string, string>();
+  if (viewNames.length > 0) {
+    const result = await db.query(
+      `SELECT viewname, definition FROM pg_views
+       WHERE schemaname = current_schema()
+         AND viewname IN (SELECT jsonb_array_elements_text($1::jsonb))`,
+      [JSON.stringify(viewNames)],
+    );
+    for (const row of result.rows) viewDefs.set(String(row["viewname"]), String(row["definition"]));
+  }
+
   return SCHEMA_REPAIRS.filter(({ probe: p }) => {
+    if (p.kind === "view") return !(viewDefs.get(p.view)?.includes(p.marker) ?? false);
     const key = p.kind === "column" ? `column:${p.table}.${p.column}` : p.kind === "table" ? `table:${p.table}` : `index:${p.index}`;
     return !present.has(key);
   });
