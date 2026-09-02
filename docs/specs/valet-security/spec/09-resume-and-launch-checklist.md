@@ -190,6 +190,16 @@ If the pivot round yields but the human answers after the engagement settled (ed
 2. The stall cap is per-engagement in-memory. A resume DOES NOT reset the stall counter; a stuck runner post-resume still pages a human after N no-progress ticks.
 3. `security_engagements.resumed_at` provides observability. `valet.security.runner.resumed` metric fires on each resume; monitoring alerts on repeated resumes of the same engagement.
 
+## Post-engagement cleanup
+
+After an engagement closes (`completed | failed | cancelled`), the following cleanup steps SHOULD be performed:
+
+1. **Revoke synthetic accounts.** Every synthetic account created via `create-test-account` (L4, Part 05 §5.13) SHOULD be revoked or disabled. The chosen mechanism (TTL-based expiry, manual revocation API, or automatic cleanup on archive) MUST be documented in the implementation's security policy.
+2. **Revoke human-provided credentials** (OPTIONAL). Human-provided credentials in `/loot/catalog.yml` MAY be flagged for manual revocation. The engagement panel SHOULD surface a reminder: "This review used N human-provided credential(s). Revoke them if they were ephemeral test accounts."
+3. **Archive engagement tree** (OPTIONAL). Mark the engagement as `archived` and restrict read access to admins only. This reduces the attack surface for credential disclosure (Appendix B §T-8).
+
+The post-engagement cleanup checklist is not a settlement gate. Implementations MAY automate cleanup or surface it as a manual step in the engagement panel.
+
 ## Test coverage
 
 **Plugin (`packages/plugin-security/src/lib/config.test.ts`):**

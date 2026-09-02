@@ -150,9 +150,10 @@ sec_loot_write {
 2. Merge inputs by `id`. A new id appends. An existing id updates (last-write-wins on updates).
 3. Serialize the merged catalog to YAML.
 4. Write the new revision through the same `security_files` append-only path.
-5. Write every `cookie_jars[<session id>].netscape_text` to `/loot/cookies-<session id>.txt` in the SAME server-side transaction as the catalog write.
+5. Write every `cookie_jars[<session id>].netscape_text` to `/loot/cookies-<session id>.txt`.
+6. **CRITICAL:** Steps 4 and 5 MUST execute within a SINGLE database transaction. The implementation MUST use database transaction isolation (e.g., PostgreSQL BEGIN/COMMIT) to ensure the catalog row AND all jar rows are written atomically, or none are written.
 
-**Why an atomic bundle?** A session row references its cookie jar. If the catalog names `s-human-1.cookie_jar: loot/cookies-s-human-1.txt` but the jar file is empty (a crash between the two writes), a persona reading the catalog and the jar sees inconsistent state. `sec_loot_write` commits both in one server-side transaction, so a coordinator crash between the two is not observable.
+**Why an atomic bundle?** A session row references its cookie jar. If the catalog names `s-human-1.cookie_jar: loot/cookies-s-human-1.txt` but the jar file is empty (a crash between the two writes), a persona reading the catalog and the jar sees inconsistent state. `sec_loot_write` commits both in one server-side transaction, so a coordinator crash between the two is not observable. This maintains INV-5 (Part 00).
 
 **Concurrency.** Only the pivot-coordinator writes loot. `sec_loot_write` requires the acting session to be a `pivot-coordinator` cell; every other persona is refused with 403. The coordinator runs serially (one cell at a time per the base design's cell rules), so there is no intra-engagement race.
 

@@ -36,11 +36,11 @@ function fingerprint(file, line, title, body) -> bytes[20]:
 1. Strip a single leading `/` if present. The path MUST be repo-relative.
 2. Convert every backslash to a forward slash (Windows to Unix).
 3. Split on `/`, drop `` (empty) and `.` segments in order.
-4. For each `..` segment, pop the previous segment. If the pop would empty the accumulator (the `..` escapes the repo root), REJECT the input. Raise `PathTraversalError`.
+4. For each `..` segment, pop the previous segment. If the pop would empty the accumulator (the `..` escapes the repo root), CLIP the input: return the sentinel string `<outside-repo>`.
 5. Rejoin the accumulated segments with `/`.
 6. Lowercase the entire path.
 
-**Rejection semantics.** A path that resolves outside the repo root is not canonicalizable. `fingerprint()` MUST propagate the rejection. A caller that catches the exception MAY log the offending input. It MUST NOT record a finding. This is stricter than a "resolve and clip" semantics, on the security-conservative side: a persona that emits a finding whose path traverses out of the tree is either lying, buggy, or under injection. In every case, refusing is safer than accepting.
+**Clipping semantics.** A path that resolves outside the repo root is clipped to the sentinel `<outside-repo>`. `fingerprint()` accepts this sentinel and computes a valid fingerprint. A caller that receives a finding with `file: "<outside-repo>"` SHOULD record it with a WARNING status and note that the path was clipped. This prevents DoS (a malicious scanner cannot suppress findings by injecting path-traversal attempts) while preserving finding visibility. The sentinel makes the attempt observable in the report.
 
 **Why lowercase?** Git is case-preserving but case-insensitive on macOS and Windows. A finding on `API/Routes.py` and `api/routes.py` is the same finding. Lowercasing produces byte-identical hex across platforms.
 
@@ -90,10 +90,6 @@ Appendix D §D.1 pins 13 vectors. Each carries `file`, `line`, `title`, `body`, 
 import hashlib
 
 
-class PathTraversalError(ValueError):
-    """The path escapes the repo root; MUST NOT be recorded."""
-
-
 def normalize_path(file: str) -> str:
     if file.startswith("/"):
         file = file[1:]
@@ -104,7 +100,7 @@ def normalize_path(file: str) -> str:
             continue
         if part == "..":
             if not segments:
-                raise PathTraversalError(f"path escapes root: {file!r}")
+                return "<outside-repo>"
             segments.pop()
             continue
         segments.append(part)

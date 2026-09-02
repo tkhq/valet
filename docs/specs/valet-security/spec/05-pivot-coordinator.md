@@ -192,6 +192,8 @@ delta_targets:
 3. Write the cookie jar text via `sec_fs_write` at the target's path: `/cells/<target NN>-<slug>/loot/cookies-<session id>.txt`.
 4. `auto-setups.log`: `{"need_id": ..., "pattern": "propagate-session", "outcome": "ok", "source_session_id": ..., "target_persona": ...}`.
 
+**Note:** Steps 2-3 execute within the `sec_loot_write` transaction when the coordinator bundles session propagation with catalog updates to maintain atomicity (Part 06 §6.4).
+
 **Idempotence.** If the target path already carries the cookie jar (a prior propagation), the file copy is a no-op. Outcome is still `ok`.
 
 **File copy, not symlink.** `sec_fs_write` writes a new `security_files` revision (a full content copy). Symlinks are not part of the engagement tree.
@@ -294,6 +296,31 @@ Enforcement. Before executing a pattern the coordinator queries `/loot/catalog.y
 - `rerun-with-existing-loot`: no-op if `pivot.yml.rerun_plan[]` already carries a matching entry.
 - `scope-auto-include`: skip if `manifest.delta.yml.authorized_hosts` already lists the host.
 - `tool-auth-reuse`: skip if a `tool_auth` row for the tool exists.
+
+## Synthetic account lifecycle
+
+**Purpose.** Synthetic accounts created via `create-test-account` (L4, §5.9) are ephemeral test fixtures. They MUST NOT become persistent security or compliance risks after the engagement closes.
+
+**Requirements.**
+
+Implementations MUST provide a mechanism to revoke or expire synthetic accounts created via `create-test-account`. Options include:
+
+1. **TTL-based expiry via username timestamps.** The generated username template embeds a timestamp or engagement ID (e.g., `pentest-<engagement_slug>-r<round>-<suffix>`). A cleanup job queries accounts matching the pattern and deletes those older than N days post-engagement-close.
+2. **Manual revocation API.** The engagement panel exposes a "Revoke synthetic accounts" button that calls an API endpoint to disable or delete every account whose `credentials.source = 'create-test-account'` for this engagement.
+3. **Automatic cleanup on engagement archive.** When an engagement transitions to `archived` (post-close state), the system automatically revokes or disables all synthetic accounts associated with that engagement.
+
+The chosen mechanism MUST be documented in the implementation's security policy. The policy SHOULD specify:
+- Retention period for synthetic accounts.
+- Cleanup trigger (manual, automatic, scheduled).
+- Whether accounts are disabled or deleted (soft vs. hard delete).
+
+**Audit trail.** Every synthetic account creation and revocation event SHOULD be logged with:
+- Engagement ID.
+- Account username.
+- Timestamp (created, revoked).
+- Action (created, disabled, deleted).
+
+**Rationale.** Synthetic accounts are attack surface (T-8 extension in Appendix B). A forgotten test account with predictable credentials becomes a security liability. Cleanup is not optional.
 
 ## `pivot.yml` schema
 

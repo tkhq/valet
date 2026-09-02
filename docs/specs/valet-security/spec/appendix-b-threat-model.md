@@ -109,19 +109,19 @@ Six categories: tool integrity, scope control, loot integrity, finding integrity
 
 ### T-8: Loot encryption bypass (plaintext credential theft)
 
-**Description.** An attacker reads the engagement's `security_files` rows, extracts plaintext credentials from `/loot/catalog.yml`.
+**Description.** An attacker reads the engagement's `security_files` rows, extracts plaintext credentials from `/loot/catalog.yml`. Alternatively, synthetic accounts created for testing are left active indefinitely, becoming persistent attack surface.
 
-**Impact.** Credential disclosure.
+**Impact.** Credential disclosure and/or persistent security liability from forgotten test accounts.
 
 **Mitigation (v1).**
 - Filesystem access control: `security_files` rows are scoped to the engagement; only the engagement's org users may read.
-- Ephemeral synthetic accounts (`create-test-account`) SHOULD be disabled at engagement close.
-- Human-provided credentials SHOULD be revoked after engagement close.
+- Synthetic account lifecycle management: Implementations MUST provide a cleanup mechanism (TTL-based expiry, manual revocation, or automatic cleanup on archive). See Part 05 §5.13 for requirements.
+- Post-engagement cleanup checklist: After engagement close, revoke synthetic accounts and optionally revoke human-provided credentials. See Part 09 "Post-engagement cleanup" for the procedure.
 
 **Mitigation (v2).**
 - Encrypt `/loot/catalog.yml` with an engagement-scoped key (Appendix C §C.3).
 
-**Residual risk (v1).** If ACLs are misconfigured (an engagement made org-wide-readable by accident), plaintext leaks. Deployment error, not a spec defect.
+**Residual risk (v1).** If ACLs are misconfigured (an engagement made org-wide-readable by accident), plaintext leaks. If cleanup is not performed, synthetic accounts persist. Both are deployment/operational concerns, not spec defects.
 
 ## Finding integrity
 
