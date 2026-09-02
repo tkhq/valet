@@ -43,7 +43,10 @@ export function MessageItem({
     <article className={cn("group px-4 py-3", isUser && "bg-neutral-100/50 dark:bg-neutral-900/40")}>
       {/* Row background spans full width; the content column is capped at a
           readable measure and centered — prose and tool cards both benefit. */}
-      <div className="mx-auto flex w-full max-w-4xl gap-3">
+      <div className={cn(
+        "mx-auto flex w-full max-w-4xl gap-3",
+        isUser && "border-l-4 border-moss pl-3"
+      )}>
         <Avatar size="sm">
           <AvatarFallback>
             {teammate ? (
