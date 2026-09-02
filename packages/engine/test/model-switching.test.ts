@@ -283,3 +283,70 @@ describe("engine: model switching", () => {
     expect(names).toContain("switch_model");
   });
 });
+
+  it("switch_model (agent-initiated) does not change userModelId (TKAI-338)", async () => {
+    const { engine, store, events, baseModel } = setup();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: baseModel,
+    });
+    const thread = await session.ensureDefaultThread();
+    // Creation-time pin is HAIKU for both fields.
+    expect(thread.modelId()).toBe(HAIKU);
+    expect(thread.userModelId()).toBe(HAIKU);
+
+    // Agent-initiated switch (tool:switch_model reason).
+    await thread.setModel(OPUS, "tool:switch_model");
+    // The runtime override changes.
+    expect(thread.modelId()).toBe(OPUS);
+    // The user-facing pin stays at the creation-time value.
+    expect(thread.userModelId()).toBe(HAIKU);
+
+    // Persisted state agrees.
+    const persisted = await store.getThread(session.id, thread.id);
+    expect(persisted?.model).toBe(OPUS);
+    expect(persisted?.userModel).toBe(HAIKU);
+
+    // A user-initiated switch updates BOTH.
+    await thread.setModel(OPUS, "set_via_api");
+    expect(thread.modelId()).toBe(OPUS);
+    expect(thread.userModelId()).toBe(OPUS);
+    const persisted2 = await store.getThread(session.id, thread.id);
+    expect(persisted2?.model).toBe(OPUS);
+    expect(persisted2?.userModel).toBe(OPUS);
+
+    // Clearing via user action resets both.
+    await thread.setModel(null, "set_via_api");
+    expect(thread.modelId()).toBeUndefined();
+    expect(thread.userModelId()).toBeUndefined();
+  });
+
+  it("spawning a child with a different model does not change parent thread's userModelId (TKAI-338)", async () => {
+    const { engine, store, baseModel } = setup();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: baseModel,
+    });
+    const thread = await session.ensureDefaultThread();
+    expect(thread.modelId()).toBe(HAIKU);
+    expect(thread.userModelId()).toBe(HAIKU);
+
+    // Simulate the orchestrator calling switch_model to a strong model
+    // before spawning (same as what the persona prompt instructs).
+    await thread.setModel(OPUS, "tool:switch_model");
+    expect(thread.modelId()).toBe(OPUS);
+    // User-facing pin is unchanged — the picker should still show HAIKU.
+    expect(thread.userModelId()).toBe(HAIKU);
+
+    // After the "child settles" (simulated by doing nothing here since we
+    // only test the parent's state), the parent's session model and
+    // thread's user pin remain unchanged.
+    expect(session.options.modelSpec ?? session.options.model.id).toBe(HAIKU);
+    expect(thread.userModelId()).toBe(HAIKU);
+  });

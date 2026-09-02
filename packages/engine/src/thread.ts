@@ -392,6 +392,15 @@ export class Thread {
    */
   private modelOverride?: string;
   /**
+   * The model the USER last chose — set at creation (same as modelOverride)
+   * and updated by user-initiated setModel calls (PATCH, `/model` command)
+   * but NOT by the `switch_model` tool. The picker reads this field so the
+   * orchestrator's transient agent switches don't clobber the user's choice.
+   * Absent on threads created before this field existed; callers fall back
+   * to modelOverride.
+   */
+  private userModelPin?: string;
+  /**
    * Per-turn API key from the host `resolveModel` seam. Resolved at turn start
    * (fresh turns and resume/replay), read by the Agent's `getApiKey`, cleared
    * at turn end. Never cached across turns — key rotation applies next turn.
@@ -407,6 +416,7 @@ export class Thread {
     this.key = data.key;
     this.mode = data.queueMode;
     this.modelOverride = data.model;
+    this.userModelPin = data.userModel;
     this.paused = data.paused ?? false;
     this.threadCreatedAt = data.createdAt || Date.now();
     this.agent = this.buildAgent();
@@ -415,6 +425,16 @@ export class Thread {
   /** Currently configured model id for this thread (or undefined to use session default). */
   modelId(): string | undefined {
     return this.modelOverride;
+  }
+
+  /**
+   * The model the USER last chose for this thread. Falls back to the
+   * runtime override for threads created before this field existed, then
+   * to undefined (session default). The picker reads this, NOT modelId(),
+   * so agent-initiated switch_model calls don't clobber the UI.
+   */
+  userModelId(): string | undefined {
+    return this.userModelPin ?? this.modelOverride;
   }
 
   // ── public API ──────────────────────────────────────────────────
@@ -1715,6 +1735,7 @@ export class Thread {
       queueMode: this.mode,
       paused: this.paused,
       model: this.modelOverride,
+      userModel: this.userModelPin,
       summary: undefined,
       createdAt: this.threadCreatedAt,
       updatedAt: Date.now(),
@@ -1735,13 +1756,19 @@ export class Thread {
   ): Promise<{ fromModel: string; toModel: string }> {
     const sessionDefault = this.session.options.modelSpec ?? this.session.options.model.id;
     const before = this.modelOverride ?? sessionDefault;
+    // Agent-initiated switches (tool:*) are runtime-only for the user-facing
+    // pin: the picker keeps showing the model the user chose, not a transient
+    // model the orchestrator switched to before spawning a child.
+    const isAgentSwitch = reason.startsWith("tool:");
     if (modelId === null) {
       this.modelOverride = undefined;
+      if (!isAgentSwitch) this.userModelPin = undefined;
     } else {
       // Validate before assigning so an unknown id is rejected and the
       // thread keeps its previous setting.
       await this.validateModelSpec(modelId);
       this.modelOverride = modelId;
+      if (!isAgentSwitch) this.userModelPin = modelId;
     }
     await this.session.providers.store.saveThread(this.session.id, this.toThreadData());
     const after = this.modelOverride ?? sessionDefault;

@@ -1002,6 +1002,14 @@ export interface ThreadSummary {
   createdAt: number;
   /** Thread-level model override. Falls back to the session default when undefined. */
   model?: string;
+  /**
+   * The model the USER last chose — creation-time pin or user-initiated
+   * PATCH/`/model`. NOT updated by the agent's `switch_model` tool.
+   * The picker reads this so the orchestrator's transient switches
+   * don't clobber the model the user selected.
+   * Falls back to `model` for threads created before this field existed.
+   */
+  userModel?: string;
   /** Set when the thread is archived (display state; history is intact). */
   archivedAt?: number;
   /**

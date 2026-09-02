@@ -691,6 +691,8 @@ export class Session {
       // default/channel/workflow threads all funnel through here; rehydrate
       // constructs Thread from persisted data and never re-stamps.
       model: this.options.modelSpec ?? this.options.model.id,
+      // User-facing pin starts equal to the runtime pin (TKAI-338).
+      userModel: this.options.modelSpec ?? this.options.model.id,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };

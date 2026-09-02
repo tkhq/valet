@@ -433,7 +433,7 @@ export function SessionHeader({
           >
             <span>
               <ModelPicker
-                currentId={activeThread ? (activeThread.model ?? session.model) : session.model}
+                currentId={activeThread ? (activeThread.userModel ?? activeThread.model ?? session.model) : session.model}
                 onSelect={(id) => {
                   if (threadScoped) {
                     // Disabled until activeThread resolves; the guard is

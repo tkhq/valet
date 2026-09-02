@@ -100,6 +100,17 @@ export interface ThreadData {
   /** Persisted pause flag — the only stored piece of queue state; everything else in QueueState derives from durable queue items. */
   paused?: boolean;
   model?: string;
+  /**
+   * The model the USER last chose for this thread — set at creation (same as
+   * `model`) and updated by user-initiated `setModel` calls (PATCH, `/model`
+   * command), but NOT by agent-initiated `switch_model` tool calls.  The
+   * picker reads this so the orchestrator's transient model switches don't
+   * clobber the model the user selected.
+   *
+   * Absent on threads created before this field existed; callers fall back
+   * to `model`.
+   */
+  userModel?: string;
   summary?: string;
   metadata?: Record<string, unknown>;
   createdAt: number;

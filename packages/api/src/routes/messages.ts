@@ -244,8 +244,9 @@ function threadToSummary(
   model?: string,
   key?: string,
   archivedAt?: number,
+  userModel?: string,
 ): ThreadSummary {
-  return { id: threadId, sessionId, title, createdAt, model, key, archivedAt };
+  return { id: threadId, sessionId, title, createdAt, model, key, archivedAt, userModel };
 }
 
 async function loadEngineSession(
@@ -304,6 +305,7 @@ messagesRouter.get("/:id/threads", async (c) => {
         t.modelId(),
         t.key,
         metaById.get(t.id)?.archivedAt,
+        t.userModelId(),
       ),
     );
   const body: ListThreadsResponse = { threads: summaries };
@@ -419,6 +421,7 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
     thread.modelId(),
     thread.key,
     archivedAt,
+    thread.userModelId(),
   );
   return c.json(summary);
 });
@@ -448,6 +451,8 @@ messagesRouter.post("/:id/threads", async (c) => {
     body.title,
     thread.modelId(),
     thread.key,
+    undefined,
+    thread.userModelId(),
   );
   return c.json(summary, 201);
 });
