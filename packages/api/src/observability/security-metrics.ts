@@ -104,3 +104,4 @@ export function recordBootRestoreTimeout(): void {
   }
   bootRestoreTimeoutCounter.add(1);
 }
+

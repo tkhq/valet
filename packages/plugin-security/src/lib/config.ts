@@ -41,6 +41,38 @@ export interface SecurityConfig {
    * live testing is authorized — the dispatch prompt says so, and a live
    * persona has no target. */
   scope?: SecurityScope;
+  /** Credentials the engagement declares (Part 12 §Config schema). Each
+   * entry names a label, a kind, and an `op://vault/item/field` reference
+   * resolved through PR #421's 1Password + sandbox-secret-broker path.
+   * The value never touches Valet. */
+  credentials?: SecurityConfigCredentialDecl[];
+}
+
+/**
+ * One credential the engagement declares. `ref` is the `op://` locator the
+ * broker dereferences at use time; `kind` drives the shape check + the
+ * persona's usage hint; `meta` carries non-value sidecar fields. Follow-up
+ * PR wires the preflight + broker allowlist.
+ */
+export interface SecurityConfigCredentialDecl {
+  /** Per-engagement handle a persona references. Unique per engagement. */
+  label: string;
+  /** One of the seven kinds from Part 10; drives file projection + hint. */
+  kind:
+    | "password"
+    | "session"
+    | "headerToken"
+    | "mtls"
+    | "signingKey"
+    | "toolAuth"
+    | "testData";
+  /** `op://vault/item/field` reference. Broker dereferences at use time. */
+  ref: string;
+  /** For toolAuth with a multi-field 1P entry: `"json"` asserts the resolved
+   * value parses as JSON so the persona can jq-parse it. Default `"raw"`. */
+  refShape?: "raw" | "json";
+  /** Non-value fields (host, algo, scheme, tool, format, role, ...). */
+  meta?: Record<string, unknown>;
 }
 
 /**
@@ -259,6 +291,80 @@ export function parseSecurityConfig(yaml: string, knownPersonas: readonly string
 
   if (map.tools !== undefined) {
     config.tools = parseToolDecls(map.tools, scopeHosts);
+  }
+
+  if (map.credentials !== undefined) {
+    if (!Array.isArray(map.credentials)) {
+      throw new Error(
+        `.valet/security.yml "credentials" must be a list of { label, kind, ref, refShape?, meta? } entries. ${CORRECTIVE}`,
+      );
+    }
+    const credentials: SecurityConfigCredentialDecl[] = [];
+    const seenLabels = new Set<string>();
+    const CRED_KINDS = new Set([
+      "password",
+      "session",
+      "headerToken",
+      "mtls",
+      "signingKey",
+      "toolAuth",
+      "testData",
+    ]);
+    // Part 12: `ref` must be an op:// locator that the broker (PR #421) can
+    // dereference. The regex matches `op://<vault>/<item>/<field>[/<sub>]`
+    // and is deliberately narrower than a URL parser so a stray path or
+    // env-var-shaped value fails at parse.
+    const OP_REF = /^op:\/\/[^/]+\/[^/]+\/[^/]+(\/[^/]+)?$/;
+    for (const [i, raw] of map.credentials.entries()) {
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+        throw new Error(
+          `.valet/security.yml credentials[${i}] must be a { label, kind, ref, refShape?, meta? } map. ${CORRECTIVE}`,
+        );
+      }
+      const rec = raw as Record<string, unknown>;
+      if (typeof rec.label !== "string" || rec.label.trim() === "") {
+        throw new Error(
+          `.valet/security.yml credentials[${i}] needs a non-empty label. ${CORRECTIVE}`,
+        );
+      }
+      if (typeof rec.kind !== "string" || !CRED_KINDS.has(rec.kind)) {
+        throw new Error(
+          `.valet/security.yml credentials[${i}] "kind" must be one of ${[...CRED_KINDS].join(", ")}. ${CORRECTIVE}`,
+        );
+      }
+      if (typeof rec.ref !== "string" || !OP_REF.test(rec.ref)) {
+        throw new Error(
+          `.valet/security.yml credentials[${i}] "ref" must be an op://vault/item/field locator. ${CORRECTIVE}`,
+        );
+      }
+      if (
+        rec.refShape !== undefined &&
+        rec.refShape !== "raw" &&
+        rec.refShape !== "json"
+      ) {
+        throw new Error(
+          `.valet/security.yml credentials[${i}] "refShape" must be "raw" or "json" when set. ${CORRECTIVE}`,
+        );
+      }
+      if (seenLabels.has(rec.label)) {
+        throw new Error(
+          `.valet/security.yml credentials[${i}] label "${rec.label}" is duplicated. ${CORRECTIVE}`,
+        );
+      }
+      seenLabels.add(rec.label);
+      const meta =
+        rec.meta && typeof rec.meta === "object" && !Array.isArray(rec.meta)
+          ? (rec.meta as Record<string, unknown>)
+          : undefined;
+      credentials.push({
+        label: rec.label,
+        kind: rec.kind as SecurityConfigCredentialDecl["kind"],
+        ref: rec.ref,
+        ...(rec.refShape ? { refShape: rec.refShape as "raw" | "json" } : {}),
+        ...(meta ? { meta } : {}),
+      });
+    }
+    config.credentials = credentials;
   }
 
   let personaKeys: string[] = [];
