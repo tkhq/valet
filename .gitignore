@@ -20,6 +20,8 @@ wrangler.deploy.toml
 .env.*.local
 .env.deploy
 .env.deploy.*
+.env.secret
+.env.secret.*
 .dev.vars
 
 # Client production env (generated from .env.deploy at build time)

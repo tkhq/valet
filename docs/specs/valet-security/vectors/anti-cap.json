@@ -1,0 +1,59 @@
+[
+  {
+    "id": "anti-cap-001",
+    "level": "L4",
+    "description": "Finding-count monotonicity pass: new >= prior",
+    "check": "finding-count-monotonicity",
+    "input": {
+      "prior_state": {"findings": ["F-dast-1", "F-dast-2", "F-dast-3"]},
+      "new_state": {"findings": ["F-dast-1", "F-dast-2", "F-dast-3", "F-dast-4", "F-dast-5"]}
+    },
+    "expected": {"check": "finding-count monotonicity", "result": "pass"}
+  },
+  {
+    "id": "anti-cap-002",
+    "level": "L4",
+    "description": "Finding-count monotonicity fail: new < prior",
+    "check": "finding-count-monotonicity",
+    "input": {
+      "prior_state": {"findings": ["F-dast-1", "F-dast-2", "F-dast-3"]},
+      "new_state": {"findings": ["F-dast-1", "F-dast-4"]}
+    },
+    "expected": {
+      "check": "finding-count monotonicity",
+      "result": "fail",
+      "reason": "finding-count decreased (prior: 3, new: 2)"
+    }
+  },
+  {
+    "id": "anti-cap-003",
+    "level": "L4",
+    "description": "pivot_need citation pass: every new finding cites",
+    "check": "pivot-need-citation",
+    "input": {
+      "prior_state": {"findings": ["F-dast-1", "F-dast-2", "F-dast-3"]},
+      "new_state": {"findings": ["F-dast-1", "F-dast-2", "F-dast-3", "F-dast-4", "F-dast-5"]},
+      "findings_files": {
+        "F-dast-4": {"traces_to": {"pivot_need": "n-dast-admin-session"}},
+        "F-dast-5": {"traces_to": {"pivot_need": "n-dast-scope-staging"}}
+      }
+    },
+    "expected": {"check": "pivot_need citation", "result": "pass"}
+  },
+  {
+    "id": "anti-cap-004",
+    "level": "L4",
+    "description": "pivot_need citation fail: new finding missing traces_to.pivot_need",
+    "check": "pivot-need-citation",
+    "input": {
+      "prior_state": {"findings": ["F-dast-1", "F-dast-2", "F-dast-3"]},
+      "new_state": {"findings": ["F-dast-1", "F-dast-2", "F-dast-3", "F-dast-4"]},
+      "findings_files": {"F-dast-4": {"traces_to": {}}}
+    },
+    "expected": {
+      "check": "pivot_need citation",
+      "result": "fail",
+      "reason": "schema violation: finding F-dast-4 missing traces_to.pivot_need"
+    }
+  }
+]

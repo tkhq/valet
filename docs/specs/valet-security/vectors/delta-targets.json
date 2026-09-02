@@ -1,0 +1,68 @@
+[
+  {
+    "id": "delta-targets-001",
+    "level": "L3",
+    "description": "dast delta re-run: admin session + scope expansion",
+    "input": {
+      "persona": "dast",
+      "resolved_needs": [
+        {
+          "id": "n-dast-admin-session",
+          "kind": "session",
+          "would_unblock": {"surface_added": ["https://api.example.com/admin/*"]}
+        },
+        {
+          "id": "n-dast-scope-staging",
+          "kind": "scope-expansion",
+          "proposed_resolution": {"auto": {"params": {"host": "staging.example.com"}}},
+          "would_unblock": {"surface_added": []}
+        }
+      ],
+      "loot": {
+        "credentials": [{"id": "c-human-1", "role": "admin"}],
+        "sessions": [{"id": "s-human-1", "host": "api.example.com"}],
+        "test_data": [],
+        "tool_auth": []
+      }
+    },
+    "expected": {
+      "delta_targets": {
+        "authed_surface": ["https://api.example.com/admin/*"],
+        "new_hosts": ["staging.example.com"],
+        "auth_scopes": ["admin"],
+        "test_data": [],
+        "tool_auth": []
+      }
+    }
+  },
+  {
+    "id": "delta-targets-002",
+    "level": "L3",
+    "description": "fuzz delta re-run: test-data (payment card)",
+    "input": {
+      "persona": "fuzz",
+      "resolved_needs": [
+        {
+          "id": "n-fuzz-payment-test-data",
+          "kind": "test-data",
+          "would_unblock": {"surface_added": ["https://api.example.com/api/v1/payment"]}
+        }
+      ],
+      "loot": {
+        "credentials": [],
+        "sessions": [],
+        "test_data": [{"id": "td-human-1", "kind": "payment-card"}],
+        "tool_auth": []
+      }
+    },
+    "expected": {
+      "delta_targets": {
+        "authed_surface": [],
+        "new_hosts": [],
+        "auth_scopes": [],
+        "test_data": ["payment-card"],
+        "tool_auth": []
+      }
+    }
+  }
+]

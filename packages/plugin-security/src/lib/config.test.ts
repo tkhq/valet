@@ -250,6 +250,7 @@ describe("BUNDLED_PERSONAS", () => {
       "fuzz",
       "exploit",
       "reconcile",
+      "pivot-coordinator",
     ]);
     expect(bundledPersonaIds()).toEqual(ids);
 

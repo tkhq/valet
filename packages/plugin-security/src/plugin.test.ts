@@ -22,6 +22,7 @@ describe("plugin manifest", () => {
       "fuzz",
       "exploit",
       "reconcile",
+      "pivot-coordinator",
     ]);
   });
 

@@ -6,6 +6,7 @@ import {
   useSecurityFindings,
   useCancelEngagement,
   useRescanReview,
+  useResumeEngagement,
   flattenFindings,
   apiErrorText,
 } from "~/api/security";
@@ -85,6 +86,7 @@ export function EngagementPanel({
   });
 
   const cancelMutation = useCancelEngagement(sessionId);
+  const resumeMutation = useResumeEngagement(sessionId);
   const [confirmCancel, setConfirmCancel] = useState(false);
   const navigate = useNavigate();
   const rescan = useRescanReview();
@@ -104,7 +106,7 @@ export function EngagementPanel({
     );
   }
 
-  const { engagement, cells, cost, diff, planCells, report, needs } = engagementQ.data;
+  const { engagement, cells, cost, diff, planCells, report, needs, resumable, resumableStats } = engagementQ.data;
   // The report is generating while a report-persona cell is running (M-P3).
   const reportGenerating = cells.some((c) => c.persona === "report" && c.status === "running");
   // The config + plan are finalized pre-creation on `/security/new`; the session
@@ -201,6 +203,71 @@ export function EngagementPanel({
           cancelMutation.mutate(undefined, { onSuccess: () => setConfirmCancel(false) });
         }}
       />
+      {/* Resume banner (v1 Part 09 §Resume contract). Renders on a terminal
+          engagement (completed | failed) that carries at least one open need,
+          at least one failed cell, or at least one pending cell that never
+          dispatched. Admin-gated button; a non-admin sees the banner but not
+          the button. */}
+      {resumable && resumableStats && (() => {
+        const parts: string[] = [];
+        if (resumableStats.openNeeds > 0) {
+          parts.push(
+            `${resumableStats.openNeeds} unresolved need${resumableStats.openNeeds === 1 ? "" : "s"}`,
+          );
+        }
+        if (resumableStats.failedCells > 0) {
+          parts.push(
+            `${resumableStats.failedCells} failed cell${resumableStats.failedCells === 1 ? "" : "s"}`,
+          );
+        }
+        if (resumableStats.pendingCells > 0) {
+          parts.push(
+            `${resumableStats.pendingCells} pending cell${resumableStats.pendingCells === 1 ? "" : "s"}`,
+          );
+        }
+        const summary =
+          parts.length === 0
+            ? "unfinished work"
+            : parts.length === 1
+              ? parts[0]
+              : parts.length === 2
+                ? `${parts[0]} and ${parts[1]}`
+                : `${parts.slice(0, -1).join(", ")}, and ${parts[parts.length - 1]}`;
+        return (
+        <div
+          className="mx-4 mt-3 rounded border border-warning-500/40 bg-warning-500/10 px-3 py-2 text-xs text-warning-700"
+          data-testid="resume-banner"
+          role="status"
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="font-semibold">This review closed with {summary}.</div>
+              <p className="mt-0.5">
+                Resume to re-run only the affected cells with the input you provide. Completed cells stay untouched.
+              </p>
+              {resumeMutation.isError && (
+                <p className="mt-1 text-danger-600" data-testid="resume-error">
+                  {apiErrorText(resumeMutation.error)}
+                </p>
+              )}
+            </div>
+            {canAdminister ? (
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => resumeMutation.mutate(undefined)}
+                disabled={resumeMutation.isPending}
+                data-testid="resume-button"
+              >
+                {resumeMutation.isPending ? "Resuming…" : "Resume review"}
+              </Button>
+            ) : (
+              <span className="text-[11px] text-muted">Ask a session admin to resume.</span>
+            )}
+          </div>
+        </div>
+        );
+      })()}
       {/* The finalized config + plan, at-a-glance and read-only. The user
           configured this pre-creation on `/security/new`. */}
       {/* Config context; the plan list shows only before cells materialize —
