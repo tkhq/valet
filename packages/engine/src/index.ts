@@ -230,6 +230,7 @@ export {
   SummarizeOverflowError,
   usableTokens,
   tailBudget,
+  inputSpillThreshold,
   turns,
   selectCutPoint,
   planPrune,
@@ -245,6 +246,10 @@ export {
   type SummarizeResult,
   type Turn,
 } from "./compaction.js";
-export { entriesToAgentMessages, type CompactionOutcome } from "./thread.js";
+export {
+  entriesToAgentMessages,
+  buildSpilledInputMarker,
+  type CompactionOutcome,
+} from "./thread.js";
 export { classifyCacheBreak, type CacheBreakCause, type CacheTurnSnapshot } from "./cache-telemetry.js";
 export { formatFileAttachmentsNote } from "./file-attachment-formatter.js";

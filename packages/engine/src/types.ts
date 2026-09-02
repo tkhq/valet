@@ -2229,6 +2229,17 @@ export interface CompactionConfig {
   pruneMinimumTokens?: number;
   /** Tool outputs longer than this get truncated when fed to the summarizer. Default: 2_000 chars. */
   toolOutputMaxChars?: number;
+  /**
+   * A single inbound user message larger than this (estimated tokens) is
+   * written to a file in the sandbox and replaced in context with a pointer,
+   * so one oversized paste cannot exceed the model's context window on its
+   * own. Compaction only summarizes older turns and always keeps the newest
+   * turn verbatim, so without this a single message larger than the window
+   * loops overflow -> compact -> overflow forever. Default: 60% of usable
+   * context. Set 0 to disable spilling (a large paste then truncates or errors
+   * instead).
+   */
+  maxInputTokens?: number;
   /** Optional separate model for the summarization call. Default: session model. */
   summarizerModel?: Model<any>;
   /** Tool names whose outputs are exempt from pruning. Merged with ToolDef.protectedFromPruning. Defaults: ['skill', 'thread_read']. */
