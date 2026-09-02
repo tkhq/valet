@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { and, count, desc, eq, inArray, or } from "drizzle-orm";
+import { and, count, desc, eq, inArray, or, sql } from "drizzle-orm";
 import { mkdir, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { parseAssistantSessionId, type Principal } from "@valet/engine";
@@ -140,14 +140,16 @@ function rowToSummary(row: typeof agentSessions.$inferSelect, run: SessionRunFie
     title: row.title ?? undefined,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
-    lastActivityAt: run.lastActivityAt,
+    // Prefer the persisted column; fall back to the queue-derived value
+    // for rows written before the column existed (TKAI-341).
+    lastActivityAt: Math.max(row.lastActivityAt ?? 0, run.lastActivityAt),
     owner: { type: row.ownerType as AssistantOwner["type"], id: row.ownerId },
   };
 }
 
 /** The row fields `deriveRunFields` reads, narrowed from a full session row. */
 function runStateRow(row: typeof agentSessions.$inferSelect): RunStateRow {
-  return { status: row.status as SessionStatus, updatedAt: row.updatedAt };
+  return { status: row.status as SessionStatus, updatedAt: row.updatedAt, lastActivityAt: row.lastActivityAt };
 }
 
 // ── List ──────────────────────────────────────────────────────────────────
@@ -185,7 +187,7 @@ export async function listStandaloneSessions(db: AppDb, userId: string, owner?: 
       .select()
       .from(agentSessions)
       .where(and(scope, inArray(agentSessions.status, ["active", "hibernated"])))
-      .orderBy(desc(agentSessions.updatedAt)),
+      .orderBy(desc(sql`COALESCE(${agentSessions.lastActivityAt}, ${agentSessions.updatedAt})`)),
     db.select({ childSessionId: childWatches.childSessionId }).from(childWatches),
     // The assistants table, not the id prefix, decides which sessions are
     // assistant sessions: migrated rows keep legacy `orchestrator:*` ids
@@ -652,6 +654,7 @@ sessionsRouter.post("/", async (c) => {
         kind,
         createdAt: now,
         updatedAt: now,
+        lastActivityAt: now,
       })
       // Returned rather than re-read: the `initialPrompt` submit below needs
       // the full row to assemble the session meta.
@@ -824,7 +827,7 @@ sessionsRouter.post("/", async (c) => {
     workspace: body.workspace,
     status: "active",
     kind,
-    ...deriveRunFields({ status: "active", updatedAt: now }, unsettled),
+    ...deriveRunFields({ status: "active", updatedAt: now, lastActivityAt: now }, unsettled),
     ...(sessionTitle !== null ? { title: sessionTitle } : {}),
     owner,
     createdAt: now,
