@@ -116,6 +116,19 @@ cost on the `turn_end` event and patch-capture records on
    - `cost_total` NULL means unpriced, never free. The engine omits cost for
      a model it has no price for. Read `priced` before you present a total.
 
+   The token and cost numbers come from stored generated columns on
+   `engine_entries` (`input_tokens` ... `total_tokens`, `cost_total`,
+   `priced`), parsed once from the `usage`/`cost` JSON at write time. The
+   view used to cast that JSON per row per query, which made every window
+   aggregate scan the slowest query in the app. The view cannot push
+   `org_id`/`user_id` predicates into `engine_entries` (both are computed
+   from joins), so `/api/usage/summary` also aggregates all of its windows
+   in ONE scan with per-window `FILTER` clauses — do not add a second scan
+   per window. Deploy note: already-migrated databases get the columns and
+   the new view body from `SCHEMA_REPAIRS` (`packages/api/src/lib/
+   drizzle.ts`), which now supports view-definition repairs via a marker
+   probe on `pg_views.definition`.
+
 ## Out of scope
 
 - Logs export (the LGTM stack accepts OTLP logs; stdout/kubectl remains the

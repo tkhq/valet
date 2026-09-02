@@ -6,7 +6,7 @@
  * counted, cache tokens are counted, an unpriced turn is reported as
  * unpriced instead of $0, and no other org's spend ever appears.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { assistantSessionId } from "@valet/engine";
 import { bootTestApi, type TestApi } from "./_setup.js";
@@ -373,6 +373,47 @@ describe("GET /api/usage/summary", () => {
       expect(body.me.day.turns).toBe(0);
       expect(body.org?.members).toEqual([]);
     } finally {
+      await api.cleanup();
+    }
+  });
+
+  it("aggregates every window and the member list in one cost_entries query", async () => {
+    const api = await bootTestApi();
+    try {
+      const now = Date.now();
+      const { db } = api.providers;
+      await db
+        .update(orgs)
+        .set({ features: { organizations: true } })
+        .where(eq(orgs.id, "local-org"));
+      await db.insert(agentSessions).values([
+        { id: "s-me", userId: "local-user", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "local-user", createdAt: now, updatedAt: now, title: "Mine" },
+        { id: "s-member", userId: "test-member", orgId: "local-org", workspace: "/w", status: "active", ownerType: "user", ownerId: "test-member", createdAt: now, updatedAt: now, title: "Member" },
+      ]);
+      const tokens = { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 };
+      // One caller turn per window boundary: day, week, month.
+      await seedTurn(api, { id: "t-day", sessionId: "s-me", tokens, costTotal: 1, createdAt: now - HOUR_MS });
+      await seedTurn(api, { id: "t-week", sessionId: "s-me", tokens, costTotal: 1, createdAt: now - 3 * 24 * HOUR_MS });
+      await seedTurn(api, { id: "t-month", sessionId: "s-me", tokens, costTotal: 1, createdAt: now - 20 * 24 * HOUR_MS });
+      // A member turn, so the org comparison has a second row.
+      await seedTurn(api, { id: "t-member", sessionId: "s-member", tokens, costTotal: 5, createdAt: now - HOUR_MS });
+
+      // The dashboard calls this on every home-page load; day/week/month and
+      // the member comparison must come from ONE scan of cost_entries, not
+      // one scan per window (the view cannot push org/user predicates into
+      // engine_entries, so every extra scan re-reads the whole window).
+      const executeSpy = vi.spyOn(db, "execute");
+      const body = await getSummary(api);
+      expect(executeSpy).toHaveBeenCalledTimes(1);
+
+      expect(body.me.day.turns).toBe(1);
+      expect(body.me.week.turns).toBe(2);
+      expect(body.me.month.turns).toBe(3);
+      expect(body.me.month.costUsd).toBeCloseTo(3, 6);
+      expect(body.org?.members.map((m) => m.userId)).toEqual(["test-member", "local-user"]);
+      expect(body.org?.members[0]?.costUsd).toBeCloseTo(5, 6);
+    } finally {
+      vi.restoreAllMocks();
       await api.cleanup();
     }
   });

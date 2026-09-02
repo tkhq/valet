@@ -142,7 +142,16 @@ interface SchemaRepair {
   probe:
     | { kind: "column"; table: string; column: string }
     | { kind: "table"; table: string }
-    | { kind: "index"; index: string };
+    | { kind: "index"; index: string }
+    // A view whose DEFINITION changed in place: the view exists on every
+    // database, so presence alone proves nothing. The probe compares a
+    // version stamp stored as COMMENT ON VIEW — a database whose comment
+    // differs (or whose view is missing) needs the repair. Every in-place
+    // edit to the view MUST bump the version in three places: here, the
+    // COMMENT repair entry, and the COMMENT statement in 0000_app.sql.
+    // (A definition-substring marker was rejected: a future edit that
+    // happens to keep the substring would silently never deploy.)
+    | { kind: "view"; view: string; version: string };
   sql: string;
 }
 
@@ -250,6 +259,135 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     probe: { kind: "column", table: "mcp_oauth_clients", column: "scopes_supported" },
     sql: 'ALTER TABLE "mcp_oauth_clients" ADD COLUMN IF NOT EXISTS "scopes_supported" jsonb',
   },
+  {
+    // The proxy request log (llm-proxy-mitm design). The cost_entries view
+    // repair below reads this table, so a database migrated before the
+    // proxy commits MUST get the table first — keep this entry (and its
+    // index entries) ABOVE the view repair; list order is execution order.
+    describe: "llm_proxy_requests table",
+    probe: { kind: "table", table: "llm_proxy_requests" },
+    sql: `CREATE TABLE IF NOT EXISTS "llm_proxy_requests" (
+      "id" text PRIMARY KEY NOT NULL,
+      "created_at" bigint NOT NULL,
+      "org_id" text NOT NULL,
+      "user_id" text NOT NULL,
+      "api_key_id" text NOT NULL,
+      "provider_kind" text NOT NULL,
+      "model" text,
+      "harness" text,
+      "endpoint" text NOT NULL,
+      "provider_response_id" text,
+      "previous_response_id" text,
+      "stream" boolean NOT NULL,
+      "status_code" integer NOT NULL,
+      "request_body" text NOT NULL,
+      "response_body" text,
+      "input_tokens" bigint NOT NULL DEFAULT 0,
+      "output_tokens" bigint NOT NULL DEFAULT 0,
+      "cache_read_tokens" bigint NOT NULL DEFAULT 0,
+      "cache_write_tokens" bigint NOT NULL DEFAULT 0,
+      "total_tokens" bigint NOT NULL DEFAULT 0,
+      "cost_usd" double precision,
+      "latency_ms" integer,
+      "error" text,
+      "parsed" jsonb,
+      "parse_version" integer,
+      "parse_error" text
+    )`,
+  },
+  {
+    describe: "llm_proxy_requests_org_created index",
+    probe: { kind: "index", index: "llm_proxy_requests_org_created" },
+    sql: 'CREATE INDEX IF NOT EXISTS "llm_proxy_requests_org_created" ON "llm_proxy_requests" ("org_id", "created_at")',
+  },
+  {
+    describe: "llm_proxy_requests_user_created index",
+    probe: { kind: "index", index: "llm_proxy_requests_user_created" },
+    sql: 'CREATE INDEX IF NOT EXISTS "llm_proxy_requests_user_created" ON "llm_proxy_requests" ("user_id", "created_at")',
+  },
+  {
+    // Parsed-once token/cost numbers for cost attribution — see the column
+    // comments in 0000_engine.sql (keep the expressions in lockstep). This
+    // is an engine-table repair on the app side because the engine tracker
+    // skips an already-applied 0000_engine.sql, same as the app tracker.
+    //
+    // Adding STORED generated columns REWRITES engine_entries — the whole
+    // thread history — under ACCESS EXCLUSIVE. The rewrite backfills every
+    // existing row, which is the point, but lock_timeout only bounds lock
+    // ACQUISITION, not the rewrite itself: writes block for the duration
+    // (roughly seconds per million rows). On a rolling update the old pod's
+    // traffic can also starve the lock (TKAI-244 shape) — if the rollout
+    // sticks, delete the old pod and re-apply, per the dev-v2 runbook.
+    describe: "engine_entries generated cost columns",
+    probe: { kind: "column", table: "engine_entries", column: "input_tokens" },
+    sql: `ALTER TABLE "engine_entries"
+      ADD COLUMN IF NOT EXISTS "input_tokens" bigint GENERATED ALWAYS AS (COALESCE(floor(("usage"::jsonb->>'input')::numeric)::bigint, 0)) STORED,
+      ADD COLUMN IF NOT EXISTS "output_tokens" bigint GENERATED ALWAYS AS (COALESCE(floor(("usage"::jsonb->>'output')::numeric)::bigint, 0)) STORED,
+      ADD COLUMN IF NOT EXISTS "cache_read_tokens" bigint GENERATED ALWAYS AS (COALESCE(floor(("usage"::jsonb->>'cacheRead')::numeric)::bigint, 0)) STORED,
+      ADD COLUMN IF NOT EXISTS "cache_write_tokens" bigint GENERATED ALWAYS AS (COALESCE(floor(("usage"::jsonb->>'cacheWrite')::numeric)::bigint, 0)) STORED,
+      ADD COLUMN IF NOT EXISTS "total_tokens" bigint GENERATED ALWAYS AS (COALESCE(floor(("usage"::jsonb->>'total')::numeric)::bigint, 0)) STORED,
+      ADD COLUMN IF NOT EXISTS "cost_total" double precision GENERATED ALWAYS AS (("cost"::jsonb->>'total')::float8) STORED,
+      ADD COLUMN IF NOT EXISTS "priced" boolean GENERATED ALWAYS AS ((("cost"::jsonb->>'total') IS NOT NULL)) STORED`,
+  },
+  {
+    // The window index for cost attribution (0000_engine.sql) — the engine
+    // tracker never ships it to an already-migrated database, and without
+    // it every usage aggregate seq-scans all of engine_entries. Plain
+    // CREATE INDEX (no CONCURRENTLY — repairs run in a transaction) blocks
+    // writes while it builds; the partial predicate keeps it small.
+    describe: "engine_entries_usage_window index",
+    probe: { kind: "index", index: "engine_entries_usage_window" },
+    sql: 'CREATE INDEX IF NOT EXISTS "engine_entries_usage_window" ON "engine_entries" ("created_at") WHERE "usage" IS NOT NULL',
+  },
+  {
+    // The view must read those generated columns instead of re-casting the
+    // JSON per row. Runs after the column repair above (list order). Keep
+    // the definition in lockstep with 0000_app.sql, and bump the version
+    // (here, in the stamp entry below, and in 0000_app.sql's COMMENT) on
+    // every definition edit.
+    describe: "cost_entries view over generated columns",
+    probe: { kind: "view", view: "cost_entries", version: "2" },
+    sql: `CREATE OR REPLACE VIEW "cost_entries" AS
+      SELECT
+        e."id" AS "entry_id", e."session_id" AS "session_id", e."created_at" AS "created_at", e."model" AS "model",
+        COALESCE(s."org_id", d."org_id") AS "org_id",
+        CASE WHEN s."id" IS NOT NULL THEN s."user_id"
+             WHEN r."owner_type" = 'user' THEN NULLIF(r."owner_id", '') END AS "user_id",
+        COALESCE(s."owner_type", r."owner_type") AS "owner_type",
+        NULLIF(COALESCE(s."owner_id", r."owner_id"), '') AS "owner_id",
+        r."workflow_id" AS "workflow_id", r."id" AS "workflow_run_id",
+        e."input_tokens" AS "input_tokens",
+        e."output_tokens" AS "output_tokens",
+        e."cache_read_tokens" AS "cache_read_tokens",
+        e."cache_write_tokens" AS "cache_write_tokens",
+        e."total_tokens" AS "total_tokens",
+        e."cost_total" AS "cost_total",
+        e."priced" AS "priced",
+        CASE WHEN e."session_id" LIKE 'orchestrator:%' THEN 'orchestrator'
+             WHEN e."session_id" LIKE 'wf:%' THEN 'workflow'
+             ELSE 'session' END AS "use_case"
+      FROM "engine_entries" e
+      LEFT JOIN "agent_sessions" s ON s."id" = e."session_id"
+      LEFT JOIN "workflow_runs" r ON e."session_id" LIKE 'wf:%' AND r."id" = split_part(e."session_id", ':', 2)
+      LEFT JOIN "workflow_definitions" d ON d."id" = r."workflow_id"
+      WHERE e."usage" IS NOT NULL AND COALESCE(s."org_id", d."org_id") IS NOT NULL
+      UNION ALL
+      SELECT
+        p."id", NULL, p."created_at", p."model", p."org_id", p."user_id", 'user', p."user_id",
+        NULL, NULL, p."input_tokens", p."output_tokens", p."cache_read_tokens", p."cache_write_tokens",
+        p."total_tokens", p."cost_usd", (p."cost_usd" IS NOT NULL), 'proxy'
+      FROM "llm_proxy_requests" p
+      WHERE p."total_tokens" > 0`,
+  },
+  {
+    // The stamp that tells the probe the definition above is live. A
+    // separate entry because a repair runs ONE statement; sharing the
+    // probe with the view entry means a crash between the two re-runs
+    // both (idempotent) on the next boot.
+    describe: "cost_entries view version stamp",
+    probe: { kind: "view", view: "cost_entries", version: "2" },
+    sql: `COMMENT ON VIEW "cost_entries" IS '2'`,
+  },
 ];
 
 /** The repairs this database still lacks, by catalog probe — one query per
@@ -261,9 +399,11 @@ export async function missingSchemaRepairs(db: PgDb): Promise<SchemaRepair[]> {
   const columnTables = new Set<string>();
   const tableNames: string[] = [];
   const indexNames: string[] = [];
+  const viewNames: string[] = [];
   for (const { probe } of SCHEMA_REPAIRS) {
     if (probe.kind === "column") columnTables.add(probe.table);
     else if (probe.kind === "table") tableNames.push(probe.table);
+    else if (probe.kind === "view") viewNames.push(probe.view);
     else indexNames.push(probe.index);
   }
 
@@ -295,7 +435,27 @@ export async function missingSchemaRepairs(db: PgDb): Promise<SchemaRepair[]> {
     (row) => `index:${String(row["indexname"])}`,
   );
 
+  // View versions need a per-probe value comparison, so they cannot ride
+  // the generic name-presence collector above. The stamp lives in the
+  // view's COMMENT (pg_description, objsubid 0 = the relation itself).
+  const viewVersions = new Map<string, string | null>();
+  if (viewNames.length > 0) {
+    const result = await db.query(
+      `SELECT c.relname AS viewname, d.description
+       FROM pg_class c
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       LEFT JOIN pg_description d ON d.objoid = c.oid AND d.objsubid = 0
+       WHERE n.nspname = current_schema() AND c.relkind = 'v'
+         AND c.relname IN (SELECT jsonb_array_elements_text($1::jsonb))`,
+      [JSON.stringify(viewNames)],
+    );
+    for (const row of result.rows) {
+      viewVersions.set(String(row["viewname"]), row["description"] === null ? null : String(row["description"]));
+    }
+  }
+
   return SCHEMA_REPAIRS.filter(({ probe: p }) => {
+    if (p.kind === "view") return viewVersions.get(p.view) !== p.version;
     const key = p.kind === "column" ? `column:${p.table}.${p.column}` : p.kind === "table" ? `table:${p.table}` : `index:${p.index}`;
     return !present.has(key);
   });
