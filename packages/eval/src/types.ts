@@ -33,6 +33,12 @@ export interface TrajectoryToolCall {
    * `tool: github.list_pull_requests` regardless of the invocation route.
    */
   actionId?: string;
+  /**
+   * True when the pruner elided this call's stored result to save context.
+   * The original output is unrecoverable; result-matching checks report
+   * the elision explicitly instead of a misleading pattern mismatch.
+   */
+  elided?: boolean;
 }
 
 /** One agent turn (one assistant message cycle) with its reported usage. */
@@ -43,6 +49,12 @@ export interface TrajectoryTurn {
   usage?: MessageUsage;
   /** USD cost for this turn. Absent when the model is unpriced. */
   cost?: MessageCost;
+  /**
+   * The submission this turn settled: links each turn back to the case's
+   * `turns[]` entry (or to a child.settled signal delivery), so checks and
+   * readers can scope per-submission instead of guessing from order.
+   */
+  queueItemId?: string;
 }
 
 /**
@@ -60,9 +72,13 @@ export interface Trajectory {
   toolCalls: TrajectoryToolCall[];
   /** Text of the last assistant message. */
   finalOutput: string;
-  /** Aggregate token usage across all turns. */
+  /**
+   * Aggregate token usage across this trajectory's OWN turns. Child
+   * sessions are excluded — use `aggregateUsage` for the recursive total a
+   * scorecard should report.
+   */
   usage: MessageUsage;
-  /** Aggregate USD cost across all turns. Absent when the model is unpriced. */
+  /** Aggregate USD cost across this trajectory's own turns. Absent when the model is unpriced. */
   cost?: MessageCost;
   /** Wall-clock duration of the case run. */
   durationMs: number;

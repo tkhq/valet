@@ -1,6 +1,6 @@
 export * from "./types.js";
 export { loadCases, parseEvalCase, CaseValidationError } from "./case-loader.js";
-export { extractTrajectory, toolResultText, type ExtractTrajectoryInput } from "./trajectory.js";
+export { aggregateUsage, extractTrajectory, toolResultText, type ExtractTrajectoryInput } from "./trajectory.js";
 export {
   runCase,
   interpolateTurnContent,

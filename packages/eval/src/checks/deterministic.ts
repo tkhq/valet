@@ -6,7 +6,7 @@
  * what the trajectory actually holds, so a red scorecard row is actionable
  * without re-running the case.
  */
-import { toolResultText } from "../trajectory.js";
+import { aggregateUsage, toolResultText } from "../trajectory.js";
 import type { CheckResult, DeterministicCheck, Trajectory, TrajectoryToolCall } from "../types.js";
 
 function pass(check: DeterministicCheck, detail?: string): CheckResult {
@@ -121,7 +121,16 @@ export function runDeterministicCheck(check: DeterministicCheck, trajectory: Tra
         return fail(check, `expected a \`${check.tool}\` result to match /${check.pattern}/, but the tool was never called.`);
       }
       const re = new RegExp(check.pattern);
-      if (!matches.some((c) => re.test(toolResultText(c.result)))) {
+      if (!matches.some((c) => !c.elided && re.test(toolResultText(c.result)))) {
+        // A compaction-elided result is unmatchable data loss, not a
+        // behavior mismatch — say so instead of implying the tool misbehaved.
+        if (matches.some((c) => c.elided)) {
+          return fail(
+            check,
+            `\`${check.tool}\` results were elided by compaction and cannot be matched against /${check.pattern}/. ` +
+              "Shorten the case or raise its compaction thresholds.",
+          );
+        }
         return fail(
           check,
           `expected at least one \`${check.tool}\` result to match /${check.pattern}/. Results: ${renderCalls(matches)}`,
@@ -200,20 +209,23 @@ export function runDeterministicCheck(check: DeterministicCheck, trajectory: Tra
     }
 
     case "max_tokens": {
-      const n = trajectory.usage.total;
-      if (n > check.value) return fail(check, `expected at most ${check.value} total tokens, got ${n}.`);
+      // Budget checks cover the whole case, child sessions included — an
+      // orchestrator that stays lean by delegating spend must not pass.
+      const n = aggregateUsage(trajectory).usage.total;
+      if (n > check.value) return fail(check, `expected at most ${check.value} total tokens (children included), got ${n}.`);
       return pass(check);
     }
 
     case "max_cost": {
-      if (trajectory.cost === undefined) {
+      const totals = aggregateUsage(trajectory);
+      if (totals.cost === undefined) {
         // Unpriced models (dev fakes, custom providers) report no cost. Pass
         // with a visible note rather than failing a run that cannot be priced.
         return pass(check, "the model is unpriced; no cost data to compare");
       }
-      const c = trajectory.cost.total;
+      const c = totals.cost.total;
       if (c > check.value) {
-        return fail(check, `expected total cost at most $${check.value}, got $${c.toFixed(4)}.`);
+        return fail(check, `expected total cost at most $${check.value} (children included), got $${c.toFixed(4)}.`);
       }
       return pass(check);
     }

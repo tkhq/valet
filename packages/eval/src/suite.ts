@@ -13,6 +13,7 @@ import {
 } from "./baseline.js";
 import { runChecks, type JudgeRunner } from "./checks/index.js";
 import { runCase } from "./runner.js";
+import { aggregateUsage } from "./trajectory.js";
 import type { EvalCase, ScorecardEntry } from "./types.js";
 
 import { envKeyForService } from "./integration.js";
@@ -112,12 +113,15 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
 
       const completed = result.outcome === "completed";
       const allChecksPass = checkResults.every((r) => r.pass);
+      // Recursive totals: an orchestrator case's spend includes every child
+      // session it spawned, not just the parent thread.
+      const totals = aggregateUsage(result.trajectory);
       entry = {
         caseId: evalCase.id,
         status: completed && allChecksPass ? "pass" : "fail",
         durationMs: result.trajectory.durationMs,
-        ...(result.trajectory.cost !== undefined ? { costUsd: result.trajectory.cost.total } : {}),
-        totalTokens: result.trajectory.usage.total,
+        ...(totals.cost !== undefined ? { costUsd: totals.cost.total } : {}),
+        totalTokens: totals.usage.total,
         checkResults,
         trajectory: result.trajectory,
         ...(result.error !== undefined ? { error: result.error } : {}),
