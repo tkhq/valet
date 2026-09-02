@@ -1,12 +1,12 @@
-# Placeholder case for the loader (TKAI-328). The runner lands in TKAI-329;
-# the real starter suite lands in TKAI-333.
+# Starter case (TKAI-333): the simplest memory round-trip.
 id: memory-write-read
 description: Write a memory entry, read it back, and confirm the content survived.
 turns:
   - role: user
     content: >-
-      Store the fact "the deploy freeze ends Friday" in memory under the key
-      deploy-freeze, then read it back and repeat the stored text verbatim.
+      Store the fact "the deploy freeze ends Friday" in memory at the path
+      notes/deploy-freeze.md, then read it back and repeat the stored text
+      verbatim.
 timeout_ms: 120000
 checks:
   - type: tool_called

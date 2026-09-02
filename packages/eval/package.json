@@ -14,7 +14,8 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "start": "tsx src/cli.ts"
   },
   "dependencies": {
     "@valet/engine": "workspace:*",
