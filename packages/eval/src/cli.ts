@@ -13,12 +13,18 @@
  *
  * Exits 0 when every run case passes, 1 otherwise.
  */
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { bundledPlugins } from "@valet/api/plugins";
+import { DockerSandboxProvider } from "@valet/sandbox-docker";
 import { loadCases } from "./case-loader.js";
 import { filterCases, parseCliArgs } from "./cli-args.js";
 import { buildJudgeRunner } from "./checks/judge.js";
+import { dockerAvailable, loadEvalCredentials } from "./integration.js";
 import { formatScorecard } from "./scorecard.js";
 import { runSuite } from "./suite.js";
+
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
 async function main(): Promise<number> {
   const opts = parseCliArgs(process.argv.slice(2));
@@ -33,11 +39,19 @@ async function main(): Promise<number> {
     return 1;
   }
 
+  const credentials = await loadEvalCredentials({ envFilePath: resolve(REPO_ROOT, ".env.eval") });
+  const needsDocker = cases.some((c) => c.profile === "full");
+  const hasDocker = needsDocker ? await dockerAvailable() : false;
+
   const result = await runSuite(cases, {
     model: opts.model,
     baselinesDir: opts.baselinesDir,
     judge: buildJudgeRunner(),
     mockPlugins: bundledPlugins,
+    realPlugins: bundledPlugins,
+    credentials,
+    dockerAvailable: hasDocker,
+    fullSandboxProvider: () => new DockerSandboxProvider(),
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
     saveBaselines: opts.saveBaseline,
     onCaseStart: (evalCase, index, total) => {
@@ -47,8 +61,9 @@ async function main(): Promise<number> {
 
   const failed = result.entries.filter((e) => e.status === "fail").length;
 
+  const out: string[] = [];
   if (opts.json) {
-    console.log(
+    out.push(
       JSON.stringify(
         {
           entries: result.entries.map((e) => (opts.verbose ? e : { ...e, trajectory: undefined })),
@@ -61,26 +76,42 @@ async function main(): Promise<number> {
       ),
     );
   } else {
-    console.log(formatScorecard(result.entries, { comparisons: result.comparisons, wallMs: result.wallMs }));
+    out.push(formatScorecard(result.entries, { comparisons: result.comparisons, wallMs: result.wallMs }));
     if (result.savedBaselinePaths.length > 0) {
-      console.log(`\nsaved ${result.savedBaselinePaths.length} baseline(s) to ${opts.baselinesDir}`);
+      out.push(`\nsaved ${result.savedBaselinePaths.length} baseline(s) to ${opts.baselinesDir}`);
     }
     if (opts.verbose) {
       for (const entry of result.entries) {
         if (entry.trajectory === undefined) continue;
-        console.log(`\n--- trajectory: ${entry.caseId} ---`);
-        console.log(JSON.stringify(entry.trajectory, null, 2));
+        out.push(`\n--- trajectory: ${entry.caseId} ---`);
+        out.push(JSON.stringify(entry.trajectory, null, 2));
       }
     }
   }
+  process.stdout.write(`${out.join("\n")}\n`);
 
   return failed > 0 ? 1 : 0;
 }
 
+/**
+ * Exit only after stdout drains: sandbox providers and engine sessions can
+ * hold live handles, so the process must exit explicitly — but a bare
+ * process.exit truncates piped stdout and eats the scorecard.
+ */
+function exitAfterFlush(code: number): void {
+  if (process.stdout.writableLength === 0) {
+    process.exit(code);
+  } else {
+    process.stdout.once("drain", () => process.exit(code));
+    // Backstop: never hang on a stalled pipe.
+    setTimeout(() => process.exit(code), 2_000).unref();
+  }
+}
+
 main().then(
-  (code) => process.exit(code),
+  (code) => exitAfterFlush(code),
   (err) => {
     console.error(err instanceof Error ? err.message : String(err));
-    process.exit(1);
+    exitAfterFlush(1);
   },
 );

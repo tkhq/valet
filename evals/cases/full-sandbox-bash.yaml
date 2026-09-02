@@ -1,0 +1,20 @@
+# Full-profile starter case (TKAI-336): Docker sandbox with a real shell.
+# SKIPs when the Docker daemon is unavailable.
+id: full-sandbox-bash
+description: Run a shell command in a Docker sandbox and report its output.
+profile: full
+turns:
+  - role: user
+    content: >-
+      Run the shell command `echo eval-sandbox-$((6*7))` and tell me the
+      exact line it printed.
+timeout_ms: 300000
+checks:
+  - type: tool_called
+    tool: bash
+  - type: tool_result_matches
+    tool: bash
+    pattern: "eval-sandbox-42"
+  - type: output_contains
+    value: eval-sandbox-42
+  - type: no_errors

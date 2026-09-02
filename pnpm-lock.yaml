@@ -413,6 +413,9 @@ importers:
       '@valet/engine':
         specifier: workspace:*
         version: link:../engine
+      '@valet/sandbox-docker':
+        specifier: workspace:*
+        version: link:../sandbox-docker
       typebox:
         specifier: 1.3.7
         version: 1.3.7

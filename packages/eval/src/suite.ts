@@ -3,7 +3,7 @@
  * runner, score each trajectory, compare to baselines, and optionally save
  * new baselines. `cli.ts` is a thin argv wrapper around `runSuite`.
  */
-import type { Model, ValetPlugin } from "@valet/engine";
+import type { Model, SandboxProvider, ValetPlugin } from "@valet/engine";
 import {
   compareToBaseline,
   loadLatestBaseline,
@@ -15,8 +15,7 @@ import { runChecks, type JudgeRunner } from "./checks/index.js";
 import { runCase } from "./runner.js";
 import type { EvalCase, ScorecardEntry } from "./types.js";
 
-/** Profiles the suite can run today. integration/full land in TKAI-336. */
-const SUPPORTED_PROFILES = new Set(["unit", "mock"]);
+import { envKeyForService } from "./integration.js";
 
 export interface SuiteOptions {
   /** Default model for cases without a pin. */
@@ -27,6 +26,14 @@ export interface SuiteOptions {
   judge?: JudgeRunner;
   /** Real plugin manifests backing `profile: mock` cases. */
   mockPlugins?: ValetPlugin[];
+  /** Real plugin manifests backing `profile: integration`/`full` cases. */
+  realPlugins?: ValetPlugin[];
+  /** Live credentials keyed by credential service (see loadEvalCredentials). */
+  credentials?: Record<string, string>;
+  /** Result of the Docker probe. false → `profile: full` cases SKIP. */
+  dockerAvailable?: boolean;
+  /** Factory for the `profile: full` sandbox provider (a Docker provider). */
+  fullSandboxProvider?: () => SandboxProvider;
   /** Override every case's timeout. */
   timeoutMs?: number;
   /** Save each finished case's trajectory as a new baseline. */
@@ -56,15 +63,25 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
     opts.onCaseStart?.(evalCase, index, cases.length);
 
     const profile = evalCase.profile ?? "unit";
-    if (!SUPPORTED_PROFILES.has(profile)) {
-      entries.push({
-        caseId: evalCase.id,
-        status: "skip",
-        skipReason: `profile ${profile} is not supported yet (integration/full: TKAI-336)`,
-        durationMs: 0,
-        checkResults: [],
-      });
-      continue;
+    const skip = (skipReason: string): void => {
+      entries.push({ caseId: evalCase.id, status: "skip", skipReason, durationMs: 0, checkResults: [] });
+    };
+
+    if (profile === "integration" || profile === "full") {
+      // Missing credentials SKIP, never FAIL: an eval box without a GitHub
+      // token has nothing to measure, and a red row would cry wolf.
+      const missing = (evalCase.required_credentials ?? []).filter(
+        (service) => opts.credentials?.[service] === undefined,
+      );
+      if (missing.length > 0) {
+        const hints = missing.map((s) => envKeyForService(s) ?? s).join(", ");
+        skip(`missing credential(s): ${missing.join(", ")}. Set ${hints} in .env.eval.`);
+        continue;
+      }
+      if (profile === "full" && opts.dockerAvailable !== true) {
+        skip("Docker is not available. Start the Docker daemon to run full-profile cases.");
+        continue;
+      }
     }
 
     let entry: ScorecardEntry;
@@ -81,6 +98,11 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
         model: evalCase.model ?? opts.model,
         ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
         ...(opts.mockPlugins !== undefined ? { mockPlugins: opts.mockPlugins } : {}),
+        ...(opts.realPlugins !== undefined ? { realPlugins: opts.realPlugins } : {}),
+        ...(opts.credentials !== undefined ? { credentials: opts.credentials } : {}),
+        ...(profile === "full" && opts.fullSandboxProvider !== undefined
+          ? { sandboxProvider: opts.fullSandboxProvider() }
+          : {}),
       });
 
       const checkResults = await runChecks(evalCase.checks, result.trajectory, {

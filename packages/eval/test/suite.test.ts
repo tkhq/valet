@@ -93,14 +93,14 @@ describe("runSuite", () => {
     faux.unregister();
   });
 
-  it("skips unsupported profiles with a reason", async () => {
+  it("fails an integration case loudly when no realPlugins are wired", async () => {
     const dir = mkdtempSync(join(tmpdir(), "valet-eval-suite-"));
-    const result = await runSuite(
-      [makeCase({ id: "integration", profile: "integration" }), makeCase({ id: "full", profile: "full" })],
-      { model: "anthropic/claude-haiku-4-5", baselinesDir: dir },
-    );
-    expect(result.entries.every((e) => e.status === "skip")).toBe(true);
-    expect(result.entries[0].skipReason).toContain("TKAI-336");
+    const result = await runSuite([makeCase({ id: "integration", profile: "integration" })], {
+      model: "anthropic/claude-haiku-4-5",
+      baselinesDir: dir,
+    });
+    expect(result.entries[0].status).toBe("fail");
+    expect(result.entries[0].error).toContain("realPlugins");
   });
 
   it("fails a mock case loudly when the suite has no mockPlugins", async () => {
