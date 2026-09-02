@@ -48,9 +48,9 @@ broker; per-session reference allowlists; write access of any kind.
 
 3. **A sandbox principal only.** An earlier revision read `c.var.user`, which
    the sandbox rung never sets. That answered a signed-in browser session and
-   threw on the CLI's own requests. The sibling browse route
-   (`/api/onepassword/items`) deliberately strips field values; a route that
-   returns them must not be reachable by a cookie.
+   threw on the CLI's own requests. No cookie-authenticated 1Password route
+   returns a value (`GET /api/onepassword/vaults` lists titles only); a route
+   that returns values must not be reachable by a cookie.
 
 4. **Values cross as base64, in a positional array.** The response carries
    `values`, one entry per requested reference in request order, or `null`

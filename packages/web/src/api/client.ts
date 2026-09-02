@@ -99,8 +99,6 @@ import type {
   ListAllWorkflowRunsResponse,
   ListOrgPoliciesResponse,
   ListPolicyOverridesResponse,
-  ListOpItemsResponse,
-  ListOpVaultsResponse,
   CreateLlmProviderRequest,
   CreateLlmProviderResponse,
   GetLlmProviderPreferencesResponse,
@@ -136,8 +134,6 @@ import type {
   InstallWorkflowTemplateResponse,
   MeResponse,
   OnePasswordSettingsResponse,
-  OpItemDetailResponse,
-  OpSuggestionsResponse,
   OrgDirectoryResponse,
   OrgMembersResponse,
   OrgPluginsResponse,
@@ -1112,21 +1108,6 @@ export const api = {
     request<OnePasswordSettingsResponse>("GET", "/onepassword/settings"),
   putOnePasswordSettings: (body: PutOnePasswordSettingsRequest) =>
     request<OnePasswordSettingsResponse>("PUT", "/onepassword/settings", body),
-  listOpVaults: (scope: "org" | "personal") =>
-    request<ListOpVaultsResponse>("GET", `/onepassword/vaults?scope=${scope}`),
-  listOpSuggestions: (scope: "org" | "personal") =>
-    request<OpSuggestionsResponse>("GET", `/onepassword/suggestions?scope=${scope}`),
-  listOpItems: (scope: "org" | "personal", vaultId: string, cursor?: string) =>
-    request<ListOpItemsResponse>(
-      "GET",
-      `/onepassword/vaults/${encodeURIComponent(vaultId)}/items?scope=${scope}` +
-        (cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""),
-    ),
-  getOpItemDetail: (scope: "org" | "personal", vaultId: string, itemId: string) =>
-    request<OpItemDetailResponse>(
-      "GET",
-      `/onepassword/vaults/${encodeURIComponent(vaultId)}/items/${encodeURIComponent(itemId)}?scope=${scope}`,
-    ),
 
   // skills — the markdown playbooks the agent reads. The catalog mixes the
   // plugin-supplied ones with the stored ones the caller owns. Only a

@@ -41,8 +41,6 @@ function fakeOnePassword(
   return {
     tokenConnected: unused,
     listVaults: unused,
-    listItems: unused,
-    getItem: unused,
     resolveReference: unused,
     findCredentialForService: async () => null,
     resolveCredential,

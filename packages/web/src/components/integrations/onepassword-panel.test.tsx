@@ -1,20 +1,13 @@
 // @vitest-environment jsdom
 /**
- * 1Password panel on `/integrations`. Mocks `~/api/onepassword`,
- * `~/api/integrations`, and `~/api/settings` the same way the old
- * Organization · 1Password suite mocked them — these tests only care
- * what the panel renders and which mutation it fires.
+ * Organization · 1Password panel. Mocks `~/api/onepassword`,
+ * `~/api/integrations`, and `~/api/settings`: these tests only care what the
+ * panel renders and which mutation it fires.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type {
-  CredentialSummary,
-  ListOpItemsResponse,
-  ListOpVaultsResponse,
-  OnePasswordSettingsResponse,
-  OpItemDetailResponse,
-} from "@valet/api/wire";
+import type { OnePasswordSettingsResponse } from "@valet/api/wire";
 import { ApiError } from "~/api/client";
 
 const putSettingsMutate = vi.fn();
@@ -28,53 +21,17 @@ let settingsData: OnePasswordSettingsResponse | undefined = {
   orgTokenConnected: false,
   personalTokenConnected: false,
 };
-let userCredentialsData: { credentials: CredentialSummary[] } = { credentials: [] };
-let orgCredentialsData: { credentials: CredentialSummary[] } = { credentials: [] };
-let vaultsData: ListOpVaultsResponse = { vaults: [{ id: "v1", title: "Vault One" }] };
-let itemsData: ListOpItemsResponse = { items: [{ id: "i1", title: "Item One", vaultId: "v1" }] };
-let itemDetailData: OpItemDetailResponse = {
-  id: "i1",
-  title: "Item One",
-  fields: [{ id: "f1", title: "credential", fieldType: "CONCEALED" }],
-};
 
 vi.mock("~/api/settings", () => ({
   useOrg: () => ({ data: orgData, isLoading: false, error: null }),
 }));
 
-let suggestionsData: { suggestions: unknown[]; unreadableVaults: string[] } | undefined = {
-  suggestions: [],
-  unreadableVaults: [],
-};
-
 vi.mock("~/api/onepassword", () => ({
   useOnePasswordSettings: () => ({ data: settingsData, isLoading: false, error: null }),
-  useOpSuggestions: () => ({ data: suggestionsData, isLoading: false, error: null }),
   usePutOnePasswordSettings: () => ({ mutate: putSettingsMutate, isPending: false, error: null }),
-  useOpVaults: () => ({ data: vaultsData, isLoading: false, error: null }),
-  useOpItems: (_scope: string, vaultId: string | undefined) => ({
-    data: vaultId ? itemsData : undefined,
-    isLoading: false,
-    error: null,
-  }),
-  useOpItemDetail: (_scope: string, vaultId: string | undefined, itemId: string | undefined) => ({
-    data: vaultId && itemId ? itemDetailData : undefined,
-    isLoading: false,
-    error: null,
-  }),
 }));
 
 vi.mock("~/api/integrations", () => ({
-  useCredentials: (scope: "user" | "org" = "user", opts?: { enabled?: boolean }) => {
-    if (scope === "org") {
-      return {
-        data: opts?.enabled === false ? undefined : orgCredentialsData,
-        isLoading: false,
-        error: null,
-      };
-    }
-    return { data: userCredentialsData, isLoading: false, error: null };
-  },
   useConnectCredential: () => ({
     mutate: connectMutate,
     mutateAsync: connectMutateAsync,
@@ -92,15 +49,6 @@ describe("OnePasswordPanel", () => {
     connectMutateAsync.mockResolvedValue({ ok: true });
     orgData = { callerRole: "admin" };
     settingsData = { allowPersonal: false, orgTokenConnected: false, personalTokenConnected: false };
-    userCredentialsData = { credentials: [] };
-    orgCredentialsData = { credentials: [] };
-    vaultsData = { vaults: [{ id: "v1", title: "Vault One" }] };
-    itemsData = { items: [{ id: "i1", title: "Item One", vaultId: "v1" }] };
-    itemDetailData = {
-      id: "i1",
-      title: "Item One",
-      fields: [{ id: "f1", title: "credential", fieldType: "CONCEALED" }],
-    };
     vi.stubGlobal("confirm", vi.fn(() => true));
   });
 

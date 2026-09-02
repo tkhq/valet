@@ -32,11 +32,6 @@ function fakeClient(overrides?: Partial<OpClient>): OpClient {
     items: {
       list: async () => [{ id: "i1", title: "Item One", vaultId: "v1" }],
       getWithSecrets: async () => ({ title: "Item One", fields: [] }),
-      get: async () => ({
-        id: "i1",
-        title: "Item One",
-        fields: [{ id: "f1", title: "credential", fieldType: "Concealed" }],
-      }),
     },
     ...overrides,
   };
@@ -322,18 +317,16 @@ describe("createOnePasswordService", () => {
       getAllowPersonal: async () => true,
       createClient: async () =>
         fakeClient({
-          items: {
-            getWithSecrets: async () => ({ title: "", fields: [] }),
+          vaults: {
             list: async () => {
               throw new OnePasswordAuthError("already typed, do not wrap again");
             },
-            get: async () => ({ id: "i1", title: "Item One", fields: [] }),
           },
         }),
     });
     try {
-      await svc.listItems("org", ctx, "v1");
-      expect.unreachable("expected listItems to throw");
+      await svc.listVaults("org", ctx);
+      expect.unreachable("expected listVaults to throw");
     } catch (err) {
       expect(err).toBeInstanceOf(OnePasswordAuthError);
       expect((err as Error).message).toBe("already typed, do not wrap again");
@@ -409,7 +402,6 @@ describe("findCredentialForService", () => {
           calls.push("getWithSecrets");
           return { title: "Google Calendar", fields: [{ id: "f1", title: "credential", fieldType: "Concealed", value: "k-123" }] };
         },
-        get: async () => ({ id: "i1", title: "Google Calendar", fields: [] }),
       },
       ...overrides,
     });
@@ -472,7 +464,6 @@ describe("findCredentialForService", () => {
           code += 1;
           return { title: "Acme", fields: [{ id: "t", title: "one-time password", fieldType: "Totp", details: { type: "Otp", content: { code: `00000${code}` } } }] };
         },
-        get: async () => ({ id: "i1", title: "Acme", fields: [] }),
       },
     });
     const svc = createOnePasswordService({

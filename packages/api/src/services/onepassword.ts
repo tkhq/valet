@@ -43,24 +43,9 @@ export interface OpItem {
   vaultId: string;
 }
 
-export interface OpItemField {
-  id: string;
-  title: string;
-  fieldType: string;
-}
-
-export interface OpItemDetail {
-  id: string;
-  title: string;
-  fields: OpItemField[];
-}
-
 /**
- * The SDK's full item, as the vault lookup reads it.
- *
- * Separate from `OpItemDetail` on purpose: that shape omits `value` so the
- * item-detail route cannot return a secret, and it must keep omitting it.
- * Only the lookup, which resolves a value by design, sees this one.
+ * The SDK's full item, as the vault lookup reads it. This is the only shape
+ * that carries field values; it never leaves the service.
  */
 export interface SdkItem {
   title: string;
@@ -79,15 +64,7 @@ export interface OpClient {
   vaults: { list(): Promise<OpVault[]> };
   items: {
     list(vaultId: string): Promise<OpItem[]>;
-    get(vaultId: string, itemId: string): Promise<OpItemDetail>;
-    /**
-     * The item WITH its secret material, for the vault lookup alone.
-     *
-     * `get` above strips field values on purpose: it backs a browse-and-pick
-     * UI that must never carry a secret. The lookup's whole job is to resolve
-     * one, so it needs a separate door rather than a widened `get` that every
-     * caller would inherit.
-     */
+    /** The item WITH its secret material, for the vault lookup alone. */
     getWithSecrets(vaultId: string, itemId: string): Promise<SdkItem>;
   };
 }
@@ -121,14 +98,8 @@ export interface OnePasswordDeps {
 
 export interface OnePasswordService {
   tokenConnected(scope: OnePasswordScope, ctx: OnePasswordCtx): Promise<boolean>;
+  /** The vaults the scope's token can read. Backs the live-server probe. */
   listVaults(scope: OnePasswordScope, ctx: OnePasswordCtx): Promise<OpVault[]>;
-  listItems(scope: OnePasswordScope, ctx: OnePasswordCtx, vaultId: string): Promise<OpItem[]>;
-  getItem(
-    scope: OnePasswordScope,
-    ctx: OnePasswordCtx,
-    vaultId: string,
-    itemId: string,
-  ): Promise<OpItemDetail>;
   resolveReference(scope: OnePasswordScope, ctx: OnePasswordCtx, reference: string): Promise<string>;
   /** The resolver-seam entry: fills the secret into a reference-carrying row. */
   resolveCredential(row: StoredCredential, ctx: OnePasswordCtx): Promise<StoredCredential>;
@@ -191,16 +162,6 @@ async function defaultCreateClient(token: string): Promise<OpClient> {
       list: async (vaultId: string) => {
         const items = await client.items.list(vaultId);
         return items.map((i) => ({ id: i.id, title: i.title, vaultId: i.vaultId }));
-      },
-      get: async (vaultId: string, itemId: string) => {
-        const item = await client.items.get(vaultId, itemId);
-        return {
-          id: item.id,
-          title: item.title,
-          // Strip field VALUES — this detail view is used for the
-          // browse-and-pick UX and must never carry secret material.
-          fields: item.fields.map((f) => ({ id: f.id, title: f.title, fieldType: f.fieldType })),
-        };
       },
       getWithSecrets: async (vaultId: string, itemId: string) => {
         const item = await client.items.get(vaultId, itemId);
@@ -396,22 +357,6 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
         return await client.vaults.list();
       } catch (err) {
         throw wrapSdkError(err, "vault listing failed");
-      }
-    },
-    async listItems(scope, ctx, vaultId) {
-      const client = await clientFor(scope, ctx);
-      try {
-        return await client.items.list(vaultId);
-      } catch (err) {
-        throw wrapSdkError(err, "item listing failed");
-      }
-    },
-    async getItem(scope, ctx, vaultId, itemId) {
-      const client = await clientFor(scope, ctx);
-      try {
-        return await client.items.get(vaultId, itemId);
-      } catch (err) {
-        throw wrapSdkError(err, "item lookup failed");
       }
     },
     resolveReference,

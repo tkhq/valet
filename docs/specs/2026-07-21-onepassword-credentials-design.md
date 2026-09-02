@@ -17,8 +17,8 @@ service-account token. Secrets are never persisted in Valet's database.
 - Runtime resolution inside the api's `buildCredentialResolver` seam
   (`packages/api/src/engine/host.ts`) — **no engine changes**.
 - Org-level and personal service-account tokens.
-- Listing routes for vaults and items (`/api/onepassword/vaults...`), kept for
-  the live-server regression test; the web no longer renders a picker.
+- `GET /api/onepassword/vaults`: the live check that a token works, and the
+  route the SDK-over-HTTP regression test drives.
 - Web UI: one 1Password page at Organization · 1Password
   (`/settings/organization/onepassword`): org token, allow-personal toggle,
   personal token.
@@ -261,10 +261,10 @@ code as of the implementing commits:
   org-scoped list independently of the caller's own credentials.
 - **1Password UI lives on Organization settings, not `/integrations`.** The
   panel moved to `/integrations` during review and back again once the vault
-  lookup made the picker and the reference list unnecessary. The picker
-  component and its browse hooks remain in the tree but nothing renders
-  them; the browse routes stay because `onepassword.live-server.test.ts`
-  drives the real SDK through one of them. Removing both is a follow-up.
+  lookup made the picker and the reference list unnecessary. The picker, its
+  browse hooks, the item and suggestion routes, and the value-stripping
+  `OpClient.items.get` were then removed as dead code. `GET /vaults` stays as
+  the token probe and the vehicle for `onepassword.live-server.test.ts`.
 - **Reference rows can still be created by the API** (`PUT
   /api/credentials/:service` with `body.onepassword`) but no UI lists or
   revokes them. Either restore that list or reject the field; open.

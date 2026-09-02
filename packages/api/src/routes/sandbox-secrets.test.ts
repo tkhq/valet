@@ -24,8 +24,6 @@ function fakeOnePassword(): OnePasswordService {
   return {
     tokenConnected: unused,
     listVaults: unused,
-    listItems: unused,
-    getItem: unused,
     findCredentialForService: async () => null,
     resolveCredential: async (row: StoredCredential) => row,
     resolveReference: async (_scope, _ctx, reference) => {

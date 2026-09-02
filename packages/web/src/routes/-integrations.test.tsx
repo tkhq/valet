@@ -219,9 +219,6 @@ vi.mock("~/api/onepassword", () => ({
     error: null,
   }),
   usePutOnePasswordSettings: () => ({ mutate: vi.fn(), isPending: false, error: null }),
-  useOpVaults: () => ({ data: { vaults: [] }, isLoading: false, error: null }),
-  useOpItems: () => ({ data: undefined, isLoading: false, error: null }),
-  useOpItemDetail: () => ({ data: undefined, isLoading: false, error: null }),
 }));
 
 // The org-provided tile's pairing block (identity-link-block.tsx) reads

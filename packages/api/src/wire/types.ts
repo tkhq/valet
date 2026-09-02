@@ -2868,12 +2868,6 @@ export interface ListOpVaultsResponse {
   vaults: { id: string; title: string }[];
 }
 
-export interface ListOpItemsResponse {
-  items: { id: string; title: string; vaultId: string }[];
-  /** Pass back as `?cursor=` for the next page. Absent on the last page. */
-  nextCursor?: string;
-}
-
 /** POST /api/sandbox-secrets/resolve — the sandbox CLI's broker call. */
 export interface ResolveSandboxSecretsResponse {
   /** One entry per requested reference, in request order: the base64 of the
@@ -2885,26 +2879,6 @@ export interface ResolveSandboxSecretsResponse {
   /** References nothing could resolve, by name and without a reason: the
    * reason would describe someone else's vault. */
   unresolved: string[];
-}
-
-export interface OpSuggestionsResponse {
-  suggestions: {
-    /** The integration the credential would be for. */
-    service: string;
-    /** The 1Password item whose title matched it. */
-    vaultId: string;
-    vaultTitle: string;
-    itemId: string;
-    itemTitle: string;
-  }[];
-  /** Vaults the scan could not read, by title, so a partial answer says so. */
-  unreadableVaults: string[];
-}
-
-export interface OpItemDetailResponse {
-  id: string;
-  title: string;
-  fields: { id: string; title: string; fieldType: string }[];
 }
 
 // ── REST: me + models (split-settings design) ─────────────────────────────
