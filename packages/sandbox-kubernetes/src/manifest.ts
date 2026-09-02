@@ -134,13 +134,11 @@ function mergeResourceOpts(
 ): SandboxResourceOpts | undefined {
   if (!defaults && !overrides) return undefined;
   const merged: SandboxResourceOpts = { ...defaults };
-  for (const key of ["cpu", "memory", "ephemeralStorage", "ephemeralStorageLimit"] as const) {
-    const value = overrides?.[key];
-    if (value !== undefined) {
-      // Narrowed per-key assignment; the union of the four keys' value
-      // types defeats a single generic assignment.
-      (merged as Record<string, string | number>)[key] = value;
-    }
+  if (overrides?.cpu !== undefined) merged.cpu = overrides.cpu;
+  if (overrides?.memory !== undefined) merged.memory = overrides.memory;
+  if (overrides?.ephemeralStorage !== undefined) merged.ephemeralStorage = overrides.ephemeralStorage;
+  if (overrides?.ephemeralStorageLimit !== undefined) {
+    merged.ephemeralStorageLimit = overrides.ephemeralStorageLimit;
   }
   return merged;
 }
