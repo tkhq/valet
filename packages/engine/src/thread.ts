@@ -1,6 +1,11 @@
 import { Agent } from "@earendil-works/pi-agent-core";
 import type { AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { getModel, isContextOverflow, streamSimple } from "@earendil-works/pi-ai/compat";
+// Root import (not /compat): the transient classifier lives in pi-ai's
+// utils and is only re-exported from the package root. It carries the
+// provider-maintained retryable/permanent taxonomy (incl. the quota
+// blacklist) — a hand-rolled copy would drift on every pi-ai upgrade.
+import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import type { Api, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
 
 type PiModel = Model<Api>;
@@ -140,6 +145,27 @@ const AUTO_CONTINUE_PROMPT =
 const MAX_CONSECUTIVE_COMPACTION_FAILURES = 3;
 
 /**
+ * Transport-level retry policy for turn LLM calls (TKAI-319). pi-ai's
+ * retryProviderRequest honors Retry-After with abortable sleeps; delays the
+ * server requests beyond the cap fail immediately so the turn-level layer
+ * (or the user) decides with visibility.
+ */
+// 2 transport retries (SDK-default parity), not more: the turn-level layer
+// above adds its own attempts, and the two multiply — 5 transport tries
+// times 3 turn attempts held one queue item for 10+ minutes.
+const TURN_STREAM_MAX_RETRIES = 2;
+const TURN_STREAM_MAX_RETRY_DELAY_MS = 30_000;
+const TURN_STREAM_TIMEOUT_MS = 600_000;
+
+/**
+ * Turn-level retry defaults for transient provider errors (TKAI-319),
+ * applied only to unattended sessions (orchestrator, workflow, child). The
+ * last backoff entry repeats when maxAttempts exceeds the list.
+ */
+const UNATTENDED_TURN_RETRY_ATTEMPTS = 2;
+const UNATTENDED_TURN_RETRY_BACKOFF_MS = [10_000, 30_000];
+
+/**
  * What a compaction pass achieved. "compacted" = a summary was persisted;
  * "pruned" = tool-output elision only; "noop" = the pass found nothing to
  * reclaim. Proactive callers treat "noop" as breaker-worthy: the trigger
@@ -159,6 +185,14 @@ const MAX_SUMMARIZE_OVERFLOW_RETRIES = 3;
 let nextId = 1;
 function uid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${(nextId++).toString(36)}`;
+}
+
+/** Plain unref'd sleep for retry backoff — abort is re-checked after it. */
+function delay(ms: number): Promise<void> {
+  return new Promise((res) => {
+    const t = setTimeout(res, ms) as { unref?: () => void };
+    if (typeof t.unref === "function") t.unref();
+  });
 }
 
 /**
@@ -3196,7 +3230,91 @@ export class Thread {
       } finally {
         this.overflowRetryInProgress = false;
       }
+      return;
     }
+
+    await this.retryTransientTurnError();
+  }
+
+  /**
+   * Turn-level retry for transient provider errors (TKAI-319). Engages only
+   * when the turn settled with a classified-transient error AND the session
+   * is unattended (or `turnRetry` is configured explicitly) — an interactive
+   * user sees the error and decides. Each retry drops the failed assistant
+   * message and calls `agent.continue()`, pi-agent-core's native re-run for
+   * a transcript ending on a user/tool-result message — re-prompting would
+   * append a SECOND copy of the user content and the model could act on it
+   * twice. The transport layer already retried underneath; this catches the
+   * failures that exhausted it (long rate-limit windows, capacity events).
+   */
+  private async retryTransientTurnError(): Promise<void> {
+    const cfgd = this.session.options.turnRetry;
+    const purpose = this.session.options.purpose;
+    const unattended = purpose === "orchestrator" || purpose === "workflow" || purpose === "child";
+    const maxAttempts = cfgd?.maxAttempts ?? (unattended ? UNATTENDED_TURN_RETRY_ATTEMPTS : 0);
+    if (maxAttempts <= 0) return;
+    // An explicitly configured empty backoff list means "no wait", not
+    // "crash on index" — but an absent/empty list falls back to defaults.
+    const backoff = cfgd?.backoffMs?.length ? cfgd.backoffMs : UNATTENDED_TURN_RETRY_BACKOFF_MS;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const last = this.agent.state.messages[this.agent.state.messages.length - 1];
+      if (
+        !last ||
+        last.role !== "assistant" ||
+        last.stopReason !== "error" ||
+        !isRetryableAssistantError(last)
+      ) {
+        return;
+      }
+      const waitMs = backoff[Math.min(attempt - 1, backoff.length - 1)] ?? 0;
+      const errBrief = (last.errorMessage ?? "provider error").slice(0, 200);
+      this.emitError(
+        "turn_transient_retry",
+        `Provider error looks transient (${errBrief}). Retrying in ${Math.round(waitMs / 1000)}s (attempt ${attempt}/${maxAttempts}).`,
+      );
+      if ((await this.backoffOrStandDown(waitMs)) === "stand-down") return;
+      // Drop the failed assistant message; the transcript now ends on the
+      // user/tool-result message, which is exactly Agent.continue()'s
+      // contract for re-running the turn without duplicating the prompt.
+      this.agent.state.messages = this.agent.state.messages.slice(0, -1);
+      await this.agent.continue();
+      await this.agent.waitForIdle();
+    }
+  }
+
+  /**
+   * Abort- and steer-aware backoff for the transient retry (TKAI-319).
+   * Nothing streams during the wait, so `agent.abort()` cannot interrupt
+   * it — instead the sleep is chunked: `this.aborted` every second, the
+   * durable queue item every 5s and once at the end. A superseded or
+   * aborted item must not spawn a zombie retry racing its successor.
+   */
+  private async backoffOrStandDown(totalMs: number): Promise<"proceed" | "stand-down"> {
+    const store = this.session.providers.store;
+    const itemId = this.runningItem?.id;
+    const checkItem = async (): Promise<boolean> => {
+      if (!itemId) return true;
+      const current = await store.getQueueItem(this.session.id, itemId);
+      return (
+        !!current &&
+        current.status === "running" &&
+        !current.supersededByItemId &&
+        current.abortRequestedAt === undefined
+      );
+    };
+    const until = Date.now() + totalMs;
+    let lastItemCheck = Date.now();
+    while (Date.now() < until) {
+      await delay(Math.min(1_000, until - Date.now()));
+      if (this.aborted) return "stand-down";
+      if (Date.now() - lastItemCheck >= 5_000) {
+        lastItemCheck = Date.now();
+        if (!(await checkItem())) return "stand-down";
+      }
+    }
+    if (this.aborted) return "stand-down";
+    return (await checkItem()) ? "proceed" : "stand-down";
   }
 
   /**
@@ -3549,7 +3667,21 @@ export class Thread {
         model: this.session.options.model,
         systemPrompt: this.buildBaseSystemPrompt(),
       },
-      streamFn: streamSimple,
+      // Deliberate transport-retry policy (TKAI-319): pi-ai wraps provider
+      // requests in an abortable backoff only when maxRetries is set — the
+      // bare streamSimple left retries to whatever the SDK defaulted to.
+      // The spread keeps everything pi-agent-core passes (apiKey, signal);
+      // only the three knobs are pinned.
+      // Defaults, not overrides (TKAI-319): anything pi-agent-core forwards
+      // from its own config wins — pinning here would silently disable the
+      // upstream knob forever.
+      streamFn: (model, context, options) =>
+        streamSimple(model, context, {
+          ...options,
+          maxRetries: options?.maxRetries ?? TURN_STREAM_MAX_RETRIES,
+          maxRetryDelayMs: options?.maxRetryDelayMs ?? TURN_STREAM_MAX_RETRY_DELAY_MS,
+          timeoutMs: options?.timeoutMs ?? TURN_STREAM_TIMEOUT_MS,
+        }),
       // Filter out custom AgentMessage types (decision_gate, compaction, etc.)
       // before the LLM sees them. They live in the engine DAG, not in LLM context.
       convertToLlm: (messages: AgentMessage[]): Message[] => {

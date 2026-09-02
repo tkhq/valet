@@ -474,6 +474,11 @@ export class Session {
     // round-trip it through options) so the next `toData()` save can't stomp
     // it back to undefined — and so `setStartRef`'s single-shot guard sees it.
     if (options.startRef === undefined) options.startRef = data.startRef;
+    // Preserve the persisted purpose the same way (TKAI-319): purpose is
+    // behavior-bearing now — it selects turn retry and cache retention — and
+    // a child session that loses it across an api restart would stop riding
+    // out the very outage that restarted the api.
+    if (options.purpose === undefined) options.purpose = data.purpose;
     const threadDatas = await providers.store.listThreads(data.id);
     for (const td of threadDatas) {
       const thread = new Thread(session, td);

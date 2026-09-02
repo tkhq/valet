@@ -2046,6 +2046,20 @@ export interface CreateSessionOptions {
   /** Compaction tuning. See CompactionConfig defaults. */
   compaction?: CompactionConfig;
   /**
+   * Turn-level retry for transient provider errors (TKAI-319). When a turn's
+   * assistant message settles with a transient error (rate limit, overload,
+   * 5xx, connection drop), the thread waits and re-runs the turn. Defaults:
+   * unattended purposes (orchestrator, workflow, child) retry twice with
+   * [10s, 30s] backoff; interactive sessions never auto-retry — a human is
+   * present to decide. pi-ai's transport-level retry runs underneath either
+   * way; this layer catches the failures that exhaust it.
+   */
+  turnRetry?: {
+    maxAttempts?: number;
+    /** Backoff before each retry, in ms; the last entry repeats. */
+    backoffMs?: number[];
+  };
+  /**
    * Max time (ms) a tool op will wait for the sandbox attachment to become
    * ready before failing with WorkspaceProvisioningError. Default: 60_000
    * (SANDBOX_READY_TIMEOUT_MS, defined in sandbox/policy.ts).
