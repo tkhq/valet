@@ -16,6 +16,10 @@ export interface AppVariables {
   providers: Providers;
   user: AuthUser;
   sandbox?: SandboxPrincipal;
+  /** Set when the request authenticated through a team-scoped API key
+   * (`apikey.metadata.teamId`). Routes that resolve an orchestrator read
+   * this to route to the team's assistant instead of the user's. */
+  teamScope?: string;
 }
 
 export type AppEnv = { Variables: AppVariables };
