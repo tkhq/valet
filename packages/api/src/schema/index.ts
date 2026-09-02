@@ -368,6 +368,13 @@ export const agentSessions = pgTable(
     sandboxReclaimedAt: bigint("sandbox_reclaimed_at", { mode: "number" }),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+    // Epoch ms of the most recent user or agent activity in this session.
+    // Updated on every prompt submission (web, channel, child signal) and
+    // on session create. The session list sorts by this column so a
+    // long-lived channel-bound session rises when it receives a message.
+    // Nullable: pre-column rows default to NULL; queries fall back to
+    // `updatedAt` via COALESCE.
+    lastActivityAt: bigint("last_activity_at", { mode: "number" }),
   },
   (t) => [
     index("agent_sessions_user").on(t.userId),

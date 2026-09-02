@@ -842,6 +842,15 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     probe: { kind: "column", table: "engine_entries", column: "seq" },
     sql: 'ALTER TABLE "engine_entries" ADD COLUMN IF NOT EXISTS "seq" bigint GENERATED ALWAYS AS IDENTITY NOT NULL',
   },
+  {
+    // Epoch ms of the most recent activity in this session (TKAI-341).
+    // The session list sorts by this column so a long-lived channel-bound
+    // session rises when it receives a message. Null on rows from before
+    // the column: queries fall back to `updated_at` via COALESCE.
+    describe: "agent_sessions.last_activity_at column",
+    probe: { kind: "column", table: "agent_sessions", column: "last_activity_at" },
+    sql: 'ALTER TABLE "agent_sessions" ADD COLUMN IF NOT EXISTS "last_activity_at" bigint',
+  },
 ];
 
 /** The repairs this database still lacks, by catalog probe — one query per

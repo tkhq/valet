@@ -1260,6 +1260,14 @@ export class ChannelHost {
       },
     );
 
+    // Bump lastActivityAt so a long-lived channel-bound session rises in
+    // the session list when it receives a message (TKAI-341).
+    const channelNow = this.now();
+    await this.deps.db
+      .update(agentSessions)
+      .set({ lastActivityAt: channelNow })
+      .where(eq(agentSessions.id, session.id));
+
     // Tie the stream registration to the admitted submission, so only THIS
     // submission's `message_start` opens a stream. Without the binding, a
     // registration outlives its turn (a queued item superseded before it is
