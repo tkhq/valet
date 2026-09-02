@@ -1,10 +1,10 @@
-# Part 12: Security Engagement Credentials via 1Password
+# Part 12: Security engagement credentials via 1Password
 
 *Depends on: Part 00, Part 01, Part 04, Part 05, Part 09, Part 11. Also depends on `docs/specs/2026-07-21-onepassword-credentials-design.md` (PR #421) and the sandbox secret broker runtime (PR #421). Conformance: L1+ (config, preflight, broker allowlist); L3 pulls in the delivery path.*
 
 ## Purpose
 
-Part 10 kept credentials in Postgres as ciphertext. It solved the plaintext leak on the flat needs-answer path, but it kept three problems: (a) a copy of every value lived in Valet, so teams already storing secrets in 1Password had to copy and rotate twice; (b) the persona sandbox mounted the plaintext as a file the agent could `cat`, so a prompt-injected persona could echo the value into a tool call or a message; (c) Valet's DB is now a target for a credential dump.
+Part 10 kept credentials in Postgres as ciphertext. It solved the plaintext leak on the flat needs-answer path, but it kept three problems. First, a copy of every value lived in Valet, so teams already storing secrets in 1Password had to copy and rotate twice. Second, the persona sandbox mounted the plaintext as a file the agent could `cat`, so a prompt-injected persona could echo the value into a tool call or a message. Third, Valet's DB became a target for a credential dump.
 
 Part 12 removes the vault and consumes PR #421's 1Password + sandbox-secret-broker plumbing.
 
