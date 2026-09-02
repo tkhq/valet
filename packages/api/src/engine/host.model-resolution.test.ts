@@ -59,6 +59,15 @@ describe("resolveModelSpec (catalog-aware bridge)", () => {
       expect(resolved?.apiKey).toBe("env-anthropic");
     });
 
+    it("resolves Claude Fable 5 from the baked Anthropic registry", async () => {
+      vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic");
+      const resolved = await resolveModelSpec(db, credentials, orgId, "anthropic/claude-fable-5");
+      expect(resolved?.model.id).toBe("claude-fable-5");
+      expect(resolved?.model.name).toBe("Claude Fable 5");
+      expect(resolved?.model.provider).toBe("anthropic");
+      expect(resolved?.canonicalId).toBe("anthropic/claude-fable-5");
+    });
+
     it("namespaced anthropic id keeps its namespace in the canonical id (wire id stays bare)", async () => {
       vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic");
       const resolved = await resolveModelSpec(db, credentials, orgId, `anthropic/${ANTHROPIC_MODEL}`);

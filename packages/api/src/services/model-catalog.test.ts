@@ -35,7 +35,7 @@ describe("model catalog", () => {
       try {
         const entries = await buildOrgCatalog(db, credentials, orgId);
         const anthropicIds = getModels("anthropic").map((m) => m.id);
-        expect(anthropicIds.length).toBeGreaterThan(0);
+        expect(anthropicIds).toContain("claude-fable-5");
 
         for (const id of anthropicIds) {
           const entry = entries.find((e) => e.id === `anthropic/${id}`);
@@ -204,8 +204,8 @@ describe("model catalog", () => {
         models: [
           { id: "moonshotai/kimi-k2.6", name: "Kimi K2.6" },
           {
-            id: "moonshotai/kimi-k3",
-            name: "MoonshotAI: Kimi K3",
+            id: "moonshotai/not-in-baked-registry",
+            name: "MoonshotAI: Not in baked registry",
             contextWindow: 1_048_576,
             pricing: { input: 3, output: 15 },
           },
@@ -221,12 +221,12 @@ describe("model catalog", () => {
       const openrouterEntries = entries.filter((e) => e.providerKind === "openrouter");
       expect(openrouterEntries.map((e) => e.id).sort()).toEqual([
         "openrouter/moonshotai/kimi-k2.6",
-        "openrouter/moonshotai/kimi-k3",
+        "openrouter/moonshotai/not-in-baked-registry",
       ]);
-      const k3 = openrouterEntries.find((e) => e.id === "openrouter/moonshotai/kimi-k3");
-      expect(k3?.name).toBe("MoonshotAI: Kimi K3");
-      expect(k3?.contextWindow).toBe(1_048_576);
-      expect(k3?.pricing).toEqual({ input: 3, output: 15 });
+      const liveModel = openrouterEntries.find((e) => e.id === "openrouter/moonshotai/not-in-baked-registry");
+      expect(liveModel?.name).toBe("MoonshotAI: Not in baked registry");
+      expect(liveModel?.contextWindow).toBe(1_048_576);
+      expect(liveModel?.pricing).toEqual({ input: 3, output: 15 });
       for (const e of openrouterEntries) expect(e.active).toBe(false);
     });
   });
