@@ -117,13 +117,13 @@ function parseCheck(raw: unknown, i: number, source: string): Check {
     if (typeof v !== "string") throw new CaseValidationError(source, `\`${at}.${key}\` must be a string`);
     return v;
   };
-  const validPattern = (pattern: string): string => {
+  const validPattern = (pattern: string, key = "pattern"): string => {
     try {
       new RegExp(pattern);
     } catch (err) {
       throw new CaseValidationError(
         source,
-        `\`${at}.pattern\` is not a valid regular expression: ${err instanceof Error ? err.message : String(err)}`,
+        `\`${at}.${key}\` is not a valid regular expression: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
     return pattern;
@@ -186,6 +186,23 @@ function parseCheck(raw: unknown, i: number, source: string): Check {
     case "max_cost":
     case "max_duration":
       return { type, value: requireNumber("value") };
+    case "verify_command": {
+      const expectOutput = raw.expect_output !== undefined && raw.expect_output !== null
+        ? validPattern(requireString("expect_output"), "expect_output")
+        : undefined;
+      const expectExitCode = optNumber("expect_exit_code");
+      const timeoutS = optNumber("timeout_s");
+      if (timeoutS !== undefined && (!Number.isInteger(timeoutS) || timeoutS < 1 || timeoutS > 600)) {
+        throw new CaseValidationError(source, `\`${at}.timeout_s\` must be an integer from 1 to 600`);
+      }
+      return {
+        type,
+        command: requireString("command"),
+        ...(expectOutput !== undefined ? { expect_output: expectOutput } : {}),
+        ...(expectExitCode !== undefined ? { expect_exit_code: expectExitCode } : {}),
+        ...(timeoutS !== undefined ? { timeout_s: timeoutS } : {}),
+      };
+    }
     case "judge_output":
     case "judge_trajectory": {
       const threshold = optNumber("threshold");
@@ -305,6 +322,24 @@ export function parseEvalCase(raw: unknown, source: string): EvalCase {
     turns: parseTurns(raw, source),
     checks: checksRaw.map((c, i) => parseCheck(c, i, source)),
   };
+
+  // verify_command runs a real shell command in the case sandbox; the
+  // virtual sandbox only simulates exec, and product-drive orchestrator
+  // sessions are sandbox-less. Only `profile: full` has a real shell.
+  if (evalCase.checks.some((c) => c.type === "verify_command")) {
+    if (profile !== "full") {
+      throw new CaseValidationError(
+        source,
+        "`verify_command` checks need `profile: full` (a real Docker sandbox; other profiles simulate exec)",
+      );
+    }
+    if (drive === "product") {
+      throw new CaseValidationError(
+        source,
+        "`verify_command` checks are not supported with `drive: product` (orchestrator sessions are sandbox-less)",
+      );
+    }
+  }
   const description = optionalString(raw, "description", source);
   const model = optionalString(raw, "model", source);
   const timeoutMs = optionalNumber(raw, "timeout_ms", source);

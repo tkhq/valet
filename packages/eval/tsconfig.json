@@ -9,6 +9,7 @@
   "references": [
     { "path": "../engine" },
     { "path": "../api" },
-    { "path": "../sandbox-docker" }
+    { "path": "../sandbox-docker" },
+    { "path": "../sandbox-local" }
   ]
 }

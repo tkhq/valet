@@ -121,6 +121,28 @@ grading model, returns `{score, reason}` JSON, passes at score >= threshold
 (default 4). Every judge failure mode becomes a FAIL result with the reason
 in `detail`, never a crash.
 
+## Builder cases (`verify_command`)
+
+Builder cases have the agent write code and produce a codebase in a real
+Docker sandbox (`profile: full`). Verification is HARNESS-run: after the
+agent settles and before sandbox teardown, the runner executes each
+`verify_command` check in the same sandbox and scores the real exit code
+and output (`expect_exit_code`, default 0; `expect_output` regex). The
+command runs outside the agent loop against whatever files the agent
+actually wrote, so the agent cannot pass by echoing expected output.
+
+Rules: `verify_command` needs `profile: full` (the virtual sandbox only
+simulates exec) and the engine drive (product-drive orchestrator sessions
+are sandbox-less); the loader rejects both misuses. Write verification
+commands against workspace-relative paths, and prefer running the produced
+code (or its own test suite) over grepping file contents.
+
+Starter builder cases: `builder-cli-script` (single file, three behavioral
+probes including the error path), `builder-node-library` (multi-file
+library whose OWN tests the harness runs via `node --test`), and
+`builder-refactor` (two turns; both the original and the steered behavior
+must survive on the final codebase).
+
 ## Scorecard and baselines
 
 `scorecard.ts` prints PASS/FAIL/SKIP per case with duration, cost, and

@@ -251,6 +251,34 @@ export function runDeterministicCheck(check: DeterministicCheck, trajectory: Tra
       }
       return pass(check);
     }
+
+    case "verify_command": {
+      const verification = trajectory.verifications?.find((v) => v.command === check.command);
+      if (verification === undefined) {
+        return fail(
+          check,
+          `the harness did not run \`${check.command}\`. verify_command needs profile: full and the engine drive.`,
+        );
+      }
+      const detailTail = `output: ${truncate(verification.output || "(empty)")}`;
+      if (verification.timedOut === true) {
+        return fail(check, `\`${check.command}\` timed out after ${check.timeout_s ?? 120}s. ${detailTail}`);
+      }
+      const expectedExit = check.expect_exit_code ?? 0;
+      if (verification.exitCode !== expectedExit) {
+        return fail(
+          check,
+          `\`${check.command}\` exited ${verification.exitCode} (expected ${expectedExit}). ${detailTail}`,
+        );
+      }
+      if (check.expect_output !== undefined && !new RegExp(check.expect_output).test(verification.output)) {
+        return fail(
+          check,
+          `\`${check.command}\` output did not match /${check.expect_output}/. ${detailTail}`,
+        );
+      }
+      return pass(check, `\`${check.command}\` exited ${verification.exitCode}`);
+    }
   }
 }
 

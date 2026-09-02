@@ -92,6 +92,21 @@ export interface Trajectory {
   children?: Trajectory[];
   /** For a child trajectory: callId of the `task` tool call that spawned it. */
   spawnedByCallId?: string;
+  /**
+   * Results of harness-run `verify_command` checks, executed in the case
+   * sandbox after settlement and before teardown. Keyed by command in the
+   * check handler.
+   */
+  verifications?: VerificationResult[];
+}
+
+/** One harness-run verification command's real result. */
+export interface VerificationResult {
+  command: string;
+  exitCode: number;
+  /** Combined stdout + stderr, in that order. */
+  output: string;
+  timedOut?: boolean;
 }
 
 // ── Checks ──────────────────────────────────────────────────────────────────
@@ -136,7 +151,25 @@ export type DeterministicCheck =
     }
   | { type: "max_tokens"; value: number }
   | { type: "max_cost"; value: number }
-  | { type: "max_duration"; value: number };
+  | { type: "max_duration"; value: number }
+  | {
+      /**
+       * HARNESS-run verification for builder cases: after the agent
+       * settles, the harness executes `command` in the case's sandbox and
+       * scores the real exit code and output. The agent cannot game it —
+       * the command runs outside the agent loop against whatever codebase
+       * the agent actually produced. Requires `profile: full` (a real
+       * Docker sandbox; the virtual sandbox only simulates exec).
+       */
+      type: "verify_command";
+      command: string;
+      /** Regex the combined stdout+stderr must match. */
+      expect_output?: string;
+      /** Expected exit code. Default 0. */
+      expect_exit_code?: number;
+      /** Command timeout in seconds. Default 120. */
+      timeout_s?: number;
+    };
 
 /** LLM-as-judge checks — score with a grading model, pass at score >= threshold. */
 export type JudgeCheck =
@@ -167,6 +200,7 @@ export const CHECK_TYPES = [
   "max_tokens",
   "max_cost",
   "max_duration",
+  "verify_command",
   "judge_output",
   "judge_trajectory",
   "judge_equivalence",
