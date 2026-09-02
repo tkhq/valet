@@ -89,7 +89,11 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
   // reads never reach the frozen actor's personal vault. One policy, shared
   // with the api-side resolver: `onePasswordScopesFor`.
   const rows = await db
-    .select({ ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId })
+    .select({
+      ownerType: agentSessions.ownerType,
+      ownerId: agentSessions.ownerId,
+      userId: agentSessions.userId,
+    })
     .from(agentSessions)
     .where(eq(agentSessions.id, sandbox.sessionId))
     .limit(1);
@@ -102,8 +106,13 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
   // is the unknown-owner case `onePasswordScopesFor` already answers with the
   // org scope alone, which is also the right answer for a team- or org-owned
   // session and for a user-owned one that is not this token holder's.
+  // `owner_id` carries a DEFAULT '' and rows predating the owner columns
+  // still hold it, so a user-owned row names its owner in `user_id` — the
+  // same `NULLIF(owner_id, '')` fallback `SCHEMA_REPAIRS` uses. A personal
+  // owner move rewrites both columns, so this cannot re-open the gap above.
   const row = rows[0];
-  const isOwnUserSession = row?.ownerType === "user" && row.ownerId === sandbox.userId;
+  const ownerUserId = row?.ownerType === "user" ? row.ownerId || row.userId : undefined;
+  const isOwnUserSession = ownerUserId !== undefined && ownerUserId === sandbox.userId;
   const scopes = onePasswordScopesFor(isOwnUserSession ? "user" : undefined);
   const ctx = { orgId: sandbox.orgId, userId: sandbox.userId };
 

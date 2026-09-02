@@ -289,6 +289,44 @@ describe("POST /api/sandbox-secrets/resolve", () => {
     expect(body.values[0]).toBeNull();
   });
 
+  // `owner_id` carries a DEFAULT '', and rows predating the owner columns
+  // still hold it. Such a row is owned by its `user_id`, so requiring a
+  // populated `owner_id` would take the personal scope away from every
+  // session created before those columns were filled in.
+  it("a legacy user-owned row with an empty owner_id still reaches the personal vault", async () => {
+    api = await bootTestApi();
+    const scopesTried: string[] = [];
+    api.providers.onePassword = {
+      ...fakeOnePassword(),
+      resolveReference: async (scope: string) => {
+        scopesTried.push(scope);
+        if (scope === "personal") return "PERSONAL-VAULT-VALUE";
+        throw new Error("no org token");
+      },
+    };
+
+    await api.providers.db.insert(agentSessions).values({
+      id: "sess-legacy-1",
+      userId: "user-a",
+      orgId: "local-org",
+      workspace: "/workspace",
+      ownerType: "user",
+      ownerId: "",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const { token } = await mintSandboxToken(api.providers.db, {
+      sessionId: "sess-legacy-1",
+      userId: "user-a",
+      orgId: "local-org",
+    });
+
+    const res = await resolve(["op://ok/item/field"], token);
+    const body = (await res.json()) as Resp;
+    expect(scopesTried).toEqual(["org", "personal"]);
+    expect(decode(body.values[0])).toBe("PERSONAL-VAULT-VALUE");
+  });
+
   it("values are positional, with null for a reference nothing resolved", async () => {
     api = await bootTestApi();
     api.providers.onePassword = fakeOnePassword();
