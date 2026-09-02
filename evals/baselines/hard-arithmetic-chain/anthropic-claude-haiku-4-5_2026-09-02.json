@@ -1,0 +1,48 @@
+{
+  "caseId": "hard-arithmetic-chain",
+  "model": "anthropic/claude-haiku-4-5",
+  "savedAt": "2026-09-02T19:18:29.556Z",
+  "status": "pass",
+  "trajectory": {
+    "caseId": "hard-arithmetic-chain",
+    "prompt": "Without using any tools, compute (347 * 89 - 12345) * 3 + 7^5 and reply with just the final number.",
+    "model": "anthropic/claude-haiku-4-5",
+    "turns": [
+      {
+        "index": 0,
+        "usage": {
+          "input": 2621,
+          "output": 99,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 2720
+        },
+        "cost": {
+          "input": 0.002621,
+          "output": 0.000495,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 0.003116
+        }
+      }
+    ],
+    "toolCalls": [],
+    "finalOutput": "Let me compute this step by step:\n\n1. 347 * 89 = 30,883\n2. 30,883 - 12,345 = 18,538\n3. 18,538 * 3 = 55,614\n4. 7^5 = 16,807\n5. 55,614 + 16,807 = 72,421\n\n**72421**",
+    "usage": {
+      "input": 2621,
+      "output": 99,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 2720
+    },
+    "cost": {
+      "input": 0.002621,
+      "output": 0.000495,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0.003116
+    },
+    "durationMs": 1763,
+    "stopReason": "end_turn"
+  }
+}

@@ -1,0 +1,19 @@
+# Hard suite (see hard-letter-index.yaml). Three chained operations with a
+# fifth power; bash is forbidden so the model cannot delegate. Expected
+# value computed by script: (347 * 89 - 12345) * 3 + 7^5 = 72421.
+id: hard-arithmetic-chain
+description: Chained arithmetic with a fifth power, computed without tools.
+turns:
+  - role: user
+    content: >-
+      Without using any tools, compute (347 * 89 - 12345) * 3 + 7^5 and
+      reply with just the final number.
+timeout_ms: 180000
+checks:
+  - type: output_contains
+    value: "72421"
+  - type: tool_not_called
+    tool: bash
+  - type: max_turns
+    value: 2
+  - type: no_errors

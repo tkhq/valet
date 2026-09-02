@@ -1,0 +1,48 @@
+{
+  "caseId": "hard-calendar-nth",
+  "model": "anthropic/claude-haiku-4-5",
+  "savedAt": "2026-09-02T19:18:35.403Z",
+  "status": "pass",
+  "trajectory": {
+    "caseId": "hard-calendar-nth",
+    "prompt": "Without using any tools, what is the date of the third Thursday of November 2027? Reply with just the day number.",
+    "model": "anthropic/claude-haiku-4-5",
+    "turns": [
+      {
+        "index": 0,
+        "usage": {
+          "input": 2611,
+          "output": 18,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 2629
+        },
+        "cost": {
+          "input": 0.002611,
+          "output": 0.00009,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 0.002701
+        }
+      }
+    ],
+    "toolCalls": [],
+    "finalOutput": "The third Thursday of November 2027 is the 18th.",
+    "usage": {
+      "input": 2611,
+      "output": 18,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 2629
+    },
+    "cost": {
+      "input": 0.002611,
+      "output": 0.00009,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0.002701
+    },
+    "durationMs": 762,
+    "stopReason": "end_turn"
+  }
+}

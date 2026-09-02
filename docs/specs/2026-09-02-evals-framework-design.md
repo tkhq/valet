@@ -111,6 +111,44 @@ straight from the database (DATABASE_URL, or the PGlite data dir — stop the
 api first) and writes one trajectory file per session under
 `evals/baselines/flagged/`.
 
+## The hard suite (model comparison)
+
+`evals/cases/hard/` holds cases tuned to separate model tiers. The loader
+reads one directory and does not recurse, so the default `make eval` never
+loads them and stays green on the cheap default model. The comparison demo
+is a two-run pair:
+
+```bash
+make eval EVAL_ARGS="--cases evals/cases/hard --save-baseline"   # small model
+make eval EVAL_ARGS="--cases evals/cases/hard --model anthropic/claude-sonnet-5"
+```
+
+The second run compares against the first run's baselines and prints
+improvements (fail -> pass), regressions, and token/cost deltas, with the
+baseline model named.
+
+Empirical results from tuning (2026-09-02, haiku-4-5 vs sonnet-5):
+
+- Calendar reasoning (`hard-date-math`) is the most reliable separator:
+  haiku failed every attempt, sonnet passed every attempt.
+- `hard-calendar-count` and `hard-string-pipeline` separate weakly (haiku
+  fails or flakes, sonnet mostly passes).
+- `hard-letter-index` is an INVERSE separator: haiku always passed, sonnet
+  repeatedly miscounted vowels. Kept deliberately — it demonstrates the
+  regression detector on a real behavior difference.
+- Single-skill puzzles (multi-digit arithmetic, base conversion, ciphers,
+  logic grids) do NOT separate these tiers: haiku passes them. They stay
+  as headroom cases.
+- Exact-counting cases were near coin-flips on BOTH tiers and were removed;
+  a case both models fail (or pass) randomly carries no model signal.
+
+Rules for adding hard cases: compute every expected value with a script
+(never mental arithmetic — a wrong expected value makes a case impossible
+and looks like a model failure), and re-run against both tiers before
+trusting a new case. The hard suite is a comparison instrument, not a
+gate: a red row on the small model is the point, so never wire it into CI
+as a pass/fail check.
+
 ## Known limitations
 
 - `mem_*` tools in eval sessions are Map-backed stand-ins: production

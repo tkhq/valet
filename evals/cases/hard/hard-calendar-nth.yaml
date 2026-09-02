@@ -1,0 +1,19 @@
+# Hard suite (see hard-letter-index.yaml). Calendar arithmetic without a
+# tool is the most reliable small-model separator found while tuning this
+# suite. Expected value computed by script: 18 November 2027.
+id: hard-calendar-nth
+description: Find the date of the third Thursday of a future month.
+turns:
+  - role: user
+    content: >-
+      Without using any tools, what is the date of the third Thursday of
+      November 2027? Reply with just the day number.
+timeout_ms: 180000
+checks:
+  - type: output_contains
+    value: "18"
+  - type: tool_not_called
+    tool: bash
+  - type: max_turns
+    value: 2
+  - type: no_errors

@@ -1,0 +1,19 @@
+# Hard suite (see hard-letter-index.yaml). Convert two roman numerals,
+# add, convert back: three compounding steps. Expected value computed by
+# script: MCMXCIV (1994) + DCCCLXXVIII (878) = 2872 = MMDCCCLXXII.
+id: hard-roman-arithmetic
+description: Add two roman numerals and answer in roman numerals.
+turns:
+  - role: user
+    content: >-
+      Without using any tools, add the roman numerals MCMXCIV and
+      DCCCLXXVIII. Reply with only the sum, written in roman numerals.
+timeout_ms: 180000
+checks:
+  - type: output_contains
+    value: MMDCCCLXXII
+  - type: tool_not_called
+    tool: bash
+  - type: max_turns
+    value: 2
+  - type: no_errors
