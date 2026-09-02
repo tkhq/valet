@@ -47,4 +47,16 @@ describe("SettingsRail", () => {
     // Beside GitHub and Slack: per-provider setup lives on the rail.
     expect(screen.getByRole("link", { name: "1Password" })).toBeTruthy();
   });
+
+  // The page holds the member's OWN personal token as well as the org one,
+  // so a member needs the link. Without it the allow-personal toggle an
+  // admin turns on has no member-facing surface.
+  it("shows a gated-on member 1Password beside Teams, and nothing else", () => {
+    orgData = { callerRole: "member", features: { organizations: true } };
+    render(<SettingsRail />);
+    expect(screen.getByRole("link", { name: "1Password" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Teams" })).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "Members" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Action log" })).toBeNull();
+  });
 });

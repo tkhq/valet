@@ -44,6 +44,12 @@ const MODELS_ITEM = { to: "/settings/models", label: "Models" } as const;
  * the `/settings/organization` route guard must never disagree on it. */
 export const ORG_TEAMS_PATH = "/settings/organization/teams";
 
+/** Same rule for 1Password: the page carries the member's OWN service-account
+ * token beside the admin-only org token, and `GET /api/onepassword/settings`
+ * answers any member, so a member who may connect one needs the link. The
+ * panel hides the org token row and the toggle from a non-admin. */
+export const ORG_ONEPASSWORD_PATH = "/settings/organization/onepassword";
+
 const ORGANIZATION_ITEMS = [
   { to: "/settings/organization", label: "General" },
   { to: "/settings/organization/members", label: "Members" },
@@ -54,15 +60,19 @@ const ORGANIZATION_ITEMS = [
   { to: "/settings/organization/library", label: "Library" },
   { to: "/settings/organization/github", label: "GitHub" },
   { to: "/settings/organization/slack", label: "Slack" },
-  { to: "/settings/organization/onepassword", label: "1Password" },
+  { to: ORG_ONEPASSWORD_PATH, label: "1Password" },
   { to: "/settings/organization/sandbox-images", label: "Sandbox images" },
   { to: "/settings/organization/policies", label: "Policies" },
   { to: "/settings/organization/action-log", label: "Action log" },
 ] as const;
 
-/** The one Organization item a plain member can use: any member can create
- * a team, and the creator administers it as its team admin. */
-const MEMBER_ORGANIZATION_ITEMS = [{ to: ORG_TEAMS_PATH, label: "Teams" }] as const;
+/** The Organization items a plain member can use: any member can create a
+ * team, and the creator administers it as its team admin; 1Password holds
+ * the member's own personal token. */
+const MEMBER_ORGANIZATION_ITEMS = [
+  { to: ORG_TEAMS_PATH, label: "Teams" },
+  { to: ORG_ONEPASSWORD_PATH, label: "1Password" },
+] as const;
 
 export function SettingsRail() {
   const orgQ = useOrg();
