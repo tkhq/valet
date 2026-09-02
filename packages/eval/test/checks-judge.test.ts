@@ -67,7 +67,7 @@ describe("buildJudgeRunner (faux judge)", () => {
     const faux = registerFauxProvider({ provider: "judge-1" });
     faux.setResponses([fauxAssistantMessage('{"score": 5, "reason": "excellent haiku"}')]);
 
-    const judge = buildJudgeRunner({ model: faux.getModel() });
+    const judge = buildJudgeRunner({ model: faux.getModel(), samples: 1 });
     const r = await judge({ type: "judge_output", rubric: "Is this a haiku?" }, makeTrajectory(), undefined);
 
     expect(r.pass).toBe(true);
@@ -83,7 +83,7 @@ describe("buildJudgeRunner (faux judge)", () => {
       fauxAssistantMessage('{"score": 3, "reason": "not quite"}'),
     ]);
 
-    const judge = buildJudgeRunner({ model: faux.getModel() });
+    const judge = buildJudgeRunner({ model: faux.getModel(), samples: 1 });
     const strict = await judge({ type: "judge_output", rubric: "r" }, makeTrajectory(), undefined);
     expect(strict.pass).toBe(false);
     expect(strict.score).toBe(3);
@@ -101,7 +101,7 @@ describe("buildJudgeRunner (faux judge)", () => {
     const faux = registerFauxProvider({ provider: "judge-3" });
     faux.setResponses([fauxAssistantMessage("I think it's pretty good!")]);
 
-    const judge = buildJudgeRunner({ model: faux.getModel() });
+    const judge = buildJudgeRunner({ model: faux.getModel(), samples: 1 });
     const r = await judge({ type: "judge_trajectory", rubric: "r" }, makeTrajectory(), undefined);
 
     expect(r.pass).toBe(false);
@@ -131,7 +131,7 @@ describe("buildJudgeRunner (faux judge)", () => {
       },
     ]);
 
-    const judge = buildJudgeRunner({ model: faux.getModel() });
+    const judge = buildJudgeRunner({ model: faux.getModel(), samples: 1 });
     const baseline = makeTrajectory({ finalOutput: "baseline output text" });
     const r = await judge({ type: "judge_equivalence" }, makeTrajectory(), baseline);
 
@@ -156,7 +156,7 @@ describe("buildJudgeRunner (faux judge)", () => {
   it("wires into runCheck through CheckContext", async () => {
     const faux = registerFauxProvider({ provider: "judge-5" });
     faux.setResponses([fauxAssistantMessage('{"score": 4, "reason": "fine"}')]);
-    const judge = buildJudgeRunner({ model: faux.getModel() });
+    const judge = buildJudgeRunner({ model: faux.getModel(), samples: 1 });
 
     const r = await runCheck({ type: "judge_output", rubric: "r" }, makeTrajectory(), { judge });
     expect(r.pass).toBe(true);
