@@ -10,8 +10,10 @@ import type { SandboxCreateOpts } from "@valet/engine";
 import type {
   K8sProviderConfig,
   ResourceList,
+  ResourceRequirements,
   SandboxContainer,
   SandboxCR,
+  SandboxResourceOpts,
   Volume,
 } from "./types.js";
 
@@ -37,6 +39,11 @@ const FULL_PROFILE_COMMAND = [
 export const WORKSPACE_VOLUME_NAME = "workspace";
 export const WORKSPACE_MOUNT_PATH = "/workspace";
 export const SESSION_LABEL_KEY = "valet.dev/session-id";
+/** Pod-template label every sandbox pod carries. The topology spread
+ * constraint's labelSelector counts pods by it, so sandboxes spread across
+ * nodes as one group. Set on the POD template (not just the CR): the
+ * controller is not guaranteed to propagate CR labels onto the pod. */
+export const SANDBOX_POD_LABEL_KEY = "valet.dev/sandbox";
 /** CR annotation carrying the owning session's id (`SandboxCreateOpts.sessionId`).
  * An annotation, not a label: session ids contain characters a label value
  * rejects (`:` in `wf:{runId}:{nodeId}`). The reconcile sweep reads it back
@@ -117,11 +124,56 @@ export function sandboxCrName(sessionKey: string): string {
   return deterministicRfc1123(sessionKey);
 }
 
-function resourceListFrom(resources: { cpu?: number; memory?: string }): ResourceList | undefined {
-  const list: ResourceList = {};
-  if (resources.cpu !== undefined) list.cpu = String(resources.cpu);
-  if (resources.memory !== undefined) list.memory = resources.memory;
-  return Object.keys(list).length > 0 ? list : undefined;
+/** Per-field merge of `cfg.defaultResources` under `opts.resources` — an
+ * opts field wins only when it is defined. Merged per-field, not
+ * all-or-nothing: the ephemeral-storage defaults are node-disk protection
+ * (TKAI-349) and must survive a caller that only picks cpu/memory. */
+function mergeResourceOpts(
+  defaults: SandboxResourceOpts | undefined,
+  overrides: SandboxResourceOpts | undefined,
+): SandboxResourceOpts | undefined {
+  if (!defaults && !overrides) return undefined;
+  const merged: SandboxResourceOpts = { ...defaults };
+  for (const key of ["cpu", "memory", "ephemeralStorage", "ephemeralStorageLimit"] as const) {
+    const value = overrides?.[key];
+    if (value !== undefined) {
+      // Narrowed per-key assignment; the union of the four keys' value
+      // types defeats a single generic assignment.
+      (merged as Record<string, string | number>)[key] = value;
+    }
+  }
+  return merged;
+}
+
+/** Maps merged resource opts to `corev1.ResourceRequirements`. cpu/memory
+ * request equals limit (Guaranteed-style, unchanged). ephemeral-storage
+ * request and limit differ on purpose: the request caps how many sandboxes
+ * the scheduler stacks per node; the limit makes the kubelet evict one
+ * runaway sandbox instead of the node going NotReady. A lone request gets
+ * the same value as its limit. */
+function resourceRequirementsFrom(resources: SandboxResourceOpts): ResourceRequirements | undefined {
+  const requests: ResourceList = {};
+  const limits: ResourceList = {};
+  if (resources.cpu !== undefined) {
+    requests.cpu = String(resources.cpu);
+    limits.cpu = String(resources.cpu);
+  }
+  if (resources.memory !== undefined) {
+    requests.memory = resources.memory;
+    limits.memory = resources.memory;
+  }
+  const storageLimit = resources.ephemeralStorageLimit ?? resources.ephemeralStorage;
+  if (resources.ephemeralStorage !== undefined) {
+    requests["ephemeral-storage"] = resources.ephemeralStorage;
+  }
+  if (storageLimit !== undefined) {
+    limits["ephemeral-storage"] = storageLimit;
+  }
+  if (Object.keys(requests).length === 0 && Object.keys(limits).length === 0) return undefined;
+  return {
+    ...(Object.keys(requests).length > 0 ? { requests } : {}),
+    ...(Object.keys(limits).length > 0 ? { limits } : {}),
+  };
 }
 
 /**
@@ -140,8 +192,8 @@ export function buildSandboxManifest(
   opts: SandboxCreateOpts,
 ): SandboxCR {
   const image = opts.image ?? cfg.defaultImage;
-  const resourceOpts = opts.resources ?? cfg.defaultResources;
-  const resourceList = resourceOpts ? resourceListFrom(resourceOpts) : undefined;
+  const resourceOpts = mergeResourceOpts(cfg.defaultResources, opts.resources);
+  const resourceRequirements = resourceOpts ? resourceRequirementsFrom(resourceOpts) : undefined;
 
   const container: SandboxContainer = {
     name: SANDBOX_CONTAINER_NAME,
@@ -163,8 +215,8 @@ export function buildSandboxManifest(
     container.env = Object.entries(opts.env).map(([envName, value]) => ({ name: envName, value }));
   }
 
-  if (resourceList) {
-    container.resources = { requests: resourceList, limits: resourceList };
+  if (resourceRequirements) {
+    container.resources = resourceRequirements;
   }
 
   const isFullProfile = opts.profile === "full";
@@ -221,6 +273,18 @@ export function buildSandboxManifest(
   const podSpec: SandboxCR["spec"]["podTemplate"]["spec"] = {
     containers: [container],
     restartPolicy: "Always",
+    // Soft hostname spread over the shared sandbox pod label (TKAI-349).
+    // ScheduleAnyway on purpose: sandboxes must still schedule under
+    // pressure; the ephemeral-storage request above is the hard
+    // concentration cap.
+    topologySpreadConstraints: [
+      {
+        maxSkew: 1,
+        topologyKey: "kubernetes.io/hostname",
+        whenUnsatisfiable: "ScheduleAnyway",
+        labelSelector: { matchLabels: { [SANDBOX_POD_LABEL_KEY]: "true" } },
+      },
+    ],
   };
   if (opts.docker) {
     // Pod-level fsGroup: the workspace PVC mounts group-owned by the
@@ -260,23 +324,35 @@ export function buildSandboxManifest(
   }
 
   if (opts.docker) {
+    // sizeLimit pins the docker-state emptyDir (image layers + container
+    // rootfs — the largest node-disk consumer, TKAI-349) at the container's
+    // ephemeral-storage limit; emptyDir usage counts against that limit, so
+    // a larger sizeLimit would be unreachable anyway. No limit configured →
+    // unbounded emptyDir, unchanged.
+    const dockerStateSizeLimit = resourceOpts?.ephemeralStorageLimit ?? resourceOpts?.ephemeralStorage;
     podSpec.volumes = [
       ...(podSpec.volumes ?? []),
-      { name: DOCKER_STATE_VOLUME_NAME, emptyDir: {} },
+      {
+        name: DOCKER_STATE_VOLUME_NAME,
+        emptyDir: dockerStateSizeLimit ? { sizeLimit: dockerStateSizeLimit } : {},
+      },
     ];
   }
 
   const spec: SandboxCR["spec"] = {
     podTemplate: {
-      ...(opts.docker
-        ? {
-            metadata: {
+      metadata: {
+        // The spread constraint's labelSelector counts pods by this label —
+        // see SANDBOX_POD_LABEL_KEY.
+        labels: { [SANDBOX_POD_LABEL_KEY]: "true" },
+        ...(opts.docker
+          ? {
               annotations: {
                 [`container.apparmor.security.beta.kubernetes.io/${SANDBOX_CONTAINER_NAME}`]: "unconfined",
               },
-            },
-          }
-        : {}),
+            }
+          : {}),
+      },
       spec: podSpec,
     },
     volumeClaimTemplates: [

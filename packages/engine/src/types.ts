@@ -1161,7 +1161,20 @@ export interface SandboxCreateOpts {
   workspace?: string;
   env?: Record<string, string>;
   timeout?: number;
-  resources?: { cpu?: number; memory?: string };
+  resources?: {
+    cpu?: number;
+    memory?: string;
+    /** Node-local disk (container rootfs + emptyDirs) the sandbox reserves,
+     * as a Kubernetes quantity string (e.g. "2Gi"). The scheduler counts it
+     * against node allocatable, which caps how many sandboxes stack onto one
+     * node (TKAI-349: unbounded stacking exhausted a node's disk and took it
+     * NotReady). Providers without node-local disk accounting ignore it. */
+    ephemeralStorage?: string;
+    /** Node-local disk ceiling for the sandbox (quantity string, e.g. "8Gi").
+     * Past it the kubelet evicts the one runaway sandbox instead of the node
+     * failing. Defaults to `ephemeralStorage` when unset. */
+    ephemeralStorageLimit?: string;
+  };
   metadata?: Record<string, unknown>;
   /**
    * The owning session's id. `Engine.materializeSandbox` stamps this on

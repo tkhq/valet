@@ -8,6 +8,7 @@ import {
   DOCKER_STATE_VOLUME_NAME,
   DOCKER_WORKLOAD_FS_GROUP,
   SANDBOX_CR_API_VERSION,
+  SANDBOX_POD_LABEL_KEY,
   buildSandboxManifest,
   credsSecretName,
   sandboxCrName,
@@ -174,6 +175,126 @@ describe("buildSandboxManifest", () => {
     const manifest = buildSandboxManifest(baseConfig, "sess-1", {});
     const container = manifest.spec.podTemplate.spec.containers[0];
     expect(container?.resources).toBeUndefined();
+  });
+
+  describe("ephemeral-storage (TKAI-349)", () => {
+    it("maps ephemeralStorage/ephemeralStorageLimit to distinct request and limit quantities", () => {
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", {
+        resources: { ephemeralStorage: "2Gi", ephemeralStorageLimit: "8Gi" },
+      });
+      const container = manifest.spec.podTemplate.spec.containers[0];
+      expect(container?.resources).toEqual({
+        requests: { "ephemeral-storage": "2Gi" },
+        limits: { "ephemeral-storage": "8Gi" },
+      });
+    });
+
+    it("defaults the limit to the request when only ephemeralStorage is set", () => {
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", {
+        resources: { ephemeralStorage: "2Gi" },
+      });
+      const container = manifest.spec.podTemplate.spec.containers[0];
+      expect(container?.resources).toEqual({
+        requests: { "ephemeral-storage": "2Gi" },
+        limits: { "ephemeral-storage": "2Gi" },
+      });
+    });
+
+    it("emits a lone limit (no request) when only ephemeralStorageLimit is set", () => {
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", {
+        resources: { ephemeralStorageLimit: "8Gi" },
+      });
+      const container = manifest.spec.podTemplate.spec.containers[0];
+      expect(container?.resources).toEqual({
+        limits: { "ephemeral-storage": "8Gi" },
+      });
+    });
+
+    it("keeps the cfg ephemeral-storage defaults when opts.resources only picks cpu/memory (per-field merge)", () => {
+      // The node-disk protection must survive a caller that customizes
+      // cpu/memory — an all-or-nothing `opts ?? cfg` would drop it.
+      const cfg: K8sProviderConfig = {
+        ...baseConfig,
+        defaultResources: { ephemeralStorage: "2Gi", ephemeralStorageLimit: "8Gi" },
+      };
+      const manifest = buildSandboxManifest(cfg, "sess-1", {
+        resources: { cpu: 2, memory: "4Gi" },
+      });
+      const container = manifest.spec.podTemplate.spec.containers[0];
+      expect(container?.resources).toEqual({
+        requests: { cpu: "2", memory: "4Gi", "ephemeral-storage": "2Gi" },
+        limits: { cpu: "2", memory: "4Gi", "ephemeral-storage": "8Gi" },
+      });
+    });
+
+    it("lets opts override the cfg ephemeral-storage defaults per-field", () => {
+      const cfg: K8sProviderConfig = {
+        ...baseConfig,
+        defaultResources: { ephemeralStorage: "2Gi", ephemeralStorageLimit: "8Gi" },
+      };
+      const manifest = buildSandboxManifest(cfg, "sess-1", {
+        resources: { ephemeralStorage: "4Gi" },
+      });
+      const container = manifest.spec.podTemplate.spec.containers[0];
+      expect(container?.resources).toEqual({
+        requests: { "ephemeral-storage": "4Gi" },
+        limits: { "ephemeral-storage": "8Gi" },
+      });
+    });
+
+    it("caps the DinD docker-state emptyDir at the ephemeral-storage limit", () => {
+      const cfg: K8sProviderConfig = {
+        ...baseConfig,
+        defaultResources: { ephemeralStorage: "2Gi", ephemeralStorageLimit: "8Gi" },
+      };
+      const manifest = buildSandboxManifest(cfg, "sb-docker", { docker: true });
+      expect(manifest.spec.podTemplate.spec.volumes).toContainEqual({
+        name: DOCKER_STATE_VOLUME_NAME,
+        emptyDir: { sizeLimit: "8Gi" },
+      });
+    });
+
+    it("leaves the docker-state emptyDir unbounded when no ephemeral-storage limit is configured", () => {
+      const manifest = buildSandboxManifest(baseConfig, "sb-docker", { docker: true });
+      expect(manifest.spec.podTemplate.spec.volumes).toContainEqual({
+        name: DOCKER_STATE_VOLUME_NAME,
+        emptyDir: {},
+      });
+    });
+  });
+
+  describe("node spread (TKAI-349)", () => {
+    it("labels the pod template with the shared sandbox pod label", () => {
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", {});
+      expect(manifest.spec.podTemplate.metadata?.labels).toEqual({
+        [SANDBOX_POD_LABEL_KEY]: "true",
+      });
+    });
+
+    it("keeps the pod label alongside the docker apparmor annotation", () => {
+      const manifest = buildSandboxManifest(baseConfig, "sb-docker", { docker: true });
+      expect(manifest.spec.podTemplate.metadata?.labels).toEqual({
+        [SANDBOX_POD_LABEL_KEY]: "true",
+      });
+      expect(manifest.spec.podTemplate.metadata?.annotations).toEqual({
+        "container.apparmor.security.beta.kubernetes.io/sandbox": "unconfined",
+      });
+    });
+
+    it("emits a SOFT hostname topology spread constraint keyed on the sandbox pod label", () => {
+      // ScheduleAnyway on purpose: sandboxes must still schedule under
+      // pressure — the ephemeral-storage request is the hard concentration
+      // cap; this only balances placement.
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", {});
+      expect(manifest.spec.podTemplate.spec.topologySpreadConstraints).toEqual([
+        {
+          maxSkew: 1,
+          topologyKey: "kubernetes.io/hostname",
+          whenUnsatisfiable: "ScheduleAnyway",
+          labelSelector: { matchLabels: { [SANDBOX_POD_LABEL_KEY]: "true" } },
+        },
+      ]);
+    });
   });
 
   it("mounts the workspace volume in the container", () => {
