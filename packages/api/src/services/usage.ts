@@ -305,60 +305,82 @@ export async function getUsageExportCsv(db: AppDb, opts: { windowMs: number; sco
 
 // ── Per-user windows (home card + /summary) ──────────────────────────────────
 
-interface WindowAggRow {
+/** One row per user with day/week/month aggregates side by side, keyed by
+ * suffix (`cost_usd_d`, `cost_usd_w`, `cost_usd_m`, ...). */
+interface MultiWindowRow {
   user_id: string;
-  input_tokens: unknown; output_tokens: unknown; cache_read_tokens: unknown; cache_write_tokens: unknown;
-  total_tokens: unknown; cost_usd: unknown; turns: unknown; unpriced_turns: unknown;
+  [column: string]: unknown;
 }
-function toWindow(row: WindowAggRow | undefined): UsageWindow {
+
+/** Reads the aggregate columns for one window suffix out of a grouped row. */
+function windowFromRow(row: MultiWindowRow | undefined, sfx: "d" | "w" | "m"): UsageWindow {
   return {
-    inputTokens: toNum(row?.input_tokens),
-    outputTokens: toNum(row?.output_tokens),
-    cacheReadTokens: toNum(row?.cache_read_tokens),
-    cacheWriteTokens: toNum(row?.cache_write_tokens),
-    totalTokens: toNum(row?.total_tokens),
-    costUsd: toNum(row?.cost_usd),
-    turns: toNum(row?.turns),
-    unpricedTurns: toNum(row?.unpriced_turns),
+    inputTokens: toNum(row?.[`input_tokens_${sfx}`]),
+    outputTokens: toNum(row?.[`output_tokens_${sfx}`]),
+    cacheReadTokens: toNum(row?.[`cache_read_tokens_${sfx}`]),
+    cacheWriteTokens: toNum(row?.[`cache_write_tokens_${sfx}`]),
+    totalTokens: toNum(row?.[`total_tokens_${sfx}`]),
+    costUsd: toNum(row?.[`cost_usd_${sfx}`]),
+    turns: toNum(row?.[`turns_${sfx}`]),
+    unpricedTurns: toNum(row?.[`unpriced_turns_${sfx}`]),
   };
 }
 
-/** Per-user token/cost aggregate since a cutoff, one row per user. `onlyUserId`
- * scopes to a single user; omit it for the org-wide member list. */
-async function windowAggregate(db: AppDb, orgId: string, sinceMs: number, onlyUserId?: string): Promise<WindowAggRow[]> {
-  const result = (await db.execute(sql`
-    SELECT user_id, ${BUCKET_COLS}
-    FROM cost_entries
-    WHERE created_at >= ${sinceMs} AND org_id = ${orgId} AND user_id IS NOT NULL
-      ${onlyUserId ? sql`AND user_id = ${onlyUserId}` : sql``}
-    GROUP BY user_id`)) as { rows: WindowAggRow[] };
-  return result.rows;
+/** The bucket aggregates for one window, FILTERed to `since` and suffixed so
+ * one scan computes several windows at once. `sfx` is a hardcoded literal. */
+function windowedBucketCols(sfx: "d" | "w" | "m", since: number): SQL {
+  const f = sql`FILTER (WHERE created_at >= ${since})`;
+  const col = (name: string): SQL => sql.raw(`${name}_${sfx}`);
+  return sql`
+    COALESCE(SUM(cost_total)          ${f},0) AS ${col("cost_usd")},
+    COALESCE(SUM(total_tokens)        ${f},0) AS ${col("total_tokens")},
+    COALESCE(SUM(input_tokens)        ${f},0) AS ${col("input_tokens")},
+    COALESCE(SUM(output_tokens)       ${f},0) AS ${col("output_tokens")},
+    COALESCE(SUM(cache_read_tokens)   ${f},0) AS ${col("cache_read_tokens")},
+    COALESCE(SUM(cache_write_tokens)  ${f},0) AS ${col("cache_write_tokens")},
+    COUNT(*)                          ${f}    AS ${col("turns")},
+    COUNT(*) FILTER (WHERE created_at >= ${since} AND NOT priced) AS ${col("unpriced_turns")}`;
 }
 
 /** The `/api/usage/summary` body: the caller's day/week/month windows, plus an
- * org-wide member comparison when the organizations feature is on. */
+ * org-wide member comparison when the organizations feature is on.
+ *
+ * The view cannot push the org/user predicates down into `engine_entries`
+ * (`org_id`/`user_id` are computed from joins), so every scan reads the whole
+ * 30-day window. One grouped scan with per-window FILTERs therefore replaces
+ * the previous scan-per-window (day, week, month, org members = 4 scans). */
 export async function getUsageSummary(db: AppDb, opts: { orgId: string; userId: string; now: number }): Promise<UsageSummaryResponse> {
   const { orgId, userId, now } = opts;
-  const [day, week, month] = await Promise.all([
-    windowAggregate(db, orgId, now - DAY_MS, userId),
-    windowAggregate(db, orgId, now - 7 * DAY_MS, userId),
-    windowAggregate(db, orgId, now - 30 * DAY_MS, userId),
-  ]);
-  const body: UsageSummaryResponse = { me: { day: toWindow(day[0]), week: toWindow(week[0]), month: toWindow(month[0]) } };
-
   const orgRows = await db.select({ features: orgs.features }).from(orgs).where(eq(orgs.id, orgId)).limit(1);
   const features = (orgRows[0]?.features ?? {}) as { organizations?: boolean };
-  if (features.organizations === true) {
-    const memberAgg = await windowAggregate(db, orgId, now - 30 * DAY_MS);
+  const orgWide = features.organizations === true;
+
+  const monthCut = now - 30 * DAY_MS;
+  const result = (await db.execute(sql`
+    SELECT user_id,
+      ${windowedBucketCols("d", now - DAY_MS)},
+      ${windowedBucketCols("w", now - 7 * DAY_MS)},
+      ${windowedBucketCols("m", monthCut)}
+    FROM cost_entries
+    WHERE created_at >= ${monthCut} AND org_id = ${orgId} AND user_id IS NOT NULL
+      ${orgWide ? sql`` : sql`AND user_id = ${userId}`}
+    GROUP BY user_id`)) as { rows: MultiWindowRow[] };
+
+  const meRow = result.rows.find((row) => row.user_id === userId);
+  const body: UsageSummaryResponse = {
+    me: { day: windowFromRow(meRow, "d"), week: windowFromRow(meRow, "w"), month: windowFromRow(meRow, "m") },
+  };
+
+  if (orgWide) {
     // Look up exactly the ids the aggregate returned — bounded (not every user
     // in the deployment) AND complete (keeps a since-left member's name).
-    const spenderIds = memberAgg.map((row) => row.user_id);
+    const spenderIds = result.rows.map((row) => row.user_id);
     const userRows = spenderIds.length === 0 ? [] : await db.select({ id: users.id, name: users.name, email: users.email }).from(users).where(inArray(users.id, spenderIds));
     const nameById = new Map(userRows.map((u) => [u.id, u.name || u.email] as const));
     body.org = {
       windowDays: 30,
-      members: memberAgg
-        .map((row) => ({ userId: row.user_id, name: nameById.get(row.user_id) ?? row.user_id, ...toWindow(row) }))
+      members: result.rows
+        .map((row) => ({ userId: row.user_id, name: nameById.get(row.user_id) ?? row.user_id, ...windowFromRow(row, "m") }))
         .sort((a, b) => b.costUsd - a.costUsd || b.totalTokens - a.totalTokens),
     };
   }
