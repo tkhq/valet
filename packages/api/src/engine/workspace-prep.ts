@@ -262,8 +262,9 @@ async function assertCloneTargetEmpty(sandbox: Sandbox, dir: string): Promise<vo
 }
 
 /** Best-effort refresh of an already-cloned dir: `git fetch origin`, then
- * `git checkout {ref}` when a ref is pinned. Offline-tolerant — failures
- * are logged and prep continues to the next binding, never thrown. */
+ * `git checkout {ref}` when a ref is pinned. For commit SHAs, creates a local
+ * branch to avoid detached HEAD. Offline-tolerant — failures are logged and
+ * prep continues to the next binding, never thrown. */
 async function refreshExistingClone(sandbox: Sandbox, dir: string, binding: RepoBinding): Promise<void> {
   const fetch = await safeExec(sandbox, "git fetch origin", { cwd: dir, timeout: GIT_REFRESH_TIMEOUT_MS });
   if (fetch.exitCode !== 0) {
@@ -272,7 +273,17 @@ async function refreshExistingClone(sandbox: Sandbox, dir: string, binding: Repo
     );
   }
   if (binding.ref) {
-    const checkout = await safeExec(sandbox, `git checkout ${shQuote(binding.ref)}`, {
+    const refIsSha = isCommitSha(binding.ref);
+    let checkoutCmd: string;
+    if (refIsSha) {
+      // For commit SHAs, create or reset a local branch to avoid detached HEAD.
+      const branchName = `valet-${binding.ref.slice(0, 7)}`;
+      checkoutCmd = `git checkout -B ${shQuote(branchName)} ${shQuote(binding.ref)}`;
+    } else {
+      // For branch/tag names, a plain checkout is sufficient.
+      checkoutCmd = `git checkout ${shQuote(binding.ref)}`;
+    }
+    const checkout = await safeExec(sandbox, checkoutCmd, {
       cwd: dir,
       timeout: GIT_REFRESH_TIMEOUT_MS,
     });
@@ -306,15 +317,18 @@ async function resolveRemoteDefaultBranch(sandbox: Sandbox, dir: string): Promis
  * Advances a FRESHLY-STAGED prebuilt repo (just `cp -a`'d out of the image, so
  * HEAD *and* the baked local branch both sit at `bakedSha`) to upstream head.
  *
- * `git fetch origin` then `git checkout -B <ref> origin/<ref>`. The `-B` is
- * load-bearing (spec decision 7): a plain `git checkout <ref>` would land on
- * the STALE LOCAL branch the bake left at `bakedSha` — git does NOT
+ * For branch/tag refs: `git fetch origin` then `git checkout -B <ref> origin/<ref>`.
+ * The `-B` is load-bearing (spec decision 7): a plain `git checkout <ref>` would
+ * land on the STALE LOCAL branch the bake left at `bakedSha` — git does NOT
  * fast-forward an already-existing branch on checkout — so the workspace would
  * never reach upstream head and `conditionalReinstall`'s `bakedSha..HEAD` diff
  * would always be empty (the reinstall trigger dead in the common path). `-B`
  * resets the local branch to origin's just-fetched head, actually moving the
- * tree forward. When no ref is pinned, the remote's default branch (from
- * `origin/HEAD`) is used.
+ * tree forward.
+ *
+ * For commit SHAs: creates a local branch pointing to the SHA to avoid detached HEAD.
+ *
+ * When no ref is pinned, the remote's default branch (from `origin/HEAD`) is used.
  *
  * Returns whether the fetch SUCCEEDED: `false` on an offline fetch, so the
  * caller skips the conditional reinstall entirely — the tree never left
@@ -339,13 +353,23 @@ async function refreshStagedPrebuild(sandbox: Sandbox, dir: string, binding: Rep
     );
     return true;
   }
-  const checkout = await safeExec(sandbox, `git checkout -B ${shQuote(ref)} ${shQuote(`origin/${ref}`)}`, {
+  const refIsSha = isCommitSha(ref);
+  let checkoutCmd: string;
+  if (refIsSha) {
+    // For commit SHAs, create a local branch to avoid detached HEAD.
+    const branchName = `valet-${ref.slice(0, 7)}`;
+    checkoutCmd = `git checkout -B ${shQuote(branchName)} ${shQuote(ref)}`;
+  } else {
+    // For branch/tag names, reset the local branch to origin's head.
+    checkoutCmd = `git checkout -B ${shQuote(ref)} ${shQuote(`origin/${ref}`)}`;
+  }
+  const checkout = await safeExec(sandbox, checkoutCmd, {
     cwd: dir,
     timeout: GIT_REFRESH_TIMEOUT_MS,
   });
   if (checkout.exitCode !== 0) {
     console.error(
-      `workspace prep: git checkout -B ${ref} origin/${ref} failed for ${binding.fullName} (${dir}) — continuing: ${checkout.stderr || checkout.stdout}`,
+      `workspace prep: git checkout -B ${ref} ${refIsSha ? ref : `origin/${ref}`} failed for ${binding.fullName} (${dir}) — continuing: ${checkout.stderr || checkout.stdout}`,
     );
   }
   return true;
@@ -379,8 +403,12 @@ async function cloneFresh(sandbox: Sandbox, dir: string, binding: RepoBinding): 
 
   if (refIsSha) {
     // The SHA is reachable from the fetched branches (a full clone fetches
-    // every branch's objects), so a detached checkout lands the exact commit.
-    const checkout = await safeExec(sandbox, `git checkout ${shQuote(binding.ref!)}`, { cwd: dir });
+    // every branch's objects). Create a local branch at this commit so the
+    // workspace has an attached HEAD instead of detached HEAD (security child
+    // sessions expect to be on a branch). The branch name uses a `valet-` prefix
+    // and the short SHA to avoid colliding with real branch names.
+    const branchName = `valet-${binding.ref!.slice(0, 7)}`;
+    const checkout = await safeExec(sandbox, `git checkout -b ${shQuote(branchName)} ${shQuote(binding.ref!)}`, { cwd: dir });
     if (checkout.exitCode !== 0) {
       throw new Error(
         execFailureMessage(
