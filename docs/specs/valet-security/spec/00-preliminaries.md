@@ -14,7 +14,7 @@ The key words MUST, MUST NOT, REQUIRED, SHALL, SHALL NOT, SHOULD, SHOULD NOT, RE
 
 One name for one thing. Where a term collides with a Valet code identifier, the code identifier wins. Where a concept has no code identifier yet, the term ships in Part 05 or Part 06 alongside the schema.
 
-**engagement.** One security review of one repository at one pinned commit. Row: `security_engagements` (`packages/api/src/schema/index.ts`; SQL: `packages/api/migrations/pg/0000_app.sql`). Value set: `status ∈ {planning, running, completed, failed, cancelled}`.
+**engagement.** One security review of one repository at one pinned commit. Row: `security_engagements` (`packages/api/src/schema/index.ts`, SQL: `packages/api/migrations/pg/0000_app.sql`). Value set: `status ∈ {planning, running, completed, failed, cancelled}`.
 
 **cell.** One dispatch unit inside an engagement. Row: `security_cells`. Value set: `status ∈ {pending, running, completed, yielded, failed}`, `mode ∈ {fresh, resume, post-pivot-delta}`. `mode: post-pivot-delta` is new in v1 (Part 01).
 
@@ -40,11 +40,11 @@ One name for one thing. Where a term collides with a Valet code identifier, the 
 
 **auto-catalog.** Five bundled patterns the coordinator may execute: `scope-auto-include` (IP-in-CIDR check), `propagate-session` (cookie jar file copy), `rerun-with-existing-loot` (re-dispatch with a delta from existing loot), `create-test-account` (HTTP POST signup, L4), `tool-auth-reuse` (auth blob copy, L4). Each is defined in Part 05.
 
-**loot catalog.** The engagement-scoped store for credentials, sessions, test data, and tool auth. Path: `/loot/catalog.yml`. Schema is normative (Part 06). The pivot-coordinator writes it; personas read it when dispatched with a `delta_targets` block.
+**loot catalog.** The engagement-scoped store for credentials, sessions, test data, and tool auth. Path: `/loot/catalog.yml`. Schema is normative (Part 06). The pivot-coordinator writes it. Personas read it when dispatched with a `delta_targets` block.
 
 **delta_targets.** A five-field payload the coordinator computes when a need is resolved: `authed_surface`, `new_hosts`, `auth_scopes`, `test_data`, `tool_auth`. Copied verbatim into the `post-pivot-delta` dispatch prompt so the persona knows what to test without re-scanning what it already tested.
 
-**tool.** A scanner binary (nmap, semgrep, gitleaks, nuclei, ffuf, ...) or an MCP daemon (ZAP, Burp, Playwright) a persona invokes. Install via APT, GitHub release, `go install`, `pip`, or `git clone` + build. Each install ships in `securityToolPrepSteps` (`packages/api/src/engine/security-bootstrap.ts`). See Part 03 for the per-persona inventory.
+**tool.** A scanner binary (nmap, semgrep, gitleaks, nuclei, ffuf) or an MCP daemon (ZAP, Burp, Playwright) a persona invokes. Install via APT, GitHub release, `go install`, `pip`, or `git clone` + build. Each install ships in `securityToolPrepSteps` (`packages/api/src/engine/security-bootstrap.ts`). See Part 03 for the per-persona inventory.
 
 **preflight probe.** A per-persona shell script (`docker/sec-preflight-<persona>.sh`) that lists every tool the persona expects, records `present`/`absent`/`version`/`install_location`, and writes the result to a coverage-report YAML. Personas read the result and emit `sec_coverage_report status=not_assessed area=<pack> tool=<tool> reason=<consequence>` for every absent tool.
 
@@ -52,7 +52,7 @@ One name for one thing. Where a term collides with a Valet code identifier, the 
 
 **settlement.** The state transition `running → completed` in `sec_cell_complete`. Triggered when the persona writes a state doc with `status: done` AND `checklist.pending: 0` AND `queue.pending: 0`, and every applicable anti-cap check passes.
 
-Use "session" for the HTTP or app-level authenticated context. Use "sandbox" for the isolated execution environment attached to one session. Never write "workspace" for either of the above; `/workspace` is the mounted repo clone inside the persona sandbox.
+Use "session" for the HTTP or app-level authenticated context. Use "sandbox" for the isolated execution environment attached to one session. Never write "workspace" for either of the above. `/workspace` is the mounted repo clone inside the persona sandbox.
 
 ## Global invariants
 
@@ -71,7 +71,7 @@ A `post-pivot-delta` cell's state doc `findings[]` MUST be a superset of the pri
 Running the same auto-catalog pattern twice with the same inputs writes the same loot entries. Deterministic username templates (`pentest-<engagement_slug>-r<round>-<suffix>`). Rerun detection: the coordinator checks the loot catalog for an existing entry keyed by `(pattern, need_id, round)` before executing. See Part 05 §5.11.
 
 **INV-5 (Loot catalog atomicity).**
-A write to `/loot/catalog.yml` is atomic. Partial writes are not observable. Two mechanisms exist: (a) v1 writes through `sec_fs_write`, which is a single-transaction insert into `security_files`, so a crashed coordinator either committed a new revision or did not; no half-row is observable; (b) the coordinator writes to `/loot/catalog.yml.tmp` first and moves to `/loot/catalog.yml` in a second `sec_fs_write` when it wants a two-phase commit for a multi-file update. See Part 06 §6.4.
+A write to `/loot/catalog.yml` is atomic. Partial writes are not observable. Two mechanisms exist: (a) v1 writes through `sec_fs_write`, which is a single-transaction insert into `security_files`, so a crashed coordinator either committed a new revision or did not (no half-row is observable), (b) the coordinator writes to `/loot/catalog.yml.tmp` first and moves to `/loot/catalog.yml` in a second `sec_fs_write` when it wants a two-phase commit for a multi-file update. See Part 06 §6.4.
 
 **INV-6 (Tool version pinning).**
 Every install command in the tool inventory pins an exact version. APT commands use `nmap=7.94-1`, not `nmap`. GitHub release commands use a tag (`v3.2.0`) and an SHA-256 checksum. `go install` uses a tag or commit hash. The preflight probe records the installed version in the coverage-report YAML. The verifier persona reads the coverage report and audits versions against the pinned set. See Part 03 §3.1 and Part 07 §7.3.
@@ -122,7 +122,7 @@ The MVP ships every L3 requirement. `create-test-account` and `tool-auth-reuse` 
 
 The base design (`docs/specs/2026-08-27-valet-security-design.md`) is unchanged by this spec. The additions land as:
 
-- New rows in `security_findings.traces_to` (JSONB column) and the anti-cap checks in `sec_cell_complete`. SQL: `packages/api/migrations/pg/0000_app.sql`; edit-in-place per the pre-1.0 rule (`packages/api/src/lib/drizzle.ts::SCHEMA_REPAIRS`).
+- New rows in `security_findings.traces_to` (JSONB column) and the anti-cap checks in `sec_cell_complete`. SQL: `packages/api/migrations/pg/0000_app.sql`. Edit in place per the pre-1.0 rule (`packages/api/src/lib/drizzle.ts::SCHEMA_REPAIRS`).
 - New persona `pivot-coordinator` in `BUNDLED_PERSONAS`. Role markdown at `packages/plugin-security/personas/pivot-coordinator.md`. Playbook at `packages/plugin-security/playbooks/pivot-coordinator.md`. No new engine tool for the coordinator: it uses the existing `sec_fs_read`/`sec_fs_write`/`sec_finding_report` set. It DOES gain access to a new persona tool `sec_loot_write` (append-only write to `/loot/catalog.yml`, with two-phase commit) documented in Part 06 §6.4.
 - New cell mode `post-pivot-delta` recognized in `parsePlan`, `serializePlan`, `buildDispatchPrompt`, and `sec_cell_complete`. Recognized in the plan editor UI (`packages/web`) as a read-only cell that the coordinator materializes.
 - New preflight scripts per persona under `docker/sec-preflight-<persona>.sh`. The existing `docker/sec-preflight.sh` becomes the default (union of the persona sets).

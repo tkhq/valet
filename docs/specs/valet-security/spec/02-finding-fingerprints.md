@@ -1,4 +1,4 @@
-# Part 02: Finding Fingerprints
+# Part 02: Finding fingerprints
 
 *Depends on: Part 00. Conformance: L0.*
 
@@ -40,7 +40,7 @@ function fingerprint(file, line, title, body) -> bytes[20]:
 5. Rejoin the accumulated segments with `/`.
 6. Lowercase the entire path.
 
-**Rejection semantics.** A path that resolves outside the repo root is not canonicalizable. `fingerprint()` MUST propagate the rejection. A caller that catches the exception MAY log the offending input; it MUST NOT record a finding. This is stricter than a "resolve and clip" semantics, on the security-conservative side: a persona that emits a finding whose path traverses out of the tree is either lying, buggy, or under injection. In every case, refusing is safer than accepting.
+**Rejection semantics.** A path that resolves outside the repo root is not canonicalizable. `fingerprint()` MUST propagate the rejection. A caller that catches the exception MAY log the offending input. It MUST NOT record a finding. This is stricter than a "resolve and clip" semantics, on the security-conservative side: a persona that emits a finding whose path traverses out of the tree is either lying, buggy, or under injection. In every case, refusing is safer than accepting.
 
 **Why lowercase?** Git is case-preserving but case-insensitive on macOS and Windows. A finding on `API/Routes.py` and `api/routes.py` is the same finding. Lowercasing produces byte-identical hex across platforms.
 
@@ -50,7 +50,7 @@ function fingerprint(file, line, title, body) -> bytes[20]:
 2. Return the first 200 codepoints. If `body` has fewer than 200, return all of them.
 3. Encode the result as UTF-8 for the payload string concatenation.
 
-**Why 200 codepoints?** This captures the first sentences of the evidence while keeping the payload bounded. Findings with the same `file`, `line`, `title`, and first-200 body-prefix are treated as the same finding across implementations, even if later paragraphs diverge (one persona appended a PoC; another appended a mitigation note). The fingerprint identifies findings; it is not a text-diff detector.
+**Why 200 codepoints?** This captures the first sentences of the evidence while keeping the payload bounded. Findings with the same `file`, `line`, `title`, and first-200 body-prefix are treated as the same finding across implementations, even if later paragraphs diverge (one persona appended a PoC, another appended a mitigation note). The fingerprint identifies findings. It is not a text-diff detector.
 
 ## Blake2b parameters
 
@@ -134,11 +134,11 @@ def fingerprint(file: str, line: int | None, title: str, body: str) -> bytes:
 
 ## Migration from v0 `security_findings.fingerprint`
 
-The base design (2026-08-27, §Tools, `sec_finding_report`) documents the v0 fingerprint as `sha256(file, line / 10, normalized title) first 16 hex`. v1 changes:
+The base design (2026-08-27, Tools section, `sec_finding_report`) documents the v0 fingerprint as `sha256(file, line / 10, normalized title) first 16 hex`. v1 changes:
 - Algorithm: Blake2b (was sha256).
 - Input set: `(file, line, title, body prefix 200 codepoints)` (was `(file, line/10 bucket, normalized title)`).
 - Output width: 40 hex characters (was 16 hex characters).
-- Column width: extend `security_findings.fingerprint TEXT` to fit 40 hex characters. Postgres text is unbounded; no length change is required. Drop any client-side assertion that pins 16 hex.
+- Column width: extend `security_findings.fingerprint TEXT` to fit 40 hex characters. Postgres text is unbounded so no length change is required. Drop any client-side assertion that pins 16 hex.
 
 Both algorithms are deterministic. Both are collision-resistant at the scale a real engagement runs. The v1 shape is a strict superset of the v0 signal (title, file, line), extended with body-prefix, so v0 duplicates remain v1 duplicates and v0 near-duplicates stay near-duplicates. Existing v0 rows do NOT migrate: the fingerprint is per-run identity, not cross-engagement identity.
 
