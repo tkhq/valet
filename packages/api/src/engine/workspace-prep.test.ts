@@ -233,21 +233,23 @@ describe("prepBinding", () => {
     expect(commands).toContain("git clone 'https://github.com/acme/widgets.git' '.' --branch 'release/1.0'");
   });
 
-  it("clones then checks out a SHA ref — NOT --branch (git rejects a SHA there)", async () => {
+  it("clones then checks out a SHA ref with a local branch — NOT --branch (git rejects a SHA there)", async () => {
     const sandbox = new RecordingSandbox();
     const sha = "f8f79e535477998412a6d16f139f94f8cd37cb9f";
     await prepBinding(sandbox, ".", binding({ ref: sha }));
     const commands = sandbox.execCalls.map((c) => c.command);
-    // Plain clone (no --branch), then a detached checkout of the commit.
+    // Plain clone (no --branch), then checkout with -b to create a local branch.
     expect(commands).toContain("git clone 'https://github.com/acme/widgets.git' '.'");
     expect(commands.some((c) => c.includes("--branch"))).toBe(false);
-    expect(commands).toContain(`git checkout '${sha}'`);
+    // Creates a local branch named valet-<short-sha> to avoid detached HEAD.
+    expect(commands).toContain(`git checkout -b 'valet-f8f79e5' '${sha}'`);
   });
 
   it("fails prep when the SHA checkout fails (unreachable commit)", async () => {
     const sandbox = new RecordingSandbox();
     const sha = "f8f79e535477998412a6d16f139f94f8cd37cb9f";
-    sandbox.setResult(`git checkout '${sha}'`, {
+    // Updated to match the new checkout -b command that creates a local branch.
+    sandbox.setResult(`git checkout -b 'valet-f8f79e5' '${sha}'`, {
       stdout: "",
       stderr: "error: pathspec did not match",
       exitCode: 1,
@@ -298,6 +300,18 @@ describe("prepBinding", () => {
     const commands = sandbox.execCalls.map((c) => c.command);
     expect(commands).toContain("git fetch origin");
     expect(commands.some((c) => c.startsWith("git checkout"))).toBe(false);
+  });
+
+  it("fetch+checkout a SHA ref on an existing clone creates a local branch", async () => {
+    const sandbox = new RecordingSandbox();
+    const sha = "f8f79e535477998412a6d16f139f94f8cd37cb9f";
+    sandbox.markExistingClone(".");
+    await prepBinding(sandbox, ".", binding({ ref: sha }));
+    const commands = sandbox.execCalls.map((c) => c.command);
+    expect(commands).toContain("git fetch origin");
+    // Creates or resets a local branch to avoid detached HEAD.
+    expect(commands).toContain(`git checkout -B 'valet-f8f79e5' '${sha}'`);
+    expect(commands.some((c) => c === `git checkout '${sha}'`)).toBe(false);
   });
 
   it("offline-tolerant: fetch failure on an existing clone logs and prep continues (does not throw)", async () => {
@@ -544,6 +558,17 @@ describe("resolveStartRef", () => {
     });
     const ref = await resolveStartRef(sandbox, ".");
     expect(ref?.branch).toBeUndefined();
+  });
+
+  it("valet-prefixed branch (created from SHA checkout) resolves correctly", async () => {
+    const sandbox = new RecordingSandbox();
+    sandbox.setResult(RESOLVE_CMD, {
+      stdout: `https://github.com/acme/widgets.git\n${SHA}\nvalet-f8f79e5\n`,
+      stderr: "",
+      exitCode: 0,
+    });
+    const ref = await resolveStartRef(sandbox, ".");
+    expect(ref?.branch).toBe("valet-f8f79e5");
   });
 
   it("returns null on resolution failure (does not throw)", async () => {
