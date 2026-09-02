@@ -27,6 +27,36 @@ export type ToolCardDefault = "smart" | "always-collapsed" | "always-expanded";
 
 const TOOL_CARD_DEFAULT_KEY = "tool-card-default";
 const TOOL_CARD_DEFAULT_FALLBACK: ToolCardDefault = "smart";
+const COLLAPSED_SUBCONVERSATION_PREFIX = "valet:subconversations-collapsed:";
+
+function collapsedSubconversationKey(parentThreadId: string): string {
+  return `${COLLAPSED_SUBCONVERSATION_PREFIX}${parentThreadId}`;
+}
+
+/** Read one parent thread's collapsed state. Parent groups start expanded. */
+export function getSubconversationsCollapsed(
+  parentThreadId: string,
+  storage: StorageReader = safeLocalStorage(),
+): boolean {
+  try {
+    return storage.getItem(collapsedSubconversationKey(parentThreadId)) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** Persist one parent thread's collapsed state independently. */
+export function setSubconversationsCollapsed(
+  parentThreadId: string,
+  collapsed: boolean,
+  storage: StorageWriter = safeLocalStorage(),
+): void {
+  try {
+    storage.setItem(collapsedSubconversationKey(parentThreadId), collapsed ? "1" : "0");
+  } catch {
+    /* Best-effort persistence; the caller's UI state stands. */
+  }
+}
 
 const TOOL_CARD_DEFAULT_VALUES: readonly ToolCardDefault[] = [
   "smart",

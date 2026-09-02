@@ -20,6 +20,7 @@ The channel selector dropdown was a workaround — channels route *to* threads, 
 - **Header:** "Threads" label + "+" new thread button
 - **Body:** Active threads grouped under channel section headers (Web, Slack DM, Slack #engineering). Channel names resolved via the existing `GET /api/channels/label` endpoint. Sections are static visual grouping (not collapsible).
 - **Thread items:** Thread title (or first message preview if untitled). Hover-reveal X button to dismiss. Unread badge (count) for threads with activity since last viewed.
+- **Subconversations:** A parent with subconversations has an accessible expand/collapse control. Each parent starts expanded. The browser stores the state by parent thread ID.
 - **Footer:** "Dismissed" row with count, expandable to show archived threads. Clicking a dismissed thread reactivates it and switches to it.
 
 ### Interactions

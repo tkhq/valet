@@ -1,6 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
-import { Archive, ArchiveRestore, MessageSquare, MoreHorizontal, Plus, RefreshCw, Search, X } from "lucide-react";
+import {
+  Archive,
+  ArchiveRestore,
+  ChevronDown,
+  MessageSquare,
+  MoreHorizontal,
+  Plus,
+  RefreshCw,
+  Search,
+  X,
+} from "lucide-react";
 import type { DecisionGate, OrchestratorChildSummary, ThreadSummary } from "@valet/api/wire";
 import {
   useArchivedThreads,
@@ -33,6 +43,7 @@ import {
 import { formatWhen } from "~/lib/format-when";
 import { cn } from "~/lib/cn";
 import { sameModelSpec, shortModelLabel } from "~/lib/models";
+import { getSubconversationsCollapsed, setSubconversationsCollapsed } from "~/lib/preferences";
 
 /**
  * What an untitled thread is called.
@@ -457,6 +468,18 @@ function ThreadNode({
   onDismissChild: (childSessionId: string) => void;
 }) {
   const label = thread.title ?? untitledThreadLabel(thread, index);
+  const [collapsed, setCollapsed] = useState(() => getSubconversationsCollapsed(thread.id));
+
+  useEffect(() => {
+    setCollapsed(getSubconversationsCollapsed(thread.id));
+  }, [thread.id]);
+
+  function toggleCollapsed() {
+    const next = !collapsed;
+    setCollapsed(next);
+    setSubconversationsCollapsed(thread.id, next);
+  }
+
   // Pin chip: the thread runs on a model other than the session default.
   // Requires a KNOWN session default — while the session query loads, and
   // for non-live sessions (GET /sessions/:id omits `model` unless the
@@ -522,6 +545,20 @@ function ThreadNode({
             )}
           </Link>
         </Tooltip>
+        {childSessions.length > 0 && (
+          <button
+            type="button"
+            aria-label={`${collapsed ? "Expand" : "Collapse"} subconversations for ${label}`}
+            aria-expanded={!collapsed}
+            onClick={toggleCollapsed}
+            className="shrink-0 rounded p-1 text-muted hover:text-ink hover:bg-ink-wash focus-visible:outline-none focus-visible:bg-ink-wash"
+          >
+            <ChevronDown
+              className={cn("h-3.5 w-3.5 transition-transform", collapsed && "-rotate-90")}
+              aria-hidden
+            />
+          </button>
+        )}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
@@ -544,7 +581,7 @@ function ThreadNode({
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
-      {childSessions.length > 0 && (
+      {childSessions.length > 0 && !collapsed && (
         <ul className="ml-8 mt-0.5 mb-1 border-l border-line/60 pl-2 space-y-0.5">
           {childSessions.map((c) => (
             <li key={c.sessionId} className="group/child flex items-center gap-1">
