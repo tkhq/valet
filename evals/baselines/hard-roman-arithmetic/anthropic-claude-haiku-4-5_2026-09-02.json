@@ -1,0 +1,48 @@
+{
+  "caseId": "hard-roman-arithmetic",
+  "model": "anthropic/claude-haiku-4-5",
+  "savedAt": "2026-09-02T19:18:50.337Z",
+  "status": "pass",
+  "trajectory": {
+    "caseId": "hard-roman-arithmetic",
+    "prompt": "Without using any tools, add the roman numerals MCMXCIV and DCCCLXXVIII. Reply with only the sum, written in roman numerals.",
+    "model": "anthropic/claude-haiku-4-5",
+    "turns": [
+      {
+        "index": 0,
+        "usage": {
+          "input": 2622,
+          "output": 190,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 2812
+        },
+        "cost": {
+          "input": 0.0026219999999999998,
+          "output": 0.0009500000000000001,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 0.0035719999999999997
+        }
+      }
+    ],
+    "toolCalls": [],
+    "finalOutput": "I need to add MCMXCIV + DCCCLXXVIII.\n\nFirst, let me convert these to Arabic numerals:\n- MCMXCIV = 1000 + (1000 - 100) + (100 - 10) + (5 - 1) = 1000 + 900 + 90 + 4 = 1994\n- DCCCLXXVIII = 500 + 300 + 70 + 8 = 878\n\nSum: 1994 + 878 = 2872\n\nNow converting 2872 back to Roman numerals:\n- 2000 = MM\n- 800 = DCCC\n- 70 = LXX\n- 2 = II\n\nMMDCCCLXXII",
+    "usage": {
+      "input": 2622,
+      "output": 190,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 2812
+    },
+    "cost": {
+      "input": 0.0026219999999999998,
+      "output": 0.0009500000000000001,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0.0035719999999999997
+    },
+    "durationMs": 2168,
+    "stopReason": "end_turn"
+  }
+}

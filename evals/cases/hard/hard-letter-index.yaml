@@ -1,0 +1,27 @@
+# Hard suite: model-separation cases. These live in evals/cases/hard/ so
+# the default `make eval` (which must stay green on the cheap default
+# model) does not load them. Run with:
+#   make eval EVAL_ARGS="--cases evals/cases/hard --model anthropic/claude-sonnet-5"
+# Compound: count vowels per word, then index by that count. Expected
+# value computed by script: banana->n, orchid->r, xylophone->l,
+# empathy->m, quixotic->x = nrlmx.
+id: hard-letter-index
+description: Index each word by its own vowel count and build a string.
+turns:
+  - role: user
+    content: >-
+      Take these words in order: banana, orchid, xylophone, empathy,
+      quixotic. For each word, count its vowels (a, e, i, o, u), then take
+      the letter at that 1-based position in the same word. Example: "tree"
+      has 2 vowels, so you would take its 2nd letter, "r". Without using
+      any tools, reply with only the resulting five-letter string,
+      lowercase.
+timeout_ms: 180000
+checks:
+  - type: output_contains
+    value: nrlmx
+  - type: tool_not_called
+    tool: bash
+  - type: max_turns
+    value: 2
+  - type: no_errors

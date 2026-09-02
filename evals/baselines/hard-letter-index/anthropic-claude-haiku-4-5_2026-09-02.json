@@ -1,0 +1,48 @@
+{
+  "caseId": "hard-letter-index",
+  "model": "anthropic/claude-haiku-4-5",
+  "savedAt": "2026-09-02T19:18:43.259Z",
+  "status": "pass",
+  "trajectory": {
+    "caseId": "hard-letter-index",
+    "prompt": "Take these words in order: banana, orchid, xylophone, empathy, quixotic. For each word, count its vowels (a, e, i, o, u), then take the letter at that 1-based position in the same word. Example: \"tree\" has 2 vowels, so you would take its 2nd letter, \"r\". Without using any tools, reply with only the resulting five-letter string, lowercase.",
+    "model": "anthropic/claude-haiku-4-5",
+    "turns": [
+      {
+        "index": 0,
+        "usage": {
+          "input": 2684,
+          "output": 171,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 2855
+        },
+        "cost": {
+          "input": 0.0026839999999999998,
+          "output": 0.0008550000000000001,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 0.0035389999999999996
+        }
+      }
+    ],
+    "toolCalls": [],
+    "finalOutput": "I'll work through each word:\n\n1. **banana** - vowels: a, a, a (3 vowels) → 3rd letter = **n**\n2. **orchid** - vowels: o, i (2 vowels) → 2nd letter = **r**\n3. **xylophone** - vowels: o, o, e (3 vowels) → 3rd letter = **l**\n4. **empathy** - vowels: e, a (2 vowels) → 2nd letter = **m**\n5. **quixotic** - vowels: u, i, o, i (4 vowels) → 4th letter = **x**\n\n**nrlmx**",
+    "usage": {
+      "input": 2684,
+      "output": 171,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 2855
+    },
+    "cost": {
+      "input": 0.0026839999999999998,
+      "output": 0.0008550000000000001,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0.0035389999999999996
+    },
+    "durationMs": 1579,
+    "stopReason": "end_turn"
+  }
+}

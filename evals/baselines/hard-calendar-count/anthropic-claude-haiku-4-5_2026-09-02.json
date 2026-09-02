@@ -1,0 +1,48 @@
+{
+  "caseId": "hard-calendar-count",
+  "model": "anthropic/claude-haiku-4-5",
+  "savedAt": "2026-09-02T19:18:34.638Z",
+  "status": "fail",
+  "trajectory": {
+    "caseId": "hard-calendar-count",
+    "prompt": "Without using any tools, how many Fridays does February 2028 have? Reply in exactly this format: days=<days in month>, fridays=<count>",
+    "model": "anthropic/claude-haiku-4-5",
+    "turns": [
+      {
+        "index": 0,
+        "usage": {
+          "input": 2622,
+          "output": 293,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 2915
+        },
+        "cost": {
+          "input": 0.0026219999999999998,
+          "output": 0.0014650000000000002,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 0.004087
+        }
+      }
+    ],
+    "toolCalls": [],
+    "finalOutput": "I need to figure out how many Fridays are in February 2028.\n\nFirst, let me determine the facts:\n- February 2028 has 29 days (2028 is a leap year, divisible by 4)\n- I need to find what day of the week February 1, 2028 falls on\n\nTo find the day of the week, I can use the fact that:\n- January 1, 2028 is a Tuesday (I can verify this mentally through calendar calculations)\n- February 1, 2028 is 31 days after January 1\n- 31 days = 4 weeks + 3 days\n- Tuesday + 3 days = Friday\n\nSo February 1, 2028 is a Friday.\n\nWith February 1 being a Friday, the Fridays in February 2028 are:\n- February 4 (Friday)\n- February 11 (Friday)\n- February 18 (Friday)\n- February 25 (Friday)\n\nWait, let me recalculate. If February 1 is a Friday:\n- February 1, 8, 15, 22, 29\n\nThat's 5 Fridays in February 2028.\n\ndays=29, fridays=5",
+    "usage": {
+      "input": 2622,
+      "output": 293,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 2915
+    },
+    "cost": {
+      "input": 0.0026219999999999998,
+      "output": 0.0014650000000000002,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0.004087
+    },
+    "durationMs": 2988,
+    "stopReason": "end_turn"
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "caseId": "hard-string-pipeline",
+  "model": "anthropic/claude-haiku-4-5",
+  "savedAt": "2026-09-02T19:18:52.471Z",
+  "status": "fail",
+  "trajectory": {
+    "caseId": "hard-string-pipeline",
+    "prompt": "Start with the word TRANSFORMATION. Apply these steps in order, without using any tools: (1) reverse the string. (2) Keep only the letters at odd positions (1st, 3rd, 5th, ...), preserving order. (3) Rotate the result left by 2 (the first two letters move to the end). (4) Swap the first and last letters. Reply with only the final string, uppercase.",
+    "model": "anthropic/claude-haiku-4-5",
+    "turns": [
+      {
+        "index": 0,
+        "usage": {
+          "input": 2680,
+          "output": 223,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 2903
+        },
+        "cost": {
+          "input": 0.00268,
+          "output": 0.001115,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 0.003795
+        }
+      }
+    ],
+    "toolCalls": [],
+    "finalOutput": "I'll work through this step by step.\n\nStarting word: TRANSFORMATION\n\n**Step 1: Reverse the string**\nTRANSFORMATION → NOITAMROFSNART\n\n**Step 2: Keep only letters at odd positions (1st, 3rd, 5th, ...)**\nN(1) O(2) I(3) T(4) A(5) M(6) R(7) O(8) F(9) S(10) N(11) A(12) R(13) T(14)\n\nOdd positions: N, I, A, R, F, N, R, T\nResult: NIARFNRT\n\n**Step 3: Rotate left by 2 (first two letters move to the end)**\nNIARFNRT → ARFNRTNI\n\n**Step 4: Swap the first and last letters**\nARFNRTNI → IRFNRTNA\n\nIRFNRTNA",
+    "usage": {
+      "input": 2680,
+      "output": 223,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 2903
+    },
+    "cost": {
+      "input": 0.00268,
+      "output": 0.001115,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0.003795
+    },
+    "durationMs": 2120,
+    "stopReason": "end_turn"
+  }
+}

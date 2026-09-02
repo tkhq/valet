@@ -1,0 +1,48 @@
+{
+  "caseId": "hard-logic-grid",
+  "model": "anthropic/claude-haiku-4-5",
+  "savedAt": "2026-09-02T19:18:46.839Z",
+  "status": "pass",
+  "trajectory": {
+    "caseId": "hard-logic-grid",
+    "prompt": "Five runners finished a race: Ana, Ben, Cleo, Dev, Ema. Clues: (1) Ben finished immediately after Ema. (2) Cleo was neither first nor last. (3) Dev finished before Ana but after Cleo. (4) Exactly one runner finished between Ema and Cleo. Reply with only the finishing order, first to last, comma-separated.",
+    "model": "anthropic/claude-haiku-4-5",
+    "turns": [
+      {
+        "index": 0,
+        "usage": {
+          "input": 2677,
+          "output": 496,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 3173
+        },
+        "cost": {
+          "input": 0.0026769999999999997,
+          "output": 0.00248,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 0.005157
+        }
+      }
+    ],
+    "toolCalls": [],
+    "finalOutput": "I need to solve this step-by-step using the clues.\n\nLet me denote the positions 1-5 (first to last).\n\nFrom clue (1): Ben finished immediately after Ema, so they're consecutive: Ema-Ben\n\nFrom clue (2): Cleo is not in position 1 or 5.\n\nFrom clue (3): Dev finished before Ana but after Cleo, so: Cleo < Dev < Ana\n\nFrom clue (4): Exactly one runner finished between Ema and Cleo.\n\nLet me work through this:\n\nSince Ema-Ben are consecutive, the possible positions for this pair are:\n- Positions 1-2\n- Positions 2-3\n- Positions 3-4\n- Positions 4-5\n\nFrom clue (4), exactly one runner is between Ema and Cleo. This means |position(Ema) - position(Cleo)| = 2.\n\nLet me try Ema-Ben in positions 1-2:\n- If Ema=1, Ben=2, then Cleo must be at position 3 (one runner between them, which is Ben)\n- From clue (3): Cleo < Dev < Ana, so Cleo=3 means Dev and Ana must be in positions 4,5\n- So: Ema(1), Ben(2), Cleo(3), Dev(4), Ana(5) ✓\n- Check clue (2): Cleo not first or last ✓\n\nLet me verify all clues:\n1. Ben immediately after Ema: Ben(2) after Ema(1) ✓\n2. Cleo neither first nor last: Cleo(3) ✓\n3. Dev before Ana but after Cleo: Cleo(3) < Dev(4) < Ana(5) ✓\n4. Exactly one runner between Ema and Cleo: Between positions 1 and 3 is position 2 (Ben) - exactly one ✓\n\nEma, Ben, Cleo, Dev, Ana",
+    "usage": {
+      "input": 2677,
+      "output": 496,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 3173
+    },
+    "cost": {
+      "input": 0.0026769999999999997,
+      "output": 0.00248,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0.005157
+    },
+    "durationMs": 3578,
+    "stopReason": "end_turn"
+  }
+}

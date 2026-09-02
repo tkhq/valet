@@ -1,0 +1,21 @@
+# Hard suite (see hard-letter-index.yaml). Leap-year awareness plus
+# weekday distribution. Expected value computed by script: February 2028
+# has 29 days and 4 Fridays.
+id: hard-calendar-count
+description: Count the Fridays in a future leap-year February.
+turns:
+  - role: user
+    content: >-
+      Without using any tools, how many Fridays does February 2028 have?
+      Reply in exactly this format: days=<days in month>, fridays=<count>
+timeout_ms: 180000
+checks:
+  - type: output_contains
+    pattern: "days\\s*=\\s*29"
+  - type: output_contains
+    pattern: "fridays\\s*=\\s*4"
+  - type: tool_not_called
+    tool: bash
+  - type: max_turns
+    value: 2
+  - type: no_errors
