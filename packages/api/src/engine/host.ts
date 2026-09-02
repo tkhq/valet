@@ -2778,11 +2778,12 @@ export class EngineHost {
   private async resolveModelForBuild(
     existing: SessionData | null,
     orgId: string,
-    prefs: { userId?: string; overrideId?: string; ownerTeamId?: string },
+    prefs: { userId?: string; overrideId?: string; ownerTeamId?: string; childDefault?: string },
   ): Promise<BuildModel> {
     if (existing?.model) return this.resolveModelObject(orgId, existing.model);
     const id =
       prefs.overrideId ??
+      prefs.childDefault ??
       (prefs.userId ? await this.userDefaultModel(prefs.userId) : undefined) ??
       (prefs.ownerTeamId ? await this.teamDefaultModel(orgId, prefs.ownerTeamId) : undefined) ??
       (await this.orgPreferredModel(orgId)) ??
@@ -2887,6 +2888,11 @@ export class EngineHost {
       userId: opts.owner.type === "user" ? opts.actorUserId : undefined,
       overrideId: opts.modelId,
       ownerTeamId: opts.owner.type === "team" ? opts.owner.id : undefined,
+      // Child sessions default to the "s" tier when no explicit overrideId
+      // was passed (TKAI-285). The tier resolves through the org's tier map
+      // to a concrete spec; childDefault sits after overrideId but before
+      // the user/team/org preference cascade.
+      childDefault: opts.modelId ? undefined : "s",
     });
 
     const profile = opts.profile ?? "headless";
