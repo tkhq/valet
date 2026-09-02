@@ -596,6 +596,16 @@ export interface ToolDef<TParams extends TSchema = TSchema> {
   requiresApproval?: boolean | ((args: Static<TParams>, ctx: ToolContext) => Promise<boolean> | boolean);
   /** When true, this tool's outputs are exempt from pruning during compaction. */
   protectedFromPruning?: boolean;
+  /**
+   * When true, this tool may execute concurrently with other tool calls in
+   * the same assistant response. Default: false — the tool runs
+   * sequentially, and one sequential tool serializes its whole batch
+   * (pi-agent-core semantics). Only read-only tools with no approval gate
+   * should opt in: parallel mutating tools race each other, and parallel
+   * approval-gated tools surface approvals out of execution order
+   * (TKAI-318).
+   */
+  concurrencySafe?: boolean;
   execute: (args: Static<TParams>, ctx: ToolContext) => Promise<ToolResult>;
 }
 
@@ -644,6 +654,17 @@ export interface ToolContext {
   repo?: { url?: string; branch?: string; ref?: string; provider?: string };
   credentials: CredentialProvider;
   sandbox: Sandbox;
+  /**
+   * Per-thread record of the model's file reads, backing the
+   * read-before-write staleness gate (TKAI-318). `get` returns the content
+   * hash stored at the newest read of the path; `record` stores a hash
+   * after a read or a successful write. Absent in hosts and tests that do
+   * not wire it — the gate is inert then.
+   */
+  fileReads?: {
+    get(path: string): string | undefined;
+    record(path: string, contentHash: string): void;
+  };
   /** Verbatim passthrough of `CreateSessionOptions.toolConfig` (Phase 4 decision 7). */
   config?: Record<string, unknown>;
   /**

@@ -763,11 +763,18 @@ interface ToolDef {
   parameters: TSchema;  // TypeBox schema (pi-ai native)
   riskLevel?: 'low' | 'medium' | 'high' | 'critical';
   requiresApproval?: boolean | ((args: Record<string, unknown>, ctx: ToolContext) => Promise<boolean> | boolean);
+  concurrencySafe?: boolean;  // default false: run sequentially (TKAI-318)
   execute: (args: Record<string, unknown>, ctx: ToolContext) => Promise<ToolResult>;
 }
 ```
 
 Tool names are globally unique within a session after registration. Built-in tools use short names (`read`, `bash`); plugin tools use service-qualified names (`github.create_pr`, `linear.create_issue`). If two tools register the same name at the same scope, session creation fails unless a thread-level override intentionally replaces a session-level tool.
+
+**Execution order (TKAI-318).** Tools default to sequential execution: the bridge maps `concurrencySafe: false` to pi-agent-core's `executionMode: "sequential"`, and one sequential tool serializes its whole batch. Only read-only, approval-free tools opt in (`read`, `thread_read`, `child_read`, `child_status`, `list_threads`); an approval-capable tool is forced sequential even when marked safe, so the flag cannot resurrect the out-of-order approval bug. Known cost: plugin/action tool batches serialize until `concurrencySafe` is derived from their metadata (MCP `readOnlyHint`) — tracked on TKAI-318.
+
+**Read-before-write gate (TKAI-318).** The thread keeps a content-hash map of the model's file reads (`ToolContext.fileReads`), keyed by lexically normalized absolute paths so path spellings cannot dodge or spuriously trip it. `edit` is a read-modify-write: it fails with corrective text when the file was never read this session or its content no longer matches the recorded hash. `write` replaces content wholesale by declared intent: it blocks only the changed-since-read case, never the never-read case, and performs no pre-read unless a hash is recorded — regenerating a large or binary artifact costs one write. Content hashing catches bash-side and human edits that timestamps cannot. The map is in-memory: after a restart the model must re-read before editing. Hosts that do not wire `fileReads` get no gate.
+
+**Empty results (TKAI-318).** The bridge replaces an empty tool result with `(toolName completed with no output)` — an empty result at the prompt tail can make the model end its turn with zero output.
 
 #### ToolContext
 
