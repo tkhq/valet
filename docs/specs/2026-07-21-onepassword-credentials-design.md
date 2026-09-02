@@ -17,8 +17,11 @@ service-account token. Secrets are never persisted in Valet's database.
 - Runtime resolution inside the api's `buildCredentialResolver` seam
   (`packages/api/src/engine/host.ts`) — **no engine changes**.
 - Org-level and personal service-account tokens.
-- Browse-and-pick selection UX (vault → item → field) backed by listing routes.
-- Web UI: one 1Password section on `/integrations`.
+- Listing routes for vaults and items (`/api/onepassword/vaults...`), kept for
+  the live-server regression test; the web no longer renders a picker.
+- Web UI: one 1Password page at Organization · 1Password
+  (`/settings/organization/onepassword`): org token, allow-personal toggle,
+  personal token.
 
 **Non-goals:** sandbox-side `op://` env injection (legacy runner feature),
 per-workflow token scoping, 1Password Connect server support (service-account
@@ -96,6 +99,17 @@ mint-cache pattern). SDK clients are cached per token.
 org). It propagates the same way `GitHubAuthError` does — surfaced as the
 tool's error result, never a session-level failure.
 
+### Vault lookup when no row exists
+
+When neither a user row nor a reachable org row names the service, the
+resolver asks 1Password for an item whose title names it
+(`findCredentialForService`, `titleNamesService`). The org token is tried
+first, then the personal token. The personal scope is consulted only for a
+user-owned session (`onePasswordScopesFor(ownerType)`): a team- or org-owned
+session can be prompted by people other than the actor frozen onto it, so its
+reads never reach that actor's personal vault. The same rule governs the
+sandbox broker.
+
 ## Owner-precedence contract
 
 **Credential reads follow user row → org row precedence for ALL credential
@@ -106,7 +120,7 @@ resolution built into the read, implemented ONCE
 three readers: the session resolver (`engine/host.ts`), the workflow tool-node
 action invoker (`plugins/action-invoker.ts`), and `ChannelHost`.**
 
-`resolveUserCredentialRead(deps, { orgId, userId }, service)` — a
+`resolveUserCredentialRead(deps, { orgId, userId, scopes? }, service, orgFallback)` — a
 `{ type: "user", id: userId }` row wins outright when present (any kind); on
 a user-row MISS it falls back to the `{ type: "org", id: orgId }` row for the
 same service. `resolveOrgCredentialRead(deps, { orgId, userId? }, service)`
@@ -175,15 +189,15 @@ with the same admin/member split by owner type.
 ## Web UI
 
 1Password is a credential source, not a plugin. It has one home:
-`/integrations`. That page holds the org token (admin), the personal token
-(when the org toggle is on), and the vault → item → field picker.
+Organization · 1Password (`/settings/organization/onepassword`), beside
+GitHub and Slack. The page holds the org token (admin), the allow-personal
+toggle (admin), and the personal token (when the toggle is on). The
+Organization rail lists it. `/integrations` does not carry 1Password.
 
-`/settings/organization/onepassword` redirects to `/integrations`. The
-Organization rail does not list 1Password. You → Connected accounts still
-shows a 1Password badge on a reference-backed credential row. It does not
-host token or picker UI.
-
-Reference-backed rows show a 1Password badge (reference visible, no secret).
+There is no picker and no reference list. A credential an integration needs
+is found in the vaults by item title at read time (see Resolution flow), so
+there is nothing to map by hand. You → Connected accounts still shows a
+1Password badge on a reference-backed credential row.
 
 ## Packaging
 
@@ -245,15 +259,15 @@ code as of the implementing commits:
   `useCredentials`/`qkIntegrations.credentials` also gained a `scope: "user" |
   "org"` parameter (default `"user"`) so `/integrations` can read the admin
   org-scoped list independently of the caller's own credentials.
-- **1Password UI lives on `/integrations`, not Organization settings.**
-  `packages/web/src/components/integrations/onepassword-panel.tsx` is the one
-  surface for tokens, the personal-token toggle, and reference credentials.
-  `packages/web/src/routes/settings.organization.onepassword.tsx` is a
-  redirect to `/integrations`. The Organization rail no longer lists
-  1Password. You → Connected accounts keeps the reference badge on a
-  credential row and does not host token or picker UI. A member sees the
-  panel (empty copy when no token is connected). An admin sees the org
-  token card and the toggle. `useCredentials("org")` stays admin-only.
+- **1Password UI lives on Organization settings, not `/integrations`.** The
+  panel moved to `/integrations` during review and back again once the vault
+  lookup made the picker and the reference list unnecessary. The picker
+  component and its browse hooks remain in the tree but nothing renders
+  them; the browse routes stay because `onepassword.live-server.test.ts`
+  drives the real SDK through one of them. Removing both is a follow-up.
+- **Reference rows can still be created by the API** (`PUT
+  /api/credentials/:service` with `body.onepassword`) but no UI lists or
+  revokes them. Either restore that list or reject the field; open.
 - **`onepassword.live.test.ts`** (Task 5) uses the real default `createClient`
   (no fake), gated on `OP_SERVICE_ACCOUNT_TOKEN` (skip-clean without it,
   verified locally). Live execution against a real 1Password service account

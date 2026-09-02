@@ -53,13 +53,12 @@ broker; per-session reference allowlists; write access of any kind.
    returns them must not be reachable by a cookie.
 
 4. **Values cross as base64, in a positional array.** The response carries
-   `values`, one entry per requested reference in request order, plus
-   `resolvedBase64` keyed by reference for the runner's provider. The shell
-   reads the positional array: an extractor that keyed by reference built its
-   search key from the raw text while the body carried the JSON-escaped form,
-   so a vault title containing a quote never matched and a resolved secret was
-   reported as missing. `null` also separates "nothing resolved it" from "the
-   field is blank", which an empty-string test conflated.
+   `values`, one entry per requested reference in request order, or `null`
+   when nothing resolved it, plus `unresolved` by name. Positional, because a
+   shell cannot key by reference: an extractor that did built its search key
+   from the raw text while the body carried the JSON-escaped form, so a vault
+   title containing a quote never matched. `null` separates "nothing resolved
+   it" from "the field is blank".
 
 5. **Base64 itself.** The caller is a POSIX shell with no JSON parser.
    A byte-level extractor cut every value at its first `"` and never unescaped
@@ -82,11 +81,13 @@ broker; per-session reference allowlists; write access of any kind.
    execs. Treat the child as trusted code that should not be handed extra
    credentials, not as a sandbox boundary.
 
-8. **A team-owned session gets the org scope only.** The sandbox token carries
-   the actor frozen onto the session at creation, not whoever is prompting it
-   now. Every member of a team can prompt a team-owned session, so consulting
-   that one person's personal vault would hand their private items to their
-   teammates.
+8. **Only a user-owned session reaches the personal scope.** The sandbox token
+   carries the actor frozen onto the session at creation, not whoever is
+   prompting it now. A team- or org-owned session can be prompted by anyone in
+   that group, so consulting the frozen actor's personal vault would hand
+   their private items to colleagues. `onePasswordScopesFor(ownerType)` in
+   `credential-resolution.ts` decides this once, for the broker and for the
+   api-side resolver, and an unknown owner gets the org scope alone.
 
 ## Flow
 
@@ -94,11 +95,11 @@ broker; per-session reference allowlists; write access of any kind.
 2. The script reads the token from `/etc/valet/creds/token`, or from
    `VALET_SANDBOX_TOKEN` when no creds mount exists.
 3. It POSTs every reference in one request to `/api/sandbox-secrets/resolve`.
-4. The route resolves each reference through `OnePasswordService`: the org
-   scope first, then the personal scope of the user the session runs as — and
-   the org scope only, when the session is team-owned.
-5. The response carries `values` (positional), `resolvedBase64` (keyed), and
-   `unresolved`.
+4. The route resolves every reference concurrently through
+   `OnePasswordService`: the org scope first, then the personal scope when the
+   session is user-owned. A scope with no token yields to the next; a token
+   1Password refuses is remembered.
+5. The response carries `values` (positional) and `unresolved`.
 6. The script decodes each value, unsets the sandbox token, exports the
    variables, and `exec`s the command.
 
@@ -116,6 +117,7 @@ Every failure names a corrective action, per the repo rule.
 | Reference resolved to a blank field | 3 | Named separately — a blank field needs a different fix from a wrong name. |
 | Broker slower than 30 seconds | 4 | Named as a timeout, not as an unreachable api. |
 | Broker refused or was unreachable | 4 | Reports the API's own message. |
+| 1Password refused the token and nothing resolved | 4 | The broker answers 502 naming the token to check; the CLI relays it. Reporting this as "nothing resolved" sent the reader to check vault names that were correct. |
 
 `curl` runs without `-f` and the status is checked separately: `-f` discards
 the body, and the body carries the message the API composed.
@@ -123,16 +125,11 @@ the body, and the body carries the message the API composed.
 ## Reachability
 
 `valet-secrets` exists only where the `credential-scripts` prep step runs, which
-is where a session has a `SpecProvider`. Two builders wire one:
-`EngineHost.sessionFor` and `EngineHost.buildChildSession`. Both pass
-`CODING_SYSTEM_PROMPT`, so the prompt paragraph covers exactly the population
-that can run the command.
-
-Orchestrator and workflow sessions are sandbox-less by design (`host.ts`, the
-`warmSandboxOnClaim: false` paths) and run no prep, so they do not have the
-command. Workflow session nodes receive `CODING_SYSTEM_PROMPT` without prep, so
-they are told about a command they do not have; the failure mode there is a
-command-not-found, not a leaked secret.
+is where a session has a `SpecProvider`. The coding prompt is composed per
+build (`codingSystemPrompt({ secretsCli })`): a build with a `SpecProvider`
+is told how to use the command, and a build without one (a workflow session
+node) is told it has no secrets command and must ask. Orchestrators run no
+prep either and carry their own rule (below).
 
 The orchestrator needs its own rule, and one sentence inside the Delegation
 section was not enough. Asked for a 1Password value, it ran `op read` — the
