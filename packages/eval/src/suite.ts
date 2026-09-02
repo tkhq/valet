@@ -41,6 +41,14 @@ export interface SuiteOptions {
   runsOverride?: number;
   /** Save each finished case's trajectory as a new baseline. */
   saveBaselines?: boolean;
+  /**
+   * Permit saving baselines for integration/full cases. Off by default:
+   * their trajectories carry LIVE API responses verbatim, and
+   * `evals/baselines/` is git-tracked — an accidental save can commit
+   * private data. Cases with these profiles are otherwise skipped from
+   * saving, with a note in the result.
+   */
+  allowLiveBaselines?: boolean;
   /** Clock seam for tests. */
   now?: () => Date;
   /** Per-case progress callback (called before each case runs). */
@@ -53,6 +61,12 @@ export interface SuiteResult {
   wallMs: number;
   /** Baseline files written when `saveBaselines` is set. */
   savedBaselinePaths: string[];
+  /**
+   * Integration/full cases whose baselines were NOT saved because
+   * `allowLiveBaselines` was off (live API responses must not land in the
+   * tracked baselines dir by accident).
+   */
+  skippedLiveBaselineCaseIds: string[];
 }
 
 export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<SuiteResult> {
@@ -61,6 +75,7 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
   const entries: ScorecardEntry[] = [];
   const comparisons: BaselineComparison[] = [];
   const savedBaselinePaths: string[] = [];
+  const skippedLiveBaselineCaseIds: string[] = [];
 
   for (const [index, evalCase] of cases.entries()) {
     opts.onCaseStart?.(evalCase, index, cases.length);
@@ -190,7 +205,10 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
       comparisons.push(compareToBaseline(entry, baseline));
     }
 
-    if (opts.saveBaselines === true && entry.trajectory !== undefined) {
+    const liveProfile = profile === "integration" || profile === "full";
+    if (opts.saveBaselines === true && liveProfile && opts.allowLiveBaselines !== true) {
+      skippedLiveBaselineCaseIds.push(evalCase.id);
+    } else if (opts.saveBaselines === true && entry.trajectory !== undefined) {
       savedBaselinePaths.push(
         await saveBaseline(opts.baselinesDir, {
           caseId: evalCase.id,
@@ -204,5 +222,11 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
     }
   }
 
-  return { entries, comparisons, wallMs: now().getTime() - startedAt, savedBaselinePaths };
+  return {
+    entries,
+    comparisons,
+    wallMs: now().getTime() - startedAt,
+    savedBaselinePaths,
+    skippedLiveBaselineCaseIds,
+  };
 }

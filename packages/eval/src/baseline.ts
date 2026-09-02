@@ -8,7 +8,7 @@
  * most recent baseline of any model is used and the comparison notes the
  * model difference.
  */
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { SamplingStats, ScorecardEntry, Trajectory } from "./types.js";
 
@@ -122,6 +122,48 @@ export async function loadLatestBaseline(
   const sameModel = records.filter((r) => r.model === model).sort(bySavedAtDesc);
   if (sameModel.length > 0) return sameModel[0];
   return records.sort(bySavedAtDesc)[0];
+}
+
+/**
+ * Prune old baseline files: keep the newest `keep` records per (case,
+ * model), delete the rest. Returns the deleted paths. Run it when the
+ * tracked baselines dir starts accumulating stale dated files.
+ */
+export async function pruneBaselines(baselinesDir: string, keep: number): Promise<string[]> {
+  if (!Number.isInteger(keep) || keep < 1) {
+    throw new Error(`pruneBaselines: keep must be a positive integer, got ${keep}`);
+  }
+  let caseDirs: string[];
+  try {
+    caseDirs = await readdir(baselinesDir);
+  } catch {
+    return [];
+  }
+  const deleted: string[] = [];
+  for (const caseId of caseDirs) {
+    // `flagged/` holds raw session exports and scaffolds, not dated records.
+    if (caseId === "flagged") continue;
+    const records = await readCaseBaselines(baselinesDir, caseId);
+    const byModel = new Map<string, BaselineRecord[]>();
+    for (const record of records) {
+      const list = byModel.get(record.model) ?? [];
+      list.push(record);
+      byModel.set(record.model, list);
+    }
+    for (const list of byModel.values()) {
+      const stale = list.sort((a, b) => b.savedAt.localeCompare(a.savedAt)).slice(keep);
+      for (const record of stale) {
+        const path = join(baselinesDir, record.caseId, `${record.model.replace(/[/\\:]/g, "-")}_${record.savedAt.slice(0, 10)}.json`);
+        try {
+          await rm(path);
+          deleted.push(path);
+        } catch {
+          // Already gone or renamed by hand; pruning is best-effort.
+        }
+      }
+    }
+  }
+  return deleted;
 }
 
 function toolSequence(t: Trajectory): string[] {

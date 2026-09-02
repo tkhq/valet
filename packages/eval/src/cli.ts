@@ -21,6 +21,7 @@ import { DockerSandboxProvider } from "@valet/sandbox-docker";
 import { loadCases } from "./case-loader.js";
 import { filterCases, parseCliArgs } from "./cli-args.js";
 import { buildJudgeRunner } from "./checks/judge.js";
+import { pruneBaselines } from "./baseline.js";
 import { dockerAvailable, loadEvalCredentials } from "./integration.js";
 import { pullFlagged } from "./pull-flagged.js";
 import { formatScorecard } from "./scorecard.js";
@@ -30,6 +31,16 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
 async function main(): Promise<number> {
   const opts = parseCliArgs(process.argv.slice(2));
+
+  if (opts.pruneBaselinesKeep !== undefined) {
+    const deleted = await pruneBaselines(opts.baselinesDir, opts.pruneBaselinesKeep);
+    process.stdout.write(
+      deleted.length > 0
+        ? `pruned ${deleted.length} baseline file(s):\n${deleted.join("\n")}\n`
+        : "nothing to prune.\n",
+    );
+    return 0;
+  }
 
   if (opts.pullFlagged) {
     // Reads the database directly. On PGlite, the api must be stopped first
@@ -76,6 +87,7 @@ async function main(): Promise<number> {
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
     ...(opts.runsOverride !== undefined ? { runsOverride: opts.runsOverride } : {}),
     saveBaselines: opts.saveBaseline,
+    allowLiveBaselines: opts.allowLiveBaselines,
     onCaseStart: (evalCase, index, total) => {
       if (!opts.json) console.error(`[eval] (${index + 1}/${total}) ${evalCase.id}`);
     },
@@ -101,6 +113,12 @@ async function main(): Promise<number> {
     out.push(formatScorecard(result.entries, { comparisons: result.comparisons, wallMs: result.wallMs }));
     if (result.savedBaselinePaths.length > 0) {
       out.push(`\nsaved ${result.savedBaselinePaths.length} baseline(s) to ${opts.baselinesDir}`);
+    }
+    if (result.skippedLiveBaselineCaseIds.length > 0) {
+      out.push(
+        `\nnot saved (live-profile trajectories carry real API responses): ${result.skippedLiveBaselineCaseIds.join(", ")}.` +
+          " Pass --allow-live-baselines to save them anyway.",
+      );
     }
     if (opts.verbose) {
       for (const entry of result.entries) {
