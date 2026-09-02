@@ -683,6 +683,25 @@ describe("the double-post guard", () => {
     expect(h.transport.started).toHaveLength(0);
     expect(h.transport.appends).toHaveLength(0);
   });
+
+  it("opens no stream after the host clears the turn for a web submission (TKAI-323)", async () => {
+    // A turn parked on an approval gate keeps its registration on purpose, so
+    // the post-approval segment can stream. If the reader answers from the web
+    // UI instead, the host clears that registration, and the web turn must not
+    // open a channel stream.
+    const h = makeHarness();
+    h.bridge.noteInboundTurn(h.turn);
+    h.bridge.clearInboundTurn(SESSION_ID, THREAD_ID);
+
+    await h.emit(messageStart("m1"));
+    h.delta("this answer belongs in the UI\n");
+    await advance(FLUSH_INTERVAL_MS);
+
+    expect(h.transport.started).toHaveLength(0);
+    expect(h.transport.appends).toHaveLength(0);
+    // Unmarked, so the host's own discrete path still owns the message.
+    expect(h.bridge.isStreamed(SESSION_ID, "m1")).toBe(false);
+  });
 });
 
 describe("transports that do not stream", () => {

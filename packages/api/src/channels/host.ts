@@ -197,6 +197,23 @@ function turnPromptIsFeedback(entries: SessionEntry[], queueItemId: string): boo
   );
 }
 
+/**
+ * True when a channel message started this submission.
+ *
+ * Two inbound paths reach a bound thread. A signal-bearing path (the event
+ * dispatcher, the follow-router) carries `signal.origin`, which
+ * `originFromEntries` reads. The direct-message path (`handleMessage`)
+ * submits a plain prompt, which has no signal, and marks the surface on
+ * `MessageEntry.channel` instead. A web-UI prompt sets neither, so it is the
+ * only submission both checks miss — which is what keeps its answer off the
+ * channel (TKAI-323).
+ */
+function submissionFromChannel(entries: SessionEntry[], queueItemId: string): boolean {
+  return entries.some(
+    (e) => e.type === "message" && e.role === "user" && e.queueItemId === queueItemId && e.channel !== undefined,
+  );
+}
+
 /** The submission's first assistant message that carries text or an
  * attachment — the one the auto-post posts. Derived from the store rather
  * than held in memory, so an api restart mid-submission cannot double-post. */
@@ -637,6 +654,32 @@ export class ChannelHost {
     // pick a delivery target when the thread key does not map, and to decide
     // whether this turn auto-posts at all.
     const origin = entry.queueItemId ? originFromEntries(entries, entry.queueItemId) : undefined;
+    // The auto-post belongs to the channel MESSAGE being answered, not to the
+    // thread it landed on. A Slack-bound thread stays bound after the reader
+    // moves to the web UI, so the thread key alone says nothing about where
+    // this turn came from. A submission with a queueItemId and no channel
+    // origin is a web-UI prompt: answer it in the UI and stay off the channel
+    // (TKAI-323). The submission still reaches the channel when the agent
+    // calls reply_to_origin, which is a deliberate cross-post.
+    //
+    // A gate approved from the UI does NOT change the submission's origin:
+    // the entries still carry the Slack signal that started it, so the
+    // post-approval outcome posts to Slack through the reopened slot below.
+    //
+    // `queueItemId === undefined` keeps the pre-submission paths (an entry
+    // written outside a queue item) on their existing behavior — the origin
+    // lookup needs a submission to read.
+    if (
+      mapped &&
+      entry.queueItemId !== undefined &&
+      origin === undefined &&
+      !submissionFromChannel(entries, entry.queueItemId)
+    ) {
+      // Release any stream registration a parked channel turn left on this
+      // thread, so the NEXT message of this web turn opens no stream either.
+      this.streamBridge.clearInboundTurn(sessionId, threadId);
+      return;
+    }
     // An overheard turn (a message in a followed thread the assistant did not
     // choose to answer here) does not auto-post; the assistant replies only
     // through reply_to_origin / react_to_origin, or stays silent. If the turn
@@ -1175,6 +1218,13 @@ export class ChannelHost {
       {
         dispatchId: event.dispatchId,
         author: { id: userId, name: event.sender.displayName, externalId: event.sender.externalId },
+        // Stamp the surface this prompt came from. A channel thread keeps its
+        // binding for its whole life, so the thread key alone cannot say
+        // whether a given turn started on the channel or in the web UI. The
+        // outbound path reads this mark to auto-post only the turns that a
+        // channel message started (TKAI-323). A plain prompt carries no
+        // `signal.origin`, so this is the only durable record for this path.
+        channel: { channelType, channelId: event.conversationKey },
       },
     );
 

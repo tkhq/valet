@@ -252,6 +252,30 @@ export class ChannelStreamBridge {
     void this.setStatus(turn, "is thinking…");
   }
 
+  /**
+   * Drops the pending turn for a thread, so the next `message_start` opens no
+   * stream.
+   *
+   * A channel thread keeps its binding for its whole life, but a turn on it
+   * can come from the web UI. `noteInboundTurn` registers one turn per
+   * inbound channel message and `turn_end` clears it, so an ordinary web turn
+   * finds nothing registered. A turn parked on an approval gate is the gap:
+   * `closeForGate` keeps the registration on purpose, so the post-approval
+   * segment can stream. The host calls this when the submission it is about to
+   * answer carries no channel origin, which keeps a web-UI turn off the
+   * channel (TKAI-323).
+   */
+  clearInboundTurn(sessionId: string, threadId: string): void {
+    const key = stateKey(sessionId, threadId);
+    const turn = this.pending.get(key);
+    if (!turn) return;
+    this.pending.delete(key);
+    // The status belongs to the channel turn that just lost its registration.
+    // Clear it, or the channel shows "is thinking…" for a turn that will
+    // never post there.
+    void this.setStatus(turn, "");
+  }
+
   /** True when this bridge streamed an engine message, so the host's discrete
    * `message_end` delivery must skip it. Synchronous by contract: the marker
    * is recorded on `message_start`, which the event stream always delivers

@@ -19,6 +19,7 @@ import {
   type InboundChannelEvent,
   type OutboundChannelAttachment,
   type OutboundChannelMessage,
+  type SessionEntry,
   type ValetPlugin,
 } from "@valet/engine";
 import { PgSessionStore, PgEventStream } from "@valet/store-postgres";
@@ -82,6 +83,35 @@ class KeyedTransport extends FakeTransport {
   conversationKeyFromThreadKey(threadKey: string): string | null {
     return threadKey.startsWith("keyed:") ? `keyed:R1:${threadKey.slice("keyed:".length)}` : null;
   }
+}
+
+/**
+ * The user entry a channel message writes when it starts a submission.
+ *
+ * The auto-post reads the SUBMISSION's surface, not the thread's binding, so
+ * a fixture that appends only assistant entries describes a submission from
+ * nowhere and never posts. `channel` is the mark the direct-message path
+ * stamps (`ChannelHost.handleMessage`). The signal-bearing paths carry
+ * `signal.origin` instead, and those fixtures build it inline.
+ */
+function channelUserEntry(args: {
+  sessionId: string;
+  threadId: string;
+  queueItemId: string;
+  text?: string;
+}): SessionEntry {
+  return {
+    type: "message",
+    id: `user-${args.queueItemId}`,
+    sessionId: args.sessionId,
+    threadId: args.threadId,
+    parentId: null,
+    createdAt: Date.now(),
+    role: "user",
+    content: args.text ?? "do the thing",
+    queueItemId: args.queueItemId,
+    channel: { channelType: "fake", channelId: "fake:dm:99" },
+  };
 }
 
 function inbound(overrides: Partial<InboundChannelEvent> = {}): InboundChannelEvent {
@@ -841,8 +871,10 @@ describe("ChannelHost outbound delivery", () => {
       role: "assistant" as const,
     };
     await engineStore.appendEntries(session.id, threadId, [
+      channelUserEntry({ sessionId: session.id, threadId, queueItemId: "qi-turn-1" }),
       { ...base, id: "turn1-msg-1", content: "I'll dig into the v1 implementation first.", queueItemId: "qi-turn-1" },
       { ...base, id: "turn1-msg-2", content: "Let me look at the repo directly.", queueItemId: "qi-turn-1" },
+      channelUserEntry({ sessionId: session.id, threadId, queueItemId: "qi-turn-2" }),
       { ...base, id: "turn2-msg-1", content: "Second turn reply.", queueItemId: "qi-turn-2" },
     ]);
 
@@ -869,6 +901,208 @@ describe("ChannelHost outbound delivery", () => {
     ]);
   });
 
+  it("a web-UI submission on a channel-bound thread posts nothing to the channel (TKAI-323)", async () => {
+    // The bug: a Slack-bound thread stays bound after the reader moves to the
+    // web UI, and the auto-post read the THREAD's binding. It must read the
+    // SUBMISSION's surface instead. A web prompt carries no channel origin and
+    // no channel mark, so its answer stays in the UI.
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    const base = {
+      type: "message" as const,
+      sessionId: session.id,
+      threadId,
+      parentId: null,
+      createdAt: Date.now(),
+      role: "assistant" as const,
+      queueItemId: "qi-web-1",
+    };
+    await engineStore.appendEntries(session.id, threadId, [
+      // A web submission: a user entry with neither `channel` nor
+      // `signal.origin`.
+      {
+        type: "message",
+        id: "web-user-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "user",
+        content: "asked from the web UI",
+        queueItemId: "qi-web-1",
+      },
+      { ...base, id: "web-msg-1", content: "The ack that must stay in the UI." },
+      { ...base, id: "web-msg-2", content: "The answer that must stay in the UI.", stopReason: "end_turn" },
+    ]);
+
+    for (const messageId of ["web-msg-1", "web-msg-2"]) {
+      await eventStream.append(
+        {
+          sessionId: session.id,
+          threadId,
+          timestamp: Date.now(),
+          event: { type: "message_end", threadId, messageId, reason: "end_turn" },
+        },
+        `web-origin-${messageId}-${randomUUID()}`,
+      );
+    }
+
+    // Absence needs a real window: the delivery is asynchronous.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(fakeTransport.sent).toHaveLength(0);
+  });
+
+  it("alternating UI and channel turns each answer on their own surface (TKAI-323)", async () => {
+    // One bound thread, three submissions: UI, channel, UI. Each answer goes
+    // where its prompt came from, and neither UI turn leaks to the channel.
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    const assistant = (id: string, content: string, queueItemId: string) => ({
+      type: "message" as const,
+      id,
+      sessionId: session.id,
+      threadId,
+      parentId: null,
+      createdAt: Date.now(),
+      role: "assistant" as const,
+      content,
+      queueItemId,
+      stopReason: "end_turn" as const,
+    });
+    const webUser = (id: string, queueItemId: string): SessionEntry => ({
+      type: "message",
+      id,
+      sessionId: session.id,
+      threadId,
+      parentId: null,
+      createdAt: Date.now(),
+      role: "user",
+      content: "from the web UI",
+      queueItemId,
+    });
+
+    await engineStore.appendEntries(session.id, threadId, [
+      webUser("alt-user-1", "qi-alt-1"),
+      assistant("alt-msg-1", "UI answer one.", "qi-alt-1"),
+      channelUserEntry({ sessionId: session.id, threadId, queueItemId: "qi-alt-2" }),
+      assistant("alt-msg-2", "Channel answer.", "qi-alt-2"),
+      webUser("alt-user-3", "qi-alt-3"),
+      assistant("alt-msg-3", "UI answer two.", "qi-alt-3"),
+    ]);
+
+    for (const messageId of ["alt-msg-1", "alt-msg-2", "alt-msg-3"]) {
+      await eventStream.append(
+        {
+          sessionId: session.id,
+          threadId,
+          timestamp: Date.now(),
+          event: { type: "message_end", threadId, messageId, reason: "end_turn" },
+        },
+        `alt-${messageId}-${randomUUID()}`,
+      );
+    }
+
+    await vi.waitFor(() => {
+      expect(fakeTransport.sent.some((s) => s.message.markdown.includes("Channel answer."))).toBe(true);
+    });
+    // Deliveries are serialized per thread, so the last one landing means the
+    // others settled. Only the channel turn reached the channel.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(fakeTransport.sent.map((s) => s.message.markdown)).toEqual(["Channel answer."]);
+  });
+
+  it("a gate approved from the UI still posts the outcome of a channel submission (TKAI-323)", async () => {
+    // The submission started in the channel; the reader approved the gate in
+    // the web UI. The approval click does not change where the submission came
+    // from, so the post-approval outcome must still reach the channel.
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    const base = {
+      type: "message" as const,
+      sessionId: session.id,
+      threadId,
+      parentId: null,
+      createdAt: Date.now(),
+      role: "assistant" as const,
+    };
+    await engineStore.appendEntries(session.id, threadId, [
+      channelUserEntry({ sessionId: session.id, threadId, queueItemId: "qi-uigate-1" }),
+      { ...base, id: "uig-msg-1", content: "About to do the risky thing.", queueItemId: "qi-uigate-1" },
+    ]);
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "uig-msg-1", reason: "end_turn" },
+      },
+      `uig1-${randomUUID()}`,
+    );
+    await vi.waitFor(() => {
+      expect(fakeTransport.sent.some((s) => s.message.markdown.includes("About to do"))).toBe(true);
+    });
+
+    const gate: DecisionGate = {
+      id: `gate-${randomUUID()}`,
+      sessionId: session.id,
+      threadId,
+      queueItemId: "qi-uigate-1",
+      resumeKey: "rk-uigate-1",
+      ordinal: 1,
+      type: "approval",
+      title: "Approve the thing?",
+      body: "do the thing",
+      actions: [{ id: "approve", label: "Approve", style: "primary" }],
+      status: "pending",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    await eventStream.append(
+      { sessionId: session.id, threadId, timestamp: Date.now(), event: { type: "decision_gate", threadId, gate } },
+      `uig-gate-${randomUUID()}`,
+    );
+    await vi.waitFor(() => {
+      expect(fakeTransport.gatePrompts).toHaveLength(1);
+    });
+
+    // Resolved from the web UI: no channel gate_callback, so the resolution
+    // carries no channel source at all.
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: {
+          type: "decision_gate_resolved",
+          threadId,
+          gateId: gate.id,
+          resolution: { actionId: "approve", resolvedBy: USER_ID, resolvedAt: Date.now() },
+        },
+      },
+      `uig-resolve-${randomUUID()}`,
+    );
+    await vi.waitFor(() => {
+      expect(fakeTransport.gateEdits).toHaveLength(1);
+    });
+
+    await engineStore.appendEntries(session.id, threadId, [
+      { ...base, id: "uig-msg-2", content: "Done: the thing succeeded.", queueItemId: "qi-uigate-1" },
+    ]);
+    await eventStream.append(
+      {
+        sessionId: session.id,
+        threadId,
+        timestamp: Date.now(),
+        event: { type: "message_end", threadId, messageId: "uig-msg-2", reason: "end_turn" },
+      },
+      `uig2-${randomUUID()}`,
+    );
+
+    await vi.waitFor(() => {
+      expect(fakeTransport.sent.some((s) => s.message.markdown.includes("Done: the thing succeeded."))).toBe(true);
+    });
+  });
+
   it("posts the ack AND the turn-final answer; the narration between stays off the channel", async () => {
     // The field failure this pins: the model acks, works for 14 rounds, and
     // ends the turn on the real answer. The reader must get the ack and the
@@ -885,6 +1119,7 @@ describe("ChannelHost outbound delivery", () => {
       queueItemId: "qi-ackfinal-1",
     };
     await engineStore.appendEntries(session.id, threadId, [
+      channelUserEntry({ sessionId: session.id, threadId, queueItemId: "qi-ackfinal-1" }),
       { ...base, id: "af-msg-1", content: "I'll check the code for how the key flows." },
       { ...base, id: "af-msg-2", content: "Found the single injection point. Reading it fully." },
       { ...base, id: "af-msg-3", content: "No. The key never enters the sandbox.", stopReason: "end_turn" },
@@ -928,6 +1163,7 @@ describe("ChannelHost outbound delivery", () => {
       queueItemId: "qi-explicit-1",
     };
     await engineStore.appendEntries(session.id, threadId, [
+      channelUserEntry({ sessionId: session.id, threadId, queueItemId: "qi-explicit-1" }),
       { ...base, id: "ex-msg-1", content: "On it — checking now." },
     ]);
     await eventStream.append(
@@ -984,6 +1220,7 @@ describe("ChannelHost outbound delivery", () => {
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("fake:99").id;
     await engineStore.appendEntries(session.id, threadId, [
+      channelUserEntry({ sessionId: session.id, threadId, queueItemId: "qi-acted-1" }),
       {
         type: "message",
         id: "acted-msg-1",
@@ -1032,6 +1269,7 @@ describe("ChannelHost outbound delivery", () => {
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
     const threadId = session.thread("fake:99").id;
     await engineStore.appendEntries(session.id, threadId, [
+      channelUserEntry({ sessionId: session.id, threadId, queueItemId: "qi-failed-reply-1" }),
       {
         type: "message",
         id: "failed-reply-msg-1",
@@ -1085,6 +1323,7 @@ describe("ChannelHost outbound delivery", () => {
       role: "assistant" as const,
     };
     await engineStore.appendEntries(session.id, threadId, [
+      channelUserEntry({ sessionId: session.id, threadId, queueItemId: "qi-gated-1" }),
       { ...base, id: "seg1-msg-1", content: "About to do the risky thing.", queueItemId: "qi-gated-1" },
     ]);
     await eventStream.append(
