@@ -242,18 +242,63 @@ memoryRouter.get("/", async (c) => {
  * card size; a generated TL;DR is what the user actually wants at a
  * glance). Cached in-process per (owner, date, content-hash): one model
  * call per journal edit per day, reset on restart — deliberately no table.
+ *
+ * The model call takes seconds, so it never runs on the request path: a
+ * cache miss answers `pending: true` immediately and generates in the
+ * background; the client polls and picks the result up from the cache.
+ * A failed generation is remembered per content-hash (edit the journal to
+ * retry), so a polling client cannot re-call the model in a loop.
  */
 const journalSummaryCache = new Map<string, string>();
+const journalSummaryFailed = new Map<string, true>();
+const journalSummaryInFlight = new Set<string>();
 /** Keys carry a date + content hash, so stale entries accumulate forever
  * on a long-lived process — evict oldest-inserted past this bound. */
 const JOURNAL_CACHE_MAX = 512;
 
-function journalCachePut(key: string, value: string): void {
-  if (journalSummaryCache.size >= JOURNAL_CACHE_MAX) {
-    const oldest = journalSummaryCache.keys().next().value;
-    if (oldest !== undefined) journalSummaryCache.delete(oldest);
+function boundedPut<V>(map: Map<string, V>, key: string, value: V): void {
+  if (map.size >= JOURNAL_CACHE_MAX) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
   }
-  journalSummaryCache.set(key, value);
+  map.set(key, value);
+}
+
+/** The background half of `/journal-summary`: one Haiku call, result into
+ * the cache (or the failure memo). Never throws — nothing awaits it. */
+async function generateJournalSummary(cacheKey: string, content: string): Promise<void> {
+  try {
+    const model = getModel("anthropic", "claude-haiku-4-5");
+    if (!model) {
+      boundedPut(journalSummaryFailed, cacheKey, true);
+      return;
+    }
+    const result = await completeSimple(
+      model,
+      {
+        systemPrompt:
+          "Summarize the day's journal in ONE sentence (max ~140 characters). " +
+          "Plain prose, no markdown, no preamble. Focus on what was " +
+          "accomplished or decided, not process.",
+        messages: [
+          { role: "user", content: [{ type: "text", text: content.slice(0, 12_000) }], timestamp: Date.now() },
+        ],
+      },
+      { temperature: 0.3, maxTokens: 80 },
+    );
+    const summary = result.content
+      .filter((b): b is { type: "text"; text: string } => b.type === "text")
+      .map((b) => b.text)
+      .join("")
+      .trim();
+    if (summary) boundedPut(journalSummaryCache, cacheKey, summary);
+    else boundedPut(journalSummaryFailed, cacheKey, true);
+  } catch (err) {
+    console.error("journal-summary generation failed:", err);
+    boundedPut(journalSummaryFailed, cacheKey, true);
+  } finally {
+    journalSummaryInFlight.delete(cacheKey);
+  }
 }
 
 function djb2(text: string): string {
@@ -291,34 +336,13 @@ memoryRouter.get("/journal-summary", async (c) => {
   const cacheKey = `${scope.owner.type}:${scope.owner.id}:${date}:${djb2(content)}`;
   const cached = journalSummaryCache.get(cacheKey);
   if (cached) return c.json({ date, summary: cached });
+  if (journalSummaryFailed.has(cacheKey)) return c.json({ date, summary: null });
 
-  try {
-    const model = getModel("anthropic", "claude-haiku-4-5");
-    if (!model) return c.json({ date, summary: null });
-    const result = await completeSimple(
-      model,
-      {
-        systemPrompt:
-          "Summarize the day's journal in ONE sentence (max ~140 characters). " +
-          "Plain prose, no markdown, no preamble. Focus on what was " +
-          "accomplished or decided, not process.",
-        messages: [
-          { role: "user", content: [{ type: "text", text: content.slice(0, 12_000) }], timestamp: Date.now() },
-        ],
-      },
-      { temperature: 0.3, maxTokens: 80 },
-    );
-    const summary = result.content
-      .filter((b): b is { type: "text"; text: string } => b.type === "text")
-      .map((b) => b.text)
-      .join("")
-      .trim();
-    if (summary) journalCachePut(cacheKey, summary);
-    return c.json({ date, summary: summary || null });
-  } catch (err) {
-    console.error("journal-summary generation failed:", err);
-    return c.json({ date, summary: null });
+  if (!journalSummaryInFlight.has(cacheKey)) {
+    journalSummaryInFlight.add(cacheKey);
+    void generateJournalSummary(cacheKey, content);
   }
+  return c.json({ date, summary: null, pending: true });
 });
 
 /**
