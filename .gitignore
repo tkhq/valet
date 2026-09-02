@@ -16,6 +16,7 @@ wrangler.deploy.toml
 .env
 .env.backup*
 .env.e2e
+.env.eval
 .env.local
 .env.*.local
 .env.deploy

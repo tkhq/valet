@@ -7,6 +7,9 @@
  * `ANTHROPIC_API_KEY` (or the matching provider env var) through pi-ai's
  * env fallback. Tests use the pi-ai faux provider instead.
  */
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   Engine,
   InMemoryBlobStore,
@@ -20,11 +23,13 @@ import {
   type ChildSpawner,
   type Model,
   type Principal,
+  type SandboxProvider,
   type Session,
   type SessionEntry,
   type ToolDef,
   type ValetPlugin,
 } from "@valet/engine";
+import { buildRealCatalogTools } from "./integration.js";
 import { EvalMemoryStore, buildEvalMemoryTools } from "./memory-tools.js";
 import { buildMockCatalogTools } from "./mock-catalog.js";
 import { extractTrajectory } from "./trajectory.js";
@@ -57,6 +62,22 @@ export interface RunnerOptions {
    * is `mock`.
    */
   mockPlugins?: ValetPlugin[];
+  /**
+   * Real plugin manifests backing `profile: integration` and
+   * `profile: full` cases (TKAI-336) — actions execute for real against
+   * live services. Required for those profiles.
+   */
+  realPlugins?: ValetPlugin[];
+  /**
+   * Live credentials keyed by credential service (e.g. `github`), seeded
+   * into the case engine's InMemoryCredentialStore for the eval user.
+   */
+  credentials?: Record<string, string>;
+  /**
+   * Sandbox provider override. The suite passes a DockerSandboxProvider
+   * for `profile: full` cases. Default: VirtualSandboxProvider.
+   */
+  sandboxProvider?: SandboxProvider;
   /** Override the session system prompt. */
   systemPrompt?: string;
 }
@@ -124,6 +145,19 @@ function restrictTools(all: ToolDef[], pins: string[] | undefined, caseId: strin
 
 /** Run one eval case through the engine and extract its trajectory. */
 export async function runCase(evalCase: EvalCase, opts: RunnerOptions): Promise<CaseRunResult> {
+  // The Docker sandbox drives readiness and job eviction with unref'd
+  // timers; in provisioning gaps they can be the ONLY pending work, and
+  // node then exits mid-case with the run unresolved. Hold one live handle
+  // for the duration of the case.
+  const keepalive = setInterval(() => {}, 60_000);
+  try {
+    return await runCaseInner(evalCase, opts);
+  } finally {
+    clearInterval(keepalive);
+  }
+}
+
+async function runCaseInner(evalCase: EvalCase, opts: RunnerOptions): Promise<CaseRunResult> {
   let model: Model<string>;
   let modelSpec: string;
   if (evalCase.model === undefined && typeof opts.model !== "string") {
@@ -148,32 +182,48 @@ export async function runCase(evalCase: EvalCase, opts: RunnerOptions): Promise<
   const remaining = (): number => Math.max(1, deadline - Date.now());
 
   const store = new InMemorySessionStore();
+  const credentialStore = new InMemoryCredentialStore();
   const engine = new Engine({
     providers: {
       store,
       stream: new InMemoryEventStream(),
       blobs: new InMemoryBlobStore(),
-      credentials: new InMemoryCredentialStore(),
-      sandboxProvider: new VirtualSandboxProvider(),
+      credentials: credentialStore,
+      sandboxProvider: opts.sandboxProvider ?? new VirtualSandboxProvider(),
     },
   });
 
   const owner: Principal = { type: "user", id: EVAL_USER_ID };
   const isOrchestrator = evalCase.session_type === "orchestrator";
   const memoryStore = new EvalMemoryStore();
-  let mockCatalog: ToolDef[] = [];
-  if (evalCase.profile === "mock") {
+  const profile = evalCase.profile ?? "unit";
+  let catalogTools: ToolDef[] = [];
+  if (profile === "mock") {
     if (opts.mockPlugins === undefined || opts.mockPlugins.length === 0) {
       throw new Error(
         `case ${evalCase.id} has profile: mock but the runner got no mockPlugins. ` +
           "Pass the bundled plugin registry in RunnerOptions.mockPlugins.",
       );
     }
-    mockCatalog = buildMockCatalogTools(evalCase.mock_tools ?? {}, opts.mockPlugins);
+    catalogTools = buildMockCatalogTools(evalCase.mock_tools ?? {}, opts.mockPlugins);
+  } else if (profile === "integration" || profile === "full") {
+    if (opts.realPlugins === undefined || opts.realPlugins.length === 0) {
+      throw new Error(
+        `case ${evalCase.id} has profile: ${profile} but the runner got no realPlugins. ` +
+          "Pass the bundled plugin registry in RunnerOptions.realPlugins.",
+      );
+    }
+    catalogTools = buildRealCatalogTools(opts.realPlugins, profile);
+    for (const [service, token] of Object.entries(opts.credentials ?? {})) {
+      await credentialStore.save({ type: "user", id: EVAL_USER_ID }, service, {
+        type: "api_key",
+        accessToken: token,
+      });
+    }
   }
   const customTools = [
     ...buildEvalMemoryTools(memoryStore),
-    ...mockCatalog,
+    ...catalogTools,
     ...(opts.extraTools ?? []),
   ];
 
@@ -203,12 +253,19 @@ export async function runCase(evalCase: EvalCase, opts: RunnerOptions): Promise<
   const restricted = evalCase.tools !== undefined ? restrictTools(allTools, evalCase.tools, evalCase.id) : allTools;
   const builtinNames = new Set(builtinTools.map((t) => t.name));
 
+  // A non-virtual provider (profile: full's Docker sandbox) bind-mounts a
+  // host workspace directory; give each case a scratch one.
+  const sandboxOpts =
+    opts.sandboxProvider !== undefined
+      ? { workspace: await mkdtemp(join(tmpdir(), `valet-eval-${evalCase.id}-`)) }
+      : {};
+
   const session = await engine.createSession({
     userId: EVAL_USER_ID,
     orgId: EVAL_ORG_ID,
     workspace: "/workspace",
     purpose: isOrchestrator ? "orchestrator" : "interactive",
-    sandbox: {},
+    sandbox: sandboxOpts,
     model,
     modelSpec,
     owner,
@@ -329,6 +386,18 @@ export async function runCase(evalCase: EvalCase, opts: RunnerOptions): Promise<
     entries,
     children: childTrajectories,
   });
+
+  // A real sandbox (Docker) holds a container; tear it down now that the
+  // entries are extracted. Virtual sandboxes make this a cheap no-op.
+  if (opts.sandboxProvider !== undefined) {
+    for (const s of [session, ...children.map((c) => c.session)]) {
+      try {
+        await s.attachment.destroy();
+      } catch (err) {
+        console.error(`[eval] sandbox teardown failed for ${s.id}:`, err instanceof Error ? err.message : err);
+      }
+    }
+  }
 
   return { trajectory, outcome, ...(error !== undefined ? { error } : {}) };
 }

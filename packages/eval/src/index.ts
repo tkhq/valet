@@ -10,6 +10,14 @@ export {
 } from "./runner.js";
 export { EvalMemoryStore, buildEvalMemoryTools } from "./memory-tools.js";
 export { buildMockCatalogTools } from "./mock-catalog.js";
+export {
+  ENV_CREDENTIAL_MAP,
+  buildRealCatalogTools,
+  dockerAvailable,
+  envKeyForService,
+  loadEvalCredentials,
+  parseEnvFile,
+} from "./integration.js";
 export { runCheck, runChecks, type CheckContext, type JudgeRunner } from "./checks/index.js";
 export { jsonSubsetMatches, runDeterministicCheck } from "./checks/deterministic.js";
 export {
