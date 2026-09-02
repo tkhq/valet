@@ -81,9 +81,18 @@ async function userFromSession(auth: ValetAuth, db: AppDb, headers: Headers): Pr
   };
 }
 
+/** Result of resolving an API key: the user identity plus an optional team
+ * scope when the key carries `metadata.teamId`. */
+interface ApiKeyResolution {
+  user: AuthUser;
+  teamId?: string;
+}
+
 /** The AuthUser behind a valid api key, or `undefined` for an invalid,
- * malformed, or dangling one. Shared by rung 4 and `resolveOptionalUser`. */
-async function userFromApiKey(auth: ValetAuth, db: AppDb, key: string): Promise<AuthUser | undefined> {
+ * malformed, or dangling one. When the key's metadata carries a `teamId`,
+ * the resolution includes it so the caller can set `c.var.teamScope`.
+ * Shared by rung 4 and `resolveOptionalUser`. */
+async function userFromApiKey(auth: ValetAuth, db: AppDb, key: string): Promise<ApiKeyResolution | undefined> {
   let result: Awaited<ReturnType<ValetAuth["api"]["verifyApiKey"]>>;
   try {
     result = await auth.api.verifyApiKey({ body: { key } });
@@ -94,13 +103,29 @@ async function userFromApiKey(auth: ValetAuth, db: AppDb, key: string): Promise<
   const rows = await db.select().from(users).where(eq(users.id, result.key.referenceId)).limit(1);
   const row = rows[0];
   if (!row) return undefined;
-  return {
+
+  const orgId = await resolveOrgId(db);
+  const user: AuthUser = {
     id: row.id,
     email: row.email,
     name: row.name ?? undefined,
     role: row.role,
-    orgId: await resolveOrgId(db),
+    orgId,
   };
+
+  // Team-scoped API key: metadata.teamId names the team this key acts for.
+  // Verify the referenced user is still a member of that team.
+  const meta = result.key.metadata;
+  const teamId = meta && typeof meta === "object" && "teamId" in meta && typeof (meta as Record<string, unknown>).teamId === "string"
+    ? (meta as Record<string, unknown>).teamId as string
+    : undefined;
+  if (teamId) {
+    const { isTeamMember } = await import("../services/teams.js");
+    if (!(await isTeamMember(db, teamId, row.id))) return undefined;
+    return { user, teamId };
+  }
+
+  return { user };
 }
 
 /** The seeded local-dev identity (an admin) — rung 5's stub default. */
@@ -133,7 +158,10 @@ export async function resolveOptionalUser(
     const sessionUser = await userFromSession(auth, db, c.req.raw.headers);
     if (sessionUser) return sessionUser;
     const apiKeyHeader = c.req.header("x-api-key");
-    if (apiKeyHeader) return userFromApiKey(auth, db, apiKeyHeader);
+    if (apiKeyHeader) {
+      const resolved = await userFromApiKey(auth, db, apiKeyHeader);
+      return resolved?.user;
+    }
     return undefined;
   }
 
@@ -232,11 +260,12 @@ export function buildAuthMiddleware(opts: BuildAuthMiddlewareOpts): MiddlewareHa
       // unverified, and dangling keys all resolve to `undefined`).
       const apiKeyHeader = c.req.header("x-api-key");
       if (apiKeyHeader) {
-        const apiKeyUser = await userFromApiKey(auth, db, apiKeyHeader);
-        if (!apiKeyUser) {
+        const apiKeyResolved = await userFromApiKey(auth, db, apiKeyHeader);
+        if (!apiKeyResolved) {
           return c.json({ error: "invalid api key" }, 401);
         }
-        c.set("user", apiKeyUser);
+        c.set("user", apiKeyResolved.user);
+        if (apiKeyResolved.teamId) c.set("teamScope", apiKeyResolved.teamId);
         await next();
         return;
       }

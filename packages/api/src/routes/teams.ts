@@ -51,6 +51,7 @@ import type { AppEnv } from "../env.js";
 import type { AuthUser } from "../middleware/auth.js";
 import {
   agentSessions,
+  apikey,
   assistants,
   childWatches,
   teamMembers,
@@ -78,6 +79,7 @@ import {
   NotTeamMemberError,
   removeMember,
   setRole,
+  isTeamMember,
   TeamNameConflictError,
   TeamOwnsWorkflowsError,
 } from "../services/teams.js";
@@ -617,4 +619,150 @@ teamsRouter.delete("/:id/members/:userId", async (c) => {
     if (mapped) return c.json(mapped.body, mapped.status);
     throw err;
   }
+});
+
+
+// ── Team API keys ────────────────────────────────────────────────────────
+//
+// Team-scoped API keys are standard better-auth API keys whose metadata
+// carries `teamId`. The `userFromApiKey` auth middleware rung detects the
+// field and sets `c.var.teamScope`, so routes that resolve an orchestrator
+// route to the team's assistant instead of the user's.
+//
+//   POST   /api/teams/:id/api-keys      → create a team-scoped key
+//   GET    /api/teams/:id/api-keys      → list the team's keys
+//   DELETE /api/teams/:id/api-keys/:keyId → revoke a key
+
+teamsRouter.get("/:id/api-keys", async (c) => {
+  const { db } = c.var.providers;
+  const user = c.var.user;
+  const id = c.req.param("id");
+
+  const team = await loadTeamInOrg(db, id, user.orgId);
+  if (!team) return c.json({ error: "team not found" }, 404);
+  if (!(await isTeamMember(db, id, user.id))) return c.json({ error: "team not found" }, 404);
+
+  const rows = await db.select().from(apikey).where(eq(apikey.referenceId, user.id));
+  // Filter to keys whose metadata carries this teamId. metadata is stored
+  // as a JSON string by better-auth.
+  const teamKeys = rows.filter((row) => {
+    if (!row.metadata) return false;
+    try {
+      const meta = typeof row.metadata === "string" ? JSON.parse(row.metadata) : row.metadata;
+      return meta && typeof meta === "object" && (meta as Record<string, unknown>).teamId === id;
+    } catch {
+      return false;
+    }
+  });
+
+  // Also include keys created by OTHER team members (any team member can
+  // list the team's keys).
+  const memberRows = await db
+    .select({ userId: teamMembers.userId })
+    .from(teamMembers)
+    .where(eq(teamMembers.teamId, id));
+  const memberIds = new Set(memberRows.map((r) => r.userId));
+
+  const allRows = await db.select().from(apikey);
+  const allTeamKeys = allRows.filter((row) => {
+    if (!row.metadata || !memberIds.has(row.referenceId)) return false;
+    try {
+      const meta = typeof row.metadata === "string" ? JSON.parse(row.metadata) : row.metadata;
+      return meta && typeof meta === "object" && (meta as Record<string, unknown>).teamId === id;
+    } catch {
+      return false;
+    }
+  });
+
+  const keys = allTeamKeys.map((row) => ({
+    id: row.id,
+    name: row.name,
+    start: row.start,
+    prefix: row.prefix,
+    enabled: row.enabled ?? true,
+    createdAt: row.createdAt?.getTime() ?? 0,
+    createdBy: row.referenceId,
+    expiresAt: row.expiresAt?.getTime() ?? null,
+  }));
+
+  return c.json({ keys });
+});
+
+teamsRouter.post("/:id/api-keys", async (c) => {
+  const { db } = c.var.providers;
+  const user = c.var.user;
+  const id = c.req.param("id");
+
+  const team = await loadTeamInOrg(db, id, user.orgId);
+  if (!team) return c.json({ error: "team not found" }, 404);
+  if (!(await isTeamMember(db, id, user.id))) return c.json({ error: "team not found" }, 404);
+
+  let body: { name?: string };
+  try {
+    body = (await c.req.json()) as { name?: string };
+  } catch {
+    body = {};
+  }
+
+  // Create the key through the better-auth handler by constructing an
+  // internal request. The caller's session cookie is forwarded so
+  // better-auth resolves the same user.
+  const internalUrl = new URL("/api/auth/api-key/create", c.req.url);
+  const internalReq = new Request(internalUrl.toString(), {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      cookie: c.req.header("cookie") ?? "",
+      // Forward API key header too, in case the caller authenticates with one
+      ...(c.req.header("x-api-key") ? { "x-api-key": c.req.header("x-api-key")! } : {}),
+    },
+    body: JSON.stringify({
+      name: body.name ?? `team:${team.name}`,
+      metadata: { teamId: id },
+    }),
+  });
+
+  const resp = await fetch(internalReq);
+  if (!resp.ok) {
+    const errBody = await resp.text();
+    return c.json({ error: errBody || "key creation failed" }, resp.status as 400);
+  }
+  const result = await resp.json();
+  return c.json(result);
+});
+
+teamsRouter.delete("/:id/api-keys/:keyId", async (c) => {
+  const { db } = c.var.providers;
+  const user = c.var.user;
+  const id = c.req.param("id");
+  const keyId = c.req.param("keyId");
+
+  const team = await loadTeamInOrg(db, id, user.orgId);
+  if (!team) return c.json({ error: "team not found" }, 404);
+  if (!(await isTeamMember(db, id, user.id))) return c.json({ error: "team not found" }, 404);
+
+  // Verify the key belongs to this team
+  const rows = await db.select().from(apikey).where(eq(apikey.id, keyId)).limit(1);
+  const row = rows[0];
+  if (!row) return c.json({ error: "key not found" }, 404);
+
+  let meta: Record<string, unknown> | null = null;
+  try {
+    meta = row.metadata ? (typeof row.metadata === "string" ? JSON.parse(row.metadata) : row.metadata) as Record<string, unknown> : null;
+  } catch {
+    meta = null;
+  }
+  if (!meta || meta.teamId !== id) return c.json({ error: "key not found" }, 404);
+
+  // Only the creator or a team admin can revoke
+  const isCreator = row.referenceId === user.id;
+  const isAdmin = await canAdministerTeam(db, id, user.id);
+  if (!isCreator && !isAdmin) {
+    return c.json({ error: "only the key creator or a team admin can revoke this key" }, 403);
+  }
+
+  // Disable the key rather than deleting, matching better-auth's revoke
+  await db.update(apikey).set({ enabled: false, updatedAt: new Date() }).where(eq(apikey.id, keyId));
+
+  return c.json({ ok: true });
 });

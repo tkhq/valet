@@ -267,10 +267,17 @@ async function computeResult(
     declared?.requires?.orgCredential === true && ctx.orgId
       ? { type: "org" as const, id: ctx.orgId }
       : undefined;
+  // Team→org escalation: when the owner is a team, try the team's own
+  // credential first, then fall back to the org credential — the same
+  // escalation chain user→org already uses.
+  const teamFallback =
+    owner.type === "team" && ctx.orgId
+      ? { type: "org" as const, id: ctx.orgId }
+      : undefined;
   const baseProvider =
     credentialService === "github"
       ? buildGithubCredentialProvider(opts, req, ctx, owner)
-      : buildCredentialProvider(opts.credentials, owner, credentialService, orgFallback);
+      : buildCredentialProvider(opts.credentials, owner, credentialService, orgFallback, teamFallback);
   // Identity enrichment, the second half of the session path's slack branch
   // (`engine/host.ts`): the resolved token alone cannot answer "may the run
   // owner read this private channel" — `slack.dm_owner` and the private-
@@ -542,9 +549,10 @@ export function findAction(actions: PluginAction[], service: string, actionId: s
   });
 }
 
-/** Decision 15: a workflow run's owner `Principal` maps onto `CredentialOwner` for user/org owners only — team-owned runs have no credential scope today. */
+/** Map a workflow run's owner `Principal` to a `CredentialOwner`. All three principal types — user, team, org — resolve to their matching credential scope. */
 function credentialOwnerFor(owner: Principal): CredentialOwner | null {
   if (owner.type === "user") return { type: "user", id: owner.id };
+  if (owner.type === "team") return { type: "team", id: owner.id };
   if (owner.type === "org") return { type: "org", id: owner.id };
   return null;
 }
@@ -558,12 +566,17 @@ function buildCredentialProvider(
   // that same service so an incidental read of another service can't reach
   // the org's credentials. Mirrors `engine/host.ts`'s user→org escalation.
   orgFallback?: CredentialOwner,
+  // Team owner to fall back to when the direct owner's read misses — set
+  // only when `owner` is a team, giving team→org escalation identical to
+  // user→org. Checked before `orgFallback` so the chain is team→org.
+  teamFallback?: CredentialOwner,
 ): CredentialProvider {
   return {
     async get(service?: string): Promise<Credential | null> {
       const svc = service ?? defaultService;
       const stored =
         (await store.get(owner, svc)) ??
+        (teamFallback && svc === defaultService ? await store.get(teamFallback, svc) : null) ??
         (orgFallback && svc === defaultService ? await store.get(orgFallback, svc) : null);
       if (!stored) return null;
       const accessToken = stored.accessToken ?? stored.apiKey ?? "";

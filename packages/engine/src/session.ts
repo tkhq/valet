@@ -1496,7 +1496,16 @@ export class Session {
   // ── credential provider for tools ───────────────────────────────
 
   credentialProvider(): CredentialProvider {
-    const owner: CredentialOwner = { type: "user", id: this.options.userId };
+    // Derive the credential owner from the session's principal. Team and org
+    // principals resolve to their own credential scope; user principals (and
+    // the default when no explicit owner was set) use the session's userId.
+    const p = this.principal;
+    const owner: CredentialOwner =
+      p.type === "team"
+        ? { type: "team", id: p.id }
+        : p.type === "org"
+          ? { type: "org", id: p.id }
+          : { type: "user", id: this.options.userId };
     const credStore = this.providers.credentials;
     // Host-provided resolver (Task 10 fix): when present it REPLACES the raw
     // store read for EVERY service — the host is the single decision point

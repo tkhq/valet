@@ -215,7 +215,7 @@ describe("buildActionInvoker", () => {
     expect(result).toEqual({ ok: true, result: { echoed: "hi", hasCredential: true } });
   });
 
-  it("team-owned run: unsupported owner type returns a deterministic {ok:false} and never invokes execute", async () => {
+  it("team-owned run: resolves team credential owner and executes the action", async () => {
     const fixture = countingAction();
     const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] });
     const invoke = buildActionInvoker({ db: await makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
@@ -225,8 +225,8 @@ describe("buildActionInvoker", () => {
       { userId: "team:t1", orgId: "org1", owner: { type: "team", id: "t1" } },
     );
 
-    expect(result.ok).toBe(false);
-    expect(fixture.calls()).toBe(0);
+    expect(result.ok).toBe(true);
+    expect(fixture.calls()).toBe(1);
   });
 
   it("execute throw is caught and mapped to {ok:false, error}", async () => {

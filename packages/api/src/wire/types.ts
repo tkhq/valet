@@ -2914,8 +2914,11 @@ export interface PutCredentialRequest {
   refreshToken?: string;
   metadata?: Record<string, unknown>;
   /** Owner scope for the saved credential. `"org"` requires the caller to be
-   * an org admin. Defaults to `"user"`. */
-  scope?: "user" | "org";
+   * an org admin; `"team"` requires team membership and a `teamId`. Defaults
+   * to `"user"`. */
+  scope?: "user" | "org" | "team";
+  /** Required when `scope` is `"team"`. The team that owns this credential. */
+  teamId?: string;
 }
 
 export interface PutCredentialResponse {

@@ -47,6 +47,7 @@ import type { CredentialOwner, StoredCredential } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { requiredScopeError, verifySlackBotToken } from "../services/slack-connect.js";
 import { connectModeFor, findCredentialDeclaration } from "../services/integration-availability.js";
+import { isTeamMember } from "../services/teams.js";
 import type {
   CredentialSummary,
   DeleteCredentialResponse,
@@ -60,9 +61,21 @@ export const credentialsRouter = new Hono<AppEnv>();
 const CREDENTIAL_TYPES: PutCredentialRequest["type"][] = ["oauth2", "api_key", "bot_token", "service_account"];
 
 const ORG_ADMIN_REQUIRED = { error: "org admin required" } as const;
+const TEAM_MEMBER_REQUIRED = { error: "team member required" } as const;
+const TEAM_ID_REQUIRED = { error: "teamId query parameter is required when scope=team" } as const;
 
-function ownerFor(user: { id: string; orgId: string }, scope: "user" | "org"): CredentialOwner {
-  return scope === "org" ? { type: "org", id: user.orgId } : { type: "user", id: user.id };
+type CredentialScope = "user" | "org" | "team";
+
+function ownerFor(user: { id: string; orgId: string }, scope: CredentialScope, teamId?: string): CredentialOwner {
+  if (scope === "org") return { type: "org", id: user.orgId };
+  if (scope === "team" && teamId) return { type: "team", id: teamId };
+  return { type: "user", id: user.id };
+}
+
+function parseScope(raw: string | undefined): CredentialScope {
+  if (raw === "org") return "org";
+  if (raw === "team") return "team";
+  return "user";
 }
 
 function isCredentialKind(type: StoredCredential["type"]): type is PutCredentialRequest["type"] {
@@ -70,13 +83,18 @@ function isCredentialKind(type: StoredCredential["type"]): type is PutCredential
 }
 
 credentialsRouter.get("/", async (c) => {
-  const { engineCredentials } = c.var.providers;
+  const { engineCredentials, db } = c.var.providers;
   const user = c.var.user;
-  const scope = c.req.query("scope") === "org" ? "org" : "user";
+  const scope = parseScope(c.req.query("scope"));
   if (scope === "org" && user.role !== "admin") {
     return c.json(ORG_ADMIN_REQUIRED, 403);
   }
-  const owner = ownerFor(user, scope);
+  const teamId = c.req.query("teamId");
+  if (scope === "team") {
+    if (!teamId) return c.json(TEAM_ID_REQUIRED, 400);
+    if (!(await isTeamMember(db, teamId, user.id))) return c.json(TEAM_MEMBER_REQUIRED, 403);
+  }
+  const owner = ownerFor(user, scope, teamId);
 
   const listed = await engineCredentials.list(owner);
   const credentials: CredentialSummary[] = [];
@@ -118,11 +136,16 @@ credentialsRouter.put("/:service", async (c) => {
     return c.json({ error: "invalid JSON body" }, 400);
   }
 
-  const scope = body.scope === "org" ? "org" : "user";
+  const scope = parseScope(body.scope);
   if (scope === "org" && user.role !== "admin") {
     return c.json(ORG_ADMIN_REQUIRED, 403);
   }
-  const owner = ownerFor(user, scope);
+  const teamId = typeof body.teamId === "string" ? body.teamId : undefined;
+  if (scope === "team") {
+    if (!teamId) return c.json(TEAM_ID_REQUIRED, 400);
+    if (!(await isTeamMember(c.var.providers.db, teamId, user.id))) return c.json(TEAM_MEMBER_REQUIRED, 403);
+  }
+  const owner = ownerFor(user, scope, teamId);
 
   // Availability gate (integration-availability design): a user-scope save
   // for a declared service whose deployment/org prerequisite is missing is
@@ -227,13 +250,18 @@ credentialsRouter.put("/:service", async (c) => {
 });
 
 credentialsRouter.delete("/:service", async (c) => {
-  const { engineCredentials } = c.var.providers;
+  const { engineCredentials, db } = c.var.providers;
   const user = c.var.user;
-  const scope = c.req.query("scope") === "org" ? "org" : "user";
+  const scope = parseScope(c.req.query("scope"));
   if (scope === "org" && user.role !== "admin") {
     return c.json(ORG_ADMIN_REQUIRED, 403);
   }
-  const owner = ownerFor(user, scope);
+  const teamId = c.req.query("teamId");
+  if (scope === "team") {
+    if (!teamId) return c.json(TEAM_ID_REQUIRED, 400);
+    if (!(await isTeamMember(db, teamId, user.id))) return c.json(TEAM_MEMBER_REQUIRED, 403);
+  }
+  const owner = ownerFor(user, scope, teamId);
   const service = c.req.param("service");
 
   await engineCredentials.delete(owner, service);
