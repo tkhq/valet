@@ -144,6 +144,164 @@ describe("turn-level transient retry (TKAI-319)", () => {
     faux.unregister();
   });
 
+  it("fails over to an equivalent model on another provider from attempt 2 (TKAI-326)", async () => {
+    const primary = registerFauxProvider({
+      provider: "failover-primary",
+      models: [{ id: "pm", name: "pm", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    const backup = registerFauxProvider({
+      provider: "failover-backup",
+      models: [{ id: "bm", name: "bm", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    const err = () =>
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error: Overloaded" });
+    primary.setResponses([err, err]); // initial call + the attempt-1 same-model retry
+    backup.setResponses([fauxAssistantMessage("failover response")]);
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model: primary.getModel("pm")!,
+      modelSpec: "failover-primary/pm",
+      purpose: "child",
+      turnRetry: { maxAttempts: 2, backoffMs: [1, 1] },
+      resolveModel: async (spec) => {
+        if (spec === "failover-primary/pm")
+          return { model: primary.getModel("pm")!, canonicalId: spec };
+        if (spec === "failover-backup/bm")
+          return { model: backup.getModel("bm")!, canonicalId: spec };
+        return null;
+      },
+      resolveFailoverModels: async () => ["failover-backup/bm"],
+    });
+    const receipt = await session.prompt("do the thing");
+    await waitFor(() => backup.getPendingResponseCount() === 0);
+    await waitFor(
+      () =>
+        events.filter((e) => e.event.type === "turn_end" && e.event.threadId === receipt.threadId)
+          .length >= 2,
+    );
+
+    const entries = await store.getEntries(session.id, receipt.threadId);
+    const lastAssistant = [...entries]
+      .reverse()
+      .find((e) => e.type === "message" && e.role === "assistant");
+    expect(lastAssistant?.type === "message" && lastAssistant.content).toBe("failover response");
+    const failovers = events.filter((e) => e.event.type === "turn_failover");
+    expect(failovers).toHaveLength(1);
+    expect(failovers[0]!.event).toMatchObject({
+      threadId: receipt.threadId,
+      fromModel: "failover-primary/pm",
+      toModel: "failover-backup/bm",
+    });
+    // Attempt 1 was still a same-model retry.
+    expect(
+      events.filter((e) => e.event.type === "error" && e.event.code === "turn_transient_retry"),
+    ).toHaveLength(1);
+
+    // Per-turn only: the NEXT turn resolves the original spec and runs on
+    // the primary again (its queue holds the only pending response).
+    primary.setResponses([fauxAssistantMessage("back on primary")]);
+    const receipt2 = await session.prompt("again");
+    await waitFor(() => primary.getPendingResponseCount() === 0);
+    await waitFor(
+      () =>
+        events.filter((e) => e.event.type === "turn_end" && e.event.threadId === receipt2.threadId)
+          .length >= 1,
+    );
+    const entries2 = await store.getEntries(session.id, receipt2.threadId);
+    const lastAssistant2 = [...entries2]
+      .reverse()
+      .find((e) => e.type === "message" && e.role === "assistant");
+    expect(lastAssistant2?.type === "message" && lastAssistant2.content).toBe("back on primary");
+    primary.unregister();
+    backup.unregister();
+  });
+
+  it("allowProviderFailover: false keeps every retry on the original model", async () => {
+    const primary = registerFauxProvider({
+      provider: "failover-optout",
+      models: [{ id: "pm", name: "pm", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    const err = () =>
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error: Overloaded" });
+    primary.setResponses([err, err, err]); // initial + 2 same-model retries
+    let lookups = 0;
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model: primary.getModel("pm")!,
+      purpose: "child",
+      turnRetry: { maxAttempts: 2, backoffMs: [1, 1] },
+      allowProviderFailover: false,
+      resolveFailoverModels: async () => {
+        lookups++;
+        return ["anywhere/else"];
+      },
+    });
+    await session.prompt("do the thing");
+    await waitFor(() => primary.getPendingResponseCount() === 0);
+    await waitFor(
+      () =>
+        events.filter((e) => e.event.type === "error" && e.event.code === "turn_transient_retry")
+          .length >= 2,
+    );
+    expect(lookups).toBe(0);
+    expect(events.some((e) => e.event.type === "turn_failover")).toBe(false);
+    primary.unregister();
+  });
+
+  it("skips unusable failover candidates and lands on the first resolvable one", async () => {
+    const primary = registerFauxProvider({
+      provider: "failover-skip-primary",
+      models: [{ id: "pm", name: "pm", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    const backup = registerFauxProvider({
+      provider: "failover-skip-backup",
+      models: [{ id: "bm", name: "bm", contextWindow: 100_000, maxTokens: 1_000 }],
+    });
+    const err = () =>
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error: Overloaded" });
+    primary.setResponses([err, err]);
+    backup.setResponses([fauxAssistantMessage("second candidate wins")]);
+    const { engine, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u",
+      orgId: "o",
+      workspace: "/",
+      sandbox: {},
+      model: primary.getModel("pm")!,
+      modelSpec: "failover-skip-primary/pm",
+      purpose: "child",
+      turnRetry: { maxAttempts: 2, backoffMs: [1, 1] },
+      resolveModel: async (spec) => {
+        if (spec === "failover-skip-primary/pm")
+          return { model: primary.getModel("pm")!, canonicalId: spec };
+        if (spec === "failover-skip-backup/bm")
+          return { model: backup.getModel("bm")!, canonicalId: spec };
+        if (spec === "dead/candidate") throw new Error("provider dead is disabled");
+        return null;
+      },
+      resolveFailoverModels: async () => ["unknown/candidate", "dead/candidate", "failover-skip-backup/bm"],
+    });
+    const receipt = await session.prompt("do the thing");
+    await waitFor(() => backup.getPendingResponseCount() === 0);
+    await waitFor(() =>
+      events.some((e) => e.event.type === "turn_failover" && e.event.threadId === receipt.threadId),
+    );
+    const failover = events.find((e) => e.event.type === "turn_failover");
+    expect(failover?.event.type === "turn_failover" && failover.event.toModel).toBe(
+      "failover-skip-backup/bm",
+    );
+    primary.unregister();
+    backup.unregister();
+  });
+
   it("an interactive session does not auto-retry", async () => {
     const faux = registerFauxProvider({
       provider: "retry-interactive",

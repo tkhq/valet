@@ -1431,6 +1431,21 @@ export type EngineEvent =
   | { type: "model_switched"; threadId?: string; fromModel: string; toModel: string; reason: string }
   | {
       /**
+       * Provider failover (TKAI-326): the transient turn retry switched this
+       * one turn to an equivalent model on another provider because the
+       * primary kept failing. `fromModel`/`toModel` are canonical model
+       * specs; `reason` is the (truncated) provider error that triggered the
+       * switch. The switch is per-turn only — the next turn re-resolves the
+       * session/thread spec, so no restore event follows.
+       */
+      type: "turn_failover";
+      threadId: string;
+      fromModel: string;
+      toModel: string;
+      reason: string;
+    }
+  | {
+      /**
        * A slash command ran and produced a transcript record (slash-commands
        * design). Session-scoped when the command is thread-agnostic; carries
        * the executing thread id otherwise. Emitted after the
@@ -1965,7 +1980,25 @@ export interface CreateSessionOptions {
    * start-ref recorded (this session is not eval-replayable).
    */
   startRef?: SessionStartRef;
-  modelFailover?: Model<any>[];
+  /**
+   * Optional host-provided failover resolver (TKAI-326). Given the turn's
+   * effective canonical model spec, returns ordered equivalent-model specs
+   * on OTHER providers (same capability tier, providers with usable
+   * credentials first — the ordering is the host's policy). Consulted only
+   * by the transient turn retry, from the second attempt on: attempt 1
+   * retries the same model; attempt 2+ tries each candidate in order.
+   * Candidates resolve through `resolveModel` at switch time, so a
+   * candidate whose credentials died since the list was built is skipped,
+   * not failed. Absent === no failover; retries stay on the same model.
+   */
+  resolveFailoverModels?: (spec: string) => Promise<string[]>;
+  /**
+   * Per-session opt-out for provider failover (TKAI-326). `false` keeps
+   * transient retries on the original model even when
+   * `resolveFailoverModels` is wired — for sessions whose org must never
+   * run on another provider (data residency, cost control). Default: true.
+   */
+  allowProviderFailover?: boolean;
   /**
    * Optional host-provided model resolver. Absent === the engine's current
    * internal resolution (`resolveModelId`): every existing path is unchanged

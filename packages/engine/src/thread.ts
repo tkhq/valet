@@ -3031,7 +3031,7 @@ export class Thread {
       this.attributeAuthors && !isSignalContent(item.content) ? item.author : undefined;
     try {
       try {
-        await this.runAgent(text, attachments, sender);
+        await this.runAgent(text, attachments, sender, item);
       } catch (err) {
         // Record the throw for settlement: a stream failing before its first
         // message_start leaves no assistant message this turn, and
@@ -3189,6 +3189,7 @@ export class Thread {
     text: string,
     attachments?: MessageEntry["attachments"],
     sender?: PromptAuthor,
+    item?: QueueItem,
   ): Promise<void> {
     const content = userContentBlocks(text, attachments, sender);
     await this.agent.prompt({
@@ -3237,7 +3238,7 @@ export class Thread {
       return;
     }
 
-    await this.retryTransientTurnError();
+    await this.retryTransientTurnError(item);
   }
 
   /**
@@ -3251,7 +3252,7 @@ export class Thread {
    * twice. The transport layer already retried underneath; this catches the
    * failures that exhausted it (long rate-limit windows, capacity events).
    */
-  private async retryTransientTurnError(): Promise<void> {
+  private async retryTransientTurnError(item?: QueueItem): Promise<void> {
     const cfgd = this.session.options.turnRetry;
     const purpose = this.session.options.purpose;
     const unattended = purpose === "orchestrator" || purpose === "workflow" || purpose === "child";
@@ -3260,6 +3261,13 @@ export class Thread {
     // An explicitly configured empty backoff list means "no wait", not
     // "crash on index" — but an absent/empty list falls back to defaults.
     const backoff = cfgd?.backoffMs?.length ? cfgd.backoffMs : UNATTENDED_TURN_RETRY_BACKOFF_MS;
+
+    // Provider failover (TKAI-326): candidate specs are fetched once per
+    // retry cycle and consumed left to right — a candidate that fails to
+    // resolve (credentials died, provider disabled) is skipped, and one
+    // that resolved but then failed its own retry is not re-tried.
+    let candidates: string[] | undefined;
+    let candidateIdx = 0;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const last = this.agent.state.messages[this.agent.state.messages.length - 1];
@@ -3271,13 +3279,33 @@ export class Thread {
       ) {
         return;
       }
-      const waitMs = backoff[Math.min(attempt - 1, backoff.length - 1)] ?? 0;
       const errBrief = (last.errorMessage ?? "provider error").slice(0, 200);
-      this.emitError(
-        "turn_transient_retry",
-        `Provider error looks transient (${errBrief}). Retrying in ${Math.round(waitMs / 1000)}s (attempt ${attempt}/${maxAttempts}).`,
-      );
-      if ((await this.backoffOrStandDown(waitMs)) === "stand-down") return;
+
+      // Attempt 1 retries the same model — most capacity blips clear within
+      // one backoff. From attempt 2 on, the primary has failed the original
+      // call AND a same-model retry: switch this turn to an equivalent model
+      // on another provider when the host wired one up (TKAI-326).
+      let switched = false;
+      if (attempt >= 2) {
+        candidates ??= await this.failoverCandidates(item);
+        while (candidateIdx < candidates.length && !switched) {
+          switched = await this.applyFailoverModel(candidates[candidateIdx++]!, item, errBrief);
+        }
+      }
+
+      if (switched) {
+        // The alternate provider is not the one melting down — skip the
+        // backoff, but still run the stand-down checks so an aborted or
+        // superseded item cannot spawn a zombie retry.
+        if ((await this.backoffOrStandDown(0)) === "stand-down") return;
+      } else {
+        const waitMs = backoff[Math.min(attempt - 1, backoff.length - 1)] ?? 0;
+        this.emitError(
+          "turn_transient_retry",
+          `Provider error looks transient (${errBrief}). Retrying in ${Math.round(waitMs / 1000)}s (attempt ${attempt}/${maxAttempts}).`,
+        );
+        if ((await this.backoffOrStandDown(waitMs)) === "stand-down") return;
+      }
       // Drop the failed assistant message; the transcript now ends on the
       // user/tool-result message, which is exactly Agent.continue()'s
       // contract for re-running the turn without duplicating the prompt.
@@ -3288,6 +3316,76 @@ export class Thread {
       await this.agent.continue();
       await this.agent.waitForIdle();
     }
+  }
+
+  /**
+   * Ordered equivalent-model specs for this turn's model (TKAI-326), from
+   * the host's `resolveFailoverModels` seam. Empty when failover is off for
+   * this session, the seam is absent, or the lookup fails — a broken lookup
+   * must degrade to the plain same-model retry, never fail the turn.
+   */
+  private async failoverCandidates(item?: QueueItem): Promise<string[]> {
+    if (this.session.options.allowProviderFailover === false) return [];
+    const resolve = this.session.options.resolveFailoverModels;
+    if (!resolve) return [];
+    try {
+      return await resolve(this.turnModelSpec(item));
+    } catch (err) {
+      this.emitError(
+        "failover_lookup_failed",
+        err instanceof Error ? err.message : String(err),
+      );
+      return [];
+    }
+  }
+
+  /**
+   * Switch THIS turn to a failover candidate (TKAI-326): resolve the spec
+   * (host resolver when present, else the internal registry), stamp the
+   * agent model + per-turn key, and emit `turn_failover`. Returns false —
+   * candidate skipped, no state touched — when the spec does not resolve or
+   * has no usable credentials right now. The switch is turn-scoped by
+   * construction: `runItem`'s finally restores the baseline model and
+   * clears `turnApiKey`, and the next turn re-resolves the persisted spec.
+   */
+  private async applyFailoverModel(
+    spec: string,
+    item: QueueItem | undefined,
+    errBrief: string,
+  ): Promise<boolean> {
+    const resolver = this.session.options.resolveModel;
+    let resolved: ResolvedModel;
+    try {
+      if (resolver) {
+        const r = await resolver(spec);
+        if (!r) return false;
+        resolved = r;
+      } else {
+        const m = resolveModelId(spec);
+        if (!m) return false;
+        resolved = { model: m };
+      }
+    } catch {
+      // NoCredentialsError, disabled provider, deleted row — the candidate
+      // is unusable right now. Skip it; the caller tries the next one.
+      return false;
+    }
+    const fromModel = this.turnModelSpec(item);
+    this.turnApiKey = resolved.apiKey;
+    this.agent.state.model = resolved.model;
+    // Same best-effort-delivery rationale as emitError: leave a host-process
+    // trace even when no client is listening.
+    console.error(
+      `[engine] thread failover session=${this.session.id} thread=${this.id} ${fromModel} -> ${spec}: ${errBrief}`,
+    );
+    void this.session.emit({
+      type: "turn_failover",
+      threadId: this.id,
+      fromModel,
+      toModel: spec,
+      reason: errBrief,
+    });
+    return true;
   }
 
   /**

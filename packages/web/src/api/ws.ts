@@ -38,6 +38,8 @@ function summarizeForLog(ev: WireEvent): string {
       return `${ev.code}: ${ev.message}`;
     case "model_switched":
       return `${ev.fromModel} → ${ev.toModel}${ev.threadId ? ` (thread)` : ` (session)`}`;
+    case "turn_failover":
+      return `${ev.fromModel} → ${ev.toModel} (failover: ${ev.reason})`;
     case "decision_gate":
       return `${ev.gate.type} "${ev.gate.title}" (${ev.gate.id})`;
     case "decision_gate_resolved":

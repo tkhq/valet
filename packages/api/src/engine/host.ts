@@ -62,6 +62,7 @@ import { securityToolPrepSteps } from "./security-bootstrap.js";
 import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
 import { getOrgModelPreferences } from "../services/org.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
+import { failoverCandidates } from "../services/model-failover.js";
 import { resolveOpenAiCredential } from "../services/openai-key.js";
 import { hasOrgKey } from "../services/model-catalog.js";
 import { listLlmProviders, parseModelId, providerNamespace } from "../services/llm-providers.js";
@@ -179,6 +180,13 @@ export interface EngineHostOpts {
   anthropicApiKey?: string;
   /** pi-ai model id; defaults to claude-haiku-4-5 for fast dogfooding. */
   defaultModelId?: string;
+  /**
+   * Ops kill switch for provider failover (TKAI-326). True === the
+   * `resolveFailoverModels` seam returns no candidates, so transient turn
+   * retries stay on the original model. Wired from
+   * `VALET_DISABLE_PROVIDER_FAILOVER=1` in main.ts.
+   */
+  disableProviderFailover?: boolean;
   /** Default Docker image for new sandboxes. */
   defaultImage?: string;
   /**
@@ -862,6 +870,7 @@ export class EngineHost {
       ownerTeamId: meta.ownerTeamId,
     });
     const resolveModel = this.makeResolveModel(meta.orgId);
+    const resolveFailoverModels = this.makeResolveFailoverModels(meta.orgId);
     const profile = meta.profile ?? "headless";
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
     // Docker flag: session-create opt OR repo `.valet/prebuild.yaml` docker
@@ -996,6 +1005,7 @@ export class EngineHost {
             model,
             modelSpec,
             resolveModel,
+            resolveFailoverModels,
             systemPrompt: SYSTEM_PROMPT,
             tools: sessionTools.length ? sessionTools : undefined,
             skills: extras.skills.length ? extras.skills : undefined,
@@ -1019,6 +1029,7 @@ export class EngineHost {
           model,
           modelSpec,
           resolveModel,
+          resolveFailoverModels,
           systemPrompt: SYSTEM_PROMPT,
           tools: sessionTools.length ? sessionTools : undefined,
           skills: extras.skills.length ? extras.skills : undefined,
@@ -2100,6 +2111,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(meta.orgId),
+      resolveFailoverModels: this.makeResolveFailoverModels(meta.orgId),
       systemPrompt: personaPrefix + orchestratorPersona(principal, ownerDisplayName),
       tools: [...buildMemoryTools(), ...extras.tools],
       skills: extras.skills.length ? extras.skills : undefined,
@@ -2611,6 +2623,22 @@ export class EngineHost {
   }
 
   /**
+   * The host `resolveFailoverModels` seam (TKAI-326) bound to one org:
+   * ordered same-tier equivalents on other providers, for the engine's
+   * transient turn retry. Candidates are computed fresh per lookup — the
+   * catalog's `active` flag already encodes enabled+keyed providers, so a
+   * revoked key drops a candidate on the next failure, not the next deploy.
+   * `disableProviderFailover` (ops kill switch) returns no candidates,
+   * which the engine treats as "retry the same model" — today's behavior.
+   */
+  private makeResolveFailoverModels(orgId: string): (spec: string) => Promise<string[]> {
+    return (spec: string) => {
+      if (this.opts.disableProviderFailover) return Promise.resolve([]);
+      return failoverCandidates(this.opts.db, this.opts.engineCredentials, orgId, spec);
+    };
+  }
+
+  /**
    * Resolve a model spec to a concrete `Model` for `options.model` at build
    * time, via the same catalog-aware bridge the per-turn seam uses. A `null`
    * return means the spec names no known model — surfaced as an error so a
@@ -2968,6 +2996,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
+      resolveFailoverModels: this.makeResolveFailoverModels(opts.orgId),
       systemPrompt: SYSTEM_PROMPT,
       tools: childTools.length ? childTools : undefined,
       skills: provisionedExtras.skills.length ? provisionedExtras.skills : undefined,
@@ -3105,6 +3134,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
+      resolveFailoverModels: this.makeResolveFailoverModels(opts.orgId),
       systemPrompt: SYSTEM_PROMPT,
       tools: extras.tools.length ? extras.tools : undefined,
       skills: extras.skills.length ? extras.skills : undefined,

@@ -18,6 +18,7 @@ import {
   useQueueStateForThread,
   useThreadLiveStatus,
   useErrorForThread,
+  useFailoverForThread,
   useCompactingForThread,
 } from "~/stores/stream";
 import { Composer } from "~/components/session/composer";
@@ -136,6 +137,7 @@ export function SessionView({
 
   const pendingGate = usePendingGateForThread(sessionId, effectiveThreadId);
   const threadError = useErrorForThread(sessionId, effectiveThreadId);
+  const failover = useFailoverForThread(sessionId, effectiveThreadId);
   const compacting = useCompactingForThread(sessionId, effectiveThreadId);
 
   // "Agent is busy" for the header badge and the transcript indicator, from
@@ -288,6 +290,14 @@ export function SessionView({
           {compacting && (
             <div className="border-t border-[--border] px-4 py-1.5 text-[11px] text-muted">
               Compacting context…
+            </div>
+          )}
+          {failover && (
+            <div className="border-t border-[--border] px-4 py-1.5 text-[11px] text-muted">
+              Switched this turn to <span className="font-medium">{failover.toModel}</span> because{" "}
+              <span className="font-medium">{failover.fromModel}</span> kept failing (
+              {failover.reason}). Your next message uses{" "}
+              <span className="font-medium">{failover.fromModel}</span> again.
             </div>
           )}
           {threadError && (

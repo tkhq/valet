@@ -1452,6 +1452,21 @@ export type WireEvent =
       recoverable: boolean;
     }
   | {
+      /**
+       * Provider failover (TKAI-326): the transient turn retry switched one
+       * turn to an equivalent model on another provider. Per-turn only —
+       * the next turn re-resolves the original model, so clients render an
+       * informational notice, not an error.
+       */
+      seq: number;
+      ts: number; offset?: string;
+      type: "turn_failover";
+      threadId: string;
+      fromModel: string;
+      toModel: string;
+      reason: string;
+    }
+  | {
       seq: number;
       ts: number; offset?: string;
       type: "model_switched";

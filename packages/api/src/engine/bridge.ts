@@ -320,6 +320,17 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
         },
       ];
 
+    case "turn_failover":
+      return [
+        {
+          type: "turn_failover",
+          threadId: e.threadId,
+          fromModel: e.fromModel,
+          toModel: e.toModel,
+          reason: e.reason,
+        },
+      ];
+
     case "model_switched":
       return [
         {

@@ -152,6 +152,15 @@ export interface SessionStreamState {
    */
   errorByThread: Record<string, { code: string; message: string }>;
   /**
+   * Last provider failover per thread (wire `turn_failover`, TKAI-326):
+   * the retry loop ran one turn on an equivalent model because the primary
+   * provider kept failing. Informational, not an error — the notice
+   * survives the recovered turn's streaming (message_start must NOT clear
+   * it: the failover continue streams immediately) and clears when the
+   * user sends the next prompt, which runs on the original model again.
+   */
+  failoverByThread: Record<string, { fromModel: string; toModel: string; reason: string }>;
+  /**
    * A wire error with no threadId (e.g. `ws_open_failed`) — a session-level
    * failure, shown whatever thread is active.
    */
@@ -243,6 +252,7 @@ const EMPTY: SessionStreamState = {
   lastOffset: "",
   statusByThread: {},
   errorByThread: {},
+  failoverByThread: {},
   messages: [],
   pendingGates: {},
   queueByThread: {},
@@ -289,6 +299,7 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       // GET /decisions seeds them on first load; subsequent gates arrive
       // on the wire.
       next.errorByThread = {};
+      next.failoverByThread = {};
       next.sessionError = undefined;
       next.statusByThread = {};
       // Compacting is transient too: the engine balances the start/end pair
@@ -524,6 +535,18 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       } else {
         next.sessionError = { code: ev.code, message: ev.message };
       }
+      return next;
+    }
+
+    case "turn_failover": {
+      // Informational: one turn ran on an equivalent model because the
+      // primary provider kept failing (TKAI-326). No status flip, no error
+      // banner — the turn is still running. Cleared on the user's next
+      // prompt (addUserMessage), which runs on the original model again.
+      next.failoverByThread = {
+        ...slice.failoverByThread,
+        [ev.threadId]: { fromModel: ev.fromModel, toModel: ev.toModel, reason: ev.reason },
+      };
       return next;
     }
 
@@ -771,10 +794,22 @@ export const useStreamStore = create<StreamStore>((set) => ({
         const { [threadId]: _, ...rest } = errorByThread;
         errorByThread = rest;
       }
+      // The failover notice promises "your next message uses the original
+      // model again" — that next message is this one, so retire the notice.
+      let failoverByThread = slice.failoverByThread;
+      if (failoverByThread[threadId]) {
+        const { [threadId]: _, ...rest } = failoverByThread;
+        failoverByThread = rest;
+      }
       return {
         bySession: {
           ...state.bySession,
-          [sessionId]: { ...slice, messages: [...slice.messages, message], errorByThread },
+          [sessionId]: {
+            ...slice,
+            messages: [...slice.messages, message],
+            errorByThread,
+            failoverByThread,
+          },
         },
       };
     });
@@ -927,6 +962,21 @@ export function useErrorForThread(
     const slice = s.bySession[sessionId];
     if (!slice) return undefined;
     return (threadId ? slice.errorByThread[threadId] : undefined) ?? slice.sessionError;
+  });
+}
+
+/**
+ * The provider-failover notice for one thread (TKAI-326), or undefined.
+ * Informational: the last turn ran on an equivalent model because the
+ * primary provider kept failing.
+ */
+export function useFailoverForThread(
+  sessionId: string,
+  threadId: string | undefined,
+): { fromModel: string; toModel: string; reason: string } | undefined {
+  return useStreamStore((s) => {
+    if (!threadId) return undefined;
+    return s.bySession[sessionId]?.failoverByThread[threadId];
   });
 }
 

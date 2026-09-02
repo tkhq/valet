@@ -263,6 +263,27 @@ describe("busEventToWire", () => {
     ]);
   });
 
+  it("forwards turn_failover with model specs and reason intact", () => {
+    const out = busEventToWire(
+      ev({
+        type: "turn_failover",
+        threadId: "t1",
+        fromModel: "anthropic/claude-opus-4-8",
+        toModel: "openai/gpt-5.5",
+        reason: "overloaded_error: Overloaded",
+      }),
+    );
+    expect(out).toEqual([
+      {
+        type: "turn_failover",
+        threadId: "t1",
+        fromModel: "anthropic/claude-opus-4-8",
+        toModel: "openai/gpt-5.5",
+        reason: "overloaded_error: Overloaded",
+      },
+    ]);
+  });
+
   it("forwards model_switched (session scope) with threadId normalized to undefined", () => {
     // Session.setModel emits with an empty threadId to signal session
     // scope; the bridge normalizes it so clients can distinguish from a

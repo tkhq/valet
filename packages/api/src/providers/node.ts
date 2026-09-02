@@ -419,6 +419,8 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
       full: process.env.VALET_FULL_BASE_IMAGE ?? resolveDefaultImage(process.env),
     },
     idleMinutes: resolveIdleMinutes(process.env),
+    // Ops kill switch for provider failover on transient errors (TKAI-326).
+    disableProviderFailover: process.env.VALET_DISABLE_PROVIDER_FAILOVER === "1",
     ...(resolvePrebuildPreflight(process.env) ? { prebuildPreflight: resolvePrebuildPreflight(process.env) } : {}),
     ...buildHibernationHooks(db),
     db,
