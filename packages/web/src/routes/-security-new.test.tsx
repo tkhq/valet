@@ -109,9 +109,10 @@ describe("SecurityNewPage", () => {
   it("walks the wizard and Start creates the session with the final config + plan", async () => {
     render(<SecurityNewPage />);
     await screen.findByTestId("config-form");
-    // Focus → Plan → Review, then Start.
+    // Focus → Plan → Launch, confirm authorization, then Start.
     fireEvent.click(screen.getByRole("button", { name: /Next: Plan/ }));
-    fireEvent.click(screen.getByRole("button", { name: /Next: Review/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Next: Launch/ }));
+    fireEvent.click(screen.getByLabelText("Confirm authorization"));
     fireEvent.click(screen.getByRole("button", { name: "Start review" }));
 
     expect(createMutate).toHaveBeenCalledTimes(1);
