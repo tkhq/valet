@@ -67,7 +67,7 @@ async function main(): Promise<number> {
   const result = await runSuite(cases, {
     model: opts.model,
     baselinesDir: opts.baselinesDir,
-    judge: buildJudgeRunner(),
+    judge: buildJudgeRunner({ modelUnderTest: opts.model }),
     mockPlugins: bundledPlugins,
     realPlugins: bundledPlugins,
     credentials,
