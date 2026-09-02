@@ -26,6 +26,11 @@ export function toAgentTool<TParams extends import("typebox").TSchema>(
     label: def.name,
     description: def.description,
     parameters: def.parameters,
+    // Sequential unless the tool opts in (TKAI-318). One sequential tool
+    // serializes its whole batch in pi-agent-core, so a response mixing a
+    // read with a write runs fully in model order — mutations never race
+    // and approval gates surface in execution order.
+    executionMode: def.concurrencySafe ? "parallel" : "sequential",
     execute: async (toolCallId, params, signal) => {
       const ctx = buildContext({
         signal: signal ?? new AbortController().signal,
@@ -59,7 +64,7 @@ export function toAgentTool<TParams extends import("typebox").TSchema>(
             if (result.attachments?.length) {
               span.setAttribute("valet.tool.attachments", result.attachments.length);
             }
-            return toAgentToolResult(result);
+            return toAgentToolResult(result, def.name);
           } catch (err) {
             recordToolExecution(def.name, Date.now() - startedAt, false);
             span.setAttribute(
@@ -74,12 +79,17 @@ export function toAgentTool<TParams extends import("typebox").TSchema>(
   };
 }
 
-function toAgentToolResult(result: ToolResult): AgentToolResult<unknown> {
+function toAgentToolResult(result: ToolResult, toolName: string): AgentToolResult<unknown> {
   const content: (TextContent | ImageContent)[] = [];
   if (result.text) content.push({ type: "text", text: result.text });
   for (const att of result.attachments ?? []) {
     const block = attachmentToContent(att);
     if (block) content.push(block);
+  }
+  // Never send an EMPTY tool result: at the prompt tail it can make the
+  // model end its turn with zero output (TKAI-318, from Claude Code).
+  if (content.length === 0) {
+    content.push({ type: "text", text: `(${toolName} completed with no output)` });
   }
   // The action-level outcome rides in details so it survives persistence:
   // the channel host reads part.result.details.ok to tell a successful

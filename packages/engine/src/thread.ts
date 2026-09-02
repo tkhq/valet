@@ -301,6 +301,13 @@ export class Thread {
    */
   private consecutiveCompactionFailures = 0;
   /**
+   * Content hashes from the model's file reads, backing the
+   * read-before-write staleness gate (TKAI-318). In-memory only: after a
+   * restart the model must re-read before writing, which is the
+   * conservative behavior we want — the sandbox may have been rebuilt.
+   */
+  private readonly fileReadHashes = new Map<string, string>();
+  /**
    * True when a transcript was rehydrated from persisted entries (spec
    * decision 5). The next `runItemInner` consumes it: a pre-turn proactive
    * check protects the first post-restart turn — the regular check only
@@ -3612,6 +3619,10 @@ export class Thread {
       cwd: session.options.workspace,
       credentials: session.credentialProvider(),
       sandbox: session.sandbox,
+      fileReads: {
+        get: (path) => this.fileReadHashes.get(path),
+        record: (path, contentHash) => this.fileReadHashes.set(path, contentHash),
+      },
       config: session.options.toolConfig,
       owner: session.owner,
       policyResolver: session.options.policyResolver,

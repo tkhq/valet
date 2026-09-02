@@ -763,11 +763,18 @@ interface ToolDef {
   parameters: TSchema;  // TypeBox schema (pi-ai native)
   riskLevel?: 'low' | 'medium' | 'high' | 'critical';
   requiresApproval?: boolean | ((args: Record<string, unknown>, ctx: ToolContext) => Promise<boolean> | boolean);
+  concurrencySafe?: boolean;  // default false: run sequentially (TKAI-318)
   execute: (args: Record<string, unknown>, ctx: ToolContext) => Promise<ToolResult>;
 }
 ```
 
 Tool names are globally unique within a session after registration. Built-in tools use short names (`read`, `bash`); plugin tools use service-qualified names (`github.create_pr`, `linear.create_issue`). If two tools register the same name at the same scope, session creation fails unless a thread-level override intentionally replaces a session-level tool.
+
+**Execution order (TKAI-318).** Tools default to sequential execution: the bridge maps `concurrencySafe: false` to pi-agent-core's `executionMode: "sequential"`, and one sequential tool serializes its whole batch. Only read-only, approval-free tools opt in (`read`, `thread_read`, `child_read`, `child_status`, `list_threads`). Parallel mutating tools race each other, and parallel approval-gated tools surface approvals out of execution order — the source of the out-of-order approval bug.
+
+**Read-before-write gate (TKAI-318).** The thread keeps a content-hash map of the model's file reads (`ToolContext.fileReads`). `write` on an existing file and `edit` fail with corrective text when the file was never read or its current content no longer matches the recorded hash ("changed since you read it… Read it again"). Content hashing catches bash-side and human edits that timestamps cannot. The map is in-memory: after a restart the model must re-read before writing. Hosts that do not wire `fileReads` get no gate.
+
+**Empty results (TKAI-318).** The bridge replaces an empty tool result with `(toolName completed with no output)` — an empty result at the prompt tail can make the model end its turn with zero output.
 
 #### ToolContext
 

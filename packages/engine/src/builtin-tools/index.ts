@@ -165,12 +165,52 @@ export function defineTool<T extends TSchema>(def: ToolDef<T>): ToolDef<T> {
   return def;
 }
 
+/**
+ * FNV-1a content hash for the read-before-write gate. Equality checking
+ * only — deliberately not node:crypto, which must stay out of the engine's
+ * browser-safe barrel.
+ */
+export function hashFileContent(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36) + ":" + text.length.toString(36);
+}
+
+/**
+ * Read-before-write staleness gate (TKAI-318, from Claude Code's
+ * readFileState). Returns corrective text when the mutation must not
+ * proceed, undefined when it may. Content-hash comparison catches bash-side
+ * and human edits that timestamps cannot. Inert when the host wires no
+ * `fileReads` (tests, minimal hosts).
+ */
+function staleWriteGate(
+  ctx: ToolContext,
+  path: string,
+  currentContent: string | undefined,
+): string | undefined {
+  if (!ctx.fileReads) return undefined;
+  if (currentContent === undefined) return undefined; // new file — nothing to protect
+  const known = ctx.fileReads.get(path);
+  if (known === undefined) {
+    return `${path} exists but has not been read this session. Read it before writing to it.`;
+  }
+  if (known !== hashFileContent(currentContent)) {
+    return `${path} changed since you read it (another process or person edited it). Read it again before writing to it.`;
+  }
+  return undefined;
+}
+
 export const readTool = defineTool({
   name: "read",
   description: "Read the contents of a file from the sandbox.",
   parameters: Type.Object({ path: Type.String() }),
+  concurrencySafe: true,
   execute: async (args, ctx) => {
     const text = await ctx.sandbox.readFile(args.path);
+    ctx.fileReads?.record(args.path, hashFileContent(text));
     return { text };
   },
 });
@@ -180,7 +220,16 @@ export const writeTool = defineTool({
   description: "Write contents to a file in the sandbox (creates or overwrites).",
   parameters: Type.Object({ path: Type.String(), content: Type.String() }),
   execute: async (args, ctx) => {
+    let existing: string | undefined;
+    try {
+      existing = await ctx.sandbox.readFile(args.path);
+    } catch {
+      // Unreadable or absent — treat as a create; the gate has nothing to protect.
+    }
+    const stale = staleWriteGate(ctx, args.path, existing);
+    if (stale) return { text: stale, ok: false };
     await ctx.sandbox.writeFile(args.path, args.content);
+    ctx.fileReads?.record(args.path, hashFileContent(args.content));
     return { text: `wrote ${args.path}` };
   },
 });
@@ -195,11 +244,14 @@ export const editTool = defineTool({
   }),
   execute: async (args, ctx) => {
     const before = await ctx.sandbox.readFile(args.path);
+    const stale = staleWriteGate(ctx, args.path, before);
+    if (stale) return { text: stale, ok: false };
     if (!before.includes(args.oldString)) {
       return { text: `no match for old_string in ${args.path}` };
     }
     const after = before.split(args.oldString).join(args.newString);
     await ctx.sandbox.writeFile(args.path, after);
+    ctx.fileReads?.record(args.path, hashFileContent(after));
     return { text: `edited ${args.path}` };
   },
 });
@@ -262,6 +314,7 @@ export const bashTool = defineTool({
 
 export const threadReadTool = defineTool({
   name: "thread_read",
+  concurrencySafe: true,
   description:
     "Read recent messages from another thread in this session. Useful for cross-thread context (e.g. an orchestrator pulling notes from a worker thread, or a thread checking what a sibling has done).",
   parameters: Type.Object({
@@ -369,6 +422,7 @@ export const CHILD_READ_MAX_CHARS = 16_000;
 
 export const childReadTool = defineTool({
   name: "child_read",
+  concurrencySafe: true,
   description:
     "Read the messages of a child session this session spawned. A " +
     "`child.settled` signal carries only a bounded copy of the child's " +
@@ -478,6 +532,7 @@ export const childSendTool = defineTool({
 
 export const childStatusTool = defineTool({
   name: "child_status",
+  concurrencySafe: true,
   description:
     "Check whether a child session is still making progress: settled or " +
     "running, plus its last queue activity time. Use it to decide between " +
@@ -525,6 +580,7 @@ export const childStatusTool = defineTool({
 
 export const listThreadsTool = defineTool({
   name: "list_threads",
+  concurrencySafe: true,
   description:
     "List sibling threads in this session, including paused ones. Use this " +
     "to discover thread keys before calling `thread_read`. Returns key, " +
