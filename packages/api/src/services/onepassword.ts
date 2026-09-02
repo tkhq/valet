@@ -78,8 +78,10 @@ export interface OnePasswordCtx {
 
 /** Why a 1Password call could not answer. `no_token` and `disabled` mean this
  * scope has nothing to offer and a caller may try the next one; `sdk` means
- * the token exists and 1Password refused, which a caller must surface. */
-export type OnePasswordErrorKind = "no_token" | "disabled" | "sdk";
+ * the token exists and 1Password refused, which a caller must surface.
+ * `scope` means the reader is not allowed to consult the token the row names
+ * — a policy refusal, never retried against another scope. */
+export type OnePasswordErrorKind = "no_token" | "disabled" | "sdk" | "scope";
 
 export class OnePasswordAuthError extends Error {
   constructor(message: string, readonly kind: OnePasswordErrorKind = "sdk") {

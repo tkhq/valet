@@ -89,11 +89,22 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
   // reads never reach the frozen actor's personal vault. One policy, shared
   // with the api-side resolver: `onePasswordScopesFor`.
   const rows = await db
-    .select({ ownerType: agentSessions.ownerType })
+    .select({ ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId })
     .from(agentSessions)
     .where(eq(agentSessions.id, sandbox.sessionId))
     .limit(1);
-  const scopes = onePasswordScopesFor(rows[0]?.ownerType);
+  // The personal scope belongs to the identity the token was minted for, not
+  // to a user-owned row in the abstract. A session can change hands
+  // (`PATCH /api/sessions/:id`) while tokens minted before the move stay
+  // valid for their full TTL — revocation is reserved for `destroy` — so
+  // reading `ownerType` alone would let whoever takes ownership present the
+  // earlier actor's token and resolve that actor's personal vault. `undefined`
+  // is the unknown-owner case `onePasswordScopesFor` already answers with the
+  // org scope alone, which is also the right answer for a team- or org-owned
+  // session and for a user-owned one that is not this token holder's.
+  const row = rows[0];
+  const isOwnUserSession = row?.ownerType === "user" && row.ownerId === sandbox.userId;
+  const scopes = onePasswordScopesFor(isOwnUserSession ? "user" : undefined);
   const ctx = { orgId: sandbox.orgId, userId: sandbox.userId };
 
   // Every reference in parallel; within one, org scope first. A scope with

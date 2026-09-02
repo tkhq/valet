@@ -33,13 +33,23 @@
  */
 import type { CredentialStore, StoredCredential, ValetPlugin } from "@valet/engine";
 import { findCredentialDeclaration } from "./integration-availability.js";
-import { ONEPASSWORD_SERVICE, onePasswordMeta, type OnePasswordService, OnePasswordScope } from "./onepassword.js";
+import {
+  ONEPASSWORD_SERVICE,
+  OnePasswordAuthError,
+  onePasswordMeta,
+  type OnePasswordService,
+  OnePasswordScope,
+} from "./onepassword.js";
 
 /** Internal services that must never surface as ordinary session/workflow
  * credentials. `onepassword` rows are the service-account tokens themselves;
  * `github_app` holds the GitHub App PEM/secrets; `llm:*` rows are org LLM
- * provider keys resolved only through the model/OpenAI probe paths. */
-function isDeniedCredentialService(service: string): boolean {
+ * provider keys resolved only through the model/OpenAI probe paths.
+ *
+ * Exported so the write path can refuse the same set: every consumer of these
+ * services reads its row RAW, so a 1Password reference stored under one would
+ * verify at save time and then be read as an empty credential forever. */
+export function isDeniedCredentialService(service: string): boolean {
   return service === ONEPASSWORD_SERVICE || service === "github_app" || service.startsWith("llm:");
 }
 
@@ -89,9 +99,15 @@ export type UserReadCtx = Required<Pick<CredentialReadCtx, "orgId" | "userId" | 
  * through the vault lookup. `excluded` is the reader's choice for a row
  * whose `tokenScope` its scopes leave out. A user read skips it, so the read
  * falls through to the org row and the vaults as if the row were absent. An
- * org read resolves it, and `resolveCredential` throws the typed
- * `OnePasswordAuthError` for a personal reference with no user, which is the
- * fail-loud contract `resolveOrgCredentialRead` documents.
+ * org read refuses it with the typed `OnePasswordAuthError`, the fail-loud
+ * contract `resolveOrgCredentialRead` documents.
+ *
+ * The org read refuses on the scopes alone rather than trusting the write
+ * path. `PUT /api/credentials/:service` rejects a personal `tokenScope` on an
+ * org-scoped row today, and it is the only writer of `metadata.onepassword`,
+ * but a caller that supplies a `userId` (an org-owned workflow run does)
+ * would otherwise resolve such a row through THAT person's personal token.
+ * The rule belongs where every row passes, not only where rows are written.
  */
 async function resolveRow(
   deps: CredentialReadDeps,
@@ -102,7 +118,13 @@ async function resolveRow(
   if (!row) return null;
   const meta = onePasswordMeta(row);
   if (!deps.onePassword || !meta) return row;
-  if (excluded === "skip" && !ctx.scopes.includes(meta.tokenScope)) return null;
+  if (!ctx.scopes.includes(meta.tokenScope)) {
+    if (excluded === "skip") return null;
+    throw new OnePasswordAuthError(
+      `This credential reads a ${meta.tokenScope} 1Password token, which this session may not use.`,
+      "scope",
+    );
+  }
   return deps.onePassword.resolveCredential(row, ctx);
 }
 

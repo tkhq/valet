@@ -277,20 +277,27 @@ describe("resolveOrgCredentialRead", () => {
     expect(sawCtx).toEqual({ orgId, userId: "", scopes: ["org"] });
   });
 
-  it("org row carrying a personal-tokenScope reference throws the typed OnePasswordAuthError when ctx has no userId", async () => {
+  // An org read refuses a personal-scope row on the scopes alone, before the
+  // service is consulted at all. The write path rejects this combination
+  // today, so the row is unreachable through the API — but an org-owned
+  // workflow run supplies a real `userId`, and without this gate such a row
+  // would resolve through THAT person's personal token.
+  it("org row carrying a personal-tokenScope reference is refused, and the service is never called", async () => {
     const credentials = fakeCredentialStore();
     await credentials.save({ type: "org", id: orgId }, "acme", {
       type: "api_key",
       metadata: { onepassword: { reference: "op://Personal/Acme/field", tokenScope: "personal" } },
     });
-    const authError = new OnePasswordAuthError(
-      "This org has no personal 1Password service account token connected.",
-    );
     const onePassword = fakeOnePassword(async () => {
-      throw authError;
+      throw new Error("must not resolve — the scopes exclude personal");
     });
 
-    await expect(resolveOrgCredentialRead({ credentials, onePassword }, { orgId }, "acme")).rejects.toBe(authError);
+    await expect(
+      resolveOrgCredentialRead({ credentials, onePassword }, { orgId }, "acme"),
+    ).rejects.toMatchObject({ kind: "scope" });
+    await expect(
+      resolveOrgCredentialRead({ credentials, onePassword }, { orgId, userId, scopes: ["org"] }, "acme"),
+    ).rejects.toBeInstanceOf(OnePasswordAuthError);
   });
 
   it("plain org row passes through unchanged (no onePassword call)", async () => {

@@ -713,6 +713,22 @@ describe("PUT /api/credentials/:service — onepassword reference extension", ()
     expect(await api.providers.engineCredentials.get({ type: "org", id: "local-org" }, "fakebot")).toBeNull();
   });
 
+  // The code that owns these services reads its row raw: an `llm:*` key
+  // through model resolution, the App private key through the GitHub App
+  // loader. A reference saved under one resolves at save time, replaces the
+  // working row, and is then read as a credential with no secret in it.
+  it.each(["llm:prov_1", "github_app"])("rejects a 1Password reference for the internal service %s", async (service) => {
+    api = await bootTestApi();
+    api.providers.onePassword = new FakeOnePasswordService();
+    const put = await fetch(`${api.baseUrl}/api/credentials/${service}`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ type: "api_key", scope: "org", onepassword: { reference: "op://vault/item/field", tokenScope: "org" } }),
+    });
+    expect(put.status).toBe(400);
+    expect(await api.providers.engineCredentials.get({ type: "org", id: "local-org" }, service)).toBeNull();
+  });
+
   it("accepts a bot_token reference for a plugin that declares bot_token", async () => {
     const botPlugin: ValetPlugin = {
       name: "fakebot",

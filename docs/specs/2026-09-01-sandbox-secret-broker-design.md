@@ -92,6 +92,15 @@ broker; per-session reference allowlists; write access of any kind.
    row passes through, and `UserReadCtx.scopes` is required so no reader can
    skip the decision.
 
+   The broker asks a second question the api side does not have to: is this
+   token's holder the session's owner? A session changes hands through
+   `PATCH /api/sessions/:id`, and tokens minted before the move stay valid
+   for their full TTL, since revocation is reserved for `destroy`. So a
+   user-owned row alone is not enough — the row's owner must also be the user
+   the presented token was minted for. Otherwise whoever takes ownership of a
+   session can present the earlier actor's token, which this route resolves
+   with, and read that actor's personal vault.
+
 ## Flow
 
 1. The agent runs `valet-secrets run --env NAME=op://vault/item/field -- cmd`.

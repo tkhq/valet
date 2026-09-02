@@ -247,6 +247,48 @@ describe("POST /api/sandbox-secrets/resolve", () => {
     expect(decode(body.values[0])).toBe("PERSONAL-VAULT-VALUE");
   });
 
+  // A session changes hands while tokens minted before the move stay valid:
+  // revocation is reserved for `destroy`, so `PATCH /api/sessions/:id` leaves
+  // the earlier actor's token live. If the scope came from `ownerType` alone,
+  // the new owner could present that token and read the earlier actor's
+  // personal vault, since the route resolves with the TOKEN's user id.
+  it("a user-owned session whose owner is not the token holder stays on the org token", async () => {
+    api = await bootTestApi();
+    const scopesTried: string[] = [];
+    api.providers.onePassword = {
+      ...fakeOnePassword(),
+      resolveReference: async (scope: string) => {
+        scopesTried.push(scope);
+        if (scope === "personal") return "ACTOR-PRIVATE-VALUE";
+        throw new Error("no org token");
+      },
+    };
+
+    // The row after the move: owned by user-b, who now prompts the session.
+    await api.providers.db.insert(agentSessions).values({
+      id: "sess-moved-1",
+      userId: "user-b",
+      orgId: "local-org",
+      workspace: "/workspace",
+      ownerType: "user",
+      ownerId: "user-b",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    // The token minted before the move still carries user-a.
+    const { token } = await mintSandboxToken(api.providers.db, {
+      sessionId: "sess-moved-1",
+      userId: "user-a",
+      orgId: "local-org",
+    });
+
+    const res = await resolve(["op://ok/item/field"], token);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Resp;
+    expect(scopesTried).toEqual(["org"]);
+    expect(body.values[0]).toBeNull();
+  });
+
   it("values are positional, with null for a reference nothing resolved", async () => {
     api = await bootTestApi();
     api.providers.onePassword = fakeOnePassword();

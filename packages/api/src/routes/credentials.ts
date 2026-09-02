@@ -49,6 +49,7 @@ import { requireOrgAdmin } from "./_org-admin.js";
 import { requiredScopeError, verifySlackBotToken } from "../services/slack-connect.js";
 import { connectModeFor, findCredentialDeclaration } from "../services/integration-availability.js";
 import { ONEPASSWORD_SERVICE, OnePasswordAuthError, onePasswordMeta } from "../services/onepassword.js";
+import { isDeniedCredentialService } from "../services/credential-resolution.js";
 import { PERSONAL_DISABLED, mapOnePasswordError } from "./_onepassword-errors.js";
 import { getAllowPersonalOnePassword } from "../services/org.js";
 import type {
@@ -260,6 +261,19 @@ credentialsRouter.put("/:service", async (c) => {
     // shipping a credential nothing reads.
     if (service === "github") {
       return c.json({ error: "github credentials cannot be 1Password references; use the GitHub connect flow" }, 400);
+    }
+    // The services the read path denies outright are read RAW by the code
+    // that owns them: an `llm:*` key through `services/model-resolution.ts`,
+    // the App private key through `services/github-app.ts`. A reference
+    // stored under one of them resolves at save time, replaces the working
+    // row, and is then read as a credential with no secret in it — the LLM
+    // provider still lists as keyed, and the GitHub App throws on every
+    // code path. Refuse the write rather than ship a row nothing resolves.
+    if (isDeniedCredentialService(service)) {
+      return c.json(
+        { error: `${service} credentials cannot be 1Password references; set them in their own settings page` },
+        400,
+      );
     }
     const hasInlineSecret =
       (typeof body.accessToken === "string" && body.accessToken.length > 0) ||

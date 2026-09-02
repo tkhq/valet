@@ -272,8 +272,34 @@ code as of the implementing commits:
   actor's personal vault. `UserReadCtx.scopes` is now required (the compiler
   makes every reader decide), and `resolveRow` enforces it: a user read skips
   a row whose scope its session may not use and falls through to the org row
-  and the vaults; an org read resolves the row and lets the typed error
-  surface, the fail-loud contract `resolveOrgCredentialRead` documents.
+  and the vaults; an org read refuses it with `OnePasswordAuthError` of kind
+  `scope`, the fail-loud contract `resolveOrgCredentialRead` documents. The
+  org read refuses on the scopes alone rather than trusting the write path:
+  an org-owned workflow run supplies a real `userId`, so a personal-scope org
+  row would otherwise resolve through that person's own token.
+- **A session's owner comes from the app row, not the engine principal.** The
+  generic session builder passes no `owner` to the engine, so
+  `SessionData.owner` reads `user` for every session `POST /api/sessions`
+  creates, team-owned ones included. `admitSignal` threaded that value into
+  the meta it rebuilds a session with, so a team-owned session rebuilt by a
+  child's settlement signal — the one path that rebuilds a session nobody is
+  watching — resolved credentials on the frozen actor's personal scope for
+  the rest of its life. It now reads `owner_type`/`owner_id` from
+  `agent_sessions` and falls back to the engine principal only for a target
+  with no row (an orchestrator), whose builders do pass an explicit owner.
+- **The broker binds the personal scope to the token's own identity.** A
+  session changes hands through `PATCH /api/sessions/:id` while sandbox
+  tokens minted before the move stay valid for their full TTL — revocation is
+  reserved for `destroy`. Reading `ownerType` alone let the new owner present
+  the earlier actor's token, which the route resolves with, and read that
+  actor's personal vault. The broker now reaches the personal scope only when
+  the row is user-owned AND its owner is the user the token was minted for.
+- **Reference writes are refused for the services the read path denies.**
+  `isDeniedCredentialService` is shared by both sides now. `llm:*` keys and
+  `github_app` are read raw by the code that owns them, so a reference stored
+  under one resolved at save time, replaced the working row, and was then
+  read as a credential holding no secret: the provider still listed as keyed,
+  and the GitHub App threw on every code path.
 - **A reference's type is held to the plugin's declared type.** A row's type
   decides which field the resolved secret lands in (`api_key` -> `apiKey`,
   otherwise `accessToken`), and a transport reads one fixed field. A Slack bot
