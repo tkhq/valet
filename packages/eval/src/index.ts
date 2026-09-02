@@ -5,6 +5,7 @@ export { aggregateUsage, extractTrajectory, toolResultText, type ExtractTrajecto
 export {
   runCase,
   interpolateTurnContent,
+  resolveEvalModel,
   type CaseOutcome,
   type CaseRunResult,
   type RunnerOptions,

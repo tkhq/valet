@@ -229,6 +229,10 @@ export interface EvalTurn {
   content: string;
 }
 
+/** Reasoning effort levels, mirroring pi-ai's ThinkingLevel. */
+export const REASONING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type ReasoningLevel = (typeof REASONING_LEVELS)[number];
+
 /**
  * Which environment the case needs.
  *  - `unit`: built-in tools only, virtual sandbox (default).
@@ -269,6 +273,14 @@ export interface EvalCase {
    * non-default values; leave unset for the provider default.
    */
   temperature?: number;
+  /**
+   * Reasoning/thinking effort for the model under test. Unset ===
+   * provider default, which for OpenAI reasoning models means MINIMAL
+   * effort (TKAI-352). The CLI's `--reasoning` overrides the whole suite,
+   * making effort itself a benchmark axis (it moves both pass rate and
+   * cost).
+   */
+  reasoning?: ReasoningLevel;
   /** Restrict the agent to these tool names. Absent → all profile tools. */
   tools?: string[];
   /** `orchestrator` sets up the full orchestrator environment. */

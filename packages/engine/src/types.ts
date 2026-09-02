@@ -2079,6 +2079,15 @@ export interface CreateSessionOptions {
    */
   sampling?: {
     temperature?: number;
+    /**
+     * Reasoning/thinking effort forwarded to pi-ai (`StreamOptions.
+     * reasoning`), which maps it per provider (OpenAI reasoning_effort,
+     * Anthropic thinking budgets, OpenRouter reasoning.effort, ...).
+     * Unset === provider default; OpenAI reasoning models then run at
+     * MINIMAL effort, which cripples them on deliberation-heavy work
+     * (TKAI-352) — hosts that route such models should set this.
+     */
+    reasoning?: import("@earendil-works/pi-ai").ThinkingLevel;
     /** Extra provider sampling params (e.g. top_p, seed where supported). */
     params?: Record<string, unknown>;
   };

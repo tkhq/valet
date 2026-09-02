@@ -15,7 +15,7 @@ import { runChecks, type JudgeRunner } from "./checks/index.js";
 import { runProductCase } from "./product-drive.js";
 import { runCase } from "./runner.js";
 import { aggregateUsage } from "./trajectory.js";
-import type { EvalCase, ScorecardEntry } from "./types.js";
+import type { EvalCase, ReasoningLevel, ScorecardEntry } from "./types.js";
 
 import { envKeyForService } from "./integration.js";
 
@@ -40,6 +40,8 @@ export interface SuiteOptions {
   timeoutMs?: number;
   /** Override every case's `runs` (pass@k sample count). */
   runsOverride?: number;
+  /** Suite-level reasoning effort (a case's own `reasoning:` wins). */
+  reasoning?: ReasoningLevel;
   /** Save each finished case's trajectory as a new baseline. */
   saveBaselines?: boolean;
   /**
@@ -140,6 +142,7 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
               })
             : await runCase(caseForRun, {
                 model: evalCase.model ?? opts.model,
+                ...(opts.reasoning !== undefined ? { reasoning: opts.reasoning } : {}),
                 ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
                 ...(opts.mockPlugins !== undefined ? { mockPlugins: opts.mockPlugins } : {}),
                 ...(opts.realPlugins !== undefined ? { realPlugins: opts.realPlugins } : {}),

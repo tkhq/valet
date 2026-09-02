@@ -33,7 +33,7 @@ import { buildRealCatalogTools } from "./integration.js";
 import { EvalMemoryStore, buildEvalMemoryTools } from "./memory-tools.js";
 import { buildMockCatalogTools } from "./mock-catalog.js";
 import { extractTrajectory, findSpawnCallId } from "./trajectory.js";
-import type { EvalCase, Trajectory, VerificationResult } from "./types.js";
+import type { EvalCase, ReasoningLevel, Trajectory, VerificationResult } from "./types.js";
 
 const DEFAULT_TIMEOUT_MS = 300_000;
 const EVAL_USER_ID = "eval-user";
@@ -80,6 +80,42 @@ export interface RunnerOptions {
   sandboxProvider?: SandboxProvider;
   /** Override the session system prompt. */
   systemPrompt?: string;
+  /**
+   * Suite-level reasoning effort for the model under test (a case's own
+   * `reasoning:` wins). Threaded to pi-ai via the engine sampling seam.
+   */
+  reasoning?: ReasoningLevel;
+}
+
+/**
+ * Model specs the static pi-ai catalog does not know yet, resolved by
+ * cloning a same-family catalog model and overriding the wire id. Cost is
+ * DROPPED unless independently confirmed: a borrowed price is a wrong
+ * price, and the scorecard's "unpriced" reads honestly. Remove entries as
+ * pi-ai catalog updates land.
+ */
+const EXTRA_MODELS: Record<string, { cloneOf: string; id: string }> = {
+  // Live Anthropic id confirmed via GET /v1/models on 2026-09-02; absent
+  // from pi-ai 0.84.2. Pricing unverified, so it runs unpriced.
+  "anthropic/claude-fable-5-1": { cloneOf: "anthropic/claude-fable-5", id: "claude-fable-5-1" },
+};
+
+/** Resolve a spec through the catalog, then the extra-models table. */
+export function resolveEvalModel(spec: string): Model<string> | undefined {
+  const fromCatalog = resolveModelId(spec);
+  if (fromCatalog) return fromCatalog;
+  const extra = EXTRA_MODELS[spec];
+  if (extra === undefined) return undefined;
+  const base = resolveModelId(extra.cloneOf);
+  if (!base) return undefined;
+  // Zeroed cost, not a deleted one: pi-ai's usage accounting reads
+  // model.cost unguarded, and the engine's cost-is-null-not-zero rule
+  // turns an all-zero cost into "unpriced" on every surface downstream.
+  return {
+    ...(base as Model<string>),
+    id: extra.id,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  } as Model<string>;
 }
 
 export interface CaseRunResult {
@@ -171,7 +207,7 @@ async function runCaseInner(evalCase: EvalCase, opts: RunnerOptions): Promise<Ca
     modelSpec =
       evalCase.model ??
       (typeof opts.model === "string" ? opts.model : `${opts.model.provider}/${opts.model.id}`);
-    const resolved = resolveModelId(modelSpec);
+    const resolved = resolveEvalModel(modelSpec);
     if (!resolved) {
       throw new Error(
         `unknown model spec \`${modelSpec}\`. Use provider/model form, e.g. anthropic/claude-haiku-4-5.`,
@@ -233,7 +269,7 @@ async function runCaseInner(evalCase: EvalCase, opts: RunnerOptions): Promise<Ca
 
   const children: SpawnedChild[] = [];
   const childSpawner: ChildSpawner = async (req, ctx) => {
-    const childModel = req.model !== undefined ? resolveModelId(req.model) : model;
+    const childModel = req.model !== undefined ? resolveEvalModel(req.model) : model;
     if (!childModel) throw new Error(`task: unknown model \`${req.model}\``);
     const child = await engine.createSession({
       userId: ctx.actorUserId,
@@ -282,7 +318,16 @@ async function runCaseInner(evalCase: EvalCase, opts: RunnerOptions): Promise<Ca
     builtinTools: restricted.filter((t) => builtinNames.has(t.name)),
     tools: restricted.filter((t) => !builtinNames.has(t.name)),
     warmSandboxOnClaim: false,
-    ...(evalCase.temperature !== undefined ? { sampling: { temperature: evalCase.temperature } } : {}),
+    ...(evalCase.temperature !== undefined || evalCase.reasoning !== undefined || opts.reasoning !== undefined
+      ? {
+          sampling: {
+            ...(evalCase.temperature !== undefined ? { temperature: evalCase.temperature } : {}),
+            ...((evalCase.reasoning ?? opts.reasoning) !== undefined
+              ? { reasoning: evalCase.reasoning ?? opts.reasoning }
+              : {}),
+          },
+        }
+      : {}),
     systemPrompt: opts.systemPrompt ?? (isOrchestrator ? EVAL_PERSONA : undefined),
     ...(isOrchestrator ? { toolConfig: { childSpawner } } : {}),
     // Evals are unattended, but retries would blur cost/duration numbers —
@@ -392,6 +437,7 @@ async function runCaseInner(evalCase: EvalCase, opts: RunnerOptions): Promise<Ca
     childTrajectories.push(t);
   }
 
+  const effectiveReasoning = evalCase.reasoning ?? opts.reasoning;
   const trajectory = extractTrajectory({
     caseId: evalCase.id,
     prompt: evalCase.turns[0].content,
@@ -399,6 +445,9 @@ async function runCaseInner(evalCase: EvalCase, opts: RunnerOptions): Promise<Ca
     durationMs,
     entries,
     children: childTrajectories,
+    // Reasoning effort is part of the run's identity for comparisons: the
+    // same model at different efforts is a different cost/quality point.
+    ...(effectiveReasoning !== undefined ? { metadata: { reasoning: effectiveReasoning } } : {}),
   });
 
   // Harness-run verifications (builder cases): execute each verify_command
