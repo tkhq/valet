@@ -35,6 +35,23 @@ export function toolResultText(result: unknown): string {
   return "";
 }
 
+/**
+ * Derive the fully-qualified plugin action id for a plugin-catalog call:
+ * `call_tool` carries it as the `tool_id` argument; a pinned tool's name is
+ * the dotted id with `.` mapped to `__` (see the engine's `pinnedToolName`).
+ */
+function deriveActionId(toolName: string, args: unknown): string | undefined {
+  if (toolName === "call_tool") {
+    if (typeof args === "object" && args !== null) {
+      const toolId = (args as Record<string, unknown>).tool_id;
+      if (typeof toolId === "string" && toolId.length > 0) return toolId;
+    }
+    return undefined;
+  }
+  if (/^[a-z0-9_-]+__[a-z0-9_]+$/.test(toolName)) return toolName.replace("__", ".");
+  return undefined;
+}
+
 function isAssistantMessage(e: SessionEntry): e is MessageEntry {
   return e.type === "message" && e.role === "assistant";
 }
@@ -96,6 +113,7 @@ export function extractTrajectory(input: ExtractTrajectoryInput): Trajectory {
 
     for (const part of entry.parts ?? []) {
       if (part.type !== "tool_call") continue;
+      const actionId = deriveActionId(part.toolName, part.args);
       toolCalls.push({
         toolName: part.toolName,
         callId: part.callId,
@@ -104,6 +122,7 @@ export function extractTrajectory(input: ExtractTrajectoryInput): Trajectory {
         ...(part.result !== undefined ? { result: part.result } : {}),
         ...(part.error !== undefined ? { error: part.error } : {}),
         index: toolIndex++,
+        ...(actionId !== undefined ? { actionId } : {}),
       });
     }
 

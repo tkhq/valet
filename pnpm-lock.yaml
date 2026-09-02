@@ -407,6 +407,9 @@ importers:
 
   packages/eval:
     dependencies:
+      '@valet/api':
+        specifier: workspace:*
+        version: link:../api
       '@valet/engine':
         specifier: workspace:*
         version: link:../engine

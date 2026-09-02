@@ -23,8 +23,10 @@ import {
   type Session,
   type SessionEntry,
   type ToolDef,
+  type ValetPlugin,
 } from "@valet/engine";
 import { EvalMemoryStore, buildEvalMemoryTools } from "./memory-tools.js";
+import { buildMockCatalogTools } from "./mock-catalog.js";
 import { extractTrajectory } from "./trajectory.js";
 import type { EvalCase, Trajectory } from "./types.js";
 
@@ -45,10 +47,16 @@ export interface RunnerOptions {
   /** Default per-case timeout when the case sets no `timeout_ms`. */
   timeoutMs?: number;
   /**
-   * Extra tools added to the session — the mock/integration plugin catalogs
-   * (TKAI-335/336) plug in here.
+   * Extra tools added to the session — the integration plugin catalog
+   * (TKAI-336) plugs in here.
    */
   extraTools?: ToolDef[];
+  /**
+   * Real plugin manifests backing `profile: mock` cases (TKAI-335). The
+   * CLI passes the api's bundled registry. Required when the case profile
+   * is `mock`.
+   */
+  mockPlugins?: ValetPlugin[];
   /** Override the session system prompt. */
   systemPrompt?: string;
 }
@@ -153,7 +161,21 @@ export async function runCase(evalCase: EvalCase, opts: RunnerOptions): Promise<
   const owner: Principal = { type: "user", id: EVAL_USER_ID };
   const isOrchestrator = evalCase.session_type === "orchestrator";
   const memoryStore = new EvalMemoryStore();
-  const customTools = [...buildEvalMemoryTools(memoryStore), ...(opts.extraTools ?? [])];
+  let mockCatalog: ToolDef[] = [];
+  if (evalCase.profile === "mock") {
+    if (opts.mockPlugins === undefined || opts.mockPlugins.length === 0) {
+      throw new Error(
+        `case ${evalCase.id} has profile: mock but the runner got no mockPlugins. ` +
+          "Pass the bundled plugin registry in RunnerOptions.mockPlugins.",
+      );
+    }
+    mockCatalog = buildMockCatalogTools(evalCase.mock_tools ?? {}, opts.mockPlugins);
+  }
+  const customTools = [
+    ...buildEvalMemoryTools(memoryStore),
+    ...mockCatalog,
+    ...(opts.extraTools ?? []),
+  ];
 
   const children: SpawnedChild[] = [];
   const childSpawner: ChildSpawner = async (req, ctx) => {
