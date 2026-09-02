@@ -6,7 +6,10 @@
  * (llm-providers design doc, plan Task 5):
  *
  *   - Known kinds (`anthropic`/`openai`/`google`/`openrouter`): the model comes from
- *     pi-ai's built-in registry (`getModel`); the key is the org credential at
+ *     the runtime model registry (`registryModelById`, see
+ *     `services/model-registry.ts` — the same ONE lookup `buildOrgCatalog`
+ *     reads, so the picker and turn start cannot disagree about what
+ *     exists); the key is the org credential at
  *     `llm:{rowId}` when a provider row + key exist, else pi-ai's env fallback
  *     (`getEnvApiKey`). With no row at all (zero-config boot) the env key still
  *     resolves the known kind — mirroring the catalog's zero-config synthesis.
@@ -42,7 +45,8 @@
  *     model not active on a custom provider). These fail the turn the way
  *     model-resolution errors do today, with a clear message.
  */
-import { getEnvApiKey, getModel, type Model } from "@earendil-works/pi-ai/compat";
+import { getEnvApiKey, type Api, type Model } from "@earendil-works/pi-ai/compat";
+import { registryModelById } from "./model-registry.js";
 import { NoCredentialsError, type CredentialOwner, type CredentialStore, type ResolvedModel } from "@valet/engine";
 import type { AppQueryable } from "../lib/drizzle.js";
 import type { LlmProviderRow } from "../schema/index.js";
@@ -88,12 +92,12 @@ async function orgKey(credentials: CredentialStore, orgId: string, rowId: string
  * spec). Round-tripping is `ResolvedModel.canonicalId`'s job: the engine
  * persists/re-feeds the canonical spec, never the wire id.
  */
-function registryModel(kind: KnownKind, modelId: string): Model<any> | null {
-  // pi-ai's getModel is typed against its compile-time MODELS table; we accept
-  // user-configurable ids and cast at the boundary (same idiom as the retired
-  // hardcoded resolveModel). Runtime lookup is dynamic, so an unknown id yields
-  // undefined rather than a type error. The engine accepts Model<any>.
-  return getModel(kind as "anthropic", modelId as "claude-haiku-4-5") ?? null;
+function registryModel(kind: KnownKind, modelId: string): Model<Api> | null {
+  // The runtime registry (`services/model-registry.ts`) is keyed by plain
+  // strings, so the id cast the retired `getModel` boundary needed is gone:
+  // that function was typed against pi-ai's compile-time MODELS table, and
+  // this one is not. An unknown id yields undefined, as before.
+  return registryModelById(kind, modelId) ?? null;
 }
 
 /** The canonical-id variant, used ONLY for `NoCredentialsError.model` — the
@@ -101,7 +105,7 @@ function registryModel(kind: KnownKind, modelId: string): Model<any> | null {
  * spec, and its `id` doubles as the user-facing spec in error surfaces. It
  * never reaches a wire call (turn start re-resolves and throws again while
  * the key is still missing). */
-function registryModelWithCanonicalId(kind: KnownKind, modelId: string, canonicalId: string): Model<any> | null {
+function registryModelWithCanonicalId(kind: KnownKind, modelId: string, canonicalId: string): Model<Api> | null {
   const model = registryModel(kind, modelId);
   if (!model) return null;
   return { ...model, id: canonicalId };

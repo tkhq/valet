@@ -3050,6 +3050,25 @@ export interface ListModelsResponse {
   models: ModelInfo[];
 }
 
+/** Last-refresh state for one upstream model-registry provider
+ * (`GET /api/models/registry-status`, TKAI-327). `usingBundledFallback` true
+ * means the served list is the bundled compile-time catalog, either because
+ * the remote fetch is off or because every attempt has failed. */
+export interface ModelRegistryProviderStatusWire {
+  providerId: string;
+  modelCount: number;
+  /** Epoch ms of the last completed upstream check. Null means never. */
+  checkedAt: number | null;
+  usingBundledFallback: boolean;
+  lastError: string | null;
+}
+
+export interface ModelRegistryStatusResponse {
+  /** False when no registry URL is configured. */
+  remoteEnabled: boolean;
+  providers: ModelRegistryProviderStatusWire[];
+}
+
 // ── REST: usage (`/api/usage/summary`) ─────────────────────────────────
 
 export interface UsageWindow {
