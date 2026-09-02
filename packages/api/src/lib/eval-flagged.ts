@@ -47,7 +47,23 @@ export async function openEvalDataSource(opts: {
       "no database configured. Set DATABASE_URL, or pass the PGlite data dir (VALET_DATA_DIR/pg).",
     );
   }
-  const pglite = await PGlite.create(opts.pgDataDir);
+  const { existsSync } = await import("node:fs");
+  if (!existsSync(opts.pgDataDir)) {
+    throw new Error(
+      `PGlite data dir not found: ${opts.pgDataDir}. ` +
+        "Set VALET_DATA_DIR to the stack that holds your sessions, or set DATABASE_URL.",
+    );
+  }
+  let pglite: PGlite;
+  try {
+    pglite = await PGlite.create(opts.pgDataDir);
+  } catch (err) {
+    // The single most common failure: a running api owns the data dir.
+    throw new Error(
+      `could not open PGlite at ${opts.pgDataDir} (${err instanceof Error ? err.message : String(err)}). ` +
+        "Stop the api first (make dev-stop), or point DATABASE_URL at a server database.",
+    );
+  }
   return {
     appDb: buildAppDb(pglite),
     engineStore: new PgSessionStore(pgDbFromPglite(pglite)),
