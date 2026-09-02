@@ -16,7 +16,7 @@ import { and, desc, eq } from "drizzle-orm";
 import type { SessionEntry } from "@valet/engine";
 import { PgSessionStore, pgDbFromPglite, pgDbFromPool } from "@valet/store-postgres";
 import { buildAppDb, type AppDb } from "./drizzle.js";
-import { agentSessions, ratings } from "../schema/index.js";
+import { agentSessions, childWatches, ratings } from "../schema/index.js";
 import type { RatingValue } from "../wire/types.js";
 
 export interface EvalDataSource {
@@ -69,6 +69,26 @@ export async function openEvalDataSource(opts: {
     engineStore: new PgSessionStore(pgDbFromPglite(pglite)),
     close: () => pglite.close(),
   };
+}
+
+/**
+ * The children a session spawned, with settlement state — the product-drive
+ * eval harness polls this for quiescence and child-trajectory capture.
+ * Schema access stays in this module (the api owns the app schema).
+ */
+export async function listChildSessions(
+  db: AppDb,
+  parentSessionId: string,
+): Promise<Array<{ childSessionId: string; queueItemId: string; settled: boolean }>> {
+  const rows = await db
+    .select({
+      childSessionId: childWatches.childSessionId,
+      queueItemId: childWatches.queueItemId,
+      settled: childWatches.settled,
+    })
+    .from(childWatches)
+    .where(eq(childWatches.parentSessionId, parentSessionId));
+  return rows;
 }
 
 export interface FlaggedSessionExport {

@@ -32,7 +32,7 @@ import {
 import { buildRealCatalogTools } from "./integration.js";
 import { EvalMemoryStore, buildEvalMemoryTools } from "./memory-tools.js";
 import { buildMockCatalogTools } from "./mock-catalog.js";
-import { extractTrajectory } from "./trajectory.js";
+import { extractTrajectory, findSpawnCallId } from "./trajectory.js";
 import type { EvalCase, Trajectory } from "./types.js";
 
 const DEFAULT_TIMEOUT_MS = 300_000;
@@ -209,7 +209,7 @@ async function runCaseInner(evalCase: EvalCase, opts: RunnerOptions): Promise<Ca
           "Pass the bundled plugin registry in RunnerOptions.mockPlugins.",
       );
     }
-    catalogTools = buildMockCatalogTools(evalCase.mock_tools ?? {}, opts.mockPlugins);
+    catalogTools = buildMockCatalogTools(evalCase.mock_tools ?? {}, opts.mockPlugins, evalCase.allowed_actions);
   } else if (profile === "integration" || profile === "full") {
     if (opts.realPlugins === undefined || opts.realPlugins.length === 0) {
       throw new Error(
@@ -217,7 +217,7 @@ async function runCaseInner(evalCase: EvalCase, opts: RunnerOptions): Promise<Ca
           "Pass the bundled plugin registry in RunnerOptions.realPlugins.",
       );
     }
-    catalogTools = buildRealCatalogTools(opts.realPlugins, profile);
+    catalogTools = buildRealCatalogTools(opts.realPlugins, profile, evalCase.allowed_actions);
     for (const [service, token] of Object.entries(opts.credentials ?? {})) {
       await credentialStore.save({ type: "user", id: EVAL_USER_ID }, service, {
         type: "api_key",
@@ -387,7 +387,7 @@ async function runCaseInner(evalCase: EvalCase, opts: RunnerOptions): Promise<Ca
       durationMs: (child.settledAt ?? Date.now()) - child.spawnedAt,
       entries: childEntries,
     });
-    const spawnCall = findSpawnCall(entries, child.session.id);
+    const spawnCall = findSpawnCallId(entries, child.session.id);
     if (spawnCall !== undefined) t.spawnedByCallId = spawnCall;
     childTrajectories.push(t);
   }
@@ -416,18 +416,3 @@ async function runCaseInner(evalCase: EvalCase, opts: RunnerOptions): Promise<Ca
   return { trajectory, outcome, ...(error !== undefined ? { error } : {}) };
 }
 
-/** Find the callId of the `task` tool call whose result names this child session. */
-function findSpawnCall(entries: SessionEntry[], childSessionId: string): string | undefined {
-  for (const entry of entries) {
-    if (entry.type !== "message" || entry.role !== "assistant") continue;
-    for (const part of entry.parts ?? []) {
-      if (part.type !== "tool_call" || part.toolName !== "task") continue;
-      const text =
-        typeof part.result === "object" && part.result !== null
-          ? String((part.result as Record<string, unknown>).text ?? "")
-          : String(part.result ?? "");
-      if (text.includes(childSessionId)) return part.callId;
-    }
-  }
-  return undefined;
-}

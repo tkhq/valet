@@ -123,7 +123,17 @@ export type DeterministicCheck =
   | { type: "output_not_contains"; value?: string; pattern?: string }
   | { type: "all_terminal" }
   | { type: "no_errors" }
-  | { type: "max_turns"; value: number }
+  | {
+      type: "max_turns";
+      value: number;
+      /**
+       * Scope: total assistant turns across the whole case (default), or
+       * the max within any single submission (`per_submission: true` —
+       * uses each turn's queueItemId linkage; signal-delivery turns count
+       * against their own submission, not the user's).
+       */
+      per_submission?: boolean;
+    }
   | { type: "max_tokens"; value: number }
   | { type: "max_cost"; value: number }
   | { type: "max_duration"; value: number };
@@ -229,7 +239,24 @@ export interface EvalCase {
   tools?: string[];
   /** `orchestrator` sets up the full orchestrator environment. */
   session_type?: "default" | "orchestrator";
+  /**
+   * How the case is driven. `engine` (default): in-process engine with
+   * eval stand-ins — fast, cheap, lab conditions. `product`: boots the
+   * real api per case and drives the REAL orchestrator session over its
+   * public routes — the production persona, HTTP mem_* tools, plugin
+   * catalog, policy, and ChildWatcher. Product cases need
+   * `session_type: orchestrator` and an ANTHROPIC_API_KEY.
+   */
+  drive?: "engine" | "product";
   profile?: EvalProfile;
+  /**
+   * Restrict the plugin catalog to these fully-qualified action ids
+   * (`service.action`). Unlike `tools:` (which cannot see past
+   * `call_tool`), this filters INSIDE the catalog: unlisted actions are
+   * not advertised and return unknown-tool errors. Applies to mock and
+   * integration/full catalogs.
+   */
+  allowed_actions?: string[];
   /** Canned tool responses, keyed by tool name (`profile: mock` only). */
   mock_tools?: Record<string, MockToolSpec>;
   /** Credential services the case needs. Missing credentials → SKIP. */

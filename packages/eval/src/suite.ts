@@ -12,6 +12,7 @@ import {
   type BaselineRecord,
 } from "./baseline.js";
 import { runChecks, type JudgeRunner } from "./checks/index.js";
+import { runProductCase } from "./product-drive.js";
 import { runCase } from "./runner.js";
 import { aggregateUsage } from "./trajectory.js";
 import type { EvalCase, ScorecardEntry } from "./types.js";
@@ -85,6 +86,11 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
       entries.push({ caseId: evalCase.id, status: "skip", skipReason, durationMs: 0, checkResults: [] });
     };
 
+    if (evalCase.drive === "product" && (process.env.ANTHROPIC_API_KEY ?? "") === "") {
+      skip("drive: product boots the real api and makes real LLM calls. Set ANTHROPIC_API_KEY.");
+      continue;
+    }
+
     if (profile === "integration" || profile === "full") {
       // Missing credentials SKIP, never FAIL: an eval box without a GitHub
       // token has nothing to measure, and a red row would cry wolf.
@@ -126,16 +132,22 @@ export async function runSuite(cases: EvalCase[], opts: SuiteOptions): Promise<S
       }
       const runOutcomes: RunOutcome[] = [];
       for (let runIndex = 0; runIndex < runCount; runIndex++) {
-        const result = await runCase(caseForRun, {
-          model: evalCase.model ?? opts.model,
-          ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
-          ...(opts.mockPlugins !== undefined ? { mockPlugins: opts.mockPlugins } : {}),
-          ...(opts.realPlugins !== undefined ? { realPlugins: opts.realPlugins } : {}),
-          ...(opts.credentials !== undefined ? { credentials: opts.credentials } : {}),
-          ...(profile === "full" && opts.fullSandboxProvider !== undefined
-            ? { sandboxProvider: opts.fullSandboxProvider() }
-            : {}),
-        });
+        const result =
+          evalCase.drive === "product"
+            ? await runProductCase(caseForRun, {
+                model: modelSpec,
+                ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+              })
+            : await runCase(caseForRun, {
+                model: evalCase.model ?? opts.model,
+                ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+                ...(opts.mockPlugins !== undefined ? { mockPlugins: opts.mockPlugins } : {}),
+                ...(opts.realPlugins !== undefined ? { realPlugins: opts.realPlugins } : {}),
+                ...(opts.credentials !== undefined ? { credentials: opts.credentials } : {}),
+                ...(profile === "full" && opts.fullSandboxProvider !== undefined
+                  ? { sandboxProvider: opts.fullSandboxProvider() }
+                  : {}),
+              });
         const checkResults = await runChecks(evalCase.checks, result.trajectory, {
           ...(opts.judge !== undefined ? { judge: opts.judge } : {}),
           ...(baseline !== null ? { baseline: baseline.trajectory } : {}),

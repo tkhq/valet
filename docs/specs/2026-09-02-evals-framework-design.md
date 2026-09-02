@@ -23,18 +23,26 @@ make eval EVAL_ARGS="--pull-flagged"          # harvest 👍-rated sessions
 
 ## Architecture decision
 
-The driver wraps the engine directly: in-memory providers
-(`InMemorySessionStore`, `InMemoryEventStream`, `InMemoryCredentialStore`,
-`InMemoryBlobStore`, `VirtualSandboxProvider`), one fresh `Engine` per
-case, no API server, no HTTP, no Docker (except `profile: full`).
+Two drive modes share one case format, one trajectory shape, and one check
+vocabulary:
 
-An earlier draft (`2026-08-24` evals-harness notes, discussed on TKAI-213)
-argued for driving the product through its public HTTP/WS routes instead.
-TKAI-213 settled on the in-process wrapper: the framework measures AGENT
-behavior (tool selection, sequencing, output quality, token spend), and the
-engine is the layer that owns that behavior. Product-surface coverage stays
-with `make e2e`. If a scorecard ever needs to certify the product surface,
-add a drive-through-the-API mode; do not bend this one.
+- `drive: engine` (default): the driver wraps the engine directly —
+  in-memory providers, one fresh `Engine` per case, eval stand-ins for
+  `mem_*`, no API server. Fast and cheap; lab conditions.
+- `drive: product`: the driver boots the REAL api in-process per case
+  (fresh scratch PGlite — no cross-case state), ensures the real
+  orchestrator over `POST /api/orchestrator`, and drives every turn over
+  the public message route. The agent runs with the production persona,
+  the HTTP-backed `mem_*` tools, the real plugin catalog and policy, and
+  the real ChildWatcher. Settlement and trajectory extraction read the
+  engine store the harness owns — drive through the front door, read
+  through the back door (the shape from the original TKAI-213 harness
+  discussion). Requires `session_type: orchestrator` and an API key;
+  cases SKIP without one.
+
+Use `engine` for volume (deterministic checks, model comparison at scale)
+and `product` for fidelity (the trajectory a user's session would actually
+produce). A production-behavior claim needs a product-drive case.
 
 ## The case format
 
@@ -47,6 +55,27 @@ YAML files in `evals/cases/`, one case per file, loaded and validated by
 
 Later user turns may interpolate the previous agent output:
 `{{last_output_match(/id: (\w+)/)}}` resolves to the first capture group.
+
+Sampling and rigor fields: `runs: N` samples the case N times (pass@k;
+`pass_threshold` sets the passing fraction, default 1 — flaky is a
+failure), `temperature` pins sampling where the model allows it, and
+`allowed_actions` restricts the plugin catalog to named action ids from
+the inside (unlike `tools:`, which cannot see past `call_tool`). A
+document with `variants: [{suffix, ...overrides}]` expands into sibling
+cases and emits only the variants — the anti-contamination shape: a
+memorized single answer no longer passes the group.
+
+Multi-run entries carry per-run token stats. The baseline comparator uses
+means when stats exist, labels token deltas `[significant]` or
+`[within noise]` against a 2-sigma band from the recorded per-run std, and
+reports pass-rate movement. A single-run-to-single-run delta stays
+unlabeled: there is no variance estimate to judge it against.
+
+Judge checks majority-vote across 3 samples (median score reported), see
+the TASK alongside the rubric and output, and the implicit default judge
+escalates to a stronger model rather than grade its own model. A live
+calibration bank in the test suite pins the default judge's verdicts on
+labeled good/bad outputs.
 
 ### Profiles
 
@@ -151,9 +180,10 @@ as a pass/fail check.
 
 ## Known limitations
 
-- `mem_*` tools in eval sessions are Map-backed stand-ins: production
-  `mem_*` calls the memory HTTP routes, which need a server. Names and the
-  path surface match, storage semantics do not.
+- `mem_*` tools in ENGINE-drive sessions are Map-backed stand-ins:
+  production `mem_*` calls the memory HTTP routes. Cases that must measure
+  real memory behavior use `drive: product`, which runs the HTTP-backed
+  tools against the booted api.
 - `integration` approximates "read-only" as riskLevel `low`. An action
   mislabeled low that mutates would run; riskLevel is the field to fix.
 - The Docker sandbox drives readiness with unref'd timers; the runner holds

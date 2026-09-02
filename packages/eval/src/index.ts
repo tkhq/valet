@@ -1,5 +1,6 @@
 export * from "./types.js";
-export { loadCases, parseEvalCase, CaseValidationError } from "./case-loader.js";
+export { expandVariants, loadCases, parseEvalCase, CaseValidationError } from "./case-loader.js";
+export { runProductCase, type ProductDriveOptions } from "./product-drive.js";
 export { aggregateUsage, extractTrajectory, toolResultText, type ExtractTrajectoryInput } from "./trajectory.js";
 export {
   runCase,
