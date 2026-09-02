@@ -110,6 +110,55 @@ Teams gain a nullable `teams.default_model`, the team-tier analog of `users.defa
 - **Restore is unchanged:** the persisted session model always wins (restore-no-clobber).
 - **Ownership stays per-field.** `SessionMeta.ownerTeamId` feeds the model cascade ONLY. The engine principal for a team-owned `buildSession` session remains `{ type: "user" }` (pre-existing), so credentials and skills stay user-scoped; do not read `ownerTeamId` as the session's principal.
 
+## Extension: runtime model registry (2026-09-02, TKAI-327)
+
+The model list used to come from `getModels`/`getModel` on
+`@earendil-works/pi-ai/compat`, which read a catalog baked into the published
+pi-ai tarball. A new model stayed invisible until pi cut a release and Valet
+bumped the dependency. Both functions are marked `@deprecated Static catalog
+read`, and `/compat` says it is temporary.
+
+`services/model-registry.ts` now fetches the catalog at runtime and keeps the
+bundled catalog as the floor.
+
+- **One code path.** `buildOrgCatalog` reads `registryModels(kind)` and
+  `resolveModelSpec` reads `registryModelById(kind, id)`. Both answer from the
+  same collection, so a model cannot appear in the picker and then fail at turn
+  start. `services/openrouter.ts`'s registry read moved to the same source.
+  Model-id namespacing is unchanged.
+- **The fallback is structural.** The registry is a pi-ai `createProvider`
+  whose static `models` is the bundled compile-time catalog and whose
+  `fetchModels` is the upstream fetch. pi-ai overlays the fetched list onto
+  the baseline by id, so a fetch that fails, times out, or returns malformed
+  data leaves the bundled list serving. A failed check returns the STORED
+  catalog rather than an empty list, because `createProvider` persists what
+  `fetchModels` resolves to and an empty return would erase a good cache.
+  The served list degrades stored, then bundled, and never to nothing.
+- **The cache is Postgres.** `PgModelsStore` implements pi-ai's `ModelsStore`
+  over `model_registry_cache` (one row per pi-ai provider id, deployment-wide,
+  not org-scoped). The catalog and its validators survive a restart and are
+  shared by every api replica, so the second replica to check sends the first
+  one's `etag`. A write that carries no validators keeps the stored ones:
+  pi-ai persists `{ models, checkedAt }` itself after `fetchModels` returns,
+  and clearing the columns there would make every later check unconditional.
+  Rows are validated on read as well as on write, and a row older than 30 days
+  is ignored so a dead catalog cannot serve forever.
+- **Refresh.** Boot restores from the cache with no network access, then
+  refreshes in the background; a timer re-checks every 6 hours. The check
+  sends `If-None-Match`/`If-Modified-Since`, so an unchanged catalog costs a
+  304. A 304 re-stamps `checkedAt`, which distinguishes "verified fresh" from
+  "never checked".
+- **Off by default.** `VALET_MODEL_REGISTRY_URL` names the upstream base; each
+  provider is read from `{base}/{providerId}.json`. Unset means no fetch and
+  the bundled catalog, which is the behavior before this change. The
+  zero-config path is unaffected: an org with no `llm_providers` rows and only
+  `ANTHROPIC_API_KEY` still sees the Anthropic list.
+- **Visibility.** `GET /api/models/registry-status` reports per provider the
+  model count, `checkedAt`, whether the bundled fallback is in use, and the
+  last error. The catalog degrades silently by design, so this route is how an
+  operator sees a stuck check. The admin LLM-providers UI does not render it
+  yet — deferred to keep this change reviewable.
+
 ## Non-goals
 
 - Per-user LLM keys (org + deployment env only this pass).

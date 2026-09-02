@@ -1349,6 +1349,33 @@ export const llmProviders = pgTable(
   (t) => [index("llm_providers_org").on(t.orgId)],
 );
 
+/** One cached pi-ai model record, as stored. The column is opaque JSON on
+ * purpose: it caches a REMOTE payload, so nothing may assume the row is
+ * well-formed. `services/model-registry-parse.ts` validates every entry on
+ * read before it reaches the catalog. */
+export type RegistryCacheModel = unknown;
+
+// The runtime model-registry cache (TKAI-327). One row per pi-ai provider
+// id. It holds the catalog fetched from upstream, plus the HTTP validators
+// that make the next check a 304. The table is deployment-wide, not
+// org-scoped: the upstream registry is the same for every org, so all api
+// replicas share one row instead of each process refetching.
+//
+// This table is a CACHE. Every read has a bundled compile-time fallback
+// (`services/model-registry.ts`), so an empty or stale table degrades the
+// catalog to the bundled list. It never fails a turn.
+export const modelRegistryCache = pgTable("model_registry_cache", {
+  providerId: text("provider_id").primaryKey(),
+  models: jsonb("models").notNull().default([]).$type<RegistryCacheModel[]>(),
+  /** Opaque ETag from the upstream response, kept verbatim (quotes included). */
+  etag: text("etag"),
+  /** Upstream `Last-Modified`, as epoch ms. */
+  lastModified: bigint("last_modified", { mode: "number" }),
+  /** When the last upstream check completed, as epoch ms. Null means never. */
+  checkedAt: bigint("checked_at", { mode: "number" }),
+  updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+});
+
 export const llmProxyRequests = pgTable(
   "llm_proxy_requests",
   {
@@ -1780,6 +1807,7 @@ export type RuntimeGrantRow = typeof runtimeGrants.$inferSelect;
 export type ActionPolicyOverrideRow = typeof actionPolicyOverrides.$inferSelect;
 export type ActionInvocationRow = typeof actionInvocations.$inferSelect;
 export type LlmProviderRow = typeof llmProviders.$inferSelect;
+export type ModelRegistryCacheRow = typeof modelRegistryCache.$inferSelect;
 export type SessionRepoRow = typeof sessionRepos.$inferSelect;
 export type GithubInstallationRow = typeof githubInstallations.$inferSelect;
 export type ImageSourceRow = typeof imageSources.$inferSelect;

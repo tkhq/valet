@@ -5,7 +5,9 @@
  *
  *   - known provider kinds (`anthropic`/`openai`/`google`) — one row per org
  *     at most (Task 2/3's singleton rule). When a row exists, its models
- *     come from pi-ai's built-in registry (`getModels(kind)`) and it's
+ *     come from the runtime model registry (`registryModels(kind)`, see
+ *     `services/model-registry.ts` — upstream when a refresh has landed,
+ *     the bundled compile-time catalog otherwise) and it's
  *     "resolvable" when an org credential exists at `llm:{row.id}` OR (for
  *     known kinds only) `getEnvApiKey(kind)` resolves. When NO row exists
  *     for a known kind, the catalog synthesizes a registry entry anyway
@@ -30,7 +32,8 @@
  * entries so `PATCH /api/me` and the preferences route can validate either
  * shape against one set.
  */
-import { getEnvApiKey, getModels } from "@earendil-works/pi-ai/compat";
+import { getEnvApiKey } from "@earendil-works/pi-ai/compat";
+import { registryModels } from "./model-registry.js";
 import type { CredentialOwner, CredentialStore } from "@valet/engine";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { getOrgModelPreferences } from "./org.js";
@@ -76,7 +79,7 @@ function knownKindEntries(
   providerId: string,
   providerName: string,
 ): CatalogEntry[] {
-  return getModels(kind).map((m) => ({
+  return registryModels(kind).map((m) => ({
     id: `${namespace}/${m.id}`,
     name: m.name,
     contextWindow: m.contextWindow,

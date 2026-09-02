@@ -758,6 +758,15 @@ CREATE INDEX "llm_providers_org" ON "llm_providers" ("org_id");
 --> statement-breakpoint
 CREATE UNIQUE INDEX "llm_providers_org_kind_singleton" ON "llm_providers" ("org_id","kind") WHERE "kind" <> 'openai_compatible';
 --> statement-breakpoint
+CREATE TABLE "model_registry_cache" (
+	"provider_id" text PRIMARY KEY NOT NULL,
+	"models" jsonb DEFAULT '[]'::jsonb NOT NULL,
+	"etag" text,
+	"last_modified" bigint,
+	"checked_at" bigint,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
 CREATE TABLE "session_repos" (
 	"session_id" text NOT NULL,
 	"host" text DEFAULT 'github' NOT NULL,

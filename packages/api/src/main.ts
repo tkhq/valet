@@ -34,6 +34,7 @@ import {
 import { reconcileInstanceConfig } from "./services/config-reconcile.js";
 import { findOrg, getOrgFeatures, getSsoTeamGroups } from "./services/org.js";
 import { reportTeamSyncState } from "./services/team-sync.js";
+import { ModelRegistry, getModelRegistry, setModelRegistry } from "./services/model-registry.js";
 import { syncAllAppWebhookUrls } from "./services/github-app.js";
 import { publicUrlFromEnv } from "./channels/host.js";
 import { wireAttentionRouter } from "./orchestrator/attention-wiring.js";
@@ -580,6 +581,16 @@ async function runBootChain(): Promise<void> {
   // while this process was down.
   providers.skillSync.start();
 
+  // Runtime model registry (TKAI-327): restore the persisted catalog with no
+  // network access, then refresh upstream in the background on a timer. Boot
+  // never waits on the registry — an unreachable upstream leaves the bundled
+  // compile-time catalog in place.
+  const modelRegistry = new ModelRegistry(providers.db);
+  setModelRegistry(modelRegistry);
+  await modelRegistry.start().catch((err) => {
+    console.error("modelRegistry.start failed:", err);
+  });
+
   // Prebuild orchestration (sandbox images v2 plan, Task 3): sweep any
   // queued/building rows orphaned by a prior process crash/restart, then begin
   // the 10s build-status poll + 10min nightly-scheduler intervals. A no-op
@@ -671,6 +682,14 @@ async function close(): Promise<void> {
     await providers.skillSync.stop();
   } catch (err) {
     console.error("skillSync.stop failed:", err);
+  }
+  try {
+    // Read through the module handle: the registry is created in the boot
+    // chain, which is a different scope, and may never have started.
+    getModelRegistry()?.stop();
+    setModelRegistry(null);
+  } catch (err) {
+    console.error("modelRegistry.stop failed:", err);
   }
   try {
     providers.prebuildService.stop();

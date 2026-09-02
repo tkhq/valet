@@ -237,6 +237,21 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "artifacts_owner_path_unique" ON "artifacts" ("owner_type","owner_id","source_memory_path")',
   },
   {
+    // The runtime model-registry cache (TKAI-327). An empty table degrades
+    // the model catalog to the bundled compile-time list, so a deployment
+    // that boots before the repair runs still serves models.
+    describe: "model_registry_cache table",
+    probe: { kind: "table", table: "model_registry_cache" },
+    sql: `CREATE TABLE IF NOT EXISTS "model_registry_cache" (
+      "provider_id" text PRIMARY KEY NOT NULL,
+      "models" jsonb DEFAULT '[]'::jsonb NOT NULL,
+      "etag" text,
+      "last_modified" bigint,
+      "checked_at" bigint,
+      "updated_at" bigint NOT NULL
+    )`,
+  },
+  {
     // Slack thread auto-follow: a thread the assistant follows so later messages
     // route to the bound assistant without a re-mention.
     describe: "followed_threads table",
