@@ -11,3 +11,10 @@ export {
 export { EvalMemoryStore, buildEvalMemoryTools } from "./memory-tools.js";
 export { runCheck, runChecks, type CheckContext, type JudgeRunner } from "./checks/index.js";
 export { jsonSubsetMatches, runDeterministicCheck } from "./checks/deterministic.js";
+export {
+  DEFAULT_JUDGE_MODEL,
+  buildJudgeRunner,
+  parseJudgeResponse,
+  renderTrajectoryForJudge,
+  type JudgeOptions,
+} from "./checks/judge.js";

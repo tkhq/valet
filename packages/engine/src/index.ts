@@ -1,8 +1,10 @@
 export * from "./types.js";
-// The pi-ai Model type, re-exported so downstream packages (e.g. @valet/eval)
-// can type model handles without their own pi-ai dependency edge (which pnpm
-// may peer-fork into a second instance — see CLAUDE.md, "Node & workspace traps").
+// pi-ai passthroughs, re-exported so downstream packages (e.g. @valet/eval)
+// can type model handles and run side completions without their own pi-ai
+// dependency edge (which pnpm may peer-fork into a second instance with its
+// own provider registry — see CLAUDE.md, "Node & workspace traps").
 export type { Model } from "@earendil-works/pi-ai/compat";
+export { completeSimple } from "@earendil-works/pi-ai/compat";
 export {
   NotFoundError,
   NoCredentialsError,
