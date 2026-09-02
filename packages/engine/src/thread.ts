@@ -3801,6 +3801,11 @@ export class Thread {
       // settles. metadata flags let client UIs hide the synthetic continuation.
       const followUp = this.buildQueueItem(AUTO_CONTINUE_PROMPT, {
         metadata: { compaction_continue: true, synthetic: true },
+        // The continuation answers the same reader as the turn it continues.
+        // Without the inherited channel mark, the outbound channel path
+        // classifies the continuation as a web prompt and mutes the rest of
+        // a channel-originated answer (TKAI-323).
+        channel: this.runningItem?.channel,
       });
       await store.admitSubmission(session.id, this.id, followUp);
       await this.emitQueueState();

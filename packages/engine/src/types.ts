@@ -489,6 +489,10 @@ export interface CommandResultEntry extends BaseEntry {
   source: import("./commands/types.js").CommandSource;
   ok: boolean;
   output: string; // markdown
+  /** Surface the command came from (`PromptOptions.channel`). A command
+   * result only auto-posts to a bound channel when this is set — a web-typed
+   * command answers in the web UI (TKAI-323). */
+  channel?: ChannelTarget;
 }
 
 export type SessionEntry =

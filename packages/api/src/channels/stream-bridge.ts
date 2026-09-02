@@ -111,6 +111,17 @@ export interface StreamTurn {
   threadTs: string;
   orgId: string;
   /**
+   * The admitted submission this registration belongs to, bound by the host
+   * via `bindInboundTurn` once `submitPrompt` returns its receipt. When set,
+   * only that submission's `message_start` opens a stream — another turn on
+   * the same thread (a web-UI prompt, a compaction continuation) never
+   * matches, so it cannot stream into a registration a queued or gate-parked
+   * channel turn still holds (TKAI-323). Unset only in the gap between
+   * `noteInboundTurn` and the receipt, where the pre-binding behavior
+   * (thread-keyed matching) applies.
+   */
+  queueItemId?: string;
+  /**
    * True once this turn streamed visible text in the current gate segment.
    * The channel contract is one posted message per segment; a later
    * message_start in the same segment must not open another stream (the
@@ -244,12 +255,29 @@ export class ChannelStreamBridge {
    * Called by the host when a channel message starts a turn, BEFORE the
    * prompt is submitted. Nothing opens yet: a turn that parks on an approval
    * gate before it writes anything must not leave an empty stream on screen.
+   * Returns the registration, so the host can bind it to its submission once
+   * admission hands back the queueItemId; undefined when this transport
+   * cannot stream (nothing registered).
    */
-  noteInboundTurn(turn: StreamTurn): void {
+  noteInboundTurn(turn: StreamTurn): StreamTurn | undefined {
     const transport = this.deps.transportFor(turn.channelType);
-    if (!transport || !canStream(transport)) return;
+    if (!transport || !canStream(transport)) return undefined;
     this.pending.set(stateKey(turn.sessionId, turn.threadId), turn);
     void this.setStatus(turn, "is thinking…");
+    return turn;
+  }
+
+  /**
+   * Binds a registration to the submission it belongs to (see
+   * `StreamTurn.queueItemId`). Called by the host right after `submitPrompt`
+   * returns. Identity-checked against the pending map: when a newer inbound
+   * message already replaced this registration, the newer message owns the
+   * slot and this bind must not stamp its queueItemId onto it.
+   */
+  bindInboundTurn(turn: StreamTurn, queueItemId: string): void {
+    const pending = this.pending.get(stateKey(turn.sessionId, turn.threadId));
+    if (pending !== turn) return;
+    turn.queueItemId = queueItemId;
   }
 
   /** True when this bridge streamed an engine message, so the host's discrete
@@ -299,6 +327,20 @@ export class ChannelStreamBridge {
       if (e.role !== "assistant") return;
       const turn = this.pending.get(key);
       if (!turn || this.active.has(key)) return;
+      // The registration belongs to ONE submission. A message from any other
+      // turn on the thread — a web-UI prompt while a channel item is still
+      // queued, a compaction continuation — must not stream into it; left
+      // unmarked, that message travels the host's discrete path, where the
+      // surface check decides (TKAI-323). Both ids known-and-equal streams;
+      // an unbound registration (pre-receipt gap) keeps thread-keyed
+      // matching.
+      if (
+        turn.queueItemId !== undefined &&
+        event.queueItemId !== undefined &&
+        event.queueItemId !== turn.queueItemId
+      ) {
+        return;
+      }
       // One streamed message per gate segment: once this segment showed
       // text, later messages stay off the channel (they are the agent's
       // working notes; the reply-routing contract routes further output

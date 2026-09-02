@@ -25,6 +25,7 @@ import { recordCredentialRead } from "./metrics.js";
 import type { Model } from "@earendil-works/pi-ai/compat";
 import type {
   BusEvent,
+  ChannelTarget,
   CommandResultEntry,
   MessageEntry,
   CreateSessionOptions,
@@ -753,7 +754,7 @@ export class Session {
         return thread.submitPrompt(withText(content, outcome.text), opts2);
       }
       if (outcome.kind === "execute") {
-        return this.executeCommand(thread, outcome.resolved, outcome.args, text, opts.author);
+        return this.executeCommand(thread, outcome.resolved, outcome.args, text, opts.author, opts.channel);
       }
       if (outcome.kind === "pass" && outcome.nearMiss !== undefined) {
         const receipt = await thread.submitPrompt(content, opts);
@@ -777,13 +778,16 @@ export class Session {
    * command-shaped receipt. Never touches queue admission — a command runs
    * even while a turn streams.
    *
-   * `PromptOptions` other than `threadId` (resolved by the caller) and
-   * `author` are intentionally not forwarded: they shape queue submissions
-   * (channel, queueMode, model, ...) and a command takes no queue item.
-   * `author` IS forwarded, onto the echo entry — the echo is a persisted
-   * user message, and on a shared session an authorless echo renders as
-   * "You" in every member's view. If another option must reach the command
-   * path, add a parameter here so the dependency is explicit.
+   * `PromptOptions` other than `threadId` (resolved by the caller),
+   * `author`, and `channel` are intentionally not forwarded: they shape
+   * queue submissions (queueMode, model, ...) and a command takes no queue
+   * item. `author` IS forwarded, onto the echo entry — the echo is a
+   * persisted user message, and on a shared session an authorless echo
+   * renders as "You" in every member's view. `channel` IS forwarded, onto
+   * the echo and the result entry — the outbound channel path posts a
+   * command result to a bound channel only when the command came from that
+   * surface (TKAI-323). If another option must reach the command path, add
+   * a parameter here so the dependency is explicit.
    */
   private async executeCommand(
     thread: Thread,
@@ -791,6 +795,7 @@ export class Session {
     args: string[],
     raw: string,
     author?: PromptAuthor,
+    channel?: ChannelTarget,
   ): Promise<PromptReceipt> {
     // Echo the typed command as a persisted user message BEFORE the result.
     // A command takes no queue item, so nothing else persists the user's
@@ -808,6 +813,7 @@ export class Session {
       role: "user",
       content: raw,
       author,
+      channel,
       createdAt: echoAt,
     };
     await this.providers.store.appendEntries(this.id, thread.id, [echo]);
@@ -845,7 +851,7 @@ export class Session {
       if (fast === null) {
         const bgName = name;
         void pending
-          .then((r) => this.persistCommandResult(thread, bgName, "plugin", r, echoAt))
+          .then((r) => this.persistCommandResult(thread, bgName, "plugin", r, echoAt, channel))
           .catch((err: unknown) =>
             this.persistCommandResult(
               thread,
@@ -853,6 +859,7 @@ export class Session {
               "plugin",
               { ok: false, output: err instanceof Error ? err.message : String(err) },
               echoAt,
+              channel,
             ),
           );
         return {
@@ -869,7 +876,7 @@ export class Session {
       throw new Error(`executeCommand: unexpected source ${resolved.source}`);
     }
 
-    await this.persistCommandResult(thread, name, source, result, echoAt);
+    await this.persistCommandResult(thread, name, source, result, echoAt, channel);
 
     return {
       sessionId: this.id,
@@ -893,6 +900,7 @@ export class Session {
     source: CommandSource,
     result: { ok: boolean; output: string },
     notBefore: number,
+    channel?: ChannelTarget,
   ): Promise<void> {
     const entry: CommandResultEntry = {
       id: uid("e"),
@@ -904,6 +912,7 @@ export class Session {
       source,
       ok: result.ok,
       output: result.output,
+      channel,
       createdAt: Math.max(Date.now(), notBefore + 1),
     };
     await this.providers.store.appendEntries(this.id, thread.id, [entry]);
