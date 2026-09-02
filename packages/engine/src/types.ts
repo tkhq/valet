@@ -1947,6 +1947,12 @@ export interface CreateSessionOptions {
   parentThreadId?: string;
   sandbox: Sandbox | SandboxCreateOpts;
   tools?: ToolDef[];
+  /**
+   * Replace the engine's built-in toolset for this session. A host/eval seam:
+   * pass a filtered copy of `builtinTools` to restrict the agent to a subset
+   * (e.g. an eval case's `tools:` pin). Absent === the full built-in set.
+   */
+  builtinTools?: ToolDef[];
   roles?: RoleSpec[];
   skills?: SkillSource[];
   model: Model<any>;

@@ -185,7 +185,7 @@ export class Session {
   readonly options: CreateSessionOptions;
   readonly sandbox: Sandbox;
   readonly attachment: SandboxAttachment;
-  readonly builtinTools: ToolDef[] = builtinTools;
+  readonly builtinTools: ToolDef[];
   /**
    * Opaque per-instance owner id for lease ownership. Claims taken by this
    * running Session carry it; `renewLeases` extends only leases we still own,
@@ -282,6 +282,7 @@ export class Session {
     this.sandbox = sandbox;
     this.attachment = attachment;
     this.policySandbox = policySandbox ?? null;
+    this.builtinTools = options.builtinTools ?? builtinTools;
     this.principal = options.owner ?? { type: "user", id: options.userId };
     this.parentSessionId = options.parentSessionId;
     this.parentThreadId = options.parentThreadId;

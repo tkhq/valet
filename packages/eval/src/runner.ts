@@ -1,0 +1,328 @@
+/**
+ * Eval runner (TKAI-329): drive one `EvalCase` through a real in-process
+ * engine and return the extracted `Trajectory`.
+ *
+ * The engine is built per case with in-memory providers — no API server, no
+ * HTTP, no Docker. LLM calls are real: the resolved model reads
+ * `ANTHROPIC_API_KEY` (or the matching provider env var) through pi-ai's
+ * env fallback. Tests use the pi-ai faux provider instead.
+ */
+import {
+  Engine,
+  InMemoryBlobStore,
+  InMemoryCredentialStore,
+  InMemoryEventStream,
+  InMemorySessionStore,
+  TimeoutError,
+  VirtualSandboxProvider,
+  builtinTools,
+  resolveModelId,
+  type ChildSpawner,
+  type Model,
+  type Principal,
+  type Session,
+  type SessionEntry,
+  type ToolDef,
+} from "@valet/engine";
+import { EvalMemoryStore, buildEvalMemoryTools } from "./memory-tools.js";
+import { extractTrajectory } from "./trajectory.js";
+import type { EvalCase, Trajectory } from "./types.js";
+
+const DEFAULT_TIMEOUT_MS = 300_000;
+const EVAL_USER_ID = "eval-user";
+const EVAL_ORG_ID = "eval-org";
+
+/** Submission outcomes the runner reports. Mirrors the engine's settlement outcomes. */
+export type CaseOutcome = "completed" | "failed" | "aborted" | "superseded" | "merged" | "timeout";
+
+export interface RunnerOptions {
+  /**
+   * Default model for cases without a `model:` pin — a spec string resolved
+   * through `resolveModelId`, or a live `Model` handle (tests pass the faux
+   * provider's model here; faux models are not in the static catalog).
+   */
+  model: string | Model<string>;
+  /** Default per-case timeout when the case sets no `timeout_ms`. */
+  timeoutMs?: number;
+  /**
+   * Extra tools added to the session — the mock/integration plugin catalogs
+   * (TKAI-335/336) plug in here.
+   */
+  extraTools?: ToolDef[];
+  /** Override the session system prompt. */
+  systemPrompt?: string;
+}
+
+export interface CaseRunResult {
+  trajectory: Trajectory;
+  outcome: CaseOutcome;
+  /** Settlement or timeout error, when the case did not complete. */
+  error?: string;
+}
+
+const EVAL_PERSONA = [
+  "You are Valet, a personal orchestrator agent under automated evaluation.",
+  "Work the task with your tools. Spawn child sessions with `task` for",
+  "substantial delegated work. Keep replies short and factual.",
+].join(" ");
+
+/**
+ * Interpolate turn templates against the previous agent output.
+ *
+ * Supported form: `{{last_output_match(/pattern/)}}` — replaced with the
+ * first capture group (or the whole match) of `pattern` applied to the
+ * previous turn's output. Throws when there is no previous output or the
+ * pattern does not match, so a broken case fails loudly.
+ */
+export function interpolateTurnContent(content: string, lastOutput: string | undefined): string {
+  return content.replace(/\{\{\s*last_output_match\(\/(.+?)\/\)\s*\}\}/g, (_m, pattern: string) => {
+    if (lastOutput === undefined) {
+      throw new Error(
+        `turn template uses last_output_match(/${pattern}/) but there is no previous agent output. ` +
+          "Move the template off the first turn.",
+      );
+    }
+    const match = lastOutput.match(new RegExp(pattern));
+    if (!match) {
+      throw new Error(
+        `turn template last_output_match(/${pattern}/) did not match the previous agent output:\n${lastOutput}`,
+      );
+    }
+    return match[1] ?? match[0];
+  });
+}
+
+interface SpawnedChild {
+  session: Session;
+  queueItemId: string;
+  prompt: string;
+  /** Set once the child settles and its child.settled signal is delivered. */
+  signaled: boolean;
+}
+
+/** Filter the session toolset to an eval case's `tools:` pin. */
+function restrictTools(all: ToolDef[], pins: string[] | undefined, caseId: string): ToolDef[] {
+  if (pins === undefined) return all;
+  const known = new Set(all.map((t) => t.name));
+  const missing = pins.filter((p) => !known.has(p));
+  if (missing.length > 0) {
+    throw new Error(
+      `case ${caseId} pins unknown tools: ${missing.join(", ")}. Available: ${[...known].sort().join(", ")}`,
+    );
+  }
+  const allowed = new Set(pins);
+  return all.filter((t) => allowed.has(t.name));
+}
+
+/** Run one eval case through the engine and extract its trajectory. */
+export async function runCase(evalCase: EvalCase, opts: RunnerOptions): Promise<CaseRunResult> {
+  let model: Model<string>;
+  let modelSpec: string;
+  if (evalCase.model === undefined && typeof opts.model !== "string") {
+    model = opts.model;
+    modelSpec = `${opts.model.provider}/${opts.model.id}`;
+  } else {
+    modelSpec =
+      evalCase.model ??
+      (typeof opts.model === "string" ? opts.model : `${opts.model.provider}/${opts.model.id}`);
+    const resolved = resolveModelId(modelSpec);
+    if (!resolved) {
+      throw new Error(
+        `unknown model spec \`${modelSpec}\`. Use provider/model form, e.g. anthropic/claude-haiku-4-5.`,
+      );
+    }
+    model = resolved;
+  }
+
+  const timeoutMs = evalCase.timeout_ms ?? opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const startedAt = Date.now();
+  const deadline = startedAt + timeoutMs;
+  const remaining = (): number => Math.max(1, deadline - Date.now());
+
+  const store = new InMemorySessionStore();
+  const engine = new Engine({
+    providers: {
+      store,
+      stream: new InMemoryEventStream(),
+      blobs: new InMemoryBlobStore(),
+      credentials: new InMemoryCredentialStore(),
+      sandboxProvider: new VirtualSandboxProvider(),
+    },
+  });
+
+  const owner: Principal = { type: "user", id: EVAL_USER_ID };
+  const isOrchestrator = evalCase.session_type === "orchestrator";
+  const memoryStore = new EvalMemoryStore();
+  const customTools = [...buildEvalMemoryTools(memoryStore), ...(opts.extraTools ?? [])];
+
+  const children: SpawnedChild[] = [];
+  const childSpawner: ChildSpawner = async (req, ctx) => {
+    const childModel = req.model !== undefined ? resolveModelId(req.model) : model;
+    if (!childModel) throw new Error(`task: unknown model \`${req.model}\``);
+    const child = await engine.createSession({
+      userId: ctx.actorUserId,
+      orgId: EVAL_ORG_ID,
+      workspace: "/workspace",
+      purpose: "child",
+      parentSessionId: ctx.parentSessionId,
+      parentThreadId: ctx.parentThreadId,
+      sandbox: {},
+      model: childModel,
+      owner: ctx.owner,
+    });
+    const receipt = await child.prompt(req.prompt);
+    children.push({ session: child, queueItemId: receipt.queueItemId, prompt: req.prompt, signaled: false });
+    return { childSessionId: child.id, queueItemId: receipt.queueItemId };
+  };
+
+  // Restriction applies across builtins and custom tools alike; the engine
+  // assembles `session.builtinTools + options.tools`.
+  const allTools = [...builtinTools, ...customTools];
+  const restricted = evalCase.tools !== undefined ? restrictTools(allTools, evalCase.tools, evalCase.id) : allTools;
+  const builtinNames = new Set(builtinTools.map((t) => t.name));
+
+  const session = await engine.createSession({
+    userId: EVAL_USER_ID,
+    orgId: EVAL_ORG_ID,
+    workspace: "/workspace",
+    purpose: isOrchestrator ? "orchestrator" : "interactive",
+    sandbox: {},
+    model,
+    modelSpec,
+    owner,
+    builtinTools: restricted.filter((t) => builtinNames.has(t.name)),
+    tools: restricted.filter((t) => !builtinNames.has(t.name)),
+    warmSandboxOnClaim: false,
+    systemPrompt: opts.systemPrompt ?? (isOrchestrator ? EVAL_PERSONA : undefined),
+    ...(isOrchestrator ? { toolConfig: { childSpawner } } : {}),
+    // Evals are unattended, but retries would blur cost/duration numbers —
+    // measure the single attempt.
+    turnRetry: { maxAttempts: 1 },
+  });
+  const thread = session.thread();
+
+  let outcome: CaseOutcome = "completed";
+  let error: string | undefined;
+  let lastOutput: string | undefined;
+
+  const awaitSubmission = async (queueItemId: string): Promise<boolean> => {
+    try {
+      const result = await thread.awaitResult(queueItemId, { timeoutMs: remaining() });
+      lastOutput = result.text ?? lastOutput;
+      if (result.outcome === "failed" || result.outcome === "aborted") {
+        outcome = result.outcome;
+        error = result.error ?? `submission ${result.outcome}`;
+        return false;
+      }
+      return true;
+    } catch (err) {
+      if (err instanceof TimeoutError) {
+        outcome = "timeout";
+        error = `case timed out after ${timeoutMs}ms`;
+        return false;
+      }
+      throw err;
+    }
+  };
+
+  // Deliver settled children back to the parent as child.settled signals,
+  // mirroring the api's ChildWatcher (packages/api/src/orchestrator/children.ts)
+  // minus the durable re-arm — an eval run lives and dies in this process.
+  const drainChildren = async (): Promise<boolean> => {
+    for (;;) {
+      const next = children.find((c) => !c.signaled);
+      if (!next) return true;
+      next.signaled = true;
+      let body: string;
+      let childOutcome: string;
+      try {
+        const res = await next.session.thread().awaitResult(next.queueItemId, { timeoutMs: remaining() });
+        childOutcome = res.outcome;
+        body =
+          res.outcome === "failed" || res.outcome === "aborted"
+            ? (res.error ?? res.text ?? `child submission ${res.outcome}`)
+            : (res.text ?? "");
+      } catch (err) {
+        if (err instanceof TimeoutError) {
+          outcome = "timeout";
+          error = `case timed out after ${timeoutMs}ms waiting for child ${next.session.id}`;
+          return false;
+        }
+        throw err;
+      }
+      const receipt = await session.prompt(
+        {
+          kind: "signal",
+          signalType: "child.settled",
+          body,
+          attributes: { child_session_id: next.session.id, outcome: childOutcome },
+          tagName: "child_settled",
+        },
+        {
+          dispatchId: `settled:${next.session.id}:${next.queueItemId}`,
+          internalSender: { sessionId: next.session.id, owner },
+        },
+      );
+      if (!(await awaitSubmission(receipt.queueItemId))) return false;
+    }
+  };
+
+  for (const [i, turn] of evalCase.turns.entries()) {
+    let content: string;
+    try {
+      content = interpolateTurnContent(turn.content, lastOutput);
+    } catch (err) {
+      outcome = "failed";
+      error = `turn ${i + 1}: ${err instanceof Error ? err.message : String(err)}`;
+      break;
+    }
+    const receipt = await session.prompt(content);
+    if (!(await awaitSubmission(receipt.queueItemId))) break;
+    if (!(await drainChildren())) break;
+  }
+
+  const durationMs = Date.now() - startedAt;
+  const entries = await store.getEntries(session.id, thread.id);
+
+  const childTrajectories: Trajectory[] = [];
+  for (const [i, child] of children.entries()) {
+    const childEntries = await store.getEntries(child.session.id, child.session.thread().id);
+    const t = extractTrajectory({
+      caseId: `${evalCase.id}#child-${i}`,
+      prompt: child.prompt,
+      model: modelSpec,
+      durationMs: 0,
+      entries: childEntries,
+    });
+    const spawnCall = findSpawnCall(entries, child.session.id);
+    if (spawnCall !== undefined) t.spawnedByCallId = spawnCall;
+    childTrajectories.push(t);
+  }
+
+  const trajectory = extractTrajectory({
+    caseId: evalCase.id,
+    prompt: evalCase.turns[0].content,
+    model: modelSpec,
+    durationMs,
+    entries,
+    children: childTrajectories,
+  });
+
+  return { trajectory, outcome, ...(error !== undefined ? { error } : {}) };
+}
+
+/** Find the callId of the `task` tool call whose result names this child session. */
+function findSpawnCall(entries: SessionEntry[], childSessionId: string): string | undefined {
+  for (const entry of entries) {
+    if (entry.type !== "message" || entry.role !== "assistant") continue;
+    for (const part of entry.parts ?? []) {
+      if (part.type !== "tool_call" || part.toolName !== "task") continue;
+      const text =
+        typeof part.result === "object" && part.result !== null
+          ? String((part.result as Record<string, unknown>).text ?? "")
+          : String(part.result ?? "");
+      if (text.includes(childSessionId)) return part.callId;
+    }
+  }
+  return undefined;
+}
