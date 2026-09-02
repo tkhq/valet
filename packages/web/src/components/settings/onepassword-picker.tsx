@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { apiErrorMessage } from "~/api/client";
+import { errorText } from "~/lib/error-text";
 import { useOpItemDetail, useOpItems, useOpVaults, type OnePasswordTokenScope } from "~/api/onepassword";
 import { Label } from "~/components/primitives";
 
@@ -77,11 +77,11 @@ export function OnePasswordPicker({ scope, onCompose }: OnePasswordPickerProps) 
   const fields = itemDetailQ.data?.fields ?? [];
 
   const error = vaultsQ.error
-    ? apiErrorMessage(vaultsQ.error, "Failed to load 1Password vaults.")
+    ? errorText(vaultsQ.error, "Failed to load 1Password vaults.")
     : itemsQ.error
-      ? apiErrorMessage(itemsQ.error, "Failed to load 1Password items.")
+      ? errorText(itemsQ.error, "Failed to load 1Password items.")
       : itemDetailQ.error
-        ? apiErrorMessage(itemDetailQ.error, "Failed to load 1Password fields.")
+        ? errorText(itemDetailQ.error, "Failed to load 1Password fields.")
         : null;
 
   function selectVault(id: string) {

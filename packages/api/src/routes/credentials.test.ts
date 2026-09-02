@@ -740,7 +740,7 @@ describe("PUT /api/credentials/:service — metadata.onepassword smuggle guard",
     expect(stored).toBeNull();
   });
 
-  it("body.onepassword present ALONGSIDE a metadata.onepassword key 400s (unambiguous — reject, don't merge)", async () => {
+  it("rejects a request that carries both body.onepassword and metadata.onepassword", async () => {
     api = await bootTestApi();
     const fake = new FakeOnePasswordService();
     api.providers.onePassword = fake;
@@ -764,7 +764,7 @@ describe("PUT /api/credentials/:service — metadata.onepassword smuggle guard",
     expect(stored).toBeNull();
   });
 
-  it("a legitimate body.onepassword request (no metadata.onepassword) still saves with metadata sourced from body.onepassword", async () => {
+  it("saves a body.onepassword request with the reference in metadata", async () => {
     api = await bootTestApi();
     api.providers.onePassword = new FakeOnePasswordService();
 
@@ -786,7 +786,7 @@ describe("PUT /api/credentials/:service — metadata.onepassword smuggle guard",
     });
   });
 
-  it("reserved service + body.onepassword + personal toggle off → 400 (reserved-service name), not 403", async () => {
+  it("rejects the reserved service name before checking the personal toggle", async () => {
     api = await bootTestApi();
     api.providers.onePassword = new FakeOnePasswordService();
 

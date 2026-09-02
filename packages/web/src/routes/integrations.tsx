@@ -23,10 +23,6 @@ import { textParam } from "~/lib/search-params";
  * search on `/skills`: `usePlugins` holds the whole plugin set, so a
  * client-side match answers about everything it claims to. The settled
  * query lives in `?q=`, so a search is a link and Back clears it.
- *
- * 1Password is not a plugin. It is a credential source, so it sits in
- * its own section on this page (not Organization settings). A search
- * that does not mention 1Password hides that section.
  */
 interface IntegrationsSearch {
   q?: string;

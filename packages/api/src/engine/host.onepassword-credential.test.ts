@@ -16,6 +16,7 @@ import {
   type CredentialOwner,
   type CredentialStore,
   type StoredCredential,
+  InMemoryCredentialStore,
 } from "@valet/engine";
 import {
   OnePasswordAuthError,
@@ -29,25 +30,7 @@ import { EngineHost, type EngineHostOpts } from "./host.js";
 const orgId = "op-org";
 const userId = "op-user";
 
-/** Minimal in-memory `CredentialStore` — keyed by `${owner.type}:${owner.id}:${service}`. */
-function fakeCredentialStore(): CredentialStore {
-  const rows = new Map<string, StoredCredential>();
-  const key = (owner: CredentialOwner, service: string) => `${owner.type}:${owner.id}:${service}`;
-  return {
-    async get(owner, service) {
-      return rows.get(key(owner, service)) ?? null;
-    },
-    async save(owner, service, credential) {
-      rows.set(key(owner, service), credential);
-    },
-    async delete(owner, service) {
-      rows.delete(key(owner, service));
-    },
-    async list() {
-      return [];
-    },
-  };
-}
+const fakeCredentialStore = (): CredentialStore => new InMemoryCredentialStore();
 
 /** Fake `OnePasswordService` — only `resolveCredential` is exercised by the resolver; every
  * other method throws if called, since this suite never drives the browse/connect routes. */

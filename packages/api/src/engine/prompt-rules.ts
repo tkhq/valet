@@ -79,26 +79,37 @@ For analysis or research, report findings in chat. Do not write them to a file u
 /**
  * A model with no named alternative asks the user to paste the credential, or
  * prints one it read from a file. Either way the secret is in the transcript
- * for good. The command is installed in every prepped sandbox, and nothing
- * else told the model it exists.
+ * for good. The command is installed by sandbox prep, which only some session
+ * builds run, so the prompt is composed per build: a prepped sandbox is told
+ * how to use it, an unprepped one is told it has nothing and must ask.
  *
- * The claim is that the value does not pass through the reply, NOT that the
+ * The claim is that the value does not pass through the reply, not that the
  * child cannot see it: the command the agent chooses runs with the variable
  * set, so `echo $TOKEN` would print it. The rule says not to.
- *
- * Workflow session nodes get this prompt and run no prep, so they are told
- * about a command they do not have — hence the not-installed branch.
  */
-export const SECRETS_RULES = `## Secrets
+export const SECRETS_RULES_WITH_CLI = `## Secrets
 
 Never print a credential, and never ask for one to be pasted. The valet-secrets command puts a secret into one command's environment, so the value does not pass through your reply.
 
 Run valet-secrets run --env NAME=op://vault/item/field -- your-command. Quote a reference that contains a space. Take the vault, item, and field names from 1Password exactly. Do not echo the variable it sets.
 
-If it reports that nothing resolved, name the failing reference to the user and ask them to check that item. If the command is not installed here, say so and ask the user how to supply the credential. Do not fall back to a pasted value.`;
+If it reports that nothing resolved, name the failing reference to the user and ask them to check that item. Do not fall back to a pasted value.`;
 
-/** System prompt for sandbox coding sessions (children and REST-created sessions). */
-export const CODING_SYSTEM_PROMPT = `You are a coding assistant running inside a Docker sandbox. Your workspace is /workspace (the only mounted directory). All read/write/edit/bash tools operate against /workspace — use absolute paths under /workspace or relative paths (which resolve there).
+export const SECRETS_RULES_NO_CLI = `## Secrets
+
+This sandbox has no secrets command. Do not run one to find out. Never print a credential, and never ask for one to be pasted. If the task needs a credential, say that this session cannot read secrets and ask the user how they want it supplied.`;
+
+/** The variant prepped sandboxes receive; kept under the old name for callers and tests. */
+export const SECRETS_RULES = SECRETS_RULES_WITH_CLI;
+
+/**
+ * System prompt for sandbox coding sessions. `secretsCli` says whether this
+ * build runs sandbox prep, which installs valet-secrets; a workflow session
+ * node does not, and telling it about a command it lacks produced a
+ * command-not-found with no scripted response.
+ */
+export function codingSystemPrompt(opts: { secretsCli: boolean }): string {
+  return `You are a coding assistant running inside a Docker sandbox. Your workspace is /workspace (the only mounted directory). All read/write/edit/bash tools operate against /workspace — use absolute paths under /workspace or relative paths (which resolve there).
 
 ${TOOL_USE_RULES}
 
@@ -110,6 +121,10 @@ ${CODING_CRAFT_RULES}
 
 ${MODEL_SWITCH_CORE}
 
-${SECRETS_RULES}
+${opts.secretsCli ? SECRETS_RULES_WITH_CLI : SECRETS_RULES_NO_CLI}
 
 ${CODING_PERSISTENCE_RULES}`;
+}
+
+/** The prepped-sandbox prompt, for callers and tests that want the constant. */
+export const CODING_SYSTEM_PROMPT = codingSystemPrompt({ secretsCli: true });

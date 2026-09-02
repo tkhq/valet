@@ -10,6 +10,7 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChannelTransport, CredentialOwner, CredentialStore, StoredCredential, ValetPlugin } from "@valet/engine";
+import { InMemoryCredentialStore } from "@valet/engine";
 import { VirtualSandboxProvider } from "@valet/engine";
 import { PgSessionStore, PgEventStream } from "@valet/store-postgres";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
@@ -19,25 +20,7 @@ import { ChannelHost } from "./host.js";
 
 const orgId = "op-channel-org";
 
-/** Minimal in-memory `CredentialStore` — keyed by `${owner.type}:${owner.id}:${service}`. */
-function fakeCredentialStore(): CredentialStore {
-  const rows = new Map<string, StoredCredential>();
-  const key = (owner: CredentialOwner, service: string) => `${owner.type}:${owner.id}:${service}`;
-  return {
-    async get(owner, service) {
-      return rows.get(key(owner, service)) ?? null;
-    },
-    async save(owner, service, credential) {
-      rows.set(key(owner, service), credential);
-    },
-    async delete(owner, service) {
-      rows.delete(key(owner, service));
-    },
-    async list() {
-      return [];
-    },
-  };
-}
+const fakeCredentialStore = (): CredentialStore => new InMemoryCredentialStore();
 
 /** Fake `OnePasswordService` — only `resolveCredential` is exercised by `ChannelHost.start()`. */
 function fakeOnePassword(

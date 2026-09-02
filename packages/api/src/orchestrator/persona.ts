@@ -203,20 +203,11 @@ reply_to_origin (since a normal final message would go nowhere). In threads with
 multiple people, keep defaulting to silence unless you can add something useful.`;
 
 /**
- * The orchestrator session's full `systemPrompt`, owner-kind-aware.
- * `displayName` is the owner's human name (a team or org name); when present the
- * persona names it, so the assistant never surfaces a raw `team_<uuid>`.
- */
-/**
- * Asked for a 1Password value, the orchestrator reached for `op read` — the
- * vendor CLI it knows from training, which is not installed here. It got zero
- * bytes and told the user their vault and item names were wrong, when they
- * were correct. The old rule named valet-secrets, a tool this session does not
- * have, and never named 1Password or a secret, so nothing matched the words a
- * person actually uses. Naming the command without forbidding it here then
- * produced the next failure: the orchestrator ran valet-secrets in its own
- * sandbox, got "not found", and told the user to fetch the value by hand
- * instead of spawning the child that can.
+ * The orchestrator runs no sandbox prep, so it has no secrets command. Told
+ * nothing, it reached for the vendor CLI it knows and blamed the vault when
+ * that returned nothing; told the command's name, it ran the command itself
+ * and told the user to look the value up by hand. The rule has to name the
+ * situation, forbid the attempt, and make delegating the action.
  */
 const SECRETS_RULES = `## Secrets
 
@@ -226,6 +217,11 @@ When a message names 1Password, a vault, a credential, a token, or an op:// refe
 
 Do not tell the user to look the secret up themselves, and never ask anyone to paste one. Delegating is the answer, not a fallback.`;
 
+/**
+ * The orchestrator session's full `systemPrompt`, owner-kind-aware.
+ * `displayName` is the owner's human name (a team or org name); when present the
+ * persona names it, so the assistant never surfaces a raw `team_<uuid>`.
+ */
 export function orchestratorPersona(owner: Principal, displayName?: string): string {
   return `${personaBody(owner, displayName)}\n\n${CAPABILITY_RULES}\n\n${DECISION_FLOW}\n\n${DELEGATION_RULES}\n\n${SECRETS_RULES}\n\n${MEMORY_RULES}\n\n${CHANNEL_REPLY}`;
 }

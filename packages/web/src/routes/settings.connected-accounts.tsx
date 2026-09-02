@@ -10,7 +10,7 @@ import {
 import { useConnectGithub, useDisconnectGithub } from "~/api/repos";
 import { useCredentials, useDisconnectCredential } from "~/api/integrations";
 import { useGithubApp } from "~/api/settings";
-import { ApiError, apiErrorMessage } from "~/api/client";
+import { ApiError } from "~/api/client";
 import { Section } from "~/components/settings/section";
 import { FieldRow } from "~/components/settings/field-row";
 import { Badge, Button, Spinner, Switch } from "~/components/primitives";

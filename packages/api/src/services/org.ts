@@ -207,8 +207,7 @@ export async function getOrgFeatures(db: AppQueryable, orgId: string): Promise<O
  * — org admins disable it explicitly.
  */
 export async function getAllowPersonalOnePassword(db: AppQueryable, orgId: string): Promise<boolean> {
-  const raw = await readRawFeatures(db, orgId);
-  return raw.allowPersonalOnePassword !== false;
+  return (await getOrgFeatures(db, orgId)).allowPersonalOnePassword;
 }
 
 /**

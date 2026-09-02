@@ -282,21 +282,6 @@ class ApiError extends Error {
   }
 }
 
-/**
- * Extract a server-provided `{ error: string }` message from a rejected
- * request, falling back to a caller-supplied default. Mirrors the
- * `extractStartLinkError` pattern from the Telegram connect flow — every
- * inline error surface (picker cascade, credential creation, token save)
- * uses this instead of a bespoke extractor per call site.
- */
-function apiErrorMessage(err: unknown, fallback: string): string {
-  if (err instanceof ApiError && err.payload && typeof err.payload === "object") {
-    const message = (err.payload as Record<string, unknown>).error;
-    if (typeof message === "string" && message) return message;
-  }
-  if (err instanceof Error && err.message) return err.message;
-  return fallback;
-}
 
 // `GET /api/auth-config` is unauthenticated and doesn't change without a
 // server restart — fetched once and cached, shared by `useAuthConfig`
@@ -1336,4 +1321,4 @@ export const api = {
     request<ProxySettingsResponse>("PUT", "/proxy/settings", patch),
 };
 
-export { ApiError, apiErrorMessage };
+export { ApiError };
