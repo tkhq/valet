@@ -394,6 +394,15 @@ describe("ThreadTree — thread rename", () => {
     return screen.findByRole<HTMLInputElement>("textbox", { name: /rename thread/i });
   }
 
+  it("keeps the browser default for the rename double-click", async () => {
+    renderTree();
+    const label = screen.getByText("Plan the launch");
+    const event = new MouseEvent("dblclick", { bubbles: true, cancelable: true });
+
+    expect(label.dispatchEvent(event)).toBe(true);
+    expect(await screen.findByRole("textbox", { name: /rename thread/i })).toBeTruthy();
+  });
+
   it("focuses and selects the title when editing starts", async () => {
     renderTree();
 

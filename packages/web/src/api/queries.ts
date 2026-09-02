@@ -339,7 +339,7 @@ export function useSetThreadArchived(sessionId: string) {
   });
 }
 
-/** Rename a thread. Use `null` to restore the generated title or fallback label. */
+/** Rename a thread. Use `null` to clear its stored title. */
 export function useRenameThread(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<PatchThreadResponse, Error, { threadId: string; title: string | null }>({

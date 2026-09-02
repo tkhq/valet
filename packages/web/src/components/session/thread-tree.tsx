@@ -622,9 +622,6 @@ function ThreadNode({
                 child: undefined,
               })}
               className={cn(
-                // Left rail marks selection; `pl-[calc(1rem-2px)]` keeps the
-                // title at the same x-offset whether or not the moss rail is
-                // present — no shift when you click between threads.
                 "flex-1 min-w-0 flex items-center py-2 text-sm",
                 "focus-visible:outline-none focus-visible:bg-ink-wash",
                 active ? "text-ink pl-[calc(1rem-2px)] font-medium" : "text-ink/85 pl-4",
@@ -644,15 +641,7 @@ function ThreadNode({
                 </span>
               )}
               {hasPendingGate && (
-                // Amber = blocked on a person, the same vocabulary as the
-                // sessions-list "Needs you" chip. Static on purpose: pulse is
-                // reserved for progress (see childStatusDotClassName). Shown on
-                // the active thread too — the dot marks where gates are, not
-                // where you aren't.
                 <span
-                  // role="img": ARIA prohibits accessible names on a bare
-                  // span (role generic), so without it screen readers skip
-                  // the label entirely.
                   role="img"
                   aria-label="Needs your decision"
                   className="ml-2 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500"

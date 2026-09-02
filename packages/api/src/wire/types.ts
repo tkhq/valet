@@ -1030,8 +1030,7 @@ export type CreateThreadResponse = ThreadSummary;
  * Patch a thread's settings. Pass `model: null` to clear the override and
  * fall back to the session default. `archived` toggles app-side display
  * state — an archived thread leaves the default GET /threads list. `title`
- * renames the thread; pass `null` (or an empty string) to clear the stored
- * title and fall back to the auto-title or the untitled label.
+ * renames the thread. Pass `null` or an empty string to clear the stored title.
  */
 export interface PatchThreadRequest {
   model?: string | null;
