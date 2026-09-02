@@ -19,6 +19,8 @@ export {
   type BaselineRecord,
 } from "./baseline.js";
 export { formatScorecard } from "./scorecard.js";
+export { runSuite, type SuiteOptions, type SuiteResult } from "./suite.js";
+export { DEFAULT_MODEL, filterCases, parseCliArgs, type CliOptions } from "./cli-args.js";
 export {
   DEFAULT_JUDGE_MODEL,
   buildJudgeRunner,

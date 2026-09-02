@@ -1,0 +1,20 @@
+# Starter case (TKAI-333): strict output structure.
+id: output-format
+description: Asks for a bare JSON object and checks its structure.
+turns:
+  - role: user
+    content: >-
+      Reply with ONLY a raw JSON object: the key "status" set to the string
+      "ok" and the key "count" set to the number 3. No prose. Do not use
+      markdown code fences. The first character of your reply must be "{"
+      and the last must be "}".
+timeout_ms: 120000
+# No fence check here: small models fence JSON nondeterministically even
+# when told not to, and a coin-flip case makes `make eval` red at random.
+checks:
+  - type: output_contains
+    pattern: '"status"\s*:\s*"ok"'
+  - type: output_contains
+    pattern: '"count"\s*:\s*3'
+  - type: max_turns
+    value: 2
