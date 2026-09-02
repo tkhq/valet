@@ -50,6 +50,9 @@ describe("preferences: tool-card default", () => {
       setItem(): void {
         throw new Error("storage blocked");
       },
+      removeItem(): void {
+        throw new Error("storage blocked");
+      },
     };
     expect(getToolCardDefault(hostile)).toBe("smart");
     expect(() => setToolCardDefault("always-expanded", hostile)).not.toThrow();

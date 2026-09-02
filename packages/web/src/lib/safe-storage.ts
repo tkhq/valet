@@ -20,6 +20,10 @@ export interface StorageWriter {
   setItem(key: string, value: string): void;
 }
 
+export interface StorageRemover {
+  removeItem(key: string): void;
+}
+
 /** In-memory fallback when real storage is absent or non-functional.
  * Module-level and therefore shared for the process lifetime: tests that
  * call an accessor WITHOUT an explicit `storage` argument share this map
@@ -27,7 +31,7 @@ export interface StorageWriter {
  * `command-recency.test.ts`). */
 const memoryStorage = new Map<string, string>();
 
-export function safeLocalStorage(): StorageReader & StorageWriter {
+export function safeLocalStorage(): StorageReader & StorageWriter & StorageRemover {
   let candidate: unknown;
   try {
     candidate = typeof window !== "undefined" ? window.localStorage : undefined;
@@ -40,16 +44,20 @@ export function safeLocalStorage(): StorageReader & StorageWriter {
     candidate !== null &&
     typeof candidate === "object" &&
     typeof (candidate as Partial<Storage>).getItem === "function" &&
-    typeof (candidate as Partial<Storage>).setItem === "function"
+    typeof (candidate as Partial<Storage>).setItem === "function" &&
+    typeof (candidate as Partial<Storage>).removeItem === "function"
   ) {
     // Structural narrowing of a host object; `Partial<Storage>` has no
-    // overlap the compiler can verify beyond the two probed methods.
-    return candidate as StorageReader & StorageWriter;
+    // overlap the compiler can verify beyond the probed methods.
+    return candidate as StorageReader & StorageWriter & StorageRemover;
   }
   return {
     getItem: (key) => memoryStorage.get(key) ?? null,
     setItem: (key, value) => {
       memoryStorage.set(key, value);
+    },
+    removeItem: (key) => {
+      memoryStorage.delete(key);
     },
   };
 }
