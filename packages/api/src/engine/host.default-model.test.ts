@@ -11,7 +11,7 @@
  * explicit `session.setModel(...)` override would get silently reverted the
  * next time the session's cache entry is evicted and rebuilt.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { users } from "../schema/index.js";
@@ -77,7 +77,8 @@ describe("EngineHost default model", () => {
     expect(child.options.model.id).toBe("claude-sonnet-4-5");
   });
 
-  it("child session: no explicit modelId falls back to the owner's default", async () => {
+  it("child session: no explicit modelId defaults to 's' tier, not the owner's default (TKAI-285)", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic");
     api = await bootTestApi();
     const { db, engineHost } = api.providers;
 
@@ -99,7 +100,9 @@ describe("EngineHost default model", () => {
       workspace: "/tmp",
     });
 
-    expect(child.options.model.id).toBe("claude-opus-4-5");
+    // The 's' tier resolves to claude-haiku-4-5 via the default tier map.
+    expect(child.options.model.id).toBe("claude-haiku-4-5");
+    vi.unstubAllEnvs();
   });
 
   it("restore-no-clobber: an explicit setModel override survives eviction + a changed user default", async () => {
