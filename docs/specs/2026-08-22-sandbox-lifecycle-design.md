@@ -177,6 +177,23 @@ defects. Both are fixed; decision 6 (no age-based kill) stands.
    revival and an overnight look at yesterday's run. Reclaiming resets
    only the workspace volume; chat history and memories live in
    Postgres.
+4. **The `/workspace` claim drops to 1Gi and is finally configurable.**
+   `K8sProviderConfig.defaultStorage` existed but nothing ever set it, so
+   the manifest builder's constant was the only size a deploy could get.
+   It now comes from `VALET_SANDBOX_WORKSPACE_STORAGE` (chart value
+   `sandbox.workspaceStorage`), and both defaults are 1Gi — a test pins
+   them equal so the two paths cannot drift. Measured against real usage
+   on agents-dev: across every live sandbox volume the largest workspace
+   held 114 MB and the rest were under 30 MB. Node-local scratch (docker
+   image layers, container rootfs) is bounded separately by the
+   ephemeral-storage limit and never lands on this claim.
+
+   Sizing is ONE-WAY per sandbox and this is not an auto-expanding
+   volume: the size is fixed in the CR's `volumeClaimTemplates` at create
+   time, no resize path exists in this repo, and a PVC cannot shrink.
+   Changing the value affects only sandboxes created afterwards. A
+   workspace that fills gets ENOSPC on write, so a deploy that clones
+   large repositories must raise it before provisioning.
 
 ## Deviations & notes
 

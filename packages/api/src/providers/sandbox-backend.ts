@@ -295,6 +295,33 @@ export function resolveSandboxEphemeralStorageLimit(env: NodeJS.ProcessEnv): str
   return quantityEnv(env.VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT, "8Gi");
 }
 
+/**
+ * Size of the PERSISTENT `/workspace` volume claim each sandbox provisions
+ * (`VALET_SANDBOX_WORKSPACE_STORAGE`, default "1Gi"). Unlike the ephemeral
+ * knobs above this is a real PVC: it survives pod recreation and
+ * hibernation, and it is what holds the repo clone and uncommitted work.
+ *
+ * 1Gi measured against real usage (agents-dev, 2026-09-02): across every
+ * live sandbox volume the largest workspace held 114 MB and the rest were
+ * under 30 MB. Node-local scratch — docker image layers, container rootfs,
+ * build caches outside /workspace — is bounded separately by the
+ * ephemeral-storage limit, so it does not land on this claim.
+ *
+ * Sizing is one-way per sandbox. A PVC cannot shrink, and NOTHING grows
+ * one either: the claim size is fixed in the Sandbox CR's
+ * volumeClaimTemplates at create time, and there is no resize path here.
+ * Changing this value only affects sandboxes created afterwards; an
+ * existing claim keeps its original size until the sandbox is destroyed
+ * and re-provisioned. A workspace that fills gets ENOSPC on write, so a
+ * deploy that clones large repos should raise this.
+ *
+ * `"0"` omits the value and falls back to the manifest builder's own
+ * default rather than provisioning a zero-sized claim.
+ */
+export function resolveSandboxWorkspaceStorage(env: NodeJS.ProcessEnv): string | undefined {
+  return quantityEnv(env.VALET_SANDBOX_WORKSPACE_STORAGE, "1Gi");
+}
+
 export interface BuildSandboxProviderDeps {
   /**
    * Injected `KubeConfig` for the `kubernetes` backend. Tests supply a
@@ -341,10 +368,15 @@ export function buildSandboxProvider(
       const pullSecret = env.VALET_SANDBOX_IMAGE_PULL_SECRET;
       const ephemeralStorage = resolveSandboxEphemeralStorageRequest(env);
       const ephemeralStorageLimit = resolveSandboxEphemeralStorageLimit(env);
+      const workspaceStorage = resolveSandboxWorkspaceStorage(env);
       const cfg: K8sProviderConfig = {
         namespace,
         defaultImage: image ?? env.VALET_FULL_BASE_IMAGE ?? DEFAULT_FULL_BASE_IMAGE,
         apiVersion: SANDBOX_CR_API_VERSION,
+        // Persistent /workspace claim size. The provider config field
+        // existed but nothing ever set it, so the manifest builder's own
+        // constant was the only value a deploy could get.
+        ...(workspaceStorage ? { defaultStorage: workspaceStorage } : {}),
         // Node-disk protection defaults (TKAI-349) — set here, on the
         // provider config, because engine host paths pass no
         // `opts.resources`; the manifest merges these per-field under any

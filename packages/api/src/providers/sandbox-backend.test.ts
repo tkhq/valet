@@ -11,7 +11,11 @@ import { describe, it, expect, vi } from "vitest";
 import * as k8s from "@kubernetes/client-node";
 import { DockerSandboxProvider } from "@valet/sandbox-docker";
 import { LocalSandboxProvider } from "@valet/sandbox-local";
-import { KubernetesSandboxProvider } from "@valet/sandbox-kubernetes";
+import {
+  KubernetesSandboxProvider,
+  SANDBOX_CR_API_VERSION,
+  buildSandboxManifest,
+} from "@valet/sandbox-kubernetes";
 import {
   buildSandboxProvider,
   parseSandboxBackend,
@@ -23,6 +27,7 @@ import {
   resolveKubeConfig,
   resolveSandboxEphemeralStorageLimit,
   resolveSandboxEphemeralStorageRequest,
+  resolveSandboxWorkspaceStorage,
 } from "./sandbox-backend.js";
 
 function fakeKubeConfig(): k8s.KubeConfig {
@@ -251,6 +256,34 @@ describe("resolveSandboxEphemeralStorageRequest / Limit (TKAI-349)", () => {
     expect(resolveSandboxEphemeralStorageLimit({ VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT: "" })).toBe(
       "8Gi",
     );
+  });
+});
+
+describe("resolveSandboxWorkspaceStorage", () => {
+  it("defaults to 1Gi when VALET_SANDBOX_WORKSPACE_STORAGE is unset", () => {
+    expect(resolveSandboxWorkspaceStorage({})).toBe("1Gi");
+  });
+
+  it("matches the manifest builder's own fallback, so both paths provision the same volume", () => {
+    // Two defaults that drift produce a different workspace depending on
+    // whether the env knob was read — the exact class of bug the unwired
+    // `defaultStorage` field caused before this.
+    const manifest = buildSandboxManifest(
+      { namespace: "ns", defaultImage: "img", apiVersion: SANDBOX_CR_API_VERSION },
+      "sess-1",
+      {},
+    );
+    expect(manifest.spec.volumeClaimTemplates[0]?.spec.resources.requests.storage).toBe(
+      resolveSandboxWorkspaceStorage({}),
+    );
+  });
+
+  it("passes an explicit quantity through verbatim", () => {
+    expect(resolveSandboxWorkspaceStorage({ VALET_SANDBOX_WORKSPACE_STORAGE: "20Gi" })).toBe("20Gi");
+  });
+
+  it('treats "0" as unset so the manifest default applies, never a zero-sized claim', () => {
+    expect(resolveSandboxWorkspaceStorage({ VALET_SANDBOX_WORKSPACE_STORAGE: "0" })).toBeUndefined();
   });
 });
 

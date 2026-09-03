@@ -311,7 +311,7 @@ describe("buildSandboxManifest", () => {
         metadata: { name: WORKSPACE_VOLUME_NAME },
         spec: {
           accessModes: ["ReadWriteOnce"],
-          resources: { requests: { storage: "2Gi" } },
+          resources: { requests: { storage: "1Gi" } },
         },
       },
     ]);

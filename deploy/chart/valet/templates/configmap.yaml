@@ -31,6 +31,9 @@ data:
   # Per-sandbox node-disk request/limit (TKAI-349) — see values.yaml.
   VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST: {{ .Values.sandbox.ephemeralStorageRequest | quote }}
   VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT: {{ .Values.sandbox.ephemeralStorageLimit | quote }}
+  # Persistent /workspace claim size — see values.yaml. One-way per
+  # sandbox: no resize path exists and a PVC cannot shrink.
+  VALET_SANDBOX_WORKSPACE_STORAGE: {{ .Values.sandbox.workspaceStorage | quote }}
   # Idle-retention windows before a suspended sandbox's workspace volume is
   # reclaimed (see values.yaml). Children churn fast and get the short
   # window; every other session class gets the long one. The api reads the

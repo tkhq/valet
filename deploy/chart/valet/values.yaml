@@ -140,6 +140,20 @@ sandbox:
   ephemeralStorageRequest: "2Gi"
   ephemeralStorageLimit: "8Gi"
 
+  # Size of the PERSISTENT /workspace claim each sandbox provisions. This
+  # is the volume that survives pod recreation and hibernation, and it
+  # holds the repo clone and uncommitted work. Node-local scratch (docker
+  # image layers, container rootfs) is bounded by the ephemeral limits
+  # above and does not land here.
+  #
+  # WARNING: this is one-way per sandbox. The size is fixed in the Sandbox
+  # CR at create time, no resize path exists, and a PVC cannot shrink.
+  # Changing it affects only sandboxes created afterwards; existing claims
+  # keep their size until the sandbox is destroyed and re-provisioned. A
+  # workspace that fills gets ENOSPC, so raise this for deploys that clone
+  # large repositories.
+  workspaceStorage: "1Gi"
+
   # How long a suspended sandbox is kept before its workspace volume is
   # reclaimed. Both windows measure IDLE time, not age: they run from the
   # session's last activity and restart when it is revived. Reclaiming
