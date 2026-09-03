@@ -255,6 +255,7 @@ export {
 export {
   entriesToAgentMessages,
   buildSpilledInputMarker,
+  formatTransientRetryMessage,
   resolveModelId,
   type CompactionOutcome,
 } from "./thread.js";

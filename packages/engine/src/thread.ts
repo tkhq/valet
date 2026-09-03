@@ -216,6 +216,33 @@ export function buildSpilledInputMarker(args: {
  */
 const MAX_SUMMARIZE_OVERFLOW_RETRIES = 3;
 
+/**
+ * Build the user-facing text for a `turn_transient_retry` event (TKAI-325).
+ * The old text embedded the raw provider error blob and read as an internal
+ * Valet judgment. This version names the upstream cause, tells the reader
+ * what to do if retries fail, and keeps the raw JSON out — the request ID
+ * (when the error carries one) is enough for a support escalation. Exported
+ * so tests can pin the copy without spinning up a whole retry loop.
+ */
+export function formatTransientRetryMessage(args: {
+  provider: string;
+  errorMessage: string | undefined;
+  waitMs: number;
+  attempt: number;
+  maxAttempts: number;
+}): string {
+  const providerLabel = args.provider
+    ? args.provider.charAt(0).toUpperCase() + args.provider.slice(1)
+    : "The upstream provider";
+  const requestId = args.errorMessage?.match(/request_id["':\s]+"?([A-Za-z0-9_-]+)"?/)?.[1];
+  const seconds = Math.round(args.waitMs / 1000);
+  const primary = `${providerLabel}'s API is unavailable or overloaded. The turn will retry automatically in ${seconds}s (attempt ${args.attempt}/${args.maxAttempts}).`;
+  const detail = requestId
+    ? ` If retries fail, switch to a different model or contact support (request ID: ${requestId}).`
+    : " If retries fail, switch to a different model.";
+  return primary + detail;
+}
+
 let nextId = 1;
 function uid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${(nextId++).toString(36)}`;
@@ -3393,10 +3420,15 @@ export class Thread {
         return;
       }
       const waitMs = backoff[Math.min(attempt - 1, backoff.length - 1)] ?? 0;
-      const errBrief = (last.errorMessage ?? "provider error").slice(0, 200);
       this.emitError(
         "turn_transient_retry",
-        `Provider error looks transient (${errBrief}). Retrying in ${Math.round(waitMs / 1000)}s (attempt ${attempt}/${maxAttempts}).`,
+        formatTransientRetryMessage({
+          provider: this.agent.state.model.provider,
+          errorMessage: last.errorMessage,
+          waitMs,
+          attempt,
+          maxAttempts,
+        }),
       );
       if ((await this.backoffOrStandDown(waitMs)) === "stand-down") return;
       // Drop the failed assistant message; the transcript now ends on the
