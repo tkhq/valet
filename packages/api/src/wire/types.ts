@@ -1029,11 +1029,14 @@ export type CreateThreadResponse = ThreadSummary;
 /**
  * Patch a thread's settings. Pass `model: null` to clear the override and
  * fall back to the session default. `archived` toggles app-side display
- * state — an archived thread leaves the default GET /threads list.
+ * state — an archived thread leaves the default GET /threads list. `title`
+ * renames the thread. Pass `null` or an empty string to clear the stored title.
  */
 export interface PatchThreadRequest {
   model?: string | null;
   archived?: boolean;
+  /** New title. The server trims it and rejects more than 200 characters. */
+  title?: string | null;
 }
 
 export type PatchThreadResponse = ThreadSummary;
