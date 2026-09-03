@@ -141,6 +141,7 @@ export const DEDICATED_INTEGRATION_FILES = [
   "src/integration/onepassword.live.test.ts",
   "src/integration/onepassword.live-server.test.ts",
   "src/integration/onepassword.agent-pull.test.ts",
+  "src/integration/onepassword.broker-live.test.ts",
 ];
 export const INTEGRATION_LIST_FILES = { core: INTEGRATION_CORE_FILES, agent: INTEGRATION_AGENT_FILES };
 
@@ -229,6 +230,7 @@ export const STEPS: StepDef[] = [
       "src/integration/onepassword.live.test.ts",
       "src/integration/onepassword.live-server.test.ts",
       "src/integration/onepassword.agent-pull.test.ts",
+      "src/integration/onepassword.broker-live.test.ts",
     ),
     needs: ["onepassword"],
     timeoutMs: 10 * MIN,

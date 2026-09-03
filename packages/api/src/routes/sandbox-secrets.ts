@@ -121,6 +121,11 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
   // answer. A token that exists and is refused by 1Password is a different
   // failure, and reporting it as "nothing resolved" sent the reader to check
   // vault names that were correct.
+  //
+  // `reference` is the third case and must not read as the second: the token
+  // worked and the reference did not resolve, so the name is what to check.
+  // The real SDK reports an unknown vault or item that way, and calling it a
+  // refused token sent the reader to rotate a token that was fine.
   let sdkRefused = false;
   const values = await Promise.all(
     references.map(async (reference): Promise<string | null> => {

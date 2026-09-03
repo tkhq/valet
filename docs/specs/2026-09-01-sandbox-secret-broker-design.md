@@ -130,6 +130,7 @@ Every failure names a corrective action, per the repo rule.
 | Broker slower than 30 seconds | 4 | Named as a timeout, not as an unreachable api. |
 | Broker refused or was unreachable | 4 | Reports the API's own message. |
 | 1Password refused the token and nothing resolved | 4 | The broker answers 502 naming the token to check; the CLI relays it. Reporting this as "nothing resolved" sent the reader to check vault names that were correct. |
+| A reference did not resolve, token fine | 4 | Named in `unresolved`, not a 502. `OnePasswordAuthError` carries kind `reference` for a failure from `secrets.resolve`, and kind `sdk` only for a client the token could not build. The real SDK reports an unknown vault or item as the former, so reporting it as a refused token sent the reader to rotate a service account that worked. The unit fake threw a token-shaped error for an unknown reference, so only a live run showed this. |
 
 `curl` runs without `-f` and the status is checked separately: `-f` discards
 the body, and the body carries the message the API composed.

@@ -80,8 +80,11 @@ export interface OnePasswordCtx {
  * scope has nothing to offer and a caller may try the next one; `sdk` means
  * the token exists and 1Password refused, which a caller must surface.
  * `scope` means the reader is not allowed to consult the token the row names
- * — a policy refusal, never retried against another scope. */
-export type OnePasswordErrorKind = "no_token" | "disabled" | "sdk" | "scope";
+ * — a policy refusal, never retried against another scope. `reference` means
+ * the token worked and THIS reference did not resolve: a typo, or an item the
+ * service account cannot read. The two are different corrective actions, so
+ * a caller must not report one as the other. */
+export type OnePasswordErrorKind = "no_token" | "disabled" | "sdk" | "scope" | "reference";
 
 export class OnePasswordAuthError extends Error {
   constructor(message: string, readonly kind: OnePasswordErrorKind = "sdk") {
@@ -213,10 +216,14 @@ const SDK_REQUEST_FAILED = "1Password request failed";
  * `err.message` nor a secret reference is interpolated into the
  * client-visible text.
  */
-function wrapSdkError(err: unknown, context: string): OnePasswordAuthError {
+function wrapSdkError(
+  err: unknown,
+  context: string,
+  kind: OnePasswordErrorKind = "sdk",
+): OnePasswordAuthError {
   if (err instanceof OnePasswordAuthError) return err;
   console.error(`onepassword: ${context}:`, err);
-  return new OnePasswordAuthError(SDK_REQUEST_FAILED, "sdk");
+  return new OnePasswordAuthError(SDK_REQUEST_FAILED, kind);
 }
 
 export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordService {
@@ -284,7 +291,11 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
       resolveCache.set(cacheKey, { value, at: nowMs });
       return value;
     } catch (err) {
-      throw wrapSdkError(err, `resolution failed for ${reference}`);
+      // The client was built, so the token itself is usable: this reference is
+      // what failed. `clientFor` above throws its own typed error for a token
+      // problem, and `wrapSdkError` passes typed errors through, so the two
+      // stay distinguishable for a caller that reports a corrective action.
+      throw wrapSdkError(err, `resolution failed for ${reference}`, "reference");
     }
   }
 

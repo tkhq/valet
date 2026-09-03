@@ -408,4 +408,24 @@ describe("POST /api/sandbox-secrets/resolve", () => {
     const body = (await res.json()) as { error: string };
     expect(body.error).toContain("Check the service account token");
   });
+
+  // A reference the token cannot read is NOT a refused token. The real SDK
+  // reports an unknown vault or item this way, and reporting it as a token
+  // problem sent the reader to rotate a service account that was fine. The
+  // fake used above throws `no_token` for an unknown reference, so only the
+  // live SDK showed this; the kind is what the route reads.
+  it("names an unresolvable reference instead of blaming the token", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = {
+      ...fakeOnePassword(),
+      resolveReference: async () => {
+        throw new OnePasswordAuthError("1Password request failed", "reference");
+      },
+    };
+    const res = await resolve(["op://typo/item/field"]);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Resp;
+    expect(body.values[0]).toBeNull();
+    expect(body.unresolved).toEqual(["op://typo/item/field"]);
+  });
 });
