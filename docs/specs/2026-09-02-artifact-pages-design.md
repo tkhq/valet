@@ -173,11 +173,16 @@ The shell supplies:
    No color gets its only definition inside a media query.
 6. The comment runtime (below), when the caller asks for it.
 
-The page's own content follows in `<body>`. The shell never rewrites it. A
-document that already declares `<!doctype html>` keeps its own structure and
-only has its `<head>` supplemented — Valet's head goes first, so the page's
-own `<title>` and styles win, while the CSP cannot be loosened by a later tag
-(browsers intersect policies; they never replace them).
+The page's own content follows Valet's head whole and verbatim — even when it
+is a full document of its own. The shell never searches the artifact for a
+`<head>` to splice into: any locator can be decoyed by a `<head>` inside a
+comment, script, or attribute, landing the CSP in dead text while the real
+head parses without it. Emitting the policy before any artifact-controlled
+byte is the only ordering an attacker cannot influence, and a CSP meta
+governs everything parsed after it. The parser tolerates the artifact's stray
+doctype/html/head/body tokens: its meta and styles still apply (later styles
+win the cascade), and a later CSP meta of its own can only tighten, never
+loosen (browsers intersect policies; they never replace them).
 
 ### Content Security Policy
 

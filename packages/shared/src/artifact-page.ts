@@ -165,18 +165,11 @@ export function normalizeArtifactIcon(raw: string | undefined): string {
 }
 
 /** Grapheme clusters, so a flag or a ZWJ family counts as one icon. Falls back
- * to codepoints where `Intl.Segmenter` is unavailable. */
+ * to codepoints where `Intl.Segmenter` is unavailable at runtime (typed since
+ * ES2022, but older browsers still lack it). */
 function segmentGraphemes(text: string): Iterable<string> {
-  const segmenter = (
-    Intl as unknown as {
-      Segmenter?: new (
-        locale?: string,
-        opts?: { granularity: string },
-      ) => { segment(input: string): Iterable<{ segment: string }> };
-    }
-  ).Segmenter;
-  if (!segmenter) return [...text];
-  const iterator = new segmenter(undefined, { granularity: "grapheme" }).segment(text);
+  if (typeof Intl.Segmenter !== "function") return [...text];
+  const iterator = new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text);
   return [...iterator].map((s) => s.segment);
 }
 
@@ -221,23 +214,26 @@ export interface ArtifactDocumentInput {
  * not be mistaken for one — the containment boundary is the frame's opaque
  * origin plus this CSP, both of which live outside the bytes.
  *
- * A document that already declares `<!doctype html>` is passed through with
- * only its `<head>` supplemented, so a page the agent wrote as a full document
- * keeps its own structure.
+ * Valet's head is ALWAYS the physically first markup, and the artifact's
+ * bytes follow it whole — even when they are a full document of their own.
+ * Never search the artifact for a `<head>` to splice into: any locator
+ * (regex or otherwise) can be decoyed by a `<head>` inside a comment,
+ * script, or attribute, landing the CSP in dead text while the real head
+ * parses without it. Emitting the policy before any artifact-controlled
+ * byte is the only ordering an attacker cannot influence, and a CSP meta
+ * governs everything parsed after it. The parser tolerates the artifact's
+ * stray doctype/html/head/body tokens: its meta/style/title still apply
+ * (later styles win the cascade), only its `<title>` loses to ours — which
+ * `resolveArtifactTitle` usually derived from it anyway.
  */
 export function buildArtifactDocument(input: ArtifactDocumentInput): string {
   const head = buildHead(input);
-  if (looksLikeFullDocument(input.content)) {
-    return injectIntoHead(input.content, head);
-  }
   return `<!doctype html>
 <html lang="en">
 <head>
 ${head}
 </head>
-<body>
 ${input.content}
-</body>
 </html>`;
 }
 
@@ -258,32 +254,6 @@ function buildHead(input: ArtifactDocumentInput): string {
   ]
     .filter((line): line is string => line !== undefined)
     .join("\n");
-}
-
-/** A document that opens with a doctype or an `<html>` tag is already whole. */
-function looksLikeFullDocument(content: string): boolean {
-  return /^\s*(<!doctype\s+html|<html[\s>])/i.test(content);
-}
-
-/**
- * Put Valet's head FIRST inside an existing `<head>`, so the artifact's own
- * `<title>` and styles override ours — except the CSP, which a later meta tag
- * cannot loosen (the browser intersects policies, it never replaces them).
- * A document with no `<head>` gets one after the opening `<html>`; one with
- * neither is served as-is with the shell wrapped around it.
- */
-function injectIntoHead(content: string, head: string): string {
-  const headOpen = /<head[^>]*>/i.exec(content);
-  if (headOpen) {
-    const at = headOpen.index + headOpen[0].length;
-    return `${content.slice(0, at)}\n${head}\n${content.slice(at)}`;
-  }
-  const htmlOpen = /<html[^>]*>/i.exec(content);
-  if (htmlOpen) {
-    const at = htmlOpen.index + htmlOpen[0].length;
-    return `${content.slice(0, at)}\n<head>\n${head}\n</head>\n${content.slice(at)}`;
-  }
-  return `<!doctype html>\n<html lang="en">\n<head>\n${head}\n</head>\n<body>\n${content}\n</body>\n</html>`;
 }
 
 /**

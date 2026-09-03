@@ -181,22 +181,26 @@ describe("buildArtifactDocument", () => {
     expect(html).toContain("&lt;script&gt;");
   });
 
-  it("supplements an existing head instead of nesting a second document", () => {
-    const html = buildArtifactDocument({
-      title: "Ignored",
-      content: `<!doctype html><html><head><title>Own</title></head><body><p>x</p></body></html>`,
-    });
-    expect(html.match(/<!doctype html>/gi)?.length).toBe(1);
-    expect(html.match(/<html/gi)?.length).toBe(1);
-    expect(html).toContain(`http-equiv="Content-Security-Policy"`);
-    // The artifact's own title comes after ours, so it wins.
-    expect(html.indexOf("<title>Own</title>")).toBeGreaterThan(html.indexOf("<title>Ignored</title>"));
+  it("puts Valet's head before EVERY artifact byte, full documents included", () => {
+    const content = `<!doctype html><html><head><title>Own</title></head><body><p>x</p></body></html>`;
+    const html = buildArtifactDocument({ title: "Shell", content });
+    const cspAt = html.indexOf(`http-equiv="Content-Security-Policy"`);
+    expect(cspAt).toBeGreaterThan(-1);
+    expect(cspAt).toBeLessThan(html.indexOf(content));
   });
 
-  it("gives a document with html but no head one", () => {
-    const html = buildArtifactDocument({ title: "T", content: `<html><body><p>x</p></body></html>` });
-    expect(html.match(/<head>/gi)?.length).toBe(1);
-    expect(html).toContain(`http-equiv="Content-Security-Policy"`);
+  it("cannot be decoyed into placing the CSP inside a comment", () => {
+    // The attack the always-first ordering exists to kill: a fake <head>
+    // inside a comment ahead of the real one. Any head-locating splice puts
+    // the CSP into dead text; emitting our head first makes the decoy inert.
+    const content = `<!doctype html>\n<html>\n<!--<head>-->\n<head><script>exfil()</script></head>\n<body>x</body>\n</html>`;
+    const html = buildArtifactDocument({ title: "T", content });
+    const cspAt = html.indexOf(`http-equiv="Content-Security-Policy"`);
+    expect(cspAt).toBeGreaterThan(-1);
+    // The policy precedes the artifact's first byte — comment, script, all
+    // of it — so it cannot land inside attacker-controlled dead text.
+    expect(cspAt).toBeLessThan(html.indexOf("<!--"));
+    expect(cspAt).toBeLessThan(html.indexOf("exfil()"));
   });
 
   it("emits the description and favicon only when present", () => {

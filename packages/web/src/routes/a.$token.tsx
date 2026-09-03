@@ -55,13 +55,16 @@ function ArtifactPage() {
   const [rects, setRects] = useState<Record<string, ArtifactAnchorRect> | null>(null);
 
   const threads = useMemo(() => groupThreads(commentsQ.data?.comments ?? []), [commentsQ.data]);
-  const anchors = useMemo(
-    () =>
-      threads
-        .filter((t) => t.root.vdid !== null && t.root.resolvedAt === null)
-        .map((t) => t.root.vdid as string),
-    [threads],
-  );
+  // Track open-thread anchors AND the in-flight pick: the frame reports
+  // fresh rects on its own scroll, and the composer repositions from them —
+  // a one-time snapshot would strand the popover on stale coordinates.
+  const anchors = useMemo(() => {
+    const vdids = threads
+      .filter((t) => t.root.vdid !== null && t.root.resolvedAt === null)
+      .map((t) => t.root.vdid as string);
+    if (pendingPick && !vdids.includes(pendingPick.vdid)) vdids.push(pendingPick.vdid);
+    return vdids;
+  }, [threads, pendingPick]);
   const openCount = threads.filter((t) => t.root.resolvedAt === null).length;
 
   // The tab should read as the document, not as the app.
@@ -224,7 +227,11 @@ function ArtifactPage() {
           )}
           {canComment && (
             <CommentComposer
-              pick={pendingPick}
+              pick={
+                pendingPick
+                  ? { ...pendingPick, rect: rects?.[pendingPick.vdid] ?? pendingPick.rect }
+                  : null
+              }
               authorName={authorName}
               canSendToSession={commentsQ.data?.canSendToSession === true}
               busy={addComment.isPending}

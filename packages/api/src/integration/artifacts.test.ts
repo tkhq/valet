@@ -602,10 +602,16 @@ describe("api integration: artifact pages", () => {
       expect(added.comment.sentToSession).toBe(sessionId);
 
       // REST is authoritative for thread history: the delivered prompt is a
-      // persisted user message on the session.
-      const messages = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/messages`);
-      expect(messages.status).toBe(200);
-      const text = JSON.stringify(await messages.json());
+      // persisted user message on the session. Persistence trails the submit
+      // receipt under load, so poll briefly instead of reading once.
+      let text = "";
+      for (let attempt = 0; attempt < 40; attempt++) {
+        const messages = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/messages`);
+        expect(messages.status).toBe(200);
+        text = JSON.stringify(await messages.json());
+        if (text.includes("[artifact comment]")) break;
+        await new Promise((r) => setTimeout(r, 250));
+      }
       expect(text).toContain("[artifact comment]");
       expect(text).toContain("Add a per-region breakdown");
     } finally {
