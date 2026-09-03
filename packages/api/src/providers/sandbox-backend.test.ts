@@ -15,6 +15,7 @@ import { KubernetesSandboxProvider } from "@valet/sandbox-kubernetes";
 import {
   buildSandboxProvider,
   parseSandboxBackend,
+  resolveChildRetentionMs,
   resolveDefaultImage,
   resolveHibernatedRetentionMs,
   resolveIdleMinutes,
@@ -164,6 +165,36 @@ describe("resolveIdleMinutes", () => {
 
   it("treats a non-numeric value as disabled", () => {
     expect(resolveIdleMinutes({ VALET_SANDBOX_IDLE_MINUTES: "bogus" })).toBe(0);
+  });
+});
+
+describe("resolveChildRetentionMs", () => {
+  it("defaults to 24 hours when VALET_CHILD_SANDBOX_RETENTION_HOURS is unset", () => {
+    expect(resolveChildRetentionMs({})).toBe(24 * 3_600_000);
+  });
+
+  it("parses a positive hours value", () => {
+    expect(resolveChildRetentionMs({ VALET_CHILD_SANDBOX_RETENTION_HOURS: "6" })).toBe(6 * 3_600_000);
+  });
+
+  it("treats an explicit 0 as disabled (eager destroy on settle)", () => {
+    expect(resolveChildRetentionMs({ VALET_CHILD_SANDBOX_RETENTION_HOURS: "0" })).toBe(0);
+  });
+
+  it("treats a negative value as disabled", () => {
+    expect(resolveChildRetentionMs({ VALET_CHILD_SANDBOX_RETENTION_HOURS: "-5" })).toBe(0);
+  });
+
+  it("treats a non-numeric value as disabled", () => {
+    expect(resolveChildRetentionMs({ VALET_CHILD_SANDBOX_RETENTION_HOURS: "bogus" })).toBe(0);
+  });
+
+  it("keeps children on a SHORTER window than every other session class", () => {
+    // The class split is the point: children are the high-churn, use-once
+    // class (hundreds a day, each holding a workspace PVC), while
+    // orchestrators and assistants are provisioned rarely and revisited
+    // for weeks. A change that collapses the two should fail here.
+    expect(resolveChildRetentionMs({})).toBeLessThan(resolveHibernatedRetentionMs({}));
   });
 });
 
