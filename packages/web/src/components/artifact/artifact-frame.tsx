@@ -78,11 +78,14 @@ export function ArtifactFrame({
   onRectsRef.current = onRects;
   const pickingRef = useRef(picking);
   const anchorsRef = useRef(anchors);
-  // The mount-time theme is frozen into the srcDoc (below); a later flip
-  // restamps via postMessage instead of reloading the frame, so script state
-  // survives. This ref carries the CURRENT value for that restamp.
-  const initialThemeRef = useRef(theme);
+  // The theme stamped into `srcDoc` is frozen at whatever `themeRef` holds
+  // when the memo below runs — mount, or the next time `title`/`rendered`/
+  // `icon`/`description` change. A later theme flip alone restamps via
+  // postMessage instead of reloading the frame (`theme` stays OUT of the
+  // memo deps), so script state survives; this ref carries the CURRENT
+  // value for both that restamp and the next srcDoc build.
   const themeRef = useRef(theme);
+  themeRef.current = theme;
 
   const srcDoc = useMemo(
     () =>
@@ -92,7 +95,7 @@ export function ArtifactFrame({
         icon,
         description,
         runtime: true,
-        theme: initialThemeRef.current ?? undefined,
+        theme: themeRef.current ?? undefined,
       }),
     [title, rendered, icon, description],
   );

@@ -121,7 +121,10 @@ function ArtifactPage() {
   const download = () => {
     if (doc.format === "html") {
       // The shelled document (no comment runtime), so the saved file opens
-      // standalone with the same policy and theming the viewer applies.
+      // standalone. It carries no viewer theme: the download is
+      // deliberately system-themed, so it renders by the reader's own OS
+      // preference wherever they open it, not the theme the viewer had
+      // active at download time.
       const page = buildArtifactDocument({
         title: doc.title,
         content: doc.rendered,
