@@ -73,7 +73,13 @@ export class SkillCollector implements ContentCollector {
       // and it means the directory is not a skill.
       const file = await reader.readFile(source.repoFullName, path, headSha);
       if (file === null) continue;
-      candidates.push({ name: dir.name, path, blobSha: file.blobSha, kind: "skill" });
+      candidates.push({
+        name: dir.name,
+        path,
+        relative: joinPath(dir.name, SKILL_FILE),
+        blobSha: file.blobSha,
+        kind: "skill",
+      });
       text.set(path, file.text);
     }
 
@@ -98,7 +104,13 @@ export class SkillCollector implements ContentCollector {
         const path = joinPath(promptsDir, file.name);
         const read = await reader.readFile(source.repoFullName, path, headSha);
         if (read === null) continue;
-        candidates.push({ name, path, blobSha: read.blobSha, kind: "prompt" });
+        candidates.push({
+          name,
+          path,
+          relative: joinPath(PROMPTS_DIR, file.name),
+          blobSha: read.blobSha,
+          kind: "prompt",
+        });
         text.set(path, read.text);
       }
     }

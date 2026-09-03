@@ -148,6 +148,10 @@ export interface SkillCandidate {
   name: string;
   /** Path from the repository root. */
   path: string;
+  /** Path from the SCAN ROOT: `path` with the source's subdirectory prefix
+   * removed. Ranking reads this rather than `path`, so only the `.valet` the
+   * source owner actually pointed at can win a name. */
+  relative: string;
   /** Git blob sha. The manifest key, so a sync can tell a changed file from
    * an unchanged one without reading either. */
   blobSha: string;
@@ -219,7 +223,13 @@ export function discoverFromTree(entries: SkillTreeEntry[], subpath: string): Tr
     const name =
       kind === "skill" ? (segments[segments.length - 2] ?? "") : fileName.slice(0, -".md".length);
     if (name.length === 0) continue;
-    const candidate: SkillCandidate = { name, path: entry.path, blobSha: entry.sha, kind };
+    const candidate: SkillCandidate = {
+      name,
+      path: entry.path,
+      relative,
+      blobSha: entry.sha,
+      kind,
+    };
 
     if (hasExcludedAncestor(segments)) {
       excludedCandidates.push(candidate);
@@ -374,14 +384,20 @@ function isScannedDotPath(fromDotDirectory: string): boolean {
   );
 }
 
-/** The one candidate under `.valet/skills`, or undefined when none or more
- * than one is: two copies there are as unrankable as any other pair. The test
- * reads the whole path, because a source with a `subpath` reaches
- * `.valet/skills` below that subdirectory. */
+/**
+ * The one candidate at the scan root's own `.valet/skills`, or undefined when
+ * none or more than one is: two copies there are as unrankable as any other
+ * pair.
+ *
+ * The test reads the path relative to the scan root, which is the folder the
+ * source owner pointed at. An anywhere-in-the-tree test would let a vendored
+ * or example copy, say `examples/demo/.valet/skills/deploy/SKILL.md`, outrank
+ * the repository's own `skills/deploy/SKILL.md` and overwrite the mirrored
+ * row in place. A source with a `subpath` still reaches `.valet/skills` below
+ * that subdirectory, because `relative` is measured from there.
+ */
 function onlyUnderValetSkills(group: SkillCandidate[]): SkillCandidate | undefined {
-  const own = group.filter(
-    (c) => c.path.startsWith(`${VALET_SKILLS_PATH}/`) || c.path.includes(`/${VALET_SKILLS_PATH}/`),
-  );
+  const own = group.filter((c) => c.relative.startsWith(`${VALET_SKILLS_PATH}/`));
   return own.length === 1 ? own[0] : undefined;
 }
 

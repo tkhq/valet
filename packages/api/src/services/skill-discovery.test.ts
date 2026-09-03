@@ -36,10 +36,18 @@ describe("discoverFromTree", () => {
     );
 
     expect(found.accepted).toEqual([
-      { name: "deploy", path: "04-skills/deploy/SKILL.md", blobSha: "blob-1", kind: "skill" },
+      {
+        name: "deploy",
+        path: "04-skills/deploy/SKILL.md",
+        // Scanned from the repository root, so `relative` equals `path`.
+        relative: "04-skills/deploy/SKILL.md",
+        blobSha: "blob-1",
+        kind: "skill",
+      },
       {
         name: "on-call",
         path: "a/b/c/on-call/SKILL.md",
+        relative: "a/b/c/on-call/SKILL.md",
         blobSha: "blob-a/b/c/on-call/SKILL.md",
         kind: "skill",
       },
@@ -160,6 +168,52 @@ describe("discoverFromTree", () => {
         ".github/workflows/ci/SKILL.md",
         ".venv/lib/pkg/a/SKILL.md",
       ]);
+    });
+
+    it("does not let a nested .valet/skills outrank the repository's own skill", () => {
+      // A vendored or example copy sits at any depth under a directory
+      // nothing excludes. Ranking it above the canonical skill would let a
+      // pull request that reads as "new example" silently replace the body
+      // of a mirrored skill, because reconcile updates the row in place.
+      const found = discoverFromTree(
+        [
+          blob("skills/deploy/SKILL.md"),
+          blob("examples/demo-app/.valet/skills/deploy/SKILL.md"),
+        ],
+        "",
+      );
+
+      // Neither wins: two same-kind candidates share a name, so the pair is
+      // unrankable and the name is reserved.
+      expect(found.accepted).toEqual([]);
+      expect(found.reservedNames.has("deploy")).toBe(true);
+      expect(found.warnings[0]).toContain("deploy: found at");
+    });
+
+    it("lets the scan root's own .valet/skills win a shared name", () => {
+      const found = discoverFromTree(
+        [blob("skills/deploy/SKILL.md"), blob(".valet/skills/deploy/SKILL.md")],
+        "",
+      );
+
+      expect(found.accepted.map((c) => c.path)).toEqual([".valet/skills/deploy/SKILL.md"]);
+    });
+
+    it("measures the scan root from the subpath, not the repository root", () => {
+      // A source pointed at `pkg` owns `pkg/.valet/skills`, and a nested copy
+      // deeper inside that subdirectory still does not outrank it.
+      const found = discoverFromTree(
+        [
+          blob("pkg/skills/deploy/SKILL.md"),
+          blob("pkg/.valet/skills/deploy/SKILL.md"),
+          blob("pkg/examples/demo/.valet/skills/release/SKILL.md"),
+          blob("pkg/skills/release/SKILL.md"),
+        ],
+        "pkg",
+      );
+
+      expect(found.accepted.map((c) => c.path)).toEqual(["pkg/.valet/skills/deploy/SKILL.md"]);
+      expect(found.reservedNames.has("release")).toBe(true);
     });
 
     it("reads nothing beside a SKILL.md out of .valet", () => {
@@ -294,8 +348,15 @@ describe("treeHoldsSubpath", () => {
 });
 
 describe("resolveNameCollisions", () => {
-  function candidate(name: string, path: string, kind: "skill" | "prompt" = "skill") {
-    return { name, path, blobSha: `blob-${path}`, kind };
+  /** `relative` defaults to `path`: these cases scan from the repository
+   * root, where the two are the same. A subpath case passes it explicitly. */
+  function candidate(
+    name: string,
+    path: string,
+    kind: "skill" | "prompt" = "skill",
+    relative: string = path,
+  ) {
+    return { name, path, relative, blobSha: `blob-${path}`, kind };
   }
 
   it("imports neither of two skills that share a name, and names both paths", () => {
