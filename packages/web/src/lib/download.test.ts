@@ -24,4 +24,8 @@ describe("artifactDownloadName", () => {
   it("falls back when the title has no usable characters", () => {
     expect(artifactDownloadName("???")).toBe("artifact.md");
   });
+
+  it("names html downloads by the source format", () => {
+    expect(artifactDownloadName("Deploy Board", "html")).toBe("deploy-board.html");
+  });
 });

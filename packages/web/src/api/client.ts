@@ -224,6 +224,11 @@ import type {
   UsageDrillItem,
   UsageScopeName,
   UsageUseCase,
+  AddArtifactCommentRequest,
+  AddArtifactCommentResponse,
+  ArtifactCommentWire,
+  ListArtifactCommentsResponse,
+  ListArtifactVersionsResponse,
 } from "@valet/api/wire";
 import type {
   ExportMemoryResponse,
@@ -677,12 +682,32 @@ export const api = {
     request<ShareArtifactResponse>("POST", "/artifacts/share", body),
   getTeamChildren: (teamId: string) =>
     request<GetTeamChildrenResponse>("GET", `/teams/${encodeURIComponent(teamId)}/children`),
-  listArtifacts: (owner?: OwnerFilter) =>
-    request<ListArtifactsResponse>("GET", `/artifacts${ownerQuery(owner)}`),
+  // `mine=1` is the caller-scoped gallery view (server-filtered — see the
+  // route's comment on why this replaced a client-side `actorUserId` match)
+  // and composes with nothing, so it is a separate option, not `OwnerFilter`.
+  listArtifacts: (owner?: OwnerFilter, opts?: { mine?: boolean }) => {
+    const base = ownerQuery(owner);
+    if (!opts?.mine) return request<ListArtifactsResponse>("GET", `/artifacts${base}`);
+    return request<ListArtifactsResponse>("GET", `/artifacts${base}${base ? "&" : "?"}mine=1`);
+  },
   patchArtifact: (id: string, body: PatchArtifactRequest) =>
     request<PatchArtifactResponse>("PATCH", `/artifacts/${encodeURIComponent(id)}`, body),
   revokeArtifact: (id: string) =>
     request<{ ok: boolean }>("DELETE", `/artifacts/${encodeURIComponent(id)}`),
+  // artifact pages (artifact-pages design): version pinning metadata and
+  // element-anchored comments. Comments are token-addressed like the read —
+  // the page only knows its token — but always need a logged-in caller.
+  listArtifactVersions: (id: string) =>
+    request<ListArtifactVersionsResponse>("GET", `/artifacts/${encodeURIComponent(id)}/versions`),
+  listArtifactComments: (token: string) =>
+    request<ListArtifactCommentsResponse>("GET", `/artifacts/${encodeURIComponent(token)}/comments`),
+  addArtifactComment: (token: string, body: AddArtifactCommentRequest) =>
+    request<AddArtifactCommentResponse>("POST", `/artifacts/${encodeURIComponent(token)}/comments`, body),
+  resolveArtifactComment: (token: string, commentId: string) =>
+    request<ArtifactCommentWire>(
+      "POST",
+      `/artifacts/${encodeURIComponent(token)}/comments/${encodeURIComponent(commentId)}/resolve`,
+    ),
   patchOrgSettings: (body: PatchOrgSettingsRequest) =>
     request<OrgSettingsResponse>("PATCH", "/org/settings", body),
   // org plugin entitlements (plugin-entitlements design). `getOrgPlugins` is

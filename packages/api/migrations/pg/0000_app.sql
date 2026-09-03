@@ -499,6 +499,12 @@ CREATE TABLE "artifacts" (
 	"source_memory_path" text NOT NULL,
 	"title" text DEFAULT '' NOT NULL,
 	"content" text NOT NULL,
+	"format" text DEFAULT 'markdown' NOT NULL,
+	"rendered" text DEFAULT '' NOT NULL,
+	"description" text DEFAULT '' NOT NULL,
+	"icon" text DEFAULT '' NOT NULL,
+	"version" bigint DEFAULT 1 NOT NULL,
+	"shared_version" bigint,
 	"visibility" text DEFAULT 'org' NOT NULL,
 	"public_by" text,
 	"created_at" bigint NOT NULL,
@@ -509,6 +515,36 @@ CREATE TABLE "artifacts" (
 CREATE UNIQUE INDEX "artifacts_token_unique" ON "artifacts" ("token");
 --> statement-breakpoint
 CREATE UNIQUE INDEX "artifacts_owner_path_unique" ON "artifacts" ("owner_type","owner_id","source_memory_path");
+--> statement-breakpoint
+CREATE TABLE "artifact_versions" (
+	"id" text PRIMARY KEY NOT NULL,
+	"artifact_id" text NOT NULL,
+	"version" bigint NOT NULL,
+	"title" text DEFAULT '' NOT NULL,
+	"format" text DEFAULT 'markdown' NOT NULL,
+	"content" text NOT NULL,
+	"rendered" text DEFAULT '' NOT NULL,
+	"actor_user_id" text NOT NULL,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "artifact_versions_unique" ON "artifact_versions" ("artifact_id","version");
+--> statement-breakpoint
+CREATE TABLE "artifact_comments" (
+	"id" text PRIMARY KEY NOT NULL,
+	"artifact_id" text NOT NULL,
+	"version" bigint NOT NULL,
+	"vdid" text,
+	"parent_id" text,
+	"body" text NOT NULL,
+	"author_user_id" text NOT NULL,
+	"sent_to_session" text,
+	"resolved_at" bigint,
+	"resolved_by" text,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "artifact_comments_artifact" ON "artifact_comments" ("artifact_id");
 --> statement-breakpoint
 CREATE TABLE "skills" (
 	"id" text PRIMARY KEY NOT NULL,

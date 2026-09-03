@@ -143,7 +143,27 @@ export async function resolveOptionalUser(
   // exists. Anonymous access is untestable through HTTP in stub mode (the
   // stub answers for everyone); the artifact access matrix covers it in
   // unit tests instead (`services/artifacts.ts`'s `decideArtifactAccess`).
-  if (process.env.VALET_LOCAL_AUTH === "1") return stubUser();
+  // The `x-valet-test-user-id` impersonation rung mirrors the middleware's,
+  // under the same double gate — without it, multi-user behavior on the
+  // pre-auth surface (artifact comments) would be untestable over HTTP.
+  if (process.env.VALET_LOCAL_AUTH === "1") {
+    const testUserId =
+      process.env.VALET_TEST_AUTH_HEADER === "1" ? c.req.header("x-valet-test-user-id") : undefined;
+    if (testUserId) {
+      const rows = await db.select().from(users).where(eq(users.id, testUserId)).limit(1);
+      const row = rows[0];
+      if (row) {
+        return {
+          id: row.id,
+          email: row.email,
+          name: row.name ?? undefined,
+          role: row.role,
+          orgId: LOCAL_ORG.id,
+        };
+      }
+    }
+    return stubUser();
+  }
 
   return undefined;
 }

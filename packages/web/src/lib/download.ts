@@ -20,12 +20,13 @@ export function memoryDownloadName(path: string): string {
   return base.includes(".") ? base : `${base}.md`;
 }
 
-/** Pure: artifact title → `.md` download filename. Titles are free text, so
- * everything outside [a-z0-9] collapses to a hyphen. */
-export function artifactDownloadName(title: string): string {
+/** Pure: artifact title → download filename in the source's extension
+ * (`.md` for markdown, `.html` for html — artifact-pages design). Titles are
+ * free text, so everything outside [a-z0-9] collapses to a hyphen. */
+export function artifactDownloadName(title: string, ext: "md" | "html" = "md"): string {
   const slug = title
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
-  return `${slug || "artifact"}.md`;
+  return `${slug || "artifact"}.${ext}`;
 }
