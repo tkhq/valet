@@ -107,6 +107,19 @@ describe("loadPrebuildOverride", () => {
       loadPrebuildOverride(readerFor({ ".valet/prebuild.yaml": "setup:\n  - 1\n  - 2\n" })),
     ).rejects.toThrow(/setup/);
   });
+
+  it("parses workspaceStorage (TKAI-385: repo-declared workspace size)", async () => {
+    const override = await loadPrebuildOverride(
+      readerFor({ ".valet/prebuild.yaml": 'workspaceStorage: "4Gi"\n' }),
+    );
+    expect(override).toEqual({ workspaceStorage: "4Gi" });
+  });
+
+  it("rejects a non-string workspaceStorage (a bare number names no unit)", async () => {
+    await expect(
+      loadPrebuildOverride(readerFor({ ".valet/prebuild.yaml": "workspaceStorage: 4\n" })),
+    ).rejects.toThrow(/workspaceStorage must be a quantity string/);
+  });
 });
 
 describe("resolveRecipe", () => {

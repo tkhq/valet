@@ -101,6 +101,13 @@ export interface PrebuildOverride {
   setup?: string[];
   skipDetect?: boolean;
   docker?: boolean;
+  /** Workspace volume size this repo needs (Kubernetes quantity, e.g.
+   * "4Gi"). Read at session create time — like `docker`, a session runtime
+   * knob that lives in the repo's own config — and provisions the workspace
+   * claim at this size instead of the deploy default, clamped to
+   * `VALET_SANDBOX_WORKSPACE_MAX` by the provider (TKAI-385). A large repo
+   * declares its footprint up front so no reactive resize is needed. */
+  workspaceStorage?: string;
 }
 
 /**
@@ -142,6 +149,14 @@ export async function loadPrebuildOverride(
       throw new Error(".valet/prebuild.yaml: docker must be a boolean");
     }
     override.docker = obj.docker;
+  }
+  if (obj.workspaceStorage !== undefined) {
+    // Quote the value in YAML: an unquoted `4Gi` parses as a string, but a
+    // bare number (`workspaceStorage: 4`) does not name a unit.
+    if (typeof obj.workspaceStorage !== "string") {
+      throw new Error('.valet/prebuild.yaml: workspaceStorage must be a quantity string like "4Gi"');
+    }
+    override.workspaceStorage = obj.workspaceStorage;
   }
   return override;
 }

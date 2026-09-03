@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { SandboxCreateOpts } from "@valet/engine";
 import {
   CREDS_MOUNT_PATH,
@@ -525,5 +525,61 @@ describe("docker flag (rootless DinD)", () => {
     expect(s).not.toContain("VALET_DOCKER_USERNS");
     expect(s).not.toContain("fsGroup");
     expect(s).not.toContain(DOCKER_LABEL_KEY);
+  });
+});
+
+describe("workspace storage sizing (TKAI-385: repo-declared size)", () => {
+  const workspaceStorage = (cr: ReturnType<typeof buildSandboxManifest>) =>
+    cr.spec.volumeClaimTemplates[0]?.spec.resources.requests.storage;
+
+  it("without a request, the claim uses cfg.defaultStorage (existing behavior)", () => {
+    const cr = buildSandboxManifest({ ...baseConfig, defaultStorage: "1Gi" }, "sess-ws", {});
+    expect(workspaceStorage(cr)).toBe("1Gi");
+  });
+
+  it("a repo-declared workspaceStorage wins over the deploy default", () => {
+    const cr = buildSandboxManifest({ ...baseConfig, defaultStorage: "1Gi" }, "sess-ws", {
+      workspaceStorage: "4Gi",
+    });
+    expect(workspaceStorage(cr)).toBe("4Gi");
+  });
+
+  it("a request past the cap is clamped to workspaceStorageMax verbatim", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const cr = buildSandboxManifest(
+      { ...baseConfig, defaultStorage: "1Gi", workspaceStorageMax: "20Gi" },
+      "sess-ws",
+      { workspaceStorage: "50Gi" },
+    );
+    expect(workspaceStorage(cr)).toBe("20Gi");
+    warnSpy.mockRestore();
+  });
+
+  it("with no cfg cap, the request clamps to the provider default cap (20Gi)", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const cr = buildSandboxManifest(baseConfig, "sess-ws", { workspaceStorage: "500Gi" });
+    expect(workspaceStorage(cr)).toBe("20Gi");
+    warnSpy.mockRestore();
+  });
+
+  it("an unparseable request falls back to the default with a log (never provision an unknown size)", () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const cr = buildSandboxManifest({ ...baseConfig, defaultStorage: "1Gi" }, "sess-ws", {
+      workspaceStorage: "lots",
+    });
+    expect(workspaceStorage(cr)).toBe("1Gi");
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  it("an unparseable cfg cap also falls back to the default (a typo'd cap must not grant the request)", () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const cr = buildSandboxManifest(
+      { ...baseConfig, defaultStorage: "1Gi", workspaceStorageMax: "unlimited" },
+      "sess-ws",
+      { workspaceStorage: "4Gi" },
+    );
+    expect(workspaceStorage(cr)).toBe("1Gi");
+    errSpy.mockRestore();
   });
 });

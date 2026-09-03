@@ -34,6 +34,14 @@ Type: `boolean` (default `false`)
 
 Set `true` to give this repo's sessions a rootless docker daemon inside the sandbox. The daemon runs as a non-root user; the sandbox is never privileged. Docker state is ephemeral — images pull again after the sandbox restarts. See `docs/specs/2026-08-15-sandbox-docker-design.md`.
 
+### `workspaceStorage`
+
+Type: `string` (a Kubernetes quantity, for example `"4Gi"`; default: the deploy's workspace size, 1Gi)
+
+Declare the workspace volume size this repo needs. A sandbox that clones this repo provisions its persistent `/workspace` claim at the declared size, so a large checkout plus install artifacts fit without any reactive resize. Quote the value — a bare `4` names no unit.
+
+The platform clamps the declared size to the deploy's growth cap (`VALET_SANDBOX_WORKSPACE_MAX`, default 20Gi); a repo cannot request unbounded storage. The declaration only affects newly provisioned workspaces — an existing sandbox keeps its volume until it is destroyed and re-provisioned. Like `docker`, this key configures the SESSION at create time, not the baked image. See `docs/specs/2026-09-03-sandbox-workspace-fit-design.md`.
+
 ## Dockerfile step order
 
 The bake produces a Dockerfile in this order:

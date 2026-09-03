@@ -341,50 +341,64 @@ export async function resolveRecipeFromGitHub(
   return resolveRecipe(files, read);
 }
 
-const repoDockerCache = new Map<string, { value: boolean; at: number }>();
-const REPO_DOCKER_TTL_MS = 10 * 60 * 1000;
-
-/** Clears the module-level `repoDockerFlag` cache. Exposed for test isolation
- * only — production code must not call this. */
-export function clearRepoDockerCache(): void {
-  repoDockerCache.clear();
+/** Session-runtime knobs a repo declares in `.valet/prebuild.yaml`, read at
+ * session create time (before any clone exists). */
+export interface RepoPrebuildFlags {
+  /** `docker: true` — run a rootless docker daemon in the sandbox. */
+  docker: boolean;
+  /** `workspaceStorage: "4Gi"` — provision the workspace claim at this size
+   * (clamped to the deploy cap by the provider). Absent when undeclared. */
+  workspaceStorage?: string;
 }
 
-/** Best-effort read of `.valet/prebuild.yaml`'s `docker` key for a repo ref.
- * Errors (auth, rate limit, bad YAML) resolve `false`: the session still
- * starts, without docker. The session-create `docker` option is the
+const repoFlagsCache = new Map<string, { value: RepoPrebuildFlags; at: number }>();
+const REPO_FLAGS_TTL_MS = 10 * 60 * 1000;
+
+/** Clears the module-level `repoPrebuildFlags` cache. Exposed for test
+ * isolation only — production code must not call this. */
+export function clearRepoPrebuildFlagsCache(): void {
+  repoFlagsCache.clear();
+}
+
+/** Best-effort read of `.valet/prebuild.yaml`'s session-runtime keys
+ * (`docker`, `workspaceStorage`) for a repo ref. Errors (auth, rate limit,
+ * bad YAML) resolve the defaults ({ docker: false }, no storage): the
+ * session still starts. The session-create `docker` option is the
  * corrective override when the repo read cannot succeed.
  *
- * Results are cached per `owner/repo@ref` for 10 minutes (both `true` and
- * `false` are cached so a missing file does not generate repeated API calls). */
-export async function repoDockerFlag(
+ * Results are cached per `owner/repo@ref` for 10 minutes (defaults are
+ * cached too, so a missing file does not generate repeated API calls). */
+export async function repoPrebuildFlags(
   deps: GitHubTokenDeps,
   token: string | null,
   owner: string,
   repo: string,
   ref: string,
-): Promise<boolean> {
+): Promise<RepoPrebuildFlags> {
   const key = `${owner}/${repo}@${ref}`;
-  const hit = repoDockerCache.get(key);
-  if (hit && Date.now() - hit.at < REPO_DOCKER_TTL_MS) return hit.value;
-  let value = false;
+  const hit = repoFlagsCache.get(key);
+  if (hit && Date.now() - hit.at < REPO_FLAGS_TTL_MS) return hit.value;
+  let value: RepoPrebuildFlags = { docker: false };
   try {
     const read = (path: string) => readGithubFile(deps, token, owner, repo, ref, path);
     const override = await loadPrebuildOverride(read);
-    value = override?.docker === true;
+    value = {
+      docker: override?.docker === true,
+      ...(override?.workspaceStorage ? { workspaceStorage: override.workspaceStorage } : {}),
+    };
   } catch (err) {
     console.error(
-      `repoDockerFlag: read failed for ${key}:`,
+      `repoPrebuildFlags: read failed for ${key}:`,
       err instanceof Error ? err.message : String(err),
     );
   }
   // Crude size cap: clear the whole map rather than LRU-evict. The map holds
-  // at most ~1000 entries (owner/repo@ref strings + booleans), which is small
-  // enough in memory; clearing is O(1) and avoids the complexity of a real
-  // eviction policy. A hard limit of 1000 is far beyond any realistic session
-  // volume before the 10-min TTL would reclaim entries anyway.
-  if (repoDockerCache.size >= 1000) repoDockerCache.clear();
-  repoDockerCache.set(key, { value, at: Date.now() });
+  // at most ~1000 entries (owner/repo@ref strings + small objects), which is
+  // small enough in memory; clearing is O(1) and avoids the complexity of a
+  // real eviction policy. A hard limit of 1000 is far beyond any realistic
+  // session volume before the 10-min TTL would reclaim entries anyway.
+  if (repoFlagsCache.size >= 1000) repoFlagsCache.clear();
+  repoFlagsCache.set(key, { value, at: Date.now() });
   return value;
 }
 

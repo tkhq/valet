@@ -53,7 +53,7 @@ import {
   resolveInstallationApiToken,
 } from "../services/github-tokens.js";
 import { primaryRepoBinding, resolveSessionGitHubToken } from "../services/session-github-token.js";
-import { repoDockerFlag } from "../bakes/source-service.js";
+import { repoPrebuildFlags, type RepoPrebuildFlags } from "../bakes/source-service.js";
 import { loadSessionMeta } from "./session-meta.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";
@@ -880,11 +880,16 @@ export class EngineHost {
     const resolveModel = this.makeResolveModel(meta.orgId);
     const profile = meta.profile ?? "headless";
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
-    // Docker flag: session-create opt OR repo `.valet/prebuild.yaml` docker
-    // key. `resolveRepoDockerFlag` is best-effort — any failure resolves
-    // false. Single image lineage: the flag only shapes SandboxCreateOpts
-    // (caps/mounts/exec identity), never which image is resolved.
-    const dockerFlag = meta.docker === true || (await this.resolveRepoDockerFlag(sessionId, meta));
+    // Repo-declared session-runtime flags from `.valet/prebuild.yaml`:
+    // `docker` (session-create opt ORs over it) and `workspaceStorage`
+    // (TKAI-385: a large repo declares its workspace size up front so the
+    // claim is provisioned big enough — no reactive resize needed).
+    // `resolveRepoPrebuildFlags` is best-effort — any failure resolves the
+    // defaults. Single image lineage: the docker flag only shapes
+    // SandboxCreateOpts (caps/mounts/exec identity), never which image is
+    // resolved.
+    const repoFlags = await this.resolveRepoPrebuildFlags(sessionId, meta);
+    const dockerFlag = meta.docker === true || repoFlags.docker;
     // Start-ref sink (engine traces spec, change 2 — host pattern B): the
     // specProvider closure resolves the primary clone's ref inside the sandbox
     // and calls this callback. The callback can fire before create/restore
@@ -951,6 +956,9 @@ export class EngineHost {
       env: sandboxEnv,
       profile,
       ...(dockerFlag ? { docker: true } : {}),
+      // Only affects a FRESHLY provisioned claim — an existing workspace
+      // volume keeps its size (the controller never resizes an owned PVC).
+      ...(repoFlags.workspaceStorage ? { workspaceStorage: repoFlags.workspaceStorage } : {}),
       ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
     };
     const policyResolver = this.getPolicyResolver();
@@ -1596,24 +1604,27 @@ export class EngineHost {
   }
 
   /**
-   * Best-effort: reads `.valet/prebuild.yaml`'s `docker` key for the session's
-   * primary repo. Returns `false` on any failure (no token, no repos, non-GitHub
-   * host, network error, bad YAML) — the session still starts without docker.
+   * Best-effort: reads `.valet/prebuild.yaml`'s session-runtime keys
+   * (`docker`, `workspaceStorage`) for the session's primary repo. Returns
+   * the defaults ({ docker: false }, no storage) on any failure (no token,
+   * no repos, non-GitHub host, network error, bad YAML) — the session still
+   * starts without docker, on the default workspace size.
    *
    * Mirrors the guard structure of `buildCredentialResolver`: exits early when
    * `githubTokenDeps`/`db` are not wired (db-less test environments).
    */
-  private async resolveRepoDockerFlag(sessionId: string, meta: SessionMeta): Promise<boolean> {
+  private async resolveRepoPrebuildFlags(sessionId: string, meta: SessionMeta): Promise<RepoPrebuildFlags> {
+    const defaults: RepoPrebuildFlags = { docker: false };
     const tokenDeps = this.opts.githubTokenDeps;
     const db = this.opts.db;
-    if (!tokenDeps || !db) return false;
+    if (!tokenDeps || !db) return defaults;
     try {
       const primaryRepo = meta.repos?.[0];
-      if (!primaryRepo) return false;
+      if (!primaryRepo) return defaults;
       const host = primaryRepo.host ?? "github.com";
-      if (host !== "github.com") return false;
+      if (host !== "github.com") return defaults;
       const [owner, repoName] = primaryRepo.fullName.split("/");
-      if (!owner || !repoName) return false;
+      if (!owner || !repoName) return defaults;
       const ref = primaryRepo.ref ?? "HEAD";
       const fullDeps = {
         db,
@@ -1639,24 +1650,24 @@ export class EngineHost {
         }
       });
       const result = await Promise.race([
-        repoDockerFlag(fullDeps, resolved.token, owner, repoName, ref),
+        repoPrebuildFlags(fullDeps, resolved.token, owner, repoName, ref),
         timeoutPromise,
       ]);
       clearTimeout(timeoutId);
       if (result === timedOut) {
         // Do not cache — a timeout is not a repo answer.
         console.error(
-          `EngineHost: resolveRepoDockerFlag timed out for session ${sessionId}`,
+          `EngineHost: resolveRepoPrebuildFlags timed out for session ${sessionId}`,
         );
-        return false;
+        return defaults;
       }
       return result;
     } catch (err) {
       console.error(
-        `EngineHost: resolveRepoDockerFlag failed for session ${sessionId}:`,
+        `EngineHost: resolveRepoPrebuildFlags failed for session ${sessionId}:`,
         err instanceof Error ? err.message : String(err),
       );
-      return false;
+      return defaults;
     }
   }
 

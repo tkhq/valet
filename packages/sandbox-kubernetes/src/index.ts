@@ -41,8 +41,11 @@ export {
   WORKSPACE_VOLUME_NAME,
   buildSandboxManifest,
   credsSecretName,
+  resolveWorkspaceStorageRequest,
   sandboxCrName,
 } from "./manifest.js";
+
+export { clampStorageRequest } from "./quantity.js";
 
 export {
   RANCHER_DESKTOP_CONTEXT,
