@@ -154,6 +154,33 @@ describe("label + regex round trip", () => {
   });
 });
 
+describe("`in` labels round trip", () => {
+  // Reply-created subscriptions store multi-channel filters as `in` values
+  // with aligned display labels. An edit that leaves the list alone must
+  // round-trip the labels, or later surfaces regress to raw C… ids.
+  it("keeps the labels while the value list is unchanged", () => {
+    const wire = [
+      { field: "channel", op: "in", value: ["C1", "C2"], labels: ["#general", "#ops"] },
+    ];
+    expect(toWireFilters(fromWireFilters(wire))).toEqual(wire);
+  });
+
+  it("drops the labels when the list is edited (labels no longer align)", () => {
+    const rows = fromWireFilters([
+      { field: "channel", op: "in", value: ["C1", "C2"], labels: ["#general", "#ops"] },
+    ]);
+    rows[0] = { ...rows[0], value: "C1, C3" };
+    expect(toWireFilters(rows)).toEqual([{ field: "channel", op: "in", value: ["C1", "C3"] }]);
+  });
+
+  it("ignores stored labels that do not align with the values", () => {
+    const rows = fromWireFilters([
+      { field: "channel", op: "in", value: ["C1", "C2"], labels: ["#general"] },
+    ]);
+    expect(toWireFilters(rows)).toEqual([{ field: "channel", op: "in", value: ["C1", "C2"] }]);
+  });
+});
+
 /** A `useFilterOptions` return the component accepts. Only the fields the
  * picker reads are set; the mock stands in for the react-query result. */
 function optionsResult(over: {

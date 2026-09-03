@@ -292,8 +292,8 @@ first UI over this system. Two tabs:
 - **Activity** — the org feed with service/key filters drawn from the
   catalog. A row expands into the event payload and its delivery attempts,
   so "why didn't my trigger fire" is answerable from the page.
-- **Subscriptions** — list, create, enable/disable, and delete over the
-  CRUD routes. The create dialog offers only catalog keys. Targets: the
+- **Subscriptions** — list, create, edit, enable/disable, and delete over
+  the CRUD routes. The create dialog offers only catalog keys. Targets: the
   caller's assistant, the active team's assistant (offered only while a
   team workspace is selected in the nav switcher — see
   2026-08-17-team-workspace-ui-design.md), the org assistant, or an owned
@@ -301,14 +301,19 @@ first UI over this system. Two tabs:
   badge team owners with the team's name and a colleague's personal
   subscription with "Personal"; an unbadged row is the caller's own.
 
-Subscription filters are API-only for now: a row shows its filter count,
-and the create dialog does not build filters yet.
+Each mutable row's menu opens an edit dialog
+(`components/events/edit-subscription-dialog.tsx`): name, event keys, and
+filters, through the same match step the wizard's advanced outcome uses. A
+save PATCHes only the changed fields (`subscription-patch.ts`), so a rename
+does not re-run the collision gate on an unchanged match. The target is
+shown read-only — the PATCH route pins `target` to the stored row, so a
+different target is a new subscription, and the dialog says so.
 
-The creation wizard renders the collision gate's answer inline
-(`components/events/collision-notice.tsx`): a blocked create lists the rules
-it would cover, each with name, owner, target kind, and filter summary, and
-offers an explicit "Create anyway"; a committed overlap shows the same list
-as a warning before the dialog closes.
+The creation wizard and the edit dialog render the collision gate's answer
+inline (`components/events/collision-notice.tsx`): a blocked write lists the
+rules it would cover, each with name, owner, target kind, and filter
+summary, and offers an explicit "Create anyway" / "Save anyway"; a committed
+overlap shows the same list as a warning before the dialog closes.
 
 ## Error handling
 

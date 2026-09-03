@@ -28,6 +28,7 @@ import { useListOwner } from "~/lib/use-list-owner";
 import { OwnerBadge } from "~/components/owner-badge";
 import { eligibleTeams } from "~/components/session/assistant-rail";
 import { AutomationWizard } from "./automation-wizard";
+import { EditSubscriptionDialog } from "./edit-subscription-dialog";
 
 /** Mirrors the server's `canMutateSubscription`: an org-owned subscription
  * is everyone's to manage, a team's belongs to its members, and a personal
@@ -84,9 +85,9 @@ function describeTarget(
 
 /**
  * Event subscriptions: the rules that turn an ingested event into action —
- * a workflow run or an orchestrator prompt. List with enable/disable and
- * delete; create via `AutomationWizard`. Rows show filters read-only
- * (filters are API-only for now).
+ * a workflow run or an orchestrator prompt. List with enable/disable,
+ * edit (`EditSubscriptionDialog`), and delete; create via
+ * `AutomationWizard`.
  *
  * The list is the active workspace's, plus every org-owned subscription. An
  * org-owned row belongs to no single workspace, so the route returns it in
@@ -196,6 +197,7 @@ function SubscriptionRow({
 }) {
   const patch = usePatchEventSubscription();
   const del = useDeleteEventSubscription();
+  const [editing, setEditing] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [toggleError, setToggleError] = useState<string | null>(null);
   const channelScope = mentionChannelScope(sub);
@@ -266,11 +268,25 @@ function SubscriptionRow({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
+            <DropdownMenuItem onSelect={() => setEditing(true)}>
+              Edit subscription
+            </DropdownMenuItem>
             <DropdownMenuItem className="text-danger-500" onSelect={() => setConfirmDelete(true)}>
               Delete subscription
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+      )}
+
+      {/* Mounted only while open: the form seeds from `sub` at mount (see the
+          dialog's header comment). */}
+      {editing && (
+        <EditSubscriptionDialog
+          open
+          onOpenChange={setEditing}
+          sub={sub}
+          targetLabel={describeTarget(sub.target, workflowNames, teamNames)}
+        />
       )}
 
       <ConfirmDialog

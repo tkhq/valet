@@ -243,25 +243,7 @@ export function AutomationWizard({
   // outcome forbids.
   const isEventOutcome = outcome === "workflow" || outcome === "notify" || outcome === "advanced";
 
-  // Filter fields the selected events declare, unioned and deduped by field —
-  // a filter is valid when any selected event declares it (the same rule the
-  // server's validateSubscription applies).
-  function unionFilterFields(selected: Set<string>): FilterField[] {
-    const out: FilterField[] = [];
-    const seen = new Set<string>();
-    for (const s of services) {
-      for (const entry of s.entries) {
-        if (!selected.has(entry.key)) continue;
-        for (const f of entry.filters ?? []) {
-          if (seen.has(f.field)) continue;
-          seen.add(f.field);
-          out.push({ field: f.field, description: f.description, options: f.options });
-        }
-      }
-    }
-    return out;
-  }
-  const filterFields = unionFilterFields(keys);
+  const filterFields = unionFilterFields(services, keys);
 
   function toggleKey(key: string) {
     const next = new Set(keys);
@@ -270,7 +252,7 @@ export function AutomationWizard({
     setKeys(next);
     // Drop filters whose field none of the now-selected events declare, so an
     // orphaned filter cannot 400 on submit.
-    setFilterRows((rows) => pruneFilterRows(rows, unionFilterFields(next)));
+    setFilterRows((rows) => pruneFilterRows(rows, unionFilterFields(services, next)));
   }
 
   const workflowChosen = target.kind === "workflow" && target.workflowId.length > 0;
@@ -939,12 +921,34 @@ function ChannelMultiSelect({
   );
 }
 
-interface CatalogService {
+export interface CatalogService {
   service: string;
   entries: { key: string; description: string; filters?: FilterField[] }[];
 }
 
-function EventMatchStep({
+/** Filter fields the selected events declare, unioned and deduped by field —
+ * a filter is valid when any selected event declares it (the same rule the
+ * server's validateSubscription applies). Shared with the edit dialog. */
+export function unionFilterFields(
+  services: CatalogService[],
+  selected: Set<string>,
+): FilterField[] {
+  const out: FilterField[] = [];
+  const seen = new Set<string>();
+  for (const s of services) {
+    for (const entry of s.entries) {
+      if (!selected.has(entry.key)) continue;
+      for (const f of entry.filters ?? []) {
+        if (seen.has(f.field)) continue;
+        seen.add(f.field);
+        out.push({ field: f.field, description: f.description, options: f.options });
+      }
+    }
+  }
+  return out;
+}
+
+export function EventMatchStep({
   services,
   catalogLoading,
   catalogError,
