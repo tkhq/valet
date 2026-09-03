@@ -91,8 +91,11 @@ export function parseCliArgs(argv: string[]): CliOptions {
     json: values.json,
     verbose: values.verbose,
     ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-    casesDir: resolve(values.cases ?? resolve(REPO_ROOT, "evals/cases")),
-    baselinesDir: resolve(values.baselines ?? resolve(REPO_ROOT, "evals/baselines")),
+    // Relative paths resolve against the repo root, not the process cwd:
+    // `make eval` runs the CLI through pnpm with cwd packages/eval, so a
+    // documented flag like `--cases evals/cases/hard` must not resolve there.
+    casesDir: resolve(REPO_ROOT, values.cases ?? "evals/cases"),
+    baselinesDir: resolve(REPO_ROOT, values.baselines ?? "evals/baselines"),
     pullFlagged: values["pull-flagged"],
     pullRating,
     ...(runsOverride !== undefined ? { runsOverride } : {}),
