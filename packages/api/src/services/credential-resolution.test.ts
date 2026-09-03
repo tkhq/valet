@@ -29,6 +29,7 @@ function fakeOnePassword(
     listVaults: unused,
     resolveReference: unused,
     findCredentialForService: async () => null,
+    findCandidates: async () => [],
     resolveCredential,
   };
 }
@@ -339,6 +340,7 @@ describe("vault lookup when no row exists", () => {
       tokenConnected: unused,
       listVaults: unused,
       resolveReference: unused,
+      findCandidates: async () => [],
       findCredentialForService: async (scope) => {
         onLookup?.(scope);
         return secret;

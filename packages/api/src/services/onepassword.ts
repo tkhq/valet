@@ -122,6 +122,29 @@ export interface OnePasswordService {
     ctx: OnePasswordCtx,
     service: string,
   ): Promise<string | null>;
+  /**
+   * Items whose title names `query`, as references a caller can then resolve.
+   *
+   * Names only: vault title, item title, and the field segment a reference
+   * would address. No value is returned, and none is cached. This is what
+   * lets an agent act on "use my Claude API key" without being told a path,
+   * and it returns EVERY match rather than the first, because two items that
+   * both name a service is the ambiguity the caller has to settle, not
+   * something for this function to guess at.
+   */
+  findCandidates(
+    scope: OnePasswordScope,
+    ctx: OnePasswordCtx,
+    query: string,
+    limit?: number,
+  ): Promise<OpCandidate[]>;
+}
+
+/** One `findCandidates` hit. Titles and a field segment, never a value. */
+export interface OpCandidate {
+  vault: string;
+  item: string;
+  field: string;
 }
 
 // ── 1Password reference metadata on a StoredCredential ──────────────────
@@ -380,6 +403,27 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
     return null;
   }
 
+  /**
+   * The reference segment that would address this item's secret, by the same
+   * precedence `itemSecret` reads it: a credential-named field, else any
+   * concealed one, else a one-time code, else the note body (`notesPlain`,
+   * the segment 1Password uses for a SecureNote). `null` when nothing in the
+   * item is addressable. Reads the same item `itemSecret` does and returns
+   * only the NAME.
+   */
+  function itemSecretSegment(item: SdkItem): string | null {
+    const named = item.fields.find((f) =>
+      /^(credential|api[ _-]?key|token|secret|password)$/i.test(f.title),
+    );
+    const concealed = item.fields.find((f) => f.fieldType === "Concealed");
+    const plain = named ?? concealed;
+    if (plain?.value) return plain.title;
+    const totp = item.fields.find((f) => f.fieldType === "Totp");
+    if (totp?.details?.type === "Otp" && totp.details.content?.code) return totp.title;
+    if (item.notes?.trim()) return "notesPlain";
+    return null;
+  }
+
   return {
     async tokenConnected(scope, ctx) {
       const owner = tokenOwner(scope, ctx);
@@ -456,6 +500,59 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
       // The VALUE, not a reference: a note body and a computed one-time
       // code have no `op://` address, so a reference cannot express them.
       return secret.value;
+    },
+
+    async findCandidates(scope, ctx, query, limit = 10) {
+      // Same gate and token read as every other path: a scope with no token,
+      // or a personal scope the org disabled, throws before a vault is read.
+      const { client, token } = await clientFor(scope, ctx);
+      const owner = tokenOwner(scope, ctx);
+      const trimmed = query.trim();
+      // A blank query would return the whole inventory, which is the vault
+      // browsing this surface deliberately does not offer.
+      if (trimmed === "") return [];
+
+      let vaults;
+      try {
+        vaults = await client.vaults.list();
+      } catch (err) {
+        throw wrapSdkError(err, "vault listing failed");
+      }
+      const vaultTitle = new Map(vaults.map((v) => [v.id, v.title]));
+
+      const inventoryKey = `${scope}:${owner.id}:${tokenTag(token)}`;
+      const nowMs = now();
+      let inventory = inventoryCache.get(inventoryKey);
+      if (!inventory || nowMs - inventory.at < 0 || nowMs - inventory.at >= RESOLVE_TTL_MS) {
+        const items: { vaultId: string; id: string; title: string }[] = [];
+        for (const vault of vaults) {
+          try {
+            for (const item of await client.items.list(vault.id)) {
+              items.push({ vaultId: vault.id, id: item.id, title: item.title });
+            }
+          } catch {
+            // A vault this token cannot read is not an error for a search.
+          }
+        }
+        inventory = { items, at: nowMs };
+        inventoryCache.set(inventoryKey, inventory);
+      }
+
+      const matches = inventory.items.filter((i) => titleNamesService(i.title, trimmed)).slice(0, limit);
+      const out: OpCandidate[] = [];
+      for (const match of matches) {
+        let detail: SdkItem;
+        try {
+          detail = await client.items.getWithSecrets(match.vaultId, match.id);
+        } catch {
+          // One unreadable item does not spoil the search.
+          continue;
+        }
+        const field = itemSecretSegment(detail);
+        if (!field) continue;
+        out.push({ vault: vaultTitle.get(match.vaultId) ?? match.vaultId, item: match.title, field });
+      }
+      return out;
     },
   };
 }

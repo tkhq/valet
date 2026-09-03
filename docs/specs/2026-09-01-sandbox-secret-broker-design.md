@@ -28,9 +28,19 @@ a destination, and the value is placed there.
   `/usr/local/bin` by the existing `credential-scripts` prep step.
 - One paragraph in `CODING_SYSTEM_PROMPT` naming the command.
 
-**Non-goals:** listing the secrets a token can read (naming a destination is a
-different capability from browsing a vault); a second provider behind the
-broker; per-session reference allowlists; write access of any kind.
+**Non-goals:** reading the VALUE of a secret a caller did not name; a second
+provider behind the broker; per-session reference allowlists; write access of
+any kind.
+
+`find` narrows an earlier non-goal rather than dropping it. Naming a
+destination is useless when you do not know the destination: an agent told
+"use my Claude API key" could not turn that into an `op://` path, so it
+guessed one, and a guessed path fails exactly like a real one it cannot
+reach. `POST /find` answers a search term with vault, item, and field TITLES
+and no values, which is the smallest thing that closes that gap. It requires
+a term, so it never lists a vault, and it returns every match rather than the
+first, because two items that both name a service is an ambiguity for the
+caller to settle.
 
 ## Decisions
 
@@ -100,6 +110,14 @@ broker; per-session reference allowlists; write access of any kind.
    the presented token was minted for. Otherwise whoever takes ownership of a
    session can present the earlier actor's token, which this route resolves
    with, and read that actor's personal vault.
+
+9. **`scope` narrows the owner rule, never widens it.** With an org and a
+   personal token both connected, the org scope is tried first and silently
+   answers anything it can read, so a caller had no way to say which one it
+   meant. `run --scope` and `find --scope` intersect with the scopes the
+   owner rule already allows. Asking for a scope the rule excludes is refused
+   by name: answering "nothing resolved" would send the reader to check vault
+   names that were correct, which is the failure this route keeps making.
 
 ## Flow
 

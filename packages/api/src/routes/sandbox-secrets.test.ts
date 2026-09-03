@@ -25,6 +25,7 @@ function fakeOnePassword(): OnePasswordService {
     tokenConnected: unused,
     listVaults: unused,
     findCredentialForService: async () => null,
+    findCandidates: async () => [],
     resolveCredential: async (row: StoredCredential) => row,
     resolveReference: async (_scope, _ctx, reference) => {
       if (!reference.startsWith("op://ok/")) throw new OnePasswordAuthError("no such item", "no_token");
@@ -414,6 +415,79 @@ describe("POST /api/sandbox-secrets/resolve", () => {
   // problem sent the reader to rotate a service account that was fine. The
   // fake used above throws `no_token` for an unknown reference, so only the
   // live SDK showed this; the kind is what the route reads.
+  // `--scope` NARROWS the owner rule, never widens it. A team-owned session
+  // asking for the personal scope is refused by name, because answering
+  // "nothing resolved" would send the reader to check vault names that were
+  // correct.
+  it("refuses a scope the owner rule excludes, and names why", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = fakeOnePassword();
+    await api.providers.db.insert(agentSessions).values({
+      id: "sess-scope-team",
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/workspace",
+      ownerType: "team",
+      ownerId: "team-1",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const { token } = await mintSandboxToken(api.providers.db, {
+      sessionId: "sess-scope-team",
+      userId: "local-user",
+      orgId: "local-org",
+    });
+    const res = await fetch(`${api.baseUrl}/api/sandbox-secrets/resolve`, {
+      method: "POST",
+      headers: { ...HEADERS, "x-valet-sandbox": token },
+      body: JSON.stringify({ references: ["op://ok/item/field"], scope: "personal" }),
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: string }).error).toContain("organization vaults only");
+  });
+
+  it("rejects a scope that is not org or personal", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = fakeOnePassword();
+    const res = await fetch(`${api.baseUrl}/api/sandbox-secrets/resolve`, {
+      method: "POST",
+      headers: { ...HEADERS, "x-valet-sandbox": await mintToken() },
+      body: JSON.stringify({ references: ["op://ok/item/field"], scope: "nope" }),
+    });
+    expect(res.status).toBe(403);
+  });
+
+  // find returns NAMES. A value in this response would be the one thing that
+  // separates it from /resolve.
+  it("find returns scope-tagged references as text, never a value", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = {
+      ...fakeOnePassword(),
+      findCandidates: async () => [{ vault: "ProDex Labs", item: "Claude API Key", field: "notesPlain" }],
+    };
+    const res = await fetch(`${api.baseUrl}/api/sandbox-secrets/find`, {
+      method: "POST",
+      headers: { ...HEADERS, "x-valet-sandbox": await mintToken() },
+      body: JSON.stringify({ query: "claude" }),
+    });
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toBe("org\top://ProDex Labs/Claude API Key/notesPlain");
+  });
+
+  it("find refuses a blank query rather than listing the vaults", async () => {
+    api = await bootTestApi();
+    api.providers.onePassword = fakeOnePassword();
+    for (const query of ["", "   ", undefined]) {
+      const res = await fetch(`${api.baseUrl}/api/sandbox-secrets/find`, {
+        method: "POST",
+        headers: { ...HEADERS, "x-valet-sandbox": await mintToken() },
+        body: JSON.stringify({ query }),
+      });
+      expect(res.status, `query ${JSON.stringify(query)}`).toBe(400);
+    }
+  });
+
   it("names an unresolvable reference instead of blaming the token", async () => {
     api = await bootTestApi();
     api.providers.onePassword = {

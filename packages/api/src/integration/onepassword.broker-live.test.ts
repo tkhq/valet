@@ -80,6 +80,14 @@ async function resolveVia(token: string, references: string[]): Promise<Response
 
 type Resp = { values: (string | null)[]; unresolved: string[] };
 
+async function postSandbox(path: string, token: string, body: unknown): Promise<Response> {
+  return fetch(`${api!.baseUrl}/api/sandbox-secrets/${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-valet-sandbox": token },
+    body: JSON.stringify(body),
+  });
+}
+
 describeIfLive("api integration: the secret broker against a real vault", () => {
   it("resolves a real reference for the session's own user, byte-for-byte", async () => {
     if (!TOKEN || !REFERENCE) throw new Error("unreachable: gated above");
@@ -229,6 +237,54 @@ describeIfLive("api integration: the secret broker against a real vault", () => 
     expect(body.values[0]).toBeNull();
     expect(body.unresolved).toEqual([REFERENCE]);
   }, 60_000);
+
+  it("find returns scope-tagged references and no values", async () => {
+    api = await bootTestApi();
+    const { service, ready } = realService(TOKEN!, "org");
+    await ready;
+    api.providers.onePassword = service;
+    await seedSession(api.providers.db, { id: "s-find", ownerType: "user", ownerId: "local-user", userId: "local-user" });
+    const { token } = await mintSandboxToken(api.providers.db, { sessionId: "s-find", userId: "local-user", orgId });
+
+    const res = await postSandbox("find", token, { query: "claude" });
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    console.log("FIND OUTPUT:\n" + text);
+    expect(text).toContain("op://");
+    expect(text).toMatch(/^(org|personal)\t/m);
+    // 108-char key must not appear anywhere in a find response.
+    expect(text).not.toMatch(/sk-ant-/);
+  }, 90_000);
+
+  it("a team-owned session asking for the personal scope is refused by name", async () => {
+    api = await bootTestApi();
+    const { service, ready } = realService(TOKEN!, "org");
+    await ready;
+    api.providers.onePassword = service;
+    await seedSession(api.providers.db, { id: "s-team", ownerType: "team", ownerId: "team-1", userId: "local-user" });
+    const { token } = await mintSandboxToken(api.providers.db, { sessionId: "s-team", userId: "local-user", orgId });
+
+    const res = await postSandbox("resolve", token, { references: ["op://ProDex Labs/Claude API Key/notesPlain"], scope: "personal" });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string };
+    console.log("REFUSAL: " + body.error);
+    expect(body.error).toContain("organization vaults only");
+  }, 90_000);
+
+  it("scope: org still resolves for a user-owned session", async () => {
+    api = await bootTestApi();
+    const { service, ready } = realService(TOKEN!, "org");
+    await ready;
+    api.providers.onePassword = service;
+    await seedSession(api.providers.db, { id: "s-scoped", ownerType: "user", ownerId: "local-user", userId: "local-user" });
+    const { token } = await mintSandboxToken(api.providers.db, { sessionId: "s-scoped", userId: "local-user", orgId });
+
+    const res = await postSandbox("resolve", token, { references: ["op://ProDex Labs/Claude API Key/notesPlain"], scope: "org" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { values: (string | null)[]; unresolved: string[] };
+    expect(body.unresolved).toEqual([]);
+    expect(Buffer.from(body.values[0]!, "base64").toString("utf8").length).toBe(108);
+  }, 90_000);
 
   it("refuses the same reference with no sandbox token", async () => {
     if (!TOKEN || !REFERENCE) throw new Error("unreachable: gated above");
