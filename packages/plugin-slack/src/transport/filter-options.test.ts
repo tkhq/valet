@@ -93,7 +93,7 @@ describe("slack.users resolver", () => {
 });
 
 describe("slack.channels resolver", () => {
-  it("maps conversations.list to FilterOption[] labeled #name", async () => {
+  it("maps users.conversations to FilterOption[] labeled #name", async () => {
     fake.setChannels([
       { id: "C1", name: "general" },
       { id: "C2", name: "random" },
@@ -103,6 +103,14 @@ describe("slack.channels resolver", () => {
       { id: "C1", label: "#general" },
       { id: "C2", label: "#random" },
     ]);
+  });
+
+  it("reads the bot's joined channels, never the workspace directory", async () => {
+    fake.setChannels([{ id: "C1", name: "general" }]);
+    await resolvers()["slack.channels"](ctx({ q: "gen" }));
+    const methods = fake.calls.map((call) => call.method);
+    expect(methods).toContain("users.conversations");
+    expect(methods).not.toContain("conversations.list");
   });
 
   it("drops archived channels and honors the query", async () => {
@@ -124,7 +132,7 @@ describe("slack.channels resolver", () => {
     expect(fake.calls).toHaveLength(0);
   });
 
-  it("empty query returns all channels (no 20-item cap) sorted alphabetically", async () => {
+  it("empty query returns all channels sorted alphabetically", async () => {
     const channels = Array.from({ length: 30 }, (_, i) => ({
       id: `C${i}`,
       name: `channel-${String(i).padStart(2, "0")}`,
@@ -139,14 +147,25 @@ describe("slack.channels resolver", () => {
     expect(labels).toEqual(sorted);
   });
 
-  it("filtered query caps at 20 results", async () => {
-    // All 30 channels match the query "channel".
-    const channels = Array.from({ length: 30 }, (_, i) => ({
+  // The old resolver stopped the scan at 20 matches and sorted only those, so
+  // the rows it kept were whichever 20 Slack happened to page first. Seed the
+  // channels in reverse so page order is the opposite of sorted order: the old
+  // cap kept #channel-119..#channel-100, this one keeps the true first 100.
+  it("caps the row count after sorting, not during the scan", async () => {
+    const channels = Array.from({ length: 120 }, (_, i) => ({
       id: `C${i}`,
-      name: `channel-${String(i).padStart(2, "0")}`,
+      name: `channel-${String(i).padStart(3, "0")}`,
     }));
-    fake.setChannels(channels);
+    fake.setChannels([...channels].reverse());
     const options = await resolvers()["slack.channels"](ctx({ q: "channel" }));
-    expect(options).toHaveLength(20);
+    expect(options).toHaveLength(100);
+    expect(options[0]).toEqual({ id: "C0", label: "#channel-000" });
+    expect(options[99]).toEqual({ id: "C99", label: "#channel-099" });
+  });
+
+  it("propagates a Slack failure so the endpoint can report it", async () => {
+    fake.setChannels([{ id: "C1", name: "general" }]);
+    fake.failNext("users.conversations", "ratelimited");
+    await expect(resolvers()["slack.channels"](ctx({ q: "gen" }))).rejects.toThrow(/users\.conversations/);
   });
 });

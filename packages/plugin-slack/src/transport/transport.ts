@@ -61,6 +61,10 @@ const MAX_FILE_DOWNLOAD_BYTES = 25 * 1024 * 1024; // 25 MB (PDFs, documents)
  * grow faster than per-DM keys, so allow for more active threads. */
 const MAX_TRACKED_ENTRIES = 2000;
 
+/** How many typeahead rows the picker gets. Applied AFTER sorting, so the
+ * rows dropped are the ones that rank last, not the ones Slack paged last. */
+const PICKER_RESULT_LIMIT = 100;
+
 /** Code-point-safe truncation: never splits a surrogate pair at the cap. */
 function truncatePlain(text: string, max: number): string {
   const points = [...text];
@@ -1055,35 +1059,44 @@ export class SlackTransport implements ChannelTransport {
   }
 
   /**
-   * Channel typeahead for the event-filter picker (conversations.list, bot
-   * token). Returns public and private channels matching `query` by name.
+   * Channel typeahead for the event-filter picker: the channels THIS BOT has
+   * joined (users.conversations, bot token), matching `query` by name.
+   *
+   * The joined set, not the workspace directory, is the set a filter can name.
+   * Slack sends `message`/`app_mention` events only for channels the app is a
+   * member of, so a filter on any other channel can never match — and reading
+   * the directory to offer them made the picker unusable at Turnkey scale. Its
+   * 20-match early return only fired for a BROAD query; a narrow one (the case
+   * that needs a lookup) paged the whole directory on every keystroke,
+   * exhausted the Tier-2 rate limit for `conversations.list`, stalled 30-60s on
+   * `Retry-After`, and then returned nothing.
+   *
+   * A bot's membership list is small, so this scans it in full and ranks the
+   * matches before it truncates. The old cap truncated in Slack's page order
+   * FIRST and sorted the survivors, which could hide an exact match behind 20
+   * arbitrary ones.
    */
   async listWorkspaceChannels(query: string): Promise<Array<{ id: string; name: string }>> {
     const q = query.trim().toLowerCase();
     const out: Array<{ id: string; name: string }> = [];
     let cursor: string | undefined;
-    // Bound the SCAN, not just the match count: mirror listWorkspaceMembers so
-    // a selective query in a workspace with thousands of channels cannot page
-    // the whole directory and hang the typeahead.
+    // A bot in more than 2000 channels is not a workspace this picker can
+    // serve well anyway; bound the scan so one runaway install cannot hang it.
     const MAX_PAGES = 10;
     let pages = 0;
     do {
-      const page = await this.api.listChannels(cursor);
+      const page = await this.api.listJoinedChannels(cursor);
       pages += 1;
       for (const channel of page.channels) {
         if (channel.isArchived) continue;
         if (q !== "" && !channel.name.toLowerCase().includes(q)) continue;
         out.push({ id: channel.id, name: channel.name });
-        // When filtering by a search term, cap at 20 to keep the typeahead
-        // snappy. When browsing (empty query), return everything within the
-        // page-scan bound so the picker shows all channels.
-        if (q !== "" && out.length >= 20) return out;
       }
       cursor = page.nextCursor;
       if (pages >= MAX_PAGES) break;
     } while (cursor !== undefined);
     out.sort((a, b) => a.name.localeCompare(b.name));
-    return out;
+    return out.slice(0, PICKER_RESULT_LIMIT);
   }
 
   /**

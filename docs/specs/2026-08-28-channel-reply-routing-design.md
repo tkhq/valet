@@ -350,6 +350,32 @@ turn that produces no reply at all is a reportable miss, not a silent drop.
   carries no username. Resolving it to a display name reuses Part 2's
   name-resolution service; until then a channel-origin sender can surface as an
   id. The headline identity fix (the team name) is complete.
+- **`slack.channels` reads the bot's joined channels, not the workspace
+  directory.** The source first paged `conversations.list`. That offered
+  channels a filter can never match — Slack sends `message`/`app_mention` only
+  for channels the app has joined — and it made the picker fail at Turnkey
+  scale. The scan stopped early only once a query collected 20 matches, so a
+  BROAD query cost one API call while a NARROW one (the case that needs the
+  lookup) paged the whole directory on every keystroke. That exhausted the
+  Tier-2 rate limit, and `slackGet`'s three `Retry-After` sleeps turned each
+  request into a 30-60s stall that resolved to nothing. `users.conversations`
+  (Tier 3) returns the joined set instead, which is small enough to page in
+  full, so the resolver ranks every match before it truncates to 100 rows. The
+  old cap truncated in Slack's page order first and sorted the survivors, which
+  could hide an exact-name match behind 20 arbitrary ones.
+- **A failed option lookup is never memoized, and never reads as "no
+  options".** Two bugs compounded the one above. The Slack resolvers caught
+  their own provider errors and returned `[]`, so a rate-limited lookup and a
+  name that does not exist were indistinguishable — the endpoint's `reason`
+  never fired and the picker showed "No matches". The endpoint then cached that
+  empty list for its full 60s TTL, so the next minute of retries answered from
+  a poisoned entry. Resolvers now let provider failures propagate, and the
+  endpoint caches only successful lookups.
+- **Known gap: `slack.users` still caps at 20 during the scan.** The member
+  typeahead has the same truncate-before-sort flaw, but no smaller set to read:
+  `users.list` is the only directory, so dropping its early return would trade
+  a truncation bug for the rate-limit bug just fixed. It needs a cached
+  directory snapshot rather than a per-keystroke scan. Left as-is deliberately.
 
 ## Sequencing
 

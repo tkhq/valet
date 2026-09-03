@@ -313,19 +313,24 @@ export class SlackApi {
   }
 
   /**
-   * conversations.list page of public and private channels. `types` is
-   * fixed to `public_channel,private_channel`; DMs and group DMs are not
-   * subscribable channels. Excludes archived channels — a filter that names
-   * a dead channel never matches.
+   * `users.conversations` page of the public and private channels THIS BOT
+   * has joined. `types` is fixed to `public_channel,private_channel`; DMs and
+   * group DMs are not subscribable channels. Excludes archived channels — a
+   * filter that names a dead channel never matches.
+   *
+   * Not `conversations.list`: Slack delivers `message` and `app_mention`
+   * events only for channels the app is a member of, so the workspace
+   * directory offers channels a filter could never match, and it is two
+   * orders of magnitude larger. See `SlackTransport.listWorkspaceChannels`.
    */
-  async listChannels(cursor?: string): Promise<{ channels: SlackChannel[]; nextCursor?: string }> {
+  async listJoinedChannels(cursor?: string): Promise<{ channels: SlackChannel[]; nextCursor?: string }> {
     const params: Record<string, unknown> = {
       limit: 200,
       types: "public_channel,private_channel",
       exclude_archived: true,
     };
     if (cursor) params.cursor = cursor;
-    const res = await this.get("conversations.list", params);
+    const res = await this.get("users.conversations", params);
     const raw = Array.isArray(res.channels) ? res.channels : [];
     const channels: SlackChannel[] = [];
     for (const item of raw) {

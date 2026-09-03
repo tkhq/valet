@@ -275,23 +275,31 @@ eventsRouter.get("/events/filter-options", async (c) => {
 
   let options: FilterOption[] = [];
   let reason: string | undefined;
+  let failed = false;
   try {
     options = await found.resolver({ orgId: user.orgId, q, deps, credential });
   } catch (err) {
     console.error(`[events] filter-options resolver ${source} failed`, err);
     reason = "The provider could not list options right now. Type the value instead.";
+    failed = true;
   }
   if (options.length === 0 && reason === undefined && credential === null) {
     reason = "Connect the integration in Settings to choose from a list. Type the value instead.";
   }
 
-  // Evict the oldest single entry (Map preserves insertion order), not the
-  // whole cache — one org's typeahead must not flush every other org's.
-  if (filterOptionsCache.size >= FILTER_OPTIONS_CACHE_CAP) {
-    const oldest = filterOptionsCache.keys().next().value;
-    if (oldest !== undefined) filterOptionsCache.delete(oldest);
+  // Never memoize a failed lookup. A provider that rate-limits one keystroke
+  // would otherwise answer the next minute of retries from an empty cache
+  // entry, so the user sees a stable "no options" for a transient fault and
+  // cannot retry their way out of it.
+  if (!failed) {
+    // Evict the oldest single entry (Map preserves insertion order), not the
+    // whole cache — one org's typeahead must not flush every other org's.
+    if (filterOptionsCache.size >= FILTER_OPTIONS_CACHE_CAP) {
+      const oldest = filterOptionsCache.keys().next().value;
+      if (oldest !== undefined) filterOptionsCache.delete(oldest);
+    }
+    filterOptionsCache.set(cacheKey, { options, expiresAt: Date.now() + FILTER_OPTIONS_TTL_MS });
   }
-  filterOptionsCache.set(cacheKey, { options, expiresAt: Date.now() + FILTER_OPTIONS_TTL_MS });
 
   const resp: FilterOptionsResponse = reason === undefined ? { options } : { options, reason };
   return c.json(resp);

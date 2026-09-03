@@ -1376,6 +1376,41 @@ describe("GET /api/events/filter-options", () => {
     const res = await fetch(`${a.baseUrl}/api/events/filter-options`);
     expect(res.status).toBe(400);
   });
+
+  // A rate-limited provider used to poison the 60s memo: the empty list from
+  // the failed call was cached, so every retry inside the next minute answered
+  // "no options" from cache and the user could not recover by retrying.
+  it("does not cache a failed lookup, so the next call retries the provider", async () => {
+    let calls = 0;
+    // Its own source name: `filterOptionsCache` is module state keyed by
+    // (org, source, deps, q), and it outlives each test's api instance.
+    const flakyPlugin: ValetPlugin = {
+      ...fixturePlugin,
+      filterOptionResolvers: {
+        "fixture.flaky": async () => {
+          calls += 1;
+          if (calls === 1) throw new Error("ratelimited");
+          return [{ id: "acme/app", label: "acme/app" }];
+        },
+      },
+    };
+    api = await bootTestApi({ plugins: [flakyPlugin] });
+
+    const first = (await (await fetch(`${api.baseUrl}/api/events/filter-options?source=fixture.flaky`)).json()) as {
+      options: unknown[];
+      reason?: string;
+    };
+    expect(first.options).toEqual([]);
+    expect(first.reason).toContain("could not list options");
+
+    const second = (await (await fetch(`${api.baseUrl}/api/events/filter-options?source=fixture.flaky`)).json()) as {
+      options: { id: string }[];
+      reason?: string;
+    };
+    expect(second.options).toEqual([{ id: "acme/app", label: "acme/app" }]);
+    expect(second.reason).toBeUndefined();
+    expect(calls).toBe(2);
+  });
 });
 
 // ── Mention scoping (TKAI-299) ─────────────────────────────────────────────
