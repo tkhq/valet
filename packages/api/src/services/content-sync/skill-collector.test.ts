@@ -860,6 +860,38 @@ Read the reference.
       expect(outcome?.changed).toBe(false);
       expect(f.calls).toHaveLength(1);
     });
+
+    it("drops the mark on a failure, so recovery re-scans under live rules", async () => {
+      // A release that does not know the column re-syncs an errored source
+      // at the same commit under its own rules. Keeping the mark would let a
+      // later release trust a scan those rules never performed.
+      const repo: FakeRepo = { sha: "commit-1", skills: { deploy: skillMd("deploy", "Deploy it.") } };
+      const f = serve(repo);
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
+      const service = serviceFor(f);
+      await service.syncOnce(source.id);
+
+      const [synced] = await db
+        .select()
+        .from(contentSources)
+        .where(eq(contentSources.id, source.id));
+      expect(synced?.discoveryScan).not.toBeNull();
+
+      // The repository turns private, so the next read gets GitHub's 404 and
+      // the sync fails. Any failure reaches `recordFailure`; the kind is not
+      // what this case is about.
+      repo.requireToken = "a-token-this-source-does-not-hold";
+      await service.syncOnce(source.id);
+
+      const [failed] = await db
+        .select()
+        .from(contentSources)
+        .where(eq(contentSources.id, source.id));
+      expect(failed?.status).toBe("error");
+      expect(failed?.discoveryScan).toBeNull();
+      // The commit is untouched, so the retry re-reads rather than trusting it.
+      expect(failed?.lastSha).toBe("commit-1");
+    });
   });
 
   it("records a moved commit that carries the same skills, and writes no skill rows", async () => {

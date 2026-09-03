@@ -36,6 +36,10 @@ export const DISCOVERY_RULES_VERSION = 1;
  * The commit is paired with the version for rollback. A release that does not
  * know this column still advances `last_sha`, so a bare version would outlive
  * a sync under the old rules and then claim a head it never read.
+ *
+ * The pairing alone does not cover a rollback that re-syncs at the SAME
+ * commit, which an errored source does on every poll. `recordFailure` clears
+ * the mark for that reason, so the two rules hold it together.
  */
 export function discoveryScanMark(commitSha: string): string {
   return `${DISCOVERY_RULES_VERSION}:${commitSha}`;

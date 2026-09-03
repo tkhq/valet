@@ -576,7 +576,15 @@ export class ContentSyncService {
   }
 
   /** Records a failed sync and schedules the retry. `last_sha` and
-   * `last_manifest_hash` are left alone, so the next attempt re-reads. */
+   * `last_manifest_hash` are left alone, so the next attempt re-reads.
+   *
+   * `discovery_scan` IS cleared. An errored source already skips the
+   * head-commit compare and re-reads the tree, so clearing costs nothing,
+   * and it closes a rollback window: a release that does not know the column
+   * re-syncs at the same commit under its own rules and leaves the mark
+   * behind, after which a later release would trust a mark for a scan its
+   * rules never performed. Cleared, the mark means what it says: the last
+   * sync that ran was complete AND used these rules. */
   private async recordFailure(source: ContentSourceRow, err: unknown): Promise<ContentSyncOutcome> {
     const now = this.now();
     const attempts = source.attempts + 1;
@@ -589,6 +597,7 @@ export class ContentSyncService {
         attempts,
         nextAttemptAt: now + backoff,
         lastError: message.slice(0, MAX_STATUS_CHARS),
+        discoveryScan: null,
         updatedAt: now,
       })
       .where(eq(contentSources.id, source.id));
