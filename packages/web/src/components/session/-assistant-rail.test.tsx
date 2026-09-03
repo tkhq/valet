@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
 /**
  * The `/chat` sidebar lists every assistant the caller can reach, grouped by
- * owner. The cases that matter most are the ones where it must render
- * NOTHING extra: a solo user with one assistant, and an org with the
- * organizations feature turned off, must both see exactly the sidebar they
- * saw before a principal could own several. Empty scaffolding for a feature
- * you do not have is worse than no feature.
+ * owner. The block always draws once its queries resolve (TKAI-337): the
+ * `+` create button lives inside it, so a single-assistant owner (solo
+ * user, or a team member with only its seeded default) still needs the
+ * block on screen to grow a second assistant. Empty scaffolding for a
+ * feature you do not have is worse than no feature — the team group stays
+ * out with the `organizations` feature off, and no group draws before its
+ * queries settle.
  */
 import type { ReactNode } from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
@@ -262,19 +264,27 @@ describe("eligibleTeams", () => {
 });
 
 describe("AssistantRail", () => {
-  it("renders no Assistants block for a solo user with one assistant", () => {
-    // One row switches nothing, so the block is not drawn at all.
+  it("draws the block for a solo user with one assistant so `+` is reachable", () => {
+    // The `+` create button lives inside the block, so a single-assistant
+    // owner (solo user, or team member with only its seeded default) must
+    // still see it — otherwise they have no way to create a second
+    // assistant. TKAI-337.
     renderRail();
-    expect(screen.queryByText("Your assistants")).toBeNull();
+    expect(screen.getByText("Your assistants")).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "New assistant for Your assistants" }),
+    ).toBeTruthy();
     expect(screen.getByTestId("thread-tree")).toBeTruthy();
   });
 
-  it("renders no Assistants block when the organizations feature is off", () => {
+  it("keeps a team group out of the block when the organizations feature is off", () => {
     orgData = org(false);
     teamsData = { teams: [team()] };
     assistantsData = { assistants: [mine(), teamAssistant()] };
     renderRail();
-    expect(screen.queryByText("Your assistants")).toBeNull();
+    // The personal group still draws (its `+` is a real affordance), and
+    // the team group is gated off with the feature.
+    expect(screen.getByText("Your assistants")).toBeTruthy();
     expect(screen.queryByText("Platform")).toBeNull();
   });
 

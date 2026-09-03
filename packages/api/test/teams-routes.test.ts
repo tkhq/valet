@@ -7,7 +7,7 @@
  * already-unit-tested service.
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../src/integration/_setup.js";
 import {
   agentSessions,
@@ -121,6 +121,10 @@ describe("teams routes", () => {
   // TKAI-296: with the membership rows gone, nobody can view or administer
   // the team's assistant, so a surviving row and session are unreachable
   // orphans. Team delete retires the assistant and soft-deletes its session.
+  //
+  // The seeded default (TKAI-337) already lives on the team, so the fixture
+  // adds a second, non-default assistant and asserts every team-owned row
+  // is retired.
   it("deleting a team retires its assistant and deletes the assistant's session", async () => {
     api = await bootTestApi();
     const { baseUrl, providers } = api;
@@ -138,7 +142,7 @@ describe("teams routes", () => {
       personality: null,
       behavior: null,
       sessionId: "assistant:asst_team_del",
-      isDefault: true,
+      isDefault: false,
       createdAt: Date.now(),
       archivedAt: null,
     });
@@ -172,6 +176,12 @@ describe("teams routes", () => {
         .where(eq(agentSessions.id, "assistant:asst_team_del"))
     )[0];
     expect(sess?.status).toBe("deleted");
+    // The seeded default is retired too — every team-owned row goes.
+    const teamOwned = await db
+      .select()
+      .from(assistants)
+      .where(and(eq(assistants.ownerType, "team"), eq(assistants.ownerId, team.id)));
+    expect(teamOwned.every((r) => r.archivedAt !== null)).toBe(true);
   });
 
   // The workflow refusal must land BEFORE the assistant teardown: a refused
@@ -195,6 +205,8 @@ describe("teams routes", () => {
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
+    // A second (non-default) assistant beside the seeded default (TKAI-337).
+    // The refusal must leave both rows untouched.
     await db.insert(assistants).values({
       id: "asst_wf_team",
       orgId: "local-org",
@@ -204,7 +216,7 @@ describe("teams routes", () => {
       personality: null,
       behavior: null,
       sessionId: "assistant:asst_wf_team",
-      isDefault: true,
+      isDefault: false,
       createdAt: Date.now(),
       archivedAt: null,
     });
@@ -219,7 +231,14 @@ describe("teams routes", () => {
       await db.select().from(assistants).where(eq(assistants.id, "asst_wf_team"))
     )[0];
     expect(row?.archivedAt).toBeNull();
-    expect(row?.isDefault).toBe(true);
+    // Every team-owned assistant survives untouched — the seeded default
+    // included.
+    const teamOwned = await db
+      .select()
+      .from(assistants)
+      .where(and(eq(assistants.ownerType, "team"), eq(assistants.ownerId, team.id)));
+    expect(teamOwned.every((r) => r.archivedAt === null)).toBe(true);
+    expect(teamOwned.some((r) => r.isDefault)).toBe(true);
   });
 
   it("404s on a team id that doesn't exist (or belongs to another org)", async () => {

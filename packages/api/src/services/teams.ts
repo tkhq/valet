@@ -25,7 +25,7 @@ import {
   workflowDefinitions,
   type TeamRow,
 } from "../schema/index.js";
-import { retireAssistant } from "../assistants/service.js";
+import { insertDefaultAssistantForPrincipal, retireAssistant } from "../assistants/service.js";
 import { getOrgFeatures, isOrgAdmin } from "./org.js";
 import { deleteMirroredContent } from "./content-sources.js";
 
@@ -256,6 +256,12 @@ export interface CreateTeamOptions {
  * a belt-and-suspenders catch on the `teams_org_name` unique constraint) so
  * two concurrent creates of the same name can't both pass the pre-check and
  * race into a raw 500 — the loser always sees `TeamNameConflictError`.
+ *
+ * A default assistant is seeded in the SAME transaction (TKAI-337). Every
+ * `/chat` UI affordance for a team keys off "the team owns an assistant"
+ * (group header, `+` button, scoped default), and lazy creation left a
+ * brand-new team as a dead end that silently opened the caller's personal
+ * conversation. The seed and the team insert live and die together.
  */
 export async function createTeam(db: AppDb, opts: CreateTeamOptions): Promise<TeamRow> {
   const id = newTeamId();
@@ -284,6 +290,7 @@ export async function createTeam(db: AppDb, opts: CreateTeamOptions): Promise<Te
 
       await tx.insert(teams).values(row);
       await tx.insert(teamMembers).values({ teamId: id, userId: opts.creatorUserId, role: "admin" });
+      await insertDefaultAssistantForPrincipal(tx, opts.orgId, { type: "team", id });
     });
   } catch (err) {
     if (isTeamNameUniqueViolation(err)) throw new TeamNameConflictError(opts.orgId, opts.name);

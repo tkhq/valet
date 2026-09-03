@@ -63,17 +63,15 @@ export function AssistantRail() {
 
   const teams = eligibleTeams(teamsQ.data?.teams, orgQ.data?.features.organizations);
   const groups = groupAssistants(assistantsQ.data?.assistants, teams);
-  const total = countAssistants(groups);
 
   // No-flash rule (same as `settings-rail.tsx`): every query the block reads
   // must resolve before it can appear. A section that renders and then
-  // vanishes is worse than one that arrives a beat late.
-  const resolved =
+  // vanishes is worse than one that arrives a beat late. Once resolved, the
+  // block is always drawn: the `+` create button lives inside it (TKAI-337),
+  // so a `total > 1` gate that hid it for single-assistant owners also hid
+  // their only path to a second assistant.
+  const showAssistants =
     orgQ.data !== undefined && teamsQ.data !== undefined && assistantsQ.data !== undefined;
-  // A switcher with one row switches nothing, so it is not drawn. This is
-  // what keeps a solo user with one assistant on exactly the sidebar they
-  // had before a principal could own several.
-  const showAssistants = resolved && total > 1;
 
   // Only an assistant the caller can actually reach may drive the thread
   // tree. With no `?assistant=`, open the ACTIVE workspace's default — so the
@@ -180,10 +178,6 @@ export interface AssistantGroup {
   /** Absent for your own group. Carries the member count and caller role. */
   team?: TeamSummary;
   assistants: AssistantSummary[];
-}
-
-export function countAssistants(groups: AssistantGroup[]): number {
-  return groups.reduce((n, group) => n + group.assistants.length, 0);
 }
 
 /**

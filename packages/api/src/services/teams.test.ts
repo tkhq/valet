@@ -1,8 +1,16 @@
 import { describe, expect, it, beforeEach } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { orgMembers, orgs, teamMembers, teams, users, workflowDefinitions } from "../schema/index.js";
+import {
+  assistants,
+  orgMembers,
+  orgs,
+  teamMembers,
+  teams,
+  users,
+  workflowDefinitions,
+} from "../schema/index.js";
 import {
   addMember,
   ConfigManagedTeamError,
@@ -48,6 +56,41 @@ describe("teams service", () => {
     const teams = await listTeamsForUser(db, "u1");
     expect(teams).toHaveLength(1);
     expect(teams[0].id).toBe(team.id);
+  });
+
+  it("createTeam seeds the team's default assistant in the same transaction (TKAI-337)", async () => {
+    // Every `/chat` UI affordance for a team keys off "the team owns an
+    // assistant". Lazy creation left a brand-new team with no group, no
+    // `+`, and silently opened the caller's personal assistant. The row
+    // must be present the moment the team is.
+    const team = await createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" });
+
+    const owned = await db
+      .select()
+      .from(assistants)
+      .where(and(eq(assistants.ownerType, "team"), eq(assistants.ownerId, team.id)));
+    expect(owned).toHaveLength(1);
+    expect(owned[0]?.isDefault).toBe(true);
+    expect(owned[0]?.archivedAt).toBeNull();
+    expect(owned[0]?.orgId).toBe(orgId);
+    // Session address follows the assistant id (`assistant:{id}`), so the
+    // rail and every dispatch resolve to the same session.
+    expect(owned[0]?.sessionId).toBe(`assistant:${owned[0]!.id}`);
+  });
+
+  it("createTeam rolls the assistant back with the team on a name conflict", async () => {
+    // The seed lives inside the create transaction, so a duplicate name
+    // must leave neither row behind — otherwise a retry after a rejected
+    // create would strand a dangling-owner assistant.
+    await createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" });
+    const before = await db.select().from(assistants);
+
+    await expect(
+      createTeam(db, { orgId, name: "Platform", creatorUserId: "u2" }),
+    ).rejects.toThrow(TeamNameConflictError);
+
+    const after = await db.select().from(assistants);
+    expect(after).toHaveLength(before.length);
   });
 
   it("rejects a duplicate team name within the same org", async () => {
