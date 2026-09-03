@@ -219,6 +219,18 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'ALTER TABLE "followed_threads" ADD COLUMN IF NOT EXISTS "last_seen_ts" text',
   },
   {
+    // Trigger provenance. A deployed database holds only person-armed rows,
+    // which is what the default encodes, so the default IS the backfill.
+    describe: "workflow_schedules.origin column",
+    probe: { kind: "column", table: "workflow_schedules", column: "origin" },
+    sql: `ALTER TABLE "workflow_schedules" ADD COLUMN IF NOT EXISTS "origin" text NOT NULL DEFAULT 'local'`,
+  },
+  {
+    describe: "event_subscriptions.origin column",
+    probe: { kind: "column", table: "event_subscriptions", column: "origin" },
+    sql: `ALTER TABLE "event_subscriptions" ADD COLUMN IF NOT EXISTS "origin" text NOT NULL DEFAULT 'local'`,
+  },
+  {
     // Which of the owner's assistants a followed thread routes to. Null on
     // rows from before the column, and on any follow whose rule named no
     // assistant — both read as "the owner's default", the old behavior.

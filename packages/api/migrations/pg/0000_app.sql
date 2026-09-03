@@ -893,6 +893,10 @@ CREATE TABLE "event_subscriptions" (
 	"filters" jsonb DEFAULT '[]'::jsonb NOT NULL,
 	"target" jsonb NOT NULL,
 	"enabled" boolean DEFAULT true NOT NULL,
+	-- `repo` rows are armed from a mirrored workflow file. The sync updates
+	-- and deletes only these, so a trigger a person armed on the same
+	-- workflow is never touched.
+	"origin" text DEFAULT 'local' NOT NULL,
 	"created_by" text NOT NULL,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
@@ -931,6 +935,10 @@ CREATE TABLE "workflow_schedules" (
 	"timezone" text DEFAULT 'UTC' NOT NULL,
 	"input" jsonb,
 	"enabled" boolean DEFAULT true NOT NULL,
+	-- `repo` rows are armed from a mirrored workflow file. The sync updates
+	-- and deletes only these, so a schedule a person armed on the same
+	-- workflow is never touched.
+	"origin" text DEFAULT 'local' NOT NULL,
 	"last_fired_at" bigint,
 	"next_fire_at" bigint NOT NULL,
 	"created_by" text NOT NULL,

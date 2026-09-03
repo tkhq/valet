@@ -875,6 +875,8 @@ describe("pg app schema + migrations", () => {
       { table: "workflow_definitions", column: "content_sha" },
       { table: "workflow_versions", column: "origin" },
       { table: "workflow_versions", column: "source_commit" },
+      { table: "workflow_schedules", column: "origin" },
+      { table: "event_subscriptions", column: "origin" },
       { table: "orgs", column: "sso_team_groups" },
       { table: "agent_sessions", column: "hibernated_sandbox_id" },
       { table: "agent_sessions", column: "sandbox_reclaimed_at" },

@@ -747,7 +747,14 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     // message instead of at run time inside a node.
     collectors: [
       new SkillCollector(),
-      new WorkflowCollector({ env: buildValidateEnvironment(actionPluginByService) }),
+      new WorkflowCollector({
+        env: buildValidateEnvironment(actionPluginByService),
+        // The event catalog `validateSubscription` reads, so an `events`
+        // block naming an unknown key or an undeclared filter field fails
+        // its file at sync instead of arming a subscription nothing can
+        // deliver.
+        plugins,
+      }),
     ],
     reader: new GitHubSkillRepoReader(),
     readerFor: skillRepoReaderFactory({

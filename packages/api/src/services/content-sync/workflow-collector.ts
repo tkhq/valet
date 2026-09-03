@@ -35,10 +35,13 @@ import {
   type ValidateEnvironment,
   type WorkflowFile,
 } from "@valet/workflow";
+import type { ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../../lib/drizzle.js";
 import {
+  eventSubscriptions,
   workflowDefinitions,
   workflowRuns,
+  workflowSchedules,
   workflowVersions,
   type ContentSourceRow,
 } from "../../schema/index.js";
@@ -47,6 +50,9 @@ import {
   newWorkflowId,
   purgeWorkflowRows,
 } from "../../workflows/service.js";
+import { nextFireAt } from "../../workflows/schedule-service.js";
+import { validateSubscriptionWrite } from "../../events/subscription-write.js";
+import type { SubscriptionFilter } from "../../events/match.js";
 import type { SkillTreeEntry } from "../skill-repo-reader.js";
 import type {
   CollectorDiscoverContext,
@@ -74,6 +80,14 @@ export interface WorkflowCollectorDeps {
    * mirrors a plain graph needs no plugin catalog.
    */
   env?: ValidateEnvironment;
+  /**
+   * The event catalog `validateSubscription` reads to check an `events`
+   * block's keys and filter fields. Optional and defaulting to none, which
+   * fails closed: with no catalog every event key is unknown, so a file
+   * declaring events reports that instead of arming a subscription nothing
+   * can deliver.
+   */
+  plugins?: ValetPlugin[];
 }
 
 export class WorkflowCollector implements ContentCollector {
@@ -99,7 +113,7 @@ export class WorkflowCollector implements ContentCollector {
     // Path order, so the manifest hash follows the commit and not the order
     // GitHub listed the tree in.
     candidates.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-    return new WorkflowPass(candidates, source, this.deps.env);
+    return new WorkflowPass(candidates, source, this.deps.env, this.deps.plugins ?? []);
   }
 }
 
@@ -151,6 +165,7 @@ class WorkflowPass implements CollectorPass {
     private readonly candidates: WorkflowCandidate[],
     source: ContentSourceRow,
     private readonly env: ValidateEnvironment | undefined,
+    private readonly plugins: ValetPlugin[],
   ) {
     this.discovered = candidates.length;
     // A user source collects no workflows: personal workflow sync is out of
@@ -221,12 +236,25 @@ class WorkflowPass implements CollectorPass {
         continue;
       }
 
-      // Decision 9: a team may not yet run tool nodes on a trigger, so a
+      // Decision 9: a team cannot run tool nodes on a trigger, so a
       // team-owned file that declares one is mirrored with its triggers
-      // unarmed. Task 6 arms triggers; until then nothing here arms any,
-      // and the warning is what tells the team why.
+      // unarmed, and the warning is what tells the team why.
       const gated = teamTriggerGate(source, parsed.file);
       if (gated !== null) warnings.push(`${candidate.path}: ${gated}`);
+
+      // Decision 8's validation order: the cron and every filter are checked
+      // BEFORE anything is written, so a bad trigger fails its file and
+      // reports on the source row rather than arming something that can
+      // never fire. A gated file plans no triggers, which is what leaves
+      // them off.
+      const plan =
+        gated === null
+          ? await planTriggers(db, this.plugins, source, parsed.file, candidate.path, now())
+          : { ok: true as const, plan: NO_TRIGGERS };
+      if (!plan.ok) {
+        warnings.push(...plan.errors.map((e) => `${candidate.path}: ${e}`));
+        continue;
+      }
 
       const name = parsed.file.name ?? candidate.name;
       const row = byPath.get(candidate.path);
@@ -249,6 +277,7 @@ class WorkflowPass implements CollectorPass {
           updatedAt: now(),
         });
         await snapshot(db, id, 1, name, parsed.file.definition, commitSha, now());
+        await armTriggers(db, source, id, plan.plan, now());
         imported += 1;
         continue;
       }
@@ -257,6 +286,10 @@ class WorkflowPass implements CollectorPass {
       // decides whether a VERSION is worth minting. A rename of the file's
       // `name` key changes the row and mints nothing, matching the product
       // edit path.
+      // The triggers reconcile on every pass, not only when the file moved:
+      // they are rows another surface can change, and the file is the
+      // authority for the ones it declares.
+      await armTriggers(db, source, row.id, plan.plan, now());
       if (row.contentSha === candidate.blobSha && row.name === name) continue;
       await db
         .update(workflowDefinitions)
@@ -408,6 +441,232 @@ class WorkflowPass implements CollectorPass {
       );
     }
     return lines.length === 0 ? null : lines.join("\n");
+  }
+}
+
+/**
+ * What a file's `schedule` and `events` blocks become, once every value that
+ * can be refused has been. Empty on a file that declares neither, and on one
+ * decision 9's gate holds back; either way the reconcile below then removes
+ * whatever the file used to declare.
+ */
+interface TriggerPlan {
+  schedule: {
+    name: string;
+    cron: string;
+    timezone: string;
+    nextFireAt: number;
+  } | null;
+  subscriptions: Array<{
+    name: string;
+    eventKeys: string[];
+    filters: SubscriptionFilter[];
+  }>;
+}
+
+const NO_TRIGGERS: TriggerPlan = { schedule: null, subscriptions: [] };
+
+/**
+ * Checks a file's declared triggers, and returns what to write.
+ *
+ * Nothing is written here. Decision 8 reuses the install path's validation
+ * ORDER: a bad cron or a filter naming an undeclared field fails the file and
+ * reports on the source row, rather than arming a trigger that can never
+ * fire. Failing the file is why this runs before the definition is mirrored.
+ *
+ * A webhook is never planned. The bearer secret is the primary key of
+ * `workflow_webhooks`, so a file that declared one would publish the secret
+ * in the repository. Arm a webhook from the Triggers page instead; it keys
+ * off `workflow_id` and survives every resync.
+ */
+async function planTriggers(
+  db: AppDb,
+  plugins: ValetPlugin[],
+  source: ContentSourceRow,
+  file: WorkflowFile,
+  path: string,
+  now: number,
+): Promise<{ ok: true; plan: TriggerPlan } | { ok: false; errors: string[] }> {
+  const errors: string[] = [];
+  let schedule: TriggerPlan["schedule"] = null;
+
+  if (file.schedule !== undefined) {
+    const timezone = file.schedule.timezone ?? "UTC";
+    // The same parser the install path calls, so a cron this accepts is one
+    // the scheduler can fire.
+    const next = nextFireAt(file.schedule.cron, timezone, now);
+    if (!next.ok) errors.push(next.error);
+    else {
+      schedule = {
+        name: file.schedule.name,
+        cron: file.schedule.cron,
+        timezone,
+        nextFireAt: next.at,
+      };
+    }
+  }
+
+  const subscriptions: TriggerPlan["subscriptions"] = [];
+  for (const event of file.events ?? []) {
+    // `matchChanged: false`: the mention gate injects the CREATOR's own
+    // identity into a filter set, and a file has no creator. A file must
+    // therefore say what it matches, which `validateSubscription` enforces.
+    const write = await validateSubscriptionWrite(
+      db,
+      plugins,
+      {
+        name: event.name ?? event.eventKeys.join(", "),
+        eventKeys: event.eventKeys,
+        filters: event.filters ?? [],
+        target: { kind: "workflow", workflowId: "pending" },
+      },
+      { matchChanged: false, anyChannel: false, creatorUserId: source.createdBy ?? source.ownerId },
+    );
+    if (!write.ok) {
+      errors.push(write.error);
+      continue;
+    }
+    subscriptions.push({
+      name: event.name ?? event.eventKeys.join(", "),
+      eventKeys: event.eventKeys,
+      // The validator's own filters, not the file's: it is the value that
+      // passed, and dropping it would arm a subscription on unchecked input.
+      filters: write.filters,
+    });
+  }
+
+  if (errors.length > 0) {
+    return {
+      ok: false,
+      errors: errors.map((e) => `${e} Fix ${path} and push; nothing from this file was mirrored.`),
+    };
+  }
+  return { ok: true, plan: { schedule, subscriptions } };
+}
+
+/**
+ * Brings the `origin='repo'` triggers of one mirrored workflow in line with
+ * its file. Every write is scoped by `workflow_id` AND `origin='repo'`, so a
+ * trigger a person armed on the same workflow is never touched: decision 8
+ * keeps the Triggers page open on a mirrored workflow, and a webhook armed
+ * there has to survive.
+ *
+ * A block removed from the file disarms its trigger, which is the whole
+ * reason this reconciles rather than only inserting.
+ */
+async function armTriggers(
+  db: AppDb,
+  source: ContentSourceRow,
+  workflowId: string,
+  plan: TriggerPlan,
+  now: number,
+): Promise<void> {
+  const existing = await db
+    .select()
+    .from(workflowSchedules)
+    .where(and(eq(workflowSchedules.workflowId, workflowId), eq(workflowSchedules.origin, "repo")));
+
+  if (plan.schedule === null) {
+    if (existing.length > 0) {
+      await db
+        .delete(workflowSchedules)
+        .where(
+          and(eq(workflowSchedules.workflowId, workflowId), eq(workflowSchedules.origin, "repo")),
+        );
+    }
+  } else {
+    const wanted = plan.schedule;
+    const current = existing[0];
+    // One schedule per file: the envelope carries one `schedule` block. A
+    // second row can only come from an older shape, so it goes.
+    for (const extra of existing.slice(1)) {
+      await db.delete(workflowSchedules).where(eq(workflowSchedules.id, extra.id));
+    }
+    if (current === undefined) {
+      await db.insert(workflowSchedules).values({
+        id: newWorkflowId("wfsched"),
+        orgId: source.orgId,
+        // The schedule follows its workflow, which follows its source.
+        ownerType: source.ownerType,
+        ownerId: source.ownerId,
+        targetKind: "workflow",
+        workflowId,
+        name: wanted.name,
+        cron: wanted.cron,
+        timezone: wanted.timezone,
+        enabled: true,
+        origin: "repo",
+        nextFireAt: wanted.nextFireAt,
+        createdBy: source.createdBy ?? source.ownerId,
+        createdAt: now,
+        updatedAt: now,
+      });
+    } else if (
+      current.cron !== wanted.cron ||
+      current.timezone !== wanted.timezone ||
+      current.name !== wanted.name
+    ) {
+      // `next_fire_at` moves only when the cron or the zone did. Rewriting it
+      // on every poll would push a due schedule forward forever.
+      const reschedule = current.cron !== wanted.cron || current.timezone !== wanted.timezone;
+      await db
+        .update(workflowSchedules)
+        .set({
+          name: wanted.name,
+          cron: wanted.cron,
+          timezone: wanted.timezone,
+          updatedAt: now,
+          ...(reschedule ? { nextFireAt: wanted.nextFireAt } : {}),
+        })
+        .where(eq(workflowSchedules.id, current.id));
+    }
+  }
+
+  // Subscriptions are keyed by the event keys they carry, which is the only
+  // identity a file gives them.
+  const subs = await db
+    .select()
+    .from(eventSubscriptions)
+    .where(and(eq(eventSubscriptions.orgId, source.orgId), eq(eventSubscriptions.origin, "repo")));
+  const mine = subs.filter((row) => {
+    if (typeof row.target !== "object" || row.target === null) return false;
+    const target = row.target as { kind?: string; workflowId?: string };
+    return target.kind === "workflow" && target.workflowId === workflowId;
+  });
+  const keyOf = (keys: string[]): string => [...keys].sort().join("\u0000");
+  const wanted = new Map(plan.subscriptions.map((sub) => [keyOf(sub.eventKeys), sub]));
+
+  for (const row of mine) {
+    const key = keyOf((row.eventKeys as string[]) ?? []);
+    const want = wanted.get(key);
+    if (want === undefined) {
+      await db.delete(eventSubscriptions).where(eq(eventSubscriptions.id, row.id));
+      continue;
+    }
+    wanted.delete(key);
+    if (row.name !== want.name || JSON.stringify(row.filters) !== JSON.stringify(want.filters)) {
+      await db
+        .update(eventSubscriptions)
+        .set({ name: want.name, filters: want.filters, updatedAt: now })
+        .where(eq(eventSubscriptions.id, row.id));
+    }
+  }
+  for (const want of wanted.values()) {
+    await db.insert(eventSubscriptions).values({
+      id: newWorkflowId("evsub"),
+      orgId: source.orgId,
+      ownerType: source.ownerType,
+      ownerId: source.ownerId,
+      name: want.name,
+      eventKeys: want.eventKeys,
+      filters: want.filters,
+      target: { kind: "workflow", workflowId },
+      enabled: true,
+      origin: "repo",
+      createdBy: source.createdBy ?? source.ownerId,
+      createdAt: now,
+      updatedAt: now,
+    });
   }
 }
 

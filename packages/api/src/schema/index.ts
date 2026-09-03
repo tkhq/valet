@@ -1685,6 +1685,10 @@ export const eventSubscriptions = pgTable(
     /** `{ kind: "workflow", workflowId } | { kind: "orchestrator" } | { kind: "signal" }`. */
     target: jsonb("target").notNull(),
     enabled: boolean("enabled").notNull().default(true),
+    /** `repo` rows are armed from a mirrored workflow file. The sync updates
+     * and deletes only these, so a subscription a person armed on the same
+     * workflow is never touched. */
+    origin: text("origin", { enum: ["local", "repo"] }).notNull().default("local"),
     createdBy: text("created_by").notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
@@ -1759,6 +1763,10 @@ export const workflowSchedules = pgTable(
     /** Optional static payload delivered as `trigger.data.input`. */
     input: jsonb("input"),
     enabled: boolean("enabled").notNull().default(true),
+    /** `repo` rows are armed from a mirrored workflow file. The sync updates
+     * and deletes only these, so a schedule a person armed on the same
+     * workflow is never touched. */
+    origin: text("origin", { enum: ["local", "repo"] }).notNull().default("local"),
     lastFiredAt: bigint("last_fired_at", { mode: "number" }),
     nextFireAt: bigint("next_fire_at", { mode: "number" }).notNull(),
     createdBy: text("created_by").notNull(),

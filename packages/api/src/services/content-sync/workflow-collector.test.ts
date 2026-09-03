@@ -568,45 +568,153 @@ describe("workflow collector", () => {
     expect(outcome?.notice).toContain("team source");
   });
 
-  it("mirrors a team workflow with tool nodes and a schedule, and warns that the trigger is off", async () => {
-    const file = [
-      "valet: workflow/v1",
-      "name: Nightly report",
-      "schedule:",
-      "  cron: 0 3 * * *",
-      "  timezone: UTC",
-      "definition:",
-      "  version: dag/v1",
-      "  nodes:",
-      "    - id: trigger",
-      "      type: trigger",
-      "    - id: fetch",
-      "      type: tool",
-      "      service: github",
-      "      action: list_issues",
-      "      params: {}",
-      "    - id: stop",
-      "      type: stop",
-      "  edges:",
-      "    - from: trigger",
-      "      to: fetch",
-      "    - from: fetch",
-      "      to: stop",
-      "",
-    ].join("\n");
-    const f = serve({ sha: "c1", files: { ".valet/workflows/report.yaml": file } });
-    const id = await teamSource();
+  describe("triggers a file declares", () => {
+    const scheduled = (cron: string) =>
+      [
+        "valet: workflow/v1",
+        "name: Nightly",
+        "schedule:",
+        `  cron: "${cron}"`,
+        "  name: Nightly run",
+        "  timezone: UTC",
+        "definition:",
+        "  version: dag/v1",
+        "  nodes:",
+        "    - id: trigger",
+        "      type: trigger",
+        "    - id: stop",
+        "      type: stop",
+        "  edges:",
+        "    - from: trigger",
+        "      to: stop",
+        "",
+      ].join("\n");
 
-    const outcome = await serviceFor(f).syncOnce(id);
-    expect(outcome?.status).toBe("warning");
+    it("arms a schedule, rewrites it when the cron moves, and disarms it when the block goes", async () => {
+      const repo: FakeRepo = {
+        sha: "c1",
+        files: { ".valet/workflows/nightly.yaml": scheduled("0 3 * * *") },
+      };
+      const f = serve(repo);
+      const id = await teamSource();
+      await serviceFor(f).syncOnce(id);
 
-    const rows = await mirrored();
-    expect(rows).toHaveLength(1);
-    expect(rows[0].name).toBe("Nightly report");
-    // Nothing arms a trigger from a file yet, and a team could not run this
-    // one on a schedule in any case. The warning is what says so.
-    expect(await db.select().from(workflowSchedules)).toHaveLength(0);
-    expect(outcome?.warnings.join(" ")).toContain("left the trigger off");
+      const armed = await db.select().from(workflowSchedules);
+      expect(armed).toHaveLength(1);
+      expect(armed[0].cron).toBe("0 3 * * *");
+      expect(armed[0].origin).toBe("repo");
+      expect(armed[0].ownerType).toBe("team");
+      expect(armed[0].workflowId).toBe((await mirrored())[0].id);
+      const scheduleId = armed[0].id;
+
+      repo.sha = "c2";
+      repo.files[".valet/workflows/nightly.yaml"] = scheduled("0 5 * * *");
+      await serviceFor(f).syncOnce(id);
+      const moved = await db.select().from(workflowSchedules);
+      expect(moved).toHaveLength(1);
+      // The same row, so its id stays stable for anything holding it.
+      expect(moved[0].id).toBe(scheduleId);
+      expect(moved[0].cron).toBe("0 5 * * *");
+
+      // Removing the block disarms it, which is why this reconciles rather
+      // than only inserting.
+      repo.sha = "c3";
+      repo.files[".valet/workflows/nightly.yaml"] = workflowYaml("Nightly");
+      await serviceFor(f).syncOnce(id);
+      expect(await db.select().from(workflowSchedules)).toHaveLength(0);
+    });
+
+    it("fails the file on a bad cron and mirrors nothing from it", async () => {
+      const f = serve({
+        sha: "c1",
+        files: {
+          ".valet/workflows/bad.yaml": scheduled("not a cron"),
+          ".valet/workflows/fine.yaml": workflowYaml("Fine"),
+        },
+      });
+      const id = await teamSource();
+      const outcome = await serviceFor(f).syncOnce(id);
+
+      // The other file still mirrors: one file's mistake costs that file.
+      expect((await mirrored()).map((r) => r.upstreamPath)).toEqual([
+        ".valet/workflows/fine.yaml",
+      ]);
+      expect(await db.select().from(workflowSchedules)).toHaveLength(0);
+      expect(outcome?.warnings.join(" ")).toContain(".valet/workflows/bad.yaml");
+    });
+
+    it("leaves a schedule a person armed alone", async () => {
+      const repo: FakeRepo = {
+        sha: "c1",
+        files: { ".valet/workflows/nightly.yaml": scheduled("0 3 * * *") },
+      };
+      const f = serve(repo);
+      const id = await teamSource();
+      await serviceFor(f).syncOnce(id);
+      const workflowId = (await mirrored())[0].id;
+
+      // Decision 8 keeps the Triggers page open on a mirrored workflow, so a
+      // person's row has to survive a resync that rewrites the file's own.
+      const now = Date.now();
+      await db.insert(workflowSchedules).values({
+        id: "sched_by_hand",
+        orgId: ORG,
+        ownerType: "team",
+        ownerId: TEAM,
+        targetKind: "workflow",
+        workflowId,
+        name: "by hand",
+        cron: "30 9 * * 1",
+        origin: "local",
+        nextFireAt: now + 1000,
+        createdBy: "u1",
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      repo.sha = "c2";
+      repo.files[".valet/workflows/nightly.yaml"] = workflowYaml("Nightly");
+      await serviceFor(f).syncOnce(id);
+
+      const left = await db.select().from(workflowSchedules);
+      expect(left.map((r) => r.id)).toEqual(["sched_by_hand"]);
+    });
+
+    it("arms nothing for a team file with tool nodes, and says why", async () => {
+      const file = [
+        "valet: workflow/v1",
+        "name: Nightly report",
+        "schedule:",
+        '  cron: "0 3 * * *"',
+        "  name: Nightly report",
+        "definition:",
+        "  version: dag/v1",
+        "  nodes:",
+        "    - id: trigger",
+        "      type: trigger",
+        "    - id: fetch",
+        "      type: tool",
+        "      service: github",
+        "      action: list_issues",
+        "      params: {}",
+        "    - id: stop",
+        "      type: stop",
+        "  edges:",
+        "    - from: trigger",
+        "      to: fetch",
+        "    - from: fetch",
+        "      to: stop",
+        "",
+      ].join("\n");
+      const f = serve({ sha: "c1", files: { ".valet/workflows/report.yaml": file } });
+      const id = await teamSource();
+      const outcome = await serviceFor(f).syncOnce(id);
+
+      // Mirrored, and unarmed: decision 9.
+      expect(await mirrored()).toHaveLength(1);
+      expect(await db.select().from(workflowSchedules)).toHaveLength(0);
+      expect(outcome?.warnings.join(" ")).toContain("left the trigger off");
+    });
   });
 
   it("never touches a local workflow, including one of the same name", async () => {
