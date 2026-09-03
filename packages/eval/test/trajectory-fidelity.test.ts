@@ -109,6 +109,26 @@ describe("turn-to-submission linkage", () => {
     });
     expect(t.turns.map((x) => x.queueItemId)).toEqual(["q1", "q2"]);
   });
+
+  it("stamps each tool call with its entry's queueItemId", () => {
+    const t = extractTrajectory({
+      caseId: "c",
+      prompt: "p",
+      model: "m",
+      durationMs: 1,
+      entries: [
+        assistantEntry({
+          queueItemId: "q1",
+          parts: [{ type: "tool_call", callId: "c1", toolName: "write", status: "completed" }],
+        }),
+        assistantEntry({
+          queueItemId: "q2",
+          parts: [{ type: "tool_call", callId: "c2", toolName: "edit", status: "completed" }],
+        }),
+      ],
+    });
+    expect(t.toolCalls.map((c) => c.queueItemId)).toEqual(["q1", "q2"]);
+  });
 });
 
 describe("elided results", () => {

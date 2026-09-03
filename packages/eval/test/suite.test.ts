@@ -27,6 +27,16 @@ describe("parseCliArgs", () => {
     expect(opts.baselinesDir.endsWith(join("evals", "baselines"))).toBe(true);
   });
 
+  it("resolves a relative --cases against the repo root, not the cwd", () => {
+    // `make eval` runs the CLI with cwd packages/eval; the documented
+    // `--cases evals/cases/hard` must resolve at the repo root.
+    const opts = parseCliArgs(["--cases", "evals/cases/hard"]);
+    expect(opts.casesDir.endsWith(join("evals", "cases", "hard"))).toBe(true);
+    expect(opts.casesDir).not.toContain(join("packages", "eval"));
+    const abs = parseCliArgs(["--cases", "/tmp/elsewhere"]);
+    expect(abs.casesDir).toBe("/tmp/elsewhere");
+  });
+
   it("parses every flag", () => {
     const opts = parseCliArgs([
       "--filter",

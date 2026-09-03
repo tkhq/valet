@@ -81,7 +81,12 @@ deviation, and reports pass-rate movement. A single-run-to-single-run delta
 stays unlabeled because there is no variance estimate to judge it against.
 
 Judge checks majority-vote across 3 samples and report the median score.
-The judge sees the task alongside the rubric and output. The implicit
+The judge sees the full conversation alongside the rubric: user turns,
+tool calls, and assistant replies grouped by submission (trajectories
+recorded before the linkage existed fall back to a flat tool-call list).
+This grouping is what makes turn-scoped rubrics ("did not fix during the
+investigation turn") judgeable from evidence; before it, the judge
+guessed turn attribution from global order and failed compliant runs. The implicit
 default judge escalates to a stronger model rather than grade its own
 model. A live calibration bank in the test suite pins the default judge's
 verdicts on labeled good and bad outputs.
@@ -131,10 +136,12 @@ borrow a related model's price: a borrowed price is a wrong price.
 ## Trajectory
 
 `packages/eval/src/trajectory.ts` extracts a `Trajectory` from persisted
-entries: prompt, model, turns (one per assistant entry, with usage and
-cost), tool calls (name, args, result, status, order), final output,
-aggregate usage and cost, duration, and stop reason. Each turn carries its
-`queueItemId`, which links it to the submission that produced it.
+entries: prompt, model, user turns (content per user input), turns (one
+per assistant entry, with usage, cost, and the turn's assistant text),
+tool calls (name, args, result, status, order), final output, aggregate
+usage and cost, duration, and stop reason. Each turn AND each tool call
+carries its `queueItemId`, which links it to the submission that produced
+it.
 Plugin-catalog calls also carry `actionId` (from `call_tool`'s `tool_id`
 or a pinned tool's name), so a check can name
 `github.list_pull_requests` regardless of invocation route.
@@ -262,6 +269,77 @@ impossible and looks like a model failure), and re-run against both tiers
 before trusting a new case. The hard suite is a comparison instrument,
 not a gate. A red row on the small model is the point, so never wire the
 hard suite into CI as a pass/fail check.
+
+## The long suite (realistic multi-turn trajectories)
+
+`evals/cases/long/` holds long-trajectory cases. Each case scripts a
+multi-turn conversation shape mined from real operator sessions. The
+cases test conversational behavior over time, not puzzle skill. Like the
+hard suite, the directory is outside the default `make eval` load; run it
+with:
+
+```bash
+make eval EVAL_ARGS="--cases evals/cases/long"
+```
+
+Each case encodes one recurring session pattern:
+
+- `long-build-steer-sweep`: a correction names one instance of a bug
+  class and asks for the whole class. The harness probes every emit path
+  on the final codebase, so a fix limited to the named spot fails.
+- `long-triage-numbered-findings`: a numbered review lands mid-session
+  with selective triage ("fix 1, 3, and 4; skip 2 and 5"). Probes check
+  the requested fixes; a skipped-finding probe and a judge check catch
+  scope inflation.
+- `long-dictation-merge`: a voice-dictation resend of the same request
+  with one changed detail and one addition. The last version is
+  authoritative; the stale detail must be gone from the artifact.
+- `long-park-resume`: the user parks a draft, asks an unrelated
+  question, then resumes. The resume turn interpolates the agent's own
+  interjection answer, so a wrong answer or a lost draft fails
+  deterministic output checks.
+- `long-scope-accretion`: a dashed "We should:" list arrives after the
+  first version exists. One behavioral probe per list item catches
+  dropped items.
+- `long-debug-evidence`: a pasted failure transcript is the spec, with
+  "investigate, don't fix yet". A judge check scores whether the agent
+  held the fix until asked; probes score the fix and a regression guard.
+- `long-field-report-fix`: a field report reshapes requirements after
+  the build (decimal-comma numbers). Probes cover the new format, the
+  old format, and a follow-up edge case.
+- `long-memory-decisions`: an orchestrator session where decisions
+  dictated early must survive interleaved work and come back assembled
+  in the final write-up.
+
+Rules for adding long cases: ground the shape in a real session pattern
+(name it in the case header comment), keep every probe order-robust when
+the turn wording allows more than one implementation order, and follow
+the hard-suite rule of computing expected values with a script. Like the
+hard suite, the long suite is an instrument, not a CI gate: a red row is
+a behavior finding to read, and the baseline comparison is the signal
+across models and versions.
+
+Empirical results from tuning (2026-09-03, single runs):
+
+- haiku-4-5: 7 of 8 passed. The one stable failure is
+  `long-park-resume`: haiku replies "Done!" and describes the finalized
+  announcement without including it (judge 1/5 in every run), and in one
+  run also botched the parked arithmetic (4,608 for 512 * 9 - 100),
+  which the interpolated turn carried into the final output where the
+  deterministic check caught it.
+- sonnet-5: 8 of 8 passed. The baseline comparator flags
+  `long-park-resume` as the improvement, so the case separates the
+  tiers on conversational behavior.
+- Earlier tuning runs caught haiku editing the buggy fixture during the
+  "don't change anything yet" investigation turn
+  (`long-debug-evidence`), shipping a syntax error without running the
+  code (`long-build-steer-sweep`), and skipping review findings
+  silently (`long-triage-numbered-findings`). Those rows recur
+  run-to-run; treat them as the behaviors under test, not noise.
+- Docker exec can drop mid-run (`sandbox_unavailable`), which fails
+  `no_errors` on full-profile cases. Observed only while other Docker
+  work ran beside the suite. Re-run a lone `sandbox_unavailable` row
+  before reading it as behavior.
 
 ## Known limitations
 

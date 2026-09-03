@@ -1,0 +1,51 @@
+# Long-trajectory suite: build, then a correction that names ONE instance
+# of a bug class and asks for the whole class. Mined from real operator
+# sessions: a mid-flight correction ("the rows output has three columns")
+# implies a sweep, and the common failure is fixing only the named spot.
+# The harness probes BOTH emit paths on the final codebase.
+id: long-build-steer-sweep
+description: Build a two-mode CSV reporter, take a quoting correction, sweep the class, add tests.
+profile: full
+turns:
+  - role: user
+    content: >-
+      Create a Node ESM project in /workspace: package.json with
+      "type": "module"; csv.js exporting toCsv(rows) that turns an array
+      of arrays into CSV text (one line per row, lines joined with
+      newlines); and report.js, a CLI. `node report.js <file> rows` reads
+      a JSON file (an array of {name, score} objects) and prints one CSV
+      line per entry as name,score. `node report.js <file> summary`
+      prints a single CSV line total,best where total is the entry count
+      and best is the name with the highest score. Reply "done" when
+      written.
+  - role: user
+    content: >-
+      I exported someone named "Reyes, Ana" and the rows output has three
+      columns for her. A CSV field that contains a comma must be wrapped
+      in double quotes. Fix it — and make sure every place we emit CSV
+      handles this, not just rows mode.
+  - role: user
+    content: >-
+      Add /workspace/csv.test.js using node's built-in test runner (run
+      it with `node --test`), covering the comma case in both modes. Run
+      the tests and paste the output.
+  - role: user
+    content: finish up
+timeout_ms: 480000
+checks:
+  - type: verify_command
+    command: >-
+      printf '[{"name":"Reyes, Ana","score":91},{"name":"Bo","score":84}]'
+      > /tmp/people.json &&
+      node /workspace/report.js /tmp/people.json rows
+    expect_output: '"Reyes, Ana","?91'
+  - type: verify_command
+    command: node /workspace/report.js /tmp/people.json summary
+    expect_output: '2"?,"Reyes, Ana"'
+  - type: verify_command
+    command: cd /workspace && node --test
+    expect_output: '# pass [1-9]'
+  - type: tool_called
+    tool: bash
+    min: 1
+  - type: no_errors

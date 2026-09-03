@@ -70,6 +70,10 @@ Rules that keep cases trustworthy:
 5. Model-separation cases go in `evals/cases/hard/`, which the default
    run never loads. The hard suite is a comparison instrument, not a
    gate; never wire it into CI as pass/fail.
+6. Multi-turn conversational-behavior cases go in `evals/cases/long/`
+   (also outside the default run). Ground each one in a real session
+   pattern and name the pattern in the case header comment. Run them
+   with `make eval EVAL_ARGS="--cases evals/cases/long"`.
 
 Check types: `tool_called`, `tool_not_called`, `tool_result_matches`,
 `tool_result_not_matches`, `tool_args_match`, `output_contains`,

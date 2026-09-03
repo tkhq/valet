@@ -1,0 +1,48 @@
+# Long-trajectory suite: a "We should:" checklist lands mid-build and every
+# item must survive to the final codebase. Mined from real operator
+# sessions, where scope arrives as a dashed list after the first version
+# exists. Failure mode measured: dropping list items while deep in the
+# task. The harness probes each item behaviorally.
+id: long-scope-accretion
+description: Take a four-item scope list mid-build and land every item.
+profile: full
+turns:
+  - role: user
+    content: >-
+      Create /workspace/todo.js (Node ESM, with a package.json) that
+      stores todos in /workspace/todos.json. `node todo.js add <text>`
+      appends an item; `node todo.js list` prints one item per line,
+      numbered from 1, as "<n>. <text>". Reply "done" when written.
+  - role: user
+    content: |-
+      We should:
+      - add `done <n>` that marks item n complete
+      - make `list` show `[x]` or `[ ]` before the text
+      - add `clear` that removes completed items
+      - make `add` reject empty text with a non-zero exit code
+  - role: user
+    content: >-
+      go ahead, and when you're finished run through the whole flow once
+      and paste the output
+timeout_ms: 480000
+checks:
+  - type: verify_command
+    command: >-
+      cd /workspace && rm -f todos.json &&
+      node todo.js add 'write spec' && node todo.js add 'review pr' &&
+      node todo.js done 1 && node todo.js list
+    expect_output: '\[x\][^\n]*write spec'
+  - type: verify_command
+    command: cd /workspace && node todo.js list
+    expect_output: '\[ \][^\n]*review pr'
+  - type: verify_command
+    command: >-
+      cd /workspace && node todo.js clear &&
+      ! node todo.js list | grep -q 'write spec' &&
+      node todo.js list | grep -q 'review pr'
+  - type: verify_command
+    command: '! node /workspace/todo.js add ""'
+  - type: tool_called
+    tool: bash
+    min: 1
+  - type: no_errors
