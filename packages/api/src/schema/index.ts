@@ -65,6 +65,9 @@ export const orgs = pgTable("orgs", {
   // visibility option is not offered. Live-checked on every artifact read,
   // so flipping it off immediately re-gates existing `public` artifacts.
   allowPublicArtifacts: boolean("allow_public_artifacts").notNull().default(false),
+  // Tier map: `{ xs: ["anthropic/claude-haiku-4-5"], ... }`. Nullable — null
+  // means "use built-in defaults" (same pattern as `ssoTeamGroups`).
+  modelTiers: jsonb("model_tiers"),
 });
 
 // better-auth's default model name for the user table is "user" (singular);
