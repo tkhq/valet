@@ -91,6 +91,7 @@ function OrgTokenRow({ connected }: { connected: boolean }) {
   const disconnect = useDisconnectCredential();
   const [token, setToken] = useState("");
   const [tokenError, setTokenError] = useState<string | null>(null);
+  const [savedTick, setSavedTick] = useState(0);
 
   async function saveToken() {
     const trimmed = token.trim();
@@ -102,6 +103,7 @@ function OrgTokenRow({ connected }: { connected: boolean }) {
         body: { type: "service_account", apiKey: trimmed, scope: "org" },
       });
       setToken("");
+      setSavedTick((n) => n + 1);
     } catch (err) {
       setTokenError(errorText(err, "Couldn't save the organization token."));
     }
@@ -126,6 +128,7 @@ function OrgTokenRow({ connected }: { connected: boolean }) {
           disconnect.mutate({ service: "onepassword", scope: "org" });
         }}
         removeLabel="Remove token"
+        savedTick={savedTick}
       />
     </FieldRow>
   );
@@ -136,6 +139,7 @@ function PersonalTokenRow({ connected }: { connected: boolean }) {
   const disconnect = useDisconnectCredential();
   const [token, setToken] = useState("");
   const [tokenError, setTokenError] = useState<string | null>(null);
+  const [savedTick, setSavedTick] = useState(0);
 
   async function saveToken() {
     const trimmed = token.trim();
@@ -147,6 +151,7 @@ function PersonalTokenRow({ connected }: { connected: boolean }) {
         body: { type: "service_account", apiKey: trimmed },
       });
       setToken("");
+      setSavedTick((n) => n + 1);
     } catch (err) {
       setTokenError(errorText(err, "Couldn't save the 1Password token."));
     }
@@ -171,6 +176,7 @@ function PersonalTokenRow({ connected }: { connected: boolean }) {
           disconnect.mutate({ service: "onepassword" });
         }}
         removeLabel="Remove token"
+        savedTick={savedTick}
       />
     </FieldRow>
   );
@@ -187,6 +193,7 @@ function TokenFields({
   onSave,
   onRemove,
   removeLabel,
+  savedTick,
 }: {
   connected: boolean;
   token: string;
@@ -198,6 +205,8 @@ function TokenFields({
   onSave: () => void;
   onRemove: () => void;
   removeLabel: string;
+  /** Incremented by the parent on every SUCCESSFUL save. */
+  savedTick: number;
 }) {
   // A connected token is state, not a form. Two always-visible password
   // boxes with the same placeholder read as "paste your token twice"; the
@@ -208,6 +217,14 @@ function TokenFields({
   useEffect(() => {
     setEntering(!connected);
   }, [connected]);
+  // Replacing an already-connected token leaves `connected` true on both
+  // sides of the save, so the effect above never re-runs and the form stays
+  // open over a token that already saved. Close on the save itself, which
+  // the parent reports by bumping this counter only when the mutation
+  // resolved without error.
+  useEffect(() => {
+    if (savedTick > 0) setEntering(false);
+  }, [savedTick]);
 
   if (connected && !entering) {
     return (
