@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import type { RepoBinding } from "../wire/types.js";
 import type { RecipeStep } from "../prebuilds/recipe.js";
 import { gitCredentialHelperScript, ghWrapperScript } from "./git-credential-helper.js";
-import { secretsCliScript } from "./secrets-cli-script.js";
+import { opShimScript, secretsCliScript } from "./secrets-cli-script.js";
 
 // Increment when the prep logic changes in a way that requires re-running all
 // steps — changing this value intentionally invalidates every cached hash.
@@ -86,6 +86,10 @@ export function computeSpec(snap: ResolveSnapshot): SandboxSpec {
     // same hash: without it, editing the script would never re-install on a
     // sandbox that already ran prep.
     secretsCliScript(snap.apiUrl) +
+    // The `op` shim ships in the same step, so it belongs in the same hash:
+    // without it, editing the shim would never re-install on a sandbox that
+    // already ran prep.
+    opShimScript() +
     String(PREP_VERSION);
   steps.push({ id: "credential-scripts", hash: sha256(credInput), critical: false });
 

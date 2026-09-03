@@ -20,13 +20,15 @@ import {
 } from "./workspace-prep.js";
 import { gitCredentialHelperScript, ghWrapperScript } from "./git-credential-helper.js";
 import type { RepoBinding } from "../wire/types.js";
+import { opShimScript } from "./secrets-cli-script.js";
 
 const API_URL = "https://api.valet.test";
 const STAGED_HELPER = ".valet-prep/git-credential-valet";
 const STAGED_GH = ".valet-prep/valet-gh";
 const STAGED_SECRETS = ".valet-prep/valet-secrets";
+const STAGED_OP_SHIM = ".valet-prep/op";
 const INSTALL_CMD =
-  "mkdir -p /usr/local/bin && cp '.valet-prep/git-credential-valet' /usr/local/bin/git-credential-valet && cp '.valet-prep/valet-gh' /usr/local/bin/valet-gh && cp '.valet-prep/valet-gh' /usr/local/bin/gh && cp '.valet-prep/valet-secrets' /usr/local/bin/valet-secrets && chmod 755 /usr/local/bin/git-credential-valet /usr/local/bin/valet-gh /usr/local/bin/gh /usr/local/bin/valet-secrets";
+  "mkdir -p /usr/local/bin && cp '.valet-prep/git-credential-valet' /usr/local/bin/git-credential-valet && cp '.valet-prep/valet-gh' /usr/local/bin/valet-gh && cp '.valet-prep/valet-gh' /usr/local/bin/gh && cp '.valet-prep/valet-secrets' /usr/local/bin/valet-secrets && cp '.valet-prep/op' /usr/local/bin/op && chmod 755 /usr/local/bin/git-credential-valet /usr/local/bin/valet-gh /usr/local/bin/gh /usr/local/bin/valet-secrets /usr/local/bin/op";
 
 interface ExecCall {
   command: string;
@@ -112,6 +114,9 @@ describe("installCredentialHelper", () => {
     expect(sandbox.writes.get(STAGED_HELPER)).toBe(gitCredentialHelperScript(API_URL));
     expect(sandbox.writes.get(STAGED_GH)).toBe(ghWrapperScript(API_URL));
     expect(sandbox.writes.has("/usr/local/bin/git-credential-valet")).toBe(false);
+    // The `op` shim ships beside them: an agent reaching for the real CLI gets
+    // the corrective action rather than `command not found`.
+    expect(sandbox.writes.get(STAGED_OP_SHIM)).toBe(opShimScript());
 
     const commands = sandbox.execCalls.map((c) => c.command);
     expect(commands).toContain(INSTALL_CMD);

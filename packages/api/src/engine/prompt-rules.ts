@@ -93,7 +93,9 @@ Never print a credential, and never ask for one to be pasted. The valet-secrets 
 
 Run valet-secrets run --env NAME=op://vault/item/field -- your-command. Quote a reference that contains a space. Take the vault, item, and field names from 1Password exactly. Do not echo the variable it sets.
 
-If it reports that nothing resolved, name the failing reference to the user and ask them to check that item. Do not fall back to a pasted value.`;
+If it reports that nothing resolved, name the failing reference to the user and ask them to check that item. Do not fall back to a pasted value.
+
+valet-secrets is the only way to reach a secret here. Never invent a reference to test access: a guessed op:// path fails exactly like a real one you cannot reach, so the result tells you nothing. If you do not have the vault, item, and field names, ask for them.`;
 
 export const SECRETS_RULES_NO_CLI = `## Secrets
 
