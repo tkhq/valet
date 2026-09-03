@@ -165,6 +165,76 @@ describe("createOnePasswordService", () => {
     expect(createClient).toHaveBeenCalledTimes(2);
   });
 
+  // Rotation has to bite at once. The caches hold values fetched WITH a
+  // particular token, so keying them by scope and owner alone outlived the
+  // token: after a replace the old value was served for the rest of the TTL,
+  // and a freshly rotated key read as invalid at the far end.
+  it("re-resolves immediately when the stored token is replaced, inside the TTL", async () => {
+    const credentials = memStore();
+    await credentials.save({ type: "org", id: ctx.orgId }, ONEPASSWORD_SERVICE, {
+      type: "service_account",
+      apiKey: "token-a",
+    });
+    let current = "value-under-token-a";
+    const resolve = vi.fn(async () => current);
+    const svc = createOnePasswordService({
+      credentials,
+      getAllowPersonal: async () => true,
+      createClient: async () => fakeClient({ secrets: { resolve } }),
+      // Time never advances: any re-resolve is the rotation, not the TTL.
+      now: () => 0,
+    });
+
+    expect(await svc.resolveReference("org", ctx, "op://V/I/f")).toBe("value-under-token-a");
+    expect(await svc.resolveReference("org", ctx, "op://V/I/f")).toBe("value-under-token-a");
+    expect(resolve).toHaveBeenCalledTimes(1);
+
+    await credentials.save({ type: "org", id: ctx.orgId }, ONEPASSWORD_SERVICE, {
+      type: "service_account",
+      apiKey: "token-b",
+    });
+    current = "value-under-token-b";
+
+    expect(await svc.resolveReference("org", ctx, "op://V/I/f")).toBe("value-under-token-b");
+    expect(resolve).toHaveBeenCalledTimes(2);
+  });
+
+  it("the vault lookup also re-runs for a replaced token inside the TTL", async () => {
+    const credentials = memStore();
+    await credentials.save({ type: "org", id: ctx.orgId }, ONEPASSWORD_SERVICE, {
+      type: "service_account",
+      apiKey: "token-a",
+    });
+    const list = vi.fn(async () => [{ id: "v1", title: "Vault" }]);
+    const svc = createOnePasswordService({
+      credentials,
+      getAllowPersonal: async () => true,
+      createClient: async () =>
+        fakeClient({
+          vaults: { list },
+          items: {
+            list: async () => [{ id: "i1", title: "Linear", vaultId: "v1" }],
+            getWithSecrets: async () => ({
+              title: "Linear",
+              fields: [{ title: "credential", fieldType: "Concealed", value: "k" }],
+            }),
+          },
+        }),
+      now: () => 0,
+    });
+
+    await svc.findCredentialForService("org", ctx, "linear");
+    await svc.findCredentialForService("org", ctx, "linear");
+    expect(list).toHaveBeenCalledTimes(1);
+
+    await credentials.save({ type: "org", id: ctx.orgId }, ONEPASSWORD_SERVICE, {
+      type: "service_account",
+      apiKey: "token-b",
+    });
+    await svc.findCredentialForService("org", ctx, "linear");
+    expect(list).toHaveBeenCalledTimes(2);
+  });
+
   it("resolveCredential fills apiKey for type api_key", async () => {
     const credentials = memStore();
     await credentials.save({ type: "org", id: ctx.orgId }, ONEPASSWORD_SERVICE, {
