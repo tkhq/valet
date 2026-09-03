@@ -2,6 +2,23 @@
 
 Place this file at the root of your repository to customize sandbox image prebuild behavior. All fields are optional. Omit the file entirely to use pure auto-detection.
 
+## Test the recipe locally
+
+Recipes run inside the platform's image bake, but you can validate and run one from a checkout with the `valet` CLI — no running Valet instance needed:
+
+```
+valet prebuild plan            # resolved steps + docker/workspaceStorage knobs
+valet prebuild plan --dockerfile
+valet prebuild build --base <sandbox image>   # real docker build, streamed
+```
+
+`plan` catches schema errors and shows what lockfile detection found (including steps a `skipDetect: true` suppresses). `build` runs the same recipe/setup commands the platform bake runs, against a local clone of your COMMITTED tree — `.git` included, matching the platform's clone, so setup commands that run git (Makefiles using `git rev-parse`, version stamping) behave identically. One exception: the recipe file itself is read from the working tree, so you can iterate without committing each attempt. BuildKit layer caching makes re-runs after editing one step cheap. Pass `--base` when the stock base ref is not pullable from your machine.
+
+Two layer-size rules worth knowing when writing `setup` commands:
+
+1. Run `chmod`/`chown -R` in the SAME command that created the files. A recursive metadata change in a later step copies every touched file into that step's layer (overlayfs copy-up), silently doubling caches in the image.
+2. Scope a recursive `chmod` to what the step created, not a whole shared prefix, for the same reason.
+
 ## Fields
 
 ### `setup`
