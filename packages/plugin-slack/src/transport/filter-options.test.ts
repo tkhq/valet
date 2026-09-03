@@ -62,6 +62,34 @@ describe("slack.users resolver", () => {
     expect(options).toEqual([]);
     expect(fake.calls).toHaveLength(0);
   });
+
+  it("empty query returns all members (no 20-item cap) sorted alphabetically", async () => {
+    const members = Array.from({ length: 30 }, (_, i) => ({
+      id: `U${i}`,
+      name: `user-${String(i).padStart(2, "0")}`,
+      real_name: `User ${String(i).padStart(2, "0")}`,
+    }));
+    // Shuffle so the raw order is not alphabetical.
+    fake.setMembers([...members].reverse());
+    const options = await resolvers()["slack.users"](ctx());
+    expect(options).toHaveLength(30);
+    // Verify alphabetical sort by name (hint carries the handle).
+    const names = options.map((o) => o.hint ?? `@${o.label}`);
+    const sorted = [...names].sort();
+    expect(names).toEqual(sorted);
+  });
+
+  it("filtered query caps at 20 results", async () => {
+    // All 30 members match the query "user".
+    const members = Array.from({ length: 30 }, (_, i) => ({
+      id: `U${i}`,
+      name: `user-${String(i).padStart(2, "0")}`,
+      real_name: `User ${String(i).padStart(2, "0")}`,
+    }));
+    fake.setMembers(members);
+    const options = await resolvers()["slack.users"](ctx({ q: "user" }));
+    expect(options).toHaveLength(20);
+  });
 });
 
 describe("slack.channels resolver", () => {
@@ -94,5 +122,31 @@ describe("slack.channels resolver", () => {
     const options = await resolvers()["slack.channels"](ctx({ credential: null }));
     expect(options).toEqual([]);
     expect(fake.calls).toHaveLength(0);
+  });
+
+  it("empty query returns all channels (no 20-item cap) sorted alphabetically", async () => {
+    const channels = Array.from({ length: 30 }, (_, i) => ({
+      id: `C${i}`,
+      name: `channel-${String(i).padStart(2, "0")}`,
+    }));
+    // Shuffle so the raw order is not alphabetical.
+    fake.setChannels([...channels].reverse());
+    const options = await resolvers()["slack.channels"](ctx());
+    expect(options).toHaveLength(30);
+    // Verify alphabetical sort by channel name.
+    const labels = options.map((o) => o.label);
+    const sorted = [...labels].sort();
+    expect(labels).toEqual(sorted);
+  });
+
+  it("filtered query caps at 20 results", async () => {
+    // All 30 channels match the query "channel".
+    const channels = Array.from({ length: 30 }, (_, i) => ({
+      id: `C${i}`,
+      name: `channel-${String(i).padStart(2, "0")}`,
+    }));
+    fake.setChannels(channels);
+    const options = await resolvers()["slack.channels"](ctx({ q: "channel" }));
+    expect(options).toHaveLength(20);
   });
 });
