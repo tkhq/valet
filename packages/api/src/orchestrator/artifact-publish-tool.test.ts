@@ -137,6 +137,24 @@ describe("artifact_publish: exactly-one-of content/path", () => {
   });
 });
 
+describe("artifact_publish: stat throws (dead/superseded sandbox)", () => {
+  it("names the corrective action instead of the not-a-file message, and never calls fetch", async () => {
+    const { fetchMock } = stubFetchOk({});
+    const sandbox = stubSandbox({ "/workspace/report.html": "<title>Deploys</title>" });
+    vi.spyOn(sandbox, "stat").mockRejectedValue(new Error("sandbox sb-test is gone"));
+    const ctx = makeCtx(sandbox);
+
+    const result = await publishTool.execute({ path: "/workspace/report.html" }, ctx);
+
+    expect(result.text).toContain("[artifact_error]");
+    expect(result.text).toContain("could not stat");
+    expect(result.text).toContain("/workspace/report.html");
+    expect(result.text).toContain("retry");
+    expect(result.text).not.toContain("is not a file in the sandbox");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("artifact_publish: missing file", () => {
   it("names the sandbox path when it is not a file", async () => {
     const sandbox = stubSandbox({});

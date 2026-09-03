@@ -578,8 +578,16 @@ export const artifactPublishTool = defineTool({
         return { text: "[artifact_error] pass exactly one of `content` (inline source) or `path` (a file in the sandbox)." };
       }
       if (hasPath) {
-        const stat = await ctx.sandbox.stat(args.path!).catch(() => null);
-        if (!stat?.isFile) {
+        let stat: { isFile: boolean; isDirectory: boolean; size: number };
+        try {
+          stat = await ctx.sandbox.stat(args.path!);
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          return {
+            text: `[artifact_error] could not stat ${args.path} in the sandbox: ${detail}. Confirm the sandbox is running and the file exists, then retry.`,
+          };
+        }
+        if (!stat.isFile) {
           return { text: `[artifact_error] ${args.path} is not a file in the sandbox. Write the page to a file first, then publish it.` };
         }
         if (stat.size > ARTIFACT_MAX_CONTENT_BYTES) {
