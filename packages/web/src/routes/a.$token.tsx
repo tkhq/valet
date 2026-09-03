@@ -154,20 +154,20 @@ function ArtifactPage() {
 
   return (
     <div className="flex h-screen flex-col">
-      <header className="border-b border-line px-6 py-4">
-        <div className="flex items-start justify-between gap-4">
-          <div className="min-w-0">
-            <h1 className="truncate font-display text-2xl leading-tight text-ink">
-              {doc.icon ? `${doc.icon} ` : ""}
-              {doc.title}
-            </h1>
-            {doc.description && <p className="mt-0.5 text-sm text-muted">{doc.description}</p>}
-            <p className="mt-1 text-xs text-muted">
-              {doc.sharedBy ? `Shared by ${doc.sharedBy} · ` : "Shared "}
-              via Valet · version {doc.version} · updated {relativeTime(doc.updatedAt)}
-            </p>
-          </div>
-          <div className="flex shrink-0 items-center gap-3 pt-1">
+      {/* One compact bar — the page below is the point; the chrome is not.
+          The title/byline collapse to a single truncating row, and the
+          description rides in the tooltip instead of a second line. */}
+      <header className="flex items-center justify-between gap-4 border-b border-line px-4 py-2">
+        <div className="flex min-w-0 items-baseline gap-2" title={doc.description || undefined}>
+          <h1 className="truncate font-display text-sm font-medium leading-tight text-ink">
+            {doc.icon ? `${doc.icon} ` : ""}
+            {doc.title}
+          </h1>
+          <p className="hidden shrink-0 text-[11px] text-muted sm:block">
+            {doc.sharedBy ? `${doc.sharedBy} · ` : ""}v{doc.version} · {relativeTime(doc.updatedAt)}
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-3">
             {canComment && (
               <button
                 type="button"
@@ -200,7 +200,6 @@ function ArtifactPage() {
               <Download className="h-3.5 w-3.5" aria-hidden />
               Download
             </button>
-          </div>
         </div>
       </header>
 
