@@ -20,6 +20,12 @@
  * workflow, and the sweep reports `directory-walk`, which already forbids
  * every delete. A one-level fallback would miss every nested definition and
  * then read the rest as deleted.
+ *
+ * A source's `subpath` does not narrow this collector, which is the one place
+ * it parts from `skill-collector.ts`. The subpath says where a repository
+ * keeps its SKILLS; `.valet/` is repository-level configuration and is read
+ * from the root whatever that setting holds. A source that sets a subpath and
+ * expects it to hide `.valet/workflows` would be surprised, so say it here.
  */
 import { and, eq, inArray } from "drizzle-orm";
 import { parse as parseYaml } from "yaml";
@@ -41,7 +47,6 @@ import {
   newWorkflowId,
   purgeWorkflowRows,
 } from "../../workflows/service.js";
-import { definitionVersionId } from "../../workflows/definition-version.js";
 import type { SkillTreeEntry } from "../skill-repo-reader.js";
 import type {
   CollectorDiscoverContext,
@@ -190,15 +195,24 @@ class WorkflowPass implements CollectorPass {
     const byPath = new Map(
       existing.flatMap((row) => (row.upstreamPath === null ? [] : [[row.upstreamPath, row] as const])),
     );
-    /** Paths the repository still holds, including the ones this pass could
-     * not use: a file that is present but unreadable is still present, and
-     * its row must not read as deleted. */
-    const upstream = new Set<string>();
+    /**
+     * Paths the repository still holds. Seeded from DISCOVERY, before any
+     * body is read, because presence in the tree is what "still there" means
+     * and a body is not needed to know it.
+     *
+     * Reading it from `text` instead would delete a mirror on a transient
+     * fault: `readContents` treats a file it could not fetch as a normal
+     * outcome, warns, and still calls reconcile, so one 404 in the window
+     * between the tree read and the file read would take the definition, its
+     * versions, its schedules and its webhook, and the next sync would
+     * re-import the file under a new id that the old runs do not point at.
+     * `skill-collector.ts` seeds from `readEntries` for the same reason.
+     */
+    const upstream = new Set(this.readEntries.map((entry) => entry.path));
 
     for (const candidate of this.candidates) {
       const raw = text.get(candidate.path);
       if (raw === undefined) continue;
-      upstream.add(candidate.path);
 
       const parsed = this.readFile(raw, candidate);
       if (parsed.kind === "skip") continue;
@@ -253,7 +267,7 @@ class WorkflowPass implements CollectorPass {
           updatedAt: now(),
         })
         .where(eq(workflowDefinitions.id, row.id));
-      if (definitionVersionId(parsed.file.definition) !== definitionVersionId(row.definition)) {
+      if (!sameGraph(parsed.file.definition, row.definition)) {
         await snapshot(
           db,
           row.id,
@@ -347,11 +361,29 @@ class WorkflowPass implements CollectorPass {
       if (parsed.code === "unlabeled" && candidate.root !== ".valet/workflows") {
         return { kind: "skip" };
       }
-      return { kind: "warn", message: parsed.errors.join(" ") };
+      // The validator names the node and not the file, so the path goes in
+      // front of its messages. Without it, the most common failure of this
+      // feature reports a broken node and never says which file holds it.
+      return { kind: "warn", message: `${candidate.path}: ${parsed.errors.join(" ")}` };
     }
     // A template in the workflow folder. The template collector owns it, and
-    // this pass leaves the path upstream so neither deletes the other's rows.
+    // discovery already put the path in `upstream`, so neither deletes the
+    // other's rows.
     if (parsed.file.kind !== "workflow") return { kind: "skip" };
+
+    // A YAML anchor that refers to itself survives the validator, which only
+    // walks `version`, `policy`, `nodes` and `edges`. It then throws out of
+    // `JSON.stringify` in drizzle's jsonb encoder and in
+    // `definitionVersionId`, which would abort the sync for every OTHER file
+    // in the same pass. One file's mistake must cost that file only.
+    try {
+      JSON.stringify(parsed.file.definition);
+    } catch {
+      return {
+        kind: "warn",
+        message: `${candidate.path}: this workflow refers to itself, so Valet cannot store it. Look for a YAML anchor that includes the node holding it, and write the value out in full.`,
+      };
+    }
     return { kind: "ok", file: parsed.file };
   }
 
@@ -396,6 +428,34 @@ function teamTriggerGate(source: ContentSourceRow, file: WorkflowFile): string |
   const nodes = file.definition.nodes;
   if (!nodes.some((node) => node.type === "tool")) return null;
   return `this workflow uses tool actions and declares a trigger. A team cannot run tool actions on a trigger yet, so Valet mirrored the workflow and left the trigger off. Run it by hand, or move the repository to an org source.`;
+}
+
+/**
+ * True when two definitions are the same graph.
+ *
+ * `definitionVersionId` cannot answer this here. It hashes `JSON.stringify`
+ * with no key canonicalization, and one side of the compare is a fresh YAML
+ * parse holding the file's key order while the other came back from Postgres
+ * `jsonb`, which sorts keys. The two hashes then differ for a byte-identical
+ * graph, and every file edit would mint a version even when only a comment or
+ * the file's `name` moved. Sorting both sides first removes that.
+ */
+function sameGraph(a: unknown, b: unknown): boolean {
+  return canonical(a) === canonical(b);
+}
+
+function canonical(value: unknown): string {
+  return JSON.stringify(sortKeys(value));
+}
+
+/** The same value with every object's keys in sorted order. Arrays keep their
+ * order, which carries meaning in a node or edge list. */
+function sortKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortKeys);
+  if (typeof value !== "object" || value === null) return value;
+  const entries = Object.entries(value as Record<string, unknown>);
+  entries.sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0));
+  return Object.fromEntries(entries.map(([k, v]) => [k, sortKeys(v)]));
 }
 
 /** Which of `ids` hold a run that has not settled. One query, and none at all

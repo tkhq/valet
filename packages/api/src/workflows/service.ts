@@ -232,6 +232,15 @@ export async function isAuthorizedForOwner(
 ): Promise<boolean> {
   if (target.ownerType === "user") return target.ownerId === owner.userId;
   if (target.ownerType === "team") return isTeamMember(db, target.ownerId, owner.userId);
+  // An org-owned workflow is one an org content source mirrors from a
+  // repository, and an org source publishes to the whole org. Comparing the
+  // row's owner id against the caller's own org id IS the scoping: an id from
+  // another org cannot match.
+  //
+  // This is the READ rule. `refuseRepoOwned` covers edits and deletes of the
+  // definition and nothing else, so arming a trigger is gated separately, by
+  // `armableDefinitionRow`.
+  if (target.ownerType === "org") return target.ownerId === owner.orgId;
   return false;
 }
 
@@ -276,24 +285,73 @@ export async function ownedDefinitionRow(
   return (await isAuthorizedFor(db, owner, row)) ? row : null;
 }
 
+/**
+ * A definition the caller may ARM A TRIGGER on. Same reach as
+ * `ownedDefinitionRow` for a user-owned or team-owned row; an org-owned row
+ * additionally needs an org admin.
+ *
+ * Reading an org-owned mirrored workflow is an org-wide capability: an org
+ * source publishes to the whole org. Arming one is not. A schedule, an event
+ * subscription and a webhook each start runs owned by the DEFINITION, and
+ * `credentialOwnerFor` in `plugins/action-invoker.ts` maps an org owner onto
+ * the org's stored credentials, so a plain member could otherwise turn a
+ * published graph into recurring work that runs with the org's credentials,
+ * choosing the cadence and the input. A manual run is exempt because
+ * `startWorkflowRun` stamps the run to the caller, who then resolves their
+ * own credentials.
+ *
+ * The team case is not a precedent for allowing this: `credentialOwnerFor`
+ * returns no owner for a team, so no team-triggered run has ever resolved a
+ * stored credential.
+ */
+export async function armableDefinitionRow(
+  db: AppDb,
+  owner: WorkflowOwner,
+  id: string,
+): Promise<typeof workflowDefinitions.$inferSelect | null> {
+  const row = await ownedDefinitionRow(db, owner, id);
+  if (!row || row.ownerType !== "org") return row;
+  return (await isOrgAdmin(db, owner.orgId, owner.userId)) ? row : null;
+}
+
 /** The "definitions this caller may read" predicate — their own, plus every
  * team they are a live member of. Shared by the definitions list and
  * `ownedWorkflowIds` so the two can never disagree about reach. Membership
  * is re-read on every call for the same reason `isAuthorizedFor` does. */
-async function ownedDefinitionFilter(db: AppDb, owner: WorkflowOwner) {
-  return ownedDefinitionFilterWith(await callerTeamIds(db, owner.userId), owner);
+async function ownedDefinitionFilter(db: AppDb, owner: WorkflowOwner, scope: OwnerScope = "read") {
+  return ownedDefinitionFilterWith(await callerTeamIds(db, owner.userId), owner, scope);
 }
+
+/**
+ * Which arms a reach set carries. `read` includes org-owned rows, which every
+ * member of that org may see. `act` leaves them out, so a surface whose rows
+ * a caller can MUTATE does not hand an org workflow's triggers to every
+ * member. `armableDefinitionRow` states why the two differ.
+ */
+type OwnerScope = "read" | "act";
 
 /** SQL form of `isAuthorizedForOwnerWith` over `workflow_definitions` —
  * the same owner arms, pushed into the WHERE clause. Takes the team set so
  * `triggerAccessSets` can reuse one membership read across both queries. */
-function ownedDefinitionFilterWith(teamIds: Set<string>, owner: WorkflowOwner) {
+function ownedDefinitionFilterWith(
+  teamIds: Set<string>,
+  owner: WorkflowOwner,
+  scope: OwnerScope = "read",
+) {
   const ownerMatch = and(eq(workflowDefinitions.ownerType, "user"), eq(workflowDefinitions.ownerId, owner.userId));
   const teamMatch =
     teamIds.size > 0
       ? and(eq(workflowDefinitions.ownerType, "team"), inArray(workflowDefinitions.ownerId, [...teamIds]))
       : undefined;
-  return teamMatch ? or(ownerMatch, teamMatch) : ownerMatch;
+  // The org arm of `isAuthorizedForOwner`, in SQL. The two must agree on a
+  // read: a row one admits and the other refuses is a workflow the list shows
+  // and every other route reports as missing.
+  const orgMatch =
+    scope === "read"
+      ? and(eq(workflowDefinitions.ownerType, "org"), eq(workflowDefinitions.ownerId, owner.orgId))
+      : undefined;
+  const arms = [ownerMatch, teamMatch, orgMatch].filter((arm) => arm !== undefined);
+  return arms.length === 1 ? arms[0] : or(...arms);
 }
 
 /** Ids of every workflow the caller may read. The cross-workflow run list
@@ -320,7 +378,12 @@ export async function triggerAccessSets(db: AppDb, owner: WorkflowOwner): Promis
   const rows = await db
     .select({ id: workflowDefinitions.id })
     .from(workflowDefinitions)
-    .where(ownedDefinitionFilterWith(teamIds, owner));
+    // `act`, not `read`: every row this set reaches is one the caller may
+    // also change, fire, or delete on the Triggers surface. Admitting
+    // org-owned workflows here would hand a plain member the triggers an org
+    // admin armed, which is the capability `armableDefinitionRow` exists to
+    // keep out.
+    .where(ownedDefinitionFilterWith(teamIds, owner, "act"));
   return { teamIds, workflowIds: new Set(rows.map((r) => r.id)) };
 }
 

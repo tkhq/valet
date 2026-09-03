@@ -45,7 +45,7 @@ import {
   isKnownProviderKind,
   type LlmProviderKind,
 } from "./llm-providers.js";
-import { parseRepoInput } from "./content-sources.js";
+import { deleteMirroredContent, parseRepoInput } from "./content-sources.js";
 import type { SourceService } from "../bakes/source-service.js";
 
 // ---------------------------------------------------------------------------
@@ -796,7 +796,9 @@ async function reconcileSkillSourcesPass(db: AppDb, cfg: InstanceConfig): Promis
     }).onConflictDoNothing();
   }
 
-  // Delete managed rows no longer in the desired set (two-delete: skills then source).
+  // Delete managed rows no longer in the desired set. The mirrored content
+  // goes with the source, through the same helper the API delete uses, so a
+  // config-managed source cannot leave orphans the API delete would not.
   const managedRows = await db
     .select({ id: contentSources.id })
     .from(contentSources)
@@ -810,7 +812,7 @@ async function reconcileSkillSourcesPass(db: AppDb, cfg: InstanceConfig): Promis
   for (const row of managedRows) {
     if (!desiredIds.has(row.id)) {
       await db.transaction(async (tx) => {
-        await tx.delete(skills).where(and(eq(skills.sourceId, row.id), eq(skills.origin, "repo")));
+        await deleteMirroredContent(tx, orgId, row.id);
         await tx.delete(contentSources).where(eq(contentSources.id, row.id));
       });
     }

@@ -12,7 +12,7 @@ import { workflowSchedules } from "../schema/index.js";
 import {
   canAccessTriggerRow,
   canAccessTriggerRowInScope,
-  ownedDefinitionRow,
+  armableDefinitionRow,
   scopedTriggerAccess,
   triggerAccessSets,
   type TriggerAccessSets,
@@ -144,14 +144,26 @@ export async function createWorkflowSchedule(
     // `user`) rather than the workflow's, that org member became the
     // owner of runs against someone else's resource. See `scheduler.ts`'s
     // `fire()` for the matching run-ownership fix.
-    const owned = await ownedDefinitionRow(db, { userId: user.id, orgId: user.orgId }, input.workflowId!);
+    const owned = await armableDefinitionRow(db, { userId: user.id, orgId: user.orgId }, input.workflowId!);
     if (!owned) return { ok: false, error: `workflow not found: ${input.workflowId}` };
-    // Follow the workflow's own owner exactly. This used to widen a team
-    // workflow's schedule to the ORG, because `owner_type` could not hold a
-    // team — which handed a team's scheduled prompt to the org assistant,
-    // a strictly larger audience than the team that owns the workflow. The
-    // column now holds a team, so the schedule follows its workflow.
-    scheduleOwner = { ownerType: owned.ownerType, ownerId: owned.ownerId };
+    // Follow the workflow's own owner, with org as the one exception. Copying
+    // the owner used to widen a team workflow's schedule to the ORG, because
+    // `owner_type` could not hold a team — which handed a team's scheduled
+    // prompt to the org assistant, a strictly larger audience than the team
+    // that owns the workflow. The column now holds a team, so the schedule
+    // follows its workflow.
+    //
+    // An ORG-owned workflow is the exception, and it fails open the other
+    // way: an org-owned trigger row is reachable by every org member through
+    // the Triggers surface's owner arm, so an admin's row would become theirs
+    // to repoint or delete. The schedule stays with the admin who armed it.
+    // Run billing is unaffected: `scheduler.ts`'s `fire()` bills the
+    // DEFINITION's owner, not the schedule's. `trigger-service.ts` and
+    // `routes/events.ts` already refuse to copy an org owner for this reason.
+    scheduleOwner =
+      owned.ownerType === "org"
+        ? { ownerType: "user", ownerId: user.id }
+        : { ownerType: owned.ownerType, ownerId: owned.ownerId };
   } else if (input.teamId) {
     // Orchestrator-prompt schedule created in a team workspace: the team owns
     // it, so `deliverToOrchestrator` fires the team's assistant. Membership is

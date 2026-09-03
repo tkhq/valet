@@ -203,13 +203,6 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'ALTER TABLE "workflow_versions" ADD COLUMN IF NOT EXISTS "source_commit" text',
   },
   {
-    // The workflows list reads one owner's runs newest-first, and the sync
-    // reads the same rows to find a workflow whose runs have not settled.
-    describe: "workflow_runs_owner_created index",
-    probe: { kind: "index", index: "workflow_runs_owner_created" },
-    sql: 'CREATE INDEX IF NOT EXISTS "workflow_runs_owner_created" ON "workflow_runs" ("owner_type","owner_id","created_at" DESC)',
-  },
-  {
     // The spawning submission's channel origin, inherited by child.settled
     // signals. Null on rows from before the column: those settlements just
     // keep the old no-origin behavior.

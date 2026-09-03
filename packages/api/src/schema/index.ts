@@ -12,7 +12,7 @@ import {
   check,
   doublePrecision,
 } from "drizzle-orm/pg-core";
-import { desc, sql } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import type { ParamMatcher } from "../policies/matchers.js";
 
 // Postgres rewrite of `schema/index.ts` (docs/specs/2026-07-15-postgres-backend-design.md,
@@ -1107,9 +1107,6 @@ export const workflowRuns = pgTable(
   (t) => [
     index("workflow_runs_status_updated").on(t.status, t.updatedAt),
     index("workflow_runs_workflow").on(t.workflowId),
-    // The workflows list reads one owner's runs newest-first, and the sync
-    // reads the same rows to find a workflow whose runs have not settled.
-    index("workflow_runs_owner_created").on(t.ownerType, t.ownerId, desc(t.createdAt)),
   ],
 );
 

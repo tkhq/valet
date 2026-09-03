@@ -20,9 +20,10 @@ import { NotFoundError } from "@valet/shared";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb } from "../lib/drizzle.js";
 import { decodePageCursor, encodePageCursor } from "../lib/page-cursor.js";
-import { skills, contentSources, type ContentSourceRow } from "../schema/index.js";
+import { skills, contentSources, workflowDefinitions, type ContentSourceRow } from "../schema/index.js";
 import { isTeamMember, listTeamsForUser, lockTeamForOwnership } from "./teams.js";
 import { isAuthorizedFor, type SkillOwner } from "./skills.js";
+import { purgeWorkflowRows } from "../workflows/service.js";
 
 /** `owner/repo` segments GitHub accepts. */
 const SEGMENT = /^[A-Za-z0-9._-]+$/;
@@ -393,12 +394,18 @@ export async function listContentSources(
 }
 
 /**
- * Removes a source and the skills it mirrors. Returns false when the id is
+ * Removes a source and everything it mirrors. Returns false when the id is
  * missing or unreachable.
  *
- * The skill delete is scoped by `source_id` AND `origin='repo'`, the same
- * pair every sync write uses. That scoping is what keeps the delete off a
- * skill somebody wrote here and off another source's rows.
+ * Every delete is scoped by `source_id` AND `origin='repo'`, the same pair
+ * every sync write uses. That scoping is what keeps the delete off content
+ * somebody wrote here and off another source's rows.
+ *
+ * One rule holds for every kind this grows to carry: a mirrored row must not
+ * outlive its source. A mirrored workflow is read-only in the product, so an
+ * orphan left here could never be removed through any route: the guard in
+ * `workflows/service.ts` refuses the delete, and the source that would have
+ * removed it is gone.
  */
 export async function deleteContentSource(
   db: AppDb,
@@ -409,10 +416,31 @@ export async function deleteContentSource(
   const row = await ownedContentSourceRow(db, owner, id, opts);
   if (!row) return false;
   await db.transaction(async (tx) => {
-    await tx.delete(skills).where(and(eq(skills.sourceId, id), eq(skills.origin, "repo")));
+    await deleteMirroredContent(tx, row.orgId, id);
     await tx.delete(contentSources).where(eq(contentSources.id, id));
   });
   return true;
+}
+
+/**
+ * Removes every mirrored row of every kind for one source. Add a kind here in
+ * the same commit that adds its collector, or its rows outlive their source.
+ *
+ * A workflow carries triggers and version history, so it goes through
+ * `purgeWorkflowRows` rather than one delete: a schedule left behind keeps
+ * firing against a workflow that is gone.
+ */
+export async function deleteMirroredContent(tx: AppDb, orgId: string, sourceId: string): Promise<void> {
+  await tx.delete(skills).where(and(eq(skills.sourceId, sourceId), eq(skills.origin, "repo")));
+  const mirrored = await tx
+    .select({ id: workflowDefinitions.id })
+    .from(workflowDefinitions)
+    .where(
+      and(eq(workflowDefinitions.sourceId, sourceId), eq(workflowDefinitions.origin, "repo")),
+    );
+  for (const workflow of mirrored) {
+    await purgeWorkflowRows(tx, orgId, workflow.id);
+  }
 }
 
 /**

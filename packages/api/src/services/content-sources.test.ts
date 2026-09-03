@@ -9,7 +9,15 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { orgMembers, orgs, skills, users } from "../schema/index.js";
+import {
+  orgMembers,
+  orgs,
+  skills,
+  users,
+  workflowDefinitions,
+  workflowSchedules,
+  workflowVersions,
+} from "../schema/index.js";
 import { addMember, createTeam, deleteTeam } from "./teams.js";
 import { createSkill, type SkillOwner } from "./skills.js";
 import {
@@ -277,6 +285,74 @@ describe("content sources service", () => {
     const left = await db.select().from(skills);
     expect(left.map((r) => r.name)).toEqual(["written-here"]);
     expect(await ownedContentSourceRow(db, owner("u1"), source.id)).toBeNull();
+  });
+
+  // A mirrored workflow is read-only in the product, so an orphan left behind
+  // here could never be removed through any route: the guard in
+  // `workflows/service.ts` refuses the delete, and the source that would have
+  // removed it is gone.
+  it("deletes the workflows a source mirrors, and their versions and triggers", async () => {
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/automation" });
+    const now = Date.now();
+    await db.insert(workflowDefinitions).values([
+      {
+        id: "wf_mirrored",
+        orgId: ORG,
+        ownerType: "user",
+        ownerId: "u1",
+        name: "Nightly",
+        definition: { version: "dag/v1", nodes: [], edges: [] },
+        origin: "repo",
+        sourceId: source.id,
+        upstreamPath: ".valet/workflows/nightly.yaml",
+        contentSha: "blob-1",
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: "wf_local",
+        orgId: ORG,
+        ownerType: "user",
+        ownerId: "u1",
+        name: "Written here",
+        definition: { version: "dag/v1", nodes: [], edges: [] },
+        origin: "local",
+        createdAt: now,
+        updatedAt: now,
+      },
+    ]);
+    await db.insert(workflowVersions).values({
+      id: "wfv_1",
+      workflowId: "wf_mirrored",
+      version: 1,
+      name: "Nightly",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+      origin: "repo",
+      sourceCommit: "c1",
+      createdAt: now,
+    });
+    await db.insert(workflowSchedules).values({
+      id: "sched_1",
+      orgId: ORG,
+      ownerType: "user",
+      ownerId: "u1",
+      targetKind: "workflow",
+      workflowId: "wf_mirrored",
+      name: "nightly",
+      cron: "0 3 * * *",
+      nextFireAt: now + 1000,
+      createdBy: "u1",
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    expect(await deleteContentSource(db, owner("u1"), source.id)).toBe(true);
+
+    const left = await db.select().from(workflowDefinitions);
+    expect(left.map((r) => r.id)).toEqual(["wf_local"]);
+    expect(await db.select().from(workflowVersions)).toHaveLength(0);
+    // A schedule left behind keeps firing against a workflow that is gone.
+    expect(await db.select().from(workflowSchedules)).toHaveLength(0);
   });
 
   it("refuses to delete another owner's source", async () => {

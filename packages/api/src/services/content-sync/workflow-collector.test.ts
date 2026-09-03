@@ -83,6 +83,10 @@ interface FakeRepo {
   truncatedTree?: boolean;
   /** Every request after this many fails, playing a GitHub outage. */
   failAfter?: number;
+  /** Paths the TREE lists and the contents endpoint answers 404 for. This is
+   * a real window: the tree read and the file reads are separate calls, and a
+   * file can go between them. */
+  unreadable?: string[];
 }
 
 function serve(repo: FakeRepo): GithubFixture {
@@ -105,6 +109,9 @@ function serve(repo: FakeRepo): GithubFixture {
           },
     getContents: (_owner, _name, path) => {
       if (down()) return failed;
+      if ((repo.unreadable ?? []).includes(path)) {
+        return { status: 404, body: { message: "Not Found" } };
+      }
       const content = repo.files[path];
       if (typeof content !== "string") return { status: 404, body: { message: "Not Found" } };
       return {
@@ -317,6 +324,149 @@ describe("workflow collector", () => {
     expect(await mirrored()).toHaveLength(0);
   });
 
+  // The bug this pins: `upstream` was built from the bodies the rail managed
+  // to read, so one 404 in the window between the tree read and the file read
+  // deleted the workflow, its versions and its triggers, and the next sync
+  // re-imported the file under a new id that the old runs did not point at.
+  it("keeps the mirror when a listed file cannot be read", async () => {
+    const repo: FakeRepo = {
+      sha: "c1",
+      files: {
+        ".valet/workflows/nightly.yaml": workflowYaml("Nightly"),
+        ".valet/workflows/other.yaml": workflowYaml("Other"),
+      },
+    };
+    const f = serve(repo);
+    const id = await teamSource();
+    await serviceFor(f).syncOnce(id);
+    const before = await mirrored();
+    expect(before).toHaveLength(2);
+    const nightly = before.find((r) => r.upstreamPath === ".valet/workflows/nightly.yaml");
+    expect(nightly).toBeDefined();
+    if (nightly === undefined) throw new Error("unreachable");
+
+    const now = Date.now();
+    await db.insert(workflowSchedules).values({
+      id: "sched_1",
+      orgId: ORG,
+      ownerType: "team",
+      ownerId: TEAM,
+      targetKind: "workflow",
+      workflowId: nightly.id,
+      name: "nightly",
+      cron: "0 3 * * *",
+      nextFireAt: now + 1000,
+      createdBy: "u1",
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    // A commit that changes the OTHER file, so compare 2 does not stop the
+    // poll, while nightly.yaml is listed and unreadable.
+    repo.sha = "c2";
+    repo.files[".valet/workflows/other.yaml"] = workflowYaml("Other", "done");
+    repo.unreadable = [".valet/workflows/nightly.yaml"];
+    const outcome = await serviceFor(f).syncOnce(id);
+
+    const after = await mirrored();
+    expect(after.map((r) => r.upstreamPath)).toEqual([
+      ".valet/workflows/nightly.yaml",
+      ".valet/workflows/other.yaml",
+    ]);
+    // Same row, so its runs and its version history still point at it.
+    expect(after.find((r) => r.upstreamPath === ".valet/workflows/nightly.yaml")?.id).toBe(
+      nightly.id,
+    );
+    expect(await db.select().from(workflowSchedules)).toHaveLength(1);
+    // The rail says so rather than staying quiet, and the commit is not
+    // recorded, so the next poll reads the file again.
+    expect(outcome?.warnings.join(" ")).toContain(".valet/workflows/nightly.yaml");
+    const [row] = await db.select().from(contentSources).where(eq(contentSources.id, id));
+    expect(row.lastSha).toBe("c1");
+  });
+
+  it("fails one file and mirrors the rest when a definition refers to itself", async () => {
+    // A YAML anchor that contains itself. The validator walks nodes and edges
+    // and never stringifies the whole value, so it passes; storing it would
+    // throw out of the jsonb encoder and take the whole pass with it.
+    const cyclic = [
+      "valet: workflow/v1",
+      "name: Loop",
+      "definition: &def",
+      "  version: dag/v1",
+      "  self: *def",
+      "  nodes:",
+      "    - id: trigger",
+      "      type: trigger",
+      "    - id: stop",
+      "      type: stop",
+      "  edges:",
+      "    - from: trigger",
+      "      to: stop",
+      "",
+    ].join("\n");
+    const f = serve({
+      sha: "c1",
+      files: {
+        ".valet/workflows/loop.yaml": cyclic,
+        ".valet/workflows/fine.yaml": workflowYaml("Fine"),
+      },
+    });
+    const id = await teamSource();
+    const outcome = await serviceFor(f).syncOnce(id);
+
+    expect(outcome?.status).toBe("warning");
+    const rows = await mirrored();
+    expect(rows.map((r) => r.upstreamPath)).toEqual([".valet/workflows/fine.yaml"]);
+    expect(outcome?.warnings.join(" ")).toContain(".valet/workflows/loop.yaml");
+  });
+
+  it("names the file in a validation warning", async () => {
+    const f = serve({
+      sha: "c1",
+      files: {
+        ".valet/workflows/broken.yaml": [
+          "valet: workflow/v1",
+          "name: Broken",
+          "definition:",
+          "  version: dag/v1",
+          "  nodes:",
+          "    - id: trigger",
+          "      type: trigger",
+          "  edges:",
+          "    - from: trigger",
+          "      to: nowhere",
+          "",
+        ].join("\n"),
+      },
+    });
+    const id = await teamSource();
+    const outcome = await serviceFor(f).syncOnce(id);
+    // The validator names the node. Without the path in front, the source
+    // status says a node is wrong and never says which file holds it.
+    expect(outcome?.warnings.join(" ")).toContain(".valet/workflows/broken.yaml");
+  });
+
+  it("mints no version when only the file's name key changed", async () => {
+    const repo: FakeRepo = {
+      sha: "c1",
+      files: { ".valet/workflows/nightly.yaml": workflowYaml("Nightly") },
+    };
+    const f = serve(repo);
+    const id = await teamSource();
+    await serviceFor(f).syncOnce(id);
+
+    repo.sha = "c2";
+    repo.files[".valet/workflows/nightly.yaml"] = workflowYaml("Renamed");
+    await serviceFor(f).syncOnce(id);
+
+    const rows = await mirrored();
+    expect(rows[0].name).toBe("Renamed");
+    // Same graph, so one version, matching the product edit path where a
+    // rename alone mints nothing.
+    expect(await db.select().from(workflowVersions)).toHaveLength(1);
+  });
+
   it("reconciles nothing when the read fails", async () => {
     const repo: FakeRepo = {
       sha: "c1",
@@ -335,30 +485,35 @@ describe("workflow collector", () => {
     expect(await mirrored()).toHaveLength(1);
   });
 
-  it("deletes nothing when GitHub cuts the tree", async () => {
+  // A cut tree must never reconcile. The workflow collector claims paths from
+  // the repository ROOT and has no `walkDirectory`, so with a subpath set it
+  // contributes no pass at all and there is nothing to prove; the case that
+  // matters is a cut tree with no subpath, where the rail fails the whole sync
+  // rather than reading a partial listing as a delete list.
+  it("fails the sync rather than deleting when GitHub cuts the tree", async () => {
     const repo: FakeRepo = {
       sha: "c1",
-      files: { "wf/.valet/workflows/nightly.yaml": workflowYaml("Nightly") },
+      files: {
+        ".valet/workflows/nightly.yaml": workflowYaml("Nightly"),
+        ".valet/workflows/other.yaml": workflowYaml("Other"),
+      },
     };
     const f = serve(repo);
-    // A subpath, because a cut tree with no subpath fails the whole sync.
-    const source = await createContentSource(
-      db,
-      { userId: "u1", orgId: ORG },
-      { repo: "tkhq/automation", subpath: "wf", teamId: TEAM },
-    );
-    await db.update(contentSources).set({ kinds: ["workflows"] }).where(eq(contentSources.id, source.id));
+    const id = await teamSource();
+    await serviceFor(f).syncOnce(id);
+    expect(await mirrored()).toHaveLength(2);
 
-    await serviceFor(f).syncOnce(source.id);
-    // The path is judged from the repository root, so a subpath'd root is not
-    // a workflow root: nothing is mirrored, and nothing is deleted either.
-    const before = await mirrored();
-
+    // The same commit, now over a cut tree: every file past the cut would
+    // read as deleted if the rail reconciled it.
     repo.sha = "c2";
+    repo.files = {};
     repo.truncatedTree = true;
-    const outcome = await serviceFor(f).syncOnce(source.id);
-    expect(outcome?.status).toBe("ok");
-    expect(await mirrored()).toHaveLength(before.length);
+    const outcome = await serviceFor(f).syncOnce(id);
+
+    expect(outcome?.status).toBe("error");
+    expect(await mirrored()).toHaveLength(2);
+    const [row] = await db.select().from(contentSources).where(eq(contentSources.id, id));
+    expect(row.lastSha).toBe("c1");
   });
 
   it("keeps the mirrored row when the file stops parsing, and says why", async () => {

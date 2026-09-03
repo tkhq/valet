@@ -17,18 +17,26 @@ import type { AppDb } from "../lib/drizzle.js";
 import { contentSources, workflowDefinitions, workflowVersions } from "../schema/index.js";
 import {
   addAggregateNode,
+  armableDefinitionRow,
   copyWorkflowDefinition,
   createWorkflowDefinition,
   deleteWorkflowDefinition,
   getWorkflowDefinition,
   listWorkflowDefinitions,
+  startWorkflowRun,
   updateWorkflowDefinition,
 } from "./service.js";
 import { PgWorkflowStore } from "./pg-store.js";
 import type { WorkflowOwner, WorkflowServiceDeps } from "./service.js";
 
+/** Records the owner every start is stamped with; this suite starts no real
+ * run, and the owner is the thing under test. */
+const started: Array<{ ownerType: string; ownerId: string } | undefined> = [];
+
 const stubRunHost: RunHost = {
-  async start() {},
+  async start(_runId, _params, _definition, owner) {
+    started.push(owner);
+  },
   async wake() {},
   async scheduleWake() {},
   async terminate() {},
@@ -198,6 +206,80 @@ describe("a mirrored workflow refuses every product write", () => {
       .where(eq(workflowDefinitions.id, id));
     expect(original.origin).toBe("repo");
     expect(original.name).toBe("Nightly");
+  });
+
+  // An org source publishes to the whole org. Before this, `isAuthorizedForOwner`
+  // answered false for every org-owned row, so an org source mirrored workflows
+  // that no route could read, list, or run: write-only rows.
+  it("lets an org member read a workflow an org source mirrored", async () => {
+    const now = Date.now();
+    await db.insert(workflowDefinitions).values({
+      id: "wf_org",
+      orgId: OWNER.orgId,
+      ownerType: "org",
+      ownerId: OWNER.orgId,
+      name: "Org nightly",
+      definition: GRAPH,
+      origin: "repo",
+      sourceId: SOURCE,
+      upstreamPath: ".valet/workflows/org.yaml",
+      contentSha: "blob-org",
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const summary = await getWorkflowDefinition(deps, OWNER, "wf_org");
+    expect(summary?.ownerType).toBe("org");
+    // The list and the single read must agree: a row one admits and the other
+    // refuses is a workflow the list shows and every other route 404s.
+    const listed = await listWorkflowDefinitions(deps, OWNER);
+    expect(listed.map((w) => w.id)).toContain("wf_org");
+
+    // Another org cannot reach it.
+    const outsider = { userId: "user_2", orgId: "org_other" };
+    expect(await getWorkflowDefinition(deps, outsider, "wf_org")).toBeNull();
+    expect((await listWorkflowDefinitions(deps, outsider)).map((w) => w.id)).not.toContain("wf_org");
+
+    // Readable is not writable: it still mirrors a file.
+    await expect(updateWorkflowDefinition(deps, OWNER, "wf_org", { name: "x" })).rejects.toThrow(
+      RepoOwnedWorkflowError,
+    );
+  });
+
+  // The whole basis of the read/act split. A manual run is the caller's, so
+  // it resolves the caller's own credentials. An armed trigger would run as
+  // the workflow's owner, which for an org row means the org's stored
+  // credentials, so arming is gated on `armableDefinitionRow` instead.
+  it("lets a member RUN an org workflow as themselves, but not arm a trigger on it", async () => {
+    const now = Date.now();
+    await db.insert(workflowDefinitions).values({
+      id: "wf_org_run",
+      orgId: OWNER.orgId,
+      ownerType: "org",
+      ownerId: OWNER.orgId,
+      name: "Org runnable",
+      definition: GRAPH,
+      origin: "repo",
+      sourceId: SOURCE,
+      upstreamPath: ".valet/workflows/runnable.yaml",
+      contentSha: "blob-run",
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    started.length = 0;
+    const run = await startWorkflowRun(deps, OWNER, "wf_org_run");
+    expect(run).not.toBeNull();
+    expect(run).toHaveProperty("runId");
+
+    // Not org-owned: the run bills the person who pressed it, so it resolves
+    // their credentials and not the org's.
+    expect(started).toHaveLength(1);
+    expect(started[0]?.ownerType).toBe("user");
+    expect(started[0]?.ownerId).toBe(OWNER.userId);
+
+    // And the act predicate refuses the same caller, who is not an org admin.
+    expect(await armableDefinitionRow(db, OWNER, "wf_org_run")).toBeNull();
   });
 
   it("still refuses when the source row is gone, without naming a repository it cannot read", async () => {

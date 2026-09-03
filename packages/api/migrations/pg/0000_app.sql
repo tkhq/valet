@@ -617,10 +617,6 @@ CREATE INDEX "workflow_runs_status_updated" ON "workflow_runs" ("status","update
 --> statement-breakpoint
 CREATE INDEX "workflow_runs_workflow" ON "workflow_runs" ("workflow_id");
 --> statement-breakpoint
--- The workflows list reads one owner's runs newest-first, and the sync reads
--- the same rows to find a workflow whose runs have not settled.
-CREATE INDEX "workflow_runs_owner_created" ON "workflow_runs" ("owner_type","owner_id","created_at" DESC);
---> statement-breakpoint
 CREATE TABLE "workflow_checkpoints" (
 	"run_id" text NOT NULL,
 	"node_id" text NOT NULL,
