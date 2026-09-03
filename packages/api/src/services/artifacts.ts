@@ -116,7 +116,7 @@ export async function shareArtifact(db: AppDb, scope: MemoryScope, opts: ShareAr
     title: result.file.title,
     content: result.file.content,
     format: "markdown",
-    description: "",
+    description: (result.file.description ?? "").trim().slice(0, 1000),
     icon: "",
     orgId: opts.orgId,
     sourceSessionId: opts.sourceSessionId,
