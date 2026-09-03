@@ -1042,11 +1042,15 @@ export class SlackTransport implements ChannelTransport {
           continue;
         }
         out.push({ id: member.id, name: member.name, realName: member.realName });
-        if (out.length >= 20) return out;
+        // When filtering by a search term, cap at 20 to keep the typeahead
+        // snappy. When browsing (empty query), return everything within the
+        // page-scan bound so the picker shows all members.
+        if (q !== "" && out.length >= 20) return out;
       }
       cursor = page.nextCursor;
       if (pages >= MAX_PAGES) break;
     } while (cursor !== undefined);
+    out.sort((a, b) => a.name.localeCompare(b.name));
     return out;
   }
 
@@ -1070,11 +1074,15 @@ export class SlackTransport implements ChannelTransport {
         if (channel.isArchived) continue;
         if (q !== "" && !channel.name.toLowerCase().includes(q)) continue;
         out.push({ id: channel.id, name: channel.name });
-        if (out.length >= 20) return out;
+        // When filtering by a search term, cap at 20 to keep the typeahead
+        // snappy. When browsing (empty query), return everything within the
+        // page-scan bound so the picker shows all channels.
+        if (q !== "" && out.length >= 20) return out;
       }
       cursor = page.nextCursor;
       if (pages >= MAX_PAGES) break;
     } while (cursor !== undefined);
+    out.sort((a, b) => a.name.localeCompare(b.name));
     return out;
   }
 
