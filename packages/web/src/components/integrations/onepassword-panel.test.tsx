@@ -93,6 +93,43 @@ describe("OnePasswordPanel", () => {
     );
   });
 
+  // Replacing an already-connected token leaves `orgTokenConnected` true on
+  // both sides of the save, so an effect keyed on it never re-runs. The form
+  // used to stay open over a token that had already saved, with no Connected
+  // badge, which reads as a save that did not happen.
+  it("closes the Replace form and restores the badge after a successful replace", async () => {
+    settingsData = { allowPersonal: false, orgTokenConnected: true, personalTokenConnected: false };
+    const user = userEvent.setup();
+    render(<OnePasswordPanel />);
+
+    await user.click(screen.getByRole("button", { name: "Replace" }));
+    await user.type(screen.getByLabelText("Organization 1Password token"), "op-token-new");
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+
+    await waitFor(() => expect(connectMutateAsync).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Organization 1Password token")).toBeNull();
+      expect(screen.getByText("Connected")).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Replace" })).toBeTruthy();
+    });
+  });
+
+  // A failed replace must keep the form open so the value can be corrected.
+  it("keeps the Replace form open when the save fails", async () => {
+    settingsData = { allowPersonal: false, orgTokenConnected: true, personalTokenConnected: false };
+    connectMutateAsync.mockRejectedValueOnce(
+      new ApiError(400, "PUT /credentials/onepassword → 400", { error: "nope" }),
+    );
+    const user = userEvent.setup();
+    render(<OnePasswordPanel />);
+
+    await user.click(screen.getByRole("button", { name: "Replace" }));
+    await user.type(screen.getByLabelText("Organization 1Password token"), "bad");
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+
+    await waitFor(() => expect(screen.getByLabelText("Organization 1Password token")).toBeTruthy());
+  });
+
   it("shows an inline error when saving the org token fails", async () => {
     connectMutateAsync.mockRejectedValueOnce(
       new ApiError(400, "PUT /credentials/onepassword → 400", { error: "1Password resolution failed" }),
