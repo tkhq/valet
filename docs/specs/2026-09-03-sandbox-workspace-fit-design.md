@@ -58,7 +58,7 @@ and retries the operation once.
 `suspend`/`gatewayEndpoint`). Only sandbox-kubernetes implements it;
 docker/local/virtual omit it and ENOSPC surfaces as before.
 
-### Trigger (workspace prep)
+### Trigger 1 (workspace prep)
 
 `safeExecGrowRetry` in `packages/api/src/engine/workspace-prep.ts` wraps
 the disk-writing git operations: fresh clone, SHA checkout, refresh
@@ -68,6 +68,23 @@ lands it retries the command once (for a fresh clone, after best-effort
 `rm -rf` of the partial target — never the workspace root `.`). A refused
 or failed grow returns the original failure with the refusal reason
 appended, so the surfaced startup error names the corrective action.
+
+### Trigger 2 (in-run, agent commands)
+
+Most fills happen during the run, not during prep: `pnpm install` on a
+large repo writes multiples of the (blobless) clone's size. `PolicySandbox`
+(`packages/engine/src/sandbox/policy.ts`) — the choke point every agent
+exec and job flows through — handles this: when a command FAILS with
+ENOSPC-shaped output, it confirms the workspace is actually full
+(`df -P . && df -Pi .`, blocks AND inodes, ≥95%), grows once, and appends
+an agent-facing note to the result ("the workspace volume was full and has
+been grown — retry the command"). The df confirmation is load-bearing:
+agent output can contain ENOSPC text for other reasons, and a false grow
+costs a one-way doubling plus the once-per-~6h EBS window. In-process
+suppression (60s) keeps a burst of failing commands to one attempt.
+`PolicySandbox` also forwards `growWorkspace`/`gatewayEndpoint`, and a
+compile-time guard (`Required<Sandbox>`) now forces the wrapper to forward
+every future `Sandbox` method.
 
 ### Mechanism (sandbox-kubernetes)
 
@@ -123,6 +140,9 @@ caller retries.
 
 ## Deviations & follow-ups
 
+- In-run growth is reactive (a command must fail once). Proactive growth
+  from the kubelet volume stats already in Prometheus (grow at a
+  threshold, before anything fails) remains open — TKAI-381.
 - The `valet.sandbox.workspace_grow` counter has no bundled dashboard
   panel or alert rule yet. Prep-time fills are transient (git cleans up),
   so the kubelet-stats `SandboxWorkspacesFillingSystemic` alert does not
