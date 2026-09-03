@@ -11,7 +11,7 @@ export interface FakeSlackApi {
   addFile(name: string, bytes: Uint8Array): void;
   /** Workspace members returned by users.list. */
   setMembers(members: Array<Record<string, unknown>>): void;
-  /** Channels returned by conversations.list. */
+  /** Channels returned by conversations.list and users.conversations. */
   setChannels(channels: Array<Record<string, unknown>>): void;
   /** files.info registry: fileId → file object. */
   setFileInfo(fileId: string, file: Record<string, unknown>): void;
@@ -151,6 +151,7 @@ export async function startFakeSlackApi(): Promise<FakeSlackApi> {
         return c.json({ ok: true, user: member });
       }
       case "conversations.list":
+      case "users.conversations":
         return c.json({ ok: true, channels, response_metadata: { next_cursor: "" } });
       case "users.lookupByEmail": {
         const member = members.find((m) => {
