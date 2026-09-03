@@ -9,8 +9,10 @@
  * destroyed.
  *
  * One destroy rule — **orphan**: the owning session (create-time
- * annotation) no longer exists in the engine store and is not cached. Its
- * sandbox has no owner left to delete it through any other path.
+ * annotation) no longer exists in the engine store and is not cached, OR
+ * its app row is soft-deleted (`status='deleted'`). Either way the sandbox
+ * has no owner left to delete it through any other path — see
+ * `isOrphaned`'s docblock for why the deleted-row branch exists.
  *
  * Everything else is REPORTED, never destroyed (CLAUDE.md: "Invariants:
  * alert, don't auto-repair"). A sandbox older than
@@ -24,8 +26,10 @@
  * immediately before the destroy. Providers without `list()` (docker/local
  * — process-local handles) make this sweep a no-op.
  */
+import { eq } from "drizzle-orm";
 import { recordSandboxDestroyed, recordSandboxFlagged, type SandboxProvider } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
+import { agentSessions } from "../schema/index.js";
 import { revokeSandboxTokens } from "../auth/sandbox-tokens.js";
 import { startSweepTimer, type SweepTimer } from "../lib/sweep-timer.js";
 
@@ -35,8 +39,10 @@ const DEFAULT_SWEEP_INTERVAL_MS = 30 * 60_000;
 export interface SweepReport {
   /** Sandboxes destroyed because their owning session is gone. */
   orphansDestroyed: number;
-  /** Sandboxes older than the report threshold — an invariant violation
-   * some owner failed to clean; reported, never destroyed here. */
+  /** Sandboxes older than the report threshold with NO engine activity
+   * inside it — an invariant violation some owner failed to clean;
+   * reported, never destroyed here. Old-but-active sandboxes (a daily-used
+   * assistant's suspended CR) are healthy and not counted. */
   overAge: number;
   /** Sandboxes with no session annotation (created before stamping).
    * Unverifiable ownership; reported, never destroyed here. */
@@ -57,6 +63,11 @@ export interface SandboxReconcileSweepDeps {
   engineStore: {
     getSession(sessionId: string): Promise<unknown>;
     listUnsettledSubmissions(sessionId: string): Promise<unknown[]>;
+    /** Engine activity clock (ms of the last queue-item update, null when
+     * the session never ran a turn) — the over-age report's staleness
+     * judge. CR age alone is not staleness: a long-lived assistant or
+     * orchestrator legitimately keeps one sandbox for months. */
+    latestActivityAt(sessionId: string): Promise<number | null>;
   };
   /** Resolved via `resolveSandboxAgeReportMs` at boot; `<= 0` disables the
    * over-age report (never affects the orphan rule). */
@@ -81,8 +92,20 @@ export class SandboxReconcileSweep {
       try {
         const ageMs = this.deps.ageReportMs;
         if (ageMs > 0 && sb.createdAtMs != null && sb.createdAtMs <= now - ageMs) {
-          report.overAge += 1;
-          overAgeIds.push(sb.id);
+          // Age alone is not a violation: a suspended CR survives every
+          // resume/suspend cycle, so a daily-used assistant legitimately
+          // holds a months-old CR (observed on agents-dev: 25 of 28
+          // flagged sandboxes had engine activity the same day). Only an
+          // over-age sandbox with NO engine activity inside the window has
+          // an owner that failed to clean up.
+          const activityAt = sb.sessionId
+            ? await this.deps.engineStore.latestActivityAt(sb.sessionId)
+            : null;
+          const activeInsideWindow = activityAt != null && activityAt > now - ageMs;
+          if (!activeInsideWindow) {
+            report.overAge += 1;
+            overAgeIds.push(sb.id);
+          }
         }
         if (!sb.sessionId) {
           report.unowned += 1;
@@ -102,8 +125,8 @@ export class SandboxReconcileSweep {
     recordSandboxFlagged("unowned", report.unowned);
     if (report.overAge > 0) {
       console.warn(
-        `SandboxReconcileSweep: ${report.overAge} sandbox(es) older than the report threshold — ` +
-          `an owner failed to clean up. Ids: ${overAgeIds.join(", ")}. ` +
+        `SandboxReconcileSweep: ${report.overAge} sandbox(es) older than the report threshold with no ` +
+          `engine activity inside it — an owner failed to clean up. Ids: ${overAgeIds.join(", ")}. ` +
           `Find the owning sweep and fix it; do not add an age-based kill here (CLAUDE.md: alert, don't auto-repair).`,
       );
     }
@@ -117,8 +140,27 @@ export class SandboxReconcileSweep {
   }
 
   /** The orphan rule's judgment: the owning session is gone from both the
-   * store and the cache. */
+   * store and the cache — or its app row is soft-deleted.
+   *
+   * The deleted-row branch exists because every `status='deleted'` writer
+   * (session delete, team delete, security teardown) calls
+   * `engineHost.destroy` first, and that destroy has crash and wake-race
+   * windows an api restart makes routine — a partial destroy leaves the
+   * engine row and sandbox alive with no owner that will ever retry
+   * (observed live on agents-dev: a deleted assistant session kept its
+   * Running pod for hours). The soft-delete is the recorded intent;
+   * `deleteTeam`'s docblock already names this sweep as the cover for
+   * callers it cannot tear down. A cached ghost must not veto a recorded
+   * delete, so this check runs before the cache check; the
+   * unsettled-submission guard in `destroyConfirmedOrphans` still protects
+   * a mid-turn race. */
   private async isOrphaned(sessionId: string): Promise<boolean> {
+    const appRows = await this.deps.db
+      .select({ status: agentSessions.status })
+      .from(agentSessions)
+      .where(eq(agentSessions.id, sessionId))
+      .limit(1);
+    if (appRows[0]?.status === "deleted") return true;
     if (this.deps.engineHost.liveSession(sessionId) != null) return false;
     const sessionRow = await this.deps.engineStore.getSession(sessionId);
     return sessionRow == null;
@@ -154,7 +196,7 @@ export class SandboxReconcileSweep {
         await revokeSandboxTokens(this.deps.db, cand.sessionId);
         destroyed += 1;
         console.log(
-          `SandboxReconcileSweep: destroyed sandbox ${cand.id} for session ${cand.sessionId} — orphaned (session gone)`,
+          `SandboxReconcileSweep: destroyed sandbox ${cand.id} for session ${cand.sessionId} — orphaned (session gone or deleted)`,
         );
       } catch (err) {
         console.error(`SandboxReconcileSweep: orphan destroy failed for sandbox ${cand.id}:`, err);

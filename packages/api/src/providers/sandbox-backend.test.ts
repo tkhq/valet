@@ -19,6 +19,8 @@ import {
   resolveHibernatedRetentionMs,
   resolveIdleMinutes,
   resolveKubeConfig,
+  resolveSandboxEphemeralStorageLimit,
+  resolveSandboxEphemeralStorageRequest,
 } from "./sandbox-backend.js";
 
 function fakeKubeConfig(): k8s.KubeConfig {
@@ -183,6 +185,40 @@ describe("resolveHibernatedRetentionMs", () => {
 
   it("treats a non-numeric value as disabled", () => {
     expect(resolveHibernatedRetentionMs({ VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES: "bogus" })).toBe(0);
+  });
+});
+
+describe("resolveSandboxEphemeralStorageRequest / Limit (TKAI-349)", () => {
+  it("defaults to 2Gi request / 8Gi limit when unset", () => {
+    expect(resolveSandboxEphemeralStorageRequest({})).toBe("2Gi");
+    expect(resolveSandboxEphemeralStorageLimit({})).toBe("8Gi");
+  });
+
+  it("passes explicit quantity strings through verbatim", () => {
+    expect(
+      resolveSandboxEphemeralStorageRequest({ VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST: "500Mi" }),
+    ).toBe("500Mi");
+    expect(
+      resolveSandboxEphemeralStorageLimit({ VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT: "16Gi" }),
+    ).toBe("16Gi");
+  });
+
+  it('treats "0" as disabled (manifest omits the field)', () => {
+    expect(
+      resolveSandboxEphemeralStorageRequest({ VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST: "0" }),
+    ).toBeUndefined();
+    expect(
+      resolveSandboxEphemeralStorageLimit({ VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT: "0" }),
+    ).toBeUndefined();
+  });
+
+  it("treats an empty string as unset (default applies)", () => {
+    expect(
+      resolveSandboxEphemeralStorageRequest({ VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST: "" }),
+    ).toBe("2Gi");
+    expect(resolveSandboxEphemeralStorageLimit({ VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT: "" })).toBe(
+      "8Gi",
+    );
   });
 });
 

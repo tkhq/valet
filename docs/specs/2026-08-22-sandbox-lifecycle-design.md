@@ -136,6 +136,32 @@ until the api registers a MeterProvider):
   sweep pass while the condition persists, so `increase(...) > 0` alerts
   cleanly. This is the alert half of "alert, don't auto-repair".
 
+## Update (2026-09-02): deleted-owner rule and an activity-aware age report
+
+Investigation of ~680 sandbox CRs on agents-dev (TKAI-349 follow-up) found
+the sweeps healthy for children and hibernated sessions, plus two real
+defects. Both are fixed; decision 6 (no age-based kill) stands.
+
+1. **Soft-deleted sessions join the orphan rule.** Every
+   `agent_sessions.status='deleted'` writer (session delete, team delete,
+   security teardown) calls `engineHost.destroy` first, but that destroy
+   has crash and wake-race windows an api restart makes routine. A partial
+   destroy left the engine row, a cached ghost, and a Running pod alive
+   for hours (observed live: a deleted assistant session). The engine row
+   surviving meant the orphan rule never fired. The sweep now treats a
+   soft-deleted app row as an orphan — the delete is the recorded intent,
+   and the unsettled-submission guard still protects a mid-turn race. The
+   engine's `Session.destroy` also no longer latches its `destroyed` flag
+   on failure, so the delete routes' deliberate second destroy retries
+   instead of silently no-oping.
+2. **The over-age report now consults the engine activity clock.** CR age
+   alone is not staleness: a suspended CR survives every resume/suspend
+   cycle, so a daily-used assistant legitimately holds a months-old CR. On
+   agents-dev, 25 of 28 flagged sandboxes had engine activity the same
+   day — the noise buried the one real leak. An over-age sandbox is now
+   reported only when its session has no engine activity inside the report
+   window.
+
 ## Deviations & notes
 
 - The TTL destroy rule (recommendation D.3 in the incident doc) was

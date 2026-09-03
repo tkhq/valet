@@ -130,6 +130,16 @@ sandbox:
   # the chart only threads the name through. Empty → field omitted.
   dockerRuntimeClass: ""
 
+  # Per-sandbox ephemeral-storage (node-local disk: container rootfs +
+  # emptyDirs, including the DinD docker-state volume). The REQUEST caps how
+  # many sandbox pods the scheduler stacks onto one node
+  # (nodeAllocatableEphemeral / request); the LIMIT makes the kubelet evict
+  # one runaway sandbox instead of the node going NotReady (TKAI-349). The
+  # limit also bounds the DinD docker-state emptyDir. Set a value to "0" to
+  # disable it. Keep the limit at or above the request.
+  ephemeralStorageRequest: "2Gi"
+  ephemeralStorageLimit: "8Gi"
+
   # DEPRECATED. Legacy fallback consulted by unparented sources when nothing
   # else resolves. Kept for one release; will be removed in a future v2.x.
   # image:

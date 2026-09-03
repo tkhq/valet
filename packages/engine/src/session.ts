@@ -1347,9 +1347,19 @@ export class Session {
       clearInterval(this.sweepTimer);
       this.sweepTimer = null;
     }
-    await Promise.all([...this.threads.values()].map((t) => t.abort()));
-    await this.attachment.destroy();
-    await this.providers.store.deleteSession(this.id);
+    try {
+      await Promise.all([...this.threads.values()].map((t) => t.abort()));
+      await this.attachment.destroy();
+      await this.providers.store.deleteSession(this.id);
+    } catch (err) {
+      // A partial destroy must stay retryable. The delete routes call
+      // destroy twice on purpose (the wake-race cover); a latched flag
+      // turned the retry into a silent no-op, and the engine row plus
+      // sandbox then outlived the delete with no owner left to reclaim
+      // them (observed live on agents-dev).
+      this.destroyed = false;
+      throw err;
+    }
   }
 
   async pendingDecisionGates(): Promise<DecisionGate[]> {
