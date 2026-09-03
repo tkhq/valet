@@ -43,6 +43,7 @@
  * `POST /api/sandbox/git-credential` at clone time. This module only ever
  * interpolates non-secret values (`apiUrl`, repo URLs/paths, git identity).
  */
+import { recordSandboxWorkspaceGrow } from "@valet/engine";
 import type { ExecResult, Sandbox, SessionStartRef } from "@valet/engine";
 import { gitCredentialHelperScript, ghWrapperScript } from "./git-credential-helper.js";
 import { secretsCliScript } from "./secrets-cli-script.js";
@@ -155,6 +156,76 @@ async function safeExec(
 function execFailureMessage(label: string, result: ExecResult): string {
   const detail = result.stderr.trim() || result.stdout.trim();
   return detail ? `${label}: ${detail}` : label;
+}
+
+// ── ENOSPC → grow the workspace, retry once ─────────────────────────────
+// Workspace-fit spec (docs/specs/2026-09-03-sandbox-workspace-fit-design.md):
+// a git operation that fills the workspace volume fails with ENOSPC. On
+// backends with a growable persistent workspace (kubernetes: the workspace
+// PVC, grown online up to VALET_SANDBOX_WORKSPACE_MAX), grow one increment
+// and retry the operation once. Every attempt records a metric — successes
+// included — so many workspaces filling at once stays an alertable signal
+// (the SandboxWorkspacesFillingSystemic alert) instead of being papered
+// over by resizes.
+
+const ENOSPC_PATTERN = /no space left on device|enospc/i;
+
+/** True when a failed exec looks like the workspace volume filled. Exported
+ * for direct unit coverage. */
+export function isEnospc(result: ExecResult): boolean {
+  return result.exitCode !== 0 && (ENOSPC_PATTERN.test(result.stderr) || ENOSPC_PATTERN.test(result.stdout));
+}
+
+/** Attempts one workspace grow after `context` hit ENOSPC. Returns whether
+ * the operation is worth retrying (the grow landed). A refusal or failure
+ * is logged and recorded, never thrown — the caller surfaces the original
+ * ENOSPC (annotated with the refusal reason) instead. */
+async function tryGrowWorkspace(sandbox: Sandbox, context: string): Promise<{ retry: boolean; reason?: string }> {
+  if (!sandbox.growWorkspace) return { retry: false };
+  try {
+    const growth = await sandbox.growWorkspace();
+    if (growth.grown) {
+      console.log(
+        `workspace prep: ${context} hit ENOSPC — grew workspace ${growth.from} → ${growth.to}, retrying once`,
+      );
+      recordSandboxWorkspaceGrow("grown");
+      return { retry: true };
+    }
+    console.error(`workspace prep: ${context} hit ENOSPC — workspace grow refused: ${growth.reason}`);
+    recordSandboxWorkspaceGrow("refused");
+    return { retry: false, reason: growth.reason };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`workspace prep: ${context} hit ENOSPC — workspace grow failed: ${message}`);
+    recordSandboxWorkspaceGrow("error");
+    return { retry: false, reason: `the grow attempt itself failed: ${message}` };
+  }
+}
+
+/**
+ * `safeExec` with the ENOSPC-grow-retry policy: when the command fails with
+ * ENOSPC and the workspace grows, run `cleanup` (best-effort debris removal
+ * so e.g. a partial clone doesn't block the re-clone) and retry the command
+ * ONCE. A refused/failed grow returns the original failure with the refusal
+ * reason appended to stderr, so the thrown prep error names the corrective
+ * context instead of a bare "No space left on device".
+ */
+async function safeExecGrowRetry(
+  sandbox: Sandbox,
+  command: string,
+  opts: { cwd?: string; timeout?: number } | undefined,
+  context: string,
+  cleanup?: () => Promise<void>,
+): Promise<ExecResult> {
+  const first = await safeExec(sandbox, command, opts);
+  if (!isEnospc(first)) return first;
+  const grow = await tryGrowWorkspace(sandbox, context);
+  if (!grow.retry) {
+    const note = `the workspace volume is full and was not grown${grow.reason ? ` (${grow.reason})` : ""}`;
+    return { ...first, stderr: `${first.stderr.trim()}\n${note}`.trim() };
+  }
+  if (cleanup) await cleanup();
+  return safeExec(sandbox, command, opts);
 }
 
 /** Stages the two Task 8 scripts at a workspace-relative path (via
@@ -272,17 +343,24 @@ async function assertCloneTargetEmpty(sandbox: Sandbox, dir: string): Promise<vo
  * `git checkout {ref}` when a ref is pinned. Offline-tolerant — failures
  * are logged and prep continues to the next binding, never thrown. */
 async function refreshExistingClone(sandbox: Sandbox, dir: string, binding: RepoBinding): Promise<void> {
-  const fetch = await safeExec(sandbox, "git fetch origin", { cwd: dir, timeout: GIT_REFRESH_TIMEOUT_MS });
+  const fetch = await safeExecGrowRetry(
+    sandbox,
+    "git fetch origin",
+    { cwd: dir, timeout: GIT_REFRESH_TIMEOUT_MS },
+    `git fetch for ${binding.fullName}`,
+  );
   if (fetch.exitCode !== 0) {
     console.error(
       `workspace prep: git fetch origin failed for ${binding.fullName} (${dir}) — continuing: ${fetch.stderr || fetch.stdout}`,
     );
   }
   if (binding.ref) {
-    const checkout = await safeExec(sandbox, `git checkout ${shQuote(binding.ref)}`, {
-      cwd: dir,
-      timeout: GIT_REFRESH_TIMEOUT_MS,
-    });
+    const checkout = await safeExecGrowRetry(
+      sandbox,
+      `git checkout ${shQuote(binding.ref)}`,
+      { cwd: dir, timeout: GIT_REFRESH_TIMEOUT_MS },
+      `git checkout ${binding.ref} for ${binding.fullName}`,
+    );
     if (checkout.exitCode !== 0) {
       console.error(
         `workspace prep: git checkout ${binding.ref} failed for ${binding.fullName} (${dir}) — continuing: ${checkout.stderr || checkout.stdout}`,
@@ -332,7 +410,12 @@ async function resolveRemoteDefaultBranch(sandbox: Sandbox, dir: string): Promis
  * warm restores keep the in-place `refreshExistingClone` behavior.
  */
 async function refreshStagedPrebuild(sandbox: Sandbox, dir: string, binding: RepoBinding): Promise<boolean> {
-  const fetch = await safeExec(sandbox, "git fetch origin", { cwd: dir, timeout: GIT_REFRESH_TIMEOUT_MS });
+  const fetch = await safeExecGrowRetry(
+    sandbox,
+    "git fetch origin",
+    { cwd: dir, timeout: GIT_REFRESH_TIMEOUT_MS },
+    `git fetch for ${binding.fullName}`,
+  );
   if (fetch.exitCode !== 0) {
     console.error(
       `workspace prep: git fetch origin failed for ${binding.fullName} (${dir}) — staying at the baked commit, skipping reinstall: ${fetch.stderr || fetch.stdout}`,
@@ -346,10 +429,12 @@ async function refreshStagedPrebuild(sandbox: Sandbox, dir: string, binding: Rep
     );
     return true;
   }
-  const checkout = await safeExec(sandbox, `git checkout -B ${shQuote(ref)} ${shQuote(`origin/${ref}`)}`, {
-    cwd: dir,
-    timeout: GIT_REFRESH_TIMEOUT_MS,
-  });
+  const checkout = await safeExecGrowRetry(
+    sandbox,
+    `git checkout -B ${shQuote(ref)} ${shQuote(`origin/${ref}`)}`,
+    { cwd: dir, timeout: GIT_REFRESH_TIMEOUT_MS },
+    `git checkout -B ${ref} for ${binding.fullName}`,
+  );
   if (checkout.exitCode !== 0) {
     console.error(
       `workspace prep: git checkout -B ${ref} origin/${ref} failed for ${binding.fullName} (${dir}) — continuing: ${checkout.stderr || checkout.stdout}`,
@@ -373,21 +458,43 @@ async function cloneFresh(sandbox: Sandbox, dir: string, binding: RepoBinding): 
   await assertCloneTargetEmpty(sandbox, dir);
 
   const refIsSha = binding.ref !== undefined && isCommitSha(binding.ref);
-  const parts = [`git clone ${shQuote(binding.cloneUrl)} ${shQuote(dir)}`];
+  // Blobless partial clone (workspace-fit spec, Part A): all refs and
+  // commits, a full working tree, but historical file blobs are fetched
+  // lazily — a multi-GB-history repo lands as a few hundred MB instead of
+  // filling the workspace volume. Deliberately NOT `--depth`: a shallow
+  // clone breaks `git log`/blame/merge-base, which agents use; blobless
+  // preserves them and back-fills blobs on demand (the credential helper
+  // is wired sandbox-wide, so later fetches authenticate the same way the
+  // clone did). The filter persists in the clone's git config, so the
+  // refresh paths' `git fetch origin` keep working unchanged.
+  const parts = [`git clone --filter=blob:none ${shQuote(binding.cloneUrl)} ${shQuote(dir)}`];
   // A branch/tag ref selects the checkout at clone time; a SHA ref cannot
-  // (see isCommitSha) and is checked out below from the full clone.
+  // (see isCommitSha) and is checked out below from the fetched history.
   if (binding.ref && !refIsSha) parts.push(`--branch ${shQuote(binding.ref)}`);
   const command = parts.join(" ");
 
-  const result = await safeExec(sandbox, command);
+  // ENOSPC → grow the workspace and re-clone once. `git clone` cleans up
+  // what it wrote on failure, but best-effort remove the target anyway so
+  // leftover debris can't turn the retry into a "target not empty" throw.
+  // Never `rm -rf` the workspace root itself (`.`).
+  const cleanup = async () => {
+    if (dir !== ".") await safeExec(sandbox, `rm -rf ${shQuote(dir)}`);
+  };
+  const result = await safeExecGrowRetry(sandbox, command, undefined, `git clone ${binding.fullName}`, cleanup);
   if (result.exitCode !== 0) {
     throw new Error(execFailureMessage(`workspace prep: git clone failed for ${binding.fullName}`, result));
   }
 
   if (refIsSha) {
-    // The SHA is reachable from the fetched branches (a full clone fetches
-    // every branch's objects), so a detached checkout lands the exact commit.
-    const checkout = await safeExec(sandbox, `git checkout ${shQuote(binding.ref!)}`, { cwd: dir });
+    // The SHA's commit/tree history is present even in a blobless clone
+    // (the filter omits only blobs, which the checkout back-fills on
+    // demand), so a detached checkout lands the exact commit.
+    const checkout = await safeExecGrowRetry(
+      sandbox,
+      `git checkout ${shQuote(binding.ref!)}`,
+      { cwd: dir },
+      `git checkout ${binding.ref} for ${binding.fullName}`,
+    );
     if (checkout.exitCode !== 0) {
       throw new Error(
         execFailureMessage(
@@ -422,7 +529,14 @@ export async function prepBinding(sandbox: Sandbox, dir: string, binding: RepoBi
  */
 async function stagePrebuiltRepo(sandbox: Sandbox, dir: string): Promise<void> {
   const q = shQuote(dir);
-  const result = await safeExec(sandbox, `mkdir -p ${q} && cp -a ${PREBUILT_REPO_PATH}/. ${q}`);
+  // ENOSPC → grow and re-copy once. Re-running `cp -a` over a partial copy
+  // overwrites in place, so no cleanup step is needed.
+  const result = await safeExecGrowRetry(
+    sandbox,
+    `mkdir -p ${q} && cp -a ${PREBUILT_REPO_PATH}/. ${q}`,
+    undefined,
+    `staging prebuilt repo into ${dir}`,
+  );
   if (result.exitCode !== 0) {
     throw new Error(execFailureMessage(`workspace prep: staging prebuilt repo into ${dir} failed`, result));
   }
