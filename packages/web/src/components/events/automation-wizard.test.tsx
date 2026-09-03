@@ -466,5 +466,37 @@ describe("AutomationWizard", () => {
       const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
       expect(body.target).toEqual({ kind: "orchestrator", orchestrator: "user", follow: true });
     });
+
+    // A schedule used to send the workspace's team unconditionally, which
+    // overrode the radio. Picking a PERSONAL assistant inside a team workspace
+    // then sent a team owner beside a personal assistant, and the server
+    // refused it naming an id the reader could do nothing about.
+    it("schedule in a team workspace follows the radio, not the workspace", () => {
+      scopeTeamId = "t_platform";
+      twoAssistants();
+      render(<AutomationWizard open onOpenChange={() => {}} />);
+
+      pickOutcome(/On a schedule/);
+      clickNext();
+      fireEvent.change(screen.getByLabelText("Cron"), { target: { value: "0 9 * * 1-5" } });
+      clickNext();
+
+      // Move off the team radio onto a personal assistant.
+      fireEvent.click(screen.getByLabelText(/Notify your assistant/));
+      fireEvent.change(screen.getByLabelText("Assistant"), { target: { value: "a-ops" } });
+      fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "standup" } });
+      clickNext();
+
+      fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "Standup" } });
+      fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+
+      const body = createSchedule.mock.calls[0][0] as CreateWorkflowScheduleRequest;
+      expect(body.teamId).toBeUndefined();
+      expect(body.target).toEqual({
+        kind: "orchestrator",
+        prompt: "standup",
+        assistantId: "a-ops",
+      });
+    });
   });
 });

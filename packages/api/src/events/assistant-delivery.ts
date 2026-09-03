@@ -31,16 +31,45 @@ import { writeDropLog } from "../orchestrator/signals.js";
  */
 const deliveryChains = new Map<string, Promise<void>>();
 
+export interface AssistantDeliveryDeps {
+  db: AppDb;
+  engineHost: EngineHost;
+  /**
+   * Seed a channel thread's earlier messages on the assistant's FIRST turn in
+   * it. Wired only on the mention path (`orchestrator-target`); the follow
+   * path never delivers first, so it leaves this unset.
+   */
+  fetchThreadContext?: (origin: ChannelOrigin) => Promise<string | null>;
+}
+
+export interface AssistantDeliveryArgs {
+  orgId: string;
+  owner: Principal;
+  actorUserId: string;
+  threadKey: string;
+  signal: SignalContent;
+  dispatchId: string;
+  /** Which of the owner's assistants answers. Absent → the owner's default. */
+  assistantId?: string;
+  /** Drop-log reason if the resolved assistant belongs to another org. */
+  mismatchReason: string;
+}
+
 export async function deliverToAssistantThread(
-  deps: Parameters<typeof deliverToAssistantThreadInner>[0],
-  args: Parameters<typeof deliverToAssistantThreadInner>[1],
+  deps: AssistantDeliveryDeps,
+  args: AssistantDeliveryArgs,
 ): Promise<void> {
-  // The assistant id is part of the key: two assistants of the same owner
-  // reading the same Slack thread hold two different assistant threads, and
-  // serializing them against each other would be a false dependency.
-  const key = `${args.orgId}:${args.owner.type}:${args.owner.id}:${args.assistantId ?? "default"}:${args.threadKey}`;
+  // Resolve BEFORE keying. The chain must be keyed on the SESSION, not on the
+  // requested assistant id: an id that names the owner's default and an absent
+  // id mean the same session, and keying on the raw value would put them on
+  // separate chains and let them race the seed window this chain exists to
+  // close. One Slack mention on a followed thread produces exactly that pair
+  // (the dispatcher passes the rule's id, the follow-router passes the row's,
+  // which is null on a follow bound before the column).
+  const session = await resolveDeliverySession(deps, args);
+  const key = `${session.id}:${args.threadKey}`;
   const prior = deliveryChains.get(key) ?? Promise.resolve();
-  const run = prior.then(() => deliverToAssistantThreadInner(deps, args));
+  const run = prior.then(() => deliverToAssistantThreadInner(deps, args, session));
   // The stored tail swallows the failure (the caller gets it from `run`) and
   // removes itself once it is still the tail, so the map does not keep one
   // settled promise per thread ever delivered to.
@@ -111,30 +140,10 @@ async function resolveDeliverySession(
 }
 
 async function deliverToAssistantThreadInner(
-  deps: {
-    db: AppDb;
-    engineHost: EngineHost;
-    /**
-     * Seed a channel thread's earlier messages on the assistant's FIRST turn in
-     * it. Wired only on the mention path (`orchestrator-target`); the follow
-     * path never delivers first, so it leaves this unset.
-     */
-    fetchThreadContext?: (origin: ChannelOrigin) => Promise<string | null>;
-  },
-  args: {
-    orgId: string;
-    owner: Principal;
-    actorUserId: string;
-    threadKey: string;
-    signal: SignalContent;
-    dispatchId: string;
-    /** Which of the owner's assistants answers. Absent → the owner's default. */
-    assistantId?: string;
-    /** Drop-log reason if the resolved assistant belongs to another org. */
-    mismatchReason: string;
-  },
+  deps: AssistantDeliveryDeps,
+  args: AssistantDeliveryArgs,
+  session: Session,
 ): Promise<void> {
-  const session = await resolveDeliverySession(deps, args);
   const data = await session.toData();
   if (data.orgId !== args.orgId) {
     await writeDropLog(deps.db, {

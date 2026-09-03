@@ -411,10 +411,14 @@ export function AutomationWizard({
         },
       );
     } else {
-      // A scheduled prompt fires an assistant, so it belongs to the active
-      // workspace — send the team so it fires the TEAM's assistant, not the
-      // caller's. (The workflow target above needs none: it follows the
-      // workflow's own owner.)
+      // A scheduled prompt fires an assistant, so `teamId` follows the RADIO,
+      // not the workspace. It used to follow the workspace, which quietly
+      // overrode a reader who picked "your assistant" inside a team; the
+      // wizard opens on the team radio there, so the default is unchanged.
+      // Sending both a team and a personal assistant is worse than quiet: the
+      // server resolves the owner to the team and refuses the assistant.
+      // (The workflow target above needs no team: it follows the workflow's
+      // own owner.)
       createSchedule.mutate(
         {
           ...base,
@@ -426,7 +430,7 @@ export function AutomationWizard({
               ? { assistantId: target.assistantId }
               : {}),
           },
-          ...(scopedTeamId ? { teamId: scopedTeamId } : {}),
+          ...(target.orchestrator === "team" ? { teamId: target.teamId } : {}),
         },
         {
           onSuccess: () => onOpenChange(false),
