@@ -28,7 +28,7 @@ import { allCatalogEntries, catalogForService } from "../events/ingest.js";
 import { subscriptionMatchesEvent, type SubscriptionFilter } from "../events/match.js";
 import { storedAnyChannelState } from "../events/mention-scope.js";
 import { validateSubscriptionWrite } from "../events/subscription-write.js";
-import { ownedDefinitionRow } from "../workflows/service.js";
+import { armableDefinitionRow } from "../workflows/service.js";
 import { checkAssistantForOwner } from "../assistants/service.js";
 import { isTeamMember } from "../services/teams.js";
 import type {
@@ -580,7 +580,7 @@ eventsRouter.post("/event-subscriptions", async (c) => {
   let ownerType: "user" | "team" | "org" = "user";
   let ownerId = user.id;
   if (body.target.kind === "workflow") {
-    const owned = await ownedDefinitionRow(db, { userId: user.id, orgId: user.orgId }, body.target.workflowId);
+    const owned = await armableDefinitionRow(db, { userId: user.id, orgId: user.orgId }, body.target.workflowId);
     if (!owned) {
       return c.json({ error: `unknown workflow: ${body.target.workflowId}` }, 400);
     }

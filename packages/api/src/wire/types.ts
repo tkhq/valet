@@ -1770,8 +1770,16 @@ export interface WorkflowDefinitionSummary {
   definition: unknown;
   createdAt: number;
   updatedAt: number;
-  ownerType: "user" | "team";
+  ownerType: "user" | "team" | "org";
   ownerId: string;
+  /** `repo` names a workflow this deployment mirrors from a file. It is
+   * read-only here: every write path refuses it with 409, and the editor
+   * offers a copy instead. Absent means `local`. */
+  origin?: "local" | "repo";
+  /** Where the file is, on a `repo` workflow: `owner/repo` and the
+   * repo-relative path. The list badges the row with it, and the editor
+   * links to it. */
+  upstream?: { repoFullName: string; path: string };
 }
 
 export interface CreateWorkflowRequest {
@@ -2821,11 +2829,16 @@ export interface SkillSourceSummary {
   subpath: string;
   ownerType: "user" | "team" | "org";
   ownerId: string;
+  /** What the sync collects from this repository. The union is restated
+   * rather than imported: this module stays free of schema imports so the
+   * web build does not pull in Drizzle. */
+  kinds: ("skills" | "workflows" | "templates" | "memories")[];
   enabled: boolean;
   /** `pending` — never synced. `ok` — synced. `warning` — synced, but at
-   * least one skill was skipped. `error` — the last sync failed. */
+   * least one file was skipped. `error` — the last sync failed. */
   status: "pending" | "ok" | "warning" | "error";
-  /** Skills this source currently mirrors. */
+  /** Skills this source currently mirrors. Zero on a source that collects no
+   * skills, which is not a fault. */
   skillCount: number;
   lastSyncedAt: number | null;
   /** Commit the last sync read. */
@@ -2862,6 +2875,11 @@ export interface CreateSkillSourceRequest {
   /** Track the repository for the org instead of for the caller.
    * Requires the caller to be an org admin; a non-admin gets 403. */
   ownerType?: "user" | "team" | "org";
+  /** What the sync collects. Omit for skills only. `workflows` and
+   * `templates` run code as the owner, so a team source collecting either
+   * needs a team admin and a personal source cannot collect them at all;
+   * both refusals are 403 and name the corrective action. */
+  kinds?: ("skills" | "workflows" | "templates" | "memories")[];
 }
 
 /** What a sync did. Returned by the create route too, because adding a

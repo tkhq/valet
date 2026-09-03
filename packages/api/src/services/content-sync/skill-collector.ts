@@ -24,6 +24,7 @@ import {
 } from "@valet/engine";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb } from "../../lib/drizzle.js";
+import { canonicalJson } from "../../lib/canonical-json.js";
 import { skills, type ContentSourceRow, type SkillRow } from "../../schema/index.js";
 import { newSkillId, skillContentSha } from "../skills.js";
 import {
@@ -385,8 +386,15 @@ async function updateMirror(
   now: number,
 ): Promise<boolean> {
   const contentSha = skillContentSha(parsed.body);
+  // `contentSha` hashes the BODY only, and the row also stores the whole
+  // frontmatter. Without comparing it, an edit that touches only a
+  // frontmatter field this test does not name — `tags`, `license`, anything
+  // an author adds — reads as unchanged and never reaches the mirror, while
+  // the manifest hash moved so every later poll re-reads the file to decide
+  // nothing.
   const unchanged =
     row.contentSha === contentSha &&
+    canonicalJson(row.frontmatter) === canonicalJson(parsed.frontmatter) &&
     row.description === parsed.description &&
     row.upstreamPath === entry.path;
   if (unchanged) return false;

@@ -2,7 +2,15 @@ import { PGlite } from "@electric-sql/pglite";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { buildAppDb, buildAppQueryable, applyAppMigrations, type AppDb } from "../lib/drizzle.js";
-import { teamMembers, teams, workflowDefinitions, workflowSchedules } from "../schema/index.js";
+import {
+  orgMembers,
+  orgs,
+  teamMembers,
+  teams,
+  users,
+  workflowDefinitions,
+  workflowSchedules,
+} from "../schema/index.js";
 import { createWorkflowSchedule, deleteWorkflowSchedule, listWorkflowSchedules, nextFireAt } from "./schedule-service.js";
 import { scheduledRunId } from "./scheduler.js";
 
@@ -154,7 +162,27 @@ describe("createWorkflowSchedule authorization", () => {
     expect(rows[0]?.ownerId).not.toBe("member-user");
   });
 
-  it("rejects scheduling an org-owned workflow — org-owned definitions aren't authorized for anyone yet (matches services/skills.ts's identical, documented gap: nothing creates one)", async () => {
+  // An org member READS an org-owned workflow, because an org content source
+  // publishes to the whole org. Arming one is a different thing: a schedule
+  // starts runs owned by the DEFINITION, and `credentialOwnerFor` resolves an
+  // org owner to the org's stored credentials, so a plain member could
+  // otherwise start recurring, org-credentialed work. `services/skills.ts`
+  // draws the same line: any member reads an org row, only an admin writes
+  // one.
+  async function seedOrg(): Promise<void> {
+    // `onConflictDoNothing`: the suite's reset does not clear these tables,
+    // and two cases seed the same org.
+    await db.insert(orgs).values({ id: "org-1", name: "Org", createdAt: 1_000 }).onConflictDoNothing();
+    for (const [id, role] of [
+      ["org-admin", "admin"],
+      ["plain-member", "member"],
+    ] as const) {
+      await db
+        .insert(users)
+        .values({ id, email: `${id}@x.test`, name: id, role: "member" })
+        .onConflictDoNothing();
+      await db.insert(orgMembers).values({ orgId: "org-1", userId: id, role }).onConflictDoNothing();
+    }
     await db.insert(workflowDefinitions).values({
       id: "wf_1",
       orgId: "org-1",
@@ -162,17 +190,46 @@ describe("createWorkflowSchedule authorization", () => {
       ownerId: "org-1",
       name: "target",
       definition: { version: "dag/v1", nodes: [], edges: [] },
+      origin: "repo",
       createdAt: 1_000,
       updatedAt: 1_000,
     });
+  }
+
+  it("refuses a plain org member arming a schedule on an org-owned workflow", async () => {
+    await seedOrg();
 
     const result = await createWorkflowSchedule(
       db,
-      { id: "any-org-member", orgId: "org-1" },
+      { id: "plain-member", orgId: "org-1" },
       { workflowId: "wf_1", name: "sched", cron: "0 * * * *" },
     );
 
     expect(result.ok).toBe(false);
+    expect(await db.select().from(workflowSchedules)).toHaveLength(0);
+  });
+
+  it("lets an org admin arm one, and stamps the schedule to the admin rather than the org", async () => {
+    await seedOrg();
+
+    const result = await createWorkflowSchedule(
+      db,
+      { id: "org-admin", orgId: "org-1" },
+      { workflowId: "wf_1", name: "sched", cron: "0 * * * *" },
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const rows = await db
+      .select()
+      .from(workflowSchedules)
+      .where(eq(workflowSchedules.id, result.schedule.scheduleId));
+    // Not `org`: an org-owned trigger row is reachable by every org member
+    // through the Triggers surface's owner arm, so copying the owner here
+    // would hand the admin's row to everyone. Run billing is unaffected —
+    // `scheduler.ts`'s `fire()` bills the definition's owner.
+    expect(rows[0]?.ownerType).toBe("user");
+    expect(rows[0]?.ownerId).toBe("org-admin");
   });
 
   it("rejects scheduling a team-owned workflow for a non-member", async () => {

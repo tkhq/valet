@@ -336,6 +336,32 @@ describe("skill collector", () => {
       expect((await db.select().from(skills)).map((r) => r.name)).toEqual(["deploy"]);
     });
 
+    // `content_sha` hashes the body only, and the row also stores the whole
+    // frontmatter. Without comparing it, an edit that touches only a
+    // frontmatter field the change test does not name reads as unchanged and
+    // never reaches the mirror, while the manifest hash moved so every later
+    // poll re-reads the file to decide nothing.
+    it("updates a skill whose frontmatter changed and whose body did not", async () => {
+      const before = "---\nname: deploy\ndescription: Ships it.\nlicense: MIT\n---\n\nDo the thing.\n";
+      const after = "---\nname: deploy\ndescription: Ships it.\nlicense: Apache-2.0\n---\n\nDo the thing.\n";
+      const repo: FakeRepo = { sha: "commit-1", skills: { deploy: before } };
+      const f = serve(repo);
+      const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
+      await serviceFor(f).syncOnce(source.id);
+      const [first] = await db.select().from(skills).where(eq(skills.name, "deploy"));
+      expect(first?.frontmatter).toMatchObject({ license: "MIT" });
+
+      repo.sha = "commit-2";
+      repo.skills.deploy = after;
+      const outcome = await serviceFor(f).syncOnce(source.id);
+
+      expect(outcome?.updated).toBe(1);
+      const [second] = await db.select().from(skills).where(eq(skills.name, "deploy"));
+      expect(second?.frontmatter).toMatchObject({ license: "Apache-2.0" });
+      // The body is untouched, which is what makes this the interesting case.
+      expect(second?.content).toBe(first?.content);
+    });
+
     it("keeps a junk path out, and does not count it as a skill", async () => {
       const f = serve({
         sha: "commit-1",
@@ -811,7 +837,7 @@ Read the reference.
       // The re-scan is once, not every poll: the sync records the commit and
       // the version it ran under, so the next poll is back to one call.
       const [row] = await db.select().from(contentSources).where(eq(contentSources.id, source.id));
-      expect(row?.discoveryScan).toBe(discoveryScanMark("commit-1"));
+      expect(row?.discoveryScan).toBe(discoveryScanMark("commit-1", ["skills"]));
     });
 
     // The rollback case. A release that does not know the column still
@@ -844,7 +870,7 @@ Read the reference.
       );
       expect(outcome?.imported).toBe(1);
       const [row] = await db.select().from(contentSources).where(eq(contentSources.id, source.id));
-      expect(row?.discoveryScan).toBe(discoveryScanMark("commit-2"));
+      expect(row?.discoveryScan).toBe(discoveryScanMark("commit-2", ["skills"]));
     });
 
     it("still costs one call for a source already at the current rules", async () => {

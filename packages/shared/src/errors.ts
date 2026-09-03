@@ -35,6 +35,7 @@ export const ErrorCodes = {
   ENCRYPTION_ERROR: 'ENCRYPTION_ERROR',
 
   // General
+  CONFLICT: 'CONFLICT',
   INTERNAL_ERROR: 'INTERNAL_ERROR',
   NOT_FOUND: 'NOT_FOUND',
   METHOD_NOT_ALLOWED: 'METHOD_NOT_ALLOWED',
@@ -93,6 +94,27 @@ export class ValidationError extends ValetError {
 export class RateLimitError extends ValetError {
   constructor(retryAfter?: number) {
     super('Rate limit exceeded', ErrorCodes.RATE_LIMIT_EXCEEDED, 429, { retryAfter });
+  }
+}
+
+/**
+ * A write refused because the workflow mirrors a file in a repository. The
+ * product never holds the edit, so there is no lost-edit case to resolve:
+ * the file is the source, and editing the file is the edit.
+ *
+ * The message names the file and the repository, because a person who
+ * reached this has the editor open and needs to know where to go.
+ */
+export class RepoOwnedWorkflowError extends ValetError {
+  constructor(
+    public readonly repoFullName: string,
+    public readonly upstreamPath: string
+  ) {
+    super(
+      `This workflow mirrors ${upstreamPath} in ${repoFullName} and cannot be changed here. Edit the file and push, or copy the workflow to get one you can edit.`,
+      ErrorCodes.CONFLICT,
+      409
+    );
   }
 }
 

@@ -76,7 +76,7 @@ import {
 import type { AppQueryable } from "../lib/drizzle.js";
 import { ingestEvent } from "../events/ingest.js";
 import { writeDropLog } from "../orchestrator/signals.js";
-import { findOrgSkillSourcesForPush, parseSkillPushPayload } from "../services/skill-sync-push.js";
+import { parseContentPushPayload } from "../services/content-sync/push.js";
 import { credentials, githubInstallations, orgs } from "../schema/index.js";
 import type {
   GetGithubAppResponse,
@@ -734,18 +734,19 @@ githubAppWebhookRouter.post("/", async (c) => {
 
   const event = c.req.header("x-github-event");
   const deps: GithubAppDeps = { db, credentials: engineCredentials, key: deriveSecretKey(encryptionKey) };
-  // Org skill sources sync on `push`. Personal and team sources stay on
-  // the poll — they often have no App installation. `syncOnce` is the
-  // same path the sweep and the Sync button use.
+  // A verified push marks every matching enabled source in the org as due and
+  // starts a sweep pass. The sync itself runs out of band, under each
+  // source's own credential, so nothing here reads the payload into content
+  // and a push storm collapses into one sync per source per tick. Polling
+  // stays the floor for a repository with no App installation.
   if (event === "push") {
-    const push = parseSkillPushPayload(payload);
+    const push = parseContentPushPayload(payload);
     if (push) {
-      const sources = await findOrgSkillSourcesForPush(db, orgId, push);
-      for (const source of sources) {
-        await c.var.providers.contentSync.syncOnce(source.id).catch((err) => {
-          console.error(`content sync ${source.id} (github push):`, err);
+      await c.var.providers.contentSync
+        .onPush(orgId, push.repoFullName, push.gitRef, push.defaultBranch)
+        .catch((err) => {
+          console.error(`content sync onPush (${push.repoFullName}):`, err);
         });
-      }
     }
   }
   if (event === "installation") {

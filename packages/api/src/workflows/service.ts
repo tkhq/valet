@@ -23,10 +23,11 @@ import {
 } from "@valet/workflow";
 import type { RunHost } from "@valet/workflow";
 import type { ActionPlugin, ValetPlugin } from "@valet/engine";
-import { NotFoundError } from "@valet/shared";
+import { NotFoundError, RepoOwnedWorkflowError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import {
   actionInvocations,
+  contentSources,
   eventSubscriptions,
   workflowDefinitions,
   workflowRuns,
@@ -147,16 +148,56 @@ export function validateDefinitionInput(
   return { ok: true, definition };
 }
 
-function rowToDefinition(row: typeof workflowDefinitions.$inferSelect): WorkflowDefinitionSummary {
-  return {
+type WorkflowRow = typeof workflowDefinitions.$inferSelect;
+
+function rowToDefinition(row: WorkflowRow, repoFullName?: string): WorkflowDefinitionSummary {
+  const summary: WorkflowDefinitionSummary = {
     id: row.id,
     name: row.name,
     definition: row.definition,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
-    ownerType: row.ownerType === "team" ? "team" : "user",
+    ownerType: row.ownerType,
     ownerId: row.ownerId,
   };
+  if (row.origin !== "repo") return summary;
+  summary.origin = "repo";
+  // The repository name comes from the source row, so a source that moves
+  // takes every badge with it. A mirrored row whose source is gone keeps
+  // `origin` and loses the reference: it is still read-only, and the sweep
+  // that removes the source removes the row.
+  if (repoFullName !== undefined && row.upstreamPath !== null) {
+    summary.upstream = { repoFullName, path: row.upstreamPath };
+  }
+  return summary;
+}
+
+/** `source_id` to `repo_full_name`, for the mirrored rows in `rows`. One
+ * query for a whole list, and none at all when nothing is mirrored. */
+async function repoNamesFor(db: AppDb, rows: WorkflowRow[]): Promise<Map<string, string>> {
+  const ids = [...new Set(rows.flatMap((r) => (r.origin === "repo" && r.sourceId ? [r.sourceId] : [])))];
+  if (ids.length === 0) return new Map();
+  const sources = await db
+    .select({ id: contentSources.id, repoFullName: contentSources.repoFullName })
+    .from(contentSources)
+    .where(inArray(contentSources.id, ids));
+  return new Map(sources.map((row) => [row.id, row.repoFullName]));
+}
+
+/**
+ * Refuses a write to a workflow this deployment mirrors from a file.
+ *
+ * Every product write path reaches `updateWorkflowDefinition` or
+ * `deleteWorkflowDefinition` — the REST route, the `workflows.update_workflow`
+ * agent action, and `addAggregateNode` — so these two calls cover all of
+ * them. The sync writes its own rows directly and does not come through
+ * here.
+ */
+async function refuseRepoOwned(db: AppDb, row: WorkflowRow): Promise<void> {
+  if (row.origin !== "repo") return;
+  const names = await repoNamesFor(db, [row]);
+  const repo = (row.sourceId !== null ? names.get(row.sourceId) : undefined) ?? "its repository";
+  throw new RepoOwnedWorkflowError(repo, row.upstreamPath ?? "its workflow file");
 }
 
 /** True when `owner` (the caller) may act on `row` — either the row's
@@ -191,6 +232,15 @@ export async function isAuthorizedForOwner(
 ): Promise<boolean> {
   if (target.ownerType === "user") return target.ownerId === owner.userId;
   if (target.ownerType === "team") return isTeamMember(db, target.ownerId, owner.userId);
+  // An org-owned workflow is one an org content source mirrors from a
+  // repository, and an org source publishes to the whole org. Comparing the
+  // row's owner id against the caller's own org id IS the scoping: an id from
+  // another org cannot match.
+  //
+  // This is the READ rule. `refuseRepoOwned` covers edits and deletes of the
+  // definition and nothing else, so arming a trigger is gated separately, by
+  // `armableDefinitionRow`.
+  if (target.ownerType === "org") return target.ownerId === owner.orgId;
   return false;
 }
 
@@ -235,24 +285,73 @@ export async function ownedDefinitionRow(
   return (await isAuthorizedFor(db, owner, row)) ? row : null;
 }
 
+/**
+ * A definition the caller may ARM A TRIGGER on. Same reach as
+ * `ownedDefinitionRow` for a user-owned or team-owned row; an org-owned row
+ * additionally needs an org admin.
+ *
+ * Reading an org-owned mirrored workflow is an org-wide capability: an org
+ * source publishes to the whole org. Arming one is not. A schedule, an event
+ * subscription and a webhook each start runs owned by the DEFINITION, and
+ * `credentialOwnerFor` in `plugins/action-invoker.ts` maps an org owner onto
+ * the org's stored credentials, so a plain member could otherwise turn a
+ * published graph into recurring work that runs with the org's credentials,
+ * choosing the cadence and the input. A manual run is exempt because
+ * `startWorkflowRun` stamps the run to the caller, who then resolves their
+ * own credentials.
+ *
+ * The team case is not a precedent for allowing this: `credentialOwnerFor`
+ * returns no owner for a team, so no team-triggered run has ever resolved a
+ * stored credential.
+ */
+export async function armableDefinitionRow(
+  db: AppDb,
+  owner: WorkflowOwner,
+  id: string,
+): Promise<typeof workflowDefinitions.$inferSelect | null> {
+  const row = await ownedDefinitionRow(db, owner, id);
+  if (!row || row.ownerType !== "org") return row;
+  return (await isOrgAdmin(db, owner.orgId, owner.userId)) ? row : null;
+}
+
 /** The "definitions this caller may read" predicate — their own, plus every
  * team they are a live member of. Shared by the definitions list and
  * `ownedWorkflowIds` so the two can never disagree about reach. Membership
  * is re-read on every call for the same reason `isAuthorizedFor` does. */
-async function ownedDefinitionFilter(db: AppDb, owner: WorkflowOwner) {
-  return ownedDefinitionFilterWith(await callerTeamIds(db, owner.userId), owner);
+async function ownedDefinitionFilter(db: AppDb, owner: WorkflowOwner, scope: OwnerScope = "read") {
+  return ownedDefinitionFilterWith(await callerTeamIds(db, owner.userId), owner, scope);
 }
+
+/**
+ * Which arms a reach set carries. `read` includes org-owned rows, which every
+ * member of that org may see. `act` leaves them out, so a surface whose rows
+ * a caller can MUTATE does not hand an org workflow's triggers to every
+ * member. `armableDefinitionRow` states why the two differ.
+ */
+type OwnerScope = "read" | "act";
 
 /** SQL form of `isAuthorizedForOwnerWith` over `workflow_definitions` —
  * the same owner arms, pushed into the WHERE clause. Takes the team set so
  * `triggerAccessSets` can reuse one membership read across both queries. */
-function ownedDefinitionFilterWith(teamIds: Set<string>, owner: WorkflowOwner) {
+function ownedDefinitionFilterWith(
+  teamIds: Set<string>,
+  owner: WorkflowOwner,
+  scope: OwnerScope = "read",
+) {
   const ownerMatch = and(eq(workflowDefinitions.ownerType, "user"), eq(workflowDefinitions.ownerId, owner.userId));
   const teamMatch =
     teamIds.size > 0
       ? and(eq(workflowDefinitions.ownerType, "team"), inArray(workflowDefinitions.ownerId, [...teamIds]))
       : undefined;
-  return teamMatch ? or(ownerMatch, teamMatch) : ownerMatch;
+  // The org arm of `isAuthorizedForOwner`, in SQL. The two must agree on a
+  // read: a row one admits and the other refuses is a workflow the list shows
+  // and every other route reports as missing.
+  const orgMatch =
+    scope === "read"
+      ? and(eq(workflowDefinitions.ownerType, "org"), eq(workflowDefinitions.ownerId, owner.orgId))
+      : undefined;
+  const arms = [ownerMatch, teamMatch, orgMatch].filter((arm) => arm !== undefined);
+  return arms.length === 1 ? arms[0] : or(...arms);
 }
 
 /** Ids of every workflow the caller may read. The cross-workflow run list
@@ -279,7 +378,12 @@ export async function triggerAccessSets(db: AppDb, owner: WorkflowOwner): Promis
   const rows = await db
     .select({ id: workflowDefinitions.id })
     .from(workflowDefinitions)
-    .where(ownedDefinitionFilterWith(teamIds, owner));
+    // `act`, not `read`: every row this set reaches is one the caller may
+    // also change, fire, or delete on the Triggers surface. Admitting
+    // org-owned workflows here would hand a plain member the triggers an org
+    // admin armed, which is the capability `armableDefinitionRow` exists to
+    // keep out.
+    .where(ownedDefinitionFilterWith(teamIds, owner, "act"));
   return { teamIds, workflowIds: new Set(rows.map((r) => r.id)) };
 }
 
@@ -388,7 +492,8 @@ export async function listWorkflowDefinitions(
     .from(workflowDefinitions)
     .where(where)
     .orderBy(desc(workflowDefinitions.updatedAt));
-  return rows.map(rowToDefinition);
+  const names = await repoNamesFor(deps.db, rows);
+  return rows.map((row) => rowToDefinition(row, row.sourceId ? names.get(row.sourceId) : undefined));
 }
 
 export async function getWorkflowDefinition(
@@ -397,7 +502,9 @@ export async function getWorkflowDefinition(
   id: string,
 ): Promise<WorkflowDefinitionSummary | null> {
   const row = await ownedDefinitionRow(deps.db, owner, id);
-  return row ? rowToDefinition(row) : null;
+  if (!row) return null;
+  const names = await repoNamesFor(deps.db, [row]);
+  return rowToDefinition(row, row.sourceId ? names.get(row.sourceId) : undefined);
 }
 
 export async function createWorkflowDefinition(
@@ -535,6 +642,7 @@ export async function updateWorkflowDefinition(
 ): Promise<WorkflowDefinitionSummary | null> {
   const row = await ownedDefinitionRow(deps.db, owner, id);
   if (!row) return null;
+  await refuseRepoOwned(deps.db, row);
 
   const now = Date.now();
   // In-flight runs are unaffected: `workflow_runs.definition` snapshots the
@@ -571,7 +679,7 @@ export async function updateWorkflowDefinition(
     definition: input.definition !== undefined ? input.definition : row.definition,
     createdAt: row.createdAt,
     updatedAt: now,
-    ownerType: row.ownerType === "team" ? "team" : "user",
+    ownerType: row.ownerType,
     ownerId: row.ownerId,
   };
 }
@@ -807,6 +915,55 @@ export async function addAggregateNode(
   return { ok: true, definition: saved, nodeId, sources: sources.map((s) => s.id) };
 }
 
+/**
+ * Copies a workflow into a `local` one the caller owns, named `<name> (copy)`.
+ *
+ * This is the escape hatch for a mirrored workflow: the file stays the source
+ * of the original, and the copy is an ordinary workflow the product can edit.
+ * It copies the graph and nothing else. Schedules, event subscriptions and
+ * webhooks stay with the original, because a copy that armed its own triggers
+ * would run the same work twice from one edit.
+ *
+ * Returns null when the workflow does not exist or is not owned.
+ */
+export async function copyWorkflowDefinition(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  id: string,
+): Promise<WorkflowDefinitionSummary | null> {
+  const row = await ownedDefinitionRow(deps.db, owner, id);
+  if (!row) return null;
+
+  const now = Date.now();
+  const copyId = newWorkflowId("wf");
+  const name = `${row.name} (copy)`;
+  // Personal, whatever the original's owner was. A team-owned mirror copied
+  // into the team would be a second team workflow every member sees; the
+  // person who wants to change the graph gets it in their own workspace,
+  // and may move it from there.
+  await deps.db.insert(workflowDefinitions).values({
+    id: copyId,
+    orgId: owner.orgId,
+    ownerType: "user",
+    ownerId: owner.userId,
+    name,
+    definition: row.definition,
+    origin: "local",
+    createdAt: now,
+    updatedAt: now,
+  });
+  await snapshotVersion(deps, copyId, 1, name, row.definition, now);
+  return {
+    id: copyId,
+    name,
+    definition: row.definition,
+    createdAt: now,
+    updatedAt: now,
+    ownerType: "user",
+    ownerId: owner.userId,
+  };
+}
+
 export type DeleteWorkflowResult = "deleted" | "not_found" | "has_active_runs";
 
 /**
@@ -823,6 +980,9 @@ export async function deleteWorkflowDefinition(
 ): Promise<DeleteWorkflowResult> {
   const row = await ownedDefinitionRow(deps.db, owner, id);
   if (!row) return "not_found";
+  // Deleting the file is the delete, exactly as editing the file is the
+  // edit. A delete here would come back on the next sync anyway.
+  await refuseRepoOwned(deps.db, row);
 
   const active = await deps.workflowStore.listRuns({
     workflowIds: [id],
@@ -831,37 +991,55 @@ export async function deleteWorkflowDefinition(
   });
   if (active.runs.length > 0) return "has_active_runs";
 
-  await deps.db.delete(workflowDefinitions).where(eq(workflowDefinitions.id, id));
-  await deps.db.delete(workflowVersions).where(eq(workflowVersions.workflowId, id));
+  await purgeWorkflowRows(deps.db, owner.orgId, id);
+  return "deleted";
+}
 
-  // Triggers must not outlive the workflow: orphaned schedules would be
-  // disabled by the scheduler eventually, but the triggers list would show
-  // ghosts until then. Event subscriptions targeting the workflow are
-  // app-db rows with no FK, so remove them explicitly.
-  await deps.db.delete(workflowSchedules).where(eq(workflowSchedules.workflowId, id));
-  const subs = await deps.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.orgId, owner.orgId));
+/**
+ * Removes every trigger that can start `workflowId`: its schedules, the event
+ * subscriptions that target it, and its webhook.
+ *
+ * Triggers must not outlive the workflow. The scheduler sweeps ALL enabled
+ * schedule rows regardless of owner reachability, so an orphan keeps firing
+ * forever against a workflow that is gone. `workflow_webhooks` is keyed by a
+ * plain `workflow_id` text column with no cascade, so an orphaned hook id
+ * would sit in the table unreachable through any owner-facing route and
+ * never actually removed.
+ *
+ * The sync calls this on its own: a mirrored workflow with an unsettled run
+ * is disarmed rather than deleted, so nothing new starts while the run
+ * finishes.
+ */
+export async function disarmWorkflowTriggers(
+  db: AppDb,
+  orgId: string,
+  workflowId: string,
+): Promise<void> {
+  await db.delete(workflowSchedules).where(eq(workflowSchedules.workflowId, workflowId));
+  await db.delete(workflowWebhooks).where(eq(workflowWebhooks.workflowId, workflowId));
+  // Event subscriptions are app-db rows with no FK, and `target` is a
+  // free-form jsonb column. Guard the shape before reading it, so a
+  // malformed row cannot abort the cleanup loop mid-delete.
+  const subs = await db.select().from(eventSubscriptions).where(eq(eventSubscriptions.orgId, orgId));
   for (const sub of subs) {
-    // `target` is a free-form jsonb column; guard the shape before reading
-    // so a malformed row cannot abort the cleanup loop mid-delete.
     if (typeof sub.target !== "object" || sub.target === null) continue;
     const target = sub.target as { kind?: string; workflowId?: string };
-    if (target.kind === "workflow" && target.workflowId === id) {
-      await deps.db.delete(eventSubscriptions).where(eq(eventSubscriptions.id, sub.id));
+    if (target.kind === "workflow" && target.workflowId === workflowId) {
+      await db.delete(eventSubscriptions).where(eq(eventSubscriptions.id, sub.id));
     }
   }
+}
 
-  // No FK/cascade on workflow_webhooks (it's keyed by workflowId, a plain
-  // text column) — without this, a deleted workflow's hookId secret would
-  // sit in the table forever, unreachable through any owner-facing route
-  // (every webhook-service.ts entry point re-checks ownedDefinitionRow,
-  // which is now gone) but never actually removed.
-  await deps.db.delete(workflowWebhooks).where(eq(workflowWebhooks.workflowId, id));
-  // Same reasoning as webhooks: workflow_schedules.workflow_id is a plain
-  // text column with no cascade, and the scheduler sweeps ALL enabled rows
-  // regardless of owner reachability — an orphan keeps firing forever
-  // against a workflow that no longer exists.
-  await deps.db.delete(workflowSchedules).where(eq(workflowSchedules.workflowId, id));
-  return "deleted";
+/** The definition, its version history, and everything that could start it.
+ * Settled runs are kept: they are history, reachable by their run id. */
+export async function purgeWorkflowRows(
+  db: AppDb,
+  orgId: string,
+  workflowId: string,
+): Promise<void> {
+  await db.delete(workflowDefinitions).where(eq(workflowDefinitions.id, workflowId));
+  await db.delete(workflowVersions).where(eq(workflowVersions.workflowId, workflowId));
+  await disarmWorkflowTriggers(db, orgId, workflowId);
 }
 
 /** Returns null when the workflow doesn't exist (or isn't owned); an
@@ -1082,11 +1260,33 @@ function threadIdOf(effects: NodeCheckpoint["effects"]): string | undefined {
   return typeof threadId === "string" ? threadId : undefined;
 }
 
-/** Owner-gated run lookup shared by cancel/approval below. */
-async function ownedRun(deps: WorkflowServiceDeps, owner: WorkflowOwner, runId: string) {
+/**
+ * Owner-gated run lookup shared by cancel, retry and approval below.
+ *
+ * `scope` is the same read-versus-act split `armableDefinitionRow` makes, and
+ * it exists here for the same reason. A run started by a schedule, an event or
+ * a webhook copies the DEFINITION's owner, so an org-owned mirrored workflow
+ * produces org-owned runs, and `credentialOwnerFor` resolves an org run owner
+ * to the org's stored credentials. Reading such a run is an org-wide
+ * capability; resolving its approval gate is not, because that is what lets
+ * the action run with those credentials.
+ *
+ * `retry` is deliberately a READ: it delegates to `startWorkflowRun`, which
+ * stamps the new run to the caller, so it resolves the caller's own
+ * credentials and grants nothing a manual start would not.
+ */
+async function ownedRun(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  runId: string,
+  scope: OwnerScope = "read",
+) {
   const run = await deps.workflowStore.getRun(runId);
   if (!run || !run.owner || !(await isAuthorizedForOwner(deps.db, owner, run.owner))) {
     return null;
+  }
+  if (scope === "act" && run.owner.ownerType === "org") {
+    if (!(await isOrgAdmin(deps.db, owner.orgId, owner.userId))) return null;
   }
   return run;
 }
@@ -1130,7 +1330,7 @@ export async function cancelWorkflowRun(
   owner: WorkflowOwner,
   runId: string,
 ): Promise<"ok" | "not_found"> {
-  const run = await ownedRun(deps, owner, runId);
+  const run = await ownedRun(deps, owner, runId, "act");
   if (!run) return "not_found";
   await deps.workflowRunHost.terminate(runId);
 
@@ -1226,7 +1426,7 @@ export async function resolveWorkflowApproval(
     via: "web" | "agent";
   },
 ): Promise<ResolveApprovalOutcome> {
-  const run = await ownedRun(deps, owner, input.runId);
+  const run = await ownedRun(deps, owner, input.runId, "act");
   if (!run) return "not_found";
   const iter = input.iteration ?? 0;
   const suffix = iter > 0 ? `:${iter}` : "";

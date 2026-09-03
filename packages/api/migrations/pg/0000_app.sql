@@ -447,6 +447,14 @@ CREATE TABLE "memory_files" (
 	"source_session_id" text DEFAULT '' NOT NULL,
 	"org_id" text DEFAULT '' NOT NULL,
 	"version" integer DEFAULT 1 NOT NULL,
+	-- Repository mirror bookkeeping. A row with a `source_id` mirrors one file
+	-- under `.valet/memory/` and lands under `lib/`, which `assertWritablePath`
+	-- already reserves for mounted libraries, so the product refuses to write
+	-- it without a new guard. NOT `origin` above, which is OKF provenance of
+	-- the fact and is already spent.
+	"source_id" text,
+	"upstream_path" text,
+	"content_sha" text,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL,
 	PRIMARY KEY("owner_type", "owner_id", "path")
@@ -559,11 +567,22 @@ CREATE TABLE "workflow_definitions" (
 	"owner_id" text NOT NULL,
 	"name" text NOT NULL,
 	"definition" jsonb NOT NULL,
+	-- Repository mirror columns. A `repo` row is the mirror of one workflow
+	-- file and is read-only in the product: editing the file is the edit, and
+	-- deleting the file is the delete. Identity is (source_id, upstream_path)
+	-- and nothing else, so a rename deletes one workflow and creates another.
+	"origin" text DEFAULT 'local' NOT NULL,
+	"source_id" text,
+	"upstream_path" text,
+	"content_sha" text,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
 );
 --> statement-breakpoint
-CREATE INDEX "workflow_definitions_owner" ON "workflow_definitions" ("org_id","owner_type","owner_id");
+CREATE INDEX "workflow_definitions_owner" ON "workflow_definitions" ("org_id","owner_type","owner_id");--> statement-breakpoint
+-- One mirrored row per file per source. Partial, because a `local` row has
+-- no source and no path, and NULLs would not collide anyway.
+CREATE UNIQUE INDEX "workflow_definitions_source_path" ON "workflow_definitions" ("source_id","upstream_path") WHERE "source_id" IS NOT NULL;
 --> statement-breakpoint
 CREATE TABLE "workflow_versions" (
 	"id" text PRIMARY KEY NOT NULL,
@@ -571,10 +590,43 @@ CREATE TABLE "workflow_versions" (
 	"version" integer NOT NULL,
 	"name" text NOT NULL,
 	"definition" jsonb NOT NULL,
+	-- Which write produced this version, and from which commit. Both NULL on
+	-- every version a product edit wrote, and on every row older than the
+	-- repository mirror.
+	"origin" text,
+	"source_commit" text,
 	"created_at" bigint NOT NULL
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "workflow_versions_wf_version" ON "workflow_versions" ("workflow_id","version");
+--> statement-breakpoint
+-- Templates mirrored from a repository. A row is a copy of one template
+-- file; installing it produces an ordinary local workflow, which is the
+-- difference between this table and `workflow_definitions`.
+CREATE TABLE "workflow_templates" (
+	"id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"owner_type" text NOT NULL,
+	"owner_id" text NOT NULL,
+	-- The id the FILE declares, which the gallery and the install route use.
+	-- Distinct from `id`, which is this row.
+	"template_id" text NOT NULL,
+	"origin" text DEFAULT 'local' NOT NULL,
+	"source_id" text,
+	"upstream_path" text NOT NULL,
+	"content_sha" text,
+	"template" jsonb NOT NULL,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+-- One template id per owner: the gallery lists by id, and two rows claiming
+-- one id would make which one installs undefined.
+CREATE UNIQUE INDEX "workflow_templates_owner_template" ON "workflow_templates" ("org_id","owner_type","owner_id","template_id");
+--> statement-breakpoint
+-- One mirrored row per file per source. Partial, matching the definitions
+-- table: a local row has no source.
+CREATE UNIQUE INDEX "workflow_templates_source_path" ON "workflow_templates" ("source_id","upstream_path") WHERE "source_id" IS NOT NULL;
 --> statement-breakpoint
 CREATE TABLE "workflow_runs" (
 	"id" text PRIMARY KEY NOT NULL,
@@ -877,6 +929,10 @@ CREATE TABLE "event_subscriptions" (
 	"filters" jsonb DEFAULT '[]'::jsonb NOT NULL,
 	"target" jsonb NOT NULL,
 	"enabled" boolean DEFAULT true NOT NULL,
+	-- `repo` rows are armed from a mirrored workflow file. The sync updates
+	-- and deletes only these, so a trigger a person armed on the same
+	-- workflow is never touched.
+	"origin" text DEFAULT 'local' NOT NULL,
 	"created_by" text NOT NULL,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
@@ -915,6 +971,10 @@ CREATE TABLE "workflow_schedules" (
 	"timezone" text DEFAULT 'UTC' NOT NULL,
 	"input" jsonb,
 	"enabled" boolean DEFAULT true NOT NULL,
+	-- `repo` rows are armed from a mirrored workflow file. The sync updates
+	-- and deletes only these, so a schedule a person armed on the same
+	-- workflow is never touched.
+	"origin" text DEFAULT 'local' NOT NULL,
 	"last_fired_at" bigint,
 	"next_fire_at" bigint NOT NULL,
 	"created_by" text NOT NULL,

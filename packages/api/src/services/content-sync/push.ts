@@ -1,16 +1,13 @@
 /**
- * Match a GitHub App `push` delivery to org-owned skill sources.
+ * Reads a GitHub App `push` delivery, for `ContentSyncService.onPush`.
  *
- * Personal and team sources do not use this path. They often have no App
- * installation, so they stay on the poll. An org source already reads with
- * the installation token; a `push` on the tracked ref is the same signal
- * the sweep's head-commit compare looks for.
+ * Every enabled source in the org that tracks the pushed repository and ref
+ * is marked due, whoever owns it. This used to be org sources only, on the
+ * reasoning that a personal or team source often has no App installation:
+ * true, and it does not matter. A source with no installation still polls,
+ * and marking it due only moves its next poll forward.
  */
-import { and, eq } from "drizzle-orm";
-import type { AppDb } from "../lib/drizzle.js";
-import { contentSources, type ContentSourceRow } from "../schema/index.js";
-
-export interface SkillPushRef {
+export interface ContentPushRef {
   repoFullName: string;
   gitRef: string;
   defaultBranch: string;
@@ -21,7 +18,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** The repository and ref a `push` names, or null when the payload is not a push. */
-export function parseSkillPushPayload(payload: unknown): SkillPushRef | null {
+export function parseContentPushPayload(payload: unknown): ContentPushRef | null {
   if (!isRecord(payload)) return null;
   if (typeof payload.ref !== "string" || payload.ref.length === 0) return null;
   const repository = payload.repository;
@@ -35,7 +32,7 @@ export function parseSkillPushPayload(payload: unknown): SkillPushRef | null {
 
 /** True when this source tracks the branch or tag the push moved. An empty
  * source ref means the repository default branch. */
-export function skillSourceRefMatchesPush(sourceRef: string, push: SkillPushRef): boolean {
+export function contentSourceRefMatchesPush(sourceRef: string, push: ContentPushRef): boolean {
   const branch = push.gitRef.startsWith("refs/heads/") ? push.gitRef.slice("refs/heads/".length) : null;
   const tag = push.gitRef.startsWith("refs/tags/") ? push.gitRef.slice("refs/tags/".length) : null;
   const short = branch ?? tag;
@@ -43,23 +40,4 @@ export function skillSourceRefMatchesPush(sourceRef: string, push: SkillPushRef)
     return branch !== null && branch === push.defaultBranch;
   }
   return sourceRef === push.gitRef || (short !== null && sourceRef === short);
-}
-
-export async function findOrgSkillSourcesForPush(
-  db: AppDb,
-  orgId: string,
-  push: SkillPushRef,
-): Promise<ContentSourceRow[]> {
-  const rows = await db
-    .select()
-    .from(contentSources)
-    .where(
-      and(
-        eq(contentSources.orgId, orgId),
-        eq(contentSources.ownerType, "org"),
-        eq(contentSources.repoFullName, push.repoFullName),
-        eq(contentSources.enabled, true),
-      ),
-    );
-  return rows.filter((row) => skillSourceRefMatchesPush(row.ref, push));
 }

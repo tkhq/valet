@@ -805,6 +805,16 @@ export const memoryFiles = pgTable(
     sourceSessionId: text("source_session_id").notNull().default(""),
     orgId: text("org_id").notNull().default(""),
     version: integer("version").notNull().default(1),
+    /** The content source that mirrors this row, or null on a row the
+     * product wrote. A mirrored row lands under `lib/`, which
+     * `assertWritablePath` already reserves for mounted libraries, so the
+     * product refuses to write it with no new guard.
+     *
+     * NOT `origin` above: that column is OKF provenance of the fact and is
+     * already spent. */
+    sourceId: text("source_id"),
+    upstreamPath: text("upstream_path"),
+    contentSha: text("content_sha"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
@@ -907,7 +917,7 @@ export const skills = pgTable(
 /** What one tracked repository mirrors. `skills` is the kind that ships; the
  * other two join the same rail
  * (`docs/specs/2026-08-24-workflows-mvp-design.md`). */
-export type ContentKind = "skills" | "workflows" | "templates";
+export type ContentKind = "skills" | "workflows" | "templates" | "memories";
 
 // One tracked repository. A `repo`-origin row in `skills` above is a MIRROR
 // of a `SKILL.md` in one of these repositories, and sync is the only thing
@@ -1021,10 +1031,26 @@ export const workflowDefinitions = pgTable(
     ownerId: text("owner_id").notNull(),
     name: text("name").notNull(),
     definition: jsonb("definition").notNull(),
+    /** `repo` rows mirror one workflow file and are read-only in the product:
+     * editing the file is the edit, deleting the file is the delete. */
+    origin: text("origin", { enum: ["local", "repo"] }).notNull().default("local"),
+    /** The content source that mirrors this row. Null on a `local` row. */
+    sourceId: text("source_id"),
+    /** Repo-relative path of the file. Identity is (sourceId, upstreamPath)
+     * and nothing else — not the name, not any id the file writes — so a
+     * rename deletes one workflow and creates another. */
+    upstreamPath: text("upstream_path"),
+    /** Hash of the mirrored file, so a re-sync can skip an unchanged row. */
+    contentSha: text("content_sha"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
-  (t) => [index("workflow_definitions_owner").on(t.orgId, t.ownerType, t.ownerId)],
+  (t) => [
+    index("workflow_definitions_owner").on(t.orgId, t.ownerType, t.ownerId),
+    uniqueIndex("workflow_definitions_source_path")
+      .on(t.sourceId, t.upstreamPath)
+      .where(sql`"source_id" IS NOT NULL`),
+  ],
 );
 
 // Immutable snapshot per save: version 1 on create, +1 on every
@@ -1038,9 +1064,53 @@ export const workflowVersions = pgTable(
     version: integer("version").notNull(),
     name: text("name").notNull(),
     definition: jsonb("definition").notNull(),
+    /** Which write produced this version, and from which commit. Both null on
+     * every version a product edit wrote, and on every row older than the
+     * repository mirror. */
+    origin: text("origin", { enum: ["local", "repo"] }),
+    sourceCommit: text("source_commit"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
   (t) => [uniqueIndex("workflow_versions_wf_version").on(t.workflowId, t.version)],
+);
+
+/**
+ * Templates mirrored from a repository. A row is a COPY of one template file,
+ * and installing it produces an ordinary `local` workflow the installer may
+ * edit. That is the whole difference between a template and a mirrored
+ * definition, which stays read-only and keeps syncing.
+ */
+export const workflowTemplates = pgTable(
+  "workflow_templates",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull(),
+    ownerId: text("owner_id").notNull(),
+    /** The id the FILE declares, which the gallery and the install route
+     * use. Distinct from `id`, which identifies this row. */
+    templateId: text("template_id").notNull(),
+    origin: text("origin", { enum: ["local", "repo"] }).notNull().default("local"),
+    sourceId: text("source_id"),
+    upstreamPath: text("upstream_path").notNull(),
+    contentSha: text("content_sha"),
+    template: jsonb("template").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    // One template id per owner: the gallery lists by id, and two rows
+    // claiming one id would make which one installs undefined.
+    uniqueIndex("workflow_templates_owner_template").on(
+      t.orgId,
+      t.ownerType,
+      t.ownerId,
+      t.templateId,
+    ),
+    uniqueIndex("workflow_templates_source_path")
+      .on(t.sourceId, t.upstreamPath)
+      .where(sql`"source_id" IS NOT NULL`),
+  ],
 );
 
 export const workflowRuns = pgTable(
@@ -1664,6 +1734,10 @@ export const eventSubscriptions = pgTable(
     /** `{ kind: "workflow", workflowId } | { kind: "orchestrator" } | { kind: "signal" }`. */
     target: jsonb("target").notNull(),
     enabled: boolean("enabled").notNull().default(true),
+    /** `repo` rows are armed from a mirrored workflow file. The sync updates
+     * and deletes only these, so a subscription a person armed on the same
+     * workflow is never touched. */
+    origin: text("origin", { enum: ["local", "repo"] }).notNull().default("local"),
     createdBy: text("created_by").notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
@@ -1738,6 +1812,10 @@ export const workflowSchedules = pgTable(
     /** Optional static payload delivered as `trigger.data.input`. */
     input: jsonb("input"),
     enabled: boolean("enabled").notNull().default(true),
+    /** `repo` rows are armed from a mirrored workflow file. The sync updates
+     * and deletes only these, so a schedule a person armed on the same
+     * workflow is never touched. */
+    origin: text("origin", { enum: ["local", "repo"] }).notNull().default("local"),
     lastFiredAt: bigint("last_fired_at", { mode: "number" }),
     nextFireAt: bigint("next_fire_at", { mode: "number" }).notNull(),
     createdBy: text("created_by").notNull(),

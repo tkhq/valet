@@ -161,6 +161,78 @@ interface SchemaRepair {
  */
 const SCHEMA_REPAIRS: SchemaRepair[] = [
   {
+    // Repository mirror columns on workflow_definitions. A deployed database
+    // predating them holds only `local` rows, which is what the default
+    // encodes, so the backfill is the default and nothing else is needed.
+    describe: "workflow_definitions.origin column",
+    probe: { kind: "column", table: "workflow_definitions", column: "origin" },
+    sql: `ALTER TABLE "workflow_definitions" ADD COLUMN IF NOT EXISTS "origin" text NOT NULL DEFAULT 'local'`,
+  },
+  {
+    describe: "workflow_definitions.source_id column",
+    probe: { kind: "column", table: "workflow_definitions", column: "source_id" },
+    sql: 'ALTER TABLE "workflow_definitions" ADD COLUMN IF NOT EXISTS "source_id" text',
+  },
+  {
+    describe: "workflow_definitions.upstream_path column",
+    probe: { kind: "column", table: "workflow_definitions", column: "upstream_path" },
+    sql: 'ALTER TABLE "workflow_definitions" ADD COLUMN IF NOT EXISTS "upstream_path" text',
+  },
+  {
+    describe: "workflow_definitions.content_sha column",
+    probe: { kind: "column", table: "workflow_definitions", column: "content_sha" },
+    sql: 'ALTER TABLE "workflow_definitions" ADD COLUMN IF NOT EXISTS "content_sha" text',
+  },
+  {
+    // Partial, matching the migration: a `local` row carries no source and no
+    // path, and those NULLs would not collide in any case.
+    describe: "workflow_definitions_source_path unique index",
+    probe: { kind: "index", index: "workflow_definitions_source_path" },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "workflow_definitions_source_path" ON "workflow_definitions" ("source_id","upstream_path") WHERE "source_id" IS NOT NULL',
+  },
+  {
+    // The mirrored template table and its two unique indexes. Additive, so a
+    // rollback to a release that does not know them is safe.
+    describe: "workflow_templates table",
+    probe: { kind: "table", table: "workflow_templates" },
+    sql: `CREATE TABLE IF NOT EXISTS "workflow_templates" (
+      "id" text PRIMARY KEY NOT NULL,
+      "org_id" text NOT NULL,
+      "owner_type" text NOT NULL,
+      "owner_id" text NOT NULL,
+      "template_id" text NOT NULL,
+      "origin" text DEFAULT 'local' NOT NULL,
+      "source_id" text,
+      "upstream_path" text NOT NULL,
+      "content_sha" text,
+      "template" jsonb NOT NULL,
+      "created_at" bigint NOT NULL,
+      "updated_at" bigint NOT NULL
+    )`,
+  },
+  {
+    describe: "workflow_templates_owner_template unique index",
+    probe: { kind: "index", index: "workflow_templates_owner_template" },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "workflow_templates_owner_template" ON "workflow_templates" ("org_id","owner_type","owner_id","template_id")',
+  },
+  {
+    describe: "workflow_templates_source_path unique index",
+    probe: { kind: "index", index: "workflow_templates_source_path" },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "workflow_templates_source_path" ON "workflow_templates" ("source_id","upstream_path") WHERE "source_id" IS NOT NULL',
+  },
+  {
+    // Provenance on a version row. Both nullable: every version a product
+    // edit wrote carries neither, and so does every row an upgrade brings.
+    describe: "workflow_versions.origin column",
+    probe: { kind: "column", table: "workflow_versions", column: "origin" },
+    sql: 'ALTER TABLE "workflow_versions" ADD COLUMN IF NOT EXISTS "origin" text',
+  },
+  {
+    describe: "workflow_versions.source_commit column",
+    probe: { kind: "column", table: "workflow_versions", column: "source_commit" },
+    sql: 'ALTER TABLE "workflow_versions" ADD COLUMN IF NOT EXISTS "source_commit" text',
+  },
+  {
     // The spawning submission's channel origin, inherited by child.settled
     // signals. Null on rows from before the column: those settlements just
     // keep the old no-origin behavior.
@@ -175,6 +247,35 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     describe: "followed_threads.last_seen_ts column",
     probe: { kind: "column", table: "followed_threads", column: "last_seen_ts" },
     sql: 'ALTER TABLE "followed_threads" ADD COLUMN IF NOT EXISTS "last_seen_ts" text',
+  },
+  {
+    // Memory mirror bookkeeping. A deployed database holds only rows the
+    // product wrote, which carry no source, so NULL is the backfill.
+    describe: "memory_files.source_id column",
+    probe: { kind: "column", table: "memory_files", column: "source_id" },
+    sql: 'ALTER TABLE "memory_files" ADD COLUMN IF NOT EXISTS "source_id" text',
+  },
+  {
+    describe: "memory_files.upstream_path column",
+    probe: { kind: "column", table: "memory_files", column: "upstream_path" },
+    sql: 'ALTER TABLE "memory_files" ADD COLUMN IF NOT EXISTS "upstream_path" text',
+  },
+  {
+    describe: "memory_files.content_sha column",
+    probe: { kind: "column", table: "memory_files", column: "content_sha" },
+    sql: 'ALTER TABLE "memory_files" ADD COLUMN IF NOT EXISTS "content_sha" text',
+  },
+  {
+    // Trigger provenance. A deployed database holds only person-armed rows,
+    // which is what the default encodes, so the default IS the backfill.
+    describe: "workflow_schedules.origin column",
+    probe: { kind: "column", table: "workflow_schedules", column: "origin" },
+    sql: `ALTER TABLE "workflow_schedules" ADD COLUMN IF NOT EXISTS "origin" text NOT NULL DEFAULT 'local'`,
+  },
+  {
+    describe: "event_subscriptions.origin column",
+    probe: { kind: "column", table: "event_subscriptions", column: "origin" },
+    sql: `ALTER TABLE "event_subscriptions" ADD COLUMN IF NOT EXISTS "origin" text NOT NULL DEFAULT 'local'`,
   },
   {
     // Which of the owner's assistants a followed thread routes to. Null on
