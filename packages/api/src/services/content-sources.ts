@@ -20,8 +20,19 @@ import { NotFoundError } from "@valet/shared";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb } from "../lib/drizzle.js";
 import { decodePageCursor, encodePageCursor } from "../lib/page-cursor.js";
-import { skills, contentSources, workflowDefinitions, type ContentSourceRow } from "../schema/index.js";
-import { isTeamMember, listTeamsForUser, lockTeamForOwnership } from "./teams.js";
+import {
+  skills,
+  contentSources,
+  workflowDefinitions,
+  type ContentKind,
+  type ContentSourceRow,
+} from "../schema/index.js";
+import {
+  canAdministerTeam,
+  isTeamMember,
+  listTeamsForUser,
+  lockTeamForOwnership,
+} from "./teams.js";
 import { isAuthorizedFor, type SkillOwner } from "./skills.js";
 import { purgeWorkflowRows } from "../workflows/service.js";
 
@@ -49,6 +60,49 @@ export class ContentSourceConflictError extends Error {
     super(`${repo} is already tracked here. Remove the existing entry first.`);
     this.name = "ContentSourceConflictError";
   }
+}
+
+/** Thrown when the caller may add a source but not one that collects this
+ * kind. The `skill_source_*` code prefix stays for the reason above. */
+export class ContentSourceForbiddenError extends Error {
+  readonly code = "skill_source_forbidden";
+  readonly statusCode = 403;
+  constructor(message: string) {
+    super(message);
+    this.name = "ContentSourceForbiddenError";
+  }
+}
+
+/** Every kind a source can collect. */
+export const CONTENT_KINDS: readonly ContentKind[] = ["skills", "workflows", "templates"];
+
+/**
+ * Kinds whose content RUNS. Push access to a tracked repository becomes
+ * authority to run tool nodes as the owner, which is the point of the
+ * feature, so the control is who may add the source: an org source already
+ * needs an org admin, and a team source collecting one of these needs
+ * someone who administers the team (2026-08-24 workflows MVP design,
+ * decision 10). A skills-only team source stays open to any member.
+ */
+const PRIVILEGED_KINDS: readonly ContentKind[] = ["workflows", "templates"];
+
+/** Reads a `kinds` value off an unchecked JSON body. Returns the default when
+ * it is absent, and throws when it is present and wrong. */
+export function parseContentKinds(raw: unknown): ContentKind[] {
+  if (raw === undefined || raw === null) return ["skills"];
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new ContentSourceInputError(
+      `Choose what to collect from this repository: ${CONTENT_KINDS.join(", ")}.`,
+    );
+  }
+  const unknown = raw.filter((k) => typeof k !== "string" || !CONTENT_KINDS.includes(k as ContentKind));
+  if (unknown.length > 0) {
+    throw new ContentSourceInputError(
+      `Valet does not collect ${unknown.map((k) => JSON.stringify(k)).join(", ")}. Choose from ${CONTENT_KINDS.join(", ")}.`,
+    );
+  }
+  // Deduplicated and in one order, so two equivalent requests store one value.
+  return CONTENT_KINDS.filter((k) => (raw as string[]).includes(k));
 }
 
 /** The `skillsrc_` prefix stays: ids are persisted, and
@@ -164,6 +218,10 @@ export interface CreateContentSourceInput {
   /** When `ownerType` is `"org"`, the caller must be an org admin.
    * Pass `true` after checking — the service trusts this flag. */
   isOrgAdmin?: boolean;
+  /** What the sync collects from this repository. Defaults to skills only.
+   * A team source collecting workflows or templates needs someone who
+   * administers the team; this function checks that itself. */
+  kinds?: ContentKind[];
 }
 
 /**
@@ -182,10 +240,30 @@ export async function createContentSource(
   // source. Same rule `createSkill` follows.
   const teamId = typeof input.teamId === "string" ? input.teamId : undefined;
   const isOrgOwned = input.ownerType === "org";
+  const kinds = input.kinds ?? ["skills"];
   // team and org are mutually exclusive scopes for one source.
   if (isOrgOwned && teamId !== undefined) {
     throw new ContentSourceInputError(
       "A source is either a team source or an org source, not both. Remove teamId or the org scope.",
+    );
+  }
+  // Decision 10. A personal source runs as one person and needs no extra
+  // authority. An org source is already admin-gated at the route. A TEAM
+  // source that collects workflows or templates hands push access to that
+  // repository the authority to run as the team, so it needs someone who
+  // administers the team. Checked before the row is built, so the refusal
+  // arrives before anything is written.
+  const privileged = kinds.filter((k) => PRIVILEGED_KINDS.includes(k));
+  if (privileged.length > 0 && teamId !== undefined) {
+    if (!(await canAdministerTeam(db, teamId, owner.userId))) {
+      throw new ContentSourceForbiddenError(
+        `Only a team admin can add a team source that collects ${privileged.join(" or ")}. Ask a team admin, or add the repository as a skills source.`,
+      );
+    }
+  }
+  if (privileged.length > 0 && teamId === undefined && !isOrgOwned) {
+    throw new ContentSourceForbiddenError(
+      `A personal source collects skills only. Add the repository as a team source or an org source to collect ${privileged.join(" or ")}.`,
     );
   }
   const now = Date.now();
@@ -201,13 +279,7 @@ export async function createContentSource(
     repoFullName: parsed.repoFullName,
     ref: parsed.ref,
     subpath: parsed.subpath,
-    // Skills only. The source routes open a kind per source, and workflows
-    // or templates need ADMIN authority over the owner first: push access to
-    // a tracked repository becomes authority to run tool nodes as that team
-    // or org (2026-08-24 workflows MVP design, decision 10). Threading a
-    // `kinds` input through this function without that gate is a privilege
-    // escalation.
-    kinds: ["skills"],
+    kinds,
     enabled: true,
     status: "pending",
     attempts: 0,

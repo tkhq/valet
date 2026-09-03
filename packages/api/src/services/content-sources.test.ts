@@ -22,6 +22,7 @@ import { addMember, createTeam, deleteTeam } from "./teams.js";
 import { createSkill, type SkillOwner } from "./skills.js";
 import {
   createContentSource,
+  parseContentKinds,
   decodeContentSourceCursor,
   deleteContentSource,
   listContentSources,
@@ -285,6 +286,65 @@ describe("content sources service", () => {
     const left = await db.select().from(skills);
     expect(left.map((r) => r.name)).toEqual(["written-here"]);
     expect(await ownedContentSourceRow(db, owner("u1"), source.id)).toBeNull();
+  });
+
+  // Decision 10: push access to a tracked repository becomes authority to run
+  // tool nodes as the owner, so the control is who may add the source.
+  describe("what a source is allowed to collect", () => {
+    it("defaults to skills, and stores one canonical order", async () => {
+      const plain = await createContentSource(db, owner("u1"), { repo: "tkhq/a" });
+      expect(plain.kinds).toEqual(["skills"]);
+
+      const team = await createTeam(db, { orgId: ORG, name: "Platform", creatorUserId: "u1" });
+      const both = await createContentSource(db, owner("u1"), {
+        repo: "tkhq/b",
+        teamId: team.id,
+        kinds: parseContentKinds(["workflows", "skills"]),
+      });
+      expect(both.kinds).toEqual(["skills", "workflows"]);
+    });
+
+    it("refuses a team source collecting workflows for a plain member, naming the fix", async () => {
+      const team = await createTeam(db, { orgId: ORG, name: "Platform", creatorUserId: "u1" });
+      await addMember(db, { teamId: team.id, userId: "u2", role: "member" });
+
+      await expect(
+        createContentSource(db, owner("u2"), {
+          repo: "tkhq/c",
+          teamId: team.id,
+          kinds: ["skills", "workflows"],
+        }),
+      ).rejects.toThrow(/team admin/);
+
+      // The same member may still add a skills-only team source.
+      const ok = await createContentSource(db, owner("u2"), { repo: "tkhq/d", teamId: team.id });
+      expect(ok.kinds).toEqual(["skills"]);
+    });
+
+    it("lets a team admin add one", async () => {
+      const team = await createTeam(db, { orgId: ORG, name: "Platform", creatorUserId: "u1" });
+      await addMember(db, { teamId: team.id, userId: "u2", role: "admin" });
+
+      const row = await createContentSource(db, owner("u2"), {
+        repo: "tkhq/e",
+        teamId: team.id,
+        kinds: ["workflows"],
+      });
+      expect(row.kinds).toEqual(["workflows"]);
+    });
+
+    it("refuses a personal source collecting workflows", async () => {
+      await expect(
+        createContentSource(db, owner("u1"), { repo: "tkhq/f", kinds: ["workflows"] }),
+      ).rejects.toThrow(/team source or an org source/);
+    });
+
+    it("reads an unchecked body, naming the choices", () => {
+      expect(parseContentKinds(undefined)).toEqual(["skills"]);
+      expect(() => parseContentKinds([])).toThrow(/Choose what to collect/);
+      expect(() => parseContentKinds(["skils"])).toThrow(/does not collect/);
+      expect(() => parseContentKinds("skills")).toThrow(/Choose what to collect/);
+    });
   });
 
   // A mirrored workflow is read-only in the product, so an orphan left behind

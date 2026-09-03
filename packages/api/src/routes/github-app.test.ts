@@ -809,7 +809,11 @@ describe("POST /webhooks/github-app", () => {
     expect(body.installations.some((i) => i.accountLogin === "newco")).toBe(true);
   });
 
-  it("a push syncs the matching org skill source and leaves a personal one", async () => {
+  // A push marks every matching enabled source due, whoever owns it, and
+  // syncs none of them inline. Marking a personal source due used to be
+  // skipped on the reasoning that it often has no App installation; true, and
+  // it only moves that source's next poll forward.
+  it("a push marks every matching source due and syncs none inline", async () => {
     api = await bootTestApi();
     const { webhookSecret } = await setupConfiguredOrg(api.baseUrl);
     const orgSource = await createContentSource(
@@ -822,8 +826,15 @@ describe("POST /webhooks/github-app", () => {
       { userId: "local-user", orgId: "local-org" },
       { repo: "tkhq/skills" },
     );
-    expect(orgSource.status).toBe("pending");
-    expect(personal.status).toBe("pending");
+    const elsewhere = await createContentSource(
+      api.providers.db,
+      { userId: "local-user", orgId: "local-org" },
+      { repo: "tkhq/other" },
+    );
+    // A new source is already due, so push them all out first: "due" is the
+    // observable this asserts.
+    const later = Date.now() + 3_600_000;
+    await api.providers.db.update(contentSources).set({ nextAttemptAt: later });
 
     const payload = {
       ref: "refs/heads/main",
@@ -833,16 +844,14 @@ describe("POST /webhooks/github-app", () => {
     const res = await postWebhook(api.baseUrl, "push", payload, sig);
     expect(res.status).toBe(204);
 
-    const [orgRow] = await api.providers.db
-      .select()
-      .from(contentSources)
-      .where(eq(contentSources.id, orgSource.id));
-    const [personalRow] = await api.providers.db
-      .select()
-      .from(contentSources)
-      .where(eq(contentSources.id, personal.id));
-    expect(orgRow?.status).not.toBe("pending");
-    expect(personalRow?.status).toBe("pending");
+    const db = api.providers.db;
+    const dueAt = async (id: string): Promise<number> => {
+      const [row] = await db.select().from(contentSources).where(eq(contentSources.id, id));
+      return row.nextAttemptAt;
+    };
+    expect(await dueAt(orgSource.id)).toBeLessThan(later);
+    expect(await dueAt(personal.id)).toBeLessThan(later);
+    expect(await dueAt(elsewhere.id)).toBe(later);
   });
 
   it("204s with no app configured anywhere", async () => {
