@@ -20,6 +20,7 @@ import {
 import { Spinner } from "~/components/primitives";
 import { artifactDownloadName, downloadTextFile } from "~/lib/download";
 import { relativeTime } from "~/lib/relative-time";
+import { useThemeAttribute } from "~/lib/use-theme-attribute";
 
 /**
  * `/a/$token` — the published-page reader (artifact-pages design). Public in
@@ -40,6 +41,7 @@ export const Route = createFileRoute("/a/$token")({
 
 function ArtifactPage() {
   const { token } = Route.useParams();
+  const theme = useThemeAttribute();
   const artifactQ = useArtifact(token);
   const canComment = artifactQ.data?.canComment === true;
 
@@ -208,6 +210,7 @@ function ArtifactPage() {
             description={doc.description || undefined}
             picking={picking}
             anchors={anchors}
+            theme={theme}
             onPick={(pick) => {
               setPendingPick(pick);
               setPicking(false);

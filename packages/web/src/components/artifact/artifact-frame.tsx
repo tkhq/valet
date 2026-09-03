@@ -37,6 +37,8 @@ interface ArtifactFrameProps {
   onPick?: (pick: ArtifactPick) => void;
   onRects?: (rects: Record<string, ArtifactAnchorRect>) => void;
   className?: string;
+  /** Viewer theme stamped into the page: explicit choice, or null/undefined for system. */
+  theme?: "light" | "dark" | null;
 }
 
 function isFiniteNumber(v: unknown): v is number {
@@ -64,6 +66,7 @@ export function ArtifactFrame({
   onPick,
   onRects,
   className,
+  theme,
 }: ArtifactFrameProps) {
   const frameRef = useRef<HTMLIFrameElement>(null);
   const readyRef = useRef(false);
@@ -75,6 +78,11 @@ export function ArtifactFrame({
   onRectsRef.current = onRects;
   const pickingRef = useRef(picking);
   const anchorsRef = useRef(anchors);
+  // The mount-time theme is frozen into the srcDoc (below); a later flip
+  // restamps via postMessage instead of reloading the frame, so script state
+  // survives. This ref carries the CURRENT value for that restamp.
+  const initialThemeRef = useRef(theme);
+  const themeRef = useRef(theme);
 
   const srcDoc = useMemo(
     () =>
@@ -84,6 +92,7 @@ export function ArtifactFrame({
         icon,
         description,
         runtime: true,
+        theme: initialThemeRef.current ?? undefined,
       }),
     [title, rendered, icon, description],
   );
@@ -113,6 +122,7 @@ export function ArtifactFrame({
         if (anchorsRef.current && anchorsRef.current.length > 0) {
           post({ type: "valet-artifact:anchors", vdids: anchorsRef.current });
         }
+        post({ type: "valet-artifact:theme", theme: themeRef.current ?? null });
         return;
       }
       if (msg.type === "valet-artifact:pick") {
@@ -148,6 +158,13 @@ export function ArtifactFrame({
     if (readyRef.current) post({ type: "valet-artifact:anchors", vdids: anchors ?? [] });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- anchorsKey is the value identity of `anchors`.
   }, [anchorsKey]);
+
+  useEffect(() => {
+    themeRef.current = theme;
+    if (readyRef.current) {
+      post({ type: "valet-artifact:theme", theme: theme ?? null });
+    }
+  }, [theme]);
 
   return (
     <iframe

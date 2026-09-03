@@ -106,4 +106,14 @@ describe("artifact comment runtime", () => {
     await flush();
     expect(received.find((m) => m.type === "valet-artifact:pick")).toBeUndefined();
   });
+
+  it("stamps and clears data-theme on the theme message", async () => {
+    window.postMessage({ type: "valet-artifact:theme", theme: "dark" }, "*");
+    await flush();
+    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+
+    window.postMessage({ type: "valet-artifact:theme", theme: null }, "*");
+    await flush();
+    expect(document.documentElement.hasAttribute("data-theme")).toBe(false);
+  });
 });
