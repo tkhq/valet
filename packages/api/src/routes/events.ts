@@ -291,6 +291,14 @@ eventsRouter.get("/events/filter-options", async (c) => {
   // would otherwise answer the next minute of retries from an empty cache
   // entry, so the user sees a stable "no options" for a transient fault and
   // cannot retry their way out of it.
+  //
+  // Deliberately NOT replaced by a short negative TTL. Rate-limit backpressure
+  // belongs to the provider read, not here: the Slack resolvers hold their
+  // directory in a single-flight cache, so a scan that is failing has exactly
+  // one attempt in flight per workspace no matter how fast the reader types
+  // (`plugin-slack/src/transport/directory-cache.ts`). Caching the failure
+  // here would only re-introduce the sticky "no matches" without adding a
+  // bound the provider layer does not already give.
   if (!failed) {
     // Evict the oldest single entry (Map preserves insertion order), not the
     // whole cache — one org's typeahead must not flush every other org's.

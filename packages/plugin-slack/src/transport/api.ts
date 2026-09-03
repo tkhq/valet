@@ -6,6 +6,7 @@
  * triple, the assistant thread methods, auth.test, users.list,
  * apps.connections.open, files.info, url_private downloads).
  */
+import { createHash } from "node:crypto";
 import { SLACK_API, slackFetch, slackGet } from "../actions/api.js";
 
 export class SlackApiError extends Error {
@@ -64,6 +65,22 @@ export class SlackApi {
     private readonly token: string,
     readonly baseUrl: string = SLACK_API,
   ) {}
+
+  private cachedDirectoryKey?: string;
+
+  /**
+   * A stable identifier for "the workspace this token reads", for keying a
+   * directory cache. A digest, not the token: a cache key is held in a map,
+   * compared, and easy to log by accident, and none of that should be true of
+   * a bot token. The base URL is mixed in so two test servers never share an
+   * entry.
+   */
+  get directoryKey(): string {
+    if (this.cachedDirectoryKey === undefined) {
+      this.cachedDirectoryKey = createHash("sha256").update(`${this.baseUrl}\n${this.token}`).digest("hex");
+    }
+    return this.cachedDirectoryKey;
+  }
 
   private async call(method: string, body: Record<string, unknown>): Promise<SlackResponse> {
     const res = await slackFetch(method, this.token, body, this.baseUrl);
