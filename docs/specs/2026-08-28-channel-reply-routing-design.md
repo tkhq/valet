@@ -371,11 +371,30 @@ turn that produces no reply at all is a reportable miss, not a silent drop.
   empty list for its full 60s TTL, so the next minute of retries answered from
   a poisoned entry. Resolvers now let provider failures propagate, and the
   endpoint caches only successful lookups.
-- **Known gap: `slack.users` still caps at 20 during the scan.** The member
-  typeahead has the same truncate-before-sort flaw, but no smaller set to read:
-  `users.list` is the only directory, so dropping its early return would trade
-  a truncation bug for the rate-limit bug just fixed. It needs a cached
-  directory snapshot rather than a per-keystroke scan. Left as-is deliberately.
+- **Both pickers read a cached directory, so neither truncates before it
+  ranks.** `slack.users` had the same truncate-before-sort flaw and no smaller
+  set to read: `users.list` is the only member directory and offers no
+  server-side search. Dropping its 20-match early return alone would have
+  traded the truncation bug for the rate-limit bug above, so the directory
+  moved behind a short-TTL, single-flight cache
+  (`transport/directory-cache.ts`), keyed by a digest of the bot token. Each
+  scan is now paid once per TTL instead of once per keystroke, which is what
+  makes ranking every match affordable. `listWorkspaceMembers` therefore
+  filters, sorts, and only then truncates, and the identity-link member search
+  gets the same fix: a person could previously type their own name in full and
+  not find themselves, behind 20 unrelated partial matches in Slack's page
+  order.
+
+  The cache also supplies the rate-limit backpressure that a negative cache in
+  the endpoint would otherwise have to. A failing scan is never stored, but a
+  scan IN FLIGHT is, so a workspace has exactly one attempt running however
+  fast the reader types, and a failure is retryable on the next keystroke
+  rather than sticky for a minute.
+
+  What remains bounded is the SCAN, not the match count: past 10 pages the
+  directory is incomplete, and a query matching only past that point reports no
+  match. For `users.list` in a very large workspace that is a real limit with
+  no API to fix it, so it is stated rather than hidden.
 
 ## Sequencing
 
