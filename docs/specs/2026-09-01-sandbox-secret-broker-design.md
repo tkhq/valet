@@ -119,6 +119,37 @@ caller to settle.
    by name: answering "nothing resolved" would send the reader to check vault
    names that were correct, which is the failure this route keeps making.
 
+10. **The repo declares which commands need which credentials.** `find`
+   removes the guessing, but the agent is still reasoning about credentials
+   on every call, and reasoning is where it goes wrong. A repo already knows
+   `stripe` needs `STRIPE_API_KEY`. `.valet/credentials.yaml` says so once:
+
+   ```yaml
+   commands:
+     - command: stripe
+       env: STRIPE_API_KEY
+       reference: op://Eng/Stripe/secret key
+     - command: aws
+       env: AWS_SECRET_ACCESS_KEY
+       credential: aws
+   ```
+
+   Each entry becomes a wrapper on PATH ahead of the real binary, generated
+   host-side and installed by the `credential-scripts` prep step. `reference`
+   pins the item; `credential` names it and lets the vault search resolve it,
+   for a repo that does not want a vault path in its tree.
+
+   The wrapper follows the `gh` shim, which is the shape that already works:
+   find the real binary by walking PATH while skipping `/usr/local/bin`, let
+   a credential the caller already set win, and fall through to a plain exec
+   when nothing resolves. That last part is what keeps a wrapper from turning
+   every unauthenticated use of a common command into a broken sandbox.
+
+   Resolution goes through `valet-secrets`, not a second copy of the broker
+   call, so the owner rule, the error messages and any future audit record
+   stay in one place. A declaration is not a grant: a repo cannot name its
+   way into a vault the session could not already read.
+
 ## Flow
 
 1. The agent runs `valet-secrets run --env NAME=op://vault/item/field -- cmd`.

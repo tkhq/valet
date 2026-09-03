@@ -11,7 +11,8 @@ import { createHash } from "node:crypto";
 import type { RepoBinding } from "../wire/types.js";
 import type { RecipeStep } from "../prebuilds/recipe.js";
 import { gitCredentialHelperScript, ghWrapperScript } from "./git-credential-helper.js";
-import { opShimScript, secretsCliScript } from "./secrets-cli-script.js";
+import { commandWrapperScript, opShimScript, secretsCliScript } from "./secrets-cli-script.js";
+import type { CredentialCommand } from "./credential-commands.js";
 
 // Increment when the prep logic changes in a way that requires re-running all
 // steps — changing this value intentionally invalidates every cached hash.
@@ -22,6 +23,13 @@ export const PREP_VERSION = 1;
 export interface ResolveSnapshot {
   /** Sandbox API base URL embedded in the credential shim scripts. */
   apiUrl: string;
+  /**
+   * Command-to-credential bindings the repo declared in
+   * `.valet/credentials.yaml`. Each becomes a wrapper on PATH ahead of the
+   * real binary, so the agent runs an ordinary command and never reasons
+   * about a reference. Empty or absent means no wrappers.
+   */
+  credentialCommands?: CredentialCommand[];
   /** Default stock image (resolveDefaultImage result). */
   stockImage: string;
   /** Per-repo baked image when a fresh prebuild is available; null otherwise. */
@@ -90,6 +98,10 @@ export function computeSpec(snap: ResolveSnapshot): SandboxSpec {
     // without it, editing the shim would never re-install on a sandbox that
     // already ran prep.
     opShimScript() +
+    // The declared wrappers ship in this step, so editing the repo's
+    // declarations has to re-run it. Hashing the generated scripts rather
+    // than the config means a rename or a changed reference reinstalls.
+    (snap.credentialCommands ?? []).map(commandWrapperScript).join("") +
     String(PREP_VERSION);
   steps.push({ id: "credential-scripts", hash: sha256(credInput), critical: false });
 

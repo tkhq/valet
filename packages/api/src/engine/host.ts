@@ -53,7 +53,7 @@ import {
   resolveInstallationApiToken,
 } from "../services/github-tokens.js";
 import { primaryRepoBinding, resolveSessionGitHubToken } from "../services/session-github-token.js";
-import { repoDockerFlag } from "../bakes/source-service.js";
+import { repoCredentialCommands, repoDockerFlag } from "../bakes/source-service.js";
 import { loadSessionMeta } from "./session-meta.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";
@@ -1362,6 +1362,12 @@ export class EngineHost {
         stockImage,
         preflight: host.opts.prebuildPreflight,
       });
+      // The repo's own command-to-credential declarations, resolved on the
+      // same best-effort footing as the docker flag: read failures yield no
+      // wrappers rather than blocking the sandbox. Read inside the closure so
+      // an edit is picked up on the next reconcile, like every other part of
+      // the spec.
+      snap.credentialCommands = await host.resolveRepoCredentialCommands(meta);
 
       // Best-effort prebuild-id recording — same as the old eager path.
       if (snap.repoBake) {
@@ -1593,6 +1599,59 @@ export class EngineHost {
       if (service === "slack" && stored && db) return withSlackOwnerMetadata(db, userId, stored);
       return stored;
     };
+  }
+
+  /**
+   * The primary repo's `.valet/credentials.yaml` declarations, or `[]`.
+   *
+   * Best-effort throughout, mirroring `resolveRepoDockerFlag`: no repo, no
+   * token, a non-GitHub host or an unreadable file all yield no wrappers.
+   * A session that cannot read a declaration still starts; it just leaves
+   * the agent to name references itself, which is where it started.
+   */
+  private async resolveRepoCredentialCommands(
+    meta: SessionMeta,
+  ): Promise<import("./credential-commands.js").CredentialCommand[]> {
+    const tokenDeps = this.opts.githubTokenDeps;
+    const db = this.opts.db;
+    if (!tokenDeps || !db) return [];
+    try {
+      const primaryRepo = meta.repos?.[0];
+      if (!primaryRepo) return [];
+      if ((primaryRepo.host ?? "github.com") !== "github.com") return [];
+      const [owner, repoName] = primaryRepo.fullName.split("/");
+      if (!owner || !repoName) return [];
+      const resolved = await resolveSessionGitHubToken(
+        {
+          db,
+          credentials: this.opts.engineCredentials,
+          key: tokenDeps.key,
+          apiUrl: tokenDeps.apiUrl,
+          githubUrl: tokenDeps.githubUrl,
+          fetchImpl: tokenDeps.fetchImpl,
+          now: tokenDeps.now,
+        },
+        { orgId: meta.orgId, purpose: "api" },
+      );
+      return await repoCredentialCommands(
+        {
+          db,
+          credentials: this.opts.engineCredentials,
+          key: tokenDeps.key,
+          apiUrl: tokenDeps.apiUrl,
+          githubUrl: tokenDeps.githubUrl,
+          fetchImpl: tokenDeps.fetchImpl,
+          now: tokenDeps.now,
+        },
+        resolved.token,
+        owner,
+        repoName,
+        primaryRepo.ref ?? "HEAD",
+      );
+    } catch (err) {
+      console.error("EngineHost: reading .valet/credentials.yaml failed:", err);
+      return [];
+    }
   }
 
   /**
