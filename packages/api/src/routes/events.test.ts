@@ -13,6 +13,7 @@ import slackPlugin from "@valet/plugin-slack/plugin";
 import type { ValetPlugin } from "@valet/engine";
 import type { RunHost } from "@valet/workflow";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
+import { createAssistant } from "../assistants/service.js";
 import {
   eventDeliveries,
   eventDropLog,
@@ -1284,6 +1285,111 @@ describe("event subscriptions — team ownership", () => {
       .from(eventSubscriptions)
       .where(eq(eventSubscriptions.id, created.id));
     expect(rows[0]?.enabled).toBe(true);
+  });
+});
+
+// ── Assistant routing on an orchestrator target ────────────────────────────
+//
+// A rule may name WHICH of its owner's assistants answers. Absent means the
+// owner's default, the behavior every rule had before the field.
+describe("event-subscription assistant target", () => {
+  async function seedAssistants(a: TestApi): Promise<{ mine: string; foreign: string }> {
+    const db = a.providers.db;
+    // The first create for a principal takes the default slot.
+    await createAssistant(db, "local-org", { type: "user", id: "local-user" }, "Primary");
+    const mine = await createAssistant(db, "local-org", { type: "user", id: "local-user" }, "Ops");
+    const foreign = await createAssistant(db, "local-org", { type: "user", id: "someone-else" }, "Theirs");
+    return { mine: mine.id, foreign: foreign.id };
+  }
+
+  it("stores a named assistant on the target and reads it back", async () => {
+    const a = await bootTestApi({ plugins: [githubPlugin] });
+    const { mine } = await seedAssistants(a);
+
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "to ops",
+        eventKeys: ["github.pull_request.opened"],
+        target: { kind: "orchestrator", orchestrator: "user", assistantId: mine },
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { target: { assistantId?: string } };
+    expect(body.target.assistantId).toBe(mine);
+  });
+
+  it("refuses an assistant owned by someone else, without saying it exists", async () => {
+    const a = await bootTestApi({ plugins: [githubPlugin] });
+    const { foreign } = await seedAssistants(a);
+
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "nope",
+        eventKeys: ["github.pull_request.opened"],
+        target: { kind: "orchestrator", orchestrator: "user", assistantId: foreign },
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    // Same message an id that does not exist gets: existence stays hidden.
+    expect(body.error).toBe(`unknown assistant: ${foreign}`);
+  });
+
+  it("patches the assistant, and null restores the owner's default", async () => {
+    const a = await bootTestApi({ plugins: [githubPlugin] });
+    const { mine } = await seedAssistants(a);
+
+    const created = (await (
+      await fetch(`${a.baseUrl}/api/event-subscriptions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "repoint me",
+          eventKeys: ["github.pull_request.opened"],
+          target: { kind: "orchestrator", orchestrator: "user" },
+        }),
+      })
+    ).json()) as { id: string; target: { assistantId?: string } };
+    expect(created.target.assistantId).toBeUndefined();
+
+    const patched = (await (
+      await fetch(`${a.baseUrl}/api/event-subscriptions/${created.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ assistantId: mine }),
+      })
+    ).json()) as { target: { assistantId?: string } };
+    expect(patched.target.assistantId).toBe(mine);
+
+    const cleared = (await (
+      await fetch(`${a.baseUrl}/api/event-subscriptions/${created.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ assistantId: null }),
+      })
+    ).json()) as { target: { assistantId?: string } };
+    expect(cleared.target.assistantId).toBeUndefined();
+  });
+
+  it("refuses assistantId on a workflow target", async () => {
+    const a = await bootTestApi({ plugins: [githubPlugin] });
+    const { mine } = await seedAssistants(a);
+    const res = await fetch(`${a.baseUrl}/api/event-subscriptions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "wrong kind",
+        eventKeys: ["github.pull_request.opened"],
+        target: { kind: "workflow", workflowId: "w1", assistantId: mine },
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("only valid on an orchestrator target");
   });
 });
 

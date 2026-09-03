@@ -29,6 +29,7 @@ import { subscriptionMatchesEvent, type SubscriptionFilter } from "../events/mat
 import { storedAnyChannelState } from "../events/mention-scope.js";
 import { validateSubscriptionWrite } from "../events/subscription-write.js";
 import { ownedDefinitionRow } from "../workflows/service.js";
+import { checkAssistantForOwner } from "../assistants/service.js";
 import { isTeamMember } from "../services/teams.js";
 import type {
   CreateEventSubscriptionRequest,
@@ -601,6 +602,14 @@ eventsRouter.post("/event-subscriptions", async (c) => {
     }
   }
 
+  // A named assistant must belong to the owner this target just resolved to.
+  // Checked here, not in `validateSubscription`, because the owner is only
+  // known once the workflow/team resolution above has run.
+  if (body.target.kind === "orchestrator" && body.target.assistantId !== undefined) {
+    const bad = await checkAssistantForOwner(db, user.orgId, { type: ownerType, id: ownerId }, body.target.assistantId);
+    if (bad) return c.json({ error: bad }, 400);
+  }
+
   // Collision gate (TKAI-294). Checked over the FINAL filters (after the
   // mention gate's injected user filter), so two users' mention rules
   // compare as the disjoint rules they are. A disabled create skips the
@@ -727,13 +736,39 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
     return c.json({ error: "enabled must be a boolean" }, 400);
   }
 
+  // `assistantId` is the one part of `target` a patch may rewrite, and only
+  // within the row's existing owner — see PatchEventSubscriptionRequest.
+  const storedTarget = row.target as EventSubscriptionTargetWire;
+  let patchedTarget = storedTarget;
+  if (body.assistantId !== undefined) {
+    if (storedTarget.kind !== "orchestrator") {
+      return c.json({ error: "assistantId is only valid on an orchestrator target" }, 400);
+    }
+    if (body.assistantId === null) {
+      const { assistantId: _dropped, ...rest } = storedTarget;
+      patchedTarget = rest;
+    } else {
+      if (typeof body.assistantId !== "string" || body.assistantId.length === 0) {
+        return c.json({ error: "assistantId must be a non-empty string" }, 400);
+      }
+      const bad = await checkAssistantForOwner(
+        db,
+        user.orgId,
+        { type: row.ownerType, id: row.ownerId },
+        body.assistantId,
+      );
+      if (bad) return c.json({ error: bad }, 400);
+      patchedTarget = { ...storedTarget, assistantId: body.assistantId };
+    }
+  }
+
   // Re-validate the row as it would exist after the patch — provided fields
   // get full validation in the context of the untouched ones.
   const merged = {
     name: body.name ?? row.name,
     eventKeys: body.eventKeys ?? row.eventKeys,
     filters: body.filters ?? row.filters,
-    target: row.target,
+    target: patchedTarget,
   };
   // Mention scoping is keyed to the CREATOR and skipped for a patch that
   // does not change the match — so an enabled-only or name-only patch still
@@ -797,6 +832,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
       name: merged.name,
       eventKeys: merged.eventKeys,
       filters,
+      target: patchedTarget,
       enabled: willBeEnabled,
       updatedAt: Date.now(),
     })

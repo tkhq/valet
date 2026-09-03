@@ -177,6 +177,22 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'ALTER TABLE "followed_threads" ADD COLUMN IF NOT EXISTS "last_seen_ts" text',
   },
   {
+    // Which of the owner's assistants a followed thread routes to. Null on
+    // rows from before the column, and on any follow whose rule named no
+    // assistant — both read as "the owner's default", the old behavior.
+    describe: "followed_threads.assistant_id column",
+    probe: { kind: "column", table: "followed_threads", column: "assistant_id" },
+    sql: 'ALTER TABLE "followed_threads" ADD COLUMN IF NOT EXISTS "assistant_id" text',
+  },
+  {
+    // Which of the owner's assistants an orchestrator-target schedule prompts.
+    // Null on rows from before the column and on schedules that named none;
+    // both resolve to the owner's default at fire time.
+    describe: "workflow_schedules.assistant_id column",
+    probe: { kind: "column", table: "workflow_schedules", column: "assistant_id" },
+    sql: 'ALTER TABLE "workflow_schedules" ADD COLUMN IF NOT EXISTS "assistant_id" text',
+  },
+  {
     // Records which person's GitHub credential a team source may use.
     // Null on every row written before the column existed, which the sync
     // reads as "no credential" rather than climbing to the org's App.

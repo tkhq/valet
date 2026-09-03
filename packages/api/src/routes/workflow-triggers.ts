@@ -169,6 +169,7 @@ workflowTriggersRouter.post("/schedules", async (c) => {
     prompt: body.target.kind === "orchestrator" ? body.target.prompt : undefined,
     input: body.target.kind === "workflow" ? body.target.input : undefined,
     teamId,
+    assistantId: body.target.kind === "orchestrator" ? body.target.assistantId : undefined,
   });
   if (!result.ok) return c.json({ error: withCronHint(result.error) }, 400);
   const resp: WorkflowScheduleResponse = { schedule: result.schedule };

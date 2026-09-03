@@ -76,6 +76,29 @@ principal → default assistant, so every existing dispatch path keeps working
 with one indirection and no new decision. Humans get the choice; automation
 gets a stable target.
 
+Amended 2026-09-02: an event subscription and a schedule may now name one
+assistant of their owner, so the default is the fallback rather than the only
+answer. `EventSubscriptionTargetWire.assistantId` (in the existing `target`
+jsonb) and `workflow_schedules.assistant_id` carry it, and
+`followed_threads.assistant_id` keeps a followed Slack thread on whichever
+assistant answered the mention that bound it. An ABSENT value still means the
+default, so every rule written before the field behaves exactly as it did, and
+a rule that names none keeps following a later change of default.
+
+The pairing is checked twice, by one rule (`checkAssistantForOwner`): at write
+time against the owner the target resolves to, and again at DELIVERY time in
+`resolveDeliverySession`. The second check is not redundant. A rule outlives
+the assistant it names — archived, or re-owned — and a stale id must never
+reach an assistant its owner does not own. A failed delivery-time check writes
+`event_target_assistant_invalid` to the drop log and throws, the same shape the
+org-mismatch check already used.
+
+Two limits worth naming. An org-owned assistant is not listable (`canViewSession`
+admits nobody to an org-owned session), so the "org assistant" choice can only
+mean its default. And a patch may rewrite `assistantId` only, never the owner:
+the owner decides the row's mutation ACL and its collision peers, so moving a
+rule between owners is a rewrite, not a field edit.
+
 A default cannot be archived while it is the default. Promote another first.
 
 Amended 2026-08-31 (TKAI-296): one exception, session delete. `DELETE

@@ -158,6 +158,10 @@ async function routeFollowedMessage(
         origin: { channelType: "slack", threadKey, reply: "manual", messageTs: f.ts },
       },
       dispatchId: `slack:follow:${f.eventId}`,
+      // The assistant that answered the binding mention. Null on a follow bound
+      // before the column, and on one whose rule named none — both mean the
+      // owner's default, the behavior those follows already had.
+      assistantId: follow.assistantId ?? undefined,
       mismatchReason: "followed_target_mismatch",
     });
   } catch (err) {
