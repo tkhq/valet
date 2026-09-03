@@ -4,6 +4,7 @@ import {
   loadPrebuildOverride,
   resolveRecipe,
   generateDockerfile,
+  generateLocalDockerfile,
   type RecipeStep,
   type ResolvedRecipe,
 } from "./recipe.js";
@@ -119,6 +120,52 @@ describe("loadPrebuildOverride", () => {
     await expect(
       loadPrebuildOverride(readerFor({ ".valet/prebuild.yaml": "workspaceStorage: 4\n" })),
     ).rejects.toThrow(/workspaceStorage must be a quantity string/);
+  });
+});
+
+describe("generateLocalDockerfile", () => {
+  it("matches the golden: COPY from context, same guarded/unguarded RUN tail as the platform bake, local label", () => {
+    const dockerfile = generateLocalDockerfile({
+      baseImage: "ghcr.io/tkhq/valet-sandbox:latest",
+      recipe: [
+        { id: "pnpm-install", lockfile: "pnpm-lock.yaml", command: "pnpm install --frozen-lockfile" },
+      ],
+      setup: ["make bootstrap"],
+    });
+    expect(dockerfile).toBe(`FROM ghcr.io/tkhq/valet-sandbox:latest
+
+COPY . /prebuilt/repo
+
+WORKDIR /prebuilt/repo
+
+RUN command -v pnpm >/dev/null 2>&1 && pnpm install --frozen-lockfile || echo "prebuild: no pnpm in this image, skipping pnpm-install"
+
+RUN make bootstrap
+
+LABEL valet.prebuild.local="true"
+`);
+  });
+
+  it("never contains token/clone machinery, and never the platform identity label", () => {
+    const dockerfile = generateLocalDockerfile({ baseImage: "img", recipe: [], setup: ["echo hi"] });
+    expect(dockerfile).not.toContain("git-token");
+    expect(dockerfile).not.toContain("git clone");
+    expect(dockerfile).not.toContain("valet.prebuild.identity");
+  });
+
+  it("emits the identical RUN tail as generateDockerfile for the same recipe/setup (shared emitter)", () => {
+    const recipe = [{ id: "pnpm-install", lockfile: "pnpm-lock.yaml", command: "pnpm install --frozen-lockfile" }];
+    const setup = ["echo one", "echo two"];
+    const tailOf = (df: string) => df.split("\n").filter((l) => l.startsWith("RUN ") && !l.includes("git")).join("\n");
+    const local = generateLocalDockerfile({ baseImage: "img", recipe, setup });
+    const platform = generateDockerfile({
+      baseImage: "img",
+      cloneUrl: "https://github.com/o/r.git",
+      commitSha: "a".repeat(40),
+      recipe,
+      setup,
+    });
+    expect(tailOf(local)).toBe(tailOf(platform));
   });
 });
 
