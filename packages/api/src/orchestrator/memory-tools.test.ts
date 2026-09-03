@@ -373,7 +373,7 @@ describe("mem_* tools: real HTTP round trip", () => {
 
     // Missing content is a tool-level error naming the fix, not an HTTP 400.
     const empty = await artifactPublishTool.execute({ key: "pages/board" }, ctx);
-    expect(empty.text).toContain("[artifact_error] content is required");
+    expect(empty.text).toContain("[artifact_error] pass exactly one of");
 
     const revoked = await artifactPublishTool.execute({ key: "pages/board", revoke: true }, ctx);
     expect(revoked.text).toBe("revoked page pages/board");

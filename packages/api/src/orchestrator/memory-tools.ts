@@ -24,6 +24,7 @@ import { Type } from "typebox";
 import type { TSchema } from "typebox";
 import { serializePrincipal, type Principal } from "@valet/engine";
 import type { ToolContext, ToolDef, ToolResult } from "@valet/engine";
+import { ARTIFACT_MAX_CONTENT_BYTES, artifactSizeError } from "@valet/shared";
 
 const UNAVAILABLE_TEXT = "[memory_unavailable] memory endpoint not configured";
 
@@ -516,18 +517,32 @@ function asPublishResultBody(body: unknown): PublishResultBody | null {
   return { ...base, version: typeof body.version === "number" ? body.version : undefined };
 }
 
+/** A sandbox path as a publish key: strip leading slashes, keep the rest. */
+function normalizePublishKey(path: string): string {
+  return path.replace(/^\/+/, "");
+}
+
 export const artifactPublishTool = defineTool({
   name: "artifact_publish",
   description:
-    "Publish content as a page at a stable link, or revoke it. Use markdown for prose a person will read; use html when the output is easier to look at than to read — a chart, a diagram, an annotated diff, options side by side, an interactive control. An html page must be self-contained: inline every stylesheet and script, embed images as data URIs, draw diagrams as inline SVG. Scripts run sandboxed with no network access; only two script CDNs load (cdn.jsdelivr.net, cdnjs.cloudflare.com) and no other external host does. Re-publishing the same key updates the page and keeps the URL. Links require a logged-in member of the user's org; only a human can widen one further from the web UI. Publish only when the user asks for a link or clearly wants a page — never proactively.",
+    "Publish content as a page at a stable link, or revoke it. Pass `content` inline, or `path` to publish a file already written in the sandbox. Use markdown for prose a person will read; use html when the output is easier to look at than to read — a chart, a diagram, an annotated diff, options side by side, an interactive control. An html page must be self-contained: inline every stylesheet and script, embed images as data URIs, draw diagrams as inline SVG. Scripts run sandboxed with no network access; only two script CDNs load (cdn.jsdelivr.net, cdnjs.cloudflare.com) and no other external host does. Re-publishing the same key updates the page and keeps the URL. Links require a logged-in member of the user's org; only a human can widen one further from the web UI. Publish only when the user asks for a link or clearly wants a page — never proactively.",
   parameters: Type.Object({
-    key: Type.String({
-      description:
-        "Stable publish key, e.g. 'pages/deploy-dashboard'. Re-publishing the same key updates the same page at the same URL.",
-    }),
+    key: Type.Optional(
+      Type.String({
+        description:
+          "Stable publish key, e.g. 'pages/deploy-dashboard'. Re-publishing the same key updates the same page at the same URL. Defaults to `path` when publishing from a file.",
+      }),
+    ),
     content: Type.Optional(
       Type.String({
-        description: "The source: GFM markdown, or a self-contained HTML document. Required unless revoking. Capped at 2 MiB.",
+        description:
+          "The source: GFM markdown, or a self-contained HTML document. Pass exactly one of `path` or `content`. Capped at 2 MiB.",
+      }),
+    ),
+    path: Type.Optional(
+      Type.String({
+        description:
+          "Path of a file in the sandbox to publish, e.g. '/workspace/report.html'. Pass exactly one of `path` or `content`. Format defaults from the extension: .html/.htm is html, anything else is markdown.",
       }),
     ),
     title: Type.Optional(
@@ -547,9 +562,43 @@ export const artifactPublishTool = defineTool({
   execute: async (args, ctx) => {
     const cfg = resolveMemoryConfig(ctx);
     if (!cfg) return { text: UNAVAILABLE_TEXT };
-    if (args.revoke !== true && (typeof args.content !== "string" || args.content.length === 0)) {
-      return { text: "[artifact_error] content is required to publish. Pass the full page source." };
+
+    const hasContent = typeof args.content === "string" && args.content.length > 0;
+    const hasPath = typeof args.path === "string" && args.path.length > 0;
+
+    let key = args.key;
+    let content = args.content;
+    let format = args.format;
+
+    if (args.revoke === true) {
+      if (!key && hasPath) key = normalizePublishKey(args.path!);
+      if (!key) return { text: "[artifact_error] pass `key` (or `path`) to name the page to revoke." };
+    } else {
+      if (hasContent === hasPath) {
+        return { text: "[artifact_error] pass exactly one of `content` (inline source) or `path` (a file in the sandbox)." };
+      }
+      if (hasPath) {
+        const stat = await ctx.sandbox.stat(args.path!).catch(() => null);
+        if (!stat?.isFile) {
+          return { text: `[artifact_error] ${args.path} is not a file in the sandbox. Write the page to a file first, then publish it.` };
+        }
+        if (stat.size > ARTIFACT_MAX_CONTENT_BYTES) {
+          const mib = (stat.size / (1024 * 1024)).toFixed(1);
+          return {
+            text: `[artifact_error] ${args.path} is ${mib} MiB, over the ${ARTIFACT_MAX_CONTENT_BYTES / (1024 * 1024)} MiB limit. Embed fewer raster images, or draw diagrams as inline SVG instead.`,
+          };
+        }
+        content = await ctx.sandbox.readFile(args.path!);
+        const sizeError = artifactSizeError(content);
+        if (sizeError) return { text: `[artifact_error] ${sizeError}` };
+        if (!format) format = /\.html?$/i.test(args.path!) ? "html" : "markdown";
+        if (!key) key = normalizePublishKey(args.path!);
+      }
+      if (!key) {
+        return { text: "[artifact_error] `key` is required when publishing inline content. Pick a stable name like 'pages/deploy-dashboard'." };
+      }
     }
+
     const owner = resolveOwner(ctx);
     const url = new URL("/api/artifacts/share", cfg.apiBaseUrl);
     const headers = memoryHeaders(cfg, owner, ctx.userId, true);
@@ -561,17 +610,17 @@ export const artifactPublishTool = defineTool({
         method: "POST",
         headers,
         body: JSON.stringify({
-          key: args.key,
-          content: args.content,
+          key,
+          content,
           title: args.title,
-          format: args.format,
+          format,
           description: args.description,
           icon: args.icon,
           revoke: args.revoke,
         }),
       },
       async (res) => {
-        if (args.revoke === true) return { text: `revoked page ${args.key}` };
+        if (args.revoke === true) return { text: `revoked page ${key}` };
         const body = asPublishResultBody(await parseJsonBody(res));
         if (!body?.url) return { text: `[artifact_error] publish succeeded but returned no URL` };
         // State the audience so the agent relays it accurately — from the
@@ -582,7 +631,7 @@ export const artifactPublishTool = defineTool({
             ? "Anyone with the link — no login required (a human widened this link earlier)."
             : "Logged-in members of the user's org. The user can widen or revoke this link from the page.";
         const version = body.version !== undefined ? ` (version ${body.version})` : "";
-        return { text: `published ${args.key} → ${body.url}${version}\nAudience: ${audience}` };
+        return { text: `published ${key} → ${body.url}${version}\nAudience: ${audience}` };
       },
     );
   },
