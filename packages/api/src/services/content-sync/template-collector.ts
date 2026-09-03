@@ -18,6 +18,7 @@
  * can delete from under the other.
  */
 import { and, eq, inArray } from "drizzle-orm";
+import { isPgUniqueViolation } from "@valet/store-postgres";
 import { parse as parseYaml } from "yaml";
 import {
   parseWorkflowFileValue,
@@ -212,28 +213,52 @@ class TemplatePass implements CollectorPass {
       const row = byPath.get(candidate.path);
       const template = toTemplate(file);
       if (row === undefined) {
-        await db.insert(workflowTemplates).values({
-          id: newWorkflowId("wftpl"),
-          orgId: source.orgId,
-          ownerType: source.ownerType,
-          ownerId: source.ownerId,
-          templateId,
-          origin: "repo",
-          sourceId: source.id,
-          upstreamPath: candidate.path,
-          contentSha: candidate.blobSha,
-          template,
-          createdAt: now(),
-          updatedAt: now(),
-        });
+        try {
+          await db.insert(workflowTemplates).values({
+            id: newWorkflowId("wftpl"),
+            orgId: source.orgId,
+            ownerType: source.ownerType,
+            ownerId: source.ownerId,
+            templateId,
+            origin: "repo",
+            sourceId: source.id,
+            upstreamPath: candidate.path,
+            contentSha: candidate.blobSha,
+            template,
+            createdAt: now(),
+            updatedAt: now(),
+          });
+        } catch (err) {
+          // `workflow_templates_owner_template` spans every source that
+          // shares an owner, and the two guards above see only the shipped
+          // catalog and this pass. A second REPOSITORY tracked for the same
+          // team can claim an id the first already holds, and letting the
+          // violation escape would abort the pass and error the source on
+          // every poll for a mistake in one file.
+          if (!isPgUniqueViolation(err)) throw err;
+          warnings.push(
+            `${candidate.path} declares the template id "${templateId}", which another repository tracked for this owner already publishes. Give one of them a different id.`,
+          );
+          continue;
+        }
         imported += 1;
         continue;
       }
       if (row.contentSha === candidate.blobSha && row.templateId === templateId) continue;
-      await db
-        .update(workflowTemplates)
-        .set({ templateId, template, contentSha: candidate.blobSha, updatedAt: now() })
-        .where(eq(workflowTemplates.id, row.id));
+      try {
+        await db
+          .update(workflowTemplates)
+          .set({ templateId, template, contentSha: candidate.blobSha, updatedAt: now() })
+          .where(eq(workflowTemplates.id, row.id));
+      } catch (err) {
+        // Same index, reached the other way: a file that CHANGES its declared
+        // id to one another source holds.
+        if (!isPgUniqueViolation(err)) throw err;
+        warnings.push(
+          `${candidate.path} now declares the template id "${templateId}", which another repository tracked for this owner already publishes. Give one of them a different id.`,
+        );
+        continue;
+      }
       updated += 1;
     }
 

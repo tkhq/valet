@@ -37,6 +37,7 @@ import {
 } from "@valet/workflow";
 import type { ValetPlugin } from "@valet/engine";
 import type { AppDb } from "../../lib/drizzle.js";
+import { canonicalJson } from "../../lib/canonical-json.js";
 import {
   eventSubscriptions,
   workflowDefinitions,
@@ -277,7 +278,11 @@ class WorkflowPass implements CollectorPass {
           updatedAt: now(),
         });
         await snapshot(db, id, 1, name, parsed.file.definition, commitSha, now());
-        await armTriggers(db, source, id, plan.plan, now());
+        for (const keys of await armTriggers(db, source, id, plan.plan, now())) {
+          warnings.push(
+            `${candidate.path} declares two event blocks for ${keys}. Valet armed the first and ignored the rest; give them different event keys, or merge their filters.`,
+          );
+        }
         imported += 1;
         continue;
       }
@@ -289,7 +294,11 @@ class WorkflowPass implements CollectorPass {
       // The triggers reconcile on every pass, not only when the file moved:
       // they are rows another surface can change, and the file is the
       // authority for the ones it declares.
-      await armTriggers(db, source, row.id, plan.plan, now());
+      for (const keys of await armTriggers(db, source, row.id, plan.plan, now())) {
+        warnings.push(
+          `${candidate.path} declares two event blocks for ${keys}. Valet armed the first and ignored the rest; give them different event keys, or merge their filters.`,
+        );
+      }
       if (row.contentSha === candidate.blobSha && row.name === name) continue;
       await db
         .update(workflowDefinitions)
@@ -300,7 +309,7 @@ class WorkflowPass implements CollectorPass {
           updatedAt: now(),
         })
         .where(eq(workflowDefinitions.id, row.id));
-      if (!sameGraph(parsed.file.definition, row.definition)) {
+      if (canonicalJson(parsed.file.definition) !== canonicalJson(row.definition)) {
         await snapshot(
           db,
           row.id,
@@ -515,9 +524,17 @@ async function planTriggers(
 
   const subscriptions: TriggerPlan["subscriptions"] = [];
   for (const event of file.events ?? []) {
-    // `matchChanged: false`: the mention gate injects the CREATOR's own
-    // identity into a filter set, and a file has no creator. A file must
-    // therefore say what it matches, which `validateSubscription` enforces.
+    // `matchChanged: false` runs `validateSubscription` and RETURNS BEFORE
+    // `enforceMentionScope`. That is deliberate and it is a real gap worth
+    // naming rather than hiding behind the flag: the mention gate narrows a
+    // Slack subscription to the creator's own mentions, and a file has no
+    // creator whose identity could be injected. So a file CAN declare a
+    // broader Slack match than a person could create through the UI. The
+    // control on that is decision 10 — only a team admin or an org admin can
+    // add a source that collects workflows at all — and the file is in a
+    // repository the team can read. Widening this to the source's creator
+    // would silently scope an org's automation to one person's mentions,
+    // which is worse.
     const write = await validateSubscriptionWrite(
       db,
       plugins,
@@ -567,7 +584,7 @@ async function armTriggers(
   workflowId: string,
   plan: TriggerPlan,
   now: number,
-): Promise<void> {
+): Promise<string[]> {
   const existing = await db
     .select()
     .from(workflowSchedules)
@@ -641,7 +658,16 @@ async function armTriggers(
     return target.kind === "workflow" && target.workflowId === workflowId;
   });
   const keyOf = (keys: string[]): string => [...keys].sort().join("\u0000");
-  const wanted = new Map(plan.subscriptions.map((sub) => [keyOf(sub.eventKeys), sub]));
+  // Built by hand rather than from the array, so two blocks naming the same
+  // event keys do not silently collapse into whichever came last. The first
+  // wins and `armTriggers` reports the rest through its return value.
+  const wanted = new Map<string, TriggerPlan["subscriptions"][number]>();
+  const collided: string[] = [];
+  for (const sub of plan.subscriptions) {
+    const key = keyOf(sub.eventKeys);
+    if (wanted.has(key)) collided.push(sub.eventKeys.join(", "));
+    else wanted.set(key, sub);
+  }
 
   for (const row of mine) {
     const key = keyOf((row.eventKeys as string[]) ?? []);
@@ -651,7 +677,7 @@ async function armTriggers(
       continue;
     }
     wanted.delete(key);
-    if (row.name !== want.name || JSON.stringify(row.filters) !== JSON.stringify(want.filters)) {
+    if (row.name !== want.name || canonicalJson(row.filters) !== canonicalJson(want.filters)) {
       await db
         .update(eventSubscriptions)
         .set({ name: want.name, filters: want.filters, updatedAt: now })
@@ -662,8 +688,15 @@ async function armTriggers(
     await db.insert(eventSubscriptions).values({
       id: newWorkflowId("evsub"),
       orgId: source.orgId,
-      ownerType: source.ownerType,
-      ownerId: source.ownerId,
+      // An ORG owner is the exception, as it is for a file-armed schedule:
+      // `canMutateSubscription` in `routes/events.ts` returns true for any
+      // org member on an org-owned row, so copying the owner here would hand
+      // every member the power to repoint or delete a subscription an admin
+      // published. The row stays with whoever created the source. Delivery is
+      // unaffected: the dispatcher starts the run as the DEFINITION's owner.
+      ...(source.ownerType === "org"
+        ? { ownerType: "user" as const, ownerId: source.createdBy ?? source.ownerId }
+        : { ownerType: source.ownerType, ownerId: source.ownerId }),
       name: want.name,
       eventKeys: want.eventKeys,
       filters: want.filters,
@@ -675,6 +708,7 @@ async function armTriggers(
       updatedAt: now,
     });
   }
+  return collided;
 }
 
 /**
@@ -694,34 +728,6 @@ function teamTriggerGate(source: ContentSourceRow, file: WorkflowFile): string |
   const nodes = file.definition.nodes;
   if (!nodes.some((node) => node.type === "tool")) return null;
   return `this workflow uses tool actions and declares a trigger. A team cannot run tool actions on a trigger yet, so Valet mirrored the workflow and left the trigger off. Run it by hand, or move the repository to an org source.`;
-}
-
-/**
- * True when two definitions are the same graph.
- *
- * `definitionVersionId` cannot answer this here. It hashes `JSON.stringify`
- * with no key canonicalization, and one side of the compare is a fresh YAML
- * parse holding the file's key order while the other came back from Postgres
- * `jsonb`, which sorts keys. The two hashes then differ for a byte-identical
- * graph, and every file edit would mint a version even when only a comment or
- * the file's `name` moved. Sorting both sides first removes that.
- */
-function sameGraph(a: unknown, b: unknown): boolean {
-  return canonical(a) === canonical(b);
-}
-
-function canonical(value: unknown): string {
-  return JSON.stringify(sortKeys(value));
-}
-
-/** The same value with every object's keys in sorted order. Arrays keep their
- * order, which carries meaning in a node or edge list. */
-function sortKeys(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortKeys);
-  if (typeof value !== "object" || value === null) return value;
-  const entries = Object.entries(value as Record<string, unknown>);
-  entries.sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0));
-  return Object.fromEntries(entries.map(([k, v]) => [k, sortKeys(v)]));
 }
 
 /** Which of `ids` hold a run that has not settled. One query, and none at all

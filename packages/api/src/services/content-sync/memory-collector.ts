@@ -30,7 +30,7 @@
  */
 import { and, eq, like } from "drizzle-orm";
 import { memoryFiles, type ContentSourceRow } from "../../schema/index.js";
-import { normalizePath, parseConcept } from "../../lib/okf.js";
+import { assertWritablePath, normalizePath, parseConcept } from "../../lib/okf.js";
 import type {
   CollectorDiscoverContext,
   CollectorNoticeContext,
@@ -65,11 +65,32 @@ export class MemoryCollector implements ContentCollector {
   }
 }
 
-/** The memory path one repository path mounts at. Normalized through the
- * subsystem's own function, so a mirrored path and a written one are held to
- * one rule. */
-function mountPath(repoPath: string): string {
-  return normalizePath(`${MOUNT_PREFIX}${repoPath.slice(MEMORY_ROOT.length + 1)}`);
+/**
+ * The memory path one repository path mounts at, or the reason it has none.
+ *
+ * `normalizePath` and `assertWritablePath` both THROW, and a repository path
+ * is not ours to choose: a colon is legal in a git tree and ordinary in a
+ * filename ("2026-08-24: retro.md"), and so is a basename the store reserves.
+ * Throwing out of the reconcile loop would abort the pass and take every
+ * OTHER memory file in the repository with it, on every poll, forever. One
+ * file's name costs that file only.
+ *
+ * `assertWritablePath` is applied deliberately, with `lib/` allowed: it is
+ * the rule a WRITTEN path obeys, and mirroring a path the product could never
+ * hold would create a row no other code can address.
+ */
+function mountPath(repoPath: string): { ok: true; path: string } | { ok: false; reason: string } {
+  const path = `${MOUNT_PREFIX}${repoPath.slice(MEMORY_ROOT.length + 1)}`;
+  try {
+    const normalized = normalizePath(path);
+    // Strip the mount prefix for the reserved-name check, then put it back:
+    // `lib/` is exactly what this collector is allowed to write and
+    // `assertWritablePath` exists to refuse.
+    assertWritablePath(normalized.slice(MOUNT_PREFIX.length));
+    return { ok: true, path: normalized };
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 class MemoryPass implements CollectorPass {
@@ -131,7 +152,14 @@ class MemoryPass implements CollectorPass {
       const raw = text.get(candidate.path);
       if (raw === undefined) continue;
 
-      const path = mountPath(candidate.path);
+      const mount = mountPath(candidate.path);
+      if (!mount.ok) {
+        warnings.push(
+          `${candidate.path} cannot be mounted as a memory file: ${mount.reason}. Rename the file and push.`,
+        );
+        continue;
+      }
+      const path = mount.path;
       const row = byPath.get(candidate.path);
       if (row !== undefined && row.contentSha === candidate.blobSha) continue;
 

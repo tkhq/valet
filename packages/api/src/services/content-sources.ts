@@ -76,7 +76,7 @@ export class ContentSourceForbiddenError extends Error {
 }
 
 /** Every kind a source can collect. */
-export const CONTENT_KINDS: readonly ContentKind[] = ["skills", "workflows", "templates"];
+export const CONTENT_KINDS: readonly ContentKind[] = ["skills", "workflows", "templates", "memories"];
 
 /**
  * Kinds whose content RUNS. Push access to a tracked repository becomes

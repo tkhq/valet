@@ -313,6 +313,12 @@ export async function patchFile(db: AppDb, scope: MemoryScope, params: PatchFile
 // ─── removeFile ────────────────────────────────────────────────────────
 
 export async function removeFile(db: AppDb, scope: MemoryScope, path: string): Promise<void> {
+  // The same rule `writeFile` and `moveFile` apply. Deleting a file is a
+  // write to the store, and `lib/` holds mounted content the product does not
+  // own: without this, `mem_rm` removed a mirrored memory file that the sync
+  // would then restore on its next poll, or not at all if the source was
+  // removed in between.
+  assertWritablePath(path);
   const normalized = normalizePath(path);
   const existingRows = await db
     .select({ path: memoryFiles.path })

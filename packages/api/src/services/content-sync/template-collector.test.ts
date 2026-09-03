@@ -261,6 +261,37 @@ describe("template collector", () => {
     expect(said).toContain(".valet/templates/stray-workflow.yaml");
   });
 
+  // `workflow_templates_owner_template` spans every source that shares an
+  // owner, and the in-pass guards see only this source. An escaping unique
+  // violation would abort the pass and error the source on every poll.
+  it("reports an id another source of the same owner already publishes", async () => {
+    const first = serve({ sha: "c1", files: { ".valet/templates/a.yaml": templateYaml("digest") } });
+    const idOne = await teamSource(["templates"]);
+    await serviceFor(first).syncOnce(idOne);
+    await fixture?.close();
+
+    const second = serve({
+      sha: "d1",
+      files: { ".valet/templates/b.yaml": templateYaml("digest", "Theirs") },
+    });
+    const source = await createContentSource(
+      db,
+      { userId: "u1", orgId: ORG },
+      { repo: "tkhq/second", teamId: TEAM },
+    );
+    await db
+      .update(contentSources)
+      .set({ kinds: ["templates"] })
+      .where(eq(contentSources.id, source.id));
+    const outcome = await serviceFor(second).syncOnce(source.id);
+
+    expect(outcome?.status).not.toBe("error");
+    const rows = await mirrored();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].sourceId).toBe(idOne);
+    expect(outcome?.warnings.join(" ")).toContain("another repository");
+  });
+
   it("mirrors nothing from a user source and says where templates go", async () => {
     const f = serve({
       sha: "c1",

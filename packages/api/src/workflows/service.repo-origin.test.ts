@@ -18,11 +18,13 @@ import { contentSources, workflowDefinitions, workflowVersions } from "../schema
 import {
   addAggregateNode,
   armableDefinitionRow,
+  cancelWorkflowRun,
   copyWorkflowDefinition,
   createWorkflowDefinition,
   deleteWorkflowDefinition,
   getWorkflowDefinition,
   listWorkflowDefinitions,
+  resolveWorkflowApproval,
   startWorkflowRun,
   updateWorkflowDefinition,
 } from "./service.js";
@@ -280,6 +282,44 @@ describe("a mirrored workflow refuses every product write", () => {
 
     // And the act predicate refuses the same caller, who is not an org admin.
     expect(await armableDefinitionRow(db, OWNER, "wf_org_run")).toBeNull();
+  });
+
+  // The read/act split has to reach the RUN paths too. A run started by a
+  // schedule copies the definition's owner, so an org-owned mirrored workflow
+  // produces org-owned runs, and resolving one's approval gate is what makes
+  // the action run with the org's stored credentials.
+  it("refuses a plain member resolving an approval on an org-owned run", async () => {
+    const now = Date.now();
+    await db.insert(workflowDefinitions).values({
+      id: "wf_org_gate",
+      orgId: OWNER.orgId,
+      ownerType: "org",
+      ownerId: OWNER.orgId,
+      name: "Org gated",
+      definition: GRAPH,
+      origin: "repo",
+      sourceId: SOURCE,
+      upstreamPath: ".valet/workflows/gate.yaml",
+      contentSha: "blob-gate",
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    // The member reads it, which is the org-wide capability that is intended.
+    expect(await getWorkflowDefinition(deps, OWNER, "wf_org_gate")).not.toBeNull();
+
+    // And is refused every act on its runs. `ownedRun` answers not_found for
+    // a non-admin, so both surface as the ordinary missing-run result.
+    expect(await cancelWorkflowRun(deps, OWNER, "wfrun_org")).toBe("not_found");
+    expect(
+      await resolveWorkflowApproval(deps, OWNER, {
+        runId: "wfrun_org",
+        nodeId: "gate",
+        approved: true,
+        scope: "run",
+        via: "web",
+      }),
+    ).toBe("not_found");
   });
 
   it("still refuses when the source row is gone, without naming a repository it cannot read", async () => {

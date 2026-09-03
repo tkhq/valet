@@ -193,6 +193,70 @@ describe("memory collector", () => {
     expect(rows[0].sourceId).toBe(id);
   });
 
+  // A repository path is not ours to choose. `normalizePath` throws on a
+  // colon, which is ordinary in a filename, and throwing out of the loop would
+  // take every other memory file in the repository with it, on every poll.
+  it("fails one file whose name cannot be a memory path, and mirrors the rest", async () => {
+    const f = serve({
+      sha: "c1",
+      files: {
+        ".valet/memory/2026-08-24: retro.md": doc("Retro"),
+        ".valet/memory/glossary.md": doc("Glossary"),
+      },
+    });
+    const id = await userSource();
+    const outcome = await serviceFor(f).syncOnce(id);
+
+    expect(outcome?.status).not.toBe("error");
+    expect((await mirrored()).map((r) => r.path)).toEqual(["lib/glossary.md"]);
+    expect(outcome?.warnings.join(" ")).toContain("2026-08-24: retro.md");
+  });
+
+  it("refuses a file whose basename the store reserves", async () => {
+    const f = serve({
+      sha: "c1",
+      files: {
+        ".valet/memory/handbook/index.md": doc("Index"),
+        ".valet/memory/handbook/overview.md": doc("Overview"),
+      },
+    });
+    const id = await userSource();
+    const outcome = await serviceFor(f).syncOnce(id);
+
+    expect((await mirrored()).map((r) => r.path)).toEqual(["lib/handbook/overview.md"]);
+    expect(outcome?.warnings.join(" ")).toContain("index.md");
+  });
+
+  // `writeFile` and `moveFile` had the guard; `removeFile` did not, so the
+  // agent's `mem_rm` could delete a mounted file outright.
+  it("refuses a product DELETE of a mounted path", async () => {
+    const f = serve({ sha: "c1", files: { ".valet/memory/a.md": doc("A") } });
+    const id = await userSource();
+    await serviceFor(f).syncOnce(id);
+
+    const { removeFile } = await import("../memory.js");
+    await expect(
+      removeFile(db, { owner: { type: "user", id: "u1" }, actorUserId: "u1" }, "lib/a.md"),
+    ).rejects.toThrow(/lib\/ is reserved/);
+    expect((await mirrored()).map((r) => r.path)).toEqual(["lib/a.md"]);
+  });
+
+  it("writes nothing on a second sync of the same commit", async () => {
+    const repo: FakeRepo = { sha: "c1", files: { ".valet/memory/a.md": doc("A") } };
+    const f = serve(repo);
+    const id = await userSource();
+    await serviceFor(f).syncOnce(id);
+    const [first] = await mirrored();
+
+    const outcome = await serviceFor(f).syncOnce(id);
+    expect(outcome?.imported).toBe(0);
+    expect(outcome?.updated).toBe(0);
+    const [second] = await mirrored();
+    // Same version and same updated_at: an unmoved repository writes nothing.
+    expect(second.version).toBe(first.version);
+    expect(second.updatedAt).toBe(first.updatedAt);
+  });
+
   it("refuses a second source that mounts a path another already holds", async () => {
     const first = serve({ sha: "c1", files: { ".valet/memory/a.md": doc("A") } });
     const idOne = await userSource("tkhq/notes");

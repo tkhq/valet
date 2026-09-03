@@ -24,6 +24,7 @@ import {
 } from "@valet/engine";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb } from "../../lib/drizzle.js";
+import { canonicalJson } from "../../lib/canonical-json.js";
 import { skills, type ContentSourceRow, type SkillRow } from "../../schema/index.js";
 import { newSkillId, skillContentSha } from "../skills.js";
 import {
@@ -393,7 +394,7 @@ async function updateMirror(
   // nothing.
   const unchanged =
     row.contentSha === contentSha &&
-    JSON.stringify(row.frontmatter) === JSON.stringify(parsed.frontmatter) &&
+    canonicalJson(row.frontmatter) === canonicalJson(parsed.frontmatter) &&
     row.description === parsed.description &&
     row.upstreamPath === entry.path;
   if (unchanged) return false;

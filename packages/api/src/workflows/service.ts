@@ -1260,11 +1260,33 @@ function threadIdOf(effects: NodeCheckpoint["effects"]): string | undefined {
   return typeof threadId === "string" ? threadId : undefined;
 }
 
-/** Owner-gated run lookup shared by cancel/approval below. */
-async function ownedRun(deps: WorkflowServiceDeps, owner: WorkflowOwner, runId: string) {
+/**
+ * Owner-gated run lookup shared by cancel, retry and approval below.
+ *
+ * `scope` is the same read-versus-act split `armableDefinitionRow` makes, and
+ * it exists here for the same reason. A run started by a schedule, an event or
+ * a webhook copies the DEFINITION's owner, so an org-owned mirrored workflow
+ * produces org-owned runs, and `credentialOwnerFor` resolves an org run owner
+ * to the org's stored credentials. Reading such a run is an org-wide
+ * capability; resolving its approval gate is not, because that is what lets
+ * the action run with those credentials.
+ *
+ * `retry` is deliberately a READ: it delegates to `startWorkflowRun`, which
+ * stamps the new run to the caller, so it resolves the caller's own
+ * credentials and grants nothing a manual start would not.
+ */
+async function ownedRun(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  runId: string,
+  scope: OwnerScope = "read",
+) {
   const run = await deps.workflowStore.getRun(runId);
   if (!run || !run.owner || !(await isAuthorizedForOwner(deps.db, owner, run.owner))) {
     return null;
+  }
+  if (scope === "act" && run.owner.ownerType === "org") {
+    if (!(await isOrgAdmin(deps.db, owner.orgId, owner.userId))) return null;
   }
   return run;
 }
@@ -1308,7 +1330,7 @@ export async function cancelWorkflowRun(
   owner: WorkflowOwner,
   runId: string,
 ): Promise<"ok" | "not_found"> {
-  const run = await ownedRun(deps, owner, runId);
+  const run = await ownedRun(deps, owner, runId, "act");
   if (!run) return "not_found";
   await deps.workflowRunHost.terminate(runId);
 
@@ -1404,7 +1426,7 @@ export async function resolveWorkflowApproval(
     via: "web" | "agent";
   },
 ): Promise<ResolveApprovalOutcome> {
-  const run = await ownedRun(deps, owner, input.runId);
+  const run = await ownedRun(deps, owner, input.runId, "act");
   if (!run) return "not_found";
   const iter = input.iteration ?? 0;
   const suffix = iter > 0 ? `:${iter}` : "";

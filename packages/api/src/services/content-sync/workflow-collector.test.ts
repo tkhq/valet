@@ -20,6 +20,7 @@ import {
 } from "../../test-helpers/github-fixture.js";
 import {
   contentSources,
+  eventSubscriptions,
   orgMembers,
   orgs,
   teamMembers,
@@ -35,6 +36,8 @@ import { GitHubSkillRepoReader } from "../skill-repo-reader.js";
 import { ContentSyncService } from "./service.js";
 import { SkillCollector } from "./skill-collector.js";
 import { WorkflowCollector } from "./workflow-collector.js";
+import githubPlugin from "@valet/plugin-github/plugin";
+import type { ValetPlugin } from "@valet/engine";
 
 const ORG = "org1";
 const TEAM = "team_1";
@@ -145,11 +148,15 @@ describe("workflow collector", () => {
     fixture = undefined;
   });
 
-  function serviceFor(f: GithubFixture): ContentSyncService {
+  /** `plugins` supplies the event catalog `validateSubscription` reads. It
+   * defaults to none, which fails closed: with no catalog every event key is
+   * unknown, and a file declaring events reports that instead of arming a
+   * subscription nothing can deliver. */
+  function serviceFor(f: GithubFixture, plugins: ValetPlugin[] = []): ContentSyncService {
     return new ContentSyncService({
       db,
       reader: new GitHubSkillRepoReader({ apiUrl: f.url }),
-      collectors: [new SkillCollector(), new WorkflowCollector()],
+      collectors: [new SkillCollector(), new WorkflowCollector({ plugins })],
     });
   }
 
@@ -678,6 +685,140 @@ describe("workflow collector", () => {
 
       const left = await db.select().from(workflowSchedules);
       expect(left.map((r) => r.id)).toEqual(["sched_by_hand"]);
+    });
+
+    // The events half had no test at all, so the whole subscription path was
+    // unexercised: validation, arming, reconcile, and the org owner rule.
+    const withEvents = (filters: string) =>
+      [
+        "valet: workflow/v1",
+        "name: On push",
+        "events:",
+        "  - eventKeys:",
+        "      - github.push",
+        "    name: On a push",
+        filters,
+        "definition:",
+        "  version: dag/v1",
+        "  nodes:",
+        "    - id: trigger",
+        "      type: trigger",
+        "    - id: stop",
+        "      type: stop",
+        "  edges:",
+        "    - from: trigger",
+        "      to: stop",
+        "",
+      ]
+        .filter((line) => line !== "")
+        .join("\n");
+
+    it("arms an event subscription, updates its filters, and disarms it", async () => {
+      const repo: FakeRepo = {
+        sha: "c1",
+        files: {
+          ".valet/workflows/onpush.yaml": withEvents(
+            "    filters:\n      - field: repo\n        op: eq\n        value: acme/service",
+          ),
+        },
+      };
+      const f = serve(repo);
+      const id = await teamSource();
+      await serviceFor(f, [githubPlugin]).syncOnce(id);
+
+      const armed = await db.select().from(eventSubscriptions);
+      expect(armed).toHaveLength(1);
+      expect(armed[0].origin).toBe("repo");
+      expect(armed[0].eventKeys).toEqual(["github.push"]);
+      expect(armed[0].target).toMatchObject({ kind: "workflow" });
+      const subId = armed[0].id;
+
+      repo.sha = "c2";
+      repo.files[".valet/workflows/onpush.yaml"] = withEvents(
+        "    filters:\n      - field: repo\n        op: eq\n        value: acme/other",
+      );
+      await serviceFor(f, [githubPlugin]).syncOnce(id);
+      const moved = await db.select().from(eventSubscriptions);
+      expect(moved).toHaveLength(1);
+      expect(moved[0].id).toBe(subId);
+      expect(moved[0].filters).toMatchObject([{ value: "acme/other" }]);
+
+      repo.sha = "c3";
+      repo.files[".valet/workflows/onpush.yaml"] = workflowYaml("On push");
+      await serviceFor(f, [githubPlugin]).syncOnce(id);
+      expect(await db.select().from(eventSubscriptions)).toHaveLength(0);
+    });
+
+    // With no event catalog every key is unknown, so a file declaring events
+    // reports that rather than arming a subscription nothing can deliver.
+    it("fails the file when this deployment has no catalog for its event key", async () => {
+      const f = serve({
+        sha: "c1",
+        files: { ".valet/workflows/onpush.yaml": withEvents("") },
+      });
+      const id = await teamSource();
+      const outcome = await serviceFor(f).syncOnce(id);
+
+      expect(await mirrored()).toHaveLength(0);
+      expect(await db.select().from(eventSubscriptions)).toHaveLength(0);
+      expect(outcome?.warnings.join(" ")).toContain(".valet/workflows/onpush.yaml");
+    });
+
+    it("fails the file when a filter names a field the catalog does not declare", async () => {
+      const f = serve({
+        sha: "c1",
+        files: {
+          ".valet/workflows/bad.yaml": withEvents(
+            "    filters:\n      - field: not_a_field\n        op: eq\n        value: x",
+          ),
+          ".valet/workflows/fine.yaml": workflowYaml("Fine"),
+        },
+      });
+      const id = await teamSource();
+      const outcome = await serviceFor(f, [githubPlugin]).syncOnce(id);
+
+      expect((await mirrored()).map((r) => r.upstreamPath)).toEqual([
+        ".valet/workflows/fine.yaml",
+      ]);
+      expect(await db.select().from(eventSubscriptions)).toHaveLength(0);
+      expect(outcome?.warnings.join(" ")).toContain(".valet/workflows/bad.yaml");
+    });
+
+    // `next_fire_at` must hold still on a name-only edit, or every poll pushes
+    // a due schedule further out and it never fires.
+    it("holds next_fire_at still when only the schedule name changed", async () => {
+      const named = (name: string) =>
+        [
+          "valet: workflow/v1",
+          "name: Nightly",
+          "schedule:",
+          '  cron: "0 3 * * *"',
+          `  name: ${name}`,
+          "definition:",
+          "  version: dag/v1",
+          "  nodes:",
+          "    - id: trigger",
+          "      type: trigger",
+          "    - id: stop",
+          "      type: stop",
+          "  edges:",
+          "    - from: trigger",
+          "      to: stop",
+          "",
+        ].join("\n");
+      const repo: FakeRepo = { sha: "c1", files: { ".valet/workflows/n.yaml": named("First") } };
+      const f = serve(repo);
+      const id = await teamSource();
+      await serviceFor(f).syncOnce(id);
+      const [before] = await db.select().from(workflowSchedules);
+
+      repo.sha = "c2";
+      repo.files[".valet/workflows/n.yaml"] = named("Renamed");
+      await serviceFor(f).syncOnce(id);
+      const [after] = await db.select().from(workflowSchedules);
+
+      expect(after.name).toBe("Renamed");
+      expect(after.nextFireAt).toBe(before.nextFireAt);
     });
 
     it("arms nothing for a team file with tool nodes, and says why", async () => {

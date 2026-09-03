@@ -339,10 +339,22 @@ describe("content sources service", () => {
       ).rejects.toThrow(/team source or an org source/);
     });
 
+    // `memories` was advertised on the wire and registered as a collector
+    // while the only allow-list the create route checks left it out, so the
+    // memory collector could never run.
+    it("accepts memories on a personal source, which is the one kind that admits one", async () => {
+      const row = await createContentSource(db, owner("u1"), {
+        repo: "tkhq/notes",
+        kinds: parseContentKinds(["memories"]),
+      });
+      expect(row.kinds).toEqual(["memories"]);
+    });
+
     it("reads an unchecked body, naming the choices", () => {
       expect(parseContentKinds(undefined)).toEqual(["skills"]);
       expect(() => parseContentKinds([])).toThrow(/Choose what to collect/);
       expect(() => parseContentKinds(["skils"])).toThrow(/does not collect/);
+      expect(parseContentKinds(["memories"])).toEqual(["memories"]);
       expect(() => parseContentKinds("skills")).toThrow(/Choose what to collect/);
     });
   });
