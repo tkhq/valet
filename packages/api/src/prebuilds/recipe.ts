@@ -101,6 +101,13 @@ export interface PrebuildOverride {
   setup?: string[];
   skipDetect?: boolean;
   docker?: boolean;
+  /** Workspace volume size this repo needs (Kubernetes quantity, e.g.
+   * "4Gi"). Read at session create time — like `docker`, a session runtime
+   * knob that lives in the repo's own config — and provisions the workspace
+   * claim at this size instead of the deploy default, clamped to
+   * `VALET_SANDBOX_WORKSPACE_MAX` by the provider (TKAI-385). A large repo
+   * declares its footprint up front so no reactive resize is needed. */
+  workspaceStorage?: string;
 }
 
 /**
@@ -142,6 +149,14 @@ export async function loadPrebuildOverride(
       throw new Error(".valet/prebuild.yaml: docker must be a boolean");
     }
     override.docker = obj.docker;
+  }
+  if (obj.workspaceStorage !== undefined) {
+    // Quote the value in YAML: an unquoted `4Gi` parses as a string, but a
+    // bare number (`workspaceStorage: 4`) does not name a unit.
+    if (typeof obj.workspaceStorage !== "string") {
+      throw new Error('.valet/prebuild.yaml: workspaceStorage must be a quantity string like "4Gi"');
+    }
+    override.workspaceStorage = obj.workspaceStorage;
   }
   return override;
 }
@@ -202,6 +217,34 @@ export const PREBUILT_REPO_PATH = "/prebuilt/repo";
 
 const ASKPASS_PATH = "/tmp/valet-git-askpass.sh";
 
+/** Emits the shared recipe/setup `RUN` tail used by every repo Dockerfile
+ * variant (platform bake and the CLI's local build), so the two cannot
+ * drift: detected recipe steps are toolchain-guarded (skip, do not fail —
+ * a detected step is Valet's inference from a lockfile, not something the
+ * repo asked for); `setup` commands are NOT guarded — they are the repo's
+ * own instruction, and a repo that asks for something the image cannot run
+ * should hear about it as a failure rather than have it silently skipped. */
+function emitStepRuns(lines: string[], recipe: RecipeStep[], setup: string[]): void {
+  for (const step of recipe) {
+    lines.push("");
+    const needs = STEP_REQUIRES[step.id];
+    if (needs === undefined) {
+      lines.push(`RUN ${step.command}`);
+      continue;
+    }
+    // The echo is what a reader sees instead of `127`.
+    lines.push(
+      `RUN command -v ${needs} >/dev/null 2>&1 && ${step.command} || ` +
+        `echo "prebuild: no ${needs} in this image, skipping ${step.id}"`,
+    );
+  }
+
+  for (const cmd of setup) {
+    lines.push("");
+    lines.push(`RUN ${cmd}`);
+  }
+}
+
 export interface GenerateDockerfileOpts {
   baseImage: string;
   cloneUrl: string;
@@ -243,30 +286,7 @@ export function generateDockerfile(opts: GenerateDockerfileOpts): string {
   lines.push(`WORKDIR ${PREBUILT_REPO_PATH}`);
   lines.push(`RUN git checkout ${commitSha}`);
 
-  for (const step of recipe) {
-    lines.push("");
-    const needs = STEP_REQUIRES[step.id];
-    if (needs === undefined) {
-      lines.push(`RUN ${step.command}`);
-      continue;
-    }
-    // Skip, do not fail. A detected step is Valet's inference from a
-    // lockfile, not something the repo asked for, so an image without the
-    // toolchain should build without the dependency cache rather than not
-    // build at all. The echo is what a reader sees instead of `127`.
-    lines.push(
-      `RUN command -v ${needs} >/dev/null 2>&1 && ${step.command} || ` +
-        `echo "prebuild: no ${needs} in this image, skipping ${step.id}"`,
-    );
-  }
-
-  // `setup` is NOT guarded. Those commands are the repo's own instruction,
-  // and a repo that asks for something the image cannot run should hear
-  // about it as a failure rather than have it silently skipped.
-  for (const cmd of setup) {
-    lines.push("");
-    lines.push(`RUN ${cmd}`);
-  }
+  emitStepRuns(lines, recipe, setup);
 
   const identityHash = createHash("sha256").update(canonicalRecipeJson(recipe, setup)).digest("hex");
   const identity = `${baseImage}|${cloneUrl}@${commitSha}|${identityHash}`;
@@ -274,6 +294,42 @@ export function generateDockerfile(opts: GenerateDockerfileOpts): string {
   lines.push(`LABEL valet.prebuild.identity="${identity}"`);
   lines.push("");
 
+  return lines.join("\n");
+}
+
+export interface GenerateLocalDockerfileOpts {
+  baseImage: string;
+  recipe: RecipeStep[];
+  setup?: string[];
+}
+
+/**
+ * Renders the LOCAL-BUILD variant of a repo prebuild Dockerfile — what
+ * `valet prebuild build` runs against a checkout on the developer's machine.
+ * Identical to `generateDockerfile` except for how the repo lands in the
+ * image: `COPY . <PREBUILT_REPO_PATH>` from the build context (the CLI feeds
+ * it a clean local `git clone` of the checkout, `.git` included — recipes
+ * really do run git against it) instead of the secret-mount network clone,
+ * which only works inside the platform (it needs a minted git token).
+ * The recipe/setup `RUN` tail is emitted by the same code as the platform
+ * bake (`emitStepRuns`), so a step that passes locally runs identically in
+ * the real bake. Labeled `valet.prebuild.local` (not `.identity`) so a local
+ * image can never satisfy a platform cache lookup.
+ */
+export function generateLocalDockerfile(opts: GenerateLocalDockerfileOpts): string {
+  const { baseImage, recipe, setup = [] } = opts;
+  const lines: string[] = [];
+  lines.push(`FROM ${baseImage}`);
+  lines.push("");
+  lines.push(`COPY . ${PREBUILT_REPO_PATH}`);
+  lines.push("");
+  lines.push(`WORKDIR ${PREBUILT_REPO_PATH}`);
+
+  emitStepRuns(lines, recipe, setup);
+
+  lines.push("");
+  lines.push(`LABEL valet.prebuild.local="true"`);
+  lines.push("");
   return lines.join("\n");
 }
 

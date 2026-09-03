@@ -27,6 +27,11 @@ import type * as k8s from "@kubernetes/client-node";
 import { setHeaderOptions } from "@kubernetes/client-node";
 import type { WorkspaceGrowth } from "@valet/engine";
 import { WORKSPACE_VOLUME_NAME } from "./manifest.js";
+import { DEFAULT_WORKSPACE_STORAGE_MAX, formatStorageQuantity, parseStorageQuantity } from "./quantity.js";
+
+// Quantity math lives in quantity.ts (manifest.ts needs it too, cycle-free);
+// re-exported here so existing importers keep working.
+export { DEFAULT_WORKSPACE_STORAGE_MAX, formatStorageQuantity, parseStorageQuantity } from "./quantity.js";
 
 /** Annotation stamped on the PVC at each grow — the rate-limit record. */
 export const WORKSPACE_GROW_ANNOTATION = "valet.dev/workspace-grow-at";
@@ -34,9 +39,6 @@ export const WORKSPACE_GROW_ANNOTATION = "valet.dev/workspace-grow-at";
 /** Minimum time between grows of one PVC. EBS allows ~one modification per
  * volume per 6 hours; a second inside the window fails at the CSI layer. */
 export const WORKSPACE_GROW_COOLDOWN_MS = 6 * 3_600_000;
-
-/** Fallback grow cap when `K8sProviderConfig.workspaceStorageMax` is unset. */
-export const DEFAULT_WORKSPACE_STORAGE_MAX = "20Gi";
 
 /** How long a grow waits for the resized capacity to land before giving up
  * (gp3 online expansion typically completes in well under a minute). */
@@ -109,52 +111,6 @@ export function sandboxPvcApiAdapter(api: k8s.CoreV1Api): SandboxPvcApi {
       );
     },
   };
-}
-
-// ── Quantity math ─────────────────────────────────────────────────────
-
-const BINARY_SUFFIXES: Record<string, number> = {
-  Ki: 2 ** 10,
-  Mi: 2 ** 20,
-  Gi: 2 ** 30,
-  Ti: 2 ** 40,
-};
-
-const DECIMAL_SUFFIXES: Record<string, number> = {
-  k: 1e3,
-  M: 1e6,
-  G: 1e9,
-  T: 1e12,
-};
-
-/**
- * Parses a Kubernetes storage quantity ("1Gi", "500Mi", "2G", "1073741824")
- * to bytes, or null when unparseable. Covers the suffixes storage values
- * realistically use (binary Ki/Mi/Gi/Ti, decimal k/M/G/T, plain bytes) —
- * not the full quantity grammar (no milli/exponent forms, which are
- * nonsensical for a PVC size).
- */
-export function parseStorageQuantity(quantity: string): number | null {
-  const match = /^([0-9]+(?:\.[0-9]+)?)(Ki|Mi|Gi|Ti|k|M|G|T)?$/.exec(quantity.trim());
-  if (!match) return null;
-  const value = Number(match[1]);
-  if (!Number.isFinite(value)) return null;
-  const suffix = match[2];
-  const unit = suffix ? (BINARY_SUFFIXES[suffix] ?? DECIMAL_SUFFIXES[suffix]) : 1;
-  return Math.floor(value * unit);
-}
-
-/** Formats bytes as the largest binary suffix that divides evenly (else
- * plain bytes) — the doubles of any whole-Mi quantity stay whole. */
-export function formatStorageQuantity(bytes: number): string {
-  for (const [suffix, unit] of [
-    ["Gi", 2 ** 30],
-    ["Mi", 2 ** 20],
-    ["Ki", 2 ** 10],
-  ] as const) {
-    if (bytes % unit === 0) return `${bytes / unit}${suffix}`;
-  }
-  return `${bytes}`;
 }
 
 // ── Growth ────────────────────────────────────────────────────────────

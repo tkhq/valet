@@ -1204,6 +1204,18 @@ export interface Sandbox {
 export interface SandboxCreateOpts {
   image?: string;
   workspace?: string;
+  /**
+   * Requested size for the sandbox's PERSISTENT workspace volume, as a
+   * quantity string (e.g. "4Gi"). Sourced from the repo's own declaration
+   * (`.valet/prebuild.yaml` `workspaceStorage`) so a large repo starts with
+   * a claim big enough for its checkout + install artifacts instead of
+   * relying on reactive growth. Providers with a sized persistent workspace
+   * (kubernetes) honor it CLAMPED to the deploy's growth cap
+   * (`VALET_SANDBOX_WORKSPACE_MAX`) — a repo cannot request unbounded
+   * storage; other providers ignore it. Only affects a freshly provisioned
+   * volume: an existing workspace keeps its size.
+   */
+  workspaceStorage?: string;
   env?: Record<string, string>;
   timeout?: number;
   resources?: {

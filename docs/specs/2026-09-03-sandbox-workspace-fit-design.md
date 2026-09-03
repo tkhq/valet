@@ -119,6 +119,39 @@ caller retries.
   `persistentvolumeclaims: get, patch` only. PVC create/delete stay with
   the agent-sandbox controller.
 
+## Part C — repo-declared workspace size (TKAI-385)
+
+A repo whose footprint is KNOWN should never lean on reactive growth (one
+EBS-rate-limited doubling per ~6h). It declares its size instead:
+
+```yaml
+# .valet/prebuild.yaml
+workspaceStorage: "4Gi"
+```
+
+- The declaration lives in `.valet/prebuild.yaml` because that file is
+  already the repo-owned config read at session create time, BEFORE any
+  clone exists (the `docker` key set the precedent for a session-runtime
+  knob there). `repoPrebuildFlags` (`packages/api/src/bakes/source-service.ts`)
+  reads both keys in one cached (10 min), best-effort, 5s-bounded GitHub
+  contents call; any failure degrades to the defaults.
+- The value flows `EngineHost.resolveRepoPrebuildFlags` →
+  `SandboxCreateOpts.workspaceStorage` → the manifest builder
+  (`resolveWorkspaceStorageRequest`), which CLAMPS it to
+  `VALET_SANDBOX_WORKSPACE_MAX` — a repo cannot request unbounded storage —
+  and falls back to the deploy default on any unparseable quantity (a
+  typo'd cap must never grant the request).
+- Only a FRESH claim is affected: the agent-sandbox controller leaves an
+  existing owned PVC untouched, so restores/adoptions keep their size.
+- Create-time sizing costs no EBS modification. Reactive growth (Part B)
+  stays as the safety net below the declared size, and starts its doubling
+  from it.
+- Only the PRIMARY (position-0) binding's declaration is read, matching the
+  `docker` key's existing behavior.
+
+Schema doc: `docs/prebuild-yaml.md`. Immediate use: set `tkhq/mono` to
+`"4Gi"` and the clone never fills the volume at all.
+
 ## Agent-visible behavior of blobless clones
 
 - Operations that read historical blobs (`git blame`, `git log -p`,
@@ -150,10 +183,10 @@ caller retries.
   an infra alert on its rate, and a dashboard panel.
 - Growth ramps slowly by design (double per ~6h per volume). A session
   that needs several doublings (a multi-GiB prebuilt bake staged onto a
-  1Gi claim) fails for multiple cooldown cycles. The structural fix is
-  create-time sizing from known inputs (the bake row knows the staged
-  size; GitHub reports packed repo size at bind time) — create-time sizes
-  cost no EBS modification. Not implemented here.
+  1Gi claim) fails for multiple cooldown cycles. Part C (the repo-declared
+  size, TKAI-385) is the manual fix; INFERRED create-time sizing from
+  known inputs (the bake row's staged size, GitHub's packed repo size)
+  remains open — TKAI-382.
 - Grown PVCs are invisible to capacity planning: nothing reports
   provisioned-vs-used or counts grown volumes. The
   `valet.dev/workspace-grow-at` annotation makes grown claims queryable;

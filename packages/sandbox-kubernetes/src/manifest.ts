@@ -7,6 +7,7 @@
  */
 import { createHash } from "node:crypto";
 import type { SandboxCreateOpts } from "@valet/engine";
+import { DEFAULT_WORKSPACE_STORAGE_MAX, clampStorageRequest } from "./quantity.js";
 import type {
   K8sProviderConfig,
   ResourceList,
@@ -175,6 +176,38 @@ function resourceRequirementsFrom(resources: SandboxResourceOpts): ResourceRequi
     ...(Object.keys(requests).length > 0 ? { requests } : {}),
     ...(Object.keys(limits).length > 0 ? { limits } : {}),
   };
+}
+
+/**
+ * Workspace claim size for a fresh sandbox (TKAI-385): a repo-declared
+ * request (`SandboxCreateOpts.workspaceStorage`) wins over the deploy
+ * default, CLAMPED to the growth cap — a repo cannot request unbounded
+ * storage. An unparseable request or cap falls back to the default with a
+ * log (never provision an unknown size). Only a FRESH claim is affected:
+ * the agent-sandbox controller leaves an existing owned PVC untouched.
+ * Exported for direct unit coverage.
+ */
+export function resolveWorkspaceStorageRequest(
+  cfg: K8sProviderConfig,
+  opts: SandboxCreateOpts,
+  name: string,
+): string {
+  const fallback = cfg.defaultStorage ?? DEFAULT_STORAGE;
+  if (!opts.workspaceStorage) return fallback;
+  const max = cfg.workspaceStorageMax ?? DEFAULT_WORKSPACE_STORAGE_MAX;
+  const clamp = clampStorageRequest(opts.workspaceStorage, max);
+  if (clamp === null) {
+    console.error(
+      `k8s sandbox ${name}: workspaceStorage "${opts.workspaceStorage}" (cap "${max}") is not a parseable quantity — using ${fallback}`,
+    );
+    return fallback;
+  }
+  if (clamp.clamped) {
+    console.warn(
+      `k8s sandbox ${name}: repo-declared workspaceStorage ${opts.workspaceStorage} exceeds the ${max} cap — clamped`,
+    );
+  }
+  return clamp.storage;
 }
 
 /**
@@ -362,7 +395,7 @@ export function buildSandboxManifest(
         spec: {
           accessModes: ["ReadWriteOnce"],
           resources: {
-            requests: { storage: cfg.defaultStorage ?? DEFAULT_STORAGE },
+            requests: { storage: resolveWorkspaceStorageRequest(cfg, opts, name) },
           },
         },
       },
