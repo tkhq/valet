@@ -222,6 +222,33 @@ export async function resolveDefaultAssistant(
 }
 
 /**
+ * Seeds a default assistant for `principal` inside the caller's
+ * transaction. Used by `createTeam` (TKAI-337) so a brand-new team owns an
+ * assistant the moment it exists. Takes `AppQueryable` so the seed joins
+ * the team-creation transaction: if the team insert rolls back, the
+ * assistant goes with it. Returns the surviving default when a concurrent
+ * path already seeded one, so the caller can rely on "the principal has a
+ * default afterwards".
+ */
+export async function insertDefaultAssistantForPrincipal(
+  tx: AppQueryable,
+  orgId: string,
+  principal: Principal,
+): Promise<AssistantRow> {
+  const row = newAssistantRow({ orgId, principal, name: null, isDefault: true });
+  const inserted = await tx.insert(assistants).values(row).onConflictDoNothing().returning();
+  if (inserted[0]) return inserted[0];
+  const winner = await findDefaultAssistant(tx, orgId, principal);
+  if (!winner) {
+    throw new Error(
+      `assistants: no default assistant for ${principal.type}:${principal.id} after an insert conflict — ` +
+        `the partial unique index rejected the insert but no default row exists`,
+    );
+  }
+  return winner;
+}
+
+/**
  * Get-or-create the session of `principal`'s DEFAULT assistant.
  *
  * Returns the engine session plus the assistant row it belongs to. Also

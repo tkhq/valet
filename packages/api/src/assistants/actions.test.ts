@@ -76,6 +76,8 @@ describe("assistantsActionPlugin", () => {
   });
 
   it("lists own and team assistants, never another user's personal ones", async () => {
+    // `createTeam` seeds an unnamed default team assistant (TKAI-337), so
+    // the named-row set is what "belongs to me or my teams" reduces to.
     const team = await createTeam(db, { orgId: ORG, name: "Security", creatorUserId: "u2" });
     await addMember(db, { teamId: team.id, userId: "u1", role: "member" });
     await createAssistant(db, ORG, { type: "user", id: "u1" }, "Mine");
@@ -84,8 +86,11 @@ describe("assistantsActionPlugin", () => {
 
     const result = await actionById("assistants.list_assistants").execute({}, ctx());
     expect(result.success).toBe(true);
-    const names = (result.data as { assistants: { name?: string }[] }).assistants.map((a) => a.name);
-    expect(names.sort()).toEqual(["Mine", "Ours"]);
+    const rows = (result.data as { assistants: { name?: string; owner: { type: string; id: string } }[] })
+      .assistants;
+    const named = rows.map((a) => a.name).filter((n): n is string => n !== undefined);
+    expect(named.sort()).toEqual(["Mine", "Ours"]);
+    expect(rows.some((a) => a.owner.type === "user" && a.owner.id === "u2")).toBe(false);
   });
 
   it("creates for a team only when the caller administers it", async () => {
