@@ -244,3 +244,26 @@ describe("buildArtifactDocument", () => {
     expect(html).toContain("background: var(--artifact-bg)");
   });
 });
+
+describe("theming", () => {
+  it("stamps data-theme when a theme is given", () => {
+    const doc = buildArtifactDocument({ title: "T", content: "<p>x</p>", theme: "dark" });
+    expect(doc).toContain('<html lang="en" data-theme="dark">');
+  });
+
+  it("leaves the root unstamped for the system default", () => {
+    const doc = buildArtifactDocument({ title: "T", content: "<p>x</p>" });
+    expect(doc).toContain('<html lang="en">');
+    expect(doc).not.toContain('<html lang="en" data-theme');
+  });
+
+  it("guards the media-query dark block against an explicit light choice", () => {
+    const doc = buildArtifactDocument({ title: "T", content: "<p>x</p>" });
+    expect(doc).toContain(':root:not([data-theme="light"])');
+    expect(doc).toContain(':root[data-theme="dark"]');
+  });
+
+  it("ships a theme handler in the runtime", () => {
+    expect(ARTIFACT_RUNTIME_JS).toContain("valet-artifact:theme");
+  });
+});
