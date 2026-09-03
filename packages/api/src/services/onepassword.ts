@@ -23,6 +23,7 @@
  * `"1Password request failed"`; the original is logged server-side only.
  */
 
+import { createHash } from "node:crypto";
 import type { CredentialOwner, CredentialStore, StoredCredential } from "@valet/engine";
 
 /** Reserved credential service name for 1Password service-account tokens. */
@@ -248,7 +249,23 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
     return row.apiKey;
   }
 
-  async function clientFor(scope: OnePasswordScope, ctx: OnePasswordCtx): Promise<OpClient> {
+  /**
+   * A short digest of the token, for cache keys.
+   *
+   * The caches below hold values fetched WITH a particular token. Keying them
+   * by scope and owner alone outlived the token: replacing a service account
+   * kept serving the old token's values for the rest of the TTL, so a rotation
+   * did not bite until five minutes later and a freshly rotated key read as
+   * invalid. The digest, not the token, so a secret is not a Map key.
+   */
+  function tokenTag(token: string): string {
+    return createHash("sha256").update(token).digest("hex").slice(0, 16);
+  }
+
+  async function clientFor(
+    scope: OnePasswordScope,
+    ctx: OnePasswordCtx,
+  ): Promise<{ client: OpClient; token: string }> {
     if (scope === "personal") {
       const allowed = await deps.getAllowPersonal(ctx.orgId);
       if (!allowed) {
@@ -270,7 +287,7 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
       });
       clientCache.set(token, pending);
     }
-    return pending;
+    return { client: await pending, token };
   }
 
   async function resolveReference(
@@ -278,9 +295,9 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
     ctx: OnePasswordCtx,
     reference: string,
   ): Promise<string> {
-    const client = await clientFor(scope, ctx);
+    const { client, token } = await clientFor(scope, ctx);
     const owner = tokenOwner(scope, ctx);
-    const cacheKey = `${scope}:${owner.id}:${reference}`;
+    const cacheKey = `${scope}:${owner.id}:${tokenTag(token)}:${reference}`;
     const cached = resolveCache.get(cacheKey);
     const nowMs = now();
     if (cached && nowMs - cached.at < RESOLVE_TTL_MS) {
@@ -370,7 +387,7 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
       return Boolean(row?.apiKey);
     },
     async listVaults(scope, ctx) {
-      const client = await clientFor(scope, ctx);
+      const { client } = await clientFor(scope, ctx);
       try {
         return await client.vaults.list();
       } catch (err) {
@@ -384,16 +401,16 @@ export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordServ
       // The gate runs before the cache, as in `resolveReference`: a hit must
       // not outlive the personal toggle or the token row that allowed it. A
       // scope with no token throws here, before any vault is touched.
-      const client = await clientFor(scope, ctx);
+      const { client, token } = await clientFor(scope, ctx);
       const owner = tokenOwner(scope, ctx);
-      const cacheKey = `${scope}:${owner.id}:${service}`;
+      const cacheKey = `${scope}:${owner.id}:${tokenTag(token)}:${service}`;
       const nowMs = now();
       const cached = lookupCache.get(cacheKey);
       if (cached && nowMs - cached.at < RESOLVE_TTL_MS) return cached.secret;
 
       // Titles only, fetched once per scope: N services asking in one turn
       // must not walk the vaults N times.
-      const inventoryKey = `${scope}:${owner.id}`;
+      const inventoryKey = `${scope}:${owner.id}:${tokenTag(token)}`;
       let inventory = inventoryCache.get(inventoryKey);
       if (!inventory || nowMs - inventory.at < 0 || nowMs - inventory.at >= RESOLVE_TTL_MS) {
         const items: { vaultId: string; id: string; title: string }[] = [];

@@ -91,8 +91,19 @@ secret material:
    return a synthesized `StoredCredential` with the secret filled per `type`.
 
 **Caching:** in-memory resolve cache keyed
-`(tokenScope, tokenOwnerId, reference)`, 5-minute TTL (mirrors the GitHub
-mint-cache pattern). SDK clients are cached per token.
+`(tokenScope, tokenOwnerId, tokenDigest, reference)`, 5-minute TTL (mirrors
+the GitHub mint-cache pattern). The vault-lookup and inventory caches carry
+the same digest. SDK clients are cached per token.
+
+The token digest is what makes a rotation bite at once. These caches hold
+values fetched WITH a particular token, so a key of scope and owner alone
+outlived the token it was read under: replacing a service account kept
+serving the previous token's values for the rest of the TTL, and a freshly
+rotated key read as invalid at the far end while the panel showed the new
+one connected. Keying by a digest of the token means a replacement misses
+every cache on its first read, without shortening the TTL for the steady
+state. Deletion and the personal toggle already bit immediately, because
+both are checked before any cache is consulted.
 
 **Failure semantics:** typed `OnePasswordAuthError` with an actionable hint
 (missing/revoked token, unresolvable reference, personal scope disabled by
