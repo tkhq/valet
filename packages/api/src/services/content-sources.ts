@@ -24,6 +24,7 @@ import {
   skills,
   contentSources,
   workflowDefinitions,
+  workflowTemplates,
   type ContentKind,
   type ContentSourceRow,
 } from "../schema/index.js";
@@ -504,6 +505,9 @@ export async function deleteContentSource(
  */
 export async function deleteMirroredContent(tx: AppDb, orgId: string, sourceId: string): Promise<void> {
   await tx.delete(skills).where(and(eq(skills.sourceId, sourceId), eq(skills.origin, "repo")));
+  await tx
+    .delete(workflowTemplates)
+    .where(and(eq(workflowTemplates.sourceId, sourceId), eq(workflowTemplates.origin, "repo")));
   const mirrored = await tx
     .select({ id: workflowDefinitions.id })
     .from(workflowDefinitions)

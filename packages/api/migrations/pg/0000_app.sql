@@ -592,6 +592,34 @@ CREATE TABLE "workflow_versions" (
 --> statement-breakpoint
 CREATE UNIQUE INDEX "workflow_versions_wf_version" ON "workflow_versions" ("workflow_id","version");
 --> statement-breakpoint
+-- Templates mirrored from a repository. A row is a copy of one template
+-- file; installing it produces an ordinary local workflow, which is the
+-- difference between this table and `workflow_definitions`.
+CREATE TABLE "workflow_templates" (
+	"id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"owner_type" text NOT NULL,
+	"owner_id" text NOT NULL,
+	-- The id the FILE declares, which the gallery and the install route use.
+	-- Distinct from `id`, which is this row.
+	"template_id" text NOT NULL,
+	"origin" text DEFAULT 'local' NOT NULL,
+	"source_id" text,
+	"upstream_path" text NOT NULL,
+	"content_sha" text,
+	"template" jsonb NOT NULL,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+-- One template id per owner: the gallery lists by id, and two rows claiming
+-- one id would make which one installs undefined.
+CREATE UNIQUE INDEX "workflow_templates_owner_template" ON "workflow_templates" ("org_id","owner_type","owner_id","template_id");
+--> statement-breakpoint
+-- One mirrored row per file per source. Partial, matching the definitions
+-- table: a local row has no source.
+CREATE UNIQUE INDEX "workflow_templates_source_path" ON "workflow_templates" ("source_id","upstream_path") WHERE "source_id" IS NOT NULL;
+--> statement-breakpoint
 CREATE TABLE "workflow_runs" (
 	"id" text PRIMARY KEY NOT NULL,
 	"workflow_id" text NOT NULL,

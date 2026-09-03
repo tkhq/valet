@@ -399,10 +399,17 @@ class WorkflowPass implements CollectorPass {
       // feature reports a broken node and never says which file holds it.
       return { kind: "warn", message: `${candidate.path}: ${parsed.errors.join(" ")}` };
     }
-    // A template in the workflow folder. The template collector owns it, and
-    // discovery already put the path in `upstream`, so neither deletes the
-    // other's rows.
-    if (parsed.file.kind !== "workflow") return { kind: "skip" };
+    // The two collectors partition the path space by FOLDER, so a template
+    // that sits in a workflow folder is mirrored by neither. Say so: silence
+    // here reads as "Valet took it" to the person who wrote it. The message
+    // names both halves of the fix, because moving the file is not enough on
+    // a source that does not collect templates.
+    if (parsed.file.kind !== "workflow") {
+      return {
+        kind: "warn",
+        message: `${candidate.path} is a workflow template and it sits in a workflow folder, so Valet did not mirror it. Move it to .valet/templates/ and push, and check that this repository is set to collect templates.`,
+      };
+    }
 
     // A YAML anchor that refers to itself survives the validator, which only
     // walks `version`, `policy`, `nodes` and `edges`. It then throws out of

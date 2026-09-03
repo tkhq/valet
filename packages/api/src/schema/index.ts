@@ -1064,6 +1064,45 @@ export const workflowVersions = pgTable(
   (t) => [uniqueIndex("workflow_versions_wf_version").on(t.workflowId, t.version)],
 );
 
+/**
+ * Templates mirrored from a repository. A row is a COPY of one template file,
+ * and installing it produces an ordinary `local` workflow the installer may
+ * edit. That is the whole difference between a template and a mirrored
+ * definition, which stays read-only and keeps syncing.
+ */
+export const workflowTemplates = pgTable(
+  "workflow_templates",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull(),
+    ownerId: text("owner_id").notNull(),
+    /** The id the FILE declares, which the gallery and the install route
+     * use. Distinct from `id`, which identifies this row. */
+    templateId: text("template_id").notNull(),
+    origin: text("origin", { enum: ["local", "repo"] }).notNull().default("local"),
+    sourceId: text("source_id"),
+    upstreamPath: text("upstream_path").notNull(),
+    contentSha: text("content_sha"),
+    template: jsonb("template").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    // One template id per owner: the gallery lists by id, and two rows
+    // claiming one id would make which one installs undefined.
+    uniqueIndex("workflow_templates_owner_template").on(
+      t.orgId,
+      t.ownerType,
+      t.ownerId,
+      t.templateId,
+    ),
+    uniqueIndex("workflow_templates_source_path")
+      .on(t.sourceId, t.upstreamPath)
+      .where(sql`"source_id" IS NOT NULL`),
+  ],
+);
+
 export const workflowRuns = pgTable(
   "workflow_runs",
   {

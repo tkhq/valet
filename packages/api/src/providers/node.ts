@@ -43,6 +43,8 @@ import { assistantsActionPlugin } from "../assistants/actions.js";
 import { ContentSyncService } from "../services/content-sync/service.js";
 import { SkillCollector } from "../services/content-sync/skill-collector.js";
 import { WorkflowCollector } from "../services/content-sync/workflow-collector.js";
+import { TemplateCollector } from "../services/content-sync/template-collector.js";
+import { listCatalogTemplates } from "../workflows/templates.js";
 import { buildValidateEnvironment } from "../workflows/validation-env.js";
 import { GitHubSkillRepoReader } from "../services/skill-repo-reader.js";
 import { skillRepoReaderFactory } from "../services/content-source-credential.js";
@@ -754,6 +756,13 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         // its file at sync instead of arming a subscription nothing can
         // deliver.
         plugins,
+      }),
+      new TemplateCollector({
+        env: buildValidateEnvironment(actionPluginByService),
+        // Resolved per pass, not per file: a mirrored id that collides with
+        // one this deployment ships is refused with both names.
+        reserved: () =>
+          new Map(listCatalogTemplates(plugins).map((owned) => [owned.template.id, owned.pluginName])),
       }),
     ],
     reader: new GitHubSkillRepoReader(),

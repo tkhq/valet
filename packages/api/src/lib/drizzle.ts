@@ -191,6 +191,36 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "workflow_definitions_source_path" ON "workflow_definitions" ("source_id","upstream_path") WHERE "source_id" IS NOT NULL',
   },
   {
+    // The mirrored template table and its two unique indexes. Additive, so a
+    // rollback to a release that does not know them is safe.
+    describe: "workflow_templates table",
+    probe: { kind: "table", table: "workflow_templates" },
+    sql: `CREATE TABLE IF NOT EXISTS "workflow_templates" (
+      "id" text PRIMARY KEY NOT NULL,
+      "org_id" text NOT NULL,
+      "owner_type" text NOT NULL,
+      "owner_id" text NOT NULL,
+      "template_id" text NOT NULL,
+      "origin" text DEFAULT 'local' NOT NULL,
+      "source_id" text,
+      "upstream_path" text NOT NULL,
+      "content_sha" text,
+      "template" jsonb NOT NULL,
+      "created_at" bigint NOT NULL,
+      "updated_at" bigint NOT NULL
+    )`,
+  },
+  {
+    describe: "workflow_templates_owner_template unique index",
+    probe: { kind: "index", index: "workflow_templates_owner_template" },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "workflow_templates_owner_template" ON "workflow_templates" ("org_id","owner_type","owner_id","template_id")',
+  },
+  {
+    describe: "workflow_templates_source_path unique index",
+    probe: { kind: "index", index: "workflow_templates_source_path" },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "workflow_templates_source_path" ON "workflow_templates" ("source_id","upstream_path") WHERE "source_id" IS NOT NULL',
+  },
+  {
     // Provenance on a version row. Both nullable: every version a product
     // edit wrote carries neither, and so does every row an upgrade brings.
     describe: "workflow_versions.origin column",
