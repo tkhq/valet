@@ -509,8 +509,8 @@ async function runBootChain(): Promise<void> {
       process.exit(1);
     }
     // Config rows are inserted pending and due. Poll once here so they do
-    // not wait for `skillSync.start()` later in this chain.
-    void providers.skillSync.pollOnce();
+    // not wait for `contentSync.start()` later in this chain.
+    void providers.contentSync.pollOnce();
   }
 
   if (closed) return;
@@ -584,10 +584,9 @@ async function runBootChain(): Promise<void> {
   // freshly-ingested ones between nudges) get delivered.
   providers.eventDispatcher.start();
 
-  // Skill-repository sync (agent-skills design): begin the sweep that re-reads
-  // every tracked repository on its own schedule, and imports any source added
-  // while this process was down.
-  providers.skillSync.start();
+  // Repository content sync: re-reads every tracked repository on its own
+  // schedule, and imports any source added while this process was down.
+  providers.contentSync.start();
 
   // Runtime model registry (TKAI-327): restore the persisted catalog with no
   // network access, then refresh upstream in the background on a timer. Boot
@@ -687,9 +686,9 @@ async function close(): Promise<void> {
     console.error("eventDispatcher.stop failed:", err);
   }
   try {
-    await providers.skillSync.stop();
+    await providers.contentSync.stop();
   } catch (err) {
-    console.error("skillSync.stop failed:", err);
+    console.error("contentSync.stop failed:", err);
   }
   try {
     // Read through the module handle: the registry is created in the boot

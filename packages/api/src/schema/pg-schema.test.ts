@@ -867,6 +867,7 @@ describe("pg app schema + migrations", () => {
   describe("column repair for in-place 0000 edits", () => {
     const REPAIRED_COLUMNS: Array<{ table: string; column: string }> = [
       { table: "skill_sources", column: "created_by" },
+      { table: "skill_sources", column: "kinds" },
       { table: "orgs", column: "sso_team_groups" },
       { table: "agent_sessions", column: "hibernated_sandbox_id" },
       { table: "agent_sessions", column: "sandbox_reclaimed_at" },
@@ -1021,6 +1022,36 @@ describe("pg app schema + migrations", () => {
       expect(isPgLockTimeout(new Error("outer", { cause: { code: "55P03" } }))).toBe(true);
       expect(isPgLockTimeout({ code: "42703" })).toBe(false);
       expect(isPgLockTimeout(new Error("plain"))).toBe(false);
+    });
+  });
+
+  // The `kinds` repair, with the ROWS asserted rather than only the column.
+  // `kinds` is `NOT NULL DEFAULT '["skills"]'`, so the repair has to leave
+  // every row a repository already tracked collecting exactly what it
+  // collected — a repair that emptied the column would silently stop a
+  // tracked repository from mirroring anything.
+  describe("the kinds repair on a database that predates the column", () => {
+    it("keeps the rows and backfills every one of them to skills", async () => {
+      const now = Date.now();
+      await db.query(
+        `INSERT INTO "skill_sources"
+           ("id","org_id","owner_type","owner_id","repo_full_name","next_attempt_at","created_at","updated_at")
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        ["cs_pre_kinds", "org-kinds", "user", "u-kinds", "acme/skills", now, now, now],
+      );
+
+      // Wind the database back to the release before `kinds` existed.
+      await db.query('ALTER TABLE "skill_sources" DROP COLUMN "kinds"');
+
+      await applyAppMigrations(db);
+
+      const rows = await db.query(
+        'SELECT "repo_full_name", "kinds" FROM "skill_sources" WHERE "id" = $1',
+        ["cs_pre_kinds"],
+      );
+      expect(rows.rows).toHaveLength(1);
+      expect(rows.rows[0]?.repo_full_name).toBe("acme/skills");
+      expect(rows.rows[0]?.kinds).toEqual(["skills"]);
     });
   });
 

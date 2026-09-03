@@ -1,12 +1,11 @@
 /**
- * Tracked skill repositories — CRUD over the `skill_sources` table, plus the
+ * Tracked repositories — CRUD over the `skill_sources` table, plus the
  * parsing that turns a pasted repository address into one row.
  *
- * A source is a subscription to a GitHub repository laid out to the Agent
- * Skills spec (`<root>/<skill-name>/SKILL.md`). The repository is
- * authoritative: `services/skill-sync.ts` is the only writer of the
- * `origin='repo'` skills a source carries, and deleting a source deletes
- * them, because a mirror has no existence apart from what it mirrors.
+ * A source is a subscription to a GitHub repository, and `kinds` says what the
+ * sync collects from it. The repository is authoritative:
+ * `services/content-sync/service.ts` is the only writer of the `origin='repo'`
+ * rows a source carries, and deleting a source deletes them.
  *
  * Access follows `services/skills.ts`: your own rows plus the rows of every
  * team you belong to, plus org-library rows every member can read. A row
@@ -21,7 +20,7 @@ import { NotFoundError } from "@valet/shared";
 import { isPgUniqueViolation } from "@valet/store-postgres";
 import type { AppDb } from "../lib/drizzle.js";
 import { decodePageCursor, encodePageCursor } from "../lib/page-cursor.js";
-import { skills, skillSources, type SkillSourceRow } from "../schema/index.js";
+import { skills, contentSources, type ContentSourceRow } from "../schema/index.js";
 import { isTeamMember, listTeamsForUser, lockTeamForOwnership } from "./teams.js";
 import { isAuthorizedFor, type SkillOwner } from "./skills.js";
 
@@ -29,27 +28,31 @@ import { isAuthorizedFor, type SkillOwner } from "./skills.js";
 const SEGMENT = /^[A-Za-z0-9._-]+$/;
 const GITHUB_HOSTS = new Set(["github.com", "www.github.com"]);
 
-/** Thrown when the pasted repository address is not one this can track. */
-export class SkillSourceInputError extends Error {
+/** Thrown when the pasted repository address is not one this can track.
+ * `code` keeps its `skill_source_*` value here and below: it is the wire
+ * contract the web client reads, so it does not move with the table. */
+export class ContentSourceInputError extends Error {
   readonly code = "skill_source_invalid";
   readonly statusCode = 400;
   constructor(message: string) {
     super(message);
-    this.name = "SkillSourceInputError";
+    this.name = "ContentSourceInputError";
   }
 }
 
 /** Thrown when the same repository and subdirectory are already tracked. */
-export class SkillSourceConflictError extends Error {
+export class ContentSourceConflictError extends Error {
   readonly code = "skill_source_conflict";
   readonly statusCode = 409;
   constructor(repo: string) {
     super(`${repo} is already tracked here. Remove the existing entry first.`);
-    this.name = "SkillSourceConflictError";
+    this.name = "ContentSourceConflictError";
   }
 }
 
-export function newSkillSourceId(): string {
+/** The `skillsrc_` prefix stays: ids are persisted, and
+ * `services/config-reconcile.ts` matches on it. */
+export function newContentSourceId(): string {
   return `skillsrc_${randomUUID()}`;
 }
 
@@ -82,7 +85,7 @@ export interface ParseRepoOptions {
 export function parseRepoInput(raw: string, opts: ParseRepoOptions = {}): ParsedRepoInput {
   const trimmed = raw.trim().replace(/\/+$/, "");
   if (trimmed.length === 0) {
-    throw new SkillSourceInputError(
+    throw new ContentSourceInputError(
       "Enter a repository. Write it as owner/repo, or paste its GitHub URL.",
     );
   }
@@ -95,7 +98,7 @@ export function parseRepoInput(raw: string, opts: ParseRepoOptions = {}): Parsed
   // non-GitHub host must be rejected rather than read as an owner.
   const isHostForm = maybeHost.includes(".");
   if (isHostForm && !GITHUB_HOSTS.has(maybeHost.toLowerCase())) {
-    throw new SkillSourceInputError(
+    throw new ContentSourceInputError(
       `Valet reads GitHub repositories only, and ${maybeHost} is not GitHub. Enter a github.com repository.`,
     );
   }
@@ -106,12 +109,12 @@ export function parseRepoInput(raw: string, opts: ParseRepoOptions = {}): Parsed
   const repoName = repoSeg?.replace(/\.git$/, "") ?? "";
 
   if (!ownerSeg || !repoName || !SEGMENT.test(ownerSeg) || !SEGMENT.test(repoName)) {
-    throw new SkillSourceInputError(
+    throw new ContentSourceInputError(
       `"${raw}" is not a repository address. Write it as owner/repo, or paste its GitHub URL.`,
     );
   }
   if (treeSeg !== undefined && treeSeg !== "tree") {
-    throw new SkillSourceInputError(
+    throw new ContentSourceInputError(
       `"${raw}" points inside a repository. Paste the repository URL, or a /tree/ URL for a subdirectory.`,
     );
   }
@@ -127,7 +130,7 @@ export function parseRepoInput(raw: string, opts: ParseRepoOptions = {}): Parsed
 function normalizeRef(ref: string): string {
   const value = ref.trim().replace(/^\/+|\/+$/g, "");
   if (value.includes("..") || /\s/.test(value)) {
-    throw new SkillSourceInputError(
+    throw new ContentSourceInputError(
       `"${ref}" is not a branch, tag, or commit. Enter one ref, with no spaces.`,
     );
   }
@@ -137,14 +140,14 @@ function normalizeRef(ref: string): string {
 function normalizeSubpath(subpath: string): string {
   const value = subpath.trim().replace(/^\/+|\/+$/g, "");
   if (value.split("/").includes("..")) {
-    throw new SkillSourceInputError(
+    throw new ContentSourceInputError(
       `"${subpath}" leaves the repository. Enter a directory inside the repository.`,
     );
   }
   return value;
 }
 
-export interface CreateSkillSourceInput {
+export interface CreateContentSourceInput {
   /** `owner/repo`, or a GitHub URL. */
   repo: string;
   ref?: string;
@@ -167,11 +170,11 @@ export interface CreateSkillSourceInput {
  * the org when the caller is an org admin. The new row is due immediately, so
  * the next sweep pass imports it without waiting a full poll interval.
  */
-export async function createSkillSource(
+export async function createContentSource(
   db: AppDb,
   owner: SkillOwner,
-  input: CreateSkillSourceInput,
-): Promise<SkillSourceRow> {
+  input: CreateContentSourceInput,
+): Promise<ContentSourceRow> {
   const parsed = parseRepoInput(input.repo, { ref: input.ref, subpath: input.subpath });
   // `typeof === "string"`, not `!== undefined`: the route casts an unchecked
   // JSON body, so an explicit `teamId: null` must fall through to a personal
@@ -180,23 +183,30 @@ export async function createSkillSource(
   const isOrgOwned = input.ownerType === "org";
   // team and org are mutually exclusive scopes for one source.
   if (isOrgOwned && teamId !== undefined) {
-    throw new SkillSourceInputError(
+    throw new ContentSourceInputError(
       "A source is either a team source or an org source, not both. Remove teamId or the org scope.",
     );
   }
   const now = Date.now();
-  const row: SkillSourceRow = {
-    id: newSkillSourceId(),
+  const row: ContentSourceRow = {
+    id: newContentSourceId(),
     orgId: owner.orgId,
     ownerType: isOrgOwned ? "org" : teamId ? "team" : "user",
     ownerId: isOrgOwned ? owner.orgId : teamId ?? owner.userId,
     // Recorded for every owner type. A team row has no other user identity
     // on it, and the unattended sweep needs one to pick a GitHub credential
-    // — see `services/skill-source-credential.ts`.
+    // — see `services/content-source-credential.ts`.
     createdBy: owner.userId,
     repoFullName: parsed.repoFullName,
     ref: parsed.ref,
     subpath: parsed.subpath,
+    // Skills only. The source routes open a kind per source, and workflows
+    // or templates need ADMIN authority over the owner first: push access to
+    // a tracked repository becomes authority to run tool nodes as that team
+    // or org (2026-08-24 workflows MVP design, decision 10). Threading a
+    // `kinds` input through this function without that gate is a privilege
+    // escalation.
+    kinds: ["skills"],
     enabled: true,
     status: "pending",
     attempts: 0,
@@ -211,7 +221,7 @@ export async function createSkillSource(
 
   try {
     if (isOrgOwned || teamId === undefined) {
-      await db.insert(skillSources).values(row);
+      await db.insert(contentSources).values(row);
     } else {
       // Same advisory lock `createSkill` takes, for the same reason: without
       // it a source could be inserted for a team whose rows are deleted in
@@ -221,13 +231,13 @@ export async function createSkillSource(
         if (!(await isTeamMember(tx, teamId, owner.userId))) {
           throw new NotFoundError("team", teamId);
         }
-        await tx.insert(skillSources).values(row);
+        await tx.insert(contentSources).values(row);
       });
     }
   } catch (err) {
     // The only unique index on this table is `skill_sources_repo` (ids are
     // freshly minted UUIDs), so a unique violation is always a repeat.
-    if (isPgUniqueViolation(err)) throw new SkillSourceConflictError(parsed.repoFullName);
+    if (isPgUniqueViolation(err)) throw new ContentSourceConflictError(parsed.repoFullName);
     throw err;
   }
   return row;
@@ -239,13 +249,13 @@ export async function createSkillSource(
  * everywhere else. Org rows stay admin-only here — add, remove, and Sync
  * keep that gate.
  */
-export async function ownedSkillSourceRow(
+export async function ownedContentSourceRow(
   db: AppDb,
   owner: SkillOwner,
   id: string,
   opts: { isOrgAdmin?: boolean } = {},
-): Promise<SkillSourceRow | null> {
-  const rows = await db.select().from(skillSources).where(eq(skillSources.id, id)).limit(1);
+): Promise<ContentSourceRow | null> {
+  const rows = await db.select().from(contentSources).where(eq(contentSources.id, id)).limit(1);
   const row = rows[0];
   if (!row) return null;
   return (await isAuthorizedFor(db, owner, row, opts)) ? row : null;
@@ -257,12 +267,12 @@ export async function ownedSkillSourceRow(
  * every member of that org. User and team rows still follow
  * `isAuthorizedFor`. Sync does not use this.
  */
-export async function readableSkillSourceRow(
+export async function readableContentSourceRow(
   db: AppDb,
   owner: SkillOwner,
   id: string,
-): Promise<SkillSourceRow | null> {
-  const rows = await db.select().from(skillSources).where(eq(skillSources.id, id)).limit(1);
+): Promise<ContentSourceRow | null> {
+  const rows = await db.select().from(contentSources).where(eq(contentSources.id, id)).limit(1);
   const row = rows[0];
   if (!row) return null;
   if (row.orgId !== owner.orgId) return null;
@@ -270,8 +280,8 @@ export async function readableSkillSourceRow(
   return (await isAuthorizedFor(db, owner, row)) ? row : null;
 }
 
-export const SKILL_SOURCE_DEFAULT_LIMIT = 20;
-export const SKILL_SOURCE_MAX_LIMIT = 100;
+export const CONTENT_SOURCE_DEFAULT_LIMIT = 20;
+export const CONTENT_SOURCE_MAX_LIMIT = 100;
 
 /**
  * The sort key of the last row of a page: repository name, then subdirectory,
@@ -279,19 +289,19 @@ export const SKILL_SOURCE_MAX_LIMIT = 100;
  * two owners tracking the same repository and subdirectory would otherwise
  * leave, and the unique index permits exactly that pair across owners.
  */
-export interface SkillSourceCursor {
+export interface ContentSourceCursor {
   repo: string;
   sub: string;
   id: string;
 }
 
-export function encodeSkillSourceCursor(cursor: SkillSourceCursor): string {
+export function encodeContentSourceCursor(cursor: ContentSourceCursor): string {
   return encodePageCursor({ ...cursor });
 }
 
 /** `undefined` for a cursor this listing did not issue. The route answers
  * that with 400 rather than silently restarting at page one. */
-export function decodeSkillSourceCursor(raw: string): SkillSourceCursor | undefined {
+export function decodeContentSourceCursor(raw: string): ContentSourceCursor | undefined {
   const fields = decodePageCursor(raw);
   if (!fields) return undefined;
   const { repo, sub, id } = fields;
@@ -301,8 +311,8 @@ export function decodeSkillSourceCursor(raw: string): SkillSourceCursor | undefi
   return { repo, sub, id };
 }
 
-export interface SkillSourcePage {
-  rows: SkillSourceRow[];
+export interface ContentSourcePage {
+  rows: ContentSourceRow[];
   nextCursor: string | undefined;
 }
 
@@ -311,7 +321,7 @@ export interface SkillSourcePage {
  * they belong to, and the org-library rows, sorted by repository name.
  *
  * Org rows show for EVERY member on an org-pinned list. Add, remove, and
- * Sync stay admin-only (`ownedSkillSourceRow`). The sweep keeps the
+ * Sync stay admin-only (`ownedContentSourceRow`). The sweep keeps the
  * catalog fresh so a member does not press Sync.
  *
  * `scope` narrows the answer to ONE owner, and replaces the union rather
@@ -330,26 +340,26 @@ export interface SkillSourcePage {
  * was already read or off one that was not. `limit + 1` rows are fetched to
  * learn whether a further page exists without a second COUNT.
  */
-export async function listSkillSources(
+export async function listContentSources(
   db: AppDb,
   owner: SkillOwner,
   scope: Principal | undefined,
   limit: number,
-  cursor: SkillSourceCursor | undefined,
+  cursor: ContentSourceCursor | undefined,
   opts: { includeOrg?: boolean } = {},
-): Promise<SkillSourcePage> {
+): Promise<ContentSourcePage> {
   const includeOrg = opts.includeOrg !== false;
   const teamIds = scope ? [] : (await listTeamsForUser(db, owner.userId)).map((t) => t.id);
-  const ownerMatch = and(eq(skillSources.ownerType, "user"), eq(skillSources.ownerId, owner.userId));
+  const ownerMatch = and(eq(contentSources.ownerType, "user"), eq(contentSources.ownerId, owner.userId));
   const teamMatch =
     teamIds.length > 0
-      ? and(eq(skillSources.ownerType, "team"), inArray(skillSources.ownerId, teamIds))
+      ? and(eq(contentSources.ownerType, "team"), inArray(contentSources.ownerId, teamIds))
       : undefined;
   // Every org row in the caller's own org — the `orgId` predicate below bounds
   // it — because the org library is readable by every member.
-  const orgMatch = includeOrg ? eq(skillSources.ownerType, "org") : undefined;
+  const orgMatch = includeOrg ? eq(contentSources.ownerType, "org") : undefined;
   const reach = scope
-    ? and(eq(skillSources.ownerType, scope.type), eq(skillSources.ownerId, scope.id))
+    ? and(eq(contentSources.ownerType, scope.type), eq(contentSources.ownerId, scope.id))
     : teamMatch && orgMatch
       ? or(ownerMatch, teamMatch, orgMatch)
       : teamMatch
@@ -359,14 +369,14 @@ export async function listSkillSources(
           : ownerMatch;
 
   const after = cursor
-    ? sql`(${skillSources.repoFullName}, ${skillSources.subpath}, ${skillSources.id}) > (${cursor.repo}, ${cursor.sub}, ${cursor.id})`
+    ? sql`(${contentSources.repoFullName}, ${contentSources.subpath}, ${contentSources.id}) > (${cursor.repo}, ${cursor.sub}, ${cursor.id})`
     : undefined;
 
   const rows = await db
     .select()
-    .from(skillSources)
-    .where(and(eq(skillSources.orgId, owner.orgId), reach, after))
-    .orderBy(asc(skillSources.repoFullName), asc(skillSources.subpath), asc(skillSources.id))
+    .from(contentSources)
+    .where(and(eq(contentSources.orgId, owner.orgId), reach, after))
+    .orderBy(asc(contentSources.repoFullName), asc(contentSources.subpath), asc(contentSources.id))
     .limit(limit + 1);
 
   const hasMore = rows.length > limit;
@@ -376,7 +386,7 @@ export async function listSkillSources(
     rows: page,
     nextCursor:
       hasMore && last
-        ? encodeSkillSourceCursor({ repo: last.repoFullName, sub: last.subpath, id: last.id })
+        ? encodeContentSourceCursor({ repo: last.repoFullName, sub: last.subpath, id: last.id })
         : undefined,
   };
 }
@@ -389,17 +399,17 @@ export async function listSkillSources(
  * pair every sync write uses. That scoping is what keeps the delete off a
  * skill somebody wrote here and off another source's rows.
  */
-export async function deleteSkillSource(
+export async function deleteContentSource(
   db: AppDb,
   owner: SkillOwner,
   id: string,
   opts: { isOrgAdmin?: boolean } = {},
 ): Promise<boolean> {
-  const row = await ownedSkillSourceRow(db, owner, id, opts);
+  const row = await ownedContentSourceRow(db, owner, id, opts);
   if (!row) return false;
   await db.transaction(async (tx) => {
     await tx.delete(skills).where(and(eq(skills.sourceId, id), eq(skills.origin, "repo")));
-    await tx.delete(skillSources).where(eq(skillSources.id, id));
+    await tx.delete(contentSources).where(eq(contentSources.id, id));
   });
   return true;
 }
@@ -409,12 +419,12 @@ export async function deleteSkillSource(
  * `syncOnce` the sweep calls, so a manual sync is the scheduled sync brought
  * forward, not a second implementation of syncing.
  */
-export async function markSkillSourceDue(db: AppDb, id: string): Promise<void> {
+export async function markContentSourceDue(db: AppDb, id: string): Promise<void> {
   const now = Date.now();
   await db
-    .update(skillSources)
+    .update(contentSources)
     .set({ nextAttemptAt: now, updatedAt: now })
-    .where(eq(skillSources.id, id));
+    .where(eq(contentSources.id, id));
 }
 
 /** How many skills each of `sourceIds` currently mirrors. */

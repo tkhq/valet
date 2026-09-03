@@ -1,15 +1,11 @@
 /**
- * Which GitHub credential a skill source syncs with.
+ * Which GitHub credential a content source syncs with. The whole tenancy rule
+ * for repository sync, in one function, because picking the wrong credential
+ * here is a privilege escalation.
  *
- * This is the whole tenancy rule for skill sync, in one function, because
- * picking the wrong credential here is a privilege escalation and a reviewer
- * must be able to check the rule without reading the sweep.
- *
- * ## The rule
- *
- * | owner  | credential                                  |
- * | ------ | ------------------------------------------- |
- * | user   | that user's own GitHub credential           |
+ * | owner  | credential                                   |
+ * | ------ | -------------------------------------------- |
+ * | user   | that user's own GitHub credential            |
  * | team   | the credential of the user who ADDED the row |
  * |        | except `skillsrc_cfg_*`: the org App        |
  * | org    | the org's GitHub App installation token     |
@@ -36,35 +32,22 @@
  *
  * ## The binding is re-checked at READ time, not at creation
  *
- * `createSkillSource` checks team membership before it writes the row. That
- * check alone is not enough, because the row then reads GitHub every
- * `SYNC_INTERVAL_MS` for as long as it exists, and any remaining team member
- * can force a read with "Sync now". If the person named in `created_by`
- * later leaves the team or the org, a creation-time check would keep pulling
- * a private repository with their credential, into skill rows the team still
- * reads. Nothing would show it: the source row shows the OWNER, not the
- * identity funding the read.
- *
- * So `resolveSkillSourceCredential` asks the same questions again on every
- * sync, matching `isTeamMember`'s stated contract that "a member removed
- * from a team must lose access to its resources on their very next request":
+ * `createContentSource` checks team membership once, and the row then reads
+ * GitHub every `SYNC_INTERVAL_MS` for as long as it exists. If the person in
+ * `created_by` later leaves the team or the org, that one check would keep
+ * pulling a private repository with their credential, and the source row shows
+ * the OWNER, not the identity funding the read. So every sync asks again:
  *
  *   1. For a team source, is `created_by` still a member of that team?
  *   2. For a user or team source, is that person still a member of the org?
  *
- * `removeMember`, org removal, and the Keycloak de-provision sweep all
- * delete only a membership row, so these two questions are what they change.
- *
  * ## Never `auth: "auto"`
  *
  * `resolveGitHubToken`'s `auto` ladder falls from a user credential through
- * the org's App installation to the org's PAT (`services/github-tokens.ts`).
- * On this path that would let a source whose owner has no GitHub connection
- * read through the org's App, which reaches every repository the App is
- * installed on. So both calls below name an explicit `auth`, which
- * `resolveGitHubToken` honors strictly: `"user"` never reaches an
- * installation token or the org PAT, and `"app"` never reaches a user
- * credential.
+ * the org's App installation to the org's PAT, which would let a source whose
+ * owner has no GitHub connection read every repository the App is installed
+ * on. Both calls below name an explicit `auth`, which the resolver honors
+ * strictly.
  *
  * ## Fails to anonymous, never up
  *
@@ -85,7 +68,7 @@
  *                     no App installation that covers the repository.
  *                     The 404 names installing the App.
  */
-import type { SkillSourceRow } from "../schema/index.js";
+import type { ContentSourceRow } from "../schema/index.js";
 import {
   GitHubAuthError,
   resolveGitHubToken,
@@ -124,7 +107,7 @@ const CONFIG_SKILL_SOURCE_PREFIX = "skillsrc_cfg_";
  * the org App. See the file comment: a `skillsrc_cfg_*` team row has no
  * adding user, so the `created_by` path would stay anonymous.
  */
-function usesOrgApp(source: SkillSourceRow): boolean {
+function usesOrgApp(source: ContentSourceRow): boolean {
   return (
     source.ownerType === "org" ||
     (source.ownerType === "team" && source.id.startsWith(CONFIG_SKILL_SOURCE_PREFIX))
@@ -132,8 +115,8 @@ function usesOrgApp(source: SkillSourceRow): boolean {
 }
 
 /**
- * The credential this source may sync with. Never throws: a sync must not
- * fail a public repository over a credential it does not need.
+ * The credential this source may sync with. Never throws: a sync must not fail
+ * a public repository over a credential it does not need.
  *
  * `GitHubAuthError` is the resolver's way of saying "no credential is
  * available". A user or UI team source reads that as `none`. An org
@@ -150,16 +133,15 @@ function usesOrgApp(source: SkillSourceRow): boolean {
  * A membership query that throws lands in the same catch, which is the safe
  * direction: an unconfirmed membership must not hand out a token.
  */
-export async function resolveSkillSourceCredential(
+export async function resolveContentSourceCredential(
   deps: GitHubTokenDeps,
-  source: SkillSourceRow,
+  source: ContentSourceRow,
 ): Promise<SkillRepoCredential> {
   try {
     if (usesOrgApp(source)) {
       const owner = ownerOf(source.repoFullName);
       // A row whose repository name carries no `/` cannot name an
-      // installation. `parseRepoInput` rejects that shape on the way in, so
-      // this only guards a hand-edited row.
+      // installation. `parseRepoInput` rejects that shape on the way in.
       if (owner.length === 0) return ANONYMOUS;
       const resolved = await resolveGitHubToken(deps, {
         orgId: source.orgId,
@@ -172,23 +154,16 @@ export async function resolveSkillSourceCredential(
         : { kind: "installation", token: resolved.token };
     }
 
-    // user and team both resolve ONE person's own credential. They differ
-    // only in which column names that person.
-    //
-    // For a user source the OWNER is the person, so `owner_id` names them
-    // and `created_by` would say the same thing. For a team source the owner
-    // is the team, so `owner_id` names no person at all and only
-    // `created_by` does. Reading `created_by` for both would work today and
-    // break the moment a row predates that column, which is exactly the
-    // case handled below.
+    // user and team both resolve ONE person's own credential, and differ only
+    // in which column names that person. Reading `created_by` for both would
+    // work until a row predates that column, which is the case handled below.
     const userId = source.ownerType === "user" ? source.ownerId : source.createdBy;
     // A team source added before `created_by` existed names nobody, and a
     // sync must not guess. It reads anonymously.
     if (userId === null || userId.length === 0) return ANONYMOUS;
 
-    // The re-checks. See "The binding is re-checked at READ time" above.
-    // They run BEFORE the token is resolved, so a departed person's token is
-    // never even read out of the credential store.
+    // The re-checks run BEFORE the token is resolved, so a departed person's
+    // token is never read out of the credential store at all.
     if (source.ownerType === "team" && !(await isTeamMember(deps.db, source.ownerId, userId))) {
       return ANONYMOUS;
     }
@@ -213,24 +188,22 @@ export async function resolveSkillSourceCredential(
     // Only the message, and only to the server log. The source row is shown
     // to users, and an arbitrary error is not written for them to read.
     console.error(
-      `skill sync ${source.id}: cannot read the GitHub credential:`,
+      `content sync ${source.id}: cannot read the GitHub credential:`,
       err instanceof Error ? err.message : String(err),
     );
     return UNAVAILABLE;
   }
 }
 
-/**
- * The reader factory `SkillSyncService` calls once per sync. Both the server
- * (`providers/node.ts`) and the integration harness build it from here, so
- * neither can hold its own copy of the rule above.
- */
+/** The reader factory `ContentSyncService` calls once per sync. The server and
+ * the integration harness both build it here, so neither holds its own copy of
+ * the rule above. */
 export function skillRepoReaderFactory(
   deps: GitHubTokenDeps,
   opts: { apiUrl?: string } = {},
-): (source: SkillSourceRow) => Promise<SkillRepoReader> {
+): (source: ContentSourceRow) => Promise<SkillRepoReader> {
   return async (source) => {
-    const credential = await resolveSkillSourceCredential(deps, source);
+    const credential = await resolveContentSourceCredential(deps, source);
     return new GitHubSkillRepoReader({ apiUrl: opts.apiUrl, credential });
   };
 }

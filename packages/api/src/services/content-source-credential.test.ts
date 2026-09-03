@@ -34,7 +34,7 @@ import {
   teamMembers,
   teams,
   users,
-  type SkillSourceRow,
+  type ContentSourceRow,
 } from "../schema/index.js";
 import { saveAppConfig, type GithubAppConfig } from "./github-app.js";
 import type { GitHubTokenDeps } from "./github-tokens.js";
@@ -42,7 +42,7 @@ import {
   GitHubSkillRepoReader,
   SkillRepoNotFoundError,
 } from "./skill-repo-reader.js";
-import { resolveSkillSourceCredential } from "./skill-source-credential.js";
+import { resolveContentSourceCredential } from "./content-source-credential.js";
 
 const ORG = "org1";
 const TEAM = "team_1";
@@ -66,8 +66,8 @@ const appConfig: GithubAppConfig = {
   privateKeyPem,
 };
 
-/** A source row shaped like one `createSkillSource` writes. */
-function sourceRow(overrides: Partial<SkillSourceRow>): SkillSourceRow {
+/** A source row shaped like one `createContentSource` writes. */
+function sourceRow(overrides: Partial<ContentSourceRow>): ContentSourceRow {
   return {
     id: "skillsrc_1",
     orgId: ORG,
@@ -77,6 +77,7 @@ function sourceRow(overrides: Partial<SkillSourceRow>): SkillSourceRow {
     repoFullName: "tkhq/tk-brain",
     ref: "",
     subpath: "",
+    kinds: ["skills"],
     enabled: true,
     status: "pending",
     attempts: 0,
@@ -91,7 +92,7 @@ function sourceRow(overrides: Partial<SkillSourceRow>): SkillSourceRow {
   };
 }
 
-describe("resolveSkillSourceCredential", () => {
+describe("resolveContentSourceCredential", () => {
   let db: AppDb;
   let pgdb: Awaited<ReturnType<typeof freshTestPgDb>>["pgdb"];
   let credentials: PgCredentialStore;
@@ -163,7 +164,7 @@ describe("resolveSkillSourceCredential", () => {
       await connectGitHub("u1", "ghu_u1", "octocat");
       fixture = startGithubFixture();
 
-      const credential = await resolveSkillSourceCredential(deps(), sourceRow({}));
+      const credential = await resolveContentSourceCredential(deps(), sourceRow({}));
 
       expect(credential).toEqual({ kind: "user", token: "ghu_u1", ownerScope: "user", login: "octocat" });
     });
@@ -173,7 +174,7 @@ describe("resolveSkillSourceCredential", () => {
       await connectGitHub("u2", "ghu_u2", "hubot");
       fixture = startGithubFixture();
 
-      expect(await resolveSkillSourceCredential(deps(), sourceRow({}))).toEqual({ kind: "none" });
+      expect(await resolveContentSourceCredential(deps(), sourceRow({}))).toEqual({ kind: "none" });
     });
 
     it("stays anonymous rather than climbing to the org App", async () => {
@@ -187,7 +188,7 @@ describe("resolveSkillSourceCredential", () => {
         }),
       });
 
-      expect(await resolveSkillSourceCredential(deps(), sourceRow({}))).toEqual({ kind: "none" });
+      expect(await resolveContentSourceCredential(deps(), sourceRow({}))).toEqual({ kind: "none" });
       expect(fixture.calls.filter((c) => c.path.includes("access_tokens"))).toHaveLength(0);
     });
 
@@ -201,7 +202,7 @@ describe("resolveSkillSourceCredential", () => {
       });
       fixture = startGithubFixture();
 
-      expect(await resolveSkillSourceCredential(deps(), sourceRow({}))).toEqual({ kind: "none" });
+      expect(await resolveContentSourceCredential(deps(), sourceRow({}))).toEqual({ kind: "none" });
     });
 
     it("stays anonymous when the connected account is identity-only", async () => {
@@ -214,7 +215,7 @@ describe("resolveSkillSourceCredential", () => {
       });
       fixture = startGithubFixture();
 
-      expect(await resolveSkillSourceCredential(deps(), sourceRow({}))).toEqual({ kind: "none" });
+      expect(await resolveContentSourceCredential(deps(), sourceRow({}))).toEqual({ kind: "none" });
     });
   });
 
@@ -223,7 +224,7 @@ describe("resolveSkillSourceCredential", () => {
       await connectGitHub("u2", "ghu_u2", "hubot");
       fixture = startGithubFixture();
 
-      const credential = await resolveSkillSourceCredential(
+      const credential = await resolveContentSourceCredential(
         deps(),
         sourceRow({ ownerType: "team", ownerId: TEAM, createdBy: "u2" }),
       );
@@ -238,7 +239,7 @@ describe("resolveSkillSourceCredential", () => {
       await connectGitHub("u1", "ghu_u1", "octocat");
       fixture = startGithubFixture();
 
-      const credential = await resolveSkillSourceCredential(
+      const credential = await resolveContentSourceCredential(
         deps(),
         sourceRow({ ownerType: "team", ownerId: TEAM, createdBy: null }),
       );
@@ -257,7 +258,7 @@ describe("resolveSkillSourceCredential", () => {
         }),
       });
 
-      const credential = await resolveSkillSourceCredential(
+      const credential = await resolveContentSourceCredential(
         deps(),
         sourceRow({
           id: "skillsrc_cfg_deadbeef0001",
@@ -272,7 +273,7 @@ describe("resolveSkillSourceCredential", () => {
 
     it("names the App install when a config-managed team source has no App", async () => {
       fixture = startGithubFixture();
-      const credential = await resolveSkillSourceCredential(
+      const credential = await resolveContentSourceCredential(
         deps(),
         sourceRow({
           id: "skillsrc_cfg_deadbeef0001",
@@ -292,7 +293,7 @@ describe("resolveSkillSourceCredential", () => {
         }),
       });
 
-      const credential = await resolveSkillSourceCredential(
+      const credential = await resolveContentSourceCredential(
         deps(),
         sourceRow({ ownerType: "team", ownerId: TEAM, createdBy: "u2" }),
       );
@@ -313,7 +314,7 @@ describe("resolveSkillSourceCredential", () => {
       const source = sourceRow({ ownerType: "team", ownerId: TEAM, createdBy: "u2" });
 
       // Legitimate while u2 is a member.
-      expect(await resolveSkillSourceCredential(deps(), source)).toEqual({
+      expect(await resolveContentSourceCredential(deps(), source)).toEqual({
         kind: "user",
         token: "ghu_exmember",
         ownerScope: "team",
@@ -324,7 +325,7 @@ describe("resolveSkillSourceCredential", () => {
         .delete(teamMembers)
         .where(and(eq(teamMembers.teamId, TEAM), eq(teamMembers.userId, "u2")));
 
-      expect(await resolveSkillSourceCredential(deps(), source)).toEqual({ kind: "none" });
+      expect(await resolveContentSourceCredential(deps(), source)).toEqual({ kind: "none" });
     });
 
     it("drops the creator's credential once they leave the ORG", async () => {
@@ -336,7 +337,7 @@ describe("resolveSkillSourceCredential", () => {
 
       await db.delete(orgMembers).where(and(eq(orgMembers.orgId, ORG), eq(orgMembers.userId, "u2")));
 
-      expect(await resolveSkillSourceCredential(deps(), source)).toEqual({ kind: "none" });
+      expect(await resolveContentSourceCredential(deps(), source)).toEqual({ kind: "none" });
     });
 
     it("does not read the ex-member's credential out of the store at all", async () => {
@@ -349,7 +350,7 @@ describe("resolveSkillSourceCredential", () => {
         .where(and(eq(teamMembers.teamId, TEAM), eq(teamMembers.userId, "u2")));
 
       const spy = vi.spyOn(credentials, "get");
-      await resolveSkillSourceCredential(
+      await resolveContentSourceCredential(
         deps(),
         sourceRow({ ownerType: "team", ownerId: TEAM, createdBy: "u2" }),
       );
@@ -369,7 +370,7 @@ describe("resolveSkillSourceCredential", () => {
 
       await db.delete(orgMembers).where(and(eq(orgMembers.orgId, ORG), eq(orgMembers.userId, "u1")));
 
-      expect(await resolveSkillSourceCredential(deps(), sourceRow({}))).toEqual({ kind: "none" });
+      expect(await resolveContentSourceCredential(deps(), sourceRow({}))).toEqual({ kind: "none" });
     });
   });
 
@@ -388,7 +389,7 @@ describe("resolveSkillSourceCredential", () => {
       await connectGitHub("u1", "ghu_u1", "octocat");
       fixture = startGithubFixture();
 
-      const credential = await resolveSkillSourceCredential(
+      const credential = await resolveContentSourceCredential(
         depsWithUnreadableCredential(),
         sourceRow({}),
       );
@@ -403,7 +404,7 @@ describe("resolveSkillSourceCredential", () => {
       fixture = startGithubFixture({
         getCommit: () => ({ status: 404, body: { message: "Not Found" } }),
       });
-      const credential = await resolveSkillSourceCredential(
+      const credential = await resolveContentSourceCredential(
         depsWithUnreadableCredential(),
         sourceRow({}),
       );
@@ -426,7 +427,7 @@ describe("resolveSkillSourceCredential", () => {
         }),
       });
 
-      const credential = await resolveSkillSourceCredential(
+      const credential = await resolveContentSourceCredential(
         deps(),
         sourceRow({ ownerType: "org", ownerId: ORG, createdBy: "u1" }),
       );
@@ -440,7 +441,7 @@ describe("resolveSkillSourceCredential", () => {
       await connectGitHub("u1", "ghu_u1", "octocat");
       fixture = startGithubFixture();
 
-      const credential = await resolveSkillSourceCredential(
+      const credential = await resolveContentSourceCredential(
         deps(),
         sourceRow({ ownerType: "org", ownerId: ORG, createdBy: "u1" }),
       );
@@ -452,7 +453,7 @@ describe("resolveSkillSourceCredential", () => {
       await installApp();
       fixture = startGithubFixture();
 
-      const credential = await resolveSkillSourceCredential(
+      const credential = await resolveContentSourceCredential(
         deps(),
         sourceRow({ ownerType: "org", ownerId: ORG, repoFullName: "other-org/skills" }),
       );
@@ -462,7 +463,7 @@ describe("resolveSkillSourceCredential", () => {
 
     it("names the App install when no token is available", async () => {
       fixture = startGithubFixture();
-      const credential = await resolveSkillSourceCredential(
+      const credential = await resolveContentSourceCredential(
         deps(),
         sourceRow({ ownerType: "org", ownerId: ORG }),
       );
@@ -478,7 +479,7 @@ describe("resolveSkillSourceCredential", () => {
         }),
       });
 
-      const credential = await resolveSkillSourceCredential(
+      const credential = await resolveContentSourceCredential(
         deps(),
         sourceRow({ ownerType: "org", ownerId: ORG, createdBy: "u1" }),
       );
@@ -489,6 +490,6 @@ describe("resolveSkillSourceCredential", () => {
 
   it("carries no token material in what it returns for an anonymous read", async () => {
     fixture = startGithubFixture();
-    expect(await resolveSkillSourceCredential(deps(), sourceRow({}))).toEqual({ kind: "none" });
+    expect(await resolveContentSourceCredential(deps(), sourceRow({}))).toEqual({ kind: "none" });
   });
 });

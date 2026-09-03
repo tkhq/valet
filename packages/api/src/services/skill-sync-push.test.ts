@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach } from "vitest";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { orgMembers, orgs, users } from "../schema/index.js";
-import { createSkillSource } from "./skill-sources.js";
+import { createContentSource } from "./content-sources.js";
 import type { SkillOwner } from "./skills.js";
 import {
   findOrgSkillSourcesForPush,
@@ -80,13 +80,13 @@ describe("findOrgSkillSourcesForPush", () => {
   });
 
   it("returns only the enabled org source on that repository and ref", async () => {
-    const orgDev = await createSkillSource(db, owner("u1"), {
+    const orgDev = await createContentSource(db, owner("u1"), {
       repo: "tkhq/skills",
       ref: "dev",
       ownerType: "org",
     });
-    await createSkillSource(db, owner("u1"), { repo: "tkhq/skills" });
-    await createSkillSource(db, owner("u1"), { repo: "tkhq/other", ownerType: "org" });
+    await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
+    await createContentSource(db, owner("u1"), { repo: "tkhq/other", ownerType: "org" });
 
     expect((await findOrgSkillSourcesForPush(db, ORG, push())).map((row) => row.id)).toEqual([]);
     expect((await findOrgSkillSourcesForPush(db, ORG, push({ ref: "refs/heads/dev" }))).map((row) => row.id)).toEqual([
