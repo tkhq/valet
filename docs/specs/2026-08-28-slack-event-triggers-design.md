@@ -236,9 +236,10 @@ opt-out the UI can.
 
 Surfaces: the AutomationWizard's reply step requires a multi-channel
 selection (or the explicit "Any channel" checkbox, off by default) and states
-that only the creator's own mentions fire the rule; the raw event picker and
-the workflow TriggerDialog show the same checkbox when `slack.app_mention` is
-selected; the subscriptions list labels each mention row "only #channel",
+that only the creator's own mentions fire the rule; the raw event picker,
+the workflow TriggerDialog, and the subscription edit dialog show the same
+checkbox when `slack.app_mention` is selected (the edit dialog seeds it from
+the stored any-channel state); the subscriptions list labels each mention row "only #channel",
 "N channels", or "any channel" (multi-channel `in` filters carry aligned
 display `labels` on the wire, so the list shows names, not raw ids).
 `slack.message` scoping is deliberately out of scope here — TKAI-302 tracks

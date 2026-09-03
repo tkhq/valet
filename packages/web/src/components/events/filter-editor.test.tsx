@@ -20,6 +20,7 @@ import {
   fromWireFilters,
   incompleteFilterRow,
   pruneFilterRows,
+  sameWireFilters,
   toWireFilters,
   type FilterField,
   type UiFilterRow,
@@ -151,6 +152,68 @@ describe("label + regex round trip", () => {
   it("round-trips the regex op", () => {
     const wire = [{ field: "branch", op: "regex", value: "^release/" }];
     expect(toWireFilters(fromWireFilters(wire))).toEqual(wire);
+  });
+});
+
+describe("`in` labels round trip", () => {
+  // Reply-created subscriptions store multi-channel filters as `in` values
+  // with aligned display labels. An edit that leaves the list alone must
+  // round-trip the labels, or later surfaces regress to raw C… ids.
+  it("keeps the labels while the value list is unchanged", () => {
+    const wire = [
+      { field: "channel", op: "in", value: ["C1", "C2"], labels: ["#general", "#ops"] },
+    ];
+    expect(toWireFilters(fromWireFilters(wire))).toEqual(wire);
+  });
+
+  it("drops the labels when the list is edited (labels no longer align)", () => {
+    const rows = fromWireFilters([
+      { field: "channel", op: "in", value: ["C1", "C2"], labels: ["#general", "#ops"] },
+    ]);
+    rows[0] = { ...rows[0], value: "C1, C3" };
+    expect(toWireFilters(rows)).toEqual([{ field: "channel", op: "in", value: ["C1", "C3"] }]);
+  });
+
+  it("ignores stored labels that do not align with the values", () => {
+    const rows = fromWireFilters([
+      { field: "channel", op: "in", value: ["C1", "C2"], labels: ["#general"] },
+    ]);
+    expect(toWireFilters(rows)).toEqual([{ field: "channel", op: "in", value: ["C1", "C2"] }]);
+  });
+
+  it("drops the labels when the field is switched (labels bind to the stored field)", () => {
+    const rows = fromWireFilters([
+      { field: "channel", op: "in", value: ["C1", "C2"], labels: ["#general", "#ops"] },
+    ]);
+    rows[0] = { ...rows[0], field: "user" };
+    expect(toWireFilters(rows)).toEqual([{ field: "user", op: "in", value: ["C1", "C2"] }]);
+  });
+});
+
+describe("sameWireFilters", () => {
+  it("treats jsonb-reordered keys as the same rule", () => {
+    expect(
+      sameWireFilters(
+        [{ op: "eq", field: "channel", label: "#general", value: "C1" }],
+        [{ field: "channel", op: "eq", value: "C1", label: "#general" }],
+      ),
+    ).toBe(true);
+  });
+
+  it("treats a stored corner the form cannot represent as unchanged", () => {
+    // A comma inside one `in` value re-splits through the form round trip;
+    // both sides go through the same trip, so the rule still reads as equal.
+    const stored = [{ field: "text", op: "in", value: ["a,b", "c"] }];
+    expect(sameWireFilters(toWireFilters(fromWireFilters(stored)), stored)).toBe(true);
+  });
+
+  it("sees a real value change", () => {
+    expect(
+      sameWireFilters(
+        [{ field: "channel", op: "eq", value: "C1" }],
+        [{ field: "channel", op: "eq", value: "C2" }],
+      ),
+    ).toBe(false);
   });
 });
 
