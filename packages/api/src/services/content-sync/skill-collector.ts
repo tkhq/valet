@@ -385,8 +385,15 @@ async function updateMirror(
   now: number,
 ): Promise<boolean> {
   const contentSha = skillContentSha(parsed.body);
+  // `contentSha` hashes the BODY only, and the row also stores the whole
+  // frontmatter. Without comparing it, an edit that touches only a
+  // frontmatter field this test does not name — `tags`, `license`, anything
+  // an author adds — reads as unchanged and never reaches the mirror, while
+  // the manifest hash moved so every later poll re-reads the file to decide
+  // nothing.
   const unchanged =
     row.contentSha === contentSha &&
+    JSON.stringify(row.frontmatter) === JSON.stringify(parsed.frontmatter) &&
     row.description === parsed.description &&
     row.upstreamPath === entry.path;
   if (unchanged) return false;

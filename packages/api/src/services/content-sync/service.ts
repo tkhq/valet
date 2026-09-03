@@ -613,7 +613,13 @@ export class ContentSyncService {
           now +
           syncIntervalMs(source.ownerType, { orgWebhookLive: this.deps.orgWebhookLive?.() === true }),
         lastSha: result.complete ? result.headSha : source.lastSha,
-        lastManifestHash: result.complete ? result.manifestHash : source.lastManifestHash,
+        // An incomplete pass CLEARS the manifest hash rather than keeping the
+        // old one. The column's meaning is "the file set these mirrored rows
+        // came from", and an incomplete pass did not mirror that set. Keeping
+        // the stale value lets a repository that reverts to it short-circuit
+        // compare 2 forever, leaving the rows the incomplete pass never wrote
+        // permanently missing.
+        lastManifestHash: result.complete ? result.manifestHash : null,
         discoveryScan: result.complete ? discoveryScanMark(result.headSha, source.kinds) : source.discoveryScan,
         lastSyncedAt: now,
         lastError: message,

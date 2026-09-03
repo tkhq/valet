@@ -749,6 +749,46 @@ describe("workflow collector", () => {
     ]);
   });
 
+  // `last_manifest_hash` means "the file set these mirrored rows came from".
+  // An incomplete pass did not mirror that set, so keeping the old value lets
+  // a repository that returns to it short-circuit compare 2 forever and the
+  // rows the incomplete pass never wrote stay missing.
+  it("clears the manifest hash on an incomplete sync, so a revert still reconciles", async () => {
+    const repo: FakeRepo = {
+      sha: "c1",
+      files: {
+        ".valet/workflows/a.yaml": workflowYaml("A"),
+        ".valet/workflows/b.yaml": workflowYaml("B"),
+      },
+    };
+    const f = serve(repo);
+    const id = await teamSource();
+    await serviceFor(f).syncOnce(id);
+    expect(await mirrored()).toHaveLength(2);
+
+    // A commit that drops one file AND cannot read the other. The pass is
+    // incomplete, so nothing about this commit is recorded.
+    repo.sha = "c2";
+    delete repo.files[".valet/workflows/b.yaml"];
+    repo.unreadable = [".valet/workflows/a.yaml"];
+    await serviceFor(f).syncOnce(id);
+    const [afterIncomplete] = await db
+      .select()
+      .from(contentSources)
+      .where(eq(contentSources.id, id));
+    expect(afterIncomplete.lastSha).toBe("c1");
+    expect(afterIncomplete.lastManifestHash).toBeNull();
+
+    // The repository returns to the first commit's file set. With the old
+    // hash still stored, compare 2 would stop here and `b` would never come
+    // back.
+    repo.sha = "c3";
+    repo.unreadable = [];
+    repo.files[".valet/workflows/b.yaml"] = workflowYaml("B");
+    await serviceFor(f).syncOnce(id);
+    expect((await mirrored()).map((r) => r.name)).toEqual(["A", "B"]);
+  });
+
   it("never touches a local workflow, including one of the same name", async () => {
     const f = serve({
       sha: "c1",
