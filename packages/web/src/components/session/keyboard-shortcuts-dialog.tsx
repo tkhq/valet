@@ -3,9 +3,9 @@ import { cn } from "~/lib/cn";
 import { CHAT_KEYBINDINGS, chordParts } from "~/lib/chat-keybindings";
 
 /**
- * Claude-style "show all shortcuts" panel (⌘/Ctrl+/). Lists the chat
- * chords Valet honors; Enter / Shift+Enter / Esc stay documented too even
- * though they live in the composer rather than the global listener.
+ * The "show all shortcuts" panel (⌘/Ctrl+/). Lists the chat chords the
+ * global listener honors. Enter, Shift+Enter and Esc are documented here
+ * too, even though the composer owns them rather than the listener.
  */
 export function KeyboardShortcutsDialog({
   open,
@@ -16,7 +16,7 @@ export function KeyboardShortcutsDialog({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent title="Keyboard shortcuts" description="Chat shortcuts, aligned with Claude.">
+      <DialogContent title="Keyboard shortcuts" description="Chat shortcuts.">
         <ul className="grid gap-2.5 text-sm">
           {CHAT_KEYBINDINGS.map((b) => (
             <ShortcutRow key={b.id} label={b.label} keys={chordParts(b.keys)} />

@@ -297,7 +297,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
     navigate({ search: (prev) => ({ ...prev, thread: undefined, child: undefined }) });
   }, [activeThreadId, navigate, setArchived]);
 
-  // Register Claude-style hotkey targets for the global listener.
+  // Register this surface's hotkey targets for the global listener.
   useEffect(() => {
     return useChatHotkeysStore.getState().register({
       newThread: () => void createAndNavigate(),
@@ -514,11 +514,14 @@ function ThreadNode({
       : undefined;
 
   const [menuOpen, setMenuOpen] = useState(false);
-  // Menu-scoped `A` (original PR) plus Claude's global ⌘⇧⌫ shown as a hint.
-  const archiveGlobalHint = formatChord({ shift: true, key: "Backspace" });
+  // The menu-scoped `A`, plus the global chord shown beside it as a hint.
+  const archiveGlobalHint = formatChord({ shift: true, code: "Backspace", key: "Backspace" });
 
   const handleMenuKeyDown = useCallback(
     (e: ReactKeyboardEvent) => {
+      // A bare `A` only. Without this, Select All (⌘A / Ctrl+A) pressed
+      // while the menu happens to be open archives the thread.
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.key === "A" || e.key === "a") {
         e.preventDefault();
         onArchive(thread.id);

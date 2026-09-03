@@ -6,12 +6,6 @@ import { formatChannelLabel } from '@valet/sdk';
 import { getChannelIcon } from '@valet/sdk/ui';
 import type { SessionThread } from '@/api/types';
 import { cn } from '@/lib/cn';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
 
 // ─── Unread Tracking ──────────────────────────────────────────────────────────
 
@@ -133,19 +127,9 @@ function ThreadItem({
   onDismiss?: () => void;
   isDismissed?: boolean;
 }) {
-  const [menuOpen, setMenuOpen] = useState(false);
   const lastViewed = getLastViewed(thread.id);
   const threadLastActive = new Date(thread.lastActiveAt).getTime();
   const hasUnread = !isActive && threadLastActive > lastViewed && thread.messageCount > 0;
-
-  const handleMenuKeyDown = useCallback((e: React.KeyboardEvent) => {
-    // Handle 'A' or 'a' key to archive when menu is open
-    if (e.key === 'A' || e.key === 'a') {
-      e.preventDefault();
-      onDismiss?.();
-      setMenuOpen(false);
-    }
-  }, [onDismiss]);
 
   return (
     <button
@@ -165,32 +149,14 @@ function ThreadItem({
         <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-violet-500" />
       )}
       {onDismiss && (
-        <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
-          <DropdownMenuTrigger asChild>
-            <span
-              role="button"
-              onClick={(e) => { e.stopPropagation(); }}
-              className="shrink-0 rounded p-0.5 text-neutral-400 opacity-0 transition-opacity hover:bg-neutral-200 hover:text-neutral-600 group-hover:opacity-100 dark:hover:bg-neutral-700 dark:hover:text-neutral-300"
-              title="Thread options"
-            >
-              <EllipsisIcon className="h-2.5 w-2.5" />
-            </span>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-40" onKeyDown={handleMenuKeyDown}>
-            <DropdownMenuItem
-              onClick={(e) => {
-                e.stopPropagation();
-                onDismiss();
-                setMenuOpen(false);
-              }}
-            >
-              <span className="flex-1">Archive</span>
-              <span className="text-[10px] text-neutral-400 dark:text-neutral-500" title="Also ⌘⇧⌫ / Ctrl+Shift+Backspace">
-                A
-              </span>
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+        <span
+          role="button"
+          tabIndex={-1}
+          onClick={(e) => { e.stopPropagation(); onDismiss(); }}
+          className="shrink-0 rounded p-0.5 text-neutral-400 opacity-0 transition-opacity hover:bg-neutral-200 hover:text-neutral-600 group-hover:opacity-100 dark:hover:bg-neutral-700 dark:hover:text-neutral-300"
+        >
+          <XIcon className="h-2.5 w-2.5" />
+        </span>
       )}
     </button>
   );
@@ -364,12 +330,10 @@ export function ThreadSidebar({
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
 
-function EllipsisIcon({ className }: { className?: string }) {
+function XIcon({ className }: { className?: string }) {
   return (
     <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
-      <circle cx="12" cy="12" r="1" />
-      <circle cx="19" cy="12" r="1" />
-      <circle cx="5" cy="12" r="1" />
+      <path d="M18 6 6 18" /><path d="m6 6 12 12" />
     </svg>
   );
 }

@@ -18,9 +18,8 @@ function copyViaHiddenTextarea(text: string): boolean {
   }
 }
 
-/** One-shot clipboard write — used by the chat hotkey path that has no
- * "copied" flash UI of its own. Prefer `useCopyToClipboard` in components. */
-export async function copyTextToClipboard(text: string): Promise<boolean> {
+/** One-shot clipboard write with the same fallback the hook uses. */
+async function copyTextToClipboard(text: string): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(text);
     return true;

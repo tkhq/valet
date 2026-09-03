@@ -28,7 +28,6 @@ import {
 } from "~/components/session/composer-drop-context";
 import { DecisionGateCard } from "~/components/session/decision-gate-card";
 import { MessageList } from "~/components/session/message-list";
-import { messageCopyText } from "~/components/session/message-item";
 import { PageDropTarget } from "~/components/session/page-drop-target";
 import { SandboxTabs, type SandboxTabId } from "~/components/session/sandbox-tabs";
 import { SessionHeader } from "~/components/session/session-header";
@@ -36,8 +35,6 @@ import { useMe } from "~/api/settings";
 import { useInvalidateSessionOnModelSwitch } from "~/hooks/use-invalidate-session-on-model-switch";
 import { useInvalidateMessagesOnCompaction } from "~/hooks/use-invalidate-messages-on-compaction";
 import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
-import { copyTextToClipboard } from "~/lib/use-copy";
-import { useChatHotkeysStore } from "~/stores/chat-hotkeys";
 import { Button, Spinner } from "~/components/primitives";
 
 /**
@@ -136,26 +133,6 @@ export function SessionView({
   }, [sessionId, effectiveThreadId, messagesQ.data, setThreadMessages]);
 
   usePendingGatesSeed(sessionId);
-
-  // Claude's ⌘⇧C — copy the latest assistant reply in this thread.
-  // Skip panel hosts (child slide-over, workflow column): they would steal
-  // the hotkey slot from the primary chat SessionView underneath.
-  useEffect(() => {
-    if (panel) return;
-    return useChatHotkeysStore.getState().register({
-      copyLastResponse: () => {
-        const messages = useStreamStore.getState().bySession[sessionId]?.messages ?? [];
-        for (let i = messages.length - 1; i >= 0; i--) {
-          const m = messages[i];
-          if (!m || m.role !== "assistant") continue;
-          if (effectiveThreadId && m.threadId && m.threadId !== effectiveThreadId) continue;
-          const text = messageCopyText(m);
-          if (text) void copyTextToClipboard(text);
-          return;
-        }
-      },
-    });
-  }, [sessionId, effectiveThreadId, panel]);
 
   const pendingGate = usePendingGateForThread(sessionId, effectiveThreadId);
   const threadError = useErrorForThread(sessionId, effectiveThreadId);
