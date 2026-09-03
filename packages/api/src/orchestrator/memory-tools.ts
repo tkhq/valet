@@ -588,7 +588,14 @@ export const artifactPublishTool = defineTool({
             text: `[artifact_error] ${args.path} is ${mib} MiB, over the ${ARTIFACT_MAX_CONTENT_BYTES / (1024 * 1024)} MiB limit. Embed fewer raster images, or draw diagrams as inline SVG instead.`,
           };
         }
-        content = await ctx.sandbox.readFile(args.path!);
+        try {
+          content = await ctx.sandbox.readFile(args.path!);
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          return {
+            text: `[artifact_error] could not read ${args.path} from the sandbox: ${detail}. Confirm the file still exists, then retry.`,
+          };
+        }
         const sizeError = artifactSizeError(content);
         if (sizeError) return { text: `[artifact_error] ${sizeError}` };
         if (!format) format = /\.html?$/i.test(args.path!) ? "html" : "markdown";

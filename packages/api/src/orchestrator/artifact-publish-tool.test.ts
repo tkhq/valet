@@ -165,6 +165,23 @@ describe("artifact_publish: size cap", () => {
   });
 });
 
+describe("artifact_publish: readFile throws after stat succeeds (TOCTOU)", () => {
+  it("names the corrective action instead of throwing, and never calls fetch", async () => {
+    const { fetchMock } = stubFetchOk({});
+    const sandbox = stubSandbox({ "/workspace/racy.html": "<title>Racy</title>" });
+    vi.spyOn(sandbox, "readFile").mockRejectedValue(new Error("ENOENT: racy.html"));
+    const ctx = makeCtx(sandbox);
+
+    const result = await publishTool.execute({ path: "/workspace/racy.html" }, ctx);
+
+    expect(result.text).toContain("[artifact_error]");
+    expect(result.text).toContain("could not read");
+    expect(result.text).toContain("/workspace/racy.html");
+    expect(result.text).toContain("retry");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("artifact_publish: markdown inference", () => {
   it("infers markdown format from a non-html extension", async () => {
     const { fetchMock } = stubFetchOk({ url: "https://x/a/t2", visibility: "org", version: 1 });
