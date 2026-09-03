@@ -33,15 +33,24 @@ afterEach(async () => {
   api = undefined;
 });
 
-/** The real service, reading the org token from a store the way boot does. */
-function realService(token: string) {
+/**
+ * The real service, reading the token from a store the way boot does.
+ *
+ * `scope` decides WHERE the token is stored, which is the only difference
+ * between an org service account and a personal one: `requireToken` reads
+ * `{type:"org", id:orgId}` for the org scope and `{type:"user", id:userId}`
+ * for the personal one. A personal token additionally needs the org's
+ * allow-personal toggle, which defaults on.
+ */
+function realService(token: string, scope: "org" | "personal" = "org", userId = "local-user") {
   const store = new InMemoryCredentialStore();
+  const owner = scope === "org" ? { type: "org" as const, id: orgId } : { type: "user" as const, id: userId };
   return {
     service: createOnePasswordService({
       credentials: store,
       getAllowPersonal: async () => true,
     }),
-    ready: store.save({ type: "org", id: orgId }, ONEPASSWORD_SERVICE, {
+    ready: store.save(owner, ONEPASSWORD_SERVICE, {
       type: "service_account",
       apiKey: token,
     }),
@@ -159,6 +168,66 @@ describeIfLive("api integration: the secret broker against a real vault", () => 
     const body = (await res.json()) as Resp;
     expect(body.values[0]).toBeNull();
     expect(body.unresolved).toEqual([missing]);
+  }, 60_000);
+
+  // The personal scope, with NO org token connected: the org scope has
+  // nothing to offer and yields, and the user's own token answers. This is
+  // the path a person testing with their own 1Password account takes.
+  it("resolves through a PERSONAL token when the session is that user's own", async () => {
+    if (!TOKEN || !REFERENCE) throw new Error("unreachable: gated above");
+    api = await bootTestApi();
+    const { service, ready } = realService(TOKEN, "personal", "local-user");
+    await ready;
+    api.providers.onePassword = service;
+
+    await seedSession(api.providers.db, {
+      id: "sess-broker-personal",
+      ownerType: "user",
+      ownerId: "local-user",
+      userId: "local-user",
+    });
+    const { token } = await mintSandboxToken(api.providers.db, {
+      sessionId: "sess-broker-personal",
+      userId: "local-user",
+      orgId,
+    });
+
+    const res = await resolveVia(token, [REFERENCE]);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Resp;
+    expect(body.unresolved).toEqual([]);
+    const delivered = Buffer.from(body.values[0]!, "base64").toString("utf8");
+    expect(delivered.length).toBeGreaterThan(0);
+  }, 60_000);
+
+  // The owner rule, proved against the real service rather than a fake: the
+  // same personal token, the same reference, a session the frozen actor's
+  // colleagues can prompt. The personal scope is never consulted, so the
+  // read finds nothing rather than handing out that actor's private item.
+  it("does NOT reach a personal token from a team-owned session", async () => {
+    if (!TOKEN || !REFERENCE) throw new Error("unreachable: gated above");
+    api = await bootTestApi();
+    const { service, ready } = realService(TOKEN, "personal", "local-user");
+    await ready;
+    api.providers.onePassword = service;
+
+    await seedSession(api.providers.db, {
+      id: "sess-broker-team-personal",
+      ownerType: "team",
+      ownerId: "team-1",
+      userId: "local-user",
+    });
+    const { token } = await mintSandboxToken(api.providers.db, {
+      sessionId: "sess-broker-team-personal",
+      userId: "local-user",
+      orgId,
+    });
+
+    const res = await resolveVia(token, [REFERENCE]);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Resp;
+    expect(body.values[0]).toBeNull();
+    expect(body.unresolved).toEqual([REFERENCE]);
   }, 60_000);
 
   it("refuses the same reference with no sandbox token", async () => {
