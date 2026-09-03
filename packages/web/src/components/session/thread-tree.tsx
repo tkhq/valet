@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import {
   Archive,
@@ -21,10 +21,12 @@ import {
   useThreads,
 } from "~/api/queries";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
+import { useChatHotkeysStore } from "~/stores/chat-hotkeys";
 import { useDismissChild, useOrchestratorChildren, useOrchestratorInfo } from "~/api/orchestrator";
 import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
 import { useStreamStore } from "~/stores/stream";
 import { createDebouncer } from "~/lib/debounce";
+import { formatChord } from "~/lib/chat-keybindings";
 import {
   bucketCounts,
   filterThreads,
@@ -279,6 +281,8 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
     }
   }
 
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
   async function createAndNavigate() {
     const thread = await createThread.mutateAsync();
     navigate({ search: (prev) => ({ ...prev, thread: thread.id, child: undefined }) });
@@ -286,6 +290,24 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
     // typed into.
     useComposerPrefillStore.getState().requestFocus();
   }
+
+  const archiveActive = useCallback(() => {
+    if (!activeThreadId) return;
+    void setArchived.mutateAsync({ threadId: activeThreadId, archived: true });
+    navigate({ search: (prev) => ({ ...prev, thread: undefined, child: undefined }) });
+  }, [activeThreadId, navigate, setArchived]);
+
+  // Register this surface's hotkey targets for the global listener.
+  useEffect(() => {
+    return useChatHotkeysStore.getState().register({
+      newThread: () => void createAndNavigate(),
+      archiveActiveThread: archiveActive,
+      focusThreadSearch: () => searchInputRef.current?.focus(),
+    });
+    // createAndNavigate closes over createThread/navigate; re-register when
+    // those identities change so the hotkey never calls a stale mutator.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [archiveActive, createThread, navigate]);
 
   return (
     <>
@@ -308,6 +330,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
         <div className="flex items-center gap-1.5 rounded border border-line bg-[--bg] px-2 focus-within:border-moss/60">
           <Search className="h-3.5 w-3.5 text-muted shrink-0" aria-hidden />
           <input
+            ref={searchInputRef}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search threads…"
@@ -490,6 +513,24 @@ function ThreadNode({
       ? thread.model
       : undefined;
 
+  const [menuOpen, setMenuOpen] = useState(false);
+  // The menu-scoped `A`, plus the global chord shown beside it as a hint.
+  const archiveGlobalHint = formatChord({ shift: true, code: "Backspace", key: "Backspace" });
+
+  const handleMenuKeyDown = useCallback(
+    (e: ReactKeyboardEvent) => {
+      // A bare `A` only. Without this, Select All (⌘A / Ctrl+A) pressed
+      // while the menu happens to be open archives the thread.
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key === "A" || e.key === "a") {
+        e.preventDefault();
+        onArchive(thread.id);
+        setMenuOpen(false);
+      }
+    },
+    [onArchive, thread.id],
+  );
+
   return (
     <div>
       {/* Row = link + context menu side by side; nesting the menu button
@@ -559,7 +600,7 @@ function ThreadNode({
             />
           </button>
         )}
-        <DropdownMenu>
+        <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
           <DropdownMenuTrigger asChild>
             <button
               type="button"
@@ -569,10 +610,18 @@ function ThreadNode({
               <MoreHorizontal className="h-3.5 w-3.5" aria-hidden />
             </button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start">
-            <DropdownMenuItem onSelect={() => onArchive(thread.id)}>
-              <Archive className="h-3.5 w-3.5 mr-2" aria-hidden />
-              Archive thread
+          <DropdownMenuContent align="start" onKeyDown={handleMenuKeyDown}>
+            <DropdownMenuItem
+              onSelect={() => onArchive(thread.id)}
+              className="justify-between gap-3"
+            >
+              <span className="inline-flex items-center gap-2">
+                <Archive className="h-3.5 w-3.5" aria-hidden />
+                Archive thread
+              </span>
+              <span className="text-[10px] text-muted tabular-nums" title={archiveGlobalHint}>
+                A
+              </span>
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={onReplaceSandbox}>
               <RefreshCw className="h-3.5 w-3.5 mr-2" aria-hidden />

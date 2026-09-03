@@ -6,6 +6,8 @@ import { AppShell } from "~/components/layout/app-shell";
 import { TopNav } from "~/components/layout/top-nav";
 import { WorkspaceScopeProvider } from "~/lib/workspace-scope";
 import { AssistantRail } from "~/components/session/assistant-rail";
+import { KeyboardShortcutsDialog } from "~/components/session/keyboard-shortcuts-dialog";
+import { useChatKeybindings } from "~/hooks/use-chat-keybindings";
 import { useAttentionPing } from "~/lib/use-attention-ping";
 import { unlock } from "~/lib/notification-sound";
 
@@ -90,6 +92,8 @@ function RootLayout() {
       <WorkspaceScopeProvider>
         <SignedInEffects />
         <AppShell topNav={<TopNav />} sidebar={sidebarForPath(pathname)}>
+          {/* Keybindings must sit under AppShell so sidebar controls resolve. */}
+          <ChatKeybindingsHost />
           <Outlet />
         </AppShell>
       </WorkspaceScopeProvider>
@@ -107,6 +111,15 @@ function SignedInEffects() {
   useAttentionPing();
   useUnlockAudioOnFirstGesture();
   return null;
+}
+
+/**
+ * Claude-aligned chat chords + the ⌘/ shortcuts dialog. Mounted as a child
+ * of `AppShell` so `useSidebarControls` is in scope for ⌘⇧S.
+ */
+function ChatKeybindingsHost() {
+  const { helpOpen, setHelpOpen } = useChatKeybindings();
+  return <KeyboardShortcutsDialog open={helpOpen} onOpenChange={setHelpOpen} />;
 }
 
 /**
