@@ -1694,6 +1694,11 @@ export const followedThreads = pgTable(
      * overheard line after downtime arrives with the missed context. Null on
      * rows from before the column: the first delivery starts tracking. */
     lastSeenTs: text("last_seen_ts"),
+    /** The assistant that answered the mention this follow was bound from, so
+     * later messages in the thread reach the SAME assistant rather than the
+     * owner's default. Null on rows from before the column, and on any follow
+     * whose rule named no assistant — both read as "the owner's default". */
+    assistantId: text("assistant_id"),
   },
   (t) => [uniqueIndex("followed_threads_key").on(t.orgId, t.channelType, t.channelId, t.threadTs)],
 );
@@ -1722,6 +1727,11 @@ export const workflowSchedules = pgTable(
     /** Prompt submitted to the orchestrator's "schedules" thread when
      * `target_kind = 'orchestrator'`. */
     prompt: text("prompt"),
+    /** Which of the owner's assistants the prompt goes to, when
+     * `target_kind = 'orchestrator'`. Null on rows from before the column, and
+     * on any schedule that named none — both read as "the owner's default".
+     * Ignored for a `workflow` target, which has no assistant. */
+    assistantId: text("assistant_id"),
     name: text("name").notNull(),
     cron: text("cron").notNull(),
     timezone: text("timezone").notNull().default("UTC"),

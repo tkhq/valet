@@ -52,6 +52,7 @@ import {
   type FilterField,
   type UiFilterRow,
 } from "~/components/events/filter-editor";
+import { useAssistants } from "~/api/assistants";
 import { useCreateEventSubscription, useEventCatalog, useFilterOptions } from "~/api/events";
 import { useIdentityLinks } from "~/api/queries";
 import { useCreateSchedule, useWorkflows } from "~/api/workflows";
@@ -71,9 +72,19 @@ interface SelectedChannel {
 /** The outcome the reader picks first. It decides the steps and the store. */
 type Outcome = "reply" | "workflow" | "notify" | "advanced" | "schedule";
 
+/**
+ * `assistantId` names WHICH of the owner's assistants answers. Absent means
+ * the owner's default, so a reader who never opens the picker gets exactly
+ * the behavior the wizard had before it existed.
+ *
+ * The org branch carries no id: an org-owned assistant is not listable
+ * (`canViewSession` admits nobody to an org-owned session), so the org choice
+ * can only mean its default.
+ */
 type OrchestratorChoice =
-  | { kind: "orchestrator"; orchestrator: "user" | "org" }
-  | { kind: "orchestrator"; orchestrator: "team"; teamId: string };
+  | { kind: "orchestrator"; orchestrator: "user"; assistantId?: string }
+  | { kind: "orchestrator"; orchestrator: "org" }
+  | { kind: "orchestrator"; orchestrator: "team"; teamId: string; assistantId?: string };
 
 type TargetChoice = OrchestratorChoice | { kind: "workflow"; workflowId: string };
 
@@ -90,6 +101,57 @@ function initialTarget(scopedTeamId: string | undefined): TargetChoice {
   return scopedTeamId !== undefined
     ? { kind: "orchestrator", orchestrator: "team", teamId: scopedTeamId }
     : { kind: "orchestrator", orchestrator: "user" };
+}
+
+/**
+ * The owner's assistants, as a dropdown, when the owner has more than one.
+ *
+ * Hidden for a single-assistant owner: with nothing to choose between, the
+ * control would only ask the reader to confirm the one answer, and the wizard
+ * already names that assistant in the radio beside it. Hidden for the org
+ * choice too, which has no listable assistants.
+ *
+ * The empty option is not "none" — it is the owner's default, resolved at
+ * delivery. Choosing it stores no id, which is what keeps a rule following a
+ * later change of default.
+ */
+function AssistantSelect({
+  owner,
+  value,
+  onChange,
+}: {
+  /** No id for the user case: the list route returns only the CALLER's own
+   * user-owned assistants, so `type === "user"` already names one person. */
+  owner: { type: "user" } | { type: "team"; id: string };
+  value: string | undefined;
+  onChange: (assistantId: string | undefined) => void;
+}) {
+  const assistantsQ = useAssistants();
+  const owned = (assistantsQ.data?.assistants ?? []).filter((a) =>
+    owner.type === "user" ? a.owner.type === "user" : a.owner.type === "team" && a.owner.id === owner.id,
+  );
+  if (owned.length < 2) return null;
+  return (
+    <div className="ml-6 mt-1">
+      <select
+        aria-label="Assistant"
+        value={value ?? ""}
+        onChange={(e) => onChange(e.target.value === "" ? undefined : e.target.value)}
+        className="w-full min-w-0 truncate rounded border border-line bg-paper px-2 py-1.5 text-sm text-ink"
+      >
+        <option value="">
+          {owned.find((a) => a.isDefault)?.name?.trim()
+            ? `Default (${owned.find((a) => a.isDefault)?.name})`
+            : "Default assistant"}
+        </option>
+        {owned.map((a) => (
+          <option key={a.id} value={a.id}>
+            {a.name?.trim() || "Untitled assistant"}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
 }
 
 /** The step labels for one outcome. The reply outcome skips the separate Then
@@ -349,15 +411,26 @@ export function AutomationWizard({
         },
       );
     } else {
-      // A scheduled prompt fires an assistant, so it belongs to the active
-      // workspace — send the team so it fires the TEAM's assistant, not the
-      // caller's. (The workflow target above needs none: it follows the
-      // workflow's own owner.)
+      // A scheduled prompt fires an assistant, so `teamId` follows the RADIO,
+      // not the workspace. It used to follow the workspace, which quietly
+      // overrode a reader who picked "your assistant" inside a team; the
+      // wizard opens on the team radio there, so the default is unchanged.
+      // Sending both a team and a personal assistant is worse than quiet: the
+      // server resolves the owner to the team and refuses the assistant.
+      // (The workflow target above needs no team: it follows the workflow's
+      // own owner.)
       createSchedule.mutate(
         {
           ...base,
-          target: { kind: "orchestrator", prompt: prompt.trim() },
-          ...(scopedTeamId ? { teamId: scopedTeamId } : {}),
+          target: {
+            kind: "orchestrator",
+            prompt: prompt.trim(),
+            // Only when the reader chose one; absent keeps the owner's default.
+            ...(target.orchestrator !== "org" && target.assistantId !== undefined
+              ? { assistantId: target.assistantId }
+              : {}),
+          },
+          ...(target.orchestrator === "team" ? { teamId: target.teamId } : {}),
         },
         {
           onSuccess: () => onOpenChange(false),
@@ -648,6 +721,15 @@ function ReplyStep({
             />
             Your assistant
           </label>
+          {target.orchestrator === "user" && (
+            <AssistantSelect
+              owner={{ type: "user" }}
+              value={target.assistantId}
+              onChange={(assistantId) =>
+                onTargetChange({ kind: "orchestrator", orchestrator: "user", assistantId })
+              }
+            />
+          )}
           {scopedTeam && (
             <label className="flex items-center gap-2 text-sm text-ink">
               <input
@@ -660,6 +742,20 @@ function ReplyStep({
               />
               {scopedTeam.name}&apos;s assistant
             </label>
+          )}
+          {scopedTeam && target.orchestrator === "team" && (
+            <AssistantSelect
+              owner={{ type: "team", id: scopedTeam.id }}
+              value={target.assistantId}
+              onChange={(assistantId) =>
+                onTargetChange({
+                  kind: "orchestrator",
+                  orchestrator: "team",
+                  teamId: scopedTeam.id,
+                  assistantId,
+                })
+              }
+            />
           )}
           <label className="flex items-center gap-2 text-sm text-ink">
             <input
@@ -1027,6 +1123,15 @@ function ThenStep({
             />
             Notify your assistant
           </label>
+          {target.kind === "orchestrator" && target.orchestrator === "user" && (
+            <AssistantSelect
+              owner={{ type: "user" }}
+              value={target.assistantId}
+              onChange={(assistantId) =>
+                onTargetChange({ kind: "orchestrator", orchestrator: "user", assistantId })
+              }
+            />
+          )}
           {/* Only the active workspace's team is offered. Targeting a different
               team is a workspace change, not a form field. */}
           {scopedTeam && (
@@ -1041,6 +1146,20 @@ function ThenStep({
               />
               Notify {scopedTeam.name}&apos;s assistant
             </label>
+          )}
+          {scopedTeam && target.kind === "orchestrator" && target.orchestrator === "team" && (
+            <AssistantSelect
+              owner={{ type: "team", id: scopedTeam.id }}
+              value={target.assistantId}
+              onChange={(assistantId) =>
+                onTargetChange({
+                  kind: "orchestrator",
+                  orchestrator: "team",
+                  teamId: scopedTeam.id,
+                  assistantId,
+                })
+              }
+            />
           )}
           <label className="flex items-center gap-2 text-sm text-ink">
             <input

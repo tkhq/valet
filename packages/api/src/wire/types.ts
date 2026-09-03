@@ -2382,7 +2382,15 @@ export type CreateWorkflowScheduleRequest = {
   teamId?: string;
 } & (
   | { target: { kind: "workflow"; workflowId: string; input?: unknown } }
-  | { target: { kind: "orchestrator"; prompt: string } }
+  | {
+      target: {
+        kind: "orchestrator";
+        prompt: string;
+        /** Which of the owner's assistants the prompt goes to. Absent → the
+         * owner's default, the behavior every schedule had before the field. */
+        assistantId?: string;
+      };
+    }
 );
 
 export interface UpdateWorkflowScheduleRequest {
@@ -2400,6 +2408,9 @@ export interface WorkflowScheduleResponse {
     targetKind: "workflow" | "orchestrator";
     workflowId?: string;
     prompt?: string;
+    /** Which of the owner's assistants an orchestrator schedule prompts.
+     * Absent → the owner's default. */
+    assistantId?: string;
     name: string;
     cron: string;
     timezone: string;
@@ -3960,6 +3971,17 @@ export type EventSubscriptionTargetWire =
       kind: "orchestrator";
       orchestrator?: "user" | "team" | "org";
       teamId?: string;
+      /**
+       * WHICH of the owner's assistants answers. Absent means the owner's
+       * default, which is what every rule written before this field did — so
+       * an absent value is the compatible reading, not an unset one.
+       *
+       * The assistant must belong to the principal the `orchestrator` and
+       * `teamId` fields resolve to. It names an assistant, never an owner:
+       * pointing a user-owned rule at a team's assistant is a change of owner,
+       * and the validator refuses it.
+       */
+      assistantId?: string;
       /** Follow the thread: after this rule delivers a channel mention, later
        * messages in that thread route to the assistant without a re-mention. */
       follow?: boolean;
@@ -4069,6 +4091,16 @@ export interface PatchEventSubscriptionRequest {
   eventKeys?: string[];
   filters?: EventSubscriptionFilterWire[];
   enabled?: boolean;
+  /**
+   * Re-point an orchestrator rule at a different assistant of the SAME owner.
+   * `null` clears the choice, so the owner's default answers again. Absent
+   * leaves it alone.
+   *
+   * The only part of `target` a patch may touch. Changing the owner is not a
+   * field edit — it decides the row's mutation ACL and its collision peers —
+   * so a rule that should belong elsewhere is rewritten, not patched.
+   */
+  assistantId?: string | null;
   /** See `CreateEventSubscriptionRequest.anyChannel`. Only consulted when
    * the patch changes `filters` or `eventKeys`. */
   anyChannel?: boolean;

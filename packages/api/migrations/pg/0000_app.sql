@@ -895,7 +895,8 @@ CREATE TABLE "followed_threads" (
 	"created_by" text NOT NULL,
 	"created_at" bigint NOT NULL,
 	"last_activity_at" bigint NOT NULL,
-	"last_seen_ts" text
+	"last_seen_ts" text,
+	"assistant_id" text
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "followed_threads_key" ON "followed_threads" ("org_id","channel_type","channel_id","thread_ts");
@@ -908,6 +909,7 @@ CREATE TABLE "workflow_schedules" (
 	"target_kind" text DEFAULT 'workflow' NOT NULL,
 	"workflow_id" text,
 	"prompt" text,
+	"assistant_id" text,
 	"name" text NOT NULL,
 	"cron" text NOT NULL,
 	"timezone" text DEFAULT 'UTC' NOT NULL,

@@ -1,17 +1,22 @@
 /**
- * The one way an event or a followed message is delivered to an owner's default
- * assistant: resolve the session, assert its org against the delivery's org
- * (the second-layer defense `admitSignal` would have provided — an event has no
+ * The one way an event or a followed message is delivered to an assistant:
+ * resolve the session, assert its org against the delivery's org (the
+ * second-layer defense `admitSignal` would have provided — an event has no
  * sender session, so there is no edge to authorize), then submit the signal on
  * the named thread. Both the dispatcher's orchestrator target
  * (`orchestrator-target.ts`) and the follow-router (`channels/follow-router.ts`)
  * go through here, so the org check and delivery shape can never drift between
  * them.
+ *
+ * `assistantId` picks ONE of the owner's assistants; without it the owner's
+ * default answers, which is what every rule written before the field did.
  */
 import type { ChannelOrigin, Principal, SignalContent } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
-import { ensureDefaultAssistantSession } from "../assistants/service.js";
+import type { Session } from "@valet/engine";
+import { ensureAssistantSession, ensureDefaultAssistantSession, loadAssistant } from "../assistants/service.js";
+import type { AssistantRow } from "../schema/index.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 
 /**
@@ -26,13 +31,45 @@ import { writeDropLog } from "../orchestrator/signals.js";
  */
 const deliveryChains = new Map<string, Promise<void>>();
 
+export interface AssistantDeliveryDeps {
+  db: AppDb;
+  engineHost: EngineHost;
+  /**
+   * Seed a channel thread's earlier messages on the assistant's FIRST turn in
+   * it. Wired only on the mention path (`orchestrator-target`); the follow
+   * path never delivers first, so it leaves this unset.
+   */
+  fetchThreadContext?: (origin: ChannelOrigin) => Promise<string | null>;
+}
+
+export interface AssistantDeliveryArgs {
+  orgId: string;
+  owner: Principal;
+  actorUserId: string;
+  threadKey: string;
+  signal: SignalContent;
+  dispatchId: string;
+  /** Which of the owner's assistants answers. Absent → the owner's default. */
+  assistantId?: string;
+  /** Drop-log reason if the resolved assistant belongs to another org. */
+  mismatchReason: string;
+}
+
 export async function deliverToAssistantThread(
-  deps: Parameters<typeof deliverToAssistantThreadInner>[0],
-  args: Parameters<typeof deliverToAssistantThreadInner>[1],
+  deps: AssistantDeliveryDeps,
+  args: AssistantDeliveryArgs,
 ): Promise<void> {
-  const key = `${args.orgId}:${args.owner.type}:${args.owner.id}:${args.threadKey}`;
+  // Resolve BEFORE keying. The chain must be keyed on the SESSION, not on the
+  // requested assistant id: an id that names the owner's default and an absent
+  // id mean the same session, and keying on the raw value would put them on
+  // separate chains and let them race the seed window this chain exists to
+  // close. One Slack mention on a followed thread produces exactly that pair
+  // (the dispatcher passes the rule's id, the follow-router passes the row's,
+  // which is null on a follow bound before the column).
+  const session = await resolveDeliverySession(deps, args);
+  const key = `${session.id}:${args.threadKey}`;
   const prior = deliveryChains.get(key) ?? Promise.resolve();
-  const run = prior.then(() => deliverToAssistantThreadInner(deps, args));
+  const run = prior.then(() => deliverToAssistantThreadInner(deps, args, session));
   // The stored tail swallows the failure (the caller gets it from `run`) and
   // removes itself once it is still the tail, so the map does not keep one
   // settled promise per thread ever delivered to.
@@ -45,32 +82,68 @@ export async function deliverToAssistantThread(
   return run;
 }
 
+/**
+ * Whether this assistant may take the delivery. A discriminated result rather
+ * than a nullable message, so the good arm carries the narrowed row and the
+ * caller needs no cast to use it.
+ */
+function checkDeliveryAssistant(
+  row: AssistantRow | undefined,
+  orgId: string,
+  owner: Principal,
+): { ok: true; row: AssistantRow } | { ok: false; why: string } {
+  if (row === undefined) return { ok: false, why: "no such assistant" };
+  if (row.orgId !== orgId) return { ok: false, why: `assistant belongs to org ${row.orgId}` };
+  if (row.ownerType !== owner.type || row.ownerId !== owner.id) {
+    return { ok: false, why: `assistant is owned by ${row.ownerType}:${row.ownerId}` };
+  }
+  if (row.archivedAt !== null) return { ok: false, why: "assistant is archived" };
+  return { ok: true, row };
+}
+
+/**
+ * The session the signal lands on: the named assistant's, or the owner's
+ * default when the rule named none.
+ *
+ * A named assistant is re-checked against the rule's owner at DELIVERY time,
+ * not only at write time. The two can drift — an assistant is archived, or the
+ * rule outlives it — and a stale id must never reach an assistant the rule's
+ * owner does not own. A drop-logged throw sends the delivery down the
+ * dispatcher's retry/dead-letter path, which is the same outcome the org
+ * mismatch below produces.
+ */
+async function resolveDeliverySession(
+  deps: { db: AppDb; engineHost: EngineHost },
+  args: { orgId: string; owner: Principal; actorUserId: string; assistantId?: string; dispatchId: string },
+): Promise<Session> {
+  const meta = { actorUserId: args.actorUserId, orgId: args.orgId };
+  if (args.assistantId === undefined) {
+    const { session } = await ensureDefaultAssistantSession(deps, args.owner, meta);
+    return session;
+  }
+
+  const checked = checkDeliveryAssistant(await loadAssistant(deps.db, args.assistantId), args.orgId, args.owner);
+  if (!checked.ok) {
+    await writeDropLog(deps.db, {
+      orgId: args.orgId,
+      reason: "event_target_assistant_invalid",
+      conversationKey: args.dispatchId,
+      detail:
+        `subscription names assistant ${args.assistantId} for owner ` +
+        `${args.owner.type}:${args.owner.id}, but ${checked.why}`,
+    });
+    throw new Error(`delivery refused: ${checked.why} (${args.assistantId})`);
+  }
+
+  const { session } = await ensureAssistantSession(deps, checked.row, meta);
+  return session;
+}
+
 async function deliverToAssistantThreadInner(
-  deps: {
-    db: AppDb;
-    engineHost: EngineHost;
-    /**
-     * Seed a channel thread's earlier messages on the assistant's FIRST turn in
-     * it. Wired only on the mention path (`orchestrator-target`); the follow
-     * path never delivers first, so it leaves this unset.
-     */
-    fetchThreadContext?: (origin: ChannelOrigin) => Promise<string | null>;
-  },
-  args: {
-    orgId: string;
-    owner: Principal;
-    actorUserId: string;
-    threadKey: string;
-    signal: SignalContent;
-    dispatchId: string;
-    /** Drop-log reason if the resolved assistant belongs to another org. */
-    mismatchReason: string;
-  },
+  deps: AssistantDeliveryDeps,
+  args: AssistantDeliveryArgs,
+  session: Session,
 ): Promise<void> {
-  const { session } = await ensureDefaultAssistantSession(deps, args.owner, {
-    actorUserId: args.actorUserId,
-    orgId: args.orgId,
-  });
   const data = await session.toData();
   if (data.orgId !== args.orgId) {
     await writeDropLog(deps.db, {

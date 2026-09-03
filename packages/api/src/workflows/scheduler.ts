@@ -119,6 +119,9 @@ export class WorkflowScheduler {
           },
         },
         dispatchId: `schedule:${schedule.id}:${slotMs}`,
+        // Null on a schedule from before the column and on one that named no
+        // assistant; both fall back to the owner's default at delivery.
+        assistantId: schedule.assistantId ?? undefined,
       });
       return "ok";
     }
