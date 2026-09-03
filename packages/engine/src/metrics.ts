@@ -36,6 +36,7 @@ interface Instruments {
   sandboxDestroyed: Counter;
   sandboxFlagged: Counter;
   sandboxCapacityWait: Histogram;
+  sandboxWorkspaceGrow: Counter;
   cacheBreaks: Counter;
 }
 
@@ -98,6 +99,10 @@ function inst(): Instruments {
       unit: "ms",
       description:
         "Time a sandbox create spent waiting at the per-org capacity gate, by outcome (admitted/timeout). Non-zero rates mean an org is contending for its sandbox ceiling.",
+    }),
+    sandboxWorkspaceGrow: meter.createCounter("valet.sandbox.workspace_grow", {
+      description:
+        "Workspace-volume grow attempts after an ENOSPC, by outcome (grown/refused/error). Every fill event records here even when the grow succeeds, so a systemic many-workspaces-filling problem stays visible instead of being papered over by resizes.",
     }),
     cacheBreaks: meter.createCounter("valet.cache.breaks", {
       description:
@@ -192,6 +197,18 @@ export function recordSandboxDestroyed(reason: SandboxDestroyReason): void {
  * condition persists, so `increase(...) > 0` alerts cleanly. */
 export function recordSandboxFlagged(kind: SandboxFlagKind, count: number): void {
   if (count > 0) inst().sandboxFlagged.add(count, { kind });
+}
+
+/** Outcome of one workspace-volume grow attempt (Sandbox.growWorkspace),
+ * recorded by workspace prep on every ENOSPC it reacts to. A closed union so
+ * a typo'd outcome cannot fragment the series. */
+export type WorkspaceGrowOutcome = "grown" | "refused" | "error";
+
+/** One workspace grow attempt after an ENOSPC. Recorded on EVERY attempt —
+ * successes included — so many-workspaces-filling-at-once stays a visible,
+ * alertable signal even when every individual grow succeeds. */
+export function recordSandboxWorkspaceGrow(outcome: WorkspaceGrowOutcome): void {
+  inst().sandboxWorkspaceGrow.add(1, { outcome });
 }
 
 /** A create's wait at the per-org capacity gate. Recorded only when the

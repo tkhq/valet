@@ -76,10 +76,23 @@ echo "$SANDBOX_VERBS" | grep -q '"update"' \
 # JSON merge patch — omitting it 403s the idle sweep and the pause route.
 echo "$SANDBOX_VERBS" | grep -q '"patch"' \
   || fail "sandboxes rule missing 'patch' verb — hibernation suspend/resume (merge-patch operatingMode) would 403"
-if echo "$ROLE_BLOCK" | grep -qE '"?persistentvolumeclaims"?'; then
-  fail "Role grants persistentvolumeclaims — agent-sandbox controller owns PVC lifecycle, api must not"
-fi
-pass "Role has the expected sandbox/pods/exec/log verbs incl. sandboxes:update, no PVC verbs"
+# On-demand workspace growth (Sandbox.growWorkspace, workspace-fit spec
+# 2026-09-03) reads and merge-patches the workspace PVC. EXACTLY get+patch:
+# PVC create/delete stay with the agent-sandbox controller (it
+# owner-references PVCs to the Sandbox CR), so any lifecycle verb here is
+# a regression.
+echo "$ROLE_BLOCK" | grep -q '"persistentvolumeclaims"' \
+  || fail "Role missing resource: persistentvolumeclaims — workspace growth (Sandbox.growWorkspace) would 403"
+PVC_VERBS=$(echo "$ROLE_BLOCK" | grep -A4 '"persistentvolumeclaims"' | grep -m1 'verbs:')
+for verb in get patch; do
+  echo "$PVC_VERBS" | grep -q "\"$verb\"" || fail "persistentvolumeclaims rule missing verb: $verb"
+done
+for verb in create delete list watch update; do
+  if echo "$PVC_VERBS" | grep -q "\"$verb\""; then
+    fail "persistentvolumeclaims rule grants '$verb' — agent-sandbox controller owns PVC lifecycle; api gets get/patch only"
+  fi
+done
+pass "Role has the expected sandbox/pods/exec/log verbs incl. sandboxes:update, PVC get/patch only"
 
 # --- RBAC: batch/jobs (Task 5 BuildKit builder), scoped -------------------
 echo "$ROLE_BLOCK" | grep -q '"batch"' || fail "Role missing apiGroup: batch"

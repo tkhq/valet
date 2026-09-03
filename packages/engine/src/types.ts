@@ -1144,6 +1144,19 @@ export interface GatewayEndpoint {
   port: number;
 }
 
+/**
+ * Outcome of a `Sandbox.growWorkspace` attempt. `grown: false` is a normal,
+ * expected answer (cap reached, resize rate-limited, backend without a
+ * growable workspace) — `reason` says why so the caller can put it in the
+ * surfaced error. `from`/`to` are backend quantity strings (e.g. "1Gi").
+ */
+export interface WorkspaceGrowth {
+  grown: boolean;
+  from?: string;
+  to?: string;
+  reason?: string;
+}
+
 export interface Sandbox {
   id: string;
   readFile(path: string): Promise<string>;
@@ -1169,6 +1182,18 @@ export interface Sandbox {
    * services). Absent method === always null — existing paths unchanged.
    */
   gatewayEndpoint?(): Promise<GatewayEndpoint | null>;
+  /**
+   * Grow the sandbox's persistent workspace volume one increment (provider
+   * policy: double the current size, capped at a configured max), then wait
+   * for the resize to take effect. Called by workspace prep when a git
+   * operation fails with ENOSPC, so the operation can be retried once on the
+   * larger volume. Returns `grown: false` (never throws) when growth is
+   * refused — at the cap, rate-limited, or the backing volume is not
+   * growable — with `reason` naming why. Absent on providers without a
+   * resizable persistent workspace (docker/local/virtual): callers must
+   * treat an absent method as `grown: false`.
+   */
+  growWorkspace?(): Promise<WorkspaceGrowth>;
 }
 
 export interface SandboxCreateOpts {

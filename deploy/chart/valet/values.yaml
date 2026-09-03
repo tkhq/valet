@@ -146,13 +146,16 @@ sandbox:
   # image layers, container rootfs) is bounded by the ephemeral limits
   # above and does not land here.
   #
-  # WARNING: this is one-way per sandbox. The size is fixed in the Sandbox
-  # CR at create time, no resize path exists, and a PVC cannot shrink.
-  # Changing it affects only sandboxes created afterwards; existing claims
-  # keep their size until the sandbox is destroyed and re-provisioned. A
-  # workspace that fills gets ENOSPC, so raise this for deploys that clone
-  # large repositories.
+  # Sizing is one-way per sandbox: a PVC cannot shrink. Changing this
+  # affects only sandboxes created afterwards. Keep the default small — it
+  # is billed on every sandbox PVC in the fleet. When a repo operation
+  # fills the volume (ENOSPC during workspace prep), the api grows that one
+  # PVC on demand instead: it doubles the claim (online gp3 expansion, one
+  # EBS-rate-limited step per ~6h) and retries once, up to
+  # workspaceStorageMax. At the cap the ENOSPC surfaces as a loud startup
+  # failure instead of unbounded growth.
   workspaceStorage: "1Gi"
+  workspaceStorageMax: "20Gi"
 
   # How long a suspended sandbox is kept before its workspace volume is
   # reclaimed. Both windows measure IDLE time, not age: they run from the

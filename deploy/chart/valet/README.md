@@ -47,9 +47,10 @@ existence for API groups it does not own.
   "Valet — Agent Observability" dashboard.
 - **Sandbox namespace + RBAC**: a `Namespace`, a namespaced `Role`, and a
   `RoleBinding` to the api's `ServiceAccount`. The Role grants sandbox
-  CRs, pods, pods/exec, and pods/log. It grants no cluster-scoped
-  permissions and no PVC verbs — the agent-sandbox controller owns PVC
-  lifecycle.
+  CRs, pods, pods/exec, and pods/log, plus `get`/`patch` on
+  persistentvolumeclaims for on-demand workspace growth. It grants no
+  cluster-scoped permissions and no PVC lifecycle verbs — the
+  agent-sandbox controller owns PVC create/delete.
 - **App Secret** with a `lookup`-based retain guard. `BETTER_AUTH_SECRET`
   and `VALET_ENCRYPTION_KEY` are generated once when values do not supply
   them, then reused on every later `helm upgrade`. Regenerating them would

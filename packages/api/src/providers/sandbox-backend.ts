@@ -30,6 +30,7 @@ import {
   podLivenessApiAdapter,
   podStatusApiAdapter,
   podsApiAdapter,
+  sandboxPvcApiAdapter,
   sandboxSecretsApiAdapter,
   type K8sProviderConfig,
 } from "@valet/sandbox-kubernetes";
@@ -307,19 +308,33 @@ export function resolveSandboxEphemeralStorageLimit(env: NodeJS.ProcessEnv): str
  * build caches outside /workspace — is bounded separately by the
  * ephemeral-storage limit, so it does not land on this claim.
  *
- * Sizing is one-way per sandbox. A PVC cannot shrink, and NOTHING grows
- * one either: the claim size is fixed in the Sandbox CR's
- * volumeClaimTemplates at create time, and there is no resize path here.
- * Changing this value only affects sandboxes created afterwards; an
- * existing claim keeps its original size until the sandbox is destroyed
- * and re-provisioned. A workspace that fills gets ENOSPC on write, so a
- * deploy that clones large repos should raise this.
+ * Sizing per sandbox is one-way: a PVC cannot shrink. Changing this value
+ * only affects sandboxes created afterwards; an existing claim keeps its
+ * size until the sandbox is destroyed and re-provisioned — or until a
+ * workspace prep ENOSPC triggers on-demand growth (`Sandbox.growWorkspace`,
+ * capped by `VALET_SANDBOX_WORKSPACE_MAX` below). Keep this default small:
+ * growth is reactive and per-sandbox, while this value is billed on every
+ * PVC in the fleet.
  *
  * `"0"` omits the value and falls back to the manifest builder's own
  * default rather than provisioning a zero-sized claim.
  */
 export function resolveSandboxWorkspaceStorage(env: NodeJS.ProcessEnv): string | undefined {
   return quantityEnv(env.VALET_SANDBOX_WORKSPACE_STORAGE, "1Gi");
+}
+
+/**
+ * Hard cap for on-demand workspace PVC growth
+ * (`VALET_SANDBOX_WORKSPACE_MAX`, default "20Gi"). When a git operation in
+ * workspace prep fails with ENOSPC, the kubernetes backend doubles the
+ * workspace claim (one EBS-rate-limited step at a time) up to this cap and
+ * retries once; at the cap the ENOSPC surfaces as a loud startup failure
+ * instead of unbounded growth. Growth is one-way (a PVC cannot shrink), so
+ * `max × VALET_ORG_SANDBOX_CEILING` bounds what one org's fleet can
+ * accrete. `"0"` falls back to the provider's own default cap.
+ */
+export function resolveSandboxWorkspaceStorageMax(env: NodeJS.ProcessEnv): string | undefined {
+  return quantityEnv(env.VALET_SANDBOX_WORKSPACE_MAX, "20Gi");
 }
 
 export interface BuildSandboxProviderDeps {
@@ -369,6 +384,7 @@ export function buildSandboxProvider(
       const ephemeralStorage = resolveSandboxEphemeralStorageRequest(env);
       const ephemeralStorageLimit = resolveSandboxEphemeralStorageLimit(env);
       const workspaceStorage = resolveSandboxWorkspaceStorage(env);
+      const workspaceStorageMax = resolveSandboxWorkspaceStorageMax(env);
       const cfg: K8sProviderConfig = {
         namespace,
         defaultImage: image ?? env.VALET_FULL_BASE_IMAGE ?? DEFAULT_FULL_BASE_IMAGE,
@@ -377,6 +393,8 @@ export function buildSandboxProvider(
         // existed but nothing ever set it, so the manifest builder's own
         // constant was the only value a deploy could get.
         ...(workspaceStorage ? { defaultStorage: workspaceStorage } : {}),
+        // On-demand workspace growth cap (Sandbox.growWorkspace).
+        ...(workspaceStorageMax ? { workspaceStorageMax } : {}),
         // Node-disk protection defaults (TKAI-349) — set here, on the
         // provider config, because engine host paths pass no
         // `opts.resources`; the manifest merges these per-field under any
@@ -402,7 +420,11 @@ export function buildSandboxProvider(
           : {}),
       };
       const secretsApi = sandboxSecretsApiAdapter(coreApi);
-      return new KubernetesSandboxProvider({ objectsApi, podsApi, execApi, livenessApi, podStatusApi, podDeleteApi, secretsApi }, cfg);
+      const pvcApi = sandboxPvcApiAdapter(coreApi);
+      return new KubernetesSandboxProvider(
+        { objectsApi, podsApi, execApi, livenessApi, podStatusApi, podDeleteApi, secretsApi, pvcApi },
+        cfg,
+      );
     }
   }
 }
