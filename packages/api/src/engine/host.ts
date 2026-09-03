@@ -59,6 +59,8 @@ import { resolveSnapshot } from "./resolve-snapshot.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";
 import { buildPrepSteps } from "./prep-steps.js";
 import { securityToolPrepSteps } from "./security-bootstrap.js";
+import type { OnePasswordService } from "../services/onepassword.js";
+import { orgFallbackPolicy, resolveUserCredentialRead, onePasswordScopesFor } from "../services/credential-resolution.js";
 import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
 import { getOrgModelPreferences } from "../services/org.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
@@ -91,7 +93,7 @@ import {
   revokeSandboxTokens,
 } from "../auth/sandbox-tokens.js";
 import securityPlugin from "@valet/plugin-security/plugin";
-import { CODING_SYSTEM_PROMPT } from "./prompt-rules.js";
+import { codingSystemPrompt } from "./prompt-rules.js";
 import { orchestratorPersona } from "../orchestrator/persona.js";
 import { buildMemoryTools } from "../orchestrator/memory-tools.js";
 import { buildSecurityPersonaTools, buildSecurityRunnerTools } from "./security-tools.js";
@@ -283,6 +285,18 @@ export interface EngineHostOpts {
     now?: () => number;
   };
   /**
+   * 1Password reference-credential resolver (1Password credential provider
+   * plan, Task 2). When present, `buildCredentialResolver` additionally
+   * checks every resolved row (github's own `github`-service branch AND the
+   * default fall-through raw-store read) for `onePasswordMeta` and — when
+   * present — routes it through `onePassword.resolveCredential` instead of
+   * returning the reference-only row. Absent === no 1Password branch: rows
+   * pass through unchanged, byte-identical to before this task. Unlike
+   * `githubTokenDeps`, this alone is enough to make `buildCredentialResolver`
+   * return a resolver even with no `db`/`githubTokenDeps` wired.
+   */
+  onePassword?: OnePasswordService;
+  /**
    * Idle window (minutes) before a `ready` sandbox is hibernated (sandbox
    * hibernation plan, Task 3). `resolveIdleMinutes` (sandbox-backend.ts)
    * parses `VALET_SANDBOX_IDLE_MINUTES`; default `30`, `0`/invalid → `0`
@@ -356,6 +370,9 @@ export interface SessionMeta {
   userId: string;
   orgId: string;
   workspace: string;
+  /** `agent_sessions.owner_type`. Absent means unknown, which reads as "not
+   * a user-owned session" for credential scope decisions. */
+  ownerType?: string;
   /** Interactive-service profile (sandbox auth gateway plan, Task 5).
    * Defaults to "headless" when omitted. */
   profile?: "headless" | "full";
@@ -412,7 +429,6 @@ function pinnedIdSet(pins: readonly PinnedActionSpec[]): ReadonlySet<string> {
   return new Set(pins.map((p) => p.actionId));
 }
 
-const SYSTEM_PROMPT = CODING_SYSTEM_PROMPT;
 
 /**
  * Size ceiling for the line-count read in `readSandboxFileMeta` (Valet Security
@@ -894,7 +910,7 @@ export class EngineHost {
       });
     };
     const specProvider = await this.buildSpecProvider(sessionId, meta, onStartRef, personaCell != null);
-    const credentialResolver = this.buildCredentialResolver(sessionId, meta.userId, meta.orgId);
+    const credentialResolver = this.buildCredentialResolver(sessionId, meta.userId, meta.orgId, meta.ownerType);
     // Slash-command options (Task 10). The workspace-skills provider's sandbox
     // accessor closes over `builtSession` — resolved lazily, so it is safe that
     // the session doesn't exist yet at this point. `hasPrep` is true only when
@@ -996,7 +1012,7 @@ export class EngineHost {
             model,
             modelSpec,
             resolveModel,
-            systemPrompt: SYSTEM_PROMPT,
+            systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
             tools: sessionTools.length ? sessionTools : undefined,
             skills: extras.skills.length ? extras.skills : undefined,
             roles: sessionRoles.length ? sessionRoles : undefined,
@@ -1019,7 +1035,7 @@ export class EngineHost {
           model,
           modelSpec,
           resolveModel,
-          systemPrompt: SYSTEM_PROMPT,
+          systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
           tools: sessionTools.length ? sessionTools : undefined,
           skills: extras.skills.length ? extras.skills : undefined,
           roles: sessionRoles.length ? sessionRoles : undefined,
@@ -1393,29 +1409,53 @@ export class EngineHost {
 
   /**
    * Builds the `credentialResolver` (engine `CreateSessionOptions` seam,
-   * GH-T10 fix) for a session, or `undefined` when `githubTokenDeps`/`db`
-   * aren't wired — callers must conditionally spread the result so an
-   * unresolved session's options stay byte-identical to before this fix (no
-   * `credentialResolver` key at all → the engine reads the raw store).
+   * GH-T10 fix) for a session, or `undefined` when neither `githubTokenDeps`+`db`
+   * nor `onePassword` are wired — callers must conditionally spread the result
+   * so an unresolved session's options stay byte-identical to before this fix
+   * (no `credentialResolver` key at all → the engine reads the raw store).
    *
    * The resolver is the SINGLE decision point for this session's credentials:
-   *  - `github` → `resolveSessionGitHubToken` (`purpose: "api"`), which honors
-   *    the session's primary `session_repos` binding auth when it has one and
-   *    resolves repo-less `auto` otherwise. A `GitHubAuthError` propagates
-   *    unchanged — the engine surfaces it as the tool's error result, hint
-   *    text intact. Synthesizes a `StoredCredential` the engine's
-   *    `credentialProvider` maps to `{ accessToken }`.
+   *  - `github` (when `githubTokenDeps`+`db` are wired) → `resolveSessionGitHubToken`
+   *    (`purpose: "api"`), which honors the session's primary `session_repos`
+   *    binding auth when it has one and resolves repo-less `auto` otherwise.
+   *    A `GitHubAuthError` propagates unchanged — the engine surfaces it as
+   *    the tool's error result, hint text intact. Synthesizes a
+   *    `StoredCredential` the engine's `credentialProvider` maps to
+   *    `{ accessToken }`.
    *  - `github:installation` → `resolveInstallationApiToken`, the explicit
    *    installation-tier request (the binding's owner, else the org's sole
-   *    installation). `null` when no installation resolves.
-   *  - `slack` → user credential first (personal `plugin-slack-user` token),
-   *    then org credential (`plugin-slack` bot token) as fallback. When a
-   *    credential is found and the session user has a `slack` identity link,
-   *    `metadata.owner_slack_user_id` is injected, activating plugin-slack's
-   *    private-channel check. No enrichment when no link is found or no
-   *    credential is stored (returns `null` or the bare stored credential).
-   *  - every OTHER service → the raw `engineCredentials.get(owner, service)`
-   *    read, byte-identical to the engine's default (store-backed) path.
+   *    installation). `null` when no installation resolves, or when `db`/
+   *    `githubTokenDeps` are not wired.
+   *  - `openai` → `resolveOpenAiCredential` when `db` is wired (org OpenAI
+   *    LLM-provider key → `resolveUserCredentialRead` for a stored "openai"
+   *    row, including 1Password references → OPENAI_API_KEY env). Without
+   *    `db`, the stored-row half runs directly via `resolveUserCredentialRead`.
+   *  - `slack` → `resolveUserCredentialRead` (user row, then org row), then
+   *    `withSlackOwnerMetadata` when a credential is found and `db` is wired.
+   *    The identity link injects `metadata.owner_slack_user_id` for
+   *    plugin-slack's private-channel check.
+   *  - every OTHER service (and `github` itself when `githubTokenDeps`/`db`
+   *    aren't wired) → `resolveUserCredentialRead` (shared owner-precedence
+   *    contract, `services/credential-resolution.ts`): a `{ type: "user", id:
+   *    userId }` row wins outright when present (any kind); on a user-row
+   *    MISS it falls back to the `{ type: "org", id: orgId }` row for the
+   *    same service. The engine always hands this resolver `owner = { type:
+   *    "user", id: userId }`, so `owner` itself is ignored below —
+   *    `userId`/`orgId` (captured by this closure) drive both halves.
+   *    Whichever row wins, when `onePassword` is wired and that row carries
+   *    `metadata.onepassword` (`onePasswordMeta`), `onePassword.resolveCredential`
+   *    fills in the secret from the referenced 1Password item; an
+   *    `OnePasswordAuthError` (missing/disabled token, SDK failure)
+   *    propagates unchanged, mirroring `GitHubAuthError`'s tool-error-result
+   *    behavior above. Rows without 1Password reference metadata (or with no
+   *    `onePassword` wired) pass through unchanged (same object, no clone).
+   *
+   *    On a user-row miss the org row is read only as far as
+   *    `orgFallbackPolicy(plugins, service)` allows: `org-provided` when a
+   *    plugin declares `requires.orgCredential` (the row is the configured
+   *    credential for everyone), otherwise `reference-only` (an admin's
+   *    1Password pointer is a deliberate act of sharing; a plain org row
+   *    stays invisible to member sessions).
    *
    * DEVIATION (for T12): workflow tool-node invocations
    * (`workflows/engine-deps.ts`'s `invokeAction`) carry no `sessionId`, so
@@ -1470,12 +1510,14 @@ export class EngineHost {
     sessionId: string,
     userId: string,
     orgId: string,
+    ownerType: string | undefined,
   ): ((owner: CredentialOwner, service: string) => Promise<StoredCredential | null>) | undefined {
     const tokenDeps = this.opts.githubTokenDeps;
     const db = this.opts.db;
     const credentials = this.opts.engineCredentials;
-    if (!tokenDeps || !db) return undefined;
-    return async (owner, service) => {
+    const onePassword = this.opts.onePassword;
+    if ((!tokenDeps || !db) && !onePassword) return undefined;
+    return async (_owner, service) => {
       if (service === GITHUB_INSTALLATION_CREDENTIAL_SERVICE) {
         // Explicit installation-tier request (github.list_repos with
         // `scope: "installation"`): mint the App installation token directly
@@ -1483,6 +1525,7 @@ export class EngineHost {
         // picked — a user token 403s on `GET /installation/repositories`.
         // `null` (no installation) stays `null`; the action names the
         // corrective step in its own error.
+        if (!db || !tokenDeps) return null;
         const binding = await primaryRepoBinding(db, sessionId);
         const token = await resolveInstallationApiToken(
           {
@@ -1499,54 +1542,56 @@ export class EngineHost {
         );
         return token === null ? null : { type: "app_install", accessToken: token };
       }
-      if (service === "openai") {
+      if (service === "openai" && db) {
         // plugin-openai's key probe: org OpenAI LLM-provider key → stored
-        // "openai" credential → OPENAI_API_KEY env. `null` keeps the openai
-        // tools hidden in list_tools (requiresCredential gating).
-        return resolveOpenAiCredential(db, credentials, owner, orgId);
-      }
-      if (service !== "github") {
-        if (service === "slack") {
-          // The Slack bot token is org-shared: `PUT
-          // /api/credentials/slack?scope=org` stores it under
-          // `{ type: "org", id: orgId }`. The engine's session always calls
-          // the resolver with a user owner, so a plain exact-owner read would
-          // return null for every production session. Read the user credential
-          // first (a personal `plugin-slack-user` token takes precedence);
-          // when absent, escalate to the org owner.
-          const stored =
-            (await credentials.get(owner, service)) ??
-            (await credentials.get({ type: "org", id: orgId }, service));
-          // Activates plugin-slack's private-channel check: the identity
-          // link is the single source of truth for the owner's Slack user
-          // id, regardless of how the link was created. Shared with the
-          // workflow action invoker (`plugins/action-invoker.ts`).
-          if (stored) return withSlackOwnerMetadata(db, userId, stored);
-          return null;
-        }
-        return await credentials.get(owner, service);
-      }
-      const resolved = await resolveSessionGitHubToken(
-        {
+        // "openai" credential (owner-precedence + 1Password) → OPENAI_API_KEY
+        // env. `null` keeps the openai tools hidden in list_tools
+        // (requiresCredential gating). Without a db the generic read below
+        // is the same call this branch used to make.
+        return resolveOpenAiCredential(
           db,
           credentials,
-          key: tokenDeps.key,
-          apiUrl: tokenDeps.apiUrl,
-          githubUrl: tokenDeps.githubUrl,
-          fetchImpl: tokenDeps.fetchImpl,
-          now: tokenDeps.now,
-        },
-        { orgId, userId, sessionId, purpose: "api" },
-      );
-      // `purpose: "api"` throws (`GitHubAuthError`, with the connect hint)
-      // rather than returning a null token; a null here would be a contract
-      // violation upstream, so surface it as the same unconnected gap.
-      if (resolved.token === null) {
-        throw new GitHubAuthError(
-          "no GitHub credential is available; connect your GitHub account or install the GitHub App for this organization",
+          { orgId, userId, scopes: onePasswordScopesFor(ownerType) },
+          process.env,
+          onePassword,
         );
       }
-      return { type: "oauth2", accessToken: resolved.token };
+      if (service === "github" && tokenDeps && db) {
+        const resolved = await resolveSessionGitHubToken(
+          {
+            db,
+            credentials,
+            key: tokenDeps.key,
+            apiUrl: tokenDeps.apiUrl,
+            githubUrl: tokenDeps.githubUrl,
+            fetchImpl: tokenDeps.fetchImpl,
+            now: tokenDeps.now,
+          },
+          { orgId, userId, sessionId, purpose: "api" },
+        );
+        // `purpose: "api"` throws (`GitHubAuthError`, with the connect hint)
+        // rather than returning a null token; a null here would be a contract
+        // violation upstream, so surface it as the same unconnected gap.
+        if (resolved.token === null) {
+          throw new GitHubAuthError(
+            "no GitHub credential is available; connect your GitHub account or install the GitHub App for this organization",
+          );
+        }
+        return { type: "oauth2", accessToken: resolved.token };
+      }
+      // Slack is not special-cased for ESCALATION any more: `plugin-slack`
+      // declares `requires.orgCredential`, so `orgFallbackPolicy` reaches the
+      // org row for it and for nothing that has not asked. What stays special
+      // is the identity link, which the private-channel check needs.
+      const fallback = orgFallbackPolicy(this.opts.plugins, service);
+      const stored = await resolveUserCredentialRead(
+        { credentials, onePassword },
+        { orgId, userId, scopes: onePasswordScopesFor(ownerType) },
+        service,
+        fallback,
+      );
+      if (service === "slack" && stored && db) return withSlackOwnerMetadata(db, userId, stored);
+      return stored;
     };
   }
 
@@ -2056,7 +2101,7 @@ export class EngineHost {
     // to. See `PATCH /api/sessions/:id`.
     const profile = await this.storedProfile(sessionId);
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.actorUserId, meta.orgId, profile);
-    const credentialResolver = this.buildCredentialResolver(sessionId, meta.actorUserId, meta.orgId);
+    const credentialResolver = this.buildCredentialResolver(sessionId, meta.actorUserId, meta.orgId, principal.type);
     // Slash-command options: same wiring as the interactive path, so the
     // orchestrator answers /model and /sessions instead of the no-context
     // fallback. The getter closes over `builtSession`, assigned below.
@@ -2891,7 +2936,7 @@ export class EngineHost {
 
     const profile = opts.profile ?? "headless";
     const sandboxMint = await this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId, profile);
-    const credentialResolver = this.buildCredentialResolver(childSessionId, opts.actorUserId, opts.orgId);
+    const credentialResolver = this.buildCredentialResolver(childSessionId, opts.actorUserId, opts.orgId, opts.owner.type);
     const policyResolver = this.getPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
     // A child spawned with a repo binding (the spawner inserts the
@@ -2912,6 +2957,7 @@ export class EngineHost {
           userId: opts.actorUserId,
           orgId: opts.orgId,
           workspace: opts.workspace,
+          ownerType: opts.owner.type,
           profile,
           ...(opts.docker !== undefined ? { docker: opts.docker } : {}),
         })
@@ -2968,7 +3014,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
-      systemPrompt: SYSTEM_PROMPT,
+      systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
       tools: childTools.length ? childTools : undefined,
       skills: provisionedExtras.skills.length ? provisionedExtras.skills : undefined,
       roles: childRoles.length ? childRoles : undefined,
@@ -3074,7 +3120,7 @@ export class EngineHost {
     });
 
     const sandboxMint = await this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId, "headless");
-    const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId);
+    const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId, opts.owner.type);
     const policyResolver = this.getPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
     const sessionOptions = {
@@ -3105,7 +3151,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
-      systemPrompt: SYSTEM_PROMPT,
+      systemPrompt: codingSystemPrompt({ secretsCli: false }),
       tools: extras.tools.length ? extras.tools : undefined,
       skills: extras.skills.length ? extras.skills : undefined,
       roles: extras.roles.length ? extras.roles : undefined,

@@ -24,8 +24,9 @@ import type { RepoBinding } from "../wire/types.js";
 const API_URL = "https://api.valet.test";
 const STAGED_HELPER = ".valet-prep/git-credential-valet";
 const STAGED_GH = ".valet-prep/valet-gh";
+const STAGED_SECRETS = ".valet-prep/valet-secrets";
 const INSTALL_CMD =
-  "mkdir -p /usr/local/bin && cp '.valet-prep/git-credential-valet' /usr/local/bin/git-credential-valet && cp '.valet-prep/valet-gh' /usr/local/bin/valet-gh && cp '.valet-prep/valet-gh' /usr/local/bin/gh && chmod 755 /usr/local/bin/git-credential-valet /usr/local/bin/valet-gh /usr/local/bin/gh";
+  "mkdir -p /usr/local/bin && cp '.valet-prep/git-credential-valet' /usr/local/bin/git-credential-valet && cp '.valet-prep/valet-gh' /usr/local/bin/valet-gh && cp '.valet-prep/valet-gh' /usr/local/bin/gh && cp '.valet-prep/valet-secrets' /usr/local/bin/valet-secrets && chmod 755 /usr/local/bin/git-credential-valet /usr/local/bin/valet-gh /usr/local/bin/gh /usr/local/bin/valet-secrets";
 
 interface ExecCall {
   command: string;

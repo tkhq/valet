@@ -71,6 +71,7 @@ import {
   loadAssistant,
   resolveDefaultAssistant,
 } from "../assistants/service.js";
+import type { OnePasswordService } from "../services/onepassword.js";
 
 // Same compile-time-vs-runtime bridge `resolveModelId` solves in
 // `packages/engine/src/thread.ts` and `EngineHost.resolveModel` (host.ts):
@@ -99,6 +100,13 @@ export interface WorkflowEngineDepsOpts {
    * credential-store read. Optional; omit in tests/deployments with no
    * github plugin registered. */
   githubTokenDeps?: ActionInvokerOpts["githubTokenDeps"];
+  /**
+   * 1Password reference-credential resolver (owner-precedence contract,
+   * Task 6) — threaded straight to `buildActionInvoker`'s `onePassword`
+   * opt. Optional; omit in tests/deployments with no 1Password service
+   * wired.
+   */
+  onePassword?: OnePasswordService;
 }
 
 /**
@@ -315,6 +323,7 @@ export function buildWorkflowEngineDeps(opts: WorkflowEngineDepsOpts): WorkflowE
     actionPluginByService: opts.actionPluginByService,
     plugins: opts.plugins,
     githubTokenDeps: opts.githubTokenDeps,
+    onePassword: opts.onePassword,
   });
 
   return {

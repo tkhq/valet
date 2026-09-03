@@ -17,6 +17,7 @@
  * callers without admitSignal needing to know which one it was handed.
  */
 import { randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
 import {
   parseAssistantSessionId,
   ValidationError as EngineValidationError,
@@ -29,7 +30,7 @@ import {
   type Thread,
 } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
-import { eventDropLog } from "../schema/index.js";
+import { agentSessions, eventDropLog } from "../schema/index.js";
 import type { EngineHost } from "../engine/host.js";
 import { loadSessionMeta } from "../engine/session-meta.js";
 
@@ -208,6 +209,22 @@ export async function admitSignal(deps: AdmitSignalDeps, args: AdmitSignalArgs):
   // an orchestrator or regular session id; orchestrator ids carry no repo
   // rows so this returns empty bindings, and `profile` stays unset (headless)
   // exactly as this path did before — see `loadSessionMeta`.
+  // Ownership comes from the app row when the target has one, and only from
+  // the engine principal when it does not. The generic session builder passes
+  // no `owner` to the engine, so `SessionData.owner` is the acting user for
+  // every session created through `POST /api/sessions`, team-owned ones
+  // included. Threading that value into a cold rebuild would tell the
+  // credential resolver the session is user-owned and hand it the frozen
+  // actor's PERSONAL 1Password scope on a session the whole team can prompt
+  // (`onePasswordScopesFor`). Child and assistant sessions are built with an
+  // explicit owner, so their engine principal is truthful, and an
+  // orchestrator target may have no row at all — hence the fallback.
+  const ownerRows = await deps.db
+    .select({ ownerType: agentSessions.ownerType, ownerId: agentSessions.ownerId })
+    .from(agentSessions)
+    .where(eq(agentSessions.id, args.to))
+    .limit(1);
+  const owner = ownerRows[0] ?? { ownerType: toData.owner.type, ownerId: toData.owner.id };
   const session = await deps.engineHost.sessionFor(
     args.to,
     await loadSessionMeta(deps.db, {
@@ -217,8 +234,8 @@ export async function admitSignal(deps: AdmitSignalDeps, args: AdmitSignalArgs):
       workspace: toData.workspace,
       // Owner threads through so a team-owned target that rebuilds on this
       // first touch keeps the team tier of the model cascade.
-      ownerType: toData.owner.type,
-      ownerId: toData.owner.id,
+      ownerType: owner.ownerType,
+      ownerId: owner.ownerId,
     }),
   );
   const thread = await resolveThread(deps, args, session, toData);

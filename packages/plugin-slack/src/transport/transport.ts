@@ -38,6 +38,7 @@ import {
   type StreamRef,
   type SuggestedPrompt,
   type TransportContext,
+  credentialSecret,
 } from "@valet/engine";
 import {
   buildContentBlocks,
@@ -1198,7 +1199,7 @@ export const slackTransportFactory: ChannelTransportFactory = {
   // host must not mint a secret or try to register anything.
   ingress: "external-webhook",
   create(ctx: TransportContext): ChannelTransport {
-    const token = ctx.credential.accessToken;
+    const token = credentialSecret(ctx.credential);
     if (!token) {
       throw new Error(
         "Slack transport requires a bot token. Connect Slack in Settings → Integrations and save the bot token.",

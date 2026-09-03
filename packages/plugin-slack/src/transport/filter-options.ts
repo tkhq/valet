@@ -13,6 +13,7 @@
  * fallback.
  */
 import type { FilterOption, FilterOptionContext, FilterOptionResolver, StoredCredential } from "@valet/engine";
+import { credentialSecret } from "@valet/engine";
 import { SlackApi } from "./api.js";
 import { SlackTransport } from "./transport.js";
 
@@ -27,12 +28,12 @@ import { SlackTransport } from "./transport.js";
  * client at a fake server.
  */
 function directoryTransport(credential: StoredCredential, apiBaseUrl?: string): SlackTransport {
-  return new SlackTransport(new SlackApi(credential.accessToken ?? "", apiBaseUrl), "filter-options");
+  return new SlackTransport(new SlackApi(credentialSecret(credential) ?? "", apiBaseUrl), "filter-options");
 }
 
 /** True when the credential can drive a bot-token directory read. */
 function hasToken(credential: StoredCredential | null): credential is StoredCredential {
-  return credential !== null && typeof credential.accessToken === "string" && credential.accessToken !== "";
+  return credentialSecret(credential) !== undefined;
 }
 
 /**

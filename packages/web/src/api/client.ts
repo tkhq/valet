@@ -133,6 +133,7 @@ import type {
   InstallWorkflowTemplateRequest,
   InstallWorkflowTemplateResponse,
   MeResponse,
+  OnePasswordSettingsResponse,
   OrgDirectoryResponse,
   OrgMembersResponse,
   OrgPluginsResponse,
@@ -188,6 +189,7 @@ import type {
   PutPolicyOverrideRequest,
   PutPolicyOverrideResponse,
   RedeliverEventResponse,
+  PutOnePasswordSettingsRequest,
   ResolveDecisionRequest,
   ResolveWorkflowApprovalRequest,
   ResolveWorkflowApprovalResponse,
@@ -280,6 +282,7 @@ class ApiError extends Error {
     this.name = "ApiError";
   }
 }
+
 
 // `GET /api/auth-config` is unauthenticated and doesn't change without a
 // server restart — fetched once and cached, shared by `useAuthConfig`
@@ -1103,7 +1106,11 @@ export const api = {
 
   // plugins + credentials (plugin-system-v2 plan Task 15 — connect surface)
   listPlugins: () => request<ListPluginsResponse>("GET", "/plugins"),
-  listCredentials: () => request<ListCredentialsResponse>("GET", "/credentials"),
+  listCredentials: (scope?: "user" | "org") =>
+    request<ListCredentialsResponse>(
+      "GET",
+      `/credentials${scope === "org" ? "?scope=org" : ""}`,
+    ),
   putCredential: (service: string, body: PutCredentialRequest) =>
     request<PutCredentialResponse>(
       "PUT",
@@ -1117,6 +1124,15 @@ export const api = {
       "DELETE",
       `/credentials/${encodeURIComponent(service)}${opts?.scope ? `?scope=${opts.scope}` : ""}`,
     ),
+
+  // 1Password picker backend + settings. `scope` selects which
+  // service-account token to browse with — "org" (open to any org member
+  // once the org token is connected) or "personal" (gated server-side by
+  // the org's allowPersonal toggle).
+  getOnePasswordSettings: () =>
+    request<OnePasswordSettingsResponse>("GET", "/onepassword/settings"),
+  putOnePasswordSettings: (body: PutOnePasswordSettingsRequest) =>
+    request<OnePasswordSettingsResponse>("PUT", "/onepassword/settings", body),
 
   // skills — the markdown playbooks the agent reads. The catalog mixes the
   // plugin-supplied ones with the stored ones the caller owns. Only a

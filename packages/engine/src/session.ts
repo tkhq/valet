@@ -57,6 +57,7 @@ import type {
   ToolDef,
   WriteFence,
 } from "./types.js";
+import { credentialSecret } from "./types.js";
 
 let nextId = 1;
 function uid(prefix: string): string {
@@ -1541,7 +1542,7 @@ export class Session {
         const stored = await read(service);
         if (!stored) return null;
         return {
-          accessToken: stored.accessToken ?? stored.apiKey ?? "",
+          accessToken: credentialSecret(stored) ?? "",
           refreshToken: stored.refreshToken,
           expiresAt: stored.expiresAt,
           scopes: stored.scopes,
@@ -1556,7 +1557,7 @@ export class Session {
         const stored = await read(service);
         if (!stored) throw new Error(`credential ${service} not connected: ${reason}`);
         return {
-          accessToken: stored.accessToken ?? stored.apiKey ?? "",
+          accessToken: credentialSecret(stored) ?? "",
           refreshToken: stored.refreshToken,
           expiresAt: stored.expiresAt,
           scopes: stored.scopes,

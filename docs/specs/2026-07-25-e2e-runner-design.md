@@ -141,6 +141,7 @@ a row, so `make e2e` is sufficient validation on its own (it does not assume
 | `telegram` | live outbound `telegram.e2e.test.ts` | `TELEGRAM_TEST_BOT_TOKEN` + `TELEGRAM_TEST_CHAT_ID` |
 | `github-live` | live GitHub App block in `github-repo.e2e.test.ts` | `VALET_GITHUB_LIVE_TEST=1` + app id + private key PEM |
 | `openai` | `llm-providers.e2e.test.ts` | `OPENAI_API_KEY` |
+| `onepassword` | live 1Password SDK in `onepassword.live.test.ts` | `OP_SERVICE_ACCOUNT_TOKEN` |
 
 Step names are stable identifiers (used by `--only` and the JSON output).
 Note: several docker-gated suites self-skip when `CI` is set
@@ -277,7 +278,7 @@ durationMs, skipReason? }], passed, failed, skipped, exitCode }`.
 - `integration-core` / `integration-agent` run explicit file lists (held in
   `scripts/e2e/lib.ts`), not whole-directory globs — keeps the two rows
   disjoint from the dedicated rows (cli, telegram, github-live, openai,
-  prebuilds, keycloak). A new integration test file must be added to one of
+  onepassword, prebuilds, keycloak). A new integration test file must be added to one of
   those lists to be covered.
 - The Keycloak test needs `AUTH_TRUSTED_ORIGINS=http://localhost:8081` —
   better-auth rejects OIDC discovery against origins outside `trustedOrigins`

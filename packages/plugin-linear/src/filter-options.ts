@@ -15,6 +15,7 @@
  * throws — a network or GraphQL error also yields [].
  */
 import type { FilterOption, FilterOptionResolver } from "@valet/engine";
+import { credentialSecret } from "@valet/engine";
 
 /** API host — GraphQL endpoint. Tests point `LINEAR_API_URL` at a fixture. */
 function resolveLinearApiUrl(env: NodeJS.ProcessEnv): string {
@@ -62,7 +63,7 @@ export function makeLinearTeamsResolver(
   env: NodeJS.ProcessEnv = process.env,
 ): FilterOptionResolver {
   return async (ctx): Promise<FilterOption[]> => {
-    const accessToken = ctx.credential?.accessToken;
+    const accessToken = credentialSecret(ctx.credential);
     if (!accessToken) return [];
 
     let res: Response;

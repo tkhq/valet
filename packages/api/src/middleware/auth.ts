@@ -20,11 +20,13 @@ export interface AuthUser {
 /** Route prefixes that consume `c.var.sandbox` today. Must match the mount
  * points in `app.ts` — see rung 2 of the ladder below:
  *   - `/api/memory` — owner-tuple OKF memory surface (decision 15).
- *   - `/api/sandbox` — in-sandbox git credential surface (GitHub/repo
+ *   - `/api/sandbox/` — in-sandbox git credential surface (GitHub/repo
  *     integration plan, Task 8).
- * A valid sandbox token against any other path 403s rather than reaching a
- * handler that unconditionally reads `c.var.user`. */
-const SANDBOX_ALLOWED_PATH_PREFIXES = ["/api/memory", "/api/sandbox"];
+ *   - `/api/sandbox-secrets/` — the secret broker `valet-secrets` calls.
+ * Each prefix ends at a path separator so one mount cannot match another's
+ * name. A valid sandbox token against any other path 403s rather than
+ * reaching a handler that reads `c.var.user`. */
+const SANDBOX_ALLOWED_PATH_PREFIXES = ["/api/memory", "/api/sandbox/", "/api/sandbox-secrets/"];
 
 /** Narrows better-auth's loosely-typed (`type: "string"`) `role`
  * additional field down to our real enum. The db column is declared

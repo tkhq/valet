@@ -31,6 +31,7 @@
  */
 import { Cable, Drama, Globe, GraduationCap, Workflow, type LucideIcon } from "lucide-react";
 import {
+  si1password,
   siCloudflare,
   siFigma,
   siGithub,
@@ -61,6 +62,8 @@ interface BrandMark {
  * ids callers fall back to when a plugin declares no slug of its own.
  */
 const BRAND_MARKS: Record<string, BrandMark> = {
+  "1password": si1password,
+  onepassword: si1password,
   cloudflare: siCloudflare,
   figma: siFigma,
   github: siGithub,
@@ -132,6 +135,8 @@ export function pluginGlyph(slug: string | undefined): LucideIcon | undefined {
  * file with it; the hue is what the card falls back to that day. First-party
  * plugins hold no hue, because `PLUGIN_GLYPHS` always answers for them. */
 const BRAND_HEX: Record<string, string> = {
+  "1password": "#1a1917",
+  onepassword: "#1a1917",
   github: "#24292f",
   gmail: "#ea4335",
   "google-calendar": "#4285f4",

@@ -2900,6 +2900,10 @@ export interface CredentialSummary {
   /** `metadata.refreshFailedAt`, when a previous token-refresh attempt
    * failed and left the credential needing a reconnect. Epoch ms. */
   refreshFailedAt?: number;
+  /** `metadata.onepassword.reference`, when this credential resolves via a
+   * 1Password reference instead of an inline secret (1Password credential
+   * provider plan, Task 3). Display-only — never secret material. */
+  onepasswordRef?: string;
 }
 
 export interface ListCredentialsResponse {
@@ -2916,6 +2920,10 @@ export interface PutCredentialRequest {
   /** Owner scope for the saved credential. `"org"` requires the caller to be
    * an org admin. Defaults to `"user"`. */
   scope?: "user" | "org";
+  /** Resolve this credential's secret via a 1Password reference instead of
+   * an inline `accessToken`/`apiKey` (1Password credential provider plan,
+   * Task 3). Mutually exclusive with both. */
+  onepassword?: { reference: string; tokenScope: "org" | "personal" };
 }
 
 export interface PutCredentialResponse {
@@ -2924,6 +2932,36 @@ export interface PutCredentialResponse {
 
 export interface DeleteCredentialResponse {
   ok: true;
+}
+
+// ── REST: 1Password picker backend + settings (1Password credential
+// provider plan, Task 3) ───────────────────────────────────────────────────
+
+export interface OnePasswordSettingsResponse {
+  allowPersonal: boolean;
+  orgTokenConnected: boolean;
+  personalTokenConnected: boolean;
+}
+
+export interface PutOnePasswordSettingsRequest {
+  allowPersonal: boolean;
+}
+
+export interface ListOpVaultsResponse {
+  vaults: { id: string; title: string }[];
+}
+
+/** POST /api/sandbox-secrets/resolve — the sandbox CLI's broker call. */
+export interface ResolveSandboxSecretsResponse {
+  /** One entry per requested reference, in request order: the base64 of the
+   * value's UTF-8 bytes, or `null` when nothing resolved it. Base64 so a
+   * POSIX shell can cut the field without a JSON parser and restore the
+   * exact bytes; positional so it needs no key. `null` is distinct from an
+   * empty value. */
+  values: (string | null)[];
+  /** References nothing could resolve, by name and without a reason: the
+   * reason would describe someone else's vault. */
+  unresolved: string[];
 }
 
 // ── REST: me + models (split-settings design) ─────────────────────────────

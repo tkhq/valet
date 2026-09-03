@@ -28,6 +28,15 @@
 const ROUTE_PATH = "/api/sandbox/git-credential";
 
 /**
+ * The sandbox token, read at call time: the creds mount first (rotated in
+ * place on backends that have one), then `$VALET_SANDBOX_TOKEN`. Every
+ * generated in-sandbox script reads it this way, so it is written once.
+ * Leaves `tok` set; empty when neither source has a token.
+ */
+export const SANDBOX_TOKEN_READ_SH = `tok=$(cat /etc/valet/creds/token 2>/dev/null)
+[ -n "$tok" ] || tok=\${VALET_SANDBOX_TOKEN:-}`;
+
+/**
  * `git-credential-valet` — a git credential helper (see `gitcredentials(7)`).
  *
  * git invokes it as `helper <verb>` and pipes the request attributes
@@ -76,8 +85,7 @@ case "\$path" in
   */*) repo=\${path#*/}; repo=\${repo%%/*}; repo=\${repo%.git} ;;
 esac
 [ -n "\$owner" ] || exit 0
-tok=\$(cat /etc/valet/creds/token 2>/dev/null)
-[ -n "\$tok" ] || tok=\${VALET_SANDBOX_TOKEN:-}
+${SANDBOX_TOKEN_READ_SH}
 [ -n "\$tok" ] || exit 0
 
 resp=\$(curl --max-time 10 -fsS \\
@@ -151,8 +159,7 @@ fi
 if [ -n "\${GH_TOKEN:-}" ] || [ -n "\${GITHUB_TOKEN:-}" ]; then exec "\$real" "\$@"; fi
 if [ -f "\${GH_CONFIG_DIR:-\$HOME/.config/gh}/hosts.yml" ]; then exec "\$real" "\$@"; fi
 
-tok=\$(cat /etc/valet/creds/token 2>/dev/null)
-[ -n "\$tok" ] || tok=\${VALET_SANDBOX_TOKEN:-}
+${SANDBOX_TOKEN_READ_SH}
 token=
 if [ -n "\$tok" ]; then
   remote=\$(git config --get remote.origin.url 2>/dev/null)

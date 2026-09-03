@@ -109,6 +109,7 @@ export async function loadSessionMeta(db: AppDb, src: SessionMetaSource): Promis
     workspace: src.workspace,
     ...(src.profile !== undefined ? { profile: src.profile } : {}),
     ...(src.docker !== undefined ? { docker: src.docker } : {}),
+    ...(src.ownerType !== undefined ? { ownerType: src.ownerType } : {}),
     ...(src.ownerType === "team" && src.ownerId ? { ownerTeamId: src.ownerId } : {}),
     repos: reposWithDirs,
     userName: userRows[0]?.name,
