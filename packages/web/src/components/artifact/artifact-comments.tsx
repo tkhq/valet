@@ -58,7 +58,7 @@ export function ArtifactPins({ threads, rects, onOpenThread }: ArtifactPinsProps
             key={thread.root.id}
             type="button"
             onClick={() => onOpenThread(thread.root.id)}
-            className="pointer-events-auto absolute z-10 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full border border-line bg-surface text-[11px] font-medium text-ink shadow-md hover:bg-moss hover:text-white"
+            className="pointer-events-auto absolute z-10 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full border border-line bg-paper text-[11px] font-medium text-ink shadow-md hover:bg-moss hover:text-white"
             style={{ top: Math.max(rect.top, 4), left: Math.min(rect.left + rect.width + 4, window.innerWidth - 40) }}
             title={thread.root.body}
           >
@@ -109,7 +109,7 @@ export function CommentComposer({
 
   return (
     <div
-      className="absolute z-20 w-[340px] rounded-lg border border-line bg-surface p-3 shadow-xl"
+      className="absolute z-20 w-[340px] rounded-lg border border-line bg-paper p-3 shadow-xl"
       style={{ top, left }}
     >
       <div className="mb-2 flex items-center justify-between">
@@ -187,7 +187,7 @@ export function ArtifactThreadPanel({
   };
 
   return (
-    <aside className="flex h-full w-80 shrink-0 flex-col border-l border-line bg-surface">
+    <aside className="flex h-full w-80 shrink-0 flex-col border-l border-line bg-paper">
       <div className="flex items-center justify-between border-b border-line px-4 py-3">
         <h2 className="flex items-center gap-2 text-sm font-medium text-ink">
           <MessageSquare className="h-4 w-4" aria-hidden />
