@@ -121,6 +121,19 @@ describe("loadPrebuildOverride", () => {
       loadPrebuildOverride(readerFor({ ".valet/prebuild.yaml": "workspaceStorage: 4\n" })),
     ).rejects.toThrow(/workspaceStorage must be a quantity string/);
   });
+
+  it("parses baseSetup (repo-declared toolchain layer)", async () => {
+    const override = await loadPrebuildOverride(
+      readerFor({ ".valet/prebuild.yaml": "baseSetup:\n  - apt-get install -y cmake\n" }),
+    );
+    expect(override).toEqual({ baseSetup: ["apt-get install -y cmake"] });
+  });
+
+  it("rejects baseSetup entries that aren't strings", async () => {
+    await expect(
+      loadPrebuildOverride(readerFor({ ".valet/prebuild.yaml": "baseSetup:\n  - 1\n" })),
+    ).rejects.toThrow(/baseSetup must be a string array/);
+  });
 });
 
 describe("generateLocalDockerfile", () => {
@@ -144,6 +157,21 @@ RUN make bootstrap
 
 LABEL valet.prebuild.local="true"
 `);
+  });
+
+  it("emits baseSetup RUNs BEFORE the repo COPY (toolchains cache across commits)", () => {
+    const dockerfile = generateLocalDockerfile({
+      baseImage: "img",
+      recipe: [],
+      setup: ["make deps"],
+      baseSetup: ["apt-get install -y cmake"],
+    });
+    const copyAt = dockerfile.indexOf("COPY . /prebuilt/repo");
+    const baseAt = dockerfile.indexOf("RUN apt-get install -y cmake");
+    const setupAt = dockerfile.indexOf("RUN make deps");
+    expect(baseAt).toBeGreaterThan(-1);
+    expect(baseAt).toBeLessThan(copyAt);
+    expect(setupAt).toBeGreaterThan(copyAt);
   });
 
   it("never contains token/clone machinery, and never the platform identity label", () => {
@@ -179,6 +207,7 @@ describe("resolveRecipe", () => {
         { id: "pnpm-install", lockfile: "pnpm-lock.yaml", command: "pnpm install --frozen-lockfile" },
       ],
       setup: [],
+      baseSetup: [],
       image: undefined,
     });
   });
@@ -193,6 +222,7 @@ describe("resolveRecipe", () => {
     expect(resolved).toEqual({
       recipe: [],
       setup: ["make bootstrap"],
+      baseSetup: [],
       image: undefined,
     });
   });

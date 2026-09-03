@@ -15,7 +15,7 @@
  *
  * ── Source discipline ────────────────────────────────────────────────────
  * The build context is a LOCAL `git clone` of the checkout (detached at
- * HEAD) in a temp dir, NOT a `COPY` of the working tree. Three reasons:
+ * HEAD), NOT a `COPY` of the working tree. Three reasons:
  *   1. Parity: the platform bake is `git clone` + `git checkout <sha>`, so
  *      `/prebuilt/repo/.git` EXISTS during setup commands — and real repos
  *      depend on it (mono's Makefiles locate the repo root via
@@ -25,14 +25,25 @@
  *      target/) is not what the platform bakes.
  *   3. Size: the clone carries the repo + history but never the working
  *      tree's multi-GB artifact dirs.
- * The ONE exception is `.valet/prebuild.yaml` itself: it is read from (and
- * copied into the context from) the WORKING TREE, so a recipe can be
- * iterated on without committing each attempt.
+ *
+ * ── Layer-cache discipline ────────────────────────────────────────────────
+ * The context is CACHED per repo under `<dataDir>/prebuild-contexts/` and
+ * reused verbatim while the repo's HEAD is unchanged (`--fresh` forces a
+ * re-clone). A fresh clone per invocation would bust BuildKit's COPY cache
+ * every run: `.git` internals (index, logs) carry clone timestamps, so two
+ * clones of the same HEAD are never byte-identical. The recipe file is
+ * deliberately NOT copied into the context: it is read from the WORKING
+ * TREE and drives only the generated RUN lines, so editing step N rebuilds
+ * from step N with every earlier layer cached — the iteration loop this
+ * command exists for. (Consequence: the IMAGE's copy of
+ * `.valet/prebuild.yaml` is the committed one; only the executed steps
+ * reflect uncommitted recipe edits.)
  *
  * The pure `runPrebuild` is exported for tests; docker probing, spawning,
  * and the git archive step are injected.
  */
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -48,6 +59,7 @@ import { DEFAULT_FULL_BASE_IMAGE } from "../../providers/sandbox-backend.js";
 import { detectDockerDaemon } from "../docker-detect.js";
 import { ExitCode } from "../exit.js";
 import { parseGlobalFlags, printErr, printLine } from "../output.js";
+import { resolveDataDir } from "../resolve.js";
 import type { CliContext } from "../types.js";
 
 const USAGE = `valet prebuild <plan|build> [path] [options]
@@ -66,10 +78,13 @@ Options:
   --base <image>      Base image (default: ${DEFAULT_FULL_BASE_IMAGE})
   --tag <tag>         (build) Image tag (default: valet-prebuild-local/<repo>)
   --no-cache          (build) Pass --no-cache to docker build
+  --fresh             (build) Discard the cached build context and re-clone
   --json              (plan) Machine-readable output
 
-The recipe file is read from the working tree, so edits are testable without
-committing; everything else builds from the committed HEAD tree.`;
+The recipe file is read from the working tree and drives only the generated
+RUN steps, so editing one step rebuilds from that step with every earlier
+layer cached. Everything else builds from the committed HEAD tree, via a
+per-repo context cache under <dataDir>/prebuild-contexts/.`;
 
 /** One shell-out: exit code + stdout. Injected for tests. */
 export interface ExecOutcome {
@@ -82,8 +97,11 @@ export interface PrebuildDeps {
   probeDocker(): Promise<boolean>;
   /** Run a command, capture stdout (git ls-tree / rev-parse). */
   capture(cmd: string, args: string[], cwd: string): Promise<ExecOutcome>;
-  /** Run a command with inherited stdio (docker build; git archive|tar). */
+  /** Run a command with inherited stdio (docker build; git clone). */
   stream(cmd: string, args: string[], opts: { cwd: string; env?: NodeJS.ProcessEnv }): Promise<number | null>;
+  /** Root dir for cached build contexts (see the layer-cache discipline
+   * note). One subdir per repo path, reused while HEAD is unchanged. */
+  contextCacheRoot: string;
 }
 
 function defaultCapture(cmd: string, args: string[], cwd: string): Promise<ExecOutcome> {
@@ -115,6 +133,10 @@ const DEFAULT_DEPS: PrebuildDeps = {
   probeDocker: () => detectDockerDaemon(),
   capture: defaultCapture,
   stream: defaultStream,
+  contextCacheRoot: join(
+    resolveDataDir({ env: process.env.VALET_DATA_DIR, config: {} }),
+    "prebuild-contexts",
+  ),
 };
 
 /** Working-tree reader for `loadPrebuildOverride` — see the header's source
@@ -188,6 +210,7 @@ export async function runPrebuild(args: string[], deps: PrebuildDeps = DEFAULT_D
     baseImage,
     recipe: resolved.recipe,
     setup: resolved.setup,
+    baseSetup: resolved.baseSetup,
   });
 
   if (sub === "plan") {
@@ -199,6 +222,7 @@ export async function runPrebuild(args: string[], deps: PrebuildDeps = DEFAULT_D
             skipDetect: override?.skipDetect === true,
             detectedSteps: detected,
             recipeSteps: resolved.recipe,
+            baseSetup: resolved.baseSetup,
             setup: resolved.setup,
             docker: override?.docker === true,
             workspaceStorage: override?.workspaceStorage ?? null,
@@ -226,6 +250,12 @@ export async function runPrebuild(args: string[], deps: PrebuildDeps = DEFAULT_D
     if (override?.skipDetect === true && detected.length > 0) {
       printLine(`suppressed by skipDetect: ${detected.map((s) => s.id).join(", ")}`);
     }
+    if (resolved.baseSetup.length > 0) {
+      printLine(`baseSetup commands (chained base image): ${resolved.baseSetup.length}`);
+      for (const cmd of resolved.baseSetup) {
+        printLine(`  - ${cmd.length > 100 ? `${cmd.slice(0, 97)}...` : cmd}`);
+      }
+    }
     if (resolved.setup.length === 0) {
       printLine("setup commands:   (none)");
     } else {
@@ -250,11 +280,34 @@ export async function runPrebuild(args: string[], deps: PrebuildDeps = DEFAULT_D
   const tagFlag = flags.tag;
   const tag = typeof tagFlag === "string" ? tagFlag : defaultImageTag(repoPath);
 
-  const tmp = await mkdtemp(join(tmpdir(), "valet-prebuild-cli-"));
-  try {
-    const contextDir = join(tmp, "context");
-    await mkdir(contextDir, { recursive: true });
-
+  // ── Cached context, keyed by repo path, valid while HEAD is unchanged
+  // (see the layer-cache discipline note in the header).
+  const headOut = await deps.capture("git", ["rev-parse", "HEAD"], repoPath);
+  const headSha = headOut.code === 0 ? headOut.stdout.trim() : "";
+  if (!headSha) {
+    printErr("valet prebuild build: git rev-parse HEAD failed. Commit your tree (HEAD must exist) and retry.");
+    return 1;
+  }
+  const contextKey = createHash("sha256").update(resolve(repoPath)).digest("hex").slice(0, 16);
+  const contextDir = join(deps.contextCacheRoot, contextKey);
+  if (flags.fresh === true) {
+    await rm(contextDir, { recursive: true, force: true });
+  }
+  let reused = false;
+  if (existsSync(contextDir)) {
+    const cached = await deps.capture("git", ["rev-parse", "HEAD"], contextDir);
+    if (cached.code === 0 && cached.stdout.trim() === headSha) {
+      reused = true;
+    } else {
+      // Stale (new commit) or corrupt — replace. One context per repo, so
+      // this is also the pruning policy.
+      await rm(contextDir, { recursive: true, force: true });
+    }
+  }
+  if (reused) {
+    printLine(`reusing cached context (HEAD ${headSha.slice(0, 12)}) — pass --fresh to re-clone`);
+  } else {
+    await mkdir(deps.contextCacheRoot, { recursive: true });
     // Local clone, detached at HEAD — parity with the platform's
     // clone+checkout (see the header's source-discipline note). `git clone`
     // of a local path is cheap (object copy, no network).
@@ -265,24 +318,20 @@ export async function runPrebuild(args: string[], deps: PrebuildDeps = DEFAULT_D
       { cwd: repoPath },
     );
     if (cloneCode !== 0) {
+      await rm(contextDir, { recursive: true, force: true }).catch(() => {});
       printErr("valet prebuild build: local git clone failed. Commit your tree (HEAD must exist) and retry.");
       return 1;
     }
-    if (existsSync(join(contextDir, ".dockerignore"))) {
-      printErr(
-        "warning: this repo has a .dockerignore; the local build honors it but the platform bake " +
-          "(a git clone) does not. Files it excludes will be missing from the local image only.",
-      );
-    }
+  }
+  if (existsSync(join(contextDir, ".dockerignore"))) {
+    printErr(
+      "warning: this repo has a .dockerignore; the local build honors it but the platform bake " +
+        "(a git clone) does not. Files it excludes will be missing from the local image only.",
+    );
+  }
 
-    // The one working-tree file: the recipe itself, so edits are testable
-    // without committing each attempt.
-    const workingRecipe = await read(".valet/prebuild.yaml");
-    if (workingRecipe !== null) {
-      await mkdir(join(contextDir, ".valet"), { recursive: true });
-      await writeFile(join(contextDir, ".valet", "prebuild.yaml"), workingRecipe);
-    }
-
+  const tmp = await mkdtemp(join(tmpdir(), "valet-prebuild-cli-"));
+  try {
     const dockerfilePath = join(tmp, "Dockerfile");
     await writeFile(dockerfilePath, dockerfile);
 

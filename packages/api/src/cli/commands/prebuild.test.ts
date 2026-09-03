@@ -37,19 +37,31 @@ interface StreamCall {
 /** Deps whose git surface reports `rootFiles` at HEAD and whose stream calls
  * (git archive, docker build) succeed while being recorded. `onDocker` runs
  * inside the fake docker call, while the temp context still exists. */
+const HEAD_SHA = "a".repeat(40);
+
 function fakeDeps(opts: {
   rootFiles?: string[];
   dockerUp?: boolean;
+  /** Cached-context answer for `rev-parse HEAD` run in a context dir (the
+   * repo itself always answers HEAD_SHA). */
+  cachedSha?: string;
+  cacheRoot?: string;
   onDocker?: (call: StreamCall) => Promise<void> | void;
 }): PrebuildDeps & { streams: StreamCall[] } {
   const streams: StreamCall[] = [];
   return {
     streams,
+    contextCacheRoot: opts.cacheRoot ?? join(repoDir, ".context-cache"),
     probeDocker: async () => opts.dockerUp ?? true,
-    capture: async (_cmd: string, args: string[]): Promise<ExecOutcome> => {
+    capture: async (_cmd: string, args: string[], cwd: string): Promise<ExecOutcome> => {
       if (args[0] === "ls-tree") {
         if (opts.rootFiles === undefined) return { code: 128, stdout: "" };
         return { code: 0, stdout: `${opts.rootFiles.join("\n")}\n` };
+      }
+      if (args[0] === "rev-parse") {
+        if (opts.rootFiles === undefined) return { code: 128, stdout: "" };
+        if (cwd === repoDir) return { code: 0, stdout: `${HEAD_SHA}\n` };
+        return { code: 0, stdout: `${opts.cachedSha ?? HEAD_SHA}\n` };
       }
       return { code: 0, stdout: "" };
     },
@@ -60,6 +72,15 @@ function fakeDeps(opts: {
       return 0;
     },
   };
+}
+
+/** Pre-creates the cached context dir a prior build would have left. */
+async function seedContext(deps: PrebuildDeps): Promise<string> {
+  const { createHash } = await import("node:crypto");
+  const key = createHash("sha256").update(repoDir).digest("hex").slice(0, 16);
+  const dir = join(deps.contextCacheRoot, key);
+  await mkdir(dir, { recursive: true });
+  return dir;
 }
 
 async function writeRecipe(yaml: string): Promise<void> {
@@ -133,19 +154,14 @@ describe("runPrebuild build", () => {
     expect(stderr()).toContain("Start Docker");
   });
 
-  it("clones HEAD locally, overlays the working-tree recipe into the context, and streams docker build", async () => {
+  it("clones HEAD into the context cache and streams docker build", async () => {
     await writeRecipe('workspaceStorage: "4Gi"\nsetup:\n  - echo hi\n');
-    let contextRecipe: string | null = null;
     let dockerfileText: string | null = null;
     const deps = fakeDeps({
       rootFiles: ["README.md"],
       onDocker: async (call) => {
-        // Inspect the temp context while it still exists: the -f Dockerfile
-        // and the context dir are the trailing args.
         const fIdx = call.args.indexOf("-f");
         dockerfileText = await readFile(call.args[fIdx + 1], "utf8");
-        const contextDir = call.args[call.args.length - 1];
-        contextRecipe = await readFile(join(contextDir, ".valet", "prebuild.yaml"), "utf8");
       },
     });
     const code = await runPrebuild(["build", repoDir, "--tag", "test/mono:local"], deps);
@@ -159,12 +175,43 @@ describe("runPrebuild build", () => {
     const docker = deps.streams.find((s) => s.cmd === "docker");
     expect(docker?.args).toContain("-t");
     expect(docker?.args).toContain("test/mono:local");
+    // Context = the per-repo cache dir, not a per-invocation temp dir.
+    expect(docker?.args[docker.args.length - 1].startsWith(deps.contextCacheRoot)).toBe(true);
     expect(docker?.env?.DOCKER_BUILDKIT).toBe("1");
     expect(dockerfileText).toContain("COPY . /prebuilt/repo");
+    // The WORKING-TREE recipe drives the RUN lines (no commit needed).
     expect(dockerfileText).toContain("RUN echo hi");
-    // The working-tree recipe (with the uncommitted edit) rode into the context.
-    expect(contextRecipe).toContain('workspaceStorage: "4Gi"');
     expect(stdout()).toContain("built test/mono:local");
+  });
+
+  it("reuses a cached context at the same HEAD (no re-clone; layer cache holds)", async () => {
+    await writeRecipe("setup:\n  - echo hi\n");
+    const deps = fakeDeps({ rootFiles: [] });
+    await seedContext(deps);
+    const code = await runPrebuild(["build", repoDir], deps);
+    expect(code).toBe(ExitCode.OK);
+    expect(deps.streams.some((s) => s.cmd === "sh")).toBe(false);
+    expect(stdout()).toContain("reusing cached context");
+  });
+
+  it("replaces a stale cached context (HEAD moved) with a fresh clone", async () => {
+    await writeRecipe("setup:\n  - echo hi\n");
+    const deps = fakeDeps({ rootFiles: [], cachedSha: "b".repeat(40) });
+    const dir = await seedContext(deps);
+    const code = await runPrebuild(["build", repoDir], deps);
+    expect(code).toBe(ExitCode.OK);
+    const clone = deps.streams.find((s) => s.cmd === "sh");
+    expect(clone?.args[1]).toContain("git clone --quiet .");
+    expect(clone?.args[1]).toContain(JSON.stringify(dir));
+  });
+
+  it("--fresh discards a valid cached context and re-clones", async () => {
+    await writeRecipe("setup:\n  - echo hi\n");
+    const deps = fakeDeps({ rootFiles: [] });
+    await seedContext(deps);
+    const code = await runPrebuild(["build", repoDir, "--fresh"], deps);
+    expect(code).toBe(ExitCode.OK);
+    expect(deps.streams.some((s) => s.cmd === "sh")).toBe(true);
   });
 
   it("--no-cache passes through to docker build", async () => {
