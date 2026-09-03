@@ -6,6 +6,8 @@ environment (Rancher Desktop) is [`deploy/README.md`](../deploy/README.md).
 The design rationale is
 [`docs/specs/2026-07-15-kubernetes-deployment-design.md`](specs/2026-07-15-kubernetes-deployment-design.md).
 This page is the map of what exists and what will break if you deviate.
+For Valet-on-Valet dev (`make k8s-*` from inside a Valet sandbox), see
+[`docs/valet-in-valet-dev.md`](valet-in-valet-dev.md).
 
 ## What Gets Deployed
 

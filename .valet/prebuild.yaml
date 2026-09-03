@@ -1,6 +1,12 @@
-# Sandbox prebuild recipe for the valet repo itself (schema:
-# docs/prebuild-yaml.md). Bakes the dev toolchain and the pnpm install
-# into the image so sandbox cold starts skip the slow steps.
+# Sandbox prebuild recipe for the valet repo itself. Turns a stock
+# sandbox into a fully working Valet-on-Valet dev environment: `make
+# dev-local`, `pnpm typecheck`, `make smoke-orchestrator`, `make e2e`, and
+# the `make k8s-*` targets all resolve on a fresh attach. See
+# docs/valet-in-valet-dev.md for the split between what is baked here and
+# what happens at first attach, the k8s cluster tradeoffs, and how
+# ANTHROPIC_API_KEY reaches the sandbox without ever landing in an image
+# layer. Schema: docs/prebuild-yaml.md. Reconcile model:
+# docs/specs/2026-08-02-sandbox-reconcile-design.md.
 #
 # skipDetect is required: auto-detection would emit a bare
 # `pnpm install --frozen-lockfile` before setup runs, and the sandbox base
@@ -14,13 +20,17 @@ docker: true
 setup:
   # Base packages the dev loop and e2e suites expect: make (Makefile
   # targets), python3 (scripts/docs/docs_lint.py), jq, build-essential
-  # (native module builds during pnpm install). curl + ca-certificates are
-  # present on the shipped sandbox images; install them anyway so the helm
-  # and kubectl steps below work on any Debian-based override image.
-  - "apt-get update && apt-get install -y --no-install-recommends make python3 jq build-essential curl ca-certificates && rm -rf /var/lib/apt/lists/*"
+  # (native module builds during pnpm install), lsof (dev-stop's port
+  # sweep, health checks, and the CLAUDE.md "start the local stack
+  # cleanly" runbook), procps (ps, used by dev-stop's tsx-child reap
+  # loop), iproute2 (ss, an lsof-free port probe some scripts fall back
+  # to). curl + ca-certificates are present on the shipped sandbox
+  # images; install them anyway so the helm, kubectl, and k3d steps
+  # below work on any Debian-based override image.
+  - "apt-get update && apt-get install -y --no-install-recommends make python3 jq build-essential curl ca-certificates lsof procps iproute2 && rm -rf /var/lib/apt/lists/*"
   # pnpm via corepack — pinned to match docker/Dockerfile.api and
   # docker/Dockerfile.sandbox-k8s.
-  - "corepack enable && corepack prepare pnpm@9.12.3 --activate"
+  - "corepack enable && corepack prepare pnpm@10.30.3 --activate"
   - "pnpm install --frozen-lockfile"
   # helm — the helm-golden e2e suite and deploy/chart work. Pinned; bump
   # deliberately. Download the tarball plus its published SHA-256 file and
@@ -30,3 +40,176 @@ setup:
   # bump deliberately. Download the binary plus its published SHA-256 file and
   # verify before install.
   - "cd /tmp && arch=$(dpkg --print-architecture) && curl -fsSL -O https://dl.k8s.io/release/v1.31.4/bin/linux/${arch}/kubectl -O https://dl.k8s.io/release/v1.31.4/bin/linux/${arch}/kubectl.sha256 && echo \"$(cat kubectl.sha256)  kubectl\" | sha256sum -c && install -m 0755 kubectl /usr/local/bin/kubectl && rm -f kubectl kubectl.sha256 && kubectl version --client"
+  # k3d — a local k3s cluster for the make k8s-* targets. Pinned; bump
+  # deliberately (also update BOTH SHA-256 sums below). Per-arch static
+  # binaries, no published checksum file, so the hashes are embedded here.
+  #
+  # k3d chosen over kind and rootless k3s: the reference env is Rancher
+  # Desktop, which is k3s; k3d wraps k3s in docker containers and matches
+  # what `make k8s-up` expects. kind was rejected because it targets pure
+  # kubeadm images and diverges further from Rancher Desktop's runtime.
+  # Rootless k3s inside the sandbox host process was rejected because the
+  # sandbox shell runs as an unprivileged user and cannot bind cgroup v2
+  # or write /var/lib/rancher without a root escalation seam this sandbox
+  # does not have.
+  #
+  # KNOWN LIMIT (documented as a follow-up product gap in
+  # docs/valet-in-valet-dev.md): k3d needs to mount a fresh sysfs inside
+  # the k3s container, which the sandbox's rootless-in-userns docker
+  # daemon rejects with "operation not permitted". k3d IS baked and
+  # `/usr/local/bin/valet-cluster-up` still tries first — it emits a
+  # readable error naming the corrective action when the mount fails.
+  # The tools land regardless so `kubectl` and `helm` reach a real cluster
+  # once the sandbox capability lands, without a second image rebuild.
+  - "cd /tmp && arch=$(dpkg --print-architecture) && case $arch in amd64) K3D_SHA=5d3f22817d9e163ab6ed43572189dd49fe724d7a6948075b570067747eca8d3f ;; arm64) K3D_SHA=ac12fcf8e35481769e173c96d3fa70dc581826482d927b94a560a3375df2621e ;; *) echo unsupported arch $arch >&2; exit 1 ;; esac && curl -fsSL -o k3d https://github.com/k3d-io/k3d/releases/download/v5.7.5/k3d-linux-${arch} && echo \"${K3D_SHA}  k3d\" | sha256sum -c && install -m 0755 k3d /usr/local/bin/k3d && rm -f k3d && k3d version"
+  # /usr/local/bin/valet-cluster-up — one-shot idempotent bring-up for
+  # the local kubernetes cluster this Makefile's `make k8s-*` targets
+  # need. Reads no secrets; writes no state to the image. Named
+  # deliberately: `make k8s-up` calls this before `make
+  # k8s-sandbox-install` so a fresh sandbox is one command away from a
+  # working cluster.
+  #
+  # Idempotent: a second call while the cluster runs is a no-op; a
+  # partial state (cluster exists but the context alias is missing) is
+  # repaired. Idempotency matters because both bashrc (below) and the
+  # make targets may invoke it.
+  #
+  # Context safety: the cluster is created with the k3d default name
+  # `rancher-desktop`, and the resulting kubectl context is renamed to
+  # match. The Makefile pins `--context rancher-desktop` on every k8s-*
+  # target; a mismatched name would silently point at the ambient
+  # current-context (potentially production). See CLAUDE.md "Kubernetes
+  # context safety".
+  - |
+    cat >/usr/local/bin/valet-cluster-up <<'SH'
+    #!/bin/sh
+    # valet-cluster-up — bring up (or repair) the local k3d cluster that
+    # backs `make k8s-*` inside a Valet-in-Valet sandbox. Idempotent.
+    # See docs/valet-in-valet-dev.md for the design and the known-limit
+    # follow-up (rootless-in-userns cannot mount sysfs → cluster create
+    # legitimately fails with a readable error).
+    set -eu
+    CLUSTER=rancher-desktop
+    CONTEXT=rancher-desktop
+    LOG=${VALET_CLUSTER_UP_LOG:-/tmp/valet-cluster-up.log}
+    say() { printf '%s\n' "$*"; }
+    # Docker must be reachable — start-docker.sh runs first at sandbox
+    # boot, but a shell that races the daemon needs a bounded wait.
+    for i in $(seq 1 30); do
+      if docker info >/dev/null 2>&1; then break; fi
+      sleep 1
+    done
+    if ! docker info >/dev/null 2>&1; then
+      say "valet-cluster-up: docker daemon is not reachable after 30s — see /var/log/valet/dockerd.log"
+      exit 1
+    fi
+    # Cluster already up? Just make sure the context alias points at it.
+    if k3d cluster list "$CLUSTER" >/dev/null 2>&1; then
+      if ! kubectl config get-contexts "$CONTEXT" >/dev/null 2>&1; then
+        # k3d writes the context as k3d-<name>; rename to the pinned alias.
+        kubectl config rename-context "k3d-${CLUSTER}" "$CONTEXT" >/dev/null 2>&1 || true
+      fi
+      say "valet-cluster-up: cluster '${CLUSTER}' already running"
+      exit 0
+    fi
+    say "valet-cluster-up: creating k3d cluster '${CLUSTER}'"
+    # --disable=traefik keeps the Ingress path Makefile-agnostic (deploy/README.md
+    # uses port-forward, not Ingress). Errors go to $LOG so a mount-perm
+    # failure inside the sandbox is one `cat` away.
+    if ! k3d cluster create "$CLUSTER" \
+        --wait --timeout 180s \
+        --k3s-arg "--disable=traefik@server:0" \
+        >>"$LOG" 2>&1; then
+      say "valet-cluster-up: k3d cluster create failed — see $LOG"
+      say ""
+      say "  The most common cause inside a Valet sandbox is the rootless-in-userns"
+      say "  docker daemon rejecting sysfs mount for the k3s container. This is a"
+      say "  named product gap; docs/valet-in-valet-dev.md tracks the follow-up."
+      say "  kubectl and helm are baked in the image, so a resolved sandbox"
+      say "  capability starts working the next time you run this script — no"
+      say "  image rebuild needed."
+      exit 1
+    fi
+    # Rename the context to match what every `make k8s-*` target pins.
+    kubectl config rename-context "k3d-${CLUSTER}" "$CONTEXT" >/dev/null 2>&1 || true
+    say "valet-cluster-up: cluster '${CLUSTER}' ready under kubectl context '${CONTEXT}'"
+    SH
+    chmod 0755 /usr/local/bin/valet-cluster-up
+  # /usr/local/bin/valet-fetch-env — POSIX sh helper that mints the
+  # dev-stack ANTHROPIC_API_KEY at attach time. Mirrors the git credential
+  # helper (packages/api/src/engine/git-credential-helper.ts): reads the
+  # sandbox token from /etc/valet/creds/token first, VALET_SANDBOX_TOKEN
+  # fallback, POSTs to $VALET_API_URL/api/sandbox/env, and writes the
+  # resulting key to /dev/shm/valet-env — tmpfs only, mode 0600, cleared
+  # on sandbox restart. NO secret is ever baked into the image or written
+  # to a durable path.
+  #
+  # The sandbox-env route (packages/api/src/routes/sandbox-env.ts) resolves
+  # the org's Anthropic LLM-provider credential first and falls back to
+  # the api's own process.env.ANTHROPIC_API_KEY. A response of
+  # `anthropicApiKey: null` means no key exists ANYWHERE; the shim writes
+  # an empty value and the api process inside the sandbox surfaces the
+  # same "ANTHROPIC_API_KEY is required" message a laptop developer sees.
+  - |
+    cat >/usr/local/bin/valet-fetch-env <<'SH'
+    #!/bin/sh
+    # valet-fetch-env — resolve dev-stack env vars from the Valet API.
+    # See docs/valet-in-valet-dev.md.
+    set -eu
+    OUT=${VALET_ENV_FILE:-/dev/shm/valet-env}
+    URL=${VALET_API_URL:-http://localhost:8788}
+    tok=$(cat /etc/valet/creds/token 2>/dev/null || true)
+    [ -n "$tok" ] || tok=${VALET_SANDBOX_TOKEN:-}
+    if [ -z "$tok" ]; then
+      # No sandbox principal — skip silently. A repl started from outside
+      # the sandbox lifecycle should not fail here.
+      : >"$OUT"
+      chmod 0600 "$OUT"
+      exit 0
+    fi
+    body=$(curl -fsS -m 10 \
+      -H "x-valet-sandbox: $tok" \
+      -H 'content-type: application/json' \
+      -d '{}' \
+      "${URL}/api/sandbox/env" 2>/dev/null || true)
+    # Parse anthropicApiKey. The response is `{"anthropicApiKey":"..."}`
+    # or `{"anthropicApiKey":null}`; sed captures the string form and
+    # leaves null as the empty match, mirroring the JSON parsing style in
+    # git-credential-helper.ts.
+    key=$(printf '%s' "$body" | sed -n 's/.*"anthropicApiKey"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    # tmpfs write, restrictive mode, atomic replace so a partial write
+    # cannot be sourced.
+    umask 077
+    tmp="${OUT}.tmp"
+    {
+      printf '# Written by valet-fetch-env; tmpfs only, cleared on restart.\n'
+      if [ -n "$key" ]; then
+        printf 'export ANTHROPIC_API_KEY=%s\n' "'$key'"
+      else
+        printf '# ANTHROPIC_API_KEY: no key resolved — set one in Settings.\n'
+      fi
+    } >"$tmp"
+    chmod 0600 "$tmp"
+    mv "$tmp" "$OUT"
+    SH
+    chmod 0755 /usr/local/bin/valet-fetch-env
+  # /etc/profile.d/valet-in-valet.sh — every interactive shell fetches
+  # the dev-stack env and sources it. Safe on non-Valet-in-Valet
+  # sandboxes: the fetch skips when the sandbox token is absent.
+  #
+  # profile.d is sourced by bash login shells; every interactive path in
+  # this image (ttyd, code-server's integrated terminal, an agent's bash
+  # exec) already reaches this file.
+  - |
+    cat >/etc/profile.d/valet-in-valet.sh <<'SH'
+    # shellcheck shell=sh
+    # Best-effort refresh: `make dev-local` reads ANTHROPIC_API_KEY from
+    # the environment (or .env); the tmpfs file survives for the shell's
+    # lifetime and cannot leak to disk.
+    if [ -x /usr/local/bin/valet-fetch-env ]; then
+      /usr/local/bin/valet-fetch-env >/dev/null 2>&1 || true
+      # shellcheck disable=SC1091
+      [ -f /dev/shm/valet-env ] && . /dev/shm/valet-env
+    fi
+    SH
+    chmod 0644 /etc/profile.d/valet-in-valet.sh
