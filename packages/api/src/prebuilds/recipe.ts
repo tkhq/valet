@@ -45,6 +45,30 @@ const DETECTION_MATRIX: DetectionRule[] = [
   { id: "go-mod-download", lockfile: "go.sum", command: "go mod download" },
 ];
 
+/**
+ * The binary each detected step needs, keyed by step id.
+ *
+ * Detection infers a step from a lockfile. It cannot know the image has the
+ * toolchain to run it, and the stock image has almost none of them: it ships
+ * node, npm and bun, and no cargo, go, python, pip, uv or yarn. So six of
+ * the seven rules below produce a `RUN` that exits 127, the build fails, and
+ * every affected repo leaves a Failed job behind. A Rust repo made this
+ * visible (TKAI-354) but Go, Python and yarn repos fail the same way.
+ *
+ * Keyed by `id` rather than carried on `RecipeStep`, because the recipe is
+ * hashed into bake identity: a new field would change every hash and rebake
+ * repos whose builds were fine.
+ */
+const STEP_REQUIRES: Readonly<Record<string, string>> = {
+  "pnpm-install": "pnpm",
+  "npm-ci": "npm",
+  "yarn-install": "yarn",
+  "uv-sync": "uv",
+  "pip-install": "pip",
+  "cargo-fetch": "cargo",
+  "go-mod-download": "go",
+};
+
 /** Root-level lockfile paths the detection matrix checks for, in matrix
  * order. Exported so callers that need to know WHICH paths to fetch before
  * calling `detectRecipe` (e.g. the prebuild service's GitHub Contents-API
@@ -221,9 +245,24 @@ export function generateDockerfile(opts: GenerateDockerfileOpts): string {
 
   for (const step of recipe) {
     lines.push("");
-    lines.push(`RUN ${step.command}`);
+    const needs = STEP_REQUIRES[step.id];
+    if (needs === undefined) {
+      lines.push(`RUN ${step.command}`);
+      continue;
+    }
+    // Skip, do not fail. A detected step is Valet's inference from a
+    // lockfile, not something the repo asked for, so an image without the
+    // toolchain should build without the dependency cache rather than not
+    // build at all. The echo is what a reader sees instead of `127`.
+    lines.push(
+      `RUN command -v ${needs} >/dev/null 2>&1 && ${step.command} || ` +
+        `echo "prebuild: no ${needs} in this image, skipping ${step.id}"`,
+    );
   }
 
+  // `setup` is NOT guarded. Those commands are the repo's own instruction,
+  // and a repo that asks for something the image cannot run should hear
+  // about it as a failure rather than have it silently skipped.
   for (const cmd of setup) {
     lines.push("");
     lines.push(`RUN ${cmd}`);
