@@ -54,6 +54,22 @@ function press(code: string, opts: { shift?: boolean; repeat?: boolean; target?:
   return event;
 }
 
+/** A jsdom `matchMedia` stand-in. jsdom ships none, and the sidebar chord
+ * asks for the mobile breakpoint. Built in full rather than cast, so a
+ * change to the DOM type shows up here. */
+function mediaQueryList(query: string): MediaQueryList {
+  return {
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
+  };
+}
+
 const newThread = vi.fn();
 const archiveActiveThread = vi.fn();
 const focusThreadSearch = vi.fn();
@@ -68,12 +84,7 @@ beforeEach(() => {
   newThread.mockClear();
   archiveActiveThread.mockClear();
   focusThreadSearch.mockClear();
-  window.matchMedia = ((query: string) => ({
-    matches: false,
-    media: query,
-    addEventListener: () => {},
-    removeEventListener: () => {},
-  })) as unknown as typeof window.matchMedia;
+  window.matchMedia = (query: string) => mediaQueryList(query);
   unregister = useChatHotkeysStore
     .getState()
     .register({ newThread, archiveActiveThread, focusThreadSearch });
