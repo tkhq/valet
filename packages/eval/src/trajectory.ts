@@ -8,7 +8,7 @@
  * come from the entry fields the engine stamps at message_end.
  */
 import type { MessageCost, MessageEntry, MessageUsage, SessionEntry } from "@valet/engine";
-import type { Trajectory, TrajectoryToolCall, TrajectoryTurn } from "./types.js";
+import type { Trajectory, TrajectoryToolCall, TrajectoryTurn, TrajectoryUserTurn } from "./types.js";
 
 /**
  * Extract readable text from a persisted tool_call `result` of any shape:
@@ -139,7 +139,16 @@ export function extractTrajectory(input: ExtractTrajectoryInput): Trajectory {
   let stopReason: string | undefined;
   let toolIndex = 0;
 
+  const userTurns: TrajectoryUserTurn[] = [];
   for (const entry of input.entries) {
+    if (entry.type === "message" && entry.role === "user") {
+      userTurns.push({
+        index: userTurns.length,
+        content: entry.content,
+        ...(entry.queueItemId !== undefined ? { queueItemId: entry.queueItemId } : {}),
+      });
+      continue;
+    }
     if (!isAssistantMessage(entry)) continue;
 
     const turn: TrajectoryTurn = { index: turns.length };
@@ -153,6 +162,7 @@ export function extractTrajectory(input: ExtractTrajectoryInput): Trajectory {
       anyCost = true;
     }
     if (entry.queueItemId !== undefined) turn.queueItemId = entry.queueItemId;
+    if (entry.content.length > 0) turn.text = entry.content;
     turns.push(turn);
 
     for (const part of entry.parts ?? []) {
@@ -168,6 +178,7 @@ export function extractTrajectory(input: ExtractTrajectoryInput): Trajectory {
         index: toolIndex++,
         ...(actionId !== undefined ? { actionId } : {}),
         ...(part.elided === true ? { elided: true } : {}),
+        ...(entry.queueItemId !== undefined ? { queueItemId: entry.queueItemId } : {}),
       });
     }
 
@@ -180,6 +191,7 @@ export function extractTrajectory(input: ExtractTrajectoryInput): Trajectory {
     prompt: input.prompt,
     model: input.model,
     turns,
+    ...(userTurns.length > 0 ? { userTurns } : {}),
     toolCalls,
     finalOutput,
     usage,

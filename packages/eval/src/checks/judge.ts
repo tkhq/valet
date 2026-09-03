@@ -25,6 +25,8 @@ const DEFAULT_THRESHOLD = 4;
 const DEFAULT_JUDGE_SAMPLES = 3;
 const RESULT_TEXT_MAX = 400;
 const OUTPUT_MAX = 8_000;
+const USER_TEXT_MAX = 600;
+const ASSISTANT_TEXT_MAX = 1_500;
 
 const JUDGE_SYSTEM_PROMPT = [
   "You are a strict evaluation judge for an AI agent platform.",
@@ -71,11 +73,42 @@ export function renderTrajectoryForJudge(t: Trajectory, label = "trajectory"): s
     `turns: ${t.turns.length}`,
     "tool calls:",
   ];
-  if (t.toolCalls.length === 0) lines.push("  (none)");
-  for (const call of t.toolCalls) {
+  const renderCall = (call: Trajectory["toolCalls"][number], indent: string): string => {
     const args = call.args !== undefined ? JSON.stringify(call.args) : "{}";
     const result = toolResultText(call.result).slice(0, RESULT_TEXT_MAX).replace(/\s+/g, " ");
-    lines.push(`  ${call.index + 1}. ${call.toolName}(${args}) [${call.status}]${result ? ` → ${result}` : ""}`);
+    return `${indent}${call.index + 1}. ${call.toolName}(${args}) [${call.status}]${result ? ` → ${result}` : ""}`;
+  };
+  // Group calls under the submission that made them, so a rubric about a
+  // specific user turn ("did not fix during the investigation turn") is
+  // judged from linkage, not guessed from global order. Trajectories from
+  // before the linkage existed fall back to the flat list.
+  const submissionOrder: string[] = [];
+  for (const turn of t.turns) {
+    const q = turn.queueItemId;
+    if (q !== undefined && !submissionOrder.includes(q)) submissionOrder.push(q);
+  }
+  const attributable =
+    submissionOrder.length > 0 &&
+    t.toolCalls.every((c) => c.queueItemId !== undefined && submissionOrder.includes(c.queueItemId));
+  if (t.toolCalls.length === 0) {
+    lines.push("  (none)");
+  } else if (attributable) {
+    submissionOrder.forEach((q, i) => {
+      lines.push(`  submission ${i + 1}:`);
+      for (const u of t.userTurns ?? []) {
+        if (u.queueItemId !== q) continue;
+        lines.push(`    user: ${u.content.slice(0, USER_TEXT_MAX).replace(/\s+/g, " ")}`);
+      }
+      const calls = t.toolCalls.filter((c) => c.queueItemId === q);
+      if (calls.length === 0) lines.push("    (no tool calls)");
+      for (const call of calls) lines.push(renderCall(call, "    "));
+      for (const turn of t.turns) {
+        if (turn.queueItemId !== q || turn.text === undefined) continue;
+        lines.push(`    assistant: ${turn.text.slice(0, ASSISTANT_TEXT_MAX).replace(/\s+/g, " ")}`);
+      }
+    });
+  } else {
+    for (const call of t.toolCalls) lines.push(renderCall(call, "  "));
   }
   lines.push(`final output:\n${t.finalOutput.slice(0, OUTPUT_MAX)}`, `</${label}>`);
   return lines.join("\n");

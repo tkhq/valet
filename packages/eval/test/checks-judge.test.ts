@@ -60,6 +60,48 @@ describe("renderTrajectoryForJudge", () => {
     expect(rendered).toContain("final output:");
     expect(rendered).toContain("Crisp leaves");
   });
+
+  it("groups user turns and tool calls by submission when the linkage exists", () => {
+    const t = makeTrajectory({
+      turns: [
+        { index: 0, queueItemId: "q-1" },
+        { index: 1, queueItemId: "q-2", text: "the regex requires both segments" },
+        { index: 2, queueItemId: "q-3" },
+      ],
+      userTurns: [
+        { index: 0, content: "create the fixture", queueItemId: "q-1" },
+        { index: 1, content: "investigate, do not fix", queueItemId: "q-2" },
+        { index: 2, content: "now fix it", queueItemId: "q-3" },
+      ],
+      toolCalls: [
+        { toolName: "write", callId: "c1", status: "completed", index: 0, queueItemId: "q-1" },
+        { toolName: "edit", callId: "c2", status: "completed", index: 1, queueItemId: "q-3" },
+      ],
+    });
+    const rendered = renderTrajectoryForJudge(t);
+    const lines = rendered.split("\n");
+    const s1 = lines.indexOf("  submission 1:");
+    const s2 = lines.indexOf("  submission 2:");
+    const s3 = lines.indexOf("  submission 3:");
+    expect(s1).toBeGreaterThan(-1);
+    expect(lines[s1 + 1]).toBe("    user: create the fixture");
+    expect(lines[s1 + 2]).toContain("write");
+    expect(lines[s2 + 1]).toBe("    user: investigate, do not fix");
+    expect(lines[s2 + 2]).toBe("    (no tool calls)");
+    expect(lines[s2 + 3]).toBe("    assistant: the regex requires both segments");
+    expect(lines[s3 + 1]).toBe("    user: now fix it");
+    expect(lines[s3 + 2]).toContain("edit");
+  });
+
+  it("falls back to the flat list when calls lack submission linkage", () => {
+    const t = makeTrajectory({
+      turns: [{ index: 0, queueItemId: "q-1" }],
+      toolCalls: [{ toolName: "write", callId: "c1", status: "completed", index: 0 }],
+    });
+    const rendered = renderTrajectoryForJudge(t);
+    expect(rendered).not.toContain("submission 1:");
+    expect(rendered).toContain("1. write({}) [completed]");
+  });
 });
 
 describe("buildJudgeRunner (faux judge)", () => {

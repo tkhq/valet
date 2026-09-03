@@ -39,6 +39,27 @@ export interface TrajectoryToolCall {
    * the elision explicitly instead of a misleading pattern mismatch.
    */
   elided?: boolean;
+  /**
+   * The submission whose turn made this call, mirroring
+   * `TrajectoryTurn.queueItemId`. Lets multi-turn readers (the judge
+   * rendering in particular) attribute a call to the user turn it served
+   * instead of guessing from global order.
+   */
+  queueItemId?: string;
+}
+
+/**
+ * One user-side input in the conversation, in entry order: a scripted case
+ * turn, or a delivered signal (e.g. child.settled) in orchestrator cases.
+ * Judges need these to score turn-scoped rubrics ("did not fix until the
+ * user asked") from evidence instead of guessing from the first prompt.
+ */
+export interface TrajectoryUserTurn {
+  /** 0-based order across the trajectory's user inputs. */
+  index: number;
+  content: string;
+  /** The submission this input created, matching `TrajectoryTurn.queueItemId`. */
+  queueItemId?: string;
 }
 
 /** One agent turn (one assistant message cycle) with its reported usage. */
@@ -55,6 +76,12 @@ export interface TrajectoryTurn {
    * readers can scope per-submission instead of guessing from order.
    */
   queueItemId?: string;
+  /**
+   * The assistant text of this turn, when it produced any. Judges need
+   * mid-conversation replies (an investigation turn's explanation, a
+   * draft) — `finalOutput` only carries the last one.
+   */
+  text?: string;
 }
 
 /**
@@ -69,6 +96,11 @@ export interface Trajectory {
   /** Model spec the case ran with (e.g. `anthropic/claude-haiku-4-5`). */
   model: string;
   turns: TrajectoryTurn[];
+  /**
+   * User-side inputs in order. Optional: trajectories recorded before this
+   * field existed do not have it.
+   */
+  userTurns?: TrajectoryUserTurn[];
   toolCalls: TrajectoryToolCall[];
   /** Text of the last assistant message. */
   finalOutput: string;

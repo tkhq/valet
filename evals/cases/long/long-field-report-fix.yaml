@@ -1,0 +1,44 @@
+# Long-trajectory suite: a field report reshapes the requirements after
+# the build. Mined from real operator sessions, where "team X ran it and
+# got the wrong total" arrives with partial evidence and the agent must
+# reproduce, extend, and prove — without breaking the original inputs.
+id: long-field-report-fix
+description: Extend a working script from a field report; both input formats must pass.
+profile: full
+turns:
+  - role: user
+    content: >-
+      Write /workspace/sum.js: a Node script that takes a file path,
+      sums one number per line, and prints the total. Reply "done" when
+      written.
+  - role: user
+    content: >-
+      The Berlin team ran it on their export and got the wrong total —
+      their numbers use a decimal comma, like 1,5. There are never
+      thousands separators. Handle both comma and dot decimals; dot
+      files must keep working and the printed total stays dot-formatted.
+      When it's fixed, prove it: run it on a comma file and a dot file
+      and paste both commands with their output.
+  - role: user
+    content: >-
+      one more thing — their files sometimes end with a blank line, make
+      sure that doesn't break the total. Then re-run the comma file and
+      the dot file and paste all the totals, and you're done.
+timeout_ms: 480000
+checks:
+  - type: verify_command
+    command: >-
+      printf '1,5\n2,25\n' > /tmp/de.txt &&
+      test "$(node /workspace/sum.js /tmp/de.txt)" = "3.75"
+  - type: verify_command
+    command: >-
+      printf '1.5\n2\n' > /tmp/en.txt &&
+      test "$(node /workspace/sum.js /tmp/en.txt)" = "3.5"
+  - type: verify_command
+    command: >-
+      printf '1\n2\n\n' > /tmp/blank.txt &&
+      test "$(node /workspace/sum.js /tmp/blank.txt)" = "3"
+  - type: tool_called
+    tool: bash
+    min: 1
+  - type: no_errors

@@ -1,0 +1,43 @@
+# Long-trajectory suite: voice dictation resends the same request with
+# additions and one changed detail. Mined from real operator sessions,
+# where near-duplicate messages arrive back to back and the LAST version
+# is authoritative. Failure modes measured: keeping the stale detail,
+# asking instead of merging, or producing a second artifact.
+id: long-dictation-merge
+description: Merge a dictation resend; the last version of the request wins.
+profile: full
+turns:
+  - role: user
+    content: >-
+      can you write /workspace/runbook.md for restarting the staging api
+      — stop the service with `systemctl stop valet-api`, check that
+      port 8080 is free, start the service again, then curl the health
+      endpoint on port 8080
+  - role: user
+    content: >-
+      can you write /workspace/runbook.md for restarting the staging api
+      — stop the service with `systemctl stop valet-api`, check that
+      port 9090 is free, start the service again, then curl the health
+      endpoint on port 9090, and add a rollback section at the end that
+      points to deploy/README.md
+timeout_ms: 300000
+checks:
+  - type: verify_command
+    command: grep -q 9090 /workspace/runbook.md
+  - type: verify_command
+    command: '! grep -q 8080 /workspace/runbook.md'
+  - type: verify_command
+    command: grep -qi rollback /workspace/runbook.md
+  - type: verify_command
+    command: grep -q 'deploy/README.md' /workspace/runbook.md
+  - type: judge_trajectory
+    rubric: >-
+      The second user message is a dictation resend of the first with a
+      corrected port and an added rollback section. Score 5 if the agent
+      treated it as the authoritative version and updated the one
+      runbook in place without asking the user to clarify the
+      duplication. Score 1 if it created a second document, asked which
+      version to keep, or left the stale port in place.
+  - type: max_turns
+    value: 8
+  - type: no_errors

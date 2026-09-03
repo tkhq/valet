@@ -1,0 +1,208 @@
+{
+  "caseId": "long-memory-decisions",
+  "model": "anthropic/claude-haiku-4-5",
+  "savedAt": "2026-09-03T06:15:44.652Z",
+  "status": "pass",
+  "trajectory": {
+    "caseId": "long-memory-decisions",
+    "prompt": "Heads up on the tier decision: the new sandbox tier is named \"ember\", the cold-start budget is 800ms, and we are NOT doing per-tier images — one image, runtime switches. Note this down; we'll write it up later.",
+    "model": "anthropic/claude-haiku-4-5",
+    "turns": [
+      {
+        "index": 0,
+        "usage": {
+          "input": 2683,
+          "output": 165,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 2848
+        },
+        "cost": {
+          "input": 0.002683,
+          "output": 0.0008250000000000001,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 0.0035080000000000003
+        },
+        "queueItemId": "q-mtl4siev-1u"
+      },
+      {
+        "index": 1,
+        "usage": {
+          "input": 2871,
+          "output": 33,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 2904
+        },
+        "cost": {
+          "input": 0.002871,
+          "output": 0.00016500000000000003,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 0.003036
+        },
+        "queueItemId": "q-mtl4siev-1u",
+        "text": "Noted. Ember tier, 800ms cold-start, single image with runtime configuration switches. Saved to memory for the writeup."
+      },
+      {
+        "index": 2,
+        "usage": {
+          "input": 2927,
+          "output": 55,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 2982
+        },
+        "cost": {
+          "input": 0.002927,
+          "output": 0.000275,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 0.003202
+        },
+        "queueItemId": "q-mtl4skvh-1z",
+        "text": "Here are two sentences for standup:\n\n> The sandbox tier work is progressing on schedule and we're on track to land it Friday. We've finalized the tier naming, cold-start budget, and image strategy—ready to move into implementation."
+      },
+      {
+        "index": 3,
+        "usage": {
+          "input": 3000,
+          "output": 177,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 3177
+        },
+        "cost": {
+          "input": 0.003,
+          "output": 0.000885,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 0.003885
+        },
+        "queueItemId": "q-mtl4slyg-23"
+      },
+      {
+        "index": 4,
+        "usage": {
+          "input": 3200,
+          "output": 15,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 3215
+        },
+        "cost": {
+          "input": 0.0031999999999999997,
+          "output": 0.00007500000000000001,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 0.0032749999999999997
+        },
+        "queueItemId": "q-mtl4slyg-23",
+        "text": "Recorded. Priya owns the tier rollout."
+      },
+      {
+        "index": 5,
+        "usage": {
+          "input": 3251,
+          "output": 85,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 3336
+        },
+        "cost": {
+          "input": 0.003251,
+          "output": 0.00042500000000000003,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 0.003676
+        },
+        "queueItemId": "q-mtl4snrs-28",
+        "text": "Here's a summary for the eng channel:\n\n---\n\n**Sandbox Tier Decision**\n\nWe've finalized the new sandbox tier:\n\n- **Tier Name:** ember\n- **Cold-start Budget:** 800ms\n- **Image Strategy:** Single image with runtime-based configuration switches (not per-tier images)\n- **Rollout Owner:** Priya\n\n---"
+      }
+    ],
+    "userTurns": [
+      {
+        "index": 0,
+        "content": "Heads up on the tier decision: the new sandbox tier is named \"ember\", the cold-start budget is 800ms, and we are NOT doing per-tier images — one image, runtime switches. Note this down; we'll write it up later.",
+        "queueItemId": "q-mtl4siev-1u"
+      },
+      {
+        "index": 1,
+        "content": "Unrelated — draft two sentences for standup saying the tier work is on track for Friday.",
+        "queueItemId": "q-mtl4skvh-1z"
+      },
+      {
+        "index": 2,
+        "content": "One more for the record: Priya owns the tier rollout.",
+        "queueItemId": "q-mtl4slyg-23"
+      },
+      {
+        "index": 3,
+        "content": "OK, write the tier decision summary for the eng channel: the tier name, the cold-start budget, the image decision, and who owns the rollout.",
+        "queueItemId": "q-mtl4snrs-28"
+      }
+    ],
+    "toolCalls": [
+      {
+        "toolName": "mem_write",
+        "callId": "toolu_01KsTw5jNQR9Srbz762CFzmk",
+        "status": "completed",
+        "args": {
+          "path": "notes/sandbox-tier-decision.md",
+          "description": "Sandbox tier decision: ember tier, 800ms cold-start, single image with runtime switches",
+          "content": "# Sandbox Tier Decision\n\n**Tier Name:** ember\n\n**Cold-start Budget:** 800ms\n\n**Image Strategy:** One image, runtime switches (NOT per-tier images)\n\n---\n\nTo be written up formally later.\n"
+        },
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "Created: notes/sandbox-tier-decision.md"
+            }
+          ],
+          "text": "Created: notes/sandbox-tier-decision.md"
+        },
+        "index": 0,
+        "queueItemId": "q-mtl4siev-1u"
+      },
+      {
+        "toolName": "mem_write",
+        "callId": "toolu_01LjuM7mXynxaywh7ada7J25",
+        "status": "completed",
+        "args": {
+          "path": "notes/sandbox-tier-decision.md",
+          "description": "Sandbox tier decision: ember tier, 800ms cold-start, single image with runtime switches",
+          "content": "# Sandbox Tier Decision\n\n**Tier Name:** ember\n\n**Cold-start Budget:** 800ms\n\n**Image Strategy:** One image, runtime switches (NOT per-tier images)\n\n**Owner:** Priya (tier rollout)\n\n---\n\nTo be written up formally later.\n"
+        },
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "Updated: notes/sandbox-tier-decision.md"
+            }
+          ],
+          "text": "Updated: notes/sandbox-tier-decision.md"
+        },
+        "index": 1,
+        "queueItemId": "q-mtl4slyg-23"
+      }
+    ],
+    "finalOutput": "Here's a summary for the eng channel:\n\n---\n\n**Sandbox Tier Decision**\n\nWe've finalized the new sandbox tier:\n\n- **Tier Name:** ember\n- **Cold-start Budget:** 800ms\n- **Image Strategy:** Single image with runtime-based configuration switches (not per-tier images)\n- **Rollout Owner:** Priya\n\n---",
+    "usage": {
+      "input": 17932,
+      "output": 530,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 18462
+    },
+    "cost": {
+      "input": 0.017931999999999997,
+      "output": 0.0026500000000000004,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0.020582
+    },
+    "durationMs": 8405,
+    "stopReason": "end_turn"
+  }
+}
