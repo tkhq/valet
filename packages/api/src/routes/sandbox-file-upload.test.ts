@@ -14,7 +14,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { createHash } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { zipExtractRoot } from "./sandbox-file-upload.js";
+import { sandboxUploadAvailability, zipExtractRoot } from "./sandbox-file-upload.js";
 import type { PostSessionFileUploadResponse } from "../wire/types.js";
 
 // A flat `zip -X` archive: a.txt ("alpha\n") + b.txt ("beta\n") at the root,
@@ -350,6 +350,21 @@ describe("POST /api/sessions/:id/files", () => {
   // MessageEntry type:"file" → agent note) is covered by
   // packages/engine/test/prompt-file-attachments.test.ts — this harness
   // runs keyless, so no turn ever starts and no user entry persists here.
+});
+
+describe("sandboxUploadAvailability", () => {
+  it.each(["detached", "provisioning", "suspended"] as const)("marks %s as waking", (state) => {
+    expect(sandboxUploadAvailability(state)).toMatchObject({ status: 409, body: { wake: true } });
+  });
+
+  it.each(["error", "released"] as const)("does not mark %s as waking", (state) => {
+    expect(sandboxUploadAvailability(state)).toMatchObject({ status: 409 });
+    expect(sandboxUploadAvailability(state)?.body).not.toHaveProperty("wake");
+  });
+
+  it("leaves ready to the handle invariant check", () => {
+    expect(sandboxUploadAvailability("ready")).toBeNull();
+  });
 });
 
 describe("zipExtractRoot", () => {

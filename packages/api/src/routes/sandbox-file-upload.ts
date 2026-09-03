@@ -28,7 +28,7 @@ import { Hono } from "hono";
 import { createHash } from "node:crypto";
 import { dirname } from "node:path";
 import { DEFAULT_MAX_UPLOAD_BYTES } from "@valet/shared";
-import type { Sandbox } from "@valet/engine";
+import type { AttachmentState, Sandbox } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { resolveUploadDest } from "../services/path-validation.js";
 import { extractPdf, pdfStubMarkdown } from "../services/pdf-extract.js";
@@ -106,6 +106,34 @@ async function statIfExists(
     if (isNotFoundError(err)) return null;
     throw err;
   }
+}
+
+type UploadAvailability =
+  | { status: 409; body: { error: string; corrective: string; wake?: true } }
+  | { status: 500; body: { error: string; corrective: string } };
+
+export function sandboxUploadAvailability(state: AttachmentState): UploadAvailability | null {
+  if (state === "ready") return null;
+  if (state === "detached" || state === "provisioning" || state === "suspended") {
+    return {
+      status: 409,
+      body: {
+        error: "sandbox not ready",
+        corrective: "The sandbox is waking. Retry in a few seconds.",
+        wake: true,
+      },
+    };
+  }
+  if (state === "error") {
+    return {
+      status: 409,
+      body: { error: "sandbox failed to start", corrective: "Recover the sandbox, then retry the upload." },
+    };
+  }
+  return {
+    status: 409,
+    body: { error: "sandbox was released", corrective: "Start a new session, then upload the file again." },
+  };
 }
 
 fileUploadRouter.post("/:id/files", async (c) => {
@@ -227,16 +255,21 @@ fileUploadRouter.post("/:id/files", async (c) => {
     );
   }
 
-  const sandbox = engineSession.attachment.current();
+  const attachment = engineSession.attachment;
+  const sandbox = attachment.current();
   if (!sandbox) {
-    engineSession.attachment.warm();
+    if (attachment.state === "ready") {
+      return c.json(
+        { error: "sandbox handle is missing", corrective: "Reload the session. If this repeats, contact support." },
+        500,
+      );
+    }
+    const unavailable = sandboxUploadAvailability(attachment.state);
+    if (unavailable && "wake" in unavailable.body) attachment.warm();
+    if (unavailable) return c.json(unavailable.body, unavailable.status);
     return c.json(
-      {
-        error: "sandbox not ready",
-        corrective: "The sandbox is waking. Retry in a few seconds.",
-        wake: true,
-      },
-      409,
+      { error: "sandbox handle is missing", corrective: "Reload the session. If this repeats, contact support." },
+      500,
     );
   }
 

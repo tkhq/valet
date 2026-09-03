@@ -136,6 +136,11 @@ export function Composer({
   }, [sessionId, threadId]);
 
   const { uploadFile } = useFileUpload(sessionId);
+  const uploadControllers = useRef(new Map<string, AbortController>());
+  useEffect(() => () => {
+    for (const controller of uploadControllers.current.values()) controller.abort();
+    uploadControllers.current.clear();
+  }, []);
   const [dragActive, setDragActive] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Form element ref for the page-level drop target — used to skip
@@ -337,7 +342,18 @@ export function Composer({
    * — the result is dropped. */
   const startUpload = useCallback(
     (slot: string, composerFile: ComposerFile) => {
-      void uploadFile(composerFile).then((updated) => {
+      uploadControllers.current.get(composerFile.id)?.abort();
+      const controller = new AbortController();
+      uploadControllers.current.set(composerFile.id, controller);
+      const update = (patch: Partial<ComposerFile>) => {
+        if (controller.signal.aborted) return;
+        useComposerDraftStore.getState().setFiles(slot, (prev) =>
+          prev.map((f) => (f.id === composerFile.id ? { ...f, ...patch } : f)),
+        );
+      };
+      void uploadFile(composerFile, controller.signal, update).then((updated) => {
+        if (controller.signal.aborted) return;
+        uploadControllers.current.delete(composerFile.id);
         useComposerDraftStore
           .getState()
           .setFiles(slot, (prev) => prev.map((f) => (f.id === composerFile.id ? updated : f)));
@@ -447,6 +463,8 @@ export function Composer({
   }
 
   function removeFile(id: string) {
+    uploadControllers.current.get(id)?.abort();
+    uploadControllers.current.delete(id);
     useComposerDraftStore.getState().setFiles(key, (prev) => prev.filter((f) => f.id !== id));
   }
 

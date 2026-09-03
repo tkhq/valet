@@ -30,7 +30,7 @@ export function FileChip({ file, onRemove, onRetry }: FileChipProps) {
         {!isError && (
           <div className="text-muted text-xs">
             {formatSize(file.bytes)}
-            {isUploading ? " · uploading…" : ""}
+            {isUploading ? ` · ${file.waitingForSandbox ? "waking sandbox…" : "uploading…"}` : ""}
           </div>
         )}
       </div>
