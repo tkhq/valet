@@ -277,6 +277,40 @@ click selection and comment anchoring during authoring, and its content is
 the session owner's own work in an authenticated view. The shadow root is the
 **authoring** renderer; the frame is the **published** renderer.
 
+## Styling: self-contained pages, skills, and the chart runtime
+
+An artifact is a self-contained asset: everything that styles it lives in
+its own bytes. There is deliberately no server-side styling injection and no
+stored theme a publish bakes in — that idea was considered and rejected,
+because it breaks the snapshot property's simplest reading (the bytes you
+published are the bytes served) and because stored design systems are Valet
+Design's concept (`docs/specs/2026-08-23-valet-design-design.md`,
+`DesignSystemProvider`), not the publish pipeline's.
+
+Consistency across sessions comes from the prompt side instead:
+
+1. **The `artifact-design` skill**
+   (`packages/plugin-memory/skills/artifact-design/SKILL.md`) carries the
+   design rules and a copy-paste component system — page scaffold, stat
+   tiles, data tables, pills, chart blocks, comparisons, timelines — all
+   speaking the shell's token vocabulary. The `artifact_publish` tool
+   description points the agent at it. Org-specific looks are more skills:
+   a brand skill that overrides the defaults wins over this one.
+2. **Shell tokens.** The shell defines light/dark-aware CSS variables
+   (`--artifact-bg/fg/muted/line/accent`) plus a categorical chart palette
+   (`--artifact-chart-1..8`). Pages that style with the variables adapt to
+   dark mode for free.
+3. **The chart runtime.** The shell injects `window.valetDS` into every page
+   (downloads included): a tiny script that resolves theme values lazily
+   from CSS variables — `--ds-*` variables the page's own stylesheet
+   defines first, the `--artifact-*` defaults second — and exposes
+   `palette`, `font`, `textColor`, `gridColor`, plus two adapters for the
+   blessed CDN libraries: `applyChartTheme(Chart)` for Chart.js 4 (sets
+   defaults and auto-assigns palette colors to datasets that pick none) and
+   `echartsTheme()` for ECharts. A page that wants a brand palette declares
+   `--ds-chart-1..8`, `--ds-chart-text`, `--ds-chart-grid`, `--ds-font-body`
+   in its own CSS and every chart follows, dark mode included.
+
 ## Element addressing
 
 Every comment anchors to a **vdid**: the content-hash element id scheme the

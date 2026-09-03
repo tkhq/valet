@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ARTIFACT_CSP,
+  ARTIFACT_DS_RUNTIME_JS,
   ARTIFACT_FRAME_SANDBOX,
   ARTIFACT_MAX_CONTENT_BYTES,
   ARTIFACT_RUNTIME_JS,
@@ -243,10 +244,20 @@ describe("buildArtifactDocument", () => {
     expect(download).not.toContain("valet-artifact:ready");
   });
 
-  it("ships a runtime that cannot terminate its own script tag", () => {
-    // A `</script>` inside the inline runtime would end the tag early and
+  it("includes the chart runtime and palette on every page, downloads included", () => {
+    const download = buildArtifactDocument({ title: "T", content: "<p>x</p>" });
+    expect(download).toContain("window.valetDS");
+    expect(download).toContain("--artifact-chart-1");
+    // The dark palette redefines the chart tokens too.
+    const dark = download.slice(download.indexOf("@media"));
+    expect(dark).toContain("--artifact-chart-1");
+  });
+
+  it("ships runtimes that cannot terminate their own script tags", () => {
+    // A `</script>` inside an inline runtime would end the tag early and
     // dump the rest as markup.
     expect(ARTIFACT_RUNTIME_JS.toLowerCase()).not.toContain("</script");
+    expect(ARTIFACT_DS_RUNTIME_JS.toLowerCase()).not.toContain("</script");
   });
 
   it("marks every page noindex", () => {

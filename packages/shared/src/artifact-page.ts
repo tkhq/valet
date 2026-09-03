@@ -266,6 +266,9 @@ function buildHead(input: ArtifactDocumentInput): string {
     description ? `<meta name="description" content="${escapeHtml(description)}">` : undefined,
     favicon ? `<link rel="icon" href="${favicon}">` : undefined,
     `<style>${ARTIFACT_BASE_CSS}</style>`,
+    // The design-system runtime rides every page, downloads included — saved
+    // files keep their styled charts. The comment runtime is viewer-only.
+    `<script>${ARTIFACT_DS_RUNTIME_JS}</script>`,
     input.runtime ? `<script>${ARTIFACT_RUNTIME_JS}</script>` : undefined,
   ]
     .filter((line): line is string => line !== undefined)
@@ -281,7 +284,15 @@ const ARTIFACT_DARK_TOKENS = `color-scheme: dark;
   --artifact-fg: #e8eaee;
   --artifact-muted: #98a0ad;
   --artifact-line: #2a2e36;
-  --artifact-accent: #7fb28f;`;
+  --artifact-accent: #7fb28f;
+  --artifact-chart-1: #7fb28f;
+  --artifact-chart-2: #8fa8e0;
+  --artifact-chart-3: #e0a070;
+  --artifact-chart-4: #c39fd6;
+  --artifact-chart-5: #e08a95;
+  --artifact-chart-6: #6cc5c5;
+  --artifact-chart-7: #d6bf6e;
+  --artifact-chart-8: #9aa3af;`;
 
 /**
  * The base sheet. Deliberately small: it sets the ground the page sits on and
@@ -304,6 +315,17 @@ const ARTIFACT_BASE_CSS = `
   --artifact-muted: #5b6270;
   --artifact-line: #e3e5ea;
   --artifact-accent: #3d6b4f;
+  /* Default categorical chart palette, read by the chart runtime
+   * (window.valetDS). A page overrides these by defining --ds-chart-N
+   * variables in its own CSS. */
+  --artifact-chart-1: #3d6b4f;
+  --artifact-chart-2: #4a6fb1;
+  --artifact-chart-3: #c2703d;
+  --artifact-chart-4: #8f5aa5;
+  --artifact-chart-5: #b03a48;
+  --artifact-chart-6: #2a8f8f;
+  --artifact-chart-7: #a3852f;
+  --artifact-chart-8: #6b7280;
 }
 :root[data-theme="light"] { color-scheme: light; }
 @media (prefers-color-scheme: dark) {
@@ -361,6 +383,88 @@ a { color: var(--artifact-accent); }
   color: var(--artifact-muted);
 }
 .valet-artifact-doc hr { border: 0; border-top: 1px solid var(--artifact-line); }
+`.trim();
+
+// ─── Chart theme runtime ─────────────────────────────────────────────────
+
+/**
+ * `window.valetDS` — how agent-authored page code themes its charts
+ * (artifact-pages design, Styling). Injected by the shell into every page,
+ * downloads included, so themed charts survive saving the file.
+ *
+ * Every value resolves lazily from CSS variables at call time: `--ds-*`
+ * variables the PAGE'S OWN stylesheet defines first, the shell's
+ * `--artifact-*` defaults second. Artifacts are self-contained — there is
+ * no server-side styling injection — so a page that wants a custom palette
+ * declares `--ds-chart-1..8` (and friends) in its own CSS, and every chart
+ * on it follows. Dark mode resolves to the dark palette without chart code
+ * knowing about themes.
+ *
+ * Two library adapters ship because the tool guidance blesses two chart
+ * libraries: `applyChartTheme(Chart)` for Chart.js (sets defaults and
+ * auto-assigns palette colors to datasets that pick none) and
+ * `echartsTheme()` for ECharts (a ready theme object).
+ */
+export const ARTIFACT_DS_RUNTIME_JS = `
+(function () {
+  "use strict";
+  function cssVar(name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+  function token(name) {
+    return cssVar("--ds-" + name) || cssVar("--artifact-" + name);
+  }
+  function palette() {
+    var out = [];
+    for (var i = 1; i <= 8; i++) {
+      var v = token("chart-" + i);
+      if (v) out.push(v);
+    }
+    return out;
+  }
+  var valetDS = {
+    token: token,
+    get palette() { return palette(); },
+    get font() {
+      return token("font-body") || (document.body ? getComputedStyle(document.body).fontFamily : "sans-serif");
+    },
+    get textColor() { return token("chart-text") || cssVar("--artifact-fg"); },
+    get gridColor() { return token("chart-grid") || cssVar("--artifact-line"); },
+    applyChartTheme: function (Chart) {
+      var self = valetDS;
+      Chart.defaults.color = self.textColor;
+      Chart.defaults.borderColor = self.gridColor;
+      Chart.defaults.font.family = self.font;
+      Chart.register({
+        id: "valet-ds-colors",
+        beforeUpdate: function (chart) {
+          var p = palette();
+          if (p.length === 0) return;
+          (chart.data.datasets || []).forEach(function (ds, i) {
+            if (ds.backgroundColor === undefined) ds.backgroundColor = p[i % p.length];
+            if (ds.borderColor === undefined) ds.borderColor = p[i % p.length];
+          });
+        },
+      });
+    },
+    echartsTheme: function () {
+      var self = valetDS;
+      var axis = {
+        axisLine: { lineStyle: { color: self.gridColor } },
+        axisLabel: { color: self.textColor },
+        splitLine: { lineStyle: { color: self.gridColor } },
+      };
+      return {
+        color: palette(),
+        textStyle: { color: self.textColor, fontFamily: self.font },
+        legend: { textStyle: { color: self.textColor } },
+        categoryAxis: axis,
+        valueAxis: axis,
+      };
+    },
+  };
+  window.valetDS = valetDS;
+})();
 `.trim();
 
 // ─── Comment runtime ─────────────────────────────────────────────────────

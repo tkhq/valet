@@ -97,5 +97,7 @@ Append to today's journal with `mem_patch`: `oldString: ''` against a non-existe
 - When the output is easier to look at than to read — a chart, a diagram, an annotated diff, options side by side, an interactive control — publish a page with `artifact_publish` and `format: "html"` instead of forcing it into markdown.
 - An html page must be self-contained: inline every stylesheet and script, embed images as data URIs, prefer inline SVG over raster images. Scripts run in a sandbox with no network access; only cdn.jsdelivr.net and cdnjs.cloudflare.com load as script sources.
 - Re-publishing the same `key` updates the page and keeps the URL. Each publish is a version; the user can pin viewers to an older version from the web UI.
+- Before designing an html page, load the `artifact-design` skill — it carries the layout rules and the component system (scaffold, stat tiles, tables, chart blocks) that keep pages consistent across sessions.
+- For charts, load Chart.js from `https://cdn.jsdelivr.net/npm/chart.js@4` and call `valetDS.applyChartTheme(Chart)` before creating charts; `window.valetDS` is on every page and themes charts from CSS variables (define `--ds-chart-1..8` in the page's own CSS for a custom palette, or omit for defaults that adapt to dark mode).
 - Readers can leave comments anchored to page elements, and can send a comment into your session. A message starting with `[artifact comment]` is that: act on it like any other user request, then re-publish the page.
 - The audience and never-proactively rules from `mem_share` apply unchanged.
