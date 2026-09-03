@@ -795,8 +795,11 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   const willBeEnabled = body.enabled ?? row.enabled;
   const matchChanged = body.filters !== undefined || body.eventKeys !== undefined;
   const arming = body.enabled === true && !row.enabled;
+  // Re-pointing the assistant changes who the rule races: moving OFF a distinct
+  // assistant onto the owner's default can create a clobber that did not exist.
+  const repointed = body.assistantId !== undefined;
   let collisions: EventSubscriptionCollisionsWire | undefined;
-  if (willBeEnabled && (matchChanged || arming)) {
+  if (willBeEnabled && (matchChanged || arming || repointed)) {
     const report = await collisionsForWrite(
       db,
       plugins,
@@ -804,7 +807,10 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
       {
         eventKeys: merged.eventKeys as string[],
         filters,
-        target: row.target as EventSubscriptionTargetWire,
+        // The PATCHED target: a patch that re-points the rule at a different
+        // assistant changes who it collides with, and comparing the stored one
+        // would answer for the rule as it was.
+        target: patchedTarget,
       },
       id,
     );

@@ -16,6 +16,7 @@ import type { AppDb } from "../lib/drizzle.js";
 import type { EngineHost } from "../engine/host.js";
 import type { Session } from "@valet/engine";
 import { ensureAssistantSession, ensureDefaultAssistantSession, loadAssistant } from "../assistants/service.js";
+import type { AssistantRow } from "../schema/index.js";
 import { writeDropLog } from "../orchestrator/signals.js";
 
 /**
@@ -53,6 +54,25 @@ export async function deliverToAssistantThread(
 }
 
 /**
+ * Whether this assistant may take the delivery. A discriminated result rather
+ * than a nullable message, so the good arm carries the narrowed row and the
+ * caller needs no cast to use it.
+ */
+function checkDeliveryAssistant(
+  row: AssistantRow | undefined,
+  orgId: string,
+  owner: Principal,
+): { ok: true; row: AssistantRow } | { ok: false; why: string } {
+  if (row === undefined) return { ok: false, why: "no such assistant" };
+  if (row.orgId !== orgId) return { ok: false, why: `assistant belongs to org ${row.orgId}` };
+  if (row.ownerType !== owner.type || row.ownerId !== owner.id) {
+    return { ok: false, why: `assistant is owned by ${row.ownerType}:${row.ownerId}` };
+  }
+  if (row.archivedAt !== null) return { ok: false, why: "assistant is archived" };
+  return { ok: true, row };
+}
+
+/**
  * The session the signal lands on: the named assistant's, or the owner's
  * default when the rule named none.
  *
@@ -73,30 +93,20 @@ async function resolveDeliverySession(
     return session;
   }
 
-  const assistant = await loadAssistant(deps.db, args.assistantId);
-  const mismatch =
-    assistant === undefined
-      ? "no such assistant"
-      : assistant.orgId !== args.orgId
-        ? `assistant belongs to org ${assistant.orgId}`
-        : assistant.ownerType !== args.owner.type || assistant.ownerId !== args.owner.id
-          ? `assistant is owned by ${assistant.ownerType}:${assistant.ownerId}`
-          : assistant.archivedAt !== null
-            ? "assistant is archived"
-            : null;
-  if (mismatch !== null || assistant === undefined) {
+  const checked = checkDeliveryAssistant(await loadAssistant(deps.db, args.assistantId), args.orgId, args.owner);
+  if (!checked.ok) {
     await writeDropLog(deps.db, {
       orgId: args.orgId,
       reason: "event_target_assistant_invalid",
       conversationKey: args.dispatchId,
       detail:
         `subscription names assistant ${args.assistantId} for owner ` +
-        `${args.owner.type}:${args.owner.id}, but ${mismatch ?? "no such assistant"}`,
+        `${args.owner.type}:${args.owner.id}, but ${checked.why}`,
     });
-    throw new Error(`delivery refused: ${mismatch ?? "no such assistant"} (${args.assistantId})`);
+    throw new Error(`delivery refused: ${checked.why} (${args.assistantId})`);
   }
 
-  const { session } = await ensureAssistantSession(deps, assistant, meta);
+  const { session } = await ensureAssistantSession(deps, checked.row, meta);
   return session;
 }
 
