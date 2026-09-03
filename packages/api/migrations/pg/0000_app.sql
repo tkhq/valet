@@ -559,11 +559,22 @@ CREATE TABLE "workflow_definitions" (
 	"owner_id" text NOT NULL,
 	"name" text NOT NULL,
 	"definition" jsonb NOT NULL,
+	-- Repository mirror columns. A `repo` row is the mirror of one workflow
+	-- file and is read-only in the product: editing the file is the edit, and
+	-- deleting the file is the delete. Identity is (source_id, upstream_path)
+	-- and nothing else, so a rename deletes one workflow and creates another.
+	"origin" text DEFAULT 'local' NOT NULL,
+	"source_id" text,
+	"upstream_path" text,
+	"content_sha" text,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
 );
 --> statement-breakpoint
-CREATE INDEX "workflow_definitions_owner" ON "workflow_definitions" ("org_id","owner_type","owner_id");
+CREATE INDEX "workflow_definitions_owner" ON "workflow_definitions" ("org_id","owner_type","owner_id");--> statement-breakpoint
+-- One mirrored row per file per source. Partial, because a `local` row has
+-- no source and no path, and NULLs would not collide anyway.
+CREATE UNIQUE INDEX "workflow_definitions_source_path" ON "workflow_definitions" ("source_id","upstream_path") WHERE "source_id" IS NOT NULL;
 --> statement-breakpoint
 CREATE TABLE "workflow_versions" (
 	"id" text PRIMARY KEY NOT NULL,
@@ -571,6 +582,11 @@ CREATE TABLE "workflow_versions" (
 	"version" integer NOT NULL,
 	"name" text NOT NULL,
 	"definition" jsonb NOT NULL,
+	-- Which write produced this version, and from which commit. Both NULL on
+	-- every version a product edit wrote, and on every row older than the
+	-- repository mirror.
+	"origin" text,
+	"source_commit" text,
 	"created_at" bigint NOT NULL
 );
 --> statement-breakpoint
@@ -600,6 +616,10 @@ CREATE TABLE "workflow_runs" (
 CREATE INDEX "workflow_runs_status_updated" ON "workflow_runs" ("status","updated_at");
 --> statement-breakpoint
 CREATE INDEX "workflow_runs_workflow" ON "workflow_runs" ("workflow_id");
+--> statement-breakpoint
+-- The workflows list reads one owner's runs newest-first, and the sync reads
+-- the same rows to find a workflow whose runs have not settled.
+CREATE INDEX "workflow_runs_owner_created" ON "workflow_runs" ("owner_type","owner_id","created_at" DESC);
 --> statement-breakpoint
 CREATE TABLE "workflow_checkpoints" (
 	"run_id" text NOT NULL,

@@ -41,6 +41,9 @@ import { workflowsActionPlugin } from "../workflows/actions.js";
 import { skillsActionPlugin } from "../services/skills-actions.js";
 import { assistantsActionPlugin } from "../assistants/actions.js";
 import { ContentSyncService } from "../services/content-sync/service.js";
+import { SkillCollector } from "../services/content-sync/skill-collector.js";
+import { WorkflowCollector } from "../services/content-sync/workflow-collector.js";
+import { buildValidateEnvironment } from "../workflows/validation-env.js";
 import { GitHubSkillRepoReader } from "../services/skill-repo-reader.js";
 import { skillRepoReaderFactory } from "../services/content-source-credential.js";
 import type { WorkflowServiceDeps } from "../workflows/service.js";
@@ -737,6 +740,15 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // resolvable credential it falls back to the anonymous `reader`.
   const contentSync = new ContentSyncService({
     db,
+    // One collector per content kind; a source runs the subset its `kinds`
+    // enables. The workflow collector validates a mirrored definition against
+    // the same plugin catalog the editor saves against, so a file naming an
+    // unknown model or tool service fails at sync with the validator's own
+    // message instead of at run time inside a node.
+    collectors: [
+      new SkillCollector(),
+      new WorkflowCollector({ env: buildValidateEnvironment(actionPluginByService) }),
+    ],
     reader: new GitHubSkillRepoReader(),
     readerFor: skillRepoReaderFactory({
       db,

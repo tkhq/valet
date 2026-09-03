@@ -359,7 +359,7 @@ export class ContentSyncService {
     }
 
     const read = await this.readContents(source, head.sha, reader, scan);
-    const applied = await this.reconcile(source, scan, read.text);
+    const applied = await this.reconcile(source, scan, read.text, head.sha);
     const totals = totalOf(applied);
     return this.recordSuccess(source, {
       headSha: head.sha,
@@ -367,8 +367,12 @@ export class ContentSyncService {
       changed: totals.imported + totals.updated + totals.deleted > 0,
       // A file discovery found and the sync could not read leaves the manifest
       // hash describing files nobody read. Recording it would make compare 2
-      // skip the whole commit forever.
-      complete: read.unread.length === 0,
+      // skip the whole commit forever. A pass that deferred work is incomplete
+      // for the same reason: nothing in the repository will move to trigger
+      // the retry.
+      complete:
+        read.unread.length === 0 &&
+        applied.every((entry) => (entry.result.deferred?.length ?? 0) === 0),
       discovered: totalDiscovered(scan),
       excluded: totalExcluded(scan),
       discovery: scan.discovery,
@@ -487,12 +491,14 @@ export class ContentSyncService {
     source: ContentSourceRow,
     scan: SyncScan,
     text: Map<string, string>,
+    commitSha: string,
   ): Promise<AppliedPass[]> {
     const applied: AppliedPass[] = [];
     for (const pass of scan.passes) {
       const result = await pass.reconcile({
         db: this.deps.db,
         source,
+        commitSha,
         text,
         discovery: scan.discovery,
         now: this.now,

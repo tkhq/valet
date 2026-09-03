@@ -14,6 +14,7 @@ import { WorkflowCursorError, type ValidateEnvironment } from "@valet/workflow";
 import {
   cancelWorkflowRun,
   createWorkflowDefinition,
+  copyWorkflowDefinition,
   deleteWorkflowDefinition,
   getWorkflowDefinition,
   getWorkflowRunDetail,
@@ -402,6 +403,20 @@ workflowsRouter.put("/:id", async (c) => {
 
   const resp: UpdateWorkflowResponse = updated;
   return c.json(resp);
+});
+
+/**
+ * Copies a workflow into a `local` one the caller owns. This is the escape
+ * hatch for a mirrored workflow, which every write path refuses with 409:
+ * the file keeps the original, and the copy is an ordinary workflow the
+ * editor can save.
+ */
+workflowsRouter.post("/:id/copy", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const copy = await copyWorkflowDefinition(deps, owner, c.req.param("id"));
+  if (!copy) return c.json({ error: "workflow not found" }, 404);
+  const resp: CreateWorkflowResponse = copy;
+  return c.json(resp, 201);
 });
 
 workflowsRouter.delete("/:id", async (c) => {

@@ -1767,8 +1767,16 @@ export interface WorkflowDefinitionSummary {
   definition: unknown;
   createdAt: number;
   updatedAt: number;
-  ownerType: "user" | "team";
+  ownerType: "user" | "team" | "org";
   ownerId: string;
+  /** `repo` names a workflow this deployment mirrors from a file. It is
+   * read-only here: every write path refuses it with 409, and the editor
+   * offers a copy instead. Absent means `local`. */
+  origin?: "local" | "repo";
+  /** Where the file is, on a `repo` workflow: `owner/repo` and the
+   * repo-relative path. The list badges the row with it, and the editor
+   * links to it. */
+  upstream?: { repoFullName: string; path: string };
 }
 
 export interface CreateWorkflowRequest {

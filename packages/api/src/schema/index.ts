@@ -12,7 +12,7 @@ import {
   check,
   doublePrecision,
 } from "drizzle-orm/pg-core";
-import { sql } from "drizzle-orm";
+import { desc, sql } from "drizzle-orm";
 import type { ParamMatcher } from "../policies/matchers.js";
 
 // Postgres rewrite of `schema/index.ts` (docs/specs/2026-07-15-postgres-backend-design.md,
@@ -1021,10 +1021,26 @@ export const workflowDefinitions = pgTable(
     ownerId: text("owner_id").notNull(),
     name: text("name").notNull(),
     definition: jsonb("definition").notNull(),
+    /** `repo` rows mirror one workflow file and are read-only in the product:
+     * editing the file is the edit, deleting the file is the delete. */
+    origin: text("origin", { enum: ["local", "repo"] }).notNull().default("local"),
+    /** The content source that mirrors this row. Null on a `local` row. */
+    sourceId: text("source_id"),
+    /** Repo-relative path of the file. Identity is (sourceId, upstreamPath)
+     * and nothing else — not the name, not any id the file writes — so a
+     * rename deletes one workflow and creates another. */
+    upstreamPath: text("upstream_path"),
+    /** Hash of the mirrored file, so a re-sync can skip an unchanged row. */
+    contentSha: text("content_sha"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
-  (t) => [index("workflow_definitions_owner").on(t.orgId, t.ownerType, t.ownerId)],
+  (t) => [
+    index("workflow_definitions_owner").on(t.orgId, t.ownerType, t.ownerId),
+    uniqueIndex("workflow_definitions_source_path")
+      .on(t.sourceId, t.upstreamPath)
+      .where(sql`"source_id" IS NOT NULL`),
+  ],
 );
 
 // Immutable snapshot per save: version 1 on create, +1 on every
@@ -1038,6 +1054,11 @@ export const workflowVersions = pgTable(
     version: integer("version").notNull(),
     name: text("name").notNull(),
     definition: jsonb("definition").notNull(),
+    /** Which write produced this version, and from which commit. Both null on
+     * every version a product edit wrote, and on every row older than the
+     * repository mirror. */
+    origin: text("origin", { enum: ["local", "repo"] }),
+    sourceCommit: text("source_commit"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
   (t) => [uniqueIndex("workflow_versions_wf_version").on(t.workflowId, t.version)],
@@ -1086,6 +1107,9 @@ export const workflowRuns = pgTable(
   (t) => [
     index("workflow_runs_status_updated").on(t.status, t.updatedAt),
     index("workflow_runs_workflow").on(t.workflowId),
+    // The workflows list reads one owner's runs newest-first, and the sync
+    // reads the same rows to find a workflow whose runs have not settled.
+    index("workflow_runs_owner_created").on(t.ownerType, t.ownerId, desc(t.createdAt)),
   ],
 );
 

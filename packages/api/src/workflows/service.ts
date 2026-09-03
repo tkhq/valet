@@ -23,10 +23,11 @@ import {
 } from "@valet/workflow";
 import type { RunHost } from "@valet/workflow";
 import type { ActionPlugin, ValetPlugin } from "@valet/engine";
-import { NotFoundError } from "@valet/shared";
+import { NotFoundError, RepoOwnedWorkflowError } from "@valet/shared";
 import type { AppDb } from "../lib/drizzle.js";
 import {
   actionInvocations,
+  contentSources,
   eventSubscriptions,
   workflowDefinitions,
   workflowRuns,
@@ -147,16 +148,56 @@ export function validateDefinitionInput(
   return { ok: true, definition };
 }
 
-function rowToDefinition(row: typeof workflowDefinitions.$inferSelect): WorkflowDefinitionSummary {
-  return {
+type WorkflowRow = typeof workflowDefinitions.$inferSelect;
+
+function rowToDefinition(row: WorkflowRow, repoFullName?: string): WorkflowDefinitionSummary {
+  const summary: WorkflowDefinitionSummary = {
     id: row.id,
     name: row.name,
     definition: row.definition,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
-    ownerType: row.ownerType === "team" ? "team" : "user",
+    ownerType: row.ownerType,
     ownerId: row.ownerId,
   };
+  if (row.origin !== "repo") return summary;
+  summary.origin = "repo";
+  // The repository name comes from the source row, so a source that moves
+  // takes every badge with it. A mirrored row whose source is gone keeps
+  // `origin` and loses the reference: it is still read-only, and the sweep
+  // that removes the source removes the row.
+  if (repoFullName !== undefined && row.upstreamPath !== null) {
+    summary.upstream = { repoFullName, path: row.upstreamPath };
+  }
+  return summary;
+}
+
+/** `source_id` to `repo_full_name`, for the mirrored rows in `rows`. One
+ * query for a whole list, and none at all when nothing is mirrored. */
+async function repoNamesFor(db: AppDb, rows: WorkflowRow[]): Promise<Map<string, string>> {
+  const ids = [...new Set(rows.flatMap((r) => (r.origin === "repo" && r.sourceId ? [r.sourceId] : [])))];
+  if (ids.length === 0) return new Map();
+  const sources = await db
+    .select({ id: contentSources.id, repoFullName: contentSources.repoFullName })
+    .from(contentSources)
+    .where(inArray(contentSources.id, ids));
+  return new Map(sources.map((row) => [row.id, row.repoFullName]));
+}
+
+/**
+ * Refuses a write to a workflow this deployment mirrors from a file.
+ *
+ * Every product write path reaches `updateWorkflowDefinition` or
+ * `deleteWorkflowDefinition` — the REST route, the `workflows.update_workflow`
+ * agent action, and `addAggregateNode` — so these two calls cover all of
+ * them. The sync writes its own rows directly and does not come through
+ * here.
+ */
+async function refuseRepoOwned(db: AppDb, row: WorkflowRow): Promise<void> {
+  if (row.origin !== "repo") return;
+  const names = await repoNamesFor(db, [row]);
+  const repo = (row.sourceId !== null ? names.get(row.sourceId) : undefined) ?? "its repository";
+  throw new RepoOwnedWorkflowError(repo, row.upstreamPath ?? "its workflow file");
 }
 
 /** True when `owner` (the caller) may act on `row` — either the row's
@@ -388,7 +429,8 @@ export async function listWorkflowDefinitions(
     .from(workflowDefinitions)
     .where(where)
     .orderBy(desc(workflowDefinitions.updatedAt));
-  return rows.map(rowToDefinition);
+  const names = await repoNamesFor(deps.db, rows);
+  return rows.map((row) => rowToDefinition(row, row.sourceId ? names.get(row.sourceId) : undefined));
 }
 
 export async function getWorkflowDefinition(
@@ -397,7 +439,9 @@ export async function getWorkflowDefinition(
   id: string,
 ): Promise<WorkflowDefinitionSummary | null> {
   const row = await ownedDefinitionRow(deps.db, owner, id);
-  return row ? rowToDefinition(row) : null;
+  if (!row) return null;
+  const names = await repoNamesFor(deps.db, [row]);
+  return rowToDefinition(row, row.sourceId ? names.get(row.sourceId) : undefined);
 }
 
 export async function createWorkflowDefinition(
@@ -535,6 +579,7 @@ export async function updateWorkflowDefinition(
 ): Promise<WorkflowDefinitionSummary | null> {
   const row = await ownedDefinitionRow(deps.db, owner, id);
   if (!row) return null;
+  await refuseRepoOwned(deps.db, row);
 
   const now = Date.now();
   // In-flight runs are unaffected: `workflow_runs.definition` snapshots the
@@ -571,7 +616,7 @@ export async function updateWorkflowDefinition(
     definition: input.definition !== undefined ? input.definition : row.definition,
     createdAt: row.createdAt,
     updatedAt: now,
-    ownerType: row.ownerType === "team" ? "team" : "user",
+    ownerType: row.ownerType,
     ownerId: row.ownerId,
   };
 }
@@ -807,6 +852,55 @@ export async function addAggregateNode(
   return { ok: true, definition: saved, nodeId, sources: sources.map((s) => s.id) };
 }
 
+/**
+ * Copies a workflow into a `local` one the caller owns, named `<name> (copy)`.
+ *
+ * This is the escape hatch for a mirrored workflow: the file stays the source
+ * of the original, and the copy is an ordinary workflow the product can edit.
+ * It copies the graph and nothing else. Schedules, event subscriptions and
+ * webhooks stay with the original, because a copy that armed its own triggers
+ * would run the same work twice from one edit.
+ *
+ * Returns null when the workflow does not exist or is not owned.
+ */
+export async function copyWorkflowDefinition(
+  deps: WorkflowServiceDeps,
+  owner: WorkflowOwner,
+  id: string,
+): Promise<WorkflowDefinitionSummary | null> {
+  const row = await ownedDefinitionRow(deps.db, owner, id);
+  if (!row) return null;
+
+  const now = Date.now();
+  const copyId = newWorkflowId("wf");
+  const name = `${row.name} (copy)`;
+  // Personal, whatever the original's owner was. A team-owned mirror copied
+  // into the team would be a second team workflow every member sees; the
+  // person who wants to change the graph gets it in their own workspace,
+  // and may move it from there.
+  await deps.db.insert(workflowDefinitions).values({
+    id: copyId,
+    orgId: owner.orgId,
+    ownerType: "user",
+    ownerId: owner.userId,
+    name,
+    definition: row.definition,
+    origin: "local",
+    createdAt: now,
+    updatedAt: now,
+  });
+  await snapshotVersion(deps, copyId, 1, name, row.definition, now);
+  return {
+    id: copyId,
+    name,
+    definition: row.definition,
+    createdAt: now,
+    updatedAt: now,
+    ownerType: "user",
+    ownerId: owner.userId,
+  };
+}
+
 export type DeleteWorkflowResult = "deleted" | "not_found" | "has_active_runs";
 
 /**
@@ -823,6 +917,9 @@ export async function deleteWorkflowDefinition(
 ): Promise<DeleteWorkflowResult> {
   const row = await ownedDefinitionRow(deps.db, owner, id);
   if (!row) return "not_found";
+  // Deleting the file is the delete, exactly as editing the file is the
+  // edit. A delete here would come back on the next sync anyway.
+  await refuseRepoOwned(deps.db, row);
 
   const active = await deps.workflowStore.listRuns({
     workflowIds: [id],
@@ -831,37 +928,55 @@ export async function deleteWorkflowDefinition(
   });
   if (active.runs.length > 0) return "has_active_runs";
 
-  await deps.db.delete(workflowDefinitions).where(eq(workflowDefinitions.id, id));
-  await deps.db.delete(workflowVersions).where(eq(workflowVersions.workflowId, id));
+  await purgeWorkflowRows(deps.db, owner.orgId, id);
+  return "deleted";
+}
 
-  // Triggers must not outlive the workflow: orphaned schedules would be
-  // disabled by the scheduler eventually, but the triggers list would show
-  // ghosts until then. Event subscriptions targeting the workflow are
-  // app-db rows with no FK, so remove them explicitly.
-  await deps.db.delete(workflowSchedules).where(eq(workflowSchedules.workflowId, id));
-  const subs = await deps.db.select().from(eventSubscriptions).where(eq(eventSubscriptions.orgId, owner.orgId));
+/**
+ * Removes every trigger that can start `workflowId`: its schedules, the event
+ * subscriptions that target it, and its webhook.
+ *
+ * Triggers must not outlive the workflow. The scheduler sweeps ALL enabled
+ * schedule rows regardless of owner reachability, so an orphan keeps firing
+ * forever against a workflow that is gone. `workflow_webhooks` is keyed by a
+ * plain `workflow_id` text column with no cascade, so an orphaned hook id
+ * would sit in the table unreachable through any owner-facing route and
+ * never actually removed.
+ *
+ * The sync calls this on its own: a mirrored workflow with an unsettled run
+ * is disarmed rather than deleted, so nothing new starts while the run
+ * finishes.
+ */
+export async function disarmWorkflowTriggers(
+  db: AppDb,
+  orgId: string,
+  workflowId: string,
+): Promise<void> {
+  await db.delete(workflowSchedules).where(eq(workflowSchedules.workflowId, workflowId));
+  await db.delete(workflowWebhooks).where(eq(workflowWebhooks.workflowId, workflowId));
+  // Event subscriptions are app-db rows with no FK, and `target` is a
+  // free-form jsonb column. Guard the shape before reading it, so a
+  // malformed row cannot abort the cleanup loop mid-delete.
+  const subs = await db.select().from(eventSubscriptions).where(eq(eventSubscriptions.orgId, orgId));
   for (const sub of subs) {
-    // `target` is a free-form jsonb column; guard the shape before reading
-    // so a malformed row cannot abort the cleanup loop mid-delete.
     if (typeof sub.target !== "object" || sub.target === null) continue;
     const target = sub.target as { kind?: string; workflowId?: string };
-    if (target.kind === "workflow" && target.workflowId === id) {
-      await deps.db.delete(eventSubscriptions).where(eq(eventSubscriptions.id, sub.id));
+    if (target.kind === "workflow" && target.workflowId === workflowId) {
+      await db.delete(eventSubscriptions).where(eq(eventSubscriptions.id, sub.id));
     }
   }
+}
 
-  // No FK/cascade on workflow_webhooks (it's keyed by workflowId, a plain
-  // text column) — without this, a deleted workflow's hookId secret would
-  // sit in the table forever, unreachable through any owner-facing route
-  // (every webhook-service.ts entry point re-checks ownedDefinitionRow,
-  // which is now gone) but never actually removed.
-  await deps.db.delete(workflowWebhooks).where(eq(workflowWebhooks.workflowId, id));
-  // Same reasoning as webhooks: workflow_schedules.workflow_id is a plain
-  // text column with no cascade, and the scheduler sweeps ALL enabled rows
-  // regardless of owner reachability — an orphan keeps firing forever
-  // against a workflow that no longer exists.
-  await deps.db.delete(workflowSchedules).where(eq(workflowSchedules.workflowId, id));
-  return "deleted";
+/** The definition, its version history, and everything that could start it.
+ * Settled runs are kept: they are history, reachable by their run id. */
+export async function purgeWorkflowRows(
+  db: AppDb,
+  orgId: string,
+  workflowId: string,
+): Promise<void> {
+  await db.delete(workflowDefinitions).where(eq(workflowDefinitions.id, workflowId));
+  await db.delete(workflowVersions).where(eq(workflowVersions.workflowId, workflowId));
+  await disarmWorkflowTriggers(db, orgId, workflowId);
 }
 
 /** Returns null when the workflow doesn't exist (or isn't owned); an

@@ -161,6 +161,55 @@ interface SchemaRepair {
  */
 const SCHEMA_REPAIRS: SchemaRepair[] = [
   {
+    // Repository mirror columns on workflow_definitions. A deployed database
+    // predating them holds only `local` rows, which is what the default
+    // encodes, so the backfill is the default and nothing else is needed.
+    describe: "workflow_definitions.origin column",
+    probe: { kind: "column", table: "workflow_definitions", column: "origin" },
+    sql: `ALTER TABLE "workflow_definitions" ADD COLUMN IF NOT EXISTS "origin" text NOT NULL DEFAULT 'local'`,
+  },
+  {
+    describe: "workflow_definitions.source_id column",
+    probe: { kind: "column", table: "workflow_definitions", column: "source_id" },
+    sql: 'ALTER TABLE "workflow_definitions" ADD COLUMN IF NOT EXISTS "source_id" text',
+  },
+  {
+    describe: "workflow_definitions.upstream_path column",
+    probe: { kind: "column", table: "workflow_definitions", column: "upstream_path" },
+    sql: 'ALTER TABLE "workflow_definitions" ADD COLUMN IF NOT EXISTS "upstream_path" text',
+  },
+  {
+    describe: "workflow_definitions.content_sha column",
+    probe: { kind: "column", table: "workflow_definitions", column: "content_sha" },
+    sql: 'ALTER TABLE "workflow_definitions" ADD COLUMN IF NOT EXISTS "content_sha" text',
+  },
+  {
+    // Partial, matching the migration: a `local` row carries no source and no
+    // path, and those NULLs would not collide in any case.
+    describe: "workflow_definitions_source_path unique index",
+    probe: { kind: "index", index: "workflow_definitions_source_path" },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "workflow_definitions_source_path" ON "workflow_definitions" ("source_id","upstream_path") WHERE "source_id" IS NOT NULL',
+  },
+  {
+    // Provenance on a version row. Both nullable: every version a product
+    // edit wrote carries neither, and so does every row an upgrade brings.
+    describe: "workflow_versions.origin column",
+    probe: { kind: "column", table: "workflow_versions", column: "origin" },
+    sql: 'ALTER TABLE "workflow_versions" ADD COLUMN IF NOT EXISTS "origin" text',
+  },
+  {
+    describe: "workflow_versions.source_commit column",
+    probe: { kind: "column", table: "workflow_versions", column: "source_commit" },
+    sql: 'ALTER TABLE "workflow_versions" ADD COLUMN IF NOT EXISTS "source_commit" text',
+  },
+  {
+    // The workflows list reads one owner's runs newest-first, and the sync
+    // reads the same rows to find a workflow whose runs have not settled.
+    describe: "workflow_runs_owner_created index",
+    probe: { kind: "index", index: "workflow_runs_owner_created" },
+    sql: 'CREATE INDEX IF NOT EXISTS "workflow_runs_owner_created" ON "workflow_runs" ("owner_type","owner_id","created_at" DESC)',
+  },
+  {
     // The spawning submission's channel origin, inherited by child.settled
     // signals. Null on rows from before the column: those settlements just
     // keep the old no-origin behavior.

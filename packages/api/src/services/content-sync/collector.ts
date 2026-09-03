@@ -78,6 +78,9 @@ export interface CollectorWalkContext {
 export interface CollectorReconcileContext {
   db: AppDb;
   source: ContentSourceRow;
+  /** The commit every body in `text` was read at. A collector that records
+   * provenance writes this and never the ref, which moves. */
+  commitSha: string;
   /** The body of every file this pass asked for, keyed by PATH and never by
    * name, so two same-named files of different kinds cannot overwrite each
    * other. */
@@ -94,6 +97,17 @@ export interface CollectorReconcileResult {
   /** Rows this pass would have deleted and kept instead, by name. Non-empty
    * only when the scan was narrower than the one that mirrored them. */
   keptStale: string[];
+  /**
+   * Rows this pass left unfinished for a reason the REPOSITORY cannot clear,
+   * by name — a mirrored workflow whose file is gone and whose run has not
+   * settled, for instance.
+   *
+   * A non-empty list makes the sync incomplete, exactly as an unread file
+   * does: `last_sha` and `last_manifest_hash` stay where they were, so the
+   * next poll re-reads and retries. Without it both compares short-circuit
+   * on an unmoved repository and the work waits for an unrelated commit.
+   */
+  deferred?: string[];
   /** One line per file this pass skipped. */
   warnings: string[];
 }
