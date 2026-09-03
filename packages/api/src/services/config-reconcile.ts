@@ -648,8 +648,8 @@ async function reconcileLlmProvidersPass(db: AppDb, cfg: InstanceConfig): Promis
 // Skill sources pass
 // ---------------------------------------------------------------------------
 
-/** Same five-minute claim lease `skill-sync.ts` uses. A pending never-synced
- * row older than this is a dead claim, not a live one. */
+/** Same five-minute claim lease `content-sync/service.ts` uses. A pending
+ * never-synced row older than this is a dead claim, not a live one. */
 const CLAIM_LEASE_MS = 5 * 60_000;
 
 async function reconcileSkillSourcesPass(db: AppDb, cfg: InstanceConfig): Promise<void> {
