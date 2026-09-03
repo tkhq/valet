@@ -23,6 +23,7 @@ import type { AuthConfigResponse, HealthResponse, ReadyResponse } from "./wire/t
 import { VALET_VERSION } from "./version.js";
 import { parseSandboxBackend } from "./providers/sandbox-backend.js";
 import { sessionsRouter, listStandaloneSessions } from "./routes/sessions.js";
+import { evalsRouter, ratingsRouter } from "./routes/ratings.js";
 import { messagesRouter } from "./routes/messages.js";
 import { adminRouter } from "./routes/admin.js";
 import { teamsRouter } from "./routes/teams.js";
@@ -38,6 +39,8 @@ import { pluginsRouter } from "./routes/plugins.js";
 import { templatesRouter } from "./routes/templates.js";
 import { skillsRouter } from "./routes/skills.js";
 import { credentialsRouter } from "./routes/credentials.js";
+import { onePasswordRouter } from "./routes/onepassword.js";
+import { sandboxSecretsRouter } from "./routes/sandbox-secrets.js";
 import { credentialConnectRouter } from "./routes/credential-connect.js";
 import { identityLinksRouter } from "./routes/identity-links.js";
 import { meRouter } from "./routes/me.js";
@@ -276,10 +279,12 @@ export function createApp(
   app.use("/api/*", buildAuthMiddleware({ auth: auth ?? null, db: providers.db }));
 
   app.route("/api/sessions", sessionsRouter);
-  // Messages + threads + file uploads + security share /api/sessions/:id/* — mounted under same prefix.
+  // Messages + threads + file uploads + security + ratings share /api/sessions/:id/* — mounted under same prefix.
   app.route("/api/sessions", messagesRouter);
   app.route("/api/sessions", fileUploadRouter);
   app.route("/api/sessions", securityRouter);
+  app.route("/api/sessions", ratingsRouter);
+  app.route("/api/evals", evalsRouter);
   app.route("/api/admin", adminRouter);
   app.route("/api/teams", teamsRouter);
   app.route("/api/memory", memoryRouter);
@@ -301,6 +306,8 @@ export function createApp(
   app.route("/api/skills", skillsRouter);
   app.route("/api/credentials", credentialConnectRouter);
   app.route("/api/credentials", credentialsRouter);
+  app.route("/api/onepassword", onePasswordRouter);
+  app.route("/api/sandbox-secrets", sandboxSecretsRouter);
   // Mounted BEFORE /api/me — defensive ordering only: meRouter today
   // registers just GET / and PATCH / (no wildcard/param routes), so there is
   // no actual collision to lose. Revisit this ordering if /api/me ever grows

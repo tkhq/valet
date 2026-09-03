@@ -1,0 +1,44 @@
+# Long-trajectory suite: decisions dictated early must survive unrelated
+# work and come back assembled at the end. Mined from real operator
+# sessions, where "note this down, we'll come back to it" precedes a
+# write-up turns later. Orchestrator session: mem_* tools are available
+# and the early turns invite their use.
+id: long-memory-decisions
+description: Record decisions across interleaved turns, then assemble the write-up.
+session_type: orchestrator
+turns:
+  - role: user
+    content: >-
+      Heads up on the tier decision: the new sandbox tier is named
+      "ember", the cold-start budget is 800ms, and we are NOT doing
+      per-tier images — one image, runtime switches. Note this down;
+      we'll write it up later.
+  - role: user
+    content: >-
+      Unrelated — draft two sentences for standup saying the tier work
+      is on track for Friday.
+  - role: user
+    content: 'One more for the record: Priya owns the tier rollout.'
+  - role: user
+    content: >-
+      OK, write the tier decision summary for the eng channel: the tier
+      name, the cold-start budget, the image decision, and who owns the
+      rollout.
+timeout_ms: 300000
+checks:
+  - type: tool_called
+    tool: mem_write
+    min: 1
+  - type: output_contains
+    pattern: '[Ee]mber'
+  - type: output_contains
+    value: "800"
+  - type: output_contains
+    value: "Priya"
+  - type: output_contains
+    pattern: '([Oo]ne|[Ss]ingle)[^.\n]{0,30}image'
+  # No no_errors check: orchestrator sessions make exploratory mem_*
+  # and file calls, and a recovered miss (an ENOENT edit followed by a
+  # successful mem_write) is not the behavior this case measures.
+  - type: max_turns
+    value: 12

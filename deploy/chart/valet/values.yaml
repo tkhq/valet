@@ -130,6 +130,56 @@ sandbox:
   # the chart only threads the name through. Empty → field omitted.
   dockerRuntimeClass: ""
 
+  # Per-sandbox ephemeral-storage (node-local disk: container rootfs +
+  # emptyDirs, including the DinD docker-state volume). The REQUEST caps how
+  # many sandbox pods the scheduler stacks onto one node
+  # (nodeAllocatableEphemeral / request); the LIMIT makes the kubelet evict
+  # one runaway sandbox instead of the node going NotReady (TKAI-349). The
+  # limit also bounds the DinD docker-state emptyDir. Set a value to "0" to
+  # disable it. Keep the limit at or above the request.
+  ephemeralStorageRequest: "2Gi"
+  ephemeralStorageLimit: "8Gi"
+
+  # Size of the PERSISTENT /workspace claim each sandbox provisions. This
+  # is the volume that survives pod recreation and hibernation, and it
+  # holds the repo clone and uncommitted work. Node-local scratch (docker
+  # image layers, container rootfs) is bounded by the ephemeral limits
+  # above and does not land here.
+  #
+  # Sizing is one-way per sandbox: a PVC cannot shrink. Changing this
+  # affects only sandboxes created afterwards. Keep the default small — it
+  # is billed on every sandbox PVC in the fleet. When a repo operation
+  # fills the volume (ENOSPC during workspace prep), the api grows that one
+  # PVC on demand instead: it doubles the claim (online gp3 expansion, one
+  # EBS-rate-limited step per ~6h) and retries once, up to
+  # workspaceStorageMax. At the cap the ENOSPC surfaces as a loud startup
+  # failure instead of unbounded growth.
+  #
+  # The grow path is a safety net, not a sizing strategy: EBS allows one
+  # modification per volume per ~6h, so a session that needs several
+  # doublings fails for hours first. Deploys that routinely clone or stage
+  # multi-GiB working trees (large prebuilt bakes) should raise
+  # workspaceStorage so new claims start big enough.
+  workspaceStorage: "1Gi"
+  workspaceStorageMax: "20Gi"
+
+  # How long a suspended sandbox is kept before its workspace volume is
+  # reclaimed. Both windows measure IDLE time, not age: they run from the
+  # session's last activity and restart when it is revived. Reclaiming
+  # resets only the workspace volume — chat history and memories live in
+  # Postgres, and reopening the session provisions a fresh sandbox.
+  #
+  # Children are split out because they are the high-churn class: an
+  # orchestrator fans out hundreds a day, each holding its own PVC, and
+  # most are never revisited. Long-lived sessions (orchestrators,
+  # assistants, top-level sessions) are provisioned rarely and revisited
+  # for weeks, so they keep the longer window.
+  #
+  # Set either to "0" to disable that reclaim (children then get an eager
+  # destroy on settle; long-lived sandboxes are kept until deleted).
+  childRetentionHours: 24
+  hibernatedRetentionHours: 72
+
   # DEPRECATED. Legacy fallback consulted by unparented sources when nothing
   # else resolves. Kept for one release; will be removed in a future v2.x.
   # image:

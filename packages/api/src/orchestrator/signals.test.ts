@@ -8,8 +8,9 @@ import { describe, it, expect, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { admitSignal, SignalEdgeDeniedError, type AdmitSignalDeps } from "./signals.js";
-import { eventDropLog } from "../schema/index.js";
+import { agentSessions, eventDropLog } from "../schema/index.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
+import type { OnePasswordService } from "../services/onepassword.js";
 
 let api: TestApi | undefined;
 
@@ -245,5 +246,76 @@ describe("admitSignal edge ACL", () => {
         dispatchId: "d-unrelated",
       }),
     ).rejects.toThrow(SignalEdgeDeniedError);
+  });
+
+  // A signal is the one path that rebuilds a session nobody is looking at, so
+  // it decides that session's 1Password scopes for the rest of its life. The
+  // generic builder hands the engine no owner, so `SessionData.owner` says
+  // "user" even for a team-owned session; taking ownership from there would
+  // grant the frozen actor's personal scope on a session the whole team can
+  // prompt. The app row is the truth.
+  it("a team-owned session rebuilt by a signal reads on the org scope alone", async () => {
+    const scopesTried: string[] = [];
+    const unused = (): never => {
+      throw new Error("not exercised by this suite");
+    };
+    const onePassword: OnePasswordService = {
+      tokenConnected: unused,
+      listVaults: unused,
+      resolveReference: unused,
+      resolveCredential: async (row) => row,
+      findCredentialForService: async (scope) => {
+        scopesTried.push(scope);
+        return null;
+      },
+    };
+    api = await bootTestApi({ onePassword });
+
+    // Built the way `POST /api/sessions` builds one: no owner reaches the
+    // engine, so its principal defaults to the acting user.
+    const parent = await api.providers.engineHost.sessionFor("parent-team-1", {
+      userId: "user-a",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    const parentThread = parent.thread("web:default");
+    await api.providers.engineHost.childSessionFor("child-team-1", {
+      parentSessionId: "parent-team-1",
+      parentThreadId: parentThread.id,
+      actorUserId: "user-a",
+      orgId: "local-org",
+      owner: { type: "team", id: "team-1" },
+      workspace: "/tmp",
+    });
+    // The app row is team-owned, which is what the routes read.
+    await api.providers.db.insert(agentSessions).values({
+      id: "parent-team-1",
+      userId: "user-a",
+      orgId: "local-org",
+      workspace: "/workspace",
+      ownerType: "team",
+      ownerId: "team-1",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    // The parent is idle and falls out of cache (an api restart does this).
+    api.providers.engineHost.evictCache("parent-team-1");
+    await admitSignal(deps(api), {
+      from: { sessionId: "child-team-1", owner: { type: "team", id: "team-1" } },
+      to: "parent-team-1",
+      threadKey: parentThread.id,
+      content: { kind: "signal", signalType: "child.settled", body: "done" },
+      dispatchId: "d-team-rebuild",
+    });
+
+    // The session the signal rebuilt is the cached one from here on.
+    const rebuilt = await api.providers.engineHost.sessionFor("parent-team-1", {
+      userId: "user-a",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+    await rebuilt.credentialProvider().get("linear");
+    expect(scopesTried).toEqual(["org"]);
   });
 });

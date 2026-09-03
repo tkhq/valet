@@ -1,0 +1,15 @@
+# Starter case (TKAI-333): token spend ceiling on a trivial prompt.
+id: cost-budget
+description: A trivial prompt must finish in one turn under a token ceiling.
+turns:
+  - role: user
+    content: Reply with the single word pong.
+timeout_ms: 120000
+checks:
+  - type: output_contains
+    pattern: "[Pp]ong"
+  - type: max_turns
+    value: 1
+  - type: max_tokens
+    value: 25000
+  - type: no_errors

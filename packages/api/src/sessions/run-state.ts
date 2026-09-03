@@ -44,6 +44,9 @@ import type { SessionRunState, SessionStatus } from "../wire/types.js";
 export interface RunStateRow {
   status: SessionStatus;
   updatedAt: number;
+  /** Persisted last-activity epoch ms (TKAI-341). Null on rows written before
+   * the column existed; callers fall back to `updatedAt`. */
+  lastActivityAt?: number | null;
 }
 
 /** The fields of a queue item this derivation reads. */
@@ -73,13 +76,13 @@ export function deriveRunState(row: RunStateRow, unsettled: readonly RunStateSub
 }
 
 /**
- * The later of the row's `updatedAt` and the newest unsettled submission's
- * `updatedAt`. A running turn touches its queue item on every claim, lease
- * renewal, and settlement, but it never touches the session row, so the row
- * alone reports a long turn as stale.
+ * The later of the row's `lastActivityAt` (or `updatedAt` as fallback) and
+ * the newest unsettled submission's `updatedAt`. A running turn touches its
+ * queue item on every claim, lease renewal, and settlement, but it never
+ * touches the session row, so the row alone reports a long turn as stale.
  */
 export function deriveLastActivityAt(row: RunStateRow, unsettled: readonly RunStateSubmission[]): number {
-  let latest = row.updatedAt;
+  let latest = row.lastActivityAt ?? row.updatedAt;
   for (const item of unsettled) {
     if (item.updatedAt > latest) latest = item.updatedAt;
   }

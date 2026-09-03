@@ -18,6 +18,7 @@ const navigate = vi.fn();
 const setArchivedMutateAsync = vi.fn().mockResolvedValue({ id: "thread-1" });
 const replaceMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const dismissMutateAsync = vi.fn().mockResolvedValue({ ok: true });
+const renameMutateAsync = vi.fn().mockResolvedValue({ id: "thread-1" });
 
 let threads: ThreadSummary[] = [];
 let archivedThreads: ThreadSummary[] = [];
@@ -49,6 +50,7 @@ vi.mock("~/api/queries", async (importOriginal) => {
     }),
     useCreateThread: () => ({ mutateAsync: vi.fn(), isPending: false }),
     useSetThreadArchived: () => ({ mutateAsync: setArchivedMutateAsync, isPending: false }),
+    useRenameThread: () => ({ mutateAsync: renameMutateAsync, isPending: false }),
     useReplaceSandbox: () => ({ mutateAsync: replaceMutateAsync, isPending: false }),
     // The gate seed (usePendingGatesSeed) stays inert: with no data the
     // effect never touches the store. Gates enter through `pendingGates`.
@@ -131,6 +133,7 @@ beforeEach(() => {
   setArchivedMutateAsync.mockClear();
   replaceMutateAsync.mockClear();
   dismissMutateAsync.mockClear();
+  renameMutateAsync.mockClear();
   threads = [thread()];
   archivedThreads = [];
   children = [];
@@ -146,6 +149,28 @@ describe("ThreadTree — thread context menu", () => {
     await user.click(screen.getByRole("menuitem", { name: /archive thread/i }));
 
     expect(setArchivedMutateAsync).toHaveBeenCalledWith({ threadId: "thread-1", archived: true });
+  });
+
+  it("archives from the menu with the A shortcut", async () => {
+    const user = userEvent.setup();
+    renderTree();
+
+    await user.click(screen.getByRole("button", { name: /thread menu/i }));
+    await user.keyboard("a");
+
+    expect(setArchivedMutateAsync).toHaveBeenCalledWith({ threadId: "thread-1", archived: true });
+  });
+
+  it("leaves Select All alone while the menu is open", async () => {
+    // The accelerator is a bare `A`. Without a modifier guard, Select All
+    // pressed over an open menu archives the thread instead.
+    const user = userEvent.setup();
+    renderTree();
+
+    await user.click(screen.getByRole("button", { name: /thread menu/i }));
+    await user.keyboard("{Control>}a{/Control}");
+
+    expect(setArchivedMutateAsync).not.toHaveBeenCalled();
   });
 
   it("archiving the ACTIVE thread navigates back to the default thread", async () => {
@@ -359,5 +384,106 @@ describe("ThreadTree — pending-gate dot", () => {
     await user.click(screen.getByRole("button", { name: /show archived/i }));
     const row = screen.getByText("Old gated").closest("li");
     expect(row?.querySelector('[aria-label="Needs your decision"]')).toBeTruthy();
+  });
+});
+
+describe("ThreadTree — thread rename", () => {
+  async function openRename(): Promise<HTMLInputElement> {
+    const label = screen.getByText("Plan the launch");
+    await userEvent.dblClick(label);
+    return screen.findByRole<HTMLInputElement>("textbox", { name: /rename thread/i });
+  }
+
+  it("keeps the browser default for the rename double-click", async () => {
+    renderTree();
+    const label = screen.getByText("Plan the launch");
+    const event = new MouseEvent("dblclick", { bubbles: true, cancelable: true });
+
+    expect(label.dispatchEvent(event)).toBe(true);
+    expect(await screen.findByRole("textbox", { name: /rename thread/i })).toBeTruthy();
+  });
+
+  it("focuses and selects the title when editing starts", async () => {
+    renderTree();
+
+    const input = await openRename();
+
+    expect(document.activeElement).toBe(input);
+    expect(input.selectionStart).toBe(0);
+    expect(input.selectionEnd).toBe(input.value.length);
+  });
+
+  it("renames a thread from an inline editor and sends the trimmed title", async () => {
+    renderTree();
+
+    const input = await openRename();
+    await userEvent.clear(input);
+    await userEvent.type(input, "  Launch plan  {enter}");
+
+    expect(renameMutateAsync).toHaveBeenCalledTimes(1);
+    expect(renameMutateAsync).toHaveBeenCalledWith({
+      threadId: "thread-1",
+      title: "Launch plan",
+    });
+  });
+
+  it("clears the title when the field is emptied", async () => {
+    renderTree();
+
+    const input = await openRename();
+    await userEvent.clear(input);
+    await userEvent.keyboard("{Enter}");
+
+    expect(renameMutateAsync).toHaveBeenCalledWith({
+      threadId: "thread-1",
+      title: null,
+    });
+  });
+
+  it("cancels the rename on Escape without a mutation", async () => {
+    renderTree();
+
+    const input = await openRename();
+    await userEvent.type(input, "unsaved{Escape}");
+
+    expect(renameMutateAsync).not.toHaveBeenCalled();
+    expect(screen.queryByRole("textbox", { name: /rename thread/i })).toBeNull();
+    expect(screen.getByText("Plan the launch")).toBeTruthy();
+  });
+
+  it("does not fire when the title is unchanged", async () => {
+    renderTree();
+
+    await openRename();
+    await userEvent.keyboard("{Enter}");
+
+    expect(renameMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("does not save a legacy title that only needs trimming", async () => {
+    threads = [thread({ title: "  Plan the launch  " })];
+    renderTree();
+
+    await openRename();
+    await userEvent.keyboard("{Enter}");
+
+    expect(renameMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("commits at most once when Enter is followed by blur", async () => {
+    renderTree();
+
+    const input = await openRename();
+    await userEvent.clear(input);
+    await userEvent.type(input, "Once{enter}");
+
+    expect(renameMutateAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it("exposes a Rename thread item in the context menu", async () => {
+    const user = userEvent.setup();
+    renderTree();
+    await user.click(screen.getByRole("button", { name: /thread menu/i }));
+    expect(screen.getByRole("menuitem", { name: /rename thread/i })).toBeTruthy();
   });
 });

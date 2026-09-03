@@ -1,0 +1,461 @@
+/**
+ * 1Password service module — the ONLY file in this codebase that imports
+ * `@1password/sdk` (mirrors the isolation in the legacy
+ * `packages/runner/src/onepassword-provider.ts`). Owns:
+ *
+ *   - SDK client construction + adaptation into the narrow `OpClient` shape
+ *     this module needs (`defaultCreateClient`), with per-token memoization.
+ *   - Service-account token lookup: org token from the org-owned
+ *     `onepassword` credential row, personal token from the session user's
+ *     user-owned row (reserved service name `ONEPASSWORD_SERVICE`).
+ *   - `resolveReference`: the resolve-cache seam (5-minute TTL), keyed by
+ *     scope + token owner + reference.
+ *   - `resolveCredential`: the resolver-seam entry point — turns a
+ *     reference-carrying `StoredCredential` (`metadata.onepassword`) into a
+ *     synthesized credential with the secret filled per `type`
+ *     (`api_key` → `apiKey`, anything else incl. `oauth2` → `accessToken`).
+ *     Rows without `metadata.onepassword` pass through unchanged (same
+ *     object, no clone) — byte-identical to today for non-1Password rows.
+ *
+ * Known `OnePasswordAuthError` cases (missing token, personal toggle off)
+ * carry a typed hint. SDK/network failures never interpolate `err.message`
+ * or the secret reference into that message — the client sees a fixed
+ * `"1Password request failed"`; the original is logged server-side only.
+ */
+
+import { createHash } from "node:crypto";
+import type { CredentialOwner, CredentialStore, StoredCredential } from "@valet/engine";
+
+/** Reserved credential service name for 1Password service-account tokens. */
+export const ONEPASSWORD_SERVICE = "onepassword";
+
+const RESOLVE_TTL_MS = 5 * 60_000;
+
+// ── Public shapes ──────────────────────────────────────────────────────
+
+export interface OpVault {
+  id: string;
+  title: string;
+}
+
+export interface OpItem {
+  id: string;
+  title: string;
+  vaultId: string;
+}
+
+/**
+ * The SDK's full item, as the vault lookup reads it. This is the only shape
+ * that carries field values; it never leaves the service.
+ */
+export interface SdkItem {
+  title: string;
+  notes?: string;
+  fields: {
+    title: string;
+    fieldType: string;
+    value?: string;
+    details?: { type: string; content?: { code?: string } };
+  }[];
+}
+
+/** Narrow view of @1password/sdk's client — the only shape this module needs. */
+export interface OpClient {
+  secrets: { resolve(reference: string): Promise<string> };
+  vaults: { list(): Promise<OpVault[]> };
+  items: {
+    list(vaultId: string): Promise<OpItem[]>;
+    /** The item WITH its secret material, for the vault lookup alone. */
+    getWithSecrets(vaultId: string, itemId: string): Promise<SdkItem>;
+  };
+}
+
+export type OnePasswordScope = "org" | "personal";
+
+export interface OnePasswordCtx {
+  orgId: string;
+  userId: string;
+}
+
+/** Why a 1Password call could not answer. `no_token` and `disabled` mean this
+ * scope has nothing to offer and a caller may try the next one; `sdk` means
+ * the token exists and 1Password refused, which a caller must surface.
+ * `scope` means the reader is not allowed to consult the token the row names
+ * — a policy refusal, never retried against another scope. `reference` means
+ * the token worked and THIS reference did not resolve: a typo, or an item the
+ * service account cannot read. The two are different corrective actions, so
+ * a caller must not report one as the other. */
+export type OnePasswordErrorKind = "no_token" | "disabled" | "sdk" | "scope" | "reference";
+
+export class OnePasswordAuthError extends Error {
+  constructor(message: string, readonly kind: OnePasswordErrorKind = "sdk") {
+    super(message);
+  }
+}
+
+export interface OnePasswordDeps {
+  credentials: CredentialStore;
+  getAllowPersonal: (orgId: string) => Promise<boolean>;
+  /** Default: real SDK (lazy import), adapted into `OpClient`. */
+  createClient?: (token: string) => Promise<OpClient>;
+  /** Default: `Date.now`. Injectable for cache-TTL tests. */
+  now?: () => number;
+}
+
+export interface OnePasswordService {
+  tokenConnected(scope: OnePasswordScope, ctx: OnePasswordCtx): Promise<boolean>;
+  /** The vaults the scope's token can read. Backs the live-server probe. */
+  listVaults(scope: OnePasswordScope, ctx: OnePasswordCtx): Promise<OpVault[]>;
+  resolveReference(scope: OnePasswordScope, ctx: OnePasswordCtx, reference: string): Promise<string>;
+  /** The resolver-seam entry: fills the secret into a reference-carrying row. */
+  resolveCredential(row: StoredCredential, ctx: OnePasswordCtx): Promise<StoredCredential>;
+  /**
+   * The secret for `service`, found by name in the vaults the token can read.
+   *
+   * This is what makes connecting a token enough: an agent asking for a
+   * credential Valet has no row for gets the one sitting in 1Password, with
+   * no per-service setup. `null` when nothing matches, which reads as "not
+   * connected" upstream.
+   */
+  findCredentialForService(
+    scope: OnePasswordScope,
+    ctx: OnePasswordCtx,
+    service: string,
+  ): Promise<string | null>;
+}
+
+// ── 1Password reference metadata on a StoredCredential ──────────────────
+
+interface OnePasswordMeta {
+  reference: string;
+  tokenScope: OnePasswordScope;
+}
+
+/** Type guard used by host + routes. */
+export function onePasswordMeta(row: StoredCredential): OnePasswordMeta | null {
+  const meta = row.metadata?.onepassword;
+  if (!meta || typeof meta !== "object") return null;
+  // `metadata` is `Record<string, unknown>`; narrowed to `object` above, so
+  // this only widens the index signature to read named properties — no
+  // shape is assumed until the `typeof`/enum checks below pass.
+  const candidate = meta as Record<string, unknown>;
+  const { reference, tokenScope } = candidate;
+  if (typeof reference !== "string") return null;
+  if (tokenScope !== "org" && tokenScope !== "personal") return null;
+  return { reference, tokenScope };
+}
+
+// ── Default SDK adapter ──────────────────────────────────────────────────
+
+async function defaultCreateClient(token: string): Promise<OpClient> {
+  const sdk = await import("@1password/sdk");
+  const client = await sdk.createClient({
+    auth: token,
+    integrationName: "Valet",
+    integrationVersion: "2.0.0",
+  });
+  return {
+    secrets: {
+      resolve: (reference: string) => client.secrets.resolve(reference),
+    },
+    vaults: {
+      list: async () => {
+        const vaults = await client.vaults.list();
+        return vaults.map((v) => ({ id: v.id, title: v.title }));
+      },
+    },
+    items: {
+      list: async (vaultId: string) => {
+        const items = await client.items.list(vaultId);
+        return items.map((i) => ({ id: i.id, title: i.title, vaultId: i.vaultId }));
+      },
+      getWithSecrets: async (vaultId: string, itemId: string) => {
+        const item = await client.items.get(vaultId, itemId);
+        return {
+          title: item.title,
+          notes: item.notes,
+          fields: item.fields.map((f) => ({
+            title: f.title,
+            fieldType: f.fieldType,
+            value: f.value,
+            details: f.details as SdkItem["fields"][number]["details"],
+          })),
+        };
+      },
+    },
+  };
+}
+
+/**
+ * Whether an item title names a service. Word-boundary and case-insensitive,
+ * with `-` and `_` in the id matching `-`, `_`, a space, or nothing: "Linear
+ * API Key" names `linear`, "Google Calendar" names `google_calendar`, and
+ * "Linearity" names neither. Narrow on purpose: this picks the secret an agent
+ * authenticates with, and a loose match points it at the wrong one.
+ *
+ * Escape first, then loosen. The other order escapes the class it just
+ * inserted, and no id containing a separator ever matches.
+ */
+export function titleNamesService(title: string, service: string): boolean {
+  const needle = service.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/[-_]/g, "[-_ ]?");
+  return new RegExp(`(^|[^a-z0-9])${needle}([^a-z0-9]|$)`, "i").test(title);
+}
+
+// ── Service factory ───────────────────────────────────────────────────────
+
+function tokenOwner(scope: OnePasswordScope, ctx: OnePasswordCtx): CredentialOwner {
+  return scope === "org" ? { type: "org", id: ctx.orgId } : { type: "user", id: ctx.userId };
+}
+
+const SDK_REQUEST_FAILED = "1Password request failed";
+
+/**
+ * Wraps any SDK rejection as `OnePasswordAuthError` with a fixed client
+ * message. Already-typed errors (missing token, disabled toggle, a prior
+ * wrap) pass through unchanged — never double-wrapped. The original
+ * rejection and `context` are logged server-side only; neither
+ * `err.message` nor a secret reference is interpolated into the
+ * client-visible text.
+ */
+function wrapSdkError(
+  err: unknown,
+  context: string,
+  kind: OnePasswordErrorKind = "sdk",
+): OnePasswordAuthError {
+  if (err instanceof OnePasswordAuthError) return err;
+  console.error(`onepassword: ${context}:`, err);
+  return new OnePasswordAuthError(SDK_REQUEST_FAILED, kind);
+}
+
+export function createOnePasswordService(deps: OnePasswordDeps): OnePasswordService {
+  const createClient = deps.createClient ?? defaultCreateClient;
+  const now = deps.now ?? Date.now;
+
+  // Keyed by token string so a rotated token evicts the stale client.
+  const clientCache = new Map<string, Promise<OpClient>>();
+  // Keyed by `${scope}:${ownerId}:${reference}`.
+  const resolveCache = new Map<string, { value: string; at: number }>();
+
+  async function requireToken(scope: OnePasswordScope, ctx: OnePasswordCtx): Promise<string> {
+    const owner = tokenOwner(scope, ctx);
+    const row = await deps.credentials.get(owner, ONEPASSWORD_SERVICE);
+    if (!row?.apiKey) {
+      const kind = scope === "org" ? "organization" : "personal";
+      throw new OnePasswordAuthError(
+        `This org has no ${kind} 1Password service account token connected.`,
+        "no_token",
+      );
+    }
+    return row.apiKey;
+  }
+
+  /**
+   * A short digest of the token, for cache keys.
+   *
+   * The caches below hold values fetched WITH a particular token. Keying them
+   * by scope and owner alone outlived the token: replacing a service account
+   * kept serving the old token's values for the rest of the TTL, so a rotation
+   * did not bite until five minutes later and a freshly rotated key read as
+   * invalid. The digest, not the token, so a secret is not a Map key.
+   */
+  function tokenTag(token: string): string {
+    return createHash("sha256").update(token).digest("hex").slice(0, 16);
+  }
+
+  async function clientFor(
+    scope: OnePasswordScope,
+    ctx: OnePasswordCtx,
+  ): Promise<{ client: OpClient; token: string }> {
+    if (scope === "personal") {
+      const allowed = await deps.getAllowPersonal(ctx.orgId);
+      if (!allowed) {
+        throw new OnePasswordAuthError(
+          "Personal 1Password tokens are disabled by your organization.",
+          "disabled",
+        );
+      }
+    }
+    const token = await requireToken(scope, ctx);
+    let pending = clientCache.get(token);
+    if (!pending) {
+      pending = createClient(token).catch((err: unknown) => {
+        // Evict on rejection — a transient failure (network blip, momentary
+        // SDK hiccup) must not permanently poison this token's cache entry
+        // until process restart. The next call re-attempts construction.
+        clientCache.delete(token);
+        throw wrapSdkError(err, "client initialization failed");
+      });
+      clientCache.set(token, pending);
+    }
+    return { client: await pending, token };
+  }
+
+  async function resolveReference(
+    scope: OnePasswordScope,
+    ctx: OnePasswordCtx,
+    reference: string,
+  ): Promise<string> {
+    const { client, token } = await clientFor(scope, ctx);
+    const owner = tokenOwner(scope, ctx);
+    const cacheKey = `${scope}:${owner.id}:${tokenTag(token)}:${reference}`;
+    const cached = resolveCache.get(cacheKey);
+    const nowMs = now();
+    if (cached && nowMs - cached.at < RESOLVE_TTL_MS) {
+      return cached.value;
+    }
+    try {
+      const value = await client.secrets.resolve(reference);
+      resolveCache.set(cacheKey, { value, at: nowMs });
+      return value;
+    } catch (err) {
+      // The client was built, so the token itself is usable: this reference is
+      // what failed. `clientFor` above throws its own typed error for a token
+      // problem, and `wrapSdkError` passes typed errors through, so the two
+      // stay distinguishable for a caller that reports a corrective action.
+      throw wrapSdkError(err, `resolution failed for ${reference}`, "reference");
+    }
+  }
+
+  async function resolveCredential(
+    row: StoredCredential,
+    ctx: OnePasswordCtx,
+  ): Promise<StoredCredential> {
+    const meta = onePasswordMeta(row);
+    if (!meta) return row;
+    const secret = await resolveReference(meta.tokenScope, ctx, meta.reference);
+    // The row's type decides the field, and `PUT /api/credentials/:service`
+    // holds that type to the plugin's declaration, so the consumer finds the
+    // secret where it reads. `scopes` rides along: the Slack setup route
+    // reports missing optional scopes from it without calling Slack again.
+    const resolved: StoredCredential = { type: row.type, metadata: row.metadata };
+    if (row.scopes) resolved.scopes = row.scopes;
+    if (row.type === "api_key") {
+      resolved.apiKey = secret;
+    } else {
+      resolved.accessToken = secret;
+    }
+    return resolved;
+  }
+
+  /**
+   * service -> reference, or null for "looked and found nothing". Cached on
+   * the same TTL as a resolve: a credential miss must not walk every vault on
+   * every tool call, and a negative answer is worth caching too, since the
+   * common case for an unconnected service is that nothing matches.
+   */
+  const lookupCache = new Map<string, { secret: string | null; at: number }>();
+  // Keyed by `${scope}:${ownerId}`: item titles for every vault the token can read.
+  const inventoryCache = new Map<string, { items: { vaultId: string; id: string; title: string }[]; at: number }>();
+
+  /**
+   * The secret an item holds, as a value rather than a reference.
+   *
+   * Three shapes, in the order they are worth having:
+   *
+   *  - a field named for a credential, or any concealed one — the common
+   *    Login case, and the only one a plain `op://` reference reaches;
+   *  - a Totp field, where the useful value is the code the SDK COMPUTES
+   *    (`details.content.code`), never the seed in `field.value`. Handing an
+   *    integration the seed would give it the power to mint codes forever;
+   *  - the note body, for a SecureNote. That is where an API key usually
+   *    lives, and such an item carries no fields at all.
+   *
+   * Returns the value and how it was found, so the caller can say which.
+   */
+  function itemSecret(item: SdkItem): { value: string; via: string; kind: "field" | "totp" | "note" } | null {
+    const named = item.fields.find((f) =>
+      /^(credential|api[ _-]?key|token|secret|password)$/i.test(f.title),
+    );
+    const concealed = item.fields.find((f) => f.fieldType === "Concealed");
+    const plain = named ?? concealed;
+    if (plain?.value) return { value: plain.value, via: `field ${plain.title}`, kind: "field" };
+
+    const totp = item.fields.find((f) => f.fieldType === "Totp");
+    const code = totp?.details?.type === "Otp" ? totp.details.content?.code : undefined;
+    if (code) return { value: code, via: `one-time code from ${totp!.title}`, kind: "totp" };
+
+    const notes = item.notes?.trim();
+    if (notes) return { value: notes, via: "the note body", kind: "note" };
+
+    return null;
+  }
+
+  return {
+    async tokenConnected(scope, ctx) {
+      const owner = tokenOwner(scope, ctx);
+      const row = await deps.credentials.get(owner, ONEPASSWORD_SERVICE);
+      return Boolean(row?.apiKey);
+    },
+    async listVaults(scope, ctx) {
+      const { client } = await clientFor(scope, ctx);
+      try {
+        return await client.vaults.list();
+      } catch (err) {
+        throw wrapSdkError(err, "vault listing failed");
+      }
+    },
+    resolveReference,
+    resolveCredential,
+
+    async findCredentialForService(scope, ctx, service) {
+      // The gate runs before the cache, as in `resolveReference`: a hit must
+      // not outlive the personal toggle or the token row that allowed it. A
+      // scope with no token throws here, before any vault is touched.
+      const { client, token } = await clientFor(scope, ctx);
+      const owner = tokenOwner(scope, ctx);
+      const cacheKey = `${scope}:${owner.id}:${tokenTag(token)}:${service}`;
+      const nowMs = now();
+      const cached = lookupCache.get(cacheKey);
+      if (cached && nowMs - cached.at < RESOLVE_TTL_MS) return cached.secret;
+
+      // Titles only, fetched once per scope: N services asking in one turn
+      // must not walk the vaults N times.
+      const inventoryKey = `${scope}:${owner.id}:${tokenTag(token)}`;
+      let inventory = inventoryCache.get(inventoryKey);
+      if (!inventory || nowMs - inventory.at < 0 || nowMs - inventory.at >= RESOLVE_TTL_MS) {
+        const items: { vaultId: string; id: string; title: string }[] = [];
+        let vaults;
+        try {
+          vaults = await client.vaults.list();
+        } catch (err) {
+          throw wrapSdkError(err, "vault listing failed");
+        }
+        for (const vault of vaults) {
+          try {
+            for (const item of await client.items.list(vault.id)) {
+              items.push({ vaultId: vault.id, id: item.id, title: item.title });
+            }
+          } catch {
+            // A vault this token cannot read is not an error for a lookup:
+            // the secret may well be in the next one.
+          }
+        }
+        inventory = { items, at: nowMs };
+        inventoryCache.set(inventoryKey, inventory);
+      }
+
+      const match = inventory.items.find((i) => titleNamesService(i.title, service));
+      if (!match) {
+        lookupCache.set(cacheKey, { secret: null, at: nowMs });
+        return null;
+      }
+      let detail: SdkItem;
+      try {
+        detail = await client.items.getWithSecrets(match.vaultId, match.id);
+      } catch (err) {
+        throw wrapSdkError(err, "item read failed");
+      }
+      const secret = itemSecret(detail);
+      if (!secret) {
+        lookupCache.set(cacheKey, { secret: null, at: nowMs });
+        return null;
+      }
+      // A one-time code is good for about thirty seconds; caching it for
+      // five minutes hands out expired codes with a valid shape.
+      if (secret.kind !== "totp") lookupCache.set(cacheKey, { secret: secret.value, at: nowMs });
+      // The VALUE, not a reference: a note body and a computed one-time
+      // code have no `op://` address, so a reference cannot express them.
+      return secret.value;
+    },
+  };
+}

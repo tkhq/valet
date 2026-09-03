@@ -1,0 +1,49 @@
+{
+  "caseId": "hard-roman-arithmetic",
+  "model": "anthropic/claude-haiku-4-5",
+  "savedAt": "2026-09-02T22:25:36.339Z",
+  "status": "pass",
+  "trajectory": {
+    "caseId": "hard-roman-arithmetic",
+    "prompt": "Without using any tools, add the roman numerals MCMXCIV and DCCCLXXVIII. Reply with only the sum, written in roman numerals.",
+    "model": "anthropic/claude-haiku-4-5",
+    "turns": [
+      {
+        "index": 0,
+        "usage": {
+          "input": 2622,
+          "output": 44,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 2666
+        },
+        "cost": {
+          "input": 0.0026219999999999998,
+          "output": 0.00022,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 0.002842
+        },
+        "queueItemId": "q-mtko02hb-2e"
+      }
+    ],
+    "toolCalls": [],
+    "finalOutput": "MCMXCIV = 1994\nDCCCLXXVIII = 878\n\n1994 + 878 = 2872\n\nMMDCCCLXXII",
+    "usage": {
+      "input": 2622,
+      "output": 44,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 2666
+    },
+    "cost": {
+      "input": 0.0026219999999999998,
+      "output": 0.00022,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0.002842
+    },
+    "durationMs": 965,
+    "stopReason": "end_turn"
+  }
+}

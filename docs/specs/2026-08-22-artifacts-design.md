@@ -2,6 +2,10 @@
 
 Date: 2026-08-22
 Status: implemented
+Extended by: `docs/specs/2026-09-02-artifact-pages-design.md` — artifacts gained
+a `format` column, an HTML page format rendered in a sandboxed frame, version
+history, and an inline publish path. This document still describes the
+visibility model, the token semantics, and the memory viewer accurately.
 
 ## Problem
 

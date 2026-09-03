@@ -11,14 +11,24 @@ import { describe, it, expect, vi } from "vitest";
 import * as k8s from "@kubernetes/client-node";
 import { DockerSandboxProvider } from "@valet/sandbox-docker";
 import { LocalSandboxProvider } from "@valet/sandbox-local";
-import { KubernetesSandboxProvider } from "@valet/sandbox-kubernetes";
+import {
+  KubernetesSandboxProvider,
+  SANDBOX_CR_API_VERSION,
+  buildSandboxManifest,
+} from "@valet/sandbox-kubernetes";
 import {
   buildSandboxProvider,
   parseSandboxBackend,
+  resolveChildRetentionMs,
   resolveDefaultImage,
   resolveHibernatedRetentionMs,
   resolveIdleMinutes,
+  resolveSandboxApiUrl,
   resolveKubeConfig,
+  resolveSandboxEphemeralStorageLimit,
+  resolveSandboxEphemeralStorageRequest,
+  resolveSandboxWorkspaceStorage,
+  resolveSandboxWorkspaceStorageMax,
 } from "./sandbox-backend.js";
 
 function fakeKubeConfig(): k8s.KubeConfig {
@@ -164,6 +174,36 @@ describe("resolveIdleMinutes", () => {
   });
 });
 
+describe("resolveChildRetentionMs", () => {
+  it("defaults to 24 hours when VALET_CHILD_SANDBOX_RETENTION_HOURS is unset", () => {
+    expect(resolveChildRetentionMs({})).toBe(24 * 3_600_000);
+  });
+
+  it("parses a positive hours value", () => {
+    expect(resolveChildRetentionMs({ VALET_CHILD_SANDBOX_RETENTION_HOURS: "6" })).toBe(6 * 3_600_000);
+  });
+
+  it("treats an explicit 0 as disabled (eager destroy on settle)", () => {
+    expect(resolveChildRetentionMs({ VALET_CHILD_SANDBOX_RETENTION_HOURS: "0" })).toBe(0);
+  });
+
+  it("treats a negative value as disabled", () => {
+    expect(resolveChildRetentionMs({ VALET_CHILD_SANDBOX_RETENTION_HOURS: "-5" })).toBe(0);
+  });
+
+  it("treats a non-numeric value as disabled", () => {
+    expect(resolveChildRetentionMs({ VALET_CHILD_SANDBOX_RETENTION_HOURS: "bogus" })).toBe(0);
+  });
+
+  it("keeps children on a SHORTER window than every other session class", () => {
+    // The class split is the point: children are the high-churn, use-once
+    // class (hundreds a day, each holding a workspace PVC), while
+    // orchestrators and assistants are provisioned rarely and revisited
+    // for weeks. A change that collapses the two should fail here.
+    expect(resolveChildRetentionMs({})).toBeLessThan(resolveHibernatedRetentionMs({}));
+  });
+});
+
 describe("resolveHibernatedRetentionMs", () => {
   it("defaults to 72 hours when VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES is unset", () => {
     expect(resolveHibernatedRetentionMs({})).toBe(72 * 60 * 60_000);
@@ -183,6 +223,83 @@ describe("resolveHibernatedRetentionMs", () => {
 
   it("treats a non-numeric value as disabled", () => {
     expect(resolveHibernatedRetentionMs({ VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES: "bogus" })).toBe(0);
+  });
+});
+
+describe("resolveSandboxEphemeralStorageRequest / Limit (TKAI-349)", () => {
+  it("defaults to 2Gi request / 8Gi limit when unset", () => {
+    expect(resolveSandboxEphemeralStorageRequest({})).toBe("2Gi");
+    expect(resolveSandboxEphemeralStorageLimit({})).toBe("8Gi");
+  });
+
+  it("passes explicit quantity strings through verbatim", () => {
+    expect(
+      resolveSandboxEphemeralStorageRequest({ VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST: "500Mi" }),
+    ).toBe("500Mi");
+    expect(
+      resolveSandboxEphemeralStorageLimit({ VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT: "16Gi" }),
+    ).toBe("16Gi");
+  });
+
+  it('treats "0" as disabled (manifest omits the field)', () => {
+    expect(
+      resolveSandboxEphemeralStorageRequest({ VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST: "0" }),
+    ).toBeUndefined();
+    expect(
+      resolveSandboxEphemeralStorageLimit({ VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT: "0" }),
+    ).toBeUndefined();
+  });
+
+  it("treats an empty string as unset (default applies)", () => {
+    expect(
+      resolveSandboxEphemeralStorageRequest({ VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST: "" }),
+    ).toBe("2Gi");
+    expect(resolveSandboxEphemeralStorageLimit({ VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT: "" })).toBe(
+      "8Gi",
+    );
+  });
+});
+
+describe("resolveSandboxWorkspaceStorage", () => {
+  it("defaults to 1Gi when VALET_SANDBOX_WORKSPACE_STORAGE is unset", () => {
+    expect(resolveSandboxWorkspaceStorage({})).toBe("1Gi");
+  });
+
+  it("matches the manifest builder's own fallback, so both paths provision the same volume", () => {
+    // Two defaults that drift produce a different workspace depending on
+    // whether the env knob was read — the exact class of bug the unwired
+    // `defaultStorage` field caused before this.
+    const manifest = buildSandboxManifest(
+      { namespace: "ns", defaultImage: "img", apiVersion: SANDBOX_CR_API_VERSION },
+      "sess-1",
+      {},
+    );
+    expect(manifest.spec.volumeClaimTemplates[0]?.spec.resources.requests.storage).toBe(
+      resolveSandboxWorkspaceStorage({}),
+    );
+  });
+
+  it("passes an explicit quantity through verbatim", () => {
+    expect(resolveSandboxWorkspaceStorage({ VALET_SANDBOX_WORKSPACE_STORAGE: "20Gi" })).toBe("20Gi");
+  });
+
+  it('treats "0" as unset so the manifest default applies, never a zero-sized claim', () => {
+    expect(resolveSandboxWorkspaceStorage({ VALET_SANDBOX_WORKSPACE_STORAGE: "0" })).toBeUndefined();
+  });
+});
+
+describe("resolveSandboxWorkspaceStorageMax", () => {
+  it("defaults to 20Gi when VALET_SANDBOX_WORKSPACE_MAX is unset", () => {
+    expect(resolveSandboxWorkspaceStorageMax({})).toBe("20Gi");
+    expect(resolveSandboxWorkspaceStorageMax({ VALET_SANDBOX_WORKSPACE_MAX: "" })).toBe("20Gi");
+  });
+
+  it("passes an explicit quantity through verbatim", () => {
+    expect(resolveSandboxWorkspaceStorageMax({ VALET_SANDBOX_WORKSPACE_MAX: "50Gi" })).toBe("50Gi");
+  });
+
+  it('treats "0" as unset so the provider\'s own default cap applies', () => {
+    expect(resolveSandboxWorkspaceStorageMax({ VALET_SANDBOX_WORKSPACE_MAX: "0" })).toBeUndefined();
   });
 });
 
@@ -234,5 +351,53 @@ describe("resolveKubeConfig", () => {
     // pinned context must throw, never silently target prod. No env vars →
     // not in-cluster (KUBERNETES_SERVICE_HOST absent), no pinned context.
     expect(() => resolveKubeConfig({})).toThrow(/VALET_KUBE_CONTEXT is required/);
+  });
+});
+
+/**
+ * `VALET_API_URL` must be reachable FROM a sandbox. On the docker backend a
+ * loopback host names the sandbox itself, so every in-sandbox client
+ * (`git-credential-valet`, `valet-gh`, `valet-secrets`) fails to connect.
+ */
+describe("resolveSandboxApiUrl", () => {
+  const docker = { VALET_SANDBOX_BACKEND: "docker" } as NodeJS.ProcessEnv;
+
+  it("rewrites every loopback spelling to host.docker.internal on docker", () => {
+    for (const host of ["localhost", "127.0.0.1", "0.0.0.0"]) {
+      expect(resolveSandboxApiUrl(docker, `http://${host}:8788`)).toBe("http://host.docker.internal:8788");
+    }
+    expect(resolveSandboxApiUrl(docker, "http://[::1]:8788")).toBe("http://host.docker.internal:8788");
+  });
+
+  it("treats an unset backend as docker (the documented default)", () => {
+    expect(resolveSandboxApiUrl({}, "http://localhost:8788")).toBe("http://host.docker.internal:8788");
+  });
+
+  it("keeps the scheme, port, and path", () => {
+    expect(resolveSandboxApiUrl(docker, "https://localhost:9443/base")).toBe(
+      "https://host.docker.internal:9443/base",
+    );
+  });
+
+  it("does not append a trailing slash to a bare origin", () => {
+    expect(resolveSandboxApiUrl(docker, "http://localhost:8788")).not.toMatch(/\/$/);
+  });
+
+  it("leaves a routable host alone — the operator meant it", () => {
+    expect(resolveSandboxApiUrl(docker, "https://valet.example.com")).toBe("https://valet.example.com");
+  });
+
+  it("leaves other backends alone", () => {
+    for (const backend of ["kubernetes", "local"]) {
+      expect(resolveSandboxApiUrl({ VALET_SANDBOX_BACKEND: backend }, "http://localhost:8788")).toBe(
+        "http://localhost:8788",
+      );
+    }
+  });
+
+  it("passes through unset, empty, and unparseable values untouched", () => {
+    expect(resolveSandboxApiUrl(docker, undefined)).toBeUndefined();
+    expect(resolveSandboxApiUrl(docker, "")).toBe("");
+    expect(resolveSandboxApiUrl(docker, "not a url")).toBe("not a url");
   });
 });

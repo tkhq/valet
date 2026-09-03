@@ -249,6 +249,7 @@ export function TopNav() {
       >
         <NavLink to="/chat">Chat</NavLink>
         <NavLink to="/memory">Memory</NavLink>
+        <NavLink to="/artifacts">Artifacts</NavLink>
         <NavLink to="/sessions" active={onSecuritySession ? false : undefined}>
           Sessions
         </NavLink>

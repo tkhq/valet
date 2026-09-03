@@ -153,8 +153,85 @@ interface SchemaRepair {
  * way and does need a real migration. Keep each `sql` in lockstep with
  * `0000_app.sql`. Delete this list at 1.0, when numbered migrations take
  * over.
+ *
+ * Every entry must also be safe to ROLL BACK: the previous release may boot
+ * this database again. Adding a column or a table is safe; renaming or
+ * dropping is not, because the older release repairs the OLD name and its
+ * statement then stops its boot. Do not rename or drop here.
  */
 const SCHEMA_REPAIRS: SchemaRepair[] = [
+  {
+    // Repository mirror columns on workflow_definitions. A deployed database
+    // predating them holds only `local` rows, which is what the default
+    // encodes, so the backfill is the default and nothing else is needed.
+    describe: "workflow_definitions.origin column",
+    probe: { kind: "column", table: "workflow_definitions", column: "origin" },
+    sql: `ALTER TABLE "workflow_definitions" ADD COLUMN IF NOT EXISTS "origin" text NOT NULL DEFAULT 'local'`,
+  },
+  {
+    describe: "workflow_definitions.source_id column",
+    probe: { kind: "column", table: "workflow_definitions", column: "source_id" },
+    sql: 'ALTER TABLE "workflow_definitions" ADD COLUMN IF NOT EXISTS "source_id" text',
+  },
+  {
+    describe: "workflow_definitions.upstream_path column",
+    probe: { kind: "column", table: "workflow_definitions", column: "upstream_path" },
+    sql: 'ALTER TABLE "workflow_definitions" ADD COLUMN IF NOT EXISTS "upstream_path" text',
+  },
+  {
+    describe: "workflow_definitions.content_sha column",
+    probe: { kind: "column", table: "workflow_definitions", column: "content_sha" },
+    sql: 'ALTER TABLE "workflow_definitions" ADD COLUMN IF NOT EXISTS "content_sha" text',
+  },
+  {
+    // Partial, matching the migration: a `local` row carries no source and no
+    // path, and those NULLs would not collide in any case.
+    describe: "workflow_definitions_source_path unique index",
+    probe: { kind: "index", index: "workflow_definitions_source_path" },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "workflow_definitions_source_path" ON "workflow_definitions" ("source_id","upstream_path") WHERE "source_id" IS NOT NULL',
+  },
+  {
+    // The mirrored template table and its two unique indexes. Additive, so a
+    // rollback to a release that does not know them is safe.
+    describe: "workflow_templates table",
+    probe: { kind: "table", table: "workflow_templates" },
+    sql: `CREATE TABLE IF NOT EXISTS "workflow_templates" (
+      "id" text PRIMARY KEY NOT NULL,
+      "org_id" text NOT NULL,
+      "owner_type" text NOT NULL,
+      "owner_id" text NOT NULL,
+      "template_id" text NOT NULL,
+      "origin" text DEFAULT 'local' NOT NULL,
+      "source_id" text,
+      "upstream_path" text NOT NULL,
+      "content_sha" text,
+      "template" jsonb NOT NULL,
+      "created_at" bigint NOT NULL,
+      "updated_at" bigint NOT NULL
+    )`,
+  },
+  {
+    describe: "workflow_templates_owner_template unique index",
+    probe: { kind: "index", index: "workflow_templates_owner_template" },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "workflow_templates_owner_template" ON "workflow_templates" ("org_id","owner_type","owner_id","template_id")',
+  },
+  {
+    describe: "workflow_templates_source_path unique index",
+    probe: { kind: "index", index: "workflow_templates_source_path" },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "workflow_templates_source_path" ON "workflow_templates" ("source_id","upstream_path") WHERE "source_id" IS NOT NULL',
+  },
+  {
+    // Provenance on a version row. Both nullable: every version a product
+    // edit wrote carries neither, and so does every row an upgrade brings.
+    describe: "workflow_versions.origin column",
+    probe: { kind: "column", table: "workflow_versions", column: "origin" },
+    sql: 'ALTER TABLE "workflow_versions" ADD COLUMN IF NOT EXISTS "origin" text',
+  },
+  {
+    describe: "workflow_versions.source_commit column",
+    probe: { kind: "column", table: "workflow_versions", column: "source_commit" },
+    sql: 'ALTER TABLE "workflow_versions" ADD COLUMN IF NOT EXISTS "source_commit" text',
+  },
   {
     // The spawning submission's channel origin, inherited by child.settled
     // signals. Null on rows from before the column: those settlements just
@@ -172,12 +249,73 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'ALTER TABLE "followed_threads" ADD COLUMN IF NOT EXISTS "last_seen_ts" text',
   },
   {
-    // Records which person's GitHub credential a team skill source may use.
+    // Memory mirror bookkeeping. A deployed database holds only rows the
+    // product wrote, which carry no source, so NULL is the backfill.
+    describe: "memory_files.source_id column",
+    probe: { kind: "column", table: "memory_files", column: "source_id" },
+    sql: 'ALTER TABLE "memory_files" ADD COLUMN IF NOT EXISTS "source_id" text',
+  },
+  {
+    describe: "memory_files.upstream_path column",
+    probe: { kind: "column", table: "memory_files", column: "upstream_path" },
+    sql: 'ALTER TABLE "memory_files" ADD COLUMN IF NOT EXISTS "upstream_path" text',
+  },
+  {
+    describe: "memory_files.content_sha column",
+    probe: { kind: "column", table: "memory_files", column: "content_sha" },
+    sql: 'ALTER TABLE "memory_files" ADD COLUMN IF NOT EXISTS "content_sha" text',
+  },
+  {
+    // Trigger provenance. A deployed database holds only person-armed rows,
+    // which is what the default encodes, so the default IS the backfill.
+    describe: "workflow_schedules.origin column",
+    probe: { kind: "column", table: "workflow_schedules", column: "origin" },
+    sql: `ALTER TABLE "workflow_schedules" ADD COLUMN IF NOT EXISTS "origin" text NOT NULL DEFAULT 'local'`,
+  },
+  {
+    describe: "event_subscriptions.origin column",
+    probe: { kind: "column", table: "event_subscriptions", column: "origin" },
+    sql: `ALTER TABLE "event_subscriptions" ADD COLUMN IF NOT EXISTS "origin" text NOT NULL DEFAULT 'local'`,
+  },
+  {
+    // Which of the owner's assistants a followed thread routes to. Null on
+    // rows from before the column, and on any follow whose rule named no
+    // assistant — both read as "the owner's default", the old behavior.
+    describe: "followed_threads.assistant_id column",
+    probe: { kind: "column", table: "followed_threads", column: "assistant_id" },
+    sql: 'ALTER TABLE "followed_threads" ADD COLUMN IF NOT EXISTS "assistant_id" text',
+  },
+  {
+    // Which of the owner's assistants an orchestrator-target schedule prompts.
+    // Null on rows from before the column and on schedules that named none;
+    // both resolve to the owner's default at fire time.
+    describe: "workflow_schedules.assistant_id column",
+    probe: { kind: "column", table: "workflow_schedules", column: "assistant_id" },
+    sql: 'ALTER TABLE "workflow_schedules" ADD COLUMN IF NOT EXISTS "assistant_id" text',
+  },
+  {
+    // Records which person's GitHub credential a team source may use.
     // Null on every row written before the column existed, which the sync
     // reads as "no credential" rather than climbing to the org's App.
     describe: "skill_sources.created_by column",
     probe: { kind: "column", table: "skill_sources", column: "created_by" },
     sql: 'ALTER TABLE "skill_sources" ADD COLUMN IF NOT EXISTS "created_by" text',
+  },
+  {
+    // The DEFAULT backfills every pre-existing row to skills only, so a
+    // repository tracked before workflow sync existed keeps mirroring what it
+    // mirrored.
+    describe: "skill_sources.kinds column",
+    probe: { kind: "column", table: "skill_sources", column: "kinds" },
+    sql: `ALTER TABLE "skill_sources" ADD COLUMN IF NOT EXISTS "kinds" jsonb DEFAULT '["skills"]'::jsonb NOT NULL`,
+  },
+  {
+    // The discovery-rules version and the commit read under it. Null on
+    // every row written before the column existed, and on every row an older
+    // release has advanced since; both make that source re-scan once.
+    describe: "skill_sources.discovery_scan column",
+    probe: { kind: "column", table: "skill_sources", column: "discovery_scan" },
+    sql: 'ALTER TABLE "skill_sources" ADD COLUMN IF NOT EXISTS "discovery_scan" text',
   },
   {
     // The per-group team-sync allowlist. Null on every row written before
@@ -204,8 +342,41 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "allow_public_artifacts" boolean NOT NULL DEFAULT false',
   },
   {
+    // Thumbs up/down feedback (TKAI-334) — the eval-seeding signal.
+    describe: "ratings table",
+    probe: { kind: "table", table: "ratings" },
+    sql: `CREATE TABLE IF NOT EXISTS "ratings" (
+      "id" text PRIMARY KEY NOT NULL,
+      "user_id" text NOT NULL,
+      "target_type" text NOT NULL,
+      "target_id" text NOT NULL,
+      "session_id" text NOT NULL,
+      "thread_id" text,
+      "rating" text NOT NULL,
+      "created_at" bigint NOT NULL,
+      "updated_at" bigint NOT NULL
+    )`,
+  },
+  {
+    describe: "ratings_user_target index",
+    probe: { kind: "index", index: "ratings_user_target" },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "ratings_user_target" ON "ratings" ("user_id","target_type","target_id")',
+  },
+  {
+    describe: "ratings_session index",
+    probe: { kind: "index", index: "ratings_session" },
+    sql: 'CREATE INDEX IF NOT EXISTS "ratings_session" ON "ratings" ("session_id")',
+  },
+  {
+    describe: "ratings_type_rating index",
+    probe: { kind: "index", index: "ratings_type_rating" },
+    sql: 'CREATE INDEX IF NOT EXISTS "ratings_type_rating" ON "ratings" ("target_type","rating")',
+  },
+  {
     // The artifacts table itself (artifacts design) — a whole-table sibling
-    // of the column repairs, for the same reason.
+    // of the column repairs, for the same reason. Carries the artifact-pages
+    // columns too; databases that already have the table get those from the
+    // per-column repairs below.
     describe: "artifacts table",
     probe: { kind: "table", table: "artifacts" },
     sql: `CREATE TABLE IF NOT EXISTS "artifacts" (
@@ -219,6 +390,12 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
       "source_memory_path" text NOT NULL,
       "title" text DEFAULT '' NOT NULL,
       "content" text NOT NULL,
+      "format" text DEFAULT 'markdown' NOT NULL,
+      "rendered" text DEFAULT '' NOT NULL,
+      "description" text DEFAULT '' NOT NULL,
+      "icon" text DEFAULT '' NOT NULL,
+      "version" bigint DEFAULT 1 NOT NULL,
+      "shared_version" bigint,
       "visibility" text DEFAULT 'org' NOT NULL,
       "public_by" text,
       "created_at" bigint NOT NULL,
@@ -243,6 +420,89 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     describe: "orgs.model_tiers column",
     probe: { kind: "column", table: "orgs", column: "model_tiers" },
     sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "model_tiers" jsonb',
+  },
+  {
+    // Which compiler produced `rendered` (artifact-pages design). 'markdown'
+    // matches every pre-pages row, whose content was always markdown.
+    describe: "artifacts.format column",
+    probe: { kind: "column", table: "artifacts", column: "format" },
+    sql: `ALTER TABLE "artifacts" ADD COLUMN IF NOT EXISTS "format" text DEFAULT 'markdown' NOT NULL`,
+  },
+  {
+    // The compiled page body. '' on a pre-pages row means "compile `content`
+    // on read" — the read path falls back, so no backfill is needed.
+    describe: "artifacts.rendered column",
+    probe: { kind: "column", table: "artifacts", column: "rendered" },
+    sql: `ALTER TABLE "artifacts" ADD COLUMN IF NOT EXISTS "rendered" text DEFAULT '' NOT NULL`,
+  },
+  {
+    describe: "artifacts.description column",
+    probe: { kind: "column", table: "artifacts", column: "description" },
+    sql: `ALTER TABLE "artifacts" ADD COLUMN IF NOT EXISTS "description" text DEFAULT '' NOT NULL`,
+  },
+  {
+    describe: "artifacts.icon column",
+    probe: { kind: "column", table: "artifacts", column: "icon" },
+    sql: `ALTER TABLE "artifacts" ADD COLUMN IF NOT EXISTS "icon" text DEFAULT '' NOT NULL`,
+  },
+  {
+    // Publish counter. 1 on pre-pages rows: their one snapshot is version 1.
+    describe: "artifacts.version column",
+    probe: { kind: "column", table: "artifacts", column: "version" },
+    sql: `ALTER TABLE "artifacts" ADD COLUMN IF NOT EXISTS "version" bigint DEFAULT 1 NOT NULL`,
+  },
+  {
+    // Pin viewers to one version; null = latest, which matches pre-pages
+    // behavior exactly.
+    describe: "artifacts.shared_version column",
+    probe: { kind: "column", table: "artifacts", column: "shared_version" },
+    sql: `ALTER TABLE "artifacts" ADD COLUMN IF NOT EXISTS "shared_version" bigint`,
+  },
+  {
+    // Version history (artifact-pages design). Pre-pages rows have no
+    // version rows; the first re-publish appends one, and reads of an
+    // unpinned artifact never join this table.
+    describe: "artifact_versions table",
+    probe: { kind: "table", table: "artifact_versions" },
+    sql: `CREATE TABLE IF NOT EXISTS "artifact_versions" (
+      "id" text PRIMARY KEY NOT NULL,
+      "artifact_id" text NOT NULL,
+      "version" bigint NOT NULL,
+      "title" text DEFAULT '' NOT NULL,
+      "format" text DEFAULT 'markdown' NOT NULL,
+      "content" text NOT NULL,
+      "rendered" text DEFAULT '' NOT NULL,
+      "actor_user_id" text NOT NULL,
+      "created_at" bigint NOT NULL
+    )`,
+  },
+  {
+    describe: "artifact_versions_unique index",
+    probe: { kind: "index", index: "artifact_versions_unique" },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "artifact_versions_unique" ON "artifact_versions" ("artifact_id","version")',
+  },
+  {
+    // Element-anchored comments on a published page (artifact-pages design).
+    describe: "artifact_comments table",
+    probe: { kind: "table", table: "artifact_comments" },
+    sql: `CREATE TABLE IF NOT EXISTS "artifact_comments" (
+      "id" text PRIMARY KEY NOT NULL,
+      "artifact_id" text NOT NULL,
+      "version" bigint NOT NULL,
+      "vdid" text,
+      "parent_id" text,
+      "body" text NOT NULL,
+      "author_user_id" text NOT NULL,
+      "sent_to_session" text,
+      "resolved_at" bigint,
+      "resolved_by" text,
+      "created_at" bigint NOT NULL
+    )`,
+  },
+  {
+    describe: "artifact_comments_artifact index",
+    probe: { kind: "index", index: "artifact_comments_artifact" },
+    sql: 'CREATE INDEX IF NOT EXISTS "artifact_comments_artifact" ON "artifact_comments" ("artifact_id")',
   },
   {
     // The runtime model-registry cache (TKAI-327). An empty table degrades
@@ -849,6 +1109,15 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     describe: "engine_entries.seq column",
     probe: { kind: "column", table: "engine_entries", column: "seq" },
     sql: 'ALTER TABLE "engine_entries" ADD COLUMN IF NOT EXISTS "seq" bigint GENERATED ALWAYS AS IDENTITY NOT NULL',
+  },
+  {
+    // Epoch ms of the most recent activity in this session (TKAI-341).
+    // The session list sorts by this column so a long-lived channel-bound
+    // session rises when it receives a message. Null on rows from before
+    // the column: queries fall back to `updated_at` via COALESCE.
+    describe: "agent_sessions.last_activity_at column",
+    probe: { kind: "column", table: "agent_sessions", column: "last_activity_at" },
+    sql: 'ALTER TABLE "agent_sessions" ADD COLUMN IF NOT EXISTS "last_activity_at" bigint',
   },
 ];
 

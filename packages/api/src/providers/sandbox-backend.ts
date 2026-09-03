@@ -30,6 +30,7 @@ import {
   podLivenessApiAdapter,
   podStatusApiAdapter,
   podsApiAdapter,
+  sandboxPvcApiAdapter,
   sandboxSecretsApiAdapter,
   type K8sProviderConfig,
 } from "@valet/sandbox-kubernetes";
@@ -145,13 +146,25 @@ export function resolveIdleMinutes(env: NodeJS.ProcessEnv): number {
 
 /**
  * Retention window for a settled child's suspended sandbox
- * (`VALET_CHILD_SANDBOX_RETENTION_HOURS`, default 72). `0`, a negative
+ * (`VALET_CHILD_SANDBOX_RETENTION_HOURS`, default 24). `0`, a negative
  * number, or a non-number disables retention: settled children get the
  * eager destroy-on-settle. Only consulted on hibernation-capable backends —
  * elsewhere the child watcher never parks in the first place.
+ *
+ * The window runs from the child's LAST settle (`child_watches.settled_at`,
+ * restamped on every re-settle) and is gated on the engine activity clock
+ * too, so it measures idle time, not age — a revived child restarts it.
+ *
+ * Shorter than the 72h every other session class gets
+ * (`resolveHibernatedRetentionMs`) on purpose: children are the
+ * high-churn, mostly use-once class (agents-dev spawns hundreds a day,
+ * each holding a workspace PVC), while an orchestrator or assistant
+ * sandbox is provisioned rarely and revisited for weeks. A day still
+ * covers same-day `child_send` revival and an overnight look at
+ * yesterday's run.
  */
 export function resolveChildRetentionMs(env: NodeJS.ProcessEnv): number {
-  return scaledEnvNumber(env.VALET_CHILD_SANDBOX_RETENTION_HOURS, 72 * 3_600_000, 3_600_000);
+  return scaledEnvNumber(env.VALET_CHILD_SANDBOX_RETENTION_HOURS, 24 * 3_600_000, 3_600_000);
 }
 
 /**
@@ -162,6 +175,12 @@ export function resolveChildRetentionMs(env: NodeJS.ProcessEnv): number {
  * history and memories live in postgres), but a Monday-morning user should
  * still find Friday's uncommitted work. Zero, negative, or non-numeric
  * disables the reaper entirely.
+ *
+ * This is the window for every long-lived session class — orchestrators,
+ * assistants, top-level sessions. Settled CHILDREN are reclaimed sooner by
+ * `ChildWatcher.sweepRetention` (`resolveChildRetentionMs`, 24h), which
+ * fires first for them; this reaper stays their backstop for the cases the
+ * child watcher cannot see (an unsettled row, a lost watch).
  */
 export function resolveHibernatedRetentionMs(env: NodeJS.ProcessEnv): number {
   return scaledEnvNumber(env.VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES, 72 * 60 * 60_000, 60_000);
@@ -198,6 +217,124 @@ export function resolveOrgSandboxCeiling(env: NodeJS.ProcessEnv): number {
  */
 export function resolveSandboxCapacityWaitMs(env: NodeJS.ProcessEnv): number {
   return scaledEnvNumber(env.VALET_SANDBOX_CAPACITY_WAIT_MINUTES, 10 * 60_000, 60_000);
+}
+
+/** Hosts that name the current machine's own loopback interface. Inside a
+ * bridge-network container each of these resolves to the CONTAINER, not to
+ * the host running the api. */
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"]);
+
+/**
+ * The api URL injected into every sandbox as `VALET_API_URL`.
+ *
+ * On the `docker` backend a sandbox runs in its own network namespace, so a
+ * loopback host points the sandbox at itself and every in-sandbox client
+ * (`git-credential-valet`, `valet-gh`, `valet-secrets`) fails to connect.
+ * Docker publishes the host under `host.docker.internal`, so this swaps the
+ * host part and keeps the scheme, port, and path. `buildDockerRunArgs` adds
+ * the matching `--add-host` entry, which is what makes the name resolve on
+ * Linux.
+ *
+ * Only a loopback host is rewritten, and only for the docker backend. A
+ * routable address the operator configured deliberately is returned
+ * unchanged, as is every other backend (the k8s chart sets the api
+ * Service's in-cluster DNS name).
+ */
+export function resolveSandboxApiUrl(
+  env: NodeJS.ProcessEnv,
+  configured: string | undefined,
+): string | undefined {
+  if (configured === undefined || configured === "") return configured;
+  if (parseSandboxBackend(env.VALET_SANDBOX_BACKEND) !== "docker") return configured;
+  let url: URL;
+  try {
+    url = new URL(configured);
+  } catch {
+    // Not a parseable URL — hand it back untouched and let the consumer
+    // report the failure against the value the operator actually set.
+    return configured;
+  }
+  if (!LOOPBACK_HOSTS.has(url.hostname) && !LOOPBACK_HOSTS.has(`[${url.hostname}]`)) return configured;
+  url.hostname = "host.docker.internal";
+  // `URL.toString()` appends a trailing slash to an empty path; callers
+  // join paths onto this value, so keep the original's shape.
+  return url.toString().replace(/\/$/, "");
+}
+
+/**
+ * Shared parse for the two ephemeral-storage quantity knobs below: unset or
+ * empty → the default; `"0"` → off (undefined — the manifest omits the
+ * field); anything else passes through verbatim as a Kubernetes quantity
+ * string ("2Gi", "500Mi"). Mirrors `scaledEnvNumber`'s disable convention,
+ * except the values are quantity strings, not numbers.
+ */
+function quantityEnv(raw: string | undefined, defaultValue: string): string | undefined {
+  if (raw === undefined || raw === "") return defaultValue;
+  if (raw === "0") return undefined;
+  return raw;
+}
+
+/**
+ * Per-sandbox ephemeral-storage REQUEST
+ * (`VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST`, default "2Gi"). The scheduler
+ * counts it against node allocatable, which caps how many sandbox pods
+ * stack onto one node — the root-cause fix for TKAI-349 (36 pods on one
+ * node exhausted its disk and took it NotReady). `"0"` disables it.
+ */
+export function resolveSandboxEphemeralStorageRequest(env: NodeJS.ProcessEnv): string | undefined {
+  return quantityEnv(env.VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST, "2Gi");
+}
+
+/**
+ * Per-sandbox ephemeral-storage LIMIT
+ * (`VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT`, default "8Gi"). Past it the
+ * kubelet evicts the one runaway sandbox instead of the node failing. Also
+ * bounds the DinD docker-state emptyDir (the manifest reuses it as the
+ * volume's sizeLimit). `"0"` disables it. Keep it at or above the request.
+ */
+export function resolveSandboxEphemeralStorageLimit(env: NodeJS.ProcessEnv): string | undefined {
+  return quantityEnv(env.VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT, "8Gi");
+}
+
+/**
+ * Size of the PERSISTENT `/workspace` volume claim each sandbox provisions
+ * (`VALET_SANDBOX_WORKSPACE_STORAGE`, default "1Gi"). Unlike the ephemeral
+ * knobs above this is a real PVC: it survives pod recreation and
+ * hibernation, and it is what holds the repo clone and uncommitted work.
+ *
+ * 1Gi measured against real usage (agents-dev, 2026-09-02): across every
+ * live sandbox volume the largest workspace held 114 MB and the rest were
+ * under 30 MB. Node-local scratch — docker image layers, container rootfs,
+ * build caches outside /workspace — is bounded separately by the
+ * ephemeral-storage limit, so it does not land on this claim.
+ *
+ * Sizing per sandbox is one-way: a PVC cannot shrink. Changing this value
+ * only affects sandboxes created afterwards; an existing claim keeps its
+ * size until the sandbox is destroyed and re-provisioned — or until a
+ * workspace prep ENOSPC triggers on-demand growth (`Sandbox.growWorkspace`,
+ * capped by `VALET_SANDBOX_WORKSPACE_MAX` below). Keep this default small:
+ * growth is reactive and per-sandbox, while this value is billed on every
+ * PVC in the fleet.
+ *
+ * `"0"` omits the value and falls back to the manifest builder's own
+ * default rather than provisioning a zero-sized claim.
+ */
+export function resolveSandboxWorkspaceStorage(env: NodeJS.ProcessEnv): string | undefined {
+  return quantityEnv(env.VALET_SANDBOX_WORKSPACE_STORAGE, "1Gi");
+}
+
+/**
+ * Hard cap for on-demand workspace PVC growth
+ * (`VALET_SANDBOX_WORKSPACE_MAX`, default "20Gi"). When a git operation in
+ * workspace prep fails with ENOSPC, the kubernetes backend doubles the
+ * workspace claim (one EBS-rate-limited step at a time) up to this cap and
+ * retries once; at the cap the ENOSPC surfaces as a loud startup failure
+ * instead of unbounded growth. Growth is one-way (a PVC cannot shrink), so
+ * `max × VALET_ORG_SANDBOX_CEILING` bounds what one org's fleet can
+ * accrete. `"0"` falls back to the provider's own default cap.
+ */
+export function resolveSandboxWorkspaceStorageMax(env: NodeJS.ProcessEnv): string | undefined {
+  return quantityEnv(env.VALET_SANDBOX_WORKSPACE_MAX, "20Gi");
 }
 
 export interface BuildSandboxProviderDeps {
@@ -244,10 +381,32 @@ export function buildSandboxProvider(
       const podStatusApi = podStatusApiAdapter(coreApi);
       const podDeleteApi = podDeleteApiAdapter(coreApi);
       const pullSecret = env.VALET_SANDBOX_IMAGE_PULL_SECRET;
+      const ephemeralStorage = resolveSandboxEphemeralStorageRequest(env);
+      const ephemeralStorageLimit = resolveSandboxEphemeralStorageLimit(env);
+      const workspaceStorage = resolveSandboxWorkspaceStorage(env);
+      const workspaceStorageMax = resolveSandboxWorkspaceStorageMax(env);
       const cfg: K8sProviderConfig = {
         namespace,
         defaultImage: image ?? env.VALET_FULL_BASE_IMAGE ?? DEFAULT_FULL_BASE_IMAGE,
         apiVersion: SANDBOX_CR_API_VERSION,
+        // Persistent /workspace claim size. The provider config field
+        // existed but nothing ever set it, so the manifest builder's own
+        // constant was the only value a deploy could get.
+        ...(workspaceStorage ? { defaultStorage: workspaceStorage } : {}),
+        // On-demand workspace growth cap (Sandbox.growWorkspace).
+        ...(workspaceStorageMax ? { workspaceStorageMax } : {}),
+        // Node-disk protection defaults (TKAI-349) — set here, on the
+        // provider config, because engine host paths pass no
+        // `opts.resources`; the manifest merges these per-field under any
+        // caller-provided resources, so every sandbox pod carries them.
+        ...(ephemeralStorage || ephemeralStorageLimit
+          ? {
+              defaultResources: {
+                ...(ephemeralStorage ? { ephemeralStorage } : {}),
+                ...(ephemeralStorageLimit ? { ephemeralStorageLimit } : {}),
+              },
+            }
+          : {}),
         // Sandbox images v2 plan, Task 5: threaded when an external prebuild
         // registry requires authenticated pulls (`externalRegistry.pullSecret`
         // in the chart). Omitted (undefined, not []) for the bundled registry
@@ -261,7 +420,11 @@ export function buildSandboxProvider(
           : {}),
       };
       const secretsApi = sandboxSecretsApiAdapter(coreApi);
-      return new KubernetesSandboxProvider({ objectsApi, podsApi, execApi, livenessApi, podStatusApi, podDeleteApi, secretsApi }, cfg);
+      const pvcApi = sandboxPvcApiAdapter(coreApi);
+      return new KubernetesSandboxProvider(
+        { objectsApi, podsApi, execApi, livenessApi, podStatusApi, podDeleteApi, secretsApi, pvcApi },
+        cfg,
+      );
     }
   }
 }

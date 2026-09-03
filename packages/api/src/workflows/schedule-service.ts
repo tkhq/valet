@@ -12,19 +12,23 @@ import { workflowSchedules } from "../schema/index.js";
 import {
   canAccessTriggerRow,
   canAccessTriggerRowInScope,
-  ownedDefinitionRow,
+  armableDefinitionRow,
   scopedTriggerAccess,
   triggerAccessSets,
   type TriggerAccessSets,
   type WorkflowOwner,
   type WorkflowOwnerRef,
 } from "./service.js";
+import { checkAssistantForOwner } from "../assistants/service.js";
 
 export interface WorkflowScheduleSummary {
   scheduleId: string;
   targetKind: "workflow" | "orchestrator";
   workflowId?: string;
   prompt?: string;
+  /** Which of the owner's assistants an orchestrator schedule prompts.
+   * Absent → the owner's default. */
+  assistantId?: string;
   name: string;
   cron: string;
   timezone: string;
@@ -71,6 +75,7 @@ function rowToSummary(row: typeof workflowSchedules.$inferSelect): WorkflowSched
     targetKind: row.targetKind,
     workflowId: row.workflowId ?? undefined,
     prompt: row.prompt ?? undefined,
+    assistantId: row.assistantId ?? undefined,
     name: row.name,
     cron: row.cron,
     timezone: row.timezone,
@@ -100,6 +105,12 @@ export async function createWorkflowSchedule(
      * target (owner follows the workflow).
      */
     teamId?: string;
+    /**
+     * Which of the owner's assistants the prompt goes to. Absent → the
+     * owner's default. Only meaningful with `prompt`; the caller checks that
+     * the assistant belongs to the resolved owner.
+     */
+    assistantId?: string;
   },
   now = Date.now(),
 ): Promise<{ ok: true; schedule: WorkflowScheduleSummary } | { ok: false; error: string }> {
@@ -133,20 +144,44 @@ export async function createWorkflowSchedule(
     // `user`) rather than the workflow's, that org member became the
     // owner of runs against someone else's resource. See `scheduler.ts`'s
     // `fire()` for the matching run-ownership fix.
-    const owned = await ownedDefinitionRow(db, { userId: user.id, orgId: user.orgId }, input.workflowId!);
+    const owned = await armableDefinitionRow(db, { userId: user.id, orgId: user.orgId }, input.workflowId!);
     if (!owned) return { ok: false, error: `workflow not found: ${input.workflowId}` };
-    // Follow the workflow's own owner exactly. This used to widen a team
-    // workflow's schedule to the ORG, because `owner_type` could not hold a
-    // team — which handed a team's scheduled prompt to the org assistant,
-    // a strictly larger audience than the team that owns the workflow. The
-    // column now holds a team, so the schedule follows its workflow.
-    scheduleOwner = { ownerType: owned.ownerType, ownerId: owned.ownerId };
+    // Follow the workflow's own owner, with org as the one exception. Copying
+    // the owner used to widen a team workflow's schedule to the ORG, because
+    // `owner_type` could not hold a team — which handed a team's scheduled
+    // prompt to the org assistant, a strictly larger audience than the team
+    // that owns the workflow. The column now holds a team, so the schedule
+    // follows its workflow.
+    //
+    // An ORG-owned workflow is the exception, and it fails open the other
+    // way: an org-owned trigger row is reachable by every org member through
+    // the Triggers surface's owner arm, so an admin's row would become theirs
+    // to repoint or delete. The schedule stays with the admin who armed it.
+    // Run billing is unaffected: `scheduler.ts`'s `fire()` bills the
+    // DEFINITION's owner, not the schedule's. `trigger-service.ts` and
+    // `routes/events.ts` already refuse to copy an org owner for this reason.
+    scheduleOwner =
+      owned.ownerType === "org"
+        ? { ownerType: "user", ownerId: user.id }
+        : { ownerType: owned.ownerType, ownerId: owned.ownerId };
   } else if (input.teamId) {
     // Orchestrator-prompt schedule created in a team workspace: the team owns
     // it, so `deliverToOrchestrator` fires the team's assistant. Membership is
     // the route's to check (existence-hiding 404) before this runs; without a
     // teamId the schedule stays the caller's own, as before.
     scheduleOwner = { ownerType: "team", ownerId: input.teamId };
+  }
+
+  // The owner is only settled above, so the assistant pairing is checked here
+  // rather than in the route. Same rule the event subscriptions use.
+  if (hasPrompt && input.assistantId !== undefined) {
+    const bad = await checkAssistantForOwner(
+      db,
+      user.orgId,
+      { type: scheduleOwner.ownerType, id: scheduleOwner.ownerId },
+      input.assistantId,
+    );
+    if (bad) return { ok: false, error: bad };
   }
 
   const inserted = await db
@@ -159,6 +194,9 @@ export async function createWorkflowSchedule(
       targetKind: hasWorkflow ? "workflow" : "orchestrator",
       workflowId: hasWorkflow ? input.workflowId! : null,
       prompt: hasPrompt ? input.prompt! : null,
+      // A workflow target has no assistant to name, so the column stays null
+      // there whatever the caller sent.
+      assistantId: hasPrompt ? (input.assistantId ?? null) : null,
       name: input.name,
       cron: input.cron,
       timezone,

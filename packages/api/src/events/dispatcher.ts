@@ -56,6 +56,8 @@ export interface OrchestratorDeliverFn {
     actorUserId: string;
     signal: SignalContent;
     dispatchId: string;
+    /** Which of the owner's assistants answers. Absent → the owner's default. */
+    assistantId?: string;
   }): Promise<void>;
 }
 
@@ -97,6 +99,8 @@ function channelText(payload: unknown): string | undefined {
 interface SubscriptionTarget {
   kind: "workflow" | "orchestrator" | "signal";
   workflowId?: string;
+  /** Which of the owner's assistants answers. Absent → the owner's default. */
+  assistantId?: string;
   /** When true, an orchestrator channel delivery follows the thread: later
    * messages route to the assistant without a re-mention. */
   follow?: boolean;
@@ -228,6 +232,7 @@ export class EventDispatcher {
             origin: origin ?? undefined,
           },
           dispatchId: `event:${delivery.id}`,
+          assistantId: target.assistantId,
         });
         // Bind the thread only AFTER the delivery lands, so a mention whose
         // delivery fails does not leave a followed thread with no listener. The
@@ -243,6 +248,9 @@ export class EventDispatcher {
               ownerType: sub.ownerType,
               ownerId: sub.ownerId,
               createdBy: sub.createdBy,
+              // Whichever assistant just answered keeps the thread, so a later
+              // overheard message does not fall back to the owner's default.
+              assistantId: target.assistantId,
               // The mention itself is the last message the assistant has seen,
               // so the follow-router's gap re-hydration starts right after it.
               lastSeenTs: origin.messageTs,

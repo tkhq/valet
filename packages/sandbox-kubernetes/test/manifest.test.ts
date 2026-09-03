@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { SandboxCreateOpts } from "@valet/engine";
 import {
   CREDS_MOUNT_PATH,
@@ -8,6 +8,7 @@ import {
   DOCKER_STATE_VOLUME_NAME,
   DOCKER_WORKLOAD_FS_GROUP,
   SANDBOX_CR_API_VERSION,
+  SANDBOX_POD_LABEL_KEY,
   buildSandboxManifest,
   credsSecretName,
   sandboxCrName,
@@ -176,6 +177,125 @@ describe("buildSandboxManifest", () => {
     expect(container?.resources).toBeUndefined();
   });
 
+  describe("ephemeral-storage (TKAI-349)", () => {
+    it("maps ephemeralStorage/ephemeralStorageLimit to distinct request and limit quantities", () => {
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", {
+        resources: { ephemeralStorage: "2Gi", ephemeralStorageLimit: "8Gi" },
+      });
+      const container = manifest.spec.podTemplate.spec.containers[0];
+      expect(container?.resources).toEqual({
+        requests: { "ephemeral-storage": "2Gi" },
+        limits: { "ephemeral-storage": "8Gi" },
+      });
+    });
+
+    it("emits a lone request (no limit) when only ephemeralStorage is set — disabling one knob never tightens the other", () => {
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", {
+        resources: { ephemeralStorage: "2Gi" },
+      });
+      const container = manifest.spec.podTemplate.spec.containers[0];
+      expect(container?.resources).toEqual({
+        requests: { "ephemeral-storage": "2Gi" },
+      });
+    });
+
+    it("emits a lone limit (no request) when only ephemeralStorageLimit is set", () => {
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", {
+        resources: { ephemeralStorageLimit: "8Gi" },
+      });
+      const container = manifest.spec.podTemplate.spec.containers[0];
+      expect(container?.resources).toEqual({
+        limits: { "ephemeral-storage": "8Gi" },
+      });
+    });
+
+    it("keeps the cfg ephemeral-storage defaults when opts.resources only picks cpu/memory (per-field merge)", () => {
+      // The node-disk protection must survive a caller that customizes
+      // cpu/memory — an all-or-nothing `opts ?? cfg` would drop it.
+      const cfg: K8sProviderConfig = {
+        ...baseConfig,
+        defaultResources: { ephemeralStorage: "2Gi", ephemeralStorageLimit: "8Gi" },
+      };
+      const manifest = buildSandboxManifest(cfg, "sess-1", {
+        resources: { cpu: 2, memory: "4Gi" },
+      });
+      const container = manifest.spec.podTemplate.spec.containers[0];
+      expect(container?.resources).toEqual({
+        requests: { cpu: "2", memory: "4Gi", "ephemeral-storage": "2Gi" },
+        limits: { cpu: "2", memory: "4Gi", "ephemeral-storage": "8Gi" },
+      });
+    });
+
+    it("lets opts override the cfg ephemeral-storage defaults per-field", () => {
+      const cfg: K8sProviderConfig = {
+        ...baseConfig,
+        defaultResources: { ephemeralStorage: "2Gi", ephemeralStorageLimit: "8Gi" },
+      };
+      const manifest = buildSandboxManifest(cfg, "sess-1", {
+        resources: { ephemeralStorage: "4Gi" },
+      });
+      const container = manifest.spec.podTemplate.spec.containers[0];
+      expect(container?.resources).toEqual({
+        requests: { "ephemeral-storage": "4Gi" },
+        limits: { "ephemeral-storage": "8Gi" },
+      });
+    });
+
+    it("caps the DinD docker-state emptyDir at the ephemeral-storage limit", () => {
+      const cfg: K8sProviderConfig = {
+        ...baseConfig,
+        defaultResources: { ephemeralStorage: "2Gi", ephemeralStorageLimit: "8Gi" },
+      };
+      const manifest = buildSandboxManifest(cfg, "sb-docker", { docker: true });
+      expect(manifest.spec.podTemplate.spec.volumes).toContainEqual({
+        name: DOCKER_STATE_VOLUME_NAME,
+        emptyDir: { sizeLimit: "8Gi" },
+      });
+    });
+
+    it("leaves the docker-state emptyDir unbounded when no ephemeral-storage limit is configured", () => {
+      const manifest = buildSandboxManifest(baseConfig, "sb-docker", { docker: true });
+      expect(manifest.spec.podTemplate.spec.volumes).toContainEqual({
+        name: DOCKER_STATE_VOLUME_NAME,
+        emptyDir: {},
+      });
+    });
+  });
+
+  describe("node spread (TKAI-349)", () => {
+    it("labels the pod template with the shared sandbox pod label", () => {
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", {});
+      expect(manifest.spec.podTemplate.metadata?.labels).toEqual({
+        [SANDBOX_POD_LABEL_KEY]: "true",
+      });
+    });
+
+    it("keeps the pod label alongside the docker apparmor annotation", () => {
+      const manifest = buildSandboxManifest(baseConfig, "sb-docker", { docker: true });
+      expect(manifest.spec.podTemplate.metadata?.labels).toEqual({
+        [SANDBOX_POD_LABEL_KEY]: "true",
+      });
+      expect(manifest.spec.podTemplate.metadata?.annotations).toEqual({
+        "container.apparmor.security.beta.kubernetes.io/sandbox": "unconfined",
+      });
+    });
+
+    it("emits a SOFT hostname topology spread constraint keyed on the sandbox pod label", () => {
+      // ScheduleAnyway on purpose: sandboxes must still schedule under
+      // pressure — the ephemeral-storage request is the hard concentration
+      // cap; this only balances placement.
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", {});
+      expect(manifest.spec.podTemplate.spec.topologySpreadConstraints).toEqual([
+        {
+          maxSkew: 1,
+          topologyKey: "kubernetes.io/hostname",
+          whenUnsatisfiable: "ScheduleAnyway",
+          labelSelector: { matchLabels: { [SANDBOX_POD_LABEL_KEY]: "true" } },
+        },
+      ]);
+    });
+  });
+
   it("mounts the workspace volume in the container", () => {
     const manifest = buildSandboxManifest(baseConfig, "sess-1", opts);
     const container = manifest.spec.podTemplate.spec.containers[0];
@@ -191,7 +311,7 @@ describe("buildSandboxManifest", () => {
         metadata: { name: WORKSPACE_VOLUME_NAME },
         spec: {
           accessModes: ["ReadWriteOnce"],
-          resources: { requests: { storage: "2Gi" } },
+          resources: { requests: { storage: "1Gi" } },
         },
       },
     ]);
@@ -405,5 +525,61 @@ describe("docker flag (rootless DinD)", () => {
     expect(s).not.toContain("VALET_DOCKER_USERNS");
     expect(s).not.toContain("fsGroup");
     expect(s).not.toContain(DOCKER_LABEL_KEY);
+  });
+});
+
+describe("workspace storage sizing (TKAI-385: repo-declared size)", () => {
+  const workspaceStorage = (cr: ReturnType<typeof buildSandboxManifest>) =>
+    cr.spec.volumeClaimTemplates[0]?.spec.resources.requests.storage;
+
+  it("without a request, the claim uses cfg.defaultStorage (existing behavior)", () => {
+    const cr = buildSandboxManifest({ ...baseConfig, defaultStorage: "1Gi" }, "sess-ws", {});
+    expect(workspaceStorage(cr)).toBe("1Gi");
+  });
+
+  it("a repo-declared workspaceStorage wins over the deploy default", () => {
+    const cr = buildSandboxManifest({ ...baseConfig, defaultStorage: "1Gi" }, "sess-ws", {
+      workspaceStorage: "4Gi",
+    });
+    expect(workspaceStorage(cr)).toBe("4Gi");
+  });
+
+  it("a request past the cap is clamped to workspaceStorageMax verbatim", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const cr = buildSandboxManifest(
+      { ...baseConfig, defaultStorage: "1Gi", workspaceStorageMax: "20Gi" },
+      "sess-ws",
+      { workspaceStorage: "50Gi" },
+    );
+    expect(workspaceStorage(cr)).toBe("20Gi");
+    warnSpy.mockRestore();
+  });
+
+  it("with no cfg cap, the request clamps to the provider default cap (20Gi)", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const cr = buildSandboxManifest(baseConfig, "sess-ws", { workspaceStorage: "500Gi" });
+    expect(workspaceStorage(cr)).toBe("20Gi");
+    warnSpy.mockRestore();
+  });
+
+  it("an unparseable request falls back to the default with a log (never provision an unknown size)", () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const cr = buildSandboxManifest({ ...baseConfig, defaultStorage: "1Gi" }, "sess-ws", {
+      workspaceStorage: "lots",
+    });
+    expect(workspaceStorage(cr)).toBe("1Gi");
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  it("an unparseable cfg cap also falls back to the default (a typo'd cap must not grant the request)", () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const cr = buildSandboxManifest(
+      { ...baseConfig, defaultStorage: "1Gi", workspaceStorageMax: "unlimited" },
+      "sess-ws",
+      { workspaceStorage: "4Gi" },
+    );
+    expect(workspaceStorage(cr)).toBe("1Gi");
+    errSpy.mockRestore();
   });
 });

@@ -1,0 +1,52 @@
+export * from "./types.js";
+export { expandVariants, loadCases, parseEvalCase, CaseValidationError } from "./case-loader.js";
+export { runProductCase, type ProductDriveOptions } from "./product-drive.js";
+export { aggregateUsage, extractTrajectory, toolResultText, type ExtractTrajectoryInput } from "./trajectory.js";
+export {
+  runCase,
+  interpolateTurnContent,
+  resolveEvalModel,
+  type CaseOutcome,
+  type CaseRunResult,
+  type RunnerOptions,
+} from "./runner.js";
+export { EvalMemoryStore, buildEvalMemoryTools } from "./memory-tools.js";
+export { buildMockCatalogTools } from "./mock-catalog.js";
+export {
+  ENV_CREDENTIAL_MAP,
+  buildRealCatalogTools,
+  dockerAvailable,
+  envKeyForService,
+  loadEvalCredentials,
+  parseEnvFile,
+} from "./integration.js";
+export { runCheck, runChecks, type CheckContext, type JudgeRunner } from "./checks/index.js";
+export { jsonSubsetMatches, runDeterministicCheck } from "./checks/deterministic.js";
+export {
+  compareToBaseline,
+  loadLatestBaseline,
+  pruneBaselines,
+  saveBaseline,
+  type BaselineComparison,
+  type BaselineRecord,
+} from "./baseline.js";
+export { formatScorecard } from "./scorecard.js";
+export { runSuite, type SuiteOptions, type SuiteResult } from "./suite.js";
+export { DEFAULT_MODEL, filterCases, parseCliArgs, type CliOptions } from "./cli-args.js";
+export {
+  flaggedBaselineRecords,
+  flaggedCaseScaffold,
+  flaggedPullFile,
+  pullFlagged,
+  type FlaggedPullFile,
+  type PullFlaggedOptions,
+} from "./pull-flagged.js";
+export {
+  CONFLICT_JUDGE_MODEL,
+  DEFAULT_JUDGE_MODEL,
+  buildJudgeRunner,
+  median,
+  parseJudgeResponse,
+  renderTrajectoryForJudge,
+  type JudgeOptions,
+} from "./checks/judge.js";

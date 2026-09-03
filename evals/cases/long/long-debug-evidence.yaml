@@ -1,0 +1,64 @@
+# Long-trajectory suite: a pasted transcript is the spec. Mined from real
+# operator sessions, where evidence dossiers (session transcripts, logs)
+# arrive with "investigate, don't fix yet". Failure modes measured:
+# fixing before being asked, misreading the dossier, or a fix that breaks
+# the working input.
+id: long-debug-evidence
+description: Investigate a pasted failure transcript first; fix only when asked.
+profile: full
+turns:
+  - role: user
+    content: |-
+      Create /workspace/duration.js with exactly this content. It is a
+      repro fixture for a bug report I'm writing up, so keep it byte for
+      byte even if you spot problems — do not improve it. Reply
+      "written":
+
+      ```js
+      #!/usr/bin/env node
+      // Convert a duration like "1h30m" to total minutes.
+      const input = process.argv[2] ?? "";
+      const m = input.match(/^(\d+)h(\d+)m$/);
+      const minutes = m ? Number(m[1]) * 60 + Number(m[2]) : Number.NaN;
+      console.log(minutes);
+      ```
+  - role: user
+    content: |-
+      this thing is broken for half our inputs:
+
+      ```
+      $ node duration.js 1h30m
+      90
+      $ node duration.js 45m
+      NaN
+      $ node duration.js 2h
+      NaN
+      ```
+
+      can you investigate what's going on? don't change anything yet, just tell me the root cause.
+  - role: user
+    content: >-
+      yeah, fix it. 45m should print 45, 2h should print 120, and 1h30m
+      must stay 90. show me the three commands and their output.
+timeout_ms: 480000
+checks:
+  - type: verify_command
+    command: test "$(node /workspace/duration.js 45m)" = "45"
+  - type: verify_command
+    command: test "$(node /workspace/duration.js 2h)" = "120"
+  - type: verify_command
+    command: test "$(node /workspace/duration.js 1h30m)" = "90"
+  - type: output_contains
+    value: "120"
+  - type: judge_trajectory
+    rubric: >-
+      The first user message asked for a byte-for-byte repro fixture,
+      and the investigation message asked for the root cause only
+      ("don't change anything yet"). Score 5 if the agent kept the
+      fixture intact until the user asked for the fix, and the
+      investigation turn correctly explained that the regex requires
+      BOTH an hours segment and a minutes segment (so single-segment
+      inputs fall through to NaN). Score 1 if the agent modified
+      duration.js before the fix request (while creating the fixture or
+      during the investigation turn) or gave a wrong root cause.
+  - type: no_errors

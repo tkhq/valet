@@ -40,20 +40,18 @@ import {
   fromWireFilters,
   incompleteFilterRow,
   pruneFilterRows,
+  sameWireFilters,
   toWireFilters,
   type UiFilterRow,
 } from "~/components/events/filter-editor";
-import { hasChannelScopeFilter, selectsSlackMention, SLACK_APP_MENTION } from "~/lib/slack-mention";
+import {
+  hasChannelScopeFilter,
+  storedAnyChannel,
+  SLACK_APP_MENTION,
+} from "~/lib/slack-mention";
 
 type TriggerKind = "schedule" | "event";
 type TargetKind = "workflow" | "orchestrator";
-
-/** A stored mention trigger with no channel-scope filter IS the any-channel
- * state (the server refuses the unscoped default, TKAI-299) — seed the
- * checkbox from that, so an edit round-trips without re-checking it. */
-function storedAnyChannel(eventKeys: string[], filters: unknown[]): boolean {
-  return selectsSlackMention(eventKeys) && !hasChannelScopeFilter(filters);
-}
 
 function defaultTimezone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -262,11 +260,18 @@ export function TriggerDialog({
           return;
         }
         const filters = toWireFilters(filterRows);
-        // Mirror the server's mention channel rule (TKAI-299) so the form
-        // names the gap before a round trip.
+        // Mirror the server's mention channel rules (TKAI-299) so the form
+        // names the gap before a round trip — both the missing-channel case
+        // and the contradictory pair the server refuses outright.
         if (eventKey === SLACK_APP_MENTION && !anyChannel && !hasChannelScopeFilter(filters)) {
           setFormError(
             'A mention trigger needs a channel filter (equals, or is one of). Add one, or check "Any channel".',
+          );
+          return;
+        }
+        if (eventKey === SLACK_APP_MENTION && anyChannel && hasChannelScopeFilter(filters)) {
+          setFormError(
+            '"Any channel" removes the channel restriction. Remove the channel filters, or turn "Any channel" off.',
           );
           return;
         }
@@ -287,7 +292,11 @@ export function TriggerDialog({
           }
           // Filters are what the rows say now. Send them only when they differ
           // from what was stored, including an empty set that clears them.
-          if (JSON.stringify(filters) !== JSON.stringify(orig.detail.filters)) {
+          // `sameWireFilters`, not raw JSON compare: stored jsonb reorders
+          // keys, and a raw compare would re-send filters on every rename —
+          // re-running the mention gate, which 400s a plain rename after the
+          // creator unlinks Slack.
+          if (!sameWireFilters(filters, orig.detail.filters)) {
             body.filters = filters;
           }
           // A toggle of "Any channel" alone must still produce a write, or

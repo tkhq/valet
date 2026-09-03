@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { Outlet, createFileRoute, useRouterState } from "@tanstack/react-router";
 import { useOrg } from "~/api/settings";
 import { Button } from "~/components/primitives";
-import { ORG_TEAMS_PATH } from "~/components/settings/settings-rail";
+import { ORG_ONEPASSWORD_PATH, ORG_TEAMS_PATH } from "~/components/settings/settings-rail";
 
 /**
  * `/settings/organization` layout — guards the org sections behind the
@@ -22,13 +22,22 @@ export const Route = createFileRoute("/settings/organization")({
 });
 
 /**
- * True when `pathname` is the Teams page or a descendant of it. The router
- * matches routes slash-tolerantly and case-insensitively while
- * `location.pathname` stays raw, so a pasted "/settings/organization/teams/"
- * must not read as a different page.
+ * True when `pathname` is a page every org member may open: Teams (or a
+ * descendant of it), and 1Password. The router matches routes
+ * slash-tolerantly and case-insensitively while `location.pathname` stays
+ * raw, so a pasted "/settings/organization/teams/" must not read as a
+ * different page.
+ *
+ * 1Password is here because the page carries the member's own personal
+ * service-account token beside the admin-only org token: the panel already
+ * hides the org row and the toggle from a non-admin, and
+ * `GET /api/onepassword/settings` answers any member. Without it the
+ * allow-personal toggle an admin turns on has no member-facing surface at
+ * all, and a member can neither connect nor revoke their own token.
  */
 export function isMemberVisiblePath(pathname: string): boolean {
   const normalized = pathname.replace(/\/+$/, "").toLowerCase();
+  if (normalized === ORG_ONEPASSWORD_PATH) return true;
   return normalized === ORG_TEAMS_PATH || normalized.startsWith(`${ORG_TEAMS_PATH}/`);
 }
 

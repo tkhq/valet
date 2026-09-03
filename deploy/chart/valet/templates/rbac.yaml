@@ -5,11 +5,12 @@ metadata:
   labels:
     {{- include "valet.labels" . | nindent 4 }}
 ---
-# Namespaced Role only — deliberately NO cluster-scoped permissions and NO
-# PVC verbs. The agent-sandbox controller owns PVC lifecycle (it
-# owner-references PVCs to the Sandbox CR); the api only ever touches the
-# Sandbox CR itself plus the pod surface (exec/log) for command execution
-# and file ops.
+# Namespaced Role only — deliberately NO cluster-scoped permissions. The
+# agent-sandbox controller owns PVC LIFECYCLE (create/delete, via owner
+# references to the Sandbox CR); the api's only PVC verbs are the get/patch
+# pair the on-demand workspace-growth path needs (see the rule below). Past
+# that, the api touches the Sandbox CR itself plus the pod surface
+# (exec/log) for command execution and file ops.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -31,6 +32,13 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["create", "get", "list", "watch", "delete"]
+  # On-demand workspace growth (Sandbox.growWorkspace): after an ENOSPC in
+  # workspace prep the api reads the workspace PVC and merge-patches its
+  # storage request one increment up (gp3 expands online). get/patch ONLY —
+  # PVC create/delete stay with the agent-sandbox controller.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "patch"]
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["create", "get", "list", "watch", "delete"]

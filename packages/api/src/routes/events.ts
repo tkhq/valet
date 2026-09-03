@@ -13,6 +13,9 @@
  * `event_keys`/`filters` jsonb shapes this file writes.
  */
 import { Hono } from "hono";
+import { resolveOrgCredentialRead } from "../services/credential-resolution.js";
+import { OnePasswordAuthError } from "../services/onepassword.js";
+import type { StoredCredential } from "@valet/engine";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, exists, gte, or, sql, type SQL } from "drizzle-orm";
 import type { FilterOption, FilterOptionResolver, ValetPlugin } from "@valet/engine";
@@ -25,7 +28,8 @@ import { allCatalogEntries, catalogForService } from "../events/ingest.js";
 import { subscriptionMatchesEvent, type SubscriptionFilter } from "../events/match.js";
 import { storedAnyChannelState } from "../events/mention-scope.js";
 import { validateSubscriptionWrite } from "../events/subscription-write.js";
-import { ownedDefinitionRow } from "../workflows/service.js";
+import { armableDefinitionRow } from "../workflows/service.js";
+import { checkAssistantForOwner } from "../assistants/service.js";
 import { isTeamMember } from "../services/teams.js";
 import type {
   CreateEventSubscriptionRequest,
@@ -229,7 +233,7 @@ const filterOptionsCache = new Map<string, { options: FilterOption[]; expiresAt:
  */
 eventsRouter.get("/events/filter-options", async (c) => {
   const user = c.var.user;
-  const { plugins, engineCredentials } = c.var.providers;
+  const { plugins, engineCredentials, onePassword } = c.var.providers;
   const source = c.req.query("source");
   if (!source) return c.json({ error: "source query parameter is required" }, 400);
 
@@ -253,27 +257,58 @@ eventsRouter.get("/events/filter-options", async (c) => {
   }
 
   // The plugin name is its credential service (slack/github/linear).
-  const credential = (await engineCredentials.get({ type: "org", id: user.orgId }, found.plugin.name)) ?? null;
+  // Through the resolver, not the raw row: an admin's 1Password reference
+  // carries no secret until it is resolved, and a raw read handed the
+  // resolver an empty credential and returned no options. A missing or
+  // unresolvable credential is a normal outcome here (empty options), so a
+  // typed 1Password failure reads as none.
+  let credential: StoredCredential | null;
+  try {
+    credential = await resolveOrgCredentialRead(
+      { credentials: engineCredentials, onePassword },
+      { orgId: user.orgId, scopes: ["org"] },
+      found.plugin.name,
+    );
+  } catch (err) {
+    if (!(err instanceof OnePasswordAuthError)) throw err;
+    credential = null;
+  }
 
   let options: FilterOption[] = [];
   let reason: string | undefined;
+  let failed = false;
   try {
     options = await found.resolver({ orgId: user.orgId, q, deps, credential });
   } catch (err) {
     console.error(`[events] filter-options resolver ${source} failed`, err);
     reason = "The provider could not list options right now. Type the value instead.";
+    failed = true;
   }
   if (options.length === 0 && reason === undefined && credential === null) {
     reason = "Connect the integration in Settings to choose from a list. Type the value instead.";
   }
 
-  // Evict the oldest single entry (Map preserves insertion order), not the
-  // whole cache — one org's typeahead must not flush every other org's.
-  if (filterOptionsCache.size >= FILTER_OPTIONS_CACHE_CAP) {
-    const oldest = filterOptionsCache.keys().next().value;
-    if (oldest !== undefined) filterOptionsCache.delete(oldest);
+  // Never memoize a failed lookup. A provider that rate-limits one keystroke
+  // would otherwise answer the next minute of retries from an empty cache
+  // entry, so the user sees a stable "no options" for a transient fault and
+  // cannot retry their way out of it.
+  //
+  // Deliberately NOT replaced by a short negative TTL. Rate-limit backpressure
+  // belongs to the provider read, not here: the Slack resolvers hold their
+  // directory in a single-flight cache, so a scan that is failing has exactly
+  // one attempt in flight per workspace no matter how fast the reader types
+  // (`plugin-slack/src/transport/directory-cache.ts`). Caching the failure
+  // here would only re-introduce the sticky "no matches" without adding a
+  // bound the provider layer does not already give.
+  if (!failed) {
+    // Evict the oldest single entry (Map preserves insertion order), not the
+    // whole cache — one org's typeahead must not flush every other org's.
+    if (filterOptionsCache.size >= FILTER_OPTIONS_CACHE_CAP) {
+      const oldest = filterOptionsCache.keys().next().value;
+      if (oldest !== undefined) filterOptionsCache.delete(oldest);
+    }
+    filterOptionsCache.set(cacheKey, { options, expiresAt: Date.now() + FILTER_OPTIONS_TTL_MS });
   }
-  filterOptionsCache.set(cacheKey, { options, expiresAt: Date.now() + FILTER_OPTIONS_TTL_MS });
 
   const resp: FilterOptionsResponse = reason === undefined ? { options } : { options, reason };
   return c.json(resp);
@@ -545,7 +580,7 @@ eventsRouter.post("/event-subscriptions", async (c) => {
   let ownerType: "user" | "team" | "org" = "user";
   let ownerId = user.id;
   if (body.target.kind === "workflow") {
-    const owned = await ownedDefinitionRow(db, { userId: user.id, orgId: user.orgId }, body.target.workflowId);
+    const owned = await armableDefinitionRow(db, { userId: user.id, orgId: user.orgId }, body.target.workflowId);
     if (!owned) {
       return c.json({ error: `unknown workflow: ${body.target.workflowId}` }, 400);
     }
@@ -573,6 +608,14 @@ eventsRouter.post("/event-subscriptions", async (c) => {
       ownerType = "team";
       ownerId = teamId;
     }
+  }
+
+  // A named assistant must belong to the owner this target just resolved to.
+  // Checked here, not in `validateSubscription`, because the owner is only
+  // known once the workflow/team resolution above has run.
+  if (body.target.kind === "orchestrator" && body.target.assistantId !== undefined) {
+    const bad = await checkAssistantForOwner(db, user.orgId, { type: ownerType, id: ownerId }, body.target.assistantId);
+    if (bad) return c.json({ error: bad }, 400);
   }
 
   // Collision gate (TKAI-294). Checked over the FINAL filters (after the
@@ -701,13 +744,39 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
     return c.json({ error: "enabled must be a boolean" }, 400);
   }
 
+  // `assistantId` is the one part of `target` a patch may rewrite, and only
+  // within the row's existing owner — see PatchEventSubscriptionRequest.
+  const storedTarget = row.target as EventSubscriptionTargetWire;
+  let patchedTarget = storedTarget;
+  if (body.assistantId !== undefined) {
+    if (storedTarget.kind !== "orchestrator") {
+      return c.json({ error: "assistantId is only valid on an orchestrator target" }, 400);
+    }
+    if (body.assistantId === null) {
+      const { assistantId: _dropped, ...rest } = storedTarget;
+      patchedTarget = rest;
+    } else {
+      if (typeof body.assistantId !== "string" || body.assistantId.length === 0) {
+        return c.json({ error: "assistantId must be a non-empty string" }, 400);
+      }
+      const bad = await checkAssistantForOwner(
+        db,
+        user.orgId,
+        { type: row.ownerType, id: row.ownerId },
+        body.assistantId,
+      );
+      if (bad) return c.json({ error: bad }, 400);
+      patchedTarget = { ...storedTarget, assistantId: body.assistantId };
+    }
+  }
+
   // Re-validate the row as it would exist after the patch — provided fields
   // get full validation in the context of the untouched ones.
   const merged = {
     name: body.name ?? row.name,
     eventKeys: body.eventKeys ?? row.eventKeys,
     filters: body.filters ?? row.filters,
-    target: row.target,
+    target: patchedTarget,
   };
   // Mention scoping is keyed to the CREATOR and skipped for a patch that
   // does not change the match — so an enabled-only or name-only patch still
@@ -734,8 +803,11 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
   const willBeEnabled = body.enabled ?? row.enabled;
   const matchChanged = body.filters !== undefined || body.eventKeys !== undefined;
   const arming = body.enabled === true && !row.enabled;
+  // Re-pointing the assistant changes who the rule races: moving OFF a distinct
+  // assistant onto the owner's default can create a clobber that did not exist.
+  const repointed = body.assistantId !== undefined;
   let collisions: EventSubscriptionCollisionsWire | undefined;
-  if (willBeEnabled && (matchChanged || arming)) {
+  if (willBeEnabled && (matchChanged || arming || repointed)) {
     const report = await collisionsForWrite(
       db,
       plugins,
@@ -743,7 +815,10 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
       {
         eventKeys: merged.eventKeys as string[],
         filters,
-        target: row.target as EventSubscriptionTargetWire,
+        // The PATCHED target: a patch that re-points the rule at a different
+        // assistant changes who it collides with, and comparing the stored one
+        // would answer for the rule as it was.
+        target: patchedTarget,
       },
       id,
     );
@@ -771,6 +846,7 @@ eventsRouter.patch("/event-subscriptions/:id", async (c) => {
       name: merged.name,
       eventKeys: merged.eventKeys,
       filters,
+      target: patchedTarget,
       enabled: willBeEnabled,
       updatedAt: Date.now(),
     })

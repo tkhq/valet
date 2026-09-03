@@ -83,6 +83,36 @@ export async function loadAssistant(db: AppQueryable, assistantId: string): Prom
 }
 
 /**
+ * Check that `assistantId` names a live assistant of `owner` inside `orgId`.
+ * Returns a message to refuse the write with, or null when the pairing is
+ * good. Shared by every automation that can name an assistant — event
+ * subscriptions and schedules — so the rule cannot drift between them.
+ *
+ * The message never distinguishes "no such assistant" from "someone else's
+ * assistant": an id the caller may not reach must read the same as one that
+ * does not exist, the same 404-not-403 convention the routes use for teams
+ * and workflows.
+ */
+export async function checkAssistantForOwner(
+  db: AppQueryable,
+  orgId: string,
+  owner: { type: "user" | "team" | "org"; id: string },
+  assistantId: string,
+): Promise<string | null> {
+  const row = await loadAssistant(db, assistantId);
+  if (
+    row === undefined ||
+    row.orgId !== orgId ||
+    row.ownerType !== owner.type ||
+    row.ownerId !== owner.id ||
+    row.archivedAt !== null
+  ) {
+    return `unknown assistant: ${assistantId}`;
+  }
+  return null;
+}
+
+/**
  * The assistant that owns `sessionId`, if any. The assistants table is the
  * authority on which session ids are assistant sessions (the
  * `assistants_session` unique index): rows migrated from
@@ -259,6 +289,7 @@ export async function ensureAssistantSession(
         ownerId: principal.id,
         createdAt: now,
         updatedAt: now,
+        lastActivityAt: now,
       })
       .onConflictDoNothing();
   }

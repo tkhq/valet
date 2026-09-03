@@ -1,0 +1,49 @@
+{
+  "caseId": "hard-calendar-count",
+  "model": "anthropic/claude-haiku-4-5",
+  "savedAt": "2026-09-02T22:25:17.053Z",
+  "status": "pass",
+  "trajectory": {
+    "caseId": "hard-calendar-count",
+    "prompt": "Without using any tools, how many Fridays does February 2028 have? Reply in exactly this format: days=<days in month>, fridays=<count>",
+    "model": "anthropic/claude-haiku-4-5",
+    "turns": [
+      {
+        "index": 0,
+        "usage": {
+          "input": 2622,
+          "output": 112,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 2734
+        },
+        "cost": {
+          "input": 0.0026219999999999998,
+          "output": 0.0005600000000000001,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 0.003182
+        },
+        "queueItemId": "q-mtknzn32-1g"
+      }
+    ],
+    "toolCalls": [],
+    "finalOutput": "Looking at February 2028:\n\nFebruary 2028 has 29 days (2028 is a leap year, divisible by 4 and not a century year exception).\n\nFebruary 1, 2028 is a Tuesday. This means:\n- Week 1: Fri Feb 4\n- Week 2: Fri Feb 11\n- Week 3: Fri Feb 18\n- Week 4: Fri Feb 25\n\ndays=29, fridays=4",
+    "usage": {
+      "input": 2622,
+      "output": 112,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 2734
+    },
+    "cost": {
+      "input": 0.0026219999999999998,
+      "output": 0.0005600000000000001,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0.003182
+    },
+    "durationMs": 1631,
+    "stopReason": "end_turn"
+  }
+}

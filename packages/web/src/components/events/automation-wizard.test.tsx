@@ -41,6 +41,18 @@ vi.mock("~/api/events", () => ({
   useFilterOptions: () => ({ data: { options: [], reason: "Connect Slack first." }, isLoading: false }),
 }));
 
+// The assistant picker reads this list. One assistant per owner by default, so
+// the picker stays hidden and these cases pin the no-choice wire body; the
+// dedicated picker cases below re-mock it with several.
+let assistantsData: { assistants: unknown[] } = {
+  assistants: [
+    { id: "a-mine", name: "Mine", isDefault: true, owner: { type: "user", id: "u1" } },
+  ],
+};
+vi.mock("~/api/assistants", () => ({
+  useAssistants: () => ({ data: assistantsData, isLoading: false, error: null }),
+}));
+
 // The reply step warns when the caller's Slack account is not linked.
 vi.mock("~/api/queries", () => ({
   useIdentityLinks: () => ({
@@ -97,6 +109,11 @@ beforeEach(() => {
   createSchedule.mockReset();
   workflowsData = { workflows: [] };
   teamsData = { teams: [{ id: "t_platform", name: "Platform", memberCount: 3 }] };
+  assistantsData = {
+    assistants: [
+      { id: "a-mine", name: "Mine", isDefault: true, owner: { type: "user", id: "u1" } },
+    ],
+  };
 });
 
 afterEach(() => {
@@ -392,5 +409,94 @@ describe("AutomationWizard", () => {
     render(<AutomationWizard open onOpenChange={onOpenChange} />);
     createReplyRule("Clean rule");
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+  // ── Assistant picker ────────────────────────────────────────────────────
+  //
+  // The picker appears only when the owner has more than one assistant: with
+  // nothing to choose between, the control would only ask the reader to
+  // confirm the one answer the radio already names.
+  describe("assistant picker", () => {
+    function twoAssistants() {
+      assistantsData = {
+        assistants: [
+          { id: "a-mine", name: "Mine", isDefault: true, owner: { type: "user", id: "u1" } },
+          { id: "a-ops", name: "Ops", isDefault: false, owner: { type: "user", id: "u1" } },
+        ],
+      };
+    }
+
+    it("stays hidden for an owner with one assistant", () => {
+      render(<AutomationWizard open onOpenChange={() => {}} />);
+      clickNext();
+      expect(screen.queryByLabelText("Assistant")).toBeNull();
+    });
+
+    it("posts the chosen assistant on the target", () => {
+      twoAssistants();
+      render(<AutomationWizard open onOpenChange={() => {}} />);
+      clickNext();
+      addReplyChannel("C123");
+      fireEvent.change(screen.getByLabelText("Assistant"), { target: { value: "a-ops" } });
+      clickNext();
+
+      fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "To Ops" } });
+      fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+
+      const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
+      expect(body.target).toEqual({
+        kind: "orchestrator",
+        orchestrator: "user",
+        assistantId: "a-ops",
+        follow: true,
+      });
+    });
+
+    it("posts no assistantId when the reader leaves it on the default", () => {
+      twoAssistants();
+      render(<AutomationWizard open onOpenChange={() => {}} />);
+      clickNext();
+      addReplyChannel("C123");
+      // The picker is on screen with several options; the reader touches none.
+      expect(screen.getByLabelText("Assistant")).toBeTruthy();
+      clickNext();
+
+      fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "Default" } });
+      fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+
+      const body = createSubscription.mock.calls[0][0] as CreateEventSubscriptionRequest;
+      expect(body.target).toEqual({ kind: "orchestrator", orchestrator: "user", follow: true });
+    });
+
+    // A schedule used to send the workspace's team unconditionally, which
+    // overrode the radio. Picking a PERSONAL assistant inside a team workspace
+    // then sent a team owner beside a personal assistant, and the server
+    // refused it naming an id the reader could do nothing about.
+    it("schedule in a team workspace follows the radio, not the workspace", () => {
+      scopeTeamId = "t_platform";
+      twoAssistants();
+      render(<AutomationWizard open onOpenChange={() => {}} />);
+
+      pickOutcome(/On a schedule/);
+      clickNext();
+      fireEvent.change(screen.getByLabelText("Cron"), { target: { value: "0 9 * * 1-5" } });
+      clickNext();
+
+      // Move off the team radio onto a personal assistant.
+      fireEvent.click(screen.getByLabelText(/Notify your assistant/));
+      fireEvent.change(screen.getByLabelText("Assistant"), { target: { value: "a-ops" } });
+      fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "standup" } });
+      clickNext();
+
+      fireEvent.change(screen.getByLabelText("Automation name"), { target: { value: "Standup" } });
+      fireEvent.click(screen.getByRole("button", { name: /Create automation/ }));
+
+      const body = createSchedule.mock.calls[0][0] as CreateWorkflowScheduleRequest;
+      expect(body.teamId).toBeUndefined();
+      expect(body.target).toEqual({
+        kind: "orchestrator",
+        prompt: "standup",
+        assistantId: "a-ops",
+      });
+    });
   });
 });

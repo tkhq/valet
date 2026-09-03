@@ -65,6 +65,7 @@ const APP_TABLES = [
   "user_identity_links",
   "memory_files",
   "workflow_definitions",
+  "workflow_templates",
   "workflow_runs",
   "workflow_checkpoints",
   "workflow_signals",
@@ -867,6 +868,19 @@ describe("pg app schema + migrations", () => {
   describe("column repair for in-place 0000 edits", () => {
     const REPAIRED_COLUMNS: Array<{ table: string; column: string }> = [
       { table: "skill_sources", column: "created_by" },
+      { table: "skill_sources", column: "kinds" },
+      { table: "skill_sources", column: "discovery_scan" },
+      { table: "workflow_definitions", column: "origin" },
+      { table: "workflow_definitions", column: "source_id" },
+      { table: "workflow_definitions", column: "upstream_path" },
+      { table: "workflow_definitions", column: "content_sha" },
+      { table: "workflow_versions", column: "origin" },
+      { table: "workflow_versions", column: "source_commit" },
+      { table: "workflow_schedules", column: "origin" },
+      { table: "event_subscriptions", column: "origin" },
+      { table: "memory_files", column: "source_id" },
+      { table: "memory_files", column: "upstream_path" },
+      { table: "memory_files", column: "content_sha" },
       { table: "orgs", column: "sso_team_groups" },
       { table: "agent_sessions", column: "hibernated_sandbox_id" },
       { table: "agent_sessions", column: "sandbox_reclaimed_at" },
@@ -890,6 +904,46 @@ describe("pg app schema + migrations", () => {
       );
       return result.rows.length > 0;
     }
+
+    // A partial unique index is the shape whose probe is easiest to get
+    // wrong: it has a WHERE clause, and `pg_indexes` reports it under the
+    // same name as a plain one. Dropping it and re-applying proves the repair
+    // both detects its absence and rebuilds it with the predicate, which is
+    // what keeps two sources from mirroring one path twice.
+    it("re-adds the partial unique index on a mirrored workflow's path", async () => {
+      const indexExists = async (): Promise<boolean> => {
+        const result = await db.query(
+          "SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = $1",
+          ["workflow_definitions_source_path"],
+        );
+        return result.rows.length > 0;
+      };
+      await db.query('DROP INDEX "workflow_definitions_source_path"');
+      expect(await indexExists()).toBe(false);
+
+      await applyAppMigrations(db);
+      expect(await indexExists()).toBe(true);
+
+      // Partial, so two LOCAL rows carrying no source do not collide.
+      const local = (id: string) =>
+        db.query(
+          `INSERT INTO "workflow_definitions" ("id","org_id","owner_type","owner_id","name","definition","created_at","updated_at")
+           VALUES ($1,'org1','user','u1','n','{}'::jsonb,1,1)`,
+          [id],
+        );
+      await local("wf_a");
+      await local("wf_b");
+
+      // And it still refuses one path mirrored twice by one source.
+      const mirrored = (id: string) =>
+        db.query(
+          `INSERT INTO "workflow_definitions" ("id","org_id","owner_type","owner_id","name","definition","origin","source_id","upstream_path","created_at","updated_at")
+           VALUES ($1,'org1','user','u1','n','{}'::jsonb,'repo','src_1','.valet/workflows/a.yaml',1,1)`,
+          [id],
+        );
+      await mirrored("wf_c");
+      await expect(mirrored("wf_d")).rejects.toThrow();
+    });
 
     it("re-adds columns that predate an already-applied 0000_app.sql", async () => {
       for (const { table, column } of REPAIRED_COLUMNS) {
@@ -1021,6 +1075,36 @@ describe("pg app schema + migrations", () => {
       expect(isPgLockTimeout(new Error("outer", { cause: { code: "55P03" } }))).toBe(true);
       expect(isPgLockTimeout({ code: "42703" })).toBe(false);
       expect(isPgLockTimeout(new Error("plain"))).toBe(false);
+    });
+  });
+
+  // The `kinds` repair, with the ROWS asserted rather than only the column.
+  // `kinds` is `NOT NULL DEFAULT '["skills"]'`, so the repair has to leave
+  // every row a repository already tracked collecting exactly what it
+  // collected — a repair that emptied the column would silently stop a
+  // tracked repository from mirroring anything.
+  describe("the kinds repair on a database that predates the column", () => {
+    it("keeps the rows and backfills every one of them to skills", async () => {
+      const now = Date.now();
+      await db.query(
+        `INSERT INTO "skill_sources"
+           ("id","org_id","owner_type","owner_id","repo_full_name","next_attempt_at","created_at","updated_at")
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        ["cs_pre_kinds", "org-kinds", "user", "u-kinds", "acme/skills", now, now, now],
+      );
+
+      // Wind the database back to the release before `kinds` existed.
+      await db.query('ALTER TABLE "skill_sources" DROP COLUMN "kinds"');
+
+      await applyAppMigrations(db);
+
+      const rows = await db.query(
+        'SELECT "repo_full_name", "kinds" FROM "skill_sources" WHERE "id" = $1',
+        ["cs_pre_kinds"],
+      );
+      expect(rows.rows).toHaveLength(1);
+      expect(rows.rows[0]?.repo_full_name).toBe("acme/skills");
+      expect(rows.rows[0]?.kinds).toEqual(["skills"]);
     });
   });
 

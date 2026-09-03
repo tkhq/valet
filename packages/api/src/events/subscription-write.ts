@@ -125,6 +125,15 @@ export function validateSubscription(
     if (who !== "team" && target.teamId !== undefined) {
       return "teamId is only valid when orchestrator is team";
     }
+    // Shape only. That the id names a LIVE assistant of the owner this target
+    // resolves to is a database question, checked in the route once the owner
+    // is known (`checkAssistantForOwner`).
+    if (target.assistantId !== undefined && (typeof target.assistantId !== "string" || target.assistantId.length === 0)) {
+      return "assistantId must be a non-empty string";
+    }
+  }
+  if (target.kind === "workflow" && target.assistantId !== undefined) {
+    return "assistantId is only valid on an orchestrator target";
   }
   return null;
 }

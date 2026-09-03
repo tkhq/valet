@@ -160,6 +160,7 @@ make dev-local           # the v2 dev stack (see Dev loop above)
 make e2e / e2e-clean     # canonical validation
 make smoke-orchestrator  # agent loop alive (no Docker)
 make smoke-session       # full session round-trip (Docker)
+make eval                # trajectory-scoring eval suite (real LLM; see packages/eval/README.md)
 make generate-registries # regen plugin registry from plugin.yaml manifests
 pnpm typecheck / pnpm test
 

@@ -19,7 +19,7 @@ import {
   followedThreads,
   orgMembers,
   skills,
-  skillSources,
+  contentSources,
   teamMembers,
   teams,
   workflowDefinitions,
@@ -27,6 +27,7 @@ import {
 } from "../schema/index.js";
 import { retireAssistant } from "../assistants/service.js";
 import { getOrgFeatures, isOrgAdmin } from "./org.js";
+import { deleteMirroredContent } from "./content-sources.js";
 
 export type TeamRole = "admin" | "member";
 
@@ -105,7 +106,7 @@ export function idpManagedTeamMessage(team: IdpManagedTeamRef, mutation: IdpMana
  * the service directly, and it keeps the refusal with the rule it enforces.
  *
  * The team sync is the deliberate exception. It writes `team_members`
- * directly and never calls the guarded functions, the same way `skill-sync`
+ * directly and never calls the guarded functions, the same way `content-sync`
  * owns its `repo`-origin skill rows.
  */
 export class IdpManagedTeamError extends Error {
@@ -587,9 +588,23 @@ export async function deleteTeam(db: AppDb, opts: DeleteTeamOptions): Promise<vo
     await tx
       .delete(skills)
       .where(and(eq(skills.ownerType, "team"), eq(skills.ownerId, opts.teamId)));
+    // Each source's mirrored content goes with the source, through the same
+    // helper the source delete uses. Without it a mirrored row outlives every
+    // route that could remove it: a mirrored workflow is read-only, and its
+    // source would be gone. `assertNoTeamOwnedWorkflows` above already
+    // refuses while the team owns any workflow, so this reaches a source
+    // whose mirrored definitions were removed by that path first, and the
+    // templates it still holds.
+    const teamSources = await tx
+      .select({ id: contentSources.id, orgId: contentSources.orgId })
+      .from(contentSources)
+      .where(and(eq(contentSources.ownerType, "team"), eq(contentSources.ownerId, opts.teamId)));
+    for (const source of teamSources) {
+      await deleteMirroredContent(tx, source.orgId, source.id);
+    }
     await tx
-      .delete(skillSources)
-      .where(and(eq(skillSources.ownerType, "team"), eq(skillSources.ownerId, opts.teamId)));
+      .delete(contentSources)
+      .where(and(eq(contentSources.ownerType, "team"), eq(contentSources.ownerId, opts.teamId)));
     // The team's assistants go with it (TKAI-296): with the membership rows
     // gone, no caller passes canViewSession/canAdministerSession, so a
     // surviving assistant row and its session are unreachable orphans —

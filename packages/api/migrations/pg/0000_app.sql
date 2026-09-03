@@ -229,7 +229,8 @@ CREATE TABLE "agent_sessions" (
 	"hibernated_sandbox_id" text,
 	"sandbox_reclaimed_at" bigint,
 	"created_at" bigint NOT NULL,
-	"updated_at" bigint NOT NULL
+	"updated_at" bigint NOT NULL,
+	"last_activity_at" bigint
 );
 --> statement-breakpoint
 CREATE INDEX "agent_sessions_user" ON "agent_sessions" ("user_id");
@@ -447,6 +448,14 @@ CREATE TABLE "memory_files" (
 	"source_session_id" text DEFAULT '' NOT NULL,
 	"org_id" text DEFAULT '' NOT NULL,
 	"version" integer DEFAULT 1 NOT NULL,
+	-- Repository mirror bookkeeping. A row with a `source_id` mirrors one file
+	-- under `.valet/memory/` and lands under `lib/`, which `assertWritablePath`
+	-- already reserves for mounted libraries, so the product refuses to write
+	-- it without a new guard. NOT `origin` above, which is OKF provenance of
+	-- the fact and is already spent.
+	"source_id" text,
+	"upstream_path" text,
+	"content_sha" text,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL,
 	PRIMARY KEY("owner_type", "owner_id", "path")
@@ -491,6 +500,12 @@ CREATE TABLE "artifacts" (
 	"source_memory_path" text NOT NULL,
 	"title" text DEFAULT '' NOT NULL,
 	"content" text NOT NULL,
+	"format" text DEFAULT 'markdown' NOT NULL,
+	"rendered" text DEFAULT '' NOT NULL,
+	"description" text DEFAULT '' NOT NULL,
+	"icon" text DEFAULT '' NOT NULL,
+	"version" bigint DEFAULT 1 NOT NULL,
+	"shared_version" bigint,
 	"visibility" text DEFAULT 'org' NOT NULL,
 	"public_by" text,
 	"created_at" bigint NOT NULL,
@@ -501,6 +516,36 @@ CREATE TABLE "artifacts" (
 CREATE UNIQUE INDEX "artifacts_token_unique" ON "artifacts" ("token");
 --> statement-breakpoint
 CREATE UNIQUE INDEX "artifacts_owner_path_unique" ON "artifacts" ("owner_type","owner_id","source_memory_path");
+--> statement-breakpoint
+CREATE TABLE "artifact_versions" (
+	"id" text PRIMARY KEY NOT NULL,
+	"artifact_id" text NOT NULL,
+	"version" bigint NOT NULL,
+	"title" text DEFAULT '' NOT NULL,
+	"format" text DEFAULT 'markdown' NOT NULL,
+	"content" text NOT NULL,
+	"rendered" text DEFAULT '' NOT NULL,
+	"actor_user_id" text NOT NULL,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "artifact_versions_unique" ON "artifact_versions" ("artifact_id","version");
+--> statement-breakpoint
+CREATE TABLE "artifact_comments" (
+	"id" text PRIMARY KEY NOT NULL,
+	"artifact_id" text NOT NULL,
+	"version" bigint NOT NULL,
+	"vdid" text,
+	"parent_id" text,
+	"body" text NOT NULL,
+	"author_user_id" text NOT NULL,
+	"sent_to_session" text,
+	"resolved_at" bigint,
+	"resolved_by" text,
+	"created_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE INDEX "artifact_comments_artifact" ON "artifact_comments" ("artifact_id");
 --> statement-breakpoint
 CREATE TABLE "skills" (
 	"id" text PRIMARY KEY NOT NULL,
@@ -532,12 +577,14 @@ CREATE TABLE "skill_sources" (
 	"repo_full_name" text NOT NULL,
 	"ref" text DEFAULT '' NOT NULL,
 	"subpath" text DEFAULT '' NOT NULL,
+	"kinds" jsonb DEFAULT '["skills"]'::jsonb NOT NULL,
 	"enabled" boolean DEFAULT true NOT NULL,
 	"status" text DEFAULT 'pending' NOT NULL,
 	"attempts" integer DEFAULT 0 NOT NULL,
 	"next_attempt_at" bigint NOT NULL,
 	"last_sha" text,
 	"last_manifest_hash" text,
+	"discovery_scan" text,
 	"last_synced_at" bigint,
 	"last_error" text,
 	"created_at" bigint NOT NULL,
@@ -557,11 +604,22 @@ CREATE TABLE "workflow_definitions" (
 	"owner_id" text NOT NULL,
 	"name" text NOT NULL,
 	"definition" jsonb NOT NULL,
+	-- Repository mirror columns. A `repo` row is the mirror of one workflow
+	-- file and is read-only in the product: editing the file is the edit, and
+	-- deleting the file is the delete. Identity is (source_id, upstream_path)
+	-- and nothing else, so a rename deletes one workflow and creates another.
+	"origin" text DEFAULT 'local' NOT NULL,
+	"source_id" text,
+	"upstream_path" text,
+	"content_sha" text,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
 );
 --> statement-breakpoint
-CREATE INDEX "workflow_definitions_owner" ON "workflow_definitions" ("org_id","owner_type","owner_id");
+CREATE INDEX "workflow_definitions_owner" ON "workflow_definitions" ("org_id","owner_type","owner_id");--> statement-breakpoint
+-- One mirrored row per file per source. Partial, because a `local` row has
+-- no source and no path, and NULLs would not collide anyway.
+CREATE UNIQUE INDEX "workflow_definitions_source_path" ON "workflow_definitions" ("source_id","upstream_path") WHERE "source_id" IS NOT NULL;
 --> statement-breakpoint
 CREATE TABLE "workflow_versions" (
 	"id" text PRIMARY KEY NOT NULL,
@@ -569,10 +627,43 @@ CREATE TABLE "workflow_versions" (
 	"version" integer NOT NULL,
 	"name" text NOT NULL,
 	"definition" jsonb NOT NULL,
+	-- Which write produced this version, and from which commit. Both NULL on
+	-- every version a product edit wrote, and on every row older than the
+	-- repository mirror.
+	"origin" text,
+	"source_commit" text,
 	"created_at" bigint NOT NULL
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "workflow_versions_wf_version" ON "workflow_versions" ("workflow_id","version");
+--> statement-breakpoint
+-- Templates mirrored from a repository. A row is a copy of one template
+-- file; installing it produces an ordinary local workflow, which is the
+-- difference between this table and `workflow_definitions`.
+CREATE TABLE "workflow_templates" (
+	"id" text PRIMARY KEY NOT NULL,
+	"org_id" text NOT NULL,
+	"owner_type" text NOT NULL,
+	"owner_id" text NOT NULL,
+	-- The id the FILE declares, which the gallery and the install route use.
+	-- Distinct from `id`, which is this row.
+	"template_id" text NOT NULL,
+	"origin" text DEFAULT 'local' NOT NULL,
+	"source_id" text,
+	"upstream_path" text NOT NULL,
+	"content_sha" text,
+	"template" jsonb NOT NULL,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+-- One template id per owner: the gallery lists by id, and two rows claiming
+-- one id would make which one installs undefined.
+CREATE UNIQUE INDEX "workflow_templates_owner_template" ON "workflow_templates" ("org_id","owner_type","owner_id","template_id");
+--> statement-breakpoint
+-- One mirrored row per file per source. Partial, matching the definitions
+-- table: a local row has no source.
+CREATE UNIQUE INDEX "workflow_templates_source_path" ON "workflow_templates" ("source_id","upstream_path") WHERE "source_id" IS NOT NULL;
 --> statement-breakpoint
 CREATE TABLE "workflow_runs" (
 	"id" text PRIMARY KEY NOT NULL,
@@ -875,6 +966,10 @@ CREATE TABLE "event_subscriptions" (
 	"filters" jsonb DEFAULT '[]'::jsonb NOT NULL,
 	"target" jsonb NOT NULL,
 	"enabled" boolean DEFAULT true NOT NULL,
+	-- `repo` rows are armed from a mirrored workflow file. The sync updates
+	-- and deletes only these, so a trigger a person armed on the same
+	-- workflow is never touched.
+	"origin" text DEFAULT 'local' NOT NULL,
 	"created_by" text NOT NULL,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL
@@ -893,7 +988,8 @@ CREATE TABLE "followed_threads" (
 	"created_by" text NOT NULL,
 	"created_at" bigint NOT NULL,
 	"last_activity_at" bigint NOT NULL,
-	"last_seen_ts" text
+	"last_seen_ts" text,
+	"assistant_id" text
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "followed_threads_key" ON "followed_threads" ("org_id","channel_type","channel_id","thread_ts");
@@ -906,11 +1002,16 @@ CREATE TABLE "workflow_schedules" (
 	"target_kind" text DEFAULT 'workflow' NOT NULL,
 	"workflow_id" text,
 	"prompt" text,
+	"assistant_id" text,
 	"name" text NOT NULL,
 	"cron" text NOT NULL,
 	"timezone" text DEFAULT 'UTC' NOT NULL,
 	"input" jsonb,
 	"enabled" boolean DEFAULT true NOT NULL,
+	-- `repo` rows are armed from a mirrored workflow file. The sync updates
+	-- and deletes only these, so a schedule a person armed on the same
+	-- workflow is never touched.
+	"origin" text DEFAULT 'local' NOT NULL,
 	"last_fired_at" bigint,
 	"next_fire_at" bigint NOT NULL,
 	"created_by" text NOT NULL,
@@ -1281,3 +1382,21 @@ FROM "llm_proxy_requests" p
 -- non-completion passthroughs (0 tokens), which would otherwise inflate
 -- `/api/usage` turn counts.
 WHERE p."total_tokens" > 0;
+--> statement-breakpoint
+CREATE TABLE "ratings" (
+	"id" text PRIMARY KEY NOT NULL,
+	"user_id" text NOT NULL,
+	"target_type" text NOT NULL,
+	"target_id" text NOT NULL,
+	"session_id" text NOT NULL,
+	"thread_id" text,
+	"rating" text NOT NULL,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "ratings_user_target" ON "ratings" ("user_id","target_type","target_id");
+--> statement-breakpoint
+CREATE INDEX "ratings_session" ON "ratings" ("session_id");
+--> statement-breakpoint
+CREATE INDEX "ratings_type_rating" ON "ratings" ("target_type","rating");

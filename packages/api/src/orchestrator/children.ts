@@ -322,6 +322,7 @@ export function buildChildSpawner(deps: ChildrenDeps, watcher: ChildWatcher): Ch
         ownerId: ctx.owner.id,
         createdAt: now,
         updatedAt: now,
+        lastActivityAt: now,
       });
 
     // No `author`: the parent AGENT composed this prompt, and `author`

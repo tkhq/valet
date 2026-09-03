@@ -12,7 +12,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import type { ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { addMember, createTeam } from "../services/teams.js";
-import { skills, skillSources } from "../schema/index.js";
+import { skills, contentSources } from "../schema/index.js";
 import type {
   ListSkillSourcesResponse,
   ListSkillsResponse,
@@ -63,7 +63,7 @@ async function seedSkill(target: TestApi, name: string, owner: Owner): Promise<v
 
 async function seedSource(target: TestApi, repo: string, owner: Owner): Promise<void> {
   const now = Date.now();
-  await target.providers.db.insert(skillSources).values({
+  await target.providers.db.insert(contentSources).values({
     id: `skillsrc_${repo.replace("/", "_")}_${owner.id}`,
     orgId: "local-org",
     ownerType: owner.type,

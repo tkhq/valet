@@ -8,6 +8,7 @@ export {
   type PodSummary,
   type ResourceList,
   type ResourceRequirements,
+  type SandboxResourceOpts,
   type SandboxCondition,
   type SandboxContainer,
   type SandboxCR,
@@ -33,14 +34,18 @@ export {
   DOCKER_STATE_VOLUME_NAME,
   DOCKER_WORKLOAD_FS_GROUP,
   SANDBOX_CONTAINER_NAME,
+  SANDBOX_POD_LABEL_KEY,
   SESSION_ANNOTATION_KEY,
   SESSION_LABEL_KEY,
   WORKSPACE_MOUNT_PATH,
   WORKSPACE_VOLUME_NAME,
   buildSandboxManifest,
   credsSecretName,
+  resolveWorkspaceStorageRequest,
   sandboxCrName,
 } from "./manifest.js";
+
+export { clampStorageRequest } from "./quantity.js";
 
 export {
   RANCHER_DESKTOP_CONTEXT,
@@ -137,6 +142,20 @@ export {
   type PodLivenessApi,
   type SandboxSecretsApi,
 } from "./provider.js";
+
+export {
+  DEFAULT_WORKSPACE_STORAGE_MAX,
+  WORKSPACE_GROW_ANNOTATION,
+  WORKSPACE_GROW_COOLDOWN_MS,
+  formatStorageQuantity,
+  growWorkspacePvc,
+  parseStorageQuantity,
+  sandboxPvcApiAdapter,
+  workspacePvcName,
+  type GrowWorkspacePvcOpts,
+  type SandboxPvcApi,
+  type WorkspacePvcRead,
+} from "./workspace-pvc.js";
 
 export {
   batchJobsApiAdapter,

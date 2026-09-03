@@ -1,0 +1,39 @@
+# Long-trajectory suite: park a task, answer an interjection, resume with
+# full context. Mined from real operator sessions ("Hold that for a sec",
+# "ok back to the first thing"). The third turn interpolates the agent's
+# own interjection answer, so a wrong answer or a lost draft both fail
+# deterministic checks on the final output.
+id: long-park-resume
+description: Draft, get interrupted with an unrelated ask, then resume and finalize.
+turns:
+  - role: user
+    content: >-
+      Draft a release announcement for valet-cli v3.2.0. It has exactly
+      two headline changes: sandbox snapshots and 40% faster cold
+      starts. Keep it as a draft — I'll have edits.
+  - role: user
+    content: >-
+      Hold that for a sec — quick math check: what is 512 * 9 - 100?
+      Reply with just the number.
+  - role: user
+    content: >-
+      Back to the announcement: finalize it now. Work in the beta-tester
+      count you just computed ({{last_output_match(/(\d\d\d\d)/)}}
+      testers), keep both headline changes, and stay under 120 words.
+timeout_ms: 240000
+checks:
+  - type: output_contains
+    pattern: '4,?508'
+  - type: output_contains
+    pattern: '[Ss]andbox [Ss]napshots'
+  - type: output_contains
+    pattern: '40%'
+  - type: judge_output
+    rubric: >-
+      The output is a release announcement for valet-cli v3.2.0 of at
+      most roughly 120 words. It covers sandbox snapshots, 40% faster
+      cold starts, and a beta-tester count, and reads as a finished
+      announcement rather than a draft with placeholders.
+  - type: max_turns
+    value: 8
+  - type: no_errors

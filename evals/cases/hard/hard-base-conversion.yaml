@@ -1,0 +1,19 @@
+# Hard suite (see hard-letter-index.yaml). Hex to base 7 on a five-digit
+# decimal value. Expected value computed by script: 0xBEEF = 48879 =
+# 262335 in base 7.
+id: hard-base-conversion
+description: Convert a hexadecimal number to base 7 without tools.
+turns:
+  - role: user
+    content: >-
+      Without using any tools, convert the hexadecimal number 0xBEEF to
+      base 7. Reply with only the base-7 digits.
+timeout_ms: 180000
+checks:
+  - type: output_contains
+    value: "262335"
+  - type: tool_not_called
+    tool: bash
+  - type: max_turns
+    value: 2
+  - type: no_errors

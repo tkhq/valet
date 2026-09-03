@@ -7,7 +7,7 @@
 
 .PHONY: help install setup clean \
         dev dev-worker dev-opencode dev-client dev-all \
-        dev-api-node dev-web dev-local dev-clean dev-keycloak dev-keycloak-down smoke-session smoke-orchestrator e2e e2e-clean \
+        dev-api-node dev-web dev-local dev-clean dev-keycloak dev-keycloak-down smoke-session smoke-orchestrator eval e2e e2e-clean \
         db-setup db-migrate db-seed db-reset \
         docker-build docker-up docker-down docker-logs \
         test test-unit test-integration test-e2e test-pg \
@@ -208,6 +208,11 @@ smoke-orchestrator: ## Orchestrator smoke: ensure + one real Anthropic turn (no 
 	@set -a; [ -f .env ] && . ./.env; set +a; \
 	if [ -z "$$ANTHROPIC_API_KEY" ]; then echo "$(RED)ANTHROPIC_API_KEY is required (set it in .env or the environment)$(NC)"; exit 1; fi; \
 	$(PNPM) --filter @valet/api smoke:orchestrator
+
+eval: ## Run the eval suite through the engine (real LLM). EVAL_ARGS="--filter x --save-baseline --json ..."
+	@set -a; [ -f .env ] && . ./.env; set +a; \
+	if [ -z "$$ANTHROPIC_API_KEY" ]; then echo "$(RED)ANTHROPIC_API_KEY is required (set it in .env or the environment)$(NC)"; exit 1; fi; \
+	$(PNPM) --filter @valet/eval start $(EVAL_ARGS)
 
 e2e: ## Unified e2e scorecard (see docs/specs/2026-07-25-e2e-runner-design.md). E2E_ARGS="--list|--doctor|--only <ids>|--json|--verbose"
 	$(PNPM) exec tsx scripts/e2e.ts $(E2E_ARGS)

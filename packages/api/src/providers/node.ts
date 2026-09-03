@@ -40,12 +40,20 @@ import { ensurePluginStoreIndexes } from "../services/plugin-store.js";
 import { workflowsActionPlugin } from "../workflows/actions.js";
 import { skillsActionPlugin } from "../services/skills-actions.js";
 import { assistantsActionPlugin } from "../assistants/actions.js";
-import { SkillSyncService } from "../services/skill-sync.js";
+import { ContentSyncService } from "../services/content-sync/service.js";
+import { SkillCollector } from "../services/content-sync/skill-collector.js";
+import { WorkflowCollector } from "../services/content-sync/workflow-collector.js";
+import { TemplateCollector } from "../services/content-sync/template-collector.js";
+import { MemoryCollector } from "../services/content-sync/memory-collector.js";
+import { listCatalogTemplates } from "../workflows/templates.js";
+import { buildValidateEnvironment } from "../workflows/validation-env.js";
 import { GitHubSkillRepoReader } from "../services/skill-repo-reader.js";
-import { skillRepoReaderFactory } from "../services/skill-source-credential.js";
+import { skillRepoReaderFactory } from "../services/content-source-credential.js";
 import type { WorkflowServiceDeps } from "../workflows/service.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { OAuthRefreshingCredentialStore } from "../plugins/oauth-refreshing-credential-store.js";
+import { createOnePasswordService } from "../services/onepassword.js";
+import { getAllowPersonalOnePassword } from "../services/org.js";
 import { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
 import { loadNodeModulesPlugins } from "../plugins/node-modules-loader.js";
 import { bundledPlugins } from "../plugins/registry.gen.js";
@@ -395,6 +403,15 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     env: process.env,
   });
 
+  // 1Password reference-credential service (1Password credential provider
+  // plan, Task 1/2) — the same instance is threaded into `EngineHost`'s
+  // `onePassword` opt below and exposed on `Providers` for the (Task 3)
+  // `/api/onepassword` routes.
+  const onePassword = createOnePasswordService({
+    credentials: engineCredentials,
+    getAllowPersonal: (orgId) => getAllowPersonalOnePassword(db, orgId),
+  });
+
   // Circular construction: EngineHost needs the ChildSpawner at construction
   // time (it's baked into every orchestrator session's toolConfig), but the
   // spawner itself needs the EngineHost (to create the child session) and
@@ -431,6 +448,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     // (same `key` `engineCredentials`/the workflow invoker/the sandbox
     // credential route derive theirs from) instead of a raw credential read.
     githubTokenDeps: { key: deriveSecretKey(opts.encryptionKey) },
+    onePassword,
     childSpawner: (req, ctx) => {
       if (!spawnerRef) throw new Error("childSpawner invoked before provider wiring completed");
       return spawnerRef(req, ctx);
@@ -546,6 +564,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     plugins,
     publicUrl: publicUrlFromEnv(process.env),
     resolveOrgId: () => resolveOrgId(db),
+    onePassword,
   });
 
   // Workflow run host (Phase 5 plan Task 10). `workflowStore` is the same
@@ -568,6 +587,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     // `resolveGitHubToken` (same `key` `engineCredentials`/the sandbox
     // credential route derive theirs from) instead of a raw credential read.
     githubTokenDeps: { key: deriveSecretKey(opts.encryptionKey) },
+    onePassword,
   });
 
   // Approval attention (decision 12): the FIRST park on an approval node
@@ -717,15 +737,39 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     normalizeChannelMessage: channelMessageNormalizer(channelHost),
   });
 
-  // Skill-repository sync (agent-skills design). `readerFor` gives each
-  // source the GitHub credential its OWNER holds, so a private repository
-  // syncs without letting a source borrow reach it does not have — the rule
-  // is in `services/skill-source-credential.ts`. A source with no resolvable
-  // credential falls back to the anonymous `reader`, which is what every
-  // public repository uses. `start()`/`stop()` are called from `main.ts`
-  // alongside the other loops.
-  const skillSync = new SkillSyncService({
+  // Repository content sync. `readerFor` gives each source the GitHub
+  // credential its OWNER holds, so a source cannot borrow reach it does not
+  // have; the rule is in `services/content-source-credential.ts`. With no
+  // resolvable credential it falls back to the anonymous `reader`.
+  const contentSync = new ContentSyncService({
     db,
+    // One collector per content kind; a source runs the subset its `kinds`
+    // enables. The workflow collector validates a mirrored definition against
+    // the same plugin catalog the editor saves against, so a file naming an
+    // unknown model or tool service fails at sync with the validator's own
+    // message instead of at run time inside a node.
+    collectors: [
+      new SkillCollector(),
+      new WorkflowCollector({
+        env: buildValidateEnvironment(actionPluginByService),
+        // The event catalog `validateSubscription` reads, so an `events`
+        // block naming an unknown key or an undeclared filter field fails
+        // its file at sync instead of arming a subscription nothing can
+        // deliver.
+        plugins,
+      }),
+      // Memories collect for every owner type, including a personal source:
+      // a mirrored memory runs nothing and resolves no credential, so
+      // decision 10's authority argument does not reach it.
+      new MemoryCollector(),
+      new TemplateCollector({
+        env: buildValidateEnvironment(actionPluginByService),
+        // Resolved per pass, not per file: a mirrored id that collides with
+        // one this deployment ships is refused with both names.
+        reserved: () =>
+          new Map(listCatalogTemplates(plugins).map((owned) => [owned.template.id, owned.pluginName])),
+      }),
+    ],
     reader: new GitHubSkillRepoReader(),
     readerFor: skillRepoReaderFactory({
       db,
@@ -744,6 +788,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     imageBuilder,
     eventStream,
     engineCredentials,
+    onePassword,
     engineHost,
     childWatcher,
     childSpawner: (req, ctx) => {
@@ -763,7 +808,7 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
     workflowScheduler,
     webhookRateLimiter,
     eventDispatcher,
-    skillSync,
+    contentSync,
     plugins,
     actionPluginByService,
     dynamicToolCounts: new DynamicToolCounts({ credentials: engineCredentials }),

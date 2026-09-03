@@ -1,7 +1,13 @@
 import { useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { useMe, useOrg } from "~/api/settings";
-import { usePatchArtifact, useRevokeArtifact, useArtifacts, useShareArtifact } from "~/api/artifacts";
+import {
+  usePatchArtifact,
+  useRevokeArtifact,
+  useArtifacts,
+  useArtifactVersions,
+  useShareArtifact,
+} from "~/api/artifacts";
 import { Button, Popover, PopoverContent, PopoverTrigger, Switch } from "~/components/primitives";
 import { useCopyToClipboard } from "~/lib/use-copy";
 
@@ -35,6 +41,12 @@ export function ShareControls({ path }: { path: string }) {
     : undefined;
   const allowPublic = orgQ.data?.allowPublicArtifacts ?? false;
   const busy = shareMutation.isPending || patchMutation.isPending || revokeMutation.isPending;
+  // Version pinning (artifact-pages design): hidden while only one version
+  // exists — a selector with one choice is noise.
+  const versionsQ = useArtifactVersions(artifact?.id, {
+    enabled: panelOpen && artifact !== undefined && artifact.version > 1,
+  });
+  const versions = versionsQ.data?.versions ?? [];
 
   return (
     <Popover open={panelOpen} onOpenChange={setPanelOpen}>
@@ -82,6 +94,32 @@ export function ShareControls({ path }: { path: string }) {
                 </>
               )}
             </p>
+            {artifact.version > 1 && versions.length > 1 && (
+              <div className="flex items-center justify-between gap-2 text-xs">
+                <label htmlFor="artifact-shared-version" className="text-muted">
+                  Viewers see
+                </label>
+                <select
+                  id="artifact-shared-version"
+                  value={artifact.sharedVersion === null ? "latest" : String(artifact.sharedVersion)}
+                  disabled={busy}
+                  onChange={(e) =>
+                    patchMutation.mutate({
+                      id: artifact.id,
+                      sharedVersion: e.target.value === "latest" ? null : Number(e.target.value),
+                    })
+                  }
+                  className="rounded border border-line bg-transparent px-1.5 py-1 text-xs"
+                >
+                  <option value="latest">Latest (v{artifact.version})</option>
+                  {versions.map((v) => (
+                    <option key={v.version} value={String(v.version)}>
+                      v{v.version}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div className="flex items-center justify-between">
               <Button
                 size="sm"

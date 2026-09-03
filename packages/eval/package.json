@@ -1,0 +1,34 @@
+{
+  "name": "@valet/eval",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "start": "tsx src/cli.ts"
+  },
+  "dependencies": {
+    "@valet/api": "workspace:*",
+    "@valet/engine": "workspace:*",
+    "@valet/sandbox-docker": "workspace:*",
+    "typebox": "^1.3.7",
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@valet/sandbox-local": "workspace:*",
+    "tsx": "^4.0.0",
+    "typescript": "^5.3.3",
+    "vitest": "^4.0.18"
+  }
+}

@@ -14,6 +14,7 @@ import { TooltipProvider } from "~/components/primitives";
 import type { ListAssistantsResponse, ListTeamsResponse, SessionDetail } from "@valet/api/wire";
 
 const deleteMutateAsync = vi.fn().mockResolvedValue({ ok: true });
+const rateSessionMutate = vi.fn();
 const setModelMutate = vi.fn();
 const setThreadModelMutate = vi.fn();
 /** Threads for the header's thread-scoped model picker. Empty by default:
@@ -58,6 +59,8 @@ vi.mock("~/api/queries", async (importOriginal) => {
     useReplaceSandbox: () => ({ isPending: false, mutateAsync: replaceMutateAsync }),
     useRenameSession: () => ({ isPending: false, mutateAsync: renameMutateAsync }),
     useSetSessionProfile: () => ({ isPending: false, mutateAsync: setProfileMutateAsync }),
+    useSessionRatings: () => ({ data: { session: null, entries: {} }, isLoading: false, error: null }),
+    useRateSession: () => ({ isPending: false, mutate: rateSessionMutate }),
   };
 });
 

@@ -24,8 +24,8 @@
  *
  * `/sources` holds the tracked repositories Valet mirrors skills from. Those
  * routes are owner-scoped the same way, and both the create route and the
- * "sync now" route call the one `SkillSyncService.syncOnce` the background
- * sweep calls (`services/skill-sync.ts`).
+ * "sync now" route call the one `ContentSyncService.syncOnce` the background
+ * sweep calls (`services/content-sync/service.ts`).
  *
  * Both listings take the same optional `?ownerType=&ownerId=` filter, for a
  * client that shows one workspace at a time. `readOwnerScope` reads it for
@@ -80,20 +80,22 @@ import {
 import { isOrgAdmin } from "../services/org.js";
 import {
   countSkillsPerSource,
-  createSkillSource,
-  decodeSkillSourceCursor,
-  deleteSkillSource,
-  listSkillSources,
-  markSkillSourceDue,
-  ownedSkillSourceRow,
-  SKILL_SOURCE_DEFAULT_LIMIT,
-  SKILL_SOURCE_MAX_LIMIT,
-  SkillSourceConflictError,
-  SkillSourceInputError,
-} from "../services/skill-sources.js";
-import type { SkillSyncOutcome } from "../services/skill-sync.js";
+  createContentSource,
+  ContentSourceForbiddenError,
+  parseContentKinds,
+  decodeContentSourceCursor,
+  deleteContentSource,
+  listContentSources,
+  markContentSourceDue,
+  ownedContentSourceRow,
+  CONTENT_SOURCE_DEFAULT_LIMIT,
+  CONTENT_SOURCE_MAX_LIMIT,
+  ContentSourceConflictError,
+  ContentSourceInputError,
+} from "../services/content-sources.js";
+import type { ContentSyncOutcome } from "../services/content-sync/service.js";
+import { contentSources, type SkillRow, type ContentSourceRow } from "../schema/index.js";
 import securityPlugin from "@valet/plugin-security/plugin";
-import { skillSources, type SkillRow, type SkillSourceRow } from "../schema/index.js";
 import type {
   CreateSkillRequest,
   CreateSkillSourceRequest,
@@ -196,7 +198,7 @@ type OwnerScope =
  * `isAuthorizedFor` answers "may this caller WRITE here", and it says no to
  * an org row for everybody but an org admin. Reading an org row is wider:
  * `readableSkillRow` gives every member every org row of their own org, and
- * both `listSkills` and `listSkillSources` put those rows in an unfiltered
+ * both `listSkills` and `listContentSources` put those rows in an unfiltered
  * listing. So `ownerType=org` is a filter any member may use, for the
  * caller's own org id alone — another org's id still reads as not found.
  */
@@ -585,15 +587,15 @@ skillsRouter.get("/sources", async (c) => {
   const filter = await readOwnerScope(db, caller, c.req.query("ownerType"), c.req.query("ownerId"));
   if (!filter.ok) return c.json({ error: filter.error }, filter.status);
 
-  const limit = readLimit(c.req.query("limit"), SKILL_SOURCE_DEFAULT_LIMIT, SKILL_SOURCE_MAX_LIMIT);
+  const limit = readLimit(c.req.query("limit"), CONTENT_SOURCE_DEFAULT_LIMIT, CONTENT_SOURCE_MAX_LIMIT);
   if (limit === undefined) {
     return c.json(
-      { error: `limit must be a whole number of 1 or more. Remove it to take the default of ${SKILL_SOURCE_DEFAULT_LIMIT}.` },
+      { error: `limit must be a whole number of 1 or more. Remove it to take the default of ${CONTENT_SOURCE_DEFAULT_LIMIT}.` },
       400,
     );
   }
   const cursorParam = c.req.query("cursor");
-  const cursor = cursorParam === undefined ? undefined : decodeSkillSourceCursor(cursorParam);
+  const cursor = cursorParam === undefined ? undefined : decodeContentSourceCursor(cursorParam);
   if (cursorParam !== undefined && cursor === undefined) {
     return c.json(
       { error: "That cursor is not one this listing issued. Remove it to start at the first page." },
@@ -609,7 +611,7 @@ skillsRouter.get("/sources", async (c) => {
     );
   }
 
-  const page = await listSkillSources(db, caller, filter.scope, limit, cursor, {
+  const page = await listContentSources(db, caller, filter.scope, limit, cursor, {
     includeOrg: !excludeOrg,
   });
   // The count query is scoped to the page's ids, so it grows with the page
@@ -636,7 +638,7 @@ skillsRouter.post("/sources", async (c) => {
     return c.json({ error: "Enter a repository. Write it as owner/repo, or paste its GitHub URL." }, 400);
   }
 
-  const { db, skillSync } = c.var.providers;
+  const { db, contentSync } = c.var.providers;
 
   // Org-owned source: require org admin.
   if (body.ownerType === "org") {
@@ -651,12 +653,16 @@ skillsRouter.post("/sources", async (c) => {
 
   let sourceId: string;
   try {
-    const row = await createSkillSource(db, owner(c), {
+    const row = await createContentSource(db, owner(c), {
       repo: body.repo,
       ref: body.ref,
       subpath: body.subpath,
       teamId: body.teamId,
       ownerType: body.ownerType,
+      // Parsed here so a bad value is a 400 naming the choices, and gated
+      // inside the service so no route can add a privileged source without
+      // the check.
+      kinds: parseContentKinds(body.kinds),
     });
     sourceId = row.id;
   } catch (err) {
@@ -666,28 +672,28 @@ skillsRouter.post("/sources", async (c) => {
 
   // A failed first sync is reported ON the row, not as a failed request: the
   // source exists, and its error is what the person needs to read.
-  const outcome = await skillSync.syncOnce(sourceId);
+  const outcome = await contentSync.syncOnce(sourceId);
   return c.json(await syncResponse(c, sourceId, outcome), 201);
 });
 
 skillsRouter.post("/sources/:id/sync", async (c) => {
-  const { db, skillSync } = c.var.providers;
+  const { db, contentSync } = c.var.providers;
   const orgAdmin = await isOrgAdmin(db, c.var.user.orgId, c.var.user.id);
   // Org sync stays admin-only, same gate as add and remove. Personal and
   // team sources stay writable by their owner. The sweep keeps org
   // catalogs fresh so a member does not need this button.
-  const row = await ownedSkillSourceRow(db, owner(c), c.req.param("id"), { isOrgAdmin: orgAdmin });
+  const row = await ownedContentSourceRow(db, owner(c), c.req.param("id"), { isOrgAdmin: orgAdmin });
   if (!row) return c.json({ error: "skill source not found" }, 404);
 
-  await markSkillSourceDue(db, row.id);
-  const outcome = await skillSync.syncOnce(row.id);
+  await markContentSourceDue(db, row.id);
+  const outcome = await contentSync.syncOnce(row.id);
   return c.json(await syncResponse(c, row.id, outcome));
 });
 
 skillsRouter.delete("/sources/:id", async (c) => {
   const { db } = c.var.providers;
   const orgAdmin = await isOrgAdmin(db, c.var.user.orgId, c.var.user.id);
-  const deleted = await deleteSkillSource(db, owner(c), c.req.param("id"), { isOrgAdmin: orgAdmin });
+  const deleted = await deleteContentSource(db, owner(c), c.req.param("id"), { isOrgAdmin: orgAdmin });
   if (!deleted) return c.json({ error: "skill source not found" }, 404);
   const resp: DeleteSkillSourceResponse = { ok: true };
   return c.json(resp);
@@ -727,9 +733,10 @@ function isShadowed(plugins: ValetPlugin[], row: SkillRow): boolean {
   return ownedSkills(plugins).some((entry) => entry.skill.name === row.name);
 }
 
-function toSourceSummary(row: SkillSourceRow, skillCount: number): SkillSourceSummary {
+function toSourceSummary(row: ContentSourceRow, skillCount: number): SkillSourceSummary {
   return {
     id: row.id,
+    kinds: row.kinds,
     repo: row.repoFullName,
     ref: row.ref,
     subpath: row.subpath,
@@ -749,10 +756,10 @@ function toSourceSummary(row: SkillSourceRow, skillCount: number): SkillSourceSu
 async function syncResponse(
   c: { var: { providers: { db: AppDb } } },
   sourceId: string,
-  outcome: SkillSyncOutcome | null,
+  outcome: ContentSyncOutcome | null,
 ): Promise<SkillSourceSyncResponse> {
   const { db } = c.var.providers;
-  const rows = await db.select().from(skillSources).where(eq(skillSources.id, sourceId)).limit(1);
+  const rows = await db.select().from(contentSources).where(eq(contentSources.id, sourceId)).limit(1);
   const counts = await countSkillsPerSource(db, [sourceId]);
   const row = rows[0];
   if (!row) throw new NotFoundError("skill source", sourceId);
@@ -768,9 +775,13 @@ async function syncResponse(
 }
 
 /** Maps a source-service error onto its HTTP status. */
-function sourceErrorResponse(err: unknown): { body: Record<string, unknown>; status: 400 | 404 | 409 } {
-  if (err instanceof SkillSourceInputError) return { body: { error: err.message }, status: 400 };
-  if (err instanceof SkillSourceConflictError) return { body: { error: err.message }, status: 409 };
+function sourceErrorResponse(err: unknown): {
+  body: Record<string, unknown>;
+  status: 400 | 403 | 404 | 409;
+} {
+  if (err instanceof ContentSourceInputError) return { body: { error: err.message }, status: 400 };
+  if (err instanceof ContentSourceForbiddenError) return { body: { error: err.message }, status: 403 };
+  if (err instanceof ContentSourceConflictError) return { body: { error: err.message }, status: 409 };
   if (err instanceof NotFoundError) return { body: { error: err.message }, status: 404 };
   throw err;
 }

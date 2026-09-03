@@ -352,6 +352,9 @@ messagesRouter.get("/:id/commands", async (c) => {
   return c.json(body);
 });
 
+/** Maximum length for a thread title. This matches the session title limit. */
+const MAX_THREAD_TITLE_CHARS = 200;
+
 messagesRouter.patch("/:id/threads/:threadId", async (c) => {
   const result = await loadEngineSession(c);
   if ("error" in result) return result.error;
@@ -368,11 +371,40 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
-  if (body.model === undefined && body.archived === undefined) {
+  if (
+    body.model === undefined &&
+    body.archived === undefined &&
+    body.title === undefined
+  ) {
     return c.json(
-      { error: "nothing to patch: send model (null to clear) and/or archived" },
+      { error: "nothing to patch: send model (null to clear), archived, and/or title" },
       400,
     );
+  }
+
+  // Validate the title before changing any thread settings.
+  let nextTitle: string | null | undefined;
+  if (body.title !== undefined) {
+    if (body.title === null) {
+      nextTitle = null;
+    } else if (typeof body.title !== "string") {
+      return c.json(
+        { error: "Set title to a string, or use null to clear it." },
+        400,
+      );
+    } else {
+      const trimmed = body.title.trim();
+      if (trimmed.length === 0) {
+        nextTitle = null;
+      } else if (trimmed.length > MAX_THREAD_TITLE_CHARS) {
+        return c.json(
+          { error: `title is too long. Use ${MAX_THREAD_TITLE_CHARS} characters or fewer.` },
+          400,
+        );
+      } else {
+        nextTitle = trimmed;
+      }
+    }
   }
 
   if (body.model !== undefined) {
@@ -385,37 +417,45 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
     }
   }
 
-  let archivedAt: number | undefined;
-  if (body.archived !== undefined) {
-    // Upsert — the mirror row may not exist yet (auto-title hasn't run).
-    const next = body.archived ? Date.now() : null;
+  // The mirror row can be missing before auto-title runs.
+  const wantsArchived = body.archived !== undefined;
+  const wantsTitle = nextTitle !== undefined;
+  if (wantsArchived || wantsTitle) {
+    const nextArchivedAt = wantsArchived
+      ? (body.archived ? Date.now() : null)
+      : undefined;
     await db
       .insert(sessionThreads)
       .values({
         id: thread.id,
         sessionId: session.id,
         createdAt: thread.toThreadData().createdAt,
-        archivedAt: next,
+        archivedAt: nextArchivedAt ?? null,
+        title: nextTitle ?? null,
       })
       .onConflictDoUpdate({
         target: sessionThreads.id,
-        set: { archivedAt: next },
+        set: {
+          ...(wantsArchived ? { archivedAt: nextArchivedAt } : {}),
+          ...(wantsTitle ? { title: nextTitle } : {}),
+        },
       });
-    archivedAt = next ?? undefined;
-  } else {
-    const rows = await db
-      .select({ archivedAt: sessionThreads.archivedAt })
-      .from(sessionThreads)
-      .where(eq(sessionThreads.id, thread.id))
-      .limit(1);
-    archivedAt = rows[0]?.archivedAt ?? undefined;
   }
+
+  // Return the same title and archive state as a subsequent GET.
+  const rows = await db
+    .select({ archivedAt: sessionThreads.archivedAt, title: sessionThreads.title })
+    .from(sessionThreads)
+    .where(eq(sessionThreads.id, thread.id))
+    .limit(1);
+  const archivedAt = rows[0]?.archivedAt ?? undefined;
+  const title = rows[0]?.title ?? undefined;
 
   const summary = threadToSummary(
     thread.id,
     thread.toThreadData().createdAt,
     session.id,
-    undefined,
+    title,
     thread.modelId(),
     thread.key,
     archivedAt,
@@ -536,9 +576,10 @@ export async function submitSessionPrompt(
 
   if (admission.promoteItemId) {
     const receipt = await thread.promoteQueuedItem(admission.promoteItemId);
+    const now = Date.now();
     await db
       .update(agentSessions)
-      .set({ updatedAt: Date.now() })
+      .set({ updatedAt: now, lastActivityAt: now })
       .where(eq(agentSessions.id, row.id));
     return {
       messageId: receipt.queueItemId || null,
@@ -648,9 +689,10 @@ export async function submitSessionPrompt(
     throw err;
   }
 
+  const submitNow = Date.now();
   await db
     .update(agentSessions)
-    .set({ updatedAt: Date.now() })
+    .set({ updatedAt: submitNow, lastActivityAt: submitNow })
     .where(eq(agentSessions.id, row.id));
 
   return {

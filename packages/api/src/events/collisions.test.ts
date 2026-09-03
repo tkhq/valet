@@ -29,7 +29,7 @@ interface TestSub {
   name: string;
   eventKeys: string[];
   filters: SubscriptionFilter[];
-  target: { kind: string; workflowId?: string };
+  target: { kind: string; workflowId?: string; assistantId?: string };
 }
 
 function sub(over: Partial<TestSub> = {}): TestSub {
@@ -259,6 +259,38 @@ describe("computeCollisions — target policy", () => {
     const report = computeCollisions(
       candidate({ target: wf("wf-a") }),
       [sub({ target: wf("wf-a") })],
+      CATALOG,
+    );
+    expect(report.blocking).toHaveLength(1);
+  });
+
+  // The assistant arm of the same fan-out rule the workflow cases above prove:
+  // telling two named assistants about one event is deliberate, not a clobber.
+  it("allows identical coverage aimed at two DIFFERENT assistants (fan-out)", () => {
+    const report = computeCollisions(
+      candidate({ target: { kind: "orchestrator", assistantId: "a-ops" } }),
+      [sub({ target: { kind: "orchestrator", assistantId: "a-eng" } })],
+      CATALOG,
+    );
+    expect(report.blocking).toHaveLength(0);
+    expect(report.overlapping).toHaveLength(0);
+  });
+
+  it("blocks identical coverage aimed at the SAME assistant", () => {
+    const report = computeCollisions(
+      candidate({ target: { kind: "orchestrator", assistantId: "a-ops" } }),
+      [sub({ target: { kind: "orchestrator", assistantId: "a-ops" } })],
+      CATALOG,
+    );
+    expect(report.blocking).toHaveLength(1);
+  });
+
+  it("still blocks when one side names no assistant: it may BE the other", () => {
+    // An absent id means the owner's default, which the named rule may also
+    // resolve to. Nothing here can tell, so the pair keeps blocking.
+    const report = computeCollisions(
+      candidate({ target: { kind: "orchestrator", assistantId: "a-ops" } }),
+      [sub({ target: { kind: "orchestrator" } })],
       CATALOG,
     );
     expect(report.blocking).toHaveLength(1);

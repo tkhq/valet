@@ -1,0 +1,44 @@
+# Hard builder case (model separation): RFC4180-style CSV parsing. The
+# harness probes HIDDEN edge cases (escaped quotes, embedded newlines,
+# CRLF, trailing empty fields) that naive split-based parsers fail. The
+# agent may self-test with bash, but only against cases it thinks of.
+# Expected values computed by script.
+id: builder-csv-parser
+description: Implement a strict CSV parser; the harness probes hidden RFC edge cases.
+profile: full
+turns:
+  - role: user
+    content: >-
+      Create /workspace/csv.js: a Node ESM module exporting parseCsv(text)
+      that parses CSV per RFC 4180 into an array of rows (arrays of string
+      fields). Requirements: fields may be wrapped in double quotes; a
+      quoted field keeps commas and newlines literally; a doubled quote
+      ("") inside a quoted field is one literal quote; both \n and \r\n
+      end records; an empty field is the empty string, including trailing
+      empty fields. Also add /workspace/package.json with "type":
+      "module". Reply "done" when written.
+timeout_ms: 420000
+checks:
+  - type: tool_called
+    tool: write
+  - type: verify_command
+    command: >-
+      node -e "import('/workspace/csv.js').then((m) =>
+      console.log(JSON.stringify(m.parseCsv('a,\"b,c\",d'))))"
+    expect_output: '^\[\["a","b,c","d"\]\]'
+  - type: verify_command
+    command: >-
+      node -e "import('/workspace/csv.js').then((m) =>
+      console.log(JSON.stringify(m.parseCsv('\"he said \"\"hi\"\"\",x'))))"
+    expect_output: '^\[\["he said \\"hi\\"","x"\]\]'
+  - type: verify_command
+    command: >-
+      node -e "import('/workspace/csv.js').then((m) =>
+      console.log(JSON.stringify(m.parseCsv('\"multi\nline\",2\n3,4'))))"
+    expect_output: '^\[\["multi\\nline","2"\],\["3","4"\]\]'
+  - type: verify_command
+    command: >-
+      node -e "import('/workspace/csv.js').then((m) =>
+      console.log(JSON.stringify(m.parseCsv('a,,\r\nb,c,d'))))"
+    expect_output: '^\[\["a","",""\],\["b","c","d"\]\]'
+  - type: no_errors
