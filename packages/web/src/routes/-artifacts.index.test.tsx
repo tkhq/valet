@@ -1,11 +1,14 @@
 // @vitest-environment jsdom
 /**
  * `/artifacts` gallery (final-review fix wave). `GET /api/artifacts` hands
- * an org ADMIN every member's artifacts, so the page must filter to rows
- * the caller themselves published — not just the non-revoked ones — before
- * the "Pages you published" header copy and the Revoke button are truthful.
- * Mocked the same way `-workflows.index.test.tsx` mocks `@tanstack/react-router`
- * and its data hooks.
+ * an org ADMIN every member's artifacts unfiltered, so ownership filtering
+ * moved server-side behind `?mine=1` (a client-side `actorUserId` match
+ * against `/api/me` failed open: a failed `/api/me` call compared against
+ * `undefined` and silently emptied the whole gallery). This suite asserts
+ * the page asks for the `mine`-filtered view and still gets revoked-row
+ * filtering and per-row revoke right. Mocked the same way
+ * `-workflows.index.test.tsx` mocks `@tanstack/react-router` and its data
+ * hooks.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
@@ -29,15 +32,6 @@ const mine: ArtifactListItem = {
   updatedAt: 2,
 };
 
-const someoneElses: ArtifactListItem = {
-  ...mine,
-  id: "art_other",
-  title: "Colleague's page",
-  token: "tok-other",
-  url: "https://valet.example/a/tok-other",
-  actorUserId: "u-2",
-};
-
 const revoked: ArtifactListItem = {
   ...mine,
   id: "art_revoked",
@@ -47,11 +41,12 @@ const revoked: ArtifactListItem = {
   revoked: true,
 };
 
-let artifactsData: { artifacts: ArtifactListItem[] } = { artifacts: [mine, someoneElses, revoked] };
-let meData: { id: string } | undefined = { id: "u-1" };
-let meLoading = false;
+let artifactsData: { artifacts: ArtifactListItem[] } = { artifacts: [mine, revoked] };
 
 const revokeMutate = vi.fn();
+let revokePending = false;
+let revokeError: Error | null = null;
+const useArtifactsMock = vi.fn();
 
 vi.mock("@tanstack/react-router", () => ({
   // `params` is spread as a real prop (an object), not through `...rest`,
@@ -74,12 +69,11 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 vi.mock("~/api/artifacts", () => ({
-  useArtifacts: () => ({ data: artifactsData, isLoading: false, error: null }),
-  useRevokeArtifact: () => ({ mutate: revokeMutate, isPending: false }),
-}));
-
-vi.mock("~/api/settings", () => ({
-  useMe: () => ({ data: meData, isLoading: meLoading, error: null }),
+  useArtifacts: (...args: unknown[]) => {
+    useArtifactsMock(...args);
+    return { data: artifactsData, isLoading: false, error: null };
+  },
+  useRevokeArtifact: () => ({ mutate: revokeMutate, isPending: revokePending, error: revokeError }),
 }));
 
 import { ArtifactsPage } from "./artifacts.index";
@@ -89,39 +83,31 @@ function renderPage() {
 }
 
 beforeEach(() => {
-  artifactsData = { artifacts: [mine, someoneElses, revoked] };
-  meData = { id: "u-1" };
-  meLoading = false;
+  artifactsData = { artifacts: [mine, revoked] };
+  revokePending = false;
+  revokeError = null;
   revokeMutate.mockClear();
+  useArtifactsMock.mockClear();
 });
 
 describe("ArtifactsPage", () => {
+  it("requests the server-filtered `mine` view instead of filtering client-side", () => {
+    renderPage();
+    expect(useArtifactsMock).toHaveBeenCalledWith(undefined, { mine: true });
+  });
+
   it("filters out revoked rows", () => {
     renderPage();
     expect(screen.getByText("Deploy report")).toBeTruthy();
     expect(screen.queryByText("Old page")).toBeNull();
   });
 
-  it("filters out rows the caller does not own, even though the api returned them", () => {
-    renderPage();
-    expect(screen.getByText("Deploy report")).toBeTruthy();
-    expect(screen.queryByText("Colleague's page")).toBeNull();
-  });
-
-  it("shows the empty state when the caller has no artifacts of their own", () => {
-    artifactsData = { artifacts: [someoneElses, revoked] };
+  it("shows the empty state when the mine-filtered list is empty", () => {
+    artifactsData = { artifacts: [revoked] };
     renderPage();
     expect(
       screen.getByText("Nothing published yet. Ask your agent to publish a page, or share a memory doc."),
     ).toBeTruthy();
-  });
-
-  it("renders a loading row while `me` is still loading, instead of an empty state", () => {
-    meData = undefined;
-    meLoading = true;
-    renderPage();
-    expect(screen.queryByText(/Nothing published yet/)).toBeNull();
-    expect(screen.queryByText("Deploy report")).toBeNull();
   });
 
   it("links each row to /a/$token with the row's token", () => {
@@ -143,5 +129,12 @@ describe("ArtifactsPage", () => {
     renderPage();
     fireEvent.click(screen.getByRole("button", { name: "Revoke" }));
     await waitFor(() => expect(revokeMutate).toHaveBeenCalledWith({ id: "art_mine" }));
+  });
+
+  it("shows a corrective error and keeps the row when revoke fails", () => {
+    revokeError = new Error("network unreachable");
+    renderPage();
+    expect(screen.getByText("Revoke failed: network unreachable. Retry, or refresh the page.")).toBeTruthy();
+    expect(screen.getByText("Deploy report")).toBeTruthy();
   });
 });

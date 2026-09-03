@@ -511,6 +511,13 @@ async function orgIdForShare(c: Context<AppEnv>, db: AppDb): Promise<string> {
   return resolveOrgId(db);
 }
 
+/** "1" or "true" — the same loose boolean-query convention as the rest of
+ * this route (an owner filter's presence, not its value, gates it; `mine`
+ * needs an explicit value because its absence is the default list). */
+function truthyQuery(value: string | undefined): boolean {
+  return value === "1" || value === "true";
+}
+
 artifactsRouter.get("/", async (c) => {
   const user = requireUser(c);
   if (!user) return c.json({ error: "unauthorized" }, 401);
@@ -521,6 +528,28 @@ artifactsRouter.get("/", async (c) => {
   // rule every team read applies). Non-members get 404 (existence-hiding).
   const ownerType = c.req.query("ownerType");
   const ownerId = c.req.query("ownerId");
+  const mine = truthyQuery(c.req.query("mine"));
+
+  // `mine` composes with nothing: it names a caller-scoped view, so pairing
+  // it with an owner filter is an ambiguous request rather than one where
+  // either reading obviously wins. 400, like the malformed-owner-filter
+  // case just below, rather than silently picking a side.
+  if (mine && (ownerType !== undefined || ownerId !== undefined)) {
+    return c.json({ error: "mine cannot be combined with an owner filter." }, 400);
+  }
+
+  if (mine) {
+    // The gallery's "your own artifacts" view. Force `orgAdmin: false` even
+    // for an org admin caller — admin status must never leak a colleague's
+    // rows into a filter whose whole point is "just mine". Client-side
+    // filtering on `actorUserId` had the same intent but failed open: if
+    // `/api/me` errored, the filter compared against `undefined` and every
+    // row was dropped, showing a false empty state.
+    const rows = await listArtifacts(db, { id: user.id, orgId: user.orgId, orgAdmin: false });
+    const body: ListArtifactsResponse = { artifacts: rows.map((row) => toListItem(c, row)) };
+    return c.json(body);
+  }
+
   if (ownerType !== undefined || ownerId !== undefined) {
     if (ownerType !== "team" || !ownerId) {
       return c.json({ error: "owner filter must be ownerType=team with an ownerId." }, 400);
