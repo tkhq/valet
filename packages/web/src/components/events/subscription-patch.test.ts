@@ -4,13 +4,14 @@
  * only changed fields go on the wire, and an "Any channel" toggle alone
  * still rides the (unchanged) filters so the server re-runs the mention
  * gate. Filters compare by content, not key order: stored jsonb comes back
- * with alphabetized keys, and a rename must not re-send (and re-collision-
- * check) an unchanged match.
+ * with reordered keys (by length, then bytewise), and a rename must not
+ * re-send (and re-collision-check) an unchanged match.
  */
 import { describe, expect, it } from "vitest";
 import type { EventSubscriptionFilterWire, EventSubscriptionWire } from "@valet/api/wire";
+import { storedAnyChannel } from "~/lib/slack-mention";
 import { fromWireFilters, toWireFilters } from "./filter-editor";
-import { buildSubscriptionPatch, storedAnyChannel } from "./subscription-patch";
+import { buildSubscriptionPatch } from "./subscription-patch";
 
 function sub(over: Partial<EventSubscriptionWire> = {}): EventSubscriptionWire {
   return {
@@ -35,7 +36,7 @@ function unchangedForm(s: EventSubscriptionWire) {
     name: s.name,
     eventKeys: [...s.eventKeys],
     filters: toWireFilters(fromWireFilters(s.filters)),
-    anyChannel: storedAnyChannel(s),
+    anyChannel: storedAnyChannel(s.eventKeys, s.filters),
   };
 }
 
@@ -48,17 +49,15 @@ const CHANNEL_EQ: EventSubscriptionFilterWire = {
 
 describe("storedAnyChannel", () => {
   it("is true for a mention rule with no channel filter", () => {
-    expect(storedAnyChannel(sub({ eventKeys: ["slack.app_mention"] }))).toBe(true);
+    expect(storedAnyChannel(["slack.app_mention"], [])).toBe(true);
   });
 
   it("is false for a mention rule with a channel filter", () => {
-    expect(
-      storedAnyChannel(sub({ eventKeys: ["slack.app_mention"], filters: [CHANNEL_EQ] })),
-    ).toBe(false);
+    expect(storedAnyChannel(["slack.app_mention"], [CHANNEL_EQ])).toBe(false);
   });
 
   it("is false for a non-mention rule", () => {
-    expect(storedAnyChannel(sub())).toBe(false);
+    expect(storedAnyChannel(["github.pr.opened"], [])).toBe(false);
   });
 });
 
@@ -68,12 +67,25 @@ describe("buildSubscriptionPatch", () => {
     expect(buildSubscriptionPatch(s, unchangedForm(s))).toBeNull();
   });
 
-  it("ignores stored-filter key order (jsonb alphabetizes)", () => {
-    // The same filter with its keys in jsonb's alphabetical order.
-    const stored = { field: "channel", label: "#general", op: "eq", value: "C1" };
+  it("ignores stored-filter key order (jsonb reorders keys)", () => {
+    // The same filter with its keys in jsonb's order (length, then bytewise).
+    const stored = { op: "eq", field: "channel", label: "#general", value: "C1" };
     const s = sub({ filters: [stored as EventSubscriptionFilterWire] });
     const patch = buildSubscriptionPatch(s, { ...unchangedForm(s), filters: [CHANNEL_EQ] });
     expect(patch).toBeNull();
+  });
+
+  it("a rename of a rule whose stored `in` value contains a comma sends only the name", () => {
+    // The form cannot represent a comma inside one `in` value (the input
+    // splits on commas), so the round trip re-splits it. The diff compares
+    // both sides through the same round trip; the un-editable corner must
+    // not turn a rename into a filters rewrite.
+    const s = sub({
+      filters: [{ field: "text", op: "in", value: ["a,b", "c"] }],
+    });
+    expect(buildSubscriptionPatch(s, { ...unchangedForm(s), name: "Renamed" })).toEqual({
+      name: "Renamed",
+    });
   });
 
   it("a rename sends only the trimmed name", () => {

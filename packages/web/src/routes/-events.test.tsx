@@ -642,7 +642,40 @@ describe("EventsPage — Subscriptions", () => {
     await openEditDialog();
     // The dialog names the stored target (the row shows it too, hence "all").
     expect(screen.getAllByText(/Run workflow: Deploy pipeline/).length).toBeGreaterThan(1);
-    expect(screen.getByText(/The target cannot change/)).toBeTruthy();
+    expect(screen.getByText(/This dialog cannot change the target/)).toBeTruthy();
     expect(screen.queryByRole("radio", { name: /Run a workflow/ })).toBeNull();
+  });
+
+  it("edit: refuses Any channel plus a channel filter before the round trip", async () => {
+    // A stored any-channel mention rule seeds the checkbox CHECKED, so
+    // "narrow it to one channel" walks into the server's refusal of the
+    // contradictory pair unless the form gates it first.
+    catalogData.services.push({
+      service: "slack",
+      entries: [
+        {
+          key: "slack.app_mention",
+          description: "The app was mentioned",
+          filters: [{ field: "channel", path: "$.event.channel", description: "channel id" }],
+        },
+      ],
+    });
+    subscriptionsData.subscriptions[0].eventKeys = ["slack.app_mention"];
+    try {
+      openSubscriptionsTab();
+      await openEditDialog();
+      const anyChannel = screen.getByRole("checkbox", { name: /Any channel/ }) as HTMLInputElement;
+      expect(anyChannel.checked).toBe(true);
+
+      fireEvent.click(screen.getByRole("button", { name: "Add filter" }));
+      fireEvent.change(screen.getByLabelText("Filter value"), { target: { value: "C1" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+      expect(screen.getByText(/"Any channel" removes the channel restriction/)).toBeTruthy();
+      expect(patchMutate).not.toHaveBeenCalled();
+    } finally {
+      catalogData.services.pop();
+      subscriptionsData.subscriptions[0].eventKeys = ["github.pr.opened"];
+    }
   });
 });

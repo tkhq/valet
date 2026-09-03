@@ -306,8 +306,10 @@ Each mutable row's menu opens an edit dialog
 filters, through the same match step the wizard's advanced outcome uses. A
 save PATCHes only the changed fields (`subscription-patch.ts`), so a rename
 does not re-run the collision gate on an unchanged match. The target is
-shown read-only — the PATCH route pins `target` to the stored row, so a
-different target is a new subscription, and the dialog says so.
+shown read-only — the PATCH route pins the target's kind and owner (only a
+same-owner `assistantId` re-point is accepted, which the dialog does not
+offer yet), so a different target is a new subscription, and the dialog
+says so.
 
 The creation wizard and the edit dialog render the collision gate's answer
 inline (`components/events/collision-notice.tsx`): a blocked write lists the

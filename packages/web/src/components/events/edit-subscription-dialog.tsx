@@ -1,8 +1,9 @@
 /**
  * EditSubscriptionDialog — edit an existing event subscription: name, event
  * keys, and filters, through the same match step the AutomationWizard's
- * advanced outcome uses. The target is shown read-only: the server pins it
- * on PATCH (`events.ts` merges `target: row.target`), so pointing a rule at
+ * advanced outcome uses. The target is shown read-only: the server pins the
+ * target's kind and owner on PATCH (only a same-owner `assistantId` re-point
+ * is accepted, which this dialog does not offer yet), so pointing a rule at
  * a different target is a delete-and-recreate, not an edit.
  *
  * A save sends only the changed fields (`buildSubscriptionPatch`), with the
@@ -28,7 +29,11 @@ import {
 } from "~/components/primitives";
 import { useEventCatalog, usePatchEventSubscription } from "~/api/events";
 import { errorText } from "~/lib/error-text";
-import { hasChannelScopeFilter, selectsSlackMention } from "~/lib/slack-mention";
+import {
+  hasChannelScopeFilter,
+  selectsSlackMention,
+  storedAnyChannel,
+} from "~/lib/slack-mention";
 import { CollisionNotice, collisionsFromError } from "./collision-notice";
 import { EventMatchStep, unionFilterFields } from "./automation-wizard";
 import {
@@ -38,7 +43,7 @@ import {
   toWireFilters,
   type UiFilterRow,
 } from "./filter-editor";
-import { buildSubscriptionPatch, storedAnyChannel } from "./subscription-patch";
+import { buildSubscriptionPatch } from "./subscription-patch";
 
 export function EditSubscriptionDialog({
   open,
@@ -60,7 +65,7 @@ export function EditSubscriptionDialog({
   const [name, setName] = useState(sub.name);
   const [keys, setKeys] = useState<Set<string>>(() => new Set(sub.eventKeys));
   const [filterRows, setFilterRows] = useState<UiFilterRow[]>(() => fromWireFilters(sub.filters));
-  const [anyChannel, setAnyChannel] = useState(() => storedAnyChannel(sub));
+  const [anyChannel, setAnyChannel] = useState(() => storedAnyChannel(sub.eventKeys, sub.filters));
   const [error, setError] = useState<string | null>(null);
   // See the wizard: `committed: false` is a refused write (409) with a "Save
   // anyway" path; `committed: true` is a saved write that still overlaps.
@@ -97,13 +102,25 @@ export function EditSubscriptionDialog({
       return;
     }
     const filters = toWireFilters(filterRows);
-    // Mirror the server's mention channel rule (TKAI-299) so the form names
-    // the gap before a round trip.
-    if (selectsSlackMention([...keys]) && !anyChannel && !hasChannelScopeFilter(filters)) {
-      setError(
-        'A mention rule needs a channel filter (equals, or is one of). Add one, or check "Any channel".',
-      );
-      return;
+    // Mirror the server's mention channel rules (TKAI-299) so the form names
+    // the gap before a round trip. Both directions: a scoped mention rule
+    // needs a channel filter, and "Any channel" contradicts one — the server
+    // refuses the pair outright, and this dialog can seed the checkbox
+    // checked (a stored any-channel rule), so adding a channel filter walks
+    // straight into that refusal without this gate.
+    if (selectsSlackMention([...keys])) {
+      if (!anyChannel && !hasChannelScopeFilter(filters)) {
+        setError(
+          'A mention rule needs a channel filter (equals, or is one of). Add one, or check "Any channel".',
+        );
+        return;
+      }
+      if (anyChannel && hasChannelScopeFilter(filters)) {
+        setError(
+          '"Any channel" removes the channel restriction. Remove the channel filters, or turn "Any channel" off.',
+        );
+        return;
+      }
     }
 
     const body = buildSubscriptionPatch(sub, {
@@ -177,13 +194,17 @@ export function EditSubscriptionDialog({
             <p className="text-xs font-medium text-muted">Then</p>
             <p className="mt-1 text-sm text-ink">{targetLabel}</p>
             <p className="mt-1 text-xs text-muted">
-              The target cannot change. To use a different target, create a new automation and
-              delete this one.
+              This dialog cannot change the target. To use a different target, create a new
+              automation and delete this one.
             </p>
           </div>
 
           {collisions !== null && (
-            <CollisionNotice report={collisions.report} committed={collisions.committed} />
+            <CollisionNotice
+              report={collisions.report}
+              committed={collisions.committed}
+              intent="save"
+            />
           )}
           {error && <p className="text-xs text-danger-500">{error}</p>}
         </div>

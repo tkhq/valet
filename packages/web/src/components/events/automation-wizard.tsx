@@ -60,7 +60,7 @@ import { useTeams } from "~/api/settings";
 import { errorText } from "~/lib/error-text";
 // The reply outcome always subscribes to this one event key, so the reader
 // never sees a raw event picker for it.
-import { SLACK_APP_MENTION } from "~/lib/slack-mention";
+import { hasChannelScopeFilter, SLACK_APP_MENTION } from "~/lib/slack-mention";
 import { useActiveWorkspace } from "~/components/workspace-clause";
 
 /** One picked channel: the Slack id plus the display label the picker showed. */
@@ -360,6 +360,15 @@ export function AutomationWizard({
         setError(`Enter a value for the "${incomplete}" filter, or remove the row.`);
         return;
       }
+      const filters = toWireFilters(filterRows);
+      // Mirror the server's mention rule (TKAI-299): "Any channel" with a
+      // channel filter is a contradiction the server refuses outright.
+      if (keys.has(SLACK_APP_MENTION) && anyChannel && hasChannelScopeFilter(filters)) {
+        setError(
+          '"Any channel" removes the channel restriction. Remove the channel filters, or turn "Any channel" off.',
+        );
+        return;
+      }
       // The notify outcome speaks to an assistant, never follows a thread.
       const eventTarget: EventSubscriptionTarget =
         outcome === "notify"
@@ -369,7 +378,7 @@ export function AutomationWizard({
         {
           name: name.trim(),
           eventKeys: [...keys],
-          filters: toWireFilters(filterRows),
+          filters,
           target: eventTarget,
           // The raw picker can select `slack.app_mention` too; the flag only
           // means anything there, and the server ignores it elsewhere.
