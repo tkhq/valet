@@ -108,6 +108,16 @@ export interface PrebuildOverride {
    * `VALET_SANDBOX_WORKSPACE_MAX` by the provider (TKAI-385). A large repo
    * declares its footprint up front so no reactive resize is needed. */
   workspaceStorage?: string;
+  /**
+   * REPO-INDEPENDENT setup commands (toolchain installs), split out of
+   * `setup` so they bake into a chained BASE image instead of re-running on
+   * every commit's rebake. The platform materializes them as a per-repo base
+   * source (`repo-base:<fullName>`): its bake is identity-keyed on these
+   * commands, so it rebuilds only when they change, and the repo bake FROMs
+   * it. Commands here run WITHOUT the repo checkout (before any clone) — a
+   * command that reads repo files belongs in `setup`.
+   */
+  baseSetup?: string[];
 }
 
 /**
@@ -158,6 +168,12 @@ export async function loadPrebuildOverride(
     }
     override.workspaceStorage = obj.workspaceStorage;
   }
+  if (obj.baseSetup !== undefined) {
+    if (!Array.isArray(obj.baseSetup) || obj.baseSetup.some((s) => typeof s !== "string")) {
+      throw new Error(".valet/prebuild.yaml: baseSetup must be a string array");
+    }
+    override.baseSetup = obj.baseSetup as string[];
+  }
   return override;
 }
 
@@ -166,6 +182,9 @@ export interface ResolvedRecipe {
   recipe: RecipeStep[];
   /** Extra setup commands from the override, run after `recipe` steps. */
   setup: string[];
+  /** Repo-independent toolchain commands baked into a chained BASE image —
+   * see `PrebuildOverride.baseSetup`. Empty when undeclared. */
+  baseSetup: string[];
   /** Override base image ref, when the repo pins one. */
   image?: string;
   /** Docker daemon inside sandbox, when the repo enables it. */
@@ -190,6 +209,7 @@ export async function resolveRecipe(
   return {
     recipe,
     setup: override?.setup ?? [],
+    baseSetup: override?.baseSetup ?? [],
     image: override?.image,
     ...(override?.docker !== undefined ? { docker: override.docker } : {}),
   };
@@ -301,6 +321,10 @@ export interface GenerateLocalDockerfileOpts {
   baseImage: string;
   recipe: RecipeStep[];
   setup?: string[];
+  /** Repo-independent toolchain commands, emitted BEFORE the repo COPY —
+   * mirroring the platform's chained base bake (they run without the repo
+   * there too), and keeping their layers cached locally across commits. */
+  baseSetup?: string[];
 }
 
 /**
@@ -317,9 +341,13 @@ export interface GenerateLocalDockerfileOpts {
  * image can never satisfy a platform cache lookup.
  */
 export function generateLocalDockerfile(opts: GenerateLocalDockerfileOpts): string {
-  const { baseImage, recipe, setup = [] } = opts;
+  const { baseImage, recipe, setup = [], baseSetup = [] } = opts;
   const lines: string[] = [];
   lines.push(`FROM ${baseImage}`);
+  for (const cmd of baseSetup) {
+    lines.push("");
+    lines.push(`RUN ${cmd}`);
+  }
   lines.push("");
   lines.push(`COPY . ${PREBUILT_REPO_PATH}`);
   lines.push("");

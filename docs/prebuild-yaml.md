@@ -51,6 +51,16 @@ Type: `boolean` (default `false`)
 
 Set `true` to give this repo's sessions a rootless docker daemon inside the sandbox. The daemon runs as a non-root user; the sandbox is never privileged. Docker state is ephemeral — images pull again after the sandbox restarts. See `docs/specs/2026-08-15-sandbox-docker-design.md`.
 
+### `baseSetup`
+
+Type: `string[]`
+
+REPO-INDEPENDENT setup commands (toolchain installs: compilers, runtimes, apt packages). Split them out of `setup` and they bake into a chained BASE image instead of re-running on every commit's rebake: the platform materializes a per-repo base source (`repo-base:<owner>/<repo>`) whose bake is identity-keyed on these commands, so it rebuilds only when the commands change. The repo bake then builds FROM that image, paying only for the repo-dependent `setup` steps.
+
+Commands here run WITHOUT the repo checkout (before any clone). A command that reads repo files (installs from a lockfile, runs `make`) belongs in `setup`.
+
+The first bake after adding or changing `baseSetup` builds the base layer first; the repo bake follows automatically when it pushes. Removing `baseSetup` reattaches the repo to the org's default base.
+
 ### `workspaceStorage`
 
 Type: `string` (a Kubernetes quantity, for example `"4Gi"`; default: the deploy's workspace size, 1Gi)
