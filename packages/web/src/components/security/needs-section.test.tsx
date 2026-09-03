@@ -84,7 +84,7 @@ describe("NeedsSection", () => {
   it("posts the answer through the resolve route on Resolve & continue", async () => {
     resolveMock.mockClear();
     renderSection([need({ id: "need_h", status: "needs_human" })]);
-    const box = screen.getByPlaceholderText(/credential, scope, or dependency/);
+    const box = screen.getByPlaceholderText(/op:\/\/vault\/item\/field/);
     fireEvent.change(box, { target: { value: "Token: stg_admin_abc123." } });
     fireEvent.click(screen.getByText(/Resolve & continue/));
     await waitFor(() => {

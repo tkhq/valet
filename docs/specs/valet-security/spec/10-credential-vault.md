@@ -1,5 +1,7 @@
 # Part 10: Per-Engagement Credential Vault
 
+> **Superseded by [Part 12](12-credentials-via-1password.md).** Part 10's engagement_credentials table, EngagementVault service, three-seam tripwire, and vault wizard step have been replaced by a design that stores only `op://vault/item/field` references and consumes PR #421's 1Password + sandbox-secret-broker plumbing. Part 10 stays in the tree for the history of the seven `kind` values and the dispatch-prompt rendering pattern that Part 12 reuses; every other section is historical. Read Part 12 for the current design.
+
 *Depends on: Part 00, Part 01, Part 04, Part 05, Part 06, Part 07, Part 09. Conformance: L1+ (server-side gates, redaction, and route behavior); L3 delivers cells to sandboxes.*
 
 ## Purpose
@@ -298,17 +300,18 @@ The dispatch prompt change (`buildDispatchPrompt` at `services/security-engageme
 
 ## Implementation checklist
 
-Not implemented by this spec; the checklist below drives the follow-up PRs.
+The checklist drives the shipping PRs. Each item names its status so a
+reader can trace what is live vs what is next.
 
-1. Schema: `engagement_credentials`, `engagement_credential_access`, `security_incidents`, `security_needs.credential_id`, CHECK constraint on `security_needs.resolution`.
-2. Service: `EngagementVault` composing `secret-crypto.ts` (existing) + PgCredentialStore pattern (existing) + owner-scoped ACL.
-3. Dispatch wiring: `buildSandboxMint` → `vault.materialize`; `credsMount` file layout; dispatch prompt renders paths only.
-4. Tripwire: `tripwire.scanEntry` in `Thread.handleAgentEvent`; `tripwire.scanFrame` in `bridge.ts`; `redactBytes` in `sandbox-gateway` egress.
-5. Routes: the six under `/security/vault` and the `resolve` extension.
-6. Wizard step and UI: "Vault" step widgets, Launch checklist integration, needs-panel cred widget.
-7. Config seed: `credentials` block in `.valet/security.yml`, env-var resolution at load time.
-8. Ops: rotation script, backup scrub hook, TTL sweep in `main.ts` next to the prebuild service, four metrics.
-9. Backfill: cred-typed `security_needs` rows with non-NULL `resolution` in pre-Part-10 databases (dev-only in v1; migrate script for staging/prod when they exist).
-10. Docs: worktree runbook update ("credentials are per-engagement; upload at Vault step; never in code review comments").
+1. **Shipped.** Schema: `engagement_credentials`, `engagement_credential_access`, `security_incidents`, `security_needs.credential_id`. SCHEMA_REPAIRS entries for every table + column + index. The CHECK constraint on `security_needs.resolution` is deferred to 1.0 numbered migrations; the service layer refuses cred-typed writes to `resolution` in the meantime.
+2. **Shipped.** Service: `EngagementVault` composing `secret-crypto.ts` + PgCredentialStore pattern + owner-scoped ACL. Adds `decryptSecretBuffer` / `encryptSecretBuffer` / `deriveKekId` so the service reads plaintext into a Buffer, zeros it in `finally`, and env-stamps every row (INV-16).
+3. **Shipped.** Dispatch wiring: `EngineHost.mintVaultCreds` → `credsMount` files at `/etc/valet/creds/vault-<label>.<ext>`. `buildDispatchPrompt` renders the file path for cred-typed answers; falls back to the raw resolution when the row has no `credential_id` so pre-vault callers keep working.
+4. **Shipped (send + persist seams).** Tripwire on the WS send seam (`scanAndRedactWireEvent` in `packages/api/src/engine/tripwire.ts`, wired in `routes/ws.ts`) and on the engine persist seam (`beforeEntryPersist` hook on `CreateSessionOptions`; `buildPersistTripwire` in `packages/api/src/engine/persist-tripwire.ts`; wired at `EngineHost.buildChildSession`). The engine's in-sandbox gateway egress redactor is deferred as a hardening pass; the persist + send seams close every path that leaves the api process.
+5. **Shipped.** Routes: `POST /:id/security/vault`, `GET /:id/security/vault`, `DELETE /:id/security/vault/:credentialId`, `GET /:id/security/vault/:credentialId/access`, and `POST /:id/security/needs/resolve` extended with `credentialInput`.
+6. **Shipped.** Wizard step and UI: a "Vault" step between Plan and Launch (`packages/web/src/components/security/vault-step.tsx`), needs-panel cred widget (`packages/web/src/components/security/needs-section.tsx`), and mutation hooks `useSecurityVault`/`useWriteSecurityVault`/`useDeleteSecurityVaultCredential`. Values live in React state only until submit; the wizard discards them from state after the vault write lands.
+7. **Shipped.** Config seed: `credentials:` block parsed by `parseSecurityConfig`; the create route reads each `env` name from `process.env` and writes to the engagement's vault as its owner. A missing env logs a warning and skips (the persona surfaces a fresh need); a duplicate label also warns and skips.
+8. **Shipped.** Ops: TTL sweep (`startVaultSweep` in `packages/api/src/services/vault-sweep.ts`), four OTel counters (`valet.security.vault.materialized`, `valet.security.vault.tripwire.hits`, `valet.security.vault.shred`, `valet.security.vault.written`), and the `EngagementVault.purgeEngagement` handle. Backup-scrub hook is a documented pipeline step, not a code change; key-rotation script is a runbook step for when staging/prod exist.
+9. **Deferred.** Backfill: cred-typed `security_needs` rows with non-NULL `resolution` on pre-Part-10 databases. Pre-1.0 dev databases run `make dev-clean`; a real backfill lands when staging/prod exist.
+10. **Shipped in this spec.** Docs: this checklist. A contributor runbook and Launch checklist copy update land in the next PR whose scope touches user-facing docs.
 
 Every step above closes at least one threat scenario; every closed scenario has a step above.

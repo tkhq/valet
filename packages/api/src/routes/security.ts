@@ -73,7 +73,6 @@ import type { Principal } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { isValidInternalToken } from "../lib/internal-auth.js";
-import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { requireUser, type AuthUser } from "../middleware/auth.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { buildActionInvoker } from "../plugins/action-invoker.js";
@@ -110,10 +109,12 @@ import {
   type CellProgress,
   type FindingSeverity,
   type FindingStatus,
+  type NeedAnswerInput,
   type SecurityReport,
   type NeedKind,
   type SpawnCellChild,
 } from "../services/security-engagements.js";
+import { deriveSecretKey } from "../lib/secret-crypto.js";
 import {
   buildJsonExport,
   buildMarkdownReport,
@@ -2447,7 +2448,7 @@ securityRouter.post("/:id/security/needs/resolve", async (c) => {
   if (!Array.isArray(body.answers) || body.answers.length === 0) {
     return c.json({ error: "Send { answers: [{ needId, resolution }] } with at least one answer." }, 400);
   }
-  const answers: { needId: string; resolution: string; dismiss?: boolean }[] = [];
+  const answers: NeedAnswerInput[] = [];
   for (const raw of body.answers) {
     if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
       return c.json({ error: "Each answer is { needId, resolution, dismiss? }." }, 400);
@@ -2460,11 +2461,12 @@ securityRouter.post("/:id/security/needs/resolve", async (c) => {
     if (!dismiss && (typeof rec.resolution !== "string" || rec.resolution.trim() === "")) {
       return c.json({ error: `Answer for ${rec.needId} needs a resolution, or set dismiss: true.` }, 400);
     }
-    answers.push({
+    const answer: NeedAnswerInput = {
       needId: rec.needId,
-      resolution: typeof rec.resolution === "string" ? rec.resolution : "",
       dismiss,
-    });
+      ...(typeof rec.resolution === "string" ? { resolution: rec.resolution } : {}),
+    };
+    answers.push(answer);
   }
 
   try {
@@ -2854,3 +2856,4 @@ securityRouter.post("/:id/security/issues/digest", async (c) => {
     return issueError(c, err);
   }
 });
+
