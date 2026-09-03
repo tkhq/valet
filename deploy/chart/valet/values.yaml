@@ -140,6 +140,37 @@ sandbox:
   ephemeralStorageRequest: "2Gi"
   ephemeralStorageLimit: "8Gi"
 
+  # Size of the PERSISTENT /workspace claim each sandbox provisions. This
+  # is the volume that survives pod recreation and hibernation, and it
+  # holds the repo clone and uncommitted work. Node-local scratch (docker
+  # image layers, container rootfs) is bounded by the ephemeral limits
+  # above and does not land here.
+  #
+  # WARNING: this is one-way per sandbox. The size is fixed in the Sandbox
+  # CR at create time, no resize path exists, and a PVC cannot shrink.
+  # Changing it affects only sandboxes created afterwards; existing claims
+  # keep their size until the sandbox is destroyed and re-provisioned. A
+  # workspace that fills gets ENOSPC, so raise this for deploys that clone
+  # large repositories.
+  workspaceStorage: "1Gi"
+
+  # How long a suspended sandbox is kept before its workspace volume is
+  # reclaimed. Both windows measure IDLE time, not age: they run from the
+  # session's last activity and restart when it is revived. Reclaiming
+  # resets only the workspace volume — chat history and memories live in
+  # Postgres, and reopening the session provisions a fresh sandbox.
+  #
+  # Children are split out because they are the high-churn class: an
+  # orchestrator fans out hundreds a day, each holding its own PVC, and
+  # most are never revisited. Long-lived sessions (orchestrators,
+  # assistants, top-level sessions) are provisioned rarely and revisited
+  # for weeks, so they keep the longer window.
+  #
+  # Set either to "0" to disable that reclaim (children then get an eager
+  # destroy on settle; long-lived sandboxes are kept until deleted).
+  childRetentionHours: 24
+  hibernatedRetentionHours: 72
+
   # DEPRECATED. Legacy fallback consulted by unparented sources when nothing
   # else resolves. Kept for one release; will be removed in a future v2.x.
   # image:

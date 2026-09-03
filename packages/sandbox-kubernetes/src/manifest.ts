@@ -19,7 +19,10 @@ import type {
 
 const MAX_NAME_LENGTH = 63;
 const HASH_SUFFIX_LENGTH = 8;
-const DEFAULT_STORAGE = "2Gi";
+/** Fallback `/workspace` claim size when the provider config names none.
+ * Kept equal to the api's `resolveSandboxWorkspaceStorage` default so a
+ * caller that skips the env knob gets the same volume a deploy does. */
+const DEFAULT_STORAGE = "1Gi";
 
 /** `full`-profile container command — starts the interactive services (ttyd,
  * code-server, auth gateway) instead of the bare `tail -f /dev/null`

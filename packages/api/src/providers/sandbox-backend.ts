@@ -145,13 +145,25 @@ export function resolveIdleMinutes(env: NodeJS.ProcessEnv): number {
 
 /**
  * Retention window for a settled child's suspended sandbox
- * (`VALET_CHILD_SANDBOX_RETENTION_HOURS`, default 72). `0`, a negative
+ * (`VALET_CHILD_SANDBOX_RETENTION_HOURS`, default 24). `0`, a negative
  * number, or a non-number disables retention: settled children get the
  * eager destroy-on-settle. Only consulted on hibernation-capable backends —
  * elsewhere the child watcher never parks in the first place.
+ *
+ * The window runs from the child's LAST settle (`child_watches.settled_at`,
+ * restamped on every re-settle) and is gated on the engine activity clock
+ * too, so it measures idle time, not age — a revived child restarts it.
+ *
+ * Shorter than the 72h every other session class gets
+ * (`resolveHibernatedRetentionMs`) on purpose: children are the
+ * high-churn, mostly use-once class (agents-dev spawns hundreds a day,
+ * each holding a workspace PVC), while an orchestrator or assistant
+ * sandbox is provisioned rarely and revisited for weeks. A day still
+ * covers same-day `child_send` revival and an overnight look at
+ * yesterday's run.
  */
 export function resolveChildRetentionMs(env: NodeJS.ProcessEnv): number {
-  return scaledEnvNumber(env.VALET_CHILD_SANDBOX_RETENTION_HOURS, 72 * 3_600_000, 3_600_000);
+  return scaledEnvNumber(env.VALET_CHILD_SANDBOX_RETENTION_HOURS, 24 * 3_600_000, 3_600_000);
 }
 
 /**
@@ -162,6 +174,12 @@ export function resolveChildRetentionMs(env: NodeJS.ProcessEnv): number {
  * history and memories live in postgres), but a Monday-morning user should
  * still find Friday's uncommitted work. Zero, negative, or non-numeric
  * disables the reaper entirely.
+ *
+ * This is the window for every long-lived session class — orchestrators,
+ * assistants, top-level sessions. Settled CHILDREN are reclaimed sooner by
+ * `ChildWatcher.sweepRetention` (`resolveChildRetentionMs`, 24h), which
+ * fires first for them; this reaper stays their backstop for the cases the
+ * child watcher cannot see (an unsettled row, a lost watch).
  */
 export function resolveHibernatedRetentionMs(env: NodeJS.ProcessEnv): number {
   return scaledEnvNumber(env.VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES, 72 * 60 * 60_000, 60_000);
@@ -277,6 +295,33 @@ export function resolveSandboxEphemeralStorageLimit(env: NodeJS.ProcessEnv): str
   return quantityEnv(env.VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT, "8Gi");
 }
 
+/**
+ * Size of the PERSISTENT `/workspace` volume claim each sandbox provisions
+ * (`VALET_SANDBOX_WORKSPACE_STORAGE`, default "1Gi"). Unlike the ephemeral
+ * knobs above this is a real PVC: it survives pod recreation and
+ * hibernation, and it is what holds the repo clone and uncommitted work.
+ *
+ * 1Gi measured against real usage (agents-dev, 2026-09-02): across every
+ * live sandbox volume the largest workspace held 114 MB and the rest were
+ * under 30 MB. Node-local scratch — docker image layers, container rootfs,
+ * build caches outside /workspace — is bounded separately by the
+ * ephemeral-storage limit, so it does not land on this claim.
+ *
+ * Sizing is one-way per sandbox. A PVC cannot shrink, and NOTHING grows
+ * one either: the claim size is fixed in the Sandbox CR's
+ * volumeClaimTemplates at create time, and there is no resize path here.
+ * Changing this value only affects sandboxes created afterwards; an
+ * existing claim keeps its original size until the sandbox is destroyed
+ * and re-provisioned. A workspace that fills gets ENOSPC on write, so a
+ * deploy that clones large repos should raise this.
+ *
+ * `"0"` omits the value and falls back to the manifest builder's own
+ * default rather than provisioning a zero-sized claim.
+ */
+export function resolveSandboxWorkspaceStorage(env: NodeJS.ProcessEnv): string | undefined {
+  return quantityEnv(env.VALET_SANDBOX_WORKSPACE_STORAGE, "1Gi");
+}
+
 export interface BuildSandboxProviderDeps {
   /**
    * Injected `KubeConfig` for the `kubernetes` backend. Tests supply a
@@ -323,10 +368,15 @@ export function buildSandboxProvider(
       const pullSecret = env.VALET_SANDBOX_IMAGE_PULL_SECRET;
       const ephemeralStorage = resolveSandboxEphemeralStorageRequest(env);
       const ephemeralStorageLimit = resolveSandboxEphemeralStorageLimit(env);
+      const workspaceStorage = resolveSandboxWorkspaceStorage(env);
       const cfg: K8sProviderConfig = {
         namespace,
         defaultImage: image ?? env.VALET_FULL_BASE_IMAGE ?? DEFAULT_FULL_BASE_IMAGE,
         apiVersion: SANDBOX_CR_API_VERSION,
+        // Persistent /workspace claim size. The provider config field
+        // existed but nothing ever set it, so the manifest builder's own
+        // constant was the only value a deploy could get.
+        ...(workspaceStorage ? { defaultStorage: workspaceStorage } : {}),
         // Node-disk protection defaults (TKAI-349) — set here, on the
         // provider config, because engine host paths pass no
         // `opts.resources`; the manifest merges these per-field under any

@@ -11,10 +11,15 @@ import { describe, it, expect, vi } from "vitest";
 import * as k8s from "@kubernetes/client-node";
 import { DockerSandboxProvider } from "@valet/sandbox-docker";
 import { LocalSandboxProvider } from "@valet/sandbox-local";
-import { KubernetesSandboxProvider } from "@valet/sandbox-kubernetes";
+import {
+  KubernetesSandboxProvider,
+  SANDBOX_CR_API_VERSION,
+  buildSandboxManifest,
+} from "@valet/sandbox-kubernetes";
 import {
   buildSandboxProvider,
   parseSandboxBackend,
+  resolveChildRetentionMs,
   resolveDefaultImage,
   resolveHibernatedRetentionMs,
   resolveIdleMinutes,
@@ -22,6 +27,7 @@ import {
   resolveKubeConfig,
   resolveSandboxEphemeralStorageLimit,
   resolveSandboxEphemeralStorageRequest,
+  resolveSandboxWorkspaceStorage,
 } from "./sandbox-backend.js";
 
 function fakeKubeConfig(): k8s.KubeConfig {
@@ -167,6 +173,36 @@ describe("resolveIdleMinutes", () => {
   });
 });
 
+describe("resolveChildRetentionMs", () => {
+  it("defaults to 24 hours when VALET_CHILD_SANDBOX_RETENTION_HOURS is unset", () => {
+    expect(resolveChildRetentionMs({})).toBe(24 * 3_600_000);
+  });
+
+  it("parses a positive hours value", () => {
+    expect(resolveChildRetentionMs({ VALET_CHILD_SANDBOX_RETENTION_HOURS: "6" })).toBe(6 * 3_600_000);
+  });
+
+  it("treats an explicit 0 as disabled (eager destroy on settle)", () => {
+    expect(resolveChildRetentionMs({ VALET_CHILD_SANDBOX_RETENTION_HOURS: "0" })).toBe(0);
+  });
+
+  it("treats a negative value as disabled", () => {
+    expect(resolveChildRetentionMs({ VALET_CHILD_SANDBOX_RETENTION_HOURS: "-5" })).toBe(0);
+  });
+
+  it("treats a non-numeric value as disabled", () => {
+    expect(resolveChildRetentionMs({ VALET_CHILD_SANDBOX_RETENTION_HOURS: "bogus" })).toBe(0);
+  });
+
+  it("keeps children on a SHORTER window than every other session class", () => {
+    // The class split is the point: children are the high-churn, use-once
+    // class (hundreds a day, each holding a workspace PVC), while
+    // orchestrators and assistants are provisioned rarely and revisited
+    // for weeks. A change that collapses the two should fail here.
+    expect(resolveChildRetentionMs({})).toBeLessThan(resolveHibernatedRetentionMs({}));
+  });
+});
+
 describe("resolveHibernatedRetentionMs", () => {
   it("defaults to 72 hours when VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES is unset", () => {
     expect(resolveHibernatedRetentionMs({})).toBe(72 * 60 * 60_000);
@@ -220,6 +256,34 @@ describe("resolveSandboxEphemeralStorageRequest / Limit (TKAI-349)", () => {
     expect(resolveSandboxEphemeralStorageLimit({ VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT: "" })).toBe(
       "8Gi",
     );
+  });
+});
+
+describe("resolveSandboxWorkspaceStorage", () => {
+  it("defaults to 1Gi when VALET_SANDBOX_WORKSPACE_STORAGE is unset", () => {
+    expect(resolveSandboxWorkspaceStorage({})).toBe("1Gi");
+  });
+
+  it("matches the manifest builder's own fallback, so both paths provision the same volume", () => {
+    // Two defaults that drift produce a different workspace depending on
+    // whether the env knob was read — the exact class of bug the unwired
+    // `defaultStorage` field caused before this.
+    const manifest = buildSandboxManifest(
+      { namespace: "ns", defaultImage: "img", apiVersion: SANDBOX_CR_API_VERSION },
+      "sess-1",
+      {},
+    );
+    expect(manifest.spec.volumeClaimTemplates[0]?.spec.resources.requests.storage).toBe(
+      resolveSandboxWorkspaceStorage({}),
+    );
+  });
+
+  it("passes an explicit quantity through verbatim", () => {
+    expect(resolveSandboxWorkspaceStorage({ VALET_SANDBOX_WORKSPACE_STORAGE: "20Gi" })).toBe("20Gi");
+  });
+
+  it('treats "0" as unset so the manifest default applies, never a zero-sized claim', () => {
+    expect(resolveSandboxWorkspaceStorage({ VALET_SANDBOX_WORKSPACE_STORAGE: "0" })).toBeUndefined();
   });
 });
 

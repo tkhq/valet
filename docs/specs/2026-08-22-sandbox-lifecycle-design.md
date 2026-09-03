@@ -161,6 +161,39 @@ defects. Both are fixed; decision 6 (no age-based kill) stands.
    day — the noise buried the one real leak. An over-age sandbox is now
    reported only when its session has no engine activity inside the report
    window.
+3. **Retention is tiered by session class.** Children drop from 72h to
+   **24h** (`VALET_CHILD_SANDBOX_RETENTION_HOURS`, chart value
+   `sandbox.childRetentionHours`); every other class keeps 72h
+   (`VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES`, chart value
+   `sandbox.hibernatedRetentionHours`). Both windows measure IDLE time,
+   not age — the child clock runs from `child_watches.settled_at`
+   (restamped on every re-settle) and is gated on the engine activity
+   clock, so a revived child restarts it. The split follows the churn:
+   agents-dev held 627 child sandboxes against 38 assistants, and the
+   standing count is spawn rate x retention, so children dominate the
+   PVC footprint (679 PVCs, about 1.4 TiB provisioned) while a
+   long-lived orchestrator or assistant sandbox is provisioned rarely
+   and revisited for weeks. A day still covers same-day `child_send`
+   revival and an overnight look at yesterday's run. Reclaiming resets
+   only the workspace volume; chat history and memories live in
+   Postgres.
+4. **The `/workspace` claim drops to 1Gi and is finally configurable.**
+   `K8sProviderConfig.defaultStorage` existed but nothing ever set it, so
+   the manifest builder's constant was the only size a deploy could get.
+   It now comes from `VALET_SANDBOX_WORKSPACE_STORAGE` (chart value
+   `sandbox.workspaceStorage`), and both defaults are 1Gi — a test pins
+   them equal so the two paths cannot drift. Measured against real usage
+   on agents-dev: across every live sandbox volume the largest workspace
+   held 114 MB and the rest were under 30 MB. Node-local scratch (docker
+   image layers, container rootfs) is bounded separately by the
+   ephemeral-storage limit and never lands on this claim.
+
+   Sizing is ONE-WAY per sandbox and this is not an auto-expanding
+   volume: the size is fixed in the CR's `volumeClaimTemplates` at create
+   time, no resize path exists in this repo, and a PVC cannot shrink.
+   Changing the value affects only sandboxes created afterwards. A
+   workspace that fills gets ENOSPC on write, so a deploy that clones
+   large repositories must raise it before provisioning.
 
 ## Deviations & notes
 
