@@ -145,13 +145,25 @@ export function resolveIdleMinutes(env: NodeJS.ProcessEnv): number {
 
 /**
  * Retention window for a settled child's suspended sandbox
- * (`VALET_CHILD_SANDBOX_RETENTION_HOURS`, default 72). `0`, a negative
+ * (`VALET_CHILD_SANDBOX_RETENTION_HOURS`, default 24). `0`, a negative
  * number, or a non-number disables retention: settled children get the
  * eager destroy-on-settle. Only consulted on hibernation-capable backends —
  * elsewhere the child watcher never parks in the first place.
+ *
+ * The window runs from the child's LAST settle (`child_watches.settled_at`,
+ * restamped on every re-settle) and is gated on the engine activity clock
+ * too, so it measures idle time, not age — a revived child restarts it.
+ *
+ * Shorter than the 72h every other session class gets
+ * (`resolveHibernatedRetentionMs`) on purpose: children are the
+ * high-churn, mostly use-once class (agents-dev spawns hundreds a day,
+ * each holding a workspace PVC), while an orchestrator or assistant
+ * sandbox is provisioned rarely and revisited for weeks. A day still
+ * covers same-day `child_send` revival and an overnight look at
+ * yesterday's run.
  */
 export function resolveChildRetentionMs(env: NodeJS.ProcessEnv): number {
-  return scaledEnvNumber(env.VALET_CHILD_SANDBOX_RETENTION_HOURS, 72 * 3_600_000, 3_600_000);
+  return scaledEnvNumber(env.VALET_CHILD_SANDBOX_RETENTION_HOURS, 24 * 3_600_000, 3_600_000);
 }
 
 /**
@@ -162,6 +174,12 @@ export function resolveChildRetentionMs(env: NodeJS.ProcessEnv): number {
  * history and memories live in postgres), but a Monday-morning user should
  * still find Friday's uncommitted work. Zero, negative, or non-numeric
  * disables the reaper entirely.
+ *
+ * This is the window for every long-lived session class — orchestrators,
+ * assistants, top-level sessions. Settled CHILDREN are reclaimed sooner by
+ * `ChildWatcher.sweepRetention` (`resolveChildRetentionMs`, 24h), which
+ * fires first for them; this reaper stays their backstop for the cases the
+ * child watcher cannot see (an unsettled row, a lost watch).
  */
 export function resolveHibernatedRetentionMs(env: NodeJS.ProcessEnv): number {
   return scaledEnvNumber(env.VALET_SANDBOX_HIBERNATED_RETENTION_MINUTES, 72 * 60 * 60_000, 60_000);
