@@ -21,6 +21,7 @@ import type {
   CredentialProvider,
   CredentialStore,
 } from "@valet/engine";
+import { credentialSecret } from "@valet/engine";
 
 const TTL_MS = 5 * 60_000;
 const DEFAULT_TIMEOUT_MS = 2_500;
@@ -96,7 +97,7 @@ export class DynamicToolCounts {
       async get(service?: string): Promise<Credential | null> {
         const stored = await store.get(owner, service ?? defaultService);
         if (!stored) return null;
-        const accessToken = stored.accessToken ?? stored.apiKey ?? "";
+        const accessToken = credentialSecret(stored) ?? "";
         if (accessToken === "") return null;
         return {
           accessToken,

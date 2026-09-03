@@ -18,6 +18,16 @@ function copyViaHiddenTextarea(text: string): boolean {
   }
 }
 
+/** One-shot clipboard write with the same fallback the hook uses. */
+async function copyTextToClipboard(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return copyViaHiddenTextarea(text);
+  }
+}
+
 /**
  * Copy-to-clipboard with a "copied" flash that resets after `resetMs`.
  * Tries the async Clipboard API first, then the hidden-textarea fallback
@@ -38,17 +48,11 @@ export function useCopyToClipboard(resetMs = 1500) {
   }
 
   async function copy(text: string) {
-    try {
-      await navigator.clipboard.writeText(text);
+    if (await copyTextToClipboard(text)) {
       flash();
       return true;
-    } catch {
-      if (copyViaHiddenTextarea(text)) {
-        flash();
-        return true;
-      }
-      return false;
     }
+    return false;
   }
 
   return { copied, copy };

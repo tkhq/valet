@@ -350,6 +350,51 @@ turn that produces no reply at all is a reportable miss, not a silent drop.
   carries no username. Resolving it to a display name reuses Part 2's
   name-resolution service; until then a channel-origin sender can surface as an
   id. The headline identity fix (the team name) is complete.
+- **`slack.channels` reads the bot's joined channels, not the workspace
+  directory.** The source first paged `conversations.list`. That offered
+  channels a filter can never match — Slack sends `message`/`app_mention` only
+  for channels the app has joined — and it made the picker fail at Turnkey
+  scale. The scan stopped early only once a query collected 20 matches, so a
+  BROAD query cost one API call while a NARROW one (the case that needs the
+  lookup) paged the whole directory on every keystroke. That exhausted the
+  Tier-2 rate limit, and `slackGet`'s three `Retry-After` sleeps turned each
+  request into a 30-60s stall that resolved to nothing. `users.conversations`
+  (Tier 3) returns the joined set instead, which is small enough to page in
+  full, so the resolver ranks every match before it truncates to 100 rows. The
+  old cap truncated in Slack's page order first and sorted the survivors, which
+  could hide an exact-name match behind 20 arbitrary ones.
+- **A failed option lookup is never memoized, and never reads as "no
+  options".** Two bugs compounded the one above. The Slack resolvers caught
+  their own provider errors and returned `[]`, so a rate-limited lookup and a
+  name that does not exist were indistinguishable — the endpoint's `reason`
+  never fired and the picker showed "No matches". The endpoint then cached that
+  empty list for its full 60s TTL, so the next minute of retries answered from
+  a poisoned entry. Resolvers now let provider failures propagate, and the
+  endpoint caches only successful lookups.
+- **Both pickers read a cached directory, so neither truncates before it
+  ranks.** `slack.users` had the same truncate-before-sort flaw and no smaller
+  set to read: `users.list` is the only member directory and offers no
+  server-side search. Dropping its 20-match early return alone would have
+  traded the truncation bug for the rate-limit bug above, so the directory
+  moved behind a short-TTL, single-flight cache
+  (`transport/directory-cache.ts`), keyed by a digest of the bot token. Each
+  scan is now paid once per TTL instead of once per keystroke, which is what
+  makes ranking every match affordable. `listWorkspaceMembers` therefore
+  filters, sorts, and only then truncates, and the identity-link member search
+  gets the same fix: a person could previously type their own name in full and
+  not find themselves, behind 20 unrelated partial matches in Slack's page
+  order.
+
+  The cache also supplies the rate-limit backpressure that a negative cache in
+  the endpoint would otherwise have to. A failing scan is never stored, but a
+  scan IN FLIGHT is, so a workspace has exactly one attempt running however
+  fast the reader types, and a failure is retryable on the next keystroke
+  rather than sticky for a minute.
+
+  What remains bounded is the SCAN, not the match count: past 10 pages the
+  directory is incomplete, and a query matching only past that point reports no
+  match. For `users.list` in a very large workspace that is a real limit with
+  no API to fix it, so it is stated rather than hidden.
 
 ## Sequencing
 

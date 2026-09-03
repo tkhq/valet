@@ -1029,11 +1029,14 @@ export type CreateThreadResponse = ThreadSummary;
 /**
  * Patch a thread's settings. Pass `model: null` to clear the override and
  * fall back to the session default. `archived` toggles app-side display
- * state — an archived thread leaves the default GET /threads list.
+ * state — an archived thread leaves the default GET /threads list. `title`
+ * renames the thread. Pass `null` or an empty string to clear the stored title.
  */
 export interface PatchThreadRequest {
   model?: string | null;
   archived?: boolean;
+  /** New title. The server trims it and rejects more than 200 characters. */
+  title?: string | null;
 }
 
 export type PatchThreadResponse = ThreadSummary;
@@ -1767,8 +1770,16 @@ export interface WorkflowDefinitionSummary {
   definition: unknown;
   createdAt: number;
   updatedAt: number;
-  ownerType: "user" | "team";
+  ownerType: "user" | "team" | "org";
   ownerId: string;
+  /** `repo` names a workflow this deployment mirrors from a file. It is
+   * read-only here: every write path refuses it with 409, and the editor
+   * offers a copy instead. Absent means `local`. */
+  origin?: "local" | "repo";
+  /** Where the file is, on a `repo` workflow: `owner/repo` and the
+   * repo-relative path. The list badges the row with it, and the editor
+   * links to it. */
+  upstream?: { repoFullName: string; path: string };
 }
 
 export interface CreateWorkflowRequest {
@@ -2382,7 +2393,15 @@ export type CreateWorkflowScheduleRequest = {
   teamId?: string;
 } & (
   | { target: { kind: "workflow"; workflowId: string; input?: unknown } }
-  | { target: { kind: "orchestrator"; prompt: string } }
+  | {
+      target: {
+        kind: "orchestrator";
+        prompt: string;
+        /** Which of the owner's assistants the prompt goes to. Absent → the
+         * owner's default, the behavior every schedule had before the field. */
+        assistantId?: string;
+      };
+    }
 );
 
 export interface UpdateWorkflowScheduleRequest {
@@ -2400,6 +2419,9 @@ export interface WorkflowScheduleResponse {
     targetKind: "workflow" | "orchestrator";
     workflowId?: string;
     prompt?: string;
+    /** Which of the owner's assistants an orchestrator schedule prompts.
+     * Absent → the owner's default. */
+    assistantId?: string;
     name: string;
     cron: string;
     timezone: string;
@@ -2792,7 +2814,7 @@ export interface DeleteSkillResponse {
  * A sync reads a public repository with no credential, and a private
  * repository with the credential the source's owner holds — a person's own
  * GitHub account for a personal or team source, and the org's GitHub App for
- * an org source (`packages/api/src/services/skill-source-credential.ts`).
+ * an org source (`packages/api/src/services/content-source-credential.ts`).
  * Nothing on this wire type carries a credential, and `lastMessage` never
  * carries token material.
  */
@@ -2807,11 +2829,16 @@ export interface SkillSourceSummary {
   subpath: string;
   ownerType: "user" | "team" | "org";
   ownerId: string;
+  /** What the sync collects from this repository. The union is restated
+   * rather than imported: this module stays free of schema imports so the
+   * web build does not pull in Drizzle. */
+  kinds: ("skills" | "workflows" | "templates" | "memories")[];
   enabled: boolean;
   /** `pending` — never synced. `ok` — synced. `warning` — synced, but at
-   * least one skill was skipped. `error` — the last sync failed. */
+   * least one file was skipped. `error` — the last sync failed. */
   status: "pending" | "ok" | "warning" | "error";
-  /** Skills this source currently mirrors. */
+  /** Skills this source currently mirrors. Zero on a source that collects no
+   * skills, which is not a fault. */
   skillCount: number;
   lastSyncedAt: number | null;
   /** Commit the last sync read. */
@@ -2848,6 +2875,11 @@ export interface CreateSkillSourceRequest {
   /** Track the repository for the org instead of for the caller.
    * Requires the caller to be an org admin; a non-admin gets 403. */
   ownerType?: "user" | "team" | "org";
+  /** What the sync collects. Omit for skills only. `workflows` and
+   * `templates` run code as the owner, so a team source collecting either
+   * needs a team admin and a personal source cannot collect them at all;
+   * both refusals are 403 and name the corrective action. */
+  kinds?: ("skills" | "workflows" | "templates" | "memories")[];
 }
 
 /** What a sync did. Returned by the create route too, because adding a
@@ -2900,6 +2932,10 @@ export interface CredentialSummary {
   /** `metadata.refreshFailedAt`, when a previous token-refresh attempt
    * failed and left the credential needing a reconnect. Epoch ms. */
   refreshFailedAt?: number;
+  /** `metadata.onepassword.reference`, when this credential resolves via a
+   * 1Password reference instead of an inline secret (1Password credential
+   * provider plan, Task 3). Display-only — never secret material. */
+  onepasswordRef?: string;
 }
 
 export interface ListCredentialsResponse {
@@ -2916,6 +2952,10 @@ export interface PutCredentialRequest {
   /** Owner scope for the saved credential. `"org"` requires the caller to be
    * an org admin. Defaults to `"user"`. */
   scope?: "user" | "org";
+  /** Resolve this credential's secret via a 1Password reference instead of
+   * an inline `accessToken`/`apiKey` (1Password credential provider plan,
+   * Task 3). Mutually exclusive with both. */
+  onepassword?: { reference: string; tokenScope: "org" | "personal" };
 }
 
 export interface PutCredentialResponse {
@@ -2924,6 +2964,36 @@ export interface PutCredentialResponse {
 
 export interface DeleteCredentialResponse {
   ok: true;
+}
+
+// ── REST: 1Password picker backend + settings (1Password credential
+// provider plan, Task 3) ───────────────────────────────────────────────────
+
+export interface OnePasswordSettingsResponse {
+  allowPersonal: boolean;
+  orgTokenConnected: boolean;
+  personalTokenConnected: boolean;
+}
+
+export interface PutOnePasswordSettingsRequest {
+  allowPersonal: boolean;
+}
+
+export interface ListOpVaultsResponse {
+  vaults: { id: string; title: string }[];
+}
+
+/** POST /api/sandbox-secrets/resolve — the sandbox CLI's broker call. */
+export interface ResolveSandboxSecretsResponse {
+  /** One entry per requested reference, in request order: the base64 of the
+   * value's UTF-8 bytes, or `null` when nothing resolved it. Base64 so a
+   * POSIX shell can cut the field without a JSON parser and restore the
+   * exact bytes; positional so it needs no key. `null` is distinct from an
+   * empty value. */
+  values: (string | null)[];
+  /** References nothing could resolve, by name and without a reason: the
+   * reason would describe someone else's vault. */
+  unresolved: string[];
 }
 
 // ── REST: me + models (split-settings design) ─────────────────────────────
@@ -2967,14 +3037,35 @@ export interface PatchOrgSettingsRequest {
   allowPublicArtifacts?: boolean;
 }
 
-// ─── Artifacts (2026-08-22 artifacts design) ────────────────────────────
+// ─── Artifacts (2026-08-22 artifacts design; 2026-09-02 artifact-pages) ──
 
 export type ArtifactVisibility = "org" | "public";
 
-/** `POST /api/artifacts/share` — snapshot a memory file into a share link
- * (or revoke the existing one). */
+/** How a viewer must render the artifact's source: `markdown` compiled
+ * through GFM at publish, `html` verbatim. Both render in the sandboxed
+ * frame. */
+export type ArtifactFormatWire = "markdown" | "html";
+
+/**
+ * `POST /api/artifacts/share` — publish (or revoke). Two shapes,
+ * discriminated by which field is present; carrying both is a 400:
+ *
+ *   - `path` — snapshot a memory file (`mem_share`, unchanged).
+ *   - `key` + `content` — inline publish (`artifact_publish`).
+ */
 export interface ShareArtifactRequest {
-  path: string;
+  /** Memory path to snapshot. Mutually exclusive with `key`. */
+  path?: string;
+  /** Publish key for inline content. Same artifact + URL on re-publish. */
+  key?: string;
+  /** Inline source. Required with `key`. */
+  content?: string;
+  title?: string;
+  /** Default `markdown`. */
+  format?: ArtifactFormatWire;
+  description?: string;
+  /** One or two emoji for the page's tab icon; anything else is dropped. */
+  icon?: string;
   revoke?: boolean;
 }
 
@@ -2983,25 +3074,42 @@ export interface ShareArtifactResponse {
   path: string;
   url: string;
   visibility: ArtifactVisibility;
+  version: number;
   updatedAt: number;
 }
 
-/** `GET /api/artifacts/:token` — the public read. Content is the snapshot
- * taken at share time, never the live memory file. */
+/** `GET /api/artifacts/:token` — the public read. Serves exactly one
+ * version (the pinned `sharedVersion`, else the latest) and takes no
+ * version parameter: a link holder must not walk the history. */
 export interface GetArtifactResponse {
   title: string;
+  /** The SOURCE — what downloads serve. */
   content: string;
+  /** The compiled page body the frame renders. */
+  rendered: string;
+  format: ArtifactFormatWire;
+  description: string;
+  icon: string;
+  version: number;
   visibility: ArtifactVisibility;
   updatedAt: number;
   /** Sharer's display name — only present for `org` visibility, where the
    * viewer is a logged-in teammate. Anonymous readers never see it. */
   sharedBy?: string;
+  /** Whether THIS caller may comment (logged-in reader). Anonymous readers
+   * of a `public` artifact get the page with no comment surface. */
+  canComment: boolean;
 }
 
 export interface ArtifactListItem {
   id: string;
   path: string;
   title: string;
+  format: ArtifactFormatWire;
+  icon: string;
+  version: number;
+  /** Pinned version viewers see; null = latest. */
+  sharedVersion: number | null;
   /** The capability token, for in-app navigation (`/a/$token`). The web
    * client must link with this, not `url`: `url` is the absolute SHARE
    * link, whose origin is the deployment's public URL — in dev that is the
@@ -3022,13 +3130,77 @@ export interface ListArtifactsResponse {
   artifacts: ArtifactListItem[];
 }
 
-/** `PATCH /api/artifacts/:id` — widen or narrow one artifact. Widening to
- * `public` requires the org's `allowPublicArtifacts` opt-in. */
+/** `PATCH /api/artifacts/:id` — widen/narrow, or pin the served version.
+ * Widening to `public` requires the org's `allowPublicArtifacts` opt-in.
+ * `sharedVersion: null` serves the latest publish. */
 export interface PatchArtifactRequest {
-  visibility: ArtifactVisibility;
+  visibility?: ArtifactVisibility;
+  sharedVersion?: number | null;
 }
 
 export type PatchArtifactResponse = ArtifactListItem;
+
+/** `GET /api/artifacts/:id/versions` — version metadata, newest first, no
+ * content bodies. Sharer-or-admin gated. */
+export interface ArtifactVersionItem {
+  version: number;
+  title: string;
+  format: ArtifactFormatWire;
+  actorUserId: string;
+  createdAt: number;
+}
+
+export interface ListArtifactVersionsResponse {
+  versions: ArtifactVersionItem[];
+}
+
+// Comments on a published page (artifact-pages design). Routes are
+// token-addressed (the page only knows its token) and require a logged-in
+// caller who can read the artifact.
+
+export interface ArtifactCommentWire {
+  id: string;
+  /** Element anchor; null = a page-level comment. */
+  vdid: string | null;
+  /** Root-thread id; null = this IS a root. One level of nesting. */
+  parentId: string | null;
+  body: string;
+  authorUserId: string;
+  authorName: string;
+  /** Version the commenter was looking at. */
+  version: number;
+  /** Session id the comment was delivered to, when it reached the agent. */
+  sentToSession: string | null;
+  resolvedAt: number | null;
+  createdAt: number;
+}
+
+export interface ListArtifactCommentsResponse {
+  comments: ArtifactCommentWire[];
+  /** Whether THIS caller's `sendToSession` would deliver: the artifact has a
+   * source session and the caller passes `canViewSession` there. The UI
+   * shows the "Send to Claude" control only when true. */
+  canSendToSession: boolean;
+  /** Whether THIS caller may resolve every thread (sharer or org admin).
+   * Everyone may resolve their own. */
+  canResolveAll: boolean;
+}
+
+export interface AddArtifactCommentRequest {
+  body: string;
+  vdid?: string;
+  parentId?: string;
+  /** Also deliver the comment into the artifact's source session as a
+   * prompt. Requires session view access; when the caller lacks it the
+   * comment still saves and `sent` comes back false. */
+  sendToSession?: boolean;
+}
+
+export interface AddArtifactCommentResponse {
+  comment: ArtifactCommentWire;
+  /** True when the comment reached the source session. */
+  sent: boolean;
+}
 
 /** Namespaced `id` (`{providerKindOrRowId}/{modelId}`, bare = Anthropic
  * back-compat) — see `services/model-catalog.ts`. `active: false` marks a
@@ -3922,6 +4094,17 @@ export type EventSubscriptionTargetWire =
       kind: "orchestrator";
       orchestrator?: "user" | "team" | "org";
       teamId?: string;
+      /**
+       * WHICH of the owner's assistants answers. Absent means the owner's
+       * default, which is what every rule written before this field did — so
+       * an absent value is the compatible reading, not an unset one.
+       *
+       * The assistant must belong to the principal the `orchestrator` and
+       * `teamId` fields resolve to. It names an assistant, never an owner:
+       * pointing a user-owned rule at a team's assistant is a change of owner,
+       * and the validator refuses it.
+       */
+      assistantId?: string;
       /** Follow the thread: after this rule delivers a channel mention, later
        * messages in that thread route to the assistant without a re-mention. */
       follow?: boolean;
@@ -4031,6 +4214,16 @@ export interface PatchEventSubscriptionRequest {
   eventKeys?: string[];
   filters?: EventSubscriptionFilterWire[];
   enabled?: boolean;
+  /**
+   * Re-point an orchestrator rule at a different assistant of the SAME owner.
+   * `null` clears the choice, so the owner's default answers again. Absent
+   * leaves it alone.
+   *
+   * The only part of `target` a patch may touch. Changing the owner is not a
+   * field edit — it decides the row's mutation ACL and its collision peers —
+   * so a rule that should belong elsewhere is rewritten, not patched.
+   */
+  assistantId?: string | null;
   /** See `CreateEventSubscriptionRequest.anyChannel`. Only consulted when
    * the patch changes `filters` or `eventKeys`. */
   anyChannel?: boolean;
@@ -4551,4 +4744,40 @@ export interface PostSessionFileUploadResponse {
   extractedTo?: string;
   /** PDF metadata. Present only when the upload is a PDF. */
   pdf?: PostSessionFileUploadPdfInfo;
+}
+
+// ── Ratings (TKAI-334) ─────────────────────────────────────────────────────
+
+export type RatingValue = "positive" | "negative";
+
+/** `rating: null` clears the caller's rating on the target. */
+export interface PutRatingRequest {
+  rating: RatingValue | null;
+  /** Entry ratings only: the engine thread holding the rated entry. */
+  threadId?: string;
+}
+
+export interface PutRatingResponse {
+  rating: RatingValue | null;
+}
+
+/** The caller's ratings inside one session, for rendering persisted state. */
+export interface GetSessionRatingsResponse {
+  session: RatingValue | null;
+  /** Entry-level ratings keyed by entry id. */
+  entries: Record<string, RatingValue>;
+}
+
+export interface FlaggedSessionWire {
+  sessionId: string;
+  rating: RatingValue;
+  title: string | null;
+  /** Rating timestamps (ms epoch). */
+  ratedAt: number;
+}
+
+export interface ListFlaggedResponse {
+  flagged: FlaggedSessionWire[];
+  /** Present when more rows exist; pass back as ?cursor=. */
+  nextCursor?: string;
 }

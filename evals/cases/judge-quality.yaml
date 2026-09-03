@@ -1,0 +1,18 @@
+# Starter case (TKAI-333): open-ended output scored by LLM-as-judge.
+id: judge-quality
+description: Open-ended explanation scored against a rubric by the judge model.
+turns:
+  - role: user
+    content: >-
+      In 3 to 5 sentences, explain to a new engineer why a background coding
+      agent platform needs an eval suite before anyone changes the agents'
+      task semantics.
+timeout_ms: 120000
+checks:
+  - type: judge_output
+    rubric: >-
+      The answer explains, in roughly 3-5 sentences, why an eval suite must
+      exist before changing agent task semantics. It should mention
+      measuring regressions (or an equivalent idea such as a behavioral
+      baseline or safety net) and stay clear and specific, without filler.
+  - type: no_errors

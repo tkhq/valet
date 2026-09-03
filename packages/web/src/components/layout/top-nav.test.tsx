@@ -140,6 +140,12 @@ describe("TopNav", () => {
     expect(link.getAttribute("href")).toBe("/sessions");
   });
 
+  it("renders an Artifacts link", async () => {
+    renderNav();
+    const link = await screen.findByRole("link", { name: "Artifacts" });
+    expect(link.getAttribute("href")).toBe("/artifacts");
+  });
+
   it("renders a Skills link between Workflows and Integrations", async () => {
     renderNav();
     const link = await screen.findByRole("link", { name: "Skills" });
@@ -164,6 +170,7 @@ describe("TopNav", () => {
     expect(labels).toEqual([
       "Chat",
       "Memory",
+      "Artifacts",
       "Sessions",
       "Workflows",
       "Security",

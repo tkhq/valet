@@ -25,7 +25,9 @@ import {
 import {
   useDeleteSession,
   usePauseSession,
+  useRateSession,
   useRenameSession,
+  useSessionRatings,
   useReplaceSandbox,
   useSetSessionModel,
   useSetSessionProfile,
@@ -39,6 +41,7 @@ import { ApiError } from "~/api/client";
 import { queueBusy, useQueueStateForThread, type AgentStatus, type ConnectionStatus } from "~/stores/stream";
 import { assistantLabel } from "./assistant-rail";
 import { ModelPicker } from "./model-picker";
+import { RatingButtons } from "./rating-buttons";
 import { MoveSessionDialog } from "./move-session-dialog";
 import { buildTranscript } from "./transcript";
 import { cn } from "~/lib/cn";
@@ -112,6 +115,8 @@ export function SessionHeader({
   const pause = usePauseSession(session.id);
   const replace = useReplaceSandbox(session.id);
   const rename = useRenameSession(session.id);
+  const ratings = useSessionRatings(session.id);
+  const rateSession = useRateSession(session.id);
   const setProfile = useSetSessionProfile(session.id);
   const me = useMe();
   const org = useOrg();
@@ -448,6 +453,12 @@ export function SessionHeader({
         <SandboxChip sandbox={sandbox} />
         <ConnectionBadge conn={conn} />
         <AgentStatusBadge status={agentStatus} turnStartedAt={turnStartedAt} queueBusy={threadBusy} />
+        <RatingButtons
+          subject="session"
+          value={ratings.data?.session ?? null}
+          disabled={rateSession.isPending}
+          onRate={(rating) => rateSession.mutate(rating)}
+        />
         <Tooltip content={copied ? "Copied to clipboard" : "Copy debug transcript (session/thread + raw tool calls + env)"}>
           <Button
             variant="ghost"

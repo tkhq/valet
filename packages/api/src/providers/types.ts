@@ -23,8 +23,9 @@ import type { SecurityRunnerDriver } from "../orchestrator/security-runner-drive
 import type { ChannelHost } from "../channels/host.js";
 import type { EventDispatcher } from "../events/dispatcher.js";
 import type { WorkflowScheduler } from "../workflows/scheduler.js";
-import type { SkillSyncService } from "../services/skill-sync.js";
+import type { ContentSyncService } from "../services/content-sync/service.js";
 import type { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
+import type { OnePasswordService } from "../services/onepassword.js";
 
 /**
  * The full set of capabilities the API needs at runtime. Built once at boot,
@@ -42,6 +43,11 @@ export interface Providers {
   sandboxProvider: SandboxProvider;
   eventStream: EventStream;
   engineCredentials: CredentialStore;
+  /** 1Password reference-credential service (1Password credential provider
+   * plan, Task 1/2) — same instance threaded into `EngineHost`'s
+   * `onePassword` opt, and used directly by the (Task 3) `/api/onepassword`
+   * routes for connect status / vault-and-item browsing. */
+  onePassword: OnePasswordService;
   /** Sandbox-image prebuild backend (sandbox images v2 plan). `null` when
    * unresolvable for the configured `VALET_SANDBOX_BACKEND`/
    * `VALET_IMAGE_BUILDER` (e.g. `local`, or `kubernetes` pre-T5) — callers
@@ -93,10 +99,10 @@ export interface Providers {
   eventDispatcher: EventDispatcher;
   /** Cron-driven workflow run starts. `start()`/`stop()` from main.ts. */
   workflowScheduler: WorkflowScheduler;
-  /** Skill-repository sync (`services/skill-sync.ts`) — `start()`/`stop()`
-   * from main.ts. `routes/skills.ts` calls its `syncOnce` for the create and
-   * "sync now" routes, so there is one sync implementation. */
-  skillSync: SkillSyncService;
+  /** Repository content sync (`services/content-sync/service.ts`) —
+   * `start()`/`stop()` from main.ts. `routes/skills.ts` calls the same
+   * `syncOnce` for its create and "sync now" routes. */
+  contentSync: ContentSyncService;
   /** Per-workflow in-memory limiter for the public webhook-trigger route
    * (`routes/workflow-hooks.ts`, overhaul design decision 5) — single-
    * process, coarse, not shared across API instances. */

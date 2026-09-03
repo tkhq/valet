@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import {
   Archive,
@@ -6,6 +6,7 @@ import {
   ChevronDown,
   MessageSquare,
   MoreHorizontal,
+  Pencil,
   Plus,
   RefreshCw,
   Search,
@@ -15,16 +16,19 @@ import type { DecisionGate, OrchestratorChildSummary, ThreadSummary } from "@val
 import {
   useArchivedThreads,
   useCreateThread,
+  useRenameThread,
   useReplaceSandbox,
   useSession,
   useSetThreadArchived,
   useThreads,
 } from "~/api/queries";
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
+import { useChatHotkeysStore } from "~/stores/chat-hotkeys";
 import { useDismissChild, useOrchestratorChildren, useOrchestratorInfo } from "~/api/orchestrator";
 import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
 import { useStreamStore } from "~/stores/stream";
 import { createDebouncer } from "~/lib/debounce";
+import { formatChord } from "~/lib/chat-keybindings";
 import {
   bucketCounts,
   filterThreads,
@@ -208,6 +212,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   useInvalidateChildrenOnQueueState(sessionId, showChildren ? childrenQ.refetch : NO_REFETCH);
   const createThread = useCreateThread(sessionId);
   const setArchived = useSetThreadArchived(sessionId);
+  const renameThread = useRenameThread(sessionId);
   const replaceSandbox = useReplaceSandbox(sessionId);
   const dismissChild = useDismissChild(sessionId);
   const [showArchived, setShowArchived] = useState(false);
@@ -279,6 +284,8 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
     }
   }
 
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
   async function createAndNavigate() {
     const thread = await createThread.mutateAsync();
     navigate({ search: (prev) => ({ ...prev, thread: thread.id, child: undefined }) });
@@ -286,6 +293,24 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
     // typed into.
     useComposerPrefillStore.getState().requestFocus();
   }
+
+  const archiveActive = useCallback(() => {
+    if (!activeThreadId) return;
+    void setArchived.mutateAsync({ threadId: activeThreadId, archived: true });
+    navigate({ search: (prev) => ({ ...prev, thread: undefined, child: undefined }) });
+  }, [activeThreadId, navigate, setArchived]);
+
+  // Register this surface's hotkey targets for the global listener.
+  useEffect(() => {
+    return useChatHotkeysStore.getState().register({
+      newThread: () => void createAndNavigate(),
+      archiveActiveThread: archiveActive,
+      focusThreadSearch: () => searchInputRef.current?.focus(),
+    });
+    // createAndNavigate closes over createThread/navigate; re-register when
+    // those identities change so the hotkey never calls a stale mutator.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [archiveActive, createThread, navigate]);
 
   return (
     <>
@@ -308,6 +333,7 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
         <div className="flex items-center gap-1.5 rounded border border-line bg-[--bg] px-2 focus-within:border-moss/60">
           <Search className="h-3.5 w-3.5 text-muted shrink-0" aria-hidden />
           <input
+            ref={searchInputRef}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search threads…"
@@ -389,6 +415,9 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
               }}
               onReplaceSandbox={() => void replaceSandbox.mutateAsync()}
               onDismissChild={(childSessionId) => void dismissChild.mutateAsync(childSessionId)}
+              onRename={(threadId, title) =>
+                void renameThread.mutateAsync({ threadId, title })
+              }
             />
           ))}
         </nav>
@@ -453,6 +482,7 @@ function ThreadNode({
   onArchive,
   onReplaceSandbox,
   onDismissChild,
+  onRename,
 }: {
   thread: ThreadSummary;
   index: number;
@@ -466,6 +496,8 @@ function ThreadNode({
   onArchive: (threadId: string) => void;
   onReplaceSandbox: () => void;
   onDismissChild: (childSessionId: string) => void;
+  /** Send `null` to clear the stored title. */
+  onRename: (threadId: string, title: string | null) => void;
 }) {
   const label = thread.title ?? untitledThreadLabel(thread, index);
   const [collapsed, setCollapsed] = useState(() => getSubconversationsCollapsed(thread.id));
@@ -490,6 +522,59 @@ function ThreadNode({
       ? thread.model
       : undefined;
 
+  // Port the v1 inline editor. Enter and blur save. Escape cancels.
+  // `savedRef` prevents Enter and its following blur from saving twice.
+  const [isEditing, setIsEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+  const savedRef = useRef(false);
+
+  useEffect(() => {
+    if (!isEditing) return;
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, [isEditing]);
+
+  const startEditing = () => {
+    setDraft(thread.title ?? "");
+    savedRef.current = false;
+    setIsEditing(true);
+  };
+
+  const commit = () => {
+    if (savedRef.current) return;
+    savedRef.current = true;
+    const trimmed = draft.trim();
+    const currentTitle = thread.title?.trim() ?? "";
+    if (trimmed !== currentTitle) {
+      onRename(thread.id, trimmed.length === 0 ? null : trimmed);
+    }
+    setIsEditing(false);
+  };
+
+  const cancel = () => {
+    savedRef.current = true;
+    setIsEditing(false);
+  };
+
+  const [menuOpen, setMenuOpen] = useState(false);
+  // The menu-scoped `A`, plus the global chord shown beside it as a hint.
+  const archiveGlobalHint = formatChord({ shift: true, code: "Backspace", key: "Backspace" });
+
+  const handleMenuKeyDown = useCallback(
+    (e: ReactKeyboardEvent) => {
+      // A bare `A` only. Without this, Select All (⌘A / Ctrl+A) pressed
+      // while the menu happens to be open archives the thread.
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key === "A" || e.key === "a") {
+        e.preventDefault();
+        onArchive(thread.id);
+        setMenuOpen(false);
+      }
+    },
+    [onArchive, thread.id],
+  );
+
   return (
     <div>
       {/* Row = link + context menu side by side; nesting the menu button
@@ -502,49 +587,69 @@ function ThreadNode({
             : "hover:bg-ink-wash/60 border-l-2 border-transparent",
         )}
       >
-        <Tooltip content={label} delayDuration={600}>
-          <Link
-            to="/chat"
-            search={(prev) => ({
-              ...prev,
-              thread: index === 0 ? undefined : thread.id,
-              child: undefined,
-            })}
-            className={cn(
-              // Left rail marks selection; `pl-[calc(1rem-2px)]` keeps the
-              // title at the same x-offset whether or not the moss rail is
-              // present — no shift when you click between threads.
-              "flex-1 min-w-0 flex items-center py-2 text-sm",
-              "focus-visible:outline-none focus-visible:bg-ink-wash",
-              active ? "text-ink pl-[calc(1rem-2px)] font-medium" : "text-ink/85 pl-4",
-            )}
-          >
-            <span className="flex-1 truncate">{label}</span>
-            {pinnedModel && (
-              <span
-                title={pinnedModel}
-                className="ml-2 shrink-0 rounded-sm bg-ink-wash px-1 py-0.5 font-mono text-[9px] text-muted"
-              >
-                {shortModelLabel(pinnedModel)}
-              </span>
-            )}
-            {hasPendingGate && (
-              // Amber = blocked on a person, the same vocabulary as the
-              // sessions-list "Needs you" chip. Static on purpose: pulse is
-              // reserved for progress (see childStatusDotClassName). Shown on
-              // the active thread too — the dot marks where gates are, not
-              // where you aren't.
-              <span
-                // role="img": ARIA prohibits accessible names on a bare
-                // span (role generic), so without it screen readers skip
-                // the label entirely.
-                role="img"
-                aria-label="Needs your decision"
-                className="ml-2 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500"
-              />
-            )}
-          </Link>
-        </Tooltip>
+        {isEditing ? (
+          <div className={cn("flex-1 min-w-0 py-1", active ? "pl-[calc(1rem-2px)]" : "pl-4")}>
+            <input
+              ref={inputRef}
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  commit();
+                } else if (event.key === "Escape") {
+                  event.preventDefault();
+                  cancel();
+                }
+              }}
+              onBlur={commit}
+              maxLength={200}
+              aria-label={`Rename thread: ${label}`}
+              placeholder="Thread name"
+              className={cn(
+                "w-full rounded border border-line bg-surface px-1.5 py-0.5 text-sm text-ink",
+                "outline-none focus:ring-1 focus:ring-moss",
+              )}
+            />
+          </div>
+        ) : (
+          <Tooltip content={label} delayDuration={600}>
+            <Link
+              to="/chat"
+              search={(prev) => ({
+                ...prev,
+                thread: index === 0 ? undefined : thread.id,
+                child: undefined,
+              })}
+              className={cn(
+                "flex-1 min-w-0 flex items-center py-2 text-sm",
+                "focus-visible:outline-none focus-visible:bg-ink-wash",
+                active ? "text-ink pl-[calc(1rem-2px)] font-medium" : "text-ink/85 pl-4",
+              )}
+              onDoubleClick={(event) => {
+                event.stopPropagation();
+                startEditing();
+              }}
+            >
+              <span className="flex-1 truncate">{label}</span>
+              {pinnedModel && (
+                <span
+                  title={pinnedModel}
+                  className="ml-2 shrink-0 rounded-sm bg-ink-wash px-1 py-0.5 font-mono text-[9px] text-muted"
+                >
+                  {shortModelLabel(pinnedModel)}
+                </span>
+              )}
+              {hasPendingGate && (
+                <span
+                  role="img"
+                  aria-label="Needs your decision"
+                  className="ml-2 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500"
+                />
+              )}
+            </Link>
+          </Tooltip>
+        )}
         {childSessions.length > 0 && (
           <button
             type="button"
@@ -559,7 +664,7 @@ function ThreadNode({
             />
           </button>
         )}
-        <DropdownMenu>
+        <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
           <DropdownMenuTrigger asChild>
             <button
               type="button"
@@ -569,10 +674,22 @@ function ThreadNode({
               <MoreHorizontal className="h-3.5 w-3.5" aria-hidden />
             </button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start">
-            <DropdownMenuItem onSelect={() => onArchive(thread.id)}>
-              <Archive className="h-3.5 w-3.5 mr-2" aria-hidden />
-              Archive thread
+          <DropdownMenuContent align="start" onKeyDown={handleMenuKeyDown}>
+            <DropdownMenuItem
+              onSelect={() => onArchive(thread.id)}
+              className="justify-between gap-3"
+            >
+              <span className="inline-flex items-center gap-2">
+                <Archive className="h-3.5 w-3.5" aria-hidden />
+                Archive thread
+              </span>
+              <span className="text-[10px] text-muted tabular-nums" title={archiveGlobalHint}>
+                A
+              </span>
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => startEditing()}>
+              <Pencil className="h-3.5 w-3.5 mr-2" aria-hidden />
+              Rename thread
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={onReplaceSandbox}>
               <RefreshCw className="h-3.5 w-3.5 mr-2" aria-hidden />

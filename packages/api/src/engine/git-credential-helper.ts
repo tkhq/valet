@@ -28,6 +28,15 @@
 const ROUTE_PATH = "/api/sandbox/git-credential";
 
 /**
+ * The sandbox token, read at call time: the creds mount first (rotated in
+ * place on backends that have one), then `$VALET_SANDBOX_TOKEN`. Every
+ * generated in-sandbox script reads it this way, so it is written once.
+ * Leaves `tok` set; empty when neither source has a token.
+ */
+export const SANDBOX_TOKEN_READ_SH = `tok=$(cat /etc/valet/creds/token 2>/dev/null)
+[ -n "$tok" ] || tok=\${VALET_SANDBOX_TOKEN:-}`;
+
+/**
  * `git-credential-valet` — a git credential helper (see `gitcredentials(7)`).
  *
  * git invokes it as `helper <verb>` and pipes the request attributes
@@ -76,15 +85,24 @@ case "\$path" in
   */*) repo=\${path#*/}; repo=\${repo%%/*}; repo=\${repo%.git} ;;
 esac
 [ -n "\$owner" ] || exit 0
-tok=\$(cat /etc/valet/creds/token 2>/dev/null)
-[ -n "\$tok" ] || tok=\${VALET_SANDBOX_TOKEN:-}
-[ -n "\$tok" ] || exit 0
+${SANDBOX_TOKEN_READ_SH}
+# Degraded paths warn on stderr (git shows credential-helper stderr) but
+# still exit 0 so PUBLIC repos keep working anonymously. Without the
+# warning, a revoked/missing sandbox token surfaces only as a cryptic
+# "unable to read <sha>" when a blobless clone lazily fetches blobs.
+if [ -z "\$tok" ]; then
+  echo "git-credential-valet: no sandbox token found — using no credentials for \$host/\$owner. If this repository needs auth, restart the session." >&2
+  exit 0
+fi
 
 resp=\$(curl --max-time 10 -fsS \\
   -X POST "${url}" \\
   -H "x-valet-sandbox: \$tok" \\
   -H "Content-Type: application/json" \\
-  -d "{\\"host\\":\\"\$host\\",\\"owner\\":\\"\$owner\\",\\"repo\\":\\"\$repo\\"}") || exit 0
+  -d "{\\"host\\":\\"\$host\\",\\"owner\\":\\"\$owner\\",\\"repo\\":\\"\$repo\\"}") || {
+  echo "git-credential-valet: credential request to the Valet API failed — using no credentials for \$host/\$owner. If git then fails to fetch, restart the session to refresh sandbox credentials." >&2
+  exit 0
+}
 
 username=\$(printf '%s' "\$resp" | sed -n 's/.*"username"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
 password=\$(printf '%s' "\$resp" | sed -n 's/.*"password"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
@@ -151,8 +169,7 @@ fi
 if [ -n "\${GH_TOKEN:-}" ] || [ -n "\${GITHUB_TOKEN:-}" ]; then exec "\$real" "\$@"; fi
 if [ -f "\${GH_CONFIG_DIR:-\$HOME/.config/gh}/hosts.yml" ]; then exec "\$real" "\$@"; fi
 
-tok=\$(cat /etc/valet/creds/token 2>/dev/null)
-[ -n "\$tok" ] || tok=\${VALET_SANDBOX_TOKEN:-}
+${SANDBOX_TOKEN_READ_SH}
 token=
 if [ -n "\$tok" ]; then
   remote=\$(git config --get remote.origin.url 2>/dev/null)

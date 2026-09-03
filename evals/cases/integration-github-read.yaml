@@ -1,0 +1,24 @@
+# Integration-profile starter case (TKAI-336): real GitHub, read-only.
+# SKIPs unless GITHUB_TOKEN is set in .env.eval.
+id: integration-github-read
+description: Fetch a public repository with a live GitHub credential.
+profile: integration
+required_credentials:
+  - github
+turns:
+  - role: user
+    content: >-
+      Use your GitHub tools to fetch the repository octocat/Hello-World and
+      tell me its default branch.
+timeout_ms: 180000
+checks:
+  - type: tool_called
+    tool: github.get_repository
+  - type: tool_args_match
+    tool: github.get_repository
+    args:
+      owner: octocat
+      repo: Hello-World
+  - type: output_contains
+    value: master
+  - type: no_errors

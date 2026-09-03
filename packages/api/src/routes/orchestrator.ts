@@ -17,7 +17,7 @@
  * the two they create.
  */
 import { Hono } from "hono";
-import { and, count, desc, eq, isNull } from "drizzle-orm";
+import { and, count, desc, eq, isNull, sql } from "drizzle-orm";
 import { parseAssistantSessionId, type Principal } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import type { AppDb } from "../lib/drizzle.js";
@@ -311,7 +311,7 @@ orchestratorRouter.get("/children", async (c) => {
         isNull(childWatches.dismissedAt),
       ),
     )
-    .orderBy(desc(childWatches.createdAt));
+    .orderBy(desc(sql`COALESCE(${agentSessions.lastActivityAt}, ${childWatches.createdAt})`));
 
   const children: OrchestratorChildSummary[] = rows.map((r) => ({
     sessionId: r.sessionId,

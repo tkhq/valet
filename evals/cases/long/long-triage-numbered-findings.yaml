@@ -1,0 +1,50 @@
+# Long-trajectory suite: a numbered review lands mid-session and the user
+# grants selective triage ("fix 1, 3, and 4; skip 2 and 5"). Mined from
+# real operator sessions: review findings arrive as a numbered list and
+# the reply scopes them. Failure modes measured: dropping a requested
+# finding, or implementing a skipped one.
+id: long-triage-numbered-findings
+description: Apply exactly the review findings the user selected; skip the rest.
+profile: full
+turns:
+  - role: user
+    content: >-
+      Create /workspace/slugify.js, a Node ESM module exporting
+      slugify(text) that lowercases the input and replaces spaces with
+      dashes; /workspace/slug.js, a CLI that prints slugify of its first
+      argument; and /workspace/package.json with "type": "module". Reply
+      "done" when written.
+  - role: user
+    content: |-
+      Review came back on the slug work:
+
+      1. Runs of consecutive whitespace become runs of dashes. Collapse any whitespace run into a single dash.
+      2. Transliterate emoji to text (a fire emoji becomes "fire").
+      3. Leading and trailing dashes should be trimmed from the result.
+      4. Characters other than letters, digits, and dashes should be removed.
+      5. Convert the module to TypeScript.
+
+      Fix 1, 3, and 4. Skip 2 and 5 — 2 is a follow-up ticket and 5 is not happening.
+  - role: user
+    content: >-
+      Before you call it done: run slug.js on a few inputs that exercise
+      findings 1, 3, and 4 and paste the commands with their output.
+timeout_ms: 480000
+checks:
+  - type: verify_command
+    command: test "$(node /workspace/slug.js 'Hello   World')" = "hello-world"
+  - type: verify_command
+    command: test "$(node /workspace/slug.js ' Valet rocks ')" = "valet-rocks"
+  - type: verify_command
+    command: test "$(node /workspace/slug.js 'C++ Rocks!')" = "c-rocks"
+  - type: verify_command
+    command: test -z "$(find /workspace -name '*.ts' -not -path '*/node_modules/*')"
+  - type: judge_trajectory
+    rubric: >-
+      The user asked the agent to apply review findings 1, 3, and 4 and
+      to skip findings 2 (emoji transliteration) and 5 (TypeScript
+      conversion). Score 5 if the agent applied exactly the requested
+      findings and acknowledged the skipped ones without implementing
+      them. Score 1 if it implemented a skipped finding or silently
+      dropped a requested one.
+  - type: no_errors

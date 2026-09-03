@@ -257,10 +257,31 @@ describe("GET /api/workflows?ownerType=&ownerId=", () => {
     expect(res.status).toBe(404);
   });
 
-  it("404s an org filter — nothing admits a caller to an org-owned workflow yet", async () => {
+  // An org content source publishes to the whole org, so an org member reads
+  // its mirrored workflows. Another org still reads as missing rather than as
+  // forbidden, the same convention every owner-scoped route here follows.
+  it("lists an org filter for the caller's own org, and 404s another org's", async () => {
     api = await bootTestApi();
-    const res = await fetch(`${api.baseUrl}/api/workflows?ownerType=org&ownerId=local-org`);
-    expect(res.status).toBe(404);
+    const now = Date.now();
+    await api.providers.db.insert(workflowDefinitions).values({
+      id: "wf_org_mirror",
+      orgId: "local-org",
+      ownerType: "org",
+      ownerId: "local-org",
+      name: "Org nightly",
+      definition: VALID_DEFINITION,
+      origin: "repo",
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const mine = await fetch(`${api.baseUrl}/api/workflows?ownerType=org&ownerId=local-org`);
+    expect(mine.status).toBe(200);
+    const body = (await mine.json()) as { workflows: Array<{ id: string }> };
+    expect(body.workflows.map((w) => w.id)).toContain("wf_org_mirror");
+
+    const other = await fetch(`${api.baseUrl}/api/workflows?ownerType=org&ownerId=some-other-org`);
+    expect(other.status).toBe(404);
   });
 
   it("400s a half-given filter, naming the fix", async () => {

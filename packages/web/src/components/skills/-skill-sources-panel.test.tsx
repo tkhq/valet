@@ -24,6 +24,7 @@ function source(over: Partial<SkillSourceSummary> = {}): SkillSourceSummary {
     subpath: "",
     ownerType: "user",
     ownerId: "u1",
+    kinds: ["skills"],
     enabled: true,
     status: "ok",
     skillCount: 3,

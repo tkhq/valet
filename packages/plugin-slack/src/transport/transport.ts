@@ -38,6 +38,7 @@ import {
   type StreamRef,
   type SuggestedPrompt,
   type TransportContext,
+  credentialSecret,
 } from "@valet/engine";
 import {
   buildContentBlocks,
@@ -48,6 +49,7 @@ import {
 } from "../message-chunking.js";
 import { SKIP_SUBTYPES } from "../subtypes.js";
 import { SlackApi, SlackApiError, SLACK_MARKDOWN_TEXT_LIMIT } from "./api.js";
+import { DirectoryCache } from "./directory-cache.js";
 import { fetchThreadTranscript } from "./thread-context.js";
 import { enrichSlackText } from "./text-enrich.js";
 import { escapeMrkdwn, markdownToSlackMrkdwn, neutralizeSlackMentions } from "./format.js";
@@ -59,6 +61,27 @@ const MAX_FILE_DOWNLOAD_BYTES = 25 * 1024 * 1024; // 25 MB (PDFs, documents)
 /** Cap the in-memory url_private / gate-text / turn maps. Per-thread keys
  * grow faster than per-DM keys, so allow for more active threads. */
 const MAX_TRACKED_ENTRIES = 2000;
+
+/** How many typeahead rows the picker gets. Applied AFTER sorting, so the
+ * rows dropped are the ones that rank last, not the ones Slack paged last. */
+const PICKER_RESULT_LIMIT = 100;
+
+/**
+ * The two directory reads the typeahead pickers rank over, held per workspace
+ * credential for a short TTL. Module-level because a transport is built per
+ * request on this path (`filter-options.ts` mints one per call), so instance
+ * state would cache nothing. See ./directory-cache.ts for why the pickers read
+ * a whole directory at all.
+ */
+const memberDirectory = new DirectoryCache<Array<{ id: string; name: string; realName?: string }>>();
+const channelDirectory = new DirectoryCache<Array<{ id: string; name: string }>>();
+
+/** Drop both directory caches. For tests, which reuse one fake Slack server
+ * across cases and would otherwise see the previous case's members. */
+export function resetSlackDirectoryCache(): void {
+  memberDirectory.clear();
+  channelDirectory.clear();
+}
 
 /** Code-point-safe truncation: never splits a surrogate pair at the cap. */
 function truncatePlain(text: string, max: number): string {
@@ -1017,64 +1040,109 @@ export class SlackTransport implements ChannelTransport {
 
   // ─── Feature-detected extras (not part of ChannelTransport) ───────────
 
-  /** Workspace-member typeahead for the identity-link flow (users.list, bot token). */
-  async listWorkspaceMembers(query: string): Promise<Array<{ id: string; name: string; realName?: string }>> {
-    const q = query.trim().toLowerCase();
-    const out: Array<{ id: string; name: string; realName?: string }> = [];
-    let cursor: string | undefined;
-    // Bound the SCAN, not just the match count: a selective query that matches
-    // few/no members would otherwise page through the entire directory (~250
-    // users.list calls in a 50k-member workspace), hanging the typeahead and
-    // hammering rate limits. Cap pages regardless of how many matches accrue.
-    const MAX_PAGES = 10;
-    let pages = 0;
-    do {
-      const page = await this.api.listUsers(cursor);
-      pages += 1;
-      for (const member of page.members) {
-        if (member.isBot || member.deleted || member.id === "USLACKBOT") continue;
-        if (
-          q !== "" &&
-          !member.name.toLowerCase().includes(q) &&
-          !(member.realName ?? "").toLowerCase().includes(q)
-        ) {
-          continue;
+  /**
+   * Every human member of the workspace, cached for the directory TTL.
+   *
+   * Bots, deleted accounts and Slackbot are dropped here rather than by the
+   * caller, so the cached list is the set a picker can actually offer.
+   *
+   * The SCAN is bounded, not the match count. A 50k-member workspace would be
+   * ~250 `users.list` calls, which no typeahead can wait for; past the bound
+   * the directory is simply incomplete, and a query that would have matched
+   * further in is reported as no match rather than waited on. `users.list` has
+   * no server-side search to narrow it, so this bound is the honest limit.
+   */
+  private allWorkspaceMembers(): Promise<Array<{ id: string; name: string; realName?: string }>> {
+    return memberDirectory.get(this.api.directoryKey, async () => {
+      const out: Array<{ id: string; name: string; realName?: string }> = [];
+      let cursor: string | undefined;
+      const MAX_PAGES = 10;
+      let pages = 0;
+      do {
+        const page = await this.api.listUsers(cursor);
+        pages += 1;
+        for (const member of page.members) {
+          if (member.isBot || member.deleted || member.id === "USLACKBOT") continue;
+          out.push({ id: member.id, name: member.name, realName: member.realName });
         }
-        out.push({ id: member.id, name: member.name, realName: member.realName });
-        if (out.length >= 20) return out;
-      }
-      cursor = page.nextCursor;
-      if (pages >= MAX_PAGES) break;
-    } while (cursor !== undefined);
-    return out;
+        cursor = page.nextCursor;
+        if (pages >= MAX_PAGES) break;
+      } while (cursor !== undefined);
+      return out;
+    });
   }
 
   /**
-   * Channel typeahead for the event-filter picker (conversations.list, bot
-   * token). Returns public and private channels matching `query` by name.
+   * Workspace-member typeahead for the identity-link flow and the event-filter
+   * picker (users.list, bot token), matching `query` by handle or real name.
+   *
+   * Filters a CACHED full directory rather than scanning per call. The scan
+   * used to stop at 20 matches, which meant the rows kept were whichever 20
+   * Slack paged first: a person could type their own name in full and not find
+   * themselves, because 20 unrelated partial matches came first in Slack's
+   * order. Ranking has to see every match, and seeing every match on every
+   * keystroke is only affordable because the directory is read once per TTL.
+   */
+  async listWorkspaceMembers(query: string): Promise<Array<{ id: string; name: string; realName?: string }>> {
+    const q = query.trim().toLowerCase();
+    const members = await this.allWorkspaceMembers();
+    const matched =
+      q === ""
+        ? [...members]
+        : members.filter(
+            (m) => m.name.toLowerCase().includes(q) || (m.realName ?? "").toLowerCase().includes(q),
+          );
+    matched.sort((a, b) => a.name.localeCompare(b.name));
+    return matched.slice(0, PICKER_RESULT_LIMIT);
+  }
+
+  /**
+   * Channel typeahead for the event-filter picker: the channels THIS BOT has
+   * joined (users.conversations, bot token), matching `query` by name.
+   *
+   * The joined set, not the workspace directory, is the set a filter can name.
+   * Slack sends `message`/`app_mention` events only for channels the app is a
+   * member of, so a filter on any other channel can never match — and reading
+   * the directory to offer them made the picker unusable at Turnkey scale. Its
+   * 20-match early return only fired for a BROAD query; a narrow one (the case
+   * that needs a lookup) paged the whole directory on every keystroke,
+   * exhausted the Tier-2 rate limit for `conversations.list`, stalled 30-60s on
+   * `Retry-After`, and then returned nothing.
+   *
+   * A bot's membership list is small, so this scans it in full and ranks the
+   * matches before it truncates. The old cap truncated in Slack's page order
+   * FIRST and sorted the survivors, which could hide an exact match behind 20
+   * arbitrary ones.
    */
   async listWorkspaceChannels(query: string): Promise<Array<{ id: string; name: string }>> {
     const q = query.trim().toLowerCase();
-    const out: Array<{ id: string; name: string }> = [];
-    let cursor: string | undefined;
-    // Bound the SCAN, not just the match count: mirror listWorkspaceMembers so
-    // a selective query in a workspace with thousands of channels cannot page
-    // the whole directory and hang the typeahead.
-    const MAX_PAGES = 10;
-    let pages = 0;
-    do {
-      const page = await this.api.listChannels(cursor);
-      pages += 1;
-      for (const channel of page.channels) {
-        if (channel.isArchived) continue;
-        if (q !== "" && !channel.name.toLowerCase().includes(q)) continue;
-        out.push({ id: channel.id, name: channel.name });
-        if (out.length >= 20) return out;
-      }
-      cursor = page.nextCursor;
-      if (pages >= MAX_PAGES) break;
-    } while (cursor !== undefined);
-    return out;
+    const channels = await this.allJoinedChannels();
+    const matched = q === "" ? [...channels] : channels.filter((c) => c.name.toLowerCase().includes(q));
+    matched.sort((a, b) => a.name.localeCompare(b.name));
+    return matched.slice(0, PICKER_RESULT_LIMIT);
+  }
+
+  /** Every live channel the bot has joined, cached for the directory TTL. */
+  private allJoinedChannels(): Promise<Array<{ id: string; name: string }>> {
+    return channelDirectory.get(this.api.directoryKey, async () => {
+      const out: Array<{ id: string; name: string }> = [];
+      let cursor: string | undefined;
+      // A bot in more than 2000 channels is not a workspace this picker can
+      // serve well anyway; bound the scan so one runaway install cannot hang it.
+      const MAX_PAGES = 10;
+      let pages = 0;
+      do {
+        const page = await this.api.listJoinedChannels(cursor);
+        pages += 1;
+        for (const channel of page.channels) {
+          if (channel.isArchived) continue;
+          out.push({ id: channel.id, name: channel.name });
+        }
+        cursor = page.nextCursor;
+        if (pages >= MAX_PAGES) break;
+      } while (cursor !== undefined);
+      return out;
+    });
   }
 
   /**
@@ -1198,7 +1266,7 @@ export const slackTransportFactory: ChannelTransportFactory = {
   // host must not mint a secret or try to register anything.
   ingress: "external-webhook",
   create(ctx: TransportContext): ChannelTransport {
-    const token = ctx.credential.accessToken;
+    const token = credentialSecret(ctx.credential);
     if (!token) {
       throw new Error(
         "Slack transport requires a bot token. Connect Slack in Settings → Integrations and save the bot token.",

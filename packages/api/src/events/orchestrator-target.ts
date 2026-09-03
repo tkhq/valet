@@ -47,9 +47,10 @@ export function buildOrchestratorTarget(deps: {
   /** Seed a channel thread's earlier messages on the assistant's first turn. */
   fetchThreadContext?: (origin: ChannelOrigin) => Promise<string | null>;
 }): OrchestratorDeliverFn {
-  return async ({ orgId, ownerType, ownerId, actorUserId, signal, dispatchId }) => {
-    // A subscription names an OWNER, never one assistant of that owner, so the
-    // shared delivery helper resolves the owner's default assistant.
+  return async ({ orgId, ownerType, ownerId, actorUserId, signal, dispatchId, assistantId }) => {
+    // A subscription names an owner and MAY name one of that owner's
+    // assistants. Without one the shared delivery helper resolves the owner's
+    // default, which is what every rule written before the field did.
     await deliverToAssistantThread(deps, {
       orgId,
       owner: { type: ownerType, id: ownerId },
@@ -57,6 +58,7 @@ export function buildOrchestratorTarget(deps: {
       threadKey: threadKeyForSignal(signal),
       signal,
       dispatchId,
+      assistantId,
       mismatchReason: "event_target_mismatch",
     });
   };

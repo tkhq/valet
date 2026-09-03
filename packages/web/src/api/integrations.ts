@@ -17,10 +17,14 @@ import type {
   PutCredentialResponse,
 } from "@valet/api/wire";
 import { api } from "./client";
+import { onePasswordKeys } from "./onepassword";
 
 export const qkIntegrations = {
   plugins: () => ["plugins"] as const,
-  credentials: () => ["credentials"] as const,
+  /** `scope` defaults to "user" — the caller's own credentials. "org"
+   * (admin-only server-side) is a distinct cache entry, not a filter over
+   * the same list. `/integrations` reads both when the caller is an admin. */
+  credentials: (scope: "user" | "org" = "user") => ["credentials", scope] as const,
 };
 
 export function usePlugins(opts?: Partial<UseQueryOptions<ListPluginsResponse>>) {
@@ -31,34 +35,45 @@ export function usePlugins(opts?: Partial<UseQueryOptions<ListPluginsResponse>>)
   });
 }
 
-export function useCredentials(opts?: Partial<UseQueryOptions<ListCredentialsResponse>>) {
+export function useCredentials(
+  scope: "user" | "org" = "user",
+  opts?: Partial<UseQueryOptions<ListCredentialsResponse>>,
+) {
   return useQuery<ListCredentialsResponse>({
-    queryKey: qkIntegrations.credentials(),
-    queryFn: () => api.listCredentials(),
+    queryKey: qkIntegrations.credentials(scope),
+    queryFn: () => api.listCredentials(scope),
     ...opts,
   });
 }
 
 /** Connect (or reconnect) a service. Invalidates both the plugin list
- * (connected flags) and the credential list after a successful save. */
+ * (connected flags) and both credential-scope caches after a successful
+ * save — the response doesn't echo the resolved owner scope, so the exact
+ * key affected isn't knowable here without re-deriving it from `body.scope`. */
 export function useConnectCredential() {
   const qc = useQueryClient();
   return useMutation<PutCredentialResponse, Error, { service: string; body: PutCredentialRequest }>({
     mutationFn: ({ service, body }) => api.putCredential(service, body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkIntegrations.plugins() });
-      qc.invalidateQueries({ queryKey: qkIntegrations.credentials() });
+      qc.invalidateQueries({ queryKey: qkIntegrations.credentials("user") });
+      qc.invalidateQueries({ queryKey: qkIntegrations.credentials("org") });
+      // The 1Password panel's Connected state reads its own settings query.
+      qc.invalidateQueries({ queryKey: onePasswordKeys.settings() });
     },
   });
 }
 
 export function useDisconnectCredential() {
   const qc = useQueryClient();
-  return useMutation<DeleteCredentialResponse, Error, string>({
-    mutationFn: (service) => api.deleteCredential(service),
+  return useMutation<DeleteCredentialResponse, Error, { service: string; scope?: "user" | "org" }>({
+    mutationFn: ({ service, scope }) => api.deleteCredential(service, scope ? { scope } : undefined),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkIntegrations.plugins() });
-      qc.invalidateQueries({ queryKey: qkIntegrations.credentials() });
+      qc.invalidateQueries({ queryKey: qkIntegrations.credentials("user") });
+      qc.invalidateQueries({ queryKey: qkIntegrations.credentials("org") });
+      // The 1Password panel's Connected state reads its own settings query.
+      qc.invalidateQueries({ queryKey: onePasswordKeys.settings() });
     },
   });
 }

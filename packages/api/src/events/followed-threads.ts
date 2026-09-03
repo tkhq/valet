@@ -24,6 +24,10 @@ export interface FollowedThreadRow extends FollowedThreadKey {
    * router's gap re-hydration has a starting point before the first overheard
    * delivery. Absent → tracking starts at the first delivery. */
   lastSeenTs?: string;
+  /** The assistant that answered the binding mention. Absent → the owner's
+   * default, which is what the rule that bound this follow also resolved to.
+   * Carried so a followed thread keeps talking to the SAME assistant. */
+  assistantId?: string;
 }
 
 /** Bind a thread to an owner's assistant. Idempotent on `(org, channel, thread)`. */
@@ -43,6 +47,7 @@ export async function upsertFollowedThread(db: AppDb, row: FollowedThreadRow): P
       createdAt: now,
       lastActivityAt: now,
       lastSeenTs: row.lastSeenTs ?? null,
+      assistantId: row.assistantId ?? null,
     })
     .onConflictDoUpdate({
       target: [
@@ -53,10 +58,18 @@ export async function upsertFollowedThread(db: AppDb, row: FollowedThreadRow): P
       ],
       // `createdBy` too: it is the actor the follow-router runs the assistant
       // session as, so a re-bind by a different owner must carry the new
-      // binder's actor, not the first one's. `lastSeenTs` is deliberately NOT
-      // in the update set: a re-mention on an already-followed thread must not
-      // rewind the router's gap tracking.
-      set: { ownerType: row.ownerType, ownerId: row.ownerId, createdBy: row.createdBy, lastActivityAt: now },
+      // binder's actor, not the first one's. `assistantId` follows the same
+      // rule — a re-bind by a rule naming a different assistant re-points the
+      // thread, and a rule naming none resets it to the owner's default.
+      // `lastSeenTs` is deliberately NOT in the update set: a re-mention on an
+      // already-followed thread must not rewind the router's gap tracking.
+      set: {
+        ownerType: row.ownerType,
+        ownerId: row.ownerId,
+        createdBy: row.createdBy,
+        assistantId: row.assistantId ?? null,
+        lastActivityAt: now,
+      },
     });
 }
 

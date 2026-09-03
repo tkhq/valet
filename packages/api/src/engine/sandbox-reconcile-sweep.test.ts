@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { SandboxListing } from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
+import { agentSessions } from "../schema/index.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { SandboxReconcileSweep, type SandboxReconcileSweepDeps } from "./sandbox-reconcile-sweep.js";
 
@@ -32,6 +33,8 @@ describe("SandboxReconcileSweep", () => {
     cachedSessions?: string[];
     /** Consumed per `listUnsettledSubmissions` call; empty → always settled. */
     unsettledQueue?: number[];
+    /** Engine activity clock per session id; absent → null (never ran). */
+    activityAt?: Record<string, number>;
     ageReportMs?: number;
   } = {}) {
     const destroyedSandboxes: string[] = [];
@@ -62,6 +65,7 @@ describe("SandboxReconcileSweep", () => {
       engineStore: {
         getSession: async (sessionId) => (known.has(sessionId) ? { id: sessionId } : null),
         listUnsettledSubmissions: async () => new Array(unsettledQueue.shift() ?? 0).fill({}),
+        latestActivityAt: async (sessionId) => overrides.activityAt?.[sessionId] ?? null,
       },
       ageReportMs: overrides.ageReportMs ?? AGE_REPORT_MS,
     };
@@ -156,6 +160,78 @@ describe("SandboxReconcileSweep", () => {
 
     expect(destroyedSandboxes).toEqual([]);
     expect(report.overAge).toBe(1);
+  });
+
+  it("an over-age sandbox with engine activity inside the window is healthy, not a violation", async () => {
+    // A suspended CR survives every resume/suspend cycle, so a daily-used
+    // assistant legitimately holds a months-old CR. Only stale over-age
+    // sandboxes are the "owner failed to clean up" signal.
+    const { deps } = fakeDeps({
+      listed: [listing("sbx-busy", "sess-busy", OVER_AGE), listing("sbx-stale", "sess-stale", OVER_AGE)],
+      knownSessions: ["sess-busy", "sess-stale"],
+      activityAt: { "sess-busy": FRESH, "sess-stale": OVER_AGE },
+    });
+
+    const report = await new SandboxReconcileSweep(deps).sweep(NOW);
+
+    expect(report.overAge).toBe(1);
+  });
+
+  describe("soft-deleted owner", () => {
+    async function insertSession(db: AppDb, id: string, status: "active" | "deleted"): Promise<void> {
+      await db.insert(agentSessions).values({
+        id,
+        userId: "u1",
+        orgId: "org1",
+        workspace: `/root/.valet/assistants/${id}`,
+        status,
+        createdAt: FRESH,
+        updatedAt: FRESH,
+      });
+    }
+
+    it("destroys the sandbox of a soft-deleted session even when the engine row and cache survive", async () => {
+      // The partial-destroy leak (observed live): a delete route's
+      // engineHost.destroy misfired, leaving the engine row, a cached
+      // ghost, and a Running pod. The soft-delete is the recorded intent
+      // — the sweep must reclaim regardless of engine row or cache state.
+      await insertSession(db, "sess-del", "deleted");
+      const { deps, destroyedSandboxes } = fakeDeps({
+        listed: [listing("sbx-del", "sess-del", FRESH)],
+        knownSessions: ["sess-del"],
+        cachedSessions: ["sess-del"],
+      });
+
+      const report = await new SandboxReconcileSweep(deps).sweep(NOW);
+
+      expect(destroyedSandboxes).toEqual(["sbx-del"]);
+      expect(report.orphansDestroyed).toBe(1);
+    });
+
+    it("unsettled submissions still win over the deleted-owner rule", async () => {
+      await insertSession(db, "sess-del", "deleted");
+      const { deps, destroyedSandboxes } = fakeDeps({
+        listed: [listing("sbx-del", "sess-del", FRESH)],
+        knownSessions: ["sess-del"],
+        unsettledQueue: [1],
+      });
+
+      await new SandboxReconcileSweep(deps).sweep(NOW);
+
+      expect(destroyedSandboxes).toEqual([]);
+    });
+
+    it("an active app row never triggers the deleted-owner rule", async () => {
+      await insertSession(db, "sess-live", "active");
+      const { deps, destroyedSandboxes } = fakeDeps({
+        listed: [listing("sbx-live", "sess-live", FRESH)],
+        knownSessions: ["sess-live"],
+      });
+
+      await new SandboxReconcileSweep(deps).sweep(NOW);
+
+      expect(destroyedSandboxes).toEqual([]);
+    });
   });
 
   it("reports unowned (pre-annotation) sandboxes without destroying them, at any age", async () => {

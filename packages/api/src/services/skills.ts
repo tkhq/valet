@@ -122,7 +122,7 @@ export interface OwnerScope {
  * Default `false` preserves the original semantics: `ownedSkillRow` and all
  * non-org write paths call this without the option and are unaffected.
  *
- * Exported because `services/skill-sources.ts` scopes tracked repositories
+ * Exported because `services/content-sources.ts` scopes tracked repositories
  * by exactly this rule. One implementation, so the two tables cannot drift.
  */
 export async function isAuthorizedFor(

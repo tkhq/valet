@@ -78,6 +78,7 @@ import type {
   SandboxListing,
   SandboxProvider,
   SandboxStatus,
+  WorkspaceGrowth,
 } from "@valet/engine";
 import { execInPod, type ExecDeps, type PodExecApi } from "./exec.js";
 import {
@@ -118,6 +119,7 @@ import {
   SESSION_ANNOTATION_KEY,
 } from "./manifest.js";
 import type { K8sProviderConfig } from "./types.js";
+import { growWorkspacePvc, type SandboxPvcApi } from "./workspace-pvc.js";
 
 /** How long `create()`/`restore()` polls for the CR to reach `Ready` before
  * giving up. Generous relative to Task 3's empirical ~15s pod-recreate
@@ -387,6 +389,10 @@ export interface KubernetesSandboxDeps {
   podsApi: SandboxPodsApi;
   execApi: PodExecApi;
   livenessApi: PodLivenessApi;
+  /** Optional: enables `growWorkspace()` (on-demand workspace PVC growth).
+   * When absent, growWorkspace reports `grown: false`. Production wiring
+   * (`packages/api/src/providers/sandbox-backend.ts`) always supplies it. */
+  pvcApi?: SandboxPvcApi;
   cfg: K8sProviderConfig;
   /** The sandbox is docker-enabled — non-privileged execs run as the
    * dockerd workload user (see exec.ts's `ExecDeps.docker`). Derived from
@@ -612,6 +618,31 @@ export class KubernetesSandbox implements Sandbox {
     if (!serviceFQDN) return null;
     return { host: serviceFQDN, port: GATEWAY_PORT };
   }
+
+  /**
+   * On-demand workspace PVC growth (engine seam `Sandbox.growWorkspace` —
+   * see `workspace-pvc.ts` for the policy: double up to
+   * `cfg.workspaceStorageMax`, EBS-cooldown rate limit, online-resize wait).
+   * A policy refusal returns `grown: false` with the reason; an API-server
+   * error from the read/patch propagates as a throw so the caller can tell
+   * "refused by design" from "the grow itself broke".
+   */
+  async growWorkspace(): Promise<WorkspaceGrowth> {
+    if (!this.deps.pvcApi) {
+      return { grown: false, reason: "workspace growth is not wired for this provider (no PVC api)" };
+    }
+    const result = await growWorkspacePvc(this.deps.pvcApi, {
+      namespace: this.deps.cfg.namespace,
+      crName: this.id,
+      maxStorage: this.deps.cfg.workspaceStorageMax,
+    });
+    if (result.grown) {
+      console.log(`k8s sandbox ${this.id}: grew workspace PVC ${result.from} → ${result.to}`);
+    } else {
+      console.warn(`k8s sandbox ${this.id}: workspace grow refused: ${result.reason}`);
+    }
+    return result;
+  }
 }
 
 // ── Provider ─────────────────────────────────────────────────────────
@@ -636,6 +667,10 @@ export interface KubernetesSandboxProviderDeps {
   /** Optional: enables credsMount — create/patch/delete the per-sandbox
    * creds Secret. When absent, credsFiles in SandboxCreateOpts is ignored. */
   secretsApi?: SandboxSecretsApi;
+  /** Optional: enables `Sandbox.growWorkspace` (on-demand workspace PVC
+   * growth after an ENOSPC). When absent, growWorkspace reports
+   * `grown: false`. Production wiring always supplies it. */
+  pvcApi?: SandboxPvcApi;
 }
 
 export class KubernetesSandboxProvider implements SandboxProvider {
@@ -954,6 +989,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         podsApi: this.deps.podsApi,
         execApi: this.deps.execApi,
         livenessApi: this.deps.livenessApi,
+        pvcApi: this.deps.pvcApi,
         cfg: this.cfg,
         docker,
       },

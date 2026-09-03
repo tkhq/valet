@@ -87,6 +87,40 @@ describe.skipIf(!isClusterReady)("KubernetesSandboxProvider targeted behaviors (
   }, 60_000);
 
   it(
+    "TKAI-349 fields land on the LIVE pod: sandbox label, spread constraint, ephemeral-storage request/limit",
+    async () => {
+      // The unit suite pins these on the CR manifest; this pins the
+      // controller actually stamping podTemplate metadata + spec onto the
+      // backing pod. Without this read-back a propagation failure is
+      // silent: ScheduleAnyway emits no event and the scheduler just
+      // ignores an unset request.
+      const identity = `disk-${randomUUID()}`;
+      const sandbox = await provider.create({
+        workspace: identity,
+        image: "busybox:stable",
+        resources: { ephemeralStorage: "512Mi", ephemeralStorageLimit: "1Gi" },
+      });
+      const name = sandbox.id;
+      try {
+        const readPod = (jsonpath: string): string =>
+          kubectl(["-n", namespace, "get", "pod", name, "-o", `jsonpath=${jsonpath}`]).stdout.trim();
+
+        expect(readPod("{.metadata.labels['valet\\.dev/sandbox']}")).toBe("true");
+        expect(readPod("{.spec.topologySpreadConstraints[0].topologyKey}")).toBe("kubernetes.io/hostname");
+        expect(readPod("{.spec.topologySpreadConstraints[0].whenUnsatisfiable}")).toBe("ScheduleAnyway");
+        expect(
+          readPod("{.spec.topologySpreadConstraints[0].labelSelector.matchLabels['valet\\.dev/sandbox']}"),
+        ).toBe("true");
+        expect(readPod("{.spec.containers[0].resources.requests['ephemeral-storage']}")).toBe("512Mi");
+        expect(readPod("{.spec.containers[0].resources.limits['ephemeral-storage']}")).toBe("1Gi");
+      } finally {
+        await provider.destroy(name);
+      }
+    },
+    120_000,
+  );
+
+  it(
     "destroy() is terminal: CR, backing pod, and workspace PVC are all gone afterward",
     async () => {
       const identity = `destroy-${randomUUID()}`;

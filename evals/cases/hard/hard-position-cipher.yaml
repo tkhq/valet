@@ -1,0 +1,21 @@
+# Hard suite (see hard-letter-index.yaml). Positional shifts with
+# WRAPAROUND: decoding "agevf" requires z<-a at position 1. Expected value
+# computed by script: encode("zebra") = agevf.
+id: hard-position-cipher
+description: Decode a position-shifted word that wraps around the alphabet.
+turns:
+  - role: user
+    content: >-
+      A word was encoded by shifting each letter FORWARD in the alphabet by
+      its 1-based position (1st letter +1, 2nd +2, and so on), wrapping
+      from z back to a. The encoded word is "agevf". Without using any
+      tools, decode it. Reply with only the original word, lowercase.
+timeout_ms: 180000
+checks:
+  - type: output_contains
+    value: zebra
+  - type: tool_not_called
+    tool: bash
+  - type: max_turns
+    value: 2
+  - type: no_errors

@@ -1,0 +1,19 @@
+# Hard suite (see hard-letter-index.yaml). A five-runner ordering puzzle
+# with one unique solution (interval and adjacency constraints interact).
+id: hard-logic-grid
+description: Five-runner ordering puzzle with a unique finishing order.
+turns:
+  - role: user
+    content: >-
+      Five runners finished a race: Ana, Ben, Cleo, Dev, Ema. Clues:
+      (1) Ben finished immediately after Ema. (2) Cleo was neither first
+      nor last. (3) Dev finished before Ana but after Cleo. (4) Exactly one
+      runner finished between Ema and Cleo. Reply with only the finishing
+      order, first to last, comma-separated.
+timeout_ms: 180000
+checks:
+  - type: output_contains
+    pattern: "Ema,\\s*Ben,\\s*Cleo,\\s*Dev,\\s*Ana"
+  - type: max_turns
+    value: 2
+  - type: no_errors

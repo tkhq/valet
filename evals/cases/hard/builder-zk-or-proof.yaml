@@ -1,0 +1,110 @@
+# Hard builder case (model separation): a disjunctive Schnorr proof
+# (CDS OR-composition) over a 256-bit safe-prime group — prove knowledge
+# of the discrete log of y1 OR y2 without revealing which. The simulated
+# branch requires the CDS trick (choose c_sim and s_sim first, then
+# t_sim = g^s_sim * y^{-c_sim} mod p, a modular INVERSE in the exponent
+# base), plus challenge splitting c1 + c2 = H(t1|t2) mod q. The hidden
+# probes are cryptographic and harness-computed: both verification
+# equations are re-derived with the harness's own modular arithmetic and
+# hash, on proofs from EITHER branch, so a fake verify() or a broken
+# simulator cannot pass. A plain-Schnorr predecessor did not separate
+# tiers (haiku ~75% per run, iteration converges); the simulator branch
+# is the step small models fail. All values validated against a
+# reference implementation before any model run.
+#
+# Tuning data (2026-09-02): with unrestricted bash iteration BOTH tiers
+# eventually converge (any self-verifiable task does) — the separator is
+# the COST of getting there. Measured per-run recursive tokens:
+# haiku-4-5 594k/268k/40k (mean 301k, brute-forcing the simulator);
+# sonnet-5 68k/29k/26k (mean 41k). The max_tokens budget of 100k gives
+# sonnet 1.5x headroom over its worst observed run and fails haiku's
+# brute-force mode; capability-within-budget is the honest claim.
+id: builder-zk-or-proof
+description: Implement a Schnorr OR-proof (CDS); harness re-derives both branch equations itself.
+profile: full
+runs: 3
+turns:
+  - role: user
+    content: >-
+      Implement a zero-knowledge OR-proof (Cramer-Damgard-Schoenmakers
+      disjunction of two Schnorr proofs) in /workspace/zkor.js (Node ESM,
+      BigInt everywhere, only node:crypto; also add /workspace/package.json
+      with "type": "module").
+
+      Group: p =
+      0xc135f37294f32354bf0f6657726b3a61a5c4b31f0de34bf8465832f1d7a95637
+      (a safe prime), q = (p - 1) / 2 =
+      0x609af9b94a7991aa5f87b32bb9359d30d2e2598f86f1a5fc232c1978ebd4ab1b,
+      generator g = 4 of the order-q subgroup.
+
+      Export exactly: constants P, Q, G; challenge(t1, t2) returning
+      BigInt("0x" + sha256hex) % Q where sha256hex is the SHA-256 hex
+      digest of the string t1.toString(16) + "|" + t2.toString(16);
+      proveOr(x, which, y1, y2) where the prover knows only x, the
+      discrete log of y1 when which is 1 or of y2 when which is 2,
+      returning a proof {t1, t2, c1, c2, s1, s2} that reveals nothing
+      about which; and verifyOr(y1, y2, proof) returning a boolean. A
+      valid proof satisfies c1 + c2 = challenge(t1, t2) (mod q) and
+      g^s_i = t_i * y_i^c_i (mod p) for BOTH i in {1, 2}. proveOr must
+      work for either value of which. Reply "done" when written.
+timeout_ms: 480000
+checks:
+  - type: tool_called
+    tool: write
+  - type: max_tokens
+    value: 100000
+  - type: verify_command
+    command: >-
+      node -e "const { createHash } = require('node:crypto');
+      import('/workspace/zkor.js').then((m) => { const mp = (b, e, mm) =>
+      { let r = 1n; b %= mm; while (e > 0n) { if (e & 1n) r = (r * b) %
+      mm; b = (b * b) % mm; e >>= 1n; } return r; }; const x1 =
+      0x1234567890abcdef1234567890abcdefn; const y1 =
+      0x9f6e8b8a538d23f1ac72a3ed684e64d34eb9e69adb1fef2d8bcf2022ee770e7fn;
+      const y2 =
+      0x66059e806b1e71e14071097546bc2b3c90190785649a7306a21d02c5d5d28d75n;
+      const pr = m.proveOr(x1, 1, y1, y2); const h = BigInt('0x' +
+      createHash('sha256').update(pr.t1.toString(16) + '|' +
+      pr.t2.toString(16)).digest('hex')) % m.Q; console.log((pr.c1 +
+      pr.c2) % m.Q === h, mp(4n, pr.s1, m.P) === (pr.t1 * mp(y1, pr.c1,
+      m.P)) % m.P, mp(4n, pr.s2, m.P) === (pr.t2 * mp(y2, pr.c2, m.P)) %
+      m.P, m.verifyOr(y1, y2, pr)); })"
+    expect_output: "^true true true true"
+  - type: verify_command
+    command: >-
+      node -e "const { createHash } = require('node:crypto');
+      import('/workspace/zkor.js').then((m) => { const mp = (b, e, mm) =>
+      { let r = 1n; b %= mm; while (e > 0n) { if (e & 1n) r = (r * b) %
+      mm; b = (b * b) % mm; e >>= 1n; } return r; }; const x2 =
+      0xaaaabbbbccccddddeeeeffff00001111n; const y1 =
+      0x9f6e8b8a538d23f1ac72a3ed684e64d34eb9e69adb1fef2d8bcf2022ee770e7fn;
+      const y2 =
+      0x66059e806b1e71e14071097546bc2b3c90190785649a7306a21d02c5d5d28d75n;
+      const pr = m.proveOr(x2, 2, y1, y2); const h = BigInt('0x' +
+      createHash('sha256').update(pr.t1.toString(16) + '|' +
+      pr.t2.toString(16)).digest('hex')) % m.Q; console.log((pr.c1 +
+      pr.c2) % m.Q === h, mp(4n, pr.s1, m.P) === (pr.t1 * mp(y1, pr.c1,
+      m.P)) % m.P, mp(4n, pr.s2, m.P) === (pr.t2 * mp(y2, pr.c2, m.P)) %
+      m.P); })"
+    expect_output: "^true true true"
+  - type: verify_command
+    command: >-
+      node -e "import('/workspace/zkor.js').then((m) => { const t1 =
+      0xbf15b4c78bfd47013b789bcefa94c1c2db2e615cfc0135966c0cfc6777142857n;
+      const t2 =
+      0x66059e806b1e71e14071097546bc2b3c90190785649a7306a21d02c5d5d28d75n;
+      console.log(m.challenge(t1, t2) ===
+      0x2041af83129ad37616a1fc8bf676e1d110933b8ff2a6b4ae96c7a6bae928030fn); })"
+    expect_output: "^true"
+  - type: verify_command
+    command: >-
+      node -e "import('/workspace/zkor.js').then((m) => { const x1 =
+      0x1234567890abcdef1234567890abcdefn; const y1 =
+      0x9f6e8b8a538d23f1ac72a3ed684e64d34eb9e69adb1fef2d8bcf2022ee770e7fn;
+      const y2 =
+      0x66059e806b1e71e14071097546bc2b3c90190785649a7306a21d02c5d5d28d75n;
+      const pr = m.proveOr(x1, 1, y1, y2); console.log(m.verifyOr(y1, y2,
+      { ...pr, s1: pr.s1 + 1n }), m.verifyOr(y1, y2, { ...pr, c1: pr.c2,
+      c2: pr.c1 })); })"
+    expect_output: "^false false"
+  - type: no_errors

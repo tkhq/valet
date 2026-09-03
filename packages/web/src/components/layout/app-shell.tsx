@@ -126,11 +126,19 @@ export function AppShell({
         <div className="flex-1 flex min-h-0 relative">
           {sidebar != null && (
             <>
-              {!collapsed && (
-                <aside className="hidden md:flex shrink-0 flex-col w-max min-w-[200px] max-w-[320px] border-r border-line">
-                  <div className="flex-1 min-h-0 flex flex-col">{sidebar}</div>
-                </aside>
-              )}
+              {/* Collapsed HIDES the aside rather than unmounting it. The
+                  sidebar registers the chat keyboard handlers (new thread,
+                  archive, search), and unmounting it left those chords
+                  silently dead for anyone whose collapsed state persisted. */}
+              <aside
+                className={cn(
+                  "shrink-0 flex-col w-max min-w-[200px] max-w-[320px] border-r border-line",
+                  collapsed ? "hidden" : "hidden md:flex",
+                )}
+                aria-hidden={collapsed}
+              >
+                <div className="flex-1 min-h-0 flex flex-col">{sidebar}</div>
+              </aside>
               {mobileOpen && (
                 <div className="md:hidden fixed inset-0 z-40 flex" role="dialog" aria-modal="true">
                   <div

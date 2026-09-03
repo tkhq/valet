@@ -371,6 +371,13 @@ export const agentSessions = pgTable(
     sandboxReclaimedAt: bigint("sandbox_reclaimed_at", { mode: "number" }),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+    // Epoch ms of the most recent user or agent activity in this session.
+    // Updated on every prompt submission (web, channel, child signal) and
+    // on session create. The session list sorts by this column so a
+    // long-lived channel-bound session rises when it receives a message.
+    // Nullable: pre-column rows default to NULL; queries fall back to
+    // `updatedAt` via COALESCE.
+    lastActivityAt: bigint("last_activity_at", { mode: "number" }),
   },
   (t) => [
     index("agent_sessions_user").on(t.userId),
@@ -801,6 +808,16 @@ export const memoryFiles = pgTable(
     sourceSessionId: text("source_session_id").notNull().default(""),
     orgId: text("org_id").notNull().default(""),
     version: integer("version").notNull().default(1),
+    /** The content source that mirrors this row, or null on a row the
+     * product wrote. A mirrored row lands under `lib/`, which
+     * `assertWritablePath` already reserves for mounted libraries, so the
+     * product refuses to write it with no new guard.
+     *
+     * NOT `origin` above: that column is OKF provenance of the fact and is
+     * already spent. */
+    sourceId: text("source_id"),
+    upstreamPath: text("upstream_path"),
+    contentSha: text("content_sha"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
@@ -809,19 +826,28 @@ export const memoryFiles = pgTable(
 
 // ─── Artifacts ──────────────────────────────────────────────────────────────
 //
-// Shared snapshots of memory files (2026-08-22 artifacts design). A row is a
-// COPY of one memory file's content at share time, not a live reference —
-// later memory edits never publish until an explicit re-share overwrites
-// `content`. `token` is the unguessable capability in the share URL
-// (`/a/{token}`); `visibility` gates who may open it: `org` (a logged-in
-// member of `org_id`) or `public` (anyone, only while
-// `orgs.allow_public_artifacts` is on). The tool surface can only create
-// `org` rows; widening to `public` is a human UI action recorded in
-// `public_by`. Revoke sets `revoked_at` and keeps the row for audit;
-// re-share after revoke mints a fresh token (a leaked link stays dead)
-// AND resets visibility to `org` — revoke ends the audience decision
+// Published pages (2026-08-22 artifacts design; extended by the 2026-09-02
+// artifact-pages design). A row is a COPY of content at publish time, not a
+// live reference — later edits never publish until an explicit re-publish.
+// `token` is the unguessable capability in the share URL (`/a/{token}`);
+// `visibility` gates who may open it: `org` (a logged-in member of `org_id`)
+// or `public` (anyone, only while `orgs.allow_public_artifacts` is on). The
+// tool surface can only create `org` rows; widening to `public` is a human UI
+// action recorded in `public_by`. Revoke sets `revoked_at` and keeps the row
+// for audit; re-publish after revoke mints a fresh token (a leaked link stays
+// dead) AND resets visibility to `org` — revoke ends the audience decision
 // along with the link, so the tool surface can never restore anonymous
 // access.
+//
+// `format` names the compiler for `content` (the SOURCE): `markdown` compiles
+// through GFM at publish, `html` passes verbatim. `rendered` is the compiled
+// page body every viewer renders in the sandboxed frame; "" on a pre-pages
+// row means "compile `content` on read". `version` counts publishes;
+// `shared_version` pins viewers to one `artifact_versions` row (null =
+// latest). `source_memory_path` is the PUBLISH KEY: the normalized memory
+// path for a `mem_share`, the caller's key for an inline `artifact_publish` —
+// not renamed because a rename cannot be rolled back safely under
+// SCHEMA_REPAIRS.
 export const artifacts = pgTable(
   "artifacts",
   {
@@ -835,6 +861,12 @@ export const artifacts = pgTable(
     sourceMemoryPath: text("source_memory_path").notNull(),
     title: text("title").notNull().default(""),
     content: text("content").notNull(),
+    format: text("format", { enum: ["markdown", "html"] }).notNull().default("markdown"),
+    rendered: text("rendered").notNull().default(""),
+    description: text("description").notNull().default(""),
+    icon: text("icon").notNull().default(""),
+    version: bigint("version", { mode: "number" }).notNull().default(1),
+    sharedVersion: bigint("shared_version", { mode: "number" }),
     visibility: text("visibility", { enum: ["org", "public"] }).notNull().default("org"),
     publicBy: text("public_by"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
@@ -843,9 +875,56 @@ export const artifacts = pgTable(
   },
   (t) => [
     uniqueIndex("artifacts_token_unique").on(t.token),
-    // One artifact per shared file: re-share is an update, never a second row.
+    // One artifact per publish key: re-publish is an update, never a second row.
     uniqueIndex("artifacts_owner_path_unique").on(t.ownerType, t.ownerId, t.sourceMemoryPath),
   ],
+);
+
+// Version history (artifact-pages design). One row per publish, append-only.
+// `content` is the source, `rendered` the compiled page body — both captured
+// so pinning `shared_version` to an old row needs no recompilation. The
+// public read serves exactly one version and takes no version parameter:
+// a link holder must never walk the history.
+export const artifactVersions = pgTable(
+  "artifact_versions",
+  {
+    id: text("id").primaryKey(),
+    artifactId: text("artifact_id").notNull(),
+    version: bigint("version", { mode: "number" }).notNull(),
+    title: text("title").notNull().default(""),
+    format: text("format", { enum: ["markdown", "html"] }).notNull().default("markdown"),
+    content: text("content").notNull(),
+    rendered: text("rendered").notNull().default(""),
+    actorUserId: text("actor_user_id").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [uniqueIndex("artifact_versions_unique").on(t.artifactId, t.version)],
+);
+
+// Element-anchored comments on a published page (artifact-pages design).
+// `vdid` is the content-hashed element id the viewer's comment runtime
+// computes (null = a page-level comment); `version` records what the
+// commenter was looking at. `parent_id` threads replies one level under a
+// root. `sent_to_session` records delivery of the comment into the source
+// session's prompt queue — allowed only when the commenter passes
+// `canViewSession` there, so sending grants nothing that typing into the
+// session would not. Resolve is a flag, never a delete.
+export const artifactComments = pgTable(
+  "artifact_comments",
+  {
+    id: text("id").primaryKey(),
+    artifactId: text("artifact_id").notNull(),
+    version: bigint("version", { mode: "number" }).notNull(),
+    vdid: text("vdid"),
+    parentId: text("parent_id"),
+    body: text("body").notNull(),
+    authorUserId: text("author_user_id").notNull(),
+    sentToSession: text("sent_to_session"),
+    resolvedAt: bigint("resolved_at", { mode: "number" }),
+    resolvedBy: text("resolved_by"),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [index("artifact_comments_artifact").on(t.artifactId)],
 );
 
 // ─── Skills ─────────────────────────────────────────────────────────────────
@@ -865,8 +944,9 @@ export const artifacts = pgTable(
 // `content_sha` is the SHA-256 of `content`. The repo importer will compare
 // it to decide whether an upstream body changed.
 //
-// `source_id` will point at a `skill_sources` row once repository sync
-// exists. It carries no foreign key yet, because that table is not built.
+// `source_id` names the `contentSources` row this skill is mirrored from.
+// It carries no foreign key, and `services/content-sources.ts` deletes the
+// mirrored rows with the source.
 //
 // Ownership columns and the owner index mirror `workflow_definitions` below,
 // because skill access follows the same rule: your own rows plus the rows of
@@ -899,32 +979,45 @@ export const skills = pgTable(
   ],
 );
 
-// One tracked skill repository. A `repo`-origin row in `skills` above is a
-// MIRROR of a `SKILL.md` in one of these repositories, and sync is the only
-// thing that writes those rows, so a source and the skills it carries are
-// created and destroyed together.
+/** What one tracked repository mirrors. `skills` is the kind that ships; the
+ * other two join the same rail
+ * (`docs/specs/2026-08-24-workflows-mvp-design.md`). */
+export type ContentKind = "skills" | "workflows" | "templates" | "memories";
+
+// One tracked repository. A `repo`-origin row in `skills` above is a MIRROR
+// of a `SKILL.md` in one of these repositories, and sync is the only thing
+// that writes those rows, so a source and the content it carries are created
+// and destroyed together.
 //
 // Do not confuse this row with the engine's `SkillSource` type, which is one
-// assembled skill on its way into a session. In prose here, "skill source"
+// assembled skill on its way into a session. In prose here, "content source"
 // always means the tracked repository.
+//
+// `kinds` says which content the sync collects. One collector per kind reads
+// the same tree, so a repository tracked for two kinds still costs one
+// head-commit read per poll — see `services/content-sync/collector.ts`.
 //
 // `ref` empty means the repository's default branch. `subpath` empty means
 // the repository root. Both are part of the UNIQUE key, so one repository can
 // be tracked twice from two different subdirectories.
 //
-// The last four sync columns are the whole change-detection state:
-// `last_sha` is the commit the last sync read, and `last_manifest_hash` is a
-// hash over the skill files that commit held. A poll that finds the same
-// commit stops after one API call; a poll that finds a moved commit with the
-// same manifest records the commit and writes no skill rows.
+// The sync columns are the whole change-detection state: `last_sha` is the
+// commit the last sync read, `last_manifest_hash` is a hash over the tracked
+// files that commit held, and `discovery_scan` pairs the path-rules version
+// with the commit read under it. The compares that use them are in
+// `services/content-sync/service.ts`.
 //
 // `status`/`attempts`/`next_attempt_at`/`last_error` are the sweep's claim
 // and retry state, shaped like `event_deliveries` — see
-// `services/skill-sync.ts` for the claim statement and the backoff ladder.
-// `last_error` carries whatever the last sync needs to tell the reader:
-// the failure for `status='error'`, and the per-skill warnings for
+// `services/content-sync/service.ts` for the claim statement and the backoff
+// ladder. `last_error` carries whatever the last sync needs to tell the
+// reader: the failure for `status='error'`, and the per-file warnings for
 // `status='warning'` (a sync that succeeded but skipped a malformed file).
-export const skillSources = pgTable(
+//
+// The SQL name stays `skill_sources`, and so do its three indexes. The
+// release before this one repairs `skill_sources` by name at boot, so a
+// rename would crash-loop the api a rollback lands on.
+export const contentSources = pgTable(
   "skill_sources",
   {
     id: text("id").primaryKey(),
@@ -941,9 +1034,12 @@ export const skillSources = pgTable(
     repoFullName: text("repo_full_name").notNull(),
     /** Branch, tag, or commit. Empty means the default branch. */
     ref: text("ref").notNull().default(""),
-    /** Narrows the skill scan to one directory. Empty scans the whole
-     * repository, which is the normal case. */
+    /** Narrows the scan to one directory. Empty scans the whole repository,
+     * which is the normal case. */
     subpath: text("subpath").notNull().default(""),
+    /** Defaults to skills only, so every row written before workflow sync
+     * existed keeps its behavior. */
+    kinds: jsonb("kinds").notNull().default(["skills"]).$type<ContentKind[]>(),
     enabled: boolean("enabled").notNull().default(true),
     status: text("status", { enum: ["pending", "ok", "warning", "error"] })
       .notNull()
@@ -952,6 +1048,11 @@ export const skillSources = pgTable(
     nextAttemptAt: bigint("next_attempt_at", { mode: "number" }).notNull(),
     lastSha: text("last_sha"),
     lastManifestHash: text("last_manifest_hash"),
+    /** `<rules version>:<sha>` from the last complete sync. NULL when the
+     * row predates the column or never synced. A value that does not describe
+     * the current head takes no head-commit short-circuit, which is what
+     * makes the mechanism survive a release that does not write it. */
+    discoveryScan: text("discovery_scan"),
     lastSyncedAt: bigint("last_synced_at", { mode: "number" }),
     lastError: text("last_error"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
@@ -995,10 +1096,26 @@ export const workflowDefinitions = pgTable(
     ownerId: text("owner_id").notNull(),
     name: text("name").notNull(),
     definition: jsonb("definition").notNull(),
+    /** `repo` rows mirror one workflow file and are read-only in the product:
+     * editing the file is the edit, deleting the file is the delete. */
+    origin: text("origin", { enum: ["local", "repo"] }).notNull().default("local"),
+    /** The content source that mirrors this row. Null on a `local` row. */
+    sourceId: text("source_id"),
+    /** Repo-relative path of the file. Identity is (sourceId, upstreamPath)
+     * and nothing else — not the name, not any id the file writes — so a
+     * rename deletes one workflow and creates another. */
+    upstreamPath: text("upstream_path"),
+    /** Hash of the mirrored file, so a re-sync can skip an unchanged row. */
+    contentSha: text("content_sha"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
-  (t) => [index("workflow_definitions_owner").on(t.orgId, t.ownerType, t.ownerId)],
+  (t) => [
+    index("workflow_definitions_owner").on(t.orgId, t.ownerType, t.ownerId),
+    uniqueIndex("workflow_definitions_source_path")
+      .on(t.sourceId, t.upstreamPath)
+      .where(sql`"source_id" IS NOT NULL`),
+  ],
 );
 
 // Immutable snapshot per save: version 1 on create, +1 on every
@@ -1012,9 +1129,53 @@ export const workflowVersions = pgTable(
     version: integer("version").notNull(),
     name: text("name").notNull(),
     definition: jsonb("definition").notNull(),
+    /** Which write produced this version, and from which commit. Both null on
+     * every version a product edit wrote, and on every row older than the
+     * repository mirror. */
+    origin: text("origin", { enum: ["local", "repo"] }),
+    sourceCommit: text("source_commit"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
   (t) => [uniqueIndex("workflow_versions_wf_version").on(t.workflowId, t.version)],
+);
+
+/**
+ * Templates mirrored from a repository. A row is a COPY of one template file,
+ * and installing it produces an ordinary `local` workflow the installer may
+ * edit. That is the whole difference between a template and a mirrored
+ * definition, which stays read-only and keeps syncing.
+ */
+export const workflowTemplates = pgTable(
+  "workflow_templates",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull(),
+    ownerId: text("owner_id").notNull(),
+    /** The id the FILE declares, which the gallery and the install route
+     * use. Distinct from `id`, which identifies this row. */
+    templateId: text("template_id").notNull(),
+    origin: text("origin", { enum: ["local", "repo"] }).notNull().default("local"),
+    sourceId: text("source_id"),
+    upstreamPath: text("upstream_path").notNull(),
+    contentSha: text("content_sha"),
+    template: jsonb("template").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    // One template id per owner: the gallery lists by id, and two rows
+    // claiming one id would make which one installs undefined.
+    uniqueIndex("workflow_templates_owner_template").on(
+      t.orgId,
+      t.ownerType,
+      t.ownerId,
+      t.templateId,
+    ),
+    uniqueIndex("workflow_templates_source_path")
+      .on(t.sourceId, t.upstreamPath)
+      .where(sql`"source_id" IS NOT NULL`),
+  ],
 );
 
 export const workflowRuns = pgTable(
@@ -1638,6 +1799,10 @@ export const eventSubscriptions = pgTable(
     /** `{ kind: "workflow", workflowId } | { kind: "orchestrator" } | { kind: "signal" }`. */
     target: jsonb("target").notNull(),
     enabled: boolean("enabled").notNull().default(true),
+    /** `repo` rows are armed from a mirrored workflow file. The sync updates
+     * and deletes only these, so a subscription a person armed on the same
+     * workflow is never touched. */
+    origin: text("origin", { enum: ["local", "repo"] }).notNull().default("local"),
     createdBy: text("created_by").notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
@@ -1668,6 +1833,11 @@ export const followedThreads = pgTable(
      * overheard line after downtime arrives with the missed context. Null on
      * rows from before the column: the first delivery starts tracking. */
     lastSeenTs: text("last_seen_ts"),
+    /** The assistant that answered the mention this follow was bound from, so
+     * later messages in the thread reach the SAME assistant rather than the
+     * owner's default. Null on rows from before the column, and on any follow
+     * whose rule named no assistant — both read as "the owner's default". */
+    assistantId: text("assistant_id"),
   },
   (t) => [uniqueIndex("followed_threads_key").on(t.orgId, t.channelType, t.channelId, t.threadTs)],
 );
@@ -1696,12 +1866,21 @@ export const workflowSchedules = pgTable(
     /** Prompt submitted to the orchestrator's "schedules" thread when
      * `target_kind = 'orchestrator'`. */
     prompt: text("prompt"),
+    /** Which of the owner's assistants the prompt goes to, when
+     * `target_kind = 'orchestrator'`. Null on rows from before the column, and
+     * on any schedule that named none — both read as "the owner's default".
+     * Ignored for a `workflow` target, which has no assistant. */
+    assistantId: text("assistant_id"),
     name: text("name").notNull(),
     cron: text("cron").notNull(),
     timezone: text("timezone").notNull().default("UTC"),
     /** Optional static payload delivered as `trigger.data.input`. */
     input: jsonb("input"),
     enabled: boolean("enabled").notNull().default(true),
+    /** `repo` rows are armed from a mirrored workflow file. The sync updates
+     * and deletes only these, so a schedule a person armed on the same
+     * workflow is never touched. */
+    origin: text("origin", { enum: ["local", "repo"] }).notNull().default("local"),
     lastFiredAt: bigint("last_fired_at", { mode: "number" }),
     nextFireAt: bigint("next_fire_at", { mode: "number" }).notNull(),
     createdBy: text("created_by").notNull(),
@@ -1798,8 +1977,8 @@ export type IdentityLinkCodeRow = typeof identityLinkCodes.$inferSelect;
 export type ChannelActiveStreamRow = typeof channelActiveStreams.$inferSelect;
 export type MemoryFileRow = typeof memoryFiles.$inferSelect;
 export type SkillRow = typeof skills.$inferSelect;
-/** One tracked skill repository. Not the engine's `SkillSource`. */
-export type SkillSourceRow = typeof skillSources.$inferSelect;
+/** One tracked repository. Not the engine's `SkillSource`. */
+export type ContentSourceRow = typeof contentSources.$inferSelect;
 export type WorkflowDefinitionRow = typeof workflowDefinitions.$inferSelect;
 export type WorkflowRunRow = typeof workflowRuns.$inferSelect;
 export type WorkflowCheckpointRow = typeof workflowCheckpoints.$inferSelect;
@@ -2141,3 +2320,32 @@ export type SecurityHandoffRow = typeof securityHandoffs.$inferSelect;
 export type SecurityFindingCommentRow = typeof securityFindingComments.$inferSelect;
 export type SecurityCoverageRow = typeof securityCoverage.$inferSelect;
 export type SecurityNeedRow = typeof securityNeeds.$inferSelect;
+
+// ── Ratings (TKAI-334) ─────────────────────────────────────────────────────
+// Thumbs up/down feedback. One table, polymorphic target: a session-level
+// rating (`target_type = 'session'`, target_id = session id) is the primary
+// eval-seeding signal; an entry-level rating (`target_type = 'entry'`,
+// target_id = engine entry id) is finer-grained debugging data. One rating
+// per (user, target); re-rating updates the row, null clears it.
+export const ratings = pgTable(
+  "ratings",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    targetType: text("target_type", { enum: ["session", "entry"] }).notNull(),
+    targetId: text("target_id").notNull(),
+    sessionId: text("session_id").notNull(),
+    // Engine thread holding the rated entry. Null for session-level rows.
+    threadId: text("thread_id"),
+    rating: text("rating", { enum: ["positive", "negative"] }).notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    uniqueIndex("ratings_user_target").on(t.userId, t.targetType, t.targetId),
+    index("ratings_session").on(t.sessionId),
+    index("ratings_type_rating").on(t.targetType, t.rating),
+  ],
+);
+
+export type RatingRow = typeof ratings.$inferSelect;

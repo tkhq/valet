@@ -9,10 +9,12 @@
  * Each resolver reuses the transport's bounded-scan directory calls
  * (`listWorkspaceMembers`, `listWorkspaceChannels`) so a large workspace
  * cannot hang the picker. A missing or token-less credential yields an empty
- * list, never a throw — the endpoint turns an empty list into a free-text
- * fallback.
+ * list — the endpoint turns that into a free-text fallback. A Slack failure
+ * propagates instead, so the endpoint can tell the user the lookup broke
+ * rather than showing "No matches".
  */
 import type { FilterOption, FilterOptionContext, FilterOptionResolver, StoredCredential } from "@valet/engine";
+import { credentialSecret } from "@valet/engine";
 import { SlackApi } from "./api.js";
 import { SlackTransport } from "./transport.js";
 
@@ -27,12 +29,12 @@ import { SlackTransport } from "./transport.js";
  * client at a fake server.
  */
 function directoryTransport(credential: StoredCredential, apiBaseUrl?: string): SlackTransport {
-  return new SlackTransport(new SlackApi(credential.accessToken ?? "", apiBaseUrl), "filter-options");
+  return new SlackTransport(new SlackApi(credentialSecret(credential) ?? "", apiBaseUrl), "filter-options");
 }
 
 /** True when the credential can drive a bot-token directory read. */
 function hasToken(credential: StoredCredential | null): credential is StoredCredential {
-  return credential !== null && typeof credential.accessToken === "string" && credential.accessToken !== "";
+  return credentialSecret(credential) !== undefined;
 }
 
 /**
@@ -43,31 +45,28 @@ function hasToken(credential: StoredCredential | null): credential is StoredCred
 async function resolveUsers(ctx: FilterOptionContext, apiBaseUrl?: string): Promise<FilterOption[]> {
   if (!hasToken(ctx.credential)) return [];
   const transport = directoryTransport(ctx.credential, apiBaseUrl);
-  try {
-    const members = await transport.listWorkspaceMembers(ctx.q ?? "");
-    return members.map((member) => {
-      const label = member.realName ?? member.name;
-      const option: FilterOption = { id: member.id, label };
-      if (member.realName !== undefined && member.realName !== member.name) option.hint = `@${member.name}`;
-      return option;
-    });
-  } catch {
-    // Contract: a provider error is an empty list, not a throw — the endpoint
-    // turns it into a free-text fallback.
-    return [];
-  }
+  const members = await transport.listWorkspaceMembers(ctx.q ?? "");
+  return members.map((member) => {
+    const label = member.realName ?? member.name;
+    const option: FilterOption = { id: member.id, label };
+    if (member.realName !== undefined && member.realName !== member.name) option.hint = `@${member.name}`;
+    return option;
+  });
 }
 
-/** List public and private channels matching `ctx.q`, labeled `#name`. */
+/**
+ * List the channels the bot has joined matching `ctx.q`, labeled `#name`.
+ *
+ * A Slack failure propagates. The endpoint turns a throw into a `reason` and a
+ * free-text input; swallowing it here returned an empty list that the picker
+ * showed as "No matches" — a rate-limited lookup and a channel that truly does
+ * not exist looked identical, and the endpoint cached the lie for a minute.
+ */
 async function resolveChannels(ctx: FilterOptionContext, apiBaseUrl?: string): Promise<FilterOption[]> {
   if (!hasToken(ctx.credential)) return [];
   const transport = directoryTransport(ctx.credential, apiBaseUrl);
-  try {
-    const channels = await transport.listWorkspaceChannels(ctx.q ?? "");
-    return channels.map((channel) => ({ id: channel.id, label: `#${channel.name}` }));
-  } catch {
-    return [];
-  }
+  const channels = await transport.listWorkspaceChannels(ctx.q ?? "");
+  return channels.map((channel) => ({ id: channel.id, label: `#${channel.name}` }));
 }
 
 /** Source name → resolver, as registered on the Slack plugin manifest. */

@@ -2,6 +2,23 @@
 
 Place this file at the root of your repository to customize sandbox image prebuild behavior. All fields are optional. Omit the file entirely to use pure auto-detection.
 
+## Test the recipe locally
+
+Recipes run inside the platform's image bake, but you can validate and run one from a checkout with the `valet` CLI — no running Valet instance needed:
+
+```
+valet prebuild plan            # resolved steps + docker/workspaceStorage knobs
+valet prebuild plan --dockerfile
+valet prebuild build --base <sandbox image>   # real docker build, streamed
+```
+
+`plan` catches schema errors and shows what lockfile detection found (including steps a `skipDetect: true` suppresses). `build` runs the same recipe/setup commands the platform bake runs, against a local clone of your COMMITTED tree — `.git` included, matching the platform's clone, so setup commands that run git (Makefiles using `git rev-parse`, version stamping) behave identically. One exception: the recipe file itself is read from the working tree, so you can iterate without committing each attempt. BuildKit layer caching makes re-runs after editing one step cheap. Pass `--base` when the stock base ref is not pullable from your machine.
+
+Two layer-size rules worth knowing when writing `setup` commands:
+
+1. Run `chmod`/`chown -R` in the SAME command that created the files. A recursive metadata change in a later step copies every touched file into that step's layer (overlayfs copy-up), silently doubling caches in the image.
+2. Scope a recursive `chmod` to what the step created, not a whole shared prefix, for the same reason.
+
 ## Fields
 
 ### `setup`
@@ -33,6 +50,14 @@ Use `skipDetect` when your repo brings its own toolchain that the base image doe
 Type: `boolean` (default `false`)
 
 Set `true` to give this repo's sessions a rootless docker daemon inside the sandbox. The daemon runs as a non-root user; the sandbox is never privileged. Docker state is ephemeral — images pull again after the sandbox restarts. See `docs/specs/2026-08-15-sandbox-docker-design.md`.
+
+### `workspaceStorage`
+
+Type: `string` (a Kubernetes quantity, for example `"4Gi"`; default: the deploy's workspace size, 1Gi)
+
+Declare the workspace volume size this repo needs. A sandbox that clones this repo provisions its persistent `/workspace` claim at the declared size, so a large checkout plus install artifacts fit without any reactive resize. Quote the value — a bare `4` names no unit.
+
+The platform clamps the declared size to the deploy's growth cap (`VALET_SANDBOX_WORKSPACE_MAX`, default 20Gi); a repo cannot request unbounded storage. The declaration only affects newly provisioned workspaces — an existing sandbox keeps its volume until it is destroyed and re-provisioned. Like `docker`, this key configures the SESSION at create time, not the baked image. See `docs/specs/2026-09-03-sandbox-workspace-fit-design.md`.
 
 ## Dockerfile step order
 

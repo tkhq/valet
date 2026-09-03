@@ -44,9 +44,9 @@ import { submitSessionPrompt } from "../routes/messages.js";
 import { ChannelHost } from "../channels/host.js";
 import { EventDispatcher } from "../events/dispatcher.js";
 import { WorkflowScheduler } from "../workflows/scheduler.js";
-import { SkillSyncService } from "../services/skill-sync.js";
+import { ContentSyncService } from "../services/content-sync/service.js";
 import { GitHubSkillRepoReader } from "../services/skill-repo-reader.js";
-import { skillRepoReaderFactory } from "../services/skill-source-credential.js";
+import { skillRepoReaderFactory } from "../services/content-source-credential.js";
 import { buildOrchestratorTarget } from "../events/orchestrator-target.js";
 import { channelThreadContextFetcher } from "../events/channel-thread-context.js";
 import { channelOriginResolver, channelMessageNormalizer } from "../events/channel-origin.js";
@@ -54,6 +54,9 @@ import { resolveOrgId } from "../lib/org.js";
 import { FsBlobStore } from "../providers/blob-fs.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
+import { createOnePasswordService } from "../services/onepassword.js";
+import { getAllowPersonalOnePassword } from "../services/org.js";
+import type { OnePasswordService } from "../services/onepassword.js";
 import { assemblePlugins } from "../plugins/assemble.js";
 import { DynamicToolCounts } from "../plugins/dynamic-tool-count.js";
 import { orgMembers, orgs, users, workflowDefinitions } from "../schema/index.js";
@@ -78,6 +81,10 @@ export interface TestApi {
 }
 
 export interface BootTestApiOpts {
+  /** Replace the 1Password service the EngineHost captures at boot. A swap on
+   * `api.providers.onePassword` after boot never reaches a session's
+   * credential provider, which closed over the boot-time instance. */
+  onePassword?: OnePasswordService;
   /** Override the default `VirtualSandboxProvider` — e.g. a create-counting
    * wrapper that proves a code path never provisions a sandbox. */
   sandboxProvider?: SandboxProvider;
@@ -178,7 +185,7 @@ export interface BootTestApiOpts {
   imageBuilder?: ImageBuilder | null;
   /** Overrides the GitHub API base URL two constructed services read
    * through: the `PrebuildService`'s credential/contents resolution (ignored
-   * when `imageBuilder` is unset), and the skill-sync reader. Point it at
+   * when `imageBuilder` is unset), and the content-sync reader. Point it at
    * `startGithubFixture()`'s `url`. */
   githubApiUrl?: string;
 }
@@ -321,6 +328,12 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
   // that don't need to observe the hooks directly. `opts.on*` overrides
   // take precedence for tests that do (e.g. asserting call order/count).
   const defaultHibernationHooks = buildHibernationHooks(db);
+  const onePassword =
+    opts.onePassword ??
+    createOnePasswordService({
+      credentials: engineCredentials,
+      getAllowPersonal: (orgId) => getAllowPersonalOnePassword(db, orgId),
+    });
   const engineHost = new EngineHost({
     engineStore,
     sandboxProvider,
@@ -336,6 +349,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     onSessionReady: opts.onSessionReady ?? defaultHibernationHooks.onSessionReady,
     idleSweepTestHooks: opts.idleSweepTestHooks,
     githubTokenDeps: opts.githubTokenDeps,
+    onePassword,
     db,
     apiBaseUrl,
     plugins,
@@ -423,6 +437,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     plugins,
     publicUrl: opts.channelPublicUrl,
     resolveOrgId: () => resolveOrgId(db),
+    onePassword,
   });
   if (opts.startChannelHost) {
     await channelHost.start();
@@ -453,6 +468,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     // this, a `github` tool node inside a workflow threw a wiring error and
     // the whole path was untestable.
     githubTokenDeps: opts.githubTokenDeps ?? { key: deriveSecretKey("test-key") },
+    onePassword,
   });
   // "Grant the rest of this run" (action-policies plan, Task 3/6): mirrors
   // `providers/node.ts`'s real-boot `onApprovalGrant` wiring so integration
@@ -524,10 +540,10 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
 
   const webhookRateLimiter = new WorkflowWebhookRateLimiter(opts.webhookRateLimit ?? { limit: 30, windowMs: 60_000 });
 
-  // Skill-repository sync. Constructed with the same real deps
+  // Repository content sync. Constructed with the same real deps
   // `buildNodeProviders` uses, but NEVER started on its timer — tests drive
   // `syncOnce`/`pollOnce` themselves, matching the event dispatcher.
-  const skillSync = new SkillSyncService({
+  const contentSync = new ContentSyncService({
     db,
     reader: new GitHubSkillRepoReader({ apiUrl: opts.githubApiUrl }),
     readerFor: skillRepoReaderFactory(githubTokenDeps, { apiUrl: opts.githubApiUrl }),
@@ -542,6 +558,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     imageBuilder: null,
     eventStream,
     engineCredentials,
+    onePassword,
     engineHost,
     childWatcher,
     childSpawner: (req, ctx) => {
@@ -559,7 +576,7 @@ export async function bootTestApi(opts: BootTestApiOpts = {}): Promise<TestApi> 
     workflowScheduler,
     webhookRateLimiter,
     eventDispatcher,
-    skillSync,
+    contentSync,
     plugins,
     actionPluginByService,
     dynamicToolCounts: new DynamicToolCounts({ credentials: engineCredentials }),

@@ -22,8 +22,8 @@ import {
   defaultRetention,
   imageRefFor,
   slugify,
-  repoDockerFlag,
-  clearRepoDockerCache,
+  repoPrebuildFlags,
+  clearRepoPrebuildFlagsCache,
   resolveChangedFiles,
   fetchRepoFile,
 } from "./source-service.js";
@@ -1450,9 +1450,9 @@ describe("error exports", () => {
   });
 });
 
-// ── repoDockerFlag ────────────────────────────────────────────────────────────
+// ── repoPrebuildFlags ────────────────────────────────────────────────────────────
 
-describe("repoDockerFlag", () => {
+describe("repoPrebuildFlags", () => {
   let db: AppDb;
   let credentials: PgCredentialStore;
   let fixture: GithubFixture;
@@ -1481,7 +1481,7 @@ describe("repoDockerFlag", () => {
   });
 
   afterEach(async () => {
-    clearRepoDockerCache();
+    clearRepoPrebuildFlagsCache();
     await fixture.close();
   });
 
@@ -1492,8 +1492,9 @@ describe("repoDockerFlag", () => {
       }
       return { status: 404, body: { message: "Not Found" } };
     };
-    const result = await repoDockerFlag(deps(), "tok", "o", "r", "main");
-    expect(result).toBe(true);
+    const result = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
+    expect(result.docker).toBe(true);
+    expect(result.workspaceStorage).toBeUndefined();
   });
 
   it("returns false when the file is absent, and caches subsequent calls", async () => {
@@ -1502,11 +1503,12 @@ describe("repoDockerFlag", () => {
       if (path === ".valet/prebuild.yaml") callCount++;
       return { status: 404, body: { message: "Not Found" } };
     };
-    const result = await repoDockerFlag(deps(), "tok", "o", "r", "main");
-    expect(result).toBe(false);
+    const result = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
+    expect(result.docker).toBe(false);
+    expect(result.workspaceStorage).toBeUndefined();
     expect(callCount).toBe(1);
     // Second call — should be served from cache, no new HTTP call.
-    await repoDockerFlag(deps(), "tok", "o", "r", "main");
+    await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
     expect(callCount).toBe(1);
   });
 
@@ -1517,8 +1519,8 @@ describe("repoDockerFlag", () => {
       }
       return { status: 404, body: { message: "Not Found" } };
     };
-    const result = await repoDockerFlag(deps(), "tok", "o", "r", "main");
-    expect(result).toBe(false);
+    const result = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
+    expect(result.docker).toBe(false);
   });
 
   it("returns false on network/server errors (best-effort)", async () => {
@@ -1528,8 +1530,8 @@ describe("repoDockerFlag", () => {
       }
       return { status: 404, body: { message: "Not Found" } };
     };
-    const result = await repoDockerFlag(deps(), "tok", "o", "r", "main");
-    expect(result).toBe(false);
+    const result = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
+    expect(result.docker).toBe(false);
   });
 
   it("resolves false and does not cache when the fetch hangs (timeout seam)", async () => {
@@ -1544,7 +1546,7 @@ describe("repoDockerFlag", () => {
 
     const timedOut = Symbol("timedOut");
     const result = await Promise.race([
-      repoDockerFlag({ ...deps(), fetchImpl: hangingFetch }, "tok", "o", "r", "hang-ref"),
+      repoPrebuildFlags({ ...deps(), fetchImpl: hangingFetch }, "tok", "o", "r", "hang-ref"),
       new Promise<typeof timedOut>((resolve) => setTimeout(() => resolve(timedOut), 200)),
     ]);
     expect(result).toBe(timedOut); // the call is still pending — not cached
@@ -1557,8 +1559,8 @@ describe("repoDockerFlag", () => {
       }
       return { status: 404, body: { message: "Not Found" } };
     };
-    const afterTimeout = await repoDockerFlag(deps(), "tok", "o", "r", "hang-ref");
-    expect(afterTimeout).toBe(true); // real fetch ran — not served from a stale cache entry
+    const afterTimeout = await repoPrebuildFlags(deps(), "tok", "o", "r", "hang-ref");
+    expect(afterTimeout.docker).toBe(true); // real fetch ran — not served from a stale cache entry
 
     // Resolve the hang to let the dangling promise settle cleanly.
     hangResolve?.();
@@ -1569,14 +1571,38 @@ describe("repoDockerFlag", () => {
     // Verifies the cap guard does not corrupt state: the 1001st call must still
     // return the correct value (false for a missing file).
     contentsHandler = () => ({ status: 404, body: { message: "Not Found" } });
-    const promises: Promise<boolean>[] = [];
+    const promises: Promise<unknown>[] = [];
     for (let i = 0; i < 1000; i++) {
-      promises.push(repoDockerFlag(deps(), "tok", "o", `repo-${i}`, "main"));
+      promises.push(repoPrebuildFlags(deps(), "tok", "o", `repo-${i}`, "main"));
     }
     await Promise.all(promises);
     // The map was cleared at entry 1000. This call re-fetches cleanly.
-    const result = await repoDockerFlag(deps(), "tok", "o", "cap-check", "main");
-    expect(result).toBe(false);
+    const result = await repoPrebuildFlags(deps(), "tok", "o", "cap-check", "main");
+    expect(result.docker).toBe(false);
+  });
+
+  it("carries the repo-declared workspaceStorage alongside docker (TKAI-385)", async () => {
+    contentsHandler = (_owner, _repo, path) => {
+      if (path === ".valet/prebuild.yaml") {
+        return { body: { content: b64('docker: true\nworkspaceStorage: "4Gi"'), encoding: "base64" } };
+      }
+      return { status: 404, body: { message: "Not Found" } };
+    };
+    const result = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
+    expect(result).toEqual({ docker: true, workspaceStorage: "4Gi" });
+  });
+
+  it("a malformed workspaceStorage value degrades to the defaults (best-effort, like every other read failure)", async () => {
+    contentsHandler = (_owner, _repo, path) => {
+      if (path === ".valet/prebuild.yaml") {
+        return { body: { content: b64("docker: true\nworkspaceStorage: 4"), encoding: "base64" } };
+      }
+      return { status: 404, body: { message: "Not Found" } };
+    };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const result = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
+    expect(result).toEqual({ docker: false });
+    errSpy.mockRestore();
   });
 });
 

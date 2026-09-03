@@ -30,7 +30,7 @@
  * the intended use, so refusing the second would be wrong.
  */
 import { randomUUID } from "node:crypto";
-import { and, eq, like, or } from "drizzle-orm";
+import { and, eq, inArray, like, or } from "drizzle-orm";
 import type { ActionPlugin, CredentialOwner, CredentialStore, ValetPlugin, WorkflowTemplate } from "@valet/engine";
 import {
   collectTemplatePaths,
@@ -43,9 +43,15 @@ import {
   type WorkflowInputDefinition,
 } from "@valet/workflow";
 import type { AppDb } from "../lib/drizzle.js";
-import { eventSubscriptions, workflowDefinitions, workflowSchedules, workflowVersions } from "../schema/index.js";
+import {
+  eventSubscriptions,
+  workflowDefinitions,
+  workflowSchedules,
+  workflowTemplates,
+  workflowVersions,
+} from "../schema/index.js";
 import { builtinWorkflowTemplates } from "./template-definitions.js";
-import { isTeamMember, lockTeamForOwnership } from "../services/teams.js";
+import { isTeamMember, listTeamsForUser, lockTeamForOwnership } from "../services/teams.js";
 import { orgProvidedServiceSet, unavailableServiceSet } from "../services/integration-availability.js";
 import { buildValidateEnvironment } from "./validation-env.js";
 import { nextFireAt } from "./schedule-service.js";
@@ -191,6 +197,69 @@ export function listCatalogTemplates(plugins: ValetPlugin[]): OwnedTemplate[] {
 
 export function findCatalogTemplate(plugins: ValetPlugin[], id: string): OwnedTemplate | null {
   return listCatalogTemplates(plugins).find((t) => t.template.id === id) ?? null;
+}
+
+/** What a mirrored template's `pluginName` reads as: the repository it came
+ * from, so every message can still name the place to go and fix it. */
+function mirroredSourceName(repoFullName: string, path: string): string {
+  return `${repoFullName}:${path}`;
+}
+
+/**
+ * The code catalog, then the mirrored templates this caller can reach: the
+ * org's rows, and the rows of every team they belong to.
+ *
+ * Order carries the precedence rule. A shipped template always outranks a
+ * mirrored one claiming its id, because we ship one side and a repository
+ * owns the other; the sync also refuses such an id with a warning, so this
+ * order is the second line rather than the first.
+ *
+ * `listCatalogTemplates` stays pure and code-only. This is the function every
+ * owner-scoped read goes through instead.
+ */
+export async function listCatalogTemplatesForOwner(
+  deps: TemplateServiceDeps,
+  caller: { userId: string; orgId: string },
+): Promise<OwnedTemplate[]> {
+  const code = listCatalogTemplates(deps.plugins);
+  const teamIds = (await listTeamsForUser(deps.db, caller.userId)).map((team) => team.id);
+  const reach = or(
+    and(eq(workflowTemplates.ownerType, "org"), eq(workflowTemplates.ownerId, caller.orgId)),
+    teamIds.length > 0
+      ? and(eq(workflowTemplates.ownerType, "team"), inArray(workflowTemplates.ownerId, teamIds))
+      : undefined,
+  );
+  const rows = await deps.db
+    .select()
+    .from(workflowTemplates)
+    .where(and(eq(workflowTemplates.orgId, caller.orgId), reach))
+    .orderBy(workflowTemplates.templateId);
+
+  const seen = new Set(code.map((owned) => owned.template.id));
+  const mirrored: OwnedTemplate[] = [];
+  for (const row of rows) {
+    // A shipped id wins, and so does the first mirrored row of two teams that
+    // both publish one id. Skipping rather than throwing: a repository owns
+    // this side, and a build-time throw would take the whole gallery down for
+    // a mistake nobody here can fix.
+    if (seen.has(row.templateId)) continue;
+    seen.add(row.templateId);
+    const source = row.sourceId === null ? "a repository" : row.sourceId;
+    mirrored.push({
+      pluginName: mirroredSourceName(source, row.upstreamPath),
+      template: row.template as WorkflowTemplate,
+    });
+  }
+  return [...code, ...mirrored];
+}
+
+/** One template the caller can reach, shipped or mirrored. */
+export async function findTemplateForOwner(
+  deps: TemplateServiceDeps,
+  caller: { userId: string; orgId: string },
+  id: string,
+): Promise<OwnedTemplate | null> {
+  return (await listCatalogTemplatesForOwner(deps, caller)).find((t) => t.template.id === id) ?? null;
 }
 
 // ─── Definition introspection ────────────────────────────────────────────
@@ -511,7 +580,7 @@ export async function listWorkflowTemplateSummaries(
   const connected = new Set([...personal.map((cred) => cred.service), ...orgProvided]);
 
   const summaries: WorkflowTemplateSummary[] = [];
-  for (const owned of listCatalogTemplates(deps.plugins)) {
+  for (const owned of await listCatalogTemplatesForOwner(deps, caller)) {
     const result = summarizeTemplate(owned, deps.actionPluginByService, connected, unavailable);
     if (!result.ok) {
       console.error(
@@ -731,7 +800,7 @@ export async function installWorkflowTemplate(
   input: InstallTemplateInput = {},
   now = Date.now(),
 ): Promise<InstallTemplateResult> {
-  const owned = findCatalogTemplate(deps.plugins, templateId);
+  const owned = await findTemplateForOwner(deps, owner, templateId);
   if (!owned) {
     return { ok: false, code: "not_found", error: `No template with id "${templateId}". Reload the gallery and try again.` };
   }

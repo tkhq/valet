@@ -295,6 +295,15 @@ export function buildDockerRunArgs(opts: BuildDockerRunArgsOpts): string[] {
     runArgs.push("--env", "VALET_SANDBOX_DOCKER=1");
   }
   if (opts.network !== "bridge") runArgs.push("--network", opts.network);
+  // `host.docker.internal` is how a container reaches the host that runs the
+  // api — the address `VALET_API_URL` carries on this backend (see
+  // `resolveSandboxApiUrl`). Docker Desktop and colima publish the name
+  // themselves; a Linux daemon does not, so map it explicitly. Skipped for
+  // `none` (no route to anything) and `host` (the container already shares
+  // the host's loopback, and Docker rejects `--add-host` there).
+  if (opts.network !== "none" && opts.network !== "host") {
+    runArgs.push("--add-host", "host.docker.internal:host-gateway");
+  }
   if (opts.env) {
     for (const [k, v] of Object.entries(opts.env)) {
       runArgs.push("--env", `${k}=${v}`);

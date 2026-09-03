@@ -16,6 +16,7 @@ wrangler.deploy.toml
 .env
 .env.backup*
 .env.e2e
+.env.eval
 .env.local
 .env.*.local
 .env.deploy
@@ -74,3 +75,6 @@ workspaces/*
 # Worktree-local dev data (make dev-local: VALET_DATA_DIR=./.valet-dev).
 # NOT .valet/ — that directory is tracked repo config (prebuild.yaml).
 .valet-dev/
+
+# Eval run output (baselines stay tracked; see packages/eval)
+evals/results/

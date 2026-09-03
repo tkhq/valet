@@ -1,0 +1,45 @@
+# Hard builder case (model separation): expression evaluator with
+# precedence, right-associative exponent, and unary minus — the classic
+# hand-rolled-parser trap. Hidden probes computed by script; the stated
+# rule is that ^ binds tighter than unary minus (-3^2 = -9).
+#
+# Tuning data (2026-09-02): haiku-4-5 passes ~1 in 4 single runs (its
+# parsers keep rejecting a unary minus inside an exponent, `2^-2`);
+# sonnet-5 passed every attempt. runs: 3 with the strict threshold turns
+# haiku's coin-flip into a reliable FAIL (~2%) without hurting sonnet.
+id: builder-expression-eval
+description: Implement an arithmetic expression evaluator; hidden probes test precedence and unary minus.
+profile: full
+runs: 3
+turns:
+  - role: user
+    content: >-
+      Create /workspace/expr.js: a Node ESM module exporting evaluate(s)
+      that evaluates an arithmetic expression string and returns a number.
+      Support +, -, *, /, parentheses, decimal numbers, and ^ for
+      exponentiation. Rules: * and / bind tighter than + and -; ^ binds
+      tighter than everything and is RIGHT-associative (2^3^2 is 2^(3^2));
+      unary minus binds looser than ^ (-3^2 is -(3^2)) and may appear
+      before numbers or parentheses. Whitespace is insignificant. Also add
+      /workspace/package.json with "type": "module". Reply "done" when
+      written.
+timeout_ms: 420000
+checks:
+  - type: tool_called
+    tool: write
+  - type: verify_command
+    command: >-
+      node -e "import('/workspace/expr.js').then((m) =>
+      console.log(m.evaluate('2+3*4'), m.evaluate('7/2'), m.evaluate('(1+2)*-3')))"
+    expect_output: "^14 3\\.5 -9"
+  - type: verify_command
+    command: >-
+      node -e "import('/workspace/expr.js').then((m) =>
+      console.log(m.evaluate('2^3^2'), m.evaluate('2^-2')))"
+    expect_output: "^512 0\\.25"
+  - type: verify_command
+    command: >-
+      node -e "import('/workspace/expr.js').then((m) =>
+      console.log(m.evaluate('-3*-(2+1)'), m.evaluate('-3^2+1')))"
+    expect_output: "^9 -8"
+  - type: no_errors

@@ -19,7 +19,7 @@ import {
   llmProviders,
   orgMembers,
   orgs,
-  skillSources,
+  contentSources,
   skills,
   teams,
   teamMembers,
@@ -45,7 +45,7 @@ import {
   isKnownProviderKind,
   type LlmProviderKind,
 } from "./llm-providers.js";
-import { parseRepoInput } from "./skill-sources.js";
+import { deleteMirroredContent, parseRepoInput } from "./content-sources.js";
 import type { SourceService } from "../bakes/source-service.js";
 
 // ---------------------------------------------------------------------------
@@ -648,8 +648,8 @@ async function reconcileLlmProvidersPass(db: AppDb, cfg: InstanceConfig): Promis
 // Skill sources pass
 // ---------------------------------------------------------------------------
 
-/** Same five-minute claim lease `skill-sync.ts` uses. A pending never-synced
- * row older than this is a dead claim, not a live one. */
+/** Same five-minute claim lease `content-sync/service.ts` uses. A pending
+ * never-synced row older than this is a dead claim, not a live one. */
 const CLAIM_LEASE_MS = 5 * 60_000;
 
 async function reconcileSkillSourcesPass(db: AppDb, cfg: InstanceConfig): Promise<void> {
@@ -725,9 +725,9 @@ async function reconcileSkillSourcesPass(db: AppDb, cfg: InstanceConfig): Promis
 
     // Check if the row already exists with the desired id.
     const existingById = await db
-      .select({ id: skillSources.id })
-      .from(skillSources)
-      .where(eq(skillSources.id, desiredId))
+      .select({ id: contentSources.id })
+      .from(contentSources)
+      .where(eq(contentSources.id, desiredId))
       .limit(1);
 
     if (existingById[0]) {
@@ -736,14 +736,14 @@ async function reconcileSkillSourcesPass(db: AppDb, cfg: InstanceConfig): Promis
       // backoff. A finishing sync can set lastSyncedAt between a select
       // and this write, so lastSyncedAt IS NULL stays on the UPDATE.
       await db
-        .update(skillSources)
+        .update(contentSources)
         .set({ nextAttemptAt: now, updatedAt: now })
         .where(
           and(
-            eq(skillSources.id, desiredId),
-            isNull(skillSources.lastSyncedAt),
-            eq(skillSources.status, "pending"),
-            lte(skillSources.updatedAt, now - CLAIM_LEASE_MS),
+            eq(contentSources.id, desiredId),
+            isNull(contentSources.lastSyncedAt),
+            eq(contentSources.status, "pending"),
+            lte(contentSources.updatedAt, now - CLAIM_LEASE_MS),
           ),
         );
       continue;
@@ -752,16 +752,16 @@ async function reconcileSkillSourcesPass(db: AppDb, cfg: InstanceConfig): Promis
     // Check for an UNMANAGED row tracking the same (orgId, ownerType, ownerId, repoFullName, subpath).
     // The unique index is on (orgId, ownerType, ownerId, repoFullName, subpath).
     const unmanagedRows = await db
-      .select({ id: skillSources.id })
-      .from(skillSources)
+      .select({ id: contentSources.id })
+      .from(contentSources)
       .where(
         and(
-          eq(skillSources.orgId, orgId),
-          eq(skillSources.ownerType, ownerType),
-          eq(skillSources.ownerId, ownerId),
-          eq(skillSources.repoFullName, repoFullName),
-          eq(skillSources.subpath, subpath),
-          notLike(skillSources.id, "skillsrc_cfg_%"),
+          eq(contentSources.orgId, orgId),
+          eq(contentSources.ownerType, ownerType),
+          eq(contentSources.ownerId, ownerId),
+          eq(contentSources.repoFullName, repoFullName),
+          eq(contentSources.subpath, subpath),
+          notLike(contentSources.id, "skillsrc_cfg_%"),
         ),
       )
       .limit(1);
@@ -775,7 +775,7 @@ async function reconcileSkillSourcesPass(db: AppDb, cfg: InstanceConfig): Promis
 
     // Insert the config-owned row. Omit `team` → org owner (today's
     // default). A named team writes that team's owner.
-    await db.insert(skillSources).values({
+    await db.insert(contentSources).values({
       id: desiredId,
       orgId,
       ownerType,
@@ -796,22 +796,24 @@ async function reconcileSkillSourcesPass(db: AppDb, cfg: InstanceConfig): Promis
     }).onConflictDoNothing();
   }
 
-  // Delete managed rows no longer in the desired set (two-delete: skills then source).
+  // Delete managed rows no longer in the desired set. The mirrored content
+  // goes with the source, through the same helper the API delete uses, so a
+  // config-managed source cannot leave orphans the API delete would not.
   const managedRows = await db
-    .select({ id: skillSources.id })
-    .from(skillSources)
+    .select({ id: contentSources.id })
+    .from(contentSources)
     .where(
       and(
-        eq(skillSources.orgId, orgId),
-        like(skillSources.id, "skillsrc_cfg_%"),
+        eq(contentSources.orgId, orgId),
+        like(contentSources.id, "skillsrc_cfg_%"),
       ),
     );
 
   for (const row of managedRows) {
     if (!desiredIds.has(row.id)) {
       await db.transaction(async (tx) => {
-        await tx.delete(skills).where(and(eq(skills.sourceId, row.id), eq(skills.origin, "repo")));
-        await tx.delete(skillSources).where(eq(skillSources.id, row.id));
+        await deleteMirroredContent(tx, orgId, row.id);
+        await tx.delete(contentSources).where(eq(contentSources.id, row.id));
       });
     }
   }

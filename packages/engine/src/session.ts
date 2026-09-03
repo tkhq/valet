@@ -57,6 +57,7 @@ import type {
   ToolDef,
   WriteFence,
 } from "./types.js";
+import { credentialSecret } from "./types.js";
 
 let nextId = 1;
 function uid(prefix: string): string {
@@ -185,7 +186,7 @@ export class Session {
   readonly options: CreateSessionOptions;
   readonly sandbox: Sandbox;
   readonly attachment: SandboxAttachment;
-  readonly builtinTools: ToolDef[] = builtinTools;
+  readonly builtinTools: ToolDef[];
   /**
    * Opaque per-instance owner id for lease ownership. Claims taken by this
    * running Session carry it; `renewLeases` extends only leases we still own,
@@ -282,6 +283,7 @@ export class Session {
     this.sandbox = sandbox;
     this.attachment = attachment;
     this.policySandbox = policySandbox ?? null;
+    this.builtinTools = options.builtinTools ?? builtinTools;
     this.principal = options.owner ?? { type: "user", id: options.userId };
     this.parentSessionId = options.parentSessionId;
     this.parentThreadId = options.parentThreadId;
@@ -1346,9 +1348,19 @@ export class Session {
       clearInterval(this.sweepTimer);
       this.sweepTimer = null;
     }
-    await Promise.all([...this.threads.values()].map((t) => t.abort()));
-    await this.attachment.destroy();
-    await this.providers.store.deleteSession(this.id);
+    try {
+      await Promise.all([...this.threads.values()].map((t) => t.abort()));
+      await this.attachment.destroy();
+      await this.providers.store.deleteSession(this.id);
+    } catch (err) {
+      // A partial destroy must stay retryable. The delete routes call
+      // destroy twice on purpose (the wake-race cover); a latched flag
+      // turned the retry into a silent no-op, and the engine row plus
+      // sandbox then outlived the delete with no owner left to reclaim
+      // them (observed live on agents-dev).
+      this.destroyed = false;
+      throw err;
+    }
   }
 
   async pendingDecisionGates(): Promise<DecisionGate[]> {
@@ -1530,7 +1542,7 @@ export class Session {
         const stored = await read(service);
         if (!stored) return null;
         return {
-          accessToken: stored.accessToken ?? stored.apiKey ?? "",
+          accessToken: credentialSecret(stored) ?? "",
           refreshToken: stored.refreshToken,
           expiresAt: stored.expiresAt,
           scopes: stored.scopes,
@@ -1545,7 +1557,7 @@ export class Session {
         const stored = await read(service);
         if (!stored) throw new Error(`credential ${service} not connected: ${reason}`);
         return {
-          accessToken: stored.accessToken ?? stored.apiKey ?? "",
+          accessToken: credentialSecret(stored) ?? "",
           refreshToken: stored.refreshToken,
           expiresAt: stored.expiresAt,
           scopes: stored.scopes,

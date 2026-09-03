@@ -4,8 +4,17 @@
  * anonymity in stub-auth mode (the stub answers for everyone) — see
  * `resolveOptionalUser` in `middleware/auth.ts`.
  */
-import { describe, it, expect } from "vitest";
-import { decideArtifactAccess } from "./artifacts.js";
+import { describe, it, expect, beforeEach } from "vitest";
+import type { AppDb } from "../lib/drizzle.js";
+import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
+import { orgMembers, orgs, users } from "../schema/index.js";
+import { writeFile, type MemoryScope } from "./memory.js";
+import { decideArtifactAccess, renderArtifactBody, shareArtifact } from "./artifacts.js";
+
+async function seedUser(db: AppDb, id: string, orgId: string) {
+  await db.insert(users).values({ id, email: `${id}@x.test`, name: id, role: "member" });
+  await db.insert(orgMembers).values({ orgId, userId: id, role: "member" });
+}
 
 const orgArtifact = { orgId: "org-1", visibility: "org" as const, revokedAt: null };
 const publicArtifact = { orgId: "org-1", visibility: "public" as const, revokedAt: null };
@@ -65,5 +74,48 @@ describe("decideArtifactAccess", () => {
     expect(decideArtifactAccess({ artifact: publicArtifact, allowPublicArtifacts: false, user: outsider })).toEqual({
       kind: "not_found",
     });
+  });
+});
+
+describe("renderArtifactBody", () => {
+  it("compiles markdown through GFM into the shell's document wrapper", () => {
+    const out = renderArtifactBody("# Title\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n- [ ] task\n", "markdown");
+    expect(out).toContain('class="valet-artifact-doc"');
+    expect(out).toContain("<h1>");
+    expect(out).toContain("<table>");
+    // GFM task lists — the tell that gfm mode is actually on.
+    expect(out).toContain('type="checkbox"');
+  });
+
+  it("passes html through verbatim — containment is the frame, not a sanitizer", () => {
+    const html = `<h1>Hi</h1><script>draw()</script>`;
+    expect(renderArtifactBody(html, "html")).toBe(html);
+  });
+});
+
+describe("shareArtifact", () => {
+  let db: AppDb;
+  const orgId = "org1";
+
+  beforeEach(async () => {
+    ({ appDb: db } = await freshTestPgDb());
+    await db.insert(orgs).values({ id: orgId, name: "Org", createdAt: Date.now() });
+    await seedUser(db, "u1", orgId);
+  });
+
+  function scopeFor(userId: string): MemoryScope {
+    return { owner: { type: "user", id: userId }, actorUserId: userId };
+  }
+
+  it("carries the memory doc's description onto the artifact", async () => {
+    const scope = scopeFor("u1");
+    await writeFile(db, scope, {
+      path: "reports/deploys.md",
+      content: "# Deploys\n\nBody.\n",
+      description: "Weekly deploy metrics.",
+    });
+
+    const row = await shareArtifact(db, scope, { path: "reports/deploys.md", orgId });
+    expect(row.description).toBe("Weekly deploy metrics.");
   });
 });

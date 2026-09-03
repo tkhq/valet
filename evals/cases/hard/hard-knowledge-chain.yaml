@@ -1,0 +1,21 @@
+# Hard suite (see hard-letter-index.yaml). Multi-hop: two recall steps
+# feeding arithmetic feeding an ordinal-prime lookup. Expected value
+# computed by script: 101 - 88 = 13; the 13th prime is 41.
+id: hard-knowledge-chain
+description: Chain two recall facts into arithmetic and a prime lookup.
+turns:
+  - role: user
+    content: >-
+      Without using any tools: take the atomic number of mendelevium,
+      subtract the number of keys on a standard modern piano, and reply
+      with the prime number at that 1-based position in the sequence of
+      primes (2 is the 1st prime). Reply with just the final number.
+timeout_ms: 180000
+checks:
+  - type: output_contains
+    value: "41"
+  - type: tool_not_called
+    tool: bash
+  - type: max_turns
+    value: 2
+  - type: no_errors

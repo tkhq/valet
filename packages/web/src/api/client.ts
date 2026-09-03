@@ -133,6 +133,7 @@ import type {
   InstallWorkflowTemplateRequest,
   InstallWorkflowTemplateResponse,
   MeResponse,
+  OnePasswordSettingsResponse,
   OrgDirectoryResponse,
   OrgMembersResponse,
   OrgPluginsResponse,
@@ -155,6 +156,9 @@ import type {
   PatchSessionRequest,
   PatchSessionResponse,
   PauseSessionResponse,
+  GetSessionRatingsResponse,
+  PutRatingRequest,
+  PutRatingResponse,
   SessionKind,
   PatchThreadRequest,
   PatchThreadResponse,
@@ -185,6 +189,7 @@ import type {
   PutPolicyOverrideRequest,
   PutPolicyOverrideResponse,
   RedeliverEventResponse,
+  PutOnePasswordSettingsRequest,
   ResolveDecisionRequest,
   ResolveWorkflowApprovalRequest,
   ResolveWorkflowApprovalResponse,
@@ -219,6 +224,11 @@ import type {
   UsageDrillItem,
   UsageScopeName,
   UsageUseCase,
+  AddArtifactCommentRequest,
+  AddArtifactCommentResponse,
+  ArtifactCommentWire,
+  ListArtifactCommentsResponse,
+  ListArtifactVersionsResponse,
 } from "@valet/api/wire";
 import type {
   ExportMemoryResponse,
@@ -277,6 +287,7 @@ class ApiError extends Error {
     this.name = "ApiError";
   }
 }
+
 
 // `GET /api/auth-config` is unauthenticated and doesn't change without a
 // server restart — fetched once and cached, shared by `useAuthConfig`
@@ -585,6 +596,16 @@ export const api = {
     request<{ ok: true }>("DELETE", `/sessions/${encodeURIComponent(id)}`),
   patchSession: (id: string, body: PatchSessionRequest) =>
     request<PatchSessionResponse>("PATCH", `/sessions/${encodeURIComponent(id)}`, body),
+  getSessionRatings: (id: string) =>
+    request<GetSessionRatingsResponse>("GET", `/sessions/${encodeURIComponent(id)}/ratings`),
+  rateSession: (id: string, body: PutRatingRequest) =>
+    request<PutRatingResponse>("POST", `/sessions/${encodeURIComponent(id)}/rating`, body),
+  rateMessage: (sessionId: string, entryId: string, body: PutRatingRequest) =>
+    request<PutRatingResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(entryId)}/rating`,
+      body,
+    ),
   mintSandboxJwt: (id: string) =>
     request<SandboxJwtResponse>("POST", `/sessions/${encodeURIComponent(id)}/sandbox-jwt`),
   pauseSession: (id: string) =>
@@ -661,12 +682,32 @@ export const api = {
     request<ShareArtifactResponse>("POST", "/artifacts/share", body),
   getTeamChildren: (teamId: string) =>
     request<GetTeamChildrenResponse>("GET", `/teams/${encodeURIComponent(teamId)}/children`),
-  listArtifacts: (owner?: OwnerFilter) =>
-    request<ListArtifactsResponse>("GET", `/artifacts${ownerQuery(owner)}`),
+  // `mine=1` is the caller-scoped gallery view (server-filtered — see the
+  // route's comment on why this replaced a client-side `actorUserId` match)
+  // and composes with nothing, so it is a separate option, not `OwnerFilter`.
+  listArtifacts: (owner?: OwnerFilter, opts?: { mine?: boolean }) => {
+    const base = ownerQuery(owner);
+    if (!opts?.mine) return request<ListArtifactsResponse>("GET", `/artifacts${base}`);
+    return request<ListArtifactsResponse>("GET", `/artifacts${base}${base ? "&" : "?"}mine=1`);
+  },
   patchArtifact: (id: string, body: PatchArtifactRequest) =>
     request<PatchArtifactResponse>("PATCH", `/artifacts/${encodeURIComponent(id)}`, body),
   revokeArtifact: (id: string) =>
     request<{ ok: boolean }>("DELETE", `/artifacts/${encodeURIComponent(id)}`),
+  // artifact pages (artifact-pages design): version pinning metadata and
+  // element-anchored comments. Comments are token-addressed like the read —
+  // the page only knows its token — but always need a logged-in caller.
+  listArtifactVersions: (id: string) =>
+    request<ListArtifactVersionsResponse>("GET", `/artifacts/${encodeURIComponent(id)}/versions`),
+  listArtifactComments: (token: string) =>
+    request<ListArtifactCommentsResponse>("GET", `/artifacts/${encodeURIComponent(token)}/comments`),
+  addArtifactComment: (token: string, body: AddArtifactCommentRequest) =>
+    request<AddArtifactCommentResponse>("POST", `/artifacts/${encodeURIComponent(token)}/comments`, body),
+  resolveArtifactComment: (token: string, commentId: string) =>
+    request<ArtifactCommentWire>(
+      "POST",
+      `/artifacts/${encodeURIComponent(token)}/comments/${encodeURIComponent(commentId)}/resolve`,
+    ),
   patchOrgSettings: (body: PatchOrgSettingsRequest) =>
     request<OrgSettingsResponse>("PATCH", "/org/settings", body),
   // org plugin entitlements (plugin-entitlements design). `getOrgPlugins` is
@@ -1090,7 +1131,11 @@ export const api = {
 
   // plugins + credentials (plugin-system-v2 plan Task 15 — connect surface)
   listPlugins: () => request<ListPluginsResponse>("GET", "/plugins"),
-  listCredentials: () => request<ListCredentialsResponse>("GET", "/credentials"),
+  listCredentials: (scope?: "user" | "org") =>
+    request<ListCredentialsResponse>(
+      "GET",
+      `/credentials${scope === "org" ? "?scope=org" : ""}`,
+    ),
   putCredential: (service: string, body: PutCredentialRequest) =>
     request<PutCredentialResponse>(
       "PUT",
@@ -1104,6 +1149,15 @@ export const api = {
       "DELETE",
       `/credentials/${encodeURIComponent(service)}${opts?.scope ? `?scope=${opts.scope}` : ""}`,
     ),
+
+  // 1Password picker backend + settings. `scope` selects which
+  // service-account token to browse with — "org" (open to any org member
+  // once the org token is connected) or "personal" (gated server-side by
+  // the org's allowPersonal toggle).
+  getOnePasswordSettings: () =>
+    request<OnePasswordSettingsResponse>("GET", "/onepassword/settings"),
+  putOnePasswordSettings: (body: PutOnePasswordSettingsRequest) =>
+    request<OnePasswordSettingsResponse>("PUT", "/onepassword/settings", body),
 
   // skills — the markdown playbooks the agent reads. The catalog mixes the
   // plugin-supplied ones with the stored ones the caller owns. Only a

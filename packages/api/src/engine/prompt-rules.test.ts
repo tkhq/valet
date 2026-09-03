@@ -5,7 +5,10 @@ import {
   CODING_PERSISTENCE_RULES,
   CODING_SYSTEM_PROMPT,
   MODEL_SWITCH_CORE,
+  SECRETS_RULES,
   TOOL_USE_RULES,
+  codingSystemPrompt,
+  SECRETS_RULES_NO_CLI,
 } from "./prompt-rules.js";
 
 function flat(text: string): string {
@@ -53,5 +56,23 @@ describe("coding system prompt (TKAI-239 v1 port)", () => {
     expect(CODING_SYSTEM_PROMPT).toContain("Do not finish a hard task on a small tier just because you started there");
     expect(CODING_SYSTEM_PROMPT).not.toContain("child_send");
     expect(CODING_SYSTEM_PROMPT).not.toMatch(/Haiku|Sonnet|Opus|Codex/);
+  });
+  // valet-secrets is installed in every prepped sandbox but appears on no
+  // tool list. Without this paragraph the model asks for a pasted credential.
+  it("names valet-secrets and the reference shape", () => {
+    expect(flat(CODING_SYSTEM_PROMPT)).toContain(flat(SECRETS_RULES));
+    expect(CODING_SYSTEM_PROMPT).toContain("valet-secrets run --env NAME=op://vault/item/field");
+    expect(CODING_SYSTEM_PROMPT).toContain("Never print a credential");
+  });
+  // The command is installed by sandbox prep. A build without prep (a
+  // workflow session node) must not be told to use it.
+  it("composes the secrets paragraph from whether prep installs the CLI", () => {
+    const withCli = codingSystemPrompt({ secretsCli: true });
+    const without = codingSystemPrompt({ secretsCli: false });
+    expect(withCli).toContain("valet-secrets run --env NAME=op://vault/item/field");
+    expect(without).not.toContain("valet-secrets run");
+    expect(flat(without)).toContain(flat(SECRETS_RULES_NO_CLI));
+    expect(without).toContain("Never print a credential");
+    expect(CODING_SYSTEM_PROMPT).toBe(withCli);
   });
 });

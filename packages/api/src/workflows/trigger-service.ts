@@ -20,7 +20,7 @@ import type { SubscriptionFilter } from "../events/match.js";
 import {
   canAccessTriggerRow,
   canAccessTriggerRowInScope,
-  ownedDefinitionRow,
+  armableDefinitionRow,
   scopedTriggerAccess,
   triggerAccessSets,
   type TriggerAccessSets,
@@ -88,7 +88,7 @@ export async function createWorkflowTrigger(
   // Unlike the schedule path, run ownership at fire time was already
   // correct here (`events/dispatcher.ts` bills the workflow definition's
   // own owner) — only this creation-time check needed the fix.
-  const owned = await ownedDefinitionRow(db, { userId: user.id, orgId: user.orgId }, input.workflowId);
+  const owned = await armableDefinitionRow(db, { userId: user.id, orgId: user.orgId }, input.workflowId);
   if (!owned) return { ok: false, error: `workflow not found: ${input.workflowId}` };
 
   const now = Date.now();

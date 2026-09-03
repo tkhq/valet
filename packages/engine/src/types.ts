@@ -783,6 +783,21 @@ export interface StoredCredential {
   metadata?: Record<string, unknown>;
 }
 
+/**
+ * The one secret a credential row carries, whichever slot holds it.
+ *
+ * A row has two slots, `accessToken` and `apiKey`, and the writer picks one
+ * by a rule the reader never sees: the row type for a 1Password reference,
+ * the request field for a pasted value. A reader that names a slot works
+ * until a writer picks the other; a Slack bot token stored under `apiKey`
+ * verified against Slack and then never started the transport. Read through
+ * this instead. Empty means no secret.
+ */
+export function credentialSecret(credential: StoredCredential | null | undefined): string | undefined {
+  const value = credential?.accessToken ?? credential?.apiKey;
+  return value === "" ? undefined : value;
+}
+
 export interface CredentialStore {
   get(owner: CredentialOwner, service: string): Promise<StoredCredential | null>;
   save(owner: CredentialOwner, service: string, credential: StoredCredential): Promise<void>;
@@ -1129,6 +1144,24 @@ export interface GatewayEndpoint {
   port: number;
 }
 
+/**
+ * Outcome of a `Sandbox.growWorkspace` attempt. `grown: false` is a normal,
+ * expected answer (cap reached, resize rate-limited, backend without a
+ * growable workspace) — `reason` says why so the caller can put it in the
+ * surfaced error. `from`/`to` are backend quantity strings (e.g. "1Gi").
+ */
+export interface WorkspaceGrowth {
+  grown: boolean;
+  from?: string;
+  to?: string;
+  reason?: string;
+  /** True when a resize WAS requested but had not completed within the wait
+   * window — the backend will finish it in the background, so a later retry
+   * of the failed operation may succeed without another grow. Distinct from
+   * a policy refusal (cap, rate limit), where nothing was requested. */
+  pending?: boolean;
+}
+
 export interface Sandbox {
   id: string;
   readFile(path: string): Promise<string>;
@@ -1154,14 +1187,52 @@ export interface Sandbox {
    * services). Absent method === always null — existing paths unchanged.
    */
   gatewayEndpoint?(): Promise<GatewayEndpoint | null>;
+  /**
+   * Grow the sandbox's persistent workspace volume one increment (provider
+   * policy: double the current size, capped at a configured max), then wait
+   * for the resize to take effect. Called by workspace prep when a git
+   * operation fails with ENOSPC, so the operation can be retried once on the
+   * larger volume. Returns `grown: false` (never throws) when growth is
+   * refused — at the cap, rate-limited, or the backing volume is not
+   * growable — with `reason` naming why. Absent on providers without a
+   * resizable persistent workspace (docker/local/virtual): callers must
+   * treat an absent method as `grown: false`.
+   */
+  growWorkspace?(): Promise<WorkspaceGrowth>;
 }
 
 export interface SandboxCreateOpts {
   image?: string;
   workspace?: string;
+  /**
+   * Requested size for the sandbox's PERSISTENT workspace volume, as a
+   * quantity string (e.g. "4Gi"). Sourced from the repo's own declaration
+   * (`.valet/prebuild.yaml` `workspaceStorage`) so a large repo starts with
+   * a claim big enough for its checkout + install artifacts instead of
+   * relying on reactive growth. Providers with a sized persistent workspace
+   * (kubernetes) honor it CLAMPED to the deploy's growth cap
+   * (`VALET_SANDBOX_WORKSPACE_MAX`) — a repo cannot request unbounded
+   * storage; other providers ignore it. Only affects a freshly provisioned
+   * volume: an existing workspace keeps its size.
+   */
+  workspaceStorage?: string;
   env?: Record<string, string>;
   timeout?: number;
-  resources?: { cpu?: number; memory?: string };
+  resources?: {
+    cpu?: number;
+    memory?: string;
+    /** Node-local disk (container rootfs + emptyDirs) the sandbox reserves,
+     * as a Kubernetes quantity string (e.g. "2Gi"). The scheduler counts it
+     * against node allocatable, which caps how many sandboxes stack onto one
+     * node (TKAI-349: unbounded stacking exhausted a node's disk and took it
+     * NotReady). Providers without node-local disk accounting ignore it. */
+    ephemeralStorage?: string;
+    /** Node-local disk ceiling for the sandbox (quantity string, e.g. "8Gi").
+     * Past it the kubelet evicts the one runaway sandbox instead of the node
+     * failing. Independent of `ephemeralStorage` — an absent side is
+     * omitted, never inferred from the other. */
+    ephemeralStorageLimit?: string;
+  };
   metadata?: Record<string, unknown>;
   /**
    * The owning session's id. `Engine.materializeSandbox` stamps this on
@@ -1947,6 +2018,12 @@ export interface CreateSessionOptions {
   parentThreadId?: string;
   sandbox: Sandbox | SandboxCreateOpts;
   tools?: ToolDef[];
+  /**
+   * Replace the engine's built-in toolset for this session. A host/eval seam:
+   * pass a filtered copy of `builtinTools` to restrict the agent to a subset
+   * (e.g. an eval case's `tools:` pin). Absent === the full built-in set.
+   */
+  builtinTools?: ToolDef[];
   roles?: RoleSpec[];
   skills?: SkillSource[];
   model: Model<any>;
@@ -2062,6 +2139,28 @@ export interface CreateSessionOptions {
     maxAttempts?: number;
     /** Backoff before each retry, in ms; the last entry repeats. */
     backoffMs?: number[];
+  };
+  /**
+   * Session-default sampling knobs, forwarded to pi-ai per turn as
+   * defaults-not-overrides (same rule as the retry/cache knobs in
+   * `Thread.buildAgent`). Hosts that need reproducible-ish runs (evals)
+   * set `temperature: 0`. Caveat: some models reject non-default
+   * temperature values (pi-ai's Model metadata tracks which); leave unset
+   * for provider defaults.
+   */
+  sampling?: {
+    temperature?: number;
+    /**
+     * Reasoning/thinking effort forwarded to pi-ai (`StreamOptions.
+     * reasoning`), which maps it per provider (OpenAI reasoning_effort,
+     * Anthropic thinking budgets, OpenRouter reasoning.effort, ...).
+     * Unset === provider default; OpenAI reasoning models then run at
+     * MINIMAL effort, which cripples them on deliberation-heavy work
+     * (TKAI-352) — hosts that route such models should set this.
+     */
+    reasoning?: import("@earendil-works/pi-ai").ThinkingLevel;
+    /** Extra provider sampling params (e.g. top_p, seed where supported). */
+    params?: Record<string, unknown>;
   };
   /**
    * Prompt-cache retention preference forwarded to pi-ai (TKAI-320).

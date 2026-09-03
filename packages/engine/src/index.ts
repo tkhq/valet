@@ -1,4 +1,10 @@
 export * from "./types.js";
+// pi-ai passthroughs, re-exported so downstream packages (e.g. @valet/eval)
+// can type model handles and run side completions without their own pi-ai
+// dependency edge (which pnpm may peer-fork into a second instance with its
+// own provider registry — see CLAUDE.md, "Node & workspace traps").
+export type { Model } from "@earendil-works/pi-ai/compat";
+export { completeSimple } from "@earendil-works/pi-ai/compat";
 export {
   NotFoundError,
   NoCredentialsError,
@@ -76,11 +82,13 @@ export {
   recordSandboxExec,
   recordSandboxFlagged,
   recordSandboxProvision,
+  recordSandboxWorkspaceGrow,
   recordSettlement,
   recordToolExecution,
   recordTurn,
   type SandboxDestroyReason,
   type SandboxFlagKind,
+  type WorkspaceGrowOutcome,
 } from "./metrics.js";
 export { Engine } from "./engine.js";
 export { Session } from "./session.js";
@@ -249,6 +257,7 @@ export {
 export {
   entriesToAgentMessages,
   buildSpilledInputMarker,
+  resolveModelId,
   type CompactionOutcome,
 } from "./thread.js";
 export { classifyCacheBreak, type CacheBreakCause, type CacheTurnSnapshot } from "./cache-telemetry.js";

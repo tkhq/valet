@@ -9,6 +9,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates gnupg sudo unzip openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
+# GitHub CLI. The `valet-gh` wrapper (engine/git-credential-helper.ts) installs
+# as `gh` too and execs the real binary with a Valet-resolved GH_TOKEN, so an
+# agent runs `gh pr list` and never handles a credential. Without the binary
+# that wrapper has nothing to exec and answers "gh is not installed in this
+# sandbox image", which reads as a broken integration rather than a missing
+# package. Dockerfile.sandbox-k8s already carries it; this is the same block.
+#
+# Pinned, and installed from the versioned GitHub Releases .deb rather than
+# GitHub's apt repo: that repo only carries the latest version, so an apt pin
+# breaks the build the moment gh ships a release. Release assets are
+# immutable and per-arch.
+# Declared, not inherited: buildx sets TARGETARCH but a stage only sees it
+# after an ARG. Without this the arm64 half of the multi-arch build silently
+# installs the amd64 .deb.
+ARG TARGETARCH
+ARG GH_VERSION=2.63.2
+RUN curl -fsSL -o /tmp/gh.deb \
+      "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${TARGETARCH:-amd64}.deb" \
+    && dpkg -i /tmp/gh.deb \
+    && rm /tmp/gh.deb \
+    && gh --version
+
 # Node.js 22
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y nodejs \
