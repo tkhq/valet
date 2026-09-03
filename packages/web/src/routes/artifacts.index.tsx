@@ -1,0 +1,114 @@
+import { createFileRoute, Link } from "@tanstack/react-router";
+import type { ArtifactListItem } from "@valet/api/wire";
+import { useArtifacts, useRevokeArtifact } from "~/api/artifacts";
+import { EmptyRow, ErrorRow, LoadingRow } from "~/components/primitives";
+import { relativeTime } from "~/lib/relative-time";
+
+/**
+ * `/artifacts` — the gallery of pages the caller published (memory docs and
+ * agent-generated snapshots alike; see the artifacts design). Revoked
+ * artifacts are filtered out: a revoked link is a dead link, not a row to
+ * manage from here.
+ *
+ * Rows link in-app with `token` (`/a/$token`), never `url` — `url` is the
+ * absolute share link, whose origin is the deployment's public URL, which
+ * in dev is the api origin and does not serve the SPA. `url` is correct
+ * only for the clipboard copy.
+ */
+export const Route = createFileRoute("/artifacts/")({ component: ArtifactsPage });
+
+function ArtifactsPage() {
+  const listQ = useArtifacts();
+  const revoke = useRevokeArtifact();
+  const artifacts = (listQ.data?.artifacts ?? []).filter((a) => !a.revoked);
+
+  return (
+    <div className="flex-1 overflow-y-auto">
+      <div className="mx-auto max-w-4xl px-6 py-10">
+        <h1 className="font-display text-2xl text-ink">Artifacts</h1>
+        <p className="mt-1 text-sm text-muted">
+          Pages you published. A link serves logged-in members of your org unless you made it public.
+        </p>
+
+        <div className="mt-6">
+          {listQ.isLoading && <LoadingRow label="Loading artifacts…" />}
+          {listQ.error && (
+            <ErrorRow>Could not load your artifacts. Check that the server is running, then reload.</ErrorRow>
+          )}
+          {listQ.data && artifacts.length === 0 && (
+            <EmptyRow>Nothing published yet. Ask your agent to publish a page, or share a memory doc.</EmptyRow>
+          )}
+          {artifacts.length > 0 && (
+            <div className="divide-y divide-line border-t border-line">
+              {artifacts.map((artifact) => (
+                <ArtifactRow
+                  key={artifact.id}
+                  artifact={artifact}
+                  revoking={revoke.isPending}
+                  onRevoke={() => revoke.mutate({ id: artifact.id })}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ArtifactRow({
+  artifact,
+  revoking,
+  onRevoke,
+}: {
+  artifact: ArtifactListItem;
+  revoking: boolean;
+  onRevoke: () => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 py-2.5">
+      <Link
+        to="/a/$token"
+        params={{ token: artifact.token }}
+        className="min-w-0 flex-1 rounded px-1 py-0.5 hover:bg-ink-wash"
+      >
+        <div className="flex min-w-0 items-center gap-2">
+          <span aria-hidden>{artifact.icon}</span>
+          <span className="min-w-0 flex-1 truncate text-sm text-ink">{artifact.title}</span>
+        </div>
+        <p className="mt-0.5 flex flex-wrap items-center gap-1 text-xs text-muted">
+          <span>{artifact.format}</span>
+          <span>·</span>
+          <span>version {artifact.sharedVersion ?? artifact.version}</span>
+          <span>·</span>
+          {artifact.visibility === "public" ? (
+            <span className="rounded bg-ink-wash px-1.5 py-0.5">public</span>
+          ) : (
+            <span>{artifact.visibility}</span>
+          )}
+          <span>·</span>
+          <span>updated {relativeTime(artifact.updatedAt)}</span>
+        </p>
+      </Link>
+      <div className="flex shrink-0 items-center gap-3">
+        <button
+          type="button"
+          onClick={() => void navigator.clipboard.writeText(artifact.url)}
+          className="text-xs text-muted hover:text-ink"
+        >
+          Copy link
+        </button>
+        <button
+          type="button"
+          disabled={revoking}
+          onClick={() => {
+            if (window.confirm("Revoke this link? Viewers get a 404.")) onRevoke();
+          }}
+          className="text-xs text-danger-500 hover:underline disabled:pointer-events-none disabled:opacity-50"
+        >
+          Revoke
+        </button>
+      </div>
+    </div>
+  );
+}
