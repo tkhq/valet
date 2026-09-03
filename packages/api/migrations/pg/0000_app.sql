@@ -228,7 +228,8 @@ CREATE TABLE "agent_sessions" (
 	"hibernated_sandbox_id" text,
 	"sandbox_reclaimed_at" bigint,
 	"created_at" bigint NOT NULL,
-	"updated_at" bigint NOT NULL
+	"updated_at" bigint NOT NULL,
+	"last_activity_at" bigint
 );
 --> statement-breakpoint
 CREATE INDEX "agent_sessions_user" ON "agent_sessions" ("user_id");
@@ -758,6 +759,15 @@ CREATE INDEX "llm_providers_org" ON "llm_providers" ("org_id");
 --> statement-breakpoint
 CREATE UNIQUE INDEX "llm_providers_org_kind_singleton" ON "llm_providers" ("org_id","kind") WHERE "kind" <> 'openai_compatible';
 --> statement-breakpoint
+CREATE TABLE "model_registry_cache" (
+	"provider_id" text PRIMARY KEY NOT NULL,
+	"models" jsonb DEFAULT '[]'::jsonb NOT NULL,
+	"etag" text,
+	"last_modified" bigint,
+	"checked_at" bigint,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
 CREATE TABLE "session_repos" (
 	"session_id" text NOT NULL,
 	"host" text DEFAULT 'github' NOT NULL,
@@ -1271,3 +1281,21 @@ FROM "llm_proxy_requests" p
 -- non-completion passthroughs (0 tokens), which would otherwise inflate
 -- `/api/usage` turn counts.
 WHERE p."total_tokens" > 0;
+--> statement-breakpoint
+CREATE TABLE "ratings" (
+	"id" text PRIMARY KEY NOT NULL,
+	"user_id" text NOT NULL,
+	"target_type" text NOT NULL,
+	"target_id" text NOT NULL,
+	"session_id" text NOT NULL,
+	"thread_id" text,
+	"rating" text NOT NULL,
+	"created_at" bigint NOT NULL,
+	"updated_at" bigint NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX "ratings_user_target" ON "ratings" ("user_id","target_type","target_id");
+--> statement-breakpoint
+CREATE INDEX "ratings_session" ON "ratings" ("session_id");
+--> statement-breakpoint
+CREATE INDEX "ratings_type_rating" ON "ratings" ("target_type","rating");

@@ -25,6 +25,7 @@ import { recordCredentialRead } from "./metrics.js";
 import type { Model } from "@earendil-works/pi-ai/compat";
 import type {
   BusEvent,
+  ChannelTarget,
   CommandResultEntry,
   MessageEntry,
   CreateSessionOptions,
@@ -185,7 +186,7 @@ export class Session {
   readonly options: CreateSessionOptions;
   readonly sandbox: Sandbox;
   readonly attachment: SandboxAttachment;
-  readonly builtinTools: ToolDef[] = builtinTools;
+  readonly builtinTools: ToolDef[];
   /**
    * Opaque per-instance owner id for lease ownership. Claims taken by this
    * running Session carry it; `renewLeases` extends only leases we still own,
@@ -282,6 +283,7 @@ export class Session {
     this.sandbox = sandbox;
     this.attachment = attachment;
     this.policySandbox = policySandbox ?? null;
+    this.builtinTools = options.builtinTools ?? builtinTools;
     this.principal = options.owner ?? { type: "user", id: options.userId };
     this.parentSessionId = options.parentSessionId;
     this.parentThreadId = options.parentThreadId;
@@ -475,6 +477,11 @@ export class Session {
     // round-trip it through options) so the next `toData()` save can't stomp
     // it back to undefined — and so `setStartRef`'s single-shot guard sees it.
     if (options.startRef === undefined) options.startRef = data.startRef;
+    // Preserve the persisted purpose the same way (TKAI-319): purpose is
+    // behavior-bearing now — it selects turn retry and cache retention — and
+    // a child session that loses it across an api restart would stop riding
+    // out the very outage that restarted the api.
+    if (options.purpose === undefined) options.purpose = data.purpose;
     const threadDatas = await providers.store.listThreads(data.id);
     for (const td of threadDatas) {
       const thread = new Thread(session, td);
@@ -749,7 +756,7 @@ export class Session {
         return thread.submitPrompt(withText(content, outcome.text), opts2);
       }
       if (outcome.kind === "execute") {
-        return this.executeCommand(thread, outcome.resolved, outcome.args, text, opts.author);
+        return this.executeCommand(thread, outcome.resolved, outcome.args, text, opts.author, opts.channel);
       }
       if (outcome.kind === "pass" && outcome.nearMiss !== undefined) {
         const receipt = await thread.submitPrompt(content, opts);
@@ -773,13 +780,16 @@ export class Session {
    * command-shaped receipt. Never touches queue admission — a command runs
    * even while a turn streams.
    *
-   * `PromptOptions` other than `threadId` (resolved by the caller) and
-   * `author` are intentionally not forwarded: they shape queue submissions
-   * (channel, queueMode, model, ...) and a command takes no queue item.
-   * `author` IS forwarded, onto the echo entry — the echo is a persisted
-   * user message, and on a shared session an authorless echo renders as
-   * "You" in every member's view. If another option must reach the command
-   * path, add a parameter here so the dependency is explicit.
+   * `PromptOptions` other than `threadId` (resolved by the caller),
+   * `author`, and `channel` are intentionally not forwarded: they shape
+   * queue submissions (queueMode, model, ...) and a command takes no queue
+   * item. `author` IS forwarded, onto the echo entry — the echo is a
+   * persisted user message, and on a shared session an authorless echo
+   * renders as "You" in every member's view. `channel` IS forwarded, onto
+   * the echo and the result entry — the outbound channel path posts a
+   * command result to a bound channel only when the command came from that
+   * surface (TKAI-323). If another option must reach the command path, add
+   * a parameter here so the dependency is explicit.
    */
   private async executeCommand(
     thread: Thread,
@@ -787,6 +797,7 @@ export class Session {
     args: string[],
     raw: string,
     author?: PromptAuthor,
+    channel?: ChannelTarget,
   ): Promise<PromptReceipt> {
     // Echo the typed command as a persisted user message BEFORE the result.
     // A command takes no queue item, so nothing else persists the user's
@@ -804,6 +815,7 @@ export class Session {
       role: "user",
       content: raw,
       author,
+      channel,
       createdAt: echoAt,
     };
     await this.providers.store.appendEntries(this.id, thread.id, [echo]);
@@ -813,7 +825,18 @@ export class Session {
     if (resolved.source === "builtin") {
       source = "builtin";
       name = resolved.name;
-      result = await executeBuiltin(name, args, this, this.options.commandContext, thread);
+      // Same failure contract as the plugin path below: a throwing builtin
+      // (e.g. /compact when the summarizer provider errors) must persist an
+      // ok:false command_result next to the already-persisted echo entry,
+      // not reject the whole submission into a raw HTTP 500 (TKAI-306).
+      try {
+        result = await executeBuiltin(name, args, this, this.options.commandContext, thread);
+      } catch (err) {
+        result = {
+          ok: false,
+          output: err instanceof Error ? err.message : String(err),
+        };
+      }
     } else if (resolved.source === "plugin") {
       source = "plugin";
       name = `${resolved.pluginName}:${resolved.def.name}`;
@@ -830,7 +853,7 @@ export class Session {
       if (fast === null) {
         const bgName = name;
         void pending
-          .then((r) => this.persistCommandResult(thread, bgName, "plugin", r, echoAt))
+          .then((r) => this.persistCommandResult(thread, bgName, "plugin", r, echoAt, channel))
           .catch((err: unknown) =>
             this.persistCommandResult(
               thread,
@@ -838,6 +861,7 @@ export class Session {
               "plugin",
               { ok: false, output: err instanceof Error ? err.message : String(err) },
               echoAt,
+              channel,
             ),
           );
         return {
@@ -854,7 +878,7 @@ export class Session {
       throw new Error(`executeCommand: unexpected source ${resolved.source}`);
     }
 
-    await this.persistCommandResult(thread, name, source, result, echoAt);
+    await this.persistCommandResult(thread, name, source, result, echoAt, channel);
 
     return {
       sessionId: this.id,
@@ -878,6 +902,7 @@ export class Session {
     source: CommandSource,
     result: { ok: boolean; output: string },
     notBefore: number,
+    channel?: ChannelTarget,
   ): Promise<void> {
     const entry: CommandResultEntry = {
       id: uid("e"),
@@ -889,6 +914,7 @@ export class Session {
       source,
       ok: result.ok,
       output: result.output,
+      channel,
       createdAt: Math.max(Date.now(), notBefore + 1),
     };
     await this.providers.store.appendEntries(this.id, thread.id, [entry]);
@@ -1322,9 +1348,19 @@ export class Session {
       clearInterval(this.sweepTimer);
       this.sweepTimer = null;
     }
-    await Promise.all([...this.threads.values()].map((t) => t.abort()));
-    await this.attachment.destroy();
-    await this.providers.store.deleteSession(this.id);
+    try {
+      await Promise.all([...this.threads.values()].map((t) => t.abort()));
+      await this.attachment.destroy();
+      await this.providers.store.deleteSession(this.id);
+    } catch (err) {
+      // A partial destroy must stay retryable. The delete routes call
+      // destroy twice on purpose (the wake-race cover); a latched flag
+      // turned the retry into a silent no-op, and the engine row plus
+      // sandbox then outlived the delete with no owner left to reclaim
+      // them (observed live on agents-dev).
+      this.destroyed = false;
+      throw err;
+    }
   }
 
   async pendingDecisionGates(): Promise<DecisionGate[]> {

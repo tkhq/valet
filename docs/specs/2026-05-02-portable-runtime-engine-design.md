@@ -763,11 +763,18 @@ interface ToolDef {
   parameters: TSchema;  // TypeBox schema (pi-ai native)
   riskLevel?: 'low' | 'medium' | 'high' | 'critical';
   requiresApproval?: boolean | ((args: Record<string, unknown>, ctx: ToolContext) => Promise<boolean> | boolean);
+  concurrencySafe?: boolean;  // default false: run sequentially (TKAI-318)
   execute: (args: Record<string, unknown>, ctx: ToolContext) => Promise<ToolResult>;
 }
 ```
 
 Tool names are globally unique within a session after registration. Built-in tools use short names (`read`, `bash`); plugin tools use service-qualified names (`github.create_pr`, `linear.create_issue`). If two tools register the same name at the same scope, session creation fails unless a thread-level override intentionally replaces a session-level tool.
+
+**Execution order (TKAI-318).** Tools default to sequential execution: the bridge maps `concurrencySafe: false` to pi-agent-core's `executionMode: "sequential"`, and one sequential tool serializes its whole batch. Only read-only, approval-free tools opt in (`read`, `thread_read`, `child_read`, `child_status`, `list_threads`); an approval-capable tool is forced sequential even when marked safe, so the flag cannot resurrect the out-of-order approval bug. Known cost: plugin/action tool batches serialize until `concurrencySafe` is derived from their metadata (MCP `readOnlyHint`) — tracked on TKAI-318.
+
+**Read-before-write gate (TKAI-318).** The thread keeps a content-hash map of the model's file reads (`ToolContext.fileReads`), keyed by lexically normalized absolute paths so path spellings cannot dodge or spuriously trip it. `edit` is a read-modify-write: it fails with corrective text when the file was never read this session or its content no longer matches the recorded hash. `write` replaces content wholesale by declared intent: it blocks only the changed-since-read case, never the never-read case, and performs no pre-read unless a hash is recorded — regenerating a large or binary artifact costs one write. Content hashing catches bash-side and human edits that timestamps cannot. The map is in-memory: after a restart the model must re-read before editing. Hosts that do not wire `fileReads` get no gate.
+
+**Empty results (TKAI-318).** The bridge replaces an empty tool result with `(toolName completed with no output)` — an empty result at the prompt tail can make the model end its turn with zero output.
 
 #### ToolContext
 
@@ -976,12 +983,13 @@ Token-aware context compression with two complementary techniques. When a thread
 
 #### Triggers
 
-- **Proactive (auto)** — after each turn, if `estimateContextTokens(systemPrompt, messages) >= usable(model, cfg)` where
+- **Proactive (auto)** — after each turn, if `estimateLiveContextTokens(systemPrompt, messages) >= usable(model, cfg)` where
   ```
   usable = contextWindow − reserved
   reserved = cfg.reserveTokens ?? min(20_000, model.maxOutputTokens)
   ```
-  the engine queues a compaction pass to run before the next user turn would otherwise execute. The trigger uses the same char-based estimate (`estimateTokens`, ~4 chars/token) as the cut-point budget — never pi-ai's per-call `Usage`. Provider-reported totals include cache reads and system/tool overhead that compaction cannot reclaim, so a usage-based trigger compacts long cached threads that do not need it (TKAI-305). The estimate undercounts tool definitions; the reactive path backstops that.
+  the engine queues a compaction pass to run before the next user turn would otherwise execute. The measure is a hybrid (TKAI-306, transplanted from Claude Code): anchor on the newest assistant message with real provider usage — its total is the exact context of that request, system prompt and tool definitions included — and add the char-based estimate (`estimateTokens`, ~4 chars/token) only for messages appended since. The anchor re-bases per response, so nothing double counts. Rehydrated transcripts carry zeroed usage and fall back to the pure estimate until the first live response. Never compare a cumulative usage sum against the window (TKAI-305).
+- **Failure circuit breaker (TKAI-306)** — after 3 consecutive proactive passes that failed (`compaction_failed`) or reclaimed nothing (`compaction_noop`: the trigger fired but the recent turns already fit the tail budget, so the context is dominated by system overhead), the thread stops attempting proactive compaction and emits `compaction_circuit_open`. A compaction that persists a summary (manual `/compact` included) closes the breaker; prune-only passes count as progress and do not trip it. Reactive and manual paths are never gated. A failed reactive compaction emits `compaction_failed` and skips the retry; the turn keeps its recorded overflow error.
 - **Reactive (overflow)** — if a turn's assistant message returns `stopReason === 'error'` and pi-ai's `isContextOverflow(message)` matches the error, the engine compacts and retries the same turn. Reactive compaction strips media attachments from history before summarizing (some overflow is media-bytes, not token-count, so dropping images can be enough on its own).
 
 #### Tail preservation
@@ -1009,11 +1017,14 @@ When pruning isn't enough (or after `cfg.pruneMinimumTokens` worth of tool outpu
 3. If the thread already has a `CompactionEntry`, load its `summary` as `previousSummary`. The new summarization is iterative — the prompt asks the summarizer to *update* the prior summary with new facts rather than write a fresh one.
 4. Call a summarizer model (`cfg.summarizerModel ?? sessionModel`; typically a smaller cheaper model like Haiku) with a structured-markdown prompt:
    ```
-   ## Goal · ## Constraints & Preferences
-   ## Progress (Done / In Progress / Blocked) · ## Key Decisions
-   ## Agreed Approach · ## Active Tools & Skills
+   ## Goal · ## Constraints & Preferences · ## User Messages
+   ## Progress (Done / In Progress / Blocked) · ## Errors & Fixes
+   ## Key Decisions · ## Agreed Approach · ## Active Tools & Skills
    ## Next Steps · ## Critical Context · ## Relevant Files
    ```
+   The prompt also asks the summarizer to draft in an `<analysis>` scratchpad first (stripped before storage) and to quote the most recent messages verbatim in the immediate next step, so task interpretation cannot drift across the boundary (TKAI-306).
+
+   An errored summarizer completion throws instead of storing an empty summary. If the error is itself a context overflow, the engine drops the oldest half of the head input and retries, up to 3 attempts; the `CompactionEntry` still covers the full head, and the previous summary anchors what the truncated input loses (TKAI-306).
    This template is required, not advisory. The summary text is the source of truth for the LLM's view of pre-cut history; using a structured form prevents the summary from drifting into prose that crowds out specific facts (paths, error strings, identifiers).
 5. Persist a `CompactionEntry` in the DAG with:
    - `summary`: the markdown produced by step 4.
@@ -1031,7 +1042,7 @@ The engine's `convertToLlm` pipeline (the function fed to pi-agent-core's `Agent
 1. Load DAG entries for the thread.
 2. Find the most recent `CompactionEntry`. If none, pass entries through unchanged.
 3. Drop every entry whose id is in the active compaction's `coveredEntryIds`.
-4. Replace them with a single user message containing the summary text, framed as `<previous-context>{summary}</previous-context>`.
+4. Replace them with a single user message containing the summary text, framed as `<previous-context>{summary}</previous-context>`, followed by an escape-hatch line naming the `thread_read` tool and this thread's key — the DAG keeps every covered entry, so the model can re-read RECENT pre-compaction details on demand. `thread_read` returns the newest `limit` entries (max 200) with no paging, so the oldest covered entries on a long thread stay out of reach; the hint says "recent turns" for that reason (TKAI-306).
 5. Apply pruning's elision: any kept entry's tool-call parts with `elided === true` get a placeholder `[output elided to save context]` in the LLM-visible content; the stored result stays in the DAG.
 6. Yield the resulting `Message[]` to the agent loop.
 
@@ -1086,6 +1097,18 @@ Hooks are registered via `CreateSessionOptions` (`compactionHooks?: CompactionHo
 | `cfg.summarizerModel` | `sessionModel` | dedicated summarizer is cheaper |
 | `cfg.protectedTools` | `['skill', 'thread_read']` | per-tool opt-out from pruning; `ToolDef.protectedFromPruning` adds to this set |
 | `cfg.autoContinue` | `true` | inject the auto-continue prompt after proactive compaction |
+
+### Provider-call resilience (TKAI-319)
+
+Two retry layers, both bounded and visible:
+
+- **Transport** — every turn LLM call passes an explicit retry policy to pi-ai (`maxRetries: 2`, `maxRetryDelayMs: 30s`, `timeoutMs: 10min`), as defaults that upstream-supplied options override, never as pins. Kept at SDK-default parity deliberately: the turn-level layer multiplies with it. Side calls (the compaction summarizer) fail fast instead: `maxRetries: 1`, 15s delay cap — nobody waits on a summarizer during a capacity event, and the compaction failure paths own recovery.
+- **Turn-level** — when a turn settles with a transient provider error (pi-ai's `isRetryableAssistantError` taxonomy — the engine deliberately does not fork it), unattended sessions (purpose orchestrator, workflow, or child; `purpose` survives restarts via `Session.rehydrate`) drop the failed assistant message and call `agent.continue()` — never a re-prompt, which would duplicate the user content in live context. Backoff is [10s, 30s], 2 attempts by default (`CreateSessionOptions.turnRetry` overrides), chunked: `this.aborted` is checked every second and the durable queue item every 5s plus once at the end, so an abort or steer during the wait stands the retry down instead of racing its successor. Each retry emits `turn_transient_retry`. Interactive sessions never auto-retry: a human is present to decide.
+
+### Prompt-cache discipline (TKAI-320)
+
+- Every turn call carries a thread-scoped `sessionId` (`{sessionId}/{threadId}`) and a `cacheRetention` preference (`CreateSessionOptions.cacheRetention`; default "long" for orchestrator sessions, "short" otherwise). pi-ai maps these to provider caching (Anthropic `cache_control` markers, OpenAI session affinity).
+- **Break telemetry, alert-only**: after each turn, `classifyCacheBreak` compares the turn's cache reads against the previous turn's prompt size. A shortfall past loose thresholds (under 50% read AND over 2k tokens missing, conversations over 4k tokens only) counts on `valet.cache.breaks` by cause: `model_changed`, `system_prompt_changed`, `tools_changed`, or `ttl_or_content`. Expected prefix rewrites reset the baseline instead of counting — compaction and the transient-turn retry both clear the snapshot — and a provider whose previous turn reported zero cache reads never alerts (it likely never reports cache usage at all). A sustained rate on one cause means something rewrites the request prefix every turn; the known suspects are the per-turn system-prompt overlays (role, cold hint, repo instructions) and per-turn tool-list rebuilds. Fixing those is deliberately sequenced AFTER this telemetry ships — restructure what the data names, not what we guess.
 
 ### Per-Thread Prompt Queue
 

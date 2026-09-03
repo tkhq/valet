@@ -294,7 +294,9 @@ describe("SecurityIndexPage", () => {
       "Full code review",
       "Access & injection",
       "Secrets & config",
-      "Full pentest",
+      "Code audit",
+      "Live pentest",
+      "Code audit + live confirmation",
     ]);
     // Full code review is selected by default.
     expect(screen.getByRole("radio", { name: "Full code review" }).getAttribute("aria-checked")).toBe(

@@ -204,6 +204,37 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "allow_public_artifacts" boolean NOT NULL DEFAULT false',
   },
   {
+    // Thumbs up/down feedback (TKAI-334) — the eval-seeding signal.
+    describe: "ratings table",
+    probe: { kind: "table", table: "ratings" },
+    sql: `CREATE TABLE IF NOT EXISTS "ratings" (
+      "id" text PRIMARY KEY NOT NULL,
+      "user_id" text NOT NULL,
+      "target_type" text NOT NULL,
+      "target_id" text NOT NULL,
+      "session_id" text NOT NULL,
+      "thread_id" text,
+      "rating" text NOT NULL,
+      "created_at" bigint NOT NULL,
+      "updated_at" bigint NOT NULL
+    )`,
+  },
+  {
+    describe: "ratings_user_target index",
+    probe: { kind: "index", index: "ratings_user_target" },
+    sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "ratings_user_target" ON "ratings" ("user_id","target_type","target_id")',
+  },
+  {
+    describe: "ratings_session index",
+    probe: { kind: "index", index: "ratings_session" },
+    sql: 'CREATE INDEX IF NOT EXISTS "ratings_session" ON "ratings" ("session_id")',
+  },
+  {
+    describe: "ratings_type_rating index",
+    probe: { kind: "index", index: "ratings_type_rating" },
+    sql: 'CREATE INDEX IF NOT EXISTS "ratings_type_rating" ON "ratings" ("target_type","rating")',
+  },
+  {
     // The artifacts table itself (artifacts design) — a whole-table sibling
     // of the column repairs, for the same reason.
     describe: "artifacts table",
@@ -235,6 +266,21 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     describe: "artifacts_owner_path_unique index",
     probe: { kind: "index", index: "artifacts_owner_path_unique" },
     sql: 'CREATE UNIQUE INDEX IF NOT EXISTS "artifacts_owner_path_unique" ON "artifacts" ("owner_type","owner_id","source_memory_path")',
+  },
+  {
+    // The runtime model-registry cache (TKAI-327). An empty table degrades
+    // the model catalog to the bundled compile-time list, so a deployment
+    // that boots before the repair runs still serves models.
+    describe: "model_registry_cache table",
+    probe: { kind: "table", table: "model_registry_cache" },
+    sql: `CREATE TABLE IF NOT EXISTS "model_registry_cache" (
+      "provider_id" text PRIMARY KEY NOT NULL,
+      "models" jsonb DEFAULT '[]'::jsonb NOT NULL,
+      "etag" text,
+      "last_modified" bigint,
+      "checked_at" bigint,
+      "updated_at" bigint NOT NULL
+    )`,
   },
   {
     // Slack thread auto-follow: a thread the assistant follows so later messages
@@ -826,6 +872,15 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     describe: "engine_entries.seq column",
     probe: { kind: "column", table: "engine_entries", column: "seq" },
     sql: 'ALTER TABLE "engine_entries" ADD COLUMN IF NOT EXISTS "seq" bigint GENERATED ALWAYS AS IDENTITY NOT NULL',
+  },
+  {
+    // Epoch ms of the most recent activity in this session (TKAI-341).
+    // The session list sorts by this column so a long-lived channel-bound
+    // session rises when it receives a message. Null on rows from before
+    // the column: queries fall back to `updated_at` via COALESCE.
+    describe: "agent_sessions.last_activity_at column",
+    probe: { kind: "column", table: "agent_sessions", column: "last_activity_at" },
+    sql: 'ALTER TABLE "agent_sessions" ADD COLUMN IF NOT EXISTS "last_activity_at" bigint',
   },
 ];
 

@@ -252,6 +252,10 @@ describe("session service hooks (systemContext, toolConfig, owner, compaction ho
     faux.setResponses([
       fauxAssistantMessage("first turn response"),
       fauxAssistantMessage("second turn response"),
+      // The manual compaction's summarizer completion. Before TKAI-306 an
+      // exhausted faux queue surfaced as an errored completion that
+      // summarize() silently turned into an empty summary; it now throws.
+      fauxAssistantMessage("## Goal\n- test summary"),
     ]);
 
     const calls: string[] = [];

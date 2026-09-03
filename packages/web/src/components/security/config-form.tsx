@@ -33,21 +33,103 @@ export function categoryLabel(id: string): string {
   return KNOWN_CATEGORIES.find((c) => c.id === id)?.label ?? id;
 }
 
+/** The authorized live-testing scope the setup wizard authors (Part 08 +
+ * Part 09 §Config schema extensions). `hosts` is required for a live plan;
+ * `cidrs`, `loginUrl`, `signupUrl`, `rateLimitRps` are optional pre-supplies
+ * that let the live cells skip mid-run interrupts. */
+export interface ScopeDraft {
+  hosts: string[];
+  cidrs: string[];
+  loginUrl: string;
+  signupUrl: string;
+  rateLimitRps: string;
+}
+
+/** A fresh empty ScopeDraft with lists initialized to []. */
+export function emptyScopeDraft(): ScopeDraft {
+  return { hosts: [], cidrs: [], loginUrl: "", signupUrl: "", rateLimitRps: "" };
+}
+
 /** The config value the form edits. */
 export interface ConfigDraft {
   focus: string;
   invariants: string[];
   categories: string[];
+  scope: ScopeDraft;
+}
+
+/** Return a clean scope for the wire: dropped empty strings and dedup-preserving
+ * the original order. */
+export function normalizeScopeHostsForSubmit(scope: ScopeDraft): string[] {
+  const seen = new Set<string>();
+  const clean: string[] = [];
+  for (const raw of scope.hosts) {
+    const host = raw.trim();
+    if (host === "" || seen.has(host)) continue;
+    seen.add(host);
+    clean.push(host);
+  }
+  return clean;
+}
+
+/** Same shape for CIDRs. */
+export function normalizeScopeCidrsForSubmit(scope: ScopeDraft): string[] {
+  const seen = new Set<string>();
+  const clean: string[] = [];
+  for (const raw of scope.cidrs) {
+    const cidr = raw.trim();
+    if (cidr === "" || seen.has(cidr)) continue;
+    seen.add(cidr);
+    clean.push(cidr);
+  }
+  return clean;
+}
+
+/** Build the wire `scope` object from the draft, dropping empty optional
+ * fields. Returns `null` when the draft has no hosts. */
+export function scopeDraftToWire(scope: ScopeDraft): {
+  hosts: string[];
+  cidrs?: string[];
+  loginUrl?: string;
+  signupUrl?: string;
+  rateLimitRps?: number;
+} | null {
+  const hosts = normalizeScopeHostsForSubmit(scope);
+  if (hosts.length === 0) return null;
+  const cidrs = normalizeScopeCidrsForSubmit(scope);
+  const login = scope.loginUrl.trim();
+  const signup = scope.signupUrl.trim();
+  const rateText = scope.rateLimitRps.trim();
+  const rate = rateText === "" ? undefined : Number(rateText);
+  return {
+    hosts,
+    ...(cidrs.length > 0 ? { cidrs } : {}),
+    ...(login !== "" ? { loginUrl: login } : {}),
+    ...(signup !== "" ? { signupUrl: signup } : {}),
+    ...(rate !== undefined && Number.isInteger(rate) && rate >= 1 && rate <= 1000
+      ? { rateLimitRps: rate }
+      : {}),
+  };
 }
 
 export function ConfigForm({
   value,
   onChange,
+  /** True when the current plan draft carries at least one live persona
+   * (dast, fuzz, exploit). When true, the scope section renders as REQUIRED
+   * (asterisk, "at least one host" hint). When false, the section still
+   * renders but as OPTIONAL: a scope on a source-only plan is informative and
+   * seeds a future live persona if the user adds one.
+   *
+   * Defaults to false so existing call sites without the prop keep their
+   * source-only shape. */
+  requireLiveScope = false,
 }: {
   value: ConfigDraft;
   onChange: (next: ConfigDraft) => void;
+  requireLiveScope?: boolean;
 }) {
-  const { focus, invariants, categories } = value;
+  const { focus, invariants, categories, scope } = value;
 
   function setFocus(next: string) {
     onChange({ ...value, focus: next });
@@ -62,6 +144,41 @@ export function ConfigForm({
         KNOWN_CATEGORIES.filter((c) => categories.includes(c.id) || c.id === id).map((c) => c.id);
     onChange({ ...value, categories: next });
   }
+  function setScopeHosts(next: string[]) {
+    onChange({ ...value, scope: { ...scope, hosts: next } });
+  }
+  function addHost() {
+    setScopeHosts([...scope.hosts, ""]);
+  }
+  function updateHost(i: number, next: string) {
+    setScopeHosts(scope.hosts.map((h, idx) => (idx === i ? next : h)));
+  }
+  function removeHost(i: number) {
+    setScopeHosts(scope.hosts.filter((_, idx) => idx !== i));
+  }
+  function setScopeCidrs(next: string[]) {
+    onChange({ ...value, scope: { ...scope, cidrs: next } });
+  }
+  function addCidr() {
+    setScopeCidrs([...scope.cidrs, ""]);
+  }
+  function updateCidr(i: number, next: string) {
+    setScopeCidrs(scope.cidrs.map((c, idx) => (idx === i ? next : c)));
+  }
+  function removeCidr(i: number) {
+    setScopeCidrs(scope.cidrs.filter((_, idx) => idx !== i));
+  }
+  function setLoginUrl(next: string) {
+    onChange({ ...value, scope: { ...scope, loginUrl: next } });
+  }
+  function setSignupUrl(next: string) {
+    onChange({ ...value, scope: { ...scope, signupUrl: next } });
+  }
+  function setRateLimit(next: string) {
+    onChange({ ...value, scope: { ...scope, rateLimitRps: next } });
+  }
+  const trimmedHosts = scope.hosts.filter((h) => h.trim() !== "");
+  const scopeEmpty = trimmedHosts.length === 0;
 
   return (
     <div data-testid="config-form">
@@ -138,6 +255,143 @@ export function ConfigForm({
               {cat.label}
             </label>
           ))}
+        </div>
+      </div>
+
+      {/* Authorized scope for live personas (Part 08 §Setup Step 1). When any
+          live persona is in the plan, the section is REQUIRED; otherwise it is
+          informative and seeds a future live persona if the user adds one. */}
+      <div className="mt-4 grid gap-1" data-testid="config-scope">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-semibold text-ink">
+            Authorized scope{requireLiveScope ? <span className="text-danger-600"> *</span> : null}
+          </span>
+          {requireLiveScope && (
+            <span className="text-[11px] text-danger-600" data-testid="config-scope-required">
+              required for live personas
+            </span>
+          )}
+        </div>
+        <p className="text-[11px] text-muted">
+          The exact hosts the live personas (DAST, fuzz, exploit) may reach.
+          Every reachable request outside this list is refused by the runtime
+          egress gate. Bare host or host:port; no scheme.
+        </p>
+        {requireLiveScope && scopeEmpty && (
+          <p className="text-[11px] text-danger-600" data-testid="config-scope-empty">
+            Add at least one host; the plan includes a live persona.
+          </p>
+        )}
+        <div className="mt-1 flex flex-col gap-2">
+          {scope.hosts.map((host, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <Input
+                value={host}
+                onChange={(e) => updateHost(i, e.target.value)}
+                placeholder="e.g. api.example.com or api.example.com:8443"
+                className="h-8 flex-1 text-xs"
+                aria-label={`Authorized host ${i + 1}`}
+              />
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => removeHost(i)}
+                aria-label={`Remove host ${i + 1}`}
+              >
+                Remove
+              </Button>
+            </div>
+          ))}
+        </div>
+        <div>
+          <Button type="button" variant="ghost" size="sm" onClick={addHost}>
+            Add host
+          </Button>
+        </div>
+
+        {/* Authorized CIDRs (v1 Part 09 §Config schema extensions). Optional;
+            feeds pivot-coordinator's scope-auto-include pattern. */}
+        <div className="mt-3 grid gap-1" data-testid="config-scope-cidrs">
+          <span className="text-[11px] text-muted">Authorized CIDRs (optional)</span>
+          <p className="text-[11px] text-muted">
+            IP ranges the pivot-coordinator MAY auto-approve when a live persona
+            discovers a new host inside them.
+          </p>
+          <div className="mt-1 flex flex-col gap-2">
+            {scope.cidrs.map((cidr, i) => (
+              <div key={i} className="flex items-center gap-2">
+                <Input
+                  value={cidr}
+                  onChange={(e) => updateCidr(i, e.target.value)}
+                  placeholder="e.g. 10.0.0.0/8"
+                  className="h-8 flex-1 text-xs"
+                  aria-label={`Authorized CIDR ${i + 1}`}
+                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => removeCidr(i)}
+                  aria-label={`Remove CIDR ${i + 1}`}
+                >
+                  Remove
+                </Button>
+              </div>
+            ))}
+          </div>
+          <div>
+            <Button type="button" variant="ghost" size="sm" onClick={addCidr}>
+              Add CIDR
+            </Button>
+          </div>
+        </div>
+
+        {/* Login URL (optional). Skips a mid-run credential interrupt. */}
+        <div className="mt-3 grid gap-1">
+          <Label htmlFor="config-scope-login-url">Login URL (optional)</Label>
+          <Input
+            id="config-scope-login-url"
+            value={scope.loginUrl}
+            onChange={(e) => setLoginUrl(e.target.value)}
+            placeholder="https://api.example.com/auth/login"
+            className="h-8 text-xs"
+          />
+          <p className="text-[11px] text-muted">
+            The pivot-coordinator POSTs to this endpoint with the credentials
+            you provide, so DAST and exploit can proceed without a mid-run
+            interrupt.
+          </p>
+        </div>
+
+        {/* Signup URL (optional; L4 only). */}
+        <div className="mt-3 grid gap-1">
+          <Label htmlFor="config-scope-signup-url">Signup URL (optional, L4)</Label>
+          <Input
+            id="config-scope-signup-url"
+            value={scope.signupUrl}
+            onChange={(e) => setSignupUrl(e.target.value)}
+            placeholder="https://api.example.com/signup"
+            className="h-8 text-xs"
+          />
+          <p className="text-[11px] text-muted">
+            Only used by the L4 <span className="font-mono">create-test-account</span> pattern; leave blank to skip.
+          </p>
+        </div>
+
+        {/* Rate limit. */}
+        <div className="mt-3 grid gap-1">
+          <Label htmlFor="config-scope-rate-limit">Rate limit (requests per second, optional)</Label>
+          <Input
+            id="config-scope-rate-limit"
+            value={scope.rateLimitRps}
+            onChange={(e) => setRateLimit(e.target.value)}
+            placeholder="e.g. 5"
+            className="h-8 w-24 text-xs"
+          />
+          <p className="text-[11px] text-muted">
+            Integer 1..1000. Absent means each live persona picks a conservative default.
+          </p>
         </div>
       </div>
     </div>

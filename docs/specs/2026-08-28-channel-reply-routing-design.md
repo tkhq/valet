@@ -130,6 +130,33 @@ the reader who approved it. The rounds between stay off the channel; an extra
 mid-turn update reaches the thread only through `reply_to_origin`. A failed or unroutable post is drop-logged
 (`event_drop_log`), never swallowed, so the Problems tab shows it.
 
+**Submission surface (TKAI-323).** A bound thread stays bound for its whole
+life, so the thread key alone cannot say where a turn came from. The safety
+net, the gate card (rule 3), and the command result (rule 6) all read the
+SUBMISSION's surface and stay off the channel for a web-UI prompt:
+
+- The direct-message path (`handleMessage`) stamps `MessageEntry.channel`
+  on the prompt it submits, and the engine's compaction auto-continue
+  inherits `channel` from the interrupted item.
+- Engine-routed admissions carry `signal` (with `signal.origin` on the
+  dispatcher/follow-router paths; without it on child settlement and
+  agent-to-agent messages). Any `signal` counts as non-web: a task spawned
+  from a channel DM settles origin-less, and its report must still post.
+- A command result posts only when its entry carries `channel`
+  (`session.executeCommand` forwards `PromptOptions.channel`). Today every
+  engine command arrives via the web REST route, so no command result posts
+  until a transport routes slash commands with `channel` set.
+- A user entry with none of these marks is a web-UI prompt:
+  `submissionIsWebPrompt` (`channels/host.ts`) mutes its auto-post and its
+  gate card. The mute writes a `console.debug` line — the only record when
+  a new inbound path forgets to mark its surface. Submissions admitted
+  before this rule shipped carry no mark; one in flight across that deploy
+  answers in the web UI only.
+- The stream bridge binds each inbound registration to its admitted
+  queueItemId (`bindInboundTurn`); a `message_start` from any other
+  submission opens no stream, so a web turn cannot stream into a
+  registration a queued or gate-parked channel turn still holds.
+
 **Reply action (contract).** Add a `reply_to_origin` action. It reads the
 current submission's origin and posts to that thread with no channel/thread
 argument to guess. The team persona instructs the assistant to use it when it

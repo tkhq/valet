@@ -1,6 +1,13 @@
 import { Agent } from "@earendil-works/pi-agent-core";
 import type { AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { getModel, isContextOverflow, streamSimple } from "@earendil-works/pi-ai/compat";
+// Root import (not /compat): the transient classifier lives in pi-ai's
+// utils and is only re-exported from the package root. It carries the
+// provider-maintained retryable/permanent taxonomy (incl. the quota
+// blacklist) — a hand-rolled copy would drift on every pi-ai upgrade.
+import { isRetryableAssistantError } from "@earendil-works/pi-ai";
+import { classifyCacheBreak, type CacheTurnSnapshot } from "./cache-telemetry.js";
+import { recordCacheBreak } from "./metrics.js";
 import type { Api, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
 
 type PiModel = Model<Api>;
@@ -56,13 +63,15 @@ import { Compile } from "typebox/compile";
 import type { TSchema } from "typebox";
 import {
   applyPrune,
-  estimateContextTokens,
+  estimateLiveContextTokens,
   estimateTokens,
   estimateTotalTokens,
   extractFileContext,
+  inputSpillThreshold,
   planPrune,
   selectCutPoint,
   summarize,
+  SummarizeOverflowError,
   usableTokens,
   type PruneResult,
   type SummarizeResult,
@@ -135,9 +144,89 @@ const CREDENTIAL_RELEASE_BACKOFF_MS = 4_000;
 const AUTO_CONTINUE_PROMPT =
   "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.";
 
+/** Proactive compaction stops retrying after this many consecutive failures (TKAI-306). */
+const MAX_CONSECUTIVE_COMPACTION_FAILURES = 3;
+
+/**
+ * Transport-level retry policy for turn LLM calls (TKAI-319). pi-ai's
+ * retryProviderRequest honors Retry-After with abortable sleeps; delays the
+ * server requests beyond the cap fail immediately so the turn-level layer
+ * (or the user) decides with visibility.
+ */
+// 2 transport retries (SDK-default parity), not more: the turn-level layer
+// above adds its own attempts, and the two multiply — 5 transport tries
+// times 3 turn attempts held one queue item for 10+ minutes.
+const TURN_STREAM_MAX_RETRIES = 2;
+const TURN_STREAM_MAX_RETRY_DELAY_MS = 30_000;
+const TURN_STREAM_TIMEOUT_MS = 600_000;
+
+/**
+ * Turn-level retry defaults for transient provider errors (TKAI-319),
+ * applied only to unattended sessions (orchestrator, workflow, child). The
+ * last backoff entry repeats when maxAttempts exceeds the list.
+ */
+const UNATTENDED_TURN_RETRY_ATTEMPTS = 2;
+const UNATTENDED_TURN_RETRY_BACKOFF_MS = [10_000, 30_000];
+
+/**
+ * What a compaction pass achieved. "compacted" = a summary was persisted;
+ * "pruned" = tool-output elision only; "noop" = the pass found nothing to
+ * reclaim; "insufficient" = the newest turn alone exceeds the usable window,
+ * so summarizing older turns cannot bring the prompt under the limit.
+ * Proactive callers treat "noop" and "insufficient" as breaker-worthy: the
+ * trigger fired but compaction cannot help, so retrying every turn is futile.
+ * The reactive caller treats "insufficient" as "do not retry" — the overflow
+ * response already stands and a retry would just overflow again.
+ */
+export type CompactionOutcome = "compacted" | "pruned" | "noop" | "insufficient";
+
+/**
+ * Metadata key stamped on a user entry whose oversized text was spilled to a
+ * sandbox file. Its value is the file path. Presence flags the entry so a
+ * replayed turn returns the pointer, not the original paste.
+ */
+const SPILLED_INPUT_PATH_KEY = "valetSpilledInputPath";
+
+/**
+ * Build the in-context pointer that replaces an oversized inbound message
+ * after its full text is spilled to `path` in the sandbox. The model reads
+ * this instead of the raw paste and pages the file in slices.
+ */
+export function buildSpilledInputMarker(args: {
+  path: string;
+  tokens: number;
+  chars: number;
+}): string {
+  return (
+    `[Large input saved to a file]\n` +
+    `Your message was about ${args.tokens} tokens (${args.chars} characters), too large to place in the context window directly. ` +
+    `The full text is saved in the sandbox at:\n` +
+    `  ${args.path}\n` +
+    `Read it in slices, not all at once. For example: \`sed -n '1,400p' ${args.path}\`. ` +
+    `Do not read the whole file in one call; that overflows the context again.`
+  );
+}
+
+/**
+ * The summarize call itself can overflow the summarizer model. Each retry
+ * drops the oldest half of the head entries fed to the summarizer (the
+ * CompactionEntry still covers the full head — the previous summary anchors
+ * what the truncated input loses). Bounded like Claude Code's
+ * prompt-too-long retry (TKAI-306).
+ */
+const MAX_SUMMARIZE_OVERFLOW_RETRIES = 3;
+
 let nextId = 1;
 function uid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${(nextId++).toString(36)}`;
+}
+
+/** Plain unref'd sleep for retry backoff — abort is re-checked after it. */
+function delay(ms: number): Promise<void> {
+  return new Promise((res) => {
+    const t = setTimeout(res, ms) as { unref?: () => void };
+    if (typeof t.unref === "function") t.unref();
+  });
 }
 
 /**
@@ -270,6 +359,24 @@ export class Thread {
    * still exceeds usable on a small-context model).
    */
   private skipNextProactiveCheck = false;
+  /**
+   * Consecutive proactive-compaction failures (TKAI-306). At
+   * MAX_CONSECUTIVE_COMPACTION_FAILURES the proactive trigger opens the
+   * circuit and stops retrying; any successful compaction (manual /compact
+   * included) resets it. Claude Code's telemetry motivated the cap: sessions
+   * with irrecoverably oversized context retried a doomed summarizer call on
+   * every turn.
+   */
+  private consecutiveCompactionFailures = 0;
+  /**
+   * Content hashes from the model's file reads, backing the
+   * read-before-write staleness gate (TKAI-318). In-memory only: after a
+   * restart the model must re-read before writing, which is the
+   * conservative behavior we want — the sandbox may have been rebuilt.
+   */
+  private readonly fileReadHashes = new Map<string, string>();
+  /** Previous turn's cache snapshot for break classification (TKAI-320). */
+  private prevCacheSnapshot: CacheTurnSnapshot | undefined;
   /**
    * True when a transcript was rehydrated from persisted entries (spec
    * decision 5). The next `runItemInner` consumes it: a pre-turn proactive
@@ -1573,6 +1680,7 @@ export class Thread {
   rehydrateTranscript(entries: SessionEntry[]): void {
     this.agent.state.messages = entriesToAgentMessages(entries, this.effectiveModelLenient(), {
       attributeAuthors: this.attributeAuthors,
+      threadKey: this.key,
     });
     // Arm the pre-turn proactive check (spec decision 5) so the first
     // post-restart turn is protected. The trigger estimates the rehydrated
@@ -2629,7 +2737,7 @@ export class Thread {
           provider: resumeModel.provider,
           id: resumeModel.id,
         },
-        { attributeAuthors: this.attributeAuthors },
+        { attributeAuthors: this.attributeAuthors, threadKey: this.key },
       );
       this.agent.state.tools = this.buildTools();
 
@@ -2776,14 +2884,62 @@ export class Thread {
         e.type === "message" && e.role === "user" && e.queueItemId === item.id,
     );
     if (existingUserEntry) {
-      return { text, attachments: existingUserEntry.attachments };
+      // A spilled entry keeps the FULL paste in `content` (durable, REST-
+      // visible) and carries the file path in metadata. Reconstruct the
+      // pointer for the LLM so a replayed turn re-prompts what fits the window,
+      // not the oversized text — matching what entriesToAgentMessages renders.
+      const spillPath = existingUserEntry.metadata?.[SPILLED_INPUT_PATH_KEY];
+      return {
+        text:
+          typeof spillPath === "string"
+            ? buildSpilledInputMarker({
+                path: spillPath,
+                tokens: estimateTokens(existingUserEntry.content),
+                chars: existingUserEntry.content.length,
+              })
+            : text,
+        attachments: existingUserEntry.attachments,
+      };
     }
+
+    // Divert an oversized paste to a sandbox file before it enters context.
+    // Signals are exempt: they are bounded and their XML envelope must render
+    // verbatim. Compaction never shrinks the newest turn, so a single message
+    // larger than the window is un-compactable; spilling keeps the content
+    // reachable (the agent pages the file) without the overflow loop. The full
+    // text stays in `entryContent` (persisted, REST-visible); only the LLM
+    // `text` becomes the pointer — so nothing the user pasted is discarded.
+    const entryId = uid("e");
+    let spilledInputPath: string | undefined;
+    if (signalMeta === undefined) {
+      const threshold = inputSpillThreshold(
+        this.agent.state.model,
+        this.session.options.compaction,
+      );
+      if (estimateTokens(entryContent) > threshold) {
+        spilledInputPath = await this.spillOversizedInput(entryId, entryContent);
+        if (spilledInputPath !== undefined) {
+          text = buildSpilledInputMarker({
+            path: spilledInputPath,
+            tokens: estimateTokens(entryContent),
+            chars: entryContent.length,
+          });
+        }
+        // On spill failure `text` stays the full content; the compaction
+        // fail-safe surfaces a clear error if it overflows, no data lost.
+      }
+    }
+
     // QueueItem.metadata flows through onto the entry so synthetic flags like
     // compaction_continue survive into the DAG for client UIs and for later
     // restoration.
+    const baseMetadata = stripSignalStamp(item.metadata);
+    const metadata = spilledInputPath
+      ? { ...(baseMetadata ?? {}), [SPILLED_INPUT_PATH_KEY]: spilledInputPath }
+      : baseMetadata;
 
     const userEntry: MessageEntry = {
-      id: uid("e"),
+      id: entryId,
       sessionId: this.session.id,
       threadId: this.id,
       parentId: null,
@@ -2799,7 +2955,7 @@ export class Thread {
       // the persisted entry's metadata (and onto the wire) a second time.
       // Built as a fresh object so the queue item's own stored metadata is
       // never mutated.
-      metadata: stripSignalStamp(item.metadata),
+      metadata,
       queueItemId: item.id,
       createdAt: Date.now(),
     };
@@ -2807,6 +2963,38 @@ export class Thread {
       this.session.providers.store.appendEntries(this.session.id, this.id, [userEntry], this.fence),
     );
     return { text, attachments };
+  }
+
+  /**
+   * Write an oversized inbound message to a file in the sandbox for the agent
+   * to page over, and return its path (undefined on failure). The full text
+   * stays in the persisted entry either way — the path only drives what the
+   * LLM sees (a pointer via `buildSpilledInputMarker`), so nothing the user
+   * pasted is ever discarded. The file lives under the workspace so the read
+   * and bash tools reach it. On failure the full content stays in context and
+   * the compaction fail-safe surfaces a clear error if it still overflows —
+   * that beats silently truncating the user's words.
+   */
+  private async spillOversizedInput(
+    entryId: string,
+    content: string,
+  ): Promise<string | undefined> {
+    const root = this.session.options.workspace.replace(/\/+$/, "");
+    const dir = `${root}/.valet/large-inputs`;
+    const path = `${dir}/${entryId}.txt`;
+    try {
+      await this.session.sandbox.mkdir(dir);
+      await this.session.sandbox.writeFile(path, content);
+      return path;
+    } catch (err) {
+      this.emitError(
+        "input_spill_failed",
+        `Could not save an oversized message to the sandbox (${
+          err instanceof Error ? err.message : String(err)
+        }); keeping the full message in context, which may overflow and surface a clear error.`,
+      );
+      return undefined;
+    }
   }
 
   /**
@@ -2921,14 +3109,7 @@ export class Thread {
     if (this.rehydratedCheckPending) {
       this.rehydratedCheckPending = false;
       if (this.shouldCompactProactive()) {
-        try {
-          await this.compactThread({ mode: "proactive", autoContinue: false });
-        } catch (err) {
-          this.emitError(
-            "compaction_failed",
-            err instanceof Error ? err.message : String(err),
-          );
-        }
+        await this.runProactiveCompaction(false);
       }
     }
 
@@ -2977,14 +3158,7 @@ export class Thread {
       // compaction pass before yielding back to the queue. Reactive
       // compaction (overflow retry) is handled inline in runAgent.
       if (this.shouldCompactProactive()) {
-        try {
-          await this.compactThread({ mode: "proactive" });
-        } catch (err) {
-          this.emitError(
-            "compaction_failed",
-            err instanceof Error ? err.message : String(err),
-          );
-        }
+        await this.runProactiveCompaction();
       }
     } finally {
       this.restoreColdHintAfterTurn(coldHintPrompt);
@@ -3148,7 +3322,28 @@ export class Thread {
     ) {
       this.overflowRetryInProgress = true;
       try {
-        await this.compactThread({ mode: "reactive" });
+        // A failed reactive compaction must not fail the turn as
+        // agent_failed with a confusing summarizer message: report it as
+        // compaction_failed and skip the retry — the recorded overflow
+        // response already carries the turn's honest error (TKAI-306).
+        let outcome: CompactionOutcome;
+        try {
+          outcome = await this.compactThread({ mode: "reactive" });
+        } catch (err) {
+          this.emitError(
+            "compaction_failed",
+            err instanceof Error ? err.message : String(err),
+          );
+          return;
+        }
+        if (outcome === "insufficient") {
+          // The newest turn alone exceeds the window, so compaction cannot
+          // help and a retry would overflow again. compactThreadInner already
+          // emitted the actionable error; leave the recorded overflow response
+          // and stop, instead of looping. This is the bug that bricked a
+          // session when a single pasted transcript exceeded the context.
+          return;
+        }
         // Drop the failed assistant message from the agent transcript and retry.
         this.agent.state.messages = this.agent.state.messages.slice(0, -1);
         await this.agent.prompt({
@@ -3160,6 +3355,153 @@ export class Thread {
       } finally {
         this.overflowRetryInProgress = false;
       }
+      return;
+    }
+
+    await this.retryTransientTurnError();
+  }
+
+  /**
+   * Turn-level retry for transient provider errors (TKAI-319). Engages only
+   * when the turn settled with a classified-transient error AND the session
+   * is unattended (or `turnRetry` is configured explicitly) — an interactive
+   * user sees the error and decides. Each retry drops the failed assistant
+   * message and calls `agent.continue()`, pi-agent-core's native re-run for
+   * a transcript ending on a user/tool-result message — re-prompting would
+   * append a SECOND copy of the user content and the model could act on it
+   * twice. The transport layer already retried underneath; this catches the
+   * failures that exhausted it (long rate-limit windows, capacity events).
+   */
+  private async retryTransientTurnError(): Promise<void> {
+    const cfgd = this.session.options.turnRetry;
+    const purpose = this.session.options.purpose;
+    const unattended = purpose === "orchestrator" || purpose === "workflow" || purpose === "child";
+    const maxAttempts = cfgd?.maxAttempts ?? (unattended ? UNATTENDED_TURN_RETRY_ATTEMPTS : 0);
+    if (maxAttempts <= 0) return;
+    // An explicitly configured empty backoff list means "no wait", not
+    // "crash on index" — but an absent/empty list falls back to defaults.
+    const backoff = cfgd?.backoffMs?.length ? cfgd.backoffMs : UNATTENDED_TURN_RETRY_BACKOFF_MS;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const last = this.agent.state.messages[this.agent.state.messages.length - 1];
+      if (
+        !last ||
+        last.role !== "assistant" ||
+        last.stopReason !== "error" ||
+        !isRetryableAssistantError(last)
+      ) {
+        return;
+      }
+      const waitMs = backoff[Math.min(attempt - 1, backoff.length - 1)] ?? 0;
+      const errBrief = (last.errorMessage ?? "provider error").slice(0, 200);
+      this.emitError(
+        "turn_transient_retry",
+        `Provider error looks transient (${errBrief}). Retrying in ${Math.round(waitMs / 1000)}s (attempt ${attempt}/${maxAttempts}).`,
+      );
+      if ((await this.backoffOrStandDown(waitMs)) === "stand-down") return;
+      // Drop the failed assistant message; the transcript now ends on the
+      // user/tool-result message, which is exactly Agent.continue()'s
+      // contract for re-running the turn without duplicating the prompt.
+      this.agent.state.messages = this.agent.state.messages.slice(0, -1);
+      // The retry rewinds the transcript, so the next response's cache reads
+      // are expected to differ — do not count that as a break (TKAI-320).
+      this.prevCacheSnapshot = undefined;
+      await this.agent.continue();
+      await this.agent.waitForIdle();
+    }
+  }
+
+  /**
+   * Abort- and steer-aware backoff for the transient retry (TKAI-319).
+   * Nothing streams during the wait, so `agent.abort()` cannot interrupt
+   * it — instead the sleep is chunked: `this.aborted` every second, the
+   * durable queue item every 5s and once at the end. A superseded or
+   * aborted item must not spawn a zombie retry racing its successor.
+   */
+  private async backoffOrStandDown(totalMs: number): Promise<"proceed" | "stand-down"> {
+    const store = this.session.providers.store;
+    const itemId = this.runningItem?.id;
+    const checkItem = async (): Promise<boolean> => {
+      if (!itemId) return true;
+      const current = await store.getQueueItem(this.session.id, itemId);
+      return (
+        !!current &&
+        current.status === "running" &&
+        !current.supersededByItemId &&
+        current.abortRequestedAt === undefined
+      );
+    };
+    const until = Date.now() + totalMs;
+    let lastItemCheck = Date.now();
+    while (Date.now() < until) {
+      await delay(Math.min(1_000, until - Date.now()));
+      if (this.aborted) return "stand-down";
+      if (Date.now() - lastItemCheck >= 5_000) {
+        lastItemCheck = Date.now();
+        if (!(await checkItem())) return "stand-down";
+      }
+    }
+    if (this.aborted) return "stand-down";
+    return (await checkItem()) ? "proceed" : "stand-down";
+  }
+
+  /**
+   * Count a failed (or futile) proactive compaction toward the circuit
+   * breaker and emit it. At the cap, emit a distinct event so clients can
+   * tell the user proactive compaction gave up (a plain compaction_failed
+   * looks like a one-off).
+   */
+  private recordProactiveCompactionFailure(code: string, message: string): void {
+    this.emitError(code, message);
+    this.bumpCompactionFailureBreaker();
+  }
+
+  /**
+   * Count one proactive-compaction failure toward the circuit breaker and open
+   * it at the threshold. Split from `recordProactiveCompactionFailure` so a
+   * caller that already emitted the failure error (the "insufficient" outcome,
+   * emitted inside compactThreadInner) can feed the breaker WITHOUT emitting a
+   * second, duplicate error for the same pass.
+   */
+  private bumpCompactionFailureBreaker(): void {
+    this.consecutiveCompactionFailures++;
+    if (this.consecutiveCompactionFailures === MAX_CONSECUTIVE_COMPACTION_FAILURES) {
+      this.emitError(
+        "compaction_circuit_open",
+        `Automatic compaction stopped after ${MAX_CONSECUTIVE_COMPACTION_FAILURES} consecutive attempts that failed or reclaimed nothing. Run /compact to retry manually.`,
+      );
+    }
+  }
+
+  /**
+   * Shared handling for both proactive compaction passes (pre-turn
+   * rehydration and post-turn). A thrown compaction counts as a failure; a
+   * "noop" outcome ALSO counts — the trigger fired but nothing was
+   * reclaimable (context dominated by system overhead the estimate cannot
+   * reduce), and without the breaker that repeats silently on every turn.
+   */
+  private async runProactiveCompaction(autoContinue?: false): Promise<void> {
+    try {
+      const outcome = await this.compactThread(
+        autoContinue === false ? { mode: "proactive", autoContinue } : { mode: "proactive" },
+      );
+      if (outcome === "noop") {
+        this.recordProactiveCompactionFailure(
+          "compaction_noop",
+          "Compaction found nothing to reclaim: the recent turns already fit the tail budget, so the context is dominated by the system prompt and tool definitions. Reduce enabled tools or start a new thread.",
+        );
+      } else if (outcome === "insufficient") {
+        // The newest turn alone exceeds the window; compaction cannot help.
+        // compactThreadInner ALREADY emitted context_overflow_unrecoverable —
+        // feed the breaker without re-emitting, so the trigger stops re-firing
+        // without surfacing the same error twice for one pass.
+        this.bumpCompactionFailureBreaker();
+      }
+    } catch (err) {
+      this.recordProactiveCompactionFailure(
+        "compaction_failed",
+        err instanceof Error ? err.message : String(err),
+      );
     }
   }
 
@@ -3170,25 +3512,31 @@ export class Thread {
     }
     const cfg = this.session.options.compaction;
     if (cfg?.enabled === false) return false;
+    // Circuit breaker (TKAI-306): a thread whose proactive compaction keeps
+    // failing must not hammer the summarizer on every turn. A successful
+    // compaction (including manual /compact) closes the breaker again.
+    if (this.consecutiveCompactionFailures >= MAX_CONSECUTIVE_COMPACTION_FAILURES) {
+      return false;
+    }
     // Budget against the turn's effective model (spec decision 4):
     // shouldCompactProactive only runs from runItem's try block, before the
     // finally restores the baseline, so `agent.state.model` is the resolved
     // turn model — including resolver-only specs `resolveModelId` can't see.
     const usable = usableTokens(this.agent.state.model, cfg);
     if (usable === 0) return false;
-    // Trigger on the same char-based estimate the cut-point budget uses —
-    // never on provider-reported usage. Reported totals include cache reads
-    // and system/tool overhead that compaction cannot reclaim, so a
-    // usage-based trigger compacts long cached threads that do not need it
-    // (TKAI-305). This runs before the turn's finally-block restores the
-    // baseline prompt, so the estimate sees the overlays the turn used.
+    // Trigger on the usage-anchored estimate (TKAI-306): the last real
+    // response's reported total is the exact context of that request
+    // (system prompt and tool definitions included), and only messages
+    // appended since are estimated with the cut-point budget's char ruler.
+    // This runs before the turn's finally-block restores the baseline
+    // prompt, so the fallback estimate sees the overlays the turn used.
     // Same role filter as `convertToLlm` — custom AgentMessage kinds never
     // reach the LLM, so they must not count toward the context estimate.
     const llmMessages = this.agent.state.messages.filter(
       (m): m is Message =>
         m.role === "user" || m.role === "assistant" || m.role === "toolResult",
     );
-    const estimated = estimateContextTokens(this.agent.state.systemPrompt, llmMessages);
+    const estimated = estimateLiveContextTokens(this.agent.state.systemPrompt, llmMessages);
     return estimated >= usable;
   }
 
@@ -3208,9 +3556,9 @@ export class Thread {
      * synthetic continuation would duplicate work.
      */
     autoContinue?: false;
-  }): Promise<void> {
+  }): Promise<CompactionOutcome> {
     const cfg = this.session.options.compaction;
-    if (cfg?.enabled === false) return;
+    if (cfg?.enabled === false) return "noop";
     return withSpan(
       "compaction",
       {
@@ -3229,7 +3577,7 @@ export class Thread {
       autoContinue?: false;
     },
     span?: Span,
-  ): Promise<void> {
+  ): Promise<CompactionOutcome> {
     const cfg = this.session.options.compaction;
     const session = this.session;
     const store = session.providers.store;
@@ -3252,6 +3600,10 @@ export class Thread {
     for (const t of [...session.builtinTools, ...(session.options.tools ?? [])]) {
       if (t.protectedFromPruning) protectedTools.add(t.name);
     }
+    // Reflects the prune pass: after a commit this is the elided view, so
+    // downstream size math (the fail-safe below) sees post-prune tokens, not
+    // the un-mutated `entries`.
+    let effectiveEntries: readonly SessionEntry[] = entries;
     const prunePlan = planPrune({ entries, cfg, protectedTools });
     if (prunePlan.willCommit) {
       const mutable = entries.map((e) => structuredClone(e)) as SessionEntry[];
@@ -3267,6 +3619,7 @@ export class Thread {
       }
       // Apply to the live agent transcript:
       this.applyElisionsToAgentMessages(prunePlan);
+      effectiveEntries = mutable;
     }
 
     // Step 2: cut-point selection.
@@ -3274,12 +3627,39 @@ export class Thread {
     if (cut.cutIndex === 0 || cut.cutIndex === entries.length) {
       // Nothing to compact: either the tail already fits everything, or
       // there's no tail to preserve. The pruning pass above may have been
-      // sufficient on its own.
-      return;
+      // sufficient on its own. The outcome tells the proactive caller apart:
+      // "pruned" is progress; "noop" means the trigger fired but nothing was
+      // reclaimable (context dominated by system overhead the budget math
+      // cannot see) — left unhandled that repeats silently every turn.
+      return prunePlan.willCommit ? "pruned" : "noop";
     }
 
     const head = entries.slice(0, cut.cutIndex);
-    if (head.length === 0) return;
+    if (head.length === 0) return prunePlan.willCommit ? "pruned" : "noop";
+
+    // Fail-safe: `fallbackToFloor` means selectCutPoint could not fit even the
+    // last turn within the tail budget and kept it anyway. If that forced tail
+    // also exceeds the usable window, summarizing the head cannot bring the
+    // prompt under the limit (post-compaction context is roughly summary +
+    // tail). This is the shape that loops overflow -> compact-head -> overflow:
+    // an un-compactable newest turn, such as a paste too large to spill or an
+    // oversized tool result. Report it as an actionable error instead of a
+    // false success the reactive path retries forever. The `fallbackToFloor`
+    // gate keeps this off the normal small-model path, where the tail-budget
+    // floor legitimately exceeds usable. The estimate MUST use the post-prune
+    // view: an oversized tool result the prune pass just elided is fittable
+    // now, and counting it at full size would wrongly abandon the turn.
+    const usable = usableTokens(effectiveModel, cfg);
+    const tailTokens = estimateTotalTokens(effectiveEntries.slice(cut.cutIndex));
+    if (cut.fallbackToFloor && usable > 0 && tailTokens > usable) {
+      this.emitError(
+        "context_overflow_unrecoverable",
+        `The newest turn is about ${tailTokens} tokens, larger than the model's ${usable}-token ` +
+          `usable context. Compaction keeps the newest turn verbatim, so it cannot reduce this. ` +
+          `Shorten the last message, split it across turns, or attach it as a file.`,
+      );
+      return "insufficient";
+    }
 
     // Step 3: summarize.
     await session.emit(
@@ -3293,21 +3673,56 @@ export class Thread {
     // finally covers the summarizer AND the persist/rebuild steps.
     try {
       const previousSummary = findMostRecentCompaction(entries)?.summary;
-      summaryResult = await summarize({
-        headEntries: head,
-        model,
-        toolOutputMaxChars: cfg?.toolOutputMaxChars,
-        attributeAuthors: this.attributeAuthors,
-        previousSummary,
-        instructions: opts.instructions,
-        // Reactive compaction fires WITHIN a claimed turn (and proactive
-        // just after runAgent, still before the turn's finally clears it),
-        // so `turnApiKey` is live here. Without this, a BYO-key session
-        // whose only key comes from the host `resolveModel` seam would fail
-        // the summarizer completion on first context overflow. Undefined
-        // when no resolver is wired (env-fallback path) — behavior unchanged.
-        apiKey: this.turnApiKey,
-      });
+      // Overflow retry (TKAI-306): if the summarize call itself blows the
+      // summarizer model's context, drop the oldest half of the head input
+      // and try again. The CompactionEntry below still covers the FULL head
+      // — under overflow duress losing the oldest detail from the summary
+      // beats failing the compaction outright, and `previousSummary` still
+      // anchors facts from earlier compactions.
+      let headForSummary = head;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          summaryResult = await summarize({
+            headEntries: headForSummary,
+            model,
+            toolOutputMaxChars: cfg?.toolOutputMaxChars,
+            attributeAuthors: this.attributeAuthors,
+            previousSummary,
+            instructions: opts.instructions,
+            // Reactive compaction fires WITHIN a claimed turn (and proactive
+            // just after runAgent, still before the turn's finally clears it),
+            // so `turnApiKey` is live here. Without this, a BYO-key session
+            // whose only key comes from the host `resolveModel` seam would fail
+            // the summarizer completion on first context overflow. Undefined
+            // when no resolver is wired (env-fallback path) — behavior unchanged.
+            apiKey: this.turnApiKey,
+          });
+          break;
+        } catch (err) {
+          if (!(err instanceof SummarizeOverflowError)) throw err;
+          // Align the cut to a user-message boundary: a summarizer input
+          // starting on an assistant message is rejected by providers that
+          // require a user-first transcript, and that 400 is not an
+          // overflow, so it would abort the whole retry loop.
+          const half = Math.floor(headForSummary.length / 2);
+          let start = -1;
+          for (let i = half; i < headForSummary.length; i++) {
+            const e = headForSummary[i];
+            if (e.type === "message" && e.role === "user") {
+              start = i;
+              break;
+            }
+          }
+          const truncated = start >= 0 ? headForSummary.slice(start) : headForSummary.slice(half);
+          if (
+            attempt + 1 >= MAX_SUMMARIZE_OVERFLOW_RETRIES ||
+            truncated.length === headForSummary.length
+          ) {
+            throw err;
+          }
+          headForSummary = truncated;
+        }
+      }
 
       // Step 4: persist CompactionEntry.
       const compactionEntry: CompactionEntry = {
@@ -3330,6 +3745,9 @@ export class Thread {
       });
       // Fenced under the current turn's attempt (compaction is always in-turn).
       await store.appendEntries(session.id, this.id, [compactionEntry], this.fence);
+      // A persisted summary closes the failure circuit breaker — any mode's
+      // success proves the summarizer works again (manual /compact included).
+      this.consecutiveCompactionFailures = 0;
 
       // Step 5: rewrite agent.state.messages. The simplest and most
       // correct path is to rebuild from the now-augmented DAG.
@@ -3341,8 +3759,12 @@ export class Thread {
           provider: effectiveModel.provider,
           id: effectiveModel.id,
         },
-        { attributeAuthors: this.attributeAuthors },
+        { attributeAuthors: this.attributeAuthors, threadKey: this.key },
       );
+      // Compaction legitimately rewrites the prefix — the next turn's cache
+      // reads SHOULD drop. Reset the break-detector baseline so the expected
+      // drop is not counted as a break (TKAI-320).
+      this.prevCacheSnapshot = undefined;
     } finally {
       await session.emit(
         { type: "compaction_end", threadId: this.id },
@@ -3379,6 +3801,11 @@ export class Thread {
       // settles. metadata flags let client UIs hide the synthetic continuation.
       const followUp = this.buildQueueItem(AUTO_CONTINUE_PROMPT, {
         metadata: { compaction_continue: true, synthetic: true },
+        // The continuation answers the same reader as the turn it continues.
+        // Without the inherited channel mark, the outbound channel path
+        // classifies the continuation as a web prompt and mutes the rest of
+        // a channel-originated answer (TKAI-323).
+        channel: this.runningItem?.channel,
       });
       await store.admitSubmission(session.id, this.id, followUp);
       await this.emitQueueState();
@@ -3392,6 +3819,8 @@ export class Thread {
     if (opts.autoContinue !== false) {
       this.skipNextProactiveCheck = true;
     }
+
+    return "compacted";
   }
 
   private applyElisionsToAgentMessages(plan: PruneResult): void {
@@ -3421,7 +3850,37 @@ export class Thread {
         model: this.session.options.model,
         systemPrompt: this.buildBaseSystemPrompt(),
       },
-      streamFn: streamSimple,
+      // Deliberate transport-retry policy (TKAI-319): pi-ai wraps provider
+      // requests in an abortable backoff only when maxRetries is set — the
+      // bare streamSimple left retries to whatever the SDK defaulted to.
+      // The spread keeps everything pi-agent-core passes (apiKey, signal);
+      // only the three knobs are pinned.
+      // Defaults, not overrides (TKAI-319): anything pi-agent-core forwards
+      // from its own config wins — pinning here would silently disable the
+      // upstream knob forever.
+      streamFn: (model, context, options) =>
+        streamSimple(model, context, {
+          ...options,
+          maxRetries: options?.maxRetries ?? TURN_STREAM_MAX_RETRIES,
+          maxRetryDelayMs: options?.maxRetryDelayMs ?? TURN_STREAM_MAX_RETRY_DELAY_MS,
+          timeoutMs: options?.timeoutMs ?? TURN_STREAM_TIMEOUT_MS,
+          // Cache wiring (TKAI-320): a stable per-thread session id gives
+          // providers with session-affinity caching a routing key (threads
+          // have divergent transcripts, so the key is thread-scoped).
+          // Retention defaults long for orchestrators — they idle between
+          // wake-ups, outliving the short TTL. Same defaults-not-overrides
+          // rule as the retry knobs above.
+          sessionId: options?.sessionId ?? `${this.session.id}/${this.id}`,
+          cacheRetention:
+            options?.cacheRetention ??
+            this.session.options.cacheRetention ??
+            (this.session.options.purpose === "orchestrator" ? "long" : "short"),
+          // Host sampling defaults (eval reproducibility seam). Same
+          // defaults-not-overrides rule: anything pi-agent-core forwards wins.
+          temperature: options?.temperature ?? this.session.options.sampling?.temperature,
+          reasoning: options?.reasoning ?? this.session.options.sampling?.reasoning,
+          samplingParams: options?.samplingParams ?? this.session.options.sampling?.params,
+        }),
       // Filter out custom AgentMessage types (decision_gate, compaction, etc.)
       // before the LLM sees them. They live in the engine DAG, not in LLM context.
       convertToLlm: (messages: AgentMessage[]): Message[] => {
@@ -3491,6 +3950,10 @@ export class Thread {
       cwd: session.options.workspace,
       credentials: session.credentialProvider(),
       sandbox: session.sandbox,
+      fileReads: {
+        get: (path) => this.fileReadHashes.get(path),
+        record: (path, contentHash) => this.fileReadHashes.set(path, contentHash),
+      },
       config: session.options.toolConfig,
       owner: session.owner,
       policyResolver: session.options.policyResolver,
@@ -3824,6 +4287,31 @@ export class Thread {
           // "no usage reported" — omit, mirroring the cost-is-null rule.
           if (this.lastAssistantUsage.total > 0) turnUsage = { ...this.lastAssistantUsage };
           turnModel = event.message.model;
+          // Cache-break telemetry (TKAI-320): compare against the previous
+          // turn's snapshot and count breaks by cause. Alert-only — nothing
+          // here changes behavior.
+          if (this.lastAssistantUsage.total > 0) {
+            const snapshot: CacheTurnSnapshot = {
+              promptTokens: u.input + u.cacheRead + u.cacheWrite,
+              cacheRead: u.cacheRead,
+              modelId: event.message.model,
+              systemPromptLength: this.agent.state.systemPrompt.length,
+              toolCount: this.agent.state.tools.length,
+            };
+            // prev.cacheRead > 0 proves this provider reports cache usage
+            // at all — OpenAI-compatible/custom providers that never do
+            // would otherwise trip the detector on every turn forever.
+            if (this.prevCacheSnapshot && this.prevCacheSnapshot.cacheRead > 0) {
+              const cause = classifyCacheBreak(this.prevCacheSnapshot, snapshot);
+              if (cause) {
+                recordCacheBreak(cause, snapshot.modelId);
+                console.error(
+                  `[engine] cache break session=${this.session.id} thread=${this.id} cause=${cause} expected_read≈${this.prevCacheSnapshot.promptTokens} got=${snapshot.cacheRead}`,
+                );
+              }
+            }
+            this.prevCacheSnapshot = snapshot;
+          }
           // Cost is null, not zero: unpriced models (custom providers, dev
           // fakes) omit the field entirely — a missing value reads
           // "unpriced", never "$0".
@@ -4376,6 +4864,14 @@ export function entriesToAgentMessages(
      * entries are exempt — their envelope already names the sender.
      */
     attributeAuthors?: boolean;
+    /**
+     * This thread's key. When set and a compaction is active, the
+     * <previous-context> wrapper tells the model the covered entries are
+     * still readable via thread_read (the DAG keeps everything; only the
+     * live context drops it). Claude Code's transcript-path escape hatch,
+     * adapted (TKAI-306).
+     */
+    threadKey?: string;
   },
 ): AgentMessage[] {
   // 1. Find the most recent CompactionEntry. Everything in its coveredEntryIds is dropped.
@@ -4390,12 +4886,18 @@ export function entriesToAgentMessages(
 
   const out: AgentMessage[] = [];
   if (activeCompaction) {
+    // thread_read returns the newest `limit` entries (max 200), so this can
+    // reach recent covered turns but not the oldest ones on a long thread —
+    // say "recent" so the model does not overtrust it.
+    const escapeHatch = opts?.threadKey
+      ? `\n\nIf you need specific details from recent turns covered by this summary (exact code, error text, tool output), read them with the thread_read tool: key "${opts.threadKey}", limit 200.`
+      : "";
     out.push({
       role: "user",
       content: [
         {
           type: "text",
-          text: `<previous-context>\n${activeCompaction.summary}\n</previous-context>`,
+          text: `<previous-context>\n${activeCompaction.summary}\n</previous-context>${escapeHatch}`,
         },
       ],
       timestamp: 0,
@@ -4407,7 +4909,21 @@ export function entriesToAgentMessages(
     if (activeCompaction?.covered.has(e.id)) continue;
 
     if (e.role === "user") {
-      const text = e.signal ? renderSignalEnvelope(e.signal, e.content) : e.content;
+      // A spilled entry keeps the full paste in `content` but must reach the
+      // LLM as the pointer, so a rehydrated transcript agrees with the hot
+      // path and does not re-overflow on the oversized text. Signals never
+      // spill, so the two branches never collide.
+      const spillPath = e.metadata?.[SPILLED_INPUT_PATH_KEY];
+      const text =
+        typeof spillPath === "string"
+          ? buildSpilledInputMarker({
+              path: spillPath,
+              tokens: estimateTokens(e.content),
+              chars: e.content.length,
+            })
+          : e.signal
+          ? renderSignalEnvelope(e.signal, e.content)
+          : e.content;
       const sender = opts?.attributeAuthors && !e.signal ? e.author : undefined;
       const contentBlocks = userContentBlocks(text, e.attachments, sender);
       out.push({

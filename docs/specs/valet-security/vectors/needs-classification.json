@@ -1,0 +1,115 @@
+[
+  {
+    "id": "classify-001",
+    "level": "L2",
+    "description": "Auto bucket: scope-auto-include with IP in CIDR (L2 not required to execute; classifies auto only at L3+)",
+    "input": {
+      "need": {
+        "id": "n-dast-scope-staging",
+        "kind": "scope-expansion",
+        "proposed_resolution": {
+          "auto": {
+            "pattern": "scope-auto-include",
+            "params": {"host": "staging.example.com", "discovered_ip": "10.1.2.3"}
+          },
+          "human": {"ask": "Approve scope expansion to staging.example.com"}
+        }
+      },
+      "ctx": {
+        "authorized_cidrs": ["10.0.0.0/8"],
+        "loot": {"sessions": [], "credentials": [], "test_data": [], "tool_auth": []},
+        "level": 2
+      }
+    },
+    "expected": {"bucket": "human"}
+  },
+  {
+    "id": "classify-002",
+    "level": "L2",
+    "description": "Human bucket: test-data need with no auto pattern",
+    "input": {
+      "need": {
+        "id": "n-fuzz-payment-test-data",
+        "kind": "test-data",
+        "proposed_resolution": {
+          "auto": {"pattern": "", "params": {}},
+          "human": {"ask": "Provide a test credit card"}
+        }
+      },
+      "ctx": {
+        "authorized_cidrs": [],
+        "loot": {"sessions": [], "credentials": [], "test_data": [], "tool_auth": []},
+        "level": 2
+      }
+    },
+    "expected": {"bucket": "human"}
+  },
+  {
+    "id": "classify-003",
+    "level": "L3",
+    "description": "Auto bucket: propagate-session with source_session_id present in loot",
+    "input": {
+      "need": {
+        "id": "n-fuzz-session",
+        "kind": "session",
+        "proposed_resolution": {
+          "auto": {"pattern": "propagate-session", "params": {"source_session_id": "s-human-1"}},
+          "human": {"ask": "Provide admin credentials"}
+        }
+      },
+      "ctx": {
+        "authorized_cidrs": [],
+        "loot": {
+          "sessions": [{"id": "s-human-1", "host": "api.example.com", "cookie_jar": "loot/cookies-s-human-1.txt"}],
+          "credentials": [], "test_data": [], "tool_auth": []
+        },
+        "level": 3
+      }
+    },
+    "expected": {"bucket": "auto"}
+  },
+  {
+    "id": "classify-004",
+    "level": "L3",
+    "description": "Human bucket: propagate-session with missing source session; params do not resolve",
+    "input": {
+      "need": {
+        "id": "n-fuzz-session",
+        "kind": "session",
+        "proposed_resolution": {
+          "auto": {"pattern": "propagate-session", "params": {"source_session_id": "s-nonexistent"}},
+          "human": {"ask": "Provide admin credentials"}
+        }
+      },
+      "ctx": {
+        "authorized_cidrs": [],
+        "loot": {"sessions": [], "credentials": [], "test_data": [], "tool_auth": []},
+        "level": 3
+      }
+    },
+    "expected": {"bucket": "human"}
+  },
+  {
+    "id": "classify-005",
+    "level": "L2",
+    "description": "v1 human bucket (v2 deferred bucket); need with a blocked_by list, no auto pattern",
+    "input": {
+      "need": {
+        "id": "n-fuzz-payment",
+        "kind": "test-data",
+        "blocked_by": ["n-fuzz-session"],
+        "proposed_resolution": {
+          "auto": {"pattern": "", "params": {}},
+          "human": {"ask": "Provide test credit card"}
+        }
+      },
+      "ctx": {
+        "authorized_cidrs": [],
+        "loot": {"sessions": [], "credentials": [], "test_data": [], "tool_auth": []},
+        "level": 2
+      }
+    },
+    "expected": {"bucket": "human"},
+    "expected_v2": {"bucket": "deferred"}
+  }
+]

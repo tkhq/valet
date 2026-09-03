@@ -536,9 +536,10 @@ export async function submitSessionPrompt(
 
   if (admission.promoteItemId) {
     const receipt = await thread.promoteQueuedItem(admission.promoteItemId);
+    const now = Date.now();
     await db
       .update(agentSessions)
-      .set({ updatedAt: Date.now() })
+      .set({ updatedAt: now, lastActivityAt: now })
       .where(eq(agentSessions.id, row.id));
     return {
       messageId: receipt.queueItemId || null,
@@ -648,9 +649,10 @@ export async function submitSessionPrompt(
     throw err;
   }
 
+  const submitNow = Date.now();
   await db
     .update(agentSessions)
-    .set({ updatedAt: Date.now() })
+    .set({ updatedAt: submitNow, lastActivityAt: submitNow })
     .where(eq(agentSessions.id, row.id));
 
   return {

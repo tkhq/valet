@@ -17,6 +17,7 @@ describe("playbooks", () => {
       "fuzz",
       "exploit",
       "reconcile",
+      "pivot-coordinator",
     ]);
   });
 

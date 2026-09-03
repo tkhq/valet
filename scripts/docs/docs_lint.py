@@ -43,6 +43,7 @@ THRESHOLDS = {
     "packages/engine/README.md": 3.5,
     "packages/api/README.md": 4.5,
     "packages/web/README.md": 3.0,
+    "packages/eval/README.md": 3.5,
 }
 
 

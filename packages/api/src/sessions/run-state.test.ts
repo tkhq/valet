@@ -89,6 +89,35 @@ describe("deriveLastActivityAt", () => {
       9_000,
     );
   });
+
+  it("prefers the persisted lastActivityAt over updatedAt (TKAI-341)", () => {
+    // A channel-bound session has lastActivityAt > updatedAt because the
+    // channel handler bumps lastActivityAt without touching updatedAt.
+    const r = row({ updatedAt: 1_000, lastActivityAt: 5_000 });
+    expect(deriveLastActivityAt(r, [])).toBe(5_000);
+  });
+
+  it("falls back to updatedAt when lastActivityAt is null (pre-column rows)", () => {
+    const r = row({ updatedAt: 3_000, lastActivityAt: null });
+    expect(deriveLastActivityAt(r, [])).toBe(3_000);
+  });
+
+  it("prefers a submission timestamp over lastActivityAt when the turn is newer", () => {
+    const r = row({ updatedAt: 1_000, lastActivityAt: 2_000 });
+    const items = [submission("running", { updatedAt: 4_000 })];
+    expect(deriveLastActivityAt(r, items)).toBe(4_000);
+  });
+
+  it("a session with older createdAt but newer lastActivityAt sorts above a newer-but-idle session", () => {
+    // Session A: created long ago, active recently via Slack.
+    const rowA = row({ updatedAt: 100, lastActivityAt: 9_000 });
+    // Session B: created recently, idle since then.
+    const rowB = row({ updatedAt: 5_000, lastActivityAt: 5_000 });
+    const activityA = deriveLastActivityAt(rowA, []);
+    const activityB = deriveLastActivityAt(rowB, []);
+    // A must sort above B (higher lastActivityAt).
+    expect(activityA).toBeGreaterThan(activityB);
+  });
 });
 
 describe("deriveRunFields", () => {

@@ -45,7 +45,7 @@
  * rename orphans the row and the next boot creates a second team beside it.
  */
 import { Hono } from "hono";
-import { and, desc, eq, inArray, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { NotFoundError, ValetError } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import type { AuthUser } from "../middleware/auth.js";
@@ -308,6 +308,7 @@ teamsRouter.get("/:id/children", async (c) => {
     settled: childWatches.settled,
     createdAt: childWatches.createdAt,
     title: agentSessions.title,
+    lastActivityAt: agentSessions.lastActivityAt,
   };
   const parentFilter = and(
     inArray(childWatches.parentSessionId, [...bySessionId.keys()]),
@@ -323,20 +324,20 @@ teamsRouter.get("/:id/children", async (c) => {
       .from(childWatches)
       .innerJoin(agentSessions, eq(agentSessions.id, childWatches.childSessionId))
       .where(parentFilter)
-      .orderBy(desc(childWatches.createdAt))
+      .orderBy(desc(sql`COALESCE(${agentSessions.lastActivityAt}, ${childWatches.createdAt})`))
       .limit(20),
     db
       .select(selection)
       .from(childWatches)
       .innerJoin(agentSessions, eq(agentSessions.id, childWatches.childSessionId))
       .where(and(parentFilter, eq(childWatches.settled, false)))
-      .orderBy(desc(childWatches.createdAt))
+      .orderBy(desc(sql`COALESCE(${agentSessions.lastActivityAt}, ${childWatches.createdAt})`))
       .limit(20),
   ]);
   const seen = new Set<string>();
   const rows = [...newest, ...running]
     .filter((r) => (seen.has(r.sessionId) ? false : (seen.add(r.sessionId), true)))
-    .sort((a, b) => b.createdAt - a.createdAt);
+    .sort((a, b) => (b.lastActivityAt ?? b.createdAt) - (a.lastActivityAt ?? a.createdAt));
 
   const children: TeamChildSummary[] = rows.map((r) => {
     const assistant = bySessionId.get(r.parentSessionId);

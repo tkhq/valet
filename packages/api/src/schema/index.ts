@@ -368,6 +368,13 @@ export const agentSessions = pgTable(
     sandboxReclaimedAt: bigint("sandbox_reclaimed_at", { mode: "number" }),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+    // Epoch ms of the most recent user or agent activity in this session.
+    // Updated on every prompt submission (web, channel, child signal) and
+    // on session create. The session list sorts by this column so a
+    // long-lived channel-bound session rises when it receives a message.
+    // Nullable: pre-column rows default to NULL; queries fall back to
+    // `updatedAt` via COALESCE.
+    lastActivityAt: bigint("last_activity_at", { mode: "number" }),
   },
   (t) => [
     index("agent_sessions_user").on(t.userId),
@@ -1349,6 +1356,33 @@ export const llmProviders = pgTable(
   (t) => [index("llm_providers_org").on(t.orgId)],
 );
 
+/** One cached pi-ai model record, as stored. The column is opaque JSON on
+ * purpose: it caches a REMOTE payload, so nothing may assume the row is
+ * well-formed. `services/model-registry-parse.ts` validates every entry on
+ * read before it reaches the catalog. */
+export type RegistryCacheModel = unknown;
+
+// The runtime model-registry cache (TKAI-327). One row per pi-ai provider
+// id. It holds the catalog fetched from upstream, plus the HTTP validators
+// that make the next check a 304. The table is deployment-wide, not
+// org-scoped: the upstream registry is the same for every org, so all api
+// replicas share one row instead of each process refetching.
+//
+// This table is a CACHE. Every read has a bundled compile-time fallback
+// (`services/model-registry.ts`), so an empty or stale table degrades the
+// catalog to the bundled list. It never fails a turn.
+export const modelRegistryCache = pgTable("model_registry_cache", {
+  providerId: text("provider_id").primaryKey(),
+  models: jsonb("models").notNull().default([]).$type<RegistryCacheModel[]>(),
+  /** Opaque ETag from the upstream response, kept verbatim (quotes included). */
+  etag: text("etag"),
+  /** Upstream `Last-Modified`, as epoch ms. */
+  lastModified: bigint("last_modified", { mode: "number" }),
+  /** When the last upstream check completed, as epoch ms. Null means never. */
+  checkedAt: bigint("checked_at", { mode: "number" }),
+  updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+});
+
 export const llmProxyRequests = pgTable(
   "llm_proxy_requests",
   {
@@ -1780,6 +1814,7 @@ export type RuntimeGrantRow = typeof runtimeGrants.$inferSelect;
 export type ActionPolicyOverrideRow = typeof actionPolicyOverrides.$inferSelect;
 export type ActionInvocationRow = typeof actionInvocations.$inferSelect;
 export type LlmProviderRow = typeof llmProviders.$inferSelect;
+export type ModelRegistryCacheRow = typeof modelRegistryCache.$inferSelect;
 export type SessionRepoRow = typeof sessionRepos.$inferSelect;
 export type GithubInstallationRow = typeof githubInstallations.$inferSelect;
 export type ImageSourceRow = typeof imageSources.$inferSelect;
@@ -2110,3 +2145,32 @@ export type SecurityHandoffRow = typeof securityHandoffs.$inferSelect;
 export type SecurityFindingCommentRow = typeof securityFindingComments.$inferSelect;
 export type SecurityCoverageRow = typeof securityCoverage.$inferSelect;
 export type SecurityNeedRow = typeof securityNeeds.$inferSelect;
+
+// ── Ratings (TKAI-334) ─────────────────────────────────────────────────────
+// Thumbs up/down feedback. One table, polymorphic target: a session-level
+// rating (`target_type = 'session'`, target_id = session id) is the primary
+// eval-seeding signal; an entry-level rating (`target_type = 'entry'`,
+// target_id = engine entry id) is finer-grained debugging data. One rating
+// per (user, target); re-rating updates the row, null clears it.
+export const ratings = pgTable(
+  "ratings",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    targetType: text("target_type", { enum: ["session", "entry"] }).notNull(),
+    targetId: text("target_id").notNull(),
+    sessionId: text("session_id").notNull(),
+    // Engine thread holding the rated entry. Null for session-level rows.
+    threadId: text("thread_id"),
+    rating: text("rating", { enum: ["positive", "negative"] }).notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    uniqueIndex("ratings_user_target").on(t.userId, t.targetType, t.targetId),
+    index("ratings_session").on(t.sessionId),
+    index("ratings_type_rating").on(t.targetType, t.rating),
+  ],
+);
+
+export type RatingRow = typeof ratings.$inferSelect;

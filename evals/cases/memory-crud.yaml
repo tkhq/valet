@@ -1,0 +1,28 @@
+# Starter case (TKAI-333): full memory lifecycle.
+id: memory-crud
+description: Create, read, update, delete, and verify a memory file.
+turns:
+  - role: user
+    content: >-
+      Do this memory exercise step by step: (1) create a memory file at
+      notes/crud-test.md with content "version one". (2) Read it back.
+      (3) Update the same file to "version two". (4) Read it back again and
+      include its content in your reply. (5) Delete the file. (6) Confirm the
+      deletion by trying to read it once more, then report what happened.
+timeout_ms: 240000
+checks:
+  - type: tool_called
+    tool: mem_write
+    min: 2
+  - type: tool_called
+    tool: mem_rm
+  - type: tool_result_matches
+    tool: mem_rm
+    pattern: "^Deleted:"
+  - type: tool_called
+    tool: mem_read
+    after: mem_rm
+  - type: output_contains
+    value: version two
+  - type: all_terminal
+  - type: no_errors

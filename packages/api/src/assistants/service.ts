@@ -259,6 +259,7 @@ export async function ensureAssistantSession(
         ownerId: principal.id,
         createdAt: now,
         updatedAt: now,
+        lastActivityAt: now,
       })
       .onConflictDoNothing();
   }

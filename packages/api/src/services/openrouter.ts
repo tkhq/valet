@@ -22,8 +22,9 @@
  * namespaced catalog id nests: `openrouter/deepseek/deepseek-v4-pro`.
  * `parseModelId` splits on the FIRST slash, so the round-trip holds.
  */
-import { getModels, type Api, type Model } from "@earendil-works/pi-ai/compat";
+import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import type { LlmProviderModel } from "../schema/index.js";
+import { registryModels } from "./model-registry.js";
 
 /** Registry entry type — openrouter models are all `openai-completions`,
  * but `getModels` returns the wider `Model<Api>`; keep the wider type. */
@@ -49,9 +50,11 @@ export const OPENROUTER_DEFAULT_MODEL_IDS: readonly string[] = [
   "meta-llama/llama-3.3-70b-instruct",
 ];
 
-/** The full pi-ai openrouter registry, keyed by model id. */
+/** The full openrouter registry, keyed by model id. Reads the runtime
+ * registry (`services/model-registry.ts`), so a model that arrived from
+ * upstream is selectable here without a pi-ai bump. */
 export function openrouterRegistry(): Map<string, OpenrouterRegistryModel> {
-  return new Map(getModels("openrouter").map((m) => [m.id, m]));
+  return new Map(registryModels("openrouter").map((m) => [m.id, m]));
 }
 
 /** Registry model → the row/catalog `LlmProviderModel` shape. */

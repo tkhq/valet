@@ -1,0 +1,15 @@
+# Starter case (TKAI-333): conversational follow-up.
+id: follow-up-question
+description: The agent answers, then handles a clarifying follow-up.
+turns:
+  - role: user
+    content: What is 17 multiplied by 23? Reply with just the number.
+  - role: user
+    content: Add 9 to that result. Reply with just the number.
+timeout_ms: 120000
+checks:
+  - type: output_contains
+    value: "400"
+  - type: max_turns
+    value: 4
+  - type: no_errors

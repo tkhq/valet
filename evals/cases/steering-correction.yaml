@@ -1,0 +1,24 @@
+# Starter case (TKAI-333): user-driven steering across turns.
+id: steering-correction
+description: The agent writes a file, the user asks for a change, the agent updates it.
+turns:
+  - role: user
+    content: >-
+      Use the write tool to create /workspace/greet.sh containing exactly
+      one line: echo "Hello". Then reply "done".
+  - role: user
+    content: >-
+      Change the script so it prints Goodbye instead of Hello, then paste
+      the final file content in your reply.
+timeout_ms: 240000
+checks:
+  - type: tool_called
+    tool: write
+  - type: tool_args_match
+    tool: write
+    args:
+      path: /workspace/greet.sh
+  - type: output_contains
+    value: Goodbye
+  - type: all_terminal
+  - type: no_errors

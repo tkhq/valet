@@ -135,6 +135,45 @@ summarizer prompt.
 - The message list renders a compaction divider for messages with
   `compaction`: a rule with token counts and a collapsible summary.
 
+### 9. Oversized inbound input spills to a file; an un-compactable tail fails loud
+
+Compaction summarizes older turns and keeps the newest turn verbatim. A single
+message larger than the model's context window is therefore un-compactable: it
+overflows, compaction summarizes the (small) head, the retry re-sends the same
+oversized tail, and the turn overflows again. Left unhandled this loops forever.
+It shipped as a real incident: a pasted session transcript of about 240k tokens
+bricked a 200k-window thread, which looped `compact 43.7k -> 1.1k` then `400
+prompt is too long` on every turn.
+
+Two layers fix it:
+
+- **Spill (primary).** When one inbound user message exceeds
+  `compaction.maxInputTokens` (default 60% of usable context; `0` disables),
+  `appendUserEntry` writes the full text to `<workspace>/.valet/large-inputs/
+  <entryId>.txt` in the sandbox. The persisted entry keeps the FULL text in
+  `content` (durable, REST-visible, so the transcript still shows what the user
+  said) plus the file path in metadata (`valetSpilledInputPath`). Only the LLM
+  view becomes a pointer: `runAgent` prompts a marker, and
+  `entriesToAgentMessages` renders the same marker on reload, so hot and cold
+  transcripts agree and neither re-overflows on the paste. The model pages the
+  file with the read and bash tools. Signals are exempt (bounded, and their XML
+  envelope must render verbatim). If the sandbox write fails, the full text
+  stays in context (nothing is truncated or dropped) and the fail-safe below
+  surfaces a clear error if it overflows.
+- **Fail-safe (defense in depth).** For a tail that still exceeds the window
+  (an oversized tool result, or a spill that could not write), `compactThreadInner`
+  checks the kept tail after cut-point selection. It measures the POST-prune
+  view: a tool result the prune pass just elided is fittable now, so counting
+  it at full size would wrongly abandon the turn. When `selectCutPoint` returns
+  `fallbackToFloor` (it could not fit even the last turn in the tail budget)
+  AND that post-prune tail still exceeds usable context, compaction cannot
+  help. It returns the new `"insufficient"` outcome and emits one
+  `context_overflow_unrecoverable` error naming the size and the fix (shorten,
+  split across turns, or attach as a file). The reactive path stops instead of
+  retrying; the proactive path feeds the circuit breaker without re-emitting.
+  The `fallbackToFloor` gate keeps this off the normal small-model path, where
+  the tail-budget floor legitimately exceeds a tiny usable window.
+
 ## Out of scope
 
 - DAG exploration UI (roll back / roll forward across compaction boundaries).

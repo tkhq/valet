@@ -165,12 +165,46 @@ export function defineTool<T extends TSchema>(def: ToolDef<T>): ToolDef<T> {
   return def;
 }
 
+/**
+ * FNV-1a content hash for the read-before-write gate. Equality checking
+ * only — deliberately not node:crypto, which must stay out of the engine's
+ * browser-safe barrel.
+ */
+export function hashFileContent(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36) + ":" + text.length.toString(36);
+}
+
+/**
+ * Normalize a model-supplied path into the fileReads map key: absolute
+ * against `cwd`, `.`/`..` segments resolved lexically. Without this,
+ * "src/app.ts" and "/workspace/src/app.ts" record under different keys and
+ * spuriously trip the gate. Deliberately not node:path — the engine barrel
+ * must stay browser-safe.
+ */
+export function normalizeGatePath(path: string, cwd: string | undefined): string {
+  const joined = path.startsWith("/") ? path : `${cwd ?? "/workspace"}/${path}`;
+  const parts: string[] = [];
+  for (const seg of joined.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") parts.pop();
+    else parts.push(seg);
+  }
+  return "/" + parts.join("/");
+}
+
 export const readTool = defineTool({
   name: "read",
   description: "Read the contents of a file from the sandbox.",
   parameters: Type.Object({ path: Type.String() }),
+  concurrencySafe: true,
   execute: async (args, ctx) => {
     const text = await ctx.sandbox.readFile(args.path);
+    ctx.fileReads?.record(normalizeGatePath(args.path, ctx.cwd), hashFileContent(text));
     return { text };
   },
 });
@@ -180,7 +214,32 @@ export const writeTool = defineTool({
   description: "Write contents to a file in the sandbox (creates or overwrites).",
   parameters: Type.Object({ path: Type.String(), content: Type.String() }),
   execute: async (args, ctx) => {
+    // Staleness gate (TKAI-318), write flavor: block ONLY when the model
+    // read this file earlier and it changed since — that protects the
+    // read-modify-write flow against concurrent human/bash edits. A
+    // never-read overwrite is allowed: `write` replaces content wholesale
+    // by declared intent, and gating it would force reads of large or
+    // binary files just to regenerate them. No recorded hash → no
+    // pre-read at all, so regenerating a 100MB artifact costs one write.
+    const key = normalizeGatePath(args.path, ctx.cwd);
+    const known = ctx.fileReads?.get(key);
+    if (known !== undefined) {
+      let current: string | undefined;
+      try {
+        current = await ctx.sandbox.readFile(args.path);
+      } catch {
+        // Deleted or unreadable since the read — the recorded state is
+        // moot either way; the write proceeds and re-records.
+      }
+      if (current !== undefined && known !== hashFileContent(current)) {
+        return {
+          text: `${args.path} changed since you read it (another process or person edited it). Read it again before writing to it.`,
+          ok: false,
+        };
+      }
+    }
     await ctx.sandbox.writeFile(args.path, args.content);
+    ctx.fileReads?.record(key, hashFileContent(args.content));
     return { text: `wrote ${args.path}` };
   },
 });
@@ -195,11 +254,32 @@ export const editTool = defineTool({
   }),
   execute: async (args, ctx) => {
     const before = await ctx.sandbox.readFile(args.path);
+    // Staleness gate (TKAI-318), edit flavor: an edit is by definition a
+    // read-modify-write, so both blocks apply — never-read and
+    // changed-since-read. Content hashing catches bash-side and human
+    // edits that timestamps cannot. Inert when the host wires no fileReads.
+    const key = normalizeGatePath(args.path, ctx.cwd);
+    if (ctx.fileReads) {
+      const known = ctx.fileReads.get(key);
+      if (known === undefined) {
+        return {
+          text: `${args.path} exists but has not been read this session. Read it before editing it.`,
+          ok: false,
+        };
+      }
+      if (known !== hashFileContent(before)) {
+        return {
+          text: `${args.path} changed since you read it (another process or person edited it). Read it again before editing it.`,
+          ok: false,
+        };
+      }
+    }
     if (!before.includes(args.oldString)) {
       return { text: `no match for old_string in ${args.path}` };
     }
     const after = before.split(args.oldString).join(args.newString);
     await ctx.sandbox.writeFile(args.path, after);
+    ctx.fileReads?.record(key, hashFileContent(after));
     return { text: `edited ${args.path}` };
   },
 });
@@ -262,6 +342,7 @@ export const bashTool = defineTool({
 
 export const threadReadTool = defineTool({
   name: "thread_read",
+  concurrencySafe: true,
   description:
     "Read recent messages from another thread in this session. Useful for cross-thread context (e.g. an orchestrator pulling notes from a worker thread, or a thread checking what a sibling has done).",
   parameters: Type.Object({
@@ -369,6 +450,7 @@ export const CHILD_READ_MAX_CHARS = 16_000;
 
 export const childReadTool = defineTool({
   name: "child_read",
+  concurrencySafe: true,
   description:
     "Read the messages of a child session this session spawned. A " +
     "`child.settled` signal carries only a bounded copy of the child's " +
@@ -478,6 +560,7 @@ export const childSendTool = defineTool({
 
 export const childStatusTool = defineTool({
   name: "child_status",
+  concurrencySafe: true,
   description:
     "Check whether a child session is still making progress: settled or " +
     "running, plus its last queue activity time. Use it to decide between " +
@@ -525,6 +608,7 @@ export const childStatusTool = defineTool({
 
 export const listThreadsTool = defineTool({
   name: "list_threads",
+  concurrencySafe: true,
   description:
     "List sibling threads in this session, including paused ones. Use this " +
     "to discover thread keys before calling `thread_read`. Returns key, " +

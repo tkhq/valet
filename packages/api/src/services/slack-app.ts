@@ -87,6 +87,9 @@ export const SLACK_OPTIONAL_BOT_SCOPES: readonly string[] = [
   "groups:read",
   "im:read",
   "mpim:read",
+  // `slack.join_channel` (`conversations.join`). Public channels only.
+  // Slack has no join scope for private channels; the bot must be invited.
+  "channels:join",
   // `slack.add_reaction` (`reactions.add`).
   "reactions:write",
   // `slack.get_reactions` (`reactions.get`).

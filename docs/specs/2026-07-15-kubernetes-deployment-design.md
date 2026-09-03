@@ -111,6 +111,51 @@ The fix changes both the api and the chart (0.10.2):
 
 Follow-up recorded, not done here: sandbox disk-exhaustion hygiene.
 
+## Update (2026-09-02): sandbox node-disk protection (TKAI-349)
+
+On 2026-09-02 one node accumulated 36 sandbox pods, exhausted its ephemeral
+storage, and went `NotReady`. Sandbox pods had no ephemeral-storage request
+or limit, no scheduling spread, and an unbounded DinD docker-state
+`emptyDir`. The `/workspace` PVC was already bounded and was not the cause.
+
+Three additive changes to the manifest builder and provider config:
+
+1. **Ephemeral-storage request + limit on the sandbox container.** The
+   request caps how many sandbox pods the scheduler stacks onto one node
+   (`nodeAllocatableEphemeral / request`). The limit makes the kubelet evict
+   one runaway sandbox instead of the node failing. Defaults: request `2Gi`,
+   limit `8Gi` — env-overridable via
+   `VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST` /
+   `VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT` (`"0"` disables a side), chart
+   values `sandbox.ephemeralStorageRequest` / `sandbox.ephemeralStorageLimit`.
+   The defaults land on `K8sProviderConfig.defaultResources` and the manifest
+   merges them PER-FIELD under `SandboxCreateOpts.resources`, so the disk
+   protection survives a caller that only picks cpu/memory. cpu/memory keep
+   the request-equals-limit shape; ephemeral-storage request and limit differ
+   on purpose.
+2. **DinD docker-state `emptyDir` gets `sizeLimit`** equal to the resolved
+   ephemeral-storage limit (emptyDir usage counts against the container
+   limit, so a larger sizeLimit is unreachable). No limit configured →
+   unbounded, as before.
+3. **Soft topology spread** over `kubernetes.io/hostname`, keyed on a new
+   shared pod-template label `valet.dev/sandbox: "true"`, with
+   `whenUnsatisfiable: ScheduleAnyway` — sandboxes must still schedule under
+   pressure; the request in (1) is the hard concentration cap.
+
+Deployment note — the protection does NOT cover pods that already exist.
+A CR spec replace does not roll the pod (verified in the reconcile plan's
+exploration notes), and the only automatic pod-roll trigger is image drift.
+A legacy pod carries no ephemeral-storage request, so the scheduler counts
+it as using zero disk and can keep packing new sandboxes onto its node. The
+window closes per sandbox on its first post-deploy suspend/wake or
+destroy/recreate cycle: the wake path goes through `create()`/`applySandbox`,
+which replaces the CR with the new template, and the controller builds the
+next pod from it. To force it closed on a hot node, delete the sandbox pod
+AFTER its CR shows the new template (the controller recreates the pod from
+the CR), or destroy the sandbox and let its owner re-provision. Infra-side
+mitigations (autoscaler headroom, node disk-pressure alerts) cover the gap
+in the meantime and are deployed separately.
+
 ## Non-goals
 
 - CI image publishing / remote clusters (follow-up when a prod cluster exists).

@@ -1,0 +1,36 @@
+# Builder case: build, then refactor on user steering across turns; the
+# harness verifies BOTH behaviors survive on the final codebase. Needs
+# Docker (profile: full).
+id: builder-refactor
+description: Build a parser, then extend it on request; the harness verifies the final codebase.
+profile: full
+turns:
+  - role: user
+    content: >-
+      Create /workspace/kv.js: a Node ESM module exporting parseKv(text)
+      that parses "key=value" lines into an object, ignoring blank lines
+      and lines starting with '#'. Also create /workspace/kv-cli.js that
+      reads a file path argument, calls parseKv, and prints
+      JSON.stringify of the result. Add /workspace/package.json with
+      "type": "module". Reply "done" when written.
+  - role: user
+    content: >-
+      Extend parseKv: values wrapped in double quotes keep internal '='
+      and '#' characters and the quotes are stripped. Unquoted behavior
+      must not change. Update the module in place. Reply "done" again.
+timeout_ms: 420000
+checks:
+  - type: tool_called
+    tool: write
+    min: 3
+  - type: verify_command
+    command: >-
+      printf 'a=1\n# comment\n\nb=two\n' > /tmp/plain.kv &&
+      node /workspace/kv-cli.js /tmp/plain.kv
+    expect_output: '\{"a":"1","b":"two"\}'
+  - type: verify_command
+    command: >-
+      printf 'url="http://x/?a=b#frag"\nplain=ok\n' > /tmp/quoted.kv &&
+      node /workspace/kv-cli.js /tmp/quoted.kv
+    expect_output: 'http://x/\?a=b#frag'
+  - type: no_errors

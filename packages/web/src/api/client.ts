@@ -156,6 +156,9 @@ import type {
   PatchSessionRequest,
   PatchSessionResponse,
   PauseSessionResponse,
+  GetSessionRatingsResponse,
+  PutRatingRequest,
+  PutRatingResponse,
   SessionKind,
   PatchThreadRequest,
   PatchThreadResponse,
@@ -566,6 +569,18 @@ export const api = {
       `/sessions/${encodeURIComponent(id)}/security/needs/resolve`,
       { answers },
     ),
+  /** POST /sessions/:id/security/resume — reopen a terminal engagement so the
+   * affected cells re-dispatch (v1 Part 09). Session admin. Empty body =
+   * default affected set (failed + open-need cells). */
+  resumeSecurityReview: (
+    id: string,
+    body: { cellIds?: string[]; reason?: string },
+  ) =>
+    request<{ status: "running"; resetCellIds: string[] }>(
+      "POST",
+      `/sessions/${encodeURIComponent(id)}/security/resume`,
+      body,
+    ),
   /** POST /sessions/security/preview — the setup page's read-only preview of
    * the config + plan a review would seed. Creates nothing. */
   securityPreview: (body: SecurityPreviewRequest) =>
@@ -576,6 +591,16 @@ export const api = {
     request<{ ok: true }>("DELETE", `/sessions/${encodeURIComponent(id)}`),
   patchSession: (id: string, body: PatchSessionRequest) =>
     request<PatchSessionResponse>("PATCH", `/sessions/${encodeURIComponent(id)}`, body),
+  getSessionRatings: (id: string) =>
+    request<GetSessionRatingsResponse>("GET", `/sessions/${encodeURIComponent(id)}/ratings`),
+  rateSession: (id: string, body: PutRatingRequest) =>
+    request<PutRatingResponse>("POST", `/sessions/${encodeURIComponent(id)}/rating`, body),
+  rateMessage: (sessionId: string, entryId: string, body: PutRatingRequest) =>
+    request<PutRatingResponse>(
+      "POST",
+      `/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(entryId)}/rating`,
+      body,
+    ),
   mintSandboxJwt: (id: string) =>
     request<SandboxJwtResponse>("POST", `/sessions/${encodeURIComponent(id)}/sandbox-jwt`),
   pauseSession: (id: string) =>

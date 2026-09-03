@@ -489,6 +489,10 @@ export interface CommandResultEntry extends BaseEntry {
   source: import("./commands/types.js").CommandSource;
   ok: boolean;
   output: string; // markdown
+  /** Surface the command came from (`PromptOptions.channel`). A command
+   * result only auto-posts to a bound channel when this is set — a web-typed
+   * command answers in the web UI (TKAI-323). */
+  channel?: ChannelTarget;
 }
 
 export type SessionEntry =
@@ -596,6 +600,16 @@ export interface ToolDef<TParams extends TSchema = TSchema> {
   requiresApproval?: boolean | ((args: Static<TParams>, ctx: ToolContext) => Promise<boolean> | boolean);
   /** When true, this tool's outputs are exempt from pruning during compaction. */
   protectedFromPruning?: boolean;
+  /**
+   * When true, this tool may execute concurrently with other tool calls in
+   * the same assistant response. Default: false — the tool runs
+   * sequentially, and one sequential tool serializes its whole batch
+   * (pi-agent-core semantics). Only read-only tools with no approval gate
+   * should opt in: parallel mutating tools race each other, and parallel
+   * approval-gated tools surface approvals out of execution order
+   * (TKAI-318).
+   */
+  concurrencySafe?: boolean;
   execute: (args: Static<TParams>, ctx: ToolContext) => Promise<ToolResult>;
 }
 
@@ -644,6 +658,17 @@ export interface ToolContext {
   repo?: { url?: string; branch?: string; ref?: string; provider?: string };
   credentials: CredentialProvider;
   sandbox: Sandbox;
+  /**
+   * Per-thread record of the model's file reads, backing the
+   * read-before-write staleness gate (TKAI-318). `get` returns the content
+   * hash stored at the newest read of the path; `record` stores a hash
+   * after a read or a successful write. Absent in hosts and tests that do
+   * not wire it — the gate is inert then.
+   */
+  fileReads?: {
+    get(path: string): string | undefined;
+    record(path: string, contentHash: string): void;
+  };
   /** Verbatim passthrough of `CreateSessionOptions.toolConfig` (Phase 4 decision 7). */
   config?: Record<string, unknown>;
   /**
@@ -1151,7 +1176,21 @@ export interface SandboxCreateOpts {
   workspace?: string;
   env?: Record<string, string>;
   timeout?: number;
-  resources?: { cpu?: number; memory?: string };
+  resources?: {
+    cpu?: number;
+    memory?: string;
+    /** Node-local disk (container rootfs + emptyDirs) the sandbox reserves,
+     * as a Kubernetes quantity string (e.g. "2Gi"). The scheduler counts it
+     * against node allocatable, which caps how many sandboxes stack onto one
+     * node (TKAI-349: unbounded stacking exhausted a node's disk and took it
+     * NotReady). Providers without node-local disk accounting ignore it. */
+    ephemeralStorage?: string;
+    /** Node-local disk ceiling for the sandbox (quantity string, e.g. "8Gi").
+     * Past it the kubelet evicts the one runaway sandbox instead of the node
+     * failing. Independent of `ephemeralStorage` — an absent side is
+     * omitted, never inferred from the other. */
+    ephemeralStorageLimit?: string;
+  };
   metadata?: Record<string, unknown>;
   /**
    * The owning session's id. `Engine.materializeSandbox` stamps this on
@@ -1937,6 +1976,12 @@ export interface CreateSessionOptions {
   parentThreadId?: string;
   sandbox: Sandbox | SandboxCreateOpts;
   tools?: ToolDef[];
+  /**
+   * Replace the engine's built-in toolset for this session. A host/eval seam:
+   * pass a filtered copy of `builtinTools` to restrict the agent to a subset
+   * (e.g. an eval case's `tools:` pin). Absent === the full built-in set.
+   */
+  builtinTools?: ToolDef[];
   roles?: RoleSpec[];
   skills?: SkillSource[];
   model: Model<any>;
@@ -2039,6 +2084,49 @@ export interface CreateSessionOptions {
   systemPrompt?: string;
   /** Compaction tuning. See CompactionConfig defaults. */
   compaction?: CompactionConfig;
+  /**
+   * Turn-level retry for transient provider errors (TKAI-319). When a turn's
+   * assistant message settles with a transient error (rate limit, overload,
+   * 5xx, connection drop), the thread waits and re-runs the turn. Defaults:
+   * unattended purposes (orchestrator, workflow, child) retry twice with
+   * [10s, 30s] backoff; interactive sessions never auto-retry — a human is
+   * present to decide. pi-ai's transport-level retry runs underneath either
+   * way; this layer catches the failures that exhaust it.
+   */
+  turnRetry?: {
+    maxAttempts?: number;
+    /** Backoff before each retry, in ms; the last entry repeats. */
+    backoffMs?: number[];
+  };
+  /**
+   * Session-default sampling knobs, forwarded to pi-ai per turn as
+   * defaults-not-overrides (same rule as the retry/cache knobs in
+   * `Thread.buildAgent`). Hosts that need reproducible-ish runs (evals)
+   * set `temperature: 0`. Caveat: some models reject non-default
+   * temperature values (pi-ai's Model metadata tracks which); leave unset
+   * for provider defaults.
+   */
+  sampling?: {
+    temperature?: number;
+    /**
+     * Reasoning/thinking effort forwarded to pi-ai (`StreamOptions.
+     * reasoning`), which maps it per provider (OpenAI reasoning_effort,
+     * Anthropic thinking budgets, OpenRouter reasoning.effort, ...).
+     * Unset === provider default; OpenAI reasoning models then run at
+     * MINIMAL effort, which cripples them on deliberation-heavy work
+     * (TKAI-352) — hosts that route such models should set this.
+     */
+    reasoning?: import("@earendil-works/pi-ai").ThinkingLevel;
+    /** Extra provider sampling params (e.g. top_p, seed where supported). */
+    params?: Record<string, unknown>;
+  };
+  /**
+   * Prompt-cache retention preference forwarded to pi-ai (TKAI-320).
+   * Default: "long" for orchestrator sessions (they idle between wake-ups,
+   * outliving the short TTL), "short" otherwise. Providers map the value
+   * to their supported retentions.
+   */
+  cacheRetention?: "none" | "short" | "long";
   /**
    * Max time (ms) a tool op will wait for the sandbox attachment to become
    * ready before failing with WorkspaceProvisioningError. Default: 60_000
@@ -2202,6 +2290,17 @@ export interface CompactionConfig {
   pruneMinimumTokens?: number;
   /** Tool outputs longer than this get truncated when fed to the summarizer. Default: 2_000 chars. */
   toolOutputMaxChars?: number;
+  /**
+   * A single inbound user message larger than this (estimated tokens) is
+   * written to a file in the sandbox and replaced in context with a pointer,
+   * so one oversized paste cannot exceed the model's context window on its
+   * own. Compaction only summarizes older turns and always keeps the newest
+   * turn verbatim, so without this a single message larger than the window
+   * loops overflow -> compact -> overflow forever. Default: 60% of usable
+   * context. Set 0 to disable spilling (a large paste then truncates or errors
+   * instead).
+   */
+  maxInputTokens?: number;
   /** Optional separate model for the summarization call. Default: session model. */
   summarizerModel?: Model<any>;
   /** Tool names whose outputs are exempt from pruning. Merged with ToolDef.protectedFromPruning. Defaults: ['skill', 'thread_read']. */

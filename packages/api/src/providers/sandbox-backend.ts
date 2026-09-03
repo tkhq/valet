@@ -242,6 +242,41 @@ export function resolveSandboxApiUrl(
   return url.toString().replace(/\/$/, "");
 }
 
+/**
+ * Shared parse for the two ephemeral-storage quantity knobs below: unset or
+ * empty → the default; `"0"` → off (undefined — the manifest omits the
+ * field); anything else passes through verbatim as a Kubernetes quantity
+ * string ("2Gi", "500Mi"). Mirrors `scaledEnvNumber`'s disable convention,
+ * except the values are quantity strings, not numbers.
+ */
+function quantityEnv(raw: string | undefined, defaultValue: string): string | undefined {
+  if (raw === undefined || raw === "") return defaultValue;
+  if (raw === "0") return undefined;
+  return raw;
+}
+
+/**
+ * Per-sandbox ephemeral-storage REQUEST
+ * (`VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST`, default "2Gi"). The scheduler
+ * counts it against node allocatable, which caps how many sandbox pods
+ * stack onto one node — the root-cause fix for TKAI-349 (36 pods on one
+ * node exhausted its disk and took it NotReady). `"0"` disables it.
+ */
+export function resolveSandboxEphemeralStorageRequest(env: NodeJS.ProcessEnv): string | undefined {
+  return quantityEnv(env.VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST, "2Gi");
+}
+
+/**
+ * Per-sandbox ephemeral-storage LIMIT
+ * (`VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT`, default "8Gi"). Past it the
+ * kubelet evicts the one runaway sandbox instead of the node failing. Also
+ * bounds the DinD docker-state emptyDir (the manifest reuses it as the
+ * volume's sizeLimit). `"0"` disables it. Keep it at or above the request.
+ */
+export function resolveSandboxEphemeralStorageLimit(env: NodeJS.ProcessEnv): string | undefined {
+  return quantityEnv(env.VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT, "8Gi");
+}
+
 export interface BuildSandboxProviderDeps {
   /**
    * Injected `KubeConfig` for the `kubernetes` backend. Tests supply a
@@ -286,10 +321,24 @@ export function buildSandboxProvider(
       const podStatusApi = podStatusApiAdapter(coreApi);
       const podDeleteApi = podDeleteApiAdapter(coreApi);
       const pullSecret = env.VALET_SANDBOX_IMAGE_PULL_SECRET;
+      const ephemeralStorage = resolveSandboxEphemeralStorageRequest(env);
+      const ephemeralStorageLimit = resolveSandboxEphemeralStorageLimit(env);
       const cfg: K8sProviderConfig = {
         namespace,
         defaultImage: image ?? env.VALET_FULL_BASE_IMAGE ?? DEFAULT_FULL_BASE_IMAGE,
         apiVersion: SANDBOX_CR_API_VERSION,
+        // Node-disk protection defaults (TKAI-349) — set here, on the
+        // provider config, because engine host paths pass no
+        // `opts.resources`; the manifest merges these per-field under any
+        // caller-provided resources, so every sandbox pod carries them.
+        ...(ephemeralStorage || ephemeralStorageLimit
+          ? {
+              defaultResources: {
+                ...(ephemeralStorage ? { ephemeralStorage } : {}),
+                ...(ephemeralStorageLimit ? { ephemeralStorageLimit } : {}),
+              },
+            }
+          : {}),
         // Sandbox images v2 plan, Task 5: threaded when an external prebuild
         // registry requires authenticated pulls (`externalRegistry.pullSecret`
         // in the chart). Omitted (undefined, not []) for the bundled registry

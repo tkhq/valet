@@ -1,0 +1,24 @@
+# Hard suite (see hard-letter-index.yaml). Four chained string transforms:
+# per-step accuracy compounds, which separates models sharply. Expected
+# value computed by script, not by hand: TRANSFORMATION -> reverse ->
+# keep odd positions -> rotate left 2 -> swap first/last = IRFNRNA.
+id: hard-string-pipeline
+description: Apply four sequential string transformations exactly.
+turns:
+  - role: user
+    content: >-
+      Start with the word TRANSFORMATION. Apply these steps in order,
+      without using any tools: (1) reverse the string. (2) Keep only the
+      letters at odd positions (1st, 3rd, 5th, ...), preserving order.
+      (3) Rotate the result left by 2 (the first two letters move to the
+      end). (4) Swap the first and last letters. Reply with only the final
+      string, uppercase.
+timeout_ms: 180000
+checks:
+  - type: output_contains
+    value: IRFNRNA
+  - type: tool_not_called
+    tool: bash
+  - type: max_turns
+    value: 2
+  - type: no_errors

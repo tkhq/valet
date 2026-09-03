@@ -41,6 +41,11 @@ export interface SeedSecurityReviewArgs {
   presetId: string;
   /** Optional include globs the preset sweeps scope to. */
   paths?: string[];
+  /** "Include a written report at the end" (Part 08 §Setup Step 1). When
+   * present, the seeded preset plan appends or skips the report cell. When
+   * absent, `presetPlan` falls to the preset's own default per
+   * `presetReportDefault`. */
+  includeReport?: boolean;
   /** GitHub token resolution deps (db + credentials + key). */
   tokenDeps: GitHubTokenDeps;
   /** The owning org, for `resolveApiTokenOrNull`. */
@@ -75,10 +80,13 @@ export interface SeededSecurityReview {
  * (`presetPlan`), because the caller validated it first.
  */
 export async function seedSecurityReview(args: SeedSecurityReviewArgs): Promise<SeededSecurityReview> {
-  const { owner, repo, ref, presetId, paths, tokenDeps, orgId } = args;
+  const { owner, repo, ref, presetId, paths, includeReport, tokenDeps, orgId } = args;
 
   const result: SeededSecurityReview = {
-    planYaml: presetPlan(presetId, { paths }),
+    planYaml: presetPlan(presetId, {
+      ...(paths ? { paths } : {}),
+      ...(includeReport !== undefined ? { includeReport } : {}),
+    }),
     focus: null,
     invariants: [],
     categories: [],
@@ -148,7 +156,10 @@ export async function seedSecurityReview(args: SeedSecurityReviewArgs): Promise<
     result.configPersonaMarkdown = null;
     result.tools = null;
     result.scope = null;
-    result.planYaml = presetPlan(presetId, { paths });
+    result.planYaml = presetPlan(presetId, {
+      ...(paths ? { paths } : {}),
+      ...(includeReport !== undefined ? { includeReport } : {}),
+    });
   }
 
   return result;
@@ -162,7 +173,16 @@ export async function seedSecurityReview(args: SeedSecurityReviewArgs): Promise<
  * `has_repo_config = false`. */
 export function seededConfigContext(
   seeded: SeededSecurityReview,
-  overrides?: { focus?: string | null; invariants?: string[]; categories?: string[] },
+  overrides?: {
+    focus?: string | null;
+    invariants?: string[];
+    categories?: string[];
+    /** Setup-page scope override (Part 08 §Setup Step 1). A non-null value
+     * with non-empty hosts wins over the repo-seeded scope; null clears the
+     * override and falls back to seed. Empty hosts array is not accepted at
+     * this seam (rejected by the create-route validator). */
+    scope?: SecurityScope | null;
+  },
 ): {
   focus?: string;
   invariants?: string[];
@@ -196,7 +216,19 @@ export function seededConfigContext(
   if (seeded.personas) ctx.personas = seeded.personas;
   if (seeded.configPersonaMarkdown) ctx.personaMarkdown = seeded.configPersonaMarkdown;
   if (seeded.tools) ctx.tools = seeded.tools;
-  if (seeded.scope) ctx.scope = seeded.scope;
+  // Setup-page scope override (Part 08 §Setup Step 1) wins over the repo seed
+  // when present with non-empty hosts. `null` explicitly clears the override
+  // and falls back to the seed. Undefined leaves the seed untouched.
+  if (overrides && "scope" in overrides) {
+    const s = overrides.scope;
+    if (s !== null && s !== undefined && Array.isArray(s.hosts) && s.hosts.length > 0) {
+      ctx.scope = s;
+    } else if (seeded.scope) {
+      ctx.scope = seeded.scope;
+    }
+  } else if (seeded.scope) {
+    ctx.scope = seeded.scope;
+  }
 
   // The engagement records `has_repo_config` from `config !== undefined`. A
   // repo config OR any user override means "configured"; a bare preset with no
@@ -205,6 +237,7 @@ export function seededConfigContext(
     seeded.hasRepoConfig ||
     ctx.focus !== undefined ||
     (ctx.invariants?.length ?? 0) > 0 ||
-    (ctx.categories?.length ?? 0) > 0;
+    (ctx.categories?.length ?? 0) > 0 ||
+    (ctx.scope !== undefined && ctx.scope.hosts.length > 0);
   return configured ? ctx : undefined;
 }

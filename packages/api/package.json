@@ -16,6 +16,22 @@
     "./memory-links": {
       "types": "./src/lib/memory-links.ts",
       "import": "./src/lib/memory-links.ts"
+    },
+    "./plugins": {
+      "types": "./src/plugins/registry.gen.ts",
+      "import": "./src/plugins/registry.gen.ts"
+    },
+    "./eval-flagged": {
+      "types": "./src/lib/eval-flagged.ts",
+      "import": "./src/lib/eval-flagged.ts"
+    },
+    "./app": {
+      "types": "./src/app.ts",
+      "import": "./src/app.ts"
+    },
+    "./providers-node": {
+      "types": "./src/providers/node.ts",
+      "import": "./src/providers/node.ts"
     }
   },
   "scripts": {

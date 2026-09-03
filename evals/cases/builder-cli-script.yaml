@@ -1,0 +1,30 @@
+# Builder case: single-file program, harness-verified. The verify_command
+# checks run OUTSIDE the agent loop against the produced file, so the agent
+# cannot pass by echoing expected output. Needs Docker (profile: full).
+id: builder-cli-script
+description: Write a working fizzbuzz CLI; the harness runs it to verify.
+profile: full
+turns:
+  - role: user
+    content: >-
+      Create /workspace/fizzbuzz.js: a Node script that takes one integer
+      argument N and prints the numbers 1 to N, one per line, replacing
+      multiples of 3 with Fizz, multiples of 5 with Buzz, and multiples of
+      both with FizzBuzz. Exit with code 2 and print "usage: fizzbuzz <n>"
+      to stderr when the argument is missing or not a positive integer.
+      Reply "done" when the file is written.
+timeout_ms: 300000
+checks:
+  - type: tool_called
+    tool: write
+  - type: verify_command
+    command: node /workspace/fizzbuzz.js 15 | tail -3
+    expect_output: "13\\n14\\nFizzBuzz"
+  - type: verify_command
+    command: node /workspace/fizzbuzz.js 5 | head -5 | tr '\n' ','
+    expect_output: "^1,2,Fizz,4,Buzz,$"
+  - type: verify_command
+    command: node /workspace/fizzbuzz.js
+    expect_exit_code: 2
+    expect_output: "usage"
+  - type: no_errors

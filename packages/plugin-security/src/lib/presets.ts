@@ -2,6 +2,10 @@ import {
   ATTACK_TREE_PERSONA,
   bundledPersonaIds,
   CODE_REVIEW_PERSONA,
+  DAST_PERSONA,
+  EXPLOIT_PERSONA,
+  FUZZ_PERSONA,
+  PIVOT_COORDINATOR_PERSONA,
   RECONCILE_PERSONA,
   REPORT_PERSONA,
   SAST_PERSONA,
@@ -47,10 +51,22 @@ export const SECURITY_PRESETS: readonly SecurityPreset[] = [
     description: "Recon, authz, injection, verify (4 cells).",
   },
   {
-    id: "full-pentest",
-    label: "Full pentest",
+    id: "code-audit",
+    label: "Code audit",
     description:
-      "Recon, threat model, code review, SAST, access control, injection (triads), attack tree, verify, report. The model half of a full pentest.",
+      "Recon, threat model, code review, SAST, access control, injection (triads), attack tree, verify, report. Source-only; deeper than a code review, no active testing.",
+  },
+  {
+    id: "live-pentest",
+    label: "Live pentest",
+    description:
+      "Recon, threat model, DAST, fuzz, exploit, verify. Requires an authorized scope in .valet/security.yml or on the setup page.",
+  },
+  {
+    id: "code-audit-plus-live",
+    label: "Code audit + live confirmation",
+    description:
+      "Every persona: threat model, code review, SAST, access control, injection, DAST, fuzz, exploit, pivot coordinator, attack tree, verify. Requires an authorized scope on the setup page.",
   },
 ] as const;
 
@@ -198,6 +214,52 @@ const SAST_SWEEP: SweepDef = {
   goal: "Run the pre-baked scanners plus per-language grep packs, triage hits, record coverage per rule pack",
 };
 
+/** A live sweep: probe the authorized target with OWASP-aligned checks. Runs
+ * as a triad by default (architect scoping the probe matrix, worker running it,
+ * verifier auditing each finding). Requires an authorized_scope in the
+ * engagement config; the runtime egress gate refuses otherwise. */
+const DAST: SweepDef = {
+  name: "dast",
+  playbook: "dast",
+  persona: DAST_PERSONA,
+  goal: "Probe the authorized target: unauth surface, authz per endpoint per actor, injection, XSS, SSRF, headers, CORS, business logic",
+};
+
+/** A live sweep: mutation and coverage-guided fuzz against the authorized
+ * target. Same scope discipline as dast. */
+const FUZZ: SweepDef = {
+  name: "fuzz",
+  playbook: "fuzz",
+  persona: FUZZ_PERSONA,
+  goal: "Fuzz reachable endpoints and input points (web, api, library where applicable); triage anomalies into evidence-backed findings",
+};
+
+/** A live sweep: chain confirmed findings to a non-destructive PoC (READ then
+ * RESTORE). Runs as a single cell (not a triad); its verifier lives inside the
+ * later verify cell. */
+const EXPLOIT: SweepDef = {
+  name: "exploit",
+  playbook: "exploit",
+  persona: EXPLOIT_PERSONA,
+  triad: false,
+  goal: "Drive each confirmed finding to a non-destructive PoC against the authorized target; never modify data outside READ/RESTORE",
+};
+
+/** A coordination sweep: the pivot-coordinator persona (v1 spec, Part 05).
+ * Aggregates needs from live cells, classifies auto vs human, executes the
+ * L3 auto-catalog patterns, surfaces one consolidated human ask, and (on
+ * resolve) writes /pivot.yml and delta_targets for post-pivot-delta cells.
+ * Runs as a single cell, not a triad. Its runtime dispatch (delta
+ * re-materialization) lands in follow-up PR A; today the cell settles
+ * cleanly once every need it read has been resolved. */
+const PIVOT_COORDINATOR_SWEEP: SweepDef = {
+  name: "pivot-coordinator",
+  playbook: "pivot-coordinator",
+  persona: PIVOT_COORDINATOR_PERSONA,
+  triad: false,
+  goal: "Aggregate needs from live cells, classify auto vs human, execute the L3 auto-catalog, surface one consolidated human ask, and compute delta_targets on resolve",
+};
+
 /** A model-only sweep: enumerate threats over STRIDE and the loaded categories.
  * Runs early (right after recon) as a single cell, not a triad. */
 const THREAT_MODEL: SweepDef = {
@@ -252,19 +314,55 @@ const PRESET_SWEEPS: Record<string, SweepDef[]> = {
   "code-review": [AUTHZ, INJECTION, SECRETS_CONFIG],
   "secrets-config": [SECRETS_CONFIG],
   "access-injection": [AUTHZ, INJECTION],
-  // The full pentest: threat model early (single cell), then the code-heavy
+  // The code audit: threat model early (single cell), then the code-heavy
   // triads (code review, SAST, access control, injection), then attack tree
   // (single cell) composing the chains, then the engagement verify, then the
-  // report cell. Recon and verify bookend as always. Post-triad expansion the
-  // plan stays under MAX_PLAN_CELLS (asserted in presets.test.ts).
-  "full-pentest": [THREAT_MODEL, CODE_REVIEW_SWEEP, SAST_SWEEP, AUTHZ, INJECTION, ATTACK_TREE],
+  // report cell. Recon and verify bookend as always. Source-only; no active
+  // testing (see live-pentest for that). Post-triad expansion the plan stays
+  // under MAX_PLAN_CELLS (asserted in presets.test.ts).
+  "code-audit": [THREAT_MODEL, CODE_REVIEW_SWEEP, SAST_SWEEP, AUTHZ, INJECTION, ATTACK_TREE],
+  // The live pentest: threat model early (single cell), then the live triads
+  // (DAST, fuzz), then exploit as a single cell, then engagement verify + report.
+  // Recon and verify bookend as always. Every live persona in the plan requires
+  // an authorized_scope; the setup wizard blocks a submit without one, and the
+  // runtime egress gate refuses a live persona whose scope is empty.
+  // Post-triad expansion: 1 recon + 1 threat-model + 2 x 3 (dast+fuzz) + 1 exploit
+  // + 1 verify + 1 report = 11 cells, within MAX_PLAN_CELLS.
+  "live-pentest": [THREAT_MODEL, DAST, FUZZ, EXPLOIT],
+  // The code audit + live confirmation: every persona in the plan. Recon
+  // opens, threat model runs early (single cell), then the code-heavy triads
+  // (code review, SAST, access control, injection), then the live triads
+  // (DAST, fuzz), then exploit as a single cell, then the pivot-coordinator
+  // aggregates any needs the live cells surfaced, then attack tree composes
+  // the chains, then engagement verify. Requires an authorized scope; the
+  // setup wizard blocks a submit without one. Post-triad expansion:
+  //   1 recon + 1 threat-model + 4*3 code-heavy triads + 2*3 live triads
+  //   + 1 exploit + 1 pivot-coordinator + 1 attack-tree + 1 verify
+  //   + optional report = 23 or 24 cells, within MAX_PLAN_CELLS (32).
+  "code-audit-plus-live": [
+    THREAT_MODEL,
+    CODE_REVIEW_SWEEP,
+    SAST_SWEEP,
+    AUTHZ,
+    INJECTION,
+    DAST,
+    FUZZ,
+    EXPLOIT,
+    PIVOT_COORDINATOR_SWEEP,
+    ATTACK_TREE,
+  ],
 };
 
-/** Presets that end in a report cell (M-P3) — a written deliverable over the
- * whole engagement (recon, confirmed findings, coverage ledger, verify verdict).
- * The full-code-review and full-pentest presets produce one; the narrow, fast
- * presets (secrets-config, access-injection) stay report-less to stay quick. */
-const PRESET_HAS_REPORT: ReadonlySet<string> = new Set(["code-review", "full-pentest"]);
+/** The default `Include report` checkbox state per preset when the caller
+ * does not pass an explicit `includeReport`. Historical shape: the wider
+ * presets (`code-review`, `code-audit`, `live-pentest`) defaulted a report
+ * on, the narrow / fast presets (`secrets-config`, `access-injection`) did
+ * not. v1 UX-flow spec (Part 08) makes the report a user choice, but keeps
+ * these defaults so existing behavior does not regress. Callers who own the
+ * "Include a written report" checkbox pass an explicit boolean. */
+export function presetReportDefault(id: string): boolean {
+  return new Set(["code-review", "code-audit", "live-pentest", "code-audit-plus-live"]).has(id);
+}
 
 /**
  * Escape a scalar for a YAML double-quoted string. Escape the backslash FIRST,
@@ -455,13 +553,14 @@ function buildRescanCells(sweeps: SweepDef[], opts?: { report?: boolean }): Plan
  * re-scan runs the reconcile pass over the carried findings. Round-trips through
  * `parsePlan`.
  */
-export function rescanPlan(id: string): string {
+export function rescanPlan(id: string, opts?: { includeReport?: boolean }): string {
   const sweeps = PRESET_SWEEPS[id];
   if (sweeps === undefined) {
     const known = SECURITY_PRESETS.map((p) => p.id).join(", ");
     throw new Error(`Unknown security preset "${id}". Known presets: ${known}.`);
   }
-  return serializePlan(buildRescanCells(sweeps, { report: PRESET_HAS_REPORT.has(id) }));
+  const includeReport = opts?.includeReport ?? presetReportDefault(id);
+  return serializePlan(buildRescanCells(sweeps, { report: includeReport }));
 }
 
 /**
@@ -471,13 +570,26 @@ export function rescanPlan(id: string): string {
  * the middle sweeps (authz, injection, secrets-config); recon and verify stay
  * repo-wide. Every returned string round-trips through `parsePlan`.
  */
-export function presetPlan(id: string, opts?: { paths?: string[] }): string {
+export function presetPlan(
+  id: string,
+  opts?: { paths?: string[]; includeReport?: boolean },
+): string {
   const sweeps = PRESET_SWEEPS[id];
   if (sweeps === undefined) {
     const known = SECURITY_PRESETS.map((p) => p.id).join(", ");
     throw new Error(`Unknown security preset "${id}". Known presets: ${known}.`);
   }
   const hasPaths = opts?.paths && opts.paths.length > 0;
-  if (id === "code-review" && !hasPaths) return codeReviewPresetPlan();
-  return serializePlan(buildPresetCells(sweeps, { ...opts, report: PRESET_HAS_REPORT.has(id) }));
+  const includeReport = opts?.includeReport ?? presetReportDefault(id);
+  // codeReviewPresetPlan is the byte-identical seed for the `code-review`
+  // preset when no paths override and the default report choice holds. Any
+  // deviation goes through buildPresetCells so the plan text reflects the
+  // user's choice.
+  if (id === "code-review" && !hasPaths && includeReport) return codeReviewPresetPlan();
+  return serializePlan(
+    buildPresetCells(sweeps, {
+      ...(opts?.paths ? { paths: opts.paths } : {}),
+      report: includeReport,
+    }),
+  );
 }

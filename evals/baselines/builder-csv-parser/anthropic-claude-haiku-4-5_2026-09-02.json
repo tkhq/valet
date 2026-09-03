@@ -1,0 +1,146 @@
+{
+  "caseId": "builder-csv-parser",
+  "model": "anthropic/claude-haiku-4-5",
+  "savedAt": "2026-09-02T22:22:58.499Z",
+  "status": "pass",
+  "trajectory": {
+    "caseId": "builder-csv-parser",
+    "prompt": "Create /workspace/csv.js: a Node ESM module exporting parseCsv(text) that parses CSV per RFC 4180 into an array of rows (arrays of string fields). Requirements: fields may be wrapped in double quotes; a quoted field keeps commas and newlines literally; a doubled quote (\"\") inside a quoted field is one literal quote; both \\n and \\r\\n end records; an empty field is the empty string, including trailing empty fields. Also add /workspace/package.json with \"type\": \"module\". Reply \"done\" when written.",
+    "model": "anthropic/claude-haiku-4-5",
+    "turns": [
+      {
+        "index": 0,
+        "usage": {
+          "input": 3143,
+          "output": 680,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 3823
+        },
+        "cost": {
+          "input": 0.003143,
+          "output": 0.0034000000000000002,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 0.006543
+        },
+        "queueItemId": "q-mtknwit6-1"
+      },
+      {
+        "index": 1,
+        "usage": {
+          "input": 3842,
+          "output": 95,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 3937
+        },
+        "cost": {
+          "input": 0.003842,
+          "output": 0.00047500000000000005,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 0.004317
+        },
+        "queueItemId": "q-mtknwit6-1"
+      },
+      {
+        "index": 2,
+        "usage": {
+          "input": 3956,
+          "output": 4,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 3960
+        },
+        "cost": {
+          "input": 0.0039559999999999994,
+          "output": 0.00002,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 0.0039759999999999995
+        },
+        "queueItemId": "q-mtknwit6-1"
+      }
+    ],
+    "toolCalls": [
+      {
+        "toolName": "write",
+        "callId": "toolu_015CRCMvc6ySxRCRG3Cumndj",
+        "status": "completed",
+        "args": {
+          "path": "/workspace/csv.js",
+          "content": "export function parseCsv(text) {\n  const rows = [];\n  let currentRow = [];\n  let currentField = '';\n  let inQuotes = false;\n  let i = 0;\n\n  while (i < text.length) {\n    const char = text[i];\n    const nextChar = i + 1 < text.length ? text[i + 1] : null;\n\n    if (inQuotes) {\n      if (char === '\"') {\n        if (nextChar === '\"') {\n          // Doubled quote (\"\") means literal quote\n          currentField += '\"';\n          i += 2;\n          continue;\n        } else {\n          // End of quoted field\n          inQuotes = false;\n          i++;\n          continue;\n        }\n      } else {\n        // Inside quotes, take character literally (including commas and newlines)\n        currentField += char;\n        i++;\n        continue;\n      }\n    } else {\n      // Not in quotes\n      if (char === '\"') {\n        // Start of quoted field\n        inQuotes = true;\n        i++;\n        continue;\n      } else if (char === ',') {\n        // Field separator\n        currentRow.push(currentField);\n        currentField = '';\n        i++;\n        continue;\n      } else if (char === '\\r') {\n        // Check for \\r\\n or just \\r\n        if (nextChar === '\\n') {\n          // \\r\\n - record separator\n          currentRow.push(currentField);\n          currentField = '';\n          rows.push(currentRow);\n          currentRow = [];\n          i += 2;\n          continue;\n        } else {\n          // Just \\r - record separator\n          currentRow.push(currentField);\n          currentField = '';\n          rows.push(currentRow);\n          currentRow = [];\n          i++;\n          continue;\n        }\n      } else if (char === '\\n') {\n        // \\n - record separator\n        currentRow.push(currentField);\n        currentField = '';\n        rows.push(currentRow);\n        currentRow = [];\n        i++;\n        continue;\n      } else {\n        // Regular character\n        currentField += char;\n        i++;\n        continue;\n      }\n    }\n  }\n\n  // Add final field and row if any\n  currentRow.push(currentField);\n  if (currentRow.length > 0 || currentField !== '') {\n    rows.push(currentRow);\n  }\n\n  return rows;\n}\n"
+        },
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "wrote /workspace/csv.js"
+            }
+          ],
+          "text": "wrote /workspace/csv.js"
+        },
+        "index": 0
+      },
+      {
+        "toolName": "write",
+        "callId": "toolu_01JCgiueR6MQePZeDYj8zcUm",
+        "status": "completed",
+        "args": {
+          "path": "/workspace/package.json",
+          "content": "{\n  \"type\": \"module\"\n}\n"
+        },
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "wrote /workspace/package.json"
+            }
+          ],
+          "text": "wrote /workspace/package.json"
+        },
+        "index": 1
+      }
+    ],
+    "finalOutput": "done",
+    "usage": {
+      "input": 10941,
+      "output": 779,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 11720
+    },
+    "cost": {
+      "input": 0.010941,
+      "output": 0.0038950000000000005,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0.014835999999999998
+    },
+    "durationMs": 8302,
+    "stopReason": "end_turn",
+    "verifications": [
+      {
+        "command": "node -e \"import('/workspace/csv.js').then((m) => console.log(JSON.stringify(m.parseCsv('a,\\\"b,c\\\",d'))))\"",
+        "exitCode": 0,
+        "output": "[[\"a\",\"b,c\",\"d\"]]\n"
+      },
+      {
+        "command": "node -e \"import('/workspace/csv.js').then((m) => console.log(JSON.stringify(m.parseCsv('\\\"he said \\\"\\\"hi\\\"\\\"\\\",x'))))\"",
+        "exitCode": 0,
+        "output": "[[\"he said \\\"hi\\\"\",\"x\"]]\n"
+      },
+      {
+        "command": "node -e \"import('/workspace/csv.js').then((m) => console.log(JSON.stringify(m.parseCsv('\\\"multi\\nline\\\",2\\n3,4'))))\"",
+        "exitCode": 0,
+        "output": "[[\"multi\\nline\",\"2\"],[\"3\",\"4\"]]\n"
+      },
+      {
+        "command": "node -e \"import('/workspace/csv.js').then((m) => console.log(JSON.stringify(m.parseCsv('a,,\\r\\nb,c,d'))))\"",
+        "exitCode": 0,
+        "output": "[[\"a\",\"\",\"\"],[\"b\",\"c\",\"d\"]]\n"
+      }
+    ]
+  }
+}

@@ -126,6 +126,7 @@ function renderTree() {
 }
 
 beforeEach(() => {
+  window.localStorage.clear();
   navigate.mockClear();
   setArchivedMutateAsync.mockClear();
   replaceMutateAsync.mockClear();
@@ -145,6 +146,28 @@ describe("ThreadTree — thread context menu", () => {
     await user.click(screen.getByRole("menuitem", { name: /archive thread/i }));
 
     expect(setArchivedMutateAsync).toHaveBeenCalledWith({ threadId: "thread-1", archived: true });
+  });
+
+  it("archives from the menu with the A shortcut", async () => {
+    const user = userEvent.setup();
+    renderTree();
+
+    await user.click(screen.getByRole("button", { name: /thread menu/i }));
+    await user.keyboard("a");
+
+    expect(setArchivedMutateAsync).toHaveBeenCalledWith({ threadId: "thread-1", archived: true });
+  });
+
+  it("leaves Select All alone while the menu is open", async () => {
+    // The accelerator is a bare `A`. Without a modifier guard, Select All
+    // pressed over an open menu archives the thread instead.
+    const user = userEvent.setup();
+    renderTree();
+
+    await user.click(screen.getByRole("button", { name: /thread menu/i }));
+    await user.keyboard("{Control>}a{/Control}");
+
+    expect(setArchivedMutateAsync).not.toHaveBeenCalled();
   });
 
   it("archiving the ACTIVE thread navigates back to the default thread", async () => {
@@ -209,6 +232,49 @@ describe("ThreadTree — archived section", () => {
       threadId: "thread-old",
       archived: false,
     });
+  });
+});
+
+describe("ThreadTree — collapsible subconversations", () => {
+  it("toggles a parent's children and persists the state", async () => {
+    children = [child({ title: "child one" })];
+    const user = userEvent.setup();
+    const view = renderTree();
+
+    const collapse = screen.getByRole("button", { name: /collapse subconversations/i });
+    expect(collapse.getAttribute("aria-expanded")).toBe("true");
+    await user.click(collapse);
+
+    expect(screen.queryByText("child one")).toBeNull();
+    expect(window.localStorage.getItem("valet:subconversations-collapsed:thread-1")).toBe("1");
+
+    view.unmount();
+    renderTree();
+    expect(screen.queryByText("child one")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: /expand subconversations/i }));
+    expect(screen.getByText("child one")).toBeTruthy();
+    expect(window.localStorage.getItem("valet:subconversations-collapsed:thread-1")).toBeNull();
+  });
+
+  it("keeps each parent's state independent", async () => {
+    threads = [
+      thread({ id: "thread-1", title: "First", createdAt: 2 }),
+      thread({ id: "thread-2", title: "Second", createdAt: 1 }),
+    ];
+    children = [
+      child({ sessionId: "child-1", parentThreadId: "thread-1", title: "first child" }),
+      child({ sessionId: "child-2", parentThreadId: "thread-2", title: "second child" }),
+    ];
+    const user = userEvent.setup();
+    renderTree();
+
+    await user.click(screen.getByRole("button", { name: /collapse subconversations for first/i }));
+
+    expect(screen.queryByText("first child")).toBeNull();
+    expect(screen.getByText("second child")).toBeTruthy();
+    expect(window.localStorage.getItem("valet:subconversations-collapsed:thread-1")).toBe("1");
+    expect(window.localStorage.getItem("valet:subconversations-collapsed:thread-2")).toBeNull();
   });
 });
 

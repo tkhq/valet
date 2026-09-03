@@ -36,6 +36,7 @@ interface Instruments {
   sandboxDestroyed: Counter;
   sandboxFlagged: Counter;
   sandboxCapacityWait: Histogram;
+  cacheBreaks: Counter;
 }
 
 let instruments: Instruments | null = null;
@@ -98,6 +99,10 @@ function inst(): Instruments {
       description:
         "Time a sandbox create spent waiting at the per-org capacity gate, by outcome (admitted/timeout). Non-zero rates mean an org is contending for its sandbox ceiling.",
     }),
+    cacheBreaks: meter.createCounter("valet.cache.breaks", {
+      description:
+        "Prompt-cache breaks between consecutive turns, by cause (model_changed, system_prompt_changed, tools_changed, ttl_or_content). A sustained rate on one cause means something rewrites the request prefix every turn — investigate that source, do not ignore (TKAI-320).",
+    }),
   };
   return instruments;
 }
@@ -131,6 +136,10 @@ export function recordSettlement(outcome: string, queueWaitMs?: number): void {
 
 export function recordToolExecution(tool: string, durationMs: number, ok: boolean): void {
   inst().toolDuration.record(durationMs, { tool, ok });
+}
+
+export function recordCacheBreak(cause: string, model?: string): void {
+  inst().cacheBreaks.add(1, { cause, ...(model ? { model } : {}) });
 }
 
 export function recordSandboxExec(durationMs: number, job: boolean): void {

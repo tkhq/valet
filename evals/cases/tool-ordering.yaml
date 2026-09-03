@@ -1,0 +1,25 @@
+# Starter case (TKAI-333): tool sequencing.
+id: tool-ordering
+description: Requires calling memory tools in a specific sequence.
+turns:
+  - role: user
+    content: >-
+      In exactly this order: first use mem_search to look for existing notes
+      about "quarterly report"; then create notes/quarterly-report.md with
+      mem_write, content "draft pending"; then verify the file exists with
+      mem_read. Do not skip or reorder steps.
+timeout_ms: 180000
+checks:
+  - type: tool_called
+    tool: mem_search
+  - type: tool_called
+    tool: mem_write
+    after: mem_search
+  - type: tool_called
+    tool: mem_read
+    after: mem_write
+  - type: tool_args_match
+    tool: mem_write
+    args:
+      path: notes/quarterly-report.md
+  - type: no_errors

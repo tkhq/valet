@@ -133,6 +133,32 @@ export class SlackApi {
     await this.call("chat.update", body);
   }
 
+  /**
+   * conversations.join → add the bot to a public channel. Idempotent: Slack
+   * returns `already_in_channel: true` when the bot is already a member,
+   * which surfaces here as `alreadyIn: true` on an otherwise ok response.
+   *
+   * Deliberately does NOT throw on a Slack error: callers (notably the
+   * `slack.join_channel` action, which is invoked by webhooks like the
+   * Grafana IRM auto-join flow) want to inspect the `error` code
+   * (`channel_not_found`, `is_archived`, `is_private`, `missing_scope`,
+   * `method_not_supported_for_channel_type`) and react rather than treat
+   * every failure as an exception. Return-shape unions replace throws.
+   */
+  async joinChannel(
+    channelId: string,
+  ): Promise<{ ok: true; alreadyIn: boolean } | { ok: false; error: string }> {
+    const res = await slackFetch(
+      "conversations.join",
+      this.token,
+      { channel: channelId },
+      this.baseUrl,
+    );
+    const parsed = (await res.json()) as SlackResponse;
+    if (!parsed.ok) return { ok: false, error: parsed.error ?? `http_${res.status}` };
+    return { ok: true, alreadyIn: parsed.already_in_channel === true };
+  }
+
   /** conversations.open with a user id → the IM channel id. */
   async openConversation(userId: string): Promise<string> {
     const res = await this.call("conversations.open", { users: userId });

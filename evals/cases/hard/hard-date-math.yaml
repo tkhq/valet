@@ -1,0 +1,18 @@
+# Hard suite (see hard-letter-index.yaml). Calendar arithmetic without a
+# tool is a known small-model weakness.
+id: hard-date-math
+description: Weekday calculation for a specific date, answered directly.
+turns:
+  - role: user
+    content: >-
+      Without using any tools, what day of the week was 15 March 2026?
+      Reply with just the day name.
+timeout_ms: 120000
+checks:
+  - type: output_contains
+    value: Sunday
+  - type: tool_not_called
+    tool: bash
+  - type: max_turns
+    value: 2
+  - type: no_errors

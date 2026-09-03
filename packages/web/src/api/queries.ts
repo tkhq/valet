@@ -27,6 +27,8 @@ import type {
   PatchSessionResponse,
   PatchThreadResponse,
   PauseSessionResponse,
+  PutRatingResponse,
+  RatingValue,
   ResolveDecisionRequest,
   SandboxJwtResponse,
   SandboxProfile,
@@ -56,6 +58,7 @@ export const qk = {
       ? (["sessions", id, "messages", threadId] as const)
       : (["sessions", id, "messages"] as const),
   decisions: (id: string) => ["sessions", id, "decisions"] as const,
+  ratings: (id: string) => ["sessions", id, "ratings"] as const,
   /** Spelled here (not in assistants.ts's `qkAssistants`) so useDeleteSession
    * below can invalidate it without an import cycle — assistants.ts already
    * imports this factory and derives `qkAssistants.list` from it. */
@@ -237,6 +240,37 @@ export function useSetSessionModel(sessionId: string) {
 
 /** PATCH /:id with a `title` — rename the session. The session row and the
  * session lists both render the title, so both caches are invalidated. */
+/** The caller's persisted 👍/👎 state for one session (TKAI-334). */
+export function useSessionRatings(sessionId: string) {
+  return useQuery({
+    queryKey: qk.ratings(sessionId),
+    queryFn: () => api.getSessionRatings(sessionId),
+  });
+}
+
+/** Session-level 👍/👎. `null` clears the rating. */
+export function useRateSession(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<PutRatingResponse, Error, RatingValue | null>({
+    mutationFn: (rating) => api.rateSession(sessionId, { rating }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.ratings(sessionId) });
+    },
+  });
+}
+
+/** Message-level 👍/👎 on one assistant entry. `null` clears the rating. */
+export function useRateMessage(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<PutRatingResponse, Error, { entryId: string; threadId?: string; rating: RatingValue | null }>({
+    mutationFn: ({ entryId, threadId, rating }) =>
+      api.rateMessage(sessionId, entryId, { rating, ...(threadId !== undefined ? { threadId } : {}) }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.ratings(sessionId) });
+    },
+  });
+}
+
 export function useRenameSession(sessionId: string) {
   const qc = useQueryClient();
   return useMutation<PatchSessionResponse, Error, string>({

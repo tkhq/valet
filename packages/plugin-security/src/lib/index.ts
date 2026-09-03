@@ -20,6 +20,7 @@ export {
   SECURITY_PRESETS,
   isKnownPreset,
   presetPlan,
+  presetReportDefault,
   rescanPlan,
   serializePlan,
 } from "./presets.js";
@@ -38,8 +39,11 @@ export {
   FUZZ_PERSONA,
   EXPLOIT_PERSONA,
   RECONCILE_PERSONA,
+  PIVOT_COORDINATOR_PERSONA,
   LIVE_PERSONAS,
   isLivePersona,
+  DETERMINISTIC_PERSONA_IDS,
+  isDeterministicPersona,
 } from "./personas.js";
 export type { SecurityPersona } from "./personas.js";
 export { expandTriads, hasTriad } from "./triad.js";

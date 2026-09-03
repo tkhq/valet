@@ -23,6 +23,7 @@ import type { AuthConfigResponse, HealthResponse, ReadyResponse } from "./wire/t
 import { VALET_VERSION } from "./version.js";
 import { parseSandboxBackend } from "./providers/sandbox-backend.js";
 import { sessionsRouter, listStandaloneSessions } from "./routes/sessions.js";
+import { evalsRouter, ratingsRouter } from "./routes/ratings.js";
 import { messagesRouter } from "./routes/messages.js";
 import { adminRouter } from "./routes/admin.js";
 import { teamsRouter } from "./routes/teams.js";
@@ -277,10 +278,12 @@ export function createApp(
   app.use("/api/*", buildAuthMiddleware({ auth: auth ?? null, db: providers.db }));
 
   app.route("/api/sessions", sessionsRouter);
-  // Messages + threads + file uploads + security share /api/sessions/:id/* — mounted under same prefix.
+  // Messages + threads + file uploads + security + ratings share /api/sessions/:id/* — mounted under same prefix.
   app.route("/api/sessions", messagesRouter);
   app.route("/api/sessions", fileUploadRouter);
   app.route("/api/sessions", securityRouter);
+  app.route("/api/sessions", ratingsRouter);
+  app.route("/api/evals", evalsRouter);
   app.route("/api/admin", adminRouter);
   app.route("/api/teams", teamsRouter);
   app.route("/api/memory", memoryRouter);

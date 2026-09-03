@@ -41,8 +41,11 @@ export interface K8sProviderConfig {
   namespace: string;
   /** Container image used when SandboxCreateOpts.image is not provided. */
   defaultImage: string;
-  /** Resource fallback used when SandboxCreateOpts.resources is not provided. */
-  defaultResources?: { cpu?: number; memory?: string };
+  /** Per-field resource defaults, merged under SandboxCreateOpts.resources
+   * (an opts field wins over the same default field). Merged — not
+   * all-or-nothing — so the ephemeral-storage defaults still protect the
+   * node when a caller only picks cpu/memory. */
+  defaultResources?: SandboxResourceOpts;
   /** Default workspace PVC size when not otherwise specified. Defaults to "2Gi" if omitted. */
   defaultStorage?: string;
   apiVersion: typeof SANDBOX_CR_API_VERSION;
@@ -92,11 +95,24 @@ export interface EnvVar {
   value: string;
 }
 
-/** `corev1.ResourceList` subset — cpu/memory quantities as strings, the wire
- * format Kubernetes expects (e.g. "500m", "2", "1Gi"). */
+/** The provider-facing resource-options shape — mirrors
+ * `SandboxCreateOpts.resources` (packages/engine/src/types.ts). Field docs
+ * live there; this local alias exists so `K8sProviderConfig` and the
+ * manifest builder don't import engine types for it. */
+export interface SandboxResourceOpts {
+  cpu?: number;
+  memory?: string;
+  ephemeralStorage?: string;
+  ephemeralStorageLimit?: string;
+}
+
+/** `corev1.ResourceList` subset — quantities as strings, the wire format
+ * Kubernetes expects (e.g. "500m", "2", "1Gi"). `ephemeral-storage` is
+ * node-local disk: container rootfs writes + emptyDir usage (TKAI-349). */
 export interface ResourceList {
   cpu?: string;
   memory?: string;
+  "ephemeral-storage"?: string;
 }
 
 export interface ResourceRequirements {
@@ -121,7 +137,11 @@ export interface SecretVolumeSource {
 export interface Volume {
   name: string;
   secret?: SecretVolumeSource;
-  emptyDir?: Record<string, never>;
+  /** `corev1.EmptyDirVolumeSource` subset. `sizeLimit` bounds the emptyDir
+   * (the DinD docker-state volume — image layers + container rootfs — is
+   * the largest node-disk consumer, TKAI-349). Usage past the limit evicts
+   * the pod. */
+  emptyDir?: { sizeLimit?: string };
   /** `corev1.HostPathVolumeSource` subset — only the /dev/fuse char device. */
   hostPath?: { path: string; type: "CharDevice" };
 }
@@ -155,9 +175,22 @@ export interface PodSecurityContext {
   fsGroup?: number;
 }
 
+/** `corev1.TopologySpreadConstraint` subset — the soft hostname spread the
+ * manifest builder emits for sandbox pods (TKAI-349). */
+export interface TopologySpreadConstraint {
+  maxSkew: number;
+  topologyKey: string;
+  whenUnsatisfiable: "DoNotSchedule" | "ScheduleAnyway";
+  labelSelector?: { matchLabels?: Record<string, string> };
+}
+
 /** `corev1.PodSpec` subset — only the fields the manifest builder sets. */
 export interface SandboxPodSpec {
   containers: SandboxContainer[];
+  /** Soft (ScheduleAnyway) spread of sandbox pods across nodes. The
+   * ephemeral-storage request is the hard concentration cap; this only
+   * balances placement while nodes have room. */
+  topologySpreadConstraints?: TopologySpreadConstraint[];
   /** See `PodSecurityContext` — set only for docker-enabled sandboxes. */
   securityContext?: PodSecurityContext;
   /** `corev1.PodSpec.hostUsers` — false runs the pod in a user namespace.

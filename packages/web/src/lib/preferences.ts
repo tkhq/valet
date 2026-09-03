@@ -8,7 +8,12 @@
  * round-trips on the next read within the page's lifetime. Reads that fail
  * outright fall back to the schema default; no exception escapes.
  */
-import { safeLocalStorage, type StorageReader, type StorageWriter } from "./safe-storage";
+import {
+  safeLocalStorage,
+  type StorageReader,
+  type StorageRemover,
+  type StorageWriter,
+} from "./safe-storage";
 
 /**
  * Default policy applied to a tool card at mount and across status
@@ -27,6 +32,38 @@ export type ToolCardDefault = "smart" | "always-collapsed" | "always-expanded";
 
 const TOOL_CARD_DEFAULT_KEY = "tool-card-default";
 const TOOL_CARD_DEFAULT_FALLBACK: ToolCardDefault = "smart";
+const COLLAPSED_SUBCONVERSATION_PREFIX = "valet:subconversations-collapsed:";
+
+function collapsedSubconversationKey(parentThreadId: string): string {
+  return `${COLLAPSED_SUBCONVERSATION_PREFIX}${parentThreadId}`;
+}
+
+/** Read one parent thread's collapsed state. Parent groups start expanded. */
+export function getSubconversationsCollapsed(
+  parentThreadId: string,
+  storage: StorageReader = safeLocalStorage(),
+): boolean {
+  try {
+    return storage.getItem(collapsedSubconversationKey(parentThreadId)) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** Persist one parent thread's collapsed state independently. */
+export function setSubconversationsCollapsed(
+  parentThreadId: string,
+  collapsed: boolean,
+  storage: StorageWriter & StorageRemover = safeLocalStorage(),
+): void {
+  try {
+    const key = collapsedSubconversationKey(parentThreadId);
+    if (collapsed) storage.setItem(key, "1");
+    else storage.removeItem(key);
+  } catch {
+    /* Best-effort persistence; the caller's UI state stands. */
+  }
+}
 
 const TOOL_CARD_DEFAULT_VALUES: readonly ToolCardDefault[] = [
   "smart",
