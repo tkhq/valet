@@ -813,19 +813,28 @@ export const memoryFiles = pgTable(
 
 // ─── Artifacts ──────────────────────────────────────────────────────────────
 //
-// Shared snapshots of memory files (2026-08-22 artifacts design). A row is a
-// COPY of one memory file's content at share time, not a live reference —
-// later memory edits never publish until an explicit re-share overwrites
-// `content`. `token` is the unguessable capability in the share URL
-// (`/a/{token}`); `visibility` gates who may open it: `org` (a logged-in
-// member of `org_id`) or `public` (anyone, only while
-// `orgs.allow_public_artifacts` is on). The tool surface can only create
-// `org` rows; widening to `public` is a human UI action recorded in
-// `public_by`. Revoke sets `revoked_at` and keeps the row for audit;
-// re-share after revoke mints a fresh token (a leaked link stays dead)
-// AND resets visibility to `org` — revoke ends the audience decision
+// Published pages (2026-08-22 artifacts design; extended by the 2026-09-02
+// artifact-pages design). A row is a COPY of content at publish time, not a
+// live reference — later edits never publish until an explicit re-publish.
+// `token` is the unguessable capability in the share URL (`/a/{token}`);
+// `visibility` gates who may open it: `org` (a logged-in member of `org_id`)
+// or `public` (anyone, only while `orgs.allow_public_artifacts` is on). The
+// tool surface can only create `org` rows; widening to `public` is a human UI
+// action recorded in `public_by`. Revoke sets `revoked_at` and keeps the row
+// for audit; re-publish after revoke mints a fresh token (a leaked link stays
+// dead) AND resets visibility to `org` — revoke ends the audience decision
 // along with the link, so the tool surface can never restore anonymous
 // access.
+//
+// `format` names the compiler for `content` (the SOURCE): `markdown` compiles
+// through GFM at publish, `html` passes verbatim. `rendered` is the compiled
+// page body every viewer renders in the sandboxed frame; "" on a pre-pages
+// row means "compile `content` on read". `version` counts publishes;
+// `shared_version` pins viewers to one `artifact_versions` row (null =
+// latest). `source_memory_path` is the PUBLISH KEY: the normalized memory
+// path for a `mem_share`, the caller's key for an inline `artifact_publish` —
+// not renamed because a rename cannot be rolled back safely under
+// SCHEMA_REPAIRS.
 export const artifacts = pgTable(
   "artifacts",
   {
@@ -839,6 +848,12 @@ export const artifacts = pgTable(
     sourceMemoryPath: text("source_memory_path").notNull(),
     title: text("title").notNull().default(""),
     content: text("content").notNull(),
+    format: text("format", { enum: ["markdown", "html"] }).notNull().default("markdown"),
+    rendered: text("rendered").notNull().default(""),
+    description: text("description").notNull().default(""),
+    icon: text("icon").notNull().default(""),
+    version: bigint("version", { mode: "number" }).notNull().default(1),
+    sharedVersion: bigint("shared_version", { mode: "number" }),
     visibility: text("visibility", { enum: ["org", "public"] }).notNull().default("org"),
     publicBy: text("public_by"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
@@ -847,9 +862,56 @@ export const artifacts = pgTable(
   },
   (t) => [
     uniqueIndex("artifacts_token_unique").on(t.token),
-    // One artifact per shared file: re-share is an update, never a second row.
+    // One artifact per publish key: re-publish is an update, never a second row.
     uniqueIndex("artifacts_owner_path_unique").on(t.ownerType, t.ownerId, t.sourceMemoryPath),
   ],
+);
+
+// Version history (artifact-pages design). One row per publish, append-only.
+// `content` is the source, `rendered` the compiled page body — both captured
+// so pinning `shared_version` to an old row needs no recompilation. The
+// public read serves exactly one version and takes no version parameter:
+// a link holder must never walk the history.
+export const artifactVersions = pgTable(
+  "artifact_versions",
+  {
+    id: text("id").primaryKey(),
+    artifactId: text("artifact_id").notNull(),
+    version: bigint("version", { mode: "number" }).notNull(),
+    title: text("title").notNull().default(""),
+    format: text("format", { enum: ["markdown", "html"] }).notNull().default("markdown"),
+    content: text("content").notNull(),
+    rendered: text("rendered").notNull().default(""),
+    actorUserId: text("actor_user_id").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [uniqueIndex("artifact_versions_unique").on(t.artifactId, t.version)],
+);
+
+// Element-anchored comments on a published page (artifact-pages design).
+// `vdid` is the content-hashed element id the viewer's comment runtime
+// computes (null = a page-level comment); `version` records what the
+// commenter was looking at. `parent_id` threads replies one level under a
+// root. `sent_to_session` records delivery of the comment into the source
+// session's prompt queue — allowed only when the commenter passes
+// `canViewSession` there, so sending grants nothing that typing into the
+// session would not. Resolve is a flag, never a delete.
+export const artifactComments = pgTable(
+  "artifact_comments",
+  {
+    id: text("id").primaryKey(),
+    artifactId: text("artifact_id").notNull(),
+    version: bigint("version", { mode: "number" }).notNull(),
+    vdid: text("vdid"),
+    parentId: text("parent_id"),
+    body: text("body").notNull(),
+    authorUserId: text("author_user_id").notNull(),
+    sentToSession: text("sent_to_session"),
+    resolvedAt: bigint("resolved_at", { mode: "number" }),
+    resolvedBy: text("resolved_by"),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [index("artifact_comments_artifact").on(t.artifactId)],
 );
 
 // ─── Skills ─────────────────────────────────────────────────────────────────

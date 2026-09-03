@@ -504,6 +504,90 @@ export const memShareTool = defineTool({
   },
 });
 
+// ─── artifact_publish ──────────────────────────────────────────────────
+
+interface PublishResultBody extends ShareResultBody {
+  version?: number;
+}
+
+function asPublishResultBody(body: unknown): PublishResultBody | null {
+  const base = asShareResultBody(body);
+  if (!base || !isRecord(body)) return base;
+  return { ...base, version: typeof body.version === "number" ? body.version : undefined };
+}
+
+export const artifactPublishTool = defineTool({
+  name: "artifact_publish",
+  description:
+    "Publish content as a page at a stable link, or revoke it. Use markdown for prose a person will read; use html when the output is easier to look at than to read — a chart, a diagram, an annotated diff, options side by side, an interactive control. An html page must be self-contained: inline every stylesheet and script, embed images as data URIs, draw diagrams as inline SVG. Scripts run sandboxed with no network access; only two script CDNs load (cdn.jsdelivr.net, cdnjs.cloudflare.com) and no other external host does. Re-publishing the same key updates the page and keeps the URL. Links require a logged-in member of the user's org; only a human can widen one further from the web UI. Publish only when the user asks for a link or clearly wants a page — never proactively.",
+  parameters: Type.Object({
+    key: Type.String({
+      description:
+        "Stable publish key, e.g. 'pages/deploy-dashboard'. Re-publishing the same key updates the same page at the same URL.",
+    }),
+    content: Type.Optional(
+      Type.String({
+        description: "The source: GFM markdown, or a self-contained HTML document. Required unless revoking. Capped at 2 MiB.",
+      }),
+    ),
+    title: Type.Optional(
+      Type.String({
+        description: "Page title. Defaults to the html <title>, the first markdown heading, or the key's basename.",
+      }),
+    ),
+    format: Type.Optional(
+      Type.Union([Type.Literal("markdown"), Type.Literal("html")], {
+        description: "How to render `content`. Default markdown.",
+      }),
+    ),
+    description: Type.Optional(Type.String({ description: "One sentence saying what the page shows." })),
+    icon: Type.Optional(Type.String({ description: "One or two emoji for the browser tab, e.g. '📊'. Keep it stable across republishes." })),
+    revoke: Type.Optional(Type.Boolean({ description: "Revoke the page at `key` instead of publishing." })),
+  }),
+  execute: async (args, ctx) => {
+    const cfg = resolveMemoryConfig(ctx);
+    if (!cfg) return { text: UNAVAILABLE_TEXT };
+    if (args.revoke !== true && (typeof args.content !== "string" || args.content.length === 0)) {
+      return { text: "[artifact_error] content is required to publish. Pass the full page source." };
+    }
+    const owner = resolveOwner(ctx);
+    const url = new URL("/api/artifacts/share", cfg.apiBaseUrl);
+    const headers = memoryHeaders(cfg, owner, ctx.userId, true);
+    // Audit column — and the target for reader comments sent to the agent.
+    headers["x-valet-session-id"] = ctx.sessionId;
+    return memoryRequest(
+      url,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          key: args.key,
+          content: args.content,
+          title: args.title,
+          format: args.format,
+          description: args.description,
+          icon: args.icon,
+          revoke: args.revoke,
+        }),
+      },
+      async (res) => {
+        if (args.revoke === true) return { text: `revoked page ${args.key}` };
+        const body = asPublishResultBody(await parseJsonBody(res));
+        if (!body?.url) return { text: `[artifact_error] publish succeeded but returned no URL` };
+        // State the audience so the agent relays it accurately — from the
+        // response's ACTUAL visibility (a human may have widened an earlier
+        // publish of this key).
+        const audience =
+          body.visibility === "public"
+            ? "Anyone with the link — no login required (a human widened this link earlier)."
+            : "Logged-in members of the user's org. The user can widen or revoke this link from the page.";
+        const version = body.version !== undefined ? ` (version ${body.version})` : "";
+        return { text: `published ${args.key} → ${body.url}${version}\nAudience: ${audience}` };
+      },
+    );
+  },
+});
+
 // ─── mem_rm ────────────────────────────────────────────────────────────
 
 export const memRmTool = defineTool({
@@ -522,7 +606,19 @@ export const memRmTool = defineTool({
   },
 });
 
-/** All eight `mem_*` ToolDefs, in the order they should be registered. */
+/** The eight `mem_*` ToolDefs plus `artifact_publish` (same transport, same
+ * publish chokepoint — see the artifact-pages design), in registration
+ * order. */
 export function buildMemoryTools(): ToolDef[] {
-  return [memWriteTool, memPatchTool, memReadTool, memSearchTool, memMoveTool, memLinksTool, memShareTool, memRmTool];
+  return [
+    memWriteTool,
+    memPatchTool,
+    memReadTool,
+    memSearchTool,
+    memMoveTool,
+    memLinksTool,
+    memShareTool,
+    artifactPublishTool,
+    memRmTool,
+  ];
 }

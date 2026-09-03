@@ -1,58 +1,77 @@
 /**
- * Artifact routes (2026-08-22 artifacts design).
+ * Artifact routes (2026-08-22 artifacts design; 2026-09-02 artifact-pages
+ * design).
  *
  * Two routers over one table, split by trust:
  *
- *   - `buildArtifactsPublicRouter` — `GET /:token`, mounted BEFORE
- *     `buildAuthMiddleware` in app.ts (the webhook-mount pattern). The
- *     token is the capability; the handler resolves the caller itself via
- *     `resolveOptionalUser` because `org`-visibility artifacts serve
+ *   - `buildArtifactsPublicRouter` — the token-addressed surface, mounted
+ *     BEFORE `buildAuthMiddleware` in app.ts (the webhook-mount pattern).
+ *     The token is the capability; each handler resolves the caller itself
+ *     via `resolveOptionalUser` because `org`-visibility artifacts serve
  *     logged-in org members and 401 everyone else, while `public` ones
- *     (org opt-in) serve anonymously. A factory, not a module-level
- *     router, because it needs the `ValetAuth` instance and its own
- *     per-IP rate limiter.
+ *     (org opt-in) serve anonymously. Comments live here too — the page
+ *     only knows its token — but always REQUIRE a resolved same-org user.
+ *     A factory, not a module-level router, because it needs the
+ *     `ValetAuth` instance and its own per-IP rate limiter.
  *   - `artifactsRouter` — share/list/manage, mounted behind the normal
- *     auth middleware. `POST /share` also serves the `mem_share` tool via
- *     the internal-token header pair, resolved through the memory routes'
- *     `resolveScope` chokepoint.
+ *     auth middleware. `POST /share` also serves the `mem_share` and
+ *     `artifact_publish` tools via the internal-token header pair, resolved
+ *     through the memory routes' `resolveScope` chokepoint.
  *
  * Share authorization is READ-level (`resolveScope(c, "read")`): sharing
  * needs no more authority than reading, because a reader can already copy
- * the content anywhere. Managing an existing artifact (widen/revoke)
+ * the content anywhere. Managing an existing artifact (widen/revoke/pin)
  * requires being its sharer or an org admin.
  */
 import { Hono, type Context } from "hono";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import type { ValetAuth } from "../auth/index.js";
 import type { AppDb } from "../lib/drizzle.js";
 import { resolveOrgId } from "../lib/org.js";
-import { users } from "../schema/index.js";
+import { agentSessions, users } from "../schema/index.js";
 import { requireUser, resolveOptionalUser, type AuthUser } from "../middleware/auth.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 import { WorkflowWebhookRateLimiter } from "../workflows/webhook-service.js";
 import { isOrgAdmin } from "../services/org.js";
 import { isTeamMember } from "../services/teams.js";
+import { canViewSession } from "../services/session-access.js";
 import { handleServiceError, resolveScope } from "./memory.js";
+import { promptAuthorFromUser, submitSessionPrompt } from "./messages.js";
 import type { MemoryScope } from "../services/memory.js";
 import {
+  addArtifactComment,
   decideArtifactAccess,
   getAllowPublicArtifacts,
   getArtifactById,
   getArtifactByToken,
+  getArtifactComment,
+  listArtifactComments,
   listArtifacts,
   listArtifactsForOwner,
+  listArtifactVersions,
+  markArtifactCommentSent,
+  publishArtifact,
+  resolveArtifactComment,
+  resolveServedVersion,
   revokeArtifactById,
   revokeArtifactByPath,
+  setArtifactSharedVersion,
   setArtifactVisibility,
   shareArtifact,
+  type ArtifactCommentRow,
   type ArtifactRow,
   type ArtifactSummaryRow,
 } from "../services/artifacts.js";
 import type {
+  AddArtifactCommentRequest,
+  AddArtifactCommentResponse,
+  ArtifactCommentWire,
   ArtifactListItem,
   GetArtifactResponse,
+  ListArtifactCommentsResponse,
   ListArtifactsResponse,
+  ListArtifactVersionsResponse,
   PatchArtifactRequest,
   ShareArtifactRequest,
   ShareArtifactResponse,
@@ -91,6 +110,10 @@ function toListItem(c: Context<AppEnv>, row: ArtifactSummaryRow): ArtifactListIt
     id: row.id,
     path: row.sourceMemoryPath,
     title: row.title,
+    format: row.format === "html" ? "html" : "markdown",
+    icon: row.icon,
+    version: row.version,
+    sharedVersion: row.sharedVersion,
     token: row.token,
     url: shareUrl(c, row.token),
     visibility: row.visibility,
@@ -137,6 +160,92 @@ function clientKey(c: Context<AppEnv>): string {
     if (forwarded) return forwarded;
   }
   return socketAddress(c) ?? "direct";
+}
+
+/** A viewer who may also comment: logged in, same org. Anonymous readers of
+ * a `public` artifact — and logged-in members of a DIFFERENT org — see the
+ * page with no comment surface: there is no author identity or abuse
+ * boundary to attach a comment to. */
+function mayComment(artifact: ArtifactRow, user: AuthUser | undefined): user is AuthUser {
+  return user !== undefined && user.orgId === artifact.orgId;
+}
+
+/** Resolve the artifact + caller for a token-addressed comment route.
+ * Returns a Response for every failure so handlers stay linear. */
+async function loadCommentContext(
+  c: Context<AppEnv>,
+  auth: ValetAuth | null,
+): Promise<{ artifact: ArtifactRow; user: AuthUser } | { error: Response }> {
+  const { db } = c.var.providers;
+  const [artifact, user] = await Promise.all([
+    getArtifactByToken(db, c.req.param("token")),
+    resolveOptionalUser(c, { auth, db }),
+  ]);
+  if (!artifact) return { error: c.json({ error: "not found" }, 404) };
+  const allowPublic =
+    artifact.visibility === "public" ? await getAllowPublicArtifacts(db, artifact.orgId) : false;
+  const access = decideArtifactAccess({ artifact, allowPublicArtifacts: allowPublic, user });
+  if (access.kind === "not_found") return { error: c.json({ error: "not found" }, 404) };
+  if (!mayComment(artifact, user)) {
+    return {
+      error: c.json(
+        { error: "Comments need a logged-in member of the organization this page belongs to." },
+        401,
+      ),
+    };
+  }
+  return { artifact, user };
+}
+
+/** Whether `user`'s `sendToSession` would deliver: the artifact records a
+ * source session and the caller could open that session and type into it
+ * (`canViewSession` — the exact check the messages route applies), so
+ * sending a comment grants nothing new. */
+async function canSendToSourceSession(
+  db: AppDb,
+  artifact: ArtifactRow,
+  user: AuthUser,
+): Promise<{ ok: false } | { ok: true; row: typeof agentSessions.$inferSelect }> {
+  if (!artifact.sourceSessionId) return { ok: false };
+  const rows = await db
+    .select()
+    .from(agentSessions)
+    .where(eq(agentSessions.id, artifact.sourceSessionId))
+    .limit(1);
+  const row = rows[0];
+  if (!row) return { ok: false };
+  if (!(await canViewSession(db, row, user.id))) return { ok: false };
+  return { ok: true, row };
+}
+
+/** Wire projection of one comment row plus its author's display name. */
+function toCommentWire(row: ArtifactCommentRow, authorName: string): ArtifactCommentWire {
+  return {
+    id: row.id,
+    vdid: row.vdid,
+    parentId: row.parentId,
+    body: row.body,
+    authorUserId: row.authorUserId,
+    authorName,
+    version: row.version,
+    sentToSession: row.sentToSession,
+    resolvedAt: row.resolvedAt,
+    createdAt: row.createdAt,
+  };
+}
+
+/** Display names for a set of authors, one query. Falls back to email, then
+ * to the raw id for a deleted account. */
+async function authorNames(db: AppDb, ids: string[]): Promise<Map<string, string>> {
+  const unique = [...new Set(ids)];
+  if (unique.length === 0) return new Map();
+  const rows = await db
+    .select({ id: users.id, name: users.name, email: users.email })
+    .from(users)
+    .where(inArray(users.id, unique));
+  const map = new Map<string, string>();
+  for (const row of rows) map.set(row.id, row.name || row.email || row.id);
+  return map;
 }
 
 export function buildArtifactsPublicRouter(auth: ValetAuth | null): Hono<AppEnv> {
@@ -188,14 +297,133 @@ export function buildArtifactsPublicRouter(auth: ValetAuth | null): Hono<AppEnv>
       sharedBy = sharerRows[0]?.name || sharerRows[0]?.email || undefined;
     }
 
+    const served = await resolveServedVersion(db, artifact);
     const body: GetArtifactResponse = {
-      title: artifact.title,
-      content: artifact.content,
+      title: served.title,
+      content: served.content,
+      rendered: served.rendered,
+      format: served.format,
+      description: artifact.description,
+      icon: artifact.icon,
+      version: served.version,
       visibility: artifact.visibility,
       updatedAt: artifact.updatedAt,
       ...(sharedBy !== undefined ? { sharedBy } : {}),
+      canComment: mayComment(artifact, user),
     };
     return c.json(body);
+  });
+
+  // ── Comments (token-addressed, same-org login required) ──────────────
+
+  router.get("/:token/comments", async (c) => {
+    c.header("X-Robots-Tag", "noindex");
+    const loaded = await loadCommentContext(c, auth);
+    if ("error" in loaded) return loaded.error;
+    const { db } = c.var.providers;
+
+    const rows = await listArtifactComments(db, loaded.artifact.id);
+    const [names, send, orgAdmin] = await Promise.all([
+      authorNames(db, rows.map((r) => r.authorUserId)),
+      canSendToSourceSession(db, loaded.artifact, loaded.user),
+      isOrgAdmin(db, loaded.user.orgId, loaded.user.id),
+    ]);
+    const body: ListArtifactCommentsResponse = {
+      comments: rows.map((r) => toCommentWire(r, names.get(r.authorUserId) ?? r.authorUserId)),
+      canSendToSession: send.ok,
+      canResolveAll: loaded.artifact.actorUserId === loaded.user.id || orgAdmin,
+    };
+    return c.json(body);
+  });
+
+  router.post("/:token/comments", async (c) => {
+    if (!limiter.allow(clientKey(c), Date.now())) {
+      return c.json({ error: "rate limited" }, 429);
+    }
+    const loaded = await loadCommentContext(c, auth);
+    if ("error" in loaded) return loaded.error;
+    const { artifact, user } = loaded;
+    const providers = c.var.providers;
+
+    let body: AddArtifactCommentRequest;
+    try {
+      body = await c.req.json<AddArtifactCommentRequest>();
+    } catch {
+      return c.json({ error: "invalid JSON body" }, 400);
+    }
+    if (typeof body.body !== "string") {
+      return c.json({ error: "body is required" }, 400);
+    }
+
+    try {
+      const row = await addArtifactComment(providers.db, {
+        artifactId: artifact.id,
+        version: artifact.version,
+        vdid: typeof body.vdid === "string" ? body.vdid : undefined,
+        parentId: typeof body.parentId === "string" ? body.parentId : undefined,
+        body: body.body,
+        authorUserId: user.id,
+      });
+
+      // Delivery to the agent is best-effort and never blocks the save: the
+      // response reports what actually happened, so the UI cannot claim a
+      // send that silently failed.
+      let sent = false;
+      if (body.sendToSession === true) {
+        const send = await canSendToSourceSession(providers.db, artifact, user);
+        if (send.ok) {
+          const anchor = row.vdid ? `element ${row.vdid}` : "page";
+          const text = `[artifact comment] on "${artifact.title}" (${anchor}): ${row.body}`;
+          const resp = await submitSessionPrompt(providers, send.row, text, {
+            author: promptAuthorFromUser(user),
+          });
+          if (resp) {
+            await markArtifactCommentSent(providers.db, row.id, artifact.sourceSessionId);
+            row.sentToSession = artifact.sourceSessionId;
+            sent = true;
+          }
+        }
+      }
+
+      const names = await authorNames(providers.db, [user.id]);
+      const resp: AddArtifactCommentResponse = {
+        comment: toCommentWire(row, names.get(user.id) ?? user.id),
+        sent,
+      };
+      return c.json(resp);
+    } catch (err) {
+      const mapped = handleServiceError(err);
+      if (mapped) return c.json(mapped.body, mapped.status);
+      throw err;
+    }
+  });
+
+  router.post("/:token/comments/:commentId/resolve", async (c) => {
+    const loaded = await loadCommentContext(c, auth);
+    if ("error" in loaded) return loaded.error;
+    const { artifact, user } = loaded;
+    const { db } = c.var.providers;
+
+    const comment = await getArtifactComment(db, c.req.param("commentId"));
+    if (!comment || comment.artifactId !== artifact.id) {
+      return c.json({ error: "not found" }, 404);
+    }
+    const allowed =
+      comment.authorUserId === user.id ||
+      artifact.actorUserId === user.id ||
+      (await isOrgAdmin(db, user.orgId, user.id));
+    if (!allowed) {
+      return c.json({ error: "only the commenter, the sharer, or an org admin can resolve a thread" }, 403);
+    }
+    try {
+      const row = await resolveArtifactComment(db, comment.id, user.id);
+      const names = await authorNames(db, [row.authorUserId]);
+      return c.json(toCommentWire(row, names.get(row.authorUserId) ?? row.authorUserId));
+    } catch (err) {
+      const mapped = handleServiceError(err);
+      if (mapped) return c.json(mapped.body, mapped.status);
+      throw err;
+    }
   });
 
   return router;
@@ -221,26 +449,49 @@ artifactsRouter.post("/share", async (c) => {
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
-  if (!body.path || typeof body.path !== "string") {
-    return c.json({ error: "path is required" }, 400);
+  const hasPath = typeof body.path === "string" && body.path.length > 0;
+  const hasKey = typeof body.key === "string" && body.key.length > 0;
+  if (hasPath === hasKey) {
+    return c.json({ error: "pass exactly one of `path` (memory share) or `key` (inline publish)" }, 400);
   }
 
   const { db } = c.var.providers;
   try {
     if (body.revoke === true) {
-      await revokeArtifactByPath(db, scope, body.path);
+      // `key` and `path` share the publish-key namespace, so one revoke
+      // path serves both shapes.
+      await revokeArtifactByPath(db, scope, hasPath ? body.path! : body.key!);
       return c.json({ ok: true });
     }
-    const row = await shareArtifact(db, scope, {
-      path: body.path,
-      orgId: await orgIdForShare(c, db),
-      sourceSessionId: c.req.header("x-valet-session-id"),
-    });
+
+    let row: ArtifactRow;
+    if (hasPath) {
+      row = await shareArtifact(db, scope, {
+        path: body.path!,
+        orgId: await orgIdForShare(c, db),
+        sourceSessionId: c.req.header("x-valet-session-id"),
+      });
+    } else {
+      if (typeof body.content !== "string" || body.content.length === 0) {
+        return c.json({ error: "content is required to publish with `key`" }, 400);
+      }
+      row = await publishArtifact(db, scope, {
+        key: body.key!,
+        content: body.content,
+        format: body.format === "html" ? "html" : "markdown",
+        title: typeof body.title === "string" ? body.title : undefined,
+        description: typeof body.description === "string" ? body.description : undefined,
+        icon: typeof body.icon === "string" ? body.icon : undefined,
+        orgId: await orgIdForShare(c, db),
+        sourceSessionId: c.req.header("x-valet-session-id"),
+      });
+    }
     const resp: ShareArtifactResponse = {
       id: row.id,
       path: row.sourceMemoryPath,
       url: shareUrl(c, row.token),
       visibility: row.visibility,
+      version: row.version,
       updatedAt: row.updatedAt,
     };
     return c.json(resp);
@@ -305,6 +556,19 @@ async function loadManagedArtifact(
   return { row };
 }
 
+artifactsRouter.get("/:id/versions", async (c) => {
+  const user = requireUser(c);
+  if (!user) return c.json({ error: "unauthorized" }, 401);
+
+  const loaded = await loadManagedArtifact(c, user);
+  if ("error" in loaded) return loaded.error;
+
+  const { db } = c.var.providers;
+  const versions = await listArtifactVersions(db, loaded.row.id);
+  const body: ListArtifactVersionsResponse = { versions };
+  return c.json(body);
+});
+
 artifactsRouter.patch("/:id", async (c) => {
   const user = requireUser(c);
   if (!user) return c.json({ error: "unauthorized" }, 401);
@@ -315,8 +579,20 @@ artifactsRouter.patch("/:id", async (c) => {
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
-  if (body.visibility !== "org" && body.visibility !== "public") {
+  const hasVisibility = body.visibility !== undefined;
+  const hasSharedVersion = "sharedVersion" in body;
+  if (!hasVisibility && !hasSharedVersion) {
+    return c.json({ error: "pass visibility and/or sharedVersion" }, 400);
+  }
+  if (hasVisibility && body.visibility !== "org" && body.visibility !== "public") {
     return c.json({ error: "visibility must be 'org' or 'public'" }, 400);
+  }
+  if (
+    hasSharedVersion &&
+    body.sharedVersion !== null &&
+    (typeof body.sharedVersion !== "number" || !Number.isInteger(body.sharedVersion) || body.sharedVersion < 1)
+  ) {
+    return c.json({ error: "sharedVersion must be a positive version number or null for latest" }, 400);
   }
 
   const loaded = await loadManagedArtifact(c, user);
@@ -333,8 +609,20 @@ artifactsRouter.patch("/:id", async (c) => {
     );
   }
 
-  const row = await setArtifactVisibility(db, loaded.row.id, body.visibility, user.id);
-  return c.json(toListItem(c, row));
+  try {
+    let row = loaded.row;
+    if (hasVisibility) {
+      row = await setArtifactVisibility(db, row.id, body.visibility!, user.id);
+    }
+    if (hasSharedVersion) {
+      row = await setArtifactSharedVersion(db, row.id, body.sharedVersion ?? null);
+    }
+    return c.json(toListItem(c, row));
+  } catch (err) {
+    const mapped = handleServiceError(err);
+    if (mapped) return c.json(mapped.body, mapped.status);
+    throw err;
+  }
 });
 
 artifactsRouter.delete("/:id", async (c) => {

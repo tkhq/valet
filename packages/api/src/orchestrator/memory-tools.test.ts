@@ -26,6 +26,7 @@ import {
   memMoveTool,
   memLinksTool,
   memShareTool,
+  artifactPublishTool,
   memRmTool,
   buildMemoryTools,
 } from "./memory-tools.js";
@@ -64,7 +65,7 @@ afterEach(async () => {
 });
 
 describe("buildMemoryTools", () => {
-  it("returns exactly the eight mem_* tools", () => {
+  it("returns the eight mem_* tools plus artifact_publish", () => {
     const names = buildMemoryTools().map((t) => t.name);
     expect(names).toEqual([
       "mem_write",
@@ -74,6 +75,7 @@ describe("buildMemoryTools", () => {
       "mem_move",
       "mem_links",
       "mem_share",
+      "artifact_publish",
       "mem_rm",
     ]);
   });
@@ -341,5 +343,39 @@ describe("mem_* tools: real HTTP round trip", () => {
 
     const reRevoke = await memShareTool.execute({ path: "artifacts/report.md", revoke: true }, ctx);
     expect(reRevoke.text).toMatch(/^\[memory_error\]/);
+  });
+
+  it("artifact_publish round-trips: publish returns URL + version + audience, republish bumps, revoke confirms", async () => {
+    api = await bootTestApi();
+    const ctx = makeCtx({
+      userId: "local-user",
+      config: { apiBaseUrl: api.baseUrl, internalToken: internalToken() },
+      owner: { type: "user", id: "local-user" },
+    });
+
+    const published = await artifactPublishTool.execute(
+      { key: "pages/board", content: "<h1>Board</h1>", format: "html", icon: "📊" },
+      ctx,
+    );
+    expect(published.text).toContain("published pages/board → ");
+    expect(published.text).toContain("/a/");
+    expect(published.text).toContain("(version 1)");
+    expect(published.text).toContain("Logged-in members");
+
+    // Same key = same page, next version.
+    const republished = await artifactPublishTool.execute(
+      { key: "pages/board", content: "<h1>Board v2</h1>", format: "html" },
+      ctx,
+    );
+    expect(republished.text).toContain("(version 2)");
+    const url = (text: string) => /→ (\S+)/.exec(text)?.[1];
+    expect(url(republished.text)).toBe(url(published.text));
+
+    // Missing content is a tool-level error naming the fix, not an HTTP 400.
+    const empty = await artifactPublishTool.execute({ key: "pages/board" }, ctx);
+    expect(empty.text).toContain("[artifact_error] content is required");
+
+    const revoked = await artifactPublishTool.execute({ key: "pages/board", revoke: true }, ctx);
+    expect(revoked.text).toBe("revoked page pages/board");
   });
 });

@@ -5,7 +5,7 @@
  * `resolveOptionalUser` in `middleware/auth.ts`.
  */
 import { describe, it, expect } from "vitest";
-import { decideArtifactAccess } from "./artifacts.js";
+import { decideArtifactAccess, renderArtifactBody } from "./artifacts.js";
 
 const orgArtifact = { orgId: "org-1", visibility: "org" as const, revokedAt: null };
 const publicArtifact = { orgId: "org-1", visibility: "public" as const, revokedAt: null };
@@ -65,5 +65,21 @@ describe("decideArtifactAccess", () => {
     expect(decideArtifactAccess({ artifact: publicArtifact, allowPublicArtifacts: false, user: outsider })).toEqual({
       kind: "not_found",
     });
+  });
+});
+
+describe("renderArtifactBody", () => {
+  it("compiles markdown through GFM into the shell's document wrapper", () => {
+    const out = renderArtifactBody("# Title\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n- [ ] task\n", "markdown");
+    expect(out).toContain('class="valet-artifact-doc"');
+    expect(out).toContain("<h1>");
+    expect(out).toContain("<table>");
+    // GFM task lists — the tell that gfm mode is actually on.
+    expect(out).toContain('type="checkbox"');
+  });
+
+  it("passes html through verbatim — containment is the frame, not a sanitizer", () => {
+    const html = `<h1>Hi</h1><script>draw()</script>`;
+    expect(renderArtifactBody(html, "html")).toBe(html);
   });
 });
