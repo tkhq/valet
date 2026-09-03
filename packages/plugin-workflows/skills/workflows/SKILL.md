@@ -37,7 +37,7 @@ Always surface returned `workflowId`/`runId` values — the chat UI uses them to
     { "id": "start", "type": "trigger" },
     { "id": "greet", "type": "set", "values": { "greeting": "hello" } },
     { "id": "gate", "type": "approval", "prompt": "Proceed with the demo?" },
-    { "id": "haiku", "type": "llm", "model": "claude-sonnet-4-6", "prompt": "Write a haiku about {{nodes.greet.result.greeting}}" },
+    { "id": "haiku", "type": "llm", "model": "s", "prompt": "Write a haiku about {{nodes.greet.result.greeting}}" },
     { "id": "done", "type": "stop", "outcome": "completed" }
   ],
   "edges": [
@@ -102,7 +102,7 @@ Templates are `{{path}}` reads over `{ trigger, nodes }`. Property paths drill i
 **Let the model abstain.** When an `outputSchema` field feeds a tool param, a required plain string forces the model to invent a value it does not have ("Unable to determine…" as a GitHub username) — and the invented value fails nodes later, at the tool, with a confusing API error. Give the field an explicit abstain value (`""`, or an enum member like `"none"`), tell the prompt when to return it, and branch on it with `when`-guarded edges to a stop node:
 
 ```json
-{ "id": "pick", "type": "llm", "model": "claude-haiku-4-5",
+{ "id": "pick", "type": "llm", "model": "xs",
   "prompt": "... Return an empty assignee when the data does not name one.",
   "outputSchema": { "type": "object", "properties": { "assignee": { "type": "string" } }, "required": ["assignee"] } }
 ```
