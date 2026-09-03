@@ -168,9 +168,14 @@ The shell supplies:
    sizing, `max-width: 100%` on media, and a body background painted from a
    token. A page that paints no background borrows the host's, which reads as
    broken in the opposite theme.
-5. Light and dark color tokens. The light palette is defined on bare `:root`;
-   the dark palette is redefined under `@media (prefers-color-scheme: dark)`.
-   No color gets its only definition inside a media query.
+5. Light and dark color tokens, for three viewer states. Light tokens sit on
+   bare `:root`. The dark block sits under `@media (prefers-color-scheme:
+   dark)`, guarded by `:root:not([data-theme="light"])` so an explicit light
+   choice can block it. A duplicate dark block sits under
+   `:root[data-theme="dark"]`, outside the media query, so an explicit dark
+   choice wins regardless of OS preference. `buildArtifactDocument` stamps
+   `data-theme` on `<html>` when the caller passes a `theme`; an unstamped
+   page follows the reader's system.
 6. The comment runtime (below), when the caller asks for it.
 
 The page's own content follows Valet's head whole and verbatim — even when it
@@ -384,6 +389,12 @@ parent → frame:
   (hover outline via an injected style, click capture).
 - `{ type: "valet-artifact:anchors", vdids: string[] }` names the anchors the
   parent wants tracked and marked.
+- `{ type: "valet-artifact:theme", theme: "light" | "dark" | null }` restamps
+  `data-theme` on the frame's document when the app theme changes. `null`
+  removes the attribute, returning the page to the system default. The
+  download builder passes no `theme` to `buildArtifactDocument`, so a saved
+  file always follows the reader's system — there is no live frame to
+  restamp.
 
 Trust rules, enforced in `ArtifactFrame`: the parent accepts messages only
 from the frame's own `contentWindow`, validates every payload shape, treats
@@ -520,6 +531,9 @@ Both paths compile and store `rendered`, append a version row, and bump
 element in the first 8 KiB for `html`, the first `#` heading for `markdown`,
 then the key's basename.
 
+A memory share now also carries the doc's `description` onto the artifact,
+trimmed and capped at 1000 characters; title resolution is unchanged.
+
 ### Management
 
 `PATCH /api/artifacts/:id` gains `sharedVersion?: number | null` alongside
@@ -531,13 +545,24 @@ route.
 
 ## Tool surface
 
-`mem_share` is unchanged. A new sibling publishes inline content:
+`mem_share` is unchanged. A new sibling publishes inline content, or a file
+already written in the sandbox:
 
 ```
-artifact_publish { key, content, title?, format?, description?, icon?, revoke? }
+artifact_publish { key?, content?, path?, title?, format?, description?, icon?, revoke? }
 ```
 
-Both tools go through `POST /api/artifacts/share` over the same
+`content` and `path` are exclusive: pass exactly one. With `path`, the tool
+reads the file through the session's sandbox handle, in-process — the read
+never goes over HTTP. `format` defaults from the path's extension (`.html`
+or `.htm` is `html`, anything else is `markdown`); `key` defaults to the
+path, normalized the same way as an inline `key`. The size cap is checked
+against `stat` before the read, so an oversized file is rejected without
+loading its bytes; a failed read (the file moved, or is unreadable) returns a
+`[artifact_error]` naming the corrective action, not a stack trace.
+
+Once the tool has content, either passed inline or read from the sandbox,
+both tools go through `POST /api/artifacts/share` over the same
 internal-token transport, so the HTTP seam stays the single chokepoint.
 
 The tool description states the audience rule verbatim, because the agent
@@ -552,6 +577,11 @@ guidance, because the model has to choose:
   script CDNs load, and no other external host does.
 
 ## Web surfaces
+
+`/artifacts` is the gallery of pages the caller published: a list of rows
+(title, format, version, visibility, updated time), each linking in-app to
+`/a/$token`, with a copy-link action and a revoke action per row. A revoked
+artifact drops out of the list.
 
 `/a/$token` keeps its standalone shell, the 401 path to `/login?next=`, and
 the revoked-link copy. Inside it:
@@ -636,7 +666,6 @@ implements against.
 | MCP connector calls at view time | Needs a viewer consent surface Valet does not have | A `capabilities` column declaring them per artifact |
 | Binary assets (images, fonts, PDFs) | No blob-backed artifact storage yet | `BlobStore` port exists; an `artifact_assets` table keyed by artifact id |
 | Agent auto-reply to comments | Needs a watch loop and a rate-limit story | `sent_to_session` already lands the comment in the session; a session-side subscription closes the loop |
-| An `/artifacts` gallery page | `GET /api/artifacts` already returns the list | One route file over the existing hook |
 | Editor roles on a share link | Valet sharing is read-only by design | Editing stays in the session |
 
 ## Implementation notes

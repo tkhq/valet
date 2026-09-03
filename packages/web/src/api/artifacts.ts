@@ -19,8 +19,16 @@ import type {
 import { api, ApiError, type OwnerFilter } from "./client";
 
 export const qkArtifacts = {
-  list: (owner?: OwnerFilter) =>
-    ["artifacts", "list", ...(owner ? [owner.ownerType, owner.ownerId] : [])] as const,
+  // `mine` gets its own key segment (not folded into the owner tuple — it
+  // composes with no owner) so the caller-scoped gallery view and an
+  // unfiltered/team-owned list cache separately instead of colliding.
+  list: (owner?: OwnerFilter, mine?: boolean) =>
+    [
+      "artifacts",
+      "list",
+      ...(owner ? [owner.ownerType, owner.ownerId] : []),
+      ...(mine ? ["mine"] : []),
+    ] as const,
   byToken: (token: string) => ["artifacts", "token", token] as const,
   comments: (token: string) => ["artifacts", "comments", token] as const,
   versions: (id: string) => ["artifacts", "versions", id] as const,
@@ -42,12 +50,13 @@ export function useArtifact(token: string, opts?: Partial<UseQueryOptions<GetArt
 
 export function useArtifacts(
   owner?: OwnerFilter,
-  opts?: Partial<UseQueryOptions<ListArtifactsResponse>>,
+  opts?: Partial<UseQueryOptions<ListArtifactsResponse>> & { mine?: boolean },
 ) {
+  const { mine, ...queryOpts } = opts ?? {};
   return useQuery<ListArtifactsResponse>({
-    queryKey: qkArtifacts.list(owner),
-    queryFn: () => api.listArtifacts(owner),
-    ...opts,
+    queryKey: qkArtifacts.list(owner, mine),
+    queryFn: () => api.listArtifacts(owner, { mine }),
+    ...queryOpts,
   });
 }
 

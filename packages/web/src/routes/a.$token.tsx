@@ -20,6 +20,7 @@ import {
 import { Spinner } from "~/components/primitives";
 import { artifactDownloadName, downloadTextFile } from "~/lib/download";
 import { relativeTime } from "~/lib/relative-time";
+import { useThemeAttribute } from "~/lib/use-theme-attribute";
 
 /**
  * `/a/$token` — the published-page reader (artifact-pages design). Public in
@@ -40,6 +41,7 @@ export const Route = createFileRoute("/a/$token")({
 
 function ArtifactPage() {
   const { token } = Route.useParams();
+  const theme = useThemeAttribute();
   const artifactQ = useArtifact(token);
   const canComment = artifactQ.data?.canComment === true;
 
@@ -119,7 +121,10 @@ function ArtifactPage() {
   const download = () => {
     if (doc.format === "html") {
       // The shelled document (no comment runtime), so the saved file opens
-      // standalone with the same policy and theming the viewer applies.
+      // standalone. It carries no viewer theme: the download is
+      // deliberately system-themed, so it renders by the reader's own OS
+      // preference wherever they open it, not the theme the viewer had
+      // active at download time.
       const page = buildArtifactDocument({
         title: doc.title,
         content: doc.rendered,
@@ -208,6 +213,7 @@ function ArtifactPage() {
             description={doc.description || undefined}
             picking={picking}
             anchors={anchors}
+            theme={theme}
             onPick={(pick) => {
               setPendingPick(pick);
               setPicking(false);

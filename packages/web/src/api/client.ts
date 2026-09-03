@@ -682,8 +682,14 @@ export const api = {
     request<ShareArtifactResponse>("POST", "/artifacts/share", body),
   getTeamChildren: (teamId: string) =>
     request<GetTeamChildrenResponse>("GET", `/teams/${encodeURIComponent(teamId)}/children`),
-  listArtifacts: (owner?: OwnerFilter) =>
-    request<ListArtifactsResponse>("GET", `/artifacts${ownerQuery(owner)}`),
+  // `mine=1` is the caller-scoped gallery view (server-filtered — see the
+  // route's comment on why this replaced a client-side `actorUserId` match)
+  // and composes with nothing, so it is a separate option, not `OwnerFilter`.
+  listArtifacts: (owner?: OwnerFilter, opts?: { mine?: boolean }) => {
+    const base = ownerQuery(owner);
+    if (!opts?.mine) return request<ListArtifactsResponse>("GET", `/artifacts${base}`);
+    return request<ListArtifactsResponse>("GET", `/artifacts${base}${base ? "&" : "?"}mine=1`);
+  },
   patchArtifact: (id: string, body: PatchArtifactRequest) =>
     request<PatchArtifactResponse>("PATCH", `/artifacts/${encodeURIComponent(id)}`, body),
   revokeArtifact: (id: string) =>

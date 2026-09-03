@@ -37,6 +37,8 @@ interface ArtifactFrameProps {
   onPick?: (pick: ArtifactPick) => void;
   onRects?: (rects: Record<string, ArtifactAnchorRect>) => void;
   className?: string;
+  /** Viewer theme stamped into the page: explicit choice, or null/undefined for system. */
+  theme?: "light" | "dark" | null;
 }
 
 function isFiniteNumber(v: unknown): v is number {
@@ -64,6 +66,7 @@ export function ArtifactFrame({
   onPick,
   onRects,
   className,
+  theme,
 }: ArtifactFrameProps) {
   const frameRef = useRef<HTMLIFrameElement>(null);
   const readyRef = useRef(false);
@@ -75,6 +78,17 @@ export function ArtifactFrame({
   onRectsRef.current = onRects;
   const pickingRef = useRef(picking);
   const anchorsRef = useRef(anchors);
+  // The theme stamped into `srcDoc` is frozen at whatever `themeRef` holds
+  // when the memo below runs — mount, or the next time `title`/`rendered`/
+  // `icon`/`description` change. A later theme flip alone restamps via
+  // postMessage instead of reloading the frame (`theme` stays OUT of the
+  // memo deps), so script state survives; this ref carries the CURRENT
+  // value for both that restamp and the next srcDoc build. This render-time
+  // write is load-bearing: it is the ONLY assignment that runs before the
+  // `srcDoc` memo below on every render, so the memo always sees the theme
+  // as of THIS render, not a stale one from the last `[theme]` effect.
+  const themeRef = useRef(theme);
+  themeRef.current = theme;
 
   const srcDoc = useMemo(
     () =>
@@ -84,6 +98,7 @@ export function ArtifactFrame({
         icon,
         description,
         runtime: true,
+        theme: themeRef.current ?? undefined,
       }),
     [title, rendered, icon, description],
   );
@@ -113,6 +128,7 @@ export function ArtifactFrame({
         if (anchorsRef.current && anchorsRef.current.length > 0) {
           post({ type: "valet-artifact:anchors", vdids: anchorsRef.current });
         }
+        post({ type: "valet-artifact:theme", theme: themeRef.current ?? null });
         return;
       }
       if (msg.type === "valet-artifact:pick") {
@@ -148,6 +164,15 @@ export function ArtifactFrame({
     if (readyRef.current) post({ type: "valet-artifact:anchors", vdids: anchors ?? [] });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- anchorsKey is the value identity of `anchors`.
   }, [anchorsKey]);
+
+  useEffect(() => {
+    // `themeRef.current` is already current — the render-time write above
+    // runs on every render, including this one. Only the ready-gated
+    // restamp belongs here.
+    if (readyRef.current) {
+      post({ type: "valet-artifact:theme", theme: theme ?? null });
+    }
+  }, [theme]);
 
   return (
     <iframe

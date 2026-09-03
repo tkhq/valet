@@ -80,15 +80,25 @@ export function artifactContentBytes(content: string): number {
 }
 
 /**
+ * The publish-time size check, given a byte count directly. Use this when
+ * the caller already knows the size (a sandbox `stat`) and reading the
+ * whole content just to measure it would waste work. Returns the message to
+ * show the caller, or `null` when the content fits. The message names the
+ * corrective action, because the caller can act on it.
+ */
+export function artifactSizeErrorForBytes(bytes: number): string | null {
+  if (bytes <= ARTIFACT_MAX_CONTENT_BYTES) return null;
+  const mib = (bytes / (1024 * 1024)).toFixed(1);
+  return `This artifact is ${mib} MiB, over the ${ARTIFACT_MAX_CONTENT_BYTES / (1024 * 1024)} MiB limit. Embed fewer raster images, or draw diagrams as inline SVG instead.`;
+}
+
+/**
  * The publish-time size check. Returns the message to show the caller, or
  * `null` when the content fits. The message names the corrective action,
  * because the caller can act on it.
  */
 export function artifactSizeError(content: string): string | null {
-  const bytes = artifactContentBytes(content);
-  if (bytes <= ARTIFACT_MAX_CONTENT_BYTES) return null;
-  const mib = (bytes / (1024 * 1024)).toFixed(1);
-  return `This artifact is ${mib} MiB, over the ${ARTIFACT_MAX_CONTENT_BYTES / (1024 * 1024)} MiB limit. Embed fewer raster images, or draw diagrams as inline SVG instead.`;
+  return artifactSizeErrorForBytes(artifactContentBytes(content));
 }
 
 /** How much of an HTML document is scanned for a `<title>`. */
@@ -204,6 +214,11 @@ export interface ArtifactDocumentInput {
    * saved file carries no dead bridge code.
    */
   runtime?: boolean;
+  /**
+   * The viewer's explicit theme choice. Omit for the system default: the
+   * root stays unstamped and the prefers-color-scheme media query governs.
+   */
+  theme?: "light" | "dark";
 }
 
 /**
@@ -228,8 +243,9 @@ export interface ArtifactDocumentInput {
  */
 export function buildArtifactDocument(input: ArtifactDocumentInput): string {
   const head = buildHead(input);
+  const themeAttr = input.theme ? ` data-theme="${input.theme}"` : "";
   return `<!doctype html>
-<html lang="en">
+<html lang="en"${themeAttr}>
 <head>
 ${head}
 </head>
@@ -257,15 +273,28 @@ function buildHead(input: ArtifactDocumentInput): string {
 }
 
 /**
+ * The dark token set, extracted once so the media-query block and the
+ * explicit `data-theme="dark"` block cannot drift apart.
+ */
+const ARTIFACT_DARK_TOKENS = `color-scheme: dark;
+  --artifact-bg: #14161a;
+  --artifact-fg: #e8eaee;
+  --artifact-muted: #98a0ad;
+  --artifact-line: #2a2e36;
+  --artifact-accent: #7fb28f;`;
+
+/**
  * The base sheet. Deliberately small: it sets the ground the page sits on and
  * gets out of the way.
  *
- * Colors are defined on bare `:root` first and redefined under
- * `prefers-color-scheme: dark`. Nothing gets its only definition inside the
- * media query, so a page that renders in a context reporting no preference
- * still has a complete palette. `body` paints an explicit background: a
- * transparent body borrows the host's, which reads as broken in the opposite
- * theme.
+ * Three viewer states share these tokens: system default (bare `:root` plus
+ * the media query), explicit light (`data-theme="light"`, which only needs to
+ * block the media query since the bare `:root` values are already light), and
+ * explicit dark (`data-theme="dark"`, redefined outside the media query so it
+ * applies regardless of the OS preference). Light values live on bare
+ * `:root` so no color's only definition sits behind a media or attribute
+ * block. `body` paints an explicit background: a transparent body borrows
+ * the host's, which reads as broken in the opposite theme.
  */
 const ARTIFACT_BASE_CSS = `
 :root {
@@ -276,15 +305,11 @@ const ARTIFACT_BASE_CSS = `
   --artifact-line: #e3e5ea;
   --artifact-accent: #3d6b4f;
 }
+:root[data-theme="light"] { color-scheme: light; }
 @media (prefers-color-scheme: dark) {
-  :root {
-    --artifact-bg: #14161a;
-    --artifact-fg: #e8eaee;
-    --artifact-muted: #98a0ad;
-    --artifact-line: #2a2e36;
-    --artifact-accent: #7fb28f;
-  }
+  :root:not([data-theme="light"]) { ${ARTIFACT_DARK_TOKENS} }
 }
+:root[data-theme="dark"] { ${ARTIFACT_DARK_TOKENS} }
 *, *::before, *::after { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
 body {
@@ -354,7 +379,8 @@ export type ArtifactFrameMessage =
 /** Messages the parent posts into the frame. */
 export type ArtifactParentMessage =
   | { type: "valet-artifact:mode"; picking: boolean }
-  | { type: "valet-artifact:anchors"; vdids: string[] };
+  | { type: "valet-artifact:anchors"; vdids: string[] }
+  | { type: "valet-artifact:theme"; theme: "light" | "dark" | null };
 
 export interface ArtifactAnchorRect {
   top: number;
@@ -509,6 +535,12 @@ export const ARTIFACT_RUNTIME_JS = `
         }
       }
       postRects();
+    } else if (d.type === "valet-artifact:theme") {
+      if (d.theme === "light" || d.theme === "dark") {
+        document.documentElement.setAttribute("data-theme", d.theme);
+      } else {
+        document.documentElement.removeAttribute("data-theme");
+      }
     }
   });
 

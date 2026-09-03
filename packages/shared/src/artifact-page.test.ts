@@ -6,6 +6,7 @@ import {
   ARTIFACT_RUNTIME_JS,
   artifactFaviconDataUri,
   artifactSizeError,
+  artifactSizeErrorForBytes,
   buildArtifactDocument,
   extractHtmlTitle,
   extractMarkdownTitle,
@@ -64,6 +65,23 @@ describe("artifactSizeError", () => {
     const atCap = "😀".repeat(ARTIFACT_MAX_CONTENT_BYTES / 4);
     expect(artifactSizeError(atCap)).toBeNull();
     expect(artifactSizeError(atCap + "😀")).not.toBeNull();
+  });
+});
+
+describe("artifactSizeErrorForBytes", () => {
+  it("passes a byte count within the cap", () => {
+    expect(artifactSizeErrorForBytes(ARTIFACT_MAX_CONTENT_BYTES)).toBeNull();
+  });
+
+  it("names the size, the limit, and the corrective action for an over-cap byte count", () => {
+    const message = artifactSizeErrorForBytes(ARTIFACT_MAX_CONTENT_BYTES + 1);
+    expect(message).toContain("2 MiB limit");
+    expect(message).toContain("inline SVG");
+  });
+
+  it("is the single source of the wording artifactSizeError delegates to", () => {
+    const oversized = "x".repeat(ARTIFACT_MAX_CONTENT_BYTES + 1);
+    expect(artifactSizeError(oversized)).toBe(artifactSizeErrorForBytes(ARTIFACT_MAX_CONTENT_BYTES + 1));
   });
 });
 
@@ -242,5 +260,28 @@ describe("buildArtifactDocument", () => {
     const beforeMedia = html.slice(0, html.indexOf("@media"));
     expect(beforeMedia).toContain("--artifact-bg: #ffffff");
     expect(html).toContain("background: var(--artifact-bg)");
+  });
+});
+
+describe("theming", () => {
+  it("stamps data-theme when a theme is given", () => {
+    const doc = buildArtifactDocument({ title: "T", content: "<p>x</p>", theme: "dark" });
+    expect(doc).toContain('<html lang="en" data-theme="dark">');
+  });
+
+  it("leaves the root unstamped for the system default", () => {
+    const doc = buildArtifactDocument({ title: "T", content: "<p>x</p>" });
+    expect(doc).toContain('<html lang="en">');
+    expect(doc).not.toContain('<html lang="en" data-theme');
+  });
+
+  it("guards the media-query dark block against an explicit light choice", () => {
+    const doc = buildArtifactDocument({ title: "T", content: "<p>x</p>" });
+    expect(doc).toContain(':root:not([data-theme="light"])');
+    expect(doc).toContain(':root[data-theme="dark"]');
+  });
+
+  it("ships a theme handler in the runtime", () => {
+    expect(ARTIFACT_RUNTIME_JS).toContain("valet-artifact:theme");
   });
 });

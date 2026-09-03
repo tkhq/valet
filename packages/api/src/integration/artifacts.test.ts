@@ -323,6 +323,54 @@ describe("api integration: artifacts", () => {
       await api.cleanup();
     }
   });
+
+  it("mine=1 scopes even an org admin to their own rows, server-side", async () => {
+    const api = await bootTestApi();
+    try {
+      const path = "journal/2026-08-28.md";
+      await writeMemoryFile(api.baseUrl, path, "# Mine\n\nBody.\n");
+      const mine = await share(api.baseUrl, path);
+
+      const memberHeaders = { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" };
+      await fetch(`${api.baseUrl}/api/memory`, {
+        method: "PUT",
+        headers: memberHeaders,
+        body: JSON.stringify({ path, content: "# Theirs\n\nBody.\n" }),
+      });
+      const memberShare = await fetch(`${api.baseUrl}/api/artifacts/share`, {
+        method: "POST",
+        headers: memberHeaders,
+        body: JSON.stringify({ path }),
+      });
+      expect(memberShare.status).toBe(200);
+
+      // The default stub caller is an org admin — the unfiltered list holds
+      // both rows.
+      const unfiltered = await fetch(`${api.baseUrl}/api/artifacts`);
+      const unfilteredBody = (await unfiltered.json()) as ListArtifactsResponse;
+      expect(unfilteredBody.artifacts.filter((a) => a.path === path)).toHaveLength(2);
+
+      // `mine=1` drops admin-wide visibility: only the admin's own row.
+      const mineOnly = await fetch(`${api.baseUrl}/api/artifacts?mine=1`);
+      expect(mineOnly.status).toBe(200);
+      const mineBody = (await mineOnly.json()) as ListArtifactsResponse;
+      const mineAtPath = mineBody.artifacts.filter((a) => a.path === path);
+      expect(mineAtPath).toHaveLength(1);
+      expect(mineAtPath[0]?.id).toBe(mine.id);
+    } finally {
+      await api.cleanup();
+    }
+  });
+
+  it("mine cannot be combined with an owner filter", async () => {
+    const api = await bootTestApi();
+    try {
+      const res = await fetch(`${api.baseUrl}/api/artifacts?mine=1&ownerType=team&ownerId=t1`);
+      expect(res.status).toBe(400);
+    } finally {
+      await api.cleanup();
+    }
+  });
 });
 
 // ─── Artifact pages (2026-09-02 artifact-pages design) ───────────────────
