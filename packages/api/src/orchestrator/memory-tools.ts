@@ -24,7 +24,8 @@ import { Type } from "typebox";
 import type { TSchema } from "typebox";
 import { serializePrincipal, type Principal } from "@valet/engine";
 import type { ToolContext, ToolDef, ToolResult } from "@valet/engine";
-import { ARTIFACT_MAX_CONTENT_BYTES, artifactSizeError } from "@valet/shared";
+import { artifactSizeError, artifactSizeErrorForBytes } from "@valet/shared";
+import { normalizePath } from "../lib/okf.js";
 
 const UNAVAILABLE_TEXT = "[memory_unavailable] memory endpoint not configured";
 
@@ -517,9 +518,25 @@ function asPublishResultBody(body: unknown): PublishResultBody | null {
   return { ...base, version: typeof body.version === "number" ? body.version : undefined };
 }
 
-/** A sandbox path as a publish key: strip leading slashes, keep the rest. */
-function normalizePublishKey(path: string): string {
-  return path.replace(/^\/+/, "");
+/**
+ * Resolve a publish key through the server's own canonical normalizer
+ * (`normalizePath` — strips leading slashes, collapses doubled ones, and
+ * rejects the same reserved shapes the `/api/memory` and `/api/artifacts`
+ * routes reject) instead of a hand-rolled leading-slash strip. Applies to
+ * both an explicit `key` and one derived from a sandbox `path`, so the
+ * success/revoke text always echoes what the server actually stored — never
+ * a pre-normalization value that can silently diverge (e.g. a doubled
+ * slash).
+ */
+function resolvePublishKey(raw: string): { key: string } | { error: string } {
+  try {
+    return { key: normalizePath(raw) };
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return {
+      error: `[artifact_error] cannot derive a publish key from ${raw}: ${detail}. Pass an explicit key, or rename the file to a plain relative path.`,
+    };
+  }
 }
 
 export const artifactPublishTool = defineTool({
@@ -571,7 +588,7 @@ export const artifactPublishTool = defineTool({
     let format = args.format;
 
     if (args.revoke === true) {
-      if (!key && hasPath) key = normalizePublishKey(args.path!);
+      if (!key && hasPath) key = args.path;
       if (!key) return { text: "[artifact_error] pass `key` (or `path`) to name the page to revoke." };
     } else {
       if (hasContent === hasPath) {
@@ -590,12 +607,8 @@ export const artifactPublishTool = defineTool({
         if (!stat.isFile) {
           return { text: `[artifact_error] ${args.path} is not a file in the sandbox. Write the page to a file first, then publish it.` };
         }
-        if (stat.size > ARTIFACT_MAX_CONTENT_BYTES) {
-          const mib = (stat.size / (1024 * 1024)).toFixed(1);
-          return {
-            text: `[artifact_error] ${args.path} is ${mib} MiB, over the ${ARTIFACT_MAX_CONTENT_BYTES / (1024 * 1024)} MiB limit. Embed fewer raster images, or draw diagrams as inline SVG instead.`,
-          };
-        }
+        const statSizeError = artifactSizeErrorForBytes(stat.size);
+        if (statSizeError) return { text: `[artifact_error] ${args.path}: ${statSizeError}` };
         try {
           content = await ctx.sandbox.readFile(args.path!);
         } catch (err) {
@@ -604,15 +617,22 @@ export const artifactPublishTool = defineTool({
             text: `[artifact_error] could not read ${args.path} from the sandbox: ${detail}. Confirm the file still exists, then retry.`,
           };
         }
+        if (content.length === 0) {
+          return { text: `[artifact_error] ${args.path} is empty. Write the page content to the file, then publish again.` };
+        }
         const sizeError = artifactSizeError(content);
         if (sizeError) return { text: `[artifact_error] ${sizeError}` };
         if (!format) format = /\.html?$/i.test(args.path!) ? "html" : "markdown";
-        if (!key) key = normalizePublishKey(args.path!);
+        if (!key) key = args.path;
       }
       if (!key) {
         return { text: "[artifact_error] `key` is required when publishing inline content. Pick a stable name like 'pages/deploy-dashboard'." };
       }
     }
+
+    const resolvedKey = resolvePublishKey(key);
+    if ("error" in resolvedKey) return { text: resolvedKey.error };
+    key = resolvedKey.key;
 
     const owner = resolveOwner(ctx);
     const url = new URL("/api/artifacts/share", cfg.apiBaseUrl);

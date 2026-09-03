@@ -228,3 +228,44 @@ describe("artifact_publish: revoke derives key from path", () => {
     expect(result.text).toBe("revoked page workspace/report.html");
   });
 });
+
+describe("artifact_publish: empty file", () => {
+  it("rejects an empty sandbox file with the corrective text, and never calls fetch", async () => {
+    const { fetchMock } = stubFetchOk({});
+    const sandbox = stubSandbox({ "/workspace/blank.html": "" });
+    const ctx = makeCtx(sandbox);
+
+    const result = await publishTool.execute({ path: "/workspace/blank.html" }, ctx);
+
+    expect(result.text).toBe(
+      "[artifact_error] /workspace/blank.html is empty. Write the page content to the file, then publish again.",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("artifact_publish: canonical key normalization", () => {
+  it("collapses a doubled slash in the derived key, and echoes the resolved key", async () => {
+    const { fetchMock } = stubFetchOk({ url: "https://x/a/t3", visibility: "org", version: 1 });
+    const sandbox = stubSandbox({ "/workspace//report.html": "<title>Deploys</title>" });
+    const ctx = makeCtx(sandbox);
+
+    const result = await publishTool.execute({ path: "/workspace//report.html" }, ctx);
+
+    const body = await capturedBody(fetchMock);
+    expect(body.key).toBe("workspace/report.html");
+    expect(result.text).toContain("published workspace/report.html");
+  });
+
+  it("returns the corrective error, without calling fetch, for a path the normalizer rejects", async () => {
+    const { fetchMock } = stubFetchOk({});
+    const sandbox = stubSandbox({ "/workspace/bad:name.html": "<title>Deploys</title>" });
+    const ctx = makeCtx(sandbox);
+
+    const result = await publishTool.execute({ path: "/workspace/bad:name.html" }, ctx);
+
+    expect(result.text).toContain("[artifact_error] cannot derive a publish key from");
+    expect(result.text).toContain("Pass an explicit key");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});

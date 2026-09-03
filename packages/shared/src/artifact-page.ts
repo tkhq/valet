@@ -80,15 +80,25 @@ export function artifactContentBytes(content: string): number {
 }
 
 /**
+ * The publish-time size check, given a byte count directly. Use this when
+ * the caller already knows the size (a sandbox `stat`) and reading the
+ * whole content just to measure it would waste work. Returns the message to
+ * show the caller, or `null` when the content fits. The message names the
+ * corrective action, because the caller can act on it.
+ */
+export function artifactSizeErrorForBytes(bytes: number): string | null {
+  if (bytes <= ARTIFACT_MAX_CONTENT_BYTES) return null;
+  const mib = (bytes / (1024 * 1024)).toFixed(1);
+  return `This artifact is ${mib} MiB, over the ${ARTIFACT_MAX_CONTENT_BYTES / (1024 * 1024)} MiB limit. Embed fewer raster images, or draw diagrams as inline SVG instead.`;
+}
+
+/**
  * The publish-time size check. Returns the message to show the caller, or
  * `null` when the content fits. The message names the corrective action,
  * because the caller can act on it.
  */
 export function artifactSizeError(content: string): string | null {
-  const bytes = artifactContentBytes(content);
-  if (bytes <= ARTIFACT_MAX_CONTENT_BYTES) return null;
-  const mib = (bytes / (1024 * 1024)).toFixed(1);
-  return `This artifact is ${mib} MiB, over the ${ARTIFACT_MAX_CONTENT_BYTES / (1024 * 1024)} MiB limit. Embed fewer raster images, or draw diagrams as inline SVG instead.`;
+  return artifactSizeErrorForBytes(artifactContentBytes(content));
 }
 
 /** How much of an HTML document is scanned for a `<title>`. */

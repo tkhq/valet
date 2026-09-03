@@ -6,6 +6,7 @@ import {
   ARTIFACT_RUNTIME_JS,
   artifactFaviconDataUri,
   artifactSizeError,
+  artifactSizeErrorForBytes,
   buildArtifactDocument,
   extractHtmlTitle,
   extractMarkdownTitle,
@@ -64,6 +65,23 @@ describe("artifactSizeError", () => {
     const atCap = "😀".repeat(ARTIFACT_MAX_CONTENT_BYTES / 4);
     expect(artifactSizeError(atCap)).toBeNull();
     expect(artifactSizeError(atCap + "😀")).not.toBeNull();
+  });
+});
+
+describe("artifactSizeErrorForBytes", () => {
+  it("passes a byte count within the cap", () => {
+    expect(artifactSizeErrorForBytes(ARTIFACT_MAX_CONTENT_BYTES)).toBeNull();
+  });
+
+  it("names the size, the limit, and the corrective action for an over-cap byte count", () => {
+    const message = artifactSizeErrorForBytes(ARTIFACT_MAX_CONTENT_BYTES + 1);
+    expect(message).toContain("2 MiB limit");
+    expect(message).toContain("inline SVG");
+  });
+
+  it("is the single source of the wording artifactSizeError delegates to", () => {
+    const oversized = "x".repeat(ARTIFACT_MAX_CONTENT_BYTES + 1);
+    expect(artifactSizeError(oversized)).toBe(artifactSizeErrorForBytes(ARTIFACT_MAX_CONTENT_BYTES + 1));
   });
 });
 
