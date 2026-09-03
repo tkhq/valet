@@ -83,7 +83,10 @@ export function ArtifactFrame({
   // `icon`/`description` change. A later theme flip alone restamps via
   // postMessage instead of reloading the frame (`theme` stays OUT of the
   // memo deps), so script state survives; this ref carries the CURRENT
-  // value for both that restamp and the next srcDoc build.
+  // value for both that restamp and the next srcDoc build. This render-time
+  // write is load-bearing: it is the ONLY assignment that runs before the
+  // `srcDoc` memo below on every render, so the memo always sees the theme
+  // as of THIS render, not a stale one from the last `[theme]` effect.
   const themeRef = useRef(theme);
   themeRef.current = theme;
 
@@ -163,7 +166,9 @@ export function ArtifactFrame({
   }, [anchorsKey]);
 
   useEffect(() => {
-    themeRef.current = theme;
+    // `themeRef.current` is already current — the render-time write above
+    // runs on every render, including this one. Only the ready-gated
+    // restamp belongs here.
     if (readyRef.current) {
       post({ type: "valet-artifact:theme", theme: theme ?? null });
     }
