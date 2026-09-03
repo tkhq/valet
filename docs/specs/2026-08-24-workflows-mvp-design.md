@@ -367,3 +367,15 @@ RBAC vocabulary. Decision 10 uses the direct `isTeamMember` and `canAdministerTe
     A mirrored id that a shipped template already claims is refused with both names, and so is a second file in one repository claiming an id the first took: the unique index would otherwise decide by insert order, which nobody can read. `listCatalogTemplatesForOwner` also puts the code catalog first, so a shipped template outranks a mirrored one even if a row somehow exists.
 
     Deleting a source, and deleting a team, now remove that owner's mirrored templates through the same `deleteMirroredContent` a mirrored workflow goes through. `deleteTeam` previously deleted a team's sources and left everything they had mirrored.
+
+24. **A mirrored memory mounts under `lib/`, which makes it read-only with no new guard.** This is Linear issue TKAI-218's remaining half rather than a task in this design, and it lands here because it is the third collector on the same rail. A memory file is not a workflow: the agent writes memory files constantly, so "the product never held the edit" is not available as the reason a mirror is read-only.
+
+    The memory subsystem already had the answer. `assertWritablePath` in `lib/okf.ts` refuses every agent and API write under `lib/`, with the message "lib/ is reserved for mounted libraries - write under notes/ or projects/", and `lib/` is that subsystem's own name for mounted, non-agent-authored content. So `.valet/memory/**/*.md` mounts at `lib/<path under the root>` and is read-only for free: no new error class, no guard threaded through the four write paths, and a refusal that already names the corrective action. The agent keeps writing under `notes/`, `projects/` and `journal/`, which this mirror cannot reach.
+
+    `memory_files.origin` could not carry the mirror flag: that column is OKF provenance of the fact and is already spent. The row gains `source_id`, `upstream_path` and `content_sha`, and every delete is scoped by the source AND the `lib/` prefix, which is this table's version of the "scoped twice" rule.
+
+    There is no second, top-level root. An OKF document has no discriminator, and `parseConcept` reads any Markdown, so a top-level `memory/` folder would claim files with nothing in them to say they are memory.
+
+    A USER source collects memories, unlike workflows and templates. A mirrored memory runs nothing and resolves no credential, so decision 10's authority argument does not reach it, and a personal repository of notes is the most natural thing to want mirrored.
+
+25. **The discovery-scan mark carries the source's kinds.** Deviation 5 binds the mark to the rules version and the commit. Neither moves when a SOURCE's `kinds` change, and its candidate set does: compare 1 would short-circuit at the stored head commit and the newly claimed content would wait for an unrelated commit. Adding a kind to a source is the ordinary way this feature is turned on, so that window is not an edge case. `discoveryScanMark(commitSha, kinds)` sorts the kinds into the mark, so a source that gains a kind re-scans on its next poll and nobody has to remember to force it.

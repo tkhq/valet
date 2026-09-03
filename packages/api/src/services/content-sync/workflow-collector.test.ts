@@ -717,6 +717,38 @@ describe("workflow collector", () => {
     });
   });
 
+  // Adding a kind to an existing source changes its candidate set without
+  // changing the repository, so compare 1 has to notice. It does because the
+  // stored scan mark carries the kinds.
+  it("re-scans a source that gains the workflows kind at an unmoved commit", async () => {
+    const f = serve({
+      sha: "c1",
+      files: {
+        ".valet/workflows/nightly.yaml": workflowYaml("Nightly"),
+        ".valet/skills/thing/SKILL.md": "---\nname: thing\ndescription: A thing.\n---\n\nDo it.\n",
+      },
+    });
+    const source = await createContentSource(
+      db,
+      { userId: "u1", orgId: ORG },
+      { repo: "tkhq/automation", teamId: TEAM },
+    );
+    // Skills only at first: the workflow file is in the tree and unclaimed.
+    await serviceFor(f).syncOnce(source.id);
+    expect(await mirrored()).toHaveLength(0);
+
+    // The repository does not move. Only what this source collects does.
+    await db
+      .update(contentSources)
+      .set({ kinds: ["skills", "workflows"] })
+      .where(eq(contentSources.id, source.id));
+    await serviceFor(f).syncOnce(source.id);
+
+    expect((await mirrored()).map((r) => r.upstreamPath)).toEqual([
+      ".valet/workflows/nightly.yaml",
+    ]);
+  });
+
   it("never touches a local workflow, including one of the same name", async () => {
     const f = serve({
       sha: "c1",

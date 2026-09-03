@@ -447,6 +447,14 @@ CREATE TABLE "memory_files" (
 	"source_session_id" text DEFAULT '' NOT NULL,
 	"org_id" text DEFAULT '' NOT NULL,
 	"version" integer DEFAULT 1 NOT NULL,
+	-- Repository mirror bookkeeping. A row with a `source_id` mirrors one file
+	-- under `.valet/memory/` and lands under `lib/`, which `assertWritablePath`
+	-- already reserves for mounted libraries, so the product refuses to write
+	-- it without a new guard. NOT `origin` above, which is OKF provenance of
+	-- the fact and is already spent.
+	"source_id" text,
+	"upstream_path" text,
+	"content_sha" text,
 	"created_at" bigint NOT NULL,
 	"updated_at" bigint NOT NULL,
 	PRIMARY KEY("owner_type", "owner_id", "path")

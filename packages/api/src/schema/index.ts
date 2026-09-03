@@ -805,6 +805,16 @@ export const memoryFiles = pgTable(
     sourceSessionId: text("source_session_id").notNull().default(""),
     orgId: text("org_id").notNull().default(""),
     version: integer("version").notNull().default(1),
+    /** The content source that mirrors this row, or null on a row the
+     * product wrote. A mirrored row lands under `lib/`, which
+     * `assertWritablePath` already reserves for mounted libraries, so the
+     * product refuses to write it with no new guard.
+     *
+     * NOT `origin` above: that column is OKF provenance of the fact and is
+     * already spent. */
+    sourceId: text("source_id"),
+    upstreamPath: text("upstream_path"),
+    contentSha: text("content_sha"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
@@ -907,7 +917,7 @@ export const skills = pgTable(
 /** What one tracked repository mirrors. `skills` is the kind that ships; the
  * other two join the same rail
  * (`docs/specs/2026-08-24-workflows-mvp-design.md`). */
-export type ContentKind = "skills" | "workflows" | "templates";
+export type ContentKind = "skills" | "workflows" | "templates" | "memories";
 
 // One tracked repository. A `repo`-origin row in `skills` above is a MIRROR
 // of a `SKILL.md` in one of these repositories, and sync is the only thing

@@ -44,6 +44,7 @@ import { ContentSyncService } from "../services/content-sync/service.js";
 import { SkillCollector } from "../services/content-sync/skill-collector.js";
 import { WorkflowCollector } from "../services/content-sync/workflow-collector.js";
 import { TemplateCollector } from "../services/content-sync/template-collector.js";
+import { MemoryCollector } from "../services/content-sync/memory-collector.js";
 import { listCatalogTemplates } from "../workflows/templates.js";
 import { buildValidateEnvironment } from "../workflows/validation-env.js";
 import { GitHubSkillRepoReader } from "../services/skill-repo-reader.js";
@@ -757,6 +758,10 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
         // deliver.
         plugins,
       }),
+      // Memories collect for every owner type, including a personal source:
+      // a mirrored memory runs nothing and resolves no credential, so
+      // decision 10's authority argument does not reach it.
+      new MemoryCollector(),
       new TemplateCollector({
         env: buildValidateEnvironment(actionPluginByService),
         // Resolved per pass, not per file: a mirrored id that collides with

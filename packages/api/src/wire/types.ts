@@ -2829,7 +2829,7 @@ export interface SkillSourceSummary {
   /** What the sync collects from this repository. The union is restated
    * rather than imported: this module stays free of schema imports so the
    * web build does not pull in Drizzle. */
-  kinds: ("skills" | "workflows" | "templates")[];
+  kinds: ("skills" | "workflows" | "templates" | "memories")[];
   enabled: boolean;
   /** `pending` — never synced. `ok` — synced. `warning` — synced, but at
    * least one file was skipped. `error` — the last sync failed. */
@@ -2876,7 +2876,7 @@ export interface CreateSkillSourceRequest {
    * `templates` run code as the owner, so a team source collecting either
    * needs a team admin and a personal source cannot collect them at all;
    * both refusals are 403 and name the corrective action. */
-  kinds?: ("skills" | "workflows" | "templates")[];
+  kinds?: ("skills" | "workflows" | "templates" | "memories")[];
 }
 
 /** What a sync did. Returned by the create route too, because adding a

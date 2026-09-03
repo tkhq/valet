@@ -31,7 +31,7 @@ export const DISCOVERY_RULES_VERSION = 1;
 
 /**
  * What a complete sync records in `skill_sources.discovery_scan`: the rules
- * version, then the commit those rules read.
+ * version, the kinds this source collects, then the commit those rules read.
  *
  * The commit is paired with the version for rollback. A release that does not
  * know this column still advances `last_sha`, so a bare version would outlive
@@ -41,8 +41,14 @@ export const DISCOVERY_RULES_VERSION = 1;
  * commit, which an errored source does on every poll. `recordFailure` clears
  * the mark for that reason, so the two rules hold it together.
  */
-export function discoveryScanMark(commitSha: string): string {
-  return `${DISCOVERY_RULES_VERSION}:${commitSha}`;
+export function discoveryScanMark(commitSha: string, kinds: readonly ContentKind[]): string {
+  // The KINDS are in the mark for the same reason the version is: they decide
+  // which collectors run, so the same commit yields a different candidate set
+  // when they change. Without them, adding a kind to an existing source
+  // leaves its stored mark matching, compare 1 short-circuits, and the newly
+  // claimed content is never mirrored until an unrelated commit lands.
+  // Sorted, so two equivalent orders produce one mark.
+  return `${DISCOVERY_RULES_VERSION}:${[...kinds].sort().join(",")}:${commitSha}`;
 }
 
 /** One tracked file as the repository holds it. `name` comes from the PATH,

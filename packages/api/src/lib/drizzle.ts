@@ -249,6 +249,23 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'ALTER TABLE "followed_threads" ADD COLUMN IF NOT EXISTS "last_seen_ts" text',
   },
   {
+    // Memory mirror bookkeeping. A deployed database holds only rows the
+    // product wrote, which carry no source, so NULL is the backfill.
+    describe: "memory_files.source_id column",
+    probe: { kind: "column", table: "memory_files", column: "source_id" },
+    sql: 'ALTER TABLE "memory_files" ADD COLUMN IF NOT EXISTS "source_id" text',
+  },
+  {
+    describe: "memory_files.upstream_path column",
+    probe: { kind: "column", table: "memory_files", column: "upstream_path" },
+    sql: 'ALTER TABLE "memory_files" ADD COLUMN IF NOT EXISTS "upstream_path" text',
+  },
+  {
+    describe: "memory_files.content_sha column",
+    probe: { kind: "column", table: "memory_files", column: "content_sha" },
+    sql: 'ALTER TABLE "memory_files" ADD COLUMN IF NOT EXISTS "content_sha" text',
+  },
+  {
     // Trigger provenance. A deployed database holds only person-armed rows,
     // which is what the default encodes, so the default IS the backfill.
     describe: "workflow_schedules.origin column",

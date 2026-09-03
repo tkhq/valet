@@ -370,7 +370,7 @@ export class ContentSyncService {
     // commit then says nothing about whether this source is current. The row
     // carries the commit its rules read rather than a bare version, because a
     // release that does not know the column still advances `last_sha`.
-    const scanIsStale = source.discoveryScan !== discoveryScanMark(head.sha);
+    const scanIsStale = source.discoveryScan !== discoveryScanMark(head.sha, source.kinds);
 
     if (head.sha === source.lastSha && !reportIsStale && !scanIsStale) {
       // Nothing was re-read, so this poll learned nothing that could clear the
@@ -614,7 +614,7 @@ export class ContentSyncService {
           syncIntervalMs(source.ownerType, { orgWebhookLive: this.deps.orgWebhookLive?.() === true }),
         lastSha: result.complete ? result.headSha : source.lastSha,
         lastManifestHash: result.complete ? result.manifestHash : source.lastManifestHash,
-        discoveryScan: result.complete ? discoveryScanMark(result.headSha) : source.discoveryScan,
+        discoveryScan: result.complete ? discoveryScanMark(result.headSha, source.kinds) : source.discoveryScan,
         lastSyncedAt: now,
         lastError: message,
         updatedAt: now,

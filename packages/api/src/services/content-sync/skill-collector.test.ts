@@ -811,7 +811,7 @@ Read the reference.
       // The re-scan is once, not every poll: the sync records the commit and
       // the version it ran under, so the next poll is back to one call.
       const [row] = await db.select().from(contentSources).where(eq(contentSources.id, source.id));
-      expect(row?.discoveryScan).toBe(discoveryScanMark("commit-1"));
+      expect(row?.discoveryScan).toBe(discoveryScanMark("commit-1", ["skills"]));
     });
 
     // The rollback case. A release that does not know the column still
@@ -844,7 +844,7 @@ Read the reference.
       );
       expect(outcome?.imported).toBe(1);
       const [row] = await db.select().from(contentSources).where(eq(contentSources.id, source.id));
-      expect(row?.discoveryScan).toBe(discoveryScanMark("commit-2"));
+      expect(row?.discoveryScan).toBe(discoveryScanMark("commit-2", ["skills"]));
     });
 
     it("still costs one call for a source already at the current rules", async () => {

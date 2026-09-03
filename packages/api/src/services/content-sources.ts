@@ -14,7 +14,7 @@
  * still reads org-library rows. The sweep keeps those rows fresh.
  */
 import { randomUUID } from "node:crypto";
-import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, like, or, sql } from "drizzle-orm";
 import type { Principal } from "@valet/engine";
 import { NotFoundError } from "@valet/shared";
 import { isPgUniqueViolation } from "@valet/store-postgres";
@@ -23,6 +23,7 @@ import { decodePageCursor, encodePageCursor } from "../lib/page-cursor.js";
 import {
   skills,
   contentSources,
+  memoryFiles,
   workflowDefinitions,
   workflowTemplates,
   type ContentKind,
@@ -508,6 +509,11 @@ export async function deleteMirroredContent(tx: AppDb, orgId: string, sourceId: 
   await tx
     .delete(workflowTemplates)
     .where(and(eq(workflowTemplates.sourceId, sourceId), eq(workflowTemplates.origin, "repo")));
+  // Mirrored memory files carry no `origin` of their own — that column is OKF
+  // provenance — so the second scope is the mounted namespace they land in.
+  await tx
+    .delete(memoryFiles)
+    .where(and(eq(memoryFiles.sourceId, sourceId), like(memoryFiles.path, "lib/%")));
   const mirrored = await tx
     .select({ id: workflowDefinitions.id })
     .from(workflowDefinitions)
