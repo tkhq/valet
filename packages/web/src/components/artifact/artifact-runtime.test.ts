@@ -100,8 +100,11 @@ describe("artifact comment runtime", () => {
       }) => void;
       echartsTheme: () => { color: string[] };
     }
-    const ds = (window as unknown as { valetDS: ValetDS }).valetDS;
+    // Subtype assertion (Window & extras), not a double-cast: the runtime
+    // attached valetDS at boot and the next line proves it.
+    const ds = (window as Window & { valetDS?: ValetDS }).valetDS;
     expect(ds).toBeDefined();
+    if (!ds) return;
 
     // The shell's defaults are absent in jsdom (no injected base sheet), so
     // set both layers explicitly and check precedence: --ds-* wins.
