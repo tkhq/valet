@@ -9,10 +9,11 @@
  * only the call shape changed from a single closure to per-step function calls.
  */
 import { describe, it, expect, vi } from "vitest";
-import type { ExecOpts, ExecResult, Sandbox } from "@valet/engine";
+import type { ExecOpts, ExecResult, Sandbox, WorkspaceGrowth } from "@valet/engine";
 import {
   installCredentialHelper,
   configureGitIdentity,
+  isEnospc,
   prepBinding,
   prepPrebuiltBinding,
   computeTargetDirs,
@@ -61,6 +62,27 @@ class RecordingSandbox implements Sandbox {
     this.execResults.set(command, result);
   }
 
+  /** Queue per-call results for an exact command string: the first exec of
+   * `command` gets `results[0]`, the second `results[1]`, … (falls back to
+   * `setResult`/success once drained). For the ENOSPC → grow → retry path,
+   * where the SAME command must fail once and then succeed. */
+  private resultQueues = new Map<string, ExecResult[]>();
+  queueResults(command: string, results: ExecResult[]): void {
+    this.resultQueues.set(command, [...results]);
+  }
+
+  /** Enable `growWorkspace` (absent by default, like docker/local): every
+   * call returns `growth` and increments `growCalls`. */
+  growCalls = 0;
+  growWorkspace?: () => Promise<WorkspaceGrowth>;
+  enableGrow(growth: WorkspaceGrowth | Error): void {
+    this.growWorkspace = async () => {
+      this.growCalls += 1;
+      if (growth instanceof Error) throw growth;
+      return growth;
+    };
+  }
+
   async readFile(): Promise<string> {
     throw new Error("not implemented");
   }
@@ -88,6 +110,8 @@ class RecordingSandbox implements Sandbox {
   async rm(): Promise<void> {}
   async exec(command: string, opts?: ExecOpts): Promise<ExecResult> {
     this.execCalls.push({ command, opts });
+    const queue = this.resultQueues.get(command);
+    if (queue && queue.length > 0) return queue.shift()!;
     return this.execResults.get(command) ?? { stdout: "", stderr: "", exitCode: 0 };
   }
 }
@@ -224,14 +248,14 @@ describe("prepBinding", () => {
     const sandbox = new RecordingSandbox();
     await prepBinding(sandbox, ".", binding());
     const commands = sandbox.execCalls.map((c) => c.command);
-    expect(commands).toContain("git clone 'https://github.com/acme/widgets.git' '.'");
+    expect(commands).toContain("git clone --filter=blob:none 'https://github.com/acme/widgets.git' '.'");
   });
 
   it("clones with --branch when ref is set", async () => {
     const sandbox = new RecordingSandbox();
     await prepBinding(sandbox, ".", binding({ ref: "release/1.0" }));
     const commands = sandbox.execCalls.map((c) => c.command);
-    expect(commands).toContain("git clone 'https://github.com/acme/widgets.git' '.' --branch 'release/1.0'");
+    expect(commands).toContain("git clone --filter=blob:none 'https://github.com/acme/widgets.git' '.' --branch 'release/1.0'");
   });
 
   it("clones then checks out a SHA ref — NOT --branch (git rejects a SHA there)", async () => {
@@ -240,7 +264,7 @@ describe("prepBinding", () => {
     await prepBinding(sandbox, ".", binding({ ref: sha }));
     const commands = sandbox.execCalls.map((c) => c.command);
     // Plain clone (no --branch), then a detached checkout of the commit.
-    expect(commands).toContain("git clone 'https://github.com/acme/widgets.git' '.'");
+    expect(commands).toContain("git clone --filter=blob:none 'https://github.com/acme/widgets.git' '.'");
     expect(commands.some((c) => c.includes("--branch"))).toBe(false);
     expect(commands).toContain(`git checkout '${sha}'`);
   });
@@ -261,7 +285,7 @@ describe("prepBinding", () => {
     sandbox.setDirEntries(".", []); // root pre-created empty by session create
     await expect(prepBinding(sandbox, ".", binding())).resolves.toBeUndefined();
     const commands = sandbox.execCalls.map((c) => c.command);
-    expect(commands).toContain("git clone 'https://github.com/acme/widgets.git' '.'");
+    expect(commands).toContain("git clone --filter=blob:none 'https://github.com/acme/widgets.git' '.'");
   });
 
   it("throws when the clone target is non-empty with no .git present", async () => {
@@ -272,7 +296,7 @@ describe("prepBinding", () => {
 
   it("clone failure THROWS (prep fails → startup-failure semantics)", async () => {
     const sandbox = new RecordingSandbox();
-    sandbox.setResult("git clone 'https://github.com/acme/widgets.git' '.'", {
+    sandbox.setResult("git clone --filter=blob:none 'https://github.com/acme/widgets.git' '.'", {
       stdout: "",
       stderr: "fatal: repository not found",
       exitCode: 128,
@@ -338,8 +362,141 @@ describe("prepBinding", () => {
       await prepBinding(sandbox, dirs[i], repos[i]);
     }
     expect(sandbox.execCalls.map((c) => c.command)).toContain(
-      "git clone 'https://github.com/acme/gadgets.git' 'gadgets'",
+      "git clone --filter=blob:none 'https://github.com/acme/gadgets.git' 'gadgets'",
     );
+    errSpy.mockRestore();
+  });
+});
+
+describe("ENOSPC → grow workspace → retry once", () => {
+  const CLONE_CMD = "git clone --filter=blob:none 'https://github.com/acme/widgets.git' 'widgets'";
+  const ENOSPC: ExecResult = {
+    stdout: "",
+    stderr: "fatal: write error: No space left on device",
+    exitCode: 128,
+  };
+  const OK: ExecResult = { stdout: "", stderr: "", exitCode: 0 };
+
+  it("isEnospc matches the git full-disk failure shapes, not successes or other failures", () => {
+    expect(isEnospc(ENOSPC)).toBe(true);
+    expect(isEnospc({ stdout: "ENOSPC: no space", stderr: "", exitCode: 1 })).toBe(true);
+    expect(isEnospc({ stdout: "", stderr: "No space left on device", exitCode: 0 })).toBe(false);
+    expect(isEnospc({ stdout: "", stderr: "fatal: repository not found", exitCode: 128 })).toBe(false);
+  });
+
+  it("clone ENOSPC: grows, removes the partial target, re-clones, and prep succeeds", async () => {
+    const sandbox = new RecordingSandbox();
+    sandbox.enableGrow({ grown: true, from: "1Gi", to: "2Gi" });
+    sandbox.queueResults(CLONE_CMD, [ENOSPC, OK]);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    await expect(prepBinding(sandbox, "widgets", binding())).resolves.toBeUndefined();
+    const commands = sandbox.execCalls.map((c) => c.command);
+    expect(sandbox.growCalls).toBe(1);
+    expect(commands.filter((c) => c === CLONE_CMD).length).toBe(2);
+    // Debris removal between the failed clone and the retry.
+    expect(commands).toContain("rm -rf 'widgets'");
+    logSpy.mockRestore();
+  });
+
+  it("clone ENOSPC with the workspace root ('.') as target never rm -rf's the root", async () => {
+    const rootClone = "git clone --filter=blob:none 'https://github.com/acme/widgets.git' '.'";
+    const sandbox = new RecordingSandbox();
+    sandbox.enableGrow({ grown: true, from: "1Gi", to: "2Gi" });
+    sandbox.queueResults(rootClone, [ENOSPC, OK]);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    await expect(prepBinding(sandbox, ".", binding())).resolves.toBeUndefined();
+    const commands = sandbox.execCalls.map((c) => c.command);
+    expect(commands.some((c) => c.startsWith("rm -rf"))).toBe(false);
+    expect(commands.filter((c) => c === rootClone).length).toBe(2);
+    logSpy.mockRestore();
+  });
+
+  it("clone ENOSPC with grow refused: throws once with the refusal reason, no retry", async () => {
+    const sandbox = new RecordingSandbox();
+    sandbox.enableGrow({ grown: false, reason: "workspace is already at the 20Gi growth cap" });
+    sandbox.queueResults(CLONE_CMD, [ENOSPC, OK]);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(prepBinding(sandbox, "widgets", binding())).rejects.toThrow(/20Gi growth cap/);
+    const commands = sandbox.execCalls.map((c) => c.command);
+    expect(commands.filter((c) => c === CLONE_CMD).length).toBe(1);
+    expect(sandbox.growCalls).toBe(1);
+    errSpy.mockRestore();
+  });
+
+  it("clone ENOSPC on a provider without growWorkspace (docker/local): throws, no retry", async () => {
+    const sandbox = new RecordingSandbox();
+    sandbox.queueResults(CLONE_CMD, [ENOSPC, OK]);
+    await expect(prepBinding(sandbox, "widgets", binding())).rejects.toThrow(/No space left on device/);
+    const commands = sandbox.execCalls.map((c) => c.command);
+    expect(commands.filter((c) => c === CLONE_CMD).length).toBe(1);
+  });
+
+  it("a non-ENOSPC clone failure never calls growWorkspace", async () => {
+    const sandbox = new RecordingSandbox();
+    sandbox.enableGrow({ grown: true, from: "1Gi", to: "2Gi" });
+    sandbox.setResult(CLONE_CMD, { stdout: "", stderr: "fatal: repository not found", exitCode: 128 });
+    await expect(prepBinding(sandbox, "widgets", binding())).rejects.toThrow(/repository not found/);
+    expect(sandbox.growCalls).toBe(0);
+  });
+
+  it("clone ENOSPC where the grow itself throws: throws the ENOSPC with the grow failure noted", async () => {
+    const sandbox = new RecordingSandbox();
+    sandbox.enableGrow(new Error("pvc patch forbidden"));
+    sandbox.queueResults(CLONE_CMD, [ENOSPC, OK]);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(prepBinding(sandbox, "widgets", binding())).rejects.toThrow(/pvc patch forbidden/);
+    errSpy.mockRestore();
+  });
+
+  it("refresh-path fetch ENOSPC: grows and refetches, prep continues", async () => {
+    const sandbox = new RecordingSandbox();
+    sandbox.markExistingClone("widgets");
+    sandbox.enableGrow({ grown: true, from: "1Gi", to: "2Gi" });
+    sandbox.queueResults("git fetch origin", [ENOSPC, OK]);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    await expect(prepBinding(sandbox, "widgets", binding({ ref: "main" }))).resolves.toBeUndefined();
+    const commands = sandbox.execCalls.map((c) => c.command);
+    expect(sandbox.growCalls).toBe(1);
+    expect(commands.filter((c) => c === "git fetch origin").length).toBe(2);
+    expect(commands).toContain("git checkout 'main'");
+    logSpy.mockRestore();
+  });
+
+  it("clone ENOSPC where the grow lands but the retry still fills: names the 6h window and the sizing knob", async () => {
+    const sandbox = new RecordingSandbox();
+    sandbox.enableGrow({ grown: true, from: "1Gi", to: "2Gi" });
+    sandbox.queueResults(CLONE_CMD, [ENOSPC, ENOSPC]);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    await expect(prepBinding(sandbox, "widgets", binding())).rejects.toThrow(
+      /grown once \(to 2Gi\).*rate-limited for ~6 hours.*VALET_SANDBOX_WORKSPACE_STORAGE/s,
+    );
+    expect(sandbox.growCalls).toBe(1);
+    logSpy.mockRestore();
+  });
+
+  it("clone ENOSPC with a pending (timed-out) resize surfaces the retry-shortly reason", async () => {
+    const sandbox = new RecordingSandbox();
+    sandbox.enableGrow({
+      grown: false,
+      pending: true,
+      reason: "workspace resize 1Gi → 2Gi was requested but did not complete within 120s",
+    });
+    sandbox.queueResults(CLONE_CMD, [ENOSPC, OK]);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(prepBinding(sandbox, "widgets", binding())).rejects.toThrow(/did not complete within/);
+    // No retry: the resize has not landed, a retry now would fail the same way.
+    expect(sandbox.execCalls.filter((c) => c.command === CLONE_CMD).length).toBe(1);
+    errSpy.mockRestore();
+  });
+
+  it("refresh-path fetch ENOSPC with grow refused stays offline-tolerant (logs, continues)", async () => {
+    const sandbox = new RecordingSandbox();
+    sandbox.markExistingClone("widgets");
+    sandbox.enableGrow({ grown: false, reason: "rate-limited" });
+    sandbox.setResult("git fetch origin", ENOSPC);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(prepBinding(sandbox, "widgets", binding({ ref: "main" }))).resolves.toBeUndefined();
+    expect(sandbox.growCalls).toBe(1);
     errSpy.mockRestore();
   });
 });
@@ -507,8 +664,8 @@ describe("prepPrebuiltBinding", () => {
     const commands = sandbox.execCalls.map((c) => c.command);
     // primary staged from the image (into its subdir), secondary cloned.
     expect(commands).toContain("mkdir -p 'widgets' && cp -a /prebuilt/repo/. 'widgets'");
-    expect(commands).toContain("git clone 'https://github.com/acme/gadgets.git' 'gadgets'");
-    expect(commands.some((c) => c.startsWith("git clone 'https://github.com/acme/widgets.git'"))).toBe(false);
+    expect(commands).toContain("git clone --filter=blob:none 'https://github.com/acme/gadgets.git' 'gadgets'");
+    expect(commands.some((c) => c.startsWith("git clone --filter=blob:none 'https://github.com/acme/widgets.git'"))).toBe(false);
   });
 });
 

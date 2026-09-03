@@ -48,6 +48,11 @@ export interface K8sProviderConfig {
   defaultResources?: SandboxResourceOpts;
   /** Default workspace PVC size when not otherwise specified. Defaults to "2Gi" if omitted. */
   defaultStorage?: string;
+  /** Hard cap for on-demand workspace PVC growth (`Sandbox.growWorkspace`):
+   * a grow never requests past this quantity. Defaults to "20Gi" if omitted.
+   * Growth is one-way — a PVC cannot shrink — so the cap bounds the total
+   * EBS spend a runaway workload can accrete. */
+  workspaceStorageMax?: string;
   apiVersion: typeof SANDBOX_CR_API_VERSION;
   /** `corev1.PodSpec.imagePullSecrets` names, threaded onto every Sandbox
    * pod's spec unconditionally when set (sandbox images v2 plan, Task 5:

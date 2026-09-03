@@ -141,6 +141,20 @@ export {
 } from "./provider.js";
 
 export {
+  DEFAULT_WORKSPACE_STORAGE_MAX,
+  WORKSPACE_GROW_ANNOTATION,
+  WORKSPACE_GROW_COOLDOWN_MS,
+  formatStorageQuantity,
+  growWorkspacePvc,
+  parseStorageQuantity,
+  sandboxPvcApiAdapter,
+  workspacePvcName,
+  type GrowWorkspacePvcOpts,
+  type SandboxPvcApi,
+  type WorkspacePvcRead,
+} from "./workspace-pvc.js";
+
+export {
   batchJobsApiAdapter,
   type CreateConfigMapParams,
   type CreateJobParams,

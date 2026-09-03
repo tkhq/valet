@@ -28,6 +28,7 @@ import {
   resolveSandboxEphemeralStorageLimit,
   resolveSandboxEphemeralStorageRequest,
   resolveSandboxWorkspaceStorage,
+  resolveSandboxWorkspaceStorageMax,
 } from "./sandbox-backend.js";
 
 function fakeKubeConfig(): k8s.KubeConfig {
@@ -284,6 +285,21 @@ describe("resolveSandboxWorkspaceStorage", () => {
 
   it('treats "0" as unset so the manifest default applies, never a zero-sized claim', () => {
     expect(resolveSandboxWorkspaceStorage({ VALET_SANDBOX_WORKSPACE_STORAGE: "0" })).toBeUndefined();
+  });
+});
+
+describe("resolveSandboxWorkspaceStorageMax", () => {
+  it("defaults to 20Gi when VALET_SANDBOX_WORKSPACE_MAX is unset", () => {
+    expect(resolveSandboxWorkspaceStorageMax({})).toBe("20Gi");
+    expect(resolveSandboxWorkspaceStorageMax({ VALET_SANDBOX_WORKSPACE_MAX: "" })).toBe("20Gi");
+  });
+
+  it("passes an explicit quantity through verbatim", () => {
+    expect(resolveSandboxWorkspaceStorageMax({ VALET_SANDBOX_WORKSPACE_MAX: "50Gi" })).toBe("50Gi");
+  });
+
+  it('treats "0" as unset so the provider\'s own default cap applies', () => {
+    expect(resolveSandboxWorkspaceStorageMax({ VALET_SANDBOX_WORKSPACE_MAX: "0" })).toBeUndefined();
   });
 });
 

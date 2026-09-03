@@ -134,17 +134,17 @@ describe("determinism", () => {
 describe("golden hashes", () => {
   it("repoBake image spec has expected specHash", () => {
     const spec = computeSpec(snapWithRepoBake);
-    expect(specHash(spec)).toMatchInlineSnapshot(`"c01a8387a350fe013838a28bf369ae59b7ab19951bdfcd6d601abfaef65ae5f3"`);
+    expect(specHash(spec)).toMatchInlineSnapshot(`"758191fea5be621bffe9e39a6f63117c6e6d758d80149b41fa233f0533e2e606"`);
   });
 
   it("baseBake image spec has expected specHash", () => {
     const spec = computeSpec(snapWithBaseBake);
-    expect(specHash(spec)).toMatchInlineSnapshot(`"89cded70bdee34d231372f62fb6ed22d91e126674fb50a8439ebea1305ba5f08"`);
+    expect(specHash(spec)).toMatchInlineSnapshot(`"1e7d48b2a00ed5e6c637997ecf81ab637d8380d35c054c9bfc88f8f7db685d1d"`);
   });
 
   it("stock image spec has expected specHash", () => {
     const spec = computeSpec(snapWithStockOnly);
-    expect(specHash(spec)).toMatchInlineSnapshot(`"c48bf3d1653156b8fae8c58c6577f34b5f8c2bd029009479643cad65a91c2ccc"`);
+    expect(specHash(spec)).toMatchInlineSnapshot(`"917243f7b0eedae0430059852bcbf80b778ccf5973c50723943f48f837f0ab07"`);
   });
 });
 

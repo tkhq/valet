@@ -82,11 +82,13 @@ export {
   recordSandboxExec,
   recordSandboxFlagged,
   recordSandboxProvision,
+  recordSandboxWorkspaceGrow,
   recordSettlement,
   recordToolExecution,
   recordTurn,
   type SandboxDestroyReason,
   type SandboxFlagKind,
+  type WorkspaceGrowOutcome,
 } from "./metrics.js";
 export { Engine } from "./engine.js";
 export { Session } from "./session.js";

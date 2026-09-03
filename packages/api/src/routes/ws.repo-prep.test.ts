@@ -139,7 +139,7 @@ describe("WS-first-touch repo prep", () => {
     // The clone ran → prepareSandbox was wired at build time despite the WS
     // route being the first touch.
     expect(
-      provider.execs.some((c) => c.startsWith("git clone 'https://github.com/acme/widgets.git'")),
+      provider.execs.some((c) => c.startsWith("git clone") && c.includes("'https://github.com/acme/widgets.git'")),
     ).toBe(true);
   });
 });
