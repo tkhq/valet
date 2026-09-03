@@ -183,15 +183,46 @@ RUN --mount=type=secret,id=git-token sh -c '\\
 WORKDIR /prebuilt/repo
 RUN git checkout a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2
 
-RUN pnpm install --frozen-lockfile
+RUN command -v pnpm >/dev/null 2>&1 && pnpm install --frozen-lockfile || echo "prebuild: no pnpm in this image, skipping pnpm-install"
 
 LABEL valet.prebuild.identity="ghcr.io/valet/sandbox-base:v12|https://github.com/acme/widgets.git@a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2|cd49d99c170e343b4954d954a63545c413fdcbc79ba845712717dabf1bba777e"
 `);
   });
 
+  // Detection infers a step from a lockfile; it cannot know the image has
+  // the toolchain. The stock image has none of cargo, go, python, pip, uv or
+  // yarn, so an unguarded step exits 127 and leaves a Failed job behind
+  // (TKAI-354). Skipping costs the dependency cache; failing costs the build.
+  it("guards every detected step on its toolchain", () => {
+    const recipe: RecipeStep[] = [
+      { id: "cargo-fetch", lockfile: "Cargo.lock", command: "cargo fetch" },
+      { id: "go-mod-download", lockfile: "go.sum", command: "go mod download" },
+      { id: "pip-install", lockfile: "requirements.txt", command: "pip install -r requirements.txt" },
+    ];
+    const dockerfile = generateDockerfile({ ...baseOpts, recipe });
+    for (const [bin, id] of [
+      ["cargo", "cargo-fetch"],
+      ["go", "go-mod-download"],
+      ["pip", "pip-install"],
+    ]) {
+      expect(dockerfile).toContain(`command -v ${bin} >/dev/null 2>&1 &&`);
+      expect(dockerfile).toContain(`skipping ${id}`);
+    }
+    // The bare form is what exits 127.
+    expect(dockerfile).not.toContain("RUN cargo fetch\n");
+  });
+
+  // A repo that declares a setup command asked for it. Silently skipping it
+  // would hide a real misconfiguration, so only inferred steps are guarded.
+  it("leaves repo-declared setup commands unguarded", () => {
+    const dockerfile = generateDockerfile({ ...baseOpts, setup: ["cargo build --release"] });
+    expect(dockerfile).toContain("RUN cargo build --release");
+    expect(dockerfile).not.toContain("skipping cargo build");
+  });
+
   it("appends setup commands after recipe steps", () => {
     const dockerfile = generateDockerfile({ ...baseOpts, setup: ["make bootstrap", "echo done"] });
-    const recipeIdx = dockerfile.indexOf("RUN pnpm install --frozen-lockfile");
+    const recipeIdx = dockerfile.indexOf("skipping pnpm-install");
     const setup1Idx = dockerfile.indexOf("RUN make bootstrap");
     const setup2Idx = dockerfile.indexOf("RUN echo done");
     expect(recipeIdx).toBeGreaterThan(-1);
