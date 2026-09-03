@@ -200,7 +200,7 @@ describe("growWorkspacePvc", () => {
     expect(api.patches).toHaveLength(0);
   });
 
-  it("refuses (patch already sent) when the resize never lands within the wait window", async () => {
+  it("reports pending (patch already sent, NOT a refusal) when the resize never lands within the wait window", async () => {
     const api = new FakePvcApi(pvc(), { capacityLagReads: Number.MAX_SAFE_INTEGER });
     const t = fakeTime();
     const result = await growWorkspacePvc(api, {
@@ -211,8 +211,36 @@ describe("growWorkspacePvc", () => {
       resizeWaitTimeoutMs: 10_000,
     });
     expect(result.grown).toBe(false);
+    expect(result.pending).toBe(true);
     expect(result.reason).toMatch(/did not complete/);
     expect(api.patches).toHaveLength(1);
+  });
+
+  it("fails CLOSED on a future-dated grow annotation (clock skew never bypasses the cooldown)", async () => {
+    const t = fakeTime();
+    const futureGrow = new Date(t.startMs + 3_600_000).toISOString(); // 1h ahead
+    const api = new FakePvcApi(pvc({ annotations: { [WORKSPACE_GROW_ANNOTATION]: futureGrow } }));
+    const result = await growWorkspacePvc(api, { namespace: NS, crName: CR, now: t.now, sleep: t.sleep });
+    expect(result.grown).toBe(false);
+    expect(result.pending).toBeUndefined();
+    expect(api.patches).toHaveLength(0);
+  });
+
+  it("stops waiting immediately when the PVC is deleted mid-resize", async () => {
+    const api = new FakePvcApi(pvc(), { capacityLagReads: Number.MAX_SAFE_INTEGER });
+    const t = fakeTime();
+    let reads = 0;
+    const original = api.readPvc.bind(api);
+    api.readPvc = async (namespace, name) => {
+      reads += 1;
+      // First read feeds the policy check; the PVC vanishes on wait reads.
+      return reads === 1 ? original(namespace, name) : null;
+    };
+    const result = await growWorkspacePvc(api, { namespace: NS, crName: CR, now: t.now, sleep: t.sleep });
+    expect(result.grown).toBe(false);
+    expect(result.reason).toMatch(/deleted while waiting/);
+    // Returned on the FIRST wait read, not after the full timeout window.
+    expect(reads).toBe(2);
   });
 
   it("defaults the cap to DEFAULT_WORKSPACE_STORAGE_MAX", async () => {

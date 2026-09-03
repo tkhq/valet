@@ -1155,6 +1155,11 @@ export interface WorkspaceGrowth {
   from?: string;
   to?: string;
   reason?: string;
+  /** True when a resize WAS requested but had not completed within the wait
+   * window — the backend will finish it in the background, so a later retry
+   * of the failed operation may succeed without another grow. Distinct from
+   * a policy refusal (cap, rate limit), where nothing was requested. */
+  pending?: boolean;
 }
 
 export interface Sandbox {

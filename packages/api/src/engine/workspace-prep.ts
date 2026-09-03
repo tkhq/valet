@@ -177,10 +177,14 @@ export function isEnospc(result: ExecResult): boolean {
 }
 
 /** Attempts one workspace grow after `context` hit ENOSPC. Returns whether
- * the operation is worth retrying (the grow landed). A refusal or failure
- * is logged and recorded, never thrown — the caller surfaces the original
- * ENOSPC (annotated with the refusal reason) instead. */
-async function tryGrowWorkspace(sandbox: Sandbox, context: string): Promise<{ retry: boolean; reason?: string }> {
+ * the operation is worth retrying (the grow landed), plus the new size for
+ * retry-failed-again messaging. A refusal or failure is logged and
+ * recorded, never thrown — the caller surfaces the original ENOSPC
+ * (annotated with the refusal reason) instead. */
+async function tryGrowWorkspace(
+  sandbox: Sandbox,
+  context: string,
+): Promise<{ retry: boolean; reason?: string; to?: string }> {
   if (!sandbox.growWorkspace) return { retry: false };
   try {
     const growth = await sandbox.growWorkspace();
@@ -189,10 +193,14 @@ async function tryGrowWorkspace(sandbox: Sandbox, context: string): Promise<{ re
         `workspace prep: ${context} hit ENOSPC — grew workspace ${growth.from} → ${growth.to}, retrying once`,
       );
       recordSandboxWorkspaceGrow("grown");
-      return { retry: true };
+      return { retry: true, to: growth.to };
     }
-    console.error(`workspace prep: ${context} hit ENOSPC — workspace grow refused: ${growth.reason}`);
-    recordSandboxWorkspaceGrow("refused");
+    // `pending` = the resize was requested but has not landed yet (NOT a
+    // policy refusal) — the background resize finishes on its own, so a
+    // later retry of the whole prep may succeed without another grow.
+    const outcome = growth.pending ? "wait_timeout" : "refused";
+    console.error(`workspace prep: ${context} hit ENOSPC — workspace grow ${outcome}: ${growth.reason}`);
+    recordSandboxWorkspaceGrow(outcome);
     return { retry: false, reason: growth.reason };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -225,7 +233,18 @@ async function safeExecGrowRetry(
     return { ...first, stderr: `${first.stderr.trim()}\n${note}`.trim() };
   }
   if (cleanup) await cleanup();
-  return safeExec(sandbox, command, opts);
+  const retry = await safeExec(sandbox, command, opts);
+  if (isEnospc(retry)) {
+    // One grow per ~6h (EBS window): a second grow inside this prep would be
+    // refused, so name the timeline and the deploy-level fix instead of
+    // surfacing a bare ENOSPC as the FIRST failure a user sees.
+    const note =
+      `the workspace was grown once (to ${grow.to ?? "a larger size"}) and is still too small; ` +
+      "another grow is rate-limited for ~6 hours. Retry later, or raise " +
+      "VALET_SANDBOX_WORKSPACE_STORAGE for deploys that clone large repositories.";
+    return { ...retry, stderr: `${retry.stderr.trim()}\n${note}`.trim() };
+  }
+  return retry;
 }
 
 /** Stages the two Task 8 scripts at a workspace-relative path (via

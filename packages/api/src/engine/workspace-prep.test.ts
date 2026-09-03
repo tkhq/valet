@@ -462,6 +462,33 @@ describe("ENOSPC → grow workspace → retry once", () => {
     logSpy.mockRestore();
   });
 
+  it("clone ENOSPC where the grow lands but the retry still fills: names the 6h window and the sizing knob", async () => {
+    const sandbox = new RecordingSandbox();
+    sandbox.enableGrow({ grown: true, from: "1Gi", to: "2Gi" });
+    sandbox.queueResults(CLONE_CMD, [ENOSPC, ENOSPC]);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    await expect(prepBinding(sandbox, "widgets", binding())).rejects.toThrow(
+      /grown once \(to 2Gi\).*rate-limited for ~6 hours.*VALET_SANDBOX_WORKSPACE_STORAGE/s,
+    );
+    expect(sandbox.growCalls).toBe(1);
+    logSpy.mockRestore();
+  });
+
+  it("clone ENOSPC with a pending (timed-out) resize surfaces the retry-shortly reason", async () => {
+    const sandbox = new RecordingSandbox();
+    sandbox.enableGrow({
+      grown: false,
+      pending: true,
+      reason: "workspace resize 1Gi → 2Gi was requested but did not complete within 120s",
+    });
+    sandbox.queueResults(CLONE_CMD, [ENOSPC, OK]);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(prepBinding(sandbox, "widgets", binding())).rejects.toThrow(/did not complete within/);
+    // No retry: the resize has not landed, a retry now would fail the same way.
+    expect(sandbox.execCalls.filter((c) => c.command === CLONE_CMD).length).toBe(1);
+    errSpy.mockRestore();
+  });
+
   it("refresh-path fetch ENOSPC with grow refused stays offline-tolerant (logs, continues)", async () => {
     const sandbox = new RecordingSandbox();
     sandbox.markExistingClone("widgets");

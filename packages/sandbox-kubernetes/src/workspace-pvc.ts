@@ -219,8 +219,10 @@ export async function growWorkspacePvc(api: SandboxPvcApi, opts: GrowWorkspacePv
   const lastGrowAt = Date.parse(pvc.annotations[WORKSPACE_GROW_ANNOTATION] ?? "");
   if (!Number.isNaN(lastGrowAt)) {
     const sinceMs = now() - lastGrowAt;
-    if (sinceMs >= 0 && sinceMs < WORKSPACE_GROW_COOLDOWN_MS) {
-      const remainingMin = Math.ceil((WORKSPACE_GROW_COOLDOWN_MS - sinceMs) / 60_000);
+    // A negative sinceMs (future-dated annotation: clock skew, or a hand-
+    // edited annotation) fails CLOSED — rate-limited, never a bypass.
+    if (sinceMs < WORKSPACE_GROW_COOLDOWN_MS) {
+      const remainingMin = Math.max(1, Math.ceil((WORKSPACE_GROW_COOLDOWN_MS - sinceMs) / 60_000));
       return refused(
         `workspace was already grown recently; EBS allows one volume modification per ~6h. ` +
           `Retry in ~${remainingMin} minutes, or free space in the workspace.`,
@@ -241,17 +243,30 @@ export async function growWorkspacePvc(api: SandboxPvcApi, opts: GrowWorkspacePv
   const deadline = now() + timeoutMs;
   for (;;) {
     const readBack = await api.readPvc(opts.namespace, pvcName);
-    const capacityBytes = readBack?.capacityStorage ? parseStorageQuantity(readBack.capacityStorage) : null;
+    if (readBack === null) {
+      // The sandbox (and its owner-referenced PVC) was destroyed mid-wait —
+      // the prep this grow was serving is doomed anyway; stop polling now.
+      return refused(`workspace PVC ${pvcName} was deleted while waiting for the resize`, current);
+    }
+    const capacityBytes = readBack.capacityStorage ? parseStorageQuantity(readBack.capacityStorage) : null;
     if (capacityBytes !== null && capacityBytes >= nextBytes) {
       return { grown: true, from: current, to: next };
     }
     if (now() >= deadline) {
-      return refused(
-        `workspace resize ${current} → ${next} was requested but did not complete within ${Math.round(timeoutMs / 1000)}s. ` +
-          "It may still complete in the background — retry the operation later. " +
-          "If it never completes, check that the StorageClass allows volume expansion.",
-        current,
-      );
+      // The patch landed; the CSI/EBS side just has not finished (resizer
+      // backlog, slow EBS optimize, or a suspended pod deferring the
+      // filesystem step until next mount). `pending` tells the caller this
+      // is NOT a policy refusal: the resize completes in the background, so
+      // a later retry of the failed operation may succeed without growing.
+      return {
+        grown: false,
+        pending: true,
+        from: current,
+        reason:
+          `workspace resize ${current} → ${next} was requested but did not complete within ${Math.round(timeoutMs / 1000)}s. ` +
+          "It should finish in the background — retry the operation shortly. " +
+          "If resizes never complete on this cluster, check that the StorageClass allows volume expansion.",
+      };
     }
     await sleep(RESIZE_POLL_INTERVAL_MS);
   }

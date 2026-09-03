@@ -102,6 +102,50 @@ caller retries.
   `persistentvolumeclaims: get, patch` only. PVC create/delete stay with
   the agent-sandbox controller.
 
+## Agent-visible behavior of blobless clones
+
+- Operations that read historical blobs (`git blame`, `git log -p`,
+  `git show <old-sha>:<path>`, `git diff <old-sha>`) now fetch blobs from
+  the remote on demand. They need working credentials at USE time, not
+  just at clone time, and on large-history files they are slow (one fetch
+  round trip per missing blob batch).
+- The credential helper warns on stderr when it has no usable token, so a
+  lazy-fetch failure names the corrective action ("restart the session")
+  instead of surfacing only as `unable to read <sha>`.
+- An agent that needs heavy history archaeology can hydrate once:
+  `git config --unset remote.origin.partialclonefilter` then
+  `git fetch --refetch origin`. The working set then accretes on the PVC
+  like a full clone.
+- Lazy-fetched blobs accumulate in `.git/objects` on the persistent
+  volume, and nothing runs `git maintenance`; a long-lived workspace
+  converges back toward full-clone size. The growth cap bounds the disk
+  consequence.
+
+## Deviations & follow-ups
+
+- The `valet.sandbox.workspace_grow` counter has no bundled dashboard
+  panel or alert rule yet. Prep-time fills are transient (git cleans up),
+  so the kubelet-stats `SandboxWorkspacesFillingSystemic` alert does not
+  see them; the counter is currently the ONLY signal for this class. Add
+  an infra alert on its rate, and a dashboard panel.
+- Growth ramps slowly by design (double per ~6h per volume). A session
+  that needs several doublings (a multi-GiB prebuilt bake staged onto a
+  1Gi claim) fails for multiple cooldown cycles. The structural fix is
+  create-time sizing from known inputs (the bake row knows the staged
+  size; GitHub reports packed repo size at bind time) — create-time sizes
+  cost no EBS modification. Not implemented here.
+- Grown PVCs are invisible to capacity planning: nothing reports
+  provisioned-vs-used or counts grown volumes. The
+  `valet.dev/workspace-grow-at` annotation makes grown claims queryable;
+  a periodic gauge would close the gap. Long-lived daily-active sessions
+  (orchestrators, assistants) ratchet monotonically — resets happen only
+  on destroy/reap paths.
+- During a large fan-out onto one repo, many PVCs grow at once; the
+  external-resizer queue and account-level EBS ModifyVolume throttling can
+  push individual grows past the 120s wait. Those record outcome
+  `wait_timeout` (the resize completes in the background; the next start
+  attempt usually succeeds without growing).
+
 ## Out of scope
 
 - Node ephemeral storage (DinD emptyDir, container rootfs) — bounded by

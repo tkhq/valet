@@ -154,6 +154,12 @@ sandbox:
   # EBS-rate-limited step per ~6h) and retries once, up to
   # workspaceStorageMax. At the cap the ENOSPC surfaces as a loud startup
   # failure instead of unbounded growth.
+  #
+  # The grow path is a safety net, not a sizing strategy: EBS allows one
+  # modification per volume per ~6h, so a session that needs several
+  # doublings fails for hours first. Deploys that routinely clone or stage
+  # multi-GiB working trees (large prebuilt bakes) should raise
+  # workspaceStorage so new claims start big enough.
   workspaceStorage: "1Gi"
   workspaceStorageMax: "20Gi"
 

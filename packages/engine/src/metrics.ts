@@ -102,7 +102,7 @@ function inst(): Instruments {
     }),
     sandboxWorkspaceGrow: meter.createCounter("valet.sandbox.workspace_grow", {
       description:
-        "Workspace-volume grow attempts after an ENOSPC, by outcome (grown/refused/error). Every fill event records here even when the grow succeeds, so a systemic many-workspaces-filling problem stays visible instead of being papered over by resizes.",
+        "Workspace-volume grow attempts after an ENOSPC, by outcome (grown/refused/wait_timeout/error). Every fill event records here even when the grow succeeds, so a systemic many-workspaces-filling problem stays visible instead of being papered over by resizes.",
     }),
     cacheBreaks: meter.createCounter("valet.cache.breaks", {
       description:
@@ -202,7 +202,7 @@ export function recordSandboxFlagged(kind: SandboxFlagKind, count: number): void
 /** Outcome of one workspace-volume grow attempt (Sandbox.growWorkspace),
  * recorded by workspace prep on every ENOSPC it reacts to. A closed union so
  * a typo'd outcome cannot fragment the series. */
-export type WorkspaceGrowOutcome = "grown" | "refused" | "error";
+export type WorkspaceGrowOutcome = "grown" | "refused" | "wait_timeout" | "error";
 
 /** One workspace grow attempt after an ENOSPC. Recorded on EVERY attempt —
  * successes included — so many-workspaces-filling-at-once stays a visible,
