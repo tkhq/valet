@@ -189,14 +189,13 @@ describe("buildSandboxManifest", () => {
       });
     });
 
-    it("defaults the limit to the request when only ephemeralStorage is set", () => {
+    it("emits a lone request (no limit) when only ephemeralStorage is set — disabling one knob never tightens the other", () => {
       const manifest = buildSandboxManifest(baseConfig, "sess-1", {
         resources: { ephemeralStorage: "2Gi" },
       });
       const container = manifest.spec.podTemplate.spec.containers[0];
       expect(container?.resources).toEqual({
         requests: { "ephemeral-storage": "2Gi" },
-        limits: { "ephemeral-storage": "2Gi" },
       });
     });
 

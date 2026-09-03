@@ -1172,7 +1172,8 @@ export interface SandboxCreateOpts {
     ephemeralStorage?: string;
     /** Node-local disk ceiling for the sandbox (quantity string, e.g. "8Gi").
      * Past it the kubelet evicts the one runaway sandbox instead of the node
-     * failing. Defaults to `ephemeralStorage` when unset. */
+     * failing. Independent of `ephemeralStorage` — an absent side is
+     * omitted, never inferred from the other. */
     ephemeralStorageLimit?: string;
   };
   metadata?: Record<string, unknown>;

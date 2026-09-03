@@ -145,10 +145,11 @@ function mergeResourceOpts(
 
 /** Maps merged resource opts to `corev1.ResourceRequirements`. cpu/memory
  * request equals limit (Guaranteed-style, unchanged). ephemeral-storage
- * request and limit differ on purpose: the request caps how many sandboxes
- * the scheduler stacks per node; the limit makes the kubelet evict one
- * runaway sandbox instead of the node going NotReady. A lone request gets
- * the same value as its limit. */
+ * request and limit are independent and differ on purpose: the request caps
+ * how many sandboxes the scheduler stacks per node; the limit makes the
+ * kubelet evict one runaway sandbox instead of the node going NotReady. An
+ * absent side is omitted — no fallback from one to the other, so an
+ * operator can disable either knob ("0" in sandbox-backend.ts) alone. */
 function resourceRequirementsFrom(resources: SandboxResourceOpts): ResourceRequirements | undefined {
   const requests: ResourceList = {};
   const limits: ResourceList = {};
@@ -160,12 +161,11 @@ function resourceRequirementsFrom(resources: SandboxResourceOpts): ResourceRequi
     requests.memory = resources.memory;
     limits.memory = resources.memory;
   }
-  const storageLimit = resources.ephemeralStorageLimit ?? resources.ephemeralStorage;
   if (resources.ephemeralStorage !== undefined) {
     requests["ephemeral-storage"] = resources.ephemeralStorage;
   }
-  if (storageLimit !== undefined) {
-    limits["ephemeral-storage"] = storageLimit;
+  if (resources.ephemeralStorageLimit !== undefined) {
+    limits["ephemeral-storage"] = resources.ephemeralStorageLimit;
   }
   if (Object.keys(requests).length === 0 && Object.keys(limits).length === 0) return undefined;
   return {
@@ -327,7 +327,7 @@ export function buildSandboxManifest(
     // ephemeral-storage limit; emptyDir usage counts against that limit, so
     // a larger sizeLimit would be unreachable anyway. No limit configured →
     // unbounded emptyDir, unchanged.
-    const dockerStateSizeLimit = resourceOpts?.ephemeralStorageLimit ?? resourceOpts?.ephemeralStorage;
+    const dockerStateSizeLimit = resourceOpts?.ephemeralStorageLimit;
     podSpec.volumes = [
       ...(podSpec.volumes ?? []),
       {

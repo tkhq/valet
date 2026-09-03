@@ -142,8 +142,19 @@ Three additive changes to the manifest builder and provider config:
    `whenUnsatisfiable: ScheduleAnyway` — sandboxes must still schedule under
    pressure; the request in (1) is the hard concentration cap.
 
-Existing sandboxes are unaffected until recreated. Infra-side mitigations
-(autoscaler headroom, node disk-pressure alerts) are deployed separately.
+Deployment note — the protection does NOT cover pods that already exist.
+A CR spec replace does not roll the pod (verified in the reconcile plan's
+exploration notes), and the only automatic pod-roll trigger is image drift.
+A legacy pod carries no ephemeral-storage request, so the scheduler counts
+it as using zero disk and can keep packing new sandboxes onto its node. The
+window closes per sandbox on its first post-deploy suspend/wake or
+destroy/recreate cycle: the wake path goes through `create()`/`applySandbox`,
+which replaces the CR with the new template, and the controller builds the
+next pod from it. To force it closed on a hot node, delete the sandbox pod
+AFTER its CR shows the new template (the controller recreates the pod from
+the CR), or destroy the sandbox and let its owner re-provision. Infra-side
+mitigations (autoscaler headroom, node disk-pressure alerts) cover the gap
+in the meantime and are deployed separately.
 
 ## Non-goals
 
