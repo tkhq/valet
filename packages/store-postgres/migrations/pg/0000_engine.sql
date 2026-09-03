@@ -209,6 +209,7 @@ CREATE TABLE "engine_threads" (
 	"queue_mode" text NOT NULL,
 	"paused" integer,
 	"model" text,
+	"user_model" text,
 	"summary" text,
 	"metadata" text,
 	"created_at" bigint NOT NULL,

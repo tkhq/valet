@@ -282,7 +282,6 @@ describe("engine: model switching", () => {
     );
     expect(names).toContain("switch_model");
   });
-});
 
   it("switch_model (agent-initiated) does not change userModelId (TKAI-338)", async () => {
     const { engine, store, events, baseModel } = setup();
@@ -350,3 +349,4 @@ describe("engine: model switching", () => {
     expect(session.options.modelSpec ?? session.options.model.id).toBe(HAIKU);
     expect(thread.userModelId()).toBe(HAIKU);
   });
+});

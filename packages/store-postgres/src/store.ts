@@ -326,14 +326,15 @@ export class PgSessionStore implements SessionStore {
     await this.db.query(
       `INSERT INTO engine_threads (
          id, session_id, key, status, active_leaf_entry_id, queue_mode, paused,
-         model, summary, metadata, created_at, updated_at
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         model, user_model, summary, metadata, created_at, updated_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
        ON CONFLICT (id) DO UPDATE SET
          status = EXCLUDED.status,
          active_leaf_entry_id = EXCLUDED.active_leaf_entry_id,
          queue_mode = EXCLUDED.queue_mode,
          paused = EXCLUDED.paused,
          model = EXCLUDED.model,
+         user_model = EXCLUDED.user_model,
          summary = EXCLUDED.summary,
          updated_at = EXCLUDED.updated_at`,
       [
@@ -345,6 +346,7 @@ export class PgSessionStore implements SessionStore {
         thread.queueMode,
         paused,
         thread.model ?? null,
+        thread.userModel ?? null,
         thread.summary ?? null,
         jsonOrNull(thread.metadata),
         thread.createdAt,
@@ -1272,6 +1274,7 @@ function rowToThread(r: ThreadRow): ThreadData {
     queueMode: r.queueMode as ThreadData["queueMode"],
     paused: r.paused === null || r.paused === undefined ? undefined : Boolean(r.paused),
     model: r.model ?? undefined,
+    userModel: r.userModel ?? undefined,
     summary: r.summary ?? undefined,
     metadata: parseJson(r.metadata),
     createdAt: r.createdAt,

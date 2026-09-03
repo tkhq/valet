@@ -919,6 +919,14 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     probe: { kind: "column", table: "agent_sessions", column: "last_activity_at" },
     sql: 'ALTER TABLE "agent_sessions" ADD COLUMN IF NOT EXISTS "last_activity_at" bigint',
   },
+  {
+    // The model the user last chose for this thread (TKAI-338). Null on
+    // rows from before the column: the Thread constructor falls back to
+    // the runtime model override, preserving pre-existing behavior.
+    describe: "engine_threads.user_model column",
+    probe: { kind: "column", table: "engine_threads", column: "user_model" },
+    sql: 'ALTER TABLE "engine_threads" ADD COLUMN IF NOT EXISTS "user_model" text',
+  },
 ];
 
 /** The repairs this database still lacks, by catalog probe — one query per

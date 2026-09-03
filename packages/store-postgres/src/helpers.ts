@@ -564,6 +564,7 @@ export interface ThreadRow {
   queueMode: string;
   paused: number | null;
   model: string | null;
+  userModel: string | null;
   summary: string | null;
   metadata: string | null;
   createdAt: number;
@@ -584,6 +585,7 @@ export function rawToThreadRow(raw: Record<string, unknown>): ThreadRow {
     // store-sqlite did.
     paused: toNumOrNull(raw.paused, "paused"),
     model: asStringOrNull(raw.model, "model"),
+    userModel: asStringOrNull(raw.user_model, "user_model"),
     summary: asStringOrNull(raw.summary, "summary"),
     metadata: asStringOrNull(raw.metadata, "metadata"),
     createdAt: toNum(raw.created_at, "created_at"),
