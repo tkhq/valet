@@ -124,7 +124,20 @@ export function CommentComposer({
       <textarea
         value={body}
         onChange={(e) => setBody(e.target.value)}
-        placeholder="Add a comment…"
+        onKeyDown={(e) => {
+          // Shift+Enter submits (mod+Enter sends to the agent when offered);
+          // plain Enter keeps inserting newlines — comments are often
+          // multi-line.
+          if (e.key !== "Enter") return;
+          if ((e.metaKey || e.ctrlKey) && canSendToSession) {
+            e.preventDefault();
+            submit(true);
+          } else if (e.shiftKey) {
+            e.preventDefault();
+            submit(false);
+          }
+        }}
+        placeholder="Add a comment… (Shift+Enter to submit)"
         rows={3}
         autoFocus
         className="w-full resize-none rounded-md border border-line bg-transparent p-2 text-sm text-ink outline-none focus:border-moss"
@@ -267,9 +280,15 @@ export function ArtifactThreadPanel({
                   <textarea
                     value={replyBody}
                     onChange={(e) => setReplyBody(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && e.shiftKey) {
+                        e.preventDefault();
+                        submitReply(thread.root.id);
+                      }
+                    }}
                     rows={2}
                     autoFocus
-                    placeholder="Reply…"
+                    placeholder="Reply… (Shift+Enter to submit)"
                     className="w-full resize-none rounded-md border border-line bg-transparent p-2 text-sm text-ink outline-none focus:border-moss"
                   />
                   <div className="mt-1 flex justify-end">
