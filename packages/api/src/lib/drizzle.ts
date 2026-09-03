@@ -193,6 +193,14 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: `ALTER TABLE "skill_sources" ADD COLUMN IF NOT EXISTS "kinds" jsonb DEFAULT '["skills"]'::jsonb NOT NULL`,
   },
   {
+    // The discovery-rules version and the commit read under it. Null on
+    // every row written before the column existed, and on every row an older
+    // release has advanced since; both make that source re-scan once.
+    describe: "skill_sources.discovery_scan column",
+    probe: { kind: "column", table: "skill_sources", column: "discovery_scan" },
+    sql: 'ALTER TABLE "skill_sources" ADD COLUMN IF NOT EXISTS "discovery_scan" text',
+  },
+  {
     // The per-group team-sync allowlist. Null on every row written before
     // the column existed, which the sync and Settings read as "never set" —
     // fail-closed, same as an empty list.

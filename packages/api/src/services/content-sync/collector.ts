@@ -15,6 +15,36 @@ import type { AppDb } from "../../lib/drizzle.js";
 import type { ContentKind, ContentSourceRow } from "../../schema/index.js";
 import type { SkillRepoReader, SkillTreeEntry } from "../skill-repo-reader.js";
 
+/**
+ * The version of the discovery RULES — which paths the collectors claim.
+ *
+ * Raise it when a change makes the SAME commit yield a different candidate
+ * set: a new directory, extension, exclusion rule or kind. Raising it makes
+ * every source re-scan once — see compare 1 in `content-sync/service.ts`.
+ *
+ * It does NOT reach a change to what a collector WRITES from a file it
+ * already found. `contentManifestHash` covers name, path and blob sha only,
+ * so compare 2 still short-circuits while the files are unchanged. Nothing
+ * re-renders mirrored rows today.
+ */
+export const DISCOVERY_RULES_VERSION = 1;
+
+/**
+ * What a complete sync records in `skill_sources.discovery_scan`: the rules
+ * version, then the commit those rules read.
+ *
+ * The commit is paired with the version for rollback. A release that does not
+ * know this column still advances `last_sha`, so a bare version would outlive
+ * a sync under the old rules and then claim a head it never read.
+ *
+ * The pairing alone does not cover a rollback that re-syncs at the SAME
+ * commit, which an errored source does on every poll. `recordFailure` clears
+ * the mark for that reason, so the two rules hold it together.
+ */
+export function discoveryScanMark(commitSha: string): string {
+  return `${DISCOVERY_RULES_VERSION}:${commitSha}`;
+}
+
 /** One tracked file as the repository holds it. `name` comes from the PATH,
  * the only identity available before the body is read. */
 export interface ContentManifestEntry {

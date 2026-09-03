@@ -213,6 +213,7 @@ export async function createContentSource(
     nextAttemptAt: now,
     lastSha: null,
     lastManifestHash: null,
+    discoveryScan: null,
     lastSyncedAt: null,
     lastError: null,
     createdAt: now,

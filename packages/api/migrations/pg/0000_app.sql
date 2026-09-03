@@ -539,6 +539,7 @@ CREATE TABLE "skill_sources" (
 	"next_attempt_at" bigint NOT NULL,
 	"last_sha" text,
 	"last_manifest_hash" text,
+	"discovery_scan" text,
 	"last_synced_at" bigint,
 	"last_error" text,
 	"created_at" bigint NOT NULL,

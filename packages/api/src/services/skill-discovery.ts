@@ -41,10 +41,11 @@
  * excluded, so it is imported. Junk arrives nested; a skill name does not.
  *
  * A dot-prefixed ancestor is excluded too, because `.github`, `.vscode` and
- * `.venv` hold tooling. `.claude` is the exception: `.claude/skills/<name>/
- * SKILL.md` is the most likely place for a real skill and must not be lost.
- * Opening `.claude` is also what makes the plugin-tree names below matter,
- * because a downloaded plugin's skills sit under `.claude/plugins`.
+ * `.venv` hold tooling. The exceptions are PATHS rather than directory names:
+ * the whole `.claude` tree, and `.valet/skills` alone — see
+ * `SCANNED_DOT_PATHS`. Opening `.claude` is what makes the plugin-tree names
+ * below matter, because a downloaded plugin's skills sit under
+ * `.claude/plugins`.
  *
  * Over-exclusion is recoverable without a new setting. The rules run on the
  * part of the path BELOW the subdirectory, so a source whose subdirectory is
@@ -123,9 +124,16 @@ export const EXCLUDED_DIRECTORIES: ReadonlySet<string> = new Set([
   "external_plugins",
 ]);
 
-/** The one dot-prefixed directory that is scanned. `.claude/skills/<name>/
- * SKILL.md` is where an agent runtime keeps a repository's own skills. */
-const SCANNED_DOT_DIRECTORY = ".claude";
+/** Outranks a same-kind file of the same name elsewhere — see
+ * `resolveNameCollisions`. */
+const VALET_SKILLS_PATH = ".valet/skills";
+
+/** The dot-prefixed PATHS this scan opens; every other dot-prefixed ancestor
+ * is skipped. `.valet` is open for `skills` only: its other contents
+ * (`prebuild.yaml`, `persona`, `prompts/*.md`) are existing conventions, and
+ * importing them as skills would change what a tracked repository mirrors on
+ * upgrade. */
+const SCANNED_DOT_PATHS: readonly string[] = [".claude", VALET_SKILLS_PATH];
 
 /** Git's mode for a symbolic link. The blob behind one holds a path string,
  * not the file it points at, so a symlinked `SKILL.md` is not readable as a
@@ -140,6 +148,10 @@ export interface SkillCandidate {
   name: string;
   /** Path from the repository root. */
   path: string;
+  /** Path from the SCAN ROOT: `path` with the source's subdirectory prefix
+   * removed. Ranking reads this rather than `path`, so only the `.valet` the
+   * source owner actually pointed at can win a name. */
+  relative: string;
   /** Git blob sha. The manifest key, so a sync can tell a changed file from
    * an unchanged one without reading either. */
   blobSha: string;
@@ -211,7 +223,13 @@ export function discoverFromTree(entries: SkillTreeEntry[], subpath: string): Tr
     const name =
       kind === "skill" ? (segments[segments.length - 2] ?? "") : fileName.slice(0, -".md".length);
     if (name.length === 0) continue;
-    const candidate: SkillCandidate = { name, path: entry.path, blobSha: entry.sha, kind };
+    const candidate: SkillCandidate = {
+      name,
+      path: entry.path,
+      relative,
+      blobSha: entry.sha,
+      kind,
+    };
 
     if (hasExcludedAncestor(segments)) {
       excludedCandidates.push(candidate);
@@ -260,13 +278,14 @@ export function treeHoldsSubpath(entries: SkillTreeEntry[], subpath: string): bo
  *     depends on where either sits. This is the rule that already shipped,
  *     back when a skill directory and a prompt file were the only two paths
  *     that could produce one name.
- *   - Two files of the SAME kind sharing a name import NEITHER. Nothing here
- *     can rank them: taking the first by sorted path would make the skill
- *     somebody gets depend on the names of unrelated directories, and a file
- *     added later could quietly displace the skill they use.
+ *   - Of two files of the SAME kind sharing a name, the one under
+ *     `.valet/skills` wins, because that folder is Valet's own.
+ *   - Any other pair of the same kind imports NEITHER. Taking the first by
+ *     sorted path would make the skill somebody gets depend on the names of
+ *     unrelated directories, and a file added later could quietly displace
+ *     the skill they use.
  *
- * Both cases warn, and the warning names every path, because the person who
- * can fix it is reading the repository and not this code.
+ * Every case warns and names every path.
  */
 export function resolveNameCollisions(candidates: SkillCandidate[]): {
   accepted: SkillCandidate[];
@@ -296,6 +315,14 @@ export function resolveNameCollisions(candidates: SkillCandidate[]): {
     const prompts = group.filter((c) => c.kind === "prompt").sort(byPath);
 
     if (skills.length > 1) {
+      const preferred = onlyUnderValetSkills(skills);
+      if (preferred !== undefined) {
+        accepted.push(preferred);
+        warnings.push(
+          `${name}: found at ${[...skills, ...prompts].map((c) => c.path).join(" and ")}. Valet imported ${preferred.path}, because ${VALET_SKILLS_PATH} is Valet's own folder. Delete the other copies to stop this message.`,
+        );
+        continue;
+      }
       const paths = [...skills, ...prompts].map((c) => c.path);
       warnings.push(
         `${name}: found at ${paths.join(" and ")}. Two skills cannot share a name, so Valet imported neither. Rename one directory, or set the subdirectory to the one that holds the skill you want.`,
@@ -311,6 +338,14 @@ export function resolveNameCollisions(candidates: SkillCandidate[]): {
           `${name}: ${prompt.path} collides with the skill at ${winner?.path ?? ""}. A skill and a prompt cannot share a name. Rename one of them.`,
         );
       }
+      continue;
+    }
+    const preferredPrompt = onlyUnderValetSkills(prompts);
+    if (preferredPrompt !== undefined) {
+      accepted.push(preferredPrompt);
+      warnings.push(
+        `${name}: found at ${prompts.map((c) => c.path).join(" and ")}. Valet imported ${preferredPrompt.path}, because ${VALET_SKILLS_PATH} is Valet's own folder. Delete the other copies to stop this message.`,
+      );
       continue;
     }
     warnings.push(
@@ -332,15 +367,38 @@ function candidateKind(fileName: string, segments: string[]): "skill" | "prompt"
 
 /** True when a directory ABOVE the candidate's own directory is not scanned.
  * The last two segments are the candidate's own directory and its file name,
- * and neither is judged here — see the file comment. */
+ * and neither is judged here — see the file comment. A dot-prefixed ancestor
+ * is judged on the path below it, not on its own name, because `.valet` is
+ * open for one subtree only. */
 function hasExcludedAncestor(segments: string[]): boolean {
-  return segments
-    .slice(0, -2)
-    .some(
-      (segment) =>
-        EXCLUDED_DIRECTORIES.has(segment) ||
-        (segment.startsWith(".") && segment !== SCANNED_DOT_DIRECTORY),
-    );
+  return segments.slice(0, -2).some((segment, index) => {
+    if (EXCLUDED_DIRECTORIES.has(segment)) return true;
+    if (!segment.startsWith(".")) return false;
+    return !isScannedDotPath(segments.slice(index).join("/"));
+  });
+}
+
+function isScannedDotPath(fromDotDirectory: string): boolean {
+  return SCANNED_DOT_PATHS.some(
+    (open) => fromDotDirectory === open || fromDotDirectory.startsWith(`${open}/`),
+  );
+}
+
+/**
+ * The one candidate at the scan root's own `.valet/skills`, or undefined when
+ * none or more than one is: two copies there are as unrankable as any other
+ * pair.
+ *
+ * The test reads the path relative to the scan root, which is the folder the
+ * source owner pointed at. An anywhere-in-the-tree test would let a vendored
+ * or example copy, say `examples/demo/.valet/skills/deploy/SKILL.md`, outrank
+ * the repository's own `skills/deploy/SKILL.md` and overwrite the mirrored
+ * row in place. A source with a `subpath` still reaches `.valet/skills` below
+ * that subdirectory, because `relative` is measured from there.
+ */
+function onlyUnderValetSkills(group: SkillCandidate[]): SkillCandidate | undefined {
+  const own = group.filter((c) => c.relative.startsWith(`${VALET_SKILLS_PATH}/`));
+  return own.length === 1 ? own[0] : undefined;
 }
 
 function byPath(a: SkillCandidate, b: SkillCandidate): number {

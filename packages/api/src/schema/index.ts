@@ -926,11 +926,11 @@ export type ContentKind = "skills" | "workflows" | "templates";
 // the repository root. Both are part of the UNIQUE key, so one repository can
 // be tracked twice from two different subdirectories.
 //
-// The last four sync columns are the whole change-detection state:
-// `last_sha` is the commit the last sync read, and `last_manifest_hash` is a
-// hash over the tracked files that commit held. A poll that finds the same
-// commit stops after one API call; a poll that finds a moved commit with the
-// same manifest records the commit and writes no mirrored rows.
+// The sync columns are the whole change-detection state: `last_sha` is the
+// commit the last sync read, `last_manifest_hash` is a hash over the tracked
+// files that commit held, and `discovery_scan` pairs the path-rules version
+// with the commit read under it. The compares that use them are in
+// `services/content-sync/service.ts`.
 //
 // `status`/`attempts`/`next_attempt_at`/`last_error` are the sweep's claim
 // and retry state, shaped like `event_deliveries` — see
@@ -973,6 +973,11 @@ export const contentSources = pgTable(
     nextAttemptAt: bigint("next_attempt_at", { mode: "number" }).notNull(),
     lastSha: text("last_sha"),
     lastManifestHash: text("last_manifest_hash"),
+    /** `<rules version>:<sha>` from the last complete sync. NULL when the
+     * row predates the column or never synced. A value that does not describe
+     * the current head takes no head-commit short-circuit, which is what
+     * makes the mechanism survive a release that does not write it. */
+    discoveryScan: text("discovery_scan"),
     lastSyncedAt: bigint("last_synced_at", { mode: "number" }),
     lastError: text("last_error"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
