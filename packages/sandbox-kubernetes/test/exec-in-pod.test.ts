@@ -155,6 +155,17 @@ describe("execInPod", () => {
     expect(result.truncated).toBe(true);
   });
 
+  it("reports truncation created when a capped stream finalizes", async () => {
+    const api = new FakePodExecApi((stdout, _stderr, statusCallback) => {
+      stdout?.emit("data", "\ud800");
+      statusCallback?.({ status: "Success" });
+    });
+
+    const result = await execInPod(deps(api), "pod-1", "dangling-surrogate", { maxOutputBytes: 0 });
+    expect(result.stdout).toContain("3 bytes omitted");
+    expect(result.truncated).toBe(true);
+  });
+
   it("force-closes the socket and reports timedOut when the status never arrives", async () => {
     const api = new FakePodExecApi((stdout) => {
       stdout?.write("partial");

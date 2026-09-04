@@ -181,14 +181,20 @@ export class LocalSandbox implements Sandbox {
 
     child.on("error", () => {
       state.status = "failed";
-      if (buf) state.output += buf.appendix();
+      if (buf) {
+        state.output += buf.appendix();
+        if (buf.truncated) state.truncated = true;
+      }
       resolveClosed();
       scheduleEviction();
     });
     child.on("close", (code, sig) => {
       state.status = "done";
       state.exitCode = code ?? (sig ? 128 + signalToInt(sig) : 1);
-      if (buf) state.output += buf.appendix();
+      if (buf) {
+        state.output += buf.appendix();
+        if (buf.truncated) state.truncated = true;
+      }
       resolveClosed();
       scheduleEviction();
     });
@@ -299,10 +305,12 @@ function execShell(command: string, opts: ExecShellOpts): Promise<ExecResult> {
       if (timer) clearTimeout(timer);
       opts.signal?.removeEventListener("abort", onAbort);
       const exitCode = code ?? (sig ? 128 + signalToInt(sig) : 1);
+      const stdoutResult = stdoutBuf ? stdoutBuf.value() : stdout;
+      const stderrResult = stderrBuf ? stderrBuf.value() : stderr;
       const truncated = (stdoutBuf?.truncated ?? false) || (stderrBuf?.truncated ?? false);
       resolveResult({
-        stdout: stdoutBuf ? stdoutBuf.value() : stdout,
-        stderr: stderrBuf ? stderrBuf.value() : stderr,
+        stdout: stdoutResult,
+        stderr: stderrResult,
         exitCode,
         timedOut: timedOut ? true : undefined,
         truncated: truncated ? true : undefined,

@@ -314,11 +314,13 @@ export async function execInPod(
   }
 
   const exitCode = winner.kind === "status" ? exitCodeFromStatus(winner.status) : 124;
+  const stdoutResult = stdoutBuffer ? stdoutBuffer.value() : stdoutText;
+  const stderrResult = stderrBuffer ? stderrBuffer.value() : stderrText;
   const truncated = (stdoutBuffer?.truncated ?? false) || (stderrBuffer?.truncated ?? false);
 
   return {
-    stdout: stdoutBuffer ? stdoutBuffer.value() : stdoutText,
-    stderr: stderrBuffer ? stderrBuffer.value() : stderrText,
+    stdout: stdoutResult,
+    stderr: stderrResult,
     exitCode,
     timedOut: winner.kind === "timeout" ? true : undefined,
     truncated: truncated ? true : undefined,

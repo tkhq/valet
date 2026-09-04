@@ -626,13 +626,19 @@ export class DockerSandbox implements Sandbox {
     child.on("error", (err) => {
       state.status = "failed";
       state.transportError = err;
-      if (buf) state.output += buf.appendix();
+      if (buf) {
+        state.output += buf.appendix();
+        if (buf.truncated) state.truncated = true;
+      }
       resolveClosed();
       scheduleEviction();
     });
     child.on("close", (code, sig) => {
       const exitCode = code ?? (sig ? 128 : 1);
-      if (buf) state.output += buf.appendix();
+      if (buf) {
+        state.output += buf.appendix();
+        if (buf.truncated) state.truncated = true;
+      }
       void (async () => {
         try {
           // See the sync exec() comment: CONTAINER_DEATH_PATTERN alone is
@@ -806,10 +812,12 @@ function execProcess(
       if (timer) clearTimeout(timer);
       opts.signal?.removeEventListener("abort", onAbort);
       const exitCode = code ?? (sig ? 128 : 1);
+      const stdoutResult = stdoutBuf ? stdoutBuf.value() : stdout;
+      const stderrResult = stderrBuf ? stderrBuf.value() : stderr;
       const truncated = (stdoutBuf?.truncated ?? false) || (stderrBuf?.truncated ?? false);
       resolveResult({
-        stdout: stdoutBuf ? stdoutBuf.value() : stdout,
-        stderr: stderrBuf ? stderrBuf.value() : stderr,
+        stdout: stdoutResult,
+        stderr: stderrResult,
         exitCode,
         timedOut: timedOut ? true : undefined,
         truncated: truncated ? true : undefined,

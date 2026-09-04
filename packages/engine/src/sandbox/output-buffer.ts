@@ -12,6 +12,8 @@
  *   safe to expose live; `appendix()` (the tail, plus an omission marker
  *   when bytes were dropped) is appended once, at process exit, and the
  *   final polls deliver it as ordinary deltas.
+ * `value()` and `appendix()` are terminal views. They finalize a pending
+ * surrogate and reject later appends.
  */
 function utf8CodePointBytes(codePoint: string): number {
   const value = codePoint.codePointAt(0);
@@ -36,6 +38,7 @@ export class CappedOutputBuffer {
   private dropped = 0;
   private pendingHighSurrogate = "";
   private headSealed: boolean;
+  private finalized = false;
   private readonly headMax: number;
   private readonly tailMax: number;
 
@@ -52,6 +55,11 @@ export class CappedOutputBuffer {
   }
 
   append(chunk: string): void {
+    if (this.finalized) {
+      throw new Error(
+        "CappedOutputBuffer is finalized. Create a new buffer before appending more output.",
+      );
+    }
     if (chunk.length === 0) return;
 
     if (this.pendingHighSurrogate.length > 0) {
@@ -116,6 +124,18 @@ export class CappedOutputBuffer {
     this.tailBytes = suffixBytes;
   }
 
+  private finalize(): void {
+    if (this.finalized) return;
+    if (this.pendingHighSurrogate.length > 0) {
+      this.pendingHighSurrogate = "";
+      // Terminal consumers have already read headText. Keep its prefix
+      // stable and append the replacement code point through the tail.
+      this.headSealed = true;
+      this.append("\ufffd");
+    }
+    this.finalized = true;
+  }
+
   /** The append-only prefix — safe to expose while the process runs. */
   get headText(): string {
     return this.head;
@@ -132,12 +152,14 @@ export class CappedOutputBuffer {
    * whole output fit in the head.
    */
   appendix(): string {
+    this.finalize();
     if (this.dropped === 0) return this.tail;
     return `${omittedMarker(this.dropped)}${this.tail}`;
   }
 
-  /** The full bounded capture: head + appendix. */
+  /** The full bounded capture: head + appendix. This is a terminal view. */
   value(): string {
+    this.finalize();
     return this.head + this.appendix();
   }
 }

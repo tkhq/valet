@@ -107,4 +107,36 @@ describe("CappedOutputBuffer", () => {
     expect(() => new CappedOutputBuffer(Number.NaN)).toThrow(RangeError);
     expect(() => new CappedOutputBuffer(Number.POSITIVE_INFINITY)).toThrow(RangeError);
   });
+
+  it("finalizes a dangling high surrogate into the terminal appendix", () => {
+    const buf = new CappedOutputBuffer(16);
+    buf.append("a\ud800");
+
+    expect(buf.headText).toBe("a");
+    expect(buf.appendix()).toBe("\ufffd");
+    expect(buf.truncated).toBe(false);
+    expect(buf.value()).toBe("a\ufffd");
+  });
+
+  it("counts a dangling high surrogate when the cap cannot retain it", () => {
+    const tight = new CappedOutputBuffer(2);
+    tight.append("\ud800");
+    expect(tight.value()).toBe(omittedMarker(3));
+    expect(tight.truncated).toBe(true);
+
+    const zero = new CappedOutputBuffer(0);
+    zero.append("\ud800");
+    expect(zero.appendix()).toBe(omittedMarker(3));
+    expect(zero.truncated).toBe(true);
+  });
+
+  it("finalizes once and rejects appends after a terminal view", () => {
+    const buf = new CappedOutputBuffer(2);
+    buf.append("\ud800");
+
+    const first = buf.appendix();
+    expect(buf.appendix()).toBe(first);
+    expect(buf.value()).toBe(first);
+    expect(() => buf.append("later")).toThrow(/finalized/);
+  });
 });
