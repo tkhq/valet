@@ -240,6 +240,34 @@ describe("api integration: thread rename", () => {
     expect(res.status).toBe(200);
   }, 30_000);
 
+  it("sets the thread reasoning pin and echoes it back normalized", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const threadId = await createThread(api.baseUrl, sessionId);
+
+    const res = await patchThread(api.baseUrl, sessionId, threadId, { reasoning: "Medium" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as PatchThreadResponse;
+    expect(body.reasoning).toBe("medium");
+
+    // A subsequent GET /threads echoes the same pin.
+    const list = await fetch(`${api.baseUrl}/api/sessions/${sessionId}/threads`);
+    const { threads } = (await list.json()) as ListThreadsResponse;
+    expect(threads.find((t) => t.id === threadId)?.reasoning).toBe("medium");
+  }, 30_000);
+
+  it("clears the thread reasoning pin and echoes null", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const threadId = await createThread(api.baseUrl, sessionId);
+
+    await patchThread(api.baseUrl, sessionId, threadId, { reasoning: "high" });
+    const res = await patchThread(api.baseUrl, sessionId, threadId, { reasoning: null });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as PatchThreadResponse;
+    expect(body.reasoning).toBeNull();
+  }, 30_000);
+
   it("400s a thread reasoning level exceeding the org cap", async () => {
     api = await bootTestApi();
     const sessionId = await createSession(api.baseUrl);

@@ -10,7 +10,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, teamMembers, teams } from "../schema/index.js";
 import { setApprovedModels } from "../services/approved-models.js";
 import { setOrgReasoningSettings } from "../services/reasoning.js";
-import type { EnsureOrchestratorResponse } from "../wire/types.js";
+import type { EnsureOrchestratorResponse, PatchSessionResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
 
@@ -258,6 +258,9 @@ describe("team-owned session lifecycle routes", () => {
       body: JSON.stringify({ reasoning: "Medium" }),
     });
     expect(withinCap.status).toBe(200);
+    // Applied (Task 11), not just validated: the response echoes the
+    // normalized session-default reasoning that was actually set.
+    expect(((await withinCap.json()) as PatchSessionResponse).reasoning).toBe("medium");
 
     const cleared = await fetch(`${api.baseUrl}/api/sessions/${sessionId}`, {
       method: "PATCH",
@@ -265,6 +268,7 @@ describe("team-owned session lifecycle routes", () => {
       body: JSON.stringify({ reasoning: null }),
     });
     expect(cleared.status).toBe(200);
+    expect(((await cleared.json()) as PatchSessionResponse).reasoning).toBeNull();
   });
 
   it("lets an org admin reach the model picker of a session stamped with another member's id", async () => {

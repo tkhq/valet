@@ -8,6 +8,7 @@ import {
   assistantSessionId,
   parseAssistantSessionId,
   NoCredentialsError,
+  isReasoningLevel,
   type BlobStore,
   type ChildReader,
   type ChildSender,
@@ -66,6 +67,7 @@ import { getOrgModelPreferences } from "../services/org.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
 import { resolveOpenAiCredential } from "../services/openai-key.js";
 import { hasOrgKey } from "../services/model-catalog.js";
+import { clampToMax, getOrgReasoningSettings, REASONING_SET, type ReasoningLevel } from "../services/reasoning.js";
 import { listLlmProviders, parseModelId, providerNamespace } from "../services/llm-providers.js";
 import type { AppDb } from "../lib/drizzle.js";
 import {
@@ -903,6 +905,10 @@ export class EngineHost {
       userId: meta.userId,
       ownerTeamId: meta.ownerTeamId,
     });
+    const reasoning = await this.resolveReasoningForBuild(existing, meta.orgId, {
+      userId: meta.userId,
+      ownerTeamId: meta.ownerTeamId,
+    });
     const resolveModel = this.makeResolveModel(meta.orgId);
     const profile = meta.profile ?? "headless";
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
@@ -1046,6 +1052,7 @@ export class EngineHost {
             model,
             modelSpec,
             resolveModel,
+            ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
             systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
             tools: sessionTools.length ? sessionTools : undefined,
             skills: extras.skills.length ? extras.skills : undefined,
@@ -1069,6 +1076,7 @@ export class EngineHost {
           model,
           modelSpec,
           resolveModel,
+          ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
           systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
           tools: sessionTools.length ? sessionTools : undefined,
           skills: extras.skills.length ? extras.skills : undefined,
@@ -2180,6 +2188,11 @@ export class EngineHost {
       ownerTeamId: principal.type === "team" ? principal.id : undefined,
       assistantDefault: assistant.model ?? undefined,
     });
+    const reasoning = await this.resolveReasoningForBuild(existing, meta.orgId, {
+      userId: principal.type === "user" ? meta.actorUserId : undefined,
+      ownerTeamId: principal.type === "team" ? principal.id : undefined,
+      assistantDefault: assistant.reasoning ?? undefined,
+    });
     const queueMode: "steer" | "followup" = principal.type === "user" ? "steer" : "followup";
     // `principal`, not `meta.actorUserId`: an assistant session belongs to
     // the principal and is shared by everyone who can reach it, exactly like
@@ -2253,6 +2266,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(meta.orgId),
+      ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
       systemPrompt: personaPrefix + orchestratorPersona(principal, ownerDisplayName),
       tools: [...buildMemoryTools(), ...extras.tools],
       skills: extras.skills.length ? extras.skills : undefined,
@@ -2962,6 +2976,77 @@ export class EngineHost {
   }
 
   /**
+   * `users.default_reasoning` for `userId`, or `undefined` if unset or the
+   * host has no `db`. Mirrors `userDefaultModel`: deliberately uncached, so
+   * a settings change applies on the very next session build.
+   */
+  private async userDefaultReasoning(userId: string): Promise<string | undefined> {
+    if (!this.opts.db) return undefined;
+    const rows = await this.opts.db
+      .select({ defaultReasoning: users.defaultReasoning })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+    return rows[0]?.defaultReasoning ?? undefined;
+  }
+
+  /**
+   * `teams.default_reasoning` for the team that owns the session being
+   * built. Mirrors `teamDefaultModel`, minus the active-provider walk —
+   * reasoning levels aren't provider-scoped, so a plain column read
+   * suffices. `undefined` when unset or the host has no `db`.
+   */
+  private async teamDefaultReasoning(orgId: string, teamId: string): Promise<string | undefined> {
+    if (!this.opts.db) return undefined;
+    const rows = await this.opts.db
+      .select({ defaultReasoning: teams.defaultReasoning })
+      .from(teams)
+      .where(eq(teams.id, teamId))
+      .limit(1);
+    return rows[0]?.defaultReasoning ?? undefined;
+  }
+
+  /**
+   * Resolve the session-default reasoning level to build/restore with.
+   * Same restore-no-clobber constraint as `resolveModelForBuild` above, and
+   * for the same reason: `Session.rehydrate` (`packages/engine/src/session.ts`)
+   * only preserves the persisted `SessionData.reasoning` when the host
+   * passes NO `sampling.reasoning` at all. Once this cascade feeds
+   * `sampling.reasoning` into every create/restoreSession call, a host that
+   * re-resolved a fresh cascade value on every rebuild would silently
+   * clobber an explicit `session.setReasoning(...)` the next time the
+   * session's cache entry is evicted and rebuilt (idle sweep, `evictAll()`
+   * on shutdown). So on restore (`existing` present), the *persisted* value
+   * always wins outright over every cascade tier. Only on create does the
+   * preference cascade apply:
+   * `assistantDefault ?? userDefault ?? teamDefault ?? orgDefault ?? undefined`
+   * — most-specific wins — and the resolved level (if any) is clamped to the
+   * org's cap (`clampToMax`). A cascade-resolved value that isn't a known
+   * level (a stale/invalid column) is treated as unset rather than thrown.
+   *
+   * `userId`/`ownerTeamId` follow the exact same opt-in gating each call
+   * site already uses for `resolveModelForBuild` — see that method's doc
+   * comment for the SHARED-session rationale.
+   */
+  private async resolveReasoningForBuild(
+    existing: SessionData | null,
+    orgId: string,
+    prefs: { userId?: string; ownerTeamId?: string; assistantDefault?: string },
+  ): Promise<string | undefined> {
+    if (existing?.reasoning) return existing.reasoning;
+    const settings = this.opts.db ? await getOrgReasoningSettings(this.opts.db, orgId) : {};
+    const level =
+      prefs.assistantDefault ??
+      (prefs.userId ? await this.userDefaultReasoning(prefs.userId) : undefined) ??
+      (prefs.ownerTeamId ? await this.teamDefaultReasoning(orgId, prefs.ownerTeamId) : undefined) ??
+      settings.default;
+    if (level === undefined || !REASONING_SET.has(level)) return undefined;
+    // Checked against REASONING_SET above, so this narrowing is safe — same
+    // pattern `services/reasoning.ts` uses for the identical cast.
+    return clampToMax(level as ReasoningLevel, settings.max);
+  }
+
+  /**
    * Resolve (or lazily create) a child session (Phase 4 decision 10/11).
    * Purpose 'child', linked to its parent via `parentSessionId`/
    * `parentThreadId`. Deliberately gets NO `toolConfig.childSpawner` — the
@@ -3063,6 +3148,10 @@ export class EngineHost {
       // the user/team/org preference cascade.
       childDefault: opts.modelId ? undefined : "s",
     });
+    const reasoning = await this.resolveReasoningForBuild(existing, opts.orgId, {
+      userId: opts.owner.type === "user" ? opts.actorUserId : undefined,
+      ownerTeamId: opts.owner.type === "team" ? opts.owner.id : undefined,
+    });
 
     const profile = opts.profile ?? "headless";
     const sandboxMint = await this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId, profile);
@@ -3144,6 +3233,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
+      ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
       systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
       tools: childTools.length ? childTools : undefined,
       skills: provisionedExtras.skills.length ? provisionedExtras.skills : undefined,
@@ -3248,6 +3338,10 @@ export class EngineHost {
       overrideId: opts.modelId,
       ownerTeamId: opts.owner.type === "team" ? opts.owner.id : undefined,
     });
+    const reasoning = await this.resolveReasoningForBuild(existing, opts.orgId, {
+      userId: opts.owner.type === "user" ? opts.actorUserId : undefined,
+      ownerTeamId: opts.owner.type === "team" ? opts.owner.id : undefined,
+    });
 
     const sandboxMint = await this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId, "headless");
     const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId, opts.owner.type);
@@ -3281,6 +3375,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
+      ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
       systemPrompt: codingSystemPrompt({ secretsCli: false }),
       tools: extras.tools.length ? extras.tools : undefined,
       skills: extras.skills.length ? extras.skills : undefined,

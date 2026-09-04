@@ -247,8 +247,9 @@ function threadToSummary(
   model?: string,
   key?: string,
   archivedAt?: number,
+  reasoning?: string | null,
 ): ThreadSummary {
-  return { id: threadId, sessionId, title, createdAt, model, key, archivedAt };
+  return { id: threadId, sessionId, title, createdAt, model, key, archivedAt, reasoning };
 }
 
 async function loadEngineSession(
@@ -307,6 +308,7 @@ messagesRouter.get("/:id/threads", async (c) => {
         t.modelId(),
         t.key,
         metaById.get(t.id)?.archivedAt,
+        t.reasoning() ?? null,
       ),
     );
   const body: ListThreadsResponse = { threads: summaries };
@@ -430,13 +432,22 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
     const normalizedReasoning = body.reasoning.trim().toLowerCase();
     const reasoningErr = await assertReasoningSelectable(db, session.orgId, normalizedReasoning);
     if (reasoningErr) return c.json({ error: reasoningErr }, 400);
-    // TODO(Task 11): apply — no thread-level reasoning storage path yet.
   }
 
   if (body.model !== undefined) {
     try {
       await thread.setModel(
         typeof body.model === "string" ? body.model : null,
+      );
+    } catch (err) {
+      return c.json({ error: (err as Error).message }, 400);
+    }
+  }
+
+  if (body.reasoning !== undefined) {
+    try {
+      await thread.setReasoning(
+        typeof body.reasoning === "string" ? body.reasoning.trim().toLowerCase() : null,
       );
     } catch (err) {
       return c.json({ error: (err as Error).message }, 400);
@@ -485,6 +496,7 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
     thread.modelId(),
     thread.key,
     archivedAt,
+    thread.reasoning() ?? null,
   );
   return c.json(summary);
 });
@@ -514,6 +526,8 @@ messagesRouter.post("/:id/threads", async (c) => {
     body.title,
     thread.modelId(),
     thread.key,
+    undefined,
+    thread.reasoning() ?? null,
   );
   return c.json(summary, 201);
 });

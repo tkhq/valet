@@ -22,6 +22,7 @@ import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { orgs, teams, users, type LlmProviderModel } from "../schema/index.js";
 import { createLlmProvider, updateLlmProvider } from "../services/llm-providers.js";
 import { setOrgModelPreferences } from "../services/org.js";
+import { setOrgReasoningSettings } from "../services/reasoning.js";
 import { createTeam } from "../services/teams.js";
 import { NoCredentialsError } from "@valet/engine";
 import { resolveModelSpec } from "../services/model-resolution.js";
@@ -732,6 +733,82 @@ describe("EngineHost model resolution wiring", () => {
         { modelId: "claude-opus-4-5" },
       );
       expect(session.options.model.id).toBe("claude-opus-4-5");
+    });
+  });
+
+  // Reasoning cascade + restore-no-clobber (model-selector-overhaul Task 11):
+  // `resolveReasoningForBuild` mirrors `resolveModelForBuild`'s shape and
+  // MUST return the persisted `SessionData.reasoning` first, or a host that
+  // re-resolves a fresh cascade value on every cache-eviction rebuild would
+  // silently clobber an explicit `session.setReasoning(...)`.
+  describe("reasoning cascade (Task 11)", () => {
+    it("assistant default beats the user's personal default", async () => {
+      api = await bootTestApi();
+      const { db, engineHost } = api.providers;
+      await db.update(users).set({ defaultReasoning: "low" }).where(eq(users.id, "local-user"));
+
+      const assistant = await resolveDefaultAssistant(db, "local-org", { type: "user", id: "local-user" });
+      await db.update(assistants).set({ reasoning: "high" }).where(eq(assistants.id, assistant.id));
+
+      const session = await engineHost.assistantSessionFor(assistant.id, {
+        actorUserId: "local-user",
+        orgId: "local-org",
+      });
+      expect(session.options.sampling?.reasoning).toBe("high");
+    });
+
+    it("org default applies when nothing else is set", async () => {
+      api = await bootTestApi();
+      const { db, engineHost } = api.providers;
+      await setOrgReasoningSettings(db, "local-org", { default: "medium" });
+
+      const session = await engineHost.sessionFor("reasoning-org-default", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp",
+      });
+      expect(session.options.sampling?.reasoning).toBe("medium");
+    });
+
+    it("a resolved level above the org max clamps down to the max", async () => {
+      api = await bootTestApi();
+      const { db, engineHost } = api.providers;
+      await db.update(users).set({ defaultReasoning: "xhigh" }).where(eq(users.id, "local-user"));
+      await setOrgReasoningSettings(db, "local-org", { max: "medium" });
+
+      const session = await engineHost.sessionFor("reasoning-clamp", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp",
+      });
+      expect(session.options.sampling?.reasoning).toBe("medium");
+    });
+
+    it("restore-no-clobber: a persisted reasoning level survives a rebuild with different cascade inputs (the trap)", async () => {
+      api = await bootTestApi();
+      const { db, engineHost } = api.providers;
+
+      const session = await engineHost.sessionFor("reasoning-restore", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp",
+      });
+      await session.setReasoning("high");
+      expect(session.options.sampling?.reasoning).toBe("high");
+
+      engineHost.evictAll();
+      // Change every cascade input that could otherwise win on rebuild —
+      // if the host re-resolved the cascade instead of reading the
+      // persisted value first, one of these would clobber "high".
+      await db.update(users).set({ defaultReasoning: "low" }).where(eq(users.id, "local-user"));
+      await setOrgReasoningSettings(db, "local-org", { default: "minimal", max: "medium" });
+
+      const restored = await engineHost.sessionFor("reasoning-restore", {
+        userId: "local-user",
+        orgId: "local-org",
+        workspace: "/tmp",
+      });
+      expect(restored.options.sampling?.reasoning).toBe("high");
     });
   });
 });
