@@ -33,6 +33,7 @@
  * shape against one set.
  */
 import { getEnvApiKey } from "@earendil-works/pi-ai/compat";
+import type { ThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
 import { registryModels } from "./model-registry.js";
 import type { CredentialOwner, CredentialStore } from "@valet/engine";
 import type { AppQueryable } from "../lib/drizzle.js";
@@ -42,6 +43,22 @@ import { curatedOpenrouterModels, openrouterRegistry, toProviderModel } from "./
 import type { LlmProviderModel } from "../schema/index.js";
 import type { ModelInfo } from "../wire/types.js";
 import { TIER_TOKENS } from "./model-tiers.js";
+import { getApprovedModels, isApproved } from "./approved-models.js";
+
+/** Canonical display/selection order for thinking levels — narrowest to
+ * broadest effort. `"off"` is never a selectable level, so it's excluded
+ * here rather than filtered out at every call site. */
+const THINKING_LEVEL_ORDER: readonly ThinkingLevel[] = ["minimal", "low", "medium", "high", "xhigh", "max"];
+
+/** The levels a reasoning model actually supports, in canonical order.
+ * `undefined` when the model doesn't reason at all, or the registry has no
+ * `thinkingLevelMap` for it (nothing to report). Only keys PRESENT in the
+ * map are considered — a `null` value marks a level explicitly unsupported,
+ * and a missing key is not claimed as supported either. */
+function thinkingLevelsFor(reasoning: boolean | undefined, map: ThinkingLevelMap | undefined): string[] | undefined {
+  if (!reasoning || !map) return undefined;
+  return THINKING_LEVEL_ORDER.filter((level) => map[level] !== undefined && map[level] !== null);
+}
 
 export type CatalogEntry = ModelInfo & { resolvable: boolean };
 
@@ -79,21 +96,25 @@ function knownKindEntries(
   resolvable: boolean,
   providerId: string,
   providerName: string,
+  approvedList: string[] | null,
 ): CatalogEntry[] {
-  return registryModels(kind).map((m) => ({
-    id: `${namespace}/${m.id}`,
-    name: m.name,
-    contextWindow: m.contextWindow,
-    reasoning: m.reasoning,
-    providerId,
-    providerKind: kind,
-    providerName,
-    active,
-    pricing: { input: m.cost.input, output: m.cost.output },
-    resolvable,
-    // TODO(Task 7): computed from org approved list
-    approved: true,
-  }));
+  return registryModels(kind).map((m) => {
+    const id = `${namespace}/${m.id}`;
+    return {
+      id,
+      name: m.name,
+      contextWindow: m.contextWindow,
+      reasoning: m.reasoning,
+      providerId,
+      providerKind: kind,
+      providerName,
+      active,
+      pricing: { input: m.cost.input, output: m.cost.output },
+      resolvable,
+      approved: isApproved(approvedList, id),
+      thinkingLevels: thinkingLevelsFor(m.reasoning, m.thinkingLevelMap),
+    };
+  });
 }
 
 /** A preference entry matches a catalog entry either by its full namespaced
@@ -132,6 +153,9 @@ function orderEntries(entries: CatalogEntry[], modelPreferences: string[]): Cata
 export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialStore, orgId: string): Promise<CatalogEntry[]> {
   const rows = await listLlmProviders(db, orgId);
   const modelPreferences = await getOrgModelPreferences(db, orgId);
+  // Fetched once per build (not per entry) — every entry's `approved` flag
+  // is derived from this same snapshot.
+  const approvedList = await getApprovedModels(db, orgId);
 
   const entries: CatalogEntry[] = [];
 
@@ -141,7 +165,7 @@ export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialS
       const orgKey = await hasOrgKey(credentials, orgId, row.id);
       const resolvable = orgKey || Boolean(getEnvApiKey(kind));
       const active = row.enabled && resolvable;
-      entries.push(...knownKindEntries(kind, providerNamespace(row), active, resolvable, row.id, row.name));
+      entries.push(...knownKindEntries(kind, providerNamespace(row), active, resolvable, row.id, row.name, approvedList));
     } else {
       // No row for this kind — zero-config back-compat: synthesize a
       // registry entry only when the deployment env can resolve a key for
@@ -151,7 +175,7 @@ export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialS
       // `providerNamespace` would give a known-kind row).
       const envKey = getEnvApiKey(kind);
       if (!envKey) continue;
-      entries.push(...knownKindEntries(kind, kind, true, true, kind, KNOWN_KIND_LABEL[kind]));
+      entries.push(...knownKindEntries(kind, kind, true, true, kind, KNOWN_KIND_LABEL[kind], approvedList));
     }
   }
 
@@ -187,8 +211,9 @@ export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialS
     for (const sel of selection ?? []) {
       const reg = registry.get(sel.id);
       const m = reg ? toProviderModel(reg) : sel;
+      const id = `${namespace}/${m.id}`;
       entries.push({
-        id: `${namespace}/${m.id}`,
+        id,
         name: m.name,
         contextWindow: m.contextWindow,
         reasoning: reg?.reasoning,
@@ -198,8 +223,8 @@ export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialS
         active,
         pricing: m.pricing,
         resolvable,
-        // TODO(Task 7): computed from org approved list
-        approved: true,
+        approved: isApproved(approvedList, id),
+        thinkingLevels: thinkingLevelsFor(reg?.reasoning, reg?.thinkingLevelMap),
       });
     }
   }
@@ -208,8 +233,9 @@ export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialS
     const resolvable = await hasOrgKey(credentials, orgId, row.id);
     const active = row.enabled && resolvable;
     for (const m of row.models) {
+      const id = `${providerNamespace(row)}/${m.id}`;
       entries.push({
-        id: `${providerNamespace(row)}/${m.id}`,
+        id,
         name: m.name,
         contextWindow: m.contextWindow,
         providerId: row.id,
@@ -218,8 +244,10 @@ export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialS
         active,
         pricing: m.pricing,
         resolvable,
-        // TODO(Task 7): computed from org approved list
-        approved: true,
+        approved: isApproved(approvedList, id),
+        // No pi-ai registry entry exists for a custom row's declared model
+        // (there's nothing upstream to look reasoning up against), so it
+        // never has a thinkingLevels list.
       });
     }
   }

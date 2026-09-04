@@ -15,6 +15,7 @@ import { setOrgModelPreferences } from "./org.js";
 import { createLlmProvider, updateLlmProvider } from "./llm-providers.js";
 import { buildOrgCatalog, catalogValidIds } from "./model-catalog.js";
 import { OPENROUTER_DEFAULT_MODEL_IDS } from "./openrouter.js";
+import { setApprovedModels } from "./approved-models.js";
 
 const orgId = "org1";
 
@@ -263,6 +264,124 @@ describe("model catalog", () => {
       } finally {
         vi.unstubAllEnvs();
       }
+    });
+  });
+
+  describe("approved flag", () => {
+    it("null approved list (unrestricted) marks every entry approved", async () => {
+      vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
+      try {
+        const entries = await buildOrgCatalog(db, credentials, orgId);
+        expect(entries.length).toBeGreaterThan(0);
+        expect(entries.every((e) => e.approved)).toBe(true);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("a restricted approved list marks only listed entries approved, others not", async () => {
+      vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
+      try {
+        const ids = getModels("anthropic")
+          .map((m) => `anthropic/${m.id}`)
+          .sort();
+        expect(ids.length).toBeGreaterThan(1);
+        const approvedId = ids[0] as string;
+        const unapprovedId = ids[ids.length - 1] as string;
+
+        await setApprovedModels(db, orgId, [approvedId]);
+
+        const entries = await buildOrgCatalog(db, credentials, orgId);
+        const approvedEntry = entries.find((e) => e.id === approvedId);
+        const unapprovedEntry = entries.find((e) => e.id === unapprovedId);
+        expect(approvedEntry?.approved).toBe(true);
+        expect(unapprovedEntry?.approved).toBe(false);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+  });
+
+  describe("thinkingLevels", () => {
+    it("a registry model with a thinkingLevelMap exposes its supported levels in canonical order", async () => {
+      vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
+      try {
+        const withMap = getModels("anthropic").find(
+          (m) => m.reasoning && m.thinkingLevelMap && Object.values(m.thinkingLevelMap).some((v) => v !== null),
+        );
+        expect(withMap).toBeDefined();
+        const map = withMap!.thinkingLevelMap!;
+        const canonicalOrder = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
+        const expected = canonicalOrder.filter((level) => map[level] !== undefined && map[level] !== null);
+        expect(expected.length).toBeGreaterThan(0);
+
+        const entries = await buildOrgCatalog(db, credentials, orgId);
+        const entry = entries.find((e) => e.id === `anthropic/${withMap!.id}`);
+        expect(entry?.thinkingLevels).toEqual(expected);
+        // "off" is never a selectable level.
+        expect(entry?.thinkingLevels).not.toContain("off");
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("a reasoning model with no thinkingLevelMap exposes thinkingLevels: undefined", async () => {
+      vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
+      try {
+        const withoutMap = getModels("anthropic").find((m) => m.reasoning && !m.thinkingLevelMap);
+        expect(withoutMap).toBeDefined();
+
+        const entries = await buildOrgCatalog(db, credentials, orgId);
+        const entry = entries.find((e) => e.id === `anthropic/${withoutMap!.id}`);
+        expect(entry?.thinkingLevels).toBeUndefined();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("custom (openai_compatible) provider entries expose thinkingLevels: undefined", async () => {
+      const row = await createLlmProvider(db, {
+        orgId,
+        kind: "openai_compatible",
+        name: "Custom",
+        baseUrl: "https://api.example.com/v1",
+        models: [{ id: "qwen-coder", name: "Qwen Coder", contextWindow: 32000 }],
+      });
+      await credentials.save({ type: "org", id: orgId }, `llm:${row.id}`, {
+        type: "api_key",
+        apiKey: "custom-secret",
+      });
+
+      const entries = await buildOrgCatalog(db, credentials, orgId);
+      const entry = entries.find((e) => e.id === `${row.id}/qwen-coder`);
+      expect(entry).toBeDefined();
+      expect(entry?.thinkingLevels).toBeUndefined();
+      expect(entry?.approved).toBe(true);
+    });
+
+    it("a non-registry openrouter selection (live-catalog pick) exposes thinkingLevels: undefined", async () => {
+      const row = await createLlmProvider(db, {
+        orgId,
+        kind: "openrouter",
+        name: "OpenRouter",
+        models: [
+          {
+            id: "moonshotai/kimi-k3",
+            name: "MoonshotAI: Kimi K3",
+            contextWindow: 1_048_576,
+            pricing: { input: 3, output: 15 },
+          },
+        ],
+      });
+      await credentials.save({ type: "org", id: orgId }, `llm:${row.id}`, {
+        type: "api_key",
+        apiKey: "sk-or-secret",
+      });
+
+      const entries = await buildOrgCatalog(db, credentials, orgId);
+      const entry = entries.find((e) => e.id === "openrouter/moonshotai/kimi-k3");
+      expect(entry).toBeDefined();
+      expect(entry?.thinkingLevels).toBeUndefined();
     });
   });
 });
