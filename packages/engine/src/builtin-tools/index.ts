@@ -653,7 +653,7 @@ export const switchModelTool = defineTool({
       if (fromModel === toModel) {
         return { text: `model unchanged (${toModel})` };
       }
-      return { text: `switched thread model: ${fromModel} → ${toModel}` };
+      return { text: `switched model for this turn: ${fromModel} → ${toModel}` };
     } catch (err) {
       return {
         text:

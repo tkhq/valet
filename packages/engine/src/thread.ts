@@ -1778,11 +1778,15 @@ export class Thread {
         // Validate before assigning so an unknown id is rejected and the
         // turn keeps its previous model.
         await this.validateModelSpec(modelId);
-        this.agentModelSwitch = modelId;
         // Retarget the live agent so the NEXT LLM CALL of this turn uses the
         // new model — the contract switch_model advertises, and what the
         // prompt rules mean by "switch_model ... in this turn, then continue".
+        //
+        // Record the escalation after the retarget. validateModelSpec above
+        // already rejects an unresolvable spec, so this ordering is belt to
+        // that brace rather than a guard against a reachable state.
         await this.applyModelToRunningTurn(modelId);
+        this.agentModelSwitch = modelId;
       }
     } else if (modelId === null) {
       this.modelOverride = undefined;

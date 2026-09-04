@@ -138,6 +138,73 @@ describe("decision gates: pending -> resolved", () => {
   });
 });
 
+describe("decision gates: opened after an earlier tool call", () => {
+  it("resumes and settles when a prior tool call ran in the same submission", async () => {
+    // The gated call is NOT the first tool call of the submission: an
+    // ordinary tool ran in an earlier LLM turn. Resolution must still drive
+    // the turn to completion and settle the queue item.
+    const faux = registerFauxProvider({ provider: "gate-after-tool" });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("noop_tool", {}, { id: "tcN" })], {
+        stopReason: "toolUse",
+      }),
+      fauxAssistantMessage([fauxToolCall("do_thing", { arg: "x" }, { id: "tcA" })], {
+        stopReason: "toolUse",
+      }),
+      fauxAssistantMessage("all done"),
+    ]);
+
+    const noopTool: ToolDef = {
+      name: "noop_tool",
+      description: "Does nothing.",
+      parameters: Type.Object({}),
+      execute: async () => ({ text: "noop" }),
+    };
+
+    const { engine, store, events } = makeEngine();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+      modelSpec: "gate-after-tool/faux-1",
+      resolveModel: async (spec: string) =>
+        spec === "gate-after-tool/faux-1" ? { model: faux.getModel(), apiKey: "k" } : null,
+      tools: [noopTool, approvalTool()],
+    });
+
+    void session.prompt("please do thing");
+
+    await waitFor(() => events.some((e) => e.event.type === "decision_gate"));
+    const gate = gatesFrom(events)[0];
+    expect(gate.status).toBe("pending");
+
+    await session.resolveDecision(gate.id, {
+      actionId: "approve",
+      resolvedBy: "u1",
+      resolvedAt: Date.now(),
+    });
+
+    // Wait for settlement, NOT `status:idle`: idle fires at every turn_end,
+    // so it already fired for the first tool turn and would match instantly,
+    // sampling a submission still in flight.
+    await waitFor(() =>
+      events.some((e) => e.event.type === "submission_settled"),
+    );
+
+    const entries = await session.readEntries("web:default");
+    const messages = entries.filter((e) => e.type === "message");
+    expect(messages.at(-1)).toMatchObject({ role: "assistant", content: "all done" });
+
+    // Nothing left wedged in `running`.
+    const unsettled = await store.listUnsettledSubmissions(session.id);
+    expect(unsettled).toEqual([]);
+
+    faux.unregister();
+  });
+});
+
 describe("decision gates: pending -> withdrawn (abort)", () => {
   it("aborting the thread withdraws the pending gate", async () => {
     const faux = registerFauxProvider({ provider: "gate-withdrawn" });

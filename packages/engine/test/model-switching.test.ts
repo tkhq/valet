@@ -16,6 +16,7 @@ import {
   fauxToolCall,
   getModel,
   registerFauxProvider,
+  Type,
   type FauxProvider,
   type Model,
 } from "@earendil-works/pi-ai/compat";
@@ -26,7 +27,9 @@ import {
   InMemorySessionStore,
   VirtualSandboxProvider,
   type BusEvent,
+  type DecisionGate,
   type ResolvedModel,
+  type ToolDef,
 } from "../src/index.js";
 import { switchModelTool } from "../src/builtin-tools/index.js";
 
@@ -181,7 +184,8 @@ describe("engine: model switching", () => {
     );
     expect(calls[0]).toEqual({ model: OPUS });
     expect((r1 as { text: string }).text).toContain(OPUS);
-    expect((r1 as { text: string }).text).toContain("thread");
+    // The result names the scope the switch actually has (TKAI-338).
+    expect((r1 as { text: string }).text).toContain("turn");
 
     // Errors surface as a readable result rather than throwing.
     const failingCtx = {
@@ -453,6 +457,109 @@ describe("engine: agent-initiated model escalation (TKAI-338)", () => {
     expect(second.threadId).toBe(first.threadId);
     expect(s.cheapCalls).toEqual(["escalate", "continuation"]);
     expect(s.strongCalls).toEqual(["continuation"]);
+  });
+
+  it("an escalation the resolver rejects leaves the turn on its current model", async () => {
+    const s = setupEscalation("esc-reject");
+    const session = await s.engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: s.cheapModel,
+      modelSpec: CHEAP_SPEC,
+      // Only the cheap spec resolves: the escalation target is refused, the
+      // way a deleted custom-provider row would refuse it mid-turn.
+      resolveModel: async (spec: string): Promise<ResolvedModel | null> =>
+        spec === CHEAP_SPEC ? { model: s.cheapModel, apiKey: "k-cheap" } : null,
+    });
+
+    const thread = await session.ensureDefaultThread();
+    const receipt = await session.prompt("do something hard");
+    await waitForStatus(s.events, receipt.threadId, "idle");
+
+    // The tool reported the failure and the turn finished on the model it
+    // started with — no half-applied escalation, no wedged turn.
+    expect(s.cheapCalls).toEqual(["escalate", "continuation"]);
+    expect(s.strongCalls).toEqual([]);
+    expect(thread.modelId()).toBe(CHEAP_SPEC);
+    const entries = await session.readEntries("web:default");
+    const toolResults = JSON.stringify(entries);
+    expect(toolResults).toContain("switch_model failed");
+  });
+
+  it("a failed escalation still lets the turn gate and settle", async () => {
+    // switch_model to a spec the resolver refuses. The tool reports the
+    // failure, and the turn goes on to open a decision gate, resume, and
+    // settle on the model it started with.
+    const cheapFaux = registerFauxProvider({ provider: "esc-gate-cheap" });
+    cleanups.push(() => cheapFaux.unregister());
+    const cheapModel = cheapFaux.getModel();
+    cheapFaux.setResponses([
+      fauxAssistantMessage(
+        [fauxToolCall("switch_model", { model: STRONG_SPEC }, { id: "tc-esc" })],
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage([fauxToolCall("do_thing", { arg: "x" }, { id: "tc-gate" })], {
+        stopReason: "toolUse",
+      }),
+      fauxAssistantMessage("all done"),
+    ]);
+
+    const store = new InMemorySessionStore();
+    const bus = new InMemoryEventStream();
+    const events: BusEvent[] = [];
+    bus.subscribe({}, (e) => events.push(e));
+    const engine = new Engine({
+      providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
+    });
+
+    const gatedTool: ToolDef = {
+      name: "do_thing",
+      description: "Do a sensitive thing, gated by approval.",
+      parameters: Type.Object({ arg: Type.String() }),
+      execute: async (args, ctx) => {
+        const resolution = await ctx.requestDecision({
+          type: "approval",
+          title: "approve do_thing?",
+          body: `arg=${args.arg}`,
+          resumeKey: `do_thing:${args.arg}`,
+        });
+        return { text: resolution.actionId === "approve" ? "did the thing" : "denied" };
+      },
+    };
+
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: cheapModel,
+      modelSpec: CHEAP_SPEC,
+      tools: [gatedTool],
+      // The escalation target never resolves.
+      resolveModel: async (spec: string): Promise<ResolvedModel | null> =>
+        spec === CHEAP_SPEC ? { model: cheapModel, apiKey: "k-cheap" } : null,
+    });
+
+    void session.prompt("do something hard");
+    await waitFor(() => events.some((e) => e.event.type === "decision_gate"));
+    const gateEvent = events.find((e) => e.event.type === "decision_gate")!;
+    const gate: DecisionGate = (gateEvent.event as { gate: DecisionGate }).gate;
+
+    await session.resolveDecision(gate.id, {
+      actionId: "approve",
+      resolvedBy: "u1",
+      resolvedAt: Date.now(),
+    });
+    // Settlement, not `status:idle`: idle already fired for the escalation
+    // turn and would match instantly.
+    await waitFor(() => events.some((e) => e.event.type === "submission_settled"));
+
+    const entries = await session.readEntries("web:default");
+    const messages = entries.filter((e) => e.type === "message");
+    expect(messages.at(-1)).toMatchObject({ role: "assistant", content: "all done" });
+    expect(await store.listUnsettledSubmissions(session.id)).toEqual([]);
   });
 
   it("a user-initiated switch still persists across turns", async () => {
