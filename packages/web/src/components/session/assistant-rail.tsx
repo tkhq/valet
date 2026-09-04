@@ -81,6 +81,12 @@ export function AssistantRail() {
   // than rendering a session the viewer cannot read.
   const choice = chooseChatAssistant(groups, scope.key, search.assistant);
   const active = choice.kind === "open" || choice.kind === "personal" ? choice.assistant : undefined;
+  // A switcher with one row switches nothing, so it is not drawn. This is
+  // what keeps a solo user with one assistant on exactly the sidebar they
+  // had before a principal could own several. An empty team is the
+  // exception: the workspace is already chosen, and the header plus create
+  // action are how you get the first assistant.
+  const showAssistants = resolved && (total > 1 || choice.kind === "empty-team");
 
   // Costs no request: the bell is already polling this query. For the
   // session with an open WS (the open conversation), the stream store's
