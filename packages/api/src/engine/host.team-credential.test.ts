@@ -15,7 +15,9 @@ import { PgCredentialStore } from "../plugins/credential-store.js";
 import { saveAppConfig, type GithubAppConfig } from "../services/github-app.js";
 import slackPlugin from "@valet/plugin-slack/plugin";
 import { linkIdentity } from "../channels/identity-links.js";
-import { EngineHost } from "./host.js";
+import { EngineHost, sessionPrincipal } from "./host.js";
+import { orgs } from "../schema/index.js";
+import { createLlmProvider } from "../services/llm-providers.js";
 
 const orgId = "team-cred-org";
 const userId = "team-cred-user";
@@ -114,6 +116,22 @@ describe("EngineHost team-owned session credentials", () => {
     expect(cred?.accessToken).toBe("inst-333");
   });
 
+  it("unbound team GitHub with a member PAT and no installation does not use the member token", async () => {
+    const { appDb, credentials } = await harness();
+    await credentials.save({ type: "user", id: userId }, "github", {
+      type: "oauth2",
+      accessToken: "user-tok",
+      metadata: { login: "octocat" },
+    });
+    fixture = startGithubFixture();
+    const h = makeHost(appDb, credentials, fixture.url);
+
+    const session = await h.sessionFor("sess-team-gh-member-pat", teamMeta);
+    await expect(session.credentialProvider().get("github")).rejects.toThrow(
+      /no GitHub credential|GitHub App/,
+    );
+  });
+
   it("resolves Slack to the org bot token with no owner_slack_user_id", async () => {
     const { appDb, credentials } = await harness();
     await credentials.save({ type: "org", id: orgId }, "slack", {
@@ -146,5 +164,47 @@ describe("EngineHost team-owned session credentials", () => {
     const cred = await session.credentialProvider().get("linear");
 
     expect(cred?.accessToken).toBe("user-linear");
+  });
+
+  it("sessionPrincipal throws when a team session has no ownerTeamId", () => {
+    expect(() =>
+      sessionPrincipal({ userId, orgId, workspace: "/tmp", ownerType: "team" }),
+    ).toThrow(/owning team id/);
+  });
+
+  it("team OpenAI prefers the org LLM-provider key over the prompting member's row", async () => {
+    const { appDb, credentials } = await harness();
+    await appDb.insert(orgs).values({ id: orgId, name: "Org", createdAt: NOW });
+    const provider = await createLlmProvider(appDb, { orgId, kind: "openai", name: "OpenAI" });
+    await credentials.save({ type: "org", id: orgId }, `llm:${provider.id}`, {
+      type: "api_key",
+      apiKey: "sk-org-llm",
+    });
+    await credentials.save({ type: "user", id: userId }, "openai", {
+      type: "api_key",
+      apiKey: "sk-member-must-not-win",
+    });
+    fixture = startGithubFixture();
+    const h = makeHost(appDb, credentials, fixture.url);
+
+    const session = await h.sessionFor("sess-team-openai-org", teamMeta);
+    const cred = await session.credentialProvider().get("openai");
+
+    expect(cred?.accessToken).toBe("sk-org-llm");
+  });
+
+  it("team OpenAI does not read the prompting member's key when no org or team row exists", async () => {
+    const { appDb, credentials } = await harness();
+    await credentials.save({ type: "user", id: userId }, "openai", {
+      type: "api_key",
+      apiKey: "sk-member-must-not-win",
+    });
+    fixture = startGithubFixture();
+    const h = makeHost(appDb, credentials, fixture.url);
+
+    const session = await h.sessionFor("sess-team-openai-no-org", teamMeta);
+    const cred = await session.credentialProvider().get("openai");
+
+    expect(cred?.accessToken).not.toBe("sk-member-must-not-win");
   });
 });

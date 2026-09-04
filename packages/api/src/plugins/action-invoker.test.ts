@@ -937,6 +937,47 @@ describe("buildActionInvoker: github service resolution", () => {
     expect(result).toEqual({ ok: true, result: { token: "inst-999" } });
   });
 
+  it("team owner + member PAT + installation: uses the installation, not the member PAT", async () => {
+    const { appDb, credentials } = await harness();
+    await credentials.save({ type: "user", id: userId }, "github", {
+      type: "oauth2",
+      accessToken: "user-tok",
+      metadata: { login: "octocat" },
+    });
+    await saveAppConfig({ credentials }, orgId, appConfig);
+    await appDb.insert(githubInstallations).values({
+      id: "ghi_444",
+      orgId,
+      installationId: 444,
+      accountLogin: "acme",
+      accountType: "Organization",
+      repositorySelection: "all",
+      suspended: false,
+      cachedToken: null,
+      cachedTokenExpiresAt: null,
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({
+        body: { token: `inst-${id}`, expires_at: new Date(NOW + 3600_000).toISOString() },
+      }),
+    });
+    const invoke = buildActionInvoker({
+      db: appDb,
+      credentials,
+      actionPluginByService: githubActionPluginByService(),
+      githubTokenDeps: { key: deriveSecretKey("cache-key"), apiUrl: fixture.url, githubUrl: fixture.url, now: () => NOW },
+    });
+
+    const result = await invoke(
+      { service: "github", action: "whoami", params: {}, invocationId: "workflow:r1:n-team" },
+      { userId, orgId, owner: { type: "team", id: "team_1" } },
+    );
+
+    expect(result).toEqual({ ok: true, result: { token: "inst-444" } });
+  });
+
   it("repo-bound session with explicit binding auth:\"app\": installation token even when the user is connected", async () => {
     const { appDb, credentials } = await harness();
     // A healthy user credential IS connected — must be ignored because the
