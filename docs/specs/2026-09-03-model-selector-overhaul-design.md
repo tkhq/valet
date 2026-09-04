@@ -353,4 +353,18 @@ Recorded during implementation (2026-09-03):
   of every model enrolled in the org's tier map and the curated set**
   (2026-09-03 follow-up), not the curated set alone. A tier-enrolled model
   must start checked, or the very next tier-map edit would 400 (the
-  tier-map PATCH validates targets against the approved list).
+  tier-map PATCH validates targets against the approved list). The seed
+  matches a tier target through the bare/namespaced normalization
+  `isApproved` uses, not exact id equality — otherwise a bare-spelled
+  Anthropic tier target (`"claude-haiku-4-5"`) drops out of the seed when
+  the catalog lists the same model namespaced.
+- **The chat picker's model list is catalog construction order**
+  (2026-09-03 follow-up), not preference-ordered. The old preference sort
+  and its alphabetical-fallback sort are both gone along with org model
+  preferences; entries render in the order `GET /api/models` returns them
+  (active before inactive, per `services/model-catalog.ts`).
+- **Instance-config `org.modelPreferences` is removed** (2026-09-03
+  follow-up). A deployment config file that still declares it fails to
+  boot with a corrective message (`InstanceConfigError`, "unknown key") —
+  intentional: config-driven org preferences no longer exist, so the
+  loader must not silently accept and drop the key.
