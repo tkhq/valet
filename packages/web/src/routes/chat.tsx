@@ -114,14 +114,14 @@ function ChatPage() {
     chosen?.owner.type === "team" ? teams.find((t) => t.id === chosen.owner.id) : undefined;
   const emptyTeam = teams.find((t) => t.id === scope.key);
 
+  const canonicalizeId = choice.kind === "open" && choice.canonicalize ? choice.assistant.id : undefined;
   useEffect(() => {
-    if (choice.kind !== "open" || !choice.canonicalize) return;
-    if (assistant === choice.assistant.id) return;
+    if (!canonicalizeId || assistant === canonicalizeId) return;
     void navigate({
-      search: (prev) => ({ ...prev, assistant: choice.assistant.id }),
+      search: (prev) => ({ ...prev, assistant: canonicalizeId }),
       replace: true,
     });
-  }, [choice, assistant, navigate]);
+  }, [canonicalizeId, assistant, navigate]);
 
   // Neither the list nor `GET /info` creates an engine session (decision 20
   // / the assistants design), so ensure the active one exists before
@@ -184,7 +184,7 @@ function ChatPage() {
     );
   }
 
-  if (scope.key !== PERSONAL && listFailed && assistant === undefined) {
+  if (scope.key !== PERSONAL && listFailed) {
     return (
       <div className="flex-1 grid place-items-center p-8 text-center text-sm text-danger-500">
         <div>
@@ -242,7 +242,15 @@ function ChatPage() {
             </span>
           </ScopeNotice>
         )}
-        {unavailable && (
+        {unavailable && choice.kind !== "personal" && (
+          <ScopeNotice>
+            <span>
+              That assistant is not available. Showing this workspace's assistant instead. Select
+              another one in the sidebar.
+            </span>
+          </ScopeNotice>
+        )}
+        {unavailable && choice.kind === "personal" && (
           <ScopeNotice>
             <span>
               That assistant is not available to you. Showing your own assistant instead. Select
@@ -250,7 +258,7 @@ function ChatPage() {
             </span>
           </ScopeNotice>
         )}
-        {unresolved && (
+        {unresolved && choice.kind === "personal" && (
           <ScopeNotice>
             <span>
               Cannot load your assistants, so this one cannot be opened. Showing your own assistant

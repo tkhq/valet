@@ -77,16 +77,9 @@ export function AssistantRail() {
   // tree. With no `?assistant=`, open the ACTIVE workspace's default — so the
   // team you switched to shows its assistant and threads here, not your own
   // (the bug when you arrived at `/chat` with a team already in scope). A
-  // stale or hand-edited `?assistant=` still falls back the same way rather
-  // than rendering a session the viewer cannot read.
+  // stale `?assistant=` on a team stays on that team.
   const choice = chooseChatAssistant(groups, scope.key, search.assistant);
   const active = choice.kind === "open" || choice.kind === "personal" ? choice.assistant : undefined;
-  // A switcher with one row switches nothing, so it is not drawn. This is
-  // what keeps a solo user with one assistant on exactly the sidebar they
-  // had before a principal could own several. An empty team is the
-  // exception: the workspace is already chosen, and the header plus create
-  // action are how you get the first assistant.
-  const showAssistants = resolved && (total > 1 || choice.kind === "empty-team");
 
   // Costs no request: the bell is already polling this query. For the
   // session with an open WS (the open conversation), the stream store's
@@ -253,11 +246,12 @@ export function scopedDefaultAssistant(
 /**
  * Which conversation `/chat` should open.
  *
- * A named `?assistant=` the caller can reach wins. Otherwise the active
- * workspace picks: that owner's default, or its first assistant. A team
- * workspace with no assistant is empty — the page must not open a personal
- * conversation. An unreachable `?assistant=` still falls back to your own
- * default; the page shows that with a strip.
+ * A named `?assistant=` the caller can reach wins (a notification or
+ * bookmark). The switcher then follows that assistant. Otherwise the
+ * active workspace picks: that owner's default, or its first assistant.
+ * A team workspace with no assistant is empty — the page must not open
+ * a personal conversation. An unreachable `?assistant=` on a team opens
+ * that team's default, or the empty-team notice. It never opens yours.
  */
 export type ChatAssistantChoice =
   | { kind: "open"; assistant: AssistantSummary; canonicalize: boolean }
@@ -271,6 +265,14 @@ export function chooseChatAssistant(
 ): ChatAssistantChoice {
   const named = findAssistant(groups, requestedId);
   if (named) return { kind: "open", assistant: named, canonicalize: false };
+
+  if (requestedId !== undefined && scopeKey !== "user") {
+    const scopedNamed = scopedDefaultAssistant(groups, scopeKey);
+    if (scopedNamed) {
+      return { kind: "open", assistant: scopedNamed, canonicalize: true };
+    }
+    return { kind: "empty-team" };
+  }
 
   if (requestedId !== undefined) {
     return { kind: "personal", assistant: ownDefaultAssistant(groups) };

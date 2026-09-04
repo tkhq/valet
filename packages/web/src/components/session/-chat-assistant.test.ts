@@ -108,8 +108,21 @@ describe("chooseChatAssistant", () => {
     });
   });
 
-  it("falls back to your own default when the named assistant is unreachable", () => {
+  it("opens the team's default when the named assistant is unreachable on a team workspace", () => {
     expect(chooseChatAssistant(groups, "t1", "asst_nope")).toEqual({
+      kind: "open",
+      assistant: expect.objectContaining({ id: "p2" }),
+      canonicalize: true,
+    });
+  });
+
+  it("keeps an empty team empty when the named assistant is unreachable", () => {
+    const emptyTeam = groupAssistants([own("mine", { isDefault: true })], teams);
+    expect(chooseChatAssistant(emptyTeam, "t1", "asst_nope")).toEqual({ kind: "empty-team" });
+  });
+
+  it("falls back to your own default when the named assistant is unreachable in personal scope", () => {
+    expect(chooseChatAssistant(groups, PERSONAL, "asst_nope")).toEqual({
       kind: "personal",
       assistant: expect.objectContaining({ id: "mine" }),
     });
