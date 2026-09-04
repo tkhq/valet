@@ -12,7 +12,13 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { TooltipProvider } from "~/components/primitives";
-import type { DecisionGate, OrchestratorChildSummary, ThreadSummary } from "@valet/api/wire";
+import type {
+  DecisionGate,
+  GetModelTiersResponse,
+  ModelInfo,
+  OrchestratorChildSummary,
+  ThreadSummary,
+} from "@valet/api/wire";
 
 const navigate = vi.fn();
 const setArchivedMutateAsync = vi.fn().mockResolvedValue({ id: "thread-1" });
@@ -24,6 +30,9 @@ let threads: ThreadSummary[] = [];
 let archivedThreads: ThreadSummary[] = [];
 let children: OrchestratorChildSummary[] = [];
 let pendingGates: Record<string, DecisionGate> = {};
+let sessionModel: string | undefined;
+let models: ModelInfo[] = [];
+let tierMap: GetModelTiersResponse = { xs: [], s: [], m: [], l: [], xl: [] };
 
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, ...rest }: { children: ReactNode; [key: string]: unknown }) => (
@@ -40,9 +49,11 @@ vi.mock("~/api/queries", async (importOriginal) => {
   return {
     ...actual,
     useThreads: () => ({ data: { threads }, isLoading: false, error: null }),
-    // Session default model for the pin chip; undefined keeps chips off
-    // unless a fixture sets a thread model explicitly.
-    useSession: () => ({ data: undefined, isLoading: false, error: null }),
+    useSession: () => ({
+      data: sessionModel ? { model: sessionModel } : undefined,
+      isLoading: false,
+      error: null,
+    }),
     useArchivedThreads: (_id: string, opts?: { enabled?: boolean }) => ({
       data: opts?.enabled === false ? undefined : { threads: archivedThreads },
       isLoading: false,
@@ -55,6 +66,15 @@ vi.mock("~/api/queries", async (importOriginal) => {
     // The gate seed (usePendingGatesSeed) stays inert: with no data the
     // effect never touches the store. Gates enter through `pendingGates`.
     useDecisions: () => ({ data: undefined, isLoading: false, error: null }),
+  };
+});
+
+vi.mock("~/api/settings", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/settings")>();
+  return {
+    ...actual,
+    useModels: () => ({ data: { models }, isLoading: false, error: null }),
+    useModelTiers: () => ({ data: tierMap, isLoading: false, error: null }),
   };
 });
 
@@ -138,6 +158,34 @@ beforeEach(() => {
   archivedThreads = [];
   children = [];
   pendingGates = {};
+  sessionModel = undefined;
+  models = [];
+  tierMap = { xs: [], s: [], m: [], l: [], xl: [] };
+});
+
+describe("ThreadTree — model label", () => {
+  it("shows the resolved model name with the selected size in a pill", () => {
+    sessionModel = "s";
+    models = [
+      {
+        id: "anthropic/claude-sonnet-5",
+        name: "Claude Sonnet 5",
+        providerId: "anthropic",
+        providerKind: "anthropic",
+        providerName: "Anthropic",
+        active: true,
+        approved: true,
+      },
+    ];
+    tierMap = { xs: [], s: [], m: [], l: ["anthropic/claude-sonnet-5"], xl: [] };
+    threads = [thread({ model: "l" })];
+
+    renderTree();
+
+    expect(screen.getByText("Claude Sonnet 5")).toBeTruthy();
+    expect(screen.getByText("Large")).toBeTruthy();
+    expect(screen.queryByText("l")).toBeNull();
+  });
 });
 
 describe("ThreadTree — thread context menu", () => {

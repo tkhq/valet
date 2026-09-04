@@ -53,6 +53,19 @@ vi.mock("~/api/queries", async (importOriginal) => {
   };
 });
 
+vi.mock("~/api/settings", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/api/settings")>();
+  return {
+    ...actual,
+    useModels: () => ({ data: { models: [] }, isLoading: false, error: null }),
+    useModelTiers: () => ({
+      data: { xs: [], s: [], m: [], l: [], xl: [] },
+      isLoading: false,
+      error: null,
+    }),
+  };
+});
+
 vi.mock("~/api/orchestrator", () => ({
   useOrchestratorInfo: () => ({ data: { sessionId: "orchestrator:user-1" } }),
   useOrchestratorChildren: () => ({ data: { children: [] }, refetch: vi.fn() }),
