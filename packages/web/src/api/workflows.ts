@@ -89,6 +89,46 @@ export function useWorkflows(
   });
 }
 
+/**
+ * Authenticated file download. A bare `<a href>` to the route would
+ * navigate the tab to raw YAML on a 4xx. Fetch first, then save. Returns
+ * the filename it wrote.
+ */
+export async function downloadWorkflowFile(
+  id: string,
+  format: "yaml" | "json" = "yaml",
+): Promise<string> {
+  const res = await fetch(
+    `/api/workflows/${encodeURIComponent(id)}/file?format=${format}`,
+  );
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const body: unknown = await res.json();
+      if (typeof body === "object" && body !== null) {
+        const e = (body as { error?: unknown }).error;
+        if (typeof e === "string") detail = e;
+      }
+    } catch {
+      // Non-JSON error body — the status alone has to do.
+    }
+    throw new Error(detail || `Export failed (${res.status}). Try again.`);
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get("content-disposition") ?? "";
+  const match = /filename="([^"]+)"/.exec(disposition);
+  const filename = match?.[1] ?? `workflow.${format}`;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+  return filename;
+}
+
 export function useWorkflow(
   id: string,
   opts?: Partial<UseQueryOptions<CreateWorkflowResponse>>,

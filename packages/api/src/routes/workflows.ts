@@ -13,7 +13,14 @@ import type { AppEnv } from "../env.js";
 import { requirePrincipal } from "../middleware/auth.js";
 import { resolveCreateOwner, type RequestPrincipal } from "../lib/request-principal.js";
 import { isTeamMember } from "../services/teams.js";
-import { WorkflowCursorError, type ValidateEnvironment } from "@valet/workflow";
+import {
+  WorkflowCursorError,
+  workflowFileBasename,
+  workflowFileEnvelope,
+  type ValidateEnvironment,
+  type WorkflowDefinition,
+} from "@valet/workflow";
+import { stringify as stringifyYaml } from "yaml";
 import {
   cancelWorkflowRun,
   createWorkflowDefinition,
@@ -394,6 +401,39 @@ workflowsRouter.get("/:id", async (c) => {
   if (!summary) return c.json({ error: "workflow not found" }, 404);
   const resp: GetWorkflowResponse = summary;
   return c.json(resp);
+});
+
+/**
+ * Decision-4 envelope as a file. Default YAML. A mirrored workflow writes
+ * its upstream reference into `description` and nowhere else, so a commit
+ * of the download is a labeled file and not a Valet row dump.
+ */
+workflowsRouter.get("/:id/file", async (c) => {
+  const { deps, owner } = serviceCtx(c);
+  const summary = await getWorkflowDefinition(deps, owner, c.req.param("id"));
+  if (!summary) return c.json({ error: "workflow not found" }, 404);
+
+  const formatRaw = blankToUndefined(c.req.query("format")) ?? "yaml";
+  if (formatRaw !== "yaml" && formatRaw !== "json") {
+    return c.json({ error: "format must be 'yaml' or 'json'." }, 400);
+  }
+  const format = formatRaw;
+
+  const description =
+    summary.origin === "repo" && summary.upstream
+      ? `Mirrored from ${summary.upstream.repoFullName}:${summary.upstream.path}`
+      : undefined;
+  const envelope = workflowFileEnvelope({
+    name: summary.name,
+    description,
+    definition: summary.definition as WorkflowDefinition,
+  });
+  const filename = workflowFileBasename(summary.name, format, summary.upstream?.path);
+  const body =
+    format === "json" ? `${JSON.stringify(envelope, null, 2)}\n` : stringifyYaml(envelope);
+  c.header("Content-Type", format === "json" ? "application/json; charset=utf-8" : "text/yaml; charset=utf-8");
+  c.header("Content-Disposition", `attachment; filename="${filename}"`);
+  return c.body(body);
 });
 
 workflowsRouter.put("/:id", async (c) => {

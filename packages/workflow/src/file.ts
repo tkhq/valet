@@ -108,6 +108,51 @@ export type WorkflowFileParseResult =
  * environment — the api passes the full one, the browser passes none, so a
  * file that parses in the browser can still be refused by the server.
  */
+/** The labeled envelope a file writes. Inverse of `parseWorkflowFileValue`
+ * for a `workflow/v1` file: parse the object this returns and the
+ * definition, name and description come back. Holds no encoder, so the
+ * caller picks YAML or JSON the same way the parser's callers pick a
+ * decoder. */
+export function workflowFileEnvelope(input: {
+  name?: string;
+  description?: string;
+  definition: WorkflowDefinition;
+  schedule?: WorkflowTemplateSchedule;
+  events?: WorkflowTemplateEventTrigger[];
+}): Record<string, unknown> {
+  const envelope: Record<string, unknown> = { valet: WORKFLOW_FILE_KIND };
+  if (typeof input.name === 'string' && input.name.trim() !== '') {
+    envelope.name = input.name.trim();
+  }
+  if (typeof input.description === 'string' && input.description.trim() !== '') {
+    envelope.description = input.description.trim();
+  }
+  envelope.definition = input.definition;
+  if (input.schedule) envelope.schedule = input.schedule;
+  if (input.events && input.events.length > 0) envelope.events = input.events;
+  return envelope;
+}
+
+/** Download name for an exported workflow. A mirrored file keeps its
+ * upstream basename (minus a known extension); a local one slugs its
+ * display name. */
+export function workflowFileBasename(
+  name: string,
+  format: 'yaml' | 'json',
+  upstreamPath?: string,
+): string {
+  if (upstreamPath) {
+    const base = upstreamPath.split('/').filter(Boolean).pop() ?? 'workflow';
+    const stem = base.replace(/\.(ya?ml|json)$/i, '') || 'workflow';
+    return `${stem}.${format}`;
+  }
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return `${slug || 'workflow'}.${format}`;
+}
+
 export function parseWorkflowFileValue(
   value: unknown,
   path: string,

@@ -53,6 +53,7 @@ let permissionsData: {
     provenance?: string;
   }>;
 } = { nodes: [] };
+const downloadWorkflowFile = vi.fn().mockResolvedValue("deploy-pipeline.yaml");
 const useWorkflowTriggersMock = vi.fn((_workflowId?: string) => ({
   data: { triggers: [] },
   isLoading: false,
@@ -92,6 +93,7 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 vi.mock("~/api/workflows", () => ({
+  downloadWorkflowFile: (...args: unknown[]) => downloadWorkflowFile(...args),
   useWorkflow: () => ({ data: workflowData, isLoading: false, error: null }),
   useUpdateWorkflow: () => ({ mutateAsync: updateMutateAsync, isPending: false }),
   useStartRun: () => ({ mutateAsync: startMutateAsync, isPending: false }),
@@ -177,6 +179,7 @@ async function openJsonMode(user: ReturnType<typeof userEvent.setup>) {
 describe("WorkflowEditorPage", () => {
   beforeEach(() => {
     navigate.mockClear();
+    downloadWorkflowFile.mockClear();
     updateMutateAsync.mockClear();
     startMutateAsync.mockClear();
     blockerProceed.mockClear();
@@ -300,6 +303,13 @@ describe("WorkflowEditorPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Runs (1+)" }));
     expect(screen.getByText("wfrun_0")).toBeTruthy();
     expect(screen.getByText(/Newest 1 runs shown/)).toBeTruthy();
+  });
+
+  it("downloads the decision-4 envelope from the overflow menu", async () => {
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    fireEvent.keyDown(screen.getByRole("button", { name: "More" }), { key: "Enter" });
+    fireEvent.click(await screen.findByText("Download"));
+    expect(downloadWorkflowFile).toHaveBeenCalledWith("wf_1");
   });
 
   it("renders the scoped triggers panel for this workflow", () => {
