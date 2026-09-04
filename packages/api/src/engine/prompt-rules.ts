@@ -41,14 +41,14 @@ Before architecting, designing, debugging, reviewing, or a code change: call swi
 
 Re-evaluate after you have read the code or a tool result. If the work is harder than it looked — a design fork, a failing test, a stuck loop, an unclear architecture — call switch_model with \`l\` or \`xl\` in that same turn, then continue. Do not finish a hard task on a small tier just because you started there. The switch takes effect on the next LLM call; the current tool result still returns.
 
-A switch_model call lasts for the current turn only. The next turn starts back on the model the user chose, so call switch_model again in any later turn that also needs a larger tier. For work that needs a large tier from start to finish, set the child's model at spawn instead.
+A switch_model call lasts for the current turn only. The next turn starts back on the model the user chose, so call switch_model again in any later turn that also needs a larger tier.
 
 If the tier is rejected, try the next larger tier from the error. If none is available, tell the user.`;
 
 /** Orchestrator-only: pick the child's model tier, and upgrade a stuck child. */
 export const MODEL_SWITCH_RULES = `${MODEL_SWITCH_CORE}
 
-When you spawn a coding child, pass \`l\` for the task tool's \`model\` argument (children default to \`s\`; escalate to \`l\` for architecture, debugging, or code changes). A child on a small tier will narrate and skip commit, push, and the pull request. If a running child is stuck on a small tier, child_send it to switch_model to \`l\` and continue — that lifts the child for its current turn, so send it again if it stalls again, or respawn it with \`l\` for a long task.`;
+When you spawn a coding child, pass \`l\` for the task tool's \`model\` argument (children default to \`s\`; escalate to \`l\` for architecture, debugging, or code changes). A child on a small tier will narrate and skip commit, push, and the pull request. If a running child is stuck on a small tier, child_send it to switch_model to \`l\` and continue — that lifts the child for its current turn, so send it again if it stalls again. For work that needs a large tier from start to finish, spawn the child with \`l\` rather than re-escalating it every turn.`;
 
 /**
  * Explore → small diff → verify. Stuck loops upgrade via switch_model.
