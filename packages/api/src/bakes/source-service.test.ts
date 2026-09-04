@@ -1785,6 +1785,28 @@ describe("repoPrebuildFlags", () => {
     errSpy.mockRestore();
   });
 
+  it("invalid base64 is an uncached error and a valid line-wrapped retry succeeds", async () => {
+    let calls = 0;
+    const valid = b64("docker: true\n");
+    const lineWrapped = `${valid.slice(0, 4)}\n${valid.slice(4)}`;
+    contentsHandler = (_owner, _repo, path) => {
+      if (path !== ".valet/prebuild.yaml") return { status: 404, body: { message: "Not Found" } };
+      calls++;
+      return calls === 1
+        ? { body: { type: "file", content: "%%%", encoding: "base64" } }
+        : { body: { type: "file", content: lineWrapped, encoding: "base64" } };
+    };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const first = await repoPrebuildFlags(deps(), "tok", "o", "r", "invalid-base64-ref");
+    const second = await repoPrebuildFlags(deps(), "tok", "o", "r", "invalid-base64-ref");
+
+    expect(first).toEqual({ docker: false, outcome: "error" });
+    expect(second).toEqual({ docker: true, outcome: "declared" });
+    expect(calls).toBe(2);
+    errSpy.mockRestore();
+  });
+
   it("an abort evicts a hung read without letting its stale cleanup delete a retry", async () => {
     let fetchCalls = 0;
     const resolvers: Array<(response: Response) => void> = [];

@@ -359,7 +359,16 @@ async function readGithubFile(
   ) {
     throw new GitHubApiError(200, apiPath, "response was not a base64 file");
   }
-  return Buffer.from(payload.content.replace(/\n/g, ""), "base64").toString("utf8");
+  const compact = payload.content.replace(/\s/g, "");
+  const validBase64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+  if (compact.length % 4 !== 0 || !validBase64.test(compact)) {
+    throw new GitHubApiError(200, apiPath, "file content was not valid base64");
+  }
+  const decoded = Buffer.from(compact, "base64");
+  if (decoded.toString("base64") !== compact) {
+    throw new GitHubApiError(200, apiPath, "file content was not canonical base64");
+  }
+  return decoded.toString("utf8");
 }
 
 /**

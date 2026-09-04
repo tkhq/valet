@@ -136,6 +136,7 @@ workspaceStorage: "4Gi"
   reads both keys in one cached (10 min), best-effort, 5s-bounded GitHub
   contents call. Only a 404 is an absent file. A malformed success response
   and all other failures use the defaults without entering the cache.
+  The reader accepts GitHub's line-wrapped base64 and rejects invalid content.
   The timeout aborts the GitHub request and removes its in-flight entry. A
   later session retries the read. Cleanup from the old request cannot remove
   a newer in-flight read for the same key.
