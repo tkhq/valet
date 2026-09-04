@@ -102,12 +102,13 @@ export interface PrebuildOverride {
   setup?: string[];
   skipDetect?: boolean;
   docker?: boolean;
-  /** Workspace volume size this repo needs (Kubernetes quantity, e.g.
-   * "4Gi"). Read at session create time — like `docker`, a session runtime
-   * knob that lives in the repo's own config — and provisions the workspace
-   * claim at this size instead of the deploy default, clamped to
-   * `VALET_SANDBOX_WORKSPACE_MAX` by the provider (TKAI-385). A large repo
-   * declares its footprint up front so no reactive resize is needed. */
+  /** Workspace volume size this repo requests (Kubernetes quantity, e.g.
+   * "4Gi"). The api reads it at session create time. Like `docker`, this is a
+   * session runtime knob in the repo config. Kubernetes bounds the claim
+   * target by the deploy default floor and `VALET_SANDBOX_WORKSPACE_MAX` cap.
+   * A fresh claim starts at that target. If this declaration is present during
+   * adoption, an undersized claim can grow toward the same target. The provider
+   * never requests a shrink or waits for capacity during adoption. */
   workspaceStorage?: string;
   /**
    * REPO-INDEPENDENT setup commands (toolchain installs), split out of

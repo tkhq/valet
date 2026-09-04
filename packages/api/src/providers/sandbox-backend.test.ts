@@ -195,6 +195,51 @@ describe("storage quantity env validation (TKAI-403)", () => {
       ),
     ).toThrow(/effective "50Gi".*effective "20Gi"/);
   });
+
+  it("throws at boot when an explicit ephemeral request exceeds the default limit", () => {
+    expect(() =>
+      buildSandboxProvider(
+        {
+          VALET_SANDBOX_BACKEND: "kubernetes",
+          VALET_SANDBOX_IMAGE: "ghcr.io/example/sandbox:latest",
+          VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST: "10Gi",
+        },
+        { kubeConfig: fakeKubeConfig() },
+      ),
+    ).toThrow(
+      /VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST \(effective "10Gi"\) exceeds VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT \(effective "8Gi"\).*Lower the request or raise the limit/,
+    );
+  });
+
+  it("throws at boot when the default ephemeral request exceeds an explicit limit", () => {
+    expect(() =>
+      buildSandboxProvider(
+        {
+          VALET_SANDBOX_BACKEND: "kubernetes",
+          VALET_SANDBOX_IMAGE: "ghcr.io/example/sandbox:latest",
+          VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT: "1Gi",
+        },
+        { kubeConfig: fakeKubeConfig() },
+      ),
+    ).toThrow(/effective "2Gi".*effective "1Gi"/);
+  });
+
+  it.each([
+    { request: "0", limit: "1Gi" },
+    { request: "10Gi", limit: "0" },
+  ])("allows a disabled ephemeral side: request=$request limit=$limit", ({ request, limit }) => {
+    expect(() =>
+      buildSandboxProvider(
+        {
+          VALET_SANDBOX_BACKEND: "kubernetes",
+          VALET_SANDBOX_IMAGE: "ghcr.io/example/sandbox:latest",
+          VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST: request,
+          VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT: limit,
+        },
+        { kubeConfig: fakeKubeConfig() },
+      ),
+    ).not.toThrow();
+  });
 });
 
 describe("resolveDefaultImage", () => {

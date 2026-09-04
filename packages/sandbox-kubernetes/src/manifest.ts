@@ -179,13 +179,14 @@ function resourceRequirementsFrom(resources: SandboxResourceOpts): ResourceRequi
 }
 
 /**
- * Workspace claim target (TKAI-385): a repo-declared request
- * (`SandboxCreateOpts.workspaceStorage`) wins over the deploy default,
- * CLAMPED to the growth cap. A repo cannot request unbounded storage. An
+ * Workspace claim target (TKAI-385): the provider bounds a repo request
+ * (`SandboxCreateOpts.workspaceStorage`) by the deploy default floor and the
+ * growth cap. A request cannot resolve to a smaller or unbounded claim. An
  * unparseable request or cap falls back to the default with a log. A fresh
- * claim starts at this target. During adoption, the provider uses this target
- * for a best-effort grow of an undersized claim. It never shrinks a claim or
- * waits for volume readiness. Exported for direct unit coverage.
+ * claim starts at this target. During adoption, an explicit declaration uses
+ * the same target for a best-effort grow of an undersized claim. The provider
+ * never shrinks a claim or waits for volume readiness. Exported for direct
+ * unit coverage.
  */
 export function resolveWorkspaceStorageRequest(
   cfg: K8sProviderConfig,

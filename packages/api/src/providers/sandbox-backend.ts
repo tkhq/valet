@@ -399,6 +399,16 @@ export function buildSandboxProvider(
       const ephemeralStorageLimit = resolveSandboxEphemeralStorageLimit(env);
       const workspaceStorage = resolveSandboxWorkspaceStorage(env);
       const workspaceStorageMax = resolveSandboxWorkspaceStorageMax(env);
+      if (ephemeralStorage && ephemeralStorageLimit) {
+        const requestBytes = parseStorageQuantity(ephemeralStorage);
+        const limitBytes = parseStorageQuantity(ephemeralStorageLimit);
+        if (requestBytes !== null && limitBytes !== null && requestBytes > limitBytes) {
+          throw new Error(
+            `VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST (effective "${ephemeralStorage}") exceeds VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT (effective "${ephemeralStorageLimit}"). ` +
+              "Lower the request or raise the limit.",
+          );
+        }
+      }
       // Contradictory deploy config fails loud at boot (TKAI-403): a default
       // above the cap would give undeclared repos MORE than a repo that
       // declares the same size gets after clamping. Compare EFFECTIVE values:

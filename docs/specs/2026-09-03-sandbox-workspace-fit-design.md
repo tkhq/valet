@@ -139,7 +139,9 @@ disables that environment variable. A disabled workspace default or cap uses
 the manifest builder's effective default of 1Gi or 20Gi. At boot, the api
 compares these effective workspace values. If the effective default exceeds
 the effective cap, the api stops and tells the operator to lower the default
-or raise the cap.
+or raise the cap. When both ephemeral-storage values are enabled, the api also
+requires the effective request to be at most the effective limit. If either
+ephemeral-storage value is disabled, the api omits that pair check.
 
 Storage comparison follows the Kubernetes `resource.Quantity` suffix forms:
 DecimalSI (`n`, `u`, `m`, empty, `k`, `K`, `M`, `G`, `T`, `P`, `E`), BinarySI
@@ -147,10 +149,11 @@ DecimalSI (`n`, `u`, `m`, empty, `k`, `K`, `M`, `G`, `T`, `P`, `E`), BinarySI
 integer math before it converts the result to a JavaScript number. It rounds
 a fractional byte away from zero while preserving its sign. Any positive
 quantity therefore resolves to at least one byte. A fractional storage
-quantity can never disable a value by becoming zero. Storage callers reject
-negative or otherwise non-positive values. The parser rejects malformed
-quantities, non-finite quantities, and results above JavaScript's safe-integer
-byte range.
+quantity can never disable a value by becoming zero. Storage callers require
+a positive value. The environment reader is the exception: a quantity whose
+parsed value is exactly zero disables that environment variable. Callers
+reject negative values. The parser rejects malformed quantities, non-finite
+quantities, and results above JavaScript's safe-integer byte range.
 
 ## Part C — repo-declared workspace size (TKAI-385)
 

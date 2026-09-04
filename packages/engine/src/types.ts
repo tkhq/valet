@@ -1212,16 +1212,14 @@ export interface SandboxCreateOpts {
   workspace?: string;
   /**
    * Requested size for the sandbox's PERSISTENT workspace volume, as a
-   * quantity string (e.g. "4Gi"). Sourced from the repo's own declaration
-   * (`.valet/prebuild.yaml` `workspaceStorage`) so a large repo starts with
-   * a claim big enough for its checkout + install artifacts instead of
-   * relying on reactive growth. Providers with a sized persistent workspace
-   * (kubernetes) honor it CLAMPED to the deploy's growth cap
-   * (`VALET_SANDBOX_WORKSPACE_MAX`) — a repo cannot request unbounded
-   * storage; other providers ignore it. A fresh volume starts at this size.
-   * When kubernetes adopts an existing volume below this size, it requests a
-   * grow but never a shrink. Adoption growth is best-effort and does not wait
-   * for volume readiness.
+   * quantity string (e.g. "4Gi"). The repo supplies this request through
+   * `.valet/prebuild.yaml` `workspaceStorage`. A provider with a sized
+   * persistent workspace resolves the effective size. Kubernetes bounds the
+   * target by its deploy floor and growth cap. A fresh volume starts at that
+   * target. When kubernetes adopts an existing volume for this explicit
+   * request, it requests a best-effort grow if the volume is below the target.
+   * It never requests a shrink or waits for volume readiness. Other providers
+   * ignore this request.
    */
   workspaceStorage?: string;
   env?: Record<string, string>;
