@@ -92,6 +92,7 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/team-dashboard.test.ts",
   "src/integration/thread-archive.test.ts",
   "src/integration/thread-rename.test.ts",
+  "src/integration/thread-create-settings.test.ts",
   "src/integration/child-dismiss.test.ts",
   "src/integration/orchestrator-children-scope.test.ts",
   "src/integration/command-route.test.ts",
