@@ -1,21 +1,24 @@
-/**
- * Integration tests for POST /api/sessions/:id/files (sandbox file upload).
- *
- * Coverage:
- * - Happy path: plain text file, zip extraction, PDF extraction (text-based and scanned)
- * - Auth: non-owner 404, sandbox-token 404
- * - Size cap: 413 on breach, partial file deleted
- * - Extract validation: 415 on force-extract non-archive
- * - Overwrite: 409 when dest exists
- * - Sandbox not ready: 409 with wake flag
- */
+/** Integration coverage for sandbox file upload, including attachment
+ * readiness, extraction, limits, overwrite safety, and ref handling. */
 
 import { describe, it, expect, afterEach } from "vitest";
 import { createHash } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { zipExtractRoot } from "./sandbox-file-upload.js";
+import { sandboxReadyError, zipExtractRoot } from "./sandbox-file-upload.js";
 import type { PostSessionFileUploadResponse } from "../wire/types.js";
+import {
+  SandboxPreparationError,
+  SandboxStartupError,
+  SandboxUnavailableError,
+  WorkspaceProvisioningError,
+  VirtualSandboxProvider,
+  type Sandbox,
+  type SandboxCapabilities,
+  type SandboxCreateOpts,
+  type SandboxProvider,
+  type SandboxStatus,
+} from "@valet/engine";
 
 // A flat `zip -X` archive: a.txt ("alpha\n") + b.txt ("beta\n") at the root,
 // no directory entries — the shape that regressed when extraction relied on
@@ -25,6 +28,31 @@ const ZIP_FLAT = Buffer.from(
   "base64",
 );
 
+class UploadSandboxProvider implements SandboxProvider {
+  readonly backend = "upload-test";
+  readonly inner = new VirtualSandboxProvider();
+  createCalls = 0;
+  resumeCalls = 0;
+  failNext = false;
+
+  capabilities(): SandboxCapabilities {
+    return { ...this.inner.capabilities(), hibernation: true };
+  }
+  async create(opts: SandboxCreateOpts): Promise<Sandbox> {
+    this.createCalls += 1;
+    if (this.failNext) {
+      this.failNext = false;
+      throw new SandboxStartupError("upload-test", "test startup failure");
+    }
+    return this.inner.create(opts);
+  }
+  restore(id: string): Promise<Sandbox> { return this.inner.restore(id); }
+  destroy(id: string): Promise<void> { return this.inner.destroy(id); }
+  status(id: string): Promise<SandboxStatus> { return this.inner.status(id); }
+  async suspend(_id: string): Promise<void> {}
+  async resume(_id: string): Promise<void> { this.resumeCalls += 1; }
+}
+
 let api: TestApi | undefined;
 
 afterEach(async () => {
@@ -32,18 +60,70 @@ afterEach(async () => {
   api = undefined;
 });
 
-async function createSession(baseUrl: string): Promise<string> {
+async function createSession(baseUrl: string, initialPrompt = "ready"): Promise<string> {
   const res = await fetch(`${baseUrl}/api/sessions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ workspace: "/tmp", initialPrompt: "ready" }),
+    body: JSON.stringify({ workspace: "/tmp", ...(initialPrompt ? { initialPrompt } : {}) }),
   });
   expect(res.status).toBe(201);
   const { id } = (await res.json()) as { id: string };
   return id;
 }
 
+async function upload(baseUrl: string, sessionId: string, name: string): Promise<Response> {
+  const form = new FormData();
+  form.append("file", new Blob([name]), name);
+  return fetch(`${baseUrl}/api/sessions/${sessionId}/files`, { method: "POST", body: form });
+}
+
 describe("POST /api/sessions/:id/files", () => {
+  it("waits for detached provisioning and reuses the ready sandbox", async () => {
+    const provider = new UploadSandboxProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+    const sessionId = await createSession(api.baseUrl, "");
+
+    expect((await upload(api.baseUrl, sessionId, "cold.txt")).status).toBe(200);
+    expect((await upload(api.baseUrl, sessionId, "ready.txt")).status).toBe(200);
+    expect(provider.createCalls).toBe(1);
+  });
+
+  it("resumes a suspended sandbox in the same upload request", async () => {
+    const provider = new UploadSandboxProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+    const sessionId = await createSession(api.baseUrl, "");
+    expect((await upload(api.baseUrl, sessionId, "before.txt")).status).toBe(200);
+    await api.providers.engineHost.liveSession(sessionId)?.attachment.suspend();
+
+    expect((await upload(api.baseUrl, sessionId, "after.txt")).status).toBe(200);
+    expect(provider.resumeCalls).toBe(1);
+  });
+
+  it("recovers a provider-backed error on the next upload", async () => {
+    const provider = new UploadSandboxProvider();
+    provider.failNext = true;
+    api = await bootTestApi({ sandboxProvider: provider });
+    const sessionId = await createSession(api.baseUrl, "");
+
+    const failed = await upload(api.baseUrl, sessionId, "failed.txt");
+    expect(failed.status).toBe(500);
+    expect(await failed.json()).toMatchObject({ error: "sandbox failed to start" });
+    expect((await upload(api.baseUrl, sessionId, "recovered.txt")).status).toBe(200);
+    expect(provider.createCalls).toBe(2);
+  });
+
+  it("does not try to restart a released attachment", async () => {
+    const provider = new UploadSandboxProvider();
+    api = await bootTestApi({ sandboxProvider: provider });
+    const sessionId = await createSession(api.baseUrl, "");
+    expect((await upload(api.baseUrl, sessionId, "before.txt")).status).toBe(200);
+    await api.providers.engineHost.liveSession(sessionId)?.attachment.destroy();
+
+    const released = await upload(api.baseUrl, sessionId, "after.txt");
+    expect(released.status).toBe(409);
+    expect(await released.json()).toMatchObject({ error: "sandbox was released" });
+    expect(provider.createCalls).toBe(1);
+  });
   it("accepts a plain text file and returns correct response shape", async () => {
     api = await bootTestApi();
 
@@ -350,6 +430,21 @@ describe("POST /api/sessions/:id/files", () => {
   // MessageEntry type:"file" → agent note) is covered by
   // packages/engine/test/prompt-file-attachments.test.ts — this harness
   // runs keyless, so no turn ever starts and no user entry persists here.
+});
+
+describe("sandboxReadyError", () => {
+  it.each([
+    [new WorkspaceProvisioningError(60_000), "provisioning", false, 409, true],
+    [new WorkspaceProvisioningError(60_000), "error", false, 409, undefined],
+    [new SandboxStartupError("id", "bad image"), "error", false, 500, undefined],
+    [new SandboxPreparationError("bad prep"), "error", false, 500, undefined],
+    [new SandboxUnavailableError(), "released", false, 409, undefined],
+    [new SandboxUnavailableError(), "error", false, 409, undefined],
+    [new Error("abort"), "provisioning", true, 408, undefined],
+  ] as const)("maps readiness failure %#", (error, state, aborted, status, wake) => {
+    const mapped = sandboxReadyError(error, state, aborted);
+    expect([mapped.status, mapped.body.wake]).toEqual([status, wake]);
+  });
 });
 
 describe("zipExtractRoot", () => {
