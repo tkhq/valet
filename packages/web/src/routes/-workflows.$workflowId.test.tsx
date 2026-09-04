@@ -94,6 +94,7 @@ vi.mock("@tanstack/react-router", () => ({
 
 vi.mock("~/api/workflows", () => ({
   downloadWorkflowFile: (...args: unknown[]) => downloadWorkflowFile(...args),
+  useCopyWorkflow: () => ({ mutateAsync: vi.fn().mockResolvedValue({ id: "wf_copy" }), isPending: false }),
   useWorkflow: () => ({ data: workflowData, isLoading: false, error: null }),
   useUpdateWorkflow: () => ({ mutateAsync: updateMutateAsync, isPending: false }),
   useStartRun: () => ({ mutateAsync: startMutateAsync, isPending: false }),
@@ -188,6 +189,8 @@ describe("WorkflowEditorPage", () => {
     blockerDisabled = undefined;
     allowMutateAsync.mockClear();
     permissionsData = { nodes: [] };
+    delete (workflowData as { origin?: string }).origin;
+    delete (workflowData as { upstream?: unknown }).upstream;
   });
 
   it("loads the fetched definition into the editor and the name field", () => {
@@ -303,6 +306,19 @@ describe("WorkflowEditorPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Runs (1+)" }));
     expect(screen.getByText("wfrun_0")).toBeTruthy();
     expect(screen.getByText(/Newest 1 runs shown/)).toBeTruthy();
+  });
+
+  it("renders a mirrored workflow read-only, with a copy and a file link", () => {
+    Object.assign(workflowData, {
+      origin: "repo",
+      upstream: { repoFullName: "tkhq/automation", path: ".valet/workflows/nightly.yaml" },
+    });
+    render(<WorkflowEditorPage workflowId="wf_1" />);
+    expect(screen.getByTestId("mirrored-banner")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "tkhq/automation:.valet/workflows/nightly.yaml" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Copy" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+    expect((screen.getByLabelText("Workflow name") as HTMLInputElement).readOnly).toBe(true);
   });
 
   it("downloads the decision-4 envelope from the overflow menu", async () => {

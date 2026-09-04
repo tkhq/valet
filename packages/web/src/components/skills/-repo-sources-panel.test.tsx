@@ -101,7 +101,7 @@ vi.mock("~/api/assistants", async (importOriginal) => {
   };
 });
 
-import { SkillSourcesPanel, type SourcesOwner } from "./skill-sources-panel";
+import { RepoSourcesPanel, type SourcesOwner } from "./repo-sources-panel";
 import { PERSONAL, WorkspaceScopeProvider } from "~/lib/workspace-scope";
 
 const onCursorsChange = vi.fn();
@@ -118,7 +118,7 @@ function renderPanel(
   return render(
     <TooltipProvider>
       <WorkspaceScopeProvider>
-        <SkillSourcesPanel
+        <RepoSourcesPanel
           {...(props.owner === undefined ? {} : { owner: props.owner })}
           {...(props.readOnly === undefined ? {} : { readOnly: props.readOnly })}
           cursors={props.cursors ?? []}
@@ -129,7 +129,7 @@ function renderPanel(
   );
 }
 
-describe("SkillSourcesPanel", () => {
+describe("RepoSourcesPanel", () => {
   beforeEach(() => {
     window.localStorage.clear();
     currentData = { sources: [], nextCursor: null };
@@ -143,6 +143,9 @@ describe("SkillSourcesPanel", () => {
     listQuery.mockReset();
     onCursorsChange.mockReset();
     orgCallerRole = "admin";
+    teamsData = {
+      teams: [{ id: "team_1", orgId: "org_1", name: "Platform", createdAt: 1, memberCount: 2, callerRole: "member" }],
+    };
   });
 
   it("says a public repository needs no GitHub connection, and names the one used for a private one", () => {
@@ -190,7 +193,10 @@ describe("SkillSourcesPanel", () => {
     });
     fireEvent.submit(screen.getByRole("form", { name: /import a skill repository/i }));
 
-    expect(add).toHaveBeenCalledWith({ repo: "https://github.com/tkhq/skills" });
+    expect(add).toHaveBeenCalledWith({
+      repo: "https://github.com/tkhq/skills",
+      kinds: ["skills"],
+    });
   });
 
   it("files the import under the workspace being read, with no second question", () => {
@@ -206,7 +212,11 @@ describe("SkillSourcesPanel", () => {
     });
     fireEvent.submit(screen.getByRole("form", { name: /import a skill repository/i }));
 
-    expect(add).toHaveBeenCalledWith({ repo: "tkhq/skills", teamId: "team_1" });
+    expect(add).toHaveBeenCalledWith({
+      repo: "tkhq/skills",
+      teamId: "team_1",
+      kinds: ["skills"],
+    });
     expect(screen.queryByLabelText("Owner")).toBeNull();
   });
 
@@ -219,7 +229,36 @@ describe("SkillSourcesPanel", () => {
     });
     fireEvent.submit(screen.getByRole("form", { name: /import a skill repository/i }));
 
-    expect(add).toHaveBeenCalledWith({ repo: "tkhq/skills" });
+    expect(add).toHaveBeenCalledWith({ repo: "tkhq/skills", kinds: ["skills"] });
+  });
+
+  it("lets a team admin tick workflows and sends the kinds", () => {
+    teamsData = {
+      teams: [{ id: "team_1", orgId: "org_1", name: "Platform", createdAt: 1, memberCount: 2, callerRole: "admin" }],
+    };
+    renderPanel("team_1");
+    fireEvent.click(screen.getByRole("button", { name: /import/i }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "workflows" }));
+    fireEvent.change(screen.getByPlaceholderText(/owner\/repo/i), {
+      target: { value: "tkhq/automation" },
+    });
+    fireEvent.submit(screen.getByRole("form", { name: /import a skill repository/i }));
+    expect(add).toHaveBeenCalledWith({
+      repo: "tkhq/automation",
+      teamId: "team_1",
+      kinds: ["skills", "workflows"],
+    });
+  });
+
+  it("disables workflows and templates for a personal source, with the reason", () => {
+    renderPanel();
+    fireEvent.click(screen.getByRole("button", { name: /import/i }));
+    expect((screen.getByRole("checkbox", { name: "workflows" }) as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByRole("checkbox", { name: "templates" }) as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByRole("checkbox", { name: "memories" }) as HTMLInputElement).disabled).toBe(false);
+    expect(
+      screen.getByText(/personal source cannot collect workflows or templates/i),
+    ).toBeTruthy();
   });
 
   it("shows the owning team's name on a team-tracked repository", () => {
@@ -347,7 +386,11 @@ describe("SkillSourcesPanel", () => {
       target: { value: "tkhq/org-skills" },
     });
     fireEvent.submit(screen.getByRole("form", { name: /import a skill repository/i }));
-    expect(add).toHaveBeenCalledWith({ repo: "tkhq/org-skills", ownerType: "org" });
+    expect(add).toHaveBeenCalledWith({
+      repo: "tkhq/org-skills",
+      ownerType: "org",
+      kinds: ["skills"],
+    });
   });
 
   it("hides Import, Sync, and Remove from a read-only reader", () => {

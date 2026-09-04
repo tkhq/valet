@@ -21,6 +21,8 @@ import { TemplateGallery } from "~/components/workflows/template-gallery";
 import { TriggerList } from "~/components/workflows/trigger-list";
 import { RunStatusChip } from "~/components/workflows/run-status-chip";
 import { Button, ConfirmDialog, Spinner } from "~/components/primitives";
+import { Pager } from "~/components/pager";
+import { currentCursor, pageNumber, popCursor, pushCursor } from "~/lib/cursor-stack";
 import { useListOwner } from "~/lib/use-list-owner";
 
 /**
@@ -285,6 +287,14 @@ function DefinitionRow({
         <span className="relative z-10">
           <OwnerBadge ownerType={workflow.ownerType} ownerId={workflow.ownerId} />
         </span>
+        {workflow.origin === "repo" && workflow.upstream && (
+          <span
+            title={`${workflow.upstream.repoFullName}:${workflow.upstream.path}`}
+            className="relative z-10 shrink-0 truncate rounded-full bg-ink-wash-strong px-2 py-0.5 font-mono text-xs text-muted"
+          >
+            {workflow.upstream.repoFullName}:{workflow.upstream.path}
+          </span>
+        )}
         {countLabel !== undefined && (
           <span className="shrink-0 text-xs font-normal text-muted">
             {countLabel} run{runCount === 1 && !runsQ.data?.nextCursor ? "" : "s"}
@@ -325,29 +335,33 @@ function DefinitionRow({
         <Button size="sm" onClick={() => void handleRun()} disabled={startRun.isPending}>
           {startRun.isPending ? "Starting…" : "Run"}
         </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={() => {
-            setDeleteError(null);
-            setDeleteOpen(true);
-          }}
-          disabled={del.isPending}
-          aria-label={`Delete ${workflow.name}`}
-        >
-          <Trash2 className="h-4 w-4" />
-        </Button>
-        <ConfirmDialog
-          open={deleteOpen}
-          onOpenChange={setDeleteOpen}
-          title={`Delete "${workflow.name}"?`}
-          description="The workflow, its saved versions, and its triggers are deleted. Settled run history is kept."
-          confirmLabel="Delete workflow"
-          pendingLabel="Deleting…"
-          pending={del.isPending}
-          error={deleteError}
-          onConfirm={() => void handleDelete()}
-        />
+        {workflow.origin !== "repo" && (
+          <>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                setDeleteError(null);
+                setDeleteOpen(true);
+              }}
+              disabled={del.isPending}
+              aria-label={`Delete ${workflow.name}`}
+            >
+              <Trash2 className="h-4 w-4" />
+            </Button>
+            <ConfirmDialog
+              open={deleteOpen}
+              onOpenChange={setDeleteOpen}
+              title={`Delete "${workflow.name}"?`}
+              description="The workflow, its saved versions, and its triggers are deleted. Settled run history is kept."
+              confirmLabel="Delete workflow"
+              pendingLabel="Deleting…"
+              pending={del.isPending}
+              error={deleteError}
+              onConfirm={() => void handleDelete()}
+            />
+          </>
+        )}
       </div>
     </li>
   );
@@ -365,8 +379,15 @@ function RunsTab() {
   // The Runs tab is a workspace list like the others: without the switcher's
   // owner it shows the caller's runs plus every team's, ignoring the scope.
   const owner = useListOwner();
-  const { data, isLoading, error } = useAllWorkflowRuns(owner);
+  const [cursors, setCursors] = useState<string[]>([]);
+  const cursor = currentCursor(cursors);
+  const { data, isLoading, error } = useAllWorkflowRuns(
+    owner,
+    cursor === undefined ? undefined : { cursor },
+  );
   const runs = data?.runs ?? [];
+  const hasNext = data?.nextCursor != null;
+  const paged = !isLoading && !error && (cursors.length > 0 || hasNext);
 
   if (isLoading) {
     return (
@@ -387,25 +408,39 @@ function RunsTab() {
   }
 
   return (
-    <ul className="space-y-2">
-      {runs.map((r) => (
-        <li key={r.runId}>
-          <Link
-            to="/workflows/runs/$runId"
-            params={{ runId: r.runId }}
-            className="flex items-center justify-between gap-3 rounded border border-line bg-paper px-4 py-3 hover:border-ink/30"
-          >
-            <div className="min-w-0">
-              <div className="truncate text-sm font-medium text-ink">{r.workflowName}</div>
-              <div className="truncate text-xs text-muted font-mono">{r.runId}</div>
-            </div>
-            <div className="flex shrink-0 items-center gap-3">
-              <span className="text-xs text-muted">{new Date(r.createdAt).toLocaleString()}</span>
-              <RunStatusChip status={r.status} outcome={r.outcome} needsApproval={false} />
-            </div>
-          </Link>
-        </li>
-      ))}
-    </ul>
+    <div>
+      <ul className="space-y-2">
+        {runs.map((r) => (
+          <li key={r.runId}>
+            <Link
+              to="/workflows/runs/$runId"
+              params={{ runId: r.runId }}
+              className="flex items-center justify-between gap-3 rounded border border-line bg-paper px-4 py-3 hover:border-ink/30"
+            >
+              <div className="min-w-0">
+                <div className="truncate text-sm font-medium text-ink">{r.workflowName}</div>
+                <div className="truncate text-xs text-muted font-mono">{r.runId}</div>
+              </div>
+              <div className="flex shrink-0 items-center gap-3">
+                <span className="text-xs text-muted">{new Date(r.createdAt).toLocaleString()}</span>
+                <RunStatusChip status={r.status} outcome={r.outcome} needsApproval={false} />
+              </div>
+            </Link>
+          </li>
+        ))}
+      </ul>
+      {paged && (
+        <Pager
+          label="runs"
+          page={pageNumber(cursors)}
+          hasPrevious={cursors.length > 0}
+          hasNext={hasNext}
+          onPrevious={() => setCursors(popCursor(cursors))}
+          onNext={() => {
+            if (data?.nextCursor != null) setCursors(pushCursor(cursors, data.nextCursor));
+          }}
+        />
+      )}
+    </div>
   );
 }

@@ -47,7 +47,7 @@ import { errorText } from "~/lib/error-text";
 import { OwnerBadge } from "~/components/owner-badge";
 import { currentCursor, pageNumber, popCursor, pushCursor } from "~/lib/cursor-stack";
 import { useWorkspaceScope } from "~/lib/workspace-scope";
-import { useOrg } from "~/api/settings";
+import { useOrg, useTeams } from "~/api/settings";
 import {
   useAddSkillSource,
   useRemoveSkillSource,
@@ -63,7 +63,11 @@ export interface SourcesOwner {
   id: string;
 }
 
-export function SkillSourcesPanel({
+const CONTENT_KINDS = ["skills", "workflows", "templates", "memories"] as const;
+type ContentKind = (typeof CONTENT_KINDS)[number];
+const PRIVILEGED_KINDS = new Set<ContentKind>(["workflows", "templates"]);
+
+export function RepoSourcesPanel({
   owner,
   readOnly = false,
   cursors,
@@ -86,6 +90,7 @@ export function SkillSourcesPanel({
   const paged = !isLoading && !error && (cursors.length > 0 || hasNext);
   const [open, setOpen] = useState(false);
   const [repo, setRepo] = useState("");
+  const [kinds, setKinds] = useState<ContentKind[]>(["skills"]);
   const add = useAddSkillSource();
   // The active workspace owns a new source unless `owner` pins the org.
   // There was an Owner select in this form. It asked again what the nav's
@@ -94,17 +99,37 @@ export function SkillSourcesPanel({
   // new one under another.
   const workspace = useWorkspaceScope();
   const org = useOrg();
+  const teams = useTeams();
   const isOrgAdmin = org.data?.callerRole === "admin";
   const orgPinned = owner?.type === "org";
+  const teamRole = teams.data?.teams.find((t) => t.id === workspace.teamId)?.callerRole;
+  const canPickPrivileged = orgPinned ? isOrgAdmin : workspace.teamId !== undefined && teamRole === "admin";
+  const privilegedReason = orgPinned
+    ? "Only an org admin can collect workflows or templates for the organization."
+    : workspace.teamId === undefined
+      ? "A personal source cannot collect workflows or templates. Add the repository as a team source."
+      : "Only a team admin can collect workflows or templates.";
+
+  function toggleKind(kind: ContentKind) {
+    if (PRIVILEGED_KINDS.has(kind) && !canPickPrivileged) return;
+    setKinds((current) =>
+      current.includes(kind) ? current.filter((k) => k !== kind) : [...current, kind],
+    );
+  }
 
   function submit(e: FormEvent) {
     e.preventDefault();
     const value = repo.trim();
     if (value.length === 0) return;
+    const selected = kinds.length > 0 ? kinds : (["skills"] as ContentKind[]);
     add.mutate(
       owner?.type === "org"
-        ? { repo: value, ownerType: "org" }
-        : { repo: value, ...(workspace.teamId === undefined ? {} : { teamId: workspace.teamId }) },
+        ? { repo: value, ownerType: "org", kinds: selected }
+        : {
+            repo: value,
+            kinds: selected,
+            ...(workspace.teamId === undefined ? {} : { teamId: workspace.teamId }),
+          },
     );
     setRepo("");
   }
@@ -159,6 +184,32 @@ export function SkillSourcesPanel({
               THIS panel would use. An org panel files an org source, which
               reads through the GitHub App, so telling its admin to connect a
               personal account would send them to the wrong screen. */}
+          <fieldset className="mt-3">
+            <legend className="text-xs font-medium text-ink">Collect</legend>
+            <div className="mt-1.5 flex flex-wrap gap-3">
+              {CONTENT_KINDS.map((kind) => {
+                const privileged = PRIVILEGED_KINDS.has(kind);
+                const disabled = privileged && !canPickPrivileged;
+                return (
+                  <label
+                    key={kind}
+                    className={`flex items-center gap-1.5 text-xs ${disabled ? "text-muted" : "text-ink"}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={kinds.includes(kind)}
+                      disabled={disabled}
+                      onChange={() => toggleKind(kind)}
+                    />
+                    {kind}
+                  </label>
+                );
+              })}
+            </div>
+            {!canPickPrivileged && (
+              <p className="mt-1.5 text-xs text-muted">{privilegedReason}</p>
+            )}
+          </fieldset>
           <p className="mt-2 text-xs text-muted">
             A public repository needs no GitHub connection.{" "}
             {orgPinned
@@ -267,7 +318,7 @@ function SourceRow({
           )}
         </div>
         <p className="mt-0.5 text-xs text-muted">
-          {source.skillCount} skill{source.skillCount === 1 ? "" : "s"} ·{" "}
+          {source.kinds.join(", ")} · {source.skillCount} skill{source.skillCount === 1 ? "" : "s"} ·{" "}
           {source.lastSyncedAt === null ? "never synced" : `synced ${relativeTime(source.lastSyncedAt)}`}
         </p>
         {/* A sync that imported nothing writes its reason here, so "0 skills"
