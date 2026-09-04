@@ -740,11 +740,14 @@ function buildGithubCredentialProvider(
       }
       const resolved = await resolveSessionGitHubToken(deps, {
         orgId: ctx.orgId,
-        userId: ctx.userId,
+        // A team or org owner must not resolve the prompting member's PAT.
+        // `auto` without userId can still mint a sole installation token.
+        ...(owner.type === "user" ? { userId: ctx.userId } : {}),
         sessionId: ctx.sessionId,
         purpose: "api",
         // `auto` means "keep the default precedence", so it must NOT
-        // override a session binding's own selection.
+        // override a session binding's own selection. `app` already
+        // required a repo above.
         ...(selection === "auto" ? {} : { auth: selection }),
         ...(repo ? { repo } : {}),
       });

@@ -78,6 +78,35 @@ describe("TeamCredentialStore", () => {
     await expect(store.get(team, "github")).rejects.toThrow(/share it with the team again/);
   });
 
+  it("treats an empty team stub as a miss so org fallback can run", async () => {
+    const inner = makeStore({
+      "team:team_1:slack": { type: "oauth2", metadata: {} },
+    });
+    const store = new TeamCredentialStore(inner, {
+      isMember: async () => {
+        throw new Error("empty stubs must not check membership");
+      },
+    });
+    await expect(store.get(team, "slack")).resolves.toBeNull();
+  });
+
+  it("returns a 1Password reference row that has no secret yet", async () => {
+    const inner = makeStore({
+      "team:team_1:openai": {
+        type: "api_key",
+        metadata: { onepassword: { reference: "op://v/i/f", tokenScope: "org" } },
+      },
+    });
+    const store = new TeamCredentialStore(inner, {
+      isMember: async () => {
+        throw new Error("1Password references must not check membership");
+      },
+    });
+    await expect(store.get(team, "openai")).resolves.toMatchObject({
+      metadata: { onepassword: { reference: "op://v/i/f", tokenScope: "org" } },
+    });
+  });
+
   it("passes user and org reads through unchanged", async () => {
     const inner = makeStore({
       "user:u1:github": { type: "oauth2", accessToken: "user-tok" },

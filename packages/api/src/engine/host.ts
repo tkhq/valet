@@ -53,7 +53,11 @@ import {
   GitHubAuthError,
   resolveInstallationApiToken,
 } from "../services/github-tokens.js";
-import { primaryRepoBinding, resolveSessionGitHubToken } from "../services/session-github-token.js";
+import {
+  githubTokenArgsForOwner,
+  primaryRepoBinding,
+  resolveSessionGitHubToken,
+} from "../services/session-github-token.js";
 import { repoCredentialCommands, repoPrebuildFlags, type RepoPrebuildFlags } from "../bakes/source-service.js";
 import { recordPrebuildFlagsResolved } from "../observability/prebuild-metrics.js";
 import { loadSessionMeta } from "./session-meta.js";
@@ -62,7 +66,13 @@ import { computeSpec, specHash } from "./sandbox-spec.js";
 import { buildPrepSteps } from "./prep-steps.js";
 import { securityToolPrepSteps } from "./security-bootstrap.js";
 import type { OnePasswordService } from "../services/onepassword.js";
-import { orgFallbackPolicy, resolveUserCredentialRead, onePasswordScopesFor } from "../services/credential-resolution.js";
+import {
+  orgFallbackPolicy,
+  resolveOrgCredentialRead,
+  resolveTeamCredentialRead,
+  resolveUserCredentialRead,
+  onePasswordScopesFor,
+} from "../services/credential-resolution.js";
 import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
 import { resolveOpenAiCredential } from "../services/openai-key.js";
@@ -409,6 +419,20 @@ export interface SessionMeta {
    * `loadSessionMeta` supplies it from the app row.
    */
   ownerTeamId?: string;
+}
+
+/** The session principal `buildSession` stamps onto `SessionOptions.owner`. */
+export function sessionPrincipal(meta: SessionMeta): Principal {
+  if (meta.ownerType === "team") {
+    if (!meta.ownerTeamId) {
+      throw new Error(
+        "this team session has no owning team id. Re-open the session from the team workspace.",
+      );
+    }
+    return { type: "team", id: meta.ownerTeamId };
+  }
+  if (meta.ownerType === "org") return { type: "org", id: meta.orgId };
+  return { type: "user", id: meta.userId };
 }
 
 /** The primary repo's GitHub coordinates, or why a GitHub read cannot run.
@@ -878,14 +902,12 @@ export class EngineHost {
       : personaCell
         ? securityProvisioning.mcpPlugins
         : [];
-    // `SessionMeta` carries no principal (`ownerTeamId` only feeds the
-    // model-preference cascade), and this builder passes no `owner` to the
-    // engine either — `Session`'s constructor then defaults the principal
-    // to `{ type: "user", id: options.userId }`. So the acting user IS this
-    // session's owner, and the same `{ user, meta.userId }` scope the
-    // session's credentials already use is the honest one here.
-    const extras = await this.sessionExtras({ type: "user", id: meta.userId }, meta.orgId, [], extraPlugins);
-    const skillsProvider = this.skillsProviderFor({ type: "user", id: meta.userId }, meta.orgId, extraPlugins);
+    // Skills follow the session principal. A team-owned session reads that
+    // team's skills, not the prompting member's. SessionOptions.owner below
+    // uses the same principal.
+    const principal = sessionPrincipal(meta);
+    const extras = await this.sessionExtras(principal, meta.orgId, [], extraPlugins);
+    const skillsProvider = this.skillsProviderFor(principal, meta.orgId, extraPlugins);
 
     const engine = new Engine({
       providers: {
@@ -947,7 +969,7 @@ export class EngineHost {
       });
     };
     const specProvider = await this.buildSpecProvider(sessionId, meta, onStartRef, personaCell != null);
-    const credentialResolver = this.buildCredentialResolver(sessionId, meta.userId, meta.orgId, meta.ownerType);
+    const credentialResolver = this.buildCredentialResolver(sessionId, meta.userId, meta.orgId);
     // Slash-command options (Task 10). The workspace-skills provider's sandbox
     // accessor closes over `builtSession` — resolved lazily, so it is safe that
     // the session doesn't exist yet at this point. `hasPrep` is true only when
@@ -1048,6 +1070,7 @@ export class EngineHost {
           options: {
             userId: meta.userId,
             orgId: meta.orgId,
+            owner: principal,
             workspace: meta.workspace,
             sandbox: sandboxOpts,
             model,
@@ -1072,6 +1095,7 @@ export class EngineHost {
           id: sessionId,
           userId: meta.userId,
           orgId: meta.orgId,
+          owner: principal,
           workspace: meta.workspace,
           sandbox: sandboxOpts,
           model,
@@ -1463,41 +1487,41 @@ export class EngineHost {
    * so an unresolved session's options stay byte-identical to before this fix
    * (no `credentialResolver` key at all → the engine reads the raw store).
    *
-   * The resolver is the SINGLE decision point for this session's credentials:
+   * The resolver is the SINGLE decision point for this session's credentials.
+   * The engine passes the session principal as `owner` (user, team, or org).
+   * The resolver trusts that argument. It does not read a separate ownerType.
+   *
    *  - `github` (when `githubTokenDeps`+`db` are wired) → `resolveSessionGitHubToken`
-   *    (`purpose: "api"`), which honors the session's primary `session_repos`
-   *    binding auth when it has one and resolves repo-less `auto` otherwise.
-   *    A `GitHubAuthError` propagates unchanged — the engine surfaces it as
-   *    the tool's error result, hint text intact. Synthesizes a
-   *    `StoredCredential` the engine's `credentialProvider` maps to
-   *    `{ accessToken }`.
+   *    (`purpose: "api"`). A user owner keeps `userId` so their PAT or
+   *    App-OAuth can win. A team or org owner omits `userId`. `auth: "app"`
+   *    is set only when a repo is known (primary `session_repos` binding).
+   *    Without a binding, resolution stays `auto` so a sole installation or
+   *    org PAT can win. A `GitHubAuthError` propagates unchanged — the
+   *    engine surfaces it as the tool's error result, hint text intact.
+   *    Synthesizes a `StoredCredential` the engine's `credentialProvider`
+   *    maps to `{ accessToken }`.
    *  - `github:installation` → `resolveInstallationApiToken`, the explicit
    *    installation-tier request (the binding's owner, else the org's sole
    *    installation). `null` when no installation resolves, or when `db`/
    *    `githubTokenDeps` are not wired.
    *  - `openai` → `resolveOpenAiCredential` when `db` is wired (org OpenAI
-   *    LLM-provider key → `resolveUserCredentialRead` for a stored "openai"
-   *    row, including 1Password references → OPENAI_API_KEY env). Without
-   *    `db`, the stored-row half runs directly via `resolveUserCredentialRead`.
-   *  - `slack` → `resolveUserCredentialRead` (user row, then org row), then
-   *    `withSlackOwnerMetadata` when a credential is found and `db` is wired.
+   *    LLM-provider key → team row for a team owner, or
+   *    `resolveUserCredentialRead` for a user owner → OPENAI_API_KEY env).
+   *    A team or org owner never reads the prompting member's user row.
+   *  - `slack` → owner-precedence read (user, team, or org), then
+   *    `withSlackOwnerMetadata` only for a user owner when `db` is wired.
    *    The identity link injects `metadata.owner_slack_user_id` for
    *    plugin-slack's private-channel check.
    *  - every OTHER service (and `github` itself when `githubTokenDeps`/`db`
-   *    aren't wired) → `resolveUserCredentialRead` (shared owner-precedence
-   *    contract, `services/credential-resolution.ts`): a `{ type: "user", id:
-   *    userId }` row wins outright when present (any kind); on a user-row
-   *    MISS it falls back to the `{ type: "org", id: orgId }` row for the
-   *    same service. The engine always hands this resolver `owner = { type:
-   *    "user", id: userId }`, so `owner` itself is ignored below —
-   *    `userId`/`orgId` (captured by this closure) drive both halves.
-   *    Whichever row wins, when `onePassword` is wired and that row carries
-   *    `metadata.onepassword` (`onePasswordMeta`), `onePassword.resolveCredential`
-   *    fills in the secret from the referenced 1Password item; an
-   *    `OnePasswordAuthError` (missing/disabled token, SDK failure)
-   *    propagates unchanged, mirroring `GitHubAuthError`'s tool-error-result
-   *    behavior above. Rows without 1Password reference metadata (or with no
-   *    `onePassword` wired) pass through unchanged (same object, no clone).
+   *    aren't wired) → `resolveUserCredentialRead` for a user owner,
+   *    `resolveTeamCredentialRead` for a team owner (org fallback only when
+   *    a plugin declares the service org-provided), or
+   *    `resolveOrgCredentialRead` for an org owner. When `onePassword` is
+   *    wired and the winning row carries `metadata.onepassword`
+   *    (`onePasswordMeta`), `onePassword.resolveCredential` fills in the
+   *    secret. An `OnePasswordAuthError` propagates unchanged, mirroring
+   *    `GitHubAuthError`. Rows without 1Password reference metadata (or
+   *    with no `onePassword` wired) pass through unchanged.
    *
    *    On a user-row miss the org row is read only as far as
    *    `orgFallbackPolicy(plugins, service)` allows: `org-provided` when a
@@ -1559,14 +1583,13 @@ export class EngineHost {
     sessionId: string,
     userId: string,
     orgId: string,
-    ownerType: string | undefined,
   ): ((owner: CredentialOwner, service: string) => Promise<StoredCredential | null>) | undefined {
     const tokenDeps = this.opts.githubTokenDeps;
     const db = this.opts.db;
     const credentials = this.opts.engineCredentials;
     const onePassword = this.opts.onePassword;
     if ((!tokenDeps || !db) && !onePassword) return undefined;
-    return async (_owner, service) => {
+    return async (owner, service) => {
       if (service === GITHUB_INSTALLATION_CREDENTIAL_SERVICE) {
         // Explicit installation-tier request (github.list_repos with
         // `scope: "installation"`): mint the App installation token directly
@@ -1600,12 +1623,18 @@ export class EngineHost {
         return resolveOpenAiCredential(
           db,
           credentials,
-          { orgId, userId, scopes: onePasswordScopesFor(ownerType) },
+          {
+            orgId,
+            owner,
+            ...(owner.type === "user" ? { userId: owner.id } : {}),
+            scopes: onePasswordScopesFor(owner.type),
+          },
           process.env,
           onePassword,
         );
       }
       if (service === "github" && tokenDeps && db) {
+        const binding = await primaryRepoBinding(db, sessionId);
         const resolved = await resolveSessionGitHubToken(
           {
             db,
@@ -1616,7 +1645,7 @@ export class EngineHost {
             fetchImpl: tokenDeps.fetchImpl,
             now: tokenDeps.now,
           },
-          { orgId, userId, sessionId, purpose: "api" },
+          githubTokenArgsForOwner(owner, orgId, sessionId, binding?.repo),
         );
         // `purpose: "api"` throws (`GitHubAuthError`, with the connect hint)
         // rather than returning a null token; a null here would be a contract
@@ -1631,15 +1660,31 @@ export class EngineHost {
       // Slack is not special-cased for ESCALATION any more: `plugin-slack`
       // declares `requires.orgCredential`, so `orgFallbackPolicy` reaches the
       // org row for it and for nothing that has not asked. What stays special
-      // is the identity link, which the private-channel check needs.
+      // is the identity link, which the private-channel check needs — and
+      // only a user-owned session has one person whose link can authorize it.
       const fallback = orgFallbackPolicy(this.opts.plugins, service);
+      if (owner.type === "team") {
+        return resolveTeamCredentialRead(
+          { credentials, onePassword },
+          { orgId, teamId: owner.id, userId, scopes: onePasswordScopesFor("team") },
+          service,
+          fallback === "org-provided" ? "org-provided" : "none",
+        );
+      }
+      if (owner.type === "org") {
+        return resolveOrgCredentialRead(
+          { credentials, onePassword },
+          { orgId, userId, scopes: onePasswordScopesFor("org") },
+          service,
+        );
+      }
       const stored = await resolveUserCredentialRead(
         { credentials, onePassword },
-        { orgId, userId, scopes: onePasswordScopesFor(ownerType) },
+        { orgId, userId: owner.id, scopes: onePasswordScopesFor("user") },
         service,
         fallback,
       );
-      if (service === "slack" && stored && db) return withSlackOwnerMetadata(db, userId, stored);
+      if (service === "slack" && stored && db) return withSlackOwnerMetadata(db, owner.id, stored);
       return stored;
     };
   }
@@ -1756,14 +1801,15 @@ export class EngineHost {
         let token: string | null = null;
         let degradedTokenless = false;
         try {
-          const resolved = await resolveSessionGitHubToken(fullDeps, {
-            orgId: meta.orgId,
-            // The session owner's user credential is a valid tier for this
-            // read; without it, user-OAuth-only orgs resolved no token at all.
-            userId: meta.userId,
-            sessionId,
-            purpose: "api",
-          });
+          const resolved = await resolveSessionGitHubToken(
+            fullDeps,
+            githubTokenArgsForOwner(
+              sessionPrincipal(meta),
+              meta.orgId,
+              sessionId,
+              { owner, name: repoName },
+            ),
+          );
           token = resolved.token;
         } catch (err) {
           // Only an AUTH failure degrades to a tokenless read (mirroring
@@ -2267,7 +2313,7 @@ export class EngineHost {
     // to. See `PATCH /api/sessions/:id`.
     const profile = await this.storedProfile(sessionId);
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.actorUserId, meta.orgId, profile);
-    const credentialResolver = this.buildCredentialResolver(sessionId, meta.actorUserId, meta.orgId, principal.type);
+    const credentialResolver = this.buildCredentialResolver(sessionId, meta.actorUserId, meta.orgId);
     // Slash-command options: same wiring as the interactive path, so the
     // orchestrator answers /model and /sessions instead of the no-context
     // fallback. The getter closes over `builtSession`, assigned below.
@@ -3202,7 +3248,7 @@ export class EngineHost {
 
     const profile = opts.profile ?? "headless";
     const sandboxMint = await this.mintSandboxEnv(childSessionId, opts.actorUserId, opts.orgId, profile);
-    const credentialResolver = this.buildCredentialResolver(childSessionId, opts.actorUserId, opts.orgId, opts.owner.type);
+    const credentialResolver = this.buildCredentialResolver(childSessionId, opts.actorUserId, opts.orgId);
     const policyResolver = this.getPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
     // A child spawned with a repo binding (the spawner inserts the
@@ -3404,7 +3450,7 @@ export class EngineHost {
     });
 
     const sandboxMint = await this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId, "headless");
-    const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId, opts.owner.type);
+    const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId);
     const policyResolver = this.getPolicyResolver();
     const pluginStoreFactory = this.getPluginStoreFactory();
     const sessionOptions = {
