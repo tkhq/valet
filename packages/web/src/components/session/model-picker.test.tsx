@@ -257,13 +257,38 @@ describe("ModelPicker — approved-models filter", () => {
     expect(document.body.textContent).not.toContain("Llama 3");
   });
 
-  it("shows every model to an admin", async () => {
+  it("hides unapproved models from an admin too, in the baseline (approval is the only gate now)", async () => {
     meData = makeMe({ orgRole: "admin" });
     const user = userEvent.setup();
     renderPicker();
 
     await user.click(screen.getByRole("button", { name: "Choose model" }));
+    expect(document.body.textContent).not.toContain("Llama 3");
+  });
+
+  it("an admin's 'show more' reveals unapproved models", async () => {
+    meData = makeMe({ orgRole: "admin" });
+    const user = userEvent.setup();
+    renderPicker();
+
+    await user.click(screen.getByRole("button", { name: "Choose model" }));
+    expect(document.body.textContent).not.toContain("Llama 3");
+    await user.click(screen.getByText(/show \d+ more/));
     expect(document.body.textContent).toContain("Llama 3");
+  });
+
+  it("a member's 'show more' never reveals unapproved models, search included", async () => {
+    meData = makeMe({ orgRole: "member" });
+    const user = userEvent.setup();
+    renderPicker();
+
+    await user.click(screen.getByRole("button", { name: "Choose model" }));
+    const showMore = screen.queryByText(/show \d+ more/);
+    if (showMore) await user.click(showMore);
+    expect(document.body.textContent).not.toContain("Llama 3");
+
+    await user.type(screen.getByLabelText("Search models"), "llama");
+    expect(document.body.textContent).not.toContain("Llama 3");
   });
 
   it("never hides the currently pinned model from a member, even if it lost approval", async () => {

@@ -132,6 +132,7 @@ vi.mock("~/api/settings", () => ({
           providerKind: "anthropic",
           providerName: "Anthropic",
           active: true,
+          approved: true,
         },
         {
           id: "custom_1/llama-3",
@@ -140,6 +141,7 @@ vi.mock("~/api/settings", () => ({
           providerKind: "openai_compatible",
           providerName: "My Router",
           active: true,
+          approved: true,
         },
       ],
     },

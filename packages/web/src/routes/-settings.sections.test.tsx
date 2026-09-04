@@ -61,11 +61,11 @@ let apiKeysData: Array<{
 
 const modelsData = {
   models: [
-    { id: "claude-haiku-4-5", name: "Claude Haiku 4.5", contextWindow: 200000, reasoning: false },
-    { id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", contextWindow: 200000, reasoning: true },
-    { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", contextWindow: 200000, reasoning: true },
-    { id: "claude-opus-4-7", name: "Claude Opus 4.7", contextWindow: 200000, reasoning: true },
-    { id: "some-exotic-model", name: "Exotic", contextWindow: 100000, reasoning: false },
+    { id: "claude-haiku-4-5", name: "Claude Haiku 4.5", contextWindow: 200000, reasoning: false, approved: true },
+    { id: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", contextWindow: 200000, reasoning: true, approved: true },
+    { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", contextWindow: 200000, reasoning: true, approved: true },
+    { id: "claude-opus-4-7", name: "Claude Opus 4.7", contextWindow: 200000, reasoning: true, approved: true },
+    { id: "some-exotic-model", name: "Exotic", contextWindow: 100000, reasoning: false, approved: true },
   ],
 };
 

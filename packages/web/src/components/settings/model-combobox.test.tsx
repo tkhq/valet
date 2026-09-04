@@ -156,3 +156,52 @@ describe("ModelCombobox — Size tier group", () => {
     expect(screen.queryByText(/isn't in the current model registry/)).toBeNull();
   });
 });
+
+describe("ModelCombobox — approved-models filter", () => {
+  beforeEach(() => {
+    modelsData = {
+      models: [
+        {
+          id: "anthropic/claude-sonnet-4-5",
+          name: "Claude Sonnet 4.5",
+          providerId: "anthropic",
+          providerKind: "anthropic",
+          providerName: "Anthropic",
+          active: true,
+          approved: true,
+        },
+        {
+          id: "custom_1/llama-3",
+          name: "Llama 3",
+          providerId: "custom_1",
+          providerKind: "openai_compatible",
+          providerName: "My Router",
+          active: true,
+          approved: false,
+        },
+      ],
+    };
+  });
+
+  it("hides an unapproved model from the option list — no admin reveal on this surface", async () => {
+    const user = userEvent.setup();
+    render(<ModelCombobox value={null} onSelect={vi.fn()} onClear={vi.fn()} />);
+    await user.click(screen.getByRole("combobox"));
+    expect(screen.queryByText("Llama 3")).toBeNull();
+    expect(screen.getByText("Sonnet 4.5")).toBeTruthy();
+  });
+
+  it("an unapproved model does not surface even via search", async () => {
+    const user = userEvent.setup();
+    render(<ModelCombobox value={null} onSelect={vi.fn()} onClear={vi.fn()} />);
+    await user.click(screen.getByRole("combobox"));
+    await user.type(screen.getByRole("combobox"), "llama");
+    expect(screen.queryByText("Llama 3")).toBeNull();
+  });
+
+  it("keeps the currently selected value labeled even after it loses approval", () => {
+    render(<ModelCombobox value="custom_1/llama-3" onSelect={vi.fn()} onClear={vi.fn()} />);
+    expect(screen.getByDisplayValue("Llama 3")).toBeTruthy();
+    expect(screen.queryByText(/isn't in the current model registry/)).toBeNull();
+  });
+});

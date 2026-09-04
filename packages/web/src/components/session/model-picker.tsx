@@ -28,18 +28,24 @@ import { matchesNeedle } from "~/lib/text-match";
  * below, always occupying the first `SIZE_TIERS.length` slots.
  *
  * Options come from the org catalog (`GET /api/models`, Task 4/8), listed
- * in response order (already preference-ordered). Members see only
- * approved models; org admins see the full catalog — except a model
- * already pinned as `currentId` is always shown, even if it has since lost
- * approval, so the picker never renders as if the current pin doesn't
- * exist. By default Anthropic entries collapse to the curated tier list
- * (one row per newest tier) so `anthropic/claude-3-5-haiku-20241022` and
- * its many aliases don't crowd the picker; the "Show all" toggle reveals
- * every entry. Non-Anthropic providers always show — they can never be a
- * duplicate of a Claude tier. Entries matching a curated `MODEL_CATALOG`
- * tier (bare or `anthropic/`-namespaced) render with their curated label +
- * description; others render with the catalog `name` + provider hint.
- * Selecting an item always submits the catalog's own id verbatim.
+ * in response order. The baseline list is approved-only for EVERYONE
+ * (org model preferences are gone; approval is the only gate left) —
+ * except a model already pinned as `currentId` is always shown, even if it
+ * has since lost approval, so the picker never renders as if the current
+ * pin doesn't exist. By default Anthropic entries also collapse to the
+ * curated tier list (one row per newest tier) so
+ * `anthropic/claude-3-5-haiku-20241022` and its many aliases don't crowd
+ * the picker. The "Show all"/"show N more" toggle reveals the rest, but
+ * its reach differs by role: for an org admin it reveals the FULL catalog,
+ * including unapproved entries (the server has a matching admin bypass, so
+ * they can still select one); for a member it only reveals the remaining
+ * APPROVED non-curated entries — an unapproved model never appears for a
+ * member, including while searching. Non-Anthropic providers always show
+ * in the curated-collapsed baseline — they can never be a duplicate of a
+ * Claude tier. Entries matching a curated `MODEL_CATALOG` tier (bare or
+ * `anthropic/`-namespaced) render with their curated label + description;
+ * others render with the catalog `name` + provider hint. Selecting an item
+ * always submits the catalog's own id verbatim.
  *
  * A reasoning row renders above the footer count line when
  * `onSelectReasoning` is supplied: segmented buttons for "Default" plus
@@ -99,10 +105,13 @@ export function filterModels(models: ModelInfo[], query: string): ModelInfo[] {
   return models.filter((m) => matchesNeedle(query, [m.name, m.id, m.providerName]));
 }
 
-/** Org-approval scope: admins see the full catalog, members see only
- * `approved` entries. Callers that need to keep a currently-pinned model
- * visible (even if it lost approval) must add it back themselves — this
- * helper stays a pure two-input filter. */
+/** The full "show more" reveal scope for a role: an org admin's reveal is
+ * the whole catalog (the server has a matching admin bypass, so they can
+ * still select an unapproved model); a member's reveal is still approved
+ * entries only — a member never reaches an unapproved model, in the
+ * baseline or the reveal, search included. Callers that need to keep a
+ * currently-pinned model visible (even if it lost approval) must add it
+ * back themselves — this helper stays a pure two-input filter. */
 export function visibleModels(models: ModelInfo[], isAdmin: boolean): ModelInfo[] {
   return isAdmin ? models : models.filter((m) => m.approved);
 }
@@ -147,30 +156,49 @@ export function ModelPicker({
   const tierMapQ = useModelTiers();
   const orgReasoningQ = useOrgReasoning();
 
-  // Approval scope, with the current pin always readmitted — a member must
-  // never see the picker act as if their own pinned model doesn't exist,
-  // even after it loses approval underneath them.
-  const approvalScoped = useMemo(() => visibleModels(models, isAdmin), [models, isAdmin]);
-  const visibleCatalog = useMemo(() => {
-    if (!currentId || approvalScoped.some((m) => m.id === currentId)) return approvalScoped;
+  // Readmit the current pin regardless of approval — a user must never see
+  // the picker act as if their own pinned model doesn't exist, even after
+  // it loses approval underneath them.
+  function withPinReadmitted(scoped: ModelInfo[]): ModelInfo[] {
+    if (!currentId || scoped.some((m) => m.id === currentId)) return scoped;
     const pinned = models.find((m) => m.id === currentId);
-    return pinned ? [...approvalScoped, pinned] : approvalScoped;
-  }, [approvalScoped, models, currentId]);
+    return pinned ? [...scoped, pinned] : scoped;
+  }
+
+  // The baseline scope, for EVERYONE: approved entries only. This is what
+  // renders before any reveal, and what a member's "show more"/search stays
+  // within — an unapproved model never appears for a member.
+  const approvedScoped = useMemo(
+    () => withPinReadmitted(models.filter((m) => m.approved)),
+    [models, currentId],
+  );
+  // The full reveal scope, gated by role: an admin's reveal is the whole
+  // catalog (the server has a matching admin bypass); a member's reveal is
+  // the same approved-only set as the baseline.
+  const roleScoped = useMemo(
+    () => withPinReadmitted(visibleModels(models, isAdmin)),
+    [models, isAdmin, currentId],
+  );
 
   // Collapse Anthropic aliases by default unless `showAll` or query is
-  // active — a search should peek into the whole catalog so a user typing
+  // active — a search should peek into the wider scope so a user typing
   // "haiku-3-5-2024" can still find that pinned alias without toggling.
+  const revealAll = showAll || query.trim().length > 0;
+  const catalogForRole = revealAll ? roleScoped : approvedScoped;
   const filteredModels = useMemo(() => {
-    const revealAll = showAll || query.trim().length > 0;
     const baseline = revealAll
-      ? visibleCatalog
-      : visibleCatalog.filter((m) => {
+      ? catalogForRole
+      : catalogForRole.filter((m) => {
           if (m.id === currentId) return true;
           if (!isAnthropic(m.id)) return true;
           return !!curatedForCatalogId(m.id);
         });
     return filterModels(baseline, query);
-  }, [visibleCatalog, showAll, query, currentId]);
+  }, [catalogForRole, revealAll, query, currentId]);
+  // What a full reveal would show for this role, same query — the source of
+  // truth for "how many more" (curated-collapse AND, for an admin,
+  // approval), so the affordance appears whenever either would add rows.
+  const fullyRevealedModels = useMemo(() => filterModels(roleScoped, query), [roleScoped, query]);
 
   // The Size group hides when the query matches no tier label or token —
   // same substring matcher the model list search uses.
@@ -187,7 +215,7 @@ export function ModelPicker({
     ],
     [filteredTiers, filteredModels],
   );
-  const hiddenCount = visibleCatalog.length - filteredModels.length;
+  const hiddenCount = fullyRevealedModels.length - filteredModels.length;
 
   // Reset highlight when the filtered set changes.
   useEffect(() => {
@@ -456,7 +484,7 @@ export function ModelPicker({
           )}
           <div className="px-3 py-1.5 text-[10px] text-muted">
             <span>
-              {filteredModels.length} of {visibleCatalog.length} models
+              {filteredModels.length} of {roleScoped.length} models
               {hiddenCount > 0 && !showAll && !query && (
                 <>
                   {" · "}

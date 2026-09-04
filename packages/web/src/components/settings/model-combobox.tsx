@@ -14,14 +14,19 @@ import { matchesNeedle } from "~/lib/text-match";
  * `GET /api/org/model-tiers`, same `tierSubtitle` helper the chat
  * `ModelPicker` uses) that submit the bare tier token (e.g. `"l"`) rather
  * than a concrete model id; the engine resolves the tier at run time. Below
- * that, options come from the org catalog (`GET /api/models`, Task 4/8) —
- * already preference-ordered. Entries whose id matches a curated
- * `MODEL_CATALOG` tier (bare or `anthropic/`-namespaced) render with the
- * friendly label + tier badge; everything else renders with its catalog
- * `name` + provider hint. Selecting a model option always submits the
- * catalog's own `id` verbatim — the curated list only supplies display
- * labels, never overrides the id being written. When `value` is a tier
- * token, the input displays `TIER_LABELS[value]`.
+ * that, options come from the org catalog (`GET /api/models`, Task 4/8),
+ * filtered to APPROVED models for everyone — this settings surface has no
+ * admin reveal (org admins manage the approved list on the org models page
+ * itself). The currently selected `value` stays labeled even if it has
+ * since lost approval or left the catalog — only the option LIST is
+ * approval-filtered, never the display of what is already chosen. Entries
+ * whose id matches a curated `MODEL_CATALOG` tier (bare or
+ * `anthropic/`-namespaced) render with the friendly label + tier badge;
+ * everything else renders with its catalog `name` + provider hint.
+ * Selecting a model option always submits the catalog's own `id` verbatim
+ * — the curated list only supplies display labels, never overrides the id
+ * being written. When `value` is a tier token, the input displays
+ * `TIER_LABELS[value]`.
  *
  * Built with a plain filtered list under the input rather than a
  * Popover/Command primitive — this package's `components/primitives/` has
@@ -55,9 +60,16 @@ export function ModelCombobox({
   const tierMapQ = useModelTiers();
 
   const models = modelsQ.data?.models ?? [];
+  // `isKnownValue`/`selectedEntry` must still recognize an unapproved (or
+  // since-removed) selected value — only the OPTION LIST below is
+  // approval-filtered, so `registryIds` stays keyed on the full catalog.
   const registryIds = useMemo(() => new Set(models.map((m) => m.id)), [models]);
+  const approvedModels = useMemo(() => models.filter((m) => m.approved), [models]);
 
-  const matches = useMemo(() => models.filter((m) => matchesQuery(m.id, m.name, query)), [models, query]);
+  const matches = useMemo(
+    () => approvedModels.filter((m) => matchesQuery(m.id, m.name, query)),
+    [approvedModels, query],
+  );
   const curatedMatches = matches
     .map((m) => ({ m, curated: curatedForCatalogId(m.id) }))
     .filter((p): p is { m: ModelInfo; curated: ModelOption } => !!p.curated);
