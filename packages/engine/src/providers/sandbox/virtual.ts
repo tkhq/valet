@@ -124,7 +124,7 @@ export class VirtualSandbox implements Sandbox {
   async exec(command: string, opts?: ExecOpts): Promise<ExecResult> {
     const cwd = opts?.cwd ?? this.cwd;
     const out = await runVirtualCommand(this, command, cwd, opts?.env);
-    if (opts?.maxOutputBytes && out.stdout.length > opts.maxOutputBytes) {
+    if (opts?.maxOutputBytes !== undefined) {
       // Same head+tail cap as the real sandboxes (see CappedOutputBuffer).
       const buf = new CappedOutputBuffer(opts.maxOutputBytes);
       buf.append(out.stdout);

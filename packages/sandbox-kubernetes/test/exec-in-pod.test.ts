@@ -134,8 +134,8 @@ describe("execInPod", () => {
     });
 
     const result = await execInPod(deps(api), "pod-1", "utf8-output", { maxOutputBytes: 8 });
-    expect(result.stdout).toMatch(/^A\n\[\.\.\. 5 bytes omitted:/);
-    expect(result.stdout).toMatch(/C🧪Z$/);
+    expect(result.stdout).toMatch(/^A\n\[\.\.\. 4 bytes omitted:/);
+    expect(result.stdout).toMatch(/BC🧪Z$/);
     expect(result.stdout).not.toContain("�");
     expect(result.truncated).toBe(true);
   });
@@ -175,6 +175,34 @@ describe("execInPod", () => {
     expect(result.timedOut).toBe(true);
     expect(result.stdout).toBe("partial");
     expect(api.closed).toBe(1);
+  }, 2000);
+
+  it("ignores transport frames that arrive after timeout finalization", async () => {
+    let lateError: unknown;
+    let resolveLate!: () => void;
+    const lateFrame = new Promise<void>((resolve) => {
+      resolveLate = resolve;
+    });
+    const api = new FakePodExecApi((stdout) => {
+      stdout?.write("early");
+      setTimeout(() => {
+        try {
+          stdout?.emit("data", "late");
+        } catch (error) {
+          lateError = error;
+        } finally {
+          resolveLate();
+        }
+      }, 100);
+    });
+
+    const result = await execInPod(deps(api), "pod-1", "sleep 999", {
+      maxOutputBytes: 100,
+      timeout: 10,
+    });
+    await lateFrame;
+    expect(lateError).toBeUndefined();
+    expect(result.stdout).toBe("early");
   }, 2000);
 
   it(
@@ -237,5 +265,36 @@ describe("execInPod", () => {
     const result = await promise;
     expect(api.closed).toBe(1);
     expect(result.timedOut).toBeUndefined();
+  }, 2000);
+
+  it("ignores transport frames that arrive after abort finalization", async () => {
+    let lateError: unknown;
+    let resolveLate!: () => void;
+    const lateFrame = new Promise<void>((resolve) => {
+      resolveLate = resolve;
+    });
+    const api = new FakePodExecApi((stdout) => {
+      stdout?.write("early");
+      setTimeout(() => {
+        try {
+          stdout?.emit("data", "late");
+        } catch (error) {
+          lateError = error;
+        } finally {
+          resolveLate();
+        }
+      }, 100);
+    });
+    const controller = new AbortController();
+    const promise = execInPod(deps(api), "pod-1", "sleep 999", {
+      maxOutputBytes: 100,
+      signal: controller.signal,
+    });
+    controller.abort();
+
+    const result = await promise;
+    await lateFrame;
+    expect(lateError).toBeUndefined();
+    expect(result.stdout).toBe("early");
   }, 2000);
 });

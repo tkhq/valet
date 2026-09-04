@@ -53,7 +53,7 @@ describe("CappedOutputBuffer", () => {
     buf.append("A🧪BC🧪Z"); // 12 bytes total
 
     expect(buf.headText).toBe("A");
-    expect(buf.value()).toBe(`A${omittedMarker(5)}C🧪Z`);
+    expect(buf.value()).toBe(`A${omittedMarker(4)}BC🧪Z`);
     expect(buf.value()).not.toContain("�");
     expect(buf.truncated).toBe(true);
   });
@@ -106,6 +106,33 @@ describe("CappedOutputBuffer", () => {
 
     expect(() => new CappedOutputBuffer(Number.NaN)).toThrow(RangeError);
     expect(() => new CappedOutputBuffer(Number.POSITIVE_INFINITY)).toThrow(RangeError);
+  });
+
+  it("borrows unused head bytes when one emoji exactly fits the total cap", () => {
+    const once = new CappedOutputBuffer(4);
+    once.append("🧪");
+    expect(once.value()).toBe("🧪");
+    expect(once.truncated).toBe(false);
+
+    const chunked = new CappedOutputBuffer(4);
+    const emoji = "🧪";
+    chunked.append(emoji[0]);
+    chunked.append(emoji[1]);
+    expect(chunked.value()).toBe("🧪");
+    expect(chunked.truncated).toBe(false);
+  });
+
+  it("passes through exact-cap multibyte output across appends", () => {
+    const once = new CappedOutputBuffer(8);
+    once.append("🧪ABCD");
+    expect(once.value()).toBe("🧪ABCD");
+    expect(once.truncated).toBe(false);
+
+    const chunked = new CappedOutputBuffer(8);
+    chunked.append("🧪AB");
+    chunked.append("CD");
+    expect(chunked.value()).toBe("🧪ABCD");
+    expect(chunked.truncated).toBe(false);
   });
 
   it("finalizes a dangling high surrogate into the terminal appendix", () => {

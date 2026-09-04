@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { omittedMarker } from "@valet/engine";
 import { LocalSandbox } from "../src/index.js";
 
 let tmp: string;
@@ -115,5 +116,21 @@ describe("LocalSandbox: job mode", () => {
     expect(output.startsWith("a")).toBe(true);
     expect(output).toContain("6 bytes omitted");
     expect(output.endsWith("hij")).toBe(true);
+  });
+
+  it("6. applies a zero-byte cap", async () => {
+    const sb = new LocalSandbox("test", tmp);
+    const { execId } = await sb.execJob("printf x", { maxOutputBytes: 0 });
+    let poll = await sb.pollJob(execId, 0);
+    let output = poll.output;
+    let truncated = poll.truncated === true;
+    while (poll.status === "running") {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      poll = await sb.pollJob(execId, poll.nextOffset);
+      output += poll.output;
+      if (poll.truncated) truncated = true;
+    }
+    expect(output).toBe(omittedMarker(1));
+    expect(truncated).toBe(true);
   });
 });

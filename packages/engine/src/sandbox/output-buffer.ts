@@ -39,18 +39,18 @@ export class CappedOutputBuffer {
   private pendingHighSurrogate = "";
   private headSealed: boolean;
   private finalized = false;
+  private readonly maxBytes: number;
   private readonly headMax: number;
-  private readonly tailMax: number;
 
   constructor(limit: number) {
     if (!Number.isFinite(limit)) {
       throw new RangeError("maxOutputBytes must be finite. Set a finite non-negative integer.");
     }
     const normalizedLimit = Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, Math.floor(limit)));
+    this.maxBytes = normalizedLimit;
     // 1/4 head, 3/4 tail: the end of the output is where test runners and
     // builds put the information the caller came for.
     this.headMax = Math.floor(normalizedLimit / 4);
-    this.tailMax = normalizedLimit - this.headMax;
     this.headSealed = this.headMax === 0;
   }
 
@@ -103,6 +103,10 @@ export class CappedOutputBuffer {
     if (remainder.length === 0) return;
     const grown = this.tail + remainder;
     const grownBytes = this.tailBytes + utf8ByteLength(remainder);
+    // A complete code point can leave unused space in the fixed head
+    // partition. Once the head seals, the terminal tail can borrow that
+    // space while the total retained bytes stay within maxBytes.
+    const tailMax = this.maxBytes - this.headBytes;
     let suffixStart = grown.length;
     let suffixBytes = 0;
 
@@ -114,7 +118,7 @@ export class CappedOutputBuffer {
         if (previous >= 0xd800 && previous <= 0xdbff) codePointStart--;
       }
       const bytes = utf8CodePointBytes(grown.slice(codePointStart, suffixStart));
-      if (suffixBytes + bytes > this.tailMax) break;
+      if (suffixBytes + bytes > tailMax) break;
       suffixBytes += bytes;
       suffixStart = codePointStart;
     }

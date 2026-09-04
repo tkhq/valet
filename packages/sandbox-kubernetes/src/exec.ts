@@ -240,14 +240,16 @@ export async function execInPod(
   const stderr = new PassThrough();
   stdout.setEncoding("utf8");
   stderr.setEncoding("utf8");
-  stdout.on("data", (chunk: string) => {
+  const onStdoutData = (chunk: string) => {
     if (stdoutBuffer) stdoutBuffer.append(chunk);
     else stdoutText += chunk;
-  });
-  stderr.on("data", (chunk: string) => {
+  };
+  const onStderrData = (chunk: string) => {
     if (stderrBuffer) stderrBuffer.append(chunk);
     else stderrText += chunk;
-  });
+  };
+  stdout.on("data", onStdoutData);
+  stderr.on("data", onStderrData);
 
   const stdin = opts?.stdin !== undefined ? Readable.from(Buffer.from(opts.stdin, "utf8")) : null;
 
@@ -312,6 +314,12 @@ export async function execInPod(
     // before we read them out below.
     await new Promise((resolve) => setTimeout(resolve, FLUSH_GRACE_MS));
   }
+
+  // Capture has two phases. Detach transport listeners before terminal
+  // buffer views reject later appends. This also ignores frames that arrive
+  // after the timeout or abort flush grace.
+  stdout.off("data", onStdoutData);
+  stderr.off("data", onStderrData);
 
   const exitCode = winner.kind === "status" ? exitCodeFromStatus(winner.status) : 124;
   const stdoutResult = stdoutBuffer ? stdoutBuffer.value() : stdoutText;
