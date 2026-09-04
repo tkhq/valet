@@ -5,6 +5,7 @@ import { orgs } from "../schema/index.js";
 import {
   REASONING_LEVELS, compareReasoning, clampToMax,
   getOrgReasoningSettings, setOrgReasoningSettings, assertReasoningSelectable,
+  mergeReasoningSettings,
 } from "./reasoning.js";
 
 const orgId = "org-reasoning";
@@ -51,5 +52,41 @@ describe("reasoning", () => {
 
   it("accepts any known level when no cap is set", async () => {
     expect(await assertReasoningSelectable(db, orgId, "max")).toBeNull();
+  });
+
+  describe("mergeReasoningSettings", () => {
+    it("leaves an absent key untouched", () => {
+      expect(mergeReasoningSettings({ default: "low", max: "high" }, {})).toEqual({
+        default: "low",
+        max: "high",
+      });
+    });
+
+    it("clears a field set to null", () => {
+      expect(mergeReasoningSettings({ default: "low", max: "high" }, { default: null })).toEqual({
+        max: "high",
+      });
+    });
+
+    it("normalizes case and whitespace before validating", () => {
+      expect(mergeReasoningSettings({}, { default: " Medium " })).toEqual({ default: "medium" });
+    });
+
+    it("rejects an unknown level", () => {
+      const err = mergeReasoningSettings({}, { default: "ultra" });
+      expect(err).toMatch(/Unknown reasoning level/);
+    });
+
+    it("rejects a merged default that exceeds the merged max", () => {
+      const err = mergeReasoningSettings({}, { default: "high", max: "low" });
+      expect(err).toBe("Default reasoning level cannot exceed the max.");
+    });
+
+    it("allows a default equal to the max", () => {
+      expect(mergeReasoningSettings({}, { default: "high", max: "high" })).toEqual({
+        default: "high",
+        max: "high",
+      });
+    });
   });
 });

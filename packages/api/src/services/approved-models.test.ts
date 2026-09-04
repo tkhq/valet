@@ -11,6 +11,7 @@ import {
   setApprovedModels,
   isApproved,
   assertModelSelectable,
+  validateApprovedModelsList,
 } from "./approved-models.js";
 
 const orgId = "org-approved-models";
@@ -61,6 +62,30 @@ describe("approved-models", () => {
       expect(await getApprovedModels(db, orgId)).toEqual(["a/b"]);
       await setApprovedModels(db, orgId, null);
       expect(await getApprovedModels(db, orgId)).toBeNull();
+    });
+  });
+
+  describe("validateApprovedModelsList", () => {
+    const validIds = new Set(["anthropic/claude-haiku-4-5", "anthropic/claude-opus-4-7"]);
+
+    it("null clears the restriction and is always OK", () => {
+      expect(validateApprovedModelsList(null, validIds)).toBeNull();
+    });
+
+    it("rejects an empty list with the clear-restriction guidance", () => {
+      expect(validateApprovedModelsList([], validIds)).toBe(
+        "Approved list cannot be empty. To approve the whole catalog, clear the restriction instead.",
+      );
+    });
+
+    it("rejects an id not in the catalog, naming the id and GET /api/models", () => {
+      const err = validateApprovedModelsList(["anthropic/claude-haiku-4-5", "nope/nope"], validIds);
+      expect(err).toMatch(/nope\/nope/);
+      expect(err).toMatch(/GET \/api\/models/);
+    });
+
+    it("accepts a non-empty list where every id is valid", () => {
+      expect(validateApprovedModelsList(["anthropic/claude-haiku-4-5"], validIds)).toBeNull();
     });
   });
 });

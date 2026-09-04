@@ -89,6 +89,46 @@ export async function setOrgReasoningSettings(
 }
 
 /**
+ * Pure merge + validate for `PATCH /api/org/reasoning`: applies a patch
+ * (`default`/`max`, each `string | null | undefined`) onto stored settings.
+ * `null` clears a field; an absent key (checked with `in`, not `undefined`
+ * equality) leaves the stored value untouched. Values are normalized
+ * (trim + lowercase) before validation, so `"Medium"` is accepted like
+ * `"medium"`.
+ *
+ * Returns the merged settings, or an error message naming the corrective
+ * action when a value is unknown or the merged default would exceed the
+ * merged max.
+ */
+export function mergeReasoningSettings(
+  current: OrgReasoningSettings,
+  patch: { default?: string | null; max?: string | null },
+): OrgReasoningSettings | string {
+  const merged: OrgReasoningSettings = { ...current };
+
+  for (const key of ["default", "max"] as const) {
+    if (!(key in patch)) continue;
+    const value = patch[key];
+    if (value === null || value === undefined) {
+      delete merged[key];
+      continue;
+    }
+    const normalized = value.trim().toLowerCase();
+    if (!REASONING_SET.has(normalized)) {
+      return `Unknown reasoning level "${value}". Valid levels: ${Array.from(REASONING_LEVELS).join(", ")}.`;
+    }
+    // Checked against REASONING_SET above, so this narrowing is safe.
+    merged[key] = normalized as ReasoningLevel;
+  }
+
+  if (merged.default && merged.max && compareReasoning(merged.default, merged.max) > 0) {
+    return "Default reasoning level cannot exceed the max.";
+  }
+
+  return merged;
+}
+
+/**
  * Validate that a reasoning level can be selected for the given org.
  * Returns an error message string if validation fails, or null if the level is OK.
  *

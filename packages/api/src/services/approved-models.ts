@@ -63,6 +63,29 @@ export function isApproved(approved: string[] | null, spec: string): boolean {
 }
 
 /**
+ * Pure validation for `PUT /api/org/approved-models`: the empty-list rule
+ * and catalog membership. `validIds` is the org's active-catalog id set
+ * (`catalogValidIds(await buildOrgCatalog(...))`) so this stays DB-free and
+ * unit-testable. Returns an error message naming the corrective action, or
+ * null when the list is acceptable.
+ */
+export function validateApprovedModelsList(approved: string[] | null, validIds: ReadonlySet<string>): string | null {
+  if (approved === null) return null;
+
+  if (approved.length === 0) {
+    return "Approved list cannot be empty. To approve the whole catalog, clear the restriction instead.";
+  }
+
+  for (const id of approved) {
+    if (!validIds.has(id)) {
+      return `Unknown model "${id}". Pick a model from the model list (GET /api/models).`;
+    }
+  }
+
+  return null;
+}
+
+/**
  * Validate that a model spec can be selected for the given org.
  * Returns null if OK, or an error message string if the spec is not allowed.
  *
