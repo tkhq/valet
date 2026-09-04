@@ -1729,6 +1729,23 @@ describe("repoPrebuildFlags", () => {
     errSpy.mockRestore();
   });
 
+  it("a tokenless answer never serves a caller WITH a token — the cache key carries an auth dimension", async () => {
+    // A tokenless read of a private repo 404s (GitHub hides existence) and
+    // resolves "absent". That entry must not satisfy an authenticated caller
+    // whose read would find the file.
+    contentsHandler = () => ({ status: 404, body: { message: "Not Found" } });
+    const anon = await repoPrebuildFlags(deps(), null, "o", "r", "main");
+    expect(anon.outcome).toBe("absent");
+    contentsHandler = (_owner, _repo, path) => {
+      if (path === ".valet/prebuild.yaml") {
+        return { body: { content: b64('workspaceStorage: "8Gi"'), encoding: "base64" } };
+      }
+      return { status: 404, body: { message: "Not Found" } };
+    };
+    const authed = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
+    expect(authed).toEqual({ docker: false, workspaceStorage: "8Gi", outcome: "declared" });
+  });
+
   it("a transient failure is NOT cached — the next call re-reads and gets the real answer (TKAI-401)", async () => {
     let calls = 0;
     contentsHandler = (_owner, _repo, path) => {

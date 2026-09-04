@@ -221,8 +221,10 @@ export function recordSandboxWorkspaceGrow(outcome: WorkspaceGrowOutcome): void 
 export type PrebuildFlagsOutcome = "declared" | "absent" | "error" | "timeout";
 
 /** One `.valet/prebuild.yaml` flags resolution at session build. Recorded on
- * EVERY repo-bound build — `declared` and `absent` included — so a silent
- * regression to defaults shows as an outcome shift, not as nothing. */
+ * every build that ATTEMPTS the read (`declared` and `absent` included) — so
+ * a silent regression to defaults shows as an outcome shift, not as nothing.
+ * Builds that skip the read (no wired deps, no repo binding, non-GitHub
+ * host) record nothing. */
 export function recordPrebuildFlagsResolved(outcome: PrebuildFlagsOutcome): void {
   inst().sandboxPrebuildFlags.add(1, { outcome });
 }

@@ -281,7 +281,15 @@ async function fetchGithubJson(deps: GitHubTokenDeps, token: string | null, path
         "repository not accessible without a GitHub credential — connect GitHub or install the App",
       );
     }
-    throw new GitHubApiError(res.status, path);
+    throw new GitHubApiError(
+      res.status,
+      path,
+      // A tokenless 404 is ambiguous: missing file, or a private repo GitHub
+      // hides. Name the corrective action for callers that surface the error.
+      !token && res.status === 404
+        ? "the repository may be private — connect GitHub or install the App"
+        : undefined,
+    );
   }
   try {
     return await res.json();
@@ -443,7 +451,13 @@ export async function repoPrebuildFlags(
   repo: string,
   ref: string,
 ): Promise<RepoPrebuildFlags> {
-  const key = `${owner}/${repo}@${ref}`;
+  // The key carries an auth dimension: a tokenless read of a PRIVATE repo
+  // 404s (GitHub hides existence) and correctly resolves "absent" — but that
+  // answer must never be served to a caller WITH a token, whose read would
+  // have found the file (TKAI-401 review). Distinct tokens still share the
+  // "auth" bucket: installation tokens are org-wide, and the residual
+  // per-user divergence (selected-repos exclusions) is accepted.
+  const key = `${owner}/${repo}@${ref}#${token ? "auth" : "anon"}`;
   const hit = repoFlagsCache.get(key);
   if (hit && Date.now() - hit.at < REPO_FLAGS_TTL_MS) return hit.value;
   const inflight = repoFlagsInflight.get(key);

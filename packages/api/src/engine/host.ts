@@ -1739,6 +1739,7 @@ export class EngineHost {
       // hung every session build unboundedly (TKAI-401).
       const work = (async (): Promise<RepoPrebuildFlags> => {
         let token: string | null = null;
+        let degradedTokenless = false;
         try {
           const resolved = await resolveSessionGitHubToken(fullDeps, {
             orgId: meta.orgId,
@@ -1750,16 +1751,23 @@ export class EngineHost {
           });
           token = resolved.token;
         } catch (err) {
-          // Tokenless degrade, mirroring `resolveApiTokenOrNull`: the
-          // contents read works unauthenticated on a public repo; a private
-          // repo then 404s, which reads as "no file".
+          // Only an AUTH failure degrades to a tokenless read (mirroring
+          // `resolveApiTokenOrNull`): the contents read works unauthenticated
+          // on a public repo. Anything else (DB fault, decrypt failure) is
+          // not "no credential configured" — rethrow so the outer catch
+          // records an uncached `error`.
+          if (!(err instanceof GitHubAuthError)) throw err;
+          degradedTokenless = true;
           console.warn(
-            `EngineHost: resolveRepoPrebuildFlags: no GitHub token for session ${sessionId} (${
-              err instanceof Error ? err.message : String(err)
-            }) — attempting a tokenless read`,
+            `EngineHost: resolveRepoPrebuildFlags: no GitHub token for session ${sessionId} (${err.message}) — attempting a tokenless read`,
           );
         }
-        return repoPrebuildFlags(fullDeps, token, owner, repoName, ref);
+        const flags = await repoPrebuildFlags(fullDeps, token, owner, repoName, ref);
+        // A tokenless 404 on a PRIVATE repo reads as "absent" — but under a
+        // degrade that is not a trustworthy repo answer (the authenticated
+        // read may have found the file). Relabel it so the log/metric show a
+        // failed resolution, not a missing file.
+        return degradedTokenless && flags.outcome === "absent" ? { ...flags, outcome: "error" } : flags;
       })();
       const result = await Promise.race([work, timeoutPromise]);
       clearTimeout(timeoutId);
