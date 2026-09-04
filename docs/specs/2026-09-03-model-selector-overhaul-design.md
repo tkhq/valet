@@ -317,3 +317,11 @@ Recorded during implementation (2026-09-03):
   PATCH routes hold the authz.
 - **Tier subtitles show the curated short label** ("Opus 4.7"), matching the
   picker's own model rows, not the raw catalog name.
+- **The chat `ModelPicker` keeps a pinned-but-unapproved model visible.** A
+  session's current model always appears in the list, even after an admin
+  drops it from the approved set, so the selector never shows a blank
+  current selection. The model stops being selectable anywhere else.
+- **`ModelCombobox` (settings surfaces) does not filter unapproved models
+  for members.** A member can still see and pick a disallowed model in the
+  list; the server rejects the save and returns a message naming the
+  approved list.
