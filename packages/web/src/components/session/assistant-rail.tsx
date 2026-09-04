@@ -79,10 +79,8 @@ export function AssistantRail() {
   // (the bug when you arrived at `/chat` with a team already in scope). A
   // stale or hand-edited `?assistant=` still falls back the same way rather
   // than rendering a session the viewer cannot read.
-  const active =
-    findAssistant(groups, search.assistant) ??
-    scopedDefaultAssistant(groups, scope.key) ??
-    ownDefaultAssistant(groups);
+  const choice = chooseChatAssistant(groups, scope.key, search.assistant);
+  const active = choice.kind === "open" || choice.kind === "personal" ? choice.assistant : undefined;
 
   // Costs no request: the bell is already polling this query. For the
   // session with an open WS (the open conversation), the stream store's
@@ -137,7 +135,8 @@ export function AssistantRail() {
           `GET /api/orchestrator/children?sessionId=` scopes the list to that
           assistant's session (access-checked), so a team worker trigger's
           child appears under the team assistant that spawned it. */}
-      {active ? <ThreadTree sessionId={active.sessionId} /> : <ThreadTree />}
+      {choice.kind !== "empty-team" &&
+        (active ? <ThreadTree sessionId={active.sessionId} /> : <ThreadTree />)}
       {renaming && (
         <RenameAssistantDialog
           key={renaming.id}
@@ -206,7 +205,7 @@ export function groupAssistants(
 
   for (const team of teams) {
     const owned = assistants.filter((a) => a.owner.type === "team" && a.owner.id === team.id);
-    if (owned.length > 0) groups.push({ key: team.id, label: team.name, team, assistants: owned });
+    groups.push({ key: team.id, label: team.name, team, assistants: owned });
   }
   return groups;
 }
@@ -243,6 +242,41 @@ export function scopedDefaultAssistant(
 ): AssistantSummary | undefined {
   const scoped = groups.find((group) => group.key === scopeKey)?.assistants ?? [];
   return scoped.find((a) => a.isDefault) ?? scoped[0];
+}
+
+/**
+ * Which conversation `/chat` should open.
+ *
+ * A named `?assistant=` the caller can reach wins. Otherwise the active
+ * workspace picks: that owner's default, or its first assistant. A team
+ * workspace with no assistant is empty — the page must not open a personal
+ * conversation. An unreachable `?assistant=` still falls back to your own
+ * default; the page shows that with a strip.
+ */
+export type ChatAssistantChoice =
+  | { kind: "open"; assistant: AssistantSummary; canonicalize: boolean }
+  | { kind: "personal"; assistant: AssistantSummary | undefined }
+  | { kind: "empty-team" };
+
+export function chooseChatAssistant(
+  groups: AssistantGroup[],
+  scopeKey: string,
+  requestedId: string | undefined,
+): ChatAssistantChoice {
+  const named = findAssistant(groups, requestedId);
+  if (named) return { kind: "open", assistant: named, canonicalize: false };
+
+  if (requestedId !== undefined) {
+    return { kind: "personal", assistant: ownDefaultAssistant(groups) };
+  }
+
+  const scoped = scopedDefaultAssistant(groups, scopeKey);
+  if (scoped) {
+    return { kind: "open", assistant: scoped, canonicalize: scopeKey !== "user" };
+  }
+
+  if (scopeKey !== "user") return { kind: "empty-team" };
+  return { kind: "personal", assistant: ownDefaultAssistant(groups) };
 }
 
 /** What the row is called. An assistant nobody has named says so, rather

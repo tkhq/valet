@@ -65,27 +65,29 @@ describe("groupAssistants", () => {
       [ownedBy("t1", "p1"), ownedBy("t1", "p2"), ownedBy("t1", "p3")],
       teams,
     );
-    expect(groups.map((g) => g.assistants.map((a) => a.id))).toEqual([["p1", "p2", "p3"]]);
+    expect(groups.map((g) => g.assistants.map((a) => a.id))).toEqual([["p1", "p2", "p3"], []]);
   });
 
   it("drops assistants of a team the caller may not open", () => {
     // `eligibleTeams` has already removed the team, so its assistant has no
     // group to sit in — an org admin does not get a team's assistant in
     // their own sidebar just because they administer the org.
-    expect(groupAssistants([ownedBy("t9", "x1")], teams)).toEqual([]);
+    expect(groupAssistants([ownedBy("t9", "x1")], teams).map((g) => g.key)).toEqual(["t1", "t2"]);
+    expect(groupAssistants([ownedBy("t9", "x1")], teams).flatMap((g) => g.assistants)).toEqual([]);
   });
 
   it("drops org-owned assistants, which no route creates and no header names", () => {
     const orgOwned: AssistantSummary = { ...own("o1"), owner: { type: "org", id: "org_1" } };
-    expect(groupAssistants([orgOwned], teams)).toEqual([]);
+    expect(groupAssistants([orgOwned], teams).flatMap((g) => g.assistants)).toEqual([]);
   });
 
   it("renders nothing while the list is unresolved", () => {
     expect(groupAssistants(undefined, teams)).toEqual([]);
   });
 
-  it("omits a team that owns no assistant rather than heading an empty group", () => {
-    expect(groupAssistants([own("mine")], teams).map((g) => g.key)).toEqual(["user"]);
+  it("still emits a group for a team that owns no assistant", () => {
+    expect(groupAssistants([own("mine")], teams).map((g) => g.key)).toEqual(["user", "t1", "t2"]);
+    expect(groupAssistants([own("mine")], teams).find((g) => g.key === "t1")?.assistants).toEqual([]);
   });
 });
 
