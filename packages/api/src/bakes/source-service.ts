@@ -260,7 +260,12 @@ export class GitHubApiError extends Error {
   }
 }
 
-async function fetchGithubJson(deps: GitHubTokenDeps, token: string | null, path: string): Promise<unknown> {
+async function fetchGithubJson(
+  deps: GitHubTokenDeps,
+  token: string | null,
+  path: string,
+  signal?: AbortSignal,
+): Promise<unknown> {
   const headers: Record<string, string> = {
     Accept: "application/vnd.github+json",
     "User-Agent": "Valet-App",
@@ -268,7 +273,7 @@ async function fetchGithubJson(deps: GitHubTokenDeps, token: string | null, path
   if (token) headers.Authorization = `Bearer ${token}`;
   let res: Response;
   try {
-    res = await githubFetchOf(deps)(`${githubApiBase(deps)}${path}`, { headers });
+    res = await githubFetchOf(deps)(`${githubApiBase(deps)}${path}`, { headers, signal });
   } catch (err) {
     throw new GitHubApiError(0, path, err instanceof Error ? err.message : String(err));
   }
@@ -325,8 +330,8 @@ export async function resolveHeadSha(
 }
 
 /** Reads one file's content at `sha` via the Contents API. `null` means the
- * REPO answered "no such file" — a 404, or a non-file payload (a directory
- * listing). Every other failure (auth, rate limit, 5xx, network) THROWS:
+ * repo answered "no such file" with a 404. Every other failure (auth, rate
+ * limit, 5xx, network, malformed success response) THROWS:
  * a transient GitHub failure must never read as "no file" (TKAI-401 — that
  * misread was cached and silently disabled repo-declared flags). */
 async function readGithubFile(
@@ -336,19 +341,24 @@ async function readGithubFile(
   repo: string,
   sha: string,
   path: string,
+  signal?: AbortSignal,
 ): Promise<string | null> {
+  const apiPath = `/repos/${owner}/${repo}/contents/${path}?ref=${encodeURIComponent(sha)}`;
   let payload: unknown;
   try {
-    payload = await fetchGithubJson(
-      deps,
-      token,
-      `/repos/${owner}/${repo}/contents/${path}?ref=${encodeURIComponent(sha)}`,
-    );
+    payload = await fetchGithubJson(deps, token, apiPath, signal);
   } catch (err) {
     if (err instanceof GitHubApiError && err.status === 404) return null;
     throw err;
   }
-  if (!isRecord(payload) || typeof payload.content !== "string" || payload.encoding !== "base64") return null;
+  if (
+    !isRecord(payload) ||
+    (payload.type !== undefined && payload.type !== "file") ||
+    typeof payload.content !== "string" ||
+    payload.encoding !== "base64"
+  ) {
+    throw new GitHubApiError(200, apiPath, "response was not a base64 file");
+  }
   return Buffer.from(payload.content.replace(/\n/g, ""), "base64").toString("utf8");
 }
 
@@ -420,13 +430,19 @@ export interface RepoPrebuildFlags {
 }
 
 const repoFlagsCache = new Map<string, { value: RepoPrebuildFlags; at: number }>();
-const repoFlagsInflight = new Map<string, Promise<RepoPrebuildFlags>>();
+interface RepoFlagsInflight {
+  controller: AbortController;
+  promise: Promise<RepoPrebuildFlags>;
+}
+
+const repoFlagsInflight = new Map<string, RepoFlagsInflight>();
 const REPO_FLAGS_TTL_MS = 10 * 60 * 1000;
 
 /** Clears the module-level `repoPrebuildFlags` cache and in-flight memo.
  * Exposed for test isolation only — production code must not call this. */
 export function clearRepoPrebuildFlagsCache(): void {
   repoFlagsCache.clear();
+  for (const entry of repoFlagsInflight.values()) entry.controller.abort();
   repoFlagsInflight.clear();
 }
 
@@ -443,13 +459,15 @@ export function clearRepoPrebuildFlagsCache(): void {
  * every session on the repo for the TTL (TKAI-401). Concurrent misses for
  * one key share a single in-flight read (a child fan-out onto one repo must
  * not multiply GitHub calls under exactly the rate-limit conditions that
- * make them fail). */
+ * make them fail). An aborted caller evicts and cancels the shared read. Its
+ * identity-checked cleanup cannot remove a replacement read for the key. */
 export async function repoPrebuildFlags(
   deps: GitHubTokenDeps,
   token: string | null,
   owner: string,
   repo: string,
   ref: string,
+  signal?: AbortSignal,
 ): Promise<RepoPrebuildFlags> {
   // The key carries an auth dimension: a tokenless read of a PRIVATE repo
   // 404s (GitHub hides existence) and correctly resolves "absent" — but that
@@ -461,12 +479,14 @@ export async function repoPrebuildFlags(
   const hit = repoFlagsCache.get(key);
   if (hit && Date.now() - hit.at < REPO_FLAGS_TTL_MS) return hit.value;
   const inflight = repoFlagsInflight.get(key);
-  if (inflight) return inflight;
+  if (inflight) return waitForRepoFlags(inflight, signal);
+  const controller = new AbortController();
   const work = (async (): Promise<RepoPrebuildFlags> => {
     let value: RepoPrebuildFlags;
     try {
-      const read = (path: string) => readGithubFile(deps, token, owner, repo, ref, path);
+      const read = (path: string) => readGithubFile(deps, token, owner, repo, ref, path, controller.signal);
       const override = await loadPrebuildOverride(read);
+      if (controller.signal.aborted) return { docker: false, outcome: "error" };
       value = {
         docker: override?.docker === true,
         ...(override?.workspaceStorage ? { workspaceStorage: override.workspaceStorage } : {}),
@@ -489,11 +509,28 @@ export async function repoPrebuildFlags(
     if (repoFlagsCache.size >= 1000) repoFlagsCache.clear();
     repoFlagsCache.set(key, { value, at: Date.now() });
     return value;
-  })().finally(() => {
-    repoFlagsInflight.delete(key);
   });
-  repoFlagsInflight.set(key, work);
-  return work;
+  const promise = work();
+  const entry: RepoFlagsInflight = { controller, promise };
+  repoFlagsInflight.set(key, entry);
+  const removeIfCurrent = () => {
+    if (repoFlagsInflight.get(key) === entry) repoFlagsInflight.delete(key);
+  };
+  controller.signal.addEventListener("abort", removeIfCurrent, { once: true });
+  void promise.then(removeIfCurrent, removeIfCurrent);
+  return waitForRepoFlags(entry, signal);
+}
+
+async function waitForRepoFlags(entry: RepoFlagsInflight, signal?: AbortSignal): Promise<RepoPrebuildFlags> {
+  if (!signal) return entry.promise;
+  const abort = () => entry.controller.abort();
+  if (signal.aborted) abort();
+  else signal.addEventListener("abort", abort, { once: true });
+  try {
+    return await entry.promise;
+  } finally {
+    signal.removeEventListener("abort", abort);
+  }
 }
 
 /**

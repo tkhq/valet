@@ -37,7 +37,6 @@ interface Instruments {
   sandboxFlagged: Counter;
   sandboxCapacityWait: Histogram;
   sandboxWorkspaceGrow: Counter;
-  sandboxPrebuildFlags: Counter;
   cacheBreaks: Counter;
 }
 
@@ -100,10 +99,6 @@ function inst(): Instruments {
       unit: "ms",
       description:
         "Time a sandbox create spent waiting at the per-org capacity gate, by outcome (admitted/timeout). Non-zero rates mean an org is contending for its sandbox ceiling.",
-    }),
-    sandboxPrebuildFlags: meter.createCounter("valet.sandbox.prebuild_flags", {
-      description:
-        "Repo prebuild-flag resolutions at session build, by outcome (declared/absent/error/timeout) — a sustained error rate means declared workspace sizes and docker flags are silently defaulting",
     }),
     sandboxWorkspaceGrow: meter.createCounter("valet.sandbox.workspace_grow", {
       description:
@@ -214,19 +209,6 @@ export type WorkspaceGrowOutcome = "grown" | "refused" | "wait_timeout" | "error
  * alertable signal even when every individual grow succeeds. */
 export function recordSandboxWorkspaceGrow(outcome: WorkspaceGrowOutcome): void {
   inst().sandboxWorkspaceGrow.add(1, { outcome });
-}
-
-/** How one repo prebuild-flags read resolved at session build (TKAI-401).
- * A closed union so a typo'd outcome cannot fragment the series. */
-export type PrebuildFlagsOutcome = "declared" | "absent" | "error" | "timeout";
-
-/** One `.valet/prebuild.yaml` flags resolution at session build. Recorded on
- * every build that ATTEMPTS the read (`declared` and `absent` included) — so
- * a silent regression to defaults shows as an outcome shift, not as nothing.
- * Builds that skip the read (no wired deps, no repo binding, non-GitHub
- * host) record nothing. */
-export function recordPrebuildFlagsResolved(outcome: PrebuildFlagsOutcome): void {
-  inst().sandboxPrebuildFlags.add(1, { outcome });
 }
 
 /** A create's wait at the per-org capacity gate. Recorded only when the

@@ -1764,6 +1764,56 @@ describe("repoPrebuildFlags", () => {
     expect(calls).toBe(2);
     errSpy.mockRestore();
   });
+
+  it("a malformed success response is NOT cached as an absent file", async () => {
+    let calls = 0;
+    contentsHandler = (_owner, _repo, path) => {
+      if (path !== ".valet/prebuild.yaml") return { status: 404, body: { message: "Not Found" } };
+      calls++;
+      return calls === 1
+        ? { body: [{ type: "dir", name: "prebuild.yaml" }] }
+        : { body: { content: b64('workspaceStorage: "8Gi"'), encoding: "base64" } };
+    };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const first = await repoPrebuildFlags(deps(), "tok", "o", "r", "malformed-ref");
+    const second = await repoPrebuildFlags(deps(), "tok", "o", "r", "malformed-ref");
+
+    expect(first).toEqual({ docker: false, outcome: "error" });
+    expect(second).toEqual({ docker: false, workspaceStorage: "8Gi", outcome: "declared" });
+    expect(calls).toBe(2);
+    errSpy.mockRestore();
+  });
+
+  it("an abort evicts a hung read without letting its stale cleanup delete a retry", async () => {
+    let fetchCalls = 0;
+    const resolvers: Array<(response: Response) => void> = [];
+    const hangingFetch: typeof fetch = (_input, init) => {
+      fetchCalls++;
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      return new Promise<Response>((resolve) => resolvers.push(resolve));
+    };
+    const readDeps = { ...deps(), fetchImpl: hangingFetch };
+    const firstController = new AbortController();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const first = repoPrebuildFlags(readDeps, "tok", "o", "r", "abort-ref", firstController.signal);
+    firstController.abort();
+    const second = repoPrebuildFlags(readDeps, "tok", "o", "r", "abort-ref");
+    expect(fetchCalls).toBe(2);
+
+    resolvers[0]?.(new Response(JSON.stringify({ message: "upstream failed" }), { status: 500 }));
+    expect(await first).toEqual({ docker: false, outcome: "error" });
+
+    const third = repoPrebuildFlags(readDeps, "tok", "o", "r", "abort-ref");
+    expect(fetchCalls).toBe(2);
+    resolvers[1]?.(
+      new Response(JSON.stringify({ content: b64("docker: true"), encoding: "base64" }), { status: 200 }),
+    );
+    expect(await second).toEqual({ docker: true, outcome: "declared" });
+    expect(await third).toEqual({ docker: true, outcome: "declared" });
+    errSpy.mockRestore();
+  });
 });
 
 describe("resolveChangedFiles", () => {

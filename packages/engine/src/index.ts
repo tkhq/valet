@@ -76,7 +76,6 @@ export {
 } from "./tracing.js";
 export {
   recordCredentialRead,
-  recordPrebuildFlagsResolved,
   recordSandboxCapacityWait,
   recordSandboxCreated,
   recordSandboxDestroyed,
@@ -87,7 +86,6 @@ export {
   recordSettlement,
   recordToolExecution,
   recordTurn,
-  type PrebuildFlagsOutcome,
   type SandboxDestroyReason,
   type SandboxFlagKind,
   type WorkspaceGrowOutcome,

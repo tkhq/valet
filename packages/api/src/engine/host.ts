@@ -32,7 +32,6 @@ import { pluginStore } from "../services/plugin-store.js";
 import {
   buildPluginCatalog,
   loadRoleFromMarkdown,
-  recordPrebuildFlagsResolved,
   type ActionPlugin,
   type CommandContext,
   type CommandDef,
@@ -55,6 +54,7 @@ import {
 } from "../services/github-tokens.js";
 import { primaryRepoBinding, resolveSessionGitHubToken } from "../services/session-github-token.js";
 import { repoCredentialCommands, repoPrebuildFlags, type RepoPrebuildFlags } from "../bakes/source-service.js";
+import { recordPrebuildFlagsResolved } from "../observability/prebuild-metrics.js";
 import { loadSessionMeta } from "./session-meta.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";
@@ -1726,9 +1726,15 @@ export class EngineHost {
       };
       const TIMEOUT_MS = 5_000;
       const timedOut = Symbol("timedOut");
+      const controller = new AbortController();
       let timeoutId: ReturnType<typeof setTimeout> | undefined;
       const timeoutPromise = new Promise<typeof timedOut>((resolve) => {
-        timeoutId = setTimeout(() => resolve(timedOut), TIMEOUT_MS);
+        timeoutId = setTimeout(() => {
+          resolve(timedOut);
+          // Resolve the deadline first. Then abort and synchronously evict the
+          // shared read before the next session can join it.
+          controller.abort();
+        }, TIMEOUT_MS);
         // Unref so the timer does not keep the process alive after all real work ends.
         if (timeoutId && typeof (timeoutId as NodeJS.Timeout).unref === "function") {
           (timeoutId as NodeJS.Timeout).unref();
@@ -1762,15 +1768,14 @@ export class EngineHost {
             `EngineHost: resolveRepoPrebuildFlags: no GitHub token for session ${sessionId} (${err.message}) — attempting a tokenless read`,
           );
         }
-        const flags = await repoPrebuildFlags(fullDeps, token, owner, repoName, ref);
+        const flags = await repoPrebuildFlags(fullDeps, token, owner, repoName, ref, controller.signal);
         // A tokenless 404 on a PRIVATE repo reads as "absent" — but under a
         // degrade that is not a trustworthy repo answer (the authenticated
         // read may have found the file). Relabel it so the log/metric show a
         // failed resolution, not a missing file.
         return degradedTokenless && flags.outcome === "absent" ? { ...flags, outcome: "error" } : flags;
       })();
-      const result = await Promise.race([work, timeoutPromise]);
-      clearTimeout(timeoutId);
+      const result = await Promise.race([work, timeoutPromise]).finally(() => clearTimeout(timeoutId));
       if (result === timedOut) {
         // Do not cache — a timeout is not a repo answer.
         console.error(

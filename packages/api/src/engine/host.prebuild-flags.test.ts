@@ -10,7 +10,7 @@
  * `loadSessionMeta` into the guard, so the stored value and the guard cannot
  * drift apart again.
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
@@ -292,4 +292,74 @@ describe("childSessionFor repo prebuild flags", () => {
     expect(contentsCall).toBeDefined();
     expect(contentsCall?.authHeader).toBeUndefined();
   });
+
+  it("a timed-out read is evicted so the next child retries", async () => {
+    let contentReads = 0;
+    const fetchImpl: typeof fetch = (_input, init) => {
+      contentReads++;
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      if (contentReads === 1) return new Promise<Response>(() => {});
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({ content: Buffer.from('workspaceStorage: "8Gi"').toString("base64"), encoding: "base64" }),
+          { status: 200 },
+        ),
+      );
+    };
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const recorder = new RecordingSandboxProvider();
+    api = await bootTestApi({
+      sandboxProvider: recorder,
+      githubTokenDeps: {
+        key: deriveSecretKey("test-key"),
+        apiUrl: "https://github.test",
+        githubUrl: "https://github.test",
+        fetchImpl,
+      },
+    });
+    const { engineHost, db } = api.providers;
+    for (const childId of ["child-timeout-one", "child-timeout-two"]) {
+      await db.insert(sessionRepos).values({
+        sessionId: childId,
+        host: "github",
+        fullName: "acme/hung-flags",
+        cloneUrl: "https://github.com/acme/hung-flags.git",
+        ref: null,
+        auth: "auto",
+        position: 0,
+        targetDir: "hung-flags",
+      });
+    }
+    const parent = await engineHost.sessionFor("parent-timeout-flags", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp/parent-timeout-flags",
+    });
+    const parentThread = parent.thread("web:default");
+    const childOpts = {
+      parentSessionId: "parent-timeout-flags",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+      owner: { type: "user" as const, id: "local-user" },
+    };
+
+    const first = await engineHost.childSessionFor("child-timeout-one", {
+      ...childOpts,
+      workspace: "/tmp/child-timeout-one",
+    });
+    await first.attachment.ensureReady({ timeoutMs: 5_000 });
+    const second = await engineHost.childSessionFor("child-timeout-two", {
+      ...childOpts,
+      workspace: "/tmp/child-timeout-two",
+    });
+    await second.attachment.ensureReady({ timeoutMs: 5_000 });
+
+    expect(contentReads).toBe(2);
+    expect(recorder.createCalls.find((call) => call.sessionId === "child-timeout-one")?.workspaceStorage).toBeUndefined();
+    expect(recorder.createCalls.find((call) => call.sessionId === "child-timeout-two")?.workspaceStorage).toBe("8Gi");
+    errorSpy.mockRestore();
+    warnSpy.mockRestore();
+  }, 15_000);
 });
