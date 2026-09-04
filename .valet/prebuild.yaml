@@ -14,10 +14,11 @@ docker: true
 setup:
   # Base packages the dev loop and e2e suites expect: make (Makefile
   # targets), python3 (scripts/docs/docs_lint.py), jq, build-essential
-  # (native module builds during pnpm install). curl + ca-certificates are
-  # present on the shipped sandbox images; install them anyway so the helm
-  # and kubectl steps below work on any Debian-based override image.
-  - "apt-get update && apt-get install -y --no-install-recommends make python3 jq build-essential curl ca-certificates && rm -rf /var/lib/apt/lists/*"
+  # (native module builds during pnpm install), unzip (the bun step below).
+  # curl + ca-certificates are present on the shipped sandbox images;
+  # install them anyway so the helm and kubectl steps below work on any
+  # Debian-based override image.
+  - "apt-get update && apt-get install -y --no-install-recommends make python3 jq build-essential unzip curl ca-certificates && rm -rf /var/lib/apt/lists/*"
   # pnpm via corepack — pinned to match docker/Dockerfile.api and
   # docker/Dockerfile.sandbox-k8s.
   - "corepack enable && corepack prepare pnpm@9.12.3 --activate"
@@ -26,6 +27,13 @@ setup:
   # deliberately. Download the tarball plus its published SHA-256 file and
   # verify before extraction.
   - "cd /tmp && arch=$(dpkg --print-architecture) && curl -fsSL -O https://get.helm.sh/helm-v3.16.4-linux-${arch}.tar.gz -O https://get.helm.sh/helm-v3.16.4-linux-${arch}.tar.gz.sha256sum && sha256sum -c helm-v3.16.4-linux-${arch}.tar.gz.sha256sum && tar -xzf helm-v3.16.4-linux-${arch}.tar.gz && install -m 0755 linux-${arch}/helm /usr/local/bin/helm && rm -rf helm-v3.16.4-linux-${arch}.tar.gz* linux-${arch} && helm version"
+  # bun — packages/runner builds and runs on bun (see docker/
+  # Dockerfile.sandbox). Installed to /usr/local/bin because
+  # each setup command is one RUN instruction with no ENV step, so the
+  # installer's ~/.bun/bin would never reach PATH. Pinned; bump deliberately.
+  # Download the release zip plus its published SHA-256 file and verify
+  # before extraction. bun names amd64 "x64", so map the dpkg arch.
+  - "cd /tmp && arch=$(dpkg --print-architecture | sed 's/amd64/x64/; s/arm64/aarch64/') && curl -fsSL -O https://github.com/oven-sh/bun/releases/download/bun-v1.4.1/bun-linux-${arch}.zip -O https://github.com/oven-sh/bun/releases/download/bun-v1.4.1/SHASUMS256.txt && grep \" bun-linux-${arch}.zip$\" SHASUMS256.txt | sha256sum -c && unzip -q bun-linux-${arch}.zip && install -m 0755 bun-linux-${arch}/bun /usr/local/bin/bun && rm -rf bun-linux-${arch}.zip SHASUMS256.txt bun-linux-${arch} && bun --version"
   # kubectl — make k8s-* targets and the sandbox-kubernetes package. Pinned;
   # bump deliberately. Download the binary plus its published SHA-256 file and
   # verify before install.
