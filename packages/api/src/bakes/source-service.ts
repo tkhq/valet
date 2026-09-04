@@ -29,9 +29,8 @@
  * in-memory build-id map, the boot-time orphan sweep, and the retention seam
  * still holds — that machinery moved here verbatim.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import {
@@ -447,6 +446,14 @@ interface RepoFlagsInflight {
 const repoFlagsInflight = new Map<string, RepoFlagsInflight>();
 const REPO_FLAGS_TTL_MS = 10 * 60 * 1000;
 
+function repoFlagsAuthDimension(token: string | null): string {
+  if (!token) return "anon";
+  // GitHub tokens can authorize different repository subsets. A full SHA-256
+  // fingerprint isolates those answers without putting the credential in a
+  // cache key that an error log can expose.
+  return `auth:${createHash("sha256").update(token).digest("hex")}`;
+}
+
 /** Clears the module-level `repoPrebuildFlags` cache and in-flight memo.
  * Exposed for test isolation only — production code must not call this. */
 export function clearRepoPrebuildFlagsCache(): void {
@@ -478,13 +485,10 @@ export async function repoPrebuildFlags(
   ref: string,
   signal?: AbortSignal,
 ): Promise<RepoPrebuildFlags> {
-  // The key carries an auth dimension: a tokenless read of a PRIVATE repo
-  // 404s (GitHub hides existence) and correctly resolves "absent" — but that
-  // answer must never be served to a caller WITH a token, whose read would
-  // have found the file (TKAI-401 review). Distinct tokens still share the
-  // "auth" bucket: installation tokens are org-wide, and the residual
-  // per-user divergence (selected-repos exclusions) is accepted.
-  const key = `${owner}/${repo}@${ref}#${token ? "auth" : "anon"}`;
+  // The key carries an auth dimension. GitHub can return different answers
+  // for tokenless reads and for tokens with different repository grants.
+  // Keep each credential's answer and in-flight read isolated.
+  const key = `${owner}/${repo}@${ref}#${repoFlagsAuthDimension(token)}`;
   const hit = repoFlagsCache.get(key);
   if (hit && Date.now() - hit.at < REPO_FLAGS_TTL_MS) return hit.value;
   const inflight = repoFlagsInflight.get(key);

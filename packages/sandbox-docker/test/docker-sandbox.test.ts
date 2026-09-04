@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { access, mkdtemp, readdir, rm, readFile, writeFile, symlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { omittedMarker } from "@valet/engine";
 import { DockerSandboxProvider, type DockerSandboxCreateOpts, createSandboxWorkspace } from "../src/index.js";
 import { buildFullProfileTestImage } from "./full-profile-test-image.js";
 
@@ -281,6 +282,30 @@ describeDocker("DockerSandbox", () => {
       expect(r.stdout).toContain("bytes omitted");
       expect(r.stdout.endsWith("TAIL")).toBe(true);
       expect(r.truncated).toBe(true);
+    } finally {
+      await provider.destroy(sb.id);
+    }
+  });
+
+  it("applies a zero-byte cap to sync and job output", async () => {
+    const sb = await makeSandbox();
+    try {
+      const sync = await sb.exec("printf x", { maxOutputBytes: 0 });
+      expect(sync.stdout).toBe(omittedMarker(1));
+      expect(sync.truncated).toBe(true);
+
+      const { execId } = await sb.execJob("printf x", { maxOutputBytes: 0 });
+      let poll = await sb.pollJob(execId, 0);
+      let output = poll.output;
+      let truncated = poll.truncated === true;
+      while (poll.status === "running") {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        poll = await sb.pollJob(execId, poll.nextOffset);
+        output += poll.output;
+        if (poll.truncated) truncated = true;
+      }
+      expect(output).toBe(omittedMarker(1));
+      expect(truncated).toBe(true);
     } finally {
       await provider.destroy(sb.id);
     }

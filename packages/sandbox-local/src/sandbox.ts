@@ -156,7 +156,7 @@ export class LocalSandbox implements Sandbox {
     // Under a cap, keep head + tail (drop the middle): the poll protocol
     // needs an append-only buffer, so only the head streams live and the
     // tail joins on at close (see CappedOutputBuffer).
-    const buf = limit ? new CappedOutputBuffer(limit) : undefined;
+    const buf = limit !== undefined ? new CappedOutputBuffer(limit) : undefined;
     const appendOutput = (chunk: string) => {
       if (!buf) {
         state.output += chunk;
@@ -168,6 +168,16 @@ export class LocalSandbox implements Sandbox {
     };
     child.stdout?.on("data", appendOutput);
     child.stderr?.on("data", appendOutput);
+
+    let outputFinalized = false;
+    const finalizeOutput = () => {
+      if (!buf || outputFinalized) return;
+      outputFinalized = true;
+      child.stdout?.off("data", appendOutput);
+      child.stderr?.off("data", appendOutput);
+      state.output += buf.appendix();
+      if (buf.truncated) state.truncated = true;
+    };
 
     if (opts?.stdin !== undefined) child.stdin?.write(opts.stdin);
     child.stdin?.end();
@@ -181,14 +191,14 @@ export class LocalSandbox implements Sandbox {
 
     child.on("error", () => {
       state.status = "failed";
-      if (buf) state.output += buf.appendix();
+      finalizeOutput();
       resolveClosed();
       scheduleEviction();
     });
     child.on("close", (code, sig) => {
       state.status = "done";
       state.exitCode = code ?? (sig ? 128 + signalToInt(sig) : 1);
-      if (buf) state.output += buf.appendix();
+      finalizeOutput();
       resolveClosed();
       scheduleEviction();
     });
@@ -251,22 +261,29 @@ function execShell(command: string, opts: ExecShellOpts): Promise<ExecResult> {
     const limit = opts.maxOutputBytes;
     // Under a cap, keep head + tail per stream and drop the middle — test
     // runners and builds print their summary last (see CappedOutputBuffer).
-    const stdoutBuf = limit ? new CappedOutputBuffer(limit) : undefined;
-    const stderrBuf = limit ? new CappedOutputBuffer(limit) : undefined;
+    const stdoutBuf = limit !== undefined ? new CappedOutputBuffer(limit) : undefined;
+    const stderrBuf = limit !== undefined ? new CappedOutputBuffer(limit) : undefined;
     let stdout = "";
     let stderr = "";
 
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
 
-    child.stdout?.on("data", (chunk: string) => {
+    const onStdoutData = (chunk: string) => {
       if (stdoutBuf) stdoutBuf.append(chunk);
       else stdout += chunk;
-    });
-    child.stderr?.on("data", (chunk: string) => {
+    };
+    const onStderrData = (chunk: string) => {
       if (stderrBuf) stderrBuf.append(chunk);
       else stderr += chunk;
-    });
+    };
+    child.stdout?.on("data", onStdoutData);
+    child.stderr?.on("data", onStderrData);
+
+    const detachCapture = () => {
+      child.stdout?.off("data", onStdoutData);
+      child.stderr?.off("data", onStderrData);
+    };
 
     if (opts.stdin !== undefined) {
       child.stdin?.write(opts.stdin);
@@ -292,17 +309,21 @@ function execShell(command: string, opts: ExecShellOpts): Promise<ExecResult> {
     child.on("error", (err) => {
       if (timer) clearTimeout(timer);
       opts.signal?.removeEventListener("abort", onAbort);
+      detachCapture();
       rejectResult(err);
     });
 
     child.on("close", (code, sig) => {
       if (timer) clearTimeout(timer);
       opts.signal?.removeEventListener("abort", onAbort);
+      detachCapture();
       const exitCode = code ?? (sig ? 128 + signalToInt(sig) : 1);
+      const stdoutResult = stdoutBuf ? stdoutBuf.value() : stdout;
+      const stderrResult = stderrBuf ? stderrBuf.value() : stderr;
       const truncated = (stdoutBuf?.truncated ?? false) || (stderrBuf?.truncated ?? false);
       resolveResult({
-        stdout: stdoutBuf ? stdoutBuf.value() : stdout,
-        stderr: stderrBuf ? stderrBuf.value() : stderr,
+        stdout: stdoutResult,
+        stderr: stderrResult,
         exitCode,
         timedOut: timedOut ? true : undefined,
         truncated: truncated ? true : undefined,

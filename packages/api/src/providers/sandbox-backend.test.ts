@@ -138,6 +138,108 @@ describe("buildSandboxProvider", () => {
       /Invalid VALET_SANDBOX_BACKEND "ec2"/,
     );
   });
+
+  it("throws at boot when the workspace default exceeds the cap (TKAI-403: contradictory deploy config)", () => {
+    expect(() =>
+      buildSandboxProvider(
+        {
+          VALET_SANDBOX_BACKEND: "kubernetes",
+          VALET_SANDBOX_IMAGE: "ghcr.io/example/sandbox:latest",
+          VALET_SANDBOX_WORKSPACE_STORAGE: "8Gi",
+          VALET_SANDBOX_WORKSPACE_MAX: "4Gi",
+        },
+        { kubeConfig: fakeKubeConfig() },
+      ),
+    ).toThrow(/VALET_SANDBOX_WORKSPACE_STORAGE \(effective "8Gi"\) exceeds VALET_SANDBOX_WORKSPACE_MAX \(effective "4Gi"\)/);
+  });
+});
+
+describe("storage quantity env validation (TKAI-403)", () => {
+  it("an unparseable quantity throws at boot naming the env var — a typo must not 422 every CR at admission", () => {
+    expect(() => resolveSandboxWorkspaceStorage({ VALET_SANDBOX_WORKSPACE_STORAGE: "8GB" })).toThrow(
+      /VALET_SANDBOX_WORKSPACE_STORAGE="8GB" is not a positive Kubernetes quantity/,
+    );
+    expect(() => resolveSandboxWorkspaceStorageMax({ VALET_SANDBOX_WORKSPACE_MAX: "twenty" })).toThrow(
+      /VALET_SANDBOX_WORKSPACE_MAX="twenty"/,
+    );
+    expect(() =>
+      resolveSandboxEphemeralStorageRequest({ VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST: "-2Gi" }),
+    ).toThrow(/VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST/);
+    expect(() =>
+      resolveSandboxEphemeralStorageLimit({ VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT: "8 gigs" }),
+    ).toThrow(/VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT/);
+  });
+
+  it('"0" still disables, unset still defaults, and a padded value is trimmed', () => {
+    expect(resolveSandboxWorkspaceStorage({ VALET_SANDBOX_WORKSPACE_STORAGE: "0" })).toBeUndefined();
+    expect(resolveSandboxWorkspaceStorage({})).toBe("1Gi");
+    expect(resolveSandboxWorkspaceStorage({ VALET_SANDBOX_WORKSPACE_STORAGE: " 8Gi " })).toBe("8Gi");
+  });
+
+  it("every zero spelling disables — padded, suffixed", () => {
+    expect(resolveSandboxWorkspaceStorage({ VALET_SANDBOX_WORKSPACE_STORAGE: " 0 " })).toBeUndefined();
+    expect(resolveSandboxWorkspaceStorage({ VALET_SANDBOX_WORKSPACE_STORAGE: "0Gi" })).toBeUndefined();
+    expect(resolveSandboxWorkspaceStorage({ VALET_SANDBOX_WORKSPACE_STORAGE: "   " })).toBe("1Gi");
+  });
+
+  it("the default-over-cap boot check compares EFFECTIVE values — a \"0\" cap does not bypass it", () => {
+    expect(() =>
+      buildSandboxProvider(
+        {
+          VALET_SANDBOX_BACKEND: "kubernetes",
+          VALET_SANDBOX_IMAGE: "ghcr.io/example/sandbox:latest",
+          VALET_SANDBOX_WORKSPACE_STORAGE: "50Gi",
+          VALET_SANDBOX_WORKSPACE_MAX: "0",
+        },
+        { kubeConfig: fakeKubeConfig() },
+      ),
+    ).toThrow(/effective "50Gi".*effective "20Gi"/);
+  });
+
+  it("throws at boot when an explicit ephemeral request exceeds the default limit", () => {
+    expect(() =>
+      buildSandboxProvider(
+        {
+          VALET_SANDBOX_BACKEND: "kubernetes",
+          VALET_SANDBOX_IMAGE: "ghcr.io/example/sandbox:latest",
+          VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST: "10Gi",
+        },
+        { kubeConfig: fakeKubeConfig() },
+      ),
+    ).toThrow(
+      /VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST \(effective "10Gi"\) exceeds VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT \(effective "8Gi"\).*Lower the request or raise the limit/,
+    );
+  });
+
+  it("throws at boot when the default ephemeral request exceeds an explicit limit", () => {
+    expect(() =>
+      buildSandboxProvider(
+        {
+          VALET_SANDBOX_BACKEND: "kubernetes",
+          VALET_SANDBOX_IMAGE: "ghcr.io/example/sandbox:latest",
+          VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT: "1Gi",
+        },
+        { kubeConfig: fakeKubeConfig() },
+      ),
+    ).toThrow(/effective "2Gi".*effective "1Gi"/);
+  });
+
+  it.each([
+    { request: "0", limit: "1Gi" },
+    { request: "10Gi", limit: "0" },
+  ])("allows a disabled ephemeral side: request=$request limit=$limit", ({ request, limit }) => {
+    expect(() =>
+      buildSandboxProvider(
+        {
+          VALET_SANDBOX_BACKEND: "kubernetes",
+          VALET_SANDBOX_IMAGE: "ghcr.io/example/sandbox:latest",
+          VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST: request,
+          VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT: limit,
+        },
+        { kubeConfig: fakeKubeConfig() },
+      ),
+    ).not.toThrow();
+  });
 });
 
 describe("resolveDefaultImage", () => {

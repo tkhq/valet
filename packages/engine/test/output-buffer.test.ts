@@ -47,4 +47,165 @@ describe("CappedOutputBuffer", () => {
     expect(buf.value()).toBe("abcdefg");
     expect(buf.truncated).toBe(false);
   });
+
+  it("uses UTF-8 bytes and keeps complete multibyte code points", () => {
+    const buf = new CappedOutputBuffer(8); // head 2 bytes, tail 6 bytes
+    buf.append("A🧪BC🧪Z"); // 12 bytes total
+
+    expect(buf.headText).toBe("A");
+    expect(buf.value()).toBe(`A${omittedMarker(4)}BC🧪Z`);
+    expect(buf.value()).not.toContain("�");
+    expect(buf.truncated).toBe(true);
+  });
+
+  it("joins a surrogate pair split across appends before applying the byte cap", () => {
+    const once = new CappedOutputBuffer(8);
+    once.append("A🧪BC🧪Z");
+
+    const chunked = new CappedOutputBuffer(8);
+    const emoji = "🧪";
+    chunked.append(`A${emoji[0]}`);
+    expect(chunked.headText).toBe("A");
+    chunked.append(`${emoji[1]}BC${emoji[0]}`);
+    chunked.append(`${emoji[1]}Z`);
+
+    expect(chunked.value()).toBe(once.value());
+    expect(chunked.value()).not.toContain("�");
+  });
+
+  it("does not fill a skipped head gap with bytes from a later append", () => {
+    const once = new CappedOutputBuffer(8);
+    once.append("🧪ABCDEF");
+
+    const chunked = new CappedOutputBuffer(8);
+    chunked.append("🧪");
+    chunked.append("ABCDEF");
+
+    expect(chunked.headText).toBe("");
+    expect(chunked.value()).toBe(once.value());
+    expect(chunked.value()).toBe(`${omittedMarker(4)}ABCDEF`);
+  });
+
+  it("supports a zero-byte cap and reports all input bytes as omitted", () => {
+    const buf = new CappedOutputBuffer(0);
+    buf.append("A🧪");
+
+    expect(buf.headText).toBe("");
+    expect(buf.value()).toBe(omittedMarker(5));
+    expect(buf.truncated).toBe(true);
+  });
+
+  it("normalizes finite limits and rejects non-finite limits", () => {
+    const fractional = new CappedOutputBuffer(4.9);
+    fractional.append("abcdefgh");
+    expect(fractional.value()).toBe(`a${omittedMarker(4)}fgh`);
+
+    const negative = new CappedOutputBuffer(-1);
+    negative.append("abc");
+    expect(negative.value()).toBe(omittedMarker(3));
+
+    expect(() => new CappedOutputBuffer(Number.NaN)).toThrow(RangeError);
+    expect(() => new CappedOutputBuffer(Number.POSITIVE_INFINITY)).toThrow(RangeError);
+  });
+
+  it("borrows unused head bytes when one emoji exactly fits the total cap", () => {
+    const once = new CappedOutputBuffer(4);
+    once.append("🧪");
+    expect(once.value()).toBe("🧪");
+    expect(once.truncated).toBe(false);
+
+    const chunked = new CappedOutputBuffer(4);
+    const emoji = "🧪";
+    chunked.append(emoji[0]);
+    chunked.append(emoji[1]);
+    expect(chunked.value()).toBe("🧪");
+    expect(chunked.truncated).toBe(false);
+  });
+
+  it("passes through exact-cap multibyte output across appends", () => {
+    const once = new CappedOutputBuffer(8);
+    once.append("🧪ABCD");
+    expect(once.value()).toBe("🧪ABCD");
+    expect(once.truncated).toBe(false);
+
+    const chunked = new CappedOutputBuffer(8);
+    chunked.append("🧪AB");
+    chunked.append("CD");
+    expect(chunked.value()).toBe("🧪ABCD");
+    expect(chunked.truncated).toBe(false);
+  });
+
+  it("matches one append across many small chunks and a large cap", () => {
+    const text = "a🧪éZ".repeat(2_000);
+    const once = new CappedOutputBuffer(4_096);
+    once.append(text);
+
+    const chunked = new CappedOutputBuffer(4_096);
+    for (const codeUnit of text.split("")) chunked.append(codeUnit);
+
+    expect(chunked.value()).toBe(once.value());
+    expect(chunked.truncated).toBe(once.truncated);
+  });
+
+  it("keeps chunking invariant across deterministic randomized cases", () => {
+    let seed = 0x5eed1234;
+    const next = () => {
+      seed = (Math.imul(seed, 1_664_525) + 1_013_904_223) >>> 0;
+      return seed;
+    };
+    const tokens = ["a", "é", "🧪", "\n"];
+
+    for (let caseIndex = 0; caseIndex < 100; caseIndex++) {
+      const cap = next() % 65;
+      const tokenCount = 1 + (next() % 100);
+      let text = "";
+      for (let i = 0; i < tokenCount; i++) text += tokens[next() % tokens.length];
+
+      const once = new CappedOutputBuffer(cap);
+      once.append(text);
+
+      const chunked = new CappedOutputBuffer(cap);
+      let offset = 0;
+      while (offset < text.length) {
+        const size = 1 + (next() % 5);
+        chunked.append(text.slice(offset, offset + size));
+        offset += size;
+      }
+
+      expect(chunked.value()).toBe(once.value());
+      expect(chunked.truncated).toBe(once.truncated);
+    }
+  });
+
+  it("finalizes a dangling high surrogate into the terminal appendix", () => {
+    const buf = new CappedOutputBuffer(16);
+    buf.append("a\ud800");
+
+    expect(buf.headText).toBe("a");
+    expect(buf.appendix()).toBe("\ufffd");
+    expect(buf.truncated).toBe(false);
+    expect(buf.value()).toBe("a\ufffd");
+  });
+
+  it("counts a dangling high surrogate when the cap cannot retain it", () => {
+    const tight = new CappedOutputBuffer(2);
+    tight.append("\ud800");
+    expect(tight.value()).toBe(omittedMarker(3));
+    expect(tight.truncated).toBe(true);
+
+    const zero = new CappedOutputBuffer(0);
+    zero.append("\ud800");
+    expect(zero.appendix()).toBe(omittedMarker(3));
+    expect(zero.truncated).toBe(true);
+  });
+
+  it("finalizes once and rejects appends after a terminal view", () => {
+    const buf = new CappedOutputBuffer(2);
+    buf.append("\ud800");
+
+    const first = buf.appendix();
+    expect(buf.appendix()).toBe(first);
+    expect(buf.value()).toBe(first);
+    expect(() => buf.append("later")).toThrow(/finalized/);
+  });
 });

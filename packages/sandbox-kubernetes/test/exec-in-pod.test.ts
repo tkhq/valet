@@ -88,13 +88,81 @@ describe("execInPod", () => {
     expect(result.exitCode).toBe(0);
   });
 
-  it("truncates stdout at maxOutputBytes and marks the result truncated", async () => {
-    const api = new FakePodExecApi((stdout, _e, statusCallback) => {
-      stdout?.write("x".repeat(1000));
+  it("keeps bounded stdout and stderr heads and tails when output is capped", async () => {
+    const api = new FakePodExecApi((stdout, stderr, statusCallback) => {
+      stdout?.write(`stdout-head-${"x".repeat(1000)}-stdout-tail`);
+      stderr?.write(`stderr-head-${"y".repeat(1000)}-stderr-tail`);
       statusCallback?.({ status: "Success" });
     });
     const result = await execInPod(deps(api), "pod-1", "yes x", { maxOutputBytes: 100 });
-    expect(result.stdout.length).toBe(100);
+
+    expect(result.stdout).toMatch(/^stdout-head-/);
+    expect(result.stdout).toContain("bytes omitted");
+    expect(result.stdout).toMatch(/-stdout-tail$/);
+    expect(result.stderr).toMatch(/^stderr-head-/);
+    expect(result.stderr).toContain("bytes omitted");
+    expect(result.stderr).toMatch(/-stderr-tail$/);
+    expect(result.stdout.length).toBeLessThanOrEqual(200);
+    expect(result.stderr.length).toBeLessThanOrEqual(200);
+    expect(result.truncated).toBe(true);
+  });
+
+  it("preserves UTF-8 characters split across transport chunks", async () => {
+    const encoded = Buffer.from("prefix-🧪-suffix", "utf8");
+    const splitInsideEmoji = encoded.indexOf(0xf0) + 2;
+    const api = new FakePodExecApi((stdout, stderr, statusCallback) => {
+      stdout?.write(encoded.subarray(0, splitInsideEmoji));
+      stdout?.write(encoded.subarray(splitInsideEmoji));
+      stderr?.write(encoded.subarray(0, splitInsideEmoji));
+      stderr?.write(encoded.subarray(splitInsideEmoji));
+      statusCallback?.({ status: "Success" });
+    });
+
+    const result = await execInPod(deps(api), "pod-1", "utf8-output");
+    expect(result.stdout).toBe("prefix-🧪-suffix");
+    expect(result.stderr).toBe("prefix-🧪-suffix");
+    expect(result.truncated).toBeUndefined();
+  });
+
+  it("applies the byte cap after decoding split UTF-8 transport chunks", async () => {
+    const encoded = Buffer.from("A🧪BC🧪Z", "utf8");
+    const firstEmoji = encoded.indexOf(0xf0);
+    const api = new FakePodExecApi((stdout, _stderr, statusCallback) => {
+      stdout?.write(encoded.subarray(0, firstEmoji + 2));
+      stdout?.write(encoded.subarray(firstEmoji + 2));
+      statusCallback?.({ status: "Success" });
+    });
+
+    const result = await execInPod(deps(api), "pod-1", "utf8-output", { maxOutputBytes: 8 });
+    expect(result.stdout).toMatch(/^A\n\[\.\.\. 4 bytes omitted:/);
+    expect(result.stdout).toMatch(/BC🧪Z$/);
+    expect(result.stdout).not.toContain("�");
+    expect(result.truncated).toBe(true);
+  });
+
+  it("treats maxOutputBytes zero as a zero-byte cap", async () => {
+    const api = new FakePodExecApi((stdout, stderr, statusCallback) => {
+      stdout?.write("abc");
+      stderr?.write("🧪");
+      statusCallback?.({ status: "Success" });
+    });
+
+    const result = await execInPod(deps(api), "pod-1", "zero-cap", { maxOutputBytes: 0 });
+    expect(result.stdout).toContain("3 bytes omitted");
+    expect(result.stderr).toContain("4 bytes omitted");
+    expect(result.stdout).not.toContain("abc");
+    expect(result.stderr).not.toContain("🧪");
+    expect(result.truncated).toBe(true);
+  });
+
+  it("reports truncation created when a capped stream finalizes", async () => {
+    const api = new FakePodExecApi((stdout, _stderr, statusCallback) => {
+      stdout?.emit("data", "\ud800");
+      statusCallback?.({ status: "Success" });
+    });
+
+    const result = await execInPod(deps(api), "pod-1", "dangling-surrogate", { maxOutputBytes: 0 });
+    expect(result.stdout).toContain("3 bytes omitted");
     expect(result.truncated).toBe(true);
   });
 
@@ -107,6 +175,34 @@ describe("execInPod", () => {
     expect(result.timedOut).toBe(true);
     expect(result.stdout).toBe("partial");
     expect(api.closed).toBe(1);
+  }, 2000);
+
+  it("ignores transport frames that arrive after timeout finalization", async () => {
+    let lateError: unknown;
+    let resolveLate!: () => void;
+    const lateFrame = new Promise<void>((resolve) => {
+      resolveLate = resolve;
+    });
+    const api = new FakePodExecApi((stdout) => {
+      stdout?.write("early");
+      setTimeout(() => {
+        try {
+          stdout?.emit("data", "late");
+        } catch (error) {
+          lateError = error;
+        } finally {
+          resolveLate();
+        }
+      }, 100);
+    });
+
+    const result = await execInPod(deps(api), "pod-1", "sleep 999", {
+      maxOutputBytes: 100,
+      timeout: 10,
+    });
+    await lateFrame;
+    expect(lateError).toBeUndefined();
+    expect(result.stdout).toBe("early");
   }, 2000);
 
   it(
@@ -169,5 +265,36 @@ describe("execInPod", () => {
     const result = await promise;
     expect(api.closed).toBe(1);
     expect(result.timedOut).toBeUndefined();
+  }, 2000);
+
+  it("ignores transport frames that arrive after abort finalization", async () => {
+    let lateError: unknown;
+    let resolveLate!: () => void;
+    const lateFrame = new Promise<void>((resolve) => {
+      resolveLate = resolve;
+    });
+    const api = new FakePodExecApi((stdout) => {
+      stdout?.write("early");
+      setTimeout(() => {
+        try {
+          stdout?.emit("data", "late");
+        } catch (error) {
+          lateError = error;
+        } finally {
+          resolveLate();
+        }
+      }, 100);
+    });
+    const controller = new AbortController();
+    const promise = execInPod(deps(api), "pod-1", "sleep 999", {
+      maxOutputBytes: 100,
+      signal: controller.signal,
+    });
+    controller.abort();
+
+    const result = await promise;
+    await lateFrame;
+    expect(lateError).toBeUndefined();
+    expect(result.stdout).toBe("early");
   }, 2000);
 });

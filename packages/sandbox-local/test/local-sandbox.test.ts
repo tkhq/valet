@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { omittedMarker } from "@valet/engine";
 import { LocalSandbox, LocalSandboxProvider } from "../src/index.js";
 
 let tmp: string;
@@ -135,6 +136,13 @@ describe("LocalSandbox: exec", () => {
     expect(res.stdout.startsWith("HEAD")).toBe(true);
     expect(res.stdout).toContain("bytes omitted");
     expect(res.stdout.endsWith("TAIL")).toBe(true);
+    expect(res.truncated).toBe(true);
+  });
+
+  it("applies a zero-byte stdout cap", async () => {
+    const sb = new LocalSandbox("test", tmp);
+    const res = await sb.exec("printf x", { maxOutputBytes: 0 });
+    expect(res.stdout).toBe(omittedMarker(1));
     expect(res.truncated).toBe(true);
   });
 

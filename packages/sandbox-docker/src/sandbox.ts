@@ -597,7 +597,7 @@ export class DockerSandbox implements Sandbox {
     // Under a cap, keep head + tail (drop the middle): the poll protocol
     // needs an append-only buffer, so only the head streams live and the
     // tail joins on at close (see CappedOutputBuffer).
-    const buf = limit ? new CappedOutputBuffer(limit) : undefined;
+    const buf = limit !== undefined ? new CappedOutputBuffer(limit) : undefined;
     const appendOutput = (chunk: string, isStderr: boolean) => {
       if (isStderr) {
         stderrTail = (stderrTail + chunk).slice(-4096);
@@ -610,8 +610,20 @@ export class DockerSandbox implements Sandbox {
       state.output = buf.headText;
       if (buf.truncated) state.truncated = true;
     };
-    child.stdout?.on("data", (chunk: string) => appendOutput(chunk, false));
-    child.stderr?.on("data", (chunk: string) => appendOutput(chunk, true));
+    const onStdoutData = (chunk: string) => appendOutput(chunk, false);
+    const onStderrData = (chunk: string) => appendOutput(chunk, true);
+    child.stdout?.on("data", onStdoutData);
+    child.stderr?.on("data", onStderrData);
+
+    let outputFinalized = false;
+    const finalizeOutput = () => {
+      if (!buf || outputFinalized) return;
+      outputFinalized = true;
+      child.stdout?.off("data", onStdoutData);
+      child.stderr?.off("data", onStderrData);
+      state.output += buf.appendix();
+      if (buf.truncated) state.truncated = true;
+    };
 
     if (opts?.stdin !== undefined) child.stdin?.write(opts.stdin);
     child.stdin?.end();
@@ -626,13 +638,13 @@ export class DockerSandbox implements Sandbox {
     child.on("error", (err) => {
       state.status = "failed";
       state.transportError = err;
-      if (buf) state.output += buf.appendix();
+      finalizeOutput();
       resolveClosed();
       scheduleEviction();
     });
     child.on("close", (code, sig) => {
       const exitCode = code ?? (sig ? 128 : 1);
-      if (buf) state.output += buf.appendix();
+      finalizeOutput();
       void (async () => {
         try {
           // See the sync exec() comment: CONTAINER_DEATH_PATTERN alone is
@@ -761,22 +773,29 @@ function execProcess(
     const limit = opts.maxOutputBytes;
     // Under a cap, keep head + tail per stream and drop the middle — test
     // runners and builds print their summary last (see CappedOutputBuffer).
-    const stdoutBuf = limit ? new CappedOutputBuffer(limit) : undefined;
-    const stderrBuf = limit ? new CappedOutputBuffer(limit) : undefined;
+    const stdoutBuf = limit !== undefined ? new CappedOutputBuffer(limit) : undefined;
+    const stderrBuf = limit !== undefined ? new CappedOutputBuffer(limit) : undefined;
     let stdout = "";
     let stderr = "";
 
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
 
-    child.stdout?.on("data", (chunk: string) => {
+    const onStdoutData = (chunk: string) => {
       if (stdoutBuf) stdoutBuf.append(chunk);
       else stdout += chunk;
-    });
-    child.stderr?.on("data", (chunk: string) => {
+    };
+    const onStderrData = (chunk: string) => {
       if (stderrBuf) stderrBuf.append(chunk);
       else stderr += chunk;
-    });
+    };
+    child.stdout?.on("data", onStdoutData);
+    child.stderr?.on("data", onStderrData);
+
+    const detachCapture = () => {
+      child.stdout?.off("data", onStdoutData);
+      child.stderr?.off("data", onStderrData);
+    };
 
     if (opts.stdin !== undefined) {
       child.stdin?.write(opts.stdin);
@@ -799,17 +818,21 @@ function execProcess(
     child.on("error", (err) => {
       if (timer) clearTimeout(timer);
       opts.signal?.removeEventListener("abort", onAbort);
+      detachCapture();
       rejectResult(err);
     });
 
     child.on("close", (code, sig) => {
       if (timer) clearTimeout(timer);
       opts.signal?.removeEventListener("abort", onAbort);
+      detachCapture();
       const exitCode = code ?? (sig ? 128 : 1);
+      const stdoutResult = stdoutBuf ? stdoutBuf.value() : stdout;
+      const stderrResult = stderrBuf ? stderrBuf.value() : stderr;
       const truncated = (stdoutBuf?.truncated ?? false) || (stderrBuf?.truncated ?? false);
       resolveResult({
-        stdout: stdoutBuf ? stdoutBuf.value() : stdout,
-        stderr: stderrBuf ? stderrBuf.value() : stderr,
+        stdout: stdoutResult,
+        stderr: stderrResult,
         exitCode,
         timedOut: timedOut ? true : undefined,
         truncated: truncated ? true : undefined,

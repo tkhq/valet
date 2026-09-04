@@ -7,7 +7,7 @@
  */
 import { createHash } from "node:crypto";
 import type { SandboxCreateOpts } from "@valet/engine";
-import { DEFAULT_WORKSPACE_STORAGE_MAX, clampStorageRequest } from "./quantity.js";
+import { DEFAULT_WORKSPACE_STORAGE_MAX, clampStorageRequest, parseStorageQuantity } from "./quantity.js";
 import type {
   K8sProviderConfig,
   ResourceList,
@@ -179,13 +179,14 @@ function resourceRequirementsFrom(resources: SandboxResourceOpts): ResourceRequi
 }
 
 /**
- * Workspace claim target (TKAI-385): a repo-declared request
- * (`SandboxCreateOpts.workspaceStorage`) wins over the deploy default,
- * CLAMPED to the growth cap. A repo cannot request unbounded storage. An
+ * Workspace claim target (TKAI-385): the provider bounds a repo request
+ * (`SandboxCreateOpts.workspaceStorage`) by the deploy default floor and the
+ * growth cap. A request cannot resolve to a smaller or unbounded claim. An
  * unparseable request or cap falls back to the default with a log. A fresh
- * claim starts at this target. During adoption, the provider uses this target
- * for a best-effort grow of an undersized claim. It never shrinks a claim or
- * waits for volume readiness. Exported for direct unit coverage.
+ * claim starts at this target. During adoption, an explicit declaration uses
+ * the same target for a best-effort grow of an undersized claim. The provider
+ * never shrinks a claim or waits for volume readiness. Exported for direct
+ * unit coverage.
  */
 export function resolveWorkspaceStorageRequest(
   cfg: K8sProviderConfig,
@@ -206,6 +207,22 @@ export function resolveWorkspaceStorageRequest(
     console.warn(
       `k8s sandbox ${name}: repo-declared workspaceStorage ${opts.workspaceStorage} exceeds the ${max} cap — clamped`,
     );
+  }
+  // The deploy default is a FLOOR (TKAI-403): a repo may grow its workspace,
+  // never shrink it below what the deploy provisions for undeclared repos —
+  // a below-default claim just burns the one ~6h EBS grow on a size the
+  // deploy already knew was too small. The floor itself is capped: a config
+  // that carries a default ABOVE the cap (the boot check catches the env
+  // route, but direct configs exist) must not let the floor un-do the clamp.
+  const fallbackBytes = parseStorageQuantity(fallback);
+  const clampBytes = parseStorageQuantity(clamp.storage);
+  if (fallbackBytes !== null && clampBytes !== null && clampBytes < fallbackBytes) {
+    const maxBytes = parseStorageQuantity(max);
+    const floor = maxBytes !== null && maxBytes < fallbackBytes ? max.trim() : fallback.trim();
+    console.log(
+      `k8s sandbox ${name}: repo-declared workspaceStorage ${opts.workspaceStorage} is below the ${floor} deploy floor — using the floor`,
+    );
+    return floor;
   }
   return clamp.storage;
 }

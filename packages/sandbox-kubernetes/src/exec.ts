@@ -23,7 +23,7 @@
 import { PassThrough, Readable } from "node:stream";
 import type { Readable as ReadableStream, Writable as WritableStream } from "node:stream";
 import type * as k8s from "@kubernetes/client-node";
-import type { ExecOpts, ExecResult } from "@valet/engine";
+import { CappedOutputBuffer, type ExecOpts, type ExecResult } from "@valet/engine";
 
 /** Directory the job-mode protocol (jobs.ts) writes its `{execId}.{out,exit,pid}`
  * files into. Exported here (rather than jobs.ts) since exec.ts's quoting
@@ -230,33 +230,26 @@ export async function execInPod(
   // under the dropped identity, matching `docker exec -u dockerd`'s effect.
   const shellCommand = deps.docker && !opts?.privileged ? wrapAsWorkloadUser(composed) : composed;
 
-  const stdoutChunks: Buffer[] = [];
-  const stderrChunks: Buffer[] = [];
-  let stdoutLen = 0;
-  let stderrLen = 0;
-  let truncated = false;
   const limit = opts?.maxOutputBytes;
+  const stdoutBuffer = limit !== undefined ? new CappedOutputBuffer(limit) : undefined;
+  const stderrBuffer = limit !== undefined ? new CappedOutputBuffer(limit) : undefined;
+  let stdoutText = "";
+  let stderrText = "";
 
   const stdout = new PassThrough();
   const stderr = new PassThrough();
-  stdout.on("data", (chunk: Buffer) => {
-    if (limit !== undefined && stdoutLen >= limit) {
-      truncated = true;
-      return;
-    }
-    const remaining = limit !== undefined ? limit - stdoutLen : chunk.length;
-    const slice = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
-    stdoutChunks.push(slice);
-    stdoutLen += slice.length;
-    if (limit !== undefined && stdoutLen >= limit) truncated = true;
-  });
-  stderr.on("data", (chunk: Buffer) => {
-    if (limit !== undefined && stderrLen >= limit) return;
-    const remaining = limit !== undefined ? limit - stderrLen : chunk.length;
-    const slice = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
-    stderrChunks.push(slice);
-    stderrLen += slice.length;
-  });
+  stdout.setEncoding("utf8");
+  stderr.setEncoding("utf8");
+  const onStdoutData = (chunk: string) => {
+    if (stdoutBuffer) stdoutBuffer.append(chunk);
+    else stdoutText += chunk;
+  };
+  const onStderrData = (chunk: string) => {
+    if (stderrBuffer) stderrBuffer.append(chunk);
+    else stderrText += chunk;
+  };
+  stdout.on("data", onStdoutData);
+  stderr.on("data", onStderrData);
 
   const stdin = opts?.stdin !== undefined ? Readable.from(Buffer.from(opts.stdin, "utf8")) : null;
 
@@ -322,11 +315,20 @@ export async function execInPod(
     await new Promise((resolve) => setTimeout(resolve, FLUSH_GRACE_MS));
   }
 
+  // Capture has two phases. Detach transport listeners before terminal
+  // buffer views reject later appends. This also ignores frames that arrive
+  // after the timeout or abort flush grace.
+  stdout.off("data", onStdoutData);
+  stderr.off("data", onStderrData);
+
   const exitCode = winner.kind === "status" ? exitCodeFromStatus(winner.status) : 124;
+  const stdoutResult = stdoutBuffer ? stdoutBuffer.value() : stdoutText;
+  const stderrResult = stderrBuffer ? stderrBuffer.value() : stderrText;
+  const truncated = (stdoutBuffer?.truncated ?? false) || (stderrBuffer?.truncated ?? false);
 
   return {
-    stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-    stderr: Buffer.concat(stderrChunks).toString("utf8"),
+    stdout: stdoutResult,
+    stderr: stderrResult,
     exitCode,
     timedOut: winner.kind === "timeout" ? true : undefined,
     truncated: truncated ? true : undefined,

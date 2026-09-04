@@ -1746,6 +1746,72 @@ describe("repoPrebuildFlags", () => {
     expect(authed).toEqual({ docker: false, workspaceStorage: "8Gi", outcome: "declared" });
   });
 
+  it("distinct authenticated tokens use independent cached answers", async () => {
+    let calls = 0;
+    const tokenResponses: Record<string, Record<string, GithubFixtureResponse>> = {
+      "token-a": {
+        "a-absent": { status: 404, body: { message: "Not Found" } },
+        "a-declared": { body: { type: "file", content: b64("docker: true"), encoding: "base64" } },
+      },
+      "token-b": {
+        "a-absent": { body: { type: "file", content: b64('workspaceStorage: "8Gi"'), encoding: "base64" } },
+        "a-declared": { status: 404, body: { message: "Not Found" } },
+      },
+    };
+    const fetchImpl: typeof fetch = (input, init) => {
+      calls++;
+      const token = new Headers(init?.headers).get("authorization")?.replace(/^Bearer /, "");
+      const ref = new URL(String(input)).searchParams.get("ref");
+      const response = token && ref ? tokenResponses[token]?.[ref] : undefined;
+      if (!response) throw new Error(`unexpected token/ref pair: ${token ?? "none"}/${ref ?? "none"}`);
+      return Promise.resolve(new Response(JSON.stringify(response.body), { status: response.status ?? 200 }));
+    };
+    const readDeps = { ...deps(), fetchImpl };
+
+    const aAbsent = await repoPrebuildFlags(readDeps, "token-a", "o", "r", "a-absent");
+    const bDeclared = await repoPrebuildFlags(readDeps, "token-b", "o", "r", "a-absent");
+    const aDeclared = await repoPrebuildFlags(readDeps, "token-a", "o", "r", "a-declared");
+    const bAbsent = await repoPrebuildFlags(readDeps, "token-b", "o", "r", "a-declared");
+
+    expect(aAbsent.outcome).toBe("absent");
+    expect(bDeclared).toEqual({ docker: false, workspaceStorage: "8Gi", outcome: "declared" });
+    expect(aDeclared).toEqual({ docker: true, outcome: "declared" });
+    expect(bAbsent.outcome).toBe("absent");
+    expect(calls).toBe(4);
+
+    expect(await repoPrebuildFlags(readDeps, "token-a", "o", "r", "a-absent")).toEqual(aAbsent);
+    expect(await repoPrebuildFlags(readDeps, "token-b", "o", "r", "a-absent")).toEqual(bDeclared);
+    expect(await repoPrebuildFlags(readDeps, "token-a", "o", "r", "a-declared")).toEqual(aDeclared);
+    expect(await repoPrebuildFlags(readDeps, "token-b", "o", "r", "a-declared")).toEqual(bAbsent);
+    expect(calls).toBe(4);
+  });
+
+  it("distinct authenticated tokens do not share an in-flight read", async () => {
+    let calls = 0;
+    const resolvers = new Map<string, (response: Response) => void>();
+    const fetchImpl: typeof fetch = (_input, init) => {
+      calls++;
+      const token = new Headers(init?.headers).get("authorization")?.replace(/^Bearer /, "");
+      if (!token) throw new Error("expected an authenticated request");
+      return new Promise<Response>((resolve) => resolvers.set(token, resolve));
+    };
+    const readDeps = { ...deps(), fetchImpl };
+
+    const tokenA = repoPrebuildFlags(readDeps, "token-a", "o", "r", "concurrent-ref");
+    const tokenB = repoPrebuildFlags(readDeps, "token-b", "o", "r", "concurrent-ref");
+    expect(calls).toBe(2);
+    resolvers.get("token-a")?.(new Response(JSON.stringify({ message: "Not Found" }), { status: 404 }));
+    resolvers.get("token-b")?.(
+      new Response(
+        JSON.stringify({ type: "file", content: b64('workspaceStorage: "8Gi"'), encoding: "base64" }),
+        { status: 200 },
+      ),
+    );
+
+    expect((await tokenA).outcome).toBe("absent");
+    expect(await tokenB).toEqual({ docker: false, workspaceStorage: "8Gi", outcome: "declared" });
+  });
+
   it("a transient failure is NOT cached — the next call re-reads and gets the real answer (TKAI-401)", async () => {
     let calls = 0;
     contentsHandler = (_owner, _repo, path) => {
@@ -1757,11 +1823,15 @@ describe("repoPrebuildFlags", () => {
         : { body: { content: b64('docker: true\nworkspaceStorage: "8Gi"'), encoding: "base64" } };
     };
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const first = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
+    const token = "github-secret-token-value";
+    const first = await repoPrebuildFlags(deps(), token, "o", "r", "main");
     expect(first).toEqual({ docker: false, outcome: "error" });
-    const second = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
+    const second = await repoPrebuildFlags(deps(), token, "o", "r", "main");
     expect(second).toEqual({ docker: true, workspaceStorage: "8Gi", outcome: "declared" });
     expect(calls).toBe(2);
+    const logged = errSpy.mock.calls.flat().map(String).join(" ");
+    expect(logged).not.toContain(token);
+    expect(logged).toMatch(/#auth:[0-9a-f]{64}/);
     errSpy.mockRestore();
   });
 

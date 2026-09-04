@@ -544,6 +544,27 @@ describe("workspace storage sizing (TKAI-385: repo-declared size)", () => {
     expect(workspaceStorage(cr)).toBe("4Gi");
   });
 
+  it("a request below the deploy default is floored at the default (TKAI-403: a repo grows, never shrinks)", () => {
+    const cr = buildSandboxManifest({ ...baseConfig, defaultStorage: "1Gi" }, "sess-ws", {
+      workspaceStorage: "512Mi",
+    });
+    expect(workspaceStorage(cr)).toBe("1Gi");
+  });
+
+  it("the floor itself is capped — a default above the cap cannot un-do the clamp", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // Contradictory direct config (the env route throws at boot): default 8Gi,
+    // cap 4Gi. Declared 2Gi is below the default, but the floor must not
+    // return 8Gi past the cap.
+    const cr = buildSandboxManifest(
+      { ...baseConfig, defaultStorage: "8Gi", workspaceStorageMax: "4Gi" },
+      "sess-ws",
+      { workspaceStorage: "2Gi" },
+    );
+    expect(workspaceStorage(cr)).toBe("4Gi");
+    warnSpy.mockRestore();
+  });
+
   it("a request past the cap is clamped to workspaceStorageMax verbatim", () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const cr = buildSandboxManifest(
