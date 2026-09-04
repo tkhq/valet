@@ -1143,6 +1143,12 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     sql: 'ALTER TABLE "user" ADD COLUMN IF NOT EXISTS "default_reasoning" text',
   },
   {
+    // Existing users keep the active thread's settings by default.
+    describe: "user.new_thread_behavior column",
+    probe: { kind: "column", table: "user", column: "new_thread_behavior" },
+    sql: `ALTER TABLE "user" ADD COLUMN IF NOT EXISTS "new_thread_behavior" text NOT NULL DEFAULT 'keep_current'`,
+  },
+  {
     // Team default reasoning level (model selector overhaul).
     // Null = inherit.
     describe: "teams.default_reasoning column",

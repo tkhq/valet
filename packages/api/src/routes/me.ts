@@ -6,7 +6,8 @@
  * membership row (shouldn't happen outside tests, but the query doesn't
  * assume it) reads as `"member"`.
  *
- * `PATCH` accepts a strict whitelist (`name`, `avatarUrl`, `defaultModel`, `defaultReasoning`);
+ * `PATCH` accepts a strict whitelist (`name`, `avatarUrl`, `defaultModel`,
+ * `defaultReasoning`, `newThreadBehavior`);
  * any other key 400s rather than being silently ignored, so a typo'd field
  * name in a client doesn't quietly no-op. `defaultModel` (when non-null) is
  * validated against the org model catalog's active id set — the same set
@@ -29,7 +30,13 @@ import type { MeResponse, PatchMeResponse } from "../wire/types.js";
 
 export const meRouter = new Hono<AppEnv>();
 
-const PATCH_FIELDS = new Set(["name", "avatarUrl", "defaultModel", "defaultReasoning"]);
+const PATCH_FIELDS = new Set([
+  "name",
+  "avatarUrl",
+  "defaultModel",
+  "defaultReasoning",
+  "newThreadBehavior",
+]);
 
 async function loadMeResponse(
   db: AppDb,
@@ -56,6 +63,7 @@ async function loadMeResponse(
     orgRole: membership?.role ?? "member",
     defaultModel: row.defaultModel,
     defaultReasoning: row.defaultReasoning ?? null,
+    newThreadBehavior: row.newThreadBehavior,
   };
 }
 
@@ -89,14 +97,20 @@ meRouter.patch("/", async (c) => {
   const unknownFields = Object.keys(raw).filter((k) => !PATCH_FIELDS.has(k));
   if (unknownFields.length > 0) {
     return c.json(
-      { error: `unknown field(s): ${unknownFields.join(", ")}. Send only name, avatarUrl, defaultModel, or defaultReasoning.` },
+      { error: `unknown field(s): ${unknownFields.join(", ")}. Send only supported profile settings.` },
       400,
     );
   }
 
   // Keyed by db column name (`image`, not wire-level `avatarUrl`) since this
   // feeds `db.update(users).set(...)` directly.
-  const update: { name?: string; image?: string; defaultModel?: string | null; defaultReasoning?: string | null } = {};
+  const update: {
+    name?: string;
+    image?: string;
+    defaultModel?: string | null;
+    defaultReasoning?: string | null;
+    newThreadBehavior?: "keep_current" | "use_defaults";
+  } = {};
 
   if ("name" in raw) {
     if (typeof raw.name !== "string") {
@@ -147,6 +161,16 @@ meRouter.patch("/", async (c) => {
       if (err) return c.json({ error: err }, 400);
       update.defaultReasoning = normalizedReasoning;
     }
+  }
+
+  if ("newThreadBehavior" in raw) {
+    if (raw.newThreadBehavior !== "keep_current" && raw.newThreadBehavior !== "use_defaults") {
+      return c.json(
+        { error: "newThreadBehavior is not supported. Select keep_current or use_defaults." },
+        400,
+      );
+    }
+    update.newThreadBehavior = raw.newThreadBehavior;
   }
 
   if (Object.keys(update).length > 0) {

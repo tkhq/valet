@@ -3035,6 +3035,8 @@ export interface ResolveSandboxSecretsResponse {
 // model override seam and is validated against `/api/models`'s id set on
 // PATCH.
 
+export type NewThreadBehavior = "keep_current" | "use_defaults";
+
 export interface MeResponse {
   id: string;
   email: string;
@@ -3046,6 +3048,8 @@ export interface MeResponse {
   defaultModel: string | null;
   /** User's default reasoning/thinking level. */
   defaultReasoning: string | null;
+  /** Controls the model and thinking settings for a new thread. */
+  newThreadBehavior: NewThreadBehavior;
 }
 
 /** Whitelisted fields only — unknown keys 400. `defaultModel: null` clears the override. */
@@ -3055,6 +3059,8 @@ export interface PatchMeRequest {
   defaultModel?: string | null;
   /** User's default reasoning/thinking level, or null to clear. */
   defaultReasoning?: string | null;
+  /** Controls the model and thinking settings for a new thread. */
+  newThreadBehavior?: NewThreadBehavior;
 }
 
 export type PatchMeResponse = MeResponse;

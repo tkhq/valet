@@ -105,6 +105,10 @@ export const users = pgTable("user", {
   defaultModel: text("default_model"),
   /** Personal default reasoning level. Null = inherit. */
   defaultReasoning: text("default_reasoning"),
+  /** Controls whether a new thread keeps active settings or uses defaults. */
+  newThreadBehavior: text("new_thread_behavior", {
+    enum: ["keep_current", "use_defaults"],
+  }).notNull().default("keep_current"),
 });
 
 // ─── better-auth core + plugin tables ───────────────────────────────────────

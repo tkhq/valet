@@ -31,6 +31,7 @@ describe("GET /api/me", () => {
       orgId: "local-org",
       orgRole: "admin",
       defaultModel: null,
+      newThreadBehavior: "keep_current",
     });
   });
 
@@ -62,6 +63,35 @@ describe("GET /api/me", () => {
 });
 
 describe("PATCH /api/me", () => {
+  it.each(["keep_current", "use_defaults"] as const)(
+    "updates newThreadBehavior to %s",
+    async (newThreadBehavior) => {
+      api = await bootTestApi();
+
+      const patch = await fetch(`${api.baseUrl}/api/me`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ newThreadBehavior }),
+      });
+      expect(patch.status).toBe(200);
+      const body = (await patch.json()) as MeResponse;
+      expect(body.newThreadBehavior).toBe(newThreadBehavior);
+    },
+  );
+
+  it("rejects an unknown newThreadBehavior with a corrective error", async () => {
+    api = await bootTestApi();
+
+    const patch = await fetch(`${api.baseUrl}/api/me`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ newThreadBehavior: "copy_model_only" }),
+    });
+    expect(patch.status).toBe(400);
+    const body = (await patch.json()) as { error: string };
+    expect(body.error).toContain("Select keep_current or use_defaults");
+  });
+
   it("updates name and round-trips it on GET", async () => {
     api = await bootTestApi();
 

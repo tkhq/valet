@@ -21,7 +21,8 @@ CREATE TABLE "user" (
 	"updated_at" timestamp DEFAULT now() NOT NULL,
 	"role" text DEFAULT 'member' NOT NULL,
 	"default_model" text,
-	"default_reasoning" text
+	"default_reasoning" text,
+	"new_thread_behavior" text DEFAULT 'keep_current' NOT NULL
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "user_email_unique" ON "user" ("email");
