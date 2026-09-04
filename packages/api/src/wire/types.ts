@@ -1709,6 +1709,10 @@ export interface CreateTeamRequest {
 
 export interface CreateTeamResponse {
   team: TeamSummary;
+  /** Seeded in the same transaction as the team. The client writes this
+   * into the assistants cache so `/chat` opens it instead of treating the
+   * team as empty and creating a second row. */
+  defaultAssistant: AssistantSummary;
 }
 
 /** `PATCH /api/teams/:id` — team settings. `defaultModel: null` clears the
