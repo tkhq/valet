@@ -2,13 +2,15 @@
  * `GET /api/org/model-tiers`  — returns the effective tier map (stored or defaults).
  * `PATCH /api/org/model-tiers` — updates `orgs.model_tiers`. Org-admin gated.
  *
- * Each spec in a tier's list must exist in the org catalog.
+ * Each spec in a tier's list must exist in the org catalog and be approved.
  */
 import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
-import { getOrgTierMap, setOrgTierMap, TIER_TOKENS, type TierMap } from "../services/model-tiers.js";
+import { getOrgTierMap, setOrgTierMap, TIER_TOKENS, tierTargetsNotApproved, type TierMap } from "../services/model-tiers.js";
 import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
+import { getApprovedModels } from "../services/approved-models.js";
+import type { GetModelTiersResponse, PatchModelTiersRequest } from "../wire/types.js";
 
 export const modelTiersRouter = new Hono<AppEnv>();
 
@@ -16,7 +18,7 @@ modelTiersRouter.get("/", async (c) => {
   const user = c.var.user;
   const { db } = c.var.providers;
   const tierMap = await getOrgTierMap(db, user.orgId);
-  return c.json(tierMap);
+  return c.json<GetModelTiersResponse>(tierMap);
 });
 
 modelTiersRouter.patch("/", async (c) => {
@@ -68,6 +70,10 @@ modelTiersRouter.patch("/", async (c) => {
     }
   }
 
+  // Validate that all tier targets are approved.
+  const approvalErr = tierTargetsNotApproved(merged, await getApprovedModels(db, user.orgId));
+  if (approvalErr) return c.json({ error: approvalErr }, 400);
+
   await setOrgTierMap(db, user.orgId, merged);
-  return c.json(merged);
+  return c.json<GetModelTiersResponse>(merged);
 });
