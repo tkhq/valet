@@ -408,6 +408,32 @@ export interface SessionMeta {
   ownerTeamId?: string;
 }
 
+/** Where `resolveRepoPrebuildFlags` reads `.valet/prebuild.yaml` from, or why
+ * it cannot. Exported (with {@link prebuildFlagsTarget}) for direct unit
+ * coverage of the guard. */
+export type PrebuildFlagsTarget =
+  | { ok: true; owner: string; repo: string; ref: string }
+  | { ok: false; reason: "no-repo" | "bad-full-name" }
+  | { ok: false; reason: "non-github-host"; host: string };
+
+/**
+ * Picks the primary repo binding's GitHub coordinates for the prebuild-flags
+ * read, or the reason it must be skipped. `session_repos.host` stores
+ * "github" (the schema default); hand-built metas may carry "github.com" —
+ * both mean GitHub. TKAI-385: a previous version matched only "github.com",
+ * which silently disabled `workspaceStorage` and the repo `docker` flag for
+ * every bound session.
+ */
+export function prebuildFlagsTarget(repos: SessionMeta["repos"]): PrebuildFlagsTarget {
+  const primary = repos?.[0];
+  if (!primary) return { ok: false, reason: "no-repo" };
+  const host = primary.host ?? "github";
+  if (host !== "github" && host !== "github.com") return { ok: false, reason: "non-github-host", host };
+  const [owner, repo] = primary.fullName.split("/");
+  if (!owner || !repo) return { ok: false, reason: "bad-full-name" };
+  return { ok: true, owner, repo, ref: primary.ref ?? "HEAD" };
+}
+
 /** A session build's model pair: the wire-ready pi-ai model object plus the
  * canonical spec the session persists (`CreateSessionOptions.modelSpec`). */
 interface BuildModel {
@@ -1619,13 +1645,16 @@ export class EngineHost {
     const db = this.opts.db;
     if (!tokenDeps || !db) return defaults;
     try {
-      const primaryRepo = meta.repos?.[0];
-      if (!primaryRepo) return defaults;
-      const host = primaryRepo.host ?? "github.com";
-      if (host !== "github.com") return defaults;
-      const [owner, repoName] = primaryRepo.fullName.split("/");
-      if (!owner || !repoName) return defaults;
-      const ref = primaryRepo.ref ?? "HEAD";
+      const target = prebuildFlagsTarget(meta.repos);
+      if (!target.ok) {
+        if (target.reason === "non-github-host") {
+          console.warn(
+            `EngineHost: resolveRepoPrebuildFlags: session ${sessionId} primary repo host "${target.host}" is not GitHub — using default flags`,
+          );
+        }
+        return defaults;
+      }
+      const { owner, repo: repoName, ref } = target;
       const fullDeps = {
         db,
         credentials: this.opts.engineCredentials,
