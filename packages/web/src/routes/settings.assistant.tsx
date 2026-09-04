@@ -67,6 +67,26 @@ export function AssistantPage() {
           emptyLabel="Team or organization default"
         />
       </FieldRow>
+
+      <FieldRow
+        label="New thread behavior"
+        hint="Choose whether a new thread keeps the current model and thinking or uses your configured defaults."
+      >
+        <select
+          aria-label="New thread behavior"
+          value={meQ.data?.newThreadBehavior ?? "keep_current"}
+          onChange={(event) => {
+            const newThreadBehavior = event.target.value;
+            if (newThreadBehavior === "keep_current" || newThreadBehavior === "use_defaults") {
+              patchMe.mutate({ newThreadBehavior });
+            }
+          }}
+          className="h-9 w-full rounded border border-[--border] bg-[--bg] px-2 text-sm text-[--fg]"
+        >
+          <option value="keep_current">Keep current settings</option>
+          <option value="use_defaults">Use configured defaults</option>
+        </select>
+      </FieldRow>
     </Section>
   );
 }

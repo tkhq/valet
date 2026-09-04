@@ -79,7 +79,9 @@ describe("ThreadTree — new thread affordance", () => {
     const button = screen.getByRole("button", { name: "New thread" });
     await userEvent.click(button);
 
-    expect(createThreadMutateAsync).toHaveBeenCalled();
+    expect(createThreadMutateAsync).toHaveBeenCalledWith({
+      sourceThreadId: "thread-1",
+    });
     expect(navigate).toHaveBeenCalledWith(
       expect.objectContaining({ search: expect.any(Function) }),
     );

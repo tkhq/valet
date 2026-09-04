@@ -174,6 +174,7 @@ function me(orgRole: "admin" | "member" = "member"): MeResponse {
     orgRole,
     defaultModel: null,
     defaultReasoning: null,
+    newThreadBehavior: "keep_current",
   };
 }
 
