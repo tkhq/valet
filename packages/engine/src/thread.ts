@@ -397,9 +397,17 @@ export class Thread {
    * `switch_model` exists so the agent can move to a stronger model when the
    * work turns out to be harder than it looked. That is a property of the
    * turn, not an edit to the user's setting, so it lives here rather than in
-   * `modelOverride`: it applies to the rest of this turn (a gate resume
-   * re-reads it through `turnModelSpec`) and is cleared when the turn
-   * settles.
+   * `modelOverride`, and is cleared when the turn settles.
+   *
+   * What actually carries the switch through the rest of the turn is
+   * `agent.state.model` plus the `prepareNextTurn` hook, NOT this field: a
+   * live decision gate blocks inside the agent loop and never unwinds
+   * `runItem`, so the loop resumes on the model it was retargeted to. This
+   * field is what makes the switch visible to `turnModelSpec` /
+   * `resolveTurnModel` if any future path re-derives the spec mid-turn.
+   * Today no such path runs with a live escalation — the two
+   * `applyResolvedKeyForResume` callers are post-restart reconcile paths,
+   * where this was never persisted and is always undefined.
    *
    * Deliberately NOT persisted. An api restart mid-turn resumes on the
    * user's model — the safe direction, and never a thread stranded on an
@@ -1768,24 +1776,31 @@ export class Thread {
     // turn-scoped escalation, not a change to the setting the user picked,
     // so it never touches `modelOverride` and is never persisted.
     const isAgentSwitch = reason.startsWith("tool:");
+    // The agent switch reports against what the TURN actually runs on, which
+    // includes the running item's pin — that outranks `modelOverride`
+    // everywhere else (see `turnModelSpec`). Leaving it out let a real
+    // retarget report "model unchanged" and emit no event.
     const before = isAgentSwitch
-      ? (this.agentModelSwitch ?? this.modelOverride ?? sessionDefault)
+      ? (this.agentModelSwitch ??
+        this.runningItem?.model ??
+        this.modelOverride ??
+        sessionDefault)
       : (this.modelOverride ?? sessionDefault);
     if (isAgentSwitch) {
       if (modelId === null) {
         this.agentModelSwitch = undefined;
       } else {
         // Validate before assigning so an unknown id is rejected and the
-        // turn keeps its previous model.
-        await this.validateModelSpec(modelId);
+        // turn keeps its previous model. The resolution is handed straight
+        // to the apply step: resolving twice costs a second provider lookup
+        // (a DB + credential read on the api host) and lets the two calls
+        // disagree, e.g. validate accepting a NoCredentialsError that apply
+        // then reports as "switch_model failed".
+        const resolved = await this.validateModelSpec(modelId);
         // Retarget the live agent so the NEXT LLM CALL of this turn uses the
         // new model — the contract switch_model advertises, and what the
         // prompt rules mean by "switch_model ... in this turn, then continue".
-        //
-        // Record the escalation after the retarget. validateModelSpec above
-        // already rejects an unresolvable spec, so this ordering is belt to
-        // that brace rather than a guard against a reachable state.
-        await this.applyModelToRunningTurn(modelId);
+        await this.applyModelToRunningTurn(modelId, resolved);
         this.agentModelSwitch = modelId;
       }
     } else if (modelId === null) {
@@ -1799,7 +1814,10 @@ export class Thread {
       await this.session.providers.store.saveThread(this.session.id, this.toThreadData());
     }
     const after = isAgentSwitch
-      ? (this.agentModelSwitch ?? this.modelOverride ?? sessionDefault)
+      ? (this.agentModelSwitch ??
+        this.runningItem?.model ??
+        this.modelOverride ??
+        sessionDefault)
       : (this.modelOverride ?? sessionDefault);
     if (before !== after) {
       await this.session.emit({
@@ -1808,6 +1826,11 @@ export class Thread {
         fromModel: before,
         toModel: after,
         reason,
+        // Turn-scoped switches end when the turn settles, and nothing emits
+        // a matching switch back. A consumer that rebuilds the current model
+        // from the event stream needs this to avoid showing the thread as
+        // permanently escalated.
+        scope: isAgentSwitch ? "turn" : "thread",
       });
     }
     return { fromModel: before, toModel: after };
@@ -1823,9 +1846,12 @@ export class Thread {
    * accepted: the model resolved; the key is configurable before a turn
    * runs. Throws `ValidationError` on an unknown spec.
    */
-  private async validateModelSpec(spec: string): Promise<void> {
+  private async validateModelSpec(spec: string): Promise<ResolvedModel | null> {
     const sessionSpec = this.session.options.modelSpec ?? this.session.options.model.id;
-    if (spec === sessionSpec || spec === this.modelOverride) return;
+    // Valid by construction, and deliberately NOT resolved: null tells the
+    // caller "accepted without a lookup", which `applyModelToRunningTurn`
+    // has to handle rather than treat as a resolution failure.
+    if (spec === sessionSpec || spec === this.modelOverride) return null;
     const resolver = this.session.options.resolveModel;
     let resolved: ResolvedModel | PiModel | null | undefined;
     try {
@@ -1839,6 +1865,9 @@ export class Thread {
         `unknown model id: ${spec}. Run /model to list the available models.`,
       );
     }
+    // Normalize both shapes to ResolvedModel so the caller can apply the
+    // model (and any per-turn key) without re-resolving.
+    return "model" in resolved ? resolved : { model: resolved };
   }
 
   /**
@@ -1851,21 +1880,56 @@ export class Thread {
    * API key, so an escalation that crosses providers still authenticates —
    * the same pairing `applyResolvedKeyForResume` does on a gate resume.
    */
-  private async applyModelToRunningTurn(spec: string): Promise<void> {
+  private async applyModelToRunningTurn(
+    spec: string,
+    resolved: ResolvedModel | null,
+  ): Promise<void> {
     if (!this.runningItem) return;
-    const resolver = this.session.options.resolveModel;
-    if (!resolver) {
-      const m = resolveModelId(spec);
-      if (m) this.agent.state.model = m;
+    if (resolved) {
+      this.turnApiKey = resolved.apiKey;
+      this.agent.state.model = resolved.model;
       return;
     }
-    const resolved = await resolver(spec);
-    // validateModelSpec already accepted this spec; a null here means the
-    // resolver changed its mind mid-turn. Fail loud rather than silently
-    // continuing on the old model after telling the agent it switched.
-    if (!resolved) throw new ValidationError(`unknown model id: ${spec}`);
-    this.turnApiKey = resolved.apiKey;
-    this.agent.state.model = resolved.model;
+    // `resolved === null` means validateModelSpec accepted the spec WITHOUT
+    // a lookup: it names the session's own effective spec, or the thread's
+    // current pin. Those still have to be applied — returning here would
+    // tell the agent it switched while the turn kept streaming against the
+    // old model, which is the defect class this whole change exists to fix.
+    const sessionSpec = this.session.options.modelSpec ?? this.session.options.model.id;
+    const resolver = this.session.options.resolveModel;
+    if (resolver) {
+      // Re-resolve so a switch BACK also refreshes the per-turn key: after an
+      // escalation, `turnApiKey` holds the escalated provider's key, and
+      // reusing it against the original provider would 401.
+      let viaResolver: ResolvedModel | null | undefined;
+      try {
+        viaResolver = await resolver(spec);
+      } catch (err) {
+        if (!(err instanceof NoCredentialsError)) throw err;
+        viaResolver = { model: err.model };
+      }
+      if (viaResolver) {
+        this.turnApiKey = viaResolver.apiKey;
+        this.agent.state.model = viaResolver.model;
+        return;
+      }
+    }
+    // No resolver, or a resolver that does not know the session's own spec.
+    // The session already holds that model object, and it may not be in
+    // pi-ai's static registry at all (custom providers, test doubles) — the
+    // same carve-out `resolveTurnModel` makes. Only a DIVERGENT spec needs
+    // the registry, and a miss there fails loud (spec decision 3).
+    if (spec === sessionSpec) {
+      this.agent.state.model = this.session.options.model;
+      return;
+    }
+    const m = resolveModelId(spec);
+    if (!m) {
+      throw new ValidationError(
+        `unknown model id: ${spec}. Run /model to list the available models.`,
+      );
+    }
+    this.agent.state.model = m;
   }
 
   /** Layered resolution: agent escalation → item model → thread pin →
@@ -1896,8 +1960,11 @@ export class Thread {
    *  form; `model.id` is the wire id and only coincides for bare/internal
    *  resolution).
    *
-   *  The escalation ranks first so a turn that suspended at a decision gate
-   *  resumes on the model it escalated to, not the one it started on. */
+   *  The escalation ranks first so that any site re-deriving the spec during
+   *  a live turn sees what the turn is really running on. No current caller
+   *  does: both callers run either at fresh-turn start (escalation already
+   *  cleared) or on a post-restart reconcile path (escalation never
+   *  persisted). It is the correct precedence, not a load-bearing one. */
   private turnModelSpec(item?: QueueItem): string {
     return (
       this.agentModelSwitch ??

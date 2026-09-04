@@ -331,6 +331,7 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
           fromModel: e.fromModel,
           toModel: e.toModel,
           reason: e.reason,
+          scope: e.scope,
         },
       ];
 

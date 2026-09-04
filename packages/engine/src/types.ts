@@ -1509,7 +1509,22 @@ export type EngineEvent =
       gateId: string;
       reason: DecisionWithdrawReason;
     }
-  | { type: "model_switched"; threadId?: string; fromModel: string; toModel: string; reason: string }
+  | {
+      type: "model_switched";
+      threadId?: string;
+      fromModel: string;
+      toModel: string;
+      reason: string;
+      /**
+       * How long the new model lasts. `"turn"` is an agent `switch_model`:
+       * it ends when the turn settles and NO matching switch-back event is
+       * emitted, so a consumer rebuilding current state from the stream must
+       * not treat it as durable. `"thread"` is the user's own pin and
+       * persists. Absent on events from before this field existed; treat
+       * absent as `"thread"` (the old behavior).
+       */
+      scope?: "turn" | "thread";
+    }
   | {
       /**
        * A slash command ran and produced a transcript record (slash-commands

@@ -197,14 +197,17 @@ The amendment splits the two writers by scope:
   `modelOverride`: persisted, applied from the next turn, unchanged.
 - **Agent writes** (`switch_model`, marked by a `tool:` reason) go to
   `Thread.agentModelSwitch`: in-memory, never persisted, ranked first in
-  `turnModelSpec` so a gate resume keeps it, and dropped when the turn
-  settles.
+  `turnModelSpec`, and dropped when the turn settles.
 
 `Thread.setModel` now retargets the live agent for an agent write, and
 `buildAgent` wires pi-agent-core's `prepareNextTurn` hook to re-read
 `agent.state.model` between loop iterations. Together those make the tool's
 advertised contract — "takes effect on the next LLM call" — true for the first
-time.
+time. `agent.state.model` is what carries the switch across a live decision
+gate: the gate blocks inside the agent loop and never unwinds `runItem`, so
+the loop resumes on the model it was retargeted to. The `turnModelSpec`
+ranking is the correct precedence for any future site that re-derives the
+spec mid-turn, not the mechanism that makes the gate case work.
 
 Consequences worth stating:
 
@@ -217,6 +220,12 @@ Consequences worth stating:
 - The picker needs no special read. `modelOverride` holds only the user's
   choice, so the picker, `/status`, and the runtime agree by construction
   rather than by a display-time rule.
+- `model_switched` carries `scope: "turn" | "thread"`. A turn-scoped switch
+  ends when the turn settles and emits no matching switch back, so a consumer
+  that rebuilds the current model from the event stream must not treat it as
+  durable. The web stream store skips its refetch for turn scope: the picker
+  reads the user's pin, which a turn-scoped switch never changes, and the
+  orchestrator persona escalates on most turns.
 
 ## Out of scope
 
