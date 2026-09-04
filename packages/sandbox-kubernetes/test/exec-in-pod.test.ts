@@ -88,14 +88,40 @@ describe("execInPod", () => {
     expect(result.exitCode).toBe(0);
   });
 
-  it("truncates stdout at maxOutputBytes and marks the result truncated", async () => {
-    const api = new FakePodExecApi((stdout, _e, statusCallback) => {
-      stdout?.write("x".repeat(1000));
+  it("keeps bounded stdout and stderr heads and tails when output is capped", async () => {
+    const api = new FakePodExecApi((stdout, stderr, statusCallback) => {
+      stdout?.write(`stdout-head-${"x".repeat(1000)}-stdout-tail`);
+      stderr?.write(`stderr-head-${"y".repeat(1000)}-stderr-tail`);
       statusCallback?.({ status: "Success" });
     });
     const result = await execInPod(deps(api), "pod-1", "yes x", { maxOutputBytes: 100 });
-    expect(result.stdout.length).toBe(100);
+
+    expect(result.stdout).toMatch(/^stdout-head-/);
+    expect(result.stdout).toContain("bytes omitted");
+    expect(result.stdout).toMatch(/-stdout-tail$/);
+    expect(result.stderr).toMatch(/^stderr-head-/);
+    expect(result.stderr).toContain("bytes omitted");
+    expect(result.stderr).toMatch(/-stderr-tail$/);
+    expect(result.stdout.length).toBeLessThanOrEqual(200);
+    expect(result.stderr.length).toBeLessThanOrEqual(200);
     expect(result.truncated).toBe(true);
+  });
+
+  it("preserves UTF-8 characters split across transport chunks", async () => {
+    const encoded = Buffer.from("prefix-🧪-suffix", "utf8");
+    const splitInsideEmoji = encoded.indexOf(0xf0) + 2;
+    const api = new FakePodExecApi((stdout, stderr, statusCallback) => {
+      stdout?.write(encoded.subarray(0, splitInsideEmoji));
+      stdout?.write(encoded.subarray(splitInsideEmoji));
+      stderr?.write(encoded.subarray(0, splitInsideEmoji));
+      stderr?.write(encoded.subarray(splitInsideEmoji));
+      statusCallback?.({ status: "Success" });
+    });
+
+    const result = await execInPod(deps(api), "pod-1", "utf8-output");
+    expect(result.stdout).toBe("prefix-🧪-suffix");
+    expect(result.stderr).toBe("prefix-🧪-suffix");
+    expect(result.truncated).toBeUndefined();
   });
 
   it("force-closes the socket and reports timedOut when the status never arrives", async () => {
