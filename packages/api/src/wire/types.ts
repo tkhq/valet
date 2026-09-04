@@ -2968,6 +2968,10 @@ export interface CredentialSummary {
    * 1Password reference instead of an inline secret (1Password credential
    * provider plan, Task 3). Display-only — never secret material. */
   onepasswordRef?: string;
+  /** Team-scope only. The member whose live user row this reference follows. */
+  delegatedFrom?: string;
+  /** Team-scope only. True when the delegator left the team or disconnected. */
+  referenceBroken?: boolean;
 }
 
 export interface ListCredentialsResponse {
@@ -2982,8 +2986,11 @@ export interface PutCredentialRequest {
   refreshToken?: string;
   metadata?: Record<string, unknown>;
   /** Owner scope for the saved credential. `"org"` requires the caller to be
-   * an org admin. Defaults to `"user"`. */
-  scope?: "user" | "org";
+   * an org admin. `"team"` requires `teamId` and team administration.
+   * Defaults to `"user"`. */
+  scope?: "user" | "org" | "team";
+  /** Required when `scope` is `"team"`. */
+  teamId?: string;
   /** Resolve this credential's secret via a 1Password reference instead of
    * an inline `accessToken`/`apiKey` (1Password credential provider plan,
    * Task 3). Mutually exclusive with both. */
@@ -2995,6 +3002,14 @@ export interface PutCredentialResponse {
 }
 
 export interface DeleteCredentialResponse {
+  ok: true;
+}
+
+export interface DelegateCredentialRequest {
+  teamId: string;
+}
+
+export interface DelegateCredentialResponse {
   ok: true;
 }
 
