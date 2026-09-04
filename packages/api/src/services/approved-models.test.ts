@@ -12,7 +12,9 @@ import {
   isApproved,
   assertModelSelectable,
   validateApprovedModelsList,
+  validateTierTargetsRemainApproved,
 } from "./approved-models.js";
+import type { TierMap } from "./model-tiers.js";
 
 const orgId = "org-approved-models";
 
@@ -101,6 +103,40 @@ describe("approved-models", () => {
 
     it("accepts a non-empty list where every id is valid", () => {
       expect(validateApprovedModelsList(["anthropic/claude-haiku-4-5"], validIds)).toBeNull();
+    });
+  });
+
+  describe("validateTierTargetsRemainApproved", () => {
+    const tierMap: TierMap = {
+      xs: ["anthropic/claude-haiku-4-5"],
+      s: ["anthropic/claude-haiku-4-5"],
+      m: ["anthropic/claude-sonnet-4-6"],
+      l: ["anthropic/claude-opus-4-7"],
+      xl: ["anthropic/claude-opus-4-7"],
+    };
+
+    it("accepts an unrestricted catalog", () => {
+      expect(validateTierTargetsRemainApproved(null, tierMap)).toBeNull();
+    });
+
+    it("rejects removal of a configured tier target with corrective guidance", () => {
+      expect(
+        validateTierTargetsRemainApproved(
+          ["anthropic/claude-haiku-4-5", "anthropic/claude-opus-4-7"],
+          tierMap,
+        ),
+      ).toBe(
+        'Model "anthropic/claude-sonnet-4-6" is still used by tier "m". Change the model tier first.',
+      );
+    });
+
+    it("normalizes bare and namespaced Anthropic model ids", () => {
+      expect(
+        validateTierTargetsRemainApproved(
+          ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-7"],
+          tierMap,
+        ),
+      ).toBeNull();
     });
   });
 });

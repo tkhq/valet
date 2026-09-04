@@ -115,3 +115,11 @@ Add regression coverage for:
 - Unrestricted pickers retain the current reveal behavior.
 
 Run the focused engine, API, and web suites during development. Run `make e2e` before completion, as required by `CLAUDE.md`.
+
+## Implementation notes
+
+The engine has an awaited thread factory. It writes initial settings before it exposes the thread in memory.
+
+The API resolves fresh defaults without the persisted session row. It rejects an approved list that omits a configured tier target.
+
+The web app resolves closed labels from the first active catalog target. A restricted picker renders approved options without a catalog reveal.

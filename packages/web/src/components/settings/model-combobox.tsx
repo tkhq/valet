@@ -3,7 +3,13 @@ import { Check } from "lucide-react";
 import { Input, Badge } from "~/components/primitives";
 import { useModelTiers, useModels } from "~/api/settings";
 import { curatedForCatalogId, type ModelOption } from "~/lib/models";
-import { isSizeTier, SIZE_TIERS, TIER_LABELS, tierSubtitle } from "~/lib/model-tiers";
+import {
+  isSizeTier,
+  selectionLabel,
+  SIZE_TIERS,
+  TIER_LABELS,
+  tierSubtitle,
+} from "~/lib/model-tiers";
 import type { ModelInfo } from "@valet/api/wire";
 import { matchesNeedle } from "~/lib/text-match";
 
@@ -25,8 +31,8 @@ import { matchesNeedle } from "~/lib/text-match";
  * everything else renders with its catalog `name` + provider hint.
  * Selecting a model option always submits the catalog's own `id` verbatim
  * — the curated list only supplies display labels, never overrides the id
- * being written. When `value` is a tier token, the input displays
- * `TIER_LABELS[value]`.
+ * being written. When `value` is a tier token, the input displays the
+ * resolved catalog model name.
  *
  * Built with a plain filtered list under the input rather than a
  * Popover/Command primitive — this package's `components/primitives/` has
@@ -60,7 +66,7 @@ export function ModelCombobox({
   const tierMapQ = useModelTiers();
 
   const models = modelsQ.data?.models ?? [];
-  // `isKnownValue`/`selectedEntry` must still recognize an unapproved (or
+  // `isKnownValue` must still recognize an unapproved (or
   // since-removed) selected value — only the OPTION LIST below is
   // approval-filtered, so `registryIds` stays keyed on the full catalog.
   const registryIds = useMemo(() => new Set(models.map((m) => m.id)), [models]);
@@ -82,12 +88,9 @@ export function ModelCombobox({
     return SIZE_TIERS.filter((t) => matchesNeedle(query, [TIER_LABELS[t], t]));
   }, [query]);
 
-  const selectedEntry = models.find((m) => m.id === value);
   const selectedCurated = curatedForCatalogId(value);
   const selectedTier = isSizeTier(value) ? value : undefined;
-  const displayValue = value
-    ? (selectedTier ? TIER_LABELS[selectedTier] : (selectedCurated?.label ?? selectedEntry?.name ?? value))
-    : "";
+  const displayValue = value ? selectionLabel(value, tierMapQ.data, models) : "";
   const isKnownValue = !value || !!selectedTier || registryIds.has(value) || !!selectedCurated;
 
   function select(id: string) {

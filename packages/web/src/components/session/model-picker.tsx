@@ -7,9 +7,23 @@ import {
   DropdownMenuLabel,
   DropdownMenuTrigger,
 } from "~/components/primitives";
-import { useMe, useModelTiers, useModels, useOrgReasoning } from "~/api/settings";
+import {
+  useApprovedModels,
+  useMe,
+  useModelTiers,
+  useModels,
+  useOrgReasoning,
+} from "~/api/settings";
 import { curatedForCatalogId } from "~/lib/models";
-import { SIZE_TIERS, TIER_LABELS, isSizeTier, labelFor, tierSubtitle, type SizeTier } from "~/lib/model-tiers";
+import {
+  SIZE_TIERS,
+  TIER_LABELS,
+  isSizeTier,
+  resolveTierModel,
+  selectionLabel,
+  tierSubtitle,
+  type SizeTier,
+} from "~/lib/model-tiers";
 import { REASONING_LABELS, levelsUpTo, reasoningLabelFor } from "~/lib/reasoning";
 import type { GetModelTiersResponse, ModelInfo } from "@valet/api/wire";
 import { cn } from "~/lib/cn";
@@ -28,11 +42,10 @@ import { matchesNeedle } from "~/lib/text-match";
  * below, always occupying the first `SIZE_TIERS.length` slots.
  *
  * Options come from the org catalog (`GET /api/models`, Task 4/8), listed
- * in response order. The baseline list is approved-only for EVERYONE
- * (org model preferences are gone; approval is the only gate left) —
- * except a model already pinned as `currentId` is always shown, even if it
- * has since lost approval, so the picker never renders as if the current
- * pin doesn't exist. By default Anthropic entries also collapse to the
+ * in response order. When the org restricts models, every role sees all
+ * approved models and no catalog reveal. A current unapproved pin remains
+ * visible only in the closed trigger. Without a restriction, Anthropic
+ * entries collapse to the
  * curated tier list (one row per newest tier) so
  * `anthropic/claude-3-5-haiku-20241022` and its many aliases don't crowd
  * the picker. The "Show all"/"show N more" toggle reveals the rest, but
@@ -127,9 +140,7 @@ function thinkingLevelsFor(
 ): string[] | undefined {
   if (!currentId) return undefined;
   if (isSizeTier(currentId)) {
-    const first = tierMap?.[currentId]?.[0];
-    if (!first) return undefined;
-    return models.find((m) => m.id === first)?.thinkingLevels;
+    return resolveTierModel(currentId, tierMap, models)?.thinkingLevels;
   }
   return models.find((m) => m.id === currentId)?.thinkingLevels;
 }
@@ -154,36 +165,35 @@ export function ModelPicker({
   const meQ = useMe();
   const isAdmin = meQ.data?.orgRole === "admin";
   const tierMapQ = useModelTiers();
+  const approvedModelsQ = useApprovedModels();
   const orgReasoningQ = useOrgReasoning();
+  const restricted = approvedModelsQ.data !== undefined && approvedModelsQ.data.approved !== null;
 
-  // Readmit the current pin regardless of approval — a user must never see
-  // the picker act as if their own pinned model doesn't exist, even after
-  // it loses approval underneath them.
+  // Unrestricted pickers readmit a current pin. Restricted pickers keep it
+  // in the trigger only and never make it selectable.
   function withPinReadmitted(scoped: ModelInfo[]): ModelInfo[] {
     if (!currentId || scoped.some((m) => m.id === currentId)) return scoped;
     const pinned = models.find((m) => m.id === currentId);
     return pinned ? [...scoped, pinned] : scoped;
   }
 
-  // The baseline scope, for EVERYONE: approved entries only. This is what
-  // renders before any reveal, and what a member's "show more"/search stays
-  // within — an unapproved model never appears for a member.
-  const approvedScoped = useMemo(
-    () => withPinReadmitted(models.filter((m) => m.approved)),
-    [models, currentId],
-  );
-  // The full reveal scope, gated by role: an admin's reveal is the whole
-  // catalog (the server has a matching admin bypass); a member's reveal is
-  // the same approved-only set as the baseline.
-  const roleScoped = useMemo(
-    () => withPinReadmitted(visibleModels(models, isAdmin)),
-    [models, isAdmin, currentId],
-  );
+  // The baseline scope contains approved entries. A restriction disables
+  // current-pin readmission.
+  const approvedScoped = useMemo(() => {
+    const approved = models.filter((model) => model.approved);
+    return restricted ? approved : withPinReadmitted(approved);
+  }, [models, currentId, restricted]);
+  // The unrestricted reveal follows the caller role. A restricted reveal
+  // is the exact approved list for every role.
+  const roleScoped = useMemo(() => {
+    if (restricted) return models.filter((model) => model.approved);
+    return withPinReadmitted(visibleModels(models, isAdmin));
+  }, [models, isAdmin, currentId, restricted]);
 
   // Collapse Anthropic aliases by default unless `showAll` or query is
   // active — a search should peek into the wider scope so a user typing
   // "haiku-3-5-2024" can still find that pinned alias without toggling.
-  const revealAll = showAll || query.trim().length > 0;
+  const revealAll = restricted || showAll || query.trim().length > 0;
   const catalogForRole = revealAll ? roleScoped : approvedScoped;
   const filteredModels = useMemo(() => {
     const baseline = revealAll
@@ -243,9 +253,7 @@ export function ModelPicker({
   }, [highlightIndex, open]);
 
   const triggerLabel = currentId
-    ? isSizeTier(currentId)
-      ? TIER_LABELS[currentId]
-      : labelFor(currentId, models)
+    ? selectionLabel(currentId, tierMapQ.data, models)
     : "Inherit";
   const reasoningLevels = levelsUpTo(orgReasoningQ.data?.max);
   const activeThinkingLevels = thinkingLevelsFor(currentId, tierMapQ.data, models);
@@ -485,7 +493,7 @@ export function ModelPicker({
           <div className="px-3 py-1.5 text-[10px] text-muted">
             <span>
               {filteredModels.length} of {roleScoped.length} models
-              {hiddenCount > 0 && !showAll && !query && (
+              {!restricted && hiddenCount > 0 && !showAll && !query && (
                 <>
                   {" · "}
                   <button
@@ -501,7 +509,7 @@ export function ModelPicker({
                   </button>
                 </>
               )}
-              {showAll && !query && (
+              {!restricted && showAll && !query && (
                 <>
                   {" · "}
                   <button

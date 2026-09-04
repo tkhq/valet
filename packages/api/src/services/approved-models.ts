@@ -11,7 +11,7 @@
 import { eq } from "drizzle-orm";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { orgs } from "../schema/index.js";
-import { TIER_SET } from "./model-tiers.js";
+import { TIER_SET, TIER_TOKENS, type TierMap } from "./model-tiers.js";
 import { parseModelId } from "./llm-providers.js";
 
 /**
@@ -92,6 +92,22 @@ export function validateApprovedModelsList(approved: string[] | null, validIds: 
     }
   }
 
+  return null;
+}
+
+/** Reject an approved list that removes a model used by a size tier. */
+export function validateTierTargetsRemainApproved(
+  approved: string[] | null,
+  tierMap: TierMap,
+): string | null {
+  if (approved === null) return null;
+  for (const tier of TIER_TOKENS) {
+    for (const spec of tierMap[tier]) {
+      if (!isApproved(approved, spec)) {
+        return `Model "${spec}" is still used by tier "${tier}". Change the model tier first.`;
+      }
+    }
+  }
   return null;
 }
 

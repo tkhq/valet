@@ -8,8 +8,14 @@
 import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
-import { getApprovedModels, setApprovedModels, validateApprovedModelsList } from "../services/approved-models.js";
+import {
+  getApprovedModels,
+  setApprovedModels,
+  validateApprovedModelsList,
+  validateTierTargetsRemainApproved,
+} from "../services/approved-models.js";
 import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
+import { getOrgTierMap } from "../services/model-tiers.js";
 import type { GetApprovedModelsResponse, PutApprovedModelsResponse } from "../wire/types.js";
 
 export const approvedModelsRouter = new Hono<AppEnv>();
@@ -50,6 +56,11 @@ approvedModelsRouter.put("/", async (c) => {
   const validIds = catalogValidIds(catalog);
   const error = validateApprovedModelsList(approved, validIds);
   if (error) return c.json({ error }, 400);
+  const tierError = validateTierTargetsRemainApproved(
+    approved,
+    await getOrgTierMap(db, user.orgId),
+  );
+  if (tierError) return c.json({ error: tierError }, 400);
 
   await setApprovedModels(db, user.orgId, approved);
   const body: PutApprovedModelsResponse = { approved };

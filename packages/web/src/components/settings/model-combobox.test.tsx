@@ -150,9 +150,23 @@ describe("ModelCombobox — Size tier group", () => {
     expect(onSelect).toHaveBeenCalledWith("l");
   });
 
-  it("displays the tier label in the input when value is a tier token", () => {
+  it("displays the resolved model name when value is a tier token", () => {
+    modelsData = {
+      models: [
+        {
+          id: "openai/gpt-5.6-sol",
+          name: "GPT-5.6 Sol",
+          providerId: "openai",
+          providerKind: "openai",
+          providerName: "OpenAI",
+          active: true,
+          approved: true,
+        },
+      ],
+    };
+    tierMapData = { xs: [], s: [], m: [], l: ["openai/gpt-5.6-sol"], xl: [] };
     render(<ModelCombobox value="l" onSelect={vi.fn()} onClear={vi.fn()} />);
-    expect(screen.getByDisplayValue("Large")).toBeTruthy();
+    expect(screen.getByDisplayValue("GPT-5.6 Sol")).toBeTruthy();
     expect(screen.queryByText(/isn't in the current model registry/)).toBeNull();
   });
 });
