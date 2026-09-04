@@ -16,6 +16,12 @@ describe("clampStorageRequest", () => {
     expect(clampStorageRequest("50Gi", "20Gi")).toEqual({ storage: "20Gi", clamped: true });
   });
 
+  it("trims whitespace-padded quantities — a padded value emitted verbatim fails CRD admission", () => {
+    expect(clampStorageRequest("8Gi ", "20Gi")).toEqual({ storage: "8Gi", clamped: false });
+    expect(clampStorageRequest(" 8Gi", "20Gi")).toEqual({ storage: "8Gi", clamped: false });
+    expect(clampStorageRequest("50Gi", " 20Gi ")).toEqual({ storage: "20Gi", clamped: true });
+  });
+
   it("compares across units (decimal request vs binary cap)", () => {
     // 3G = 3e9 bytes < 4Gi; 5G = 5e9 bytes > 4Gi (~4.29e9).
     expect(clampStorageRequest("3G", "4Gi")).toEqual({ storage: "3G", clamped: false });

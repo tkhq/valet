@@ -1650,11 +1650,13 @@ export class EngineHost {
     const db = this.opts.db;
     if (!tokenDeps || !db) return [];
     try {
-      const primaryRepo = meta.repos?.[0];
-      if (!primaryRepo) return [];
-      if ((primaryRepo.host ?? "github.com") !== "github.com") return [];
-      const [owner, repoName] = primaryRepo.fullName.split("/");
-      if (!owner || !repoName) return [];
+      // Same target guard as `resolveRepoPrebuildFlags` (TKAI-385): a copy of
+      // this guard here once matched only "github.com" while `session_repos.host`
+      // stores "github", which silently disabled credentials.yaml wrappers for
+      // every DB-loaded session.
+      const target = prebuildFlagsTarget(meta.repos);
+      if (!target.ok) return [];
+      const { owner, repo: repoName, ref } = target;
       const resolved = await resolveSessionGitHubToken(
         {
           db,
@@ -1680,7 +1682,7 @@ export class EngineHost {
         resolved.token,
         owner,
         repoName,
-        primaryRepo.ref ?? "HEAD",
+        ref,
       );
     } catch (err) {
       console.error("EngineHost: reading .valet/credentials.yaml failed:", err);
@@ -3051,11 +3053,11 @@ export class EngineHost {
     // start-ref sink: a child session records no start-ref today. An absent
     // `opts.db` (tests that wire no db) degrades to empty bindings, same as
     // `sessionExtras`/`mintSandboxEnv`.
-    // `profile`/`docker` MUST reach the meta: `buildSpecProvider` resolves
-    // the sandbox image per-profile from it. Dropping them here resolved a
-    // full/docker child against the HEADLESS base bake — an image without
-    // /start-full.sh or the docker toolchain — while the manifest ran the
-    // full-profile command, so the pod crash-looped (dev-v2 DinD outage).
+    // `profile`/`docker` MUST reach the meta: dropping them once shipped a
+    // dev-v2 DinD outage (a full/docker child crash-looped against the wrong
+    // bake). Image resolution is single-lineage today (resolve-snapshot pins
+    // profile "full"), so they no longer select the image — but the meta is
+    // what later consumers and the spec provider see; keep it complete.
     const meta = this.opts.db
       ? await loadSessionMeta(this.opts.db, {
           id: childSessionId,

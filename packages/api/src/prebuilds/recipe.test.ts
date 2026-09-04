@@ -122,6 +122,16 @@ describe("loadPrebuildOverride", () => {
     ).rejects.toThrow(/workspaceStorage must be a quantity string/);
   });
 
+  it("rejects a workspaceStorage the provider could not parse (typo'd suffix, zero, negative)", async () => {
+    // The provider's fallback is a silent 1Gi on the api pod; the author must
+    // hear about the typo at read time instead.
+    for (const bad of ['workspaceStorage: "8GB"\n', 'workspaceStorage: "0"\n', 'workspaceStorage: "-1Gi"\n']) {
+      await expect(loadPrebuildOverride(readerFor({ ".valet/prebuild.yaml": bad }))).rejects.toThrow(
+        /not a positive Kubernetes quantity/,
+      );
+    }
+  });
+
   it("parses baseSetup (repo-declared toolchain layer)", async () => {
     const override = await loadPrebuildOverride(
       readerFor({ ".valet/prebuild.yaml": "baseSetup:\n  - apt-get install -y cmake\n" }),

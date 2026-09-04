@@ -14,6 +14,7 @@
  */
 import { createHash } from "node:crypto";
 import { parse as parseYaml } from "yaml";
+import { parseStorageQuantity } from "@valet/sandbox-kubernetes";
 
 export interface RecipeStep {
   /** Stable identifier — the fetch-on-start diff keys on this, so it must
@@ -165,6 +166,16 @@ export async function loadPrebuildOverride(
     // bare number (`workspaceStorage: 4`) does not name a unit.
     if (typeof obj.workspaceStorage !== "string") {
       throw new Error('.valet/prebuild.yaml: workspaceStorage must be a quantity string like "4Gi"');
+    }
+    // Validate here, not only in the provider: the provider's fallback is a
+    // SILENT 1Gi on the api pod, feedback the repo author never sees. A typo
+    // like "8GB" (invalid k8s suffix) must fail loudly at read time, where
+    // the failure is logged with the repo name.
+    const bytes = parseStorageQuantity(obj.workspaceStorage);
+    if (bytes === null || bytes <= 0) {
+      throw new Error(
+        `.valet/prebuild.yaml: workspaceStorage "${obj.workspaceStorage}" is not a positive Kubernetes quantity — use a form like "4Gi" or "500Mi"`,
+      );
     }
     override.workspaceStorage = obj.workspaceStorage;
   }

@@ -303,5 +303,11 @@ describe("childSessionFor repo prebuild flags", () => {
     expect(call).toBeDefined();
     expect(call?.workspaceStorage).toBe("8Gi");
     expect(call?.docker).toBe(true);
+
+    // The contents read must be AUTHENTICATED with the minted installation
+    // token — a change that swallows token errors and proceeds tokenless
+    // would keep the flags green against this permissive fixture otherwise.
+    const contentsCall = fixture.calls.find((c) => c.path.includes("/contents/"));
+    expect(contentsCall?.authHeader).toBe("Bearer inst-111");
   });
 });

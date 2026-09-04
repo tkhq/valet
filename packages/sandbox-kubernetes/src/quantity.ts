@@ -55,11 +55,16 @@ export function formatStorageQuantity(bytes: number): string {
 }
 
 /**
- * Clamps a requested storage quantity to a cap: the request verbatim when it
- * fits, the cap verbatim when it exceeds it (`clamped: true`), or null when
+ * Clamps a requested storage quantity to a cap: the request (trimmed) when it
+ * fits, the cap (trimmed) when it exceeds it (`clamped: true`), or null when
  * either quantity is unparseable — the caller falls back to its default
  * rather than provisioning an unknown size (a typo'd cap must never grant an
  * unbounded request).
+ *
+ * Trimmed, never verbatim: `parseStorageQuantity` trims before matching, so a
+ * whitespace-padded value (`"8Gi "` survives YAML quoting) parses here — but
+ * emitted verbatim it fails the CRD's quantity pattern and the CR is rejected
+ * at admission, which kills the sandbox outright instead of falling back.
  */
 export function clampStorageRequest(
   requested: string,
@@ -69,6 +74,6 @@ export function clampStorageRequest(
   if (requestedBytes === null || requestedBytes <= 0) return null;
   const maxBytes = parseStorageQuantity(max);
   if (maxBytes === null || maxBytes <= 0) return null;
-  if (requestedBytes > maxBytes) return { storage: max, clamped: true };
-  return { storage: requested, clamped: false };
+  if (requestedBytes > maxBytes) return { storage: max.trim(), clamped: true };
+  return { storage: requested.trim(), clamped: false };
 }

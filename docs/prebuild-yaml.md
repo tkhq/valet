@@ -69,6 +69,8 @@ Declare the workspace volume size this repo needs. A sandbox that clones this re
 
 The platform clamps the declared size to the deploy's growth cap (`VALET_SANDBOX_WORKSPACE_MAX`, default 20Gi); a repo cannot request unbounded storage. The declaration only affects newly provisioned workspaces — an existing sandbox keeps its volume until it is destroyed and re-provisioned. Like `docker`, this key configures the SESSION at create time, not the baked image. See `docs/specs/2026-09-03-sandbox-workspace-fit-design.md`.
 
+The key applies on the kubernetes sandbox backend only. The docker backend (`make dev-local`) mounts `/workspace` from the host filesystem, so it has no volume to size and ignores this key. Use binary or decimal Kubernetes suffixes (`Gi`, `Mi`, `G`, `M`) — forms like `"8GB"` are rejected at read time.
+
 ## Dockerfile step order
 
 The bake produces a Dockerfile in this order:
