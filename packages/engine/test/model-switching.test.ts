@@ -44,7 +44,7 @@ import {
   type ResolvedModel,
   type ToolDef,
 } from "../src/index.js";
-import { switchModelTool } from "../src/builtin-tools/index.js";
+import { switchModelTool, taskTool } from "../src/builtin-tools/index.js";
 
 const builtinToolNames = builtinTools.map((t) => t.name);
 
@@ -102,6 +102,15 @@ function setup(): SetupResult {
 }
 
 describe("engine: model switching", () => {
+  it("keeps tool guidance consistent with supervisor-selected drafting and review tiers", () => {
+    expect(taskTool.description).not.toContain("Pass `l` or `xl` for architecture");
+    expect(taskTool.description).toContain("s/m/l for drafting");
+    expect(taskTool.description).toContain("l/xl for separate review");
+    expect(taskTool.description).toContain("XL children review only");
+    expect(switchModelTool.description).toContain("Children retain their assigned model");
+    expect(switchModelTool.description).toContain("capability gap");
+  });
+
   it("Thread.setModel persists the override and emits model_switched", async () => {
     const { engine, store, events, baseModel } = setup();
     const session = await engine.createSession({

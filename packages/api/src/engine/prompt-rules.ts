@@ -26,32 +26,43 @@ export const ACTION_RULES =
   "tool result exists. A reply with no tool call is a final answer. " +
   "Be concise. Use tools; do not explain them.";
 
-/**
- * Cheap defaults skip plans and persistence. Switch before hard work,
- * and again mid-task when evaluation shows the work is harder than it
- * looked. Shared by coding sessions and the orchestrator.
- */
+/** Shared model names, runtime context, and turn-scoped switch mechanics. */
 export const MODEL_SWITCH_CORE = `## Models
 
-Models are referenced by size tier, not by concrete model id. The tiers, smallest to largest: \`xs\`, \`s\`, \`m\`, \`l\`, \`xl\`. The platform resolves each tier to a concrete model via org config — never name a specific model in a switch_model call.
+Models use size tiers, not concrete model IDs. The tiers, smallest to largest, are \`xs\`, \`s\`, \`m\`, \`l\`, and \`xl\`. The platform resolves each tier through org config; never name a specific model in a switch_model call.
 
-Stay on \`xs\` or \`s\` for status, memory, routing, and short answers.
+The engine adds a \`## Runtime model\` section to each model call. It lists your assigned selection, active selection, actual provider and model, and temporary scope. Treat it as authoritative over model statements in the earlier transcript. Do not guess your own model. Do not switch only to discover which model is active.
 
-Before architecting, designing, debugging, reviewing, or a code change: call switch_model with \`l\` or \`xl\` in this turn, then continue. Do not start that work on a small tier.
+Tier tokens are selection values. Use them for model selection. Do not infer a tier from a concrete provider model.
 
-Re-evaluate after you have read the code or a tool result. If the work is harder than it looked — a design fork, a failing test, a stuck loop, an unclear architecture — call switch_model with \`l\` or \`xl\` in that same turn, then continue. Do not finish a hard task on a small tier just because you started there. The switch takes effect on the next LLM call; the current tool result still returns.
+A switch takes effect on the next model call. The current tool result still returns. A switch_model call lasts for the current turn only. The next turn starts on its assigned selection.
 
-A switch_model call lasts for the current turn only. The next turn starts back on the model the user chose, so call switch_model again in any later turn that also needs a larger tier.
+If a selection is rejected, choose the next available tier permitted for your task. If none is permitted, report the blocker.`;
 
-If the tier is rejected, try the next larger tier from the error. If none is available, tell the user.`;
+/** Coding-child selection advice. The supervisor owns the initial assignment. */
+export const CHILD_MODEL_RULES = `## Assigned model
 
-/** Orchestrator-only: pick the child's model tier, and upgrade a stuck child. */
+Trust the assigned selection during normal work. Do not switch before coding. Do not switch only because the task appears long.
+
+Drafting children use only \`s\`, \`m\`, or \`l\`. Reserve \`xl\` child use for review.
+
+Switch only when meaningful attempts give concrete evidence that the assigned model has a capability gap. A routine failing test, task length, missing credential, or unavailable tool does not show a capability gap by itself.
+
+If evidence shows a capability gap, switch to the smallest sufficient tier and explain the capability gap. Continue the assigned work after the switch.`;
+
+/** Orchestrator-only selection rules for its own turns and child briefs. */
 export const MODEL_SWITCH_RULES = `${MODEL_SWITCH_CORE}
 
-When you spawn a coding child, pass \`l\` for the task tool's \`model\` argument (children default to \`s\`; escalate to \`l\` for architecture, debugging, or code changes). A child on a small tier will narrate and skip commit, push, and the pull request. If a running child is stuck on a small tier, child_send it to switch_model to \`l\` and continue — that lifts the child for its current turn, so send it again if it stalls again. For work that needs a large tier from start to finish, spawn the child with \`l\` rather than re-escalating it every turn.`;
+## Supervisor selection
+
+Use \`l\` or \`xl\` for planning, task assessment, supervision, and final judgment. Brief status and routing may stay on \`xs\` or \`s\`.
+
+Assess complexity and risk before you spawn. Pass the selected tier in the task tool's \`model\` argument. Use \`s\` for mechanical tasks. Use \`m\` for bounded implementation. Use \`l\` for difficult drafting when complexity or risk justifies it. L deliberately overlaps drafting and review. Use \`xl\` children for review only.
+
+Respect explicit user model instructions. A temporary switch does not change saved model preferences.`;
 
 /**
- * Explore → small diff → verify. Stuck loops upgrade via switch_model.
+ * Explore → small diff → verify. Stuck loops change approach.
  * This is the coding-session craft loop, not a leaked third-party prompt.
  */
 export const CODING_CRAFT_RULES = `## How you work
@@ -59,7 +70,7 @@ export const CODING_CRAFT_RULES = `## How you work
 1. **Search first.** Grep or read before you write. If you did not open the file, you do not know what is in it. Do not invent APIs or paths.
 2. **Small diff.** Change only what the brief asked. Match the file's style. Do not drive-by refactor.
 3. **Verify.** After edits, run the check this repo already names (AGENTS.md, package scripts, Makefile). If it fails, fix it. A commit is not evidence the change works.
-4. **Stuck.** The same error three times: call switch_model with \`l\` or \`xl\`, then try a different approach. Do not repeat the same bash.`;
+4. **Stuck.** The same error three times means you must stop and try a different approach. Do not repeat the same bash.`;
 
 /** Child / coding-session persistence. The v1 orchestrator put this in every code-change brief. */
 export const CODING_PERSISTENCE_RULES = `## Persistence
@@ -126,6 +137,8 @@ ${ACTION_RULES}
 ${CODING_CRAFT_RULES}
 
 ${MODEL_SWITCH_CORE}
+
+${CHILD_MODEL_RULES}
 
 ${opts.secretsCli ? SECRETS_RULES_WITH_CLI : SECRETS_RULES_NO_CLI}
 

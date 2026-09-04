@@ -632,19 +632,22 @@ export const listThreadsTool = defineTool({
 export const switchModelTool = defineTool({
   name: "switch_model",
   description:
-    "Switch the model used for the rest of *this turn*. Useful when the work " +
-    "turns out to need a stronger reasoning model, or a faster/cheaper one. " +
+    "Switch the model used for the rest of *this turn*. Read Runtime model " +
+    "context for your current model; do not switch just to discover it. " +
+    "Children retain their assigned model during normal work. If meaningful " +
+    "attempts reveal a capability gap, explain the evidence and use the smallest " +
+    "sufficient tier. A routine failing test or missing credential is not enough. " +
+    "Drafting children use s/m, or l for difficult work. Child xl use is for reviews only. " +
     "The change takes effect on the next LLM call — the in-flight tool call " +
     "finishes against the old model. Scope is the current turn only: when the " +
     "turn ends, the thread returns to the model the user chose, so call this " +
     "again in a later turn if that turn also needs it. The thread and session " +
-    "model settings belong to the user and are not exposed to the agent. For " +
-    "work that needs a strong model throughout, set the child's `model` when " +
-    "you spawn it instead.",
+    "model settings belong to the user and cannot be changed through this tool. " +
+    "Supervisors select a child's model at spawn from its task difficulty and purpose.",
   parameters: Type.Object({
     model: Type.String({
       description:
-        "Target size tier (xs, s, m, l, xl) or a concrete model id. Prefer tiers — the platform resolves them to models via org config.",
+        "Target size tier (xs, s, m, l, xl). Use tiers so org configuration selects the model. Concrete model IDs remain accepted.",
     }),
   }),
   execute: async (args, ctx) => {
@@ -713,16 +716,17 @@ export const taskTool = defineTool({
     "forget — this call does not wait for the child to finish). The " +
     "parent thread receives a `child.settled` signal with the child's " +
     "result once it completes. Unavailable inside child sessions " +
-    "(depth-limited to one level). Children default to tier `s` (a " +
-    "cost-efficient model). Pass `l` or `xl` for architecture, debugging, " +
-    "or code changes. Tiers resolve to concrete models via org config; " +
+    "(depth-limited to one level). Children default to tier `s`. " +
+    "Assess difficulty and select s/m/l for drafting, or l/xl for separate review. " +
+    "XL children review only. Include the scope, selected tier and reason, " +
+    "and acceptance checks in the brief. Tiers resolve through org config; " +
     "do not name specific models.",
   parameters: Type.Object({
     prompt: Type.String({ minLength: 1, description: "The task for the child session to perform." }),
     title: Type.Optional(Type.String()),
     repo: Type.Optional(Type.String({ description: "Clone URL or org/repo; interpretation is host policy." })),
     branch: Type.Optional(Type.String()),
-    model: Type.Optional(Type.String({ description: "Size tier (xs, s, m, l, xl) for the child. Default: s." })),
+    model: Type.Optional(Type.String({ description: "Choose explicitly by task difficulty: s for mechanical drafting, m for bounded implementation, l for difficult drafting or review, xl for review only. Default: s. Explain the assignment in the brief." })),
     profile: Type.Optional(
       Type.Union([Type.Literal("headless"), Type.Literal("full")], {
         description:
