@@ -62,7 +62,13 @@ import { computeSpec, specHash } from "./sandbox-spec.js";
 import { buildPrepSteps } from "./prep-steps.js";
 import { securityToolPrepSteps } from "./security-bootstrap.js";
 import type { OnePasswordService } from "../services/onepassword.js";
-import { orgFallbackPolicy, resolveUserCredentialRead, onePasswordScopesFor } from "../services/credential-resolution.js";
+import {
+  orgFallbackPolicy,
+  resolveOrgCredentialRead,
+  resolveTeamCredentialRead,
+  resolveUserCredentialRead,
+  onePasswordScopesFor,
+} from "../services/credential-resolution.js";
 import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
 import { resolveOpenAiCredential } from "../services/openai-key.js";
@@ -409,6 +415,15 @@ export interface SessionMeta {
    * `loadSessionMeta` supplies it from the app row.
    */
   ownerTeamId?: string;
+}
+
+/** The session principal `buildSession` stamps onto `SessionOptions.owner`. */
+export function sessionPrincipal(meta: SessionMeta): Principal {
+  if (meta.ownerType === "team" && meta.ownerTeamId) {
+    return { type: "team", id: meta.ownerTeamId };
+  }
+  if (meta.ownerType === "org") return { type: "org", id: meta.orgId };
+  return { type: "user", id: meta.userId };
 }
 
 /** The primary repo's GitHub coordinates, or why a GitHub read cannot run.
@@ -1048,6 +1063,7 @@ export class EngineHost {
           options: {
             userId: meta.userId,
             orgId: meta.orgId,
+            owner: sessionPrincipal(meta),
             workspace: meta.workspace,
             sandbox: sandboxOpts,
             model,
@@ -1072,6 +1088,7 @@ export class EngineHost {
           id: sessionId,
           userId: meta.userId,
           orgId: meta.orgId,
+          owner: sessionPrincipal(meta),
           workspace: meta.workspace,
           sandbox: sandboxOpts,
           model,
@@ -1559,14 +1576,14 @@ export class EngineHost {
     sessionId: string,
     userId: string,
     orgId: string,
-    ownerType: string | undefined,
+    _ownerType: string | undefined,
   ): ((owner: CredentialOwner, service: string) => Promise<StoredCredential | null>) | undefined {
     const tokenDeps = this.opts.githubTokenDeps;
     const db = this.opts.db;
     const credentials = this.opts.engineCredentials;
     const onePassword = this.opts.onePassword;
     if ((!tokenDeps || !db) && !onePassword) return undefined;
-    return async (_owner, service) => {
+    return async (owner, service) => {
       if (service === GITHUB_INSTALLATION_CREDENTIAL_SERVICE) {
         // Explicit installation-tier request (github.list_repos with
         // `scope: "installation"`): mint the App installation token directly
@@ -1600,7 +1617,11 @@ export class EngineHost {
         return resolveOpenAiCredential(
           db,
           credentials,
-          { orgId, userId, scopes: onePasswordScopesFor(ownerType) },
+          {
+            orgId,
+            userId: owner.type === "user" ? owner.id : userId,
+            scopes: onePasswordScopesFor(owner.type),
+          },
           process.env,
           onePassword,
         );
@@ -1616,7 +1637,9 @@ export class EngineHost {
             fetchImpl: tokenDeps.fetchImpl,
             now: tokenDeps.now,
           },
-          { orgId, userId, sessionId, purpose: "api" },
+          owner.type === "user"
+            ? { orgId, userId: owner.id, sessionId, purpose: "api" }
+            : { orgId, sessionId, purpose: "api", auth: "app" },
         );
         // `purpose: "api"` throws (`GitHubAuthError`, with the connect hint)
         // rather than returning a null token; a null here would be a contract
@@ -1631,15 +1654,31 @@ export class EngineHost {
       // Slack is not special-cased for ESCALATION any more: `plugin-slack`
       // declares `requires.orgCredential`, so `orgFallbackPolicy` reaches the
       // org row for it and for nothing that has not asked. What stays special
-      // is the identity link, which the private-channel check needs.
+      // is the identity link, which the private-channel check needs — and
+      // only a user-owned session has one person whose link can authorize it.
       const fallback = orgFallbackPolicy(this.opts.plugins, service);
+      if (owner.type === "team") {
+        return resolveTeamCredentialRead(
+          { credentials, onePassword },
+          { orgId, teamId: owner.id, userId, scopes: onePasswordScopesFor("team") },
+          service,
+          fallback === "org-provided" ? "org-provided" : "none",
+        );
+      }
+      if (owner.type === "org") {
+        return resolveOrgCredentialRead(
+          { credentials, onePassword },
+          { orgId, userId, scopes: onePasswordScopesFor("org") },
+          service,
+        );
+      }
       const stored = await resolveUserCredentialRead(
         { credentials, onePassword },
-        { orgId, userId, scopes: onePasswordScopesFor(ownerType) },
+        { orgId, userId: owner.id, scopes: onePasswordScopesFor("user") },
         service,
         fallback,
       );
-      if (service === "slack" && stored && db) return withSlackOwnerMetadata(db, userId, stored);
+      if (service === "slack" && stored && db) return withSlackOwnerMetadata(db, owner.id, stored);
       return stored;
     };
   }
