@@ -286,4 +286,34 @@ reasoning control, then is used at:
 
 ## Deviations
 
-None yet. Record implementation deviations here.
+Recorded during implementation (2026-09-03):
+
+- **Engine reasoning pin placement.** The thread pin lives on the Thread and
+  applies in `streamFn`; the engine leaves pi-agent-core's
+  `AgentState.thinkingLevel` at "off". Section 6 above already reflects
+  this. Reason: agent rebuilds would lose AgentState, and the clamp needs
+  the per-call model.
+- **Session reasoning is not stamped onto new threads.** Unlike the model
+  pin, a thread with no pin of its own follows the session value live, so
+  `session.setReasoning` reaches existing threads.
+- **No engine event on `setReasoning`.** The web UI reads the value back
+  over REST. Add a `reasoning_switched` event if live sync is needed later.
+- **Clear vs unset.** `PATCH reasoning: null` clears the stored value. After
+  the next cache-eviction rebuild the cascade re-applies user/org defaults,
+  so a deliberate clear does not survive a rebuild when a default exists.
+- **The cap is not retroactive.** A persisted level is never re-clamped. If
+  an admin lowers the max after a session pinned a higher level, that
+  session keeps its level across rebuilds ("clamp the cascade result only").
+- **A reasoning-only PATCH wakes a hibernated session**, the same way a
+  model PATCH does.
+- **Assistant PATCH also catalog-validates `model`** (`validateDefaultModelId`),
+  beyond section 4's list. Without it a typo would be stored and later fail
+  the session build as a 500.
+- **`tierTargetsNotApproved` lives in `routes/model-tiers.ts`**, not the
+  service, to avoid a circular import between `model-tiers.ts` and
+  `approved-models.ts`.
+- **Org sections use route-level admin gating** (`OrgRouteGuard`), matching
+  the page's existing sections. There is no per-section role check; the
+  PATCH routes hold the authz.
+- **Tier subtitles show the curated short label** ("Opus 4.7"), matching the
+  picker's own model rows, not the raw catalog name.
