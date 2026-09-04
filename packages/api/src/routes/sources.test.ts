@@ -604,6 +604,30 @@ describe("POST /api/org/sources/:id/bake", () => {
     expect(JSON.stringify(body)).not.toContain("org-pat-token");
     expect(builder.specs).toHaveLength(1);
   });
+
+  it("502s with corrective guidance when GitHub fails", async () => {
+    fixture = startGithubFixture({
+      getRepo: () => ({ body: { default_branch: "main" } }),
+      getCommit: () => ({ status: 503, body: { message: "Service Unavailable" } }),
+    });
+    api = await bootTestApi({ imageBuilder: new FakeImageBuilder(), githubApiUrl: fixture.url });
+    await api.providers.engineCredentials.save({ type: "org", id: "local-org" }, "github", {
+      type: "api_key",
+      accessToken: "org-pat-token",
+      metadata: { login: "org-pat" },
+    });
+    const source = await seedRepoSource(api);
+
+    const res = await fetch(`${api.baseUrl}/api/org/sources/${source.id}/bake`, {
+      method: "POST",
+      headers: HEADERS,
+    });
+
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("Retry the build");
+    expect(body.error).not.toContain("org-pat-token");
+  });
 });
 
 // ── GET /api/org/sources/:id/bakes ───────────────────────────────────────────

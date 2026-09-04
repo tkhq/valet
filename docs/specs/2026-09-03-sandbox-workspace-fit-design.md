@@ -134,7 +134,12 @@ workspaceStorage: "4Gi"
   clone exists (the `docker` key set the precedent for a session-runtime
   knob there). `repoPrebuildFlags` (`packages/api/src/bakes/source-service.ts`)
   reads both keys in one cached (10 min), best-effort, 5s-bounded GitHub
-  contents call; any failure degrades to the defaults.
+  contents call. Only a 404 is an absent file. A malformed success response
+  and all other failures use the defaults without entering the cache.
+  The reader accepts GitHub's line-wrapped base64 and rejects invalid content.
+  The timeout aborts the GitHub request and removes its in-flight entry. A
+  later session retries the read. Cleanup from the old request cannot remove
+  a newer in-flight read for the same key.
 - The value flows `EngineHost.resolveRepoPrebuildFlags` →
   `SandboxCreateOpts.workspaceStorage` → the manifest builder
   (`resolveWorkspaceStorageRequest`), which CLAMPS it to
@@ -153,6 +158,8 @@ workspaceStorage: "4Gi"
   from it.
 - Only the PRIMARY (position-0) binding's declaration is read, matching the
   `docker` key's existing behavior.
+- The API owns the `valet.sandbox.prebuild_flags` counter because the API owns
+  the GitHub read. The portable engine does not export this metric.
 
 Schema doc: `docs/prebuild-yaml.md`. Immediate use: set `tkhq/mono` to
 `"4Gi"` and the clone never fills the volume at all.

@@ -54,6 +54,7 @@ import {
 } from "../services/github-tokens.js";
 import { primaryRepoBinding, resolveSessionGitHubToken } from "../services/session-github-token.js";
 import { repoCredentialCommands, repoPrebuildFlags, type RepoPrebuildFlags } from "../bakes/source-service.js";
+import { recordPrebuildFlagsResolved } from "../observability/prebuild-metrics.js";
 import { loadSessionMeta } from "./session-meta.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";
@@ -1699,10 +1700,10 @@ export class EngineHost {
    * `githubTokenDeps`/`db` are not wired (db-less test environments).
    */
   private async resolveRepoPrebuildFlags(sessionId: string, meta: SessionMeta): Promise<RepoPrebuildFlags> {
-    const defaults: RepoPrebuildFlags = { docker: false };
+    const defaults: RepoPrebuildFlags = { docker: false, outcome: "error" };
     const tokenDeps = this.opts.githubTokenDeps;
     const db = this.opts.db;
-    if (!tokenDeps || !db) return defaults;
+    if (!tokenDeps || !db) return { docker: false, outcome: "absent" };
     try {
       const target = primaryGitHubRepoTarget(meta.repos);
       if (!target.ok) {
@@ -1711,7 +1712,7 @@ export class EngineHost {
             `EngineHost: resolveRepoPrebuildFlags: session ${sessionId} primary repo host "${target.host}" is not GitHub — using default flags`,
           );
         }
-        return defaults;
+        return { docker: false, outcome: "absent" };
       }
       const { owner, repo: repoName, ref } = target;
       const fullDeps = {
@@ -1723,38 +1724,81 @@ export class EngineHost {
         fetchImpl: tokenDeps.fetchImpl,
         now: tokenDeps.now,
       };
-      const resolved = await resolveSessionGitHubToken(
-        fullDeps,
-        { orgId: meta.orgId, sessionId, purpose: "api" },
-      );
       const TIMEOUT_MS = 5_000;
       const timedOut = Symbol("timedOut");
+      const controller = new AbortController();
       let timeoutId: ReturnType<typeof setTimeout> | undefined;
       const timeoutPromise = new Promise<typeof timedOut>((resolve) => {
-        timeoutId = setTimeout(() => resolve(timedOut), TIMEOUT_MS);
+        timeoutId = setTimeout(() => {
+          resolve(timedOut);
+          // Resolve the deadline first. Then abort and synchronously evict the
+          // shared read before the next session can join it.
+          controller.abort();
+        }, TIMEOUT_MS);
         // Unref so the timer does not keep the process alive after all real work ends.
         if (timeoutId && typeof (timeoutId as NodeJS.Timeout).unref === "function") {
           (timeoutId as NodeJS.Timeout).unref();
         }
       });
-      const result = await Promise.race([
-        repoPrebuildFlags(fullDeps, resolved.token, owner, repoName, ref),
-        timeoutPromise,
-      ]);
-      clearTimeout(timeoutId);
+      // Token resolution runs INSIDE the race: the installation-token mint is
+      // a GitHub round trip too, and outside the race a blackholed GitHub
+      // hung every session build unboundedly (TKAI-401).
+      const work = (async (): Promise<RepoPrebuildFlags> => {
+        let token: string | null = null;
+        let degradedTokenless = false;
+        try {
+          const resolved = await resolveSessionGitHubToken(fullDeps, {
+            orgId: meta.orgId,
+            // The session owner's user credential is a valid tier for this
+            // read; without it, user-OAuth-only orgs resolved no token at all.
+            userId: meta.userId,
+            sessionId,
+            purpose: "api",
+          });
+          token = resolved.token;
+        } catch (err) {
+          // Only an AUTH failure degrades to a tokenless read (mirroring
+          // `resolveApiTokenOrNull`): the contents read works unauthenticated
+          // on a public repo. Anything else (DB fault, decrypt failure) is
+          // not "no credential configured" — rethrow so the outer catch
+          // records an uncached `error`.
+          if (!(err instanceof GitHubAuthError)) throw err;
+          degradedTokenless = true;
+          console.warn(
+            `EngineHost: resolveRepoPrebuildFlags: no GitHub token for session ${sessionId} (${err.message}) — attempting a tokenless read`,
+          );
+        }
+        const flags = await repoPrebuildFlags(fullDeps, token, owner, repoName, ref, controller.signal);
+        // A tokenless 404 on a PRIVATE repo reads as "absent" — but under a
+        // degrade that is not a trustworthy repo answer (the authenticated
+        // read may have found the file). Relabel it so the log/metric show a
+        // failed resolution, not a missing file.
+        return degradedTokenless && flags.outcome === "absent" ? { ...flags, outcome: "error" } : flags;
+      })();
+      const result = await Promise.race([work, timeoutPromise]).finally(() => clearTimeout(timeoutId));
       if (result === timedOut) {
         // Do not cache — a timeout is not a repo answer.
         console.error(
           `EngineHost: resolveRepoPrebuildFlags timed out for session ${sessionId}`,
         );
+        recordPrebuildFlagsResolved("timeout");
         return defaults;
       }
+      // The one line that says what the sandbox will actually get — both
+      // shipped TKAI-385 regressions were invisible because a silent default
+      // is indistinguishable from "nothing declared" (TKAI-401).
+      console.log(
+        `EngineHost: prebuild flags for session ${sessionId} (${owner}/${repoName}@${ref}): ` +
+          `workspaceStorage=${result.workspaceStorage ?? "none"} docker=${result.docker} (${result.outcome})`,
+      );
+      recordPrebuildFlagsResolved(result.outcome);
       return result;
     } catch (err) {
       console.error(
         `EngineHost: resolveRepoPrebuildFlags failed for session ${sessionId}:`,
         err instanceof Error ? err.message : String(err),
       );
+      recordPrebuildFlagsResolved("error");
       return defaults;
     }
   }

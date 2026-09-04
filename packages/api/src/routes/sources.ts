@@ -25,7 +25,8 @@ import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
 import { imageSources, bakes, type ImageSourceRow } from "../schema/index.js";
 import { GitHubAuthError } from "../services/github-tokens.js";
-import { PrebuildConfigNotFoundError, PrebuildUnavailableError } from "../bakes/source-service.js";
+import { GitHubApiError, PrebuildConfigNotFoundError, PrebuildUnavailableError } from "../bakes/source-service.js";
+import type { ApiError } from "../wire/types.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -307,6 +308,15 @@ sourcesRouter.post("/:id/bake", async (c) => {
     if (err instanceof PrebuildUnavailableError) return c.json({ error: err.message }, 409);
     if (err instanceof PrebuildConfigNotFoundError) return c.json({ error: err.message }, 404);
     if (err instanceof GitHubAuthError) return c.json({ error: err.message }, 502);
+    // A GitHub-side failure (404 on a private repo without a credential, rate
+    // limit, 5xx) is an upstream error, not an api bug. The 502 keeps the
+    // status and path details, then names the action the administrator can take.
+    if (err instanceof GitHubApiError) {
+      const response: ApiError = {
+        error: `${err.message}. Retry the build. If it fails again, check GitHub access and status.`,
+      };
+      return c.json(response, 502);
+    }
     throw err;
   }
 });

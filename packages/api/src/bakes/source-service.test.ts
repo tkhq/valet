@@ -1653,36 +1653,41 @@ describe("repoPrebuildFlags", () => {
     expect(result.docker).toBe(false);
   });
 
-  it("resolves false and does not cache when the fetch hangs (timeout seam)", async () => {
+  it("a hung fetch is never cached, and concurrent callers share ONE in-flight read", async () => {
     // A never-resolving fetch simulates a hung connection. The caller
-    // (host.ts resolveRepoDockerFlag) races this against a 5 s deadline;
+    // (host.ts resolveRepoPrebuildFlags) races this against a 5 s deadline;
     // here we use a 200 ms deadline so the suite stays fast.
+    let fetchCalls = 0;
     let hangResolve: (() => void) | undefined;
-    const hangingFetch: typeof fetch = () =>
-      new Promise<Response>((resolve) => {
-        hangResolve = () => resolve(new Response("{}", { status: 200 }));
+    const hangingFetch: typeof fetch = () => {
+      fetchCalls++;
+      return new Promise<Response>((resolve) => {
+        hangResolve = () =>
+          resolve(
+            new Response(JSON.stringify({ content: b64("docker: true"), encoding: "base64" }), {
+              status: 200,
+            }),
+          );
       });
+    };
 
     const timedOut = Symbol("timedOut");
-    const result = await Promise.race([
-      repoPrebuildFlags({ ...deps(), fetchImpl: hangingFetch }, "tok", "o", "r", "hang-ref"),
+    const first = repoPrebuildFlags({ ...deps(), fetchImpl: hangingFetch }, "tok", "o", "r", "hang-ref");
+    const raced = await Promise.race([
+      first,
       new Promise<typeof timedOut>((resolve) => setTimeout(() => resolve(timedOut), 200)),
     ]);
-    expect(result).toBe(timedOut); // the call is still pending — not cached
+    expect(raced).toBe(timedOut); // the call is still pending — nothing cached
 
-    // The key must NOT be in the cache. If it were, a subsequent call with the
-    // real fixture (docker: true) would return the cached false instead of true.
-    contentsHandler = (_owner, _repo, path) => {
-      if (path === ".valet/prebuild.yaml") {
-        return { body: { content: b64("docker: true"), encoding: "base64" } };
-      }
-      return { status: 404, body: { message: "Not Found" } };
-    };
-    const afterTimeout = await repoPrebuildFlags(deps(), "tok", "o", "r", "hang-ref");
-    expect(afterTimeout.docker).toBe(true); // real fetch ran — not served from a stale cache entry
-
-    // Resolve the hang to let the dangling promise settle cleanly.
+    // A second caller while the first hangs joins the SAME in-flight read —
+    // a fan-out of child spawns onto one cold key must not multiply GitHub
+    // calls under exactly the failure conditions that make them slow.
+    const second = repoPrebuildFlags({ ...deps(), fetchImpl: hangingFetch }, "tok", "o", "r", "hang-ref");
     hangResolve?.();
+    // Both callers get the eventual REAL answer, from one HTTP request.
+    expect((await first).docker).toBe(true);
+    expect((await second).docker).toBe(true);
+    expect(fetchCalls).toBe(1);
   });
 
   it("does not grow unboundedly — still resolves correctly after 1001 distinct keys", async () => {
@@ -1708,7 +1713,7 @@ describe("repoPrebuildFlags", () => {
       return { status: 404, body: { message: "Not Found" } };
     };
     const result = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
-    expect(result).toEqual({ docker: true, workspaceStorage: "4Gi" });
+    expect(result).toEqual({ docker: true, workspaceStorage: "4Gi", outcome: "declared" });
   });
 
   it("a malformed workspaceStorage value degrades to the defaults (best-effort, like every other read failure)", async () => {
@@ -1720,7 +1725,115 @@ describe("repoPrebuildFlags", () => {
     };
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const result = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
-    expect(result).toEqual({ docker: false });
+    expect(result).toEqual({ docker: false, outcome: "error" });
+    errSpy.mockRestore();
+  });
+
+  it("a tokenless answer never serves a caller WITH a token — the cache key carries an auth dimension", async () => {
+    // A tokenless read of a private repo 404s (GitHub hides existence) and
+    // resolves "absent". That entry must not satisfy an authenticated caller
+    // whose read would find the file.
+    contentsHandler = () => ({ status: 404, body: { message: "Not Found" } });
+    const anon = await repoPrebuildFlags(deps(), null, "o", "r", "main");
+    expect(anon.outcome).toBe("absent");
+    contentsHandler = (_owner, _repo, path) => {
+      if (path === ".valet/prebuild.yaml") {
+        return { body: { content: b64('workspaceStorage: "8Gi"'), encoding: "base64" } };
+      }
+      return { status: 404, body: { message: "Not Found" } };
+    };
+    const authed = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
+    expect(authed).toEqual({ docker: false, workspaceStorage: "8Gi", outcome: "declared" });
+  });
+
+  it("a transient failure is NOT cached — the next call re-reads and gets the real answer (TKAI-401)", async () => {
+    let calls = 0;
+    contentsHandler = (_owner, _repo, path) => {
+      if (path !== ".valet/prebuild.yaml") return { status: 404, body: { message: "Not Found" } };
+      calls++;
+      // First read: rate-limited. Second read: the real file.
+      return calls === 1
+        ? { status: 403, body: { message: "API rate limit exceeded" } }
+        : { body: { content: b64('docker: true\nworkspaceStorage: "8Gi"'), encoding: "base64" } };
+    };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const first = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
+    expect(first).toEqual({ docker: false, outcome: "error" });
+    const second = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
+    expect(second).toEqual({ docker: true, workspaceStorage: "8Gi", outcome: "declared" });
+    expect(calls).toBe(2);
+    errSpy.mockRestore();
+  });
+
+  it("a malformed success response is NOT cached as an absent file", async () => {
+    let calls = 0;
+    contentsHandler = (_owner, _repo, path) => {
+      if (path !== ".valet/prebuild.yaml") return { status: 404, body: { message: "Not Found" } };
+      calls++;
+      return calls === 1
+        ? { body: [{ type: "dir", name: "prebuild.yaml" }] }
+        : { body: { content: b64('workspaceStorage: "8Gi"'), encoding: "base64" } };
+    };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const first = await repoPrebuildFlags(deps(), "tok", "o", "r", "malformed-ref");
+    const second = await repoPrebuildFlags(deps(), "tok", "o", "r", "malformed-ref");
+
+    expect(first).toEqual({ docker: false, outcome: "error" });
+    expect(second).toEqual({ docker: false, workspaceStorage: "8Gi", outcome: "declared" });
+    expect(calls).toBe(2);
+    errSpy.mockRestore();
+  });
+
+  it("invalid base64 is an uncached error and a valid line-wrapped retry succeeds", async () => {
+    let calls = 0;
+    const valid = b64("docker: true\n");
+    const lineWrapped = `${valid.slice(0, 4)}\n${valid.slice(4)}`;
+    contentsHandler = (_owner, _repo, path) => {
+      if (path !== ".valet/prebuild.yaml") return { status: 404, body: { message: "Not Found" } };
+      calls++;
+      return calls === 1
+        ? { body: { type: "file", content: "%%%", encoding: "base64" } }
+        : { body: { type: "file", content: lineWrapped, encoding: "base64" } };
+    };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const first = await repoPrebuildFlags(deps(), "tok", "o", "r", "invalid-base64-ref");
+    const second = await repoPrebuildFlags(deps(), "tok", "o", "r", "invalid-base64-ref");
+
+    expect(first).toEqual({ docker: false, outcome: "error" });
+    expect(second).toEqual({ docker: true, outcome: "declared" });
+    expect(calls).toBe(2);
+    errSpy.mockRestore();
+  });
+
+  it("an abort evicts a hung read without letting its stale cleanup delete a retry", async () => {
+    let fetchCalls = 0;
+    const resolvers: Array<(response: Response) => void> = [];
+    const hangingFetch: typeof fetch = (_input, init) => {
+      fetchCalls++;
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      return new Promise<Response>((resolve) => resolvers.push(resolve));
+    };
+    const readDeps = { ...deps(), fetchImpl: hangingFetch };
+    const firstController = new AbortController();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const first = repoPrebuildFlags(readDeps, "tok", "o", "r", "abort-ref", firstController.signal);
+    firstController.abort();
+    const second = repoPrebuildFlags(readDeps, "tok", "o", "r", "abort-ref");
+    expect(fetchCalls).toBe(2);
+
+    resolvers[0]?.(new Response(JSON.stringify({ message: "upstream failed" }), { status: 500 }));
+    expect(await first).toEqual({ docker: false, outcome: "error" });
+
+    const third = repoPrebuildFlags(readDeps, "tok", "o", "r", "abort-ref");
+    expect(fetchCalls).toBe(2);
+    resolvers[1]?.(
+      new Response(JSON.stringify({ content: b64("docker: true"), encoding: "base64" }), { status: 200 }),
+    );
+    expect(await second).toEqual({ docker: true, outcome: "declared" });
+    expect(await third).toEqual({ docker: true, outcome: "declared" });
     errSpy.mockRestore();
   });
 });
