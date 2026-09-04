@@ -6,14 +6,30 @@
  *   - `resolveModelId("claude-opus-4-7")` returns a Model object (the
  *     real id is in pi-ai's static registry, the faux replaces its
  *     behavior).
- *   - We can drive turns through both without hitting Anthropic.
- *   - We can assert mid-turn switches by seeing which faux's pre-loaded
- *     responses fire.
+ *   - setModel's own resolution can be asserted without a host resolver.
+ *
+ * TWO HARNESS TRAPS, both of which produced confident wrong answers here:
+ *
+ * 1. A faux registered over a real anthropic id does NOT intercept the
+ *    stream. A turn built that way reaches the live Anthropic API and
+ *    bills real tokens; the faux's queued responses never fire. To observe
+ *    which model a call reached, give each faux its own PROVIDER and tell
+ *    them apart by spec through `modelSpec` + the `resolveModel` seam
+ *    (every faux model's `.id` is "faux-1", so wire ids cannot separate
+ *    them). The escalation suite below does this.
+ *
+ * 2. `status: "idle"` fires at every `turn_end`, not at the end of a
+ *    submission. Waiting on it after a multi-turn run matches an idle from
+ *    an earlier turn and samples state mid-flight — which reads exactly
+ *    like a hung turn. Wait on `submission_settled`.
  */
 import { afterEach, describe, it, expect } from "vitest";
 import {
+  fauxAssistantMessage,
+  fauxToolCall,
   getModel,
   registerFauxProvider,
+  Type,
   type FauxProvider,
   type Model,
 } from "@earendil-works/pi-ai/compat";
@@ -24,6 +40,9 @@ import {
   InMemorySessionStore,
   VirtualSandboxProvider,
   type BusEvent,
+  type DecisionGate,
+  type ResolvedModel,
+  type ToolDef,
 } from "../src/index.js";
 import { switchModelTool } from "../src/builtin-tools/index.js";
 
@@ -158,15 +177,11 @@ describe("engine: model switching", () => {
     expect(persisted?.model).toBe(OPUS);
   });
 
-  it("switch_model tool dispatches to ctx.setModel (thread-only)", async () => {
-    // Unit-test the tool directly with a stub ToolContext. Driving a full
-    // agent loop here is awkward because pi-ai's faux registration
-    // doesn't intercept `getModel` lookups, so the second LLM call after
-    // a tool tries to hit real Anthropic. The integration that the tool
-    // is registered + reachable from the agent runtime is covered
-    // implicitly by the rest of this suite — agent.state.tools is built
-    // from session.builtinTools, which we asserted contains
-    // switchModelTool above.
+  it("switch_model tool dispatches to ctx.setModel", async () => {
+    // Unit-test the tool's own error handling with a stub ToolContext. The
+    // full agent-loop integration (does the switch reach the next LLM call,
+    // and does it end with the turn) is covered by the escalation suite at
+    // the bottom of this file, which drives real turns across two fauxes.
 
     const calls: Array<{ model: string }> = [];
     const stubCtx = {
@@ -182,7 +197,8 @@ describe("engine: model switching", () => {
     );
     expect(calls[0]).toEqual({ model: OPUS });
     expect((r1 as { text: string }).text).toContain(OPUS);
-    expect((r1 as { text: string }).text).toContain("thread");
+    // The result names the scope the switch actually has (TKAI-338).
+    expect((r1 as { text: string }).text).toContain("turn");
 
     // Errors surface as a readable result rather than throwing.
     const failingCtx = {
@@ -381,5 +397,379 @@ describe("engine: model switching", () => {
       builtinToolNames as readonly string[]
     );
     expect(names).toContain("switch_model");
+  });
+});
+
+/**
+ * Agent-initiated escalation (TKAI-338).
+ *
+ * Harness note: every faux provider hands back a model whose `.id` is
+ * "faux-1", so two fauxes cannot be told apart by wire id. They ARE told
+ * apart by spec, via the host `resolveModel` seam plus `modelSpec` — the
+ * documented shape for a host whose spec differs from the wire id. That lets
+ * a test observe *which model a given LLM call reached* by which faux's
+ * queued response fired.
+ *
+ * Do NOT reach for `registerFauxProvider({ provider: "anthropic", model:
+ * "claude-…" })` here: overriding a real registry id does not intercept the
+ * stream, and the turn goes to the live Anthropic API.
+ */
+const CHEAP_SPEC = "escprov-cheap/faux-1";
+const STRONG_SPEC = "escprov-strong/faux-1";
+
+describe("engine: agent-initiated model escalation (TKAI-338)", () => {
+  interface EscalationSetup {
+    engine: Engine;
+    store: InMemorySessionStore;
+    events: BusEvent[];
+    cheapModel: Model<unknown>;
+    resolver: (spec: string) => Promise<ResolvedModel | null>;
+    cheapCalls: string[];
+    strongCalls: string[];
+  }
+
+  function setupEscalation(tag: string): EscalationSetup {
+    const cheapFaux = registerFauxProvider({ provider: `${tag}-cheap` });
+    const strongFaux = registerFauxProvider({ provider: `${tag}-strong` });
+    cleanups.push(() => cheapFaux.unregister());
+    cleanups.push(() => strongFaux.unregister());
+
+    const cheapModel = cheapFaux.getModel();
+    const strongModel = strongFaux.getModel();
+    const cheapCalls: string[] = [];
+    const strongCalls: string[] = [];
+
+    // Cheap model: the first call escalates. Its second queued response is
+    // the one that fires if the switch never lands — so the assertion can
+    // tell "escalation applied" from "escalation ignored".
+    cheapFaux.setResponses([
+      () => {
+        cheapCalls.push("escalate");
+        return fauxAssistantMessage(
+          [fauxToolCall("switch_model", { model: STRONG_SPEC }, { id: "tc-esc" })],
+          { stopReason: "toolUse" },
+        );
+      },
+      () => {
+        cheapCalls.push("continuation");
+        return fauxAssistantMessage("continued on the cheap model");
+      },
+    ]);
+    strongFaux.setResponses([
+      () => {
+        strongCalls.push("continuation");
+        return fauxAssistantMessage("continued on the strong model");
+      },
+    ]);
+
+    const resolver = async (spec: string): Promise<ResolvedModel | null> => {
+      if (spec === CHEAP_SPEC) return { model: cheapModel, apiKey: "k-cheap" };
+      if (spec === STRONG_SPEC) return { model: strongModel, apiKey: "k-strong" };
+      return null;
+    };
+
+    const store = new InMemorySessionStore();
+    const bus = new InMemoryEventStream();
+    const sandboxProvider = new VirtualSandboxProvider();
+    const events: BusEvent[] = [];
+    bus.subscribe({}, (e) => events.push(e));
+    const engine = new Engine({ providers: { store, stream: bus, sandboxProvider } });
+
+    return { engine, store, events, cheapModel, resolver, cheapCalls, strongCalls };
+  }
+
+  /**
+   * Wait for the SUBMISSION to settle, not for `status: "idle"`.
+   *
+   * `idle` fires at every pi-agent-core `turn_end`, so in a run that makes
+   * more than one LLM call it has already fired before the later calls
+   * happen. Waiting on it samples the run mid-flight and passes only when
+   * the faux happens to finish inside the first poll (trap 2 in the header).
+   */
+  async function waitForSettled(
+    events: BusEvent[],
+    timeoutMs = 3000,
+  ): Promise<void> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (events.some((e) => e.event.type === "submission_settled")) return;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    throw new Error("timed out waiting for submission_settled");
+  }
+
+  async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (predicate()) return;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    throw new Error("waitFor: timed out");
+  }
+
+  async function makeSession(s: EscalationSetup) {
+    return s.engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: s.cheapModel,
+      modelSpec: CHEAP_SPEC,
+      resolveModel: s.resolver,
+    });
+  }
+
+  it("takes effect on the next LLM call of the SAME turn", async () => {
+    const s = setupEscalation("esc-applies");
+    const session = await makeSession(s);
+
+    const receipt = await session.prompt("do something hard");
+    await waitForSettled(s.events);
+
+    // The turn escalated once, then the CONTINUATION reached the strong
+    // model — what the tool description and the prompt rules both promise
+    // ("switch_model ... in this turn, then continue").
+    expect(s.cheapCalls).toEqual(["escalate"]);
+    expect(s.strongCalls).toEqual(["continuation"]);
+  });
+
+  it("does not outlive the turn: the thread pin stays on the user's model", async () => {
+    const s = setupEscalation("esc-scope");
+    const session = await makeSession(s);
+
+    const thread = await session.ensureDefaultThread();
+    expect(thread.modelId()).toBe(CHEAP_SPEC);
+
+    const receipt = await session.prompt("do something hard");
+    await waitForSettled(s.events);
+
+    // The escalation was turn-scoped: the user's pin is what survives, in
+    // memory and on disk. Nothing strands the thread on the strong model.
+    expect(thread.modelId()).toBe(CHEAP_SPEC);
+    const persisted = await s.store.getThread(session.id, thread.id);
+    expect(persisted?.model).toBe(CHEAP_SPEC);
+  });
+
+  it("a later turn starts back on the user's model", async () => {
+    const s = setupEscalation("esc-next-turn");
+    const session = await makeSession(s);
+
+    const first = await session.prompt("do something hard");
+    await waitForSettled(s.events);
+    expect(s.strongCalls).toEqual(["continuation"]);
+
+    // Second turn: the cheap faux's remaining queued response is what should
+    // fire. If the escalation had persisted, the strong faux would run dry
+    // and this turn would fail instead.
+    const second = await session.prompt("a cheap follow-up");
+    await waitFor(() => s.cheapCalls.length === 2);
+    expect(second.threadId).toBe(first.threadId);
+    expect(s.cheapCalls).toEqual(["escalate", "continuation"]);
+    expect(s.strongCalls).toEqual(["continuation"]);
+  });
+
+  it("an escalation the resolver rejects leaves the turn on its current model", async () => {
+    const s = setupEscalation("esc-reject");
+    const session = await s.engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: s.cheapModel,
+      modelSpec: CHEAP_SPEC,
+      // Only the cheap spec resolves: the escalation target is refused, the
+      // way a deleted custom-provider row would refuse it mid-turn.
+      resolveModel: async (spec: string): Promise<ResolvedModel | null> =>
+        spec === CHEAP_SPEC ? { model: s.cheapModel, apiKey: "k-cheap" } : null,
+    });
+
+    const thread = await session.ensureDefaultThread();
+    const receipt = await session.prompt("do something hard");
+    await waitForSettled(s.events);
+
+    // The tool reported the failure and the turn finished on the model it
+    // started with — no half-applied escalation, no wedged turn.
+    expect(s.cheapCalls).toEqual(["escalate", "continuation"]);
+    expect(s.strongCalls).toEqual([]);
+    expect(thread.modelId()).toBe(CHEAP_SPEC);
+    const entries = await session.readEntries("web:default");
+    const toolResults = JSON.stringify(entries);
+    expect(toolResults).toContain("switch_model failed");
+  });
+
+  it("a failed escalation still lets the turn gate and settle", async () => {
+    // switch_model to a spec the resolver refuses. The tool reports the
+    // failure, and the turn goes on to open a decision gate, resume, and
+    // settle on the model it started with.
+    const cheapFaux = registerFauxProvider({ provider: "esc-gate-cheap" });
+    cleanups.push(() => cheapFaux.unregister());
+    const cheapModel = cheapFaux.getModel();
+    cheapFaux.setResponses([
+      fauxAssistantMessage(
+        [fauxToolCall("switch_model", { model: STRONG_SPEC }, { id: "tc-esc" })],
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage([fauxToolCall("do_thing", { arg: "x" }, { id: "tc-gate" })], {
+        stopReason: "toolUse",
+      }),
+      fauxAssistantMessage("all done"),
+    ]);
+
+    const store = new InMemorySessionStore();
+    const bus = new InMemoryEventStream();
+    const events: BusEvent[] = [];
+    bus.subscribe({}, (e) => events.push(e));
+    const engine = new Engine({
+      providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
+    });
+
+    const gatedTool: ToolDef = {
+      name: "do_thing",
+      description: "Do a sensitive thing, gated by approval.",
+      parameters: Type.Object({ arg: Type.String() }),
+      execute: async (args, ctx) => {
+        const resolution = await ctx.requestDecision({
+          type: "approval",
+          title: "approve do_thing?",
+          body: `arg=${args.arg}`,
+          resumeKey: `do_thing:${args.arg}`,
+        });
+        return { text: resolution.actionId === "approve" ? "did the thing" : "denied" };
+      },
+    };
+
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: cheapModel,
+      modelSpec: CHEAP_SPEC,
+      tools: [gatedTool],
+      // The escalation target never resolves.
+      resolveModel: async (spec: string): Promise<ResolvedModel | null> =>
+        spec === CHEAP_SPEC ? { model: cheapModel, apiKey: "k-cheap" } : null,
+    });
+
+    void session.prompt("do something hard");
+    await waitFor(() => events.some((e) => e.event.type === "decision_gate"));
+    const gateEvent = events.find((e) => e.event.type === "decision_gate")!;
+    const gate: DecisionGate = (gateEvent.event as { gate: DecisionGate }).gate;
+
+    await session.resolveDecision(gate.id, {
+      actionId: "approve",
+      resolvedBy: "u1",
+      resolvedAt: Date.now(),
+    });
+    // Settlement, not `status:idle`: idle already fired for the escalation
+    // turn and would match instantly.
+    await waitFor(() => events.some((e) => e.event.type === "submission_settled"));
+
+    const entries = await session.readEntries("web:default");
+    const messages = entries.filter((e) => e.type === "message");
+    expect(messages.at(-1)).toMatchObject({ role: "assistant", content: "all done" });
+    expect(await store.listUnsettledSubmissions(session.id)).toEqual([]);
+  });
+
+  it("switching BACK to the session's own spec retargets the turn", async () => {
+    // The switch-back spec is valid by construction, so validateModelSpec
+    // accepts it without resolving and hands back null. That branch still
+    // has to apply the model (and refresh the per-turn key, which currently
+    // holds the escalated provider's). Reporting success without applying
+    // is the defect class this change exists to remove.
+    const cheapFaux = registerFauxProvider({ provider: "esc-back-cheap" });
+    const strongFaux = registerFauxProvider({ provider: "esc-back-strong" });
+    cleanups.push(() => cheapFaux.unregister());
+    cleanups.push(() => strongFaux.unregister());
+    const cheapModel = cheapFaux.getModel();
+    const strongModel = strongFaux.getModel();
+
+    const seq: string[] = [];
+    const keys: Array<string | undefined> = [];
+    cheapFaux.setResponses([
+      (_c, opts) => {
+        seq.push("cheap:escalate");
+        keys.push(opts?.apiKey);
+        return fauxAssistantMessage(
+          [fauxToolCall("switch_model", { model: STRONG_SPEC }, { id: "t1" })],
+          { stopReason: "toolUse" },
+        );
+      },
+      (_c, opts) => {
+        seq.push("cheap:final");
+        keys.push(opts?.apiKey);
+        return fauxAssistantMessage("back on the cheap model");
+      },
+    ]);
+    strongFaux.setResponses([
+      (_c, opts) => {
+        seq.push("strong:deescalate");
+        keys.push(opts?.apiKey);
+        return fauxAssistantMessage(
+          [fauxToolCall("switch_model", { model: CHEAP_SPEC }, { id: "t2" })],
+          { stopReason: "toolUse" },
+        );
+      },
+    ]);
+
+    const store = new InMemorySessionStore();
+    const bus = new InMemoryEventStream();
+    const events: BusEvent[] = [];
+    bus.subscribe({}, (e) => events.push(e));
+    const engine = new Engine({
+      providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
+    });
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: cheapModel,
+      modelSpec: CHEAP_SPEC,
+      resolveModel: async (spec: string): Promise<ResolvedModel | null> => {
+        if (spec === CHEAP_SPEC) return { model: cheapModel, apiKey: "k-cheap" };
+        if (spec === STRONG_SPEC) return { model: strongModel, apiKey: "k-strong" };
+        return null;
+      },
+    });
+
+    await session.prompt("do something hard, then wind back down");
+    await waitForSettled(events);
+
+    expect(seq).toEqual(["cheap:escalate", "strong:deescalate", "cheap:final"]);
+    // The key follows the model both ways: reusing the strong provider's key
+    // against the cheap provider would 401 in production.
+    expect(keys).toEqual(["k-cheap", "k-strong", "k-cheap"]);
+  });
+
+  it("model_switched says whether the switch outlives the turn", async () => {
+    const s = setupEscalation("esc-scope-field");
+    const session = await makeSession(s);
+    const thread = await session.ensureDefaultThread();
+
+    await session.prompt("do something hard");
+    await waitForSettled(s.events);
+
+    const agentSwitch = s.events.find((e) => e.event.type === "model_switched");
+    expect(agentSwitch?.event).toMatchObject({ scope: "turn", toModel: STRONG_SPEC });
+
+    await thread.setModel(STRONG_SPEC, "set_via_api");
+    const userSwitch = s.events
+      .filter((e) => e.event.type === "model_switched")
+      .at(-1);
+    expect(userSwitch?.event).toMatchObject({ scope: "thread", toModel: STRONG_SPEC });
+  });
+
+  it("a user-initiated switch still persists across turns", async () => {
+    const s = setupEscalation("esc-user");
+    const session = await makeSession(s);
+
+    const thread = await session.ensureDefaultThread();
+    // No `tool:` prefix — this is the PATCH / `/model` path.
+    await thread.setModel(STRONG_SPEC, "set_via_api");
+
+    expect(thread.modelId()).toBe(STRONG_SPEC);
+    const persisted = await s.store.getThread(session.id, thread.id);
+    expect(persisted?.model).toBe(STRONG_SPEC);
   });
 });

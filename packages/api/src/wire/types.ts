@@ -1474,11 +1474,21 @@ export type WireEvent =
       seq: number;
       ts: number; offset?: string;
       type: "model_switched";
-      /** Present when scope === thread; absent for session-level switches. */
+      /** Present for a thread-level switch; absent for session-level switches. */
       threadId?: string;
       fromModel: string;
       toModel: string;
       reason: string;
+      /**
+       * How long the new model lasts. `"turn"` is an agent `switch_model`:
+       * it ends when the turn settles and NO matching switch-back event is
+       * emitted, so a client rebuilding current state from the stream must
+       * not treat it as durable, and the picker (which reads the user's pin)
+       * needs no refetch for it. `"thread"` is the user's own pin and
+       * persists. Absent on events from before this field existed; treat
+       * absent as `"thread"`.
+       */
+      scope?: "turn" | "thread";
     }
   | {
       /**

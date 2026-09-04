@@ -632,12 +632,15 @@ export const listThreadsTool = defineTool({
 export const switchModelTool = defineTool({
   name: "switch_model",
   description:
-    "Switch the model used for subsequent LLM calls in *this thread*. " +
-    "Useful when a turn needs a stronger reasoning model or a faster/cheaper " +
-    "one. The change takes effect on the next LLM call — the in-flight tool " +
-    "call finishes against the old model. Scope is always thread-local; " +
-    "changing the session default is a user-facing setting and not exposed " +
-    "to the agent.",
+    "Switch the model used for the rest of *this turn*. Useful when the work " +
+    "turns out to need a stronger reasoning model, or a faster/cheaper one. " +
+    "The change takes effect on the next LLM call — the in-flight tool call " +
+    "finishes against the old model. Scope is the current turn only: when the " +
+    "turn ends, the thread returns to the model the user chose, so call this " +
+    "again in a later turn if that turn also needs it. The thread and session " +
+    "model settings belong to the user and are not exposed to the agent. For " +
+    "work that needs a strong model throughout, set the child's `model` when " +
+    "you spawn it instead.",
   parameters: Type.Object({
     model: Type.String({
       description:
@@ -650,7 +653,7 @@ export const switchModelTool = defineTool({
       if (fromModel === toModel) {
         return { text: `model unchanged (${toModel})` };
       }
-      return { text: `switched thread model: ${fromModel} → ${toModel}` };
+      return { text: `switched model for this turn: ${fromModel} → ${toModel}` };
     } catch (err) {
       return {
         text:
