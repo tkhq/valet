@@ -6,9 +6,22 @@
  *   - `resolveModelId("claude-opus-4-7")` returns a Model object (the
  *     real id is in pi-ai's static registry, the faux replaces its
  *     behavior).
- *   - We can drive turns through both without hitting Anthropic.
- *   - We can assert mid-turn switches by seeing which faux's pre-loaded
- *     responses fire.
+ *   - setModel's own resolution can be asserted without a host resolver.
+ *
+ * TWO HARNESS TRAPS, both of which produced confident wrong answers here:
+ *
+ * 1. A faux registered over a real anthropic id does NOT intercept the
+ *    stream. A turn built that way reaches the live Anthropic API and
+ *    bills real tokens; the faux's queued responses never fire. To observe
+ *    which model a call reached, give each faux its own PROVIDER and tell
+ *    them apart by spec through `modelSpec` + the `resolveModel` seam
+ *    (every faux model's `.id` is "faux-1", so wire ids cannot separate
+ *    them). The escalation suite below does this.
+ *
+ * 2. `status: "idle"` fires at every `turn_end`, not at the end of a
+ *    submission. Waiting on it after a multi-turn run matches an idle from
+ *    an earlier turn and samples state mid-flight — which reads exactly
+ *    like a hung turn. Wait on `submission_settled`.
  */
 import { afterEach, describe, it, expect } from "vitest";
 import {
@@ -160,15 +173,11 @@ describe("engine: model switching", () => {
     expect(persisted?.model).toBe(OPUS);
   });
 
-  it("switch_model tool dispatches to ctx.setModel (thread-only)", async () => {
-    // Unit-test the tool directly with a stub ToolContext. Driving a full
-    // agent loop here is awkward because pi-ai's faux registration
-    // doesn't intercept `getModel` lookups, so the second LLM call after
-    // a tool tries to hit real Anthropic. The integration that the tool
-    // is registered + reachable from the agent runtime is covered
-    // implicitly by the rest of this suite — agent.state.tools is built
-    // from session.builtinTools, which we asserted contains
-    // switchModelTool above.
+  it("switch_model tool dispatches to ctx.setModel", async () => {
+    // Unit-test the tool's own error handling with a stub ToolContext. The
+    // full agent-loop integration (does the switch reach the next LLM call,
+    // and does it end with the turn) is covered by the escalation suite at
+    // the bottom of this file, which drives real turns across two fauxes.
 
     const calls: Array<{ model: string }> = [];
     const stubCtx = {
