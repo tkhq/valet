@@ -8,6 +8,8 @@ import { describe, it, expect, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, teamMembers, teams } from "../schema/index.js";
+import { setApprovedModels } from "../services/approved-models.js";
+import { setOrgReasoningSettings } from "../services/reasoning.js";
 import type { EnsureOrchestratorResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -205,6 +207,64 @@ describe("team-owned session lifecycle routes", () => {
     expect(res.status).toBe(409);
     const body = (await res.json()) as { error: string };
     expect(body).toEqual({ error: "provider does not support hibernation" });
+  });
+
+  it("400s a catalog-valid but unapproved model for a non-org-admin team admin; org admin bypasses", async () => {
+    api = await bootTestApi();
+    // Team admin (passes `canAdministerSession`) but a plain org member, so
+    // the approved-list gate has a real non-admin caller to bind against.
+    await seedTeam(api, "admin");
+    const sessionId = await openTeamAssistant(api, MEMBER_HEADERS);
+    await setApprovedModels(api.providers.db, "local-org", ["anthropic/claude-opus-4-7"]);
+
+    const memberRes = await fetch(`${api.baseUrl}/api/sessions/${sessionId}`, {
+      method: "PATCH",
+      headers: { ...MEMBER_HEADERS, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "anthropic/claude-haiku-4-5" }),
+    });
+    expect(memberRes.status).toBe(400);
+    const body = (await memberRes.json()) as { error: string };
+    expect(body.error).toMatch(/approved list/);
+
+    // The default identity (`local-user`, no header) is an org admin and
+    // bypasses the gate, same as `canAdministerSession` already lets it
+    // through the ownership check above.
+    const adminRes = await fetch(`${api.baseUrl}/api/sessions/${sessionId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "anthropic/claude-haiku-4-5" }),
+    });
+    expect(adminRes.status).toBe(200);
+  });
+
+  it("400s a session reasoning level exceeding the org cap; null always clears", async () => {
+    api = await bootTestApi();
+    await seedTeam(api, "admin");
+    const sessionId = await openTeamAssistant(api, MEMBER_HEADERS);
+    await setOrgReasoningSettings(api.providers.db, "local-org", { max: "medium" });
+
+    const overCap = await fetch(`${api.baseUrl}/api/sessions/${sessionId}`, {
+      method: "PATCH",
+      headers: { ...MEMBER_HEADERS, "Content-Type": "application/json" },
+      body: JSON.stringify({ reasoning: "high" }),
+    });
+    expect(overCap.status).toBe(400);
+    const body = (await overCap.json()) as { error: string };
+    expect(body.error).toMatch(/exceeds the org max/);
+
+    const withinCap = await fetch(`${api.baseUrl}/api/sessions/${sessionId}`, {
+      method: "PATCH",
+      headers: { ...MEMBER_HEADERS, "Content-Type": "application/json" },
+      body: JSON.stringify({ reasoning: "Medium" }),
+    });
+    expect(withinCap.status).toBe(200);
+
+    const cleared = await fetch(`${api.baseUrl}/api/sessions/${sessionId}`, {
+      method: "PATCH",
+      headers: { ...MEMBER_HEADERS, "Content-Type": "application/json" },
+      body: JSON.stringify({ reasoning: null }),
+    });
+    expect(cleared.status).toBe(200);
   });
 
   it("lets an org admin reach the model picker of a session stamped with another member's id", async () => {

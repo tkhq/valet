@@ -15,6 +15,9 @@ import {
   type SessionRunFields,
 } from "../sessions/run-state.js";
 import { canAdministerSession, canViewSession } from "../services/session-access.js";
+import { isOrgAdminUser } from "./_org-admin.js";
+import { assertModelSelectable } from "../services/approved-models.js";
+import { assertReasoningSelectable } from "../services/reasoning.js";
 import { loadAssistantBySessionId, retireAssistant } from "../assistants/service.js";
 import {
   createSecurityEngagementService,
@@ -927,14 +930,35 @@ sessionsRouter.patch("/:id", async (c) => {
   const wantsTitle = body.title !== undefined;
   const wantsProfile = body.profile !== undefined;
   const wantsOwner = body.teamId !== undefined;
+  const wantsReasoning = body.reasoning !== undefined;
   // A body with no field at all keeps the message this guard has always
   // sent. The model picker is still the only caller that can omit a field
   // by accident, and a contract test pins this exact response.
-  if (!wantsModel && !wantsTitle && !wantsProfile && !wantsOwner) {
+  if (!wantsModel && !wantsTitle && !wantsProfile && !wantsOwner && !wantsReasoning) {
     return c.json({ error: "model is required" }, 400);
   }
   if (wantsModel && (typeof body.model !== "string" || body.model.length === 0)) {
     return c.json({ error: "model must be a non-empty string. Send a model id from GET /api/models." }, 400);
+  }
+  if (wantsModel) {
+    const isAdmin = await isOrgAdminUser(c);
+    const err = await assertModelSelectable(db, row.orgId, isAdmin, body.model as string);
+    if (err) return c.json({ error: err }, 400);
+  }
+  // `reasoning: null` clears the override and always passes. Storage/
+  // application of a session-level override is Task 11 — this only
+  // validates so a bad value 400s instead of being silently accepted.
+  if (wantsReasoning && body.reasoning !== null) {
+    if (typeof body.reasoning !== "string") {
+      return c.json(
+        { error: "reasoning must be a reasoning level string, or null to clear the override." },
+        400,
+      );
+    }
+    const normalizedReasoning = body.reasoning.trim().toLowerCase();
+    const reasoningErr = await assertReasoningSelectable(db, row.orgId, normalizedReasoning);
+    if (reasoningErr) return c.json({ error: reasoningErr }, 400);
+    // TODO(Task 11): apply — no session-level reasoning storage path yet.
   }
 
   let nextTitle: string | undefined;

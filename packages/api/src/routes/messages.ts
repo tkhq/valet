@@ -50,6 +50,9 @@ import {
   UnknownAttachmentError,
   type AttachmentInfo,
 } from "../services/attachment-refs.js";
+import { isOrgAdminUser } from "./_org-admin.js";
+import { assertModelSelectable } from "../services/approved-models.js";
+import { assertReasoningSelectable } from "../services/reasoning.js";
 
 export const messagesRouter = new Hono<AppEnv>();
 
@@ -374,7 +377,8 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
   if (
     body.model === undefined &&
     body.archived === undefined &&
-    body.title === undefined
+    body.title === undefined &&
+    body.reasoning === undefined
   ) {
     return c.json(
       { error: "nothing to patch: send model (null to clear), archived, and/or title" },
@@ -405,6 +409,28 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
         nextTitle = trimmed;
       }
     }
+  }
+
+  if (body.model !== undefined && typeof body.model === "string") {
+    const isAdmin = await isOrgAdminUser(c);
+    const err = await assertModelSelectable(db, session.orgId, isAdmin, body.model);
+    if (err) return c.json({ error: err }, 400);
+  }
+
+  // `reasoning: null` clears the override and always passes. Storage/
+  // application of a thread-level override is Task 11 — this only
+  // validates so a bad value 400s instead of being silently accepted.
+  if (body.reasoning !== undefined && body.reasoning !== null) {
+    if (typeof body.reasoning !== "string") {
+      return c.json(
+        { error: "reasoning must be a reasoning level string, or null to clear the override." },
+        400,
+      );
+    }
+    const normalizedReasoning = body.reasoning.trim().toLowerCase();
+    const reasoningErr = await assertReasoningSelectable(db, session.orgId, normalizedReasoning);
+    if (reasoningErr) return c.json({ error: reasoningErr }, 400);
+    // TODO(Task 11): apply — no thread-level reasoning storage path yet.
   }
 
   if (body.model !== undefined) {

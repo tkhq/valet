@@ -2,6 +2,8 @@
 import { sql } from "drizzle-orm";
 import { afterEach, describe, it, expect } from "vitest";
 import { bootTestApi, type TestApi } from "./_setup.js";
+import { setApprovedModels } from "../services/approved-models.js";
+import { setOrgReasoningSettings } from "../services/reasoning.js";
 import type {
   CreateSessionResponse,
   CreateThreadResponse,
@@ -9,10 +11,10 @@ import type {
   PatchThreadResponse,
 } from "../wire/types.js";
 
-async function createSession(baseUrl: string): Promise<string> {
+async function createSession(baseUrl: string, headers?: Record<string, string>): Promise<string> {
   const res = await fetch(`${baseUrl}/api/sessions`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...headers },
     body: JSON.stringify({ workspace: "/tmp" }),
   });
   expect(res.status).toBe(201);
@@ -20,10 +22,10 @@ async function createSession(baseUrl: string): Promise<string> {
   return body.id;
 }
 
-async function createThread(baseUrl: string, sessionId: string): Promise<string> {
+async function createThread(baseUrl: string, sessionId: string, headers?: Record<string, string>): Promise<string> {
   const res = await fetch(`${baseUrl}/api/sessions/${sessionId}/threads`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...headers },
     body: JSON.stringify({}),
   });
   expect(res.status).toBe(201);
@@ -31,10 +33,16 @@ async function createThread(baseUrl: string, sessionId: string): Promise<string>
   return body.id;
 }
 
-async function patchThread(baseUrl: string, sessionId: string, threadId: string, body: unknown) {
+async function patchThread(
+  baseUrl: string,
+  sessionId: string,
+  threadId: string,
+  body: unknown,
+  headers?: Record<string, string>,
+) {
   return fetch(`${baseUrl}/api/sessions/${sessionId}/threads/${threadId}`, {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...headers },
     body: JSON.stringify(body),
   });
 }
@@ -221,5 +229,69 @@ describe("api integration: thread rename", () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     expect(body.error).toContain("title");
+  }, 30_000);
+
+  it("accepts a reasoning-only PATCH (no model/archived/title required)", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const threadId = await createThread(api.baseUrl, sessionId);
+
+    const res = await patchThread(api.baseUrl, sessionId, threadId, { reasoning: "Medium" });
+    expect(res.status).toBe(200);
+  }, 30_000);
+
+  it("400s a thread reasoning level exceeding the org cap", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const threadId = await createThread(api.baseUrl, sessionId);
+    await setOrgReasoningSettings(api.providers.db, "local-org", { max: "medium" });
+
+    const res = await patchThread(api.baseUrl, sessionId, threadId, { reasoning: "high" });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/exceeds the org max/);
+  }, 30_000);
+
+  it("400s an unknown thread reasoning level", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const threadId = await createThread(api.baseUrl, sessionId);
+
+    const res = await patchThread(api.baseUrl, sessionId, threadId, { reasoning: "not-a-level" });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/Unknown reasoning level/);
+  }, 30_000);
+
+  it("clears thread reasoning when passed null, even above the org cap", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const threadId = await createThread(api.baseUrl, sessionId);
+    await setOrgReasoningSettings(api.providers.db, "local-org", { max: "minimal" });
+
+    const res = await patchThread(api.baseUrl, sessionId, threadId, { reasoning: null });
+    expect(res.status).toBe(200);
+  }, 30_000);
+
+  it("400s a catalog-valid but unapproved thread model for a plain member", async () => {
+    api = await bootTestApi();
+    const MEMBER_HEADERS = { "x-valet-test-user-id": "test-member" };
+    // A personal session has no org-admin bypass on view/administer (direct
+    // owner only) — created as `test-member`, a real non-admin org member,
+    // so `assertModelSelectable`'s admin flag is genuinely false here.
+    const sessionId = await createSession(api.baseUrl, MEMBER_HEADERS);
+    const threadId = await createThread(api.baseUrl, sessionId, MEMBER_HEADERS);
+    await setApprovedModels(api.providers.db, "local-org", ["anthropic/claude-opus-4-7"]);
+
+    const res = await patchThread(
+      api.baseUrl,
+      sessionId,
+      threadId,
+      { model: "anthropic/claude-haiku-4-5" },
+      MEMBER_HEADERS,
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/approved list/);
   }, 30_000);
 });

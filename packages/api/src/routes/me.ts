@@ -22,6 +22,9 @@ import type { AppDb } from "../lib/drizzle.js";
 import { requireUser } from "../middleware/auth.js";
 import { orgMembers, users } from "../schema/index.js";
 import { validateDefaultModelId } from "../services/model-catalog.js";
+import { isOrgAdminUser } from "./_org-admin.js";
+import { assertModelSelectable } from "../services/approved-models.js";
+import { assertReasoningSelectable } from "../services/reasoning.js";
 import type { MeResponse, PatchMeResponse } from "../wire/types.js";
 
 export const meRouter = new Hono<AppEnv>();
@@ -120,6 +123,11 @@ meRouter.patch("/", async (c) => {
     const { engineCredentials } = c.var.providers;
     const invalid = await validateDefaultModelId(db, engineCredentials, user.orgId, defaultModel);
     if (invalid) return c.json({ error: invalid }, 400);
+    if (defaultModel !== null) {
+      const isAdmin = await isOrgAdminUser(c);
+      const err = await assertModelSelectable(db, user.orgId, isAdmin, defaultModel);
+      if (err) return c.json({ error: err }, 400);
+    }
     update.defaultModel = defaultModel;
   }
 
@@ -131,7 +139,14 @@ meRouter.patch("/", async (c) => {
         400,
       );
     }
-    update.defaultReasoning = defaultReasoning;
+    if (defaultReasoning === null) {
+      update.defaultReasoning = null;
+    } else {
+      const normalizedReasoning = defaultReasoning.trim().toLowerCase();
+      const err = await assertReasoningSelectable(db, user.orgId, normalizedReasoning);
+      if (err) return c.json({ error: err }, 400);
+      update.defaultReasoning = normalizedReasoning;
+    }
   }
 
   if (Object.keys(update).length > 0) {
