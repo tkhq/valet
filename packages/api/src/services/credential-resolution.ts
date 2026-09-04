@@ -244,3 +244,33 @@ export async function resolveOrgCredentialRead(
   const orgRow = await deps.credentials.get({ type: "org", id: ctx.orgId }, service);
   return resolveRow(deps, orgRow, { orgId: ctx.orgId, userId: ctx.userId ?? "", scopes: ctx.scopes ?? ["org"] }, "resolve");
 }
+
+/**
+ * Team-row-only read, plus 1Password resolution on that row. A team run
+ * never borrows a member's personal credential. The org row is consulted
+ * only when `orgFallback` is `"org-provided"` — a plugin declared the
+ * service as the org bot. `"reference-only"` and `"none"` stop at the team.
+ *
+ * `ctx.teamId` is the team principal. `ctx.userId` is unused for the team
+ * row itself; a personal-tokenScope 1Password pointer on a team row fails
+ * closed through `resolveRow` (`excluded: "resolve"`).
+ */
+export async function resolveTeamCredentialRead(
+  deps: CredentialReadDeps,
+  ctx: { orgId: string; teamId: string; userId?: string; scopes?: readonly OnePasswordScope[] },
+  service: string,
+  orgFallback: OrgFallback,
+): Promise<StoredCredential | null> {
+  if (isDeniedCredentialService(service)) return null;
+  const scopes = ctx.scopes ?? ["org"];
+  const teamRow = await deps.credentials.get({ type: "team", id: ctx.teamId }, service);
+  const fromTeam = await resolveRow(
+    deps,
+    teamRow,
+    { orgId: ctx.orgId, userId: ctx.userId ?? "", scopes },
+    "resolve",
+  );
+  if (fromTeam) return fromTeam;
+  if (orgFallback !== "org-provided") return null;
+  return resolveOrgCredentialRead(deps, { orgId: ctx.orgId, userId: ctx.userId, scopes }, service);
+}
