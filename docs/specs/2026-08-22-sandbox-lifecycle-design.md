@@ -188,12 +188,13 @@ defects. Both are fixed; decision 6 (no age-based kill) stands.
    image layers, container rootfs) is bounded separately by the
    ephemeral-storage limit and never lands on this claim.
 
-   Sizing is ONE-WAY per sandbox and this is not an auto-expanding
-   volume: the size is fixed in the CR's `volumeClaimTemplates` at create
-   time, no resize path exists in this repo, and a PVC cannot shrink.
-   Changing the value affects only sandboxes created afterwards. A
-   workspace that fills gets ENOSPC on write, so a deploy that clones
-   large repositories must raise it before provisioning.
+   Sizing is ONE-WAY per sandbox: a PVC cannot shrink, and changing the
+   value affects only sandboxes created afterwards. Since the
+   workspace-fit change (2026-09-03), a workspace that fills during
+   workspace prep is grown on demand instead of failing outright: the api
+   doubles the PVC (capped by `VALET_SANDBOX_WORKSPACE_MAX`) and retries
+   the git operation once. See
+   `docs/specs/2026-09-03-sandbox-workspace-fit-design.md`.
 
 ## Deviations & notes
 

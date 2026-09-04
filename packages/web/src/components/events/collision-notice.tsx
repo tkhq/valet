@@ -84,14 +84,18 @@ function CollisionRow({ collision, blocking }: { collision: EventSubscriptionCol
 /**
  * `committed: false` — the write was refused; the caller may offer an
  * explicit "create anyway". `committed: true` — the rule was saved and this
- * is the overlap warning that rode back with it.
+ * is the overlap warning that rode back with it. `intent` names the caller's
+ * verb: "create" for the wizard, "save" for the edit dialog, so the notice
+ * never says "Created." after a PATCH.
  */
 export function CollisionNotice({
   report,
   committed,
+  intent = "create",
 }: {
   report: EventSubscriptionCollisionsWire;
   committed: boolean;
+  intent?: "create" | "save";
 }) {
   const blocked = report.blocking.length > 0 && !committed;
   return (
@@ -102,7 +106,7 @@ export function CollisionNotice({
     >
       <p className="text-xs font-medium text-ink">
         {committed
-          ? "Created. This rule fires alongside existing rules:"
+          ? `${intent === "save" ? "Saved" : "Created"}. This rule fires alongside existing rules:`
           : report.blocking.length > 0
             ? "Not saved: this rule covers everything these rules already handle. All of them would fire together."
             : "This rule overlaps with existing rules:"}
@@ -117,8 +121,8 @@ export function CollisionNotice({
       </ul>
       {blocked && (
         <p className="mt-1 text-xs text-muted">
-          Narrow the channels or filters so the rules stay separate, or create it anyway to
-          accept the double delivery.
+          Narrow the channels or filters so the rules stay separate, or{" "}
+          {intent === "save" ? "save" : "create"} it anyway to accept the double delivery.
         </p>
       )}
     </div>

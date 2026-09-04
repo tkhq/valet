@@ -31,7 +31,7 @@ export const DISCOVERY_RULES_VERSION = 1;
 
 /**
  * What a complete sync records in `skill_sources.discovery_scan`: the rules
- * version, then the commit those rules read.
+ * version, the kinds this source collects, then the commit those rules read.
  *
  * The commit is paired with the version for rollback. A release that does not
  * know this column still advances `last_sha`, so a bare version would outlive
@@ -41,8 +41,14 @@ export const DISCOVERY_RULES_VERSION = 1;
  * commit, which an errored source does on every poll. `recordFailure` clears
  * the mark for that reason, so the two rules hold it together.
  */
-export function discoveryScanMark(commitSha: string): string {
-  return `${DISCOVERY_RULES_VERSION}:${commitSha}`;
+export function discoveryScanMark(commitSha: string, kinds: readonly ContentKind[]): string {
+  // The KINDS are in the mark for the same reason the version is: they decide
+  // which collectors run, so the same commit yields a different candidate set
+  // when they change. Without them, adding a kind to an existing source
+  // leaves its stored mark matching, compare 1 short-circuits, and the newly
+  // claimed content is never mirrored until an unrelated commit lands.
+  // Sorted, so two equivalent orders produce one mark.
+  return `${DISCOVERY_RULES_VERSION}:${[...kinds].sort().join(",")}:${commitSha}`;
 }
 
 /** One tracked file as the repository holds it. `name` comes from the PATH,
@@ -78,6 +84,9 @@ export interface CollectorWalkContext {
 export interface CollectorReconcileContext {
   db: AppDb;
   source: ContentSourceRow;
+  /** The commit every body in `text` was read at. A collector that records
+   * provenance writes this and never the ref, which moves. */
+  commitSha: string;
   /** The body of every file this pass asked for, keyed by PATH and never by
    * name, so two same-named files of different kinds cannot overwrite each
    * other. */
@@ -94,6 +103,17 @@ export interface CollectorReconcileResult {
   /** Rows this pass would have deleted and kept instead, by name. Non-empty
    * only when the scan was narrower than the one that mirrored them. */
   keptStale: string[];
+  /**
+   * Rows this pass left unfinished for a reason the REPOSITORY cannot clear,
+   * by name — a mirrored workflow whose file is gone and whose run has not
+   * settled, for instance.
+   *
+   * A non-empty list makes the sync incomplete, exactly as an unread file
+   * does: `last_sha` and `last_manifest_hash` stay where they were, so the
+   * next poll re-reads and retries. Without it both compares short-circuit
+   * on an unmoved repository and the work waits for an unrelated commit.
+   */
+  deferred?: string[];
   /** One line per file this pass skipped. */
   warnings: string[];
 }

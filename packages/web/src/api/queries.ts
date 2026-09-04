@@ -339,6 +339,19 @@ export function useSetThreadArchived(sessionId: string) {
   });
 }
 
+/** Rename a thread. Use `null` to clear its stored title. */
+export function useRenameThread(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<PatchThreadResponse, Error, { threadId: string; title: string | null }>({
+    mutationFn: ({ threadId, title }) =>
+      api.patchThread(sessionId, threadId, { title }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
+      qc.invalidateQueries({ queryKey: qk.threadsArchived(sessionId) });
+    },
+  });
+}
+
 export function useDecisions(
   sessionId: string,
   opts?: UseQueryOptions<ListDecisionsResponse>,

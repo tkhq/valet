@@ -53,7 +53,7 @@ import {
   resolveInstallationApiToken,
 } from "../services/github-tokens.js";
 import { primaryRepoBinding, resolveSessionGitHubToken } from "../services/session-github-token.js";
-import { repoCredentialCommands, repoDockerFlag } from "../bakes/source-service.js";
+import { repoCredentialCommands, repoPrebuildFlags, type RepoPrebuildFlags } from "../bakes/source-service.js";
 import { loadSessionMeta } from "./session-meta.js";
 import { resolveSnapshot } from "./resolve-snapshot.js";
 import { computeSpec, specHash } from "./sandbox-spec.js";
@@ -406,6 +406,32 @@ export interface SessionMeta {
    * `loadSessionMeta` supplies it from the app row.
    */
   ownerTeamId?: string;
+}
+
+/** Where `resolveRepoPrebuildFlags` reads `.valet/prebuild.yaml` from, or why
+ * it cannot. Exported (with {@link prebuildFlagsTarget}) for direct unit
+ * coverage of the guard. */
+export type PrebuildFlagsTarget =
+  | { ok: true; owner: string; repo: string; ref: string }
+  | { ok: false; reason: "no-repo" | "bad-full-name" }
+  | { ok: false; reason: "non-github-host"; host: string };
+
+/**
+ * Picks the primary repo binding's GitHub coordinates for the prebuild-flags
+ * read, or the reason it must be skipped. `session_repos.host` stores
+ * "github" (the schema default); hand-built metas may carry "github.com" —
+ * both mean GitHub. TKAI-385: a previous version matched only "github.com",
+ * which silently disabled `workspaceStorage` and the repo `docker` flag for
+ * every bound session.
+ */
+export function prebuildFlagsTarget(repos: SessionMeta["repos"]): PrebuildFlagsTarget {
+  const primary = repos?.[0];
+  if (!primary) return { ok: false, reason: "no-repo" };
+  const host = primary.host ?? "github";
+  if (host !== "github" && host !== "github.com") return { ok: false, reason: "non-github-host", host };
+  const [owner, repo] = primary.fullName.split("/");
+  if (!owner || !repo) return { ok: false, reason: "bad-full-name" };
+  return { ok: true, owner, repo, ref: primary.ref ?? "HEAD" };
 }
 
 /** A session build's model pair: the wire-ready pi-ai model object plus the
@@ -880,11 +906,16 @@ export class EngineHost {
     const resolveModel = this.makeResolveModel(meta.orgId);
     const profile = meta.profile ?? "headless";
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
-    // Docker flag: session-create opt OR repo `.valet/prebuild.yaml` docker
-    // key. `resolveRepoDockerFlag` is best-effort — any failure resolves
-    // false. Single image lineage: the flag only shapes SandboxCreateOpts
-    // (caps/mounts/exec identity), never which image is resolved.
-    const dockerFlag = meta.docker === true || (await this.resolveRepoDockerFlag(sessionId, meta));
+    // Repo-declared session-runtime flags from `.valet/prebuild.yaml`:
+    // `docker` (session-create opt ORs over it) and `workspaceStorage`
+    // (TKAI-385: a large repo declares its workspace size up front so the
+    // claim is provisioned big enough — no reactive resize needed).
+    // `resolveRepoPrebuildFlags` is best-effort — any failure resolves the
+    // defaults. Single image lineage: the docker flag only shapes
+    // SandboxCreateOpts (caps/mounts/exec identity), never which image is
+    // resolved.
+    const repoFlags = await this.resolveRepoPrebuildFlags(sessionId, meta);
+    const dockerFlag = meta.docker === true || repoFlags.docker;
     // Start-ref sink (engine traces spec, change 2 — host pattern B): the
     // specProvider closure resolves the primary clone's ref inside the sandbox
     // and calls this callback. The callback can fire before create/restore
@@ -951,6 +982,9 @@ export class EngineHost {
       env: sandboxEnv,
       profile,
       ...(dockerFlag ? { docker: true } : {}),
+      // Only affects a FRESHLY provisioned claim — an existing workspace
+      // volume keeps its size (the controller never resizes an owned PVC).
+      ...(repoFlags.workspaceStorage ? { workspaceStorage: repoFlags.workspaceStorage } : {}),
       ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
     };
     const policyResolver = this.getPolicyResolver();
@@ -1604,7 +1638,7 @@ export class EngineHost {
   /**
    * The primary repo's `.valet/credentials.yaml` declarations, or `[]`.
    *
-   * Best-effort throughout, mirroring `resolveRepoDockerFlag`: no repo, no
+   * Best-effort throughout, mirroring `resolveRepoPrebuildFlags`: no repo, no
    * token, a non-GitHub host or an unreadable file all yield no wrappers.
    * A session that cannot read a declaration still starts; it just leaves
    * the agent to name references itself, which is where it started.
@@ -1655,25 +1689,31 @@ export class EngineHost {
   }
 
   /**
-   * Best-effort: reads `.valet/prebuild.yaml`'s `docker` key for the session's
-   * primary repo. Returns `false` on any failure (no token, no repos, non-GitHub
-   * host, network error, bad YAML) — the session still starts without docker.
+   * Best-effort: reads `.valet/prebuild.yaml`'s session-runtime keys
+   * (`docker`, `workspaceStorage`) for the session's primary repo. Returns
+   * the defaults ({ docker: false }, no storage) on any failure (no token,
+   * no repos, non-GitHub host, network error, bad YAML) — the session still
+   * starts without docker, on the default workspace size.
    *
    * Mirrors the guard structure of `buildCredentialResolver`: exits early when
    * `githubTokenDeps`/`db` are not wired (db-less test environments).
    */
-  private async resolveRepoDockerFlag(sessionId: string, meta: SessionMeta): Promise<boolean> {
+  private async resolveRepoPrebuildFlags(sessionId: string, meta: SessionMeta): Promise<RepoPrebuildFlags> {
+    const defaults: RepoPrebuildFlags = { docker: false };
     const tokenDeps = this.opts.githubTokenDeps;
     const db = this.opts.db;
-    if (!tokenDeps || !db) return false;
+    if (!tokenDeps || !db) return defaults;
     try {
-      const primaryRepo = meta.repos?.[0];
-      if (!primaryRepo) return false;
-      const host = primaryRepo.host ?? "github.com";
-      if (host !== "github.com") return false;
-      const [owner, repoName] = primaryRepo.fullName.split("/");
-      if (!owner || !repoName) return false;
-      const ref = primaryRepo.ref ?? "HEAD";
+      const target = prebuildFlagsTarget(meta.repos);
+      if (!target.ok) {
+        if (target.reason === "non-github-host") {
+          console.warn(
+            `EngineHost: resolveRepoPrebuildFlags: session ${sessionId} primary repo host "${target.host}" is not GitHub — using default flags`,
+          );
+        }
+        return defaults;
+      }
+      const { owner, repo: repoName, ref } = target;
       const fullDeps = {
         db,
         credentials: this.opts.engineCredentials,
@@ -1698,24 +1738,24 @@ export class EngineHost {
         }
       });
       const result = await Promise.race([
-        repoDockerFlag(fullDeps, resolved.token, owner, repoName, ref),
+        repoPrebuildFlags(fullDeps, resolved.token, owner, repoName, ref),
         timeoutPromise,
       ]);
       clearTimeout(timeoutId);
       if (result === timedOut) {
         // Do not cache — a timeout is not a repo answer.
         console.error(
-          `EngineHost: resolveRepoDockerFlag timed out for session ${sessionId}`,
+          `EngineHost: resolveRepoPrebuildFlags timed out for session ${sessionId}`,
         );
-        return false;
+        return defaults;
       }
       return result;
     } catch (err) {
       console.error(
-        `EngineHost: resolveRepoDockerFlag failed for session ${sessionId}:`,
+        `EngineHost: resolveRepoPrebuildFlags failed for session ${sessionId}:`,
         err instanceof Error ? err.message : String(err),
       );
-      return false;
+      return defaults;
     }
   }
 
@@ -2882,11 +2922,12 @@ export class EngineHost {
   private async resolveModelForBuild(
     existing: SessionData | null,
     orgId: string,
-    prefs: { userId?: string; overrideId?: string; ownerTeamId?: string },
+    prefs: { userId?: string; overrideId?: string; ownerTeamId?: string; childDefault?: string },
   ): Promise<BuildModel> {
     if (existing?.model) return this.resolveModelObject(orgId, existing.model);
     const id =
       prefs.overrideId ??
+      prefs.childDefault ??
       (prefs.userId ? await this.userDefaultModel(prefs.userId) : undefined) ??
       (prefs.ownerTeamId ? await this.teamDefaultModel(orgId, prefs.ownerTeamId) : undefined) ??
       (await this.orgPreferredModel(orgId)) ??
@@ -2991,6 +3032,11 @@ export class EngineHost {
       userId: opts.owner.type === "user" ? opts.actorUserId : undefined,
       overrideId: opts.modelId,
       ownerTeamId: opts.owner.type === "team" ? opts.owner.id : undefined,
+      // Child sessions default to the "s" tier when no explicit overrideId
+      // was passed (TKAI-285). The tier resolves through the org's tier map
+      // to a concrete spec; childDefault sits after overrideId but before
+      // the user/team/org preference cascade.
+      childDefault: opts.modelId ? undefined : "s",
     });
 
     const profile = opts.profile ?? "headless";

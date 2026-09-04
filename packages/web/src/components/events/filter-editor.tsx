@@ -28,6 +28,11 @@ export interface UiFilterRow {
   /** Display name for a picker value (a resolved id → "Alice"). Persisted on
    * the wire filter, ignored by matching, shown as the selected label. */
   label?: string;
+  /** A stored `in` filter's display labels, aligned with its original value
+   * list, plus the field they were stored under. Reattached on submit only
+   * while the edited row still matches both — an edited list or a switched
+   * field drops them rather than mislabel a value. */
+  inLabels?: { field: string; values: string[]; labels: string[] };
 }
 
 /** Mint a stable row id. `crypto.randomUUID` is present in every browser this
@@ -88,7 +93,17 @@ export function toWireFilters(rows: UiFilterRow[]): EventSubscriptionFilterWire[
         .map((v) => v.trim())
         .filter((v) => v.length > 0);
       if (values.length === 0) continue;
-      out.push({ field: row.field, op: "in", value: values });
+      const orig = row.inLabels;
+      if (
+        orig !== undefined &&
+        orig.field === row.field &&
+        orig.values.length === values.length &&
+        orig.values.every((v, i) => v === values[i])
+      ) {
+        out.push({ field: row.field, op: "in", value: values, labels: orig.labels });
+      } else {
+        out.push({ field: row.field, op: "in", value: values });
+      }
     } else {
       const value = row.value.trim();
       if (value.length === 0) continue;
@@ -121,9 +136,34 @@ export function fromWireFilters(filters: unknown[]): UiFilterRow[] {
         : "";
     const label = typeof r.label === "string" ? r.label : undefined;
     const id = newRowId();
-    rows.push(label !== undefined ? { id, field, op, value, label } : { id, field, op, value });
+    const row: UiFilterRow = { id, field, op, value };
+    if (label !== undefined) row.label = label;
+    // Keep an `in` filter's aligned display labels so an untouched list
+    // round-trips them (see `UiFilterRow.inLabels`).
+    if (op === "in" && Array.isArray(r.value) && Array.isArray(r.labels)) {
+      const values = r.value.filter((v): v is string => typeof v === "string");
+      const labels = r.labels.filter((v): v is string => typeof v === "string");
+      if (labels.length === values.length && labels.length === r.labels.length) {
+        row.inLabels = { field, values, labels };
+      }
+    }
+    rows.push(row);
   }
   return rows;
+}
+
+/**
+ * Whether two filter lists are the same rule, compared through the form
+ * round trip (`fromWireFilters` → `toWireFilters`). Raw comparison lies in
+ * both directions: stored jsonb reorders keys (by length, then bytewise),
+ * and corners the form cannot represent (comma-bearing `in` values,
+ * misaligned label arrays) would make an untouched list look edited —
+ * turning a rename into a filters rewrite. One canonical form on both sides
+ * also means no hand-maintained field list to drift from the wire type.
+ */
+export function sameWireFilters(a: unknown[], b: unknown[]): boolean {
+  const canon = (fs: unknown[]) => JSON.stringify(toWireFilters(fromWireFilters(fs)));
+  return canon(a) === canon(b);
 }
 
 /**

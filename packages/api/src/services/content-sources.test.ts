@@ -9,11 +9,20 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { orgMembers, orgs, skills, users } from "../schema/index.js";
+import {
+  orgMembers,
+  orgs,
+  skills,
+  users,
+  workflowDefinitions,
+  workflowSchedules,
+  workflowVersions,
+} from "../schema/index.js";
 import { addMember, createTeam, deleteTeam } from "./teams.js";
 import { createSkill, type SkillOwner } from "./skills.js";
 import {
   createContentSource,
+  parseContentKinds,
   decodeContentSourceCursor,
   deleteContentSource,
   listContentSources,
@@ -277,6 +286,145 @@ describe("content sources service", () => {
     const left = await db.select().from(skills);
     expect(left.map((r) => r.name)).toEqual(["written-here"]);
     expect(await ownedContentSourceRow(db, owner("u1"), source.id)).toBeNull();
+  });
+
+  // Decision 10: push access to a tracked repository becomes authority to run
+  // tool nodes as the owner, so the control is who may add the source.
+  describe("what a source is allowed to collect", () => {
+    it("defaults to skills, and stores one canonical order", async () => {
+      const plain = await createContentSource(db, owner("u1"), { repo: "tkhq/a" });
+      expect(plain.kinds).toEqual(["skills"]);
+
+      const team = await createTeam(db, { orgId: ORG, name: "Platform", creatorUserId: "u1" });
+      const both = await createContentSource(db, owner("u1"), {
+        repo: "tkhq/b",
+        teamId: team.id,
+        kinds: parseContentKinds(["workflows", "skills"]),
+      });
+      expect(both.kinds).toEqual(["skills", "workflows"]);
+    });
+
+    it("refuses a team source collecting workflows for a plain member, naming the fix", async () => {
+      const team = await createTeam(db, { orgId: ORG, name: "Platform", creatorUserId: "u1" });
+      await addMember(db, { teamId: team.id, userId: "u2", role: "member" });
+
+      await expect(
+        createContentSource(db, owner("u2"), {
+          repo: "tkhq/c",
+          teamId: team.id,
+          kinds: ["skills", "workflows"],
+        }),
+      ).rejects.toThrow(/team admin/);
+
+      // The same member may still add a skills-only team source.
+      const ok = await createContentSource(db, owner("u2"), { repo: "tkhq/d", teamId: team.id });
+      expect(ok.kinds).toEqual(["skills"]);
+    });
+
+    it("lets a team admin add one", async () => {
+      const team = await createTeam(db, { orgId: ORG, name: "Platform", creatorUserId: "u1" });
+      await addMember(db, { teamId: team.id, userId: "u2", role: "admin" });
+
+      const row = await createContentSource(db, owner("u2"), {
+        repo: "tkhq/e",
+        teamId: team.id,
+        kinds: ["workflows"],
+      });
+      expect(row.kinds).toEqual(["workflows"]);
+    });
+
+    it("refuses a personal source collecting workflows", async () => {
+      await expect(
+        createContentSource(db, owner("u1"), { repo: "tkhq/f", kinds: ["workflows"] }),
+      ).rejects.toThrow(/team source or an org source/);
+    });
+
+    // `memories` was advertised on the wire and registered as a collector
+    // while the only allow-list the create route checks left it out, so the
+    // memory collector could never run.
+    it("accepts memories on a personal source, which is the one kind that admits one", async () => {
+      const row = await createContentSource(db, owner("u1"), {
+        repo: "tkhq/notes",
+        kinds: parseContentKinds(["memories"]),
+      });
+      expect(row.kinds).toEqual(["memories"]);
+    });
+
+    it("reads an unchecked body, naming the choices", () => {
+      expect(parseContentKinds(undefined)).toEqual(["skills"]);
+      expect(() => parseContentKinds([])).toThrow(/Choose what to collect/);
+      expect(() => parseContentKinds(["skils"])).toThrow(/does not collect/);
+      expect(parseContentKinds(["memories"])).toEqual(["memories"]);
+      expect(() => parseContentKinds("skills")).toThrow(/Choose what to collect/);
+    });
+  });
+
+  // A mirrored workflow is read-only in the product, so an orphan left behind
+  // here could never be removed through any route: the guard in
+  // `workflows/service.ts` refuses the delete, and the source that would have
+  // removed it is gone.
+  it("deletes the workflows a source mirrors, and their versions and triggers", async () => {
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/automation" });
+    const now = Date.now();
+    await db.insert(workflowDefinitions).values([
+      {
+        id: "wf_mirrored",
+        orgId: ORG,
+        ownerType: "user",
+        ownerId: "u1",
+        name: "Nightly",
+        definition: { version: "dag/v1", nodes: [], edges: [] },
+        origin: "repo",
+        sourceId: source.id,
+        upstreamPath: ".valet/workflows/nightly.yaml",
+        contentSha: "blob-1",
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        id: "wf_local",
+        orgId: ORG,
+        ownerType: "user",
+        ownerId: "u1",
+        name: "Written here",
+        definition: { version: "dag/v1", nodes: [], edges: [] },
+        origin: "local",
+        createdAt: now,
+        updatedAt: now,
+      },
+    ]);
+    await db.insert(workflowVersions).values({
+      id: "wfv_1",
+      workflowId: "wf_mirrored",
+      version: 1,
+      name: "Nightly",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+      origin: "repo",
+      sourceCommit: "c1",
+      createdAt: now,
+    });
+    await db.insert(workflowSchedules).values({
+      id: "sched_1",
+      orgId: ORG,
+      ownerType: "user",
+      ownerId: "u1",
+      targetKind: "workflow",
+      workflowId: "wf_mirrored",
+      name: "nightly",
+      cron: "0 3 * * *",
+      nextFireAt: now + 1000,
+      createdBy: "u1",
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    expect(await deleteContentSource(db, owner("u1"), source.id)).toBe(true);
+
+    const left = await db.select().from(workflowDefinitions);
+    expect(left.map((r) => r.id)).toEqual(["wf_local"]);
+    expect(await db.select().from(workflowVersions)).toHaveLength(0);
+    // A schedule left behind keeps firing against a workflow that is gone.
+    expect(await db.select().from(workflowSchedules)).toHaveLength(0);
   });
 
   it("refuses to delete another owner's source", async () => {

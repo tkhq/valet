@@ -2,12 +2,14 @@ import type {
   ExecJobHandle,
   ExecOpts,
   ExecResult,
+  GatewayEndpoint,
   JobPoll,
   Sandbox,
+  WorkspaceGrowth,
 } from "../types.js";
 import { SandboxSupersededError, SandboxUnavailableError } from "../errors.js";
 import { attrTruncate, withSpan } from "../tracing.js";
-import { recordSandboxExec } from "../metrics.js";
+import { recordSandboxExec, recordSandboxWorkspaceGrow } from "../metrics.js";
 import type { SandboxAttachment } from "./attachment.js";
 
 /** Default `CreateSessionOptions.sandboxReadyTimeoutMs` (spec decision 6). */
@@ -34,6 +36,41 @@ function isTransportError(err: unknown): boolean {
 function dirnameOf(path: string): string {
   const idx = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
   return idx <= 0 ? "/" : path.slice(0, idx);
+}
+
+// ── In-run workspace-full recovery (workspace-fit spec, mid-run trigger) ──
+// Workspace prep grows the volume when ITS git operations hit ENOSPC, but
+// most fills happen during the run (`pnpm install` writes multiples of the
+// clone's size). This hook closes that gap at the one choke point every
+// agent command flows through: when an exec/job fails with ENOSPC-shaped
+// output, confirm the workspace filesystem is actually (nearly) full via
+// `df`, grow it once, and tell the agent to retry. The df confirmation is
+// load-bearing: agent output can contain ENOSPC text for other reasons
+// (test fixtures, other mounts), and a false grow both costs a one-way
+// doubling and consumes the once-per-~6h EBS modification window.
+
+/** ENOSPC-shaped command output. Mirrors workspace prep's pattern. */
+const ENOSPC_OUTPUT_PATTERN = /no space left on device|enospc/i;
+
+/** `df` use% at or past which the workspace counts as full. Covers block
+ * exhaustion; the paired `df -Pi` read covers inode exhaustion (node_modules
+ * on a small filesystem hits inodes first surprisingly often). */
+const WORKSPACE_FULL_THRESHOLD_PCT = 95;
+
+/** Minimum gap between grow attempts from THIS process. A burst of failing
+ * commands is one fill event: the first attempt handles it (or is refused by
+ * the provider's own cooldown); re-running df + grow per failure is noise. */
+const GROW_ATTEMPT_SUPPRESS_MS = 60_000;
+
+/** Largest NN% token in `df -P` / `df -Pi` output (0 when none parse).
+ * Exported for direct unit coverage. */
+export function maxDfUsePercent(dfOutput: string): number {
+  let max = 0;
+  for (const match of dfOutput.matchAll(/(?:^|\s)(\d{1,3})%(?:\s|$)/gm)) {
+    const pct = Number(match[1]);
+    if (pct > max) max = pct;
+  }
+  return max;
 }
 
 export interface PolicySandboxOptions {
@@ -128,6 +165,13 @@ export class PolicySandbox implements Sandbox {
         });
         if (result.truncated) span.setAttribute("valet.sandbox.output_truncated", true);
         if (result.timedOut) span.setAttribute("valet.sandbox.timed_out", true);
+        if (!result.timedOut && result.exitCode !== 0) {
+          const note = await this.maybeGrowAfterEnospc(`${result.stderr}\n${result.stdout}`);
+          if (note) {
+            span.setAttribute("valet.sandbox.workspace_grow_note", true);
+            return { ...result, stderr: [result.stderr.trimEnd(), note].filter(Boolean).join("\n") };
+          }
+        }
         return result;
       },
     );
@@ -193,6 +237,13 @@ export class PolicySandbox implements Sandbox {
     if (poll.status === "done" || poll.status === "failed") {
       this.pendingJobs.delete(execId);
     }
+    // Best-effort: the terminal output slice may not contain the ENOSPC text
+    // (it can land in an earlier polled slice), but a job that DIES on a full
+    // disk usually says so in its last lines.
+    if (poll.status === "done" && poll.exitCode !== undefined && poll.exitCode !== 0) {
+      const note = await this.maybeGrowAfterEnospc(poll.output);
+      if (note) return { ...poll, output: [poll.output.trimEnd(), note].filter(Boolean).join("\n") };
+    }
     return poll;
   }
 
@@ -215,7 +266,76 @@ export class PolicySandbox implements Sandbox {
     return this.pendingJobs.size;
   }
 
+  /** Forwarded so callers of the wrapped sandbox keep the raw contract:
+   * absent gateway === null (never a thrown "unsupported"). */
+  async gatewayEndpoint(): Promise<GatewayEndpoint | null> {
+    return this.dispatch(async (sb) => (sb.gatewayEndpoint ? sb.gatewayEndpoint() : null));
+  }
+
+  /** Forwarded so the seam stays reachable through the wrapper; a backend
+   * without a growable workspace reports a refusal, matching the provider
+   * contract (`grown: false` + reason, never a throw). */
+  async growWorkspace(): Promise<WorkspaceGrowth> {
+    return this.dispatch(async (sb) =>
+      sb.growWorkspace
+        ? sb.growWorkspace()
+        : { grown: false, reason: "this sandbox backend has no growable workspace" },
+    );
+  }
+
   // ── internals ──────────────────────────────────────────────────────
+
+  /** Wall-clock of the last in-run grow attempt (0 = never). See
+   * GROW_ATTEMPT_SUPPRESS_MS. */
+  private lastGrowAttemptAt = 0;
+
+  /**
+   * In-run workspace-full recovery (see the module-level block above the
+   * constants): called after a FAILED exec/terminal job poll with the
+   * command's combined output. Returns an agent-facing note to append to the
+   * result's stderr/output when the workspace was confirmed full — naming
+   * what happened and what to do — or null when this failure is not a
+   * workspace-full event (no ENOSPC text, df below threshold, suppressed,
+   * or the sandbox has no grow seam). Never throws: a broken grow must not
+   * turn a completed command result into an error.
+   */
+  private async maybeGrowAfterEnospc(outputText: string): Promise<string | null> {
+    if (!ENOSPC_OUTPUT_PATTERN.test(outputText)) return null;
+    const nowMs = Date.now();
+    if (nowMs - this.lastGrowAttemptAt < GROW_ATTEMPT_SUPPRESS_MS) return null;
+    this.lastGrowAttemptAt = nowMs;
+    try {
+      return await this.dispatch(async (sb) => {
+        if (!sb.growWorkspace) return null;
+        // Confirm the WORKSPACE filesystem is the full one. Default cwd is
+        // the workspace root on every backend; -P for blocks, -Pi for
+        // inodes (node_modules exhausts inodes on small filesystems).
+        const df = await sb.exec("df -P . && df -Pi .");
+        if (df.exitCode !== 0 || maxDfUsePercent(df.stdout) < WORKSPACE_FULL_THRESHOLD_PCT) return null;
+        let growth: WorkspaceGrowth;
+        try {
+          growth = await sb.growWorkspace();
+        } catch (err) {
+          recordSandboxWorkspaceGrow("error");
+          console.error(`sandbox ${this.id}: in-run workspace grow failed:`, err);
+          return null;
+        }
+        recordSandboxWorkspaceGrow(growth.grown ? "grown" : growth.pending ? "wait_timeout" : "refused");
+        if (growth.grown) {
+          return `[valet] The workspace volume was full and has been grown (${growth.from} → ${growth.to}). Retry the command.`;
+        }
+        if (growth.pending) {
+          return "[valet] The workspace volume is full; a resize was requested and should finish shortly. Retry the command in about a minute.";
+        }
+        return `[valet] The workspace volume is full and was not grown: ${growth.reason} Free disk space in the workspace (for example, remove build artifacts) before retrying.`;
+      });
+    } catch (err) {
+      // ensureReady/dispatch-level failure (sandbox died mid-check) — the
+      // original command result must still flow back untouched.
+      console.error(`sandbox ${this.id}: in-run workspace-full check failed:`, err);
+      return null;
+    }
+  }
 
   private abortError(signal: AbortSignal): Error {
     const reason = signal.reason;
@@ -265,3 +385,13 @@ export class PolicySandbox implements Sandbox {
 function jobUnsupportedError(): Error {
   return new Error("[job_unsupported] this sandbox does not support job-mode exec");
 }
+
+// Compile-time guard (shape-drift trap): PolicySandbox must forward EVERY
+// Sandbox method, optional ones included. A wrapper that silently lacks a
+// newly added optional method turns that feature into a no-op for every
+// consumer of the wrapped sandbox, and every existing test still passes.
+// Adding a method to `Sandbox` breaks this assignment until PolicySandbox
+// forwards it.
+type PolicyForwardsAllSandboxMethods = PolicySandbox extends Required<Sandbox> ? true : never;
+const policyForwardsAllSandboxMethods: PolicyForwardsAllSandboxMethods = true;
+void policyForwardsAllSandboxMethods;

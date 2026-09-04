@@ -33,18 +33,20 @@ export const ACTION_RULES =
  */
 export const MODEL_SWITCH_CORE = `## Models
 
-Stay on a cheap, fast model for status, memory, routing, and short answers.
+Models are referenced by size tier, not by concrete model id. The tiers, smallest to largest: \`xs\`, \`s\`, \`m\`, \`l\`, \`xl\`. The platform resolves each tier to a concrete model via org config — never name a specific model in a switch_model call.
 
-Before architecting, designing, debugging, reviewing, or a code change: call switch_model to a stronger reasoning-model id in this turn, then continue. Do not start that work on a cheap model. Use an id the org catalog already lists; do not hardcode a vendor family.
+Stay on \`xs\` or \`s\` for status, memory, routing, and short answers.
 
-Re-evaluate after you have read the code or a tool result. If the work is harder than it looked — a design fork, a failing test, a stuck loop, an unclear architecture — call switch_model to a stronger id in that same turn, then continue. Do not finish a hard task on a cheap model just because you started there. The switch takes effect on the next LLM call; the current tool result still returns.
+Before architecting, designing, debugging, reviewing, or a code change: call switch_model with \`l\` or \`xl\` in this turn, then continue. Do not start that work on a small tier.
 
-If the id is rejected, try another stronger id from the error. If none is available, tell the user.`;
+Re-evaluate after you have read the code or a tool result. If the work is harder than it looked — a design fork, a failing test, a stuck loop, an unclear architecture — call switch_model with \`l\` or \`xl\` in that same turn, then continue. Do not finish a hard task on a small tier just because you started there. The switch takes effect on the next LLM call; the current tool result still returns.
 
-/** Orchestrator-only: pick the child's model, and upgrade a stuck child. */
+If the tier is rejected, try the next larger tier from the error. If none is available, tell the user.`;
+
+/** Orchestrator-only: pick the child's model tier, and upgrade a stuck child. */
 export const MODEL_SWITCH_RULES = `${MODEL_SWITCH_CORE}
 
-When you spawn a coding child, set the task tool's \`model\` to that same strong id. A child that inherits a cheap model will narrate and skip commit, push, and the pull request. If a running child is stuck on a cheap model, child_send it to switch_model and continue.`;
+When you spawn a coding child, pass \`l\` for the task tool's \`model\` argument (children default to \`s\`; escalate to \`l\` for architecture, debugging, or code changes). A child on a small tier will narrate and skip commit, push, and the pull request. If a running child is stuck on a small tier, child_send it to switch_model to \`l\` and continue.`;
 
 /**
  * Explore → small diff → verify. Stuck loops upgrade via switch_model.
@@ -55,7 +57,7 @@ export const CODING_CRAFT_RULES = `## How you work
 1. **Search first.** Grep or read before you write. If you did not open the file, you do not know what is in it. Do not invent APIs or paths.
 2. **Small diff.** Change only what the brief asked. Match the file's style. Do not drive-by refactor.
 3. **Verify.** After edits, run the check this repo already names (AGENTS.md, package scripts, Makefile). If it fails, fix it. A commit is not evidence the change works.
-4. **Stuck.** The same error three times: call switch_model to a stronger reasoning-model id, then try a different approach. Do not repeat the same bash.`;
+4. **Stuck.** The same error three times: call switch_model with \`l\` or \`xl\`, then try a different approach. Do not repeat the same bash.`;
 
 /** Child / coding-session persistence. The v1 orchestrator put this in every code-change brief. */
 export const CODING_PERSISTENCE_RULES = `## Persistence

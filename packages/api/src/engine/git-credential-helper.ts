@@ -86,13 +86,23 @@ case "\$path" in
 esac
 [ -n "\$owner" ] || exit 0
 ${SANDBOX_TOKEN_READ_SH}
-[ -n "\$tok" ] || exit 0
+# Degraded paths warn on stderr (git shows credential-helper stderr) but
+# still exit 0 so PUBLIC repos keep working anonymously. Without the
+# warning, a revoked/missing sandbox token surfaces only as a cryptic
+# "unable to read <sha>" when a blobless clone lazily fetches blobs.
+if [ -z "\$tok" ]; then
+  echo "git-credential-valet: no sandbox token found — using no credentials for \$host/\$owner. If this repository needs auth, restart the session." >&2
+  exit 0
+fi
 
 resp=\$(curl --max-time 10 -fsS \\
   -X POST "${url}" \\
   -H "x-valet-sandbox: \$tok" \\
   -H "Content-Type: application/json" \\
-  -d "{\\"host\\":\\"\$host\\",\\"owner\\":\\"\$owner\\",\\"repo\\":\\"\$repo\\"}") || exit 0
+  -d "{\\"host\\":\\"\$host\\",\\"owner\\":\\"\$owner\\",\\"repo\\":\\"\$repo\\"}") || {
+  echo "git-credential-valet: credential request to the Valet API failed — using no credentials for \$host/\$owner. If git then fails to fetch, restart the session to refresh sandbox credentials." >&2
+  exit 0
+}
 
 username=\$(printf '%s' "\$resp" | sed -n 's/.*"username"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')
 password=\$(printf '%s' "\$resp" | sed -n 's/.*"password"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p')

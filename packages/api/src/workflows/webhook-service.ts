@@ -18,7 +18,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { workflowDefinitions, workflowWebhooks } from "../schema/index.js";
-import { newWorkflowId, ownedDefinitionRow, type WorkflowOwner } from "./service.js";
+import { newWorkflowId, armableDefinitionRow, type WorkflowOwner } from "./service.js";
 import { publicUrlFromEnv } from "../channels/host.js";
 
 export interface WorkflowWebhookSummary {
@@ -80,7 +80,7 @@ export async function mintOrRotateWorkflowWebhook(
   workflowId: string,
   now = Date.now(),
 ): Promise<{ ok: true; webhook: WorkflowWebhookSummary } | { ok: false; error: string }> {
-  const def = await ownedDefinitionRow(db, owner, workflowId);
+  const def = await armableDefinitionRow(db, owner, workflowId);
   if (!def) return { ok: false, error: `workflow not found: ${workflowId}` };
 
   const hookId = newHookId();
@@ -105,7 +105,7 @@ export async function getWorkflowWebhook(
   owner: WorkflowOwner,
   workflowId: string,
 ): Promise<{ ok: true; webhook: WorkflowWebhookSummary | null } | { ok: false; error: string }> {
-  const def = await ownedDefinitionRow(db, owner, workflowId);
+  const def = await armableDefinitionRow(db, owner, workflowId);
   if (!def) return { ok: false, error: `workflow not found: ${workflowId}` };
 
   const rows = await db.select().from(workflowWebhooks).where(eq(workflowWebhooks.workflowId, workflowId)).limit(1);
@@ -123,7 +123,7 @@ export async function deleteWorkflowWebhook(
   owner: WorkflowOwner,
   workflowId: string,
 ): Promise<DeleteWorkflowWebhookResult> {
-  const def = await ownedDefinitionRow(db, owner, workflowId);
+  const def = await armableDefinitionRow(db, owner, workflowId);
   if (!def) return "not_found";
 
   const deleted = await db

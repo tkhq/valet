@@ -641,7 +641,7 @@ export const switchModelTool = defineTool({
   parameters: Type.Object({
     model: Type.String({
       description:
-        "Target model id, e.g. 'claude-haiku-4-5' or 'anthropic/claude-opus-4-7'.",
+        "Target size tier (xs, s, m, l, xl) or a concrete model id. Prefer tiers — the platform resolves them to models via org config.",
     }),
   }),
   execute: async (args, ctx) => {
@@ -710,13 +710,16 @@ export const taskTool = defineTool({
     "forget — this call does not wait for the child to finish). The " +
     "parent thread receives a `child.settled` signal with the child's " +
     "result once it completes. Unavailable inside child sessions " +
-    "(depth-limited to one level).",
+    "(depth-limited to one level). Children default to tier `s` (a " +
+    "cost-efficient model). Pass `l` or `xl` for architecture, debugging, " +
+    "or code changes. Tiers resolve to concrete models via org config; " +
+    "do not name specific models.",
   parameters: Type.Object({
     prompt: Type.String({ minLength: 1, description: "The task for the child session to perform." }),
     title: Type.Optional(Type.String()),
     repo: Type.Optional(Type.String({ description: "Clone URL or org/repo; interpretation is host policy." })),
     branch: Type.Optional(Type.String()),
-    model: Type.Optional(Type.String()),
+    model: Type.Optional(Type.String({ description: "Size tier (xs, s, m, l, xl) for the child. Default: s." })),
     profile: Type.Optional(
       Type.Union([Type.Literal("headless"), Type.Literal("full")], {
         description:

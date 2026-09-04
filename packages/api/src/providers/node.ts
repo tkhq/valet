@@ -41,6 +41,12 @@ import { workflowsActionPlugin } from "../workflows/actions.js";
 import { skillsActionPlugin } from "../services/skills-actions.js";
 import { assistantsActionPlugin } from "../assistants/actions.js";
 import { ContentSyncService } from "../services/content-sync/service.js";
+import { SkillCollector } from "../services/content-sync/skill-collector.js";
+import { WorkflowCollector } from "../services/content-sync/workflow-collector.js";
+import { TemplateCollector } from "../services/content-sync/template-collector.js";
+import { MemoryCollector } from "../services/content-sync/memory-collector.js";
+import { listCatalogTemplates } from "../workflows/templates.js";
+import { buildValidateEnvironment } from "../workflows/validation-env.js";
 import { GitHubSkillRepoReader } from "../services/skill-repo-reader.js";
 import { skillRepoReaderFactory } from "../services/content-source-credential.js";
 import type { WorkflowServiceDeps } from "../workflows/service.js";
@@ -737,6 +743,33 @@ export async function buildNodeProviders(opts: NodeProviderOpts): Promise<Provid
   // resolvable credential it falls back to the anonymous `reader`.
   const contentSync = new ContentSyncService({
     db,
+    // One collector per content kind; a source runs the subset its `kinds`
+    // enables. The workflow collector validates a mirrored definition against
+    // the same plugin catalog the editor saves against, so a file naming an
+    // unknown model or tool service fails at sync with the validator's own
+    // message instead of at run time inside a node.
+    collectors: [
+      new SkillCollector(),
+      new WorkflowCollector({
+        env: buildValidateEnvironment(actionPluginByService),
+        // The event catalog `validateSubscription` reads, so an `events`
+        // block naming an unknown key or an undeclared filter field fails
+        // its file at sync instead of arming a subscription nothing can
+        // deliver.
+        plugins,
+      }),
+      // Memories collect for every owner type, including a personal source:
+      // a mirrored memory runs nothing and resolves no credential, so
+      // decision 10's authority argument does not reach it.
+      new MemoryCollector(),
+      new TemplateCollector({
+        env: buildValidateEnvironment(actionPluginByService),
+        // Resolved per pass, not per file: a mirrored id that collides with
+        // one this deployment ships is refused with both names.
+        reserved: () =>
+          new Map(listCatalogTemplates(plugins).map((owned) => [owned.template.id, owned.pluginName])),
+      }),
+    ],
     reader: new GitHubSkillRepoReader(),
     readerFor: skillRepoReaderFactory({
       db,

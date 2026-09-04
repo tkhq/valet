@@ -51,6 +51,7 @@ import { NoCredentialsError, type CredentialOwner, type CredentialStore, type Re
 import type { AppQueryable } from "../lib/drizzle.js";
 import type { LlmProviderRow } from "../schema/index.js";
 import { isKnownProviderKind, listLlmProviders, parseModelId, providerNamespace } from "./llm-providers.js";
+import { TIER_SET, resolveTier } from "./model-tiers.js";
 
 /** The registry-backed kinds (narrower than `LlmProviderKind`). Note
  * `openrouter` model ids themselves contain slashes
@@ -176,6 +177,19 @@ export async function resolveModelSpec(
   orgId: string,
   spec: string,
 ): Promise<ResolvedModel | null> {
+  // Tier tokens (xs, s, m, l, xl) resolve through the org's tier map to a
+  // concrete model spec, then recurse. canonicalId stays the tier token so
+  // the engine persists the tier, not the resolved spec — re-pointing a
+  // tier reaches existing threads (TKAI-285).
+  const normalized = spec.trim().toLowerCase();
+  if (db && TIER_SET.has(normalized)) {
+    const resolved = await resolveTier(db, credentials, orgId, normalized);
+    if (!resolved) return null; // no active provider for any entry
+    const result = await resolveModelSpec(db, credentials, orgId, resolved);
+    if (result) return { ...result, canonicalId: normalized };
+    return null;
+  }
+
   const { namespace, modelId } = parseModelId(spec);
   // Echo the caller's canonical form (bare stays bare, namespaced stays
   // namespaced) so the persisted id is idempotent under re-resolution.

@@ -56,6 +56,7 @@ import {
   type SkillRepoReader,
 } from "../skill-repo-reader.js";
 import { treeHoldsSubpath, MAX_SKILL_CANDIDATES } from "../skill-discovery.js";
+import { contentSourceRefMatchesPush } from "./push.js";
 import {
   contentManifestHash,
   discoveryScanMark,
@@ -275,6 +276,61 @@ export class ContentSyncService {
    * Syncs one source. The only sync implementation: the sweep and the "Sync
    * now" route both land here. Returns null when the source row is gone.
    */
+  /**
+   * Marks every source this push could have moved as due, then nudges the
+   * sweep. Returns how many rows it marked.
+   *
+   * It reads NOTHING from the payload into content. The sync then re-reads
+   * GitHub under the source's own credential, so a forged payload costs at
+   * worst one extra poll. It never syncs inline either, so a push storm
+   * collapses into one sync per source per tick.
+   *
+   * A source in `error` is left alone. `recordFailure` puts it on a backoff
+   * ladder, and a repository that pushes often would otherwise reset that
+   * ladder on every push and retry a broken source at push rate.
+   */
+  async onPush(
+    orgId: string,
+    repoFullName: string,
+    gitRef: string,
+    defaultBranch: string,
+  ): Promise<number> {
+    const rows = await this.deps.db
+      .select()
+      .from(contentSources)
+      .where(
+        and(
+          eq(contentSources.orgId, orgId),
+          eq(contentSources.repoFullName, repoFullName),
+          eq(contentSources.enabled, true),
+        ),
+      );
+    // The ref rule is a string compare the database cannot express: an empty
+    // source ref means the repository's default branch, which only the
+    // payload knows.
+    const due = rows.filter(
+      (row) =>
+        row.status !== "error" &&
+        contentSourceRefMatchesPush(row.ref, { repoFullName, gitRef, defaultBranch }),
+    );
+    if (due.length === 0) return 0;
+    const now = this.now();
+    await this.deps.db
+      .update(contentSources)
+      .set({ nextAttemptAt: now, updatedAt: now })
+      .where(
+        inArray(
+          contentSources.id,
+          due.map((row) => row.id),
+        ),
+      );
+    // Start a pass now rather than waiting out the tick. `pollOnce` is a
+    // no-op while one is already draining, and it claims rows, so a push
+    // storm cannot start two passes over the same source.
+    void this.pollOnce();
+    return due.length;
+  }
+
   async syncOnce(sourceId: string): Promise<ContentSyncOutcome | null> {
     const { db } = this.deps;
     const [source] = await db
@@ -314,7 +370,7 @@ export class ContentSyncService {
     // commit then says nothing about whether this source is current. The row
     // carries the commit its rules read rather than a bare version, because a
     // release that does not know the column still advances `last_sha`.
-    const scanIsStale = source.discoveryScan !== discoveryScanMark(head.sha);
+    const scanIsStale = source.discoveryScan !== discoveryScanMark(head.sha, source.kinds);
 
     if (head.sha === source.lastSha && !reportIsStale && !scanIsStale) {
       // Nothing was re-read, so this poll learned nothing that could clear the
@@ -359,7 +415,7 @@ export class ContentSyncService {
     }
 
     const read = await this.readContents(source, head.sha, reader, scan);
-    const applied = await this.reconcile(source, scan, read.text);
+    const applied = await this.reconcile(source, scan, read.text, head.sha);
     const totals = totalOf(applied);
     return this.recordSuccess(source, {
       headSha: head.sha,
@@ -367,8 +423,12 @@ export class ContentSyncService {
       changed: totals.imported + totals.updated + totals.deleted > 0,
       // A file discovery found and the sync could not read leaves the manifest
       // hash describing files nobody read. Recording it would make compare 2
-      // skip the whole commit forever.
-      complete: read.unread.length === 0,
+      // skip the whole commit forever. A pass that deferred work is incomplete
+      // for the same reason: nothing in the repository will move to trigger
+      // the retry.
+      complete:
+        read.unread.length === 0 &&
+        applied.every((entry) => (entry.result.deferred?.length ?? 0) === 0),
       discovered: totalDiscovered(scan),
       excluded: totalExcluded(scan),
       discovery: scan.discovery,
@@ -487,12 +547,14 @@ export class ContentSyncService {
     source: ContentSourceRow,
     scan: SyncScan,
     text: Map<string, string>,
+    commitSha: string,
   ): Promise<AppliedPass[]> {
     const applied: AppliedPass[] = [];
     for (const pass of scan.passes) {
       const result = await pass.reconcile({
         db: this.deps.db,
         source,
+        commitSha,
         text,
         discovery: scan.discovery,
         now: this.now,
@@ -551,8 +613,14 @@ export class ContentSyncService {
           now +
           syncIntervalMs(source.ownerType, { orgWebhookLive: this.deps.orgWebhookLive?.() === true }),
         lastSha: result.complete ? result.headSha : source.lastSha,
-        lastManifestHash: result.complete ? result.manifestHash : source.lastManifestHash,
-        discoveryScan: result.complete ? discoveryScanMark(result.headSha) : source.discoveryScan,
+        // An incomplete pass CLEARS the manifest hash rather than keeping the
+        // old one. The column's meaning is "the file set these mirrored rows
+        // came from", and an incomplete pass did not mirror that set. Keeping
+        // the stale value lets a repository that reverts to it short-circuit
+        // compare 2 forever, leaving the rows the incomplete pass never wrote
+        // permanently missing.
+        lastManifestHash: result.complete ? result.manifestHash : null,
+        discoveryScan: result.complete ? discoveryScanMark(result.headSha, source.kinds) : source.discoveryScan,
         lastSyncedAt: now,
         lastError: message,
         updatedAt: now,

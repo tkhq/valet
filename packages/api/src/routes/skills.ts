@@ -81,6 +81,8 @@ import { isOrgAdmin } from "../services/org.js";
 import {
   countSkillsPerSource,
   createContentSource,
+  ContentSourceForbiddenError,
+  parseContentKinds,
   decodeContentSourceCursor,
   deleteContentSource,
   listContentSources,
@@ -657,6 +659,10 @@ skillsRouter.post("/sources", async (c) => {
       subpath: body.subpath,
       teamId: body.teamId,
       ownerType: body.ownerType,
+      // Parsed here so a bad value is a 400 naming the choices, and gated
+      // inside the service so no route can add a privileged source without
+      // the check.
+      kinds: parseContentKinds(body.kinds),
     });
     sourceId = row.id;
   } catch (err) {
@@ -730,6 +736,7 @@ function isShadowed(plugins: ValetPlugin[], row: SkillRow): boolean {
 function toSourceSummary(row: ContentSourceRow, skillCount: number): SkillSourceSummary {
   return {
     id: row.id,
+    kinds: row.kinds,
     repo: row.repoFullName,
     ref: row.ref,
     subpath: row.subpath,
@@ -768,8 +775,12 @@ async function syncResponse(
 }
 
 /** Maps a source-service error onto its HTTP status. */
-function sourceErrorResponse(err: unknown): { body: Record<string, unknown>; status: 400 | 404 | 409 } {
+function sourceErrorResponse(err: unknown): {
+  body: Record<string, unknown>;
+  status: 400 | 403 | 404 | 409;
+} {
   if (err instanceof ContentSourceInputError) return { body: { error: err.message }, status: 400 };
+  if (err instanceof ContentSourceForbiddenError) return { body: { error: err.message }, status: 403 };
   if (err instanceof ContentSourceConflictError) return { body: { error: err.message }, status: 409 };
   if (err instanceof NotFoundError) return { body: { error: err.message }, status: 404 };
   throw err;

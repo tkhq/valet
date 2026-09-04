@@ -19,11 +19,13 @@ import {
   DEFAULT_PREBUILD_REGISTRY_HOST,
   SourceService,
   PrebuildUnavailableError,
+  RepoBaseLayerBakingError,
+  repoBaseSourceName,
   defaultRetention,
   imageRefFor,
   slugify,
-  repoDockerFlag,
-  clearRepoDockerCache,
+  repoPrebuildFlags,
+  clearRepoPrebuildFlagsCache,
   resolveChangedFiles,
   fetchRepoFile,
 } from "./source-service.js";
@@ -230,10 +232,15 @@ describe("SourceService", () => {
   // When true, expose a second lockfile so the resolved recipe changes (used to
   // move a repo's identity without moving its head sha).
   let lockfilePresent = false;
+  // Repo-declared .valet/prebuild.yaml served by the fixture (null = absent).
+  let prebuildYaml: string | null = null;
 
   function contentsFor(path: string): GithubFixtureResponse {
     if (path === "package-lock.json") return { body: { content: b64("{}"), encoding: "base64" } };
     if (lockfilePresent && path === "yarn.lock") return { body: { content: b64("{}"), encoding: "base64" } };
+    if (prebuildYaml !== null && path === ".valet/prebuild.yaml") {
+      return { body: { content: b64(prebuildYaml), encoding: "base64" } };
+    }
     return { status: 404, body: { message: "Not Found" } };
   }
 
@@ -271,6 +278,7 @@ describe("SourceService", () => {
     currentSha = "headsha1";
     idSeq = 0;
     lockfilePresent = false;
+    prebuildYaml = null;
     fixture = startGithubFixture({
       getRepo: () => ({ body: { default_branch: "main" } }),
       getCommit: () => ({ body: { sha: currentSha } }),
@@ -672,6 +680,117 @@ describe("SourceService", () => {
   });
 
   // ── decay matrix ──────────────────────────────────────────────────────
+
+  describe("repo-declared base layer (prebuild.yaml baseSetup)", () => {
+    const BASE_YAML = 'baseSetup:\n  - "apt-get install -y cmake"\n  - "curl -fsSL https://example.com/go.sh | sh"\n';
+
+    async function loadSource(id: string) {
+      return (await db.select().from(imageSources).where(eq(imageSources.id, id)))[0];
+    }
+    async function loadSynthetic() {
+      const rows = await db
+        .select()
+        .from(imageSources)
+        .where(and(eq(imageSources.kind, "base"), eq(imageSources.name, repoBaseSourceName("acme/widgets"))));
+      return rows[0];
+    }
+
+    it("first bake with baseSetup: materializes the synthetic base, kicks ITS bake, defers the repo, and the push cascade bakes the repo FROM it", async () => {
+      prebuildYaml = BASE_YAML;
+      const repoId = await seedRepoSource(db, { id: "repo1" });
+
+      await expect(service.startBake(repoId)).rejects.toThrow(RepoBaseLayerBakingError);
+
+      // The synthetic base exists, holds the commands, and now parents the repo.
+      const synthetic = await loadSynthetic();
+      expect(synthetic).toBeDefined();
+      expect(synthetic.profile).toBeNull();
+      expect(synthetic.setupCommands).toEqual([
+        "apt-get install -y cmake",
+        "curl -fsSL https://example.com/go.sh | sh",
+      ]);
+      expect((await loadSource(repoId)).parentId).toBe(synthetic.id);
+
+      // Only the BASE bake dispatched, carrying the baseSetup commands.
+      expect(builder.specs).toHaveLength(1);
+      expect(builder.specs[0].kind).toBe("base");
+      expect(builder.specs[0].setup).toEqual([
+        "apt-get install -y cmake",
+        "curl -fsSL https://example.com/go.sh | sh",
+      ]);
+
+      // Base pushes → same-night cascade bakes the repo FROM the base image.
+      builder.setState(builder.buildIds[0], { state: "pushed" });
+      await service.syncActiveBuilds();
+      expect(builder.specs).toHaveLength(2);
+      expect(builder.specs[1].kind).toBe("repo");
+      const baseBake = (await db.select().from(bakes).where(eq(bakes.sourceId, synthetic.id)))[0];
+      expect(builder.specs[1].baseImage).toBe(baseBake.imageRef);
+    });
+
+    it("a new commit reuses the pushed base (identity-keyed): no second base bake", async () => {
+      prebuildYaml = BASE_YAML;
+      const repoId = await seedRepoSource(db, { id: "repo1" });
+      await expect(service.startBake(repoId)).rejects.toThrow(RepoBaseLayerBakingError);
+      builder.setState(builder.buildIds[0], { state: "pushed" });
+      await service.syncActiveBuilds(); // cascade bakes the repo (spec #2)
+      builder.setState(builder.buildIds[1], { state: "pushed" });
+      await service.syncActiveBuilds();
+
+      currentSha = "headsha2";
+      await service.startBake(repoId);
+      const kinds = builder.specs.map((s) => s.kind);
+      expect(kinds).toEqual(["base", "repo", "repo"]);
+      const baseBake = (await db.select().from(bakes))[0];
+      expect(builder.specs[2].baseImage).toBe(baseBake.imageRef);
+    });
+
+    it("changing baseSetup rebakes the base (new identity) before the repo", async () => {
+      prebuildYaml = BASE_YAML;
+      const repoId = await seedRepoSource(db, { id: "repo1" });
+      await expect(service.startBake(repoId)).rejects.toThrow(RepoBaseLayerBakingError);
+      builder.setState(builder.buildIds[0], { state: "pushed" });
+      await service.syncActiveBuilds();
+
+      prebuildYaml = 'baseSetup:\n  - "apt-get install -y cmake ninja-build"\n';
+      await expect(service.startBake(repoId)).rejects.toThrow(RepoBaseLayerBakingError);
+      const baseSpecs = builder.specs.filter((s) => s.kind === "base");
+      expect(baseSpecs).toHaveLength(2);
+      expect(baseSpecs[1].setup).toEqual(["apt-get install -y cmake ninja-build"]);
+      expect((await loadSynthetic()).setupCommands).toEqual(["apt-get install -y cmake ninja-build"]);
+    });
+
+    it("removing baseSetup detaches: repo reparents to the org default and the synthetic base is disabled", async () => {
+      const orgBaseId = await seedBaseSource(db, ["apt-get install -y jq"]);
+      await seedBake(db, orgBaseId, { identityHash: "org-base-ident" });
+      prebuildYaml = BASE_YAML;
+      const repoId = await seedRepoSource(db, { id: "repo1" });
+      await expect(service.startBake(repoId)).rejects.toThrow(RepoBaseLayerBakingError);
+      builder.setState(builder.buildIds[0], { state: "pushed" });
+      await service.syncActiveBuilds();
+      const synthetic = await loadSynthetic();
+
+      prebuildYaml = null;
+      // The detach lands even though this bake may then defer on the org base
+      // (its seeded bake carries a mismatched identity) — assert the rows.
+      await service.startBake(repoId).catch(() => {});
+      expect((await loadSource(repoId)).parentId).toBe(orgBaseId);
+      expect((await loadSource(synthetic.id)).enabled).toBe(false);
+    });
+
+    it("the scheduler treats a base-layer defer as a defer, not a failure", async () => {
+      prebuildYaml = BASE_YAML;
+      await seedRepoSource(db, { id: "repo1" });
+      await seedLiveSession(db, "acme/widgets");
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      await service.runSchedulerPass();
+      expect(errSpy).not.toHaveBeenCalled();
+      expect(builder.specs.map((s) => s.kind)).toEqual(["base"]);
+      logSpy.mockRestore();
+      errSpy.mockRestore();
+    });
+  });
 
   describe("decay (spec decision 13)", () => {
     it("a live binding blocks decay even past 30 days", async () => {
@@ -1450,9 +1569,9 @@ describe("error exports", () => {
   });
 });
 
-// ── repoDockerFlag ────────────────────────────────────────────────────────────
+// ── repoPrebuildFlags ────────────────────────────────────────────────────────────
 
-describe("repoDockerFlag", () => {
+describe("repoPrebuildFlags", () => {
   let db: AppDb;
   let credentials: PgCredentialStore;
   let fixture: GithubFixture;
@@ -1481,7 +1600,7 @@ describe("repoDockerFlag", () => {
   });
 
   afterEach(async () => {
-    clearRepoDockerCache();
+    clearRepoPrebuildFlagsCache();
     await fixture.close();
   });
 
@@ -1492,8 +1611,9 @@ describe("repoDockerFlag", () => {
       }
       return { status: 404, body: { message: "Not Found" } };
     };
-    const result = await repoDockerFlag(deps(), "tok", "o", "r", "main");
-    expect(result).toBe(true);
+    const result = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
+    expect(result.docker).toBe(true);
+    expect(result.workspaceStorage).toBeUndefined();
   });
 
   it("returns false when the file is absent, and caches subsequent calls", async () => {
@@ -1502,11 +1622,12 @@ describe("repoDockerFlag", () => {
       if (path === ".valet/prebuild.yaml") callCount++;
       return { status: 404, body: { message: "Not Found" } };
     };
-    const result = await repoDockerFlag(deps(), "tok", "o", "r", "main");
-    expect(result).toBe(false);
+    const result = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
+    expect(result.docker).toBe(false);
+    expect(result.workspaceStorage).toBeUndefined();
     expect(callCount).toBe(1);
     // Second call — should be served from cache, no new HTTP call.
-    await repoDockerFlag(deps(), "tok", "o", "r", "main");
+    await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
     expect(callCount).toBe(1);
   });
 
@@ -1517,8 +1638,8 @@ describe("repoDockerFlag", () => {
       }
       return { status: 404, body: { message: "Not Found" } };
     };
-    const result = await repoDockerFlag(deps(), "tok", "o", "r", "main");
-    expect(result).toBe(false);
+    const result = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
+    expect(result.docker).toBe(false);
   });
 
   it("returns false on network/server errors (best-effort)", async () => {
@@ -1528,8 +1649,8 @@ describe("repoDockerFlag", () => {
       }
       return { status: 404, body: { message: "Not Found" } };
     };
-    const result = await repoDockerFlag(deps(), "tok", "o", "r", "main");
-    expect(result).toBe(false);
+    const result = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
+    expect(result.docker).toBe(false);
   });
 
   it("resolves false and does not cache when the fetch hangs (timeout seam)", async () => {
@@ -1544,7 +1665,7 @@ describe("repoDockerFlag", () => {
 
     const timedOut = Symbol("timedOut");
     const result = await Promise.race([
-      repoDockerFlag({ ...deps(), fetchImpl: hangingFetch }, "tok", "o", "r", "hang-ref"),
+      repoPrebuildFlags({ ...deps(), fetchImpl: hangingFetch }, "tok", "o", "r", "hang-ref"),
       new Promise<typeof timedOut>((resolve) => setTimeout(() => resolve(timedOut), 200)),
     ]);
     expect(result).toBe(timedOut); // the call is still pending — not cached
@@ -1557,8 +1678,8 @@ describe("repoDockerFlag", () => {
       }
       return { status: 404, body: { message: "Not Found" } };
     };
-    const afterTimeout = await repoDockerFlag(deps(), "tok", "o", "r", "hang-ref");
-    expect(afterTimeout).toBe(true); // real fetch ran — not served from a stale cache entry
+    const afterTimeout = await repoPrebuildFlags(deps(), "tok", "o", "r", "hang-ref");
+    expect(afterTimeout.docker).toBe(true); // real fetch ran — not served from a stale cache entry
 
     // Resolve the hang to let the dangling promise settle cleanly.
     hangResolve?.();
@@ -1569,14 +1690,38 @@ describe("repoDockerFlag", () => {
     // Verifies the cap guard does not corrupt state: the 1001st call must still
     // return the correct value (false for a missing file).
     contentsHandler = () => ({ status: 404, body: { message: "Not Found" } });
-    const promises: Promise<boolean>[] = [];
+    const promises: Promise<unknown>[] = [];
     for (let i = 0; i < 1000; i++) {
-      promises.push(repoDockerFlag(deps(), "tok", "o", `repo-${i}`, "main"));
+      promises.push(repoPrebuildFlags(deps(), "tok", "o", `repo-${i}`, "main"));
     }
     await Promise.all(promises);
     // The map was cleared at entry 1000. This call re-fetches cleanly.
-    const result = await repoDockerFlag(deps(), "tok", "o", "cap-check", "main");
-    expect(result).toBe(false);
+    const result = await repoPrebuildFlags(deps(), "tok", "o", "cap-check", "main");
+    expect(result.docker).toBe(false);
+  });
+
+  it("carries the repo-declared workspaceStorage alongside docker (TKAI-385)", async () => {
+    contentsHandler = (_owner, _repo, path) => {
+      if (path === ".valet/prebuild.yaml") {
+        return { body: { content: b64('docker: true\nworkspaceStorage: "4Gi"'), encoding: "base64" } };
+      }
+      return { status: 404, body: { message: "Not Found" } };
+    };
+    const result = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
+    expect(result).toEqual({ docker: true, workspaceStorage: "4Gi" });
+  });
+
+  it("a malformed workspaceStorage value degrades to the defaults (best-effort, like every other read failure)", async () => {
+    contentsHandler = (_owner, _repo, path) => {
+      if (path === ".valet/prebuild.yaml") {
+        return { body: { content: b64("docker: true\nworkspaceStorage: 4"), encoding: "base64" } };
+      }
+      return { status: 404, body: { message: "Not Found" } };
+    };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const result = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
+    expect(result).toEqual({ docker: false });
+    errSpy.mockRestore();
   });
 });
 

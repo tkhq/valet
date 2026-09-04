@@ -65,6 +65,7 @@ const APP_TABLES = [
   "user_identity_links",
   "memory_files",
   "workflow_definitions",
+  "workflow_templates",
   "workflow_runs",
   "workflow_checkpoints",
   "workflow_signals",
@@ -869,6 +870,17 @@ describe("pg app schema + migrations", () => {
       { table: "skill_sources", column: "created_by" },
       { table: "skill_sources", column: "kinds" },
       { table: "skill_sources", column: "discovery_scan" },
+      { table: "workflow_definitions", column: "origin" },
+      { table: "workflow_definitions", column: "source_id" },
+      { table: "workflow_definitions", column: "upstream_path" },
+      { table: "workflow_definitions", column: "content_sha" },
+      { table: "workflow_versions", column: "origin" },
+      { table: "workflow_versions", column: "source_commit" },
+      { table: "workflow_schedules", column: "origin" },
+      { table: "event_subscriptions", column: "origin" },
+      { table: "memory_files", column: "source_id" },
+      { table: "memory_files", column: "upstream_path" },
+      { table: "memory_files", column: "content_sha" },
       { table: "orgs", column: "sso_team_groups" },
       { table: "agent_sessions", column: "hibernated_sandbox_id" },
       { table: "agent_sessions", column: "sandbox_reclaimed_at" },
@@ -892,6 +904,46 @@ describe("pg app schema + migrations", () => {
       );
       return result.rows.length > 0;
     }
+
+    // A partial unique index is the shape whose probe is easiest to get
+    // wrong: it has a WHERE clause, and `pg_indexes` reports it under the
+    // same name as a plain one. Dropping it and re-applying proves the repair
+    // both detects its absence and rebuilds it with the predicate, which is
+    // what keeps two sources from mirroring one path twice.
+    it("re-adds the partial unique index on a mirrored workflow's path", async () => {
+      const indexExists = async (): Promise<boolean> => {
+        const result = await db.query(
+          "SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = $1",
+          ["workflow_definitions_source_path"],
+        );
+        return result.rows.length > 0;
+      };
+      await db.query('DROP INDEX "workflow_definitions_source_path"');
+      expect(await indexExists()).toBe(false);
+
+      await applyAppMigrations(db);
+      expect(await indexExists()).toBe(true);
+
+      // Partial, so two LOCAL rows carrying no source do not collide.
+      const local = (id: string) =>
+        db.query(
+          `INSERT INTO "workflow_definitions" ("id","org_id","owner_type","owner_id","name","definition","created_at","updated_at")
+           VALUES ($1,'org1','user','u1','n','{}'::jsonb,1,1)`,
+          [id],
+        );
+      await local("wf_a");
+      await local("wf_b");
+
+      // And it still refuses one path mirrored twice by one source.
+      const mirrored = (id: string) =>
+        db.query(
+          `INSERT INTO "workflow_definitions" ("id","org_id","owner_type","owner_id","name","definition","origin","source_id","upstream_path","created_at","updated_at")
+           VALUES ($1,'org1','user','u1','n','{}'::jsonb,'repo','src_1','.valet/workflows/a.yaml',1,1)`,
+          [id],
+        );
+      await mirrored("wf_c");
+      await expect(mirrored("wf_d")).rejects.toThrow();
+    });
 
     it("re-adds columns that predate an already-applied 0000_app.sql", async () => {
       for (const { table, column } of REPAIRED_COLUMNS) {

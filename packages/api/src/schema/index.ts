@@ -65,6 +65,9 @@ export const orgs = pgTable("orgs", {
   // visibility option is not offered. Live-checked on every artifact read,
   // so flipping it off immediately re-gates existing `public` artifacts.
   allowPublicArtifacts: boolean("allow_public_artifacts").notNull().default(false),
+  // Tier map: `{ xs: ["anthropic/claude-haiku-4-5"], ... }`. Nullable — null
+  // means "use built-in defaults" (same pattern as `ssoTeamGroups`).
+  modelTiers: jsonb("model_tiers"),
 });
 
 // better-auth's default model name for the user table is "user" (singular);
@@ -805,6 +808,16 @@ export const memoryFiles = pgTable(
     sourceSessionId: text("source_session_id").notNull().default(""),
     orgId: text("org_id").notNull().default(""),
     version: integer("version").notNull().default(1),
+    /** The content source that mirrors this row, or null on a row the
+     * product wrote. A mirrored row lands under `lib/`, which
+     * `assertWritablePath` already reserves for mounted libraries, so the
+     * product refuses to write it with no new guard.
+     *
+     * NOT `origin` above: that column is OKF provenance of the fact and is
+     * already spent. */
+    sourceId: text("source_id"),
+    upstreamPath: text("upstream_path"),
+    contentSha: text("content_sha"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
@@ -813,19 +826,28 @@ export const memoryFiles = pgTable(
 
 // ─── Artifacts ──────────────────────────────────────────────────────────────
 //
-// Shared snapshots of memory files (2026-08-22 artifacts design). A row is a
-// COPY of one memory file's content at share time, not a live reference —
-// later memory edits never publish until an explicit re-share overwrites
-// `content`. `token` is the unguessable capability in the share URL
-// (`/a/{token}`); `visibility` gates who may open it: `org` (a logged-in
-// member of `org_id`) or `public` (anyone, only while
-// `orgs.allow_public_artifacts` is on). The tool surface can only create
-// `org` rows; widening to `public` is a human UI action recorded in
-// `public_by`. Revoke sets `revoked_at` and keeps the row for audit;
-// re-share after revoke mints a fresh token (a leaked link stays dead)
-// AND resets visibility to `org` — revoke ends the audience decision
+// Published pages (2026-08-22 artifacts design; extended by the 2026-09-02
+// artifact-pages design). A row is a COPY of content at publish time, not a
+// live reference — later edits never publish until an explicit re-publish.
+// `token` is the unguessable capability in the share URL (`/a/{token}`);
+// `visibility` gates who may open it: `org` (a logged-in member of `org_id`)
+// or `public` (anyone, only while `orgs.allow_public_artifacts` is on). The
+// tool surface can only create `org` rows; widening to `public` is a human UI
+// action recorded in `public_by`. Revoke sets `revoked_at` and keeps the row
+// for audit; re-publish after revoke mints a fresh token (a leaked link stays
+// dead) AND resets visibility to `org` — revoke ends the audience decision
 // along with the link, so the tool surface can never restore anonymous
 // access.
+//
+// `format` names the compiler for `content` (the SOURCE): `markdown` compiles
+// through GFM at publish, `html` passes verbatim. `rendered` is the compiled
+// page body every viewer renders in the sandboxed frame; "" on a pre-pages
+// row means "compile `content` on read". `version` counts publishes;
+// `shared_version` pins viewers to one `artifact_versions` row (null =
+// latest). `source_memory_path` is the PUBLISH KEY: the normalized memory
+// path for a `mem_share`, the caller's key for an inline `artifact_publish` —
+// not renamed because a rename cannot be rolled back safely under
+// SCHEMA_REPAIRS.
 export const artifacts = pgTable(
   "artifacts",
   {
@@ -839,6 +861,12 @@ export const artifacts = pgTable(
     sourceMemoryPath: text("source_memory_path").notNull(),
     title: text("title").notNull().default(""),
     content: text("content").notNull(),
+    format: text("format", { enum: ["markdown", "html"] }).notNull().default("markdown"),
+    rendered: text("rendered").notNull().default(""),
+    description: text("description").notNull().default(""),
+    icon: text("icon").notNull().default(""),
+    version: bigint("version", { mode: "number" }).notNull().default(1),
+    sharedVersion: bigint("shared_version", { mode: "number" }),
     visibility: text("visibility", { enum: ["org", "public"] }).notNull().default("org"),
     publicBy: text("public_by"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
@@ -847,9 +875,56 @@ export const artifacts = pgTable(
   },
   (t) => [
     uniqueIndex("artifacts_token_unique").on(t.token),
-    // One artifact per shared file: re-share is an update, never a second row.
+    // One artifact per publish key: re-publish is an update, never a second row.
     uniqueIndex("artifacts_owner_path_unique").on(t.ownerType, t.ownerId, t.sourceMemoryPath),
   ],
+);
+
+// Version history (artifact-pages design). One row per publish, append-only.
+// `content` is the source, `rendered` the compiled page body — both captured
+// so pinning `shared_version` to an old row needs no recompilation. The
+// public read serves exactly one version and takes no version parameter:
+// a link holder must never walk the history.
+export const artifactVersions = pgTable(
+  "artifact_versions",
+  {
+    id: text("id").primaryKey(),
+    artifactId: text("artifact_id").notNull(),
+    version: bigint("version", { mode: "number" }).notNull(),
+    title: text("title").notNull().default(""),
+    format: text("format", { enum: ["markdown", "html"] }).notNull().default("markdown"),
+    content: text("content").notNull(),
+    rendered: text("rendered").notNull().default(""),
+    actorUserId: text("actor_user_id").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [uniqueIndex("artifact_versions_unique").on(t.artifactId, t.version)],
+);
+
+// Element-anchored comments on a published page (artifact-pages design).
+// `vdid` is the content-hashed element id the viewer's comment runtime
+// computes (null = a page-level comment); `version` records what the
+// commenter was looking at. `parent_id` threads replies one level under a
+// root. `sent_to_session` records delivery of the comment into the source
+// session's prompt queue — allowed only when the commenter passes
+// `canViewSession` there, so sending grants nothing that typing into the
+// session would not. Resolve is a flag, never a delete.
+export const artifactComments = pgTable(
+  "artifact_comments",
+  {
+    id: text("id").primaryKey(),
+    artifactId: text("artifact_id").notNull(),
+    version: bigint("version", { mode: "number" }).notNull(),
+    vdid: text("vdid"),
+    parentId: text("parent_id"),
+    body: text("body").notNull(),
+    authorUserId: text("author_user_id").notNull(),
+    sentToSession: text("sent_to_session"),
+    resolvedAt: bigint("resolved_at", { mode: "number" }),
+    resolvedBy: text("resolved_by"),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [index("artifact_comments_artifact").on(t.artifactId)],
 );
 
 // ─── Skills ─────────────────────────────────────────────────────────────────
@@ -907,7 +982,7 @@ export const skills = pgTable(
 /** What one tracked repository mirrors. `skills` is the kind that ships; the
  * other two join the same rail
  * (`docs/specs/2026-08-24-workflows-mvp-design.md`). */
-export type ContentKind = "skills" | "workflows" | "templates";
+export type ContentKind = "skills" | "workflows" | "templates" | "memories";
 
 // One tracked repository. A `repo`-origin row in `skills` above is a MIRROR
 // of a `SKILL.md` in one of these repositories, and sync is the only thing
@@ -1021,10 +1096,26 @@ export const workflowDefinitions = pgTable(
     ownerId: text("owner_id").notNull(),
     name: text("name").notNull(),
     definition: jsonb("definition").notNull(),
+    /** `repo` rows mirror one workflow file and are read-only in the product:
+     * editing the file is the edit, deleting the file is the delete. */
+    origin: text("origin", { enum: ["local", "repo"] }).notNull().default("local"),
+    /** The content source that mirrors this row. Null on a `local` row. */
+    sourceId: text("source_id"),
+    /** Repo-relative path of the file. Identity is (sourceId, upstreamPath)
+     * and nothing else — not the name, not any id the file writes — so a
+     * rename deletes one workflow and creates another. */
+    upstreamPath: text("upstream_path"),
+    /** Hash of the mirrored file, so a re-sync can skip an unchanged row. */
+    contentSha: text("content_sha"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
-  (t) => [index("workflow_definitions_owner").on(t.orgId, t.ownerType, t.ownerId)],
+  (t) => [
+    index("workflow_definitions_owner").on(t.orgId, t.ownerType, t.ownerId),
+    uniqueIndex("workflow_definitions_source_path")
+      .on(t.sourceId, t.upstreamPath)
+      .where(sql`"source_id" IS NOT NULL`),
+  ],
 );
 
 // Immutable snapshot per save: version 1 on create, +1 on every
@@ -1038,9 +1129,53 @@ export const workflowVersions = pgTable(
     version: integer("version").notNull(),
     name: text("name").notNull(),
     definition: jsonb("definition").notNull(),
+    /** Which write produced this version, and from which commit. Both null on
+     * every version a product edit wrote, and on every row older than the
+     * repository mirror. */
+    origin: text("origin", { enum: ["local", "repo"] }),
+    sourceCommit: text("source_commit"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
   },
   (t) => [uniqueIndex("workflow_versions_wf_version").on(t.workflowId, t.version)],
+);
+
+/**
+ * Templates mirrored from a repository. A row is a COPY of one template file,
+ * and installing it produces an ordinary `local` workflow the installer may
+ * edit. That is the whole difference between a template and a mirrored
+ * definition, which stays read-only and keeps syncing.
+ */
+export const workflowTemplates = pgTable(
+  "workflow_templates",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull(),
+    ownerId: text("owner_id").notNull(),
+    /** The id the FILE declares, which the gallery and the install route
+     * use. Distinct from `id`, which identifies this row. */
+    templateId: text("template_id").notNull(),
+    origin: text("origin", { enum: ["local", "repo"] }).notNull().default("local"),
+    sourceId: text("source_id"),
+    upstreamPath: text("upstream_path").notNull(),
+    contentSha: text("content_sha"),
+    template: jsonb("template").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    // One template id per owner: the gallery lists by id, and two rows
+    // claiming one id would make which one installs undefined.
+    uniqueIndex("workflow_templates_owner_template").on(
+      t.orgId,
+      t.ownerType,
+      t.ownerId,
+      t.templateId,
+    ),
+    uniqueIndex("workflow_templates_source_path")
+      .on(t.sourceId, t.upstreamPath)
+      .where(sql`"source_id" IS NOT NULL`),
+  ],
 );
 
 export const workflowRuns = pgTable(
@@ -1664,6 +1799,10 @@ export const eventSubscriptions = pgTable(
     /** `{ kind: "workflow", workflowId } | { kind: "orchestrator" } | { kind: "signal" }`. */
     target: jsonb("target").notNull(),
     enabled: boolean("enabled").notNull().default(true),
+    /** `repo` rows are armed from a mirrored workflow file. The sync updates
+     * and deletes only these, so a subscription a person armed on the same
+     * workflow is never touched. */
+    origin: text("origin", { enum: ["local", "repo"] }).notNull().default("local"),
     createdBy: text("created_by").notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
@@ -1738,6 +1877,10 @@ export const workflowSchedules = pgTable(
     /** Optional static payload delivered as `trigger.data.input`. */
     input: jsonb("input"),
     enabled: boolean("enabled").notNull().default(true),
+    /** `repo` rows are armed from a mirrored workflow file. The sync updates
+     * and deletes only these, so a schedule a person armed on the same
+     * workflow is never touched. */
+    origin: text("origin", { enum: ["local", "repo"] }).notNull().default("local"),
     lastFiredAt: bigint("last_fired_at", { mode: "number" }),
     nextFireAt: bigint("next_fire_at", { mode: "number" }).notNull(),
     createdBy: text("created_by").notNull(),

@@ -60,7 +60,7 @@ import { useTeams } from "~/api/settings";
 import { errorText } from "~/lib/error-text";
 // The reply outcome always subscribes to this one event key, so the reader
 // never sees a raw event picker for it.
-import { SLACK_APP_MENTION } from "~/lib/slack-mention";
+import { hasChannelScopeFilter, SLACK_APP_MENTION } from "~/lib/slack-mention";
 import { useActiveWorkspace } from "~/components/workspace-clause";
 
 /** One picked channel: the Slack id plus the display label the picker showed. */
@@ -243,25 +243,7 @@ export function AutomationWizard({
   // outcome forbids.
   const isEventOutcome = outcome === "workflow" || outcome === "notify" || outcome === "advanced";
 
-  // Filter fields the selected events declare, unioned and deduped by field —
-  // a filter is valid when any selected event declares it (the same rule the
-  // server's validateSubscription applies).
-  function unionFilterFields(selected: Set<string>): FilterField[] {
-    const out: FilterField[] = [];
-    const seen = new Set<string>();
-    for (const s of services) {
-      for (const entry of s.entries) {
-        if (!selected.has(entry.key)) continue;
-        for (const f of entry.filters ?? []) {
-          if (seen.has(f.field)) continue;
-          seen.add(f.field);
-          out.push({ field: f.field, description: f.description, options: f.options });
-        }
-      }
-    }
-    return out;
-  }
-  const filterFields = unionFilterFields(keys);
+  const filterFields = unionFilterFields(services, keys);
 
   function toggleKey(key: string) {
     const next = new Set(keys);
@@ -270,7 +252,7 @@ export function AutomationWizard({
     setKeys(next);
     // Drop filters whose field none of the now-selected events declare, so an
     // orphaned filter cannot 400 on submit.
-    setFilterRows((rows) => pruneFilterRows(rows, unionFilterFields(next)));
+    setFilterRows((rows) => pruneFilterRows(rows, unionFilterFields(services, next)));
   }
 
   const workflowChosen = target.kind === "workflow" && target.workflowId.length > 0;
@@ -378,6 +360,15 @@ export function AutomationWizard({
         setError(`Enter a value for the "${incomplete}" filter, or remove the row.`);
         return;
       }
+      const filters = toWireFilters(filterRows);
+      // Mirror the server's mention rule (TKAI-299): "Any channel" with a
+      // channel filter is a contradiction the server refuses outright.
+      if (keys.has(SLACK_APP_MENTION) && anyChannel && hasChannelScopeFilter(filters)) {
+        setError(
+          '"Any channel" removes the channel restriction. Remove the channel filters, or turn "Any channel" off.',
+        );
+        return;
+      }
       // The notify outcome speaks to an assistant, never follows a thread.
       const eventTarget: EventSubscriptionTarget =
         outcome === "notify"
@@ -387,7 +378,7 @@ export function AutomationWizard({
         {
           name: name.trim(),
           eventKeys: [...keys],
-          filters: toWireFilters(filterRows),
+          filters,
           target: eventTarget,
           // The raw picker can select `slack.app_mention` too; the flag only
           // means anything there, and the server ignores it elsewhere.
@@ -939,12 +930,34 @@ function ChannelMultiSelect({
   );
 }
 
-interface CatalogService {
+export interface CatalogService {
   service: string;
   entries: { key: string; description: string; filters?: FilterField[] }[];
 }
 
-function EventMatchStep({
+/** Filter fields the selected events declare, unioned and deduped by field —
+ * a filter is valid when any selected event declares it (the same rule the
+ * server's validateSubscription applies). Shared with the edit dialog. */
+export function unionFilterFields(
+  services: CatalogService[],
+  selected: Set<string>,
+): FilterField[] {
+  const out: FilterField[] = [];
+  const seen = new Set<string>();
+  for (const s of services) {
+    for (const entry of s.entries) {
+      if (!selected.has(entry.key)) continue;
+      for (const f of entry.filters ?? []) {
+        if (seen.has(f.field)) continue;
+        seen.add(f.field);
+        out.push({ field: f.field, description: f.description, options: f.options });
+      }
+    }
+  }
+  return out;
+}
+
+export function EventMatchStep({
   services,
   catalogLoading,
   catalogError,

@@ -27,6 +27,7 @@ import {
 } from "../schema/index.js";
 import { retireAssistant } from "../assistants/service.js";
 import { getOrgFeatures, isOrgAdmin } from "./org.js";
+import { deleteMirroredContent } from "./content-sources.js";
 
 export type TeamRole = "admin" | "member";
 
@@ -587,6 +588,20 @@ export async function deleteTeam(db: AppDb, opts: DeleteTeamOptions): Promise<vo
     await tx
       .delete(skills)
       .where(and(eq(skills.ownerType, "team"), eq(skills.ownerId, opts.teamId)));
+    // Each source's mirrored content goes with the source, through the same
+    // helper the source delete uses. Without it a mirrored row outlives every
+    // route that could remove it: a mirrored workflow is read-only, and its
+    // source would be gone. `assertNoTeamOwnedWorkflows` above already
+    // refuses while the team owns any workflow, so this reaches a source
+    // whose mirrored definitions were removed by that path first, and the
+    // templates it still holds.
+    const teamSources = await tx
+      .select({ id: contentSources.id, orgId: contentSources.orgId })
+      .from(contentSources)
+      .where(and(eq(contentSources.ownerType, "team"), eq(contentSources.ownerId, opts.teamId)));
+    for (const source of teamSources) {
+      await deleteMirroredContent(tx, source.orgId, source.id);
+    }
     await tx
       .delete(contentSources)
       .where(and(eq(contentSources.ownerType, "team"), eq(contentSources.ownerId, opts.teamId)));

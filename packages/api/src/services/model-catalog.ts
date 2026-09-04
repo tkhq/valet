@@ -41,6 +41,7 @@ import { isKnownProviderKind, listLlmProviders, parseModelId, providerNamespace 
 import { curatedOpenrouterModels, openrouterRegistry, toProviderModel } from "./openrouter.js";
 import type { LlmProviderModel } from "../schema/index.js";
 import type { ModelInfo } from "../wire/types.js";
+import { TIER_TOKENS } from "./model-tiers.js";
 
 export type CatalogEntry = ModelInfo & { resolvable: boolean };
 
@@ -233,6 +234,8 @@ export function catalogValidIds(entries: CatalogEntry[]): Set<string> {
     const { namespace, modelId } = parseModelId(entry.id);
     if (namespace === "anthropic") ids.add(modelId);
   }
+  // Tier tokens are valid model specs (TKAI-285).
+  for (const tier of TIER_TOKENS) ids.add(tier);
   return ids;
 }
 

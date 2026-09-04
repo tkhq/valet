@@ -593,4 +593,89 @@ describe("EventsPage — Subscriptions", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Delete subscription" }));
     expect(deleteMutate).toHaveBeenCalledWith("sub_1", expect.anything());
   });
+
+  async function openEditDialog() {
+    fireEvent.keyDown(screen.getByRole("button", { name: "PR alerts actions" }), { key: "Enter" });
+    fireEvent.click(await screen.findByText("Edit subscription"));
+  }
+
+  it("edit: the form is prefilled and a rename patches only the name", async () => {
+    openSubscriptionsTab();
+    await openEditDialog();
+
+    const nameInput = screen.getByLabelText("Name") as HTMLInputElement;
+    expect(nameInput.value).toBe("PR alerts");
+    const key = screen.getByRole("checkbox", {
+      name: /A pull request was opened/,
+    }) as HTMLInputElement;
+    expect(key.checked).toBe(true);
+
+    fireEvent.change(nameInput, { target: { value: "PR alerts (prod)" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(patchMutate).toHaveBeenCalledWith(
+      { id: "sub_1", body: { name: "PR alerts (prod)" } },
+      expect.anything(),
+    );
+  });
+
+  it("edit: adding an event key patches the full key list", async () => {
+    openSubscriptionsTab();
+    await openEditDialog();
+    fireEvent.click(screen.getByRole("checkbox", { name: /A pull request was merged/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(patchMutate).toHaveBeenCalledWith(
+      { id: "sub_1", body: { eventKeys: ["github.pr.opened", "github.pr.merged"] } },
+      expect.anything(),
+    );
+  });
+
+  it("edit: a save with no changes closes without a write", async () => {
+    openSubscriptionsTab();
+    await openEditDialog();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(patchMutate).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByLabelText("Name")).toBeNull());
+  });
+
+  it("edit: the target is shown read-only, with no target controls", async () => {
+    openSubscriptionsTab();
+    await openEditDialog();
+    // The dialog names the stored target (the row shows it too, hence "all").
+    expect(screen.getAllByText(/Run workflow: Deploy pipeline/).length).toBeGreaterThan(1);
+    expect(screen.getByText(/This dialog cannot change the target/)).toBeTruthy();
+    expect(screen.queryByRole("radio", { name: /Run a workflow/ })).toBeNull();
+  });
+
+  it("edit: refuses Any channel plus a channel filter before the round trip", async () => {
+    // A stored any-channel mention rule seeds the checkbox CHECKED, so
+    // "narrow it to one channel" walks into the server's refusal of the
+    // contradictory pair unless the form gates it first.
+    catalogData.services.push({
+      service: "slack",
+      entries: [
+        {
+          key: "slack.app_mention",
+          description: "The app was mentioned",
+          filters: [{ field: "channel", path: "$.event.channel", description: "channel id" }],
+        },
+      ],
+    });
+    subscriptionsData.subscriptions[0].eventKeys = ["slack.app_mention"];
+    try {
+      openSubscriptionsTab();
+      await openEditDialog();
+      const anyChannel = screen.getByRole("checkbox", { name: /Any channel/ }) as HTMLInputElement;
+      expect(anyChannel.checked).toBe(true);
+
+      fireEvent.click(screen.getByRole("button", { name: "Add filter" }));
+      fireEvent.change(screen.getByLabelText("Filter value"), { target: { value: "C1" } });
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+      expect(screen.getByText(/"Any channel" removes the channel restriction/)).toBeTruthy();
+      expect(patchMutate).not.toHaveBeenCalled();
+    } finally {
+      catalogData.services.pop();
+      subscriptionsData.subscriptions[0].eventKeys = ["github.pr.opened"];
+    }
+  });
 });

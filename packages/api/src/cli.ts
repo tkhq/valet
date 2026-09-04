@@ -42,6 +42,7 @@ const COMMANDS: Record<string, CommandImporter> = {
   chat: () => import("./cli/commands/chat.js"),
   mcp: () => import("./cli/commands/mcp.js"),
   reset: () => import("./cli/commands/reset.js"),
+  prebuild: () => import("./cli/commands/prebuild.js"),
 };
 
 const USAGE = `valet <command> [options]
@@ -61,6 +62,7 @@ Commands:
   chat        Interactive chat with a session
   mcp         MCP client operations
   reset       Reset local state
+  prebuild    Test a repo's .valet/prebuild.yaml locally (plan / docker build)
 
 Global options:
   --json          Machine-readable JSON output (where supported)

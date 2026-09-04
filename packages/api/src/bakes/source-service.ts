@@ -67,6 +67,24 @@ export class PrebuildUnavailableError extends Error {
   }
 }
 
+/** Name marker for a repo-declared base layer's synthetic source (prebuild
+ * `baseSetup` — see `ensureRepoBaseLayer`). */
+export function repoBaseSourceName(repoFullName: string): string {
+  return `repo-base:${repoFullName}`;
+}
+
+/** A repo bake that could not start because its base layer has no consistent
+ * pushed bake yet. Not a failure: the base bake was kicked, and the
+ * same-night cascade starts the repo bake when it pushes. */
+export class RepoBaseLayerBakingError extends Error {
+  constructor(baseName: string) {
+    super(
+      `the repo's base layer (${baseName}) is baking first; the repo bake starts automatically when it pushes`,
+    );
+    this.name = "RepoBaseLayerBakingError";
+  }
+}
+
 export class PrebuildConfigNotFoundError extends Error {
   readonly statusCode = 404;
   constructor(sourceId: string) {
@@ -342,50 +360,64 @@ export async function resolveRecipeFromGitHub(
   return resolveRecipe(files, read);
 }
 
-const repoDockerCache = new Map<string, { value: boolean; at: number }>();
-const REPO_DOCKER_TTL_MS = 10 * 60 * 1000;
-
-/** Clears the module-level `repoDockerFlag` cache. Exposed for test isolation
- * only — production code must not call this. */
-export function clearRepoDockerCache(): void {
-  repoDockerCache.clear();
+/** Session-runtime knobs a repo declares in `.valet/prebuild.yaml`, read at
+ * session create time (before any clone exists). */
+export interface RepoPrebuildFlags {
+  /** `docker: true` — run a rootless docker daemon in the sandbox. */
+  docker: boolean;
+  /** `workspaceStorage: "4Gi"` — provision the workspace claim at this size
+   * (clamped to the deploy cap by the provider). Absent when undeclared. */
+  workspaceStorage?: string;
 }
 
-/** Best-effort read of `.valet/prebuild.yaml`'s `docker` key for a repo ref.
- * Errors (auth, rate limit, bad YAML) resolve `false`: the session still
- * starts, without docker. The session-create `docker` option is the
+const repoFlagsCache = new Map<string, { value: RepoPrebuildFlags; at: number }>();
+const REPO_FLAGS_TTL_MS = 10 * 60 * 1000;
+
+/** Clears the module-level `repoPrebuildFlags` cache. Exposed for test
+ * isolation only — production code must not call this. */
+export function clearRepoPrebuildFlagsCache(): void {
+  repoFlagsCache.clear();
+}
+
+/** Best-effort read of `.valet/prebuild.yaml`'s session-runtime keys
+ * (`docker`, `workspaceStorage`) for a repo ref. Errors (auth, rate limit,
+ * bad YAML) resolve the defaults ({ docker: false }, no storage): the
+ * session still starts. The session-create `docker` option is the
  * corrective override when the repo read cannot succeed.
  *
- * Results are cached per `owner/repo@ref` for 10 minutes (both `true` and
- * `false` are cached so a missing file does not generate repeated API calls). */
-export async function repoDockerFlag(
+ * Results are cached per `owner/repo@ref` for 10 minutes (defaults are
+ * cached too, so a missing file does not generate repeated API calls). */
+export async function repoPrebuildFlags(
   deps: GitHubTokenDeps,
   token: string | null,
   owner: string,
   repo: string,
   ref: string,
-): Promise<boolean> {
+): Promise<RepoPrebuildFlags> {
   const key = `${owner}/${repo}@${ref}`;
-  const hit = repoDockerCache.get(key);
-  if (hit && Date.now() - hit.at < REPO_DOCKER_TTL_MS) return hit.value;
-  let value = false;
+  const hit = repoFlagsCache.get(key);
+  if (hit && Date.now() - hit.at < REPO_FLAGS_TTL_MS) return hit.value;
+  let value: RepoPrebuildFlags = { docker: false };
   try {
     const read = (path: string) => readGithubFile(deps, token, owner, repo, ref, path);
     const override = await loadPrebuildOverride(read);
-    value = override?.docker === true;
+    value = {
+      docker: override?.docker === true,
+      ...(override?.workspaceStorage ? { workspaceStorage: override.workspaceStorage } : {}),
+    };
   } catch (err) {
     console.error(
-      `repoDockerFlag: read failed for ${key}:`,
+      `repoPrebuildFlags: read failed for ${key}:`,
       err instanceof Error ? err.message : String(err),
     );
   }
   // Crude size cap: clear the whole map rather than LRU-evict. The map holds
-  // at most ~1000 entries (owner/repo@ref strings + booleans), which is small
-  // enough in memory; clearing is O(1) and avoids the complexity of a real
-  // eviction policy. A hard limit of 1000 is far beyond any realistic session
-  // volume before the 10-min TTL would reclaim entries anyway.
-  if (repoDockerCache.size >= 1000) repoDockerCache.clear();
-  repoDockerCache.set(key, { value, at: Date.now() });
+  // at most ~1000 entries (owner/repo@ref strings + small objects), which is
+  // small enough in memory; clearing is O(1) and avoids the complexity of a
+  // real eviction policy. A hard limit of 1000 is far beyond any realistic
+  // session volume before the 10-min TTL would reclaim entries anyway.
+  if (repoFlagsCache.size >= 1000) repoFlagsCache.clear();
+  repoFlagsCache.set(key, { value, at: Date.now() });
   return value;
 }
 
@@ -794,6 +826,98 @@ export class SourceService {
    * a legacy headless-base parent onto the default-full base; any other
    * parent (external, custom base) is kept as-is. Falls back to the current
    * parent when the full base is not seeded yet. */
+  /**
+   * Materializes a repo's declared `baseSetup` (`.valet/prebuild.yaml`) as a
+   * SYNTHETIC base source and parents the repo source at it, so the
+   * repo-independent toolchain commands bake once into a chained base image
+   * (identity-keyed: rebaked only when the commands change) instead of
+   * re-running on every commit's rebake.
+   *
+   * The synthetic source is a plain `kind='base'` row named
+   * `repo-base:<fullName>` with `profile: null` — NULL keeps it clear of the
+   * one-base-per-(org,profile) partial unique index, which belongs to the
+   * org's seeded lineage bases. It parents at the org's default full base
+   * (single lineage) and rides ALL the existing base machinery unchanged:
+   * nightly identity-skip scheduling, repo-child deferral
+   * (`repoBakeDefers`), and the same-night push cascade
+   * (`cascadeBaseChildren`).
+   *
+   * Attach/update: find-or-create the row, refresh `setup_commands` on
+   * drift, re-enable, and point the repo's `parent_id` at it. Detach (empty
+   * `baseSetup` while parented at the synthetic row): repoint the repo at
+   * the org default base and disable the synthetic row so the scheduler
+   * stops rebaking it (retention reaps its pushed bakes). Returns the repo
+   * source with any `parent_id` change applied.
+   */
+  private async ensureRepoBaseLayer(source: ImageSourceRow, baseSetup: string[]): Promise<ImageSourceRow> {
+    if (source.kind !== "repo") return source;
+    const name = repoBaseSourceName(source.repoFullName ?? "");
+    const rows = await this.db
+      .select()
+      .from(imageSources)
+      .where(and(eq(imageSources.orgId, source.orgId), eq(imageSources.kind, "base"), eq(imageSources.name, name)))
+      .limit(1);
+    const synthetic = rows[0];
+    const now = this.now();
+
+    if (baseSetup.length === 0) {
+      if (synthetic && source.parentId === synthetic.id) {
+        const fallback = await this.defaultBaseId(source.orgId);
+        await this.db
+          .update(imageSources)
+          .set({ parentId: fallback, updatedAt: now })
+          .where(eq(imageSources.id, source.id));
+        await this.db
+          .update(imageSources)
+          .set({ enabled: false, updatedAt: now })
+          .where(eq(imageSources.id, synthetic.id));
+        return { ...source, parentId: fallback };
+      }
+      return source;
+    }
+
+    let baseId: string;
+    if (!synthetic) {
+      baseId = `src_${this.newId()}`;
+      await this.db.insert(imageSources).values({
+        id: baseId,
+        orgId: source.orgId,
+        kind: "base",
+        parentId: await this.defaultBaseId(source.orgId),
+        name,
+        externalRef: null,
+        pullSecretName: null,
+        setupCommands: baseSetup,
+        profile: null,
+        repoHost: null,
+        repoFullName: null,
+        cloneUrl: null,
+        schedule: "nightly",
+        enabled: true,
+        lastBoundAt: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+    } else {
+      baseId = synthetic.id;
+      const drifted = JSON.stringify(readSetupCommands(synthetic)) !== JSON.stringify(baseSetup);
+      if (drifted || !synthetic.enabled) {
+        await this.db
+          .update(imageSources)
+          .set({ setupCommands: baseSetup, enabled: true, updatedAt: now })
+          .where(eq(imageSources.id, baseId));
+      }
+    }
+    if (source.parentId !== baseId) {
+      await this.db
+        .update(imageSources)
+        .set({ parentId: baseId, updatedAt: now })
+        .where(eq(imageSources.id, source.id));
+      return { ...source, parentId: baseId };
+    }
+    return source;
+  }
+
   private async adoptedParentIdFor(orgId: string, currentParentId: string | null): Promise<string | null> {
     if (currentParentId === null) return this.defaultBaseId(orgId);
     const parentRows = await this.db
@@ -829,6 +953,20 @@ export class SourceService {
     const apiToken = await resolveApiTokenOrNull(this.githubTokenDeps, source.orgId, owner, repo);
     const head = await resolveHeadSha(this.githubTokenDeps, apiToken, owner, repo);
     const resolved = await resolveRecipeFromGitHub(this.githubTokenDeps, apiToken, owner, repo, head.sha);
+    source = await this.ensureRepoBaseLayer(source, resolved.baseSetup);
+    // Derivation invariant: never bake a repo whose base parent has no
+    // consistent pushed bake — it would FROM stock while recording the
+    // parent-chained identity, then skip forever with the base layer never
+    // landing. Kick the base bake and report; the same-night cascade
+    // (`cascadeBaseChildren`) starts this repo's bake when the base pushes.
+    if (await this.repoBakeDefers(source)) {
+      const parentId = source.parentId;
+      if (parentId && !(await this.hasActiveBake(parentId))) {
+        await this.startBake(parentId);
+      }
+      const parent = await this.loadParent(source);
+      throw new RepoBaseLayerBakingError(parent?.name ?? parentId ?? "unknown");
+    }
     const baseImage = await this.resolveBaseImage(source, resolved.image);
 
     const snapshot: RecipeSnapshot = { recipe: resolved.recipe, setup: resolved.setup, image: resolved.image };
@@ -1265,7 +1403,18 @@ export class SourceService {
     // Reuse the resolved head/recipe by baking through startRepoBake, which
     // re-resolves — acceptable (a second cheap metadata call); the skip check
     // above already gated the expensive builder dispatch.
-    await this.startBake(source.id);
+    try {
+      await this.startBake(source.id);
+    } catch (err) {
+      // A newly declared/changed `baseSetup` surfaces here on the first pass:
+      // startRepoBake linked the synthetic base and kicked ITS bake instead.
+      // That is a defer, not a failure — the push cascade bakes this repo.
+      if (err instanceof RepoBaseLayerBakingError) {
+        console.log(`prebuild scheduler: defer ${source.name}: ${err.message}`);
+        return;
+      }
+      throw err;
+    }
   }
 
   /**

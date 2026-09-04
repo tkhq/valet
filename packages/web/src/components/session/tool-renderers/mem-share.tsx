@@ -4,17 +4,19 @@ import { PathLabel, ToolBody } from "./tool-shell";
 import { resultText, type ToolRenderer } from "./types";
 
 /**
- * Renderer for the orchestrator's `mem_share` tool (artifacts design).
- * The fallback renderer shows the result as inert monospace text, which
- * left the share URL — the whole point of the call — unclickable. This
- * renderer parses the tool's result line and presents the link with a
- * copy button and the audience statement.
+ * Renderer for the orchestrator's `mem_share` and `artifact_publish` tools
+ * (artifacts design; artifact-pages design). The fallback renderer shows
+ * the result as inert monospace text, which left the share URL — the whole
+ * point of the call — unclickable. This renderer parses the tool's result
+ * line and presents the link with a copy button and the audience statement.
+ * The two tools share the result grammar (`shared|published <key> → <url>`),
+ * so one renderer covers both.
  */
 
-/** Pure: mem_share result text → parsed share, or null when the text is
- * not the `shared <path> → <url>` shape (revokes, errors). */
+/** Pure: share/publish result text → parsed share, or null when the text is
+ * not the `shared|published <key> → <url>` shape (revokes, errors). */
 export function parseShareResult(text: string): { url: string; audience: string | null } | null {
-  const match = text.match(/^shared .+ → (https?:\/\/\S+)/m);
+  const match = text.match(/^(?:shared|published) .+ → (https?:\/\/\S+)/m);
   if (!match) return null;
   const audience = text.match(/^Audience: (.+)$/m);
   return { url: match[1], audience: audience ? audience[1] : null };
@@ -22,9 +24,10 @@ export function parseShareResult(text: string): { url: string; audience: string 
 
 function getArgs(args: unknown): { path: string; revoke: boolean } {
   if (!args || typeof args !== "object") return { path: "", revoke: false };
-  const a = args as { path?: unknown; revoke?: unknown };
+  const a = args as { path?: unknown; key?: unknown; revoke?: unknown };
   return {
-    path: typeof a.path === "string" ? a.path : "",
+    // mem_share addresses a memory `path`; artifact_publish a publish `key`.
+    path: typeof a.path === "string" ? a.path : typeof a.key === "string" ? a.key : "",
     revoke: a.revoke === true,
   };
 }
@@ -44,7 +47,7 @@ function CopyButton({ value }: { value: string }) {
 }
 
 export const memShareRenderer: ToolRenderer = {
-  matches: "mem_share",
+  matches: ["mem_share", "artifact_publish"],
   category: "write",
   Icon: Share2,
   formatTarget: (args) => getArgs(args).path || undefined,

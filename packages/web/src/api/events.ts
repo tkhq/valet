@@ -162,12 +162,21 @@ export function useEventSubscriptions(
   });
 }
 
+/** A workflow-target subscription is the same row the workflow page lists as
+ * an event trigger (`["workflows", "triggers", …]`), so every subscription
+ * mutation invalidates that key too — else the trigger list serves a stale
+ * snapshot after an edit here. Raw prefix, matching `api/workflows.ts`. */
+function invalidateSubscriptionReaders(qc: ReturnType<typeof useQueryClient>) {
+  void qc.invalidateQueries({ queryKey: qkEvents.subscriptions() });
+  void qc.invalidateQueries({ queryKey: ["workflows", "triggers"] });
+}
+
 export function useCreateEventSubscription() {
   const qc = useQueryClient();
   return useMutation<CreateEventSubscriptionResponse, Error, CreateEventSubscriptionRequest>({
     mutationFn: (body) => api.createEventSubscription(body),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkEvents.subscriptions() });
+      invalidateSubscriptionReaders(qc);
     },
   });
 }
@@ -181,7 +190,7 @@ export function usePatchEventSubscription() {
   >({
     mutationFn: ({ id, body }) => api.patchEventSubscription(id, body),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkEvents.subscriptions() });
+      invalidateSubscriptionReaders(qc);
     },
   });
 }
@@ -191,7 +200,7 @@ export function useDeleteEventSubscription() {
   return useMutation<void, Error, string>({
     mutationFn: (id) => api.deleteEventSubscription(id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkEvents.subscriptions() });
+      invalidateSubscriptionReaders(qc);
     },
   });
 }

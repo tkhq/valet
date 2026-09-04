@@ -15,6 +15,14 @@ export function selectsSlackMention(eventKeys: string[]): boolean {
   );
 }
 
+/** A stored mention rule with no channel-scope filter IS the any-channel
+ * state (the server refuses the unscoped default, TKAI-299) — seed an "Any
+ * channel" checkbox from this, so an edit round-trips without re-checking
+ * it. */
+export function storedAnyChannel(eventKeys: string[], filters: unknown[]): boolean {
+  return selectsSlackMention(eventKeys) && !hasChannelScopeFilter(filters);
+}
+
 /** Whether the filters constrain the channel to a non-empty fixed set —
  * field `channel` with op `eq`, or op `in` with at least one value. Accepts
  * the loose `unknown[]` the wire hands back. */

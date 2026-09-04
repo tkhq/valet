@@ -247,6 +247,13 @@ export async function writeFile(db: AppDb, scope: MemoryScope, params: WriteFile
     sourceSessionId: existing?.sourceSessionId ?? "",
     orgId: existing?.orgId ?? "",
     version: (existing?.version ?? 0) + 1,
+    // A row this path writes mirrors nothing. `assertWritablePath` above
+    // refuses `lib/`, so a mirrored row is never reached here; carrying the
+    // existing values anyway keeps the invariant true rather than resting on
+    // that guard.
+    sourceId: existing?.sourceId ?? null,
+    upstreamPath: existing?.upstreamPath ?? null,
+    contentSha: existing?.contentSha ?? null,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
   };
@@ -306,6 +313,12 @@ export async function patchFile(db: AppDb, scope: MemoryScope, params: PatchFile
 // ─── removeFile ────────────────────────────────────────────────────────
 
 export async function removeFile(db: AppDb, scope: MemoryScope, path: string): Promise<void> {
+  // The same rule `writeFile` and `moveFile` apply. Deleting a file is a
+  // write to the store, and `lib/` holds mounted content the product does not
+  // own: without this, `mem_rm` removed a mirrored memory file that the sync
+  // would then restore on its next poll, or not at all if the source was
+  // removed in between.
+  assertWritablePath(path);
   const normalized = normalizePath(path);
   const existingRows = await db
     .select({ path: memoryFiles.path })
@@ -1083,6 +1096,12 @@ export async function importFiles(db: AppDb, scope: MemoryScope, params: ImportF
       sourceSessionId: params.trusted ? (existing?.sourceSessionId ?? "") : "",
       orgId: existing?.orgId ?? "",
       version: (existing?.version ?? 0) + 1,
+      // A row the product writes mirrors nothing. A mirrored row's own
+      // bookkeeping is preserved when one exists, so a re-import of a
+      // mounted file does not orphan it from its source.
+      sourceId: existing?.sourceId ?? null,
+      upstreamPath: existing?.upstreamPath ?? null,
+      contentSha: existing?.contentSha ?? null,
       createdAt: existing?.createdAt ?? updatedAt,
       updatedAt,
     };

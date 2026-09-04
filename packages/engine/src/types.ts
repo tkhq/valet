@@ -1144,6 +1144,24 @@ export interface GatewayEndpoint {
   port: number;
 }
 
+/**
+ * Outcome of a `Sandbox.growWorkspace` attempt. `grown: false` is a normal,
+ * expected answer (cap reached, resize rate-limited, backend without a
+ * growable workspace) — `reason` says why so the caller can put it in the
+ * surfaced error. `from`/`to` are backend quantity strings (e.g. "1Gi").
+ */
+export interface WorkspaceGrowth {
+  grown: boolean;
+  from?: string;
+  to?: string;
+  reason?: string;
+  /** True when a resize WAS requested but had not completed within the wait
+   * window — the backend will finish it in the background, so a later retry
+   * of the failed operation may succeed without another grow. Distinct from
+   * a policy refusal (cap, rate limit), where nothing was requested. */
+  pending?: boolean;
+}
+
 export interface Sandbox {
   id: string;
   readFile(path: string): Promise<string>;
@@ -1169,11 +1187,35 @@ export interface Sandbox {
    * services). Absent method === always null — existing paths unchanged.
    */
   gatewayEndpoint?(): Promise<GatewayEndpoint | null>;
+  /**
+   * Grow the sandbox's persistent workspace volume one increment (provider
+   * policy: double the current size, capped at a configured max), then wait
+   * for the resize to take effect. Called by workspace prep when a git
+   * operation fails with ENOSPC, so the operation can be retried once on the
+   * larger volume. Returns `grown: false` (never throws) when growth is
+   * refused — at the cap, rate-limited, or the backing volume is not
+   * growable — with `reason` naming why. Absent on providers without a
+   * resizable persistent workspace (docker/local/virtual): callers must
+   * treat an absent method as `grown: false`.
+   */
+  growWorkspace?(): Promise<WorkspaceGrowth>;
 }
 
 export interface SandboxCreateOpts {
   image?: string;
   workspace?: string;
+  /**
+   * Requested size for the sandbox's PERSISTENT workspace volume, as a
+   * quantity string (e.g. "4Gi"). Sourced from the repo's own declaration
+   * (`.valet/prebuild.yaml` `workspaceStorage`) so a large repo starts with
+   * a claim big enough for its checkout + install artifacts instead of
+   * relying on reactive growth. Providers with a sized persistent workspace
+   * (kubernetes) honor it CLAMPED to the deploy's growth cap
+   * (`VALET_SANDBOX_WORKSPACE_MAX`) — a repo cannot request unbounded
+   * storage; other providers ignore it. Only affects a freshly provisioned
+   * volume: an existing workspace keeps its size.
+   */
+  workspaceStorage?: string;
   env?: Record<string, string>;
   timeout?: number;
   resources?: {

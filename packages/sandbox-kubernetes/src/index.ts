@@ -41,8 +41,11 @@ export {
   WORKSPACE_VOLUME_NAME,
   buildSandboxManifest,
   credsSecretName,
+  resolveWorkspaceStorageRequest,
   sandboxCrName,
 } from "./manifest.js";
+
+export { clampStorageRequest } from "./quantity.js";
 
 export {
   RANCHER_DESKTOP_CONTEXT,
@@ -139,6 +142,20 @@ export {
   type PodLivenessApi,
   type SandboxSecretsApi,
 } from "./provider.js";
+
+export {
+  DEFAULT_WORKSPACE_STORAGE_MAX,
+  WORKSPACE_GROW_ANNOTATION,
+  WORKSPACE_GROW_COOLDOWN_MS,
+  formatStorageQuantity,
+  growWorkspacePvc,
+  parseStorageQuantity,
+  sandboxPvcApiAdapter,
+  workspacePvcName,
+  type GrowWorkspacePvcOpts,
+  type SandboxPvcApi,
+  type WorkspacePvcRead,
+} from "./workspace-pvc.js";
 
 export {
   batchJobsApiAdapter,
