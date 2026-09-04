@@ -65,7 +65,7 @@
  */
 import type * as k8s from "@kubernetes/client-node";
 import { setHeaderOptions } from "@kubernetes/client-node";
-import { CONTAINER_DEATH_PATTERN, SandboxStartupError } from "@valet/engine";
+import { CONTAINER_DEATH_PATTERN, SandboxStartupError, recordSandboxWorkspaceGrow } from "@valet/engine";
 import type {
   ExecJobHandle,
   ExecOpts,
@@ -120,7 +120,7 @@ import {
   SESSION_ANNOTATION_KEY,
 } from "./manifest.js";
 import type { K8sProviderConfig } from "./types.js";
-import { growWorkspacePvc, type SandboxPvcApi } from "./workspace-pvc.js";
+import { growWorkspacePvc, parseStorageQuantity, workspacePvcName, type SandboxPvcApi } from "./workspace-pvc.js";
 
 /** How long `create()`/`restore()` polls for the CR to reach `Ready` before
  * giving up. Generous relative to Task 3's empirical ~15s pod-recreate
@@ -789,21 +789,52 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     // undersized forever without this. That is an EXPECTED state in normal
     // operation — repos add or raise the declaration after workspaces exist —
     // so converging here is the declared-state fix, not a silent repair; the
-    // grow path logs, rate-limits (one EBS modify per ~6h per volume), and
-    // clamps to the deploy cap exactly like a reactive grow.
-    if (adopted && this.deps.pvcApi) {
-      const declared = opts.workspaceStorage !== undefined ? resolveWorkspaceStorageRequest(this.cfg, opts, name) : undefined;
-      if (declared !== undefined) {
-        const growth = await growWorkspacePvc(this.deps.pvcApi, {
-          namespace: this.cfg.namespace,
-          crName: name,
-          maxStorage: this.cfg.workspaceStorageMax,
-          targetStorage: declared,
-        });
-        if (growth.grown) {
-          console.log(`k8s sandbox ${name}: grew adopted workspace PVC ${growth.from} → ${growth.to} (repo-declared size)`);
-        } else if (!growth.reason?.includes("already at or above")) {
-          console.warn(`k8s sandbox ${name}: adopted workspace PVC below the declared ${declared} and not grown: ${growth.reason}`);
+    // grow path logs, rate-limits (one EBS modify per ~6h per volume, a slot
+    // this convergence SPENDS — a reactive grow the same session may then be
+    // refused), and clamps to the deploy cap exactly like a reactive grow.
+    //
+    // Best-effort by construction: a failed or refused grow must never fail
+    // create() — on a StorageClass without allowVolumeExpansion the resize
+    // patch is rejected by admission every time, and the session must still
+    // boot on the small claim (prep's ENOSPC path owns the fallout). No
+    // capacity wait either (`resizeWaitTimeoutMs: 0`): on EBS the filesystem
+    // grows at MOUNT time, which happens after `waitReady` below — polling
+    // here would burn up to 120s against a pod that does not exist yet. The
+    // patch and cooldown annotation land; the kubelet finishes at mount.
+    if (adopted && this.deps.pvcApi && opts.workspaceStorage !== undefined) {
+      const declared = resolveWorkspaceStorageRequest(this.cfg, opts, name);
+      const declaredBytes = parseStorageQuantity(declared);
+      const pvcRead = await this.deps.pvcApi
+        .readPvc(this.cfg.namespace, workspacePvcName(name))
+        .catch(() => null);
+      const currentBytes = pvcRead?.requestedStorage ? parseStorageQuantity(pvcRead.requestedStorage) : null;
+      if (declaredBytes !== null && currentBytes !== null && currentBytes < declaredBytes) {
+        try {
+          const growth = await growWorkspacePvc(this.deps.pvcApi, {
+            namespace: this.cfg.namespace,
+            crName: name,
+            maxStorage: this.cfg.workspaceStorageMax,
+            targetStorage: declared,
+            resizeWaitTimeoutMs: 0,
+          });
+          if (growth.grown) {
+            console.log(`k8s sandbox ${name}: grew adopted workspace PVC ${growth.from} → ${growth.to} (repo-declared size)`);
+            recordSandboxWorkspaceGrow("grown");
+          } else if (growth.pending) {
+            // Expected at create time: the resize was requested and the
+            // filesystem step lands when the pod mounts the volume.
+            console.log(`k8s sandbox ${name}: adopted workspace PVC resize to ${declared} requested; completes at mount`);
+            recordSandboxWorkspaceGrow("wait_timeout");
+          } else {
+            console.warn(`k8s sandbox ${name}: adopted workspace PVC below the declared ${declared} and not grown: ${growth.reason}`);
+            recordSandboxWorkspaceGrow("refused");
+          }
+        } catch (err) {
+          console.warn(
+            `k8s sandbox ${name}: adopted workspace PVC convergence to ${declared} failed (continuing on the existing claim):`,
+            err instanceof Error ? err.message : String(err),
+          );
+          recordSandboxWorkspaceGrow("error");
         }
       }
     }

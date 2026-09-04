@@ -205,7 +205,13 @@ Schema doc: `docs/prebuild-yaml.md`. Immediate use: set `tkhq/mono` to
 - Adopted claims converge to the declared size (TKAI-402): `create()` on an
   existing CR grows an undersized workspace PVC to the repo-declared
   `workspaceStorage` through the same rate-limited grow path (one EBS modify
-  per ~6h per volume, clamped to the cap). Claims created before a repo
+  per ~6h per volume, clamped to the cap). Best-effort: a rejected resize
+  (StorageClass without `allowVolumeExpansion`) never fails `create()`, and
+  there is no capacity wait at create time — the filesystem grows when the
+  pod mounts the volume; prep's ENOSPC retry covers the residue. The
+  convergence spends the volume's EBS modify slot, so a reactive grow in the
+  same ~6h window is refused. Outcomes record on
+  `valet.sandbox.workspace_grow`. Claims created before a repo
   declares or raises its size are an expected state, so this is declared-state
   convergence, not a silent repair. `create()` also warns when the adopted CR
   was owned by a DIFFERENT session — workspace strings are not per-session

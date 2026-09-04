@@ -608,7 +608,11 @@ describe("create() adoption convergence (TKAI-402)", () => {
     storage: string;
   }
 
-  function makeAdoptingProvider(opts: { pvcRequested: string; previousSessionId: string }) {
+  function makeAdoptingProvider(opts: {
+    pvcRequested: string;
+    previousSessionId: string;
+    patchRejects?: string;
+  }) {
     const patches: PvcPatch[] = [];
     let requested = opts.pvcRequested;
     const pvcApi = {
@@ -616,6 +620,7 @@ describe("create() adoption convergence (TKAI-402)", () => {
         return { requestedStorage: requested, capacityStorage: requested, annotations: {} };
       },
       async patchPvcStorage(_ns: string, _name: string, storage: string) {
+        if (opts.patchRejects !== undefined) throw new Error(opts.patchRejects);
         patches.push({ storage });
         requested = storage;
       },
@@ -661,5 +666,37 @@ describe("create() adoption convergence (TKAI-402)", () => {
     );
     warnSpy.mockRestore();
     expect(warned).toBe(true);
+  });
+
+  it("a rejected resize patch never fails create() — non-expandable StorageClasses boot on the small claim", async () => {
+    // Model a StorageClass without allowVolumeExpansion: admission rejects
+    // the patch every time.
+    const { provider, patches } = makeAdoptingProvider({
+      pvcRequested: "1Gi",
+      previousSessionId: "session-old",
+      patchRejects: 'persistentvolumeclaims "workspace-x" is forbidden: volume expansion is disabled',
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await expect(
+      provider.create({ workspace: "/ws/mono", sessionId: "session-new", workspaceStorage: "8Gi" }),
+    ).resolves.toBeDefined();
+    const warned = warnSpy.mock.calls.some(
+      (args) => typeof args[0] === "string" && args[0].includes("convergence to 8Gi failed"),
+    );
+    warnSpy.mockRestore();
+    expect(warned).toBe(true);
+    expect(patches).toHaveLength(0);
+  });
+
+  it("an adopted claim at the growth cap does not warn (declared above the cap resolves to the cap)", async () => {
+    const { provider, patches } = makeAdoptingProvider({ pvcRequested: "20Gi", previousSessionId: "session-old" });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await provider.create({ workspace: "/ws/mono", sessionId: "session-new", workspaceStorage: "50Gi" });
+    const falseWarn = warnSpy.mock.calls.some(
+      (args) => typeof args[0] === "string" && args[0].includes("below the declared"),
+    );
+    warnSpy.mockRestore();
+    expect(patches).toHaveLength(0);
+    expect(falseWarn).toBe(false);
   });
 });

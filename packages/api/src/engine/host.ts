@@ -982,8 +982,9 @@ export class EngineHost {
       env: sandboxEnv,
       profile,
       ...(dockerFlag ? { docker: true } : {}),
-      // Only affects a FRESHLY provisioned claim — an existing workspace
-      // volume keeps its size (the controller never resizes an owned PVC).
+      // Sizes a fresh claim; an adopted (existing) claim converges UP to this
+      // through the provider's rate-limited grow at create time (TKAI-402).
+      // A claim never shrinks.
       ...(repoFlags.workspaceStorage ? { workspaceStorage: repoFlags.workspaceStorage } : {}),
       ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
     };
@@ -3167,8 +3168,9 @@ export class EngineHost {
             : sandboxMint?.env,
         profile,
         ...(dockerFlag ? { docker: true } : {}),
-        // Only affects a FRESHLY provisioned claim — an existing workspace
-        // volume keeps its size (the controller never resizes an owned PVC).
+        // Sizes a fresh claim; an adopted (existing) claim converges UP to
+        // this through the provider's rate-limited grow at create time
+        // (TKAI-402). A claim never shrinks.
         ...(repoFlags.workspaceStorage ? { workspaceStorage: repoFlags.workspaceStorage } : {}),
         ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
       },
