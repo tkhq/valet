@@ -107,25 +107,24 @@ export class CappedOutputBuffer {
     // partition. Once the head seals, the terminal tail can borrow that
     // space while the total retained bytes stay within maxBytes.
     const tailMax = this.maxBytes - this.headBytes;
-    let suffixStart = grown.length;
-    let suffixBytes = 0;
-
-    while (suffixStart > 0) {
-      let codePointStart = suffixStart - 1;
-      const last = grown.charCodeAt(codePointStart);
-      if (last >= 0xdc00 && last <= 0xdfff && codePointStart > 0) {
-        const previous = grown.charCodeAt(codePointStart - 1);
-        if (previous >= 0xd800 && previous <= 0xdbff) codePointStart--;
-      }
-      const bytes = utf8CodePointBytes(grown.slice(codePointStart, suffixStart));
-      if (suffixBytes + bytes > tailMax) break;
-      suffixBytes += bytes;
-      suffixStart = codePointStart;
+    const overflow = grownBytes - tailMax;
+    if (overflow <= 0) {
+      this.tail = grown;
+      this.tailBytes = grownBytes;
+      return;
     }
 
-    this.dropped += grownBytes - suffixBytes;
-    this.tail = grown.slice(suffixStart);
-    this.tailBytes = suffixBytes;
+    let removedEnd = 0;
+    let removedBytes = 0;
+    for (const codePoint of grown) {
+      removedBytes += utf8CodePointBytes(codePoint);
+      removedEnd += codePoint.length;
+      if (removedBytes >= overflow) break;
+    }
+
+    this.dropped += removedBytes;
+    this.tail = grown.slice(removedEnd);
+    this.tailBytes = grownBytes - removedBytes;
   }
 
   private finalize(): void {

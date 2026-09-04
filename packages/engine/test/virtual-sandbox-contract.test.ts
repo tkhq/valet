@@ -28,6 +28,13 @@ it("virtual exec applies zero and multibyte byte caps", async () => {
     const multibyte = await sandbox.exec("echo 🧪", { maxOutputBytes: 3 });
     expect(multibyte.stdout).toBe(`${omittedMarker(4)}\n`);
     expect(multibyte.truncated).toBe(true);
+
+    const command = "missing-virtual-command";
+    const uncappedError = `command not found: ${command}\n`;
+    const stderr = await sandbox.exec(command, { maxOutputBytes: 0 });
+    expect(stderr.stdout).toBe("");
+    expect(stderr.stderr).toBe(omittedMarker(new TextEncoder().encode(uncappedError).byteLength));
+    expect(stderr.truncated).toBe(true);
   } finally {
     await provider.destroy(sandbox.id);
   }

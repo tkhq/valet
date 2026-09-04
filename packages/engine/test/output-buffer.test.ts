@@ -135,6 +135,48 @@ describe("CappedOutputBuffer", () => {
     expect(chunked.truncated).toBe(false);
   });
 
+  it("matches one append across many small chunks and a large cap", () => {
+    const text = "a🧪éZ".repeat(2_000);
+    const once = new CappedOutputBuffer(4_096);
+    once.append(text);
+
+    const chunked = new CappedOutputBuffer(4_096);
+    for (const codeUnit of text.split("")) chunked.append(codeUnit);
+
+    expect(chunked.value()).toBe(once.value());
+    expect(chunked.truncated).toBe(once.truncated);
+  });
+
+  it("keeps chunking invariant across deterministic randomized cases", () => {
+    let seed = 0x5eed1234;
+    const next = () => {
+      seed = (Math.imul(seed, 1_664_525) + 1_013_904_223) >>> 0;
+      return seed;
+    };
+    const tokens = ["a", "é", "🧪", "\n"];
+
+    for (let caseIndex = 0; caseIndex < 100; caseIndex++) {
+      const cap = next() % 65;
+      const tokenCount = 1 + (next() % 100);
+      let text = "";
+      for (let i = 0; i < tokenCount; i++) text += tokens[next() % tokens.length];
+
+      const once = new CappedOutputBuffer(cap);
+      once.append(text);
+
+      const chunked = new CappedOutputBuffer(cap);
+      let offset = 0;
+      while (offset < text.length) {
+        const size = 1 + (next() % 5);
+        chunked.append(text.slice(offset, offset + size));
+        offset += size;
+      }
+
+      expect(chunked.value()).toBe(once.value());
+      expect(chunked.truncated).toBe(once.truncated);
+    }
+  });
+
   it("finalizes a dangling high surrogate into the terminal appendix", () => {
     const buf = new CappedOutputBuffer(16);
     buf.append("a\ud800");
