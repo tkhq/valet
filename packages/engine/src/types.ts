@@ -1184,6 +1184,17 @@ export interface WorkspaceGrowth {
 
 export interface Sandbox {
   id: string;
+  /** True when create adopted existing provider state or persistent storage.
+   * Preparation failures must retain it or use non-terminal release, not destroy.
+   * Providers must report true even if adoption also replaces the live compute.
+   * False or absent preserves fresh-create cleanup for existing providers. */
+  adopted?: boolean;
+  /** Internal provider record of repository CPU/memory overrides, not effective
+   * resources or deployment defaults. An object includes authoritative `{}`.
+   * Null means adopted compute has no recoverable override record. Undefined
+   * means the provider does not report this metadata. Providers must persist a
+   * known record before replacing compute so retries can return the same record. */
+  resourceOverrides?: Pick<SandboxResources, "cpu" | "memory"> | null;
   readFile(path: string): Promise<string>;
   readBinary(path: string): Promise<Uint8Array>;
   writeFile(path: string, content: string): Promise<void>;
@@ -1255,6 +1266,19 @@ export interface SandboxCreateOpts {
   env?: Record<string, string>;
   timeout?: number;
   resources?: SandboxResources;
+  /**
+   * Internal adoption intent. If true, a provider that adopts existing compute
+   * keeps its CPU and memory requests and limits, even when resources is set.
+   * Fresh compute still uses resources and provider defaults. The engine sets
+   * this when the desired spec has no authoritative repository resource opinion.
+   */
+  preserveResourcesOnAdopt?: boolean;
+  /** Internal migration reader for adopted compute without durable override
+   * metadata. The provider calls this on the old handle before replacement and
+   * persists a returned object, including `{}`, before it deletes compute.
+   * Undefined means no record exists; it must not become stale create resources.
+   * A read error aborts adoption before replacement. Fresh creation skips it. */
+  readResourceOverrides?: (sandbox: Sandbox) => Promise<Pick<SandboxResources, "cpu" | "memory"> | undefined>;
   metadata?: Record<string, unknown>;
   /**
    * The owning session's id. `Engine.materializeSandbox` stamps this on

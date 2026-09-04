@@ -137,10 +137,86 @@ failure from replacing a sandbox with deployment defaults. If the first read for
 a new sandbox fails, no recorded overrides exist, so initial provisioning uses
 deployment defaults.
 
-Deployment default changes affect new sandboxes. They do not cause resource drift
-for existing sandboxes because provider defaults are outside the desired session
-spec. An operator can replace an existing sandbox through the existing replace
-endpoint when a deployment default changes.
+Provider creation can adopt existing compute after an API restart. The engine
+sets the internal `preserveResourcesOnAdopt` option when the desired spec has no
+resource opinion. This option takes precedence over stale CPU or memory in
+rebuilt create options during adoption. Fresh compute still uses those options
+and provider defaults. An authoritative resource object, including `{}`, clears
+the preservation option.
+
+Kubernetes preserves the existing CR's exact CPU and memory requests and limits
+during no-opinion adoption, including absent fields. It applies incoming
+ephemeral-storage fields and does not mutate the caller's manifest. The adoption
+path uses its existing read after a create conflict; it does not pre-read the CR.
+The provider stores a desired-resource fingerprint in the CR pod template's
+`valet.dev/resource-fingerprint` annotation. The sandbox container also receives
+the reserved literal environment value `VALET_SANDBOX_RESOURCE_FINGERPRINT`.
+The provider removes caller values for this name before it sets the marker.
+The fingerprint includes desired CPU and memory requests and limits.
+It uses canonical quantity values: `500m` equals `0.5`, and `4096Mi` equals `4Gi`.
+Missing fields remain distinct from zero. Admission-added resources, such as
+LimitRange defaults, do not change the fingerprint or trigger repeated rolls.
+
+The agent-sandbox controller updates existing pod metadata from the template,
+without replacing the pod's container spec. Pod annotations cannot prove applied
+resources. The provider reads the live fingerprint only from the reserved literal
+environment entry. It rejects `valueFrom` entries and does not use pod metadata.
+This immutable pod-spec value records the generation used when the pod was created.
+
+The provider compares the live pod's image and literal fingerprint with the
+applied CR in one pod read. A difference deletes the pod even when its image matches.
+This comparison retries a stale pod if the CR update succeeded but pod deletion
+failed. The shared rollout waits for a new UID and a live pod with `Ready=True`.
+That pod must also match the requested image and any desired resource fingerprint.
+A stale CR Ready condition cannot complete creation while the pod is absent or
+Pending, including after an API restart. The workspace PVC remains. An
+authoritative `{}` applies deployment defaults or removes prior overrides.
+If the live pod read fails, creation fails without declaring resource convergence.
+
+Legacy CRs can lack a fingerprint. No-opinion adoption preserves marker absence
+and does not infer resource drift from the admitted pod. Image drift remains
+independent. The first authoritative resource opinion, including `{}`, adds a
+fingerprint and can roll the legacy pod once. Later calls compare fingerprints.
+
+After provider creation, the engine reads the returned sandbox's applied state
+before prep. An adopted sandbox retains its recorded resources when the desired
+spec has no opinion. A fresh sandbox has no applied file and runs the full plan.
+The provider reports `Sandbox.adopted=true` when creation adopts existing state
+or storage, even if it replaces the live compute. If applied-state reads or prep
+fail, the engine retains that adopted state or uses non-terminal release. It
+destroys failed fresh compute only. Explicit session deletion can still destroy
+adopted state. This rule prevents a transient prep error from deleting a workspace PVC.
+
+Providers can return an internal `Sandbox.resourceOverrides` record. This record
+contains repository overrides, not effective resources or deployment defaults.
+An object, including `{}`, is known metadata. `null` means adopted compute has
+no recoverable record. An omitted field means the provider does not report this
+metadata. Known provider metadata takes precedence over the applied file and
+rebuilt create options. Unknown adopted metadata must not use stale create options.
+The attachment removes rejected CPU and memory from saved create options while
+keeping ephemeral storage. Later no-opinion replacements cannot restore those values.
+`PolicySandbox` forwards the current record without starting a sandbox.
+
+Kubernetes stores this record in the `valet.dev/resource-overrides` CR annotation.
+Authoritative creation and adoption store only caller CPU and memory overrides.
+No-opinion adoption preserves the annotation. For a legacy CR without a valid
+record, the provider calls the engine's optional `readResourceOverrides` reader
+on the old live sandbox. The provider stores a recovered opinion with the pod
+template update, before pod deletion. A read failure aborts adoption before either
+change. A missing pod or applied resource record stays unknown; the provider
+does not infer repository overrides from deployment defaults.
+
+The returned sandbox exposes the durable record after readiness. An image rollout
+can remove the old applied file, but it cannot remove the CR annotation. A retry
+after a crash uses that annotation without reading the old pod. The engine runs
+the full prep plan on the new pod and records the preserved resource opinion.
+
+Deployment defaults are outside the desired session spec. Changing them alone
+does not trigger engine reconciliation of a running attachment. The next creation
+uses current defaults. Authoritative adoption after API restart or recovery also
+uses current defaults and replaces the pod if its effective resources changed.
+No-opinion adoption preserves existing CPU and memory. An operator can use the
+existing replace endpoint to apply new defaults to a running attachment.
 
 ## Failure behavior
 

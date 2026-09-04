@@ -99,7 +99,8 @@ import {
   deleteSandbox,
   getSandbox,
   listSandboxMetadata,
-  livePodImageDiffers,
+  livePodDrift,
+  podTemplateResourceFingerprint,
   podDeleteApiAdapter,
   resolvePodName,
   SANDBOX_KIND,
@@ -434,6 +435,8 @@ export interface KubernetesSandboxDeps {
  */
 export class KubernetesSandbox implements Sandbox {
   readonly id: string;
+  adopted?: boolean;
+  resourceOverrides?: Sandbox["resourceOverrides"];
   private readonly deps: KubernetesSandboxDeps;
   private nextJobId = 1;
 
@@ -684,8 +687,8 @@ export interface KubernetesSandboxProviderDeps {
    * behavior aren't forced to wire a new dep. Production wiring
    * (`packages/api/src/providers/sandbox-backend.ts`) always supplies it. */
   podStatusApi?: SandboxPodStatusApi;
-  /** Optional: enables `create()`'s image-drift convergence path — when the
-   * live pod's image differs from the manifest image, the pod is deleted so
+  /** Optional: enables `create()`'s image and resource convergence. When the
+   * live pod's image or authoritative CPU/memory changes, the pod is deleted so
    * the controller reconciles a fresh one. Omitting it disables the drift
    * check (pre-task-8 behavior). Production wiring always supplies it. */
   podDeleteApi?: SandboxPodDeleteApi;
@@ -760,9 +763,8 @@ export class KubernetesSandboxProvider implements SandboxProvider {
    * layer's failure-recovery path (which calls `create()` again with the
    * same opts after `reportFailure`) never fails on "already exists".
    *
-   * Image-drift convergence (Task 8): after `applySandbox`, if a live pod
-   * exists whose first container image differs from the manifest image, this
-   * method deletes that pod. The agent-sandbox controller then reconciles a
+   * After `applySandbox`, image drift or changed authoritative CPU/memory
+   * deletes the live pod. The agent-sandbox controller then reconciles a
    * fresh pod from the updated CR spec. This method proceeds to `waitReady`
    * the same way a cold create does — the controller recreates the pod under
    * the same name, so the label-selector-based readiness poll is unaffected
@@ -794,7 +796,21 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     // workspace-survival intent). The flag comes from applySandbox's own
     // create/409 branch, so it cannot race the way an existence pre-GET
     // would.
-    const { cr: applied, adopted, previousSession } = await applySandbox(this.deps.objectsApi, this.cfg, manifest);
+    const { cpu, memory } = opts.resources ?? {};
+    const { cr: applied, adopted, previousSession, resourceOverrides } = await applySandbox(
+      this.deps.objectsApi, this.cfg, manifest,
+      {
+        preserveResourcesOnAdopt: opts.preserveResourcesOnAdopt,
+        resourceOverrides: { ...(cpu !== undefined ? { cpu } : {}), ...(memory !== undefined ? { memory } : {}) },
+        readResourceOverrides: opts.readResourceOverrides
+          ? async () => {
+            const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, name);
+            if (podName === null || await this.deps.livenessApi.getPodUid(this.cfg.namespace, podName) === null) return undefined;
+            return opts.readResourceOverrides?.(this.makeSandbox(name, Boolean(opts.docker)));
+          }
+          : undefined,
+      },
+    );
 
     // Workspace strings are not guaranteed per-session (the web defaults every
     // session on a repo to one shared path), so an adopt can silently hand one
@@ -921,33 +937,37 @@ export class KubernetesSandboxProvider implements SandboxProvider {
 
     if (this.deps.podDeleteApi && this.deps.podStatusApi) {
       const manifestImage = (opts.image ?? this.cfg.defaultImage) as string;
-      const check = await livePodImageDiffers(
+      const check = await livePodDrift(
         this.deps.objectsApi,
         this.deps.podsApi,
         this.deps.podStatusApi,
         this.cfg,
         name,
         manifestImage,
+        undefined,
+        podTemplateResourceFingerprint(applied.spec.podTemplate),
       );
       if (check.differs) {
-        console.log(`k8s sandbox ${name}: rolling pod (image ${check.liveImage} → ${manifestImage})`);
+        const podName = check.podName;
+        const reason = check.imageDrift ? `image ${check.liveImage} → ${manifestImage}` : "CPU/memory changed";
+        console.log(`k8s sandbox ${name}: rolling pod (${reason})`);
         // Capture the old pod UID before deletion so the wait-for-fresh loop
         // below can detect when the controller has reconciled a NEW pod object
         // (same name, new UID) — rather than racing against a stale
         // `Ready=True` CR condition left over from the deleted pod.
-        const oldUid = await this.deps.livenessApi.getPodUid(this.cfg.namespace, check.podName);
-        await this.deps.podDeleteApi.deletePod(this.cfg.namespace, check.podName);
+        const oldUid = await this.deps.livenessApi.getPodUid(this.cfg.namespace, podName);
+        await this.deps.podDeleteApi.deletePod(this.cfg.namespace, podName);
         // Wait for the controller to reconcile a fresh pod (new UID). This
         // mirrors the conformance suite's `recreate` callback logic. Without
         // this wait, `waitReady` could observe a stale `Ready=True` CR
         // condition from the just-deleted pod and return prematurely.
         const podRollDeadline = Date.now() + READY_TIMEOUT_MS;
         for (;;) {
-          const newUid = await this.deps.livenessApi.getPodUid(this.cfg.namespace, check.podName);
+          const newUid = await this.deps.livenessApi.getPodUid(this.cfg.namespace, podName);
           if (newUid !== null && newUid !== oldUid) break;
           if (Date.now() >= podRollDeadline) {
             throw new Error(
-              `k8s sandbox ${name}: controller did not reconcile a fresh pod within ${READY_TIMEOUT_MS}ms after image-drift roll`,
+              `k8s sandbox ${name}: controller did not create a fresh pod within ${READY_TIMEOUT_MS}ms after rollout. Check the sandbox controller and pod events.`,
             );
           }
           await sleep(READY_POLL_INTERVAL_MS);
@@ -956,7 +976,10 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     }
 
     try {
-      await this.waitReady(name);
+      await this.waitReady(name, {
+        image: opts.image ?? this.cfg.defaultImage,
+        resourceFingerprint: podTemplateResourceFingerprint(applied.spec.podTemplate),
+      });
     } catch (err) {
       if (!adopted && err instanceof SandboxStartupError) {
         // Narrow, documented exception to decision 5 ("only the session-
@@ -975,7 +998,10 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       }
       throw err;
     }
-    return this.makeSandbox(name, Boolean(opts.docker));
+    const sandbox = this.makeSandbox(name, Boolean(opts.docker));
+    sandbox.adopted = adopted;
+    sandbox.resourceOverrides = resourceOverrides;
+    return sandbox;
   }
 
   /** Re-asserts (GETs) the same CR name — never creates. The engine
@@ -1157,11 +1183,21 @@ export class KubernetesSandboxProvider implements SandboxProvider {
    * branch (no `error` state ever observed, just genuinely slow) keeps
    * throwing a plain `Error` — that IS a transient, retry-shaped condition.
    */
-  private async waitReady(name: string): Promise<void> {
+  private async waitReady(name: string, expected?: { image: string; resourceFingerprint?: string }): Promise<void> {
     const deadline = Date.now() + READY_TIMEOUT_MS;
     for (;;) {
       const status = await sandboxStatus(this.deps.objectsApi, this.cfg, name, this.deps.podsApi, this.deps.podStatusApi);
-      if (status.state === "ready") return;
+      if (status.state === "ready") {
+        if (!this.deps.podStatusApi) return;
+        // A CR can retain Ready=True after deletion. Creation and wake must
+        // observe the live replacement pod Ready, not just its new UID.
+        const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, name);
+        const pod = podName === null ? null : await this.deps.podStatusApi.getPodStatus(this.cfg.namespace, podName);
+        const liveImage = pod?.sandboxImage ?? pod?.containerStatuses?.find((container) => container.name === SANDBOX_CONTAINER_NAME)?.image;
+        const matchesDesired = expected === undefined || (liveImage === expected.image &&
+          (expected.resourceFingerprint === undefined || pod?.resourceFingerprint === expected.resourceFingerprint));
+        if (matchesDesired && pod?.phase === "Running" && pod.conditions?.some((condition) => condition.type === "Ready" && condition.status === "True")) return;
+      }
       if (status.state === "error") {
         throw new SandboxStartupError(name, status.error ?? "unknown");
       }

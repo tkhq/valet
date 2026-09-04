@@ -199,7 +199,13 @@ git commit -m "feat(engine): persist sandbox resources"
 **Files:**
 - Modify: `packages/engine/test/attachment-reconcile.test.ts`
 - Modify: `packages/engine/src/sandbox/attachment.ts`
+- Modify: `packages/engine/src/types.ts`
+- Modify: `packages/sandbox-kubernetes/src/lifecycle.ts`
+- Modify: `packages/sandbox-kubernetes/src/provider.ts`
+- Modify: `packages/sandbox-kubernetes/test/lifecycle.test.ts`
+- Modify: `packages/sandbox-kubernetes/test/provider.test.ts`
 - Modify: `docs/specs/2026-08-02-sandbox-reconcile-design.md`
+- Modify: `docs/specs/2026-09-04-prebuild-sandbox-resources-design.md`
 
 - [ ] **Step 1: Extend the recording provider test seam**
 
@@ -228,6 +234,21 @@ Prove these cases:
 - Resource drift on a suspended sandbox skips resume and creates the new sandbox.
 - A non-isolated provider does not replace on resource drift.
 - A failed resource replacement uses the existing spec-hash backoff.
+- A new attachment adopts an existing sandbox without erasing its resource record.
+- No-opinion adoption preserves exact CR CPU/memory requests and limits, including absence.
+- Authoritative adoption rolls compute for CPU/memory changes, including removal, with an unchanged image.
+- A retry still rolls a stale pod after the CR update succeeded but pod deletion failed.
+- Equivalent quantity formats do not roll, including `0.5`/`500m` and `4Gi`/`4096Mi`.
+- A provider-side image rollout preserves applied override metadata despite stale create options.
+- Legacy metadata migration stores the override opinion before pod deletion; a crash and provider restart retain it.
+- Empty overrides stay distinct from unknown metadata and deployment defaults.
+- The policy wrapper forwards provider metadata without provisioning.
+- Applied-state read or prep failures retain adopted storage; fresh failed compute is still destroyed.
+- A stale CR Ready condition cannot complete creation while the replacement pod is absent or Pending.
+- Admission-added resources do not cause repeated rolls; an authoritative desired change still rolls.
+- Legacy no-opinion adoption keeps fingerprint absence; authoritative adoption migrates with one rollout.
+- Controller-propagated pod annotations cannot hide stale container resources or environment markers.
+- Caller environment cannot replace the reserved literal fingerprint or introduce it during legacy no-opinion adoption.
 
 - [ ] **Step 5: Implement canonical comparison and replacement**
 
@@ -241,15 +262,59 @@ Apply the same comparison and preservation rules in wake folding and cold
 provision. Do not create a second replacement implementation. Extract a small
 private helper if image and resource paths would otherwise diverge.
 
+Set the internal `preserveResourcesOnAdopt` create option when a desired spec
+exists but has no resource opinion. This marker overrides stale create resources
+on adoption. Authoritative desired resources, including `{}`, clear the marker.
+Fresh creation still uses create resources and provider defaults.
+
+Pass this intent through `KubernetesSandboxProvider.create` into `applySandbox`.
+Use its existing conflict-branch GET to preserve prior CPU/memory in a cloned
+incoming template. Keep incoming ephemeral-storage fields. Stamp a canonical
+CPU/memory fingerprint in `podTemplate.metadata.annotations` and compare that
+fingerprint with the live sandbox container's reserved literal environment value,
+`VALET_SANDBOX_RESOURCE_FINGERPRINT`. Ignore live pod annotations: the controller
+updates metadata without changing container specs. Remove caller values for the
+reserved name before setting the marker. Admission defaults must not cause resource drift.
+Compare image and fingerprint in one pod read. Roll a changed pod through the
+existing deletion and new-UID wait. Require the live pod's Ready condition,
+requested image, and desired fingerprint before creation returns.
+This check retries a stale pod after a successful CR update and failed deletion.
+No-opinion adoption preserves an existing fingerprint, including legacy absence.
+The first authoritative opinion can roll a legacy pod once to stamp it.
+Do not pre-read the CR. After create returns, read the sandbox's applied state
+before prep. A fresh sandbox runs the full plan; adoption keeps prior successes.
+Return `Sandbox.adopted` from provider creation and forward it through the policy
+wrapper. Applied-state read and prep failures must retain or non-terminally
+release adopted state. Destroy failed fresh compute only, unless the owning
+session explicitly requests destruction.
+
+Store repository overrides separately from effective resources in the Kubernetes
+`valet.dev/resource-overrides` CR annotation. Preserve it on no-opinion adoption.
+For legacy CRs, use the optional `SandboxCreateOpts.readResourceOverrides` callback
+to recover the old applied opinion before the CR update or pod deletion. Return
+the durable opinion as `Sandbox.resourceOverrides`. An object includes `{}`;
+`null` means unknown adopted metadata; `undefined` means unsupported reporting.
+The engine uses provider metadata before applied-file or create-option fallbacks.
+It must not infer overrides from stale options when adopted metadata is unknown.
+Forward this field through `PolicySandbox` and retain its exhaustive member guard.
+Compare live quantities with exact decimal arithmetic, including Kubernetes
+nano rounding and the BinarySI magnitude cap.
+
 - [ ] **Step 6: Run the focused tests and verify GREEN**
 
 Run: `pnpm --filter @valet/engine test attachment-reconcile`
+
+Run: `pnpm --filter @valet/sandbox-kubernetes test lifecycle.test.ts provider.test.ts`
 
 Expected: PASS.
 
 - [ ] **Step 7: Run the engine package tests**
 
 Run: `pnpm --filter @valet/engine test`
+
+Run: `pnpm --filter @valet/engine typecheck`
+
+Run: `pnpm --filter @valet/sandbox-kubernetes typecheck`
 
 Expected: PASS.
 
@@ -261,7 +326,7 @@ as a replacement trigger.
 - [ ] **Step 9: Commit reconciliation**
 
 ```bash
-git add packages/engine/src/sandbox/attachment.ts packages/engine/test/attachment-reconcile.test.ts docs/specs/2026-08-02-sandbox-reconcile-design.md
+git add packages/engine/src/types.ts packages/engine/src/sandbox/attachment.ts packages/engine/test/attachment-reconcile.test.ts packages/sandbox-kubernetes/src/lifecycle.ts packages/sandbox-kubernetes/src/provider.ts packages/sandbox-kubernetes/test/lifecycle.test.ts packages/sandbox-kubernetes/test/provider.test.ts docs/specs/2026-08-02-sandbox-reconcile-design.md docs/specs/2026-09-04-prebuild-sandbox-resources-design.md
 git commit -m "feat(engine): reconcile sandbox resources"
 ```
 

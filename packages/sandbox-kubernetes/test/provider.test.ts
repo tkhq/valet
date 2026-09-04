@@ -7,9 +7,9 @@ import { describe, expect, it, vi } from "vitest";
 import { assertSafeExecId, looksSignalKilled, KubernetesSandboxProvider } from "../src/provider.js";
 import type { SandboxSecretsApi } from "../src/provider.js";
 import { SANDBOX_CR_API_VERSION } from "../src/index.js";
-import { credsSecretName, DOCKER_LABEL_KEY, sandboxCrName } from "../src/manifest.js";
+import { buildSandboxManifest, credsSecretName, DOCKER_LABEL_KEY, sandboxCrName } from "../src/manifest.js";
 import { wrapAsWorkloadUser, type ExecStatus } from "../src/exec.js";
-import type { K8sProviderConfig } from "../src/types.js";
+import type { K8sProviderConfig, ResourceRequirements, SandboxCR, SandboxCRRead } from "../src/types.js";
 import type {
   CreateSandboxParams,
   DeleteSandboxParams,
@@ -20,7 +20,10 @@ import type {
   ReplaceSandboxParams,
   SandboxCustomObjectsApi,
   SandboxPodsApi,
+  SandboxCpuMemoryResources,
+  PodStatusInfo,
 } from "../src/lifecycle.js";
+import { sandboxCpuMemoryResources } from "../src/lifecycle.js";
 import type { PodLivenessApi } from "../src/provider.js";
 import type { PodExecApi } from "../src/exec.js";
 
@@ -486,6 +489,387 @@ class FakeApiError extends Error {
     this.code = code;
   }
 }
+
+/** Existing CR with live compute. Replacement updates the template, not the pod. */
+class ResourceAdoptingObjectsApi extends FakeObjectsApi {
+  cr: SandboxCRRead;
+  calls: string[] = [];
+
+  constructor(manifest: SandboxCR) {
+    super();
+    this.cr = {
+      ...manifest,
+      metadata: {
+        ...manifest.metadata, uid: "cr-existing", resourceVersion: "1",
+        annotations: { "agents.x-k8s.io/pod-name": "pod-existing" },
+      },
+      status: { conditions: [{ type: "Ready", status: "True", reason: "DependenciesReady" }] },
+    };
+  }
+
+  override async createNamespacedCustomObject(): Promise<unknown> {
+    this.calls.push("create");
+    throw new FakeApiError(409, "already exists");
+  }
+
+  override async getNamespacedCustomObject(): Promise<unknown> {
+    this.calls.push("get");
+    return this.cr;
+  }
+
+  override async replaceNamespacedCustomObject(params: ReplaceSandboxParams): Promise<unknown> {
+    this.calls.push("replace");
+    this.cr = {
+      ...params.body,
+      metadata: {
+        ...this.cr.metadata, ...params.body.metadata, resourceVersion: "2",
+        annotations: { ...this.cr.metadata.annotations, ...params.body.metadata.annotations },
+      },
+      status: this.cr.status,
+    };
+    return this.cr;
+  }
+}
+
+describe("create() resource adoption and pod rollout", () => {
+  function expectFingerprintedTemplate(actual: unknown, expected: SandboxCR["spec"]["podTemplate"]) {
+    expect(actual).toEqual({ ...expected, metadata: { ...expected.metadata,
+      annotations: { ...expected.metadata?.annotations, "valet.dev/resource-fingerprint": expect.any(String) },
+    }, spec: { ...expected.spec, containers: expected.spec.containers.map((container) => ({ ...container,
+      env: [...(container.env ?? []), { name: "VALET_SANDBOX_RESOURCE_FINGERPRINT", value: expect.any(String) }],
+    })) } });
+  }
+
+  function templateFingerprint(template: unknown): string | undefined {
+    if (typeof template !== "object" || template === null || !("metadata" in template)) return undefined;
+    const metadata = template.metadata;
+    if (typeof metadata !== "object" || metadata === null || !("annotations" in metadata)) return undefined;
+    const annotations = metadata.annotations;
+    if (typeof annotations !== "object" || annotations === null || !("valet.dev/resource-fingerprint" in annotations)) return undefined;
+    const value = annotations["valet.dev/resource-fingerprint"];
+    return typeof value === "string" ? value : undefined;
+  }
+
+  function bootFingerprint(template: unknown): string | undefined {
+    if (typeof template !== "object" || template === null || !("spec" in template)) return undefined;
+    const spec = template.spec;
+    if (typeof spec !== "object" || spec === null || !("containers" in spec) || !Array.isArray(spec.containers)) return undefined;
+    const container: unknown = spec.containers.find((entry: unknown) =>
+      typeof entry === "object" && entry !== null && "name" in entry && entry.name === "sandbox");
+    if (typeof container !== "object" || container === null || !("env" in container) || !Array.isArray(container.env)) return undefined;
+    const marker: unknown = container.env.find((entry: unknown) =>
+      typeof entry === "object" && entry !== null && "name" in entry && entry.name === "VALET_SANDBOX_RESOURCE_FINGERPRINT");
+    return typeof marker === "object" && marker !== null && "value" in marker && typeof marker.value === "string" ? marker.value : undefined;
+  }
+
+  function setup(resources: ResourceRequirements | undefined, defaultResources?: K8sProviderConfig["defaultResources"]) {
+    const cfg = { ...providerCfg, defaultResources };
+    const manifest = buildSandboxManifest(cfg, sandboxCrName("/ws/resources"), {});
+    manifest.spec.podTemplate.spec.containers[0].resources = resources;
+    const objectsApi = new ResourceAdoptingObjectsApi(manifest);
+    const deletedPods: string[] = [];
+    let uid: string | null = "pod-old";
+    let liveImage = cfg.defaultImage;
+    let liveResources: SandboxCpuMemoryResources = resources ?? {};
+    let liveFingerprint: string | undefined;
+    let podOverride: PodStatusInfo | null | undefined;
+    const podDeleteApi = {
+      deletePod: vi.fn(async (_namespace: string, podName: string) => {
+        deletedPods.push(podName);
+        uid = `pod-new-${deletedPods.length}`;
+        liveResources = sandboxCpuMemoryResources(objectsApi.cr.spec.podTemplate);
+        liveFingerprint = bootFingerprint(objectsApi.cr.spec.podTemplate);
+        const template = objectsApi.cr.spec.podTemplate;
+        if (typeof template === "object" && template !== null && "spec" in template &&
+          typeof template.spec === "object" && template.spec !== null && "containers" in template.spec &&
+          Array.isArray(template.spec.containers)) {
+          const container: unknown = template.spec.containers[0];
+          if (typeof container === "object" && container !== null && "image" in container && typeof container.image === "string") {
+            liveImage = container.image;
+          }
+        }
+      }),
+    };
+    const setLivePod = (nextUid: string | null, pod: PodStatusInfo | null) => { uid = nextUid; podOverride = pod; };
+    const getLivePod = (): PodStatusInfo | null => podOverride === undefined ? {
+      phase: "Running", conditions: [{ type: "Ready", status: "True" }],
+      containerStatuses: [{ name: "sandbox", image: liveImage }],
+      sandboxResources: liveResources, resourceFingerprint: liveFingerprint,
+    } : podOverride;
+    const restartWithPodState = () => new KubernetesSandboxProvider({
+      objectsApi, podsApi: new FakePodsApi(), execApi: fakePodExecApi,
+      livenessApi: { getPodUid: async () => uid }, podStatusApi: { getPodStatus: async () => getLivePod() }, podDeleteApi,
+    }, cfg);
+    return { provider: restartWithPodState(), restart: restartWithPodState, objectsApi, deletedPods, cfg, podDeleteApi,
+      setLivePod, getLivePod, setAdmittedResources: (admitted: SandboxCpuMemoryResources) => { liveResources = admitted; } };
+  }
+
+  const prior = {
+    requests: { cpu: "250m", memory: "4Gi" },
+    limits: { cpu: "4", memory: "8Gi" },
+  };
+
+  it("no opinion preserves exact CPU/memory despite stale options and updates ephemeral storage without a roll", async () => {
+    const { provider, objectsApi, deletedPods } = setup(prior, { cpu: 1, memory: "2Gi" });
+
+    await provider.create({
+      workspace: "/ws/resources", preserveResourcesOnAdopt: true,
+      resources: { cpu: 2, ephemeralStorage: "10Gi", ephemeralStorageLimit: "20Gi" },
+    });
+
+    expect(objectsApi.cr.spec.podTemplate).toMatchObject({
+      spec: { containers: [{ resources: {
+        requests: { ...prior.requests, "ephemeral-storage": "10Gi" },
+        limits: { ...prior.limits, "ephemeral-storage": "20Gi" },
+      } }] },
+    });
+    expect(deletedPods).toEqual([]);
+    expect(objectsApi.calls.slice(0, 3)).toEqual(["create", "get", "replace"]);
+  });
+
+  it.each([
+    { cpu: 2, memory: "8Gi" },
+    { cpu: 4, memory: "4Gi" },
+  ])("same-image authoritative resources %j roll the live pod", async (resources) => {
+    const { provider, objectsApi, deletedPods, cfg } = setup({
+      requests: { cpu: "4", memory: "8Gi" }, limits: { cpu: "4", memory: "8Gi" },
+    });
+
+    await provider.create({ workspace: "/ws/resources", resources });
+
+    expect(deletedPods).toEqual(["pod-existing"]);
+    expectFingerprintedTemplate(objectsApi.cr.spec.podTemplate, buildSandboxManifest(cfg, sandboxCrName("/ws/resources"), { resources }).spec.podTemplate);
+  });
+
+  it.each([undefined, { cpu: 1, memory: "2Gi" }])("authoritative empty resources roll onto deployment defaults %j", async (defaultResources) => {
+    const { provider, objectsApi, deletedPods, cfg } = setup(prior, defaultResources);
+
+    await provider.create({ workspace: "/ws/resources", resources: {} });
+
+    expect(deletedPods).toEqual(["pod-existing"]);
+    expectFingerprintedTemplate(objectsApi.cr.spec.podTemplate, buildSandboxManifest(cfg, sandboxCrName("/ws/resources"), { resources: {} }).spec.podTemplate);
+  });
+
+  it("a change only to CPU limits rolls the pod", async () => {
+    const { provider, deletedPods } = setup({ requests: { cpu: "4" }, limits: { cpu: "8" } });
+
+    await provider.create({ workspace: "/ws/resources", resources: { cpu: 4 } });
+
+    expect(deletedPods).toEqual(["pod-existing"]);
+  });
+
+  it("retries a stale live pod after the CR update succeeded but pod deletion failed", async () => {
+    const { provider, objectsApi, podDeleteApi, cfg } = setup(prior);
+    const resources = { cpu: 2, memory: "4Gi" };
+    podDeleteApi.deletePod.mockRejectedValueOnce(new Error("pod deletion failed"));
+
+    await expect(provider.create({ workspace: "/ws/resources", resources })).rejects.toThrow("pod deletion failed");
+    expectFingerprintedTemplate(objectsApi.cr.spec.podTemplate, buildSandboxManifest(cfg, sandboxCrName("/ws/resources"), { resources }).spec.podTemplate);
+
+    await provider.create({ workspace: "/ws/resources", resources });
+
+    expect(podDeleteApi.deletePod).toHaveBeenCalledTimes(2);
+    await provider.create({ workspace: "/ws/resources", resources });
+    expect(podDeleteApi.deletePod).toHaveBeenCalledTimes(2);
+  });
+
+  it("unchanged authoritative CPU/memory do not roll after fingerprint migration", async () => {
+    const { provider, deletedPods } = setup({
+      requests: { cpu: "4", memory: "8Gi" }, limits: { cpu: "4", memory: "8Gi" },
+    });
+
+    await provider.create({ workspace: "/ws/resources", resources: { cpu: 4, memory: "8Gi" } });
+    expect(deletedPods).toEqual(["pod-existing"]);
+    await provider.create({ workspace: "/ws/resources", resources: { cpu: 4, memory: "8Gi" } });
+
+    expect(deletedPods).toEqual(["pod-existing"]);
+  });
+
+  it("equivalent CPU/memory quantities do not roll on repeated authoritative adoption", async () => {
+    const { provider, deletedPods } = setup({
+      requests: { cpu: "500m", memory: "4096Mi" }, limits: { cpu: "500m", memory: "4096Mi" },
+    });
+
+    await provider.create({ workspace: "/ws/resources", resources: { cpu: 0.5, memory: "4096Mi" } });
+    expect(deletedPods).toEqual(["pod-existing"]);
+    await provider.create({ workspace: "/ws/resources", resources: { cpu: 0.5, memory: "4Gi" } });
+
+    expect(deletedPods).toEqual(["pod-existing"]);
+  });
+
+  it.each([{ cpu: 4, memory: "8Gi" }, {}])("migrates legacy override metadata %j before image rollout and retains it across a crash", async (resourceOverrides) => {
+    const { provider, restart, objectsApi, podDeleteApi } = setup(prior);
+    const originalDelete = podDeleteApi.deletePod.getMockImplementation();
+    if (!originalDelete) throw new Error("expected pod deletion implementation");
+    podDeleteApi.deletePod.mockImplementationOnce(async (namespace, podName) => {
+      await originalDelete(namespace, podName);
+      throw new Error("connection lost after pod deletion");
+    });
+    const readResourceOverrides = vi.fn(async (sandbox: import("@valet/engine").Sandbox) => {
+      expect(sandbox.id).toBe("ws-resources");
+      expect(podDeleteApi.deletePod).not.toHaveBeenCalled();
+      return resourceOverrides;
+    });
+    const opts = {
+      workspace: "/ws/resources", image: "image:new", preserveResourcesOnAdopt: true,
+      resources: { cpu: 1 }, readResourceOverrides,
+    };
+
+    await expect(provider.create(opts)).rejects.toThrow("connection lost after pod deletion");
+    expect(objectsApi.cr.metadata.annotations?.["valet.dev/resource-overrides"]).toBe(JSON.stringify(resourceOverrides));
+    readResourceOverrides.mockRejectedValue(new Error("old applied file is gone"));
+
+    const sandbox = await restart().create(opts);
+
+    expect(sandbox.resourceOverrides).toEqual(resourceOverrides);
+    expect(readResourceOverrides).toHaveBeenCalledTimes(1);
+    expect(podDeleteApi.deletePod).toHaveBeenCalledTimes(1);
+  });
+
+  it("a failed legacy metadata read does not update the CR or delete the pod", async () => {
+    const { provider, objectsApi, deletedPods } = setup(prior);
+    const original = structuredClone(objectsApi.cr);
+
+    await expect(provider.create({
+      workspace: "/ws/resources", image: "image:new", preserveResourcesOnAdopt: true,
+      readResourceOverrides: async () => { throw new Error("applied state read failed"); },
+    })).rejects.toThrow("applied state read failed");
+
+    expect(objectsApi.cr).toEqual(original);
+    expect(deletedPods).toEqual([]);
+  });
+
+  it("image drift with no resource opinion shares one rollout and preserves CPU/memory", async () => {
+    const { provider, objectsApi, deletedPods } = setup(prior);
+
+    await provider.create({ workspace: "/ws/resources", image: "image:new", preserveResourcesOnAdopt: true });
+
+    expect(deletedPods).toEqual(["pod-existing"]);
+    expect(objectsApi.cr.spec.podTemplate).toMatchObject({
+      spec: { containers: [{ image: "image:new", resources: prior }] },
+    });
+  });
+
+  it("reports adopted ownership even after provider-side image replacement", async () => {
+    const { provider } = setup(prior);
+    const sandbox = await provider.create({ workspace: "/ws/resources", image: "image:new", preserveResourcesOnAdopt: true });
+    expect(sandbox.adopted).toBe(true);
+  });
+
+  it("admission-added resources do not cause repeated rollout, but a requested change does", async () => {
+    const { provider, setAdmittedResources, deletedPods, objectsApi } = setup(undefined);
+    await provider.create({ workspace: "/ws/resources", resources: {} });
+    expect(templateFingerprint(objectsApi.cr.spec.podTemplate)).toBeDefined();
+    setAdmittedResources({ requests: { cpu: "500m", memory: "1Gi" }, limits: { cpu: "1", memory: "2Gi" } });
+    const before = deletedPods.length;
+
+    await provider.create({ workspace: "/ws/resources", resources: {} });
+    expect(deletedPods.length).toBe(before);
+    const fingerprint = templateFingerprint(objectsApi.cr.spec.podTemplate);
+    await provider.create({ workspace: "/ws/resources", resources: { cpu: 100 }, preserveResourcesOnAdopt: true });
+    expect(templateFingerprint(objectsApi.cr.spec.podTemplate)).toBe(fingerprint);
+    expect(deletedPods.length).toBe(before);
+    await provider.create({ workspace: "/ws/resources", resources: { cpu: 2 } });
+    expect(deletedPods.length).toBe(before + 1);
+    setAdmittedResources({ requests: { cpu: "2", memory: "1Gi" }, limits: { cpu: "2", memory: "2Gi" } });
+    await provider.create({ workspace: "/ws/resources", resources: { cpu: 2 } });
+    expect(deletedPods.length).toBe(before + 1);
+  });
+
+  it("legacy no-opinion adoption retains fingerprint absence and ignores admission resources", async () => {
+    const { provider, setAdmittedResources, deletedPods, objectsApi } = setup(undefined);
+    setAdmittedResources(prior);
+
+    await provider.create({ workspace: "/ws/resources", preserveResourcesOnAdopt: true });
+
+    expect(deletedPods).toEqual([]);
+    expect(templateFingerprint(objectsApi.cr.spec.podTemplate)).toBeUndefined();
+  });
+
+  it("legacy authoritative adoption stamps a fingerprint through one rollout", async () => {
+    const { provider, deletedPods, objectsApi } = setup(undefined);
+    await provider.create({ workspace: "/ws/resources", resources: {} });
+    expect(deletedPods).toEqual(["pod-existing"]);
+    expect(templateFingerprint(objectsApi.cr.spec.podTemplate)).toBeDefined();
+    await provider.create({ workspace: "/ws/resources", resources: {} });
+    expect(deletedPods).toEqual(["pod-existing"]);
+  });
+
+  it("reserved literal boot fingerprints cannot be overridden or introduced by caller env", async () => {
+    const { provider, objectsApi } = setup(undefined);
+    const env = { VALET_SANDBOX_RESOURCE_FINGERPRINT: "caller-value", USER_FLAG: "keep" };
+    await provider.create({ workspace: "/ws/resources", preserveResourcesOnAdopt: true, env });
+    expect(bootFingerprint(objectsApi.cr.spec.podTemplate)).toBeUndefined();
+
+    await provider.create({ workspace: "/ws/resources", resources: {}, env });
+    const fingerprint = templateFingerprint(objectsApi.cr.spec.podTemplate);
+    expect(fingerprint).toBeDefined();
+    expect(bootFingerprint(objectsApi.cr.spec.podTemplate)).toBe(fingerprint);
+    expect(fingerprint).not.toBe("caller-value");
+
+    await provider.create({ workspace: "/ws/resources", preserveResourcesOnAdopt: true, env: { USER_FLAG: "keep" } });
+    expect(bootFingerprint(objectsApi.cr.spec.podTemplate)).toBe(fingerprint);
+    expect(objectsApi.cr.spec.podTemplate).toMatchObject({ spec: { containers: [{ env: expect.arrayContaining([{ name: "USER_FLAG", value: "keep" }]) }] } });
+  });
+
+  it.each([false, true])("waits through absent and Pending replacement pods despite stale CR Ready (restart: %s)", async (restartAfterDelete) => {
+    vi.useFakeTimers();
+    try {
+      const { provider, setLivePod, podDeleteApi } = setup(prior);
+      const originalDelete = podDeleteApi.deletePod.getMockImplementation();
+      if (!originalDelete) throw new Error("expected pod deletion implementation");
+      if (restartAfterDelete) setLivePod(null, null);
+      else podDeleteApi.deletePod.mockImplementationOnce(async (namespace, podName) => {
+        await originalDelete(namespace, podName);
+        setLivePod(null, null);
+      });
+      let settled = false;
+      const creating = provider.create({ workspace: "/ws/resources", image: "image:new", preserveResourcesOnAdopt: true })
+        .then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(0);
+      expect.soft(settled).toBe(false);
+
+      setLivePod("pod-pending", { phase: "Pending", conditions: [{ type: "Ready", status: "False" }] });
+      await vi.advanceTimersByTimeAsync(1000);
+      expect.soft(settled).toBe(false);
+
+      setLivePod("pod-pending", { phase: "Running", sandboxImage: "image:new", conditions: [{ type: "Ready", status: "True" }] });
+      await vi.advanceTimersByTimeAsync(1000);
+      await creating;
+      expect(settled).toBe(true);
+      expect(podDeleteApi.deletePod).toHaveBeenCalledTimes(restartAfterDelete ? 0 : 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not accept a Ready replacement with a stale resource fingerprint", async () => {
+    vi.useFakeTimers();
+    try {
+      const { provider, setLivePod, getLivePod, podDeleteApi } = setup(prior);
+      const originalDelete = podDeleteApi.deletePod.getMockImplementation();
+      if (!originalDelete) throw new Error("expected pod deletion implementation");
+      let readyPod: PodStatusInfo | null = null;
+      podDeleteApi.deletePod.mockImplementationOnce(async (namespace, podName) => {
+        await originalDelete(namespace, podName);
+        readyPod = getLivePod();
+        if (!readyPod) throw new Error("expected replacement pod");
+        setLivePod("pod-stale", { ...readyPod, resourceFingerprint: "old-generation" });
+      });
+      let settled = false;
+      const creating = provider.create({ workspace: "/ws/resources", resources: { cpu: 2 } }).then(() => { settled = true; });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect.soft(settled).toBe(false);
+      setLivePod("pod-current", readyPod);
+      await vi.advanceTimersByTimeAsync(1000);
+      await creating;
+      expect(settled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
 
 /** Stateful objects api: 404 until created, CR carries an error-shaped
  * condition so `waitReady` fails terminally on its first poll. Exercises
