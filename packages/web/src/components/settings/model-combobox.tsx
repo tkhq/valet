@@ -124,7 +124,7 @@ export function ModelCombobox({
                 {value === m.id && <Check className="h-3.5 w-3.5 text-moss" />}
                 <span className="text-ink">{curated.label}</span>
               </span>
-              <Badge variant={tierBadgeVariant(curated.tier)}>{curated.tier}</Badge>
+              <Badge variant={speedClassBadgeVariant(curated.speedClass)}>{curated.speedClass}</Badge>
             </button>
           ))}
           {otherMatches.map((m) => (
@@ -168,8 +168,10 @@ function matchesQuery(id: string, label: string, query: string): boolean {
   return matchesNeedle(query, [id, label]);
 }
 
-function tierBadgeVariant(tier: ModelOption["tier"]): "neutral" | "accent" | "success" {
-  if (tier === "powerful") return "accent";
-  if (tier === "balanced") return "success";
+function speedClassBadgeVariant(
+  speedClass: ModelOption["speedClass"],
+): "neutral" | "accent" | "success" {
+  if (speedClass === "powerful") return "accent";
+  if (speedClass === "balanced") return "success";
   return "neutral";
 }

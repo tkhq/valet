@@ -102,6 +102,14 @@ import type {
   CreateLlmProviderRequest,
   CreateLlmProviderResponse,
   GetLlmProviderPreferencesResponse,
+  GetModelTiersResponse,
+  PatchModelTiersRequest,
+  GetApprovedModelsResponse,
+  PutApprovedModelsRequest,
+  PutApprovedModelsResponse,
+  GetOrgReasoningResponse,
+  PatchOrgReasoningRequest,
+  PatchOrgReasoningResponse,
   ListLlmProvidersResponse,
   ListMessagesResponse,
   ListNotificationPreferencesResponse,
@@ -1095,6 +1103,15 @@ export const api = {
     request<GetLlmProviderPreferencesResponse>("GET", "/org/llm-providers/preferences"),
   putLlmProviderPreferences: (body: PutLlmProviderPreferencesRequest) =>
     request<PutLlmProviderPreferencesResponse>("PUT", "/org/llm-providers/preferences", body),
+  getModelTiers: () => request<GetModelTiersResponse>("GET", "/org/model-tiers"),
+  patchModelTiers: (body: PatchModelTiersRequest) =>
+    request<GetModelTiersResponse>("PATCH", "/org/model-tiers", body),
+  getApprovedModels: () => request<GetApprovedModelsResponse>("GET", "/org/approved-models"),
+  putApprovedModels: (body: PutApprovedModelsRequest) =>
+    request<PutApprovedModelsResponse>("PUT", "/org/approved-models", body),
+  getOrgReasoning: () => request<GetOrgReasoningResponse>("GET", "/org/reasoning"),
+  patchOrgReasoning: (body: PatchOrgReasoningRequest) =>
+    request<PatchOrgReasoningResponse>("PATCH", "/org/reasoning", body),
 
   // org invites (org-admin only)
   listInvites: () => request<ListInvitesResponse>("GET", "/org/invites"),

@@ -21,8 +21,11 @@ import type {
   PatchTeamRequest,
   PatchTeamResponse,
   DeleteCredentialResponse,
+  GetApprovedModelsResponse,
   GetGithubAppResponse,
   GetLlmProviderPreferencesResponse,
+  GetModelTiersResponse,
+  GetOrgReasoningResponse,
   GetSlackAppResponse,
   ListLlmProvidersResponse,
   ListModelsResponse,
@@ -39,10 +42,13 @@ import type {
   PatchLlmProviderResponse,
   PatchMeRequest,
   PatchMeResponse,
+  PatchModelTiersRequest,
   PatchOrgMemberRequest,
   PatchOrgMemberResponse,
   PatchOrgPluginRequest,
   PatchOrgPluginResponse,
+  PatchOrgReasoningRequest,
+  PatchOrgReasoningResponse,
   PatchOrgRequest,
   PatchOrgResponse,
   PatchOrgSettingsRequest,
@@ -50,6 +56,8 @@ import type {
   PostGithubAppManifestRequest,
   PostGithubAppManifestResponse,
   ProbeLlmProviderResponse,
+  PutApprovedModelsRequest,
+  PutApprovedModelsResponse,
   PutCredentialResponse,
   PutLlmProviderKeyRequest,
   PutLlmProviderKeyResponse,
@@ -88,6 +96,9 @@ export const qkSettings = {
   llmProviders: () => ["settings", "llmProviders"] as const,
   openrouterRegistry: () => ["settings", "openrouterRegistry"] as const,
   llmProviderPreferences: () => ["settings", "llmProviderPreferences"] as const,
+  modelTiers: () => ["settings", "modelTiers"] as const,
+  approvedModels: () => ["settings", "approvedModels"] as const,
+  orgReasoning: () => ["settings", "orgReasoning"] as const,
   teams: () => ["settings", "teams"] as const,
   teamMembers: (teamId: string) => ["settings", "teams", teamId, "members"] as const,
   githubApp: () => ["settings", "githubApp"] as const,
@@ -197,6 +208,30 @@ export function useLlmProviderPreferences(opts?: UseQueryOptions<GetLlmProviderP
   return useQuery<GetLlmProviderPreferencesResponse>({
     queryKey: qkSettings.llmProviderPreferences(),
     queryFn: () => api.getLlmProviderPreferences(),
+    ...opts,
+  });
+}
+
+export function useModelTiers(opts?: UseQueryOptions<GetModelTiersResponse>) {
+  return useQuery<GetModelTiersResponse>({
+    queryKey: qkSettings.modelTiers(),
+    queryFn: () => api.getModelTiers(),
+    ...opts,
+  });
+}
+
+export function useApprovedModels(opts?: UseQueryOptions<GetApprovedModelsResponse>) {
+  return useQuery<GetApprovedModelsResponse>({
+    queryKey: qkSettings.approvedModels(),
+    queryFn: () => api.getApprovedModels(),
+    ...opts,
+  });
+}
+
+export function useOrgReasoning(opts?: UseQueryOptions<GetOrgReasoningResponse>) {
+  return useQuery<GetOrgReasoningResponse>({
+    queryKey: qkSettings.orgReasoning(),
+    queryFn: () => api.getOrgReasoning(),
     ...opts,
   });
 }
@@ -384,6 +419,38 @@ export function usePutLlmProviderPreferences() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkSettings.llmProviderPreferences() });
       qc.invalidateQueries({ queryKey: qkSettings.models() });
+    },
+  });
+}
+
+export function usePatchModelTiers() {
+  const qc = useQueryClient();
+  return useMutation<GetModelTiersResponse, Error, PatchModelTiersRequest>({
+    mutationFn: (body) => api.patchModelTiers(body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkSettings.modelTiers() });
+      qc.invalidateQueries({ queryKey: qkSettings.models() });
+    },
+  });
+}
+
+export function usePutApprovedModels() {
+  const qc = useQueryClient();
+  return useMutation<PutApprovedModelsResponse, Error, PutApprovedModelsRequest>({
+    mutationFn: (body) => api.putApprovedModels(body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkSettings.approvedModels() });
+      qc.invalidateQueries({ queryKey: qkSettings.models() });
+    },
+  });
+}
+
+export function usePatchOrgReasoning() {
+  const qc = useQueryClient();
+  return useMutation<PatchOrgReasoningResponse, Error, PatchOrgReasoningRequest>({
+    mutationFn: (body) => api.patchOrgReasoning(body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkSettings.orgReasoning() });
     },
   });
 }
