@@ -3073,6 +3073,15 @@ export class EngineHost {
           profile,
           ...(opts.docker !== undefined ? { docker: opts.docker } : {}),
         };
+    // Repo-declared session-runtime flags from `.valet/prebuild.yaml`
+    // (TKAI-385): the same read `buildSession` does, so a child bound to a
+    // repo gets the repo's `workspaceStorage` and `docker` exactly like a
+    // REST-created session. This was MISSING at first ship — child sandboxes
+    // (the orchestrator's verify/task sessions) provisioned the 1Gi default
+    // claim while REST sessions honored the declaration. Best-effort: any
+    // failure resolves the defaults.
+    const repoFlags = await this.resolveRepoPrebuildFlags(childSessionId, meta);
+    const dockerFlag = opts.docker === true || repoFlags.docker;
     const specProvider = await this.buildSpecProvider(childSessionId, meta, undefined, personaCell != null);
     // Repo AGENTS.md instructions (agents-md spec, decision 5): a child
     // spawned with a repo binding reads its AGENTS.md exactly like a
@@ -3113,7 +3122,10 @@ export class EngineHost {
             ? { ...(sandboxMint?.env ?? {}), ...securityProvisioning.scopeEnv }
             : sandboxMint?.env,
         profile,
-        ...(opts.docker ? { docker: true } : {}),
+        ...(dockerFlag ? { docker: true } : {}),
+        // Only affects a FRESHLY provisioned claim — an existing workspace
+        // volume keeps its size (the controller never resizes an owned PVC).
+        ...(repoFlags.workspaceStorage ? { workspaceStorage: repoFlags.workspaceStorage } : {}),
         ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
       },
       model,

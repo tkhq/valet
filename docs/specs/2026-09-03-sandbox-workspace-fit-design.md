@@ -182,6 +182,14 @@ Schema doc: `docs/prebuild-yaml.md`. Immediate use: set `tkhq/mono` to
   `prebuildFlagsTarget`, logs the skip when a host is genuinely not GitHub,
   and `host.prebuild-flags.test.ts` pins the schema default through
   `loadSessionMeta` into the guard.
+- Second miss, same week: `buildChildSession` (the orchestrator-spawned
+  child path) assembled its own sandbox opts and never called
+  `resolveRepoPrebuildFlags` at all — children bound to a repo provisioned
+  the 1Gi default claim while REST-created sessions honored the declaration.
+  The child builder now runs the same read, and the same test file drives
+  `childSessionFor` end to end against a GitHub fixture. Workflow sessions
+  (`buildWorkflowSession`) still load no repo bindings and read no flags —
+  open follow-up if workflow sessions ever clone repos.
 - In-run growth is reactive (a command must fail once). Proactive growth
   from the kubelet volume stats already in Prometheus (grow at a
   threshold, before anything fails) remains open — TKAI-381.
