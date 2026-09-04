@@ -23,7 +23,6 @@ import type {
   DeleteCredentialResponse,
   GetApprovedModelsResponse,
   GetGithubAppResponse,
-  GetLlmProviderPreferencesResponse,
   GetModelTiersResponse,
   GetOrgReasoningResponse,
   GetSlackAppResponse,
@@ -61,8 +60,6 @@ import type {
   PutCredentialResponse,
   PutLlmProviderKeyRequest,
   PutLlmProviderKeyResponse,
-  PutLlmProviderPreferencesRequest,
-  PutLlmProviderPreferencesResponse,
   SetTeamMemberRoleRequest,
   TestLlmProviderRequest,
   TestLlmProviderResponse,
@@ -95,7 +92,6 @@ export const qkSettings = {
   models: () => ["settings", "models"] as const,
   llmProviders: () => ["settings", "llmProviders"] as const,
   openrouterRegistry: () => ["settings", "openrouterRegistry"] as const,
-  llmProviderPreferences: () => ["settings", "llmProviderPreferences"] as const,
   modelTiers: () => ["settings", "modelTiers"] as const,
   approvedModels: () => ["settings", "approvedModels"] as const,
   orgReasoning: () => ["settings", "orgReasoning"] as const,
@@ -201,14 +197,6 @@ export function useOpenrouterRegistry(opts?: { enabled?: boolean }) {
     queryFn: () => api.openrouterRegistry(),
     staleTime: Infinity,
     enabled: opts?.enabled ?? true,
-  });
-}
-
-export function useLlmProviderPreferences(opts?: UseQueryOptions<GetLlmProviderPreferencesResponse>) {
-  return useQuery<GetLlmProviderPreferencesResponse>({
-    queryKey: qkSettings.llmProviderPreferences(),
-    queryFn: () => api.getLlmProviderPreferences(),
-    ...opts,
   });
 }
 
@@ -409,17 +397,6 @@ export function useProbeLlmProvider() {
 export function useTestLlmProvider() {
   return useMutation<TestLlmProviderResponse, Error, { id: string; body: TestLlmProviderRequest }>({
     mutationFn: ({ id, body }) => api.testLlmProvider(id, body),
-  });
-}
-
-export function usePutLlmProviderPreferences() {
-  const qc = useQueryClient();
-  return useMutation<PutLlmProviderPreferencesResponse, Error, PutLlmProviderPreferencesRequest>({
-    mutationFn: (body) => api.putLlmProviderPreferences(body),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qkSettings.llmProviderPreferences() });
-      qc.invalidateQueries({ queryKey: qkSettings.models() });
-    },
   });
 }
 

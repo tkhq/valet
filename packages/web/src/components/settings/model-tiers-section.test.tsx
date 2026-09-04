@@ -1,10 +1,9 @@
 // @vitest-environment jsdom
 /**
  * ModelTiersSection (model-selector-overhaul, Task 13): one row-group per
- * `SIZE_TIERS` entry showing the tier's ordered target list, reusing the
- * up/down/remove + `AddModelTypeahead` row pattern from
- * `ModelPreferencesSection`. Every edit issues a single-tier
- * `PatchModelTiersRequest`.
+ * `SIZE_TIERS` entry showing the tier's ordered target list, using the
+ * up/down/remove + `AddModelTypeahead` row pattern. Every edit issues a
+ * single-tier `PatchModelTiersRequest`.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, within } from "@testing-library/react";

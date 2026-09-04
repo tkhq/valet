@@ -1,21 +1,23 @@
 // @vitest-environment jsdom
 /**
  * ApprovedModelsSection (model-selector-overhaul, Task 13): the switch
- * clears (`approved: null`) or seeds (curated ids present in the catalog)
- * the org's approved-model list; the checkbox list below edits it directly
- * and blocks unchecking the last entry client-side (the API 400s an empty
+ * clears (`approved: null`) or seeds the org's approved-model list from the
+ * union of every model enrolled in the org's tier map and the curated ids
+ * present in the catalog; the checkbox list below edits it directly and
+ * blocks unchecking the last entry client-side (the API 400s an empty
  * list), surfacing the API's error text on any other failure.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { ModelInfo } from "@valet/api/wire";
+import type { ModelInfo, WireTierMap } from "@valet/api/wire";
 import { ApiError } from "~/api/client";
 
 const putMutate = vi.fn();
 
 let modelsData: { models: ModelInfo[] } = { models: [] };
 let approvedData: { approved: string[] | null } = { approved: null };
+let tiersData: WireTierMap = { xs: [], s: [], m: [], l: [], xl: [] };
 
 vi.mock("~/api/settings", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/api/settings")>();
@@ -23,6 +25,7 @@ vi.mock("~/api/settings", async (importOriginal) => {
     ...actual,
     useModels: () => ({ data: modelsData, isLoading: false, error: null }),
     useApprovedModels: () => ({ data: approvedData, isLoading: false, error: null }),
+    useModelTiers: () => ({ data: tiersData, isLoading: false, error: null }),
     usePutApprovedModels: () => ({ mutate: putMutate, isPending: false }),
   };
 });
@@ -65,6 +68,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   modelsData = { models: [HAIKU, SONNET, LLAMA] };
   approvedData = { approved: null };
+  tiersData = { xs: [], s: [], m: [], l: [], xl: [] };
 });
 
 describe("ApprovedModelsSection — switch", () => {
@@ -78,6 +82,37 @@ describe("ApprovedModelsSection — switch", () => {
   });
 
   it("turning the switch on seeds the curated ids present in the catalog", async () => {
+    const user = userEvent.setup();
+    render(<ApprovedModelsSection />);
+
+    await user.click(screen.getByRole("switch", { name: "Restrict members to approved models" }));
+
+    expect(putMutate).toHaveBeenCalledWith(
+      { approved: [HAIKU.id, SONNET.id] },
+      expect.anything(),
+    );
+  });
+
+  it("turning the switch on also seeds a non-curated model enrolled in a tier", async () => {
+    // LLAMA is not curated (see the comment above), but it's a tier target —
+    // it MUST end up in the seed, or the very next tier-map edit would 400
+    // (the tier-map PATCH validates targets against the approved list).
+    tiersData = { xs: [], s: [LLAMA.id], m: [], l: [], xl: [] };
+    const user = userEvent.setup();
+    render(<ApprovedModelsSection />);
+
+    await user.click(screen.getByRole("switch", { name: "Restrict members to approved models" }));
+
+    expect(putMutate).toHaveBeenCalledWith(
+      { approved: expect.arrayContaining([HAIKU.id, SONNET.id, LLAMA.id]) },
+      expect.anything(),
+    );
+    const [{ approved }] = putMutate.mock.calls[0] as [{ approved: string[] }, unknown];
+    expect(approved).toHaveLength(3); // deduped, no extras
+  });
+
+  it("a tier target not present in the catalog is dropped from the seed", async () => {
+    tiersData = { xs: [], s: ["prov_gone/deleted-model"], m: [], l: [], xl: [] };
     const user = userEvent.setup();
     render(<ApprovedModelsSection />);
 

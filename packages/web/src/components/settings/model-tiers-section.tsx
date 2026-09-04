@@ -2,7 +2,7 @@ import { ArrowDown, ArrowUp, X } from "lucide-react";
 import { useState } from "react";
 import { Button, Spinner } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
-import { AddModelTypeahead } from "~/components/settings/model-preferences-section";
+import { AddModelTypeahead } from "~/components/settings/add-model-typeahead";
 import { useModelTiers, useModels, usePatchModelTiers } from "~/api/settings";
 import { apiErrorMessage } from "~/api/policies";
 import { SIZE_TIERS, TIER_LABELS, type SizeTier } from "~/lib/model-tiers";
@@ -30,8 +30,9 @@ function tierPatch(tier: SizeTier, next: string[]): PatchModelTiersRequest {
  * Organization · Models — size-tier map (model-selector-overhaul, Task 13).
  * One row-group per `SIZE_TIERS` entry, each an ordered target list the
  * engine resolves at run time (`GET`/`PATCH /api/org/model-tiers`, always
- * five tiers). Reuses the up/down/remove row pattern and `AddModelTypeahead`
- * from `ModelPreferencesSection` per tier.
+ * five tiers). Uses the up/down/remove row pattern and `AddModelTypeahead`
+ * per tier; these targets are the org's fallback chain now that org model
+ * preferences are gone.
  */
 export function ModelTiersSection() {
   const modelsQ = useModels();

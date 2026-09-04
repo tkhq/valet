@@ -101,7 +101,6 @@ import type {
   ListPolicyOverridesResponse,
   CreateLlmProviderRequest,
   CreateLlmProviderResponse,
-  GetLlmProviderPreferencesResponse,
   GetModelTiersResponse,
   PatchModelTiersRequest,
   GetApprovedModelsResponse,
@@ -182,8 +181,6 @@ import type {
   PutCredentialResponse,
   PutLlmProviderKeyRequest,
   PutLlmProviderKeyResponse,
-  PutLlmProviderPreferencesRequest,
-  PutLlmProviderPreferencesResponse,
   CreateEventSubscriptionRequest,
   CreateEventSubscriptionResponse,
   FilterOptionsResponse,
@@ -1099,10 +1096,6 @@ export const api = {
       `/org/llm-providers/${encodeURIComponent(id)}/test`,
       body,
     ),
-  getLlmProviderPreferences: () =>
-    request<GetLlmProviderPreferencesResponse>("GET", "/org/llm-providers/preferences"),
-  putLlmProviderPreferences: (body: PutLlmProviderPreferencesRequest) =>
-    request<PutLlmProviderPreferencesResponse>("PUT", "/org/llm-providers/preferences", body),
   getModelTiers: () => request<GetModelTiersResponse>("GET", "/org/model-tiers"),
   patchModelTiers: (body: PatchModelTiersRequest) =>
     request<GetModelTiersResponse>("PATCH", "/org/model-tiers", body),

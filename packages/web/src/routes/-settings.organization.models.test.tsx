@@ -1,15 +1,15 @@
 // @vitest-environment jsdom
 /**
  * Organization · Models (split-settings design, Task 7): known-provider key
- * save never echoes the submitted key, custom-provider "Fetch models"
- * merges probed ids into checkboxes, and reordering preferences posts the
- * new array. Mocks `~/api/settings` the same way `-settings.organization
- * .test.tsx` mocks it for General/Members/Teams — these tests only care
- * what each section renders and which mutation it fires.
+ * save never echoes the submitted key, and custom-provider "Fetch models"
+ * merges probed ids into checkboxes. Mocks `~/api/settings` the same way
+ * `-settings.organization.test.tsx` mocks it for General/Members/Teams —
+ * these tests only care what each section renders and which mutation it
+ * fires.
  */
 import type { ReactElement } from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { TooltipProvider } from "~/components/primitives";
 import type { LlmProviderSummary, ModelInfo } from "@valet/api/wire";
@@ -31,10 +31,8 @@ const putLlmProviderKeyMutateAsync = vi.fn();
 const deleteLlmProviderKeyMutate = vi.fn();
 const probeLlmProviderMutate = vi.fn();
 const testLlmProviderMutate = vi.fn();
-const putLlmProviderPreferencesMutate = vi.fn();
 
 let providersData: { providers: LlmProviderSummary[] } = { providers: [] };
-let preferencesData: { preferences: string[] } = { preferences: [] };
 let modelsData: { models: ModelInfo[] } = { models: [] };
 
 vi.mock("@tanstack/react-router", () => ({
@@ -74,12 +72,6 @@ vi.mock("~/api/settings", async (importOriginal) => {
   }),
   useProbeLlmProvider: () => ({ mutate: probeLlmProviderMutate, isPending: false, error: null }),
   useTestLlmProvider: () => ({ mutate: testLlmProviderMutate, isPending: false, error: null }),
-  useLlmProviderPreferences: () => ({ data: preferencesData, isLoading: false, error: null }),
-  usePutLlmProviderPreferences: () => ({
-    mutate: putLlmProviderPreferencesMutate,
-    isPending: false,
-    error: null,
-  }),
   useModels: () => ({ data: modelsData, isLoading: false, error: null }),
   useOpenrouterRegistry: () => ({
     data: { models: [{ id: "moonshotai/kimi-k3", name: "MoonshotAI: Kimi K3" }], live: true },
@@ -90,12 +82,10 @@ vi.mock("~/api/settings", async (importOriginal) => {
 });
 
 import { LlmProvidersSection } from "~/components/settings/llm-providers-section";
-import { ModelPreferencesSection } from "~/components/settings/model-preferences-section";
 
 beforeEach(() => {
   vi.clearAllMocks();
   providersData = { providers: [] };
-  preferencesData = { preferences: [] };
   modelsData = { models: [] };
 });
 
@@ -342,101 +332,5 @@ describe("LlmProvidersSection — custom provider", () => {
     await user.click(screen.getByRole("button", { name: "Delete provider" }));
 
     expect(await screen.findByText("provider is the org default model's provider")).toBeTruthy();
-  });
-});
-
-describe("ModelPreferencesSection", () => {
-  beforeEach(() => {
-    modelsData = {
-      models: [
-        {
-          id: "anthropic/claude-1",
-          name: "Claude One",
-          providerId: "anthropic",
-          providerKind: "anthropic",
-          providerName: "Anthropic",
-          active: true,
-          approved: true,
-        },
-        {
-          id: "openai/gpt-1",
-          name: "GPT One",
-          providerId: "openai",
-          providerKind: "openai",
-          providerName: "OpenAI",
-          active: true,
-          approved: true,
-        },
-      ],
-    };
-    preferencesData = { preferences: ["anthropic/claude-1", "openai/gpt-1"] };
-  });
-
-  it("badges the first row as default", () => {
-    render(<ModelPreferencesSection />);
-    const rows = screen.getAllByText(/Claude One|GPT One/);
-    expect(within(rows[0].closest("div")!.parentElement!).getByText("Default")).toBeTruthy();
-  });
-
-  it("moving a row down posts the reordered preferences array", async () => {
-    const user = userEvent.setup();
-    render(<ModelPreferencesSection />);
-    await user.click(screen.getByRole("button", { name: "Move Claude One down" }));
-    expect(putLlmProviderPreferencesMutate).toHaveBeenCalledWith(
-      { preferences: ["openai/gpt-1", "anthropic/claude-1"] },
-      expect.objectContaining({ onError: expect.any(Function) }),
-    );
-  });
-
-  it("removing a row posts the array without it", async () => {
-    const user = userEvent.setup();
-    render(<ModelPreferencesSection />);
-    await user.click(screen.getByRole("button", { name: "Remove Claude One" }));
-    expect(putLlmProviderPreferencesMutate).toHaveBeenCalledWith(
-      { preferences: ["openai/gpt-1"] },
-      expect.objectContaining({ onError: expect.any(Function) }),
-    );
-  });
-
-  it("adds an unlisted model via the search typeahead", async () => {
-    const user = userEvent.setup();
-    preferencesData = { preferences: ["anthropic/claude-1"] };
-    render(<ModelPreferencesSection />);
-    // Closed until focused — no flat catalog dump on the page.
-    expect(screen.queryByText("GPT One")).toBeNull();
-
-    const search = screen.getByRole("textbox", { name: "Search models to add" });
-    await user.type(search, "gpt");
-    await user.click(screen.getByText("GPT One"));
-    expect(putLlmProviderPreferencesMutate).toHaveBeenCalledWith(
-      { preferences: ["anthropic/claude-1", "openai/gpt-1"] },
-      expect.objectContaining({ onError: expect.any(Function) }),
-    );
-  });
-
-  it("typeahead filters by query and reports no matches", async () => {
-    const user = userEvent.setup();
-    preferencesData = { preferences: [] };
-    render(<ModelPreferencesSection />);
-    const search = screen.getByRole("textbox", { name: "Search models to add" });
-    await user.type(search, "claude");
-    expect(screen.getByText("Claude One")).toBeTruthy();
-    expect(screen.queryByText("GPT One")).toBeNull();
-
-    await user.clear(search);
-    await user.type(search, "zzz-no-such-model");
-    expect(screen.getByText("No matching models.")).toBeTruthy();
-  });
-
-  it("surfaces an error message when the save mutation rejects", async () => {
-    const user = userEvent.setup();
-    putLlmProviderPreferencesMutate.mockImplementation((_vars, opts) => {
-      opts.onError(new Error("invalid model ids: openai/gpt-1"));
-    });
-    render(<ModelPreferencesSection />);
-
-    await user.click(screen.getByRole("button", { name: "Remove Claude One" }));
-
-    expect(await screen.findByText("invalid model ids: openai/gpt-1")).toBeTruthy();
   });
 });

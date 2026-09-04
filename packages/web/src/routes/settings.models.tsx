@@ -1,6 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { LlmProvidersSection } from "~/components/settings/llm-providers-section";
-import { ModelPreferencesSection } from "~/components/settings/model-preferences-section";
 
 /**
  * `/settings/models` — single-user-mode home for provider/model
@@ -20,7 +19,6 @@ export function SettingsModelsPage() {
   return (
     <div className="space-y-10">
       <LlmProvidersSection />
-      <ModelPreferencesSection />
     </div>
   );
 }
