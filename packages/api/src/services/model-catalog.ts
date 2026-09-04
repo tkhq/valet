@@ -91,6 +91,8 @@ function knownKindEntries(
     active,
     pricing: { input: m.cost.input, output: m.cost.output },
     resolvable,
+    // TODO(Task 7): computed from org approved list
+    approved: true,
   }));
 }
 
@@ -196,6 +198,8 @@ export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialS
         active,
         pricing: m.pricing,
         resolvable,
+        // TODO(Task 7): computed from org approved list
+        approved: true,
       });
     }
   }
@@ -214,6 +218,8 @@ export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialS
         active,
         pricing: m.pricing,
         resolvable,
+        // TODO(Task 7): computed from org approved list
+        approved: true,
       });
     }
   }

@@ -115,6 +115,8 @@ export interface SessionDetail extends SessionSummary {
   messageCount: number;
   /** Session-default model id. Threads inherit when they have no override. */
   model?: string;
+  /** Session-default reasoning/thinking level. */
+  reasoning?: string | null;
   profile: SandboxProfile;
   /** Request a rootless docker daemon inside this session's sandbox
    * (docker-in-sandbox). See docs/specs/2026-08-15-sandbox-docker-design.md. */
@@ -895,6 +897,10 @@ export interface AssistantSummary {
   personality?: string;
   /** Absent means every skill and integration (the pre-config behavior). */
   behavior?: AssistantBehavior;
+  /** Assistant-specific model override. */
+  model?: string | null;
+  /** Assistant-specific reasoning/thinking level override. */
+  reasoning?: string | null;
 }
 
 export interface ListAssistantsResponse {
@@ -926,6 +932,10 @@ export interface PatchAssistantRequest {
   personality?: string | null;
   /** null clears back to "everything". */
   behavior?: AssistantBehavior | null;
+  /** Assistant-specific model override, or null to clear. */
+  model?: string | null;
+  /** Assistant-specific reasoning/thinking level override, or null to clear. */
+  reasoning?: string | null;
 }
 
 export type PatchAssistantResponse = AssistantSummary;
@@ -1002,6 +1012,8 @@ export interface ThreadSummary {
   createdAt: number;
   /** Thread-level model override. Falls back to the session default when undefined. */
   model?: string;
+  /** Thread-level reasoning/thinking level override. */
+  reasoning?: string | null;
   /** Set when the thread is archived (display state; history is intact). */
   archivedAt?: number;
   /**
@@ -1034,6 +1046,8 @@ export type CreateThreadResponse = ThreadSummary;
  */
 export interface PatchThreadRequest {
   model?: string | null;
+  /** Thread-level reasoning/thinking level override. */
+  reasoning?: string | null;
   archived?: boolean;
   /** New title. The server trims it and rejects more than 200 characters. */
   title?: string | null;
@@ -1053,6 +1067,8 @@ export type PatchThreadResponse = ThreadSummary;
  */
 export interface PatchSessionRequest {
   model?: string;
+  /** Session-default reasoning/thinking level. */
+  reasoning?: string | null;
   /** New session name. Trimmed server-side. Must not be empty. */
   title?: string;
   /**
@@ -1658,6 +1674,8 @@ export interface TeamSummary {
    * resolution falls through to the org preference list.
    */
   defaultModel: string | null;
+  /** Team's default reasoning/thinking level. */
+  defaultReasoning?: string | null;
 }
 
 export interface TeamMemberSummary {
@@ -1685,6 +1703,8 @@ export interface CreateTeamResponse {
  * override back to the org preference list. */
 export interface PatchTeamRequest {
   defaultModel?: string | null;
+  /** Team's default reasoning/thinking level, or null to clear. */
+  defaultReasoning?: string | null;
 }
 
 export interface PatchTeamResponse {
@@ -3014,6 +3034,8 @@ export interface MeResponse {
   orgId: string;
   orgRole: "admin" | "member";
   defaultModel: string | null;
+  /** User's default reasoning/thinking level. */
+  defaultReasoning: string | null;
 }
 
 /** Whitelisted fields only — unknown keys 400. `defaultModel: null` clears the override. */
@@ -3021,6 +3043,8 @@ export interface PatchMeRequest {
   name?: string;
   avatarUrl?: string;
   defaultModel?: string | null;
+  /** User's default reasoning/thinking level, or null to clear. */
+  defaultReasoning?: string | null;
 }
 
 export type PatchMeResponse = MeResponse;
@@ -3216,6 +3240,10 @@ export interface ModelInfo {
   providerName: string;
   active: boolean;
   pricing?: { input: number; output: number };
+  /** Whether this model is approved for the org. */
+  approved: boolean;
+  /** Available extended thinking/reasoning levels for this model. */
+  thinkingLevels?: string[];
 }
 
 export interface ListModelsResponse {
@@ -3240,6 +3268,52 @@ export interface ModelRegistryStatusResponse {
   remoteEnabled: boolean;
   providers: ModelRegistryProviderStatusWire[];
 }
+
+/** Model tier map: tier id (xs|s|m|l|xl) to list of model ids in that tier. */
+export type WireTierMap = Record<"xs" | "s" | "m" | "l" | "xl", string[]>;
+
+/** `GET /api/org/settings/model-tiers` — the org's model tier assignments. */
+export type GetModelTiersResponse = WireTierMap;
+
+/** `PATCH /api/org/settings/model-tiers` — partial tier updates. */
+export type PatchModelTiersRequest = Partial<WireTierMap>;
+
+/** `GET /api/org/settings/approved-models` — the org's approved model list. */
+export interface GetApprovedModelsResponse {
+  /** List of approved model ids, or null if no approval list is set. */
+  approved: string[] | null;
+}
+
+/** `PUT /api/org/settings/approved-models` — set or clear the approved list. */
+export interface PutApprovedModelsRequest {
+  /** List of approved model ids, or null to clear the list. */
+  approved: string[] | null;
+}
+
+/** `PUT /api/org/settings/approved-models` — response. */
+export type PutApprovedModelsResponse = GetApprovedModelsResponse;
+
+/** Org-level reasoning settings. */
+export interface OrgReasoningSettings {
+  /** Default reasoning/thinking level. */
+  default?: string;
+  /** Maximum allowed reasoning level. */
+  max?: string;
+}
+
+/** `GET /api/org/settings/reasoning` — the org's reasoning settings. */
+export type GetOrgReasoningResponse = OrgReasoningSettings;
+
+/** `PATCH /api/org/settings/reasoning` — update reasoning settings. */
+export type PatchOrgReasoningRequest = {
+  /** Default reasoning level, or null to clear. */
+  default?: string | null;
+  /** Maximum reasoning level, or null to clear. */
+  max?: string | null;
+};
+
+/** `PATCH /api/org/settings/reasoning` — response. */
+export type PatchOrgReasoningResponse = OrgReasoningSettings;
 
 // ── REST: usage (`/api/usage/summary`) ─────────────────────────────────
 
