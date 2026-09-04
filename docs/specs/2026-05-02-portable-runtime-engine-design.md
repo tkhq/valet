@@ -1507,6 +1507,10 @@ Adapters must include all pending decision gates in the initial connection paylo
 
 **Offset-based resume:** every delivered *durable* client event carries the durable stream `offset`. On (re)connect, a client supplies its last seen offset; the adapter replays durable events from that offset via `EventStream.read` and then switches to live delivery, deduplicating by offset at the boundary. A client with no offset receives `init` (metadata-only) and loads message history through the REST API. Live-only delta events carry **no offset** and are never replayed — the persisted entries are their durable record, and clients must not advance their resume offset on a delta.
 
+**Browser reconnect policy:** The browser retries non-terminal closes with exponential backoff from 500 ms to 8 seconds. It resets the delay only after an `init` event confirms a valid session stream. A WebSocket `open` event does not confirm the session because the server can accept the handshake and then reject access. Close code `4040` is terminal because it means that the session does not exist or the user cannot view it. Other close codes remain retryable.
+
+**Browser render isolation:** A `text_delta` replaces only its target message object. Other message objects keep their identity. `MessageItem` uses this stable boundary to skip unchanged history rows while the message list follows the active stream. This prevents unchanged Markdown trees from rebuilding for each token without coupling each row to the stream store. The shared `Markdown` component does not own this optimization.
+
 ### Structured Results
 
 Optional schema-validated output extraction. Any prompt or skill invocation can pass a result schema (Valibot or TypeBox). The engine instructs the LLM to emit a result in a delimited block, extracts it, and validates against the schema.

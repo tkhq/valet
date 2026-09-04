@@ -13,6 +13,15 @@ import { describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import type { StreamMessage } from "~/stores/stream";
 
+const markdownRender = vi.hoisted(() => vi.fn());
+
+vi.mock("~/components/markdown", () => ({
+  Markdown: ({ children }: { children: string }) => {
+    markdownRender(children);
+    return <span>{children}</span>;
+  },
+}));
+
 // The rating hooks need a QueryClient these renders don't mount; spread the
 // real module so every other export stays present (see session-header.test.tsx).
 vi.mock("~/api/queries", async (importOriginal) => {
@@ -28,10 +37,14 @@ import { TooltipProvider } from "~/components/primitives";
 import { MessageItem } from "./message-item";
 
 function renderItem(message: StreamMessage) {
-  return render(
+  return render(itemTree(message));
+}
+
+function itemTree(message: StreamMessage) {
+  return (
     <TooltipProvider>
       <MessageItem message={message} />
-    </TooltipProvider>,
+    </TooltipProvider>
   );
 }
 
@@ -86,5 +99,18 @@ describe("MessageItem copy button", () => {
       }),
     );
     expect(screen.queryByRole("button", { name: "Copy message" })).toBeNull();
+  });
+});
+
+describe("MessageItem render isolation", () => {
+  it("does not re-render unchanged Markdown when its parent renders again", () => {
+    markdownRender.mockClear();
+    const message = msg({ parts: [{ kind: "text", text: "stable history" }] });
+    const view = renderItem(message);
+    expect(markdownRender).toHaveBeenCalledTimes(1);
+
+    view.rerender(itemTree(message));
+
+    expect(markdownRender).toHaveBeenCalledTimes(1);
   });
 });

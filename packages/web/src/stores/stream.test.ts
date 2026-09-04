@@ -44,6 +44,34 @@ function statusEvent(
 describe("stream store reducer", () => {
   beforeEach(reset);
 
+  it("preserves store identity for an offset-free ping", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, messageStart("m1", 1));
+    const before = useStreamStore.getState();
+    const beforeSlice = before.bySession[SESSION];
+
+    ingest(SESSION, { seq: 2, ts: Date.now(), type: "ping" });
+
+    expect(useStreamStore.getState()).toBe(before);
+    expect(useStreamStore.getState().bySession[SESSION]).toBe(beforeSlice);
+  });
+
+  it("advances store identity when a ping carries a newer offset", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, messageStart("m1", 1));
+    const before = useStreamStore.getState();
+
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      offset: offset(2),
+      type: "ping",
+    });
+
+    expect(useStreamStore.getState()).not.toBe(before);
+    expect(useStreamStore.getState().bySession[SESSION].lastOffset).toBe(offset(2));
+  });
+
   it("advances lastOffset to the max seen and drops frames at/under it, but chunk-style frames never advance it", () => {
     const { ingest } = useStreamStore.getState();
 

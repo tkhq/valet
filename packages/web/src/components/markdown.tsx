@@ -1,4 +1,4 @@
-import { isValidElement, memo, type MouseEvent, type ReactNode } from "react";
+import { isValidElement, type MouseEvent, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { resolveLinkTarget } from "@valet/api/memory-links";
@@ -74,7 +74,7 @@ function isPlainLeftClick(e: MouseEvent<HTMLAnchorElement>): boolean {
  * Pass `memoryLinks` to make cross-references between memory documents
  * navigate in place — see `MemoryLinkHandling`.
  */
-export const Markdown = memo(function Markdown({
+export function Markdown({
   children,
   className,
   memoryLinks,
@@ -184,4 +184,4 @@ export const Markdown = memo(function Markdown({
       </ReactMarkdown>
     </div>
   );
-});
+}

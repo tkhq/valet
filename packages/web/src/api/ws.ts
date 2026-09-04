@@ -120,10 +120,10 @@ export function useSessionWebSocket(sessionId: string) {
       };
       socket.onclose = (closeEv) => {
         if (cancelled) return;
-        // 4xxx = application-level rejection (4040 session not found, etc.).
-        // Reconnecting is pointless — the server will reject again.
-        // Set "error" (not "closed") so the UI shows a failure state.
-        if (closeEv.code >= 4000 && closeEv.code < 5000) {
+        // 4040 means the session does not exist or the user cannot view it.
+        // A retry cannot change that result. Other private close codes can
+        // describe temporary application state, so they keep the backoff.
+        if (closeEv.code === 4040) {
           setConnection(sessionId, "error");
           return;
         }

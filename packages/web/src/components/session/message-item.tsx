@@ -46,6 +46,11 @@ function MessageRating({ message }: { message: StreamMessage }) {
   );
 }
 
+/**
+ * `text_delta` replaces only the active message object, but MessageList must
+ * still render to follow the stream. Memoizing at this stable prop boundary
+ * keeps every unchanged history row from rebuilding its Markdown tree.
+ */
 export const MessageItem = memo(function MessageItem({
   message,
   suppressEmptyPlaceholder = false,
@@ -398,4 +403,3 @@ function formatTime(ts: number): string {
   const d = new Date(ts);
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
-
