@@ -646,9 +646,10 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
     }
 
     case "ping": {
-      // Ping carries no state change. Return the original slice (not `next`)
-      // to preserve object identity and avoid a spurious re-render.
-      return slice;
+      // Ping carries no state change. Preserve identity unless the
+      // frame advanced lastOffset (defensive — pings don't carry
+      // offsets today, but the contract allows it).
+      return ev.offset && ev.offset > slice.lastOffset ? next : slice;
     }
 
     case "command_result": {
