@@ -23,7 +23,8 @@ import {
   type ValetPlugin,
 } from "@valet/engine";
 import { PgSessionStore, PgEventStream } from "@valet/store-postgres";
-import { agentSessions, teamMembers, teams, users } from "../schema/index.js";
+import { eq } from "drizzle-orm";
+import { agentSessions, assistants, teamMembers, teams, users } from "../schema/index.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost } from "../engine/host.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
@@ -308,6 +309,77 @@ describe("ChannelHost outbound delivery", () => {
     // Give a second pass an opportunity to double-deliver before asserting.
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(fakeTransport.sent.filter((s) => s.message.markdown.includes("duplicate delivery test"))).toHaveLength(1);
+  });
+
+  it("brands the assistant's reply with its name and avatar (TKAI-387)", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    await testDb.appDb
+      .update(assistants)
+      .set({ name: "Ledger", avatarUrl: "https://cdn.example.com/ledger.png" })
+      .where(eq(assistants.sessionId, session.id));
+    const threadId = session.thread("fake:99").id;
+    await engineStore.appendEntries(session.id, threadId, [
+      {
+        type: "message",
+        id: "brand-msg-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant",
+        content: "branded reply",
+        stopReason: "end_turn",
+      },
+    ]);
+
+    const event: BusEvent = {
+      sessionId: session.id,
+      threadId,
+      timestamp: Date.now(),
+      event: { type: "message_end", threadId, messageId: "brand-msg-1", reason: "end_turn" },
+    };
+    await eventStream.append(event, `brand-${randomUUID()}`);
+
+    await vi.waitFor(() => {
+      expect(fakeTransport.sent.some((s) => s.message.markdown.includes("branded reply"))).toBe(true);
+    });
+    const sent = fakeTransport.sent.find((s) => s.message.markdown.includes("branded reply"));
+    expect(sent?.message.sender).toEqual({
+      displayName: "Ledger",
+      avatarUrl: "https://cdn.example.com/ledger.png",
+    });
+  });
+
+  it("sends no identity override when the assistant has neither name nor avatar", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    await engineStore.appendEntries(session.id, threadId, [
+      {
+        type: "message",
+        id: "plain-msg-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant",
+        content: "plain reply",
+        stopReason: "end_turn",
+      },
+    ]);
+
+    const event: BusEvent = {
+      sessionId: session.id,
+      threadId,
+      timestamp: Date.now(),
+      event: { type: "message_end", threadId, messageId: "plain-msg-1", reason: "end_turn" },
+    };
+    await eventStream.append(event, `plain-${randomUUID()}`);
+
+    await vi.waitFor(() => {
+      expect(fakeTransport.sent.some((s) => s.message.markdown.includes("plain reply"))).toBe(true);
+    });
+    const sent = fakeTransport.sent.find((s) => s.message.markdown.includes("plain reply"));
+    expect(sent?.message.sender).toBeUndefined();
   });
 
   it("delivers a command_result to the channel the command came from", async () => {

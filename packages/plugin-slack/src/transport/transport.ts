@@ -24,6 +24,7 @@ import {
   ChannelStreamError,
   type ChannelGatePrompt,
   type ChannelGateResolution,
+  type ChannelSenderIdentity,
   type ChannelStreamErrorKind,
   type ChannelTransport,
   type ChannelTransportFactory,
@@ -87,6 +88,22 @@ export function resetSlackDirectoryCache(): void {
 function truncatePlain(text: string, max: number): string {
   const points = [...text];
   return points.length > max ? `${points.slice(0, max - 1).join("")}…` : text;
+}
+
+/**
+ * `chat.postMessage` override fields for a per-assistant identity
+ * (`username`/`icon_url`, `chat:write.customize` scope). Empty strings are
+ * treated as unset — Slack rejects an empty `username`. Absent or empty →
+ * `{}`, so the post keeps the bot's own identity.
+ */
+function identityOverride(sender: ChannelSenderIdentity | undefined): { username?: string; iconUrl?: string } {
+  if (!sender) return {};
+  const username = sender.displayName?.trim();
+  const iconUrl = sender.avatarUrl?.trim();
+  return {
+    ...(username ? { username } : {}),
+    ...(iconUrl ? { iconUrl } : {}),
+  };
 }
 
 /** Slack date token: renders the moment in each reader's own timezone. */
@@ -784,6 +801,26 @@ export class SlackTransport implements ChannelTransport {
 
   // ─── Discrete-message egress ──────────────────────────────────────────
 
+  /**
+   * chat.postMessage, retried once without the identity override when the
+   * workspace lacks `chat:write.customize`. The override is decoration; the
+   * message itself must still land, under the bot's own identity.
+   */
+  private async postMessageAs(
+    opts: Parameters<SlackApi["postMessage"]>[0],
+  ): Promise<{ ts: string }> {
+    try {
+      return await this.api.postMessage(opts);
+    } catch (err) {
+      const hadOverride = opts.username !== undefined || opts.iconUrl !== undefined;
+      if (hadOverride && err instanceof SlackApiError && err.detail === "missing_scope") {
+        const { username: _u, iconUrl: _i, ...rest } = opts;
+        return this.api.postMessage(rest);
+      }
+      throw err;
+    }
+  }
+
   async send(conversationKey: string, message: OutboundChannelMessage): Promise<SendRef> {
     const target = this.mustParse(conversationKey);
     const threadTs = this.replyThreadTs(conversationKey);
@@ -796,7 +833,13 @@ export class SlackTransport implements ChannelTransport {
       blocks = buildContentBlocks(message.markdown, formatted, SLACK_MAX_BLOCKS);
       text = formatted.slice(0, SLACK_TEXT_LIMIT); // notification fallback
     }
-    const res = await this.api.postMessage({ channel: target.channelId, text, threadTs, blocks });
+    const res = await this.postMessageAs({
+      channel: target.channelId,
+      text,
+      threadTs,
+      blocks,
+      ...identityOverride(message.sender),
+    });
     return { conversationKey, messageId: res.ts };
   }
 
@@ -874,11 +917,12 @@ export class SlackTransport implements ChannelTransport {
       })),
     });
     const threadTs = this.replyThreadTs(conversationKey);
-    const res = await this.api.postMessage({
+    const res = await this.postMessageAs({
       channel: target.channelId,
       text,
       threadTs,
       blocks,
+      ...identityOverride(gate.sender),
     });
     // The returned ref must round-trip through the inbound click:
     // `parseBlockActions` rebuilds the conversationKey from

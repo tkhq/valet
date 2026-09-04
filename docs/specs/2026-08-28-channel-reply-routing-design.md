@@ -183,6 +183,16 @@ the same contract: one streamed message per gate segment.
 - **Sender.** `#441` renders a sender line for user messages. Confirm the
   channel-origin signal carries an author (1.2 sets it from `event.actor`) so
   the same line renders. If a gap remains on the events path, close it here.
+- **Outbound identity (TKAI-387).** Every auto-post and gate card carries the
+  sending assistant's identity. `ChannelHost` resolves the session's
+  `assistants` row (`assistantSenderIdentity`) and sets
+  `OutboundChannelMessage.sender` / `ChannelGatePrompt.sender` from
+  `name`/`avatar_url`. The Slack transport maps them to `username`/`icon_url`
+  on `chat.postMessage` (the `chat:write.customize` scope); when the workspace
+  lacks the scope, the transport retries once without the override, because
+  the message must land either way. An assistant with neither field set posts
+  under the bot's own identity, unchanged. Resolution edits (`chat.update`)
+  keep the identity the card posted with.
 
 ### Part 2 — one routing wizard, names not ids
 

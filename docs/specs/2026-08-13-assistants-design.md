@@ -138,6 +138,7 @@ assistants
   owner_type   text not null      -- user | team | org
   owner_id     text not null
   name         text
+  avatar_url   text               -- outbound-post avatar (TKAI-387); null = the bot's own icon
   session_id   text not null      -- assistant:{id}; migrated rows keep legacy orchestrator:* ids
   is_default   boolean not null
   created_at   bigint not null

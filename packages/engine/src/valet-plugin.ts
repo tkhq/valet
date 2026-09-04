@@ -260,8 +260,22 @@ export interface InboundChannelEvent {
   raw: RawChannelUpdate;
 }
 
+/**
+ * Per-assistant outbound identity. The host resolves it from the assistant
+ * that owns the sending session; a transport that can brand a post (Slack:
+ * `username`/`icon_url` under `chat:write.customize`) applies it. Absent —
+ * or on a transport without the capability — the post keeps the bot's own
+ * identity.
+ */
+export interface ChannelSenderIdentity {
+  displayName?: string;
+  avatarUrl?: string;
+}
+
 export interface OutboundChannelMessage {
   markdown: string;
+  /** Assistant identity override. Absent = the bot's own identity. */
+  sender?: ChannelSenderIdentity;
 }
 
 export type OutboundChannelAttachment =
@@ -281,6 +295,9 @@ export interface ChannelGatePrompt {
    */
   fields?: Array<{ label: string; value: string }>;
   actions: Array<{ id: string; label: string; style?: "primary" | "danger" }>;
+  /** Assistant identity override for the prompt card. Absent = the bot's
+   * own identity. Resolution edits keep the identity the card posted with. */
+  sender?: ChannelSenderIdentity;
 }
 
 export interface ChannelGateResolution {

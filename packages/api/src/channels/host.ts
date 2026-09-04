@@ -794,9 +794,13 @@ export class ChannelHost {
     // Whether the reply's TEXT landed on the channel, so a later attachment
     // failure does not produce a false "your reply was NOT posted" note.
     let textPosted = false;
+    const sender = await this.assistantSenderIdentity(sessionId);
     try {
       if (entry.content) {
-        await transport.send(target.conversationKey, { markdown: entry.content });
+        await transport.send(target.conversationKey, {
+          markdown: entry.content,
+          ...(sender !== undefined ? { sender } : {}),
+        });
         textPosted = true;
       }
       for (const part of entry.parts ?? []) {
@@ -885,6 +889,34 @@ export class ChannelHost {
       );
     } catch (err) {
       console.error("[channels] reply-dropped feedback failed", err);
+    }
+  }
+
+  /**
+   * Per-assistant outbound identity for a session's channel posts
+   * (TKAI-387): the assistant's `name` and `avatarUrl`, read from the row
+   * on every delivery so an edit takes effect on the next post. `undefined`
+   * when the session is not an assistant's, or when the assistant has no
+   * override set — the transport then posts under the bot's own identity.
+   * Best-effort: a lookup failure must not stop the delivery.
+   */
+  private async assistantSenderIdentity(
+    sessionId: string,
+  ): Promise<{ displayName?: string; avatarUrl?: string } | undefined> {
+    try {
+      const row = await loadAssistantBySessionId(this.deps.db, sessionId);
+      if (!row) return undefined;
+      const displayName = row.name ?? undefined;
+      const avatarUrl = row.avatarUrl ?? undefined;
+      if (displayName === undefined && avatarUrl === undefined) return undefined;
+      return {
+        ...(displayName !== undefined ? { displayName } : {}),
+        ...(avatarUrl !== undefined ? { avatarUrl } : {}),
+      };
+    } catch (err) {
+      // Identity is decoration on the post; the text must still land.
+      console.error("[channels] assistant identity lookup failed", err);
+      return undefined;
     }
   }
 
@@ -1010,7 +1042,14 @@ export class ChannelHost {
     },
     sessionId: string,
   ): Promise<void> {
-    const ref = await transport.sendGatePrompt(conversationKey, prompt);
+    // The card carries the asking assistant's identity, same as the
+    // auto-post: in a channel with several assistants the reader must see
+    // WHO is asking for approval. Resolution edits keep the posted identity.
+    const sender = await this.assistantSenderIdentity(sessionId);
+    const ref = await transport.sendGatePrompt(conversationKey, {
+      ...prompt,
+      ...(sender !== undefined ? { sender } : {}),
+    });
     this.gateActions.set(prompt.gateId, prompt.actions);
     this.recordGatePrompt(prompt.gateId, ref, sessionId);
     const settled = this.settledGates.get(prompt.gateId);

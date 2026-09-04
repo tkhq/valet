@@ -882,6 +882,8 @@ export interface AssistantSummary {
   /** Absent until someone names it. The UI shows a placeholder rather than
    * inventing a name the user never chose. */
   name?: string;
+  /** Avatar URL for outbound channel posts. Absent = the bot's own icon. */
+  avatarUrl?: string;
   /** `assistant:{id}` — every assistant, default included. Carried here so
    * listing assistants is also how the client learns their session ids, and
    * opening one still creates nothing until the conversation starts. */
@@ -925,6 +927,9 @@ export interface PatchAssistantRequest {
   /** null clears the name; the session then drops the persona prefix and
    * the UI shows its placeholder label. */
   name?: string | null;
+  /** https URL of the avatar shown on outbound channel posts, or null to
+   * clear it (the bot's own icon shows again). */
+  avatarUrl?: string | null;
   isDefault?: true;
   /** null clears the personality: the session keeps only its name ("You are
    * {name}."). The legacy memory-file fallback applies only to assistants

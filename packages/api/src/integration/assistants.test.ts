@@ -624,6 +624,44 @@ describe("personality and behavior config", () => {
     expect(created.personality).toBeUndefined();
   });
 
+  it("PATCH writes avatarUrl, and null clears it (TKAI-387)", async () => {
+    api = await bootTestApi();
+    const created = await create(api, { name: "Ledger" });
+    expect(created.avatarUrl).toBeUndefined();
+
+    const set = await fetch(`${api.baseUrl}/api/assistants/${created.id}`, {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ avatarUrl: "https://cdn.example.com/ledger.png" }),
+    });
+    expect(set.status).toBe(200);
+    const patched = (await set.json()) as PatchAssistantResponse;
+    expect(patched.avatarUrl).toBe("https://cdn.example.com/ledger.png");
+
+    const clear = await fetch(`${api.baseUrl}/api/assistants/${created.id}`, {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ avatarUrl: null }),
+    });
+    expect(clear.status).toBe(200);
+    const cleared = (await clear.json()) as PatchAssistantResponse;
+    expect(cleared.avatarUrl).toBeUndefined();
+  });
+
+  it("PATCH rejects a non-https avatarUrl and names the fix", async () => {
+    api = await bootTestApi();
+    const created = await create(api, { name: "Ledger" });
+
+    const res = await fetch(`${api.baseUrl}/api/assistants/${created.id}`, {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ avatarUrl: "http://cdn.example.com/ledger.png" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("https://");
+  });
+
   it("PATCH name null clears the name", async () => {
     api = await bootTestApi();
     const created = await create(api, { name: "Triage" });

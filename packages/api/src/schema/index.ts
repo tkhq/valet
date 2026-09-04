@@ -533,8 +533,12 @@ export const assistants = pgTable(
     orgId: text("org_id").notNull(),
     ownerType: text("owner_type", { enum: ["user", "team", "org"] }).notNull(),
     ownerId: text("owner_id").notNull(),
-    /** What the reader calls it. Was `orchestrator_identities.handle`. */
+    /** What the reader calls it. Was `orchestrator_identities.handle`. Also
+     * the outbound display name on channel posts (Slack `username`). */
     name: text("name"),
+    /** Avatar image URL for outbound channel posts (Slack `icon_url`).
+     * Null falls back to the bot's own icon. */
+    avatarUrl: text("avatar_url"),
     /** Per-assistant persona text. Null falls back to the owner's
      * assistant/personality.md memory file (the pre-config behavior). */
     personality: text("personality"),
