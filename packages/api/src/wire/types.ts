@@ -1034,6 +1034,8 @@ export interface ListThreadsResponse {
 export interface CreateThreadRequest {
   /** Optional title — not currently persisted by the engine; reserved. */
   title?: string;
+  /** Active thread whose effective model and thinking can seed the new thread. */
+  sourceThreadId?: string;
 }
 
 export type CreateThreadResponse = ThreadSummary;

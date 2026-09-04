@@ -18,6 +18,7 @@ const ME: MeResponse = {
   orgRole: "admin",
   defaultModel: null,
   defaultReasoning: null,
+  newThreadBehavior: "keep_current",
 };
 
 let dir: string;

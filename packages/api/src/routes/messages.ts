@@ -13,10 +13,15 @@
  */
 import { Hono, type Context } from "hono";
 import { eq, inArray } from "drizzle-orm";
-import { dispatchCommand, NotFoundError, ValidationError } from "@valet/engine";
+import {
+  dispatchCommand,
+  NotFoundError,
+  parseReasoningLevel,
+  ValidationError,
+} from "@valet/engine";
 import type { PromptAuthor, SessionEntry, Session as EngineSession } from "@valet/engine";
 import type { AppEnv } from "../env.js";
-import { agentSessions, sessionThreads } from "../schema/index.js";
+import { agentSessions, sessionThreads, users } from "../schema/index.js";
 import { makeCommandContext } from "../engine/command-providers.js";
 import type {
   CreateThreadRequest,
@@ -254,7 +259,14 @@ function threadToSummary(
 
 async function loadEngineSession(
   c: Context<AppEnv>,
-): Promise<{ session: typeof agentSessions.$inferSelect; engineSession: EngineSession } | { error: Response }> {
+): Promise<
+  | {
+      session: typeof agentSessions.$inferSelect;
+      engineSession: EngineSession;
+      meta: Awaited<ReturnType<typeof loadSessionMeta>>;
+    }
+  | { error: Response }
+> {
   const session = await loadOwnedSession(c);
   if (!session) return { error: c.json({ error: "session not found" }, 404) };
   const { engineHost, db } = c.var.providers;
@@ -264,8 +276,9 @@ async function loadEngineSession(
   // carries them. The first call to actually build the session (create or
   // restore) wires `prepareSandbox`; later calls are no-op reads once cached
   // (`sessionFor` returns early without touching `meta`).
-  const engineSession = await engineHost.sessionFor(session.id, await loadSessionMeta(db, session));
-  return { session, engineSession };
+  const meta = await loadSessionMeta(db, session);
+  const engineSession = await engineHost.sessionFor(session.id, meta);
+  return { session, engineSession, meta };
 }
 
 messagesRouter.get("/:id/threads", async (c) => {
@@ -504,21 +517,51 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
 messagesRouter.post("/:id/threads", async (c) => {
   const result = await loadEngineSession(c);
   if ("error" in result) return result.error;
-  const { session, engineSession } = result;
+  const { session, engineSession, meta } = result;
+  const { db, engineHost } = c.var.providers;
 
-  let body: CreateThreadRequest = {};
+  let parsed: unknown = {};
   try {
     const text = await c.req.text();
-    body = text ? (JSON.parse(text) as CreateThreadRequest) : {};
+    parsed = text ? JSON.parse(text) : {};
   } catch {
-    return c.json({ error: "invalid JSON body" }, 400);
+    return c.json({ error: "invalid JSON body. Send a JSON object." }, 400);
   }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return c.json({ error: "invalid JSON body. Send a JSON object." }, 400);
+  }
+  const body = parsed as CreateThreadRequest;
+  if (body.sourceThreadId !== undefined && typeof body.sourceThreadId !== "string") {
+    return c.json({ error: "sourceThreadId must be a string. Select a thread from this session." }, 400);
+  }
+
+  const source = body.sourceThreadId
+    ? engineSession.threadById(body.sourceThreadId)
+    : null;
+  if (body.sourceThreadId && !source) {
+    return c.json({ error: "thread not found. Select a thread from this session." }, 404);
+  }
+
+  const behaviorRows = await db
+    .select({ newThreadBehavior: users.newThreadBehavior })
+    .from(users)
+    .where(eq(users.id, c.var.user.id))
+    .limit(1);
+  const keepCurrent = behaviorRows[0]?.newThreadBehavior !== "use_defaults";
+  const settings = keepCurrent && source
+    ? {
+        model: source.modelId() ?? engineSession.options.modelSpec ?? engineSession.options.model.id,
+        reasoning: parseReasoningLevel(
+          source.reasoning() ?? engineSession.options.sampling?.reasoning,
+        ),
+      }
+    : await engineHost.resolveFreshThreadSettings(session.id, meta, c.var.user.id);
 
   // Engine identifies threads by `key`; we generate a fresh one so each
   // POST creates a new thread (calling thread() with an existing key
   // returns the cached one).
   const key = `web:${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-  const thread = engineSession.thread(key);
+  const thread = await engineSession.createThread(key, settings);
   const summary: CreateThreadResponse = threadToSummary(
     thread.id,
     thread.toThreadData().createdAt,

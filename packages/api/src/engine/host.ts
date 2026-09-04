@@ -3060,6 +3060,42 @@ export class EngineHost {
   }
 
   /**
+   * Resolve settings for a new thread without consulting persisted session
+   * settings. Tier tokens remain tokens so later turns use the current map.
+   */
+  async resolveFreshThreadSettings(
+    sessionId: string,
+    meta: SessionMeta,
+    actorUserId = meta.userId,
+  ): Promise<{ model: string; reasoning?: ReasoningLevel }> {
+    const assistant = this.opts.db
+      ? await loadAssistantBySessionId(this.opts.db, sessionId)
+      : undefined;
+    const isUserAssistant = assistant?.ownerType === "user";
+    const isTeamAssistant = assistant?.ownerType === "team";
+    const userId = assistant ? (isUserAssistant ? actorUserId : undefined) : actorUserId;
+    const ownerTeamId = assistant
+      ? (isTeamAssistant ? assistant.ownerId : undefined)
+      : meta.ownerTeamId;
+    const { spec } = await this.resolveModelForBuild(null, meta.orgId, {
+      userId,
+      ownerTeamId,
+      assistantDefault: assistant?.model ?? undefined,
+    });
+    const reasoning = await this.resolveReasoningForBuild(null, meta.orgId, {
+      userId,
+      ownerTeamId,
+      assistantDefault: assistant?.reasoning ?? undefined,
+    });
+    return {
+      model: spec,
+      ...(reasoning && REASONING_SET.has(reasoning)
+        ? { reasoning: reasoning as ReasoningLevel }
+        : {}),
+    };
+  }
+
+  /**
    * Resolve (or lazily create) a child session (Phase 4 decision 10/11).
    * Purpose 'child', linked to its parent via `parentSessionId`/
    * `parentThreadId`. Deliberately gets NO `toolConfig.childSpawner` — the
