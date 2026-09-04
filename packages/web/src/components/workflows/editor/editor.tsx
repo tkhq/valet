@@ -102,6 +102,8 @@ export interface EditorProps {
   /** Per-node policy predictions for the canvas cards, keyed by node id.
    * The page owns the query (it is per stored workflow, not per draft). */
   gateByNodeId?: ReadonlyMap<string, "require_approval" | "deny">;
+  /** A mirrored workflow is edited in its file. Hide Save and the JSON hatch. */
+  readOnly?: boolean;
 }
 
 export function Editor({
@@ -113,6 +115,7 @@ export function Editor({
   onCancelExternal,
   onDirtyChange,
   gateByNodeId,
+  readOnly = false,
 }: EditorProps) {
   const [definition, setDefinition] = useState<WorkflowDefinition>(initialDefinition);
   const [dirty, setDirty] = useState(false);
@@ -335,36 +338,39 @@ export function Editor({
               cannot express, so it stays — but out of the way. Reaching it
               takes a menu; leaving it takes one visible button, because
               nobody should have to hunt for the way back to the canvas. */}
-          {jsonMode ? (
-            <Button variant="secondary" size="sm" onClick={() => setJsonMode(false)}>
-              Visual editor
+          {!readOnly &&
+            (jsonMode ? (
+              <Button variant="secondary" size="sm" onClick={() => setJsonMode(false)}>
+                Visual editor
+              </Button>
+            ) : (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="ghost" size="sm" aria-label="More editor actions">
+                    <MoreHorizontal className="h-4 w-4" aria-hidden />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start">
+                  <DropdownMenuItem onSelect={() => setJsonMode(true)}>Edit JSON</DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ))}
+        </div>
+        {!readOnly && (
+          <div className="flex items-center gap-2">
+            {saveError && (
+              <span role="alert" className="text-xs text-danger-600 dark:text-danger-500">
+                {saveError}
+              </span>
+            )}
+            <Button variant="secondary" size="sm" onClick={handleCancel} disabled={!effectiveDirty}>
+              Cancel
             </Button>
-          ) : (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="sm" aria-label="More editor actions">
-                  <MoreHorizontal className="h-4 w-4" aria-hidden />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start">
-                <DropdownMenuItem onSelect={() => setJsonMode(true)}>Edit JSON</DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          {saveError && (
-            <span role="alert" className="text-xs text-danger-600 dark:text-danger-500">
-              {saveError}
-            </span>
-          )}
-          <Button variant="secondary" size="sm" onClick={handleCancel} disabled={!effectiveDirty}>
-            Cancel
-          </Button>
-          <Button size="sm" onClick={() => void handleSave()} disabled={saveDisabled}>
-            {saving ? "Saving…" : "Save"}
-          </Button>
-        </div>
+            <Button size="sm" onClick={() => void handleSave()} disabled={saveDisabled}>
+              {saving ? "Saving…" : "Save"}
+            </Button>
+          </div>
+        )}
       </div>
 
       {conflict && (

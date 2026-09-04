@@ -61,8 +61,8 @@ export const qkWorkflows = {
   // page-less forms stay the prefix that invalidates every workspace at once.
   triggers: (workflowId?: string, owner?: OwnerFilter) =>
     ["workflows", "triggers", workflowId ?? "all", ...(owner ? [owner.ownerType, owner.ownerId] : [])] as const,
-  allRuns: (owner?: OwnerFilter) =>
-    ["workflows", "all-runs", ...(owner ? [owner.ownerType, owner.ownerId] : [])] as const,
+  allRuns: (owner?: OwnerFilter, page?: WorkflowRunPage) =>
+    ["workflows", "all-runs", ...(owner ? [owner.ownerType, owner.ownerId] : []), ...(page ? [page] : [])] as const,
   triggerCatalog: () => ["workflows", "trigger-catalog"] as const,
   // Sits under the `detail(id)` prefix on purpose: saving the definition
   // invalidates the detail, and the predictions must follow the definition.
@@ -235,11 +235,12 @@ export function useTriggerCatalog() {
 /** `owner` scopes the hub Runs tab to one workspace. */
 export function useAllWorkflowRuns(
   owner?: OwnerFilter,
+  page?: WorkflowRunPage,
   opts?: Partial<UseQueryOptions<ListAllWorkflowRunsResponse>>,
 ) {
   return useQuery<ListAllWorkflowRunsResponse>({
-    queryKey: qkWorkflows.allRuns(owner),
-    queryFn: () => api.listAllWorkflowRuns(owner),
+    queryKey: qkWorkflows.allRuns(owner, page),
+    queryFn: () => api.listAllWorkflowRuns(owner, page),
     refetchInterval: 5000, // runs move; same cadence as run detail
     ...opts,
   });
@@ -251,6 +252,16 @@ export function useCreateWorkflow() {
   const qc = useQueryClient();
   return useMutation<CreateWorkflowResponse, Error, CreateWorkflowRequest>({
     mutationFn: (body) => api.createWorkflow(body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qkWorkflows.list() });
+    },
+  });
+}
+
+export function useCopyWorkflow() {
+  const qc = useQueryClient();
+  return useMutation<CreateWorkflowResponse, Error, string>({
+    mutationFn: (id) => api.copyWorkflow(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qkWorkflows.list() });
     },
