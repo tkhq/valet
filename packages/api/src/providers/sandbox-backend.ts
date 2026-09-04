@@ -25,6 +25,7 @@ import {
   KubernetesSandboxProvider,
   SANDBOX_CR_API_VERSION,
   customObjectsApiAdapter,
+  parseStorageQuantity,
   podDeleteApiAdapter,
   podExecApiAdapter,
   podLivenessApiAdapter,
@@ -262,16 +263,25 @@ export function resolveSandboxApiUrl(
 }
 
 /**
- * Shared parse for the two ephemeral-storage quantity knobs below: unset or
- * empty → the default; `"0"` → off (undefined — the manifest omits the
- * field); anything else passes through verbatim as a Kubernetes quantity
- * string ("2Gi", "500Mi"). Mirrors `scaledEnvNumber`'s disable convention,
- * except the values are quantity strings, not numbers.
+ * Shared parse for the storage quantity knobs below: unset or empty → the
+ * default; `"0"` → off (undefined — the manifest omits the field); anything
+ * else must parse as a positive Kubernetes quantity ("2Gi", "500Mi") or the
+ * boot THROWS naming the env var (TKAI-403). These values are emitted into
+ * pod specs and PVC claims verbatim; an unvalidated typo ("8GB") used to
+ * fail k8s admission on EVERY sandbox create — a fleet-wide outage with a
+ * raw 422 instead of one loud boot error. Mirrors `scaledEnvNumber`'s
+ * disable convention, except the values are quantity strings, not numbers.
  */
-function quantityEnv(raw: string | undefined, defaultValue: string): string | undefined {
+function quantityEnv(name: string, raw: string | undefined, defaultValue: string): string | undefined {
   if (raw === undefined || raw === "") return defaultValue;
   if (raw === "0") return undefined;
-  return raw;
+  const bytes = parseStorageQuantity(raw);
+  if (bytes === null || bytes <= 0) {
+    throw new Error(
+      `${name}="${raw}" is not a positive Kubernetes quantity. Use a form like "2Gi" or "500Mi", or "0" to disable.`,
+    );
+  }
+  return raw.trim();
 }
 
 /**
@@ -282,7 +292,7 @@ function quantityEnv(raw: string | undefined, defaultValue: string): string | un
  * node exhausted its disk and took it NotReady). `"0"` disables it.
  */
 export function resolveSandboxEphemeralStorageRequest(env: NodeJS.ProcessEnv): string | undefined {
-  return quantityEnv(env.VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST, "2Gi");
+  return quantityEnv("VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST", env.VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST, "2Gi");
 }
 
 /**
@@ -293,7 +303,7 @@ export function resolveSandboxEphemeralStorageRequest(env: NodeJS.ProcessEnv): s
  * volume's sizeLimit). `"0"` disables it. Keep it at or above the request.
  */
 export function resolveSandboxEphemeralStorageLimit(env: NodeJS.ProcessEnv): string | undefined {
-  return quantityEnv(env.VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT, "8Gi");
+  return quantityEnv("VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT", env.VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT, "8Gi");
 }
 
 /**
@@ -320,7 +330,7 @@ export function resolveSandboxEphemeralStorageLimit(env: NodeJS.ProcessEnv): str
  * default rather than provisioning a zero-sized claim.
  */
 export function resolveSandboxWorkspaceStorage(env: NodeJS.ProcessEnv): string | undefined {
-  return quantityEnv(env.VALET_SANDBOX_WORKSPACE_STORAGE, "1Gi");
+  return quantityEnv("VALET_SANDBOX_WORKSPACE_STORAGE", env.VALET_SANDBOX_WORKSPACE_STORAGE, "1Gi");
 }
 
 /**
@@ -334,7 +344,7 @@ export function resolveSandboxWorkspaceStorage(env: NodeJS.ProcessEnv): string |
  * accrete. `"0"` falls back to the provider's own default cap.
  */
 export function resolveSandboxWorkspaceStorageMax(env: NodeJS.ProcessEnv): string | undefined {
-  return quantityEnv(env.VALET_SANDBOX_WORKSPACE_MAX, "20Gi");
+  return quantityEnv("VALET_SANDBOX_WORKSPACE_MAX", env.VALET_SANDBOX_WORKSPACE_MAX, "20Gi");
 }
 
 export interface BuildSandboxProviderDeps {
@@ -385,6 +395,19 @@ export function buildSandboxProvider(
       const ephemeralStorageLimit = resolveSandboxEphemeralStorageLimit(env);
       const workspaceStorage = resolveSandboxWorkspaceStorage(env);
       const workspaceStorageMax = resolveSandboxWorkspaceStorageMax(env);
+      // Contradictory deploy config fails loud at boot (TKAI-403): a default
+      // above the cap would give undeclared repos MORE than a repo that
+      // declares the same size gets after clamping.
+      if (workspaceStorage && workspaceStorageMax) {
+        const defaultBytes = parseStorageQuantity(workspaceStorage);
+        const maxBytes = parseStorageQuantity(workspaceStorageMax);
+        if (defaultBytes !== null && maxBytes !== null && defaultBytes > maxBytes) {
+          throw new Error(
+            `VALET_SANDBOX_WORKSPACE_STORAGE="${workspaceStorage}" exceeds VALET_SANDBOX_WORKSPACE_MAX="${workspaceStorageMax}". ` +
+              "Lower the default or raise the cap.",
+          );
+        }
+      }
       const cfg: K8sProviderConfig = {
         namespace,
         defaultImage: image ?? env.VALET_FULL_BASE_IMAGE ?? DEFAULT_FULL_BASE_IMAGE,

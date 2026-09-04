@@ -71,6 +71,8 @@ The platform clamps the declared size to the deploy's growth cap (`VALET_SANDBOX
 
 The key applies on the kubernetes sandbox backend only. The docker backend (`make dev-local`) mounts `/workspace` from the host filesystem, so it has no volume to size and ignores this key. Use binary or decimal Kubernetes suffixes (`Gi`, `Mi`, `G`, `M`) — forms like `"8GB"` are rejected at read time.
 
+The deploy default is also a floor: a declaration below it (`"512Mi"` when the deploy provisions 1Gi) is raised to the default. A repo can grow its workspace, never shrink it.
+
 ## Dockerfile step order
 
 The bake produces a Dockerfile in this order:

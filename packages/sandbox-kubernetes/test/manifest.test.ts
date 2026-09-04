@@ -544,6 +544,13 @@ describe("workspace storage sizing (TKAI-385: repo-declared size)", () => {
     expect(workspaceStorage(cr)).toBe("4Gi");
   });
 
+  it("a request below the deploy default is floored at the default (TKAI-403: a repo grows, never shrinks)", () => {
+    const cr = buildSandboxManifest({ ...baseConfig, defaultStorage: "1Gi" }, "sess-ws", {
+      workspaceStorage: "512Mi",
+    });
+    expect(workspaceStorage(cr)).toBe("1Gi");
+  });
+
   it("a request past the cap is clamped to workspaceStorageMax verbatim", () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const cr = buildSandboxManifest(

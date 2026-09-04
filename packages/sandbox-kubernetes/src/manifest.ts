@@ -7,7 +7,7 @@
  */
 import { createHash } from "node:crypto";
 import type { SandboxCreateOpts } from "@valet/engine";
-import { DEFAULT_WORKSPACE_STORAGE_MAX, clampStorageRequest } from "./quantity.js";
+import { DEFAULT_WORKSPACE_STORAGE_MAX, clampStorageRequest, parseStorageQuantity } from "./quantity.js";
 import type {
   K8sProviderConfig,
   ResourceList,
@@ -206,6 +206,18 @@ export function resolveWorkspaceStorageRequest(
     console.warn(
       `k8s sandbox ${name}: repo-declared workspaceStorage ${opts.workspaceStorage} exceeds the ${max} cap — clamped`,
     );
+  }
+  // The deploy default is a FLOOR (TKAI-403): a repo may grow its workspace,
+  // never shrink it below what the deploy provisions for undeclared repos —
+  // a below-default claim just burns the one ~6h EBS grow on a size the
+  // deploy already knew was too small.
+  const fallbackBytes = parseStorageQuantity(fallback);
+  const clampBytes = parseStorageQuantity(clamp.storage);
+  if (fallbackBytes !== null && clampBytes !== null && clampBytes < fallbackBytes) {
+    console.log(
+      `k8s sandbox ${name}: repo-declared workspaceStorage ${opts.workspaceStorage} is below the ${fallback} deploy default — using the default`,
+    );
+    return fallback;
   }
   return clamp.storage;
 }
