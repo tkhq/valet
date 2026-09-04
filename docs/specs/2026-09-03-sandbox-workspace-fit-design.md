@@ -176,6 +176,9 @@ workspaceStorage: "4Gi"
   The timeout aborts the GitHub request and removes its in-flight entry. A
   later session retries the read. Cleanup from the old request cannot remove
   a newer in-flight read for the same key.
+  Cache and in-flight keys use the full SHA-256 token fingerprint. Different
+  GitHub grants cannot share answers, and logs never contain the raw token.
+  Tokenless reads use a separate key.
 - The value flows `EngineHost.resolveRepoPrebuildFlags` to
   `SandboxCreateOpts.workspaceStorage`, and then to
   `resolveWorkspaceStorageRequest`. The YAML loader requires a positive
