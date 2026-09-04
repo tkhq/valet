@@ -320,17 +320,17 @@ describe("LlmProvidersSection — custom provider", () => {
     );
   });
 
-  it("surfaces the 409 default-provider-in-use error verbatim", async () => {
+  it("surfaces a delete-mutation error verbatim", async () => {
     const user = userEvent.setup();
     providersData = { providers: [customProvider] };
     deleteLlmProviderMutate.mockImplementation((_id, opts) => {
-      opts.onError(new Error("provider is the org default model's provider"));
+      opts.onError(new Error("failed to delete provider: request timed out"));
     });
     renderWithTooltip(<LlmProvidersSection />);
 
     await user.click(screen.getByRole("button", { name: "Delete My Router" }));
     await user.click(screen.getByRole("button", { name: "Delete provider" }));
 
-    expect(await screen.findByText("provider is the org default model's provider")).toBeTruthy();
+    expect(await screen.findByText("failed to delete provider: request timed out")).toBeTruthy();
   });
 });

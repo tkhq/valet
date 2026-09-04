@@ -111,6 +111,26 @@ describe("ApprovedModelsSection — switch", () => {
     expect(approved).toHaveLength(3); // deduped, no extras
   });
 
+  it("a bare-spelled Anthropic tier target seeds even when the catalog lists it namespaced", async () => {
+    // The catalog can list an Anthropic entry namespaced while a tier
+    // target names the bare back-compat spelling (or vice versa) — both
+    // spellings name the same model, so the seed must match through the
+    // same normalization `isApproved` (server-side) uses, not exact `id`
+    // equality, or this tier target would fail its own tier-map's
+    // approval check right after being seeded.
+    modelsData = { models: [{ ...HAIKU, id: "anthropic/claude-haiku-4-5" }, SONNET, LLAMA] };
+    tiersData = { xs: [], s: ["claude-haiku-4-5"], m: [], l: [], xl: [] };
+    const user = userEvent.setup();
+    render(<ApprovedModelsSection />);
+
+    await user.click(screen.getByRole("switch", { name: "Restrict members to approved models" }));
+
+    expect(putMutate).toHaveBeenCalledWith(
+      { approved: expect.arrayContaining(["claude-haiku-4-5", "anthropic/claude-haiku-4-5", SONNET.id]) },
+      expect.anything(),
+    );
+  });
+
   it("a tier target not present in the catalog is dropped from the seed", async () => {
     tiersData = { xs: [], s: ["prov_gone/deleted-model"], m: [], l: [], xl: [] };
     const user = userEvent.setup();

@@ -117,4 +117,16 @@ describe("ModelTiersSection", () => {
 
     expect(patchMutate).toHaveBeenCalledWith({ xs: [HAIKU.id, OPUS.id] }, expect.anything());
   });
+
+  it("the typeahead excludes unapproved models — offering one would 400 on save", async () => {
+    modelsData = { models: [HAIKU, SONNET, { ...OPUS, approved: false }] };
+    const user = userEvent.setup();
+    render(<ModelTiersSection />);
+
+    const searchInputs = screen.getAllByLabelText("Search models to add");
+    await user.click(searchInputs[0]);
+    const typeahead = searchInputs[0].closest(".space-y-1") as HTMLElement;
+    expect(within(typeahead).queryByText(/Opus 4\.7/)).toBeNull();
+    expect(within(typeahead).getByText(/Sonnet 4\.5/)).toBeTruthy();
+  });
 });

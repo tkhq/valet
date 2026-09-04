@@ -4,7 +4,7 @@ import { Checkbox, Spinner, Switch } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
 import { useApprovedModels, useModelTiers, useModels, usePutApprovedModels } from "~/api/settings";
 import { apiErrorMessage } from "~/api/policies";
-import { curatedForCatalogId } from "~/lib/models";
+import { curatedForCatalogId, sameModelSpec } from "~/lib/models";
 import { SIZE_TIERS } from "~/lib/model-tiers";
 import type { WireTierMap } from "@valet/api/wire";
 
@@ -65,10 +65,16 @@ export function ApprovedModelsSection() {
       putApproved.mutate({ approved: null }, { onError: (err) => setError(apiErrorMessage(err)) });
       return;
     }
-    const catalogIds = new Set(catalog.map((m) => m.id));
+    // `.has(id)` alone would miss a bare-spelled Anthropic tier target
+    // (`"claude-haiku-4-5"`) when the catalog lists it namespaced
+    // (`"anthropic/claude-haiku-4-5"`) — match through the same bare/
+    // namespaced normalization `isApproved` (server-side) uses, or a
+    // bare-spelled enrolled target gets dropped from the seed and then
+    // fails its own tier-map's approval check.
+    const inCatalog = (id: string) => catalog.some((m) => sameModelSpec(m.id, id));
     const enrolled = tiersQ.data ? tierEnrolledIds(tiersQ.data) : [];
     const curated = catalog.filter((m) => curatedForCatalogId(m.id)).map((m) => m.id);
-    const seeded = [...new Set([...enrolled, ...curated])].filter((id) => catalogIds.has(id));
+    const seeded = [...new Set([...enrolled, ...curated])].filter(inCatalog);
     putApproved.mutate({ approved: seeded }, { onError: (err) => setError(apiErrorMessage(err)) });
   }
 

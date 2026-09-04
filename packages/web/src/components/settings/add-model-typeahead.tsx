@@ -11,8 +11,7 @@ import { matchesNeedle } from "~/lib/text-match";
  * 30 rows with a "narrow the search" hint, and stays open after an add so
  * several models can be added in one sitting.
  *
- * Used by `ModelTiersSection`'s per-tier target list and by
- * `ApprovedModelsSection`'s catalog checklist.
+ * Used by `ModelTiersSection`'s per-tier target list.
  */
 export function AddModelTypeahead({
   options,

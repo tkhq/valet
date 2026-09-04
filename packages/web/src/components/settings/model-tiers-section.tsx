@@ -71,7 +71,13 @@ export function ModelTiersSection() {
           {SIZE_TIERS.map((tier) => {
             const targets = tiers[tier];
             const firstModel = targets[0] ? catalogById.get(targets[0]) : undefined;
-            const unlisted = catalog.filter((m) => !targets.includes(m.id));
+            // Offering an unapproved model here would 400 on save (the
+            // tier-map PATCH validates every target against the approved
+            // list) — `m.approved` is already true for everyone when the
+            // org has no restriction, so this only narrows the typeahead
+            // when a restriction is active. Tier tokens never appear in
+            // `catalog`, so they need no equivalent filtering here.
+            const unlisted = catalog.filter((m) => !targets.includes(m.id) && m.approved);
 
             function moveUp(index: number) {
               if (index <= 0) return;

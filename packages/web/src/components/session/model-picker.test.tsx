@@ -283,8 +283,10 @@ describe("ModelPicker — approved-models filter", () => {
     renderPicker();
 
     await user.click(screen.getByRole("button", { name: "Choose model" }));
-    const showMore = screen.queryByText(/show \d+ more/);
-    if (showMore) await user.click(showMore);
+    // Nothing more to reveal for this fixture: the one approved entry
+    // (Sonnet 4.5) is already shown, so the affordance itself must not
+    // render — a member's reveal scope is the same as the baseline.
+    expect(screen.queryByText(/show \d+ more/)).toBeNull();
     expect(document.body.textContent).not.toContain("Llama 3");
 
     await user.type(screen.getByLabelText("Search models"), "llama");
