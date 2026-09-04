@@ -98,7 +98,7 @@ export {
   type WorkspaceGrowOutcome,
 } from "./metrics.js";
 export { Engine } from "./engine.js";
-export { Session } from "./session.js";
+export { Session, type ThreadInitialSettings } from "./session.js";
 export { Thread } from "./thread.js";
 export {
   InMemoryBlobStore,
