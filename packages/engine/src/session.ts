@@ -20,6 +20,7 @@ import type {
 import type { SandboxAttachment, AttachmentStatus } from "./sandbox/attachment.js";
 import type { PolicySandbox } from "./sandbox/policy.js";
 import { NoCredentialsError, StaleAttemptError, ValidationError } from "./errors.js";
+import { isReasoningLevel, parseReasoningLevel, REASONING_LEVELS } from "./reasoning.js";
 import { detachedFromTrace, withSpan } from "./tracing.js";
 import { recordCredentialRead } from "./metrics.js";
 import type { Model } from "@earendil-works/pi-ai/compat";
@@ -482,6 +483,15 @@ export class Session {
     // a child session that loses it across an api restart would stop riding
     // out the very outage that restarted the api.
     if (options.purpose === undefined) options.purpose = data.purpose;
+    // Same no-clobber rule for the session-default reasoning level: a host
+    // that does not re-supply `sampling.reasoning` keeps the persisted
+    // level, so the next `toData()` save cannot stomp it back to NULL. An
+    // explicit level from the host still wins. An unreadable token degrades
+    // to "unset" rather than failing the restore.
+    if (options.sampling?.reasoning === undefined) {
+      const persisted = parseReasoningLevel(data.reasoning);
+      if (persisted !== undefined) options.sampling = { ...options.sampling, reasoning: persisted };
+    }
     const threadDatas = await providers.store.listThreads(data.id);
     for (const td of threadDatas) {
       const thread = new Thread(session, td);
@@ -1394,6 +1404,7 @@ export class Session {
       // `model.id` whenever the host resolver returned a wire-ready model
       // for a namespaced spec (see `ResolvedModel.canonicalId`).
       model: this.options.modelSpec ?? this.options.model.id,
+      reasoning: this.options.sampling?.reasoning,
       startRef: this.options.startRef,
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -1469,6 +1480,30 @@ export class Session {
       });
     }
     return { fromModel: before, toModel: modelId };
+  }
+
+  /**
+   * Set this session's default reasoning level. Threads without their own
+   * pin pick it up on their next LLM call. Persists via `store.saveSession`
+   * (SessionData.reasoning).
+   *
+   * Pass one of `REASONING_LEVELS`, or `null` to clear the default and let
+   * the provider decide. Throws `ValidationError` on an unknown token; the
+   * clamp to a model's supported levels happens at stream time, not here.
+   */
+  async setReasoning(level: string | null): Promise<void> {
+    if (level === null) {
+      if (this.options.sampling) this.options.sampling.reasoning = undefined;
+    } else {
+      // Validate before assigning so a bad token leaves the default intact.
+      if (!isReasoningLevel(level)) {
+        throw new ValidationError(
+          `unknown reasoning level: ${level}. Valid levels: ${REASONING_LEVELS.join(", ")}.`,
+        );
+      }
+      this.options.sampling = { ...this.options.sampling, reasoning: level };
+    }
+    await this.providers.store.saveSession(await this.toData());
   }
 
   async emit(event: EngineEvent, opts?: EmitOptions): Promise<void> {

@@ -1163,6 +1163,23 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     probe: { kind: "column", table: "assistants", column: "reasoning" },
     sql: 'ALTER TABLE "assistants" ADD COLUMN IF NOT EXISTS "reasoning" text',
   },
+  {
+    // Persisted session-default reasoning level (model selector overhaul).
+    // An ENGINE table: the same rule as engine_entries.seq above applies —
+    // additive columns arrive through this repair, and ENGINE_SCHEMA_VERSION
+    // stays put, because its check is fail-loud and a bump would make every
+    // deployed database demand a wipe of thread history.
+    describe: "engine_sessions.reasoning column",
+    probe: { kind: "column", table: "engine_sessions", column: "reasoning" },
+    sql: 'ALTER TABLE "engine_sessions" ADD COLUMN IF NOT EXISTS "reasoning" text',
+  },
+  {
+    // Per-thread reasoning pin (model selector overhaul). Engine table —
+    // see the note on engine_sessions.reasoning above.
+    describe: "engine_threads.reasoning column",
+    probe: { kind: "column", table: "engine_threads", column: "reasoning" },
+    sql: 'ALTER TABLE "engine_threads" ADD COLUMN IF NOT EXISTS "reasoning" text',
+  },
 ];
 
 /** The repairs this database still lacks, by catalog probe — one query per

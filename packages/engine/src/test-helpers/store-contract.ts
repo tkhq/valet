@@ -90,6 +90,25 @@ export function runSessionStoreContract(name: string, ctx: StoreContractContext)
       expect(list.map((s) => s.id)).toEqual(["a"]);
     });
 
+    it("saveSession round-trips the reasoning level", async () => {
+      // The session-default reasoning level is a persisted column, not a
+      // derived value: a restart must return the level the user chose.
+      await store.saveSession(newSession({ reasoning: "high" }));
+      expect((await store.getSession("sess-1"))?.reasoning).toBe("high");
+      // Clearing it persists as absent, not as a stale "high".
+      await store.saveSession(newSession({ reasoning: undefined }));
+      expect((await store.getSession("sess-1"))?.reasoning).toBeUndefined();
+    });
+
+    it("saveThread round-trips the reasoning pin", async () => {
+      await store.saveSession(newSession());
+      const t = newThread("sess-1");
+      await store.saveThread("sess-1", { ...t, reasoning: "low" });
+      expect((await store.getThread("sess-1", "th-1"))?.reasoning).toBe("low");
+      await store.saveThread("sess-1", { ...t, reasoning: undefined });
+      expect((await store.getThread("sess-1", "th-1"))?.reasoning).toBeUndefined();
+    });
+
     it("saveThread + listThreads round-trips", async () => {
       await store.saveSession(newSession());
       await store.saveThread("sess-1", newThread("sess-1", "task:A", "th-1"));

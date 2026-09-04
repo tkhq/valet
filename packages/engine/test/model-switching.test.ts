@@ -36,6 +36,9 @@ interface SetupResult {
   haikuFaux: FauxProvider;
   opusFaux: FauxProvider;
   engine: Engine;
+  /** A second engine over the same providers — restores past `engine`'s
+   *  session cache, which is what a process restart looks like. */
+  newEngine: () => Engine;
   store: InMemorySessionStore;
   events: BusEvent[];
   /** The "real" registry entry for haiku (now backed by the faux). Has the
@@ -75,7 +78,8 @@ function setup(): SetupResult {
   // getModel() returns a Model with `.id === "faux-1"` and would make
   // setModel comparisons fail.
   const baseModel = getModel("anthropic", HAIKU as never)!;
-  return { haikuFaux, opusFaux, engine, store, events, baseModel };
+  const newEngine = () => new Engine({ providers: { store, stream: bus, sandboxProvider } });
+  return { haikuFaux, opusFaux, engine, newEngine, store, events, baseModel };
 }
 
 describe("engine: model switching", () => {
@@ -268,6 +272,102 @@ describe("engine: model switching", () => {
     // resolution (custom providers / test doubles are not in the registry).
     const receipt = await thread.submitPrompt("hi", { model: HAIKU });
     expect(receipt.queueItemId).toBeTruthy();
+  });
+
+  it("Thread.setReasoning persists the pin and survives a restore", async () => {
+    const { engine, newEngine, store, baseModel } = setup();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: baseModel,
+    });
+    const thread = await session.ensureDefaultThread();
+    // A fresh thread carries no pin — it inherits the session default.
+    expect(thread.reasoning()).toBeUndefined();
+
+    await thread.setReasoning("high");
+    expect(thread.reasoning()).toBe("high");
+    expect((await store.getThread(session.id, thread.id))?.reasoning).toBe("high");
+
+    // Reload the session from the store: the pin comes back with it.
+    const restored = await newEngine().restoreSession({
+      sessionId: session.id,
+      options: { userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: baseModel },
+    });
+    expect(restored.threadById(thread.id)?.reasoning()).toBe("high");
+    // The next save must not stomp the pin back to NULL.
+    expect(restored.threadById(thread.id)?.toThreadData().reasoning).toBe("high");
+
+    // null clears the pin, in memory and in the store.
+    await thread.setReasoning(null);
+    expect(thread.reasoning()).toBeUndefined();
+    expect((await store.getThread(session.id, thread.id))?.reasoning).toBeUndefined();
+  });
+
+  it("session.setReasoning persists on the session row; a restore does not clobber it", async () => {
+    const { engine, newEngine, store, baseModel } = setup();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: baseModel,
+    });
+    expect(session.options.sampling?.reasoning).toBeUndefined();
+
+    await session.setReasoning("low");
+    expect(session.options.sampling?.reasoning).toBe("low");
+    expect((await store.getSession(session.id))?.reasoning).toBe("low");
+    expect((await session.toData()).reasoning).toBe("low");
+
+    // A host that does not re-supply `sampling.reasoning` on restore keeps
+    // the persisted level (same rule as purpose / start-ref).
+    const restored = await newEngine().restoreSession({
+      sessionId: session.id,
+      options: { userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: baseModel },
+    });
+    expect(restored.options.sampling?.reasoning).toBe("low");
+    expect((await restored.toData()).reasoning).toBe("low");
+
+    // An explicit level from the host still wins.
+    const reasserted = await newEngine().restoreSession({
+      sessionId: session.id,
+      options: {
+        userId: "u1",
+        orgId: "o1",
+        workspace: "/",
+        sandbox: {},
+        model: baseModel,
+        sampling: { reasoning: "max" },
+      },
+    });
+    expect(reasserted.options.sampling?.reasoning).toBe("max");
+
+    // null clears the session default.
+    await session.setReasoning(null);
+    expect(session.options.sampling?.reasoning).toBeUndefined();
+    expect((await store.getSession(session.id))?.reasoning).toBeUndefined();
+  });
+
+  it("setReasoning rejects an unknown level without mutating state", async () => {
+    const { engine, baseModel } = setup();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: baseModel,
+      sampling: { reasoning: "medium" },
+    });
+    const thread = await session.ensureDefaultThread();
+    await thread.setReasoning("high");
+
+    await expect(thread.setReasoning("turbo")).rejects.toThrow(/unknown reasoning level/);
+    expect(thread.reasoning()).toBe("high");
+    await expect(session.setReasoning("turbo")).rejects.toThrow(/unknown reasoning level/);
+    expect(session.options.sampling?.reasoning).toBe("medium");
   });
 
   it("switch_model is registered in builtinTools", () => {

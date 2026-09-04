@@ -44,6 +44,13 @@ import {
   validateSignalTagName,
 } from "./submission.js";
 import { NoCredentialsError, NotFoundError, StaleAttemptError, TimeoutError, ValidationError } from "./errors.js";
+import {
+  isReasoningLevel,
+  parseReasoningLevel,
+  REASONING_LEVELS,
+  resolveReasoningLevel,
+  type ReasoningLevel,
+} from "./reasoning.js";
 import { extractStructuredOutput } from "./result-schema.js";
 import { buildRepoInstructionsFragment } from "./repo-instructions.js";
 import { formatFileAttachmentsNote } from "./file-attachment-formatter.js";
@@ -392,6 +399,13 @@ export class Thread {
    */
   private modelOverride?: string;
   /**
+   * Per-thread reasoning-level pin. When set, it outranks the session
+   * default on every LLM call of this thread. Persisted via toThreadData →
+   * store.saveThread. Clamped to the turn's model at stream time, never
+   * here — see `resolveReasoningLevel`.
+   */
+  private reasoningOverride?: ReasoningLevel;
+  /**
    * Per-turn API key from the host `resolveModel` seam. Resolved at turn start
    * (fresh turns and resume/replay), read by the Agent's `getApiKey`, cleared
    * at turn end. Never cached across turns — key rotation applies next turn.
@@ -407,6 +421,9 @@ export class Thread {
     this.key = data.key;
     this.mode = data.queueMode;
     this.modelOverride = data.model;
+    // An unrecognized persisted token degrades to "no pin" instead of
+    // killing the rehydrate (parseReasoningLevel).
+    this.reasoningOverride = parseReasoningLevel(data.reasoning);
     this.paused = data.paused ?? false;
     this.threadCreatedAt = data.createdAt || Date.now();
     this.agent = this.buildAgent();
@@ -415,6 +432,11 @@ export class Thread {
   /** Currently configured model id for this thread (or undefined to use session default). */
   modelId(): string | undefined {
     return this.modelOverride;
+  }
+
+  /** This thread's reasoning-level pin (or undefined to use the session default). */
+  reasoning(): string | undefined {
+    return this.reasoningOverride;
   }
 
   // ── public API ──────────────────────────────────────────────────
@@ -1715,6 +1737,7 @@ export class Thread {
       queueMode: this.mode,
       paused: this.paused,
       model: this.modelOverride,
+      reasoning: this.reasoningOverride,
       summary: undefined,
       createdAt: this.threadCreatedAt,
       updatedAt: Date.now(),
@@ -1755,6 +1778,30 @@ export class Thread {
       });
     }
     return { fromModel: before, toModel: after };
+  }
+
+  /**
+   * Set or clear this thread's reasoning-level pin. The new value takes
+   * effect on the *next* LLM call. Pass `null` to clear the pin and fall
+   * back to the session default.
+   *
+   * The token is validated against `REASONING_LEVELS` here; the clamp to
+   * the model's supported levels happens at stream time, so a pin the
+   * current model cannot honor is kept, not rewritten.
+   */
+  async setReasoning(level: string | null): Promise<void> {
+    if (level === null) {
+      this.reasoningOverride = undefined;
+    } else {
+      // Validate before assigning so a bad token leaves the pin intact.
+      if (!isReasoningLevel(level)) {
+        throw new ValidationError(
+          `unknown reasoning level: ${level}. Valid levels: ${REASONING_LEVELS.join(", ")}.`,
+        );
+      }
+      this.reasoningOverride = level;
+    }
+    await this.session.providers.store.saveThread(this.session.id, this.toThreadData());
   }
 
   /**
@@ -3878,7 +3925,16 @@ export class Thread {
           // Host sampling defaults (eval reproducibility seam). Same
           // defaults-not-overrides rule: anything pi-agent-core forwards wins.
           temperature: options?.temperature ?? this.session.options.sampling?.temperature,
-          reasoning: options?.reasoning ?? this.session.options.sampling?.reasoning,
+          // Reasoning layers per call: pi-agent-core's own option → this
+          // thread's pin → the session default. The clamp lives here (not
+          // in setReasoning) so a pin survives a model that cannot honor
+          // it: `model` is the model this call actually runs on.
+          reasoning: resolveReasoningLevel(
+            model,
+            options?.reasoning,
+            this.reasoningOverride,
+            this.session.options.sampling?.reasoning,
+          ),
           samplingParams: options?.samplingParams ?? this.session.options.sampling?.params,
         }),
       // Filter out custom AgentMessage types (decision_gate, compaction, etc.)

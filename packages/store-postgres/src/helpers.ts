@@ -526,6 +526,7 @@ export interface SessionRow {
   parentSessionId: string | null;
   parentThreadId: string | null;
   model: string | null;
+  reasoning: string | null;
   metadata: string | null;
   startRef: string | null;
   createdAt: number;
@@ -547,6 +548,7 @@ export function rawToSessionRow(raw: Record<string, unknown>): SessionRow {
     parentSessionId: asStringOrNull(raw.parent_session_id, "parent_session_id"),
     parentThreadId: asStringOrNull(raw.parent_thread_id, "parent_thread_id"),
     model: asStringOrNull(raw.model, "model"),
+    reasoning: asStringOrNull(raw.reasoning, "reasoning"),
     metadata: asStringOrNull(raw.metadata, "metadata"),
     startRef: asStringOrNull(raw.start_ref, "start_ref"),
     createdAt: toNum(raw.created_at, "created_at"),
@@ -564,6 +566,7 @@ export interface ThreadRow {
   queueMode: string;
   paused: number | null;
   model: string | null;
+  reasoning: string | null;
   summary: string | null;
   metadata: string | null;
   createdAt: number;
@@ -584,6 +587,7 @@ export function rawToThreadRow(raw: Record<string, unknown>): ThreadRow {
     // store-sqlite did.
     paused: toNumOrNull(raw.paused, "paused"),
     model: asStringOrNull(raw.model, "model"),
+    reasoning: asStringOrNull(raw.reasoning, "reasoning"),
     summary: asStringOrNull(raw.summary, "summary"),
     metadata: asStringOrNull(raw.metadata, "metadata"),
     createdAt: toNum(raw.created_at, "created_at"),

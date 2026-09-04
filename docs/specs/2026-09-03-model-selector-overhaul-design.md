@@ -117,6 +117,16 @@ schema in place, and add a matching `SCHEMA_REPAIRS` entry per column.
 - `assistants.reasoning` text, nullable.
 - `users.default_reasoning` text, nullable.
 - `teams.default_reasoning` text, nullable.
+- `engine_sessions.reasoning` text, nullable: the persisted session default.
+- `engine_threads.reasoning` text, nullable: the per-thread pin.
+
+The two engine columns are raw SQL, not Drizzle: edit
+`packages/store-postgres/migrations/pg/0000_engine.sql` and the row
+interfaces plus `rawTo*Row` mappers in
+`packages/store-postgres/src/helpers.ts`. They get `SCHEMA_REPAIRS` entries
+like the app columns, and `ENGINE_SCHEMA_VERSION` stays put — that check is
+fail-loud, so a bump would make every deployed database demand a wipe of
+thread history.
 
 After the edit, every worktree with dev data needs `make dev-clean`.
 
@@ -194,11 +204,25 @@ streams, so a tier remap to a weaker model degrades instead of failing.
 
 ### 6. Engine changes (reasoning only)
 
-- `thread.setReasoning(level | null)` mirroring `thread.setModel`: writes
-  the pi-agent-core `AgentState.thinkingLevel`, persists in thread state,
-  and survives reload. Follow the tool-call persistence round trip rules
-  (engine write → wire → REST → frontend) and add regression tests at each
-  hop.
+- `thread.setReasoning(level | null)` and `thread.reasoning()` mirror
+  `thread.setModel` / `thread.modelId()`: the pin lives on the Thread, goes
+  to the store through `toThreadData()` → `saveThread`, and comes back on
+  rehydrate. `session.setReasoning(level | null)` does the same for the
+  session default through `SessionData.reasoning`; a restore that does not
+  re-supply `sampling.reasoning` keeps the persisted level (the no-clobber
+  rule that `purpose` and `startRef` already follow).
+- The engine owns the level vocabulary in `packages/engine/src/reasoning.ts`
+  (`REASONING_LEVELS`, `isReasoningLevel`, `parseReasoningLevel`,
+  `resolveReasoningLevel`). It does not import the api package's copy — the
+  engine is portable, and its barrel stays browser-safe.
+- `Thread.buildAgent`'s `streamFn` resolves the level per call:
+  per-call option → thread pin → `session.options.sampling.reasoning`, then
+  `clampThinkingLevel` against the model that call runs on. The engine
+  leaves pi-agent-core's `AgentState.thinkingLevel` at "off" so this one
+  seam stays authoritative, and an unreadable persisted token degrades to
+  "unset" instead of failing the restore.
+- Follow the tool-call persistence round trip rules (engine write → wire →
+  REST → frontend) and add regression tests at each hop.
 - `PATCH /api/sessions/:id/threads/:threadId` accepts `reasoning` and calls
   `thread.setReasoning`. `PATCH /api/sessions/:id` accepts `reasoning` for
   the session default (stored in session options sampling).
