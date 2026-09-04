@@ -132,4 +132,28 @@ describe("EngineHost default model", () => {
 
     expect(restored.options.model.id).toBe("claude-sonnet-4-5");
   });
+
+  it("resolves fresh thread defaults without the persisted session settings", async () => {
+    api = await bootTestApi();
+    const { db, engineHost } = api.providers;
+    const session = await defaultAssistantSessionFor(
+      api.providers,
+      { type: "user", id: "local-user" },
+      { actorUserId: "local-user", orgId: "local-org" },
+    );
+    await session.setModel("claude-opus-4-5");
+    await session.setReasoning("high");
+    await db
+      .update(users)
+      .set({ defaultModel: "m", defaultReasoning: "low" })
+      .where(eq(users.id, "local-user"));
+
+    const settings = await engineHost.resolveFreshThreadSettings(session.id, {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp",
+    });
+
+    expect(settings).toEqual({ model: "m", reasoning: "low" });
+  });
 });

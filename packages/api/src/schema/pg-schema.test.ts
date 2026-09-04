@@ -1150,6 +1150,7 @@ describe("pg app schema + migrations", () => {
       expect(row).toHaveLength(1);
       expect(row[0]?.role).toBe("member");
       expect(row[0]?.name).toBe("Pg Test User");
+      expect(row[0]?.newThreadBehavior).toBe("keep_current");
     });
   });
 });

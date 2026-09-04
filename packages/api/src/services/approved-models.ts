@@ -8,10 +8,10 @@
  * held to it. Tier tokens (xs, s, m, l, xl) always pass, since they resolve
  * at runtime via the tier map and may map to different models per org.
  */
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { orgs } from "../schema/index.js";
-import { TIER_SET } from "./model-tiers.js";
+import { TIER_SET, TIER_TOKENS, type TierMap } from "./model-tiers.js";
 import { parseModelId } from "./llm-providers.js";
 
 /**
@@ -44,6 +44,16 @@ export async function setApprovedModels(
   approved: string[] | null,
 ): Promise<void> {
   await db.update(orgs).set({ approvedModels: approved }).where(eq(orgs.id, orgId));
+}
+
+/** Serialize approved-model and tier-map validation/writes on the org row. */
+export async function lockOrgModelPolicy(db: AppQueryable, orgId: string): Promise<void> {
+  // A self-assignment is a portable row lock for both node-postgres and
+  // PGlite. Keep it inside the caller's transaction.
+  await db
+    .update(orgs)
+    .set({ approvedModels: sql`${orgs.approvedModels}` })
+    .where(eq(orgs.id, orgId));
 }
 
 /**
@@ -92,6 +102,22 @@ export function validateApprovedModelsList(approved: string[] | null, validIds: 
     }
   }
 
+  return null;
+}
+
+/** Reject an approved list that removes a model used by a size tier. */
+export function validateTierTargetsRemainApproved(
+  approved: string[] | null,
+  tierMap: TierMap,
+): string | null {
+  if (approved === null) return null;
+  for (const tier of TIER_TOKENS) {
+    for (const spec of tierMap[tier]) {
+      if (!isApproved(approved, spec)) {
+        return `Model "${spec}" is still used by tier "${tier}". Change the model tier first.`;
+      }
+    }
+  }
   return null;
 }
 

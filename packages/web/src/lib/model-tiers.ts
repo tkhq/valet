@@ -1,4 +1,4 @@
-import { curatedForCatalogId } from "~/lib/models";
+import { curatedForCatalogId, sameModelSpec } from "~/lib/models";
 import type { GetModelTiersResponse, ModelInfo } from "@valet/api/wire";
 
 /**
@@ -40,6 +40,29 @@ export function labelFor(id: string, models: ModelInfo[]): string {
   return models.find((m) => m.id === id)?.name ?? id;
 }
 
+/** First active catalog model for a tier, in configured target order. */
+export function resolveTierModel(
+  tier: SizeTier,
+  tierMap: GetModelTiersResponse | undefined,
+  models: ModelInfo[],
+): ModelInfo | undefined {
+  for (const target of tierMap?.[tier] ?? []) {
+    const model = models.find((entry) => entry.active && sameModelSpec(entry.id, target));
+    if (model) return model;
+  }
+  return undefined;
+}
+
+/** Label for a closed model control. Tier labels remain picker helper text. */
+export function selectionLabel(
+  id: string,
+  tierMap: GetModelTiersResponse | undefined,
+  models: ModelInfo[],
+): string {
+  if (isSizeTier(id)) return resolveTierModel(id, tierMap, models)?.name ?? TIER_LABELS[id];
+  return models.find((model) => sameModelSpec(model.id, id))?.name ?? labelFor(id, models);
+}
+
 /** Subtitle for a Size tier row: the catalog name of the tier's first
  * configured target, resolved against `models`. Falls back to the raw spec
  * string when the target isn't in the catalog (a stale/retired pin), and
@@ -50,7 +73,7 @@ export function tierSubtitle(
   tierMap: GetModelTiersResponse | undefined,
   models: ModelInfo[],
 ): string | undefined {
-  const first = tierMap?.[tier]?.[0];
-  if (!first) return undefined;
-  return labelFor(first, models);
+  const resolved = resolveTierModel(tier, tierMap, models);
+  if (resolved) return resolved.name;
+  return tierMap?.[tier]?.[0];
 }

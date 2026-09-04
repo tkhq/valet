@@ -12,7 +12,13 @@ import {
   Search,
   X,
 } from "lucide-react";
-import type { DecisionGate, OrchestratorChildSummary, ThreadSummary } from "@valet/api/wire";
+import type {
+  DecisionGate,
+  GetModelTiersResponse,
+  ModelInfo,
+  OrchestratorChildSummary,
+  ThreadSummary,
+} from "@valet/api/wire";
 import {
   useArchivedThreads,
   useCreateThread,
@@ -25,6 +31,7 @@ import {
 import { useComposerPrefillStore } from "~/stores/composer-prefill";
 import { useChatHotkeysStore } from "~/stores/chat-hotkeys";
 import { useDismissChild, useOrchestratorChildren, useOrchestratorInfo } from "~/api/orchestrator";
+import { useModels, useModelTiers } from "~/api/settings";
 import { usePendingGatesSeed } from "~/hooks/use-pending-gates-seed";
 import { useStreamStore } from "~/stores/stream";
 import { createDebouncer } from "~/lib/debounce";
@@ -46,7 +53,8 @@ import {
 } from "~/components/primitives";
 import { formatWhen } from "~/lib/format-when";
 import { cn } from "~/lib/cn";
-import { sameModelSpec, shortModelLabel } from "~/lib/models";
+import { sameModelSpec } from "~/lib/models";
+import { isSizeTier, selectionLabel, tierSubtitle, TIER_LABELS } from "~/lib/model-tiers";
 import { getSubconversationsCollapsed, setSubconversationsCollapsed } from "~/lib/preferences";
 
 /**
@@ -203,6 +211,8 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   // always-on chip would just be noise).
   const sessionQ = useSession(sessionId);
   const sessionModel = sessionQ.data?.model;
+  const modelsQ = useModels();
+  const tierMapQ = useModelTiers();
   const childrenQ = useOrchestratorChildren(sessionId, {
     refetchInterval: CHILDREN_POLL_MS,
     enabled: showChildren,
@@ -287,7 +297,9 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   async function createAndNavigate() {
-    const thread = await createThread.mutateAsync();
+    const thread = await createThread.mutateAsync(
+      activeThreadId ? { sourceThreadId: activeThreadId } : {},
+    );
     navigate({ search: (prev) => ({ ...prev, thread: thread.id, child: undefined }) });
     // Land the cursor in the composer — a fresh thread exists to be
     // typed into.
@@ -400,6 +412,8 @@ function ThreadTreeInner({ sessionId, showChildren }: { sessionId: string; showC
               thread={t}
               index={threads.indexOf(t)}
               sessionModel={sessionModel}
+              models={modelsQ.data?.models ?? []}
+              tierMap={tierMapQ.data}
               active={t.id === activeThreadId}
               hasPendingGate={gatedThreadIds.has(t.id)}
               childSessions={grouped.get(t.id) ?? []}
@@ -475,6 +489,8 @@ function ThreadNode({
   thread,
   index,
   sessionModel,
+  models,
+  tierMap,
   active,
   hasPendingGate,
   childSessions,
@@ -488,6 +504,8 @@ function ThreadNode({
   index: number;
   /** Session default model — the pin chip shows only when the thread's pin diverges from it. */
   sessionModel?: string;
+  models: ModelInfo[];
+  tierMap?: GetModelTiersResponse;
   active: boolean;
   /** The thread holds a pending decision gate — show the needs-you dot. */
   hasPendingGate: boolean;
@@ -521,6 +539,12 @@ function ThreadNode({
     sessionModel && thread.model && !sameModelSpec(thread.model, sessionModel)
       ? thread.model
       : undefined;
+  const pinnedTier = isSizeTier(pinnedModel) ? pinnedModel : undefined;
+  const pinnedModelLabel = pinnedModel
+    ? pinnedTier
+      ? tierSubtitle(pinnedTier, tierMap, models)
+      : selectionLabel(pinnedModel, tierMap, models)
+    : undefined;
 
   // Port the v1 inline editor. Enter and blur save. Escape cancels.
   // `savedRef` prevents Enter and its following blur from saving twice.
@@ -632,12 +656,16 @@ function ThreadNode({
               }}
             >
               <span className="flex-1 truncate">{label}</span>
-              {pinnedModel && (
-                <span
-                  title={pinnedModel}
-                  className="ml-2 shrink-0 rounded-sm bg-ink-wash px-1 py-0.5 font-mono text-[9px] text-muted"
-                >
-                  {shortModelLabel(pinnedModel)}
+              {pinnedModelLabel && (
+                <span className="ml-2 flex min-w-0 items-center gap-1" title={pinnedModelLabel}>
+                  <span className="max-w-28 truncate text-[10px] font-normal text-muted">
+                    {pinnedModelLabel}
+                  </span>
+                  {pinnedTier && (
+                    <span className="shrink-0 rounded-sm bg-ink-wash px-1 py-0.5 text-[9px] font-normal text-muted">
+                      {TIER_LABELS[pinnedTier]}
+                    </span>
+                  )}
                 </span>
               )}
               {hasPendingGate && (

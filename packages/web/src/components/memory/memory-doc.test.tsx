@@ -55,6 +55,7 @@ const meFixture = {
   orgRole: "member" as const,
   defaultModel: null,
   defaultReasoning: null,
+  newThreadBehavior: "keep_current" as const,
 };
 
 const orgFixture = {

@@ -247,9 +247,23 @@ export function useTeamMembers(teamId: string, opts?: UseQueryOptions<ListTeamMe
 
 export function usePatchMe() {
   const qc = useQueryClient();
-  return useMutation<PatchMeResponse, Error, PatchMeRequest>({
+  return useMutation<
+    PatchMeResponse,
+    Error,
+    PatchMeRequest,
+    { previous: MeResponse | undefined }
+  >({
     mutationFn: (body) => api.patchMe(body),
-    onSuccess: () => {
+    onMutate: async (body) => {
+      await qc.cancelQueries({ queryKey: qkSettings.me() });
+      const previous = qc.getQueryData<MeResponse>(qkSettings.me());
+      if (previous) qc.setQueryData<MeResponse>(qkSettings.me(), { ...previous, ...body });
+      return { previous };
+    },
+    onError: (_error, _body, context) => {
+      if (context?.previous) qc.setQueryData(qkSettings.me(), context.previous);
+    },
+    onSettled: () => {
       qc.invalidateQueries({ queryKey: qkSettings.me() });
     },
   });
@@ -630,4 +644,3 @@ export function useDeleteSlackApp() {
     },
   });
 }
-

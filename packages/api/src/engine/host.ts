@@ -67,7 +67,7 @@ import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
 import { resolveOpenAiCredential } from "../services/openai-key.js";
 import { hasOrgKey } from "../services/model-catalog.js";
-import { clampToMax, getOrgReasoningSettings, REASONING_SET, type ReasoningLevel } from "../services/reasoning.js";
+import { clampToMax, getOrgReasoningSettings, type ReasoningLevel } from "../services/reasoning.js";
 import { listLlmProviders, parseModelId, providerNamespace } from "../services/llm-providers.js";
 import { TIER_SET } from "../services/model-tiers.js";
 import type { AppDb } from "../lib/drizzle.js";
@@ -3045,18 +3045,52 @@ export class EngineHost {
     existing: SessionData | null,
     orgId: string,
     prefs: { userId?: string; ownerTeamId?: string; assistantDefault?: string },
-  ): Promise<string | undefined> {
-    if (existing?.reasoning) return existing.reasoning;
+  ): Promise<ReasoningLevel | undefined> {
+    if (existing?.reasoning) {
+      return isReasoningLevel(existing.reasoning) ? existing.reasoning : undefined;
+    }
     const settings = this.opts.db ? await getOrgReasoningSettings(this.opts.db, orgId) : {};
     const level =
       prefs.assistantDefault ??
       (prefs.userId ? await this.userDefaultReasoning(prefs.userId) : undefined) ??
       (prefs.ownerTeamId ? await this.teamDefaultReasoning(orgId, prefs.ownerTeamId) : undefined) ??
       settings.default;
-    if (level === undefined || !REASONING_SET.has(level)) return undefined;
-    // Checked against REASONING_SET above, so this narrowing is safe — same
-    // pattern `services/reasoning.ts` uses for the identical cast.
-    return clampToMax(level as ReasoningLevel, settings.max);
+    if (!isReasoningLevel(level)) return undefined;
+    return clampToMax(level, settings.max);
+  }
+
+  /**
+   * Resolve settings for a new thread without consulting persisted session
+   * settings. Tier tokens remain tokens so later turns use the current map.
+   */
+  async resolveFreshThreadSettings(
+    sessionId: string,
+    meta: SessionMeta,
+    actorUserId = meta.userId,
+  ): Promise<{ model: string; reasoning: ReasoningLevel | null }> {
+    const assistant = this.opts.db
+      ? await loadAssistantBySessionId(this.opts.db, sessionId)
+      : undefined;
+    const isUserAssistant = assistant?.ownerType === "user";
+    const isTeamAssistant = assistant?.ownerType === "team";
+    const userId = assistant ? (isUserAssistant ? actorUserId : undefined) : actorUserId;
+    const ownerTeamId = assistant
+      ? (isTeamAssistant ? assistant.ownerId : undefined)
+      : meta.ownerTeamId;
+    const { spec } = await this.resolveModelForBuild(null, meta.orgId, {
+      userId,
+      ownerTeamId,
+      assistantDefault: assistant?.model ?? undefined,
+    });
+    const reasoning = await this.resolveReasoningForBuild(null, meta.orgId, {
+      userId,
+      ownerTeamId,
+      assistantDefault: assistant?.reasoning ?? undefined,
+    });
+    return {
+      model: spec,
+      reasoning: reasoning ?? null,
+    };
   }
 
   /**

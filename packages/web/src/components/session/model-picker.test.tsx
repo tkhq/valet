@@ -17,6 +17,7 @@ let isLoading = false;
 let meData: MeResponse | undefined;
 let tierMapData: GetModelTiersResponse | undefined;
 let orgReasoningData: GetOrgReasoningResponse | undefined;
+let approvedModelsData: { approved: string[] | null } | undefined;
 
 function makeMe(overrides: Partial<MeResponse> = {}): MeResponse {
   return {
@@ -29,6 +30,7 @@ function makeMe(overrides: Partial<MeResponse> = {}): MeResponse {
     orgRole: "member",
     defaultModel: null,
     defaultReasoning: null,
+    newThreadBehavior: "keep_current",
     ...overrides,
   };
 }
@@ -42,6 +44,7 @@ vi.mock("~/api/settings", async (importOriginal) => {
     useModels: () => ({ data: modelsData, isLoading, error: null }),
     useMe: () => ({ data: meData, isLoading: false, error: null }),
     useModelTiers: () => ({ data: tierMapData, isLoading: false, error: null }),
+    useApprovedModels: () => ({ data: approvedModelsData, isLoading: false, error: null }),
     useOrgReasoning: () => ({ data: orgReasoningData, isLoading: false, error: null }),
   };
 });
@@ -83,6 +86,7 @@ beforeEach(() => {
   meData = makeMe();
   tierMapData = { xs: [], s: [], m: [], l: [], xl: [] };
   orgReasoningData = {};
+  approvedModelsData = { approved: null };
 });
 
 describe("visibleModels", () => {
@@ -216,9 +220,25 @@ describe("ModelPicker — Size tier group", () => {
     expect(document.querySelectorAll('[data-row-kind="model"]')).toHaveLength(1);
   });
 
-  it("shows the tier trigger label for a tier currentId", () => {
-    renderPicker({ currentId: "xl" });
-    expect(screen.getByRole("button", { name: "Choose model" }).textContent).toContain("X-Large");
+  it("shows the resolved model name and thinking for a tier currentId", () => {
+    modelsData = {
+      models: [
+        {
+          id: "openai/gpt-5.6-sol",
+          name: "GPT-5.6 Sol",
+          providerId: "openai",
+          providerKind: "openai",
+          providerName: "OpenAI",
+          active: true,
+          approved: true,
+        },
+      ],
+    };
+    tierMapData = { xs: [], s: [], m: [], l: ["openai/gpt-5.6-sol"], xl: [] };
+    renderPicker({ currentId: "l", currentReasoning: "medium" });
+    expect(screen.getByRole("button", { name: "Choose model" }).textContent).toContain(
+      "GPT-5.6 Sol · Medium",
+    );
   });
 });
 
@@ -266,7 +286,7 @@ describe("ModelPicker — approved-models filter", () => {
     expect(document.body.textContent).not.toContain("Llama 3");
   });
 
-  it("an admin's 'show more' reveals unapproved models", async () => {
+  it("an admin's 'show more' reveals unapproved models when unrestricted", async () => {
     meData = makeMe({ orgRole: "admin" });
     const user = userEvent.setup();
     renderPicker();
@@ -300,6 +320,49 @@ describe("ModelPicker — approved-models filter", () => {
 
     await user.click(screen.getByRole("button", { name: "Choose model" }));
     expect(document.body.textContent).toContain("Llama 3");
+  });
+
+  it.each(["member", "admin"] as const)(
+    "shows only approved options and no catalog reveal for a restricted %s",
+    async (orgRole) => {
+      approvedModelsData = { approved: ["anthropic/claude-sonnet-4-5"] };
+      meData = makeMe({ orgRole });
+      const user = userEvent.setup();
+      renderPicker();
+
+      await user.click(screen.getByRole("button", { name: "Choose model" }));
+      expect(document.querySelectorAll('[data-row-kind="model"]')).toHaveLength(1);
+      expect(document.body.textContent).toContain("Sonnet 4.5");
+      expect(document.body.textContent).not.toContain("Llama 3");
+      expect(screen.queryByText(/show \d+ more/)).toBeNull();
+    },
+  );
+
+  it("keeps an unapproved current model display-only when restricted", async () => {
+    approvedModelsData = { approved: ["anthropic/claude-sonnet-4-5"] };
+    const user = userEvent.setup();
+    renderPicker({ currentId: "custom_1/llama-3" });
+    expect(screen.getByRole("button", { name: "Choose model" }).textContent).toContain("Llama 3");
+
+    await user.click(screen.getByRole("button", { name: "Choose model" }));
+    const optionText = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-row-kind="model"]'),
+    ).map((row) => row.textContent);
+    expect(optionText.join(" ")).not.toContain("Llama 3");
+  });
+
+  it("fails closed while the approved-model policy is unresolved", async () => {
+    approvedModelsData = undefined;
+    meData = makeMe({ orgRole: "admin" });
+    const user = userEvent.setup();
+    renderPicker();
+
+    await user.click(screen.getByRole("button", { name: "Choose model" }));
+    expect(document.querySelectorAll('[data-row-kind="model"]')).toHaveLength(0);
+    expect(screen.queryByText(/show \d+ more/)).toBeNull();
+
+    await user.type(screen.getByLabelText("Search models"), "llama");
+    expect(document.body.textContent).not.toContain("Llama 3");
   });
 });
 

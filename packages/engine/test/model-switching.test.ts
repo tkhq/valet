@@ -23,7 +23,7 @@
  *    an earlier turn and samples state mid-flight — which reads exactly
  *    like a hung turn. Wait on `submission_settled`.
  */
-import { afterEach, describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import {
   fauxAssistantMessage,
   fauxToolCall,
@@ -233,6 +233,73 @@ describe("engine: model switching", () => {
     // A NEW thread pins the new default.
     const second = session.thread("web:second");
     expect(second.modelId()).toBe(OPUS);
+  });
+
+  it("createThread persists explicit settings before it exposes the thread", async () => {
+    const { engine, store, baseModel } = setup();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: baseModel,
+    });
+
+    const thread = await session.createThread("web:configured", {
+      model: "s",
+      reasoning: "high",
+    });
+
+    expect(thread.modelId()).toBe("s");
+    expect(thread.reasoning()).toBe("high");
+    expect(await store.getThread(session.id, thread.id)).toMatchObject({
+      model: "s",
+      reasoning: "high",
+    });
+    expect(await session.threadByKey("web:configured")).toBe(thread);
+  });
+
+  it("createThread persists an explicit no-reasoning setting across restore", async () => {
+    const { engine, newEngine, store, baseModel } = setup();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: baseModel,
+      sampling: { reasoning: "high" },
+    });
+
+    const thread = await session.createThread("web:no-reasoning", {
+      model: "s",
+      reasoning: null,
+    });
+    expect(thread.reasoning()).toBeUndefined();
+    expect((await store.getThread(session.id, thread.id))?.reasoning).toBe("off");
+
+    const restored = await newEngine().restoreSession({
+      sessionId: session.id,
+      options: { userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: baseModel },
+    });
+    expect(restored.threadById(thread.id)?.toThreadData().reasoning).toBe("off");
+  });
+
+  it("createThread does not expose a thread when persistence fails", async () => {
+    const { engine, store, baseModel } = setup();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: baseModel,
+    });
+    vi.spyOn(store, "saveThread").mockRejectedValueOnce(new Error("store unavailable"));
+
+    await expect(session.createThread("web:failed", { model: "s" })).rejects.toThrow(
+      "store unavailable",
+    );
+    expect(await session.threadByKey("web:failed")).toBeNull();
+    expect(session.listThreads()).toHaveLength(0);
   });
 
   it("QueueItem.model outranks the thread pin; a dead item pin fails loud", async () => {

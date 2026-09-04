@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { isSizeTier, SIZE_TIERS, TIER_LABELS, tierLabel, tierSubtitle } from "./model-tiers";
+import {
+  isSizeTier,
+  resolveTierModel,
+  selectionLabel,
+  SIZE_TIERS,
+  TIER_LABELS,
+  tierLabel,
+  tierSubtitle,
+} from "./model-tiers";
 import type { GetModelTiersResponse, ModelInfo } from "@valet/api/wire";
 
 describe("SIZE_TIERS / TIER_LABELS", () => {
@@ -66,7 +74,7 @@ describe("tierSubtitle", () => {
     };
     // The org catalog name overlays with the curated label when the target
     // matches a known Anthropic tier (same rule model rows use).
-    expect(tierSubtitle("xl", tierMap, models)).toBe("Opus 4.7");
+    expect(tierSubtitle("xl", tierMap, models)).toBe("Claude Opus 4.7");
   });
 
   it("falls back to the raw spec string when the target is not in the catalog", () => {
@@ -81,5 +89,51 @@ describe("tierSubtitle", () => {
 
   it("returns undefined when the tier map has not loaded", () => {
     expect(tierSubtitle("xl", undefined, models)).toBeUndefined();
+  });
+});
+
+describe("resolved tier selections", () => {
+  const models: ModelInfo[] = [
+    {
+      id: "openai/gpt-5.6-luna",
+      name: "GPT-5.6 Luna",
+      providerId: "openai",
+      providerKind: "openai",
+      providerName: "OpenAI",
+      active: false,
+      approved: true,
+    },
+    {
+      id: "openai/gpt-5.6-sol",
+      name: "GPT-5.6 Sol",
+      providerId: "openai",
+      providerKind: "openai",
+      providerName: "OpenAI",
+      active: true,
+      approved: true,
+    },
+  ];
+  const tierMap: GetModelTiersResponse = {
+    xs: [],
+    s: [],
+    m: [],
+    l: ["openai/gpt-5.6-luna", "openai/gpt-5.6-sol"],
+    xl: [],
+  };
+
+  it("uses the first active configured target", () => {
+    expect(resolveTierModel("l", tierMap, models)?.name).toBe("GPT-5.6 Sol");
+  });
+
+  it("shows a concrete model name for a selected tier", () => {
+    expect(selectionLabel("l", tierMap, models)).toBe("GPT-5.6 Sol");
+  });
+
+  it("shows the catalog name for a selected concrete model", () => {
+    expect(selectionLabel("openai/gpt-5.6-sol", tierMap, models)).toBe("GPT-5.6 Sol");
+  });
+
+  it("falls back to the tier label when no target resolves", () => {
+    expect(selectionLabel("l", tierMap, [])).toBe("Large");
   });
 });

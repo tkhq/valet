@@ -79,6 +79,7 @@ vi.mock("~/api/settings", () => ({
   useOrg: () => ({ data: undefined, isLoading: false, error: null }),
   useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
   useModelTiers: () => ({ data: undefined, isLoading: false, error: null }),
+  useApprovedModels: () => ({ data: { approved: null }, isLoading: false, error: null }),
   useOrgReasoning: () => ({ data: undefined, isLoading: false, error: null }),
 }));
 

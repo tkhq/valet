@@ -34,6 +34,7 @@ let meData: {
   orgRole: "admin" | "member";
   defaultModel: string | null;
   defaultReasoning?: string | null;
+  newThreadBehavior: "keep_current" | "use_defaults";
 } | undefined = {
   id: "u1",
   email: "me@example.com",
@@ -44,6 +45,7 @@ let meData: {
   orgRole: "admin",
   defaultModel: null,
   defaultReasoning: null,
+  newThreadBehavior: "keep_current",
 };
 
 let orgData: { callerRole: "admin" | "member"; features: { organizations: boolean } } | undefined = {
@@ -140,6 +142,7 @@ describe("ProfilePage", () => {
       orgId: "org_1",
       orgRole: "admin",
       defaultModel: null,
+      newThreadBehavior: "keep_current",
     };
     orgData = { callerRole: "admin", features: { organizations: false } };
   });
@@ -205,6 +208,7 @@ describe("AssistantPage", () => {
       orgRole: "admin",
       defaultModel: null,
       defaultReasoning: null,
+      newThreadBehavior: "keep_current",
     };
   });
 
@@ -284,6 +288,18 @@ describe("AssistantPage", () => {
 
     await user.selectOptions(screen.getByLabelText("Reasoning"), "");
     expect(patchMeMutate).toHaveBeenCalledWith({ defaultReasoning: null });
+  });
+
+  it("changes the model and thinking behavior for new threads", async () => {
+    const user = userEvent.setup();
+    render(<AssistantPage />);
+    const select = screen.getByLabelText("New thread behavior") as HTMLSelectElement;
+    expect(select.value).toBe("keep_current");
+
+    await user.selectOptions(select, "use_defaults");
+    expect(patchMeMutate).toHaveBeenCalledWith({
+      newThreadBehavior: "use_defaults",
+    });
   });
 });
 

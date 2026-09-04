@@ -20,7 +20,13 @@ import type {
 import type { SandboxAttachment, AttachmentStatus } from "./sandbox/attachment.js";
 import type { PolicySandbox } from "./sandbox/policy.js";
 import { NoCredentialsError, StaleAttemptError, ValidationError } from "./errors.js";
-import { isReasoningLevel, parseReasoningLevel, REASONING_LEVELS } from "./reasoning.js";
+import {
+  isReasoningLevel,
+  parseReasoningLevel,
+  REASONING_LEVELS,
+  THREAD_REASONING_DISABLED,
+  type ReasoningLevel,
+} from "./reasoning.js";
 import { detachedFromTrace, withSpan } from "./tracing.js";
 import { recordCredentialRead } from "./metrics.js";
 import type { Model } from "@earendil-works/pi-ai/compat";
@@ -179,6 +185,12 @@ export interface EmitOptions {
    * anything outside a claimed attempt) NEVER reject on append failure.
    */
   fence?: WriteFence;
+}
+
+/** Settings pinned when an API caller creates a new thread. */
+export interface ThreadInitialSettings {
+  model?: string;
+  reasoning?: ReasoningLevel | null;
 }
 
 export class Session {
@@ -685,14 +697,11 @@ export class Session {
     return this.thread("web:default");
   }
 
-  thread(key?: string): Thread {
-    const k = key ?? "web:default";
-    const existing = this.threadsByKey.get(k);
-    if (existing) return existing;
-    const data: ThreadData = {
+  private buildThreadData(key: string, initial?: ThreadInitialSettings): ThreadData {
+    return {
       id: uid("th"),
       sessionId: this.id,
-      key: k,
+      key,
       status: "active",
       queueMode: this.options.queueMode ?? "followup",
       // Pin the session's effective model at creation (TKAI-201): one chat
@@ -700,14 +709,33 @@ export class Session {
       // affects only future threads. This is the single creation seam —
       // default/channel/workflow threads all funnel through here; rehydrate
       // constructs Thread from persisted data and never re-stamps.
-      model: this.options.modelSpec ?? this.options.model.id,
+      model: initial?.model ?? this.options.modelSpec ?? this.options.model.id,
+      reasoning:
+        initial?.reasoning === null ? THREAD_REASONING_DISABLED : initial?.reasoning,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
+  }
+
+  thread(key?: string): Thread {
+    const k = key ?? "web:default";
+    const existing = this.threadsByKey.get(k);
+    if (existing) return existing;
+    const data = this.buildThreadData(k);
     const thread = new Thread(this, data);
-    this.threads.set(thread.id, thread);
-    this.threadsByKey.set(k, thread);
+    this.attachThread(thread);
     void this.providers.store.saveThread(this.id, data);
+    return thread;
+  }
+
+  /** Persist a new thread before it becomes visible in this session. */
+  async createThread(key: string, initial?: ThreadInitialSettings): Promise<Thread> {
+    const existing = this.threadsByKey.get(key);
+    if (existing) return existing;
+    const data = this.buildThreadData(key, initial);
+    await this.providers.store.saveThread(this.id, data);
+    const thread = new Thread(this, data);
+    this.attachThread(thread);
     return thread;
   }
 
@@ -1149,7 +1177,7 @@ export class Session {
    */
   async newThread(): Promise<Thread> {
     const key = `web:${uid("t")}`;
-    return this.thread(key);
+    return this.createThread(key);
   }
 
   async resolveDecision(gateId: string, resolution: DecisionResolution): Promise<void> {
