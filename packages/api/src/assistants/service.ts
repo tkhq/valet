@@ -65,6 +65,8 @@ export function toAssistantSummary(row: AssistantRow): AssistantSummary {
     sessionId: row.sessionId,
     isDefault: row.isDefault,
     createdAt: row.createdAt,
+    model: row.model,
+    reasoning: row.reasoning,
   };
 }
 
@@ -437,6 +439,14 @@ export async function applyProfilePatch(
     isDefault?: true;
     personality?: string | null;
     behavior?: AssistantBehavior | null;
+    /** Model-selector-overhaul Task 9. Not part of the eviction check below:
+     * unlike name/personality/behavior, the model/reasoning cascade is
+     * consulted only at session BUILD time, and restore-no-clobber means a
+     * live session's persisted model already won and stays put until the
+     * cache is next evicted for some other reason — same as a team or org
+     * default-model change, which also does not evict. */
+    model?: string | null;
+    reasoning?: string | null;
   },
   evict: (sessionId: string) => void,
 ): Promise<AssistantRow> {
@@ -459,6 +469,14 @@ export async function patchAssistant(
     isDefault?: true;
     personality?: string | null;
     behavior?: AssistantBehavior | null;
+    /** Tier token or catalog model id, or null to clear. Callers validate
+     * with `assertModelSelectable` before calling — this function trusts
+     * the value verbatim. */
+    model?: string | null;
+    /** A reasoning level, already normalized (trim + lowercase) by the
+     * caller, or null to clear. Callers validate with
+     * `assertReasoningSelectable` before calling. */
+    reasoning?: string | null;
   },
 ): Promise<AssistantRow> {
   if (row.archivedAt !== null) throw new ArchivedAssistantError();
@@ -471,6 +489,8 @@ export async function patchAssistant(
     personality?: string | null;
     behavior?: string | null;
     isDefault?: boolean;
+    model?: string | null;
+    reasoning?: string | null;
   } = {};
   if (patch.name !== undefined) changes.name = patch.name;
   if (patch.personality !== undefined) {
@@ -482,6 +502,8 @@ export async function patchAssistant(
   }
   if (patch.behavior !== undefined) changes.behavior = serializeAssistantBehavior(patch.behavior);
   if (patch.isDefault === true) changes.isDefault = true;
+  if (patch.model !== undefined) changes.model = patch.model;
+  if (patch.reasoning !== undefined) changes.reasoning = patch.reasoning;
 
   return db.transaction(async (tx) => {
     if (patch.isDefault === true) {

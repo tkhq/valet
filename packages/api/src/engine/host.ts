@@ -2090,6 +2090,12 @@ export class EngineHost {
        * `assistantSessionId(id)` at creation, so passing it is a no-op
        * there; omitted, the derived id is the fallback. */
       sessionId?: string;
+      /** Explicit model spec for a first build, same `overrideId` cascade
+       * slot `childSessionFor`/workflow session builds already expose via
+       * their own `modelId` opt (model-selector-overhaul Task 9) — no
+       * production caller passes this yet, but the slot stays consistent
+       * across every session-build entry point. */
+      modelId?: string;
     },
   ): Promise<Session> {
     const sessionId = opts?.sessionId ?? assistantSessionId(assistantId);
@@ -2099,7 +2105,7 @@ export class EngineHost {
     if (pending) return pending;
 
     const epoch = this.buildEpoch.get(sessionId) ?? 0;
-    const promise = this.buildAssistantSession(sessionId, assistantId, meta, epoch, 0).finally(() => {
+    const promise = this.buildAssistantSession(sessionId, assistantId, meta, epoch, 0, opts?.modelId).finally(() => {
       this.inflight.delete(sessionId);
     });
     this.inflight.set(sessionId, promise);
@@ -2112,6 +2118,7 @@ export class EngineHost {
     meta: { actorUserId: string; orgId: string },
     epoch: number,
     attempt: number,
+    overrideId?: string,
   ): Promise<Session> {
     if (!this.opts.db) {
       throw new Error("EngineHost: assistantSessionFor requires opts.db");
@@ -2169,7 +2176,9 @@ export class EngineHost {
     // actor's own default (TKAI-255 review round).
     const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, meta.orgId, {
       userId: principal.type === "user" ? meta.actorUserId : undefined,
+      overrideId,
       ownerTeamId: principal.type === "team" ? principal.id : undefined,
+      assistantDefault: assistant.model ?? undefined,
     });
     const queueMode: "steer" | "followup" = principal.type === "user" ? "steer" : "followup";
     // `principal`, not `meta.actorUserId`: an assistant session belongs to
@@ -2302,7 +2311,7 @@ export class EngineHost {
       // below drops it again if writes are still arriving — bounded
       // staleness instead of unbounded rebuild.
       session.suspendTimers();
-      return this.buildAssistantSession(sessionId, assistantId, meta, epochNow, attempt + 1);
+      return this.buildAssistantSession(sessionId, assistantId, meta, epochNow, attempt + 1, overrideId);
     }
     builtSession = session;
 
@@ -2909,7 +2918,7 @@ export class EngineHost {
    * `overrideId` and the user default — that persisted value already
    * reflects whatever `setModel` (or the original create-time model) set.
    * Only on create does the preference cascade apply (TKAI-255):
-   * `overrideId ?? userDefault ?? teamDefault ?? orgPreferred ?? hardcoded`
+   * `overrideId ?? assistantDefault ?? childDefault ?? userDefault ?? teamDefault ?? orgPreferred ?? hardcoded`
    * — most-specific wins. The tiers are opt-in via `prefs`:
    *
    * - `userId` names the person whose personal default may apply. Callers
@@ -2918,15 +2927,31 @@ export class EngineHost {
    *   touch a shared session must not freeze their personal preference
    *   onto everyone (the resolved model persists, restore-no-clobber).
    * - `ownerTeamId` opts into the team tier for team-owned sessions.
+   * - `assistantDefault` is the assistant row's OWN stored `model` (Task 9,
+   *   model-selector-overhaul). Unlike `userId`, this is principal-scoped,
+   *   not actor-scoped: an assistant's stored model belongs to the
+   *   assistant itself, so passing it for a SHARED team/org assistant is
+   *   correct and does not leak whoever happened to wake the session first
+   *   — every waker sees the same assistant-level pick. It sits right
+   *   after `overrideId` because it is the next most specific choice: a
+   *   caller-supplied explicit override always wins, but absent one, the
+   *   assistant's own configured model outranks every other default tier.
    */
   private async resolveModelForBuild(
     existing: SessionData | null,
     orgId: string,
-    prefs: { userId?: string; overrideId?: string; ownerTeamId?: string; childDefault?: string },
+    prefs: {
+      userId?: string;
+      overrideId?: string;
+      ownerTeamId?: string;
+      childDefault?: string;
+      assistantDefault?: string;
+    },
   ): Promise<BuildModel> {
     if (existing?.model) return this.resolveModelObject(orgId, existing.model);
     const id =
       prefs.overrideId ??
+      prefs.assistantDefault ??
       prefs.childDefault ??
       (prefs.userId ? await this.userDefaultModel(prefs.userId) : undefined) ??
       (prefs.ownerTeamId ? await this.teamDefaultModel(orgId, prefs.ownerTeamId) : undefined) ??

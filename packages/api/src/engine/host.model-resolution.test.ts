@@ -27,6 +27,8 @@ import { NoCredentialsError } from "@valet/engine";
 import { resolveModelSpec } from "../services/model-resolution.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { defaultAssistantSessionFor } from "../test-helpers/assistant-session.js";
+import { resolveDefaultAssistant } from "../assistants/service.js";
+import { assistants } from "../schema/index.js";
 
 const orgId = "org-res";
 const ANTHROPIC_MODEL = "claude-haiku-4-5";
@@ -692,5 +694,44 @@ describe("EngineHost model resolution wiring", () => {
     expect(restored.options.modelSpec).toBe(spec);
     expect(restored.options.model.id).toBe("m1"); // wire id, restored verbatim
     expect(restored.options.model.provider).toBe(row.id);
+  });
+
+  // `assistantDefault` (model-selector-overhaul Task 9): an assistant's own
+  // stored `model` column, threaded into the cascade from `assistantSessionFor`.
+  describe("assistantDefault cascade slot (Task 9)", () => {
+    it("new-session precedence: the assistant's own model wins over the user's personal default", async () => {
+      api = await bootTestApi();
+      const { db, engineHost } = api.providers;
+      await db.update(users).set({ defaultModel: "claude-opus-4-5" }).where(eq(users.id, "local-user"));
+
+      const assistant = await resolveDefaultAssistant(db, "local-org", { type: "user", id: "local-user" });
+      // "l" tier resolves to anthropic/claude-opus-4-7 by built-in default
+      // (model-tiers.ts) — distinct from the user's "claude-opus-4-5" pick,
+      // so the two tiers are distinguishable.
+      await db.update(assistants).set({ model: "l" }).where(eq(assistants.id, assistant.id));
+
+      const session = await engineHost.assistantSessionFor(assistant.id, {
+        actorUserId: "local-user",
+        orgId: "local-org",
+      });
+      // The tier token persists as the spec (TKAI-285: re-pointing a tier
+      // must reach existing threads), not the concrete model it resolved to.
+      expect(session.options.modelSpec).toBe("l");
+    });
+
+    it("new-session precedence: an explicit overrideId wins over the assistant's own model", async () => {
+      api = await bootTestApi();
+      const { db, engineHost } = api.providers;
+
+      const assistant = await resolveDefaultAssistant(db, "local-org", { type: "user", id: "local-user" });
+      await db.update(assistants).set({ model: "l" }).where(eq(assistants.id, assistant.id));
+
+      const session = await engineHost.assistantSessionFor(
+        assistant.id,
+        { actorUserId: "local-user", orgId: "local-org" },
+        { modelId: "claude-opus-4-5" },
+      );
+      expect(session.options.model.id).toBe("claude-opus-4-5");
+    });
   });
 });
