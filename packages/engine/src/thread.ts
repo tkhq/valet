@@ -7,6 +7,7 @@ import { getModel, isContextOverflow, streamSimple } from "@earendil-works/pi-ai
 // blacklist) — a hand-rolled copy would drift on every pi-ai upgrade.
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import { classifyCacheBreak, type CacheTurnSnapshot } from "./cache-telemetry.js";
+import { appendRuntimeModelContext } from "./model-context.js";
 import { recordCacheBreak } from "./metrics.js";
 import type { Api, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
 
@@ -431,6 +432,10 @@ export class Thread {
    * expensive model with nobody who chose it.
    */
   private agentModelSwitch?: string;
+  /** Snapshot at turn resolution: a user can change the next turn's pin while this one runs. */
+  private assignedModelSpec?: string;
+  /** Set only after a role model resolves and is applied. Never persisted. */
+  private roleModelSpec?: string;
   /**
    * Per-turn API key from the host `resolveModel` seam. Resolved at turn start
    * (fresh turns and resume/replay), read by the Agent's `getApiKey`, cleared
@@ -2055,6 +2060,7 @@ export class Thread {
    * model and credentials the user never chose.
    */
   private async resolveTurnModelForTurn(item?: QueueItem): Promise<PiModel> {
+    this.assignedModelSpec = this.turnModelSpec(item);
     const resolver = this.session.options.resolveModel;
     if (!resolver) return this.resolveTurnModel(item);
     const spec = this.turnModelSpec(item);
@@ -2100,6 +2106,7 @@ export class Thread {
    * wedge).
    */
   private async applyResolvedKeyForResume(item?: QueueItem): Promise<void> {
+    this.assignedModelSpec = this.turnModelSpec(item);
     const resolver = this.session.options.resolveModel;
     if (!resolver) return;
     const spec = this.turnModelSpec(item);
@@ -3473,6 +3480,7 @@ export class Thread {
         if (next) {
           priorModel = this.agent.state.model;
           this.agent.state.model = next;
+          this.roleModelSpec = role.model;
         }
       } catch (err) {
         this.emitError(
@@ -3490,6 +3498,7 @@ export class Thread {
   }
 
   private restoreRoleAfterTurn(overlay: RoleOverlay): void {
+    this.roleModelSpec = undefined;
     if (!overlay.restore) return;
     if (overlay.systemPrompt !== undefined) {
       this.agent.state.systemPrompt = overlay.systemPrompt;
@@ -3750,7 +3759,9 @@ export class Thread {
       (m): m is Message =>
         m.role === "user" || m.role === "assistant" || m.role === "toolResult",
     );
-    const estimated = estimateLiveContextTokens(this.agent.state.systemPrompt, llmMessages);
+    const estimated = estimateLiveContextTokens(
+      this.modelSystemPrompt(this.agent.state.systemPrompt, this.agent.state.model), llmMessages,
+    );
     return estimated >= usable;
   }
 
@@ -4054,6 +4065,22 @@ export class Thread {
     }
   }
 
+  /** Build from the actual stream model after role and agent overrides have applied. */
+  private modelSystemPrompt(prompt: string | undefined, model: PiModel): string {
+    const assignedSelection = this.assignedModelSpec ?? this.turnModelSpec(this.runningItem ?? undefined);
+    return appendRuntimeModelContext(prompt, {
+      assignedSelection,
+      activeSelection: this.agentModelSwitch ?? this.roleModelSpec ?? assignedSelection,
+      provider: model.provider,
+      modelId: model.id,
+      temporaryOverride: this.agentModelSwitch !== undefined
+        ? "switch_model"
+        : this.roleModelSpec !== undefined
+          ? "role model"
+          : this.runningItem?.model !== undefined ? "submission model" : undefined,
+    });
+  }
+
   private buildAgent(): Agent {
     // Only wire `getApiKey` when a host resolver is present. Absent → the Agent
     // is constructed with the exact same options as before the seam existed, so
@@ -4073,7 +4100,10 @@ export class Thread {
       // from its own config wins — pinning here would silently disable the
       // upstream knob forever.
       streamFn: (model, context, options) =>
-        streamSimple(model, context, {
+        streamSimple(model, {
+          ...context,
+          systemPrompt: this.modelSystemPrompt(context.systemPrompt, model),
+        }, {
           ...options,
           maxRetries: options?.maxRetries ?? TURN_STREAM_MAX_RETRIES,
           maxRetryDelayMs: options?.maxRetryDelayMs ?? TURN_STREAM_MAX_RETRY_DELAY_MS,
@@ -4527,7 +4557,7 @@ export class Thread {
               promptTokens: u.input + u.cacheRead + u.cacheWrite,
               cacheRead: u.cacheRead,
               modelId: event.message.model,
-              systemPromptLength: this.agent.state.systemPrompt.length,
+              systemPromptLength: this.modelSystemPrompt(this.agent.state.systemPrompt, this.agent.state.model).length,
               toolCount: this.agent.state.tools.length,
             };
             // prev.cacheRead > 0 proves this provider reports cache usage

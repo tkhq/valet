@@ -179,7 +179,7 @@ Two layers fix it:
 
 The original design gave `switch_model` and the user's own controls one field,
 `engine_threads.model`. Two writers on one field produced a defect: the
-orchestrator persona tells the agent to escalate before it designs or spawns,
+orchestrator persona told the agent to escalate before it designed or spawned,
 so a routine turn rewrote the user's setting, the picker reported the new
 model, and the thread stayed on the expensive model for every later turn.
 
@@ -224,8 +224,34 @@ Consequences worth stating:
   ends when the turn settles and emits no matching switch back, so a consumer
   that rebuilds the current model from the event stream must not treat it as
   durable. The web stream store skips its refetch for turn scope: the picker
-  reads the user's pin, which a turn-scoped switch never changes, and the
-  orchestrator persona escalates on most turns.
+  reads the user's pin, which a turn-scoped switch never changes.
+
+## Amendment (2026-09-04): agents receive their current model
+
+Each outbound agent call receives a `Runtime model` section after its system
+instructions. The engine supplies these facts at the stream boundary:
+
+- Assigned selection, captured when the turn resolves its model.
+- Active selection, including a successful role override or agent switch.
+- Actual provider and model ID from the model passed to the stream function.
+- Temporary override source and its expiry at the end of the turn.
+
+The assignment uses the submission model, thread pin, then session default.
+Capturing it prevents a concurrent user pin change from mislabeling a running
+turn. The active selection uses an agent switch, then a successful role model,
+then that assignment. A failed role lookup or model switch does not change it.
+Selections retain tier tokens when available. The engine never infers a tier
+from a concrete model ID because several tiers can resolve to the same model.
+
+The engine recomputes this section for every call, including continuations and
+restored sessions. It does not store the section in messages or mutate the base
+system prompt. Context estimation and cache telemetry include the added text.
+The text has no timestamp or per-call counter, so unchanged facts remain stable.
+
+The [supervised model guidance](2026-09-04-supervised-model-guidance-design.md)
+replaces blanket escalation advice. Supervisors select drafting and review
+tiers. Children retain their assignment unless evidence supports escalation.
+These prompt rules do not change model resolution, persistence, or user pins.
 
 ## Out of scope
 
