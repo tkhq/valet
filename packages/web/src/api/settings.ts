@@ -26,6 +26,7 @@ import type {
   GetModelTiersResponse,
   GetOrgReasoningResponse,
   GetSlackAppResponse,
+  ListAssistantsResponse,
   ListLlmProvidersResponse,
   ListModelsResponse,
   ListTeamMembersResponse,
@@ -462,7 +463,13 @@ export function useCreateTeam() {
   const qc = useQueryClient();
   return useMutation<CreateTeamResponse, Error, CreateTeamRequest>({
     mutationFn: (body) => api.createTeam(body),
-    onSuccess: () => {
+    onSuccess: (created) => {
+      qc.setQueryData<ListAssistantsResponse>(qkAssistants.list(), (prev) => {
+        const row = created.defaultAssistant;
+        if (!prev) return { assistants: [row] };
+        if (prev.assistants.some((a) => a.id === row.id)) return prev;
+        return { assistants: [...prev.assistants, row] };
+      });
       for (const queryKey of teamCreateQueryKeys()) {
         qc.invalidateQueries({ queryKey });
       }
