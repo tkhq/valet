@@ -216,9 +216,29 @@ describe("ModelPicker — Size tier group", () => {
     expect(document.querySelectorAll('[data-row-kind="model"]')).toHaveLength(1);
   });
 
-  it("shows the tier trigger label for a tier currentId", () => {
+  it("falls back to the tier label on the trigger when the tier has no targets", () => {
     renderPicker({ currentId: "xl" });
-    expect(screen.getByRole("button", { name: "Choose model" }).textContent).toContain("X-Large");
+    const chip = screen.getByRole("button", { name: "Choose model" });
+    expect(chip.textContent).toContain("X-Large");
+    expect(chip.textContent).toContain("XL");
+  });
+
+  it("shows the resolved model name plus a size pill for an explicit tier pick", () => {
+    tierMapData = { xs: ["anthropic/claude-sonnet-4-5"], s: [], m: [], l: [], xl: [] };
+    renderPicker({ currentId: "xs" });
+    const chip = screen.getByRole("button", { name: "Choose model" });
+    // Curated label overlays the catalog name, same as the model rows.
+    expect(chip.textContent).toContain("Sonnet 4.5");
+    expect(chip.textContent).toContain("XS");
+    expect(chip.textContent).not.toContain("Extra Small");
+  });
+
+  it("shows no size pill for a bare model pick", () => {
+    renderPicker({ currentId: "custom_1/llama-3" });
+    const chip = screen.getByRole("button", { name: "Choose model" });
+    expect(chip.textContent).toContain("Llama 3");
+    expect(chip.querySelectorAll("span").length).toBeLessThanOrEqual(2); // name span only, no pill span
+    expect(chip.textContent).not.toMatch(/\bXS\b|\bXL\b/);
   });
 });
 

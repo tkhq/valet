@@ -9,7 +9,7 @@ import {
 } from "~/components/primitives";
 import { useMe, useModelTiers, useModels, useOrgReasoning } from "~/api/settings";
 import { curatedForCatalogId } from "~/lib/models";
-import { SIZE_TIERS, TIER_LABELS, isSizeTier, labelFor, tierSubtitle, type SizeTier } from "~/lib/model-tiers";
+import { SIZE_TIERS, TIER_BADGES, TIER_LABELS, isSizeTier, labelFor, tierSubtitle, type SizeTier } from "~/lib/model-tiers";
 import { REASONING_LABELS, levelsUpTo, reasoningLabelFor } from "~/lib/reasoning";
 import type { GetModelTiersResponse, ModelInfo } from "@valet/api/wire";
 import { cn } from "~/lib/cn";
@@ -242,9 +242,13 @@ export function ModelPicker({
     el?.scrollIntoView({ block: "nearest" });
   }, [highlightIndex, open]);
 
+  // An explicit size pick shows the RESOLVED model's name plus a size pill;
+  // a bare model pick shows the name alone. The tier label is only the
+  // fallback while the tier map (or its target) is unknown.
+  const triggerTier = currentId && isSizeTier(currentId) ? currentId : undefined;
   const triggerLabel = currentId
-    ? isSizeTier(currentId)
-      ? TIER_LABELS[currentId]
+    ? triggerTier
+      ? (tierSubtitle(triggerTier, tierMapQ.data, models) ?? TIER_LABELS[triggerTier])
       : labelFor(currentId, models)
     : "Inherit";
   const reasoningLevels = levelsUpTo(orgReasoningQ.data?.max);
@@ -290,10 +294,15 @@ export function ModelPicker({
           aria-label="Choose model"
         >
           <Sparkles className="h-3.5 w-3.5 text-muted" aria-hidden />
-          <span className="truncate text-xs">
-            {triggerLabel}
-            {currentReasoning && ` · ${reasoningLabelFor(currentReasoning)}`}
-          </span>
+          <span className="truncate text-xs">{triggerLabel}</span>
+          {triggerTier && (
+            <span className="shrink-0 rounded border border-line bg-neutral-100 px-1 text-[9px] font-semibold uppercase tracking-wide text-muted dark:bg-neutral-800">
+              {TIER_BADGES[triggerTier]}
+            </span>
+          )}
+          {currentReasoning && (
+            <span className="shrink-0 text-xs">· {reasoningLabelFor(currentReasoning)}</span>
+          )}
           <ChevronDown className="h-3.5 w-3.5 text-muted shrink-0 ml-auto" />
         </Button>
       </DropdownMenuTrigger>

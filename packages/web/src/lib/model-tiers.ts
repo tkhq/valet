@@ -19,6 +19,16 @@ export const TIER_LABELS: Record<SizeTier, string> = {
   xl: "X-Large",
 };
 
+/** Short pill text for a tier, shown next to the resolved model name when a
+ * size was selected explicitly (bare model picks carry no pill). */
+export const TIER_BADGES: Record<SizeTier, string> = {
+  xs: "XS",
+  s: "S",
+  m: "M",
+  l: "L",
+  xl: "XL",
+};
+
 /** Narrows a string to a known `SizeTier`. Rejects `null`/`undefined`. */
 export function isSizeTier(id: string | null | undefined): id is SizeTier {
   return !!id && (SIZE_TIERS as readonly string[]).includes(id);
