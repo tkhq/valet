@@ -10,6 +10,7 @@ import type {
 import {
   downloadWorkflowFile,
   useAllowWorkflowPermissions,
+  useCopyWorkflow,
   useStartRun,
   useUpdateWorkflow,
   useWorkflow,
@@ -98,6 +99,8 @@ export function WorkflowEditorPage({ workflowId }: { workflowId: string }) {
       workflowId={workflowId}
       initialName={data.name}
       initialDefinition={definition}
+      origin={data.origin}
+      upstream={data.upstream}
       update={update}
       startRun={startRun}
       runsQuery={runsQ}
@@ -117,6 +120,8 @@ function WorkflowEditorPane({
   workflowId,
   initialName,
   initialDefinition,
+  origin,
+  upstream,
   update,
   startRun,
   runsQuery,
@@ -127,6 +132,8 @@ function WorkflowEditorPane({
   workflowId: string;
   initialName: string;
   initialDefinition: WorkflowDefinition;
+  origin?: "local" | "repo";
+  upstream?: { repoFullName: string; path: string };
   update: UpdateWorkflowMutation;
   startRun: ReturnType<typeof useStartRun>;
   runsQuery: {
@@ -146,6 +153,8 @@ function WorkflowEditorPane({
   // drawers — see `WorkflowAssistantPanel`. It has no open/closed state of
   // its own: describing a change is the primary way to edit a workflow, so
   // the conversation is on screen from the moment the editor is.
+  const copy = useCopyWorkflow();
+  const mirrored = origin === "repo";
   const assistant = useWorkflowAssistant(workflowId, initialName);
   // The one thing that makes a live edit visible: a completed patch in the
   // panel's conversation refetches the workflow, and `Editor` adopts it.
@@ -267,7 +276,8 @@ function WorkflowEditorPane({
             onChange={(e) => setName(e.target.value)}
             aria-label="Workflow name"
             placeholder="Untitled workflow"
-            className="min-w-0 rounded border border-transparent bg-transparent px-1 -mx-1 text-lg font-semibold tracking-tight text-ink font-display hover:border-line focus:border-line focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40"
+            readOnly={mirrored}
+            className="min-w-0 rounded border border-transparent bg-transparent px-1 -mx-1 text-lg font-semibold tracking-tight text-ink font-display hover:border-line focus:border-line focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/40 read-only:hover:border-transparent"
           />
         </div>
         <div className="flex items-center gap-2">
@@ -299,6 +309,20 @@ function WorkflowEditorPane({
                 : `${gatingActions.length} actions need approval`}
             </button>
           )}
+          {mirrored && (
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={copy.isPending}
+              onClick={() => {
+                void copy.mutateAsync(workflowId).then((copied) => {
+                  void navigate({ to: "/workflows/$workflowId", params: { workflowId: copied.id } });
+                });
+              }}
+            >
+              {copy.isPending ? "Copying…" : "Copy"}
+            </Button>
+          )}
           <Button size="sm" onClick={() => void handleRun()} disabled={startRun.isPending}>
             {startRun.isPending ? "Starting…" : "Run"}
           </Button>
@@ -329,6 +353,28 @@ function WorkflowEditorPane({
           </DropdownMenu>
         </div>
       </div>
+
+      {mirrored && (
+        <div
+          data-testid="mirrored-banner"
+          className="border-b border-line bg-ink-wash px-6 py-2 text-xs text-muted"
+        >
+          This workflow is mirrored from{" "}
+          {upstream ? (
+            <a
+              href={`https://github.com/${upstream.repoFullName}/blob/HEAD/${upstream.path}`}
+              target="_blank"
+              rel="noreferrer"
+              className="font-mono underline underline-offset-2"
+            >
+              {upstream.repoFullName}:{upstream.path}
+            </a>
+          ) : (
+            "a repository file"
+          )}
+          . Edit the file and push. Copy makes a local workflow you can save.
+        </div>
+      )}
 
       {blockedActions.length > 0 && (
         <div
@@ -404,6 +450,7 @@ function WorkflowEditorPane({
             initialDefinition={initialDefinition}
             onSave={handleSave}
             saving={update.isPending}
+            readOnly={mirrored}
             gateByNodeId={gateByNodeId}
             assistant={
               <WorkflowAssistantPanel

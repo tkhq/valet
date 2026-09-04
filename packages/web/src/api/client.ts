@@ -846,6 +846,8 @@ export const api = {
     request<GetWorkflowResponse>("GET", `/workflows/${encodeURIComponent(id)}`),
   createWorkflow: (body: CreateWorkflowRequest) =>
     request<CreateWorkflowResponse>("POST", "/workflows", body),
+  copyWorkflow: (id: string) =>
+    request<CreateWorkflowResponse>("POST", `/workflows/${encodeURIComponent(id)}/copy`),
   /** One file out of a PUBLIC GitHub repository, for the import dialog. The
    * body comes back as text: the dialog parses it with the same parser it
    * applies to a pasted file. */
@@ -1002,11 +1004,17 @@ export const api = {
     ),
   getWorkflowTriggerCatalog: () =>
     request<GetWorkflowTriggerCatalogResponse>("GET", "/workflows/trigger-catalog"),
-  listAllWorkflowRuns: (owner?: OwnerFilter, limit?: number) =>
-    request<ListAllWorkflowRunsResponse>(
+  listAllWorkflowRuns: (owner?: OwnerFilter, page?: WorkflowRunPage) => {
+    const qs = new URLSearchParams();
+    if (page?.limit) qs.set("limit", String(page.limit));
+    if (page?.cursor) qs.set("cursor", page.cursor);
+    const owned = ownerParams(owner);
+    const joined = [qs.toString(), owned].filter(Boolean).join("&");
+    return request<ListAllWorkflowRunsResponse>(
       "GET",
-      `/workflows/runs${limit ? `?limit=${limit}${ownerSuffix(owner)}` : ownerQuery(owner)}`,
-    ),
+      `/workflows/runs${joined ? `?${joined}` : ""}`,
+    );
+  },
   createWorkflowSchedule: (body: CreateWorkflowScheduleRequest) =>
     request<WorkflowScheduleResponse>("POST", "/workflows/schedules", body),
   updateWorkflowSchedule: (id: string, body: UpdateWorkflowScheduleRequest) =>

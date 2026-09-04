@@ -10,7 +10,7 @@ import {
   SkillGrid,
   type SkillGridFilters,
 } from "~/components/skills/skill-grid";
-import { SkillSourcesPanel } from "~/components/skills/skill-sources-panel";
+import { RepoSourcesPanel } from "~/components/skills/repo-sources-panel";
 import { WorkspaceClause } from "~/components/workspace-clause";
 import {
   currentCursor,
@@ -123,7 +123,7 @@ export function SkillsIndexPage() {
         </div>
 
         <div className="mt-6">
-          <SkillSourcesPanel
+          <RepoSourcesPanel
             cursors={sourceCursors}
             onCursorsChange={(next) => go({ sourcePage: formatCursorStack(next) })}
           />

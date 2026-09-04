@@ -41,6 +41,8 @@ const workflowsData: { workflows: WorkflowDefinitionSummary[] } = {
       updatedAt: 2,
       ownerType: "team",
       ownerId: "team_1",
+      origin: "repo",
+      upstream: { repoFullName: "tkhq/automation", path: ".valet/workflows/nightly.yaml" },
     },
   ],
 };
@@ -71,6 +73,7 @@ const triggersData = {
 };
 
 const allRunsData = {
+  nextCursor: "cursor_2",
   runs: [
     {
       runId: "wfrun_1",
@@ -296,6 +299,13 @@ describe("WorkflowsIndexPage", () => {
     renderPage();
     expect(screen.getByText("Deploy pipeline")).toBeTruthy(); // workflowName column
     expect(screen.getByText("completed")).toBeTruthy(); // RunStatusChip label
+    expect(screen.getByRole("button", { name: "Next" })).toBeTruthy();
+  });
+
+  it("badges a mirrored workflow with its repository path", () => {
+    renderPage();
+    expect(screen.getByText("tkhq/automation:.valet/workflows/nightly.yaml")).toBeTruthy();
+    expect(screen.queryByLabelText("Delete Nightly digest")).toBeNull();
   });
 
   it("renders the Triggers tab with the unified list", () => {
