@@ -145,11 +145,12 @@ Storage comparison follows the Kubernetes `resource.Quantity` suffix forms:
 DecimalSI (`n`, `u`, `m`, empty, `k`, `K`, `M`, `G`, `T`, `P`, `E`), BinarySI
 (`Ki` through `Ei`), and signed decimal exponents. The parser uses exact
 integer math before it converts the result to a JavaScript number. It rounds
-a positive fractional byte away from zero, so any positive quantity resolves
-to at least one byte. A fractional storage quantity can therefore never
-disable a value by becoming zero. The parser rejects malformed quantities,
-negative quantities, non-finite quantities, and results above JavaScript's
-safe-integer byte range.
+a fractional byte away from zero while preserving its sign. Any positive
+quantity therefore resolves to at least one byte. A fractional storage
+quantity can never disable a value by becoming zero. Storage callers reject
+negative or otherwise non-positive values. The parser rejects malformed
+quantities, non-finite quantities, and results above JavaScript's safe-integer
+byte range.
 
 ## Part C — repo-declared workspace size (TKAI-385)
 
