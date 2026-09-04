@@ -787,6 +787,30 @@ describe("create() adoption convergence (TKAI-402)", () => {
     warnSpy.mockRestore();
   });
 
+  it.each(["0", "-1Gi"])(
+    "reports a non-positive adopted claim storage request (%s) and continues",
+    async (pvcRequested) => {
+      const { provider, patches } = makeAdoptingProvider({
+        pvcRequested,
+        previousSessionId: "session-old",
+      });
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      recordWorkspaceGrow.mockClear();
+
+      await expect(
+        provider.create({ workspace: "/ws/mono", sessionId: "session-new", workspaceStorage: "8Gi" }),
+      ).resolves.toBeDefined();
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/Storage request is invalid.*workspace-ws-mono.*valet-sandboxes.*Set the PVC storage request/s),
+      );
+      expect(recordWorkspaceGrow).toHaveBeenCalledWith("error");
+      expect(recordWorkspaceGrow).not.toHaveBeenCalledWith("refused");
+      expect(patches).toHaveLength(0);
+      warnSpy.mockRestore();
+    },
+  );
+
   it("an adopted claim at the growth cap does not warn (declared above the cap resolves to the cap)", async () => {
     const { provider, patches } = makeAdoptingProvider({ pvcRequested: "20Gi", previousSessionId: "session-old" });
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});

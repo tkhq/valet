@@ -865,8 +865,8 @@ export class KubernetesSandboxProvider implements SandboxProvider {
             action: "Check the PVC storage request before retrying.",
           });
         } else {
-          currentBytes = parseStorageQuantity(pvcRead.requestedStorage);
-          if (currentBytes === null) {
+          const parsed = parseStorageQuantity(pvcRead.requestedStorage);
+          if (parsed === null || parsed <= 0) {
             reportAdoptedWorkspacePvcError({
               sandboxName: name,
               pvcName,
@@ -875,6 +875,8 @@ export class KubernetesSandboxProvider implements SandboxProvider {
               problem: "Storage request is invalid",
               action: "Set the PVC storage request to a Kubernetes quantity before retrying.",
             });
+          } else {
+            currentBytes = parsed;
           }
         }
       }
