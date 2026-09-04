@@ -296,21 +296,27 @@ describe.skipIf(!isClusterReady)("KubernetesSandboxProvider targeted behaviors (
       }
       const elapsedMs = Date.now() - start;
 
-      expect(thrown).toBeInstanceOf(SandboxStartupError);
-      if (!(thrown instanceof SandboxStartupError)) {
-        throw new Error("Expected SandboxStartupError from the bogus image.");
+      try {
+        expect(thrown).toBeInstanceOf(SandboxStartupError);
+        if (!(thrown instanceof SandboxStartupError)) {
+          throw new Error("Expected SandboxStartupError from the bogus image.");
+        }
+        expect(thrown.message).toMatch(/sandbox failed to start/i);
+        expect(thrown.reason).toMatch(/image pull failed/i);
+        expect(thrown.reason).toMatch(/(ImagePullBackOff|ErrImagePull)/);
+
+        // The image-pull failure must resolve in a few poll intervals. It
+        // must not use the full 60-second generic ready timeout.
+        expect(elapsedMs).toBeLessThan(30_000);
+
+        // create() owns a CR that it creates. If startup fails, create()
+        // removes that fresh CR before it returns the startup error.
+        await expect(provider.status(name)).resolves.toEqual({ id: name, state: "released" });
+      } finally {
+        // Keep this cleanup defensive if startup behavior regresses. The
+        // normal path already removed the CR, and destroy() is idempotent.
+        await provider.destroy(name);
       }
-      expect(thrown.message).toMatch(/sandbox failed to start/i);
-      expect(thrown.reason).toMatch(/image pull failed/i);
-      expect(thrown.reason).toMatch(/(ImagePullBackOff|ErrImagePull)/);
-
-      // The image-pull failure must resolve in a few poll intervals. It
-      // must not use the full 60-second generic ready timeout.
-      expect(elapsedMs).toBeLessThan(30_000);
-
-      // create() owns a CR that it creates. If startup fails, create()
-      // removes that fresh CR before it returns the startup error.
-      await expect(provider.status(name)).resolves.toEqual({ id: name, state: "released" });
     },
     60_000,
   );

@@ -124,6 +124,37 @@ describe("execInPod", () => {
     expect(result.truncated).toBeUndefined();
   });
 
+  it("applies the byte cap after decoding split UTF-8 transport chunks", async () => {
+    const encoded = Buffer.from("A🧪BC🧪Z", "utf8");
+    const firstEmoji = encoded.indexOf(0xf0);
+    const api = new FakePodExecApi((stdout, _stderr, statusCallback) => {
+      stdout?.write(encoded.subarray(0, firstEmoji + 2));
+      stdout?.write(encoded.subarray(firstEmoji + 2));
+      statusCallback?.({ status: "Success" });
+    });
+
+    const result = await execInPod(deps(api), "pod-1", "utf8-output", { maxOutputBytes: 8 });
+    expect(result.stdout).toMatch(/^A\n\[\.\.\. 5 bytes omitted:/);
+    expect(result.stdout).toMatch(/C🧪Z$/);
+    expect(result.stdout).not.toContain("�");
+    expect(result.truncated).toBe(true);
+  });
+
+  it("treats maxOutputBytes zero as a zero-byte cap", async () => {
+    const api = new FakePodExecApi((stdout, stderr, statusCallback) => {
+      stdout?.write("abc");
+      stderr?.write("🧪");
+      statusCallback?.({ status: "Success" });
+    });
+
+    const result = await execInPod(deps(api), "pod-1", "zero-cap", { maxOutputBytes: 0 });
+    expect(result.stdout).toContain("3 bytes omitted");
+    expect(result.stderr).toContain("4 bytes omitted");
+    expect(result.stdout).not.toContain("abc");
+    expect(result.stderr).not.toContain("🧪");
+    expect(result.truncated).toBe(true);
+  });
+
   it("force-closes the socket and reports timedOut when the status never arrives", async () => {
     const api = new FakePodExecApi((stdout) => {
       stdout?.write("partial");

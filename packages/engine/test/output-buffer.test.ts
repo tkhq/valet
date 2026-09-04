@@ -47,4 +47,64 @@ describe("CappedOutputBuffer", () => {
     expect(buf.value()).toBe("abcdefg");
     expect(buf.truncated).toBe(false);
   });
+
+  it("uses UTF-8 bytes and keeps complete multibyte code points", () => {
+    const buf = new CappedOutputBuffer(8); // head 2 bytes, tail 6 bytes
+    buf.append("A🧪BC🧪Z"); // 12 bytes total
+
+    expect(buf.headText).toBe("A");
+    expect(buf.value()).toBe(`A${omittedMarker(5)}C🧪Z`);
+    expect(buf.value()).not.toContain("�");
+    expect(buf.truncated).toBe(true);
+  });
+
+  it("joins a surrogate pair split across appends before applying the byte cap", () => {
+    const once = new CappedOutputBuffer(8);
+    once.append("A🧪BC🧪Z");
+
+    const chunked = new CappedOutputBuffer(8);
+    const emoji = "🧪";
+    chunked.append(`A${emoji[0]}`);
+    expect(chunked.headText).toBe("A");
+    chunked.append(`${emoji[1]}BC${emoji[0]}`);
+    chunked.append(`${emoji[1]}Z`);
+
+    expect(chunked.value()).toBe(once.value());
+    expect(chunked.value()).not.toContain("�");
+  });
+
+  it("does not fill a skipped head gap with bytes from a later append", () => {
+    const once = new CappedOutputBuffer(8);
+    once.append("🧪ABCDEF");
+
+    const chunked = new CappedOutputBuffer(8);
+    chunked.append("🧪");
+    chunked.append("ABCDEF");
+
+    expect(chunked.headText).toBe("");
+    expect(chunked.value()).toBe(once.value());
+    expect(chunked.value()).toBe(`${omittedMarker(4)}ABCDEF`);
+  });
+
+  it("supports a zero-byte cap and reports all input bytes as omitted", () => {
+    const buf = new CappedOutputBuffer(0);
+    buf.append("A🧪");
+
+    expect(buf.headText).toBe("");
+    expect(buf.value()).toBe(omittedMarker(5));
+    expect(buf.truncated).toBe(true);
+  });
+
+  it("normalizes finite limits and rejects non-finite limits", () => {
+    const fractional = new CappedOutputBuffer(4.9);
+    fractional.append("abcdefgh");
+    expect(fractional.value()).toBe(`a${omittedMarker(4)}fgh`);
+
+    const negative = new CappedOutputBuffer(-1);
+    negative.append("abc");
+    expect(negative.value()).toBe(omittedMarker(3));
+
+    expect(() => new CappedOutputBuffer(Number.NaN)).toThrow(RangeError);
+    expect(() => new CappedOutputBuffer(Number.POSITIVE_INFINITY)).toThrow(RangeError);
+  });
 });

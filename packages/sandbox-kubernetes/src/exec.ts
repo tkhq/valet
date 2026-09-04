@@ -231,8 +231,8 @@ export async function execInPod(
   const shellCommand = deps.docker && !opts?.privileged ? wrapAsWorkloadUser(composed) : composed;
 
   const limit = opts?.maxOutputBytes;
-  const stdoutBuffer = limit ? new CappedOutputBuffer(limit) : undefined;
-  const stderrBuffer = limit ? new CappedOutputBuffer(limit) : undefined;
+  const stdoutBuffer = limit !== undefined ? new CappedOutputBuffer(limit) : undefined;
+  const stderrBuffer = limit !== undefined ? new CappedOutputBuffer(limit) : undefined;
   let stdoutText = "";
   let stderrText = "";
 
