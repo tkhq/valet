@@ -175,6 +175,8 @@ function newAssistantRow(args: {
     name: args.name,
     personality: args.personality ?? null,
     behavior: args.behavior ?? null,
+    model: null,
+    reasoning: null,
     sessionId: assistantSessionId(id),
     isDefault: args.isDefault,
     createdAt: Date.now(),

@@ -1119,6 +1119,50 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     probe: { kind: "column", table: "agent_sessions", column: "last_activity_at" },
     sql: 'ALTER TABLE "agent_sessions" ADD COLUMN IF NOT EXISTS "last_activity_at" bigint',
   },
+  {
+    // Org allowlist of selectable model ids (model selector overhaul).
+    // Null = whole catalog approved. Empty array is rejected at the API.
+    // Admins bypass the list.
+    describe: "orgs.approved_models column",
+    probe: { kind: "column", table: "orgs", column: "approved_models" },
+    sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "approved_models" jsonb',
+  },
+  {
+    // Org reasoning settings for model selector (model selector overhaul).
+    // { default?: ThinkingLevel, max?: ThinkingLevel }. Null = no default,
+    // no cap.
+    describe: "orgs.reasoning_settings column",
+    probe: { kind: "column", table: "orgs", column: "reasoning_settings" },
+    sql: 'ALTER TABLE "orgs" ADD COLUMN IF NOT EXISTS "reasoning_settings" jsonb',
+  },
+  {
+    // Personal default reasoning level (model selector overhaul).
+    // Null = inherit.
+    describe: "user.default_reasoning column",
+    probe: { kind: "column", table: "user", column: "default_reasoning" },
+    sql: 'ALTER TABLE "user" ADD COLUMN IF NOT EXISTS "default_reasoning" text',
+  },
+  {
+    // Team default reasoning level (model selector overhaul).
+    // Null = inherit.
+    describe: "teams.default_reasoning column",
+    probe: { kind: "column", table: "teams", column: "default_reasoning" },
+    sql: 'ALTER TABLE "teams" ADD COLUMN IF NOT EXISTS "default_reasoning" text',
+  },
+  {
+    // Per-assistant model override (model selector overhaul).
+    // Tier token or catalog model id. Null = inherit the cascade.
+    describe: "assistants.model column",
+    probe: { kind: "column", table: "assistants", column: "model" },
+    sql: 'ALTER TABLE "assistants" ADD COLUMN IF NOT EXISTS "model" text',
+  },
+  {
+    // Per-assistant reasoning override (model selector overhaul).
+    // Null = inherit the cascade.
+    describe: "assistants.reasoning column",
+    probe: { kind: "column", table: "assistants", column: "reasoning" },
+    sql: 'ALTER TABLE "assistants" ADD COLUMN IF NOT EXISTS "reasoning" text',
+  },
 ];
 
 /** The repairs this database still lacks, by catalog probe — one query per

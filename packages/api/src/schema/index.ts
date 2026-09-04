@@ -68,6 +68,12 @@ export const orgs = pgTable("orgs", {
   // Tier map: `{ xs: ["anthropic/claude-haiku-4-5"], ... }`. Nullable — null
   // means "use built-in defaults" (same pattern as `ssoTeamGroups`).
   modelTiers: jsonb("model_tiers"),
+  /** Org allowlist of selectable model ids. Null = whole catalog approved.
+   * Empty array is rejected at the API. Admins bypass the list. */
+  approvedModels: jsonb("approved_models"),
+  /** { default?: ThinkingLevel, max?: ThinkingLevel }. Null = no default,
+   * no cap. */
+  reasoningSettings: jsonb("reasoning_settings"),
 });
 
 // better-auth's default model name for the user table is "user" (singular);
@@ -102,6 +108,8 @@ export const users = pgTable("user", {
   // Nullable user preference feeding `EngineHost`'s model override seam;
   // null falls back to the host default (split-settings design, decision 9).
   defaultModel: text("default_model"),
+  /** Personal default reasoning level. Null = inherit. */
+  defaultReasoning: text("default_reasoning"),
 });
 
 // ─── better-auth core + plugin tables ───────────────────────────────────────
@@ -484,6 +492,8 @@ export const teams = pgTable(
      * `orgs.model_preferences` in the resolution chain. Null = no override.
      */
     defaultModel: text("default_model"),
+    /** Team default reasoning level. Null = inherit. */
+    defaultReasoning: text("default_reasoning"),
   },
   (t) => [
     uniqueIndex("teams_org_name").on(t.orgId, t.name),
@@ -533,6 +543,10 @@ export const assistants = pgTable(
      * integration. Validated on write (`validateAssistantBehavior`); parsed
      * fail-open on read (`parseAssistantBehavior`). */
     behavior: text("behavior"),
+    /** Tier token or catalog model id. Null = inherit the cascade. */
+    model: text("model"),
+    /** Reasoning level. Null = inherit the cascade. */
+    reasoning: text("reasoning"),
     sessionId: text("session_id").notNull(),
     /**
      * The one a machine picks when nobody chose. Workflow orchestrator
