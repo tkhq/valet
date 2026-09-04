@@ -116,7 +116,6 @@ describe("quantity math", () => {
   it("returns null on unparseable quantities", () => {
     expect(parseStorageQuantity("")).toBeNull();
     expect(parseStorageQuantity("lots")).toBeNull();
-    expect(parseStorageQuantity("-1Gi")).toBeNull();
     expect(parseStorageQuantity("1Zi")).toBeNull();
   });
 

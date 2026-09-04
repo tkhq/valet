@@ -408,23 +408,22 @@ export interface SessionMeta {
   ownerTeamId?: string;
 }
 
-/** Where `resolveRepoPrebuildFlags` reads `.valet/prebuild.yaml` from, or why
- * it cannot. Exported (with {@link prebuildFlagsTarget}) for direct unit
- * coverage of the guard. */
-export type PrebuildFlagsTarget =
+/** The primary repo's GitHub coordinates, or why a GitHub read cannot run.
+ * Exported with {@link primaryGitHubRepoTarget} for direct guard coverage. */
+export type PrimaryGitHubRepoTarget =
   | { ok: true; owner: string; repo: string; ref: string }
   | { ok: false; reason: "no-repo" | "bad-full-name" }
   | { ok: false; reason: "non-github-host"; host: string };
 
 /**
- * Picks the primary repo binding's GitHub coordinates for the prebuild-flags
- * read, or the reason it must be skipped. `session_repos.host` stores
- * "github" (the schema default); hand-built metas may carry "github.com" —
- * both mean GitHub. TKAI-385: a previous version matched only "github.com",
- * which silently disabled `workspaceStorage` and the repo `docker` flag for
+ * Resolves the primary repo binding's GitHub coordinates for prebuild and
+ * credentials config reads, or the reason both reads must be skipped.
+ * `session_repos.host` stores "github" (the schema default); hand-built metas
+ * may carry "github.com". Both values mean GitHub. TKAI-385: a previous
+ * version matched only "github.com", which disabled repo config reads for
  * every bound session.
  */
-export function prebuildFlagsTarget(repos: SessionMeta["repos"]): PrebuildFlagsTarget {
+export function primaryGitHubRepoTarget(repos: SessionMeta["repos"]): PrimaryGitHubRepoTarget {
   const primary = repos?.[0];
   if (!primary) return { ok: false, reason: "no-repo" };
   const host = primary.host ?? "github";
@@ -1650,11 +1649,12 @@ export class EngineHost {
     const db = this.opts.db;
     if (!tokenDeps || !db) return [];
     try {
-      const primaryRepo = meta.repos?.[0];
-      if (!primaryRepo) return [];
-      if ((primaryRepo.host ?? "github.com") !== "github.com") return [];
-      const [owner, repoName] = primaryRepo.fullName.split("/");
-      if (!owner || !repoName) return [];
+      // The shared target guard accepts both stored GitHub host spellings
+      // (TKAI-385). A local copy once disabled credentials.yaml wrappers for
+      // every DB-loaded session because it accepted only "github.com".
+      const target = primaryGitHubRepoTarget(meta.repos);
+      if (!target.ok) return [];
+      const { owner, repo: repoName, ref } = target;
       const resolved = await resolveSessionGitHubToken(
         {
           db,
@@ -1680,7 +1680,7 @@ export class EngineHost {
         resolved.token,
         owner,
         repoName,
-        primaryRepo.ref ?? "HEAD",
+        ref,
       );
     } catch (err) {
       console.error("EngineHost: reading .valet/credentials.yaml failed:", err);
@@ -1704,7 +1704,7 @@ export class EngineHost {
     const db = this.opts.db;
     if (!tokenDeps || !db) return defaults;
     try {
-      const target = prebuildFlagsTarget(meta.repos);
+      const target = primaryGitHubRepoTarget(meta.repos);
       if (!target.ok) {
         if (target.reason === "non-github-host") {
           console.warn(
@@ -3051,11 +3051,11 @@ export class EngineHost {
     // start-ref sink: a child session records no start-ref today. An absent
     // `opts.db` (tests that wire no db) degrades to empty bindings, same as
     // `sessionExtras`/`mintSandboxEnv`.
-    // `profile`/`docker` MUST reach the meta: `buildSpecProvider` resolves
-    // the sandbox image per-profile from it. Dropping them here resolved a
-    // full/docker child against the HEADLESS base bake — an image without
-    // /start-full.sh or the docker toolchain — while the manifest ran the
-    // full-profile command, so the pod crash-looped (dev-v2 DinD outage).
+    // `profile`/`docker` MUST reach the meta: dropping them once shipped a
+    // dev-v2 DinD outage (a full/docker child crash-looped against the wrong
+    // bake). Image resolution is single-lineage today (resolve-snapshot pins
+    // profile "full"), so they no longer select the image — but the meta is
+    // what later consumers and the spec provider see; keep it complete.
     const meta = this.opts.db
       ? await loadSessionMeta(this.opts.db, {
           id: childSessionId,
@@ -3073,6 +3073,15 @@ export class EngineHost {
           profile,
           ...(opts.docker !== undefined ? { docker: opts.docker } : {}),
         };
+    // Repo-declared session-runtime flags from `.valet/prebuild.yaml`
+    // (TKAI-385): the same read `buildSession` does, so a child bound to a
+    // repo gets the repo's `workspaceStorage` and `docker` exactly like a
+    // REST-created session. This was MISSING at first ship — child sandboxes
+    // (the orchestrator's verify/task sessions) provisioned the 1Gi default
+    // claim while REST sessions honored the declaration. Best-effort: any
+    // failure resolves the defaults.
+    const repoFlags = await this.resolveRepoPrebuildFlags(childSessionId, meta);
+    const dockerFlag = opts.docker === true || repoFlags.docker;
     const specProvider = await this.buildSpecProvider(childSessionId, meta, undefined, personaCell != null);
     // Repo AGENTS.md instructions (agents-md spec, decision 5): a child
     // spawned with a repo binding reads its AGENTS.md exactly like a
@@ -3113,7 +3122,10 @@ export class EngineHost {
             ? { ...(sandboxMint?.env ?? {}), ...securityProvisioning.scopeEnv }
             : sandboxMint?.env,
         profile,
-        ...(opts.docker ? { docker: true } : {}),
+        ...(dockerFlag ? { docker: true } : {}),
+        // Only affects a FRESHLY provisioned claim — an existing workspace
+        // volume keeps its size (the controller never resizes an owned PVC).
+        ...(repoFlags.workspaceStorage ? { workspaceStorage: repoFlags.workspaceStorage } : {}),
         ...(sandboxMint ? { credsFiles: sandboxMint.credsFiles } : {}),
       },
       model,

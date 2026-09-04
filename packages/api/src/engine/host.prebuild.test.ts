@@ -11,83 +11,11 @@
  * `resolve.test.ts`; here we pin only the wiring that test can't see.
  */
 import { describe, it, expect, afterEach } from "vitest";
-import {
-  type ExecResult,
-  type Sandbox,
-  type SandboxCapabilities,
-  type SandboxCreateOpts,
-  type SandboxProvider,
-  type SandboxStatus,
-} from "@valet/engine";
 import { eq } from "drizzle-orm";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, imageSources, bakes } from "../schema/index.js";
 import type { RepoBinding } from "../wire/types.js";
-
-/** Minimal `Sandbox` that returns success for every exec and no-ops the fs
- * writes workspace prep performs, so `prepareSandbox` completes without a real
- * container. `stat` always throws → prep takes the cold (stage-from-image)
- * path. */
-class PrepFriendlySandbox implements Sandbox {
-  constructor(readonly id: string) {}
-  async readFile(): Promise<string> {
-    return "";
-  }
-  async readBinary(): Promise<Uint8Array> {
-    return new Uint8Array();
-  }
-  async writeFile(): Promise<void> {}
-  async writeBinary(): Promise<void> {}
-  async readdir(): Promise<string[]> {
-    return [];
-  }
-  async stat(): Promise<{ isFile: boolean; isDirectory: boolean; size: number }> {
-    throw new Error("ENOENT");
-  }
-  async mkdir(): Promise<void> {}
-  async rm(): Promise<void> {}
-  async exec(): Promise<ExecResult> {
-    return { stdout: "", stderr: "", exitCode: 0 };
-  }
-  async destroy(): Promise<void> {}
-}
-
-class RecordingSandboxProvider implements SandboxProvider {
-  readonly backend = "recording-test";
-  readonly createCalls: SandboxCreateOpts[] = [];
-  private sandboxes = new Map<string, PrepFriendlySandbox>();
-  private nextId = 1;
-
-  capabilities(): SandboxCapabilities {
-    return {
-      snapshot: "none",
-      persistentWorkspace: true,
-      tunnels: false,
-      warmPool: false,
-      hibernation: false,
-      customImage: true,
-    };
-  }
-
-  async create(opts: SandboxCreateOpts): Promise<Sandbox> {
-    this.createCalls.push(opts);
-    const id = `rec-${this.nextId++}`;
-    const sb = new PrepFriendlySandbox(id);
-    this.sandboxes.set(id, sb);
-    return sb;
-  }
-  async restore(id: string): Promise<Sandbox> {
-    const sb = this.sandboxes.get(id);
-    if (!sb) throw new Error(`recording sandbox not found: ${id}`);
-    return sb;
-  }
-  async destroy(id: string): Promise<void> {
-    this.sandboxes.delete(id);
-  }
-  async status(id: string): Promise<SandboxStatus> {
-    return this.sandboxes.has(id) ? { id, state: "ready", startedAt: Date.now() } : { id, state: "released" };
-  }
-}
+import { RecordingSandboxProvider } from "../test-helpers/recording-sandbox.js";
 
 const ORG = "local-org";
 const REPO = "acme/widgets";
