@@ -132,8 +132,11 @@ export function ModelPreferencesSection() {
  * tradeoff there applies here too). The list opens on focus/typing, caps at
  * 30 rows with a "narrow the search" hint, and stays open after an add so
  * several models can be added in one sitting.
+ *
+ * Exported for reuse by `ModelTiersSection`, which needs the same
+ * search-to-add control per tier.
  */
-function AddModelTypeahead({
+export function AddModelTypeahead({
   options,
   onAdd,
 }: {
