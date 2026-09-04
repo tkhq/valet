@@ -56,6 +56,35 @@ export async function primaryRepoBinding(
 }
 
 /**
+ * GitHub token args for a session owner. A user principal keeps `userId` so
+ * their PAT or App-OAuth can win. A team or org principal omits `userId` so
+ * a member PAT cannot. `auth: "app"` is set only when a repo is known —
+ * `resolveGitHubToken` requires a repo owner for that selection. Without a
+ * repo, resolution stays `auto` so a sole installation or org PAT can win.
+ */
+export function githubTokenArgsForOwner(
+  owner: { type: string; id: string },
+  orgId: string,
+  sessionId: string,
+  knownRepo?: { owner: string; name: string },
+): {
+  orgId: string;
+  sessionId: string;
+  purpose: "api";
+  userId?: string;
+  auth?: GitHubAuthMode;
+  repo?: { owner: string; name: string };
+} {
+  if (owner.type === "user") {
+    return { orgId, userId: owner.id, sessionId, purpose: "api" };
+  }
+  if (knownRepo) {
+    return { orgId, sessionId, purpose: "api", auth: "app", repo: knownRepo };
+  }
+  return { orgId, sessionId, purpose: "api" };
+}
+
+/**
  * Resolve a GitHub token for a session: loads the session's primary repo
  * binding (when `sessionId` is given and the session has one) and calls
  * `resolveGitHubToken` with the binding's `repo`/`auth`, falling back to
