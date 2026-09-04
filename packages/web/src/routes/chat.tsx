@@ -1,21 +1,23 @@
 import { useCallback, useEffect, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { Users } from "lucide-react";
+import type { TeamSummary } from "@valet/api/wire";
 import { useEnsureOrchestrator, useOrchestratorInfo } from "~/api/orchestrator";
-import { useAssistants, useEnsureAssistantSession } from "~/api/assistants";
-import { useOrg, useTeams } from "~/api/settings";
+import { useAssistants, useCreateAssistant, useEnsureAssistantSession } from "~/api/assistants";
+import { useMe, useOrg, useTeams } from "~/api/settings";
 import { useInvalidateMessagesOnQueueState } from "~/hooks/use-invalidate-messages-on-queue-state";
 import { ChildPanel } from "~/components/session/child-panel";
 import { SessionView } from "~/components/session/session-view";
 import {
+  canAdministerGroup,
+  chooseChatAssistant,
   eligibleTeams,
   findAssistant,
   groupAssistants,
-  ownDefaultAssistant,
-  scopedDefaultAssistant,
 } from "~/components/session/assistant-rail";
-import { useWorkspaceScope } from "~/lib/workspace-scope";
 import { Spinner } from "~/components/primitives";
+import { errorText } from "~/lib/error-text";
+import { PERSONAL, useWorkspaceScope } from "~/lib/workspace-scope";
 
 interface ChatSearch {
   /** Active thread id. Defaults to the first thread (engine's web:default). */
@@ -23,8 +25,9 @@ interface ChatSearch {
   /** Open child session id — renders `ChildPanel` as a slide-over. */
   child?: string;
   /**
-   * Which assistant to talk to. Absent = your own default, which is what an
-   * absent `?team=` meant before a principal could own several.
+   * Which assistant to talk to. Absent = the active workspace's default
+   * (personal, or the team's). A team with no assistant shows a notice
+   * instead of your personal conversation.
    *
    * It carries the assistant id, not the session id. The address scheme
    * (`assistant:{id}`) is the server's to change, and every consumer is
@@ -62,8 +65,9 @@ function ChatPage() {
   const assistantsQ = useAssistants();
   const teamsQ = useTeams();
   const orgQ = useOrg();
-  const navigate = useNavigate({ from: Route.fullPath });
+  const meQ = useMe();
   const scope = useWorkspaceScope();
+  const navigate = useNavigate({ from: Route.fullPath });
   const ensure = useEnsureOrchestrator();
   const ensureAssistantSession = useEnsureAssistantSession();
   // Session ids this page has confirmed exist, so it never mounts the
@@ -89,45 +93,35 @@ function ChatPage() {
   const scopeResolved =
     teamsQ.data !== undefined && orgQ.data !== undefined && assistantsQ.data !== undefined;
   const listFailed = assistantsQ.error != null;
-  const active = findAssistant(groups, assistant);
+  const named = findAssistant(groups, assistant);
+  const choice = chooseChatAssistant(groups, scope.key, assistant);
+  const chosen = choice.kind === "open" || choice.kind === "personal" ? choice.assistant : undefined;
   // Two different facts, two different messages: the list says this
   // assistant is not yours to open, or the list never arrived.
-  const unavailable = assistant !== undefined && scopeResolved && active === undefined;
+  const unavailable = assistant !== undefined && scopeResolved && named === undefined;
   const unresolved = assistant !== undefined && listFailed;
 
   // `GET /api/orchestrator/info` stays the fallback for your own default:
   // it answers before the list does on a cold load, and it still answers if
   // the list fails, so a broken assistants call costs you the switcher
-  // rather than the conversation.
-  const ownDefault = ownDefaultAssistant(groups);
-  // With no `?assistant=`, open the ACTIVE workspace's default assistant, so
-  // arriving at `/chat` with a team already in scope shows that team's
-  // conversation — not your personal one (the reported bug). Falls back to
-  // your own default when the scoped workspace owns no assistant, or on a
-  // cold load before the list lands (`info` answers first).
-  const scopedDefault = scopedDefaultAssistant(groups, scope.key);
-  const fallback = scopedDefault ?? ownDefault;
-  const personalSessionId = fallback?.sessionId ?? info.data?.sessionId;
-  const sessionId = active?.sessionId ?? personalSessionId;
-
-  // Canonicalize the URL to the scoped team default so the sidebar highlight,
-  // the "shared with the team" notice and any `?child=` all resolve to the
-  // opened assistant — the same move the workspace switcher makes when you
-  // pick a team from `/chat`. Personal scope keeps the param-less URL (its
-  // default IS the fallback), and a team that owns no assistant leaves
-  // `scopedDefault` undefined, so this fires once, only for a real team
-  // assistant, after the list resolves.
-  useEffect(() => {
-    if (assistant === undefined && scopeResolved && scope.teamId && scopedDefault) {
-      navigate({ replace: true, search: (prev) => ({ ...prev, assistant: scopedDefault.id }) });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [assistant, scopeResolved, scope.teamId, scopedDefault?.id]);
+  // rather than the conversation. A team workspace must not use it — that
+  // is the silent personal fallback this page used to make.
+  const personalSessionId = chosen?.sessionId ?? info.data?.sessionId;
+  const sessionId =
+    chosen?.sessionId ?? (choice.kind === "personal" ? personalSessionId : undefined);
 
   const team =
-    active?.owner.type === "team"
-      ? teams.find((t) => t.id === active.owner.id)
-      : undefined;
+    chosen?.owner.type === "team" ? teams.find((t) => t.id === chosen.owner.id) : undefined;
+  const emptyTeam = teams.find((t) => t.id === scope.key);
+
+  const canonicalizeId = choice.kind === "open" && choice.canonicalize ? choice.assistant.id : undefined;
+  useEffect(() => {
+    if (!canonicalizeId || assistant === canonicalizeId) return;
+    void navigate({
+      search: (prev) => ({ ...prev, assistant: canonicalizeId }),
+      replace: true,
+    });
+  }, [canonicalizeId, assistant, navigate]);
 
   // Neither the list nor `GET /info` creates an engine session (decision 20
   // / the assistants design), so ensure the active one exists before
@@ -139,12 +133,15 @@ function ChatPage() {
   // routes remain the fallback for exactly one case — a cold load where the
   // assistants list has not arrived, so there is no id to send yet and only
   // `GET /info` knows the caller's own session.
-  const activeId = active?.id ?? fallback?.id;
+  const activeId = chosen?.id;
   useEffect(() => {
+    if (choice.kind === "empty-team") return;
     if (activeId) ensureAssistantSession.mutate(activeId, { onSuccess: markOpened });
-    else if (personalSessionId) ensure.mutate(undefined, { onSuccess: markOpened });
+    else if (choice.kind === "personal" && personalSessionId) {
+      ensure.mutate(undefined, { onSuccess: markOpened });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeId, personalSessionId]);
+  }, [activeId, personalSessionId, choice.kind]);
 
   // CRITICAL (Task 1 flag): signal entries (e.g. child.settled) only reach
   // the client via REST — no live WS event carries the signal payload.
@@ -160,9 +157,11 @@ function ChatPage() {
     navigate({ search: (prev) => ({ ...prev, child: childId }) });
   }
 
-  // A requested assistant is unresolved until the queries land. Showing your
-  // own in the meantime would flash the wrong conversation.
-  if (assistant !== undefined && !scopeResolved && !listFailed) {
+  // A requested assistant, or a team workspace, is unresolved until the
+  // queries land. Showing your own in the meantime would flash the wrong
+  // conversation.
+  const waitingOnTeam = scope.key !== PERSONAL && !scopeResolved && !listFailed;
+  if ((assistant !== undefined || waitingOnTeam) && !scopeResolved && !listFailed) {
     return (
       <div className="flex-1 grid place-items-center text-sm text-muted">
         <Spinner /> Loading…
@@ -170,7 +169,32 @@ function ChatPage() {
     );
   }
 
-  if (!active && info.isLoading) {
+  if (choice.kind === "empty-team" && scopeResolved && !listFailed) {
+    return (
+      <EmptyTeamNotice
+        team={emptyTeam}
+        canAdminister={
+          emptyTeam !== undefined &&
+          canAdministerGroup(
+            { key: emptyTeam.id, label: emptyTeam.name, team: emptyTeam, assistants: [] },
+            meQ.data?.orgRole === "admin",
+          )
+        }
+      />
+    );
+  }
+
+  if (scope.key !== PERSONAL && listFailed) {
+    return (
+      <div className="flex-1 grid place-items-center p-8 text-center text-sm text-danger-500">
+        <div>
+          Cannot load your assistants. Reload the page.
+        </div>
+      </div>
+    );
+  }
+
+  if (choice.kind === "personal" && !chosen && info.isLoading) {
     return (
       <div className="flex-1 grid place-items-center text-sm text-muted">
         <Spinner /> Loading…
@@ -178,7 +202,7 @@ function ChatPage() {
     );
   }
 
-  if (!active && (info.error || !sessionId)) {
+  if (choice.kind === "personal" && !chosen && (info.error || !sessionId)) {
     return (
       <div className="flex-1 grid place-items-center p-8 text-center text-sm text-danger-500">
         <div>
@@ -218,7 +242,15 @@ function ChatPage() {
             </span>
           </ScopeNotice>
         )}
-        {unavailable && (
+        {unavailable && choice.kind !== "personal" && (
+          <ScopeNotice>
+            <span>
+              That assistant is not available. Showing this workspace's assistant instead. Select
+              another one in the sidebar.
+            </span>
+          </ScopeNotice>
+        )}
+        {unavailable && choice.kind === "personal" && (
           <ScopeNotice>
             <span>
               That assistant is not available to you. Showing your own assistant instead. Select
@@ -226,7 +258,7 @@ function ChatPage() {
             </span>
           </ScopeNotice>
         )}
-        {unresolved && (
+        {unresolved && choice.kind === "personal" && (
           <ScopeNotice>
             <span>
               Cannot load your assistants, so this one cannot be opened. Showing your own assistant
@@ -238,6 +270,63 @@ function ChatPage() {
       </div>
       {child && <ChildPanel childId={child} onClose={closeChild} />}
     </>
+  );
+}
+
+function EmptyTeamNotice({
+  team,
+  canAdminister,
+}: {
+  team: TeamSummary | undefined;
+  canAdminister: boolean;
+}) {
+  const create = useCreateAssistant();
+  const navigate = useNavigate({ from: Route.fullPath });
+  const place = team?.name ?? "this team";
+
+  function onCreate() {
+    if (!team) return;
+    create.mutate(
+      { owner: { type: "team", id: team.id } },
+      {
+        onSuccess: (created) =>
+          void navigate({
+            search: (prev) => ({
+              ...prev,
+              assistant: created.id,
+              thread: undefined,
+              child: undefined,
+            }),
+          }),
+      },
+    );
+  }
+
+  return (
+    <div className="flex-1 min-h-0 flex flex-col">
+      <ScopeNotice>
+        <Users className="h-3.5 w-3.5 shrink-0" aria-hidden />
+        <span>
+          No assistant in {place} yet.
+          {canAdminister
+            ? ""
+            : " Ask a team admin to create one."}
+        </span>
+        {canAdminister && team && (
+          <button
+            type="button"
+            className="underline"
+            onClick={onCreate}
+            disabled={create.isPending}
+          >
+            {create.isPending ? "Creating…" : "Create an assistant"}
+          </button>
+        )}
+      </ScopeNotice>
+      {create.error != null && (
+        <p className="px-4 py-2 text-xs text-danger-500">{errorText(create.error)}</p>
+      )}
+    </div>
   );
 }
 

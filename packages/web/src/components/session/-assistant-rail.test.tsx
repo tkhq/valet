@@ -420,6 +420,19 @@ describe("AssistantRail", () => {
     );
   });
 
+  it("draws an empty team's header and create action", () => {
+    window.localStorage.setItem("valet:workspace", "team_1");
+    teamsData = { teams: [team({ callerRole: "admin" })] };
+    assistantsData = { assistants: [mine()] };
+    renderRail();
+    expect(screen.getByText("Platform")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "New assistant for Platform" })).toBeTruthy();
+    expect(screen.queryByText("Your assistants")).toBeNull();
+    // The unscoped tree defaults to your personal session. An empty team
+    // must not mount it — notice and create only.
+    expect(screen.queryByTestId("thread-tree")).toBeNull();
+  });
+
   it("falls back to your own default when ?assistant= names a team you left", () => {
     // The team is gone from `GET /api/teams`, so its assistant has no group
     // and cannot be opened, even though the id is real.
