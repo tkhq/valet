@@ -88,3 +88,44 @@ scheme so primitives theme without prop drilling.
 
 `/primitives` renders all primitives in isolation. Use it when you
 iterate on tokens or component variants.
+
+## PWA install
+
+The production build is installable as a Progressive Web App on desktop
+Chrome/Edge, Android, and iOS (Safari → Share → Add to Home Screen). The
+pieces:
+
+- `public/manifest.webmanifest` — install metadata (name, icons,
+  standalone display). `index.html` links it and carries the Apple
+  fallback tags.
+- `public/icons/` — PNG icons generated from the favicon geometry by
+  `node scripts/generate-pwa-icons.mjs`. The script is a pure-Node
+  rasterizer, so regeneration is deterministic; commit the output.
+- `src/pwa/sw.js` — the service worker template. The Vite plugin in
+  `src/pwa/vite-plugin.ts` stamps it with a build id and emits it as
+  `/sw.js` at build time. `src/pwa/register.ts` registers it in
+  production only; the dev server never has one.
+
+**Caching policy (do not loosen):** The Vite plugin sorts and deduplicates the
+exact emitted `/assets/` paths. It stamps this allowlist into the worker. The
+worker intercepts only same-origin `GET` requests whose path is in the
+allowlist. It explicitly excludes navigations. It also never intercepts
+`/api`, `/proxy`, `/mcp`, auth, WebSocket traffic, or unknown `/assets/` paths.
+The worker caches only successful, nonredirected, non-HTML network responses.
+This response check prevents a removed asset path from caching SPA fallback
+HTML. No authenticated or user-specific response enters a cache.
+`src/pwa/sw.test.ts` locks this in.
+
+The worker serves allowed assets cache-first from a build-scoped cache. If a
+Cache Storage open, match, or put fails, it logs a warning. It preserves normal
+one-fetch network behavior and returns the network response.
+
+**Updates:** each page load fetches `index.html` from the network, so a
+new deploy is picked up on the next navigation. A new worker uses the browser's
+standard update lifecycle. Existing pages keep their current worker and cache
+until all controlled pages close or leave the worker scope. The waiting worker
+then activates and deletes older Valet asset caches.
+
+**Offline:** none, by design. With the network down the installed app
+fails like a normal web page. Valet is real-time and authenticated; a
+cached shell without live data would mislead.
