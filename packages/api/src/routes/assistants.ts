@@ -38,6 +38,7 @@ import { readOwnerFilter } from "./_owner-filter.js";
 import { listTeamsForUser } from "../services/teams.js";
 import { assertModelSelectable } from "../services/approved-models.js";
 import { assertReasoningSelectable } from "../services/reasoning.js";
+import { validateDefaultModelId } from "../services/model-catalog.js";
 import { isOrgAdminUser } from "./_org-admin.js";
 import type {
   AssistantOwner,
@@ -183,6 +184,15 @@ assistantsRouter.patch("/:id", async (c) => {
   // store identically (precedent: routes/org-reasoning.ts).
   const patch: PatchAssistantRequest = { ...body };
   if (body.model !== undefined && body.model !== null) {
+    // Catalog-existence check first (same call shape as `me.ts`/`teams.ts`
+    // for this field class): without it, a typo'd model id 200s here and
+    // only surfaces as an uncaught error the next time the assistant's
+    // session builds (`resolveModelObject`'s "unknown model" throw has no
+    // catch between it and `ensureAssistantSession`). `catalogValidIds`
+    // already includes the five tier tokens, so "l" etc. still pass.
+    const { engineCredentials } = c.var.providers;
+    const invalid = await validateDefaultModelId(db, engineCredentials, user.orgId, body.model);
+    if (invalid) return c.json({ error: invalid }, 400);
     const isAdmin = await isOrgAdminUser(c);
     const err = await assertModelSelectable(db, user.orgId, isAdmin, body.model);
     if (err) return c.json({ error: err }, 400);

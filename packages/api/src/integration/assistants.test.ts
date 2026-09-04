@@ -39,6 +39,11 @@ let api: TestApi | undefined;
 afterEach(async () => {
   await api?.cleanup();
   api = undefined;
+  // This file is in the "integration" vitest project, which — unlike
+  // "unit" — has no `vitest.setup.ts` scrub between tests (integration
+  // suites need the real ambient ANTHROPIC_API_KEY). A `vi.stubEnv` in one
+  // test would otherwise leak into the next.
+  vi.unstubAllEnvs();
 });
 
 const MEMBER_HEADERS = { "x-valet-test-user-id": "test-member" };
@@ -729,6 +734,26 @@ describe("model and reasoning config (model-selector-overhaul Task 9)", () => {
     expect(((await badReasoning.json()) as { error: string }).error).toContain("reasoning must be a string");
   });
 
+  it("rejects a model id that does not exist in the catalog and names the model list", async () => {
+    api = await bootTestApi();
+    const created = await create(api, {});
+
+    const res = await fetch(`${api.baseUrl}/api/assistants/${created.id}`, {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ model: "anthropic/clade-opus-4-7" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    // Same corrective-action wording as `validateDefaultModelId` (me.ts/teams.ts):
+    // names GET /api/models as the place to pick a real id.
+    expect(body.error).toContain("GET /api/models");
+
+    // The row was never written — confirms the 400 happened before any patch.
+    const listed = await list(api);
+    expect(listed.find((a) => a.id === created.id)?.model).toBeNull();
+  });
+
   it("rejects an unknown reasoning level and names the valid ones", async () => {
     api = await bootTestApi();
     const created = await create(api, {});
@@ -759,6 +784,10 @@ describe("model and reasoning config (model-selector-overhaul Task 9)", () => {
   });
 
   it("a plain member is held to the org's approved-models list; an org admin bypasses it", async () => {
+    // A real (non-tier) namespaced id must be catalog-active to pass the
+    // new `validateDefaultModelId` gate before the approved-list check even
+    // runs — zero-config anthropic needs an env key present.
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-test-stub");
     api = await bootTestApi();
     await setApprovedModels(api.providers.db, "local-org", ["anthropic/claude-haiku-4-5"]);
     const memberOwned = await create(api, {}, MEMBER_HEADERS);
