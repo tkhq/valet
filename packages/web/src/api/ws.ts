@@ -120,10 +120,14 @@ export function useSessionWebSocket(sessionId: string) {
       };
       socket.onclose = (closeEv) => {
         if (cancelled) return;
-        setConnection(sessionId, "closed");
         // 4xxx = application-level rejection (4040 session not found, etc.).
         // Reconnecting is pointless — the server will reject again.
-        if (closeEv.code >= 4000 && closeEv.code < 5000) return;
+        // Set "error" (not "closed") so the UI shows a failure state.
+        if (closeEv.code >= 4000 && closeEv.code < 5000) {
+          setConnection(sessionId, "error");
+          return;
+        }
+        setConnection(sessionId, "closed");
         retryTimer = setTimeout(open, retryDelay);
         retryDelay = Math.min(MAX_RETRY_MS, retryDelay * 2);
       };
