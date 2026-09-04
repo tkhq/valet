@@ -52,7 +52,13 @@ import {
   resolveInstallationApiToken,
   type GitHubTokenDeps,
 } from "../services/github-tokens.js";
-import { orgFallbackPolicy, resolveOrgCredentialRead, resolveUserCredentialRead, onePasswordScopesFor } from "../services/credential-resolution.js";
+import {
+  orgFallbackPolicy,
+  resolveOrgCredentialRead,
+  resolveTeamCredentialRead,
+  resolveUserCredentialRead,
+  onePasswordScopesFor,
+} from "../services/credential-resolution.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import { resolveSessionGitHubToken } from "../services/session-github-token.js";
 import { persistInvocationAudit, resolveActionPolicy, updateInvocationOutcome } from "../policies/service.js";
@@ -233,7 +239,7 @@ async function computeResult(
   if (!owner) {
     return {
       ok: false,
-      error: `credential resolution is not supported for owner type "${ctx.owner.type}" (workflow action invocation only supports user/org owners)`,
+      error: `credential resolution is not supported for owner type "${ctx.owner.type}" (workflow action invocation only supports user/team/org owners)`,
     };
   }
   const credentialService = entry.actionPlugin.credentialService ?? entry.actionPlugin.service;
@@ -552,9 +558,10 @@ export function findAction(actions: PluginAction[], service: string, actionId: s
   });
 }
 
-/** Decision 15: a workflow run's owner `Principal` maps onto `CredentialOwner` for user/org owners only — team-owned runs have no credential scope today. */
+/** A workflow run's owner `Principal` maps onto `CredentialOwner` of the same type. */
 function credentialOwnerFor(owner: Principal): CredentialOwner | null {
   if (owner.type === "user") return { type: "user", id: owner.id };
+  if (owner.type === "team") return { type: "team", id: owner.id };
   if (owner.type === "org") return { type: "org", id: owner.id };
   return null;
 }
@@ -564,12 +571,13 @@ function credentialOwnerFor(owner: Principal): CredentialOwner | null {
  * owner-precedence contract (`services/credential-resolution.ts`)
  * instead of a raw `CredentialStore.get`. A user-owned run resolves via
  * `resolveUserCredentialRead` (user row shadows org row, `owner.id` as the
- * acting user); an org-owned run resolves via `resolveOrgCredentialRead`
- * (org row only), with `ctx.userId` — the run's actor bookkeeping field —
- * threaded through for a personal-tokenScope 1Password reference to resolve
- * against. Either path fills a `metadata.onepassword` row's secret when
- * `opts.onePassword` is wired; absent onePassword or a non-reference row
- * passes through raw.
+ * acting user); a team-owned run resolves via `resolveTeamCredentialRead`
+ * (team row, then org only when the service is org-provided); an org-owned
+ * run resolves via `resolveOrgCredentialRead` (org row only), with
+ * `ctx.userId` — the run's actor bookkeeping field — threaded through for a
+ * personal-tokenScope 1Password reference to resolve against. Either path
+ * fills a `metadata.onepassword` row's secret when `opts.onePassword` is
+ * wired; absent onePassword or a non-reference row passes through raw.
  */
 function buildCredentialProvider(
   opts: ActionInvokerOpts,
@@ -600,7 +608,14 @@ function buildCredentialProvider(
               svc,
               fallback,
             )
-          : await resolveOrgCredentialRead(deps, { orgId: ctx.orgId, userId: ctx.userId, scopes: ["org"] }, svc);
+          : owner.type === "team"
+            ? await resolveTeamCredentialRead(
+                deps,
+                { orgId: ctx.orgId, teamId: owner.id, userId: ctx.userId, scopes: onePasswordScopesFor("team") },
+                svc,
+                fallback,
+              )
+            : await resolveOrgCredentialRead(deps, { orgId: ctx.orgId, userId: ctx.userId, scopes: ["org"] }, svc);
       if (!stored) return null;
       const accessToken = credentialSecret(stored) ?? "";
       if (accessToken === "") return null;

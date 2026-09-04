@@ -281,18 +281,87 @@ describe("buildActionInvoker", () => {
     expect(sawCtx).toEqual({ orgId: "org1", userId: "u1", scopes: ["org"] });
   });
 
-  it("team-owned run: unsupported owner type returns a deterministic {ok:false} and never invokes execute", async () => {
+  it("team-owned run: resolves a direct team credential", async () => {
+    const store = new FakeCredentialStore();
+    store.seed({ type: "team", id: "t1" }, "demo", { type: "api_key", apiKey: "team-tok" });
     const fixture = countingAction();
     const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] });
-    const invoke = buildActionInvoker({ db: await makeDb(), credentials: new FakeCredentialStore(), actionPluginByService });
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: store, actionPluginByService });
 
     const result = await invoke(
-      { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:n1" },
+      { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:team-direct" },
+      { userId: "team:t1", orgId: "org1", owner: { type: "team", id: "t1" } },
+    );
+
+    expect(result).toEqual({ ok: true, result: { echoed: "hi", hasCredential: true } });
+  });
+
+  it("team-owned slack run: uses the org bot token and stays bare", async () => {
+    let seenOwnerId: unknown = "sentinel";
+    const action: PluginAction = {
+      id: "slack.whoami",
+      name: "whoami",
+      description: "reports the owner id it was handed",
+      riskLevel: "low",
+      parameters: Type.Object({}),
+      execute: async (_args, ctx) => {
+        const cred = await ctx.credentials.get();
+        seenOwnerId = cred?.metadata?.["owner_slack_user_id"];
+        return { success: true, data: { token: cred?.accessToken ?? null } };
+      },
+    };
+    const actionPlugin: ActionPlugin = { service: "slack", actions: [action] };
+    const plugin: ValetPlugin = {
+      name: "slack",
+      version: "0.0.1",
+      actions: [actionPlugin],
+      credentials: [{ type: "bot_token", configKeys: ["accessToken"], requires: { orgCredential: true } }],
+    };
+    const store = new FakeCredentialStore();
+    store.seed({ type: "org", id: "org1" }, "slack", { type: "bot_token", accessToken: "org-bot" });
+    const db = await makeDb();
+    await linkIdentity(db, { provider: "slack", externalId: "U123LINKED", userId: "u1" });
+    const invoke = buildActionInvoker({
+      db,
+      credentials: store,
+      actionPluginByService: new Map([["slack", { plugin, actionPlugin }]]),
+    });
+
+    const result = await invoke(
+      { service: "slack", action: "whoami", params: {}, invocationId: "workflow:r1:team-slack" },
+      { userId: "u1", orgId: "org1", owner: { type: "team", id: "t1" } },
+    );
+
+    expect(result).toEqual({ ok: true, result: { token: "org-bot" } });
+    expect(seenOwnerId).toBeUndefined();
+  });
+
+  it("team-owned run: a broken delegated reference returns the typed error", async () => {
+    const { TeamCredentialStore, CredentialReferenceBrokenError } = await import(
+      "./team-credential-store.js"
+    );
+    const inner = new FakeCredentialStore();
+    inner.seed({ type: "team", id: "t1" }, "demo", {
+      type: "oauth2",
+      metadata: { delegatedFrom: "u1" },
+    });
+    const store = new TeamCredentialStore(inner, { isMember: async () => true });
+    const fixture = countingAction();
+    const actionPluginByService = actionPluginByServiceOf("demo", { service: "demo", actions: [fixture.action] });
+    const invoke = buildActionInvoker({ db: await makeDb(), credentials: store, actionPluginByService });
+
+    const result = await invoke(
+      { service: "demo", action: "ping", params: { msg: "hi" }, invocationId: "workflow:r1:team-broken" },
       { userId: "team:t1", orgId: "org1", owner: { type: "team", id: "t1" } },
     );
 
     expect(result.ok).toBe(false);
-    expect(fixture.calls()).toBe(0);
+    expect(result.ok === false && "error" in result ? result.error : "").toMatch(
+      /Reconnect demo|share it with the team again/,
+    );
+    expect(result.ok === false && "error" in result ? result.error : "").toBe(
+      new CredentialReferenceBrokenError("demo").message,
+    );
   });
 
   it("execute throw is caught and mapped to {ok:false, error}", async () => {
