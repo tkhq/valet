@@ -58,6 +58,8 @@ export type { ValidationResult, ValidateEnvironment } from './dag/validate.js';
 
 export {
   parseWorkflowFileValue,
+  workflowFileBasename,
+  workflowFileEnvelope,
   WORKFLOW_FILE_EXTENSIONS,
   WORKFLOW_FILE_KIND,
   WORKFLOW_TEMPLATE_FILE_KIND,

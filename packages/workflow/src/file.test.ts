@@ -12,6 +12,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   parseWorkflowFileValue,
+  workflowFileBasename,
+  workflowFileEnvelope,
   WORKFLOW_FILE_KIND,
   WORKFLOW_TEMPLATE_FILE_KIND,
 } from './file.js';
@@ -467,5 +469,36 @@ describe('parseWorkflowFileValue', () => {
       expect(result.code).toBe('invalid');
       expect(result.errors.join(' ')).toContain('trigger');
     });
+  });
+});
+
+describe('workflowFileEnvelope', () => {
+  it('round-trips through the parser into the same definition', () => {
+    const envelope = workflowFileEnvelope({
+      name: 'Nightly triage',
+      description: 'Sweeps open issues.',
+      definition: definition(),
+    });
+    const result = parseWorkflowFileValue(envelope, 'nightly.yaml');
+    expect(result.ok).toBe(true);
+    if (!result.ok || result.file.kind !== 'workflow') return;
+    expect(result.file.name).toBe('Nightly triage');
+    expect(result.file.description).toBe('Sweeps open issues.');
+    expect(result.file.definition).toEqual(definition());
+    expect(envelope).toEqual({
+      valet: WORKFLOW_FILE_KIND,
+      name: 'Nightly triage',
+      description: 'Sweeps open issues.',
+      definition: definition(),
+    });
+  });
+});
+
+describe('workflowFileBasename', () => {
+  it('slugs a local name and keeps an upstream basename', () => {
+    expect(workflowFileBasename('Nightly triage', 'yaml')).toBe('nightly-triage.yaml');
+    expect(workflowFileBasename('Nightly', 'json', '.valet/workflows/nightly.yaml')).toBe(
+      'nightly.json',
+    );
   });
 });
