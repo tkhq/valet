@@ -46,6 +46,7 @@ beforeEach(() => {
         providerKind: "openai_compatible",
         providerName: "My Router",
         active: true,
+        approved: true,
       },
       {
         id: "anthropic/claude-sonnet-4-5",
@@ -54,6 +55,7 @@ beforeEach(() => {
         providerKind: "anthropic",
         providerName: "Anthropic",
         active: true,
+        approved: true,
       },
     ],
   };

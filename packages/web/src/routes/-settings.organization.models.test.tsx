@@ -356,6 +356,7 @@ describe("ModelPreferencesSection", () => {
           providerKind: "anthropic",
           providerName: "Anthropic",
           active: true,
+          approved: true,
         },
         {
           id: "openai/gpt-1",
@@ -364,6 +365,7 @@ describe("ModelPreferencesSection", () => {
           providerKind: "openai",
           providerName: "OpenAI",
           active: true,
+          approved: true,
         },
       ],
     };

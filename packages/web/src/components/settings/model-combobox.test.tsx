@@ -39,6 +39,7 @@ beforeEach(() => {
         providerKind: "anthropic",
         providerName: "Anthropic",
         active: true,
+        approved: true,
       },
       {
         id: "custom_1/llama-3",
@@ -47,6 +48,7 @@ beforeEach(() => {
         providerKind: "openai_compatible",
         providerName: "My Router",
         active: true,
+        approved: true,
       },
     ],
   };

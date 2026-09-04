@@ -54,6 +54,7 @@ const meFixture = {
   orgId: "org1",
   orgRole: "member" as const,
   defaultModel: null,
+  defaultReasoning: null,
 };
 
 const orgFixture = {
