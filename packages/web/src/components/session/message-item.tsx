@@ -46,7 +46,7 @@ function MessageRating({ message }: { message: StreamMessage }) {
   );
 }
 
-export function MessageItem({
+export const MessageItem = memo(function MessageItem({
   message,
   suppressEmptyPlaceholder = false,
   queued = false,
@@ -149,7 +149,7 @@ export function MessageItem({
       </div>
     </article>
   );
-}
+});
 
 /**
  * A persisted assistant row with no parts and no content is what a turn

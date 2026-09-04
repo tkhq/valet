@@ -93,7 +93,6 @@ export function useSessionWebSocket(sessionId: string) {
       const lastOffset = useStreamStore.getState().bySession[sessionId]?.lastOffset;
       socket = new WebSocket(wsUrl(sessionId, lastOffset || undefined));
       socket.onopen = () => {
-        retryDelay = INITIAL_RETRY_MS;
         setConnection(sessionId, "open");
       };
       socket.onmessage = (ev) => {
@@ -105,6 +104,12 @@ export function useSessionWebSocket(sessionId: string) {
             console.debug(`[ws] seq=${wire.seq} ${wire.type} ${summary}`);
           }
           ingest(sessionId, wire);
+          // Reset backoff only after receiving init — confirms the session
+          // is valid and the connection is healthy. Resetting in onopen
+          // allowed a connect→immediate-close loop at INITIAL_RETRY_MS.
+          if (wire.type === "init") {
+            retryDelay = INITIAL_RETRY_MS;
+          }
         } catch (err) {
           console.error("ws parse failed:", err);
         }
@@ -113,9 +118,12 @@ export function useSessionWebSocket(sessionId: string) {
         // The matching onclose will trigger the reconnect.
         setConnection(sessionId, "error");
       };
-      socket.onclose = () => {
+      socket.onclose = (closeEv) => {
         if (cancelled) return;
         setConnection(sessionId, "closed");
+        // 4xxx = application-level rejection (4040 session not found, etc.).
+        // Reconnecting is pointless — the server will reject again.
+        if (closeEv.code >= 4000 && closeEv.code < 5000) return;
         retryTimer = setTimeout(open, retryDelay);
         retryDelay = Math.min(MAX_RETRY_MS, retryDelay * 2);
       };

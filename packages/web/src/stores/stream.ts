@@ -646,7 +646,9 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
     }
 
     case "ping": {
-      return next;
+      // Ping carries no state change. Return the original slice (not `next`)
+      // to preserve object identity and avoid a spurious re-render.
+      return slice;
     }
 
     case "command_result": {
