@@ -121,6 +121,36 @@ caller retries.
   `persistentvolumeclaims: get, patch` only. PVC create/delete stay with
   the agent-sandbox controller.
 
+### Storage configuration at boot (TKAI-403)
+
+The kubernetes provider validates all storage quantity environment variables
+when the api starts. The variables are
+`VALET_SANDBOX_WORKSPACE_STORAGE`, `VALET_SANDBOX_WORKSPACE_MAX`,
+`VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST`, and
+`VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT`. The api trims each value before it
+uses the value. If a value is invalid, negative, or unsafe to compare, the api
+stops and names the variable in the error. This check prevents one invalid
+value from making every later Sandbox CR fail admission.
+
+An unset or blank value uses its code default. The workspace default is 1Gi,
+the workspace cap is 20Gi, the ephemeral-storage request is 2Gi, and the
+ephemeral-storage limit is 8Gi. Any zero quantity, such as `"0"` or `"0Gi"`,
+disables that environment variable. A disabled workspace default or cap uses
+the manifest builder's effective default of 1Gi or 20Gi. At boot, the api
+compares these effective workspace values. If the effective default exceeds
+the effective cap, the api stops and tells the operator to lower the default
+or raise the cap.
+
+Storage comparison follows the Kubernetes `resource.Quantity` suffix forms:
+DecimalSI (`n`, `u`, `m`, empty, `k`, `K`, `M`, `G`, `T`, `P`, `E`), BinarySI
+(`Ki` through `Ei`), and signed decimal exponents. The parser uses exact
+integer math before it converts the result to a JavaScript number. It rounds
+a positive fractional byte away from zero, so any positive quantity resolves
+to at least one byte. A fractional storage quantity can therefore never
+disable a value by becoming zero. The parser rejects malformed quantities,
+negative quantities, non-finite quantities, and results above JavaScript's
+safe-integer byte range.
+
 ## Part C — repo-declared workspace size (TKAI-385)
 
 A repo whose footprint is KNOWN should never lean on reactive growth (one
@@ -142,20 +172,24 @@ workspaceStorage: "4Gi"
   The timeout aborts the GitHub request and removes its in-flight entry. A
   later session retries the read. Cleanup from the old request cannot remove
   a newer in-flight read for the same key.
-- The value flows `EngineHost.resolveRepoPrebuildFlags` →
-  `SandboxCreateOpts.workspaceStorage` → the manifest builder
-  (`resolveWorkspaceStorageRequest`), which CLAMPS it to
-  `VALET_SANDBOX_WORKSPACE_MAX` — a repo cannot request unbounded storage —
-  and falls back to the deploy default on any unparseable quantity (a
-  typo'd cap must never grant the request).
-- Quantity comparison accepts the `resource.Quantity` forms that Kubernetes
-  uses. These are DecimalSI (`n`, `u`, `m`, empty, `k`, `K`, `M`, `G`, `T`,
-  `P`, `E`), BinarySI (`Ki` through `Ei`), and signed decimal exponents.
-  The comparison rounds fractional byte counts away from zero. It rejects
-  negative, non-finite, and unsafe byte counts.
-- A fresh claim starts at the declared size. On adoption, the provider reads
-  the existing claim and requests a grow when it is smaller than the declared
-  size. It never requests a shrink.
+- The value flows `EngineHost.resolveRepoPrebuildFlags` to
+  `SandboxCreateOpts.workspaceStorage`, and then to
+  `resolveWorkspaceStorageRequest`. The YAML loader requires a positive
+  quantity and stores the trimmed value. An invalid declaration makes the
+  flag read fail, so the session uses the deploy default and does not cache
+  the failed read.
+- The manifest builder clamps a valid declaration to the effective workspace
+  cap. It then applies the smaller of the deploy default and the cap as a
+  floor. For valid boot configuration, the claim target is the declared value
+  bounded by the deploy default and the cap. A declaration below the default
+  cannot shrink the claim. A declaration above the cap cannot provision
+  unbounded storage. If direct provider configuration bypasses boot and sets
+  the default above the cap, the cap also bounds the floor. An unparseable
+  request or cap uses the deploy default, so an invalid cap never grants the
+  requested size.
+- A fresh claim starts at the bounded claim target. On adoption, the provider
+  reads the existing claim and requests a grow when it is smaller than that
+  target. It never requests a shrink.
 - Create-time sizing costs no EBS modification. Reactive growth (Part B)
   stays as the safety net below the declared size, and starts its doubling
   from it.
