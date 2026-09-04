@@ -44,11 +44,6 @@ export const orgs = pgTable("orgs", {
   // JSON object of feature flags, e.g. `{ organizations: boolean }`. Read
   // driver-parsed by `services/org.ts` — jsonb.
   features: jsonb("features").notNull().default({}),
-  // Ordered list of namespaced model ids (e.g. `"anthropic/claude-opus-4"`)
-  // the org has opted into, most-preferred first. Read/written as JSON
-  // (`services/org.ts`'s `getOrgModelPreferences`/`setOrgModelPreferences`)
-  // — jsonb, mirroring the `features` column above.
-  modelPreferences: jsonb("model_preferences").notNull().default([]),
   // Top-level group paths the login team sync mirrors (e.g. `["/platform"]`),
   // editable from Settings (`services/org.ts`). NULL means "never set",
   // which mirrors nothing — the same fail-closed answer as an empty list.
@@ -488,8 +483,8 @@ export const teams = pgTable(
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     /**
      * Team default model for sessions this team owns (TKAI-255). Sits
-     * between the member's `users.default_model` and the org's
-     * `orgs.model_preferences` in the resolution chain. Null = no override.
+     * between the member's `users.default_model` and the org's tier map in
+     * the resolution chain. Null = no override.
      */
     defaultModel: text("default_model"),
     /** Team default reasoning level. Null = inherit. */
@@ -1501,7 +1496,7 @@ export const actionInvocations = pgTable(
 // openrouter registry — seeded with `OPENROUTER_DEFAULT_MODEL_IDS` at
 // create); the other known kinds resolve their model list from the
 // engine's built-in catalog. Read/written as JSON, jsonb per the
-// `features`/`modelPreferences` convention above.
+// `features` convention above.
 
 export interface LlmProviderModel {
   id: string;

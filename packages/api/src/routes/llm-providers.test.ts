@@ -17,7 +17,6 @@ import { llmProviders } from "../schema/index.js";
 import { OPENROUTER_DEFAULT_MODEL_IDS } from "../services/openrouter.js";
 import type {
   CreateLlmProviderResponse,
-  GetLlmProviderPreferencesResponse,
   ListLlmProvidersResponse,
   OpenrouterRegistryResponse,
   ProbeLlmProviderResponse,
@@ -524,67 +523,7 @@ describe("DELETE /api/org/llm-providers/:id/key", () => {
     expect(listBody.providers[0]?.hasKey).toBe(false);
   });
 
-  it("204s revoking a known-kind provider's key even when it's the org default (env fallback may cover it)", async () => {
-    api = await bootTestApi();
-    const created = await createAnthropicProvider(api.baseUrl);
-    await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/key`, {
-      method: "PUT",
-      headers: HEADERS,
-      body: JSON.stringify({ apiKey: "sk-ant-secret-value-1234" }),
-    });
-    await fetch(`${api.baseUrl}/api/org/llm-providers/preferences`, {
-      method: "PUT",
-      headers: HEADERS,
-      body: JSON.stringify({ preferences: ["anthropic/claude-haiku-4-5"] }),
-    });
-
-    const delRes = await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/key`, {
-      method: "DELETE",
-      headers: HEADERS,
-    });
-    expect(delRes.status).toBe(204);
-  });
-
-  it("409s revoking a custom provider's key when it backs preferences[0]", async () => {
-    api = await bootTestApi();
-    const createRes = await fetch(`${api.baseUrl}/api/org/llm-providers`, {
-      method: "POST",
-      headers: HEADERS,
-      body: JSON.stringify({ kind: "openai_compatible", name: "Custom", baseUrl: "https://api.example.com/v1" }),
-    });
-    const created = (await createRes.json()) as CreateLlmProviderResponse;
-    await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/key`, {
-      method: "PUT",
-      headers: HEADERS,
-      body: JSON.stringify({ apiKey: "custom-secret-1234" }),
-    });
-    await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}`, {
-      method: "PATCH",
-      headers: HEADERS,
-      body: JSON.stringify({ models: [{ id: "m1", name: "M1" }] }),
-    });
-    const prefRes = await fetch(`${api.baseUrl}/api/org/llm-providers/preferences`, {
-      method: "PUT",
-      headers: HEADERS,
-      body: JSON.stringify({ preferences: [`${created.id}/m1`] }),
-    });
-    expect(prefRes.status).toBe(200);
-
-    const delRes = await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/key`, {
-      method: "DELETE",
-      headers: HEADERS,
-    });
-    expect(delRes.status).toBe(409);
-    const body = (await delRes.json()) as { error: string };
-    expect(body.error).toBe("provider is the org default model's provider");
-
-    // Key must still be present — the guard fired before any mutation.
-    const listRes = await fetch(`${api.baseUrl}/api/org/llm-providers`, { headers: HEADERS });
-    const listBody = (await listRes.json()) as ListLlmProvidersResponse;
-    expect(listBody.providers.find((p) => p.id === created.id)?.hasKey).toBe(true);
-  });
-
-  it("204s revoking a custom provider's key when it is NOT the org default", async () => {
+  it("204s revoking a custom provider's key", async () => {
     api = await bootTestApi();
     const createRes = await fetch(`${api.baseUrl}/api/org/llm-providers`, {
       method: "POST",
@@ -636,7 +575,7 @@ describe("DELETE /api/org/llm-providers/:id", () => {
     expect(res.status).toBe(404);
   });
 
-  it("revokes the credential and deletes the row when not the org default", async () => {
+  it("revokes the credential and deletes the row", async () => {
     api = await bootTestApi();
     const created = await createAnthropicProvider(api.baseUrl);
     await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/key`, {
@@ -658,141 +597,6 @@ describe("DELETE /api/org/llm-providers/:id", () => {
     expect(rows).toHaveLength(0);
   });
 
-  it("409s deleting the provider that is the org default model's provider", async () => {
-    api = await bootTestApi();
-    const created = await createAnthropicProvider(api.baseUrl);
-    await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/key`, {
-      method: "PUT",
-      headers: HEADERS,
-      body: JSON.stringify({ apiKey: "sk-ant-secret-value-1234" }),
-    });
-
-    const prefRes = await fetch(`${api.baseUrl}/api/org/llm-providers/preferences`, {
-      method: "PUT",
-      headers: HEADERS,
-      body: JSON.stringify({ preferences: ["anthropic/claude-haiku-4-5"] }),
-    });
-    expect(prefRes.status).toBe(200);
-
-    const delRes = await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}`, {
-      method: "DELETE",
-      headers: HEADERS,
-    });
-    expect(delRes.status).toBe(409);
-    const body = (await delRes.json()) as { error: string };
-    expect(body.error).toBe("provider is the org default model's provider");
-
-    // Row must still exist — the guard fired before any mutation.
-    const rows = await api.providers.db.select().from(llmProviders).where(eq(llmProviders.id, created.id));
-    expect(rows).toHaveLength(1);
-  });
-
-  it("409s deleting the default provider via a bare (unnamespaced) preference id, which means anthropic", async () => {
-    api = await bootTestApi();
-    const created = await createAnthropicProvider(api.baseUrl);
-    await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}/key`, {
-      method: "PUT",
-      headers: HEADERS,
-      body: JSON.stringify({ apiKey: "sk-ant-secret-value-1234" }),
-    });
-
-    await fetch(`${api.baseUrl}/api/org/llm-providers/preferences`, {
-      method: "PUT",
-      headers: HEADERS,
-      body: JSON.stringify({ preferences: ["claude-haiku-4-5"] }),
-    });
-
-    const delRes = await fetch(`${api.baseUrl}/api/org/llm-providers/${created.id}`, {
-      method: "DELETE",
-      headers: HEADERS,
-    });
-    expect(delRes.status).toBe(409);
-  });
-});
-
-describe("GET/PUT /api/org/llm-providers/preferences", () => {
-  it("403s for a non-admin org member on both verbs", async () => {
-    api = await bootTestApi();
-    const getRes = await fetch(`${api.baseUrl}/api/org/llm-providers/preferences`, { headers: MEMBER_HEADERS });
-    expect(getRes.status).toBe(403);
-    const putRes = await fetch(`${api.baseUrl}/api/org/llm-providers/preferences`, {
-      method: "PUT",
-      headers: MEMBER_HEADERS,
-      body: JSON.stringify({ preferences: [] }),
-    });
-    expect(putRes.status).toBe(403);
-  });
-
-  it("defaults to an empty list, round-trips a set list", async () => {
-    api = await bootTestApi();
-    const before = await fetch(`${api.baseUrl}/api/org/llm-providers/preferences`, { headers: HEADERS });
-    expect(before.status).toBe(200);
-    expect((await before.json()) as GetLlmProviderPreferencesResponse).toEqual({ preferences: [] });
-
-    // Ids must be active in the org catalog — seed keyed providers first.
-    const anthropic = await createAnthropicProvider(api.baseUrl);
-    await fetch(`${api.baseUrl}/api/org/llm-providers/${anthropic.id}/key`, {
-      method: "PUT",
-      headers: HEADERS,
-      body: JSON.stringify({ apiKey: "sk-ant-secret-value-1234" }),
-    });
-    const openaiRes = await fetch(`${api.baseUrl}/api/org/llm-providers`, {
-      method: "POST",
-      headers: HEADERS,
-      body: JSON.stringify({ kind: "openai", name: "OpenAI" }),
-    });
-    const openai = (await openaiRes.json()) as CreateLlmProviderResponse;
-    await fetch(`${api.baseUrl}/api/org/llm-providers/${openai.id}/key`, {
-      method: "PUT",
-      headers: HEADERS,
-      body: JSON.stringify({ apiKey: "sk-openai-secret-value-1234" }),
-    });
-
-    const putRes = await fetch(`${api.baseUrl}/api/org/llm-providers/preferences`, {
-      method: "PUT",
-      headers: HEADERS,
-      body: JSON.stringify({ preferences: ["anthropic/claude-haiku-4-5", "openai/gpt-5"] }),
-    });
-    expect(putRes.status).toBe(200);
-    expect((await putRes.json()) as GetLlmProviderPreferencesResponse).toEqual({
-      preferences: ["anthropic/claude-haiku-4-5", "openai/gpt-5"],
-    });
-
-    const after = await fetch(`${api.baseUrl}/api/org/llm-providers/preferences`, { headers: HEADERS });
-    expect((await after.json()) as GetLlmProviderPreferencesResponse).toEqual({
-      preferences: ["anthropic/claude-haiku-4-5", "openai/gpt-5"],
-    });
-  });
-
-  it("400s ids that aren't in the org catalog's active set", async () => {
-    api = await bootTestApi();
-    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/preferences`, {
-      method: "PUT",
-      headers: HEADERS,
-      body: JSON.stringify({ preferences: ["anthropic/claude-haiku-4-5"] }),
-    });
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toContain("anthropic/claude-haiku-4-5");
-  });
-
-  it("400s a non-array-of-strings body", async () => {
-    api = await bootTestApi();
-    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/preferences`, {
-      method: "PUT",
-      headers: HEADERS,
-      body: JSON.stringify({ preferences: [123, "anthropic/claude-haiku-4-5"] }),
-    });
-    expect(res.status).toBe(400);
-  });
-
-  it("is not captured by the /:id routes", async () => {
-    api = await bootTestApi();
-    // If "preferences" were captured as :id, this would 404 (not found as a
-    // provider row) instead of returning the (empty) preferences shape.
-    const res = await fetch(`${api.baseUrl}/api/org/llm-providers/preferences`, { headers: HEADERS });
-    expect(res.status).toBe(200);
-  });
 });
 
 describe("POST /api/org/llm-providers/:id/probe", () => {

@@ -63,7 +63,6 @@ import { securityToolPrepSteps } from "./security-bootstrap.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import { orgFallbackPolicy, resolveUserCredentialRead, onePasswordScopesFor } from "../services/credential-resolution.js";
 import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
-import { getOrgModelPreferences } from "../services/org.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
 import { resolveOpenAiCredential } from "../services/openai-key.js";
 import { hasOrgKey } from "../services/model-catalog.js";
@@ -181,7 +180,7 @@ export interface EngineHostOpts {
   blobs?: BlobStore;
   /** Anthropic API key required for prompts. Without it, prompts fail. */
   anthropicApiKey?: string;
-  /** pi-ai model id; defaults to claude-haiku-4-5 for fast dogfooding. */
+  /** pi-ai model id or tier token; defaults to tier "s" when unset. */
   defaultModelId?: string;
   /** Default Docker image for new sandboxes. */
   defaultImage?: string;
@@ -2804,59 +2803,12 @@ export class EngineHost {
   }
 
   /**
-   * `orgs.modelPreferences`, walked in preference order to find the first
-   * entry backed by an ACTIVE provider, or `undefined` when unset, the host
-   * has no `db`, or every preference's provider is inactive (disabled, or
-   * deleted/unknown for custom namespaces). Uncached — a preferences change
-   * applies on the very next session build (split-settings decision 9).
-   *
-   * Spec: new sessions must never resolve to an inactive provider (llm-
-   * providers design doc decision 6) — disabling the provider behind
-   * `orgPreferences[0]` must fall through to the next preference, not throw.
-   * This only guards the new-session default tier; `overrideId` and the
-   * user's explicit `defaultModel` still resolve straight through to
-   * `resolveModelObject` and throw on a disabled provider, per the spec's
-   * failure semantics for an explicit pick. Restore is untouched — it never
-   * consults preferences at all (persisted model always wins).
-   *
-   * One `listLlmProviders` query total (not one per preference / no full
-   * catalog build), plus one credential read per CUSTOM-namespaced
-   * preference entry (acceptable — preference lists are short and this only
-   * runs at session-build time, never per turn). "Active" mirrors the
-   * catalog's own `resolvable` definition (`services/model-catalog.ts`),
-   * which in turn mirrors `resolveModelSpec`'s throw condition:
-   *   - known kind (anthropic/openai/google), no row → always active
-   *     (zero-config path, same as `resolveModelSpec`'s no-row branch).
-   *   - known kind WITH a row → active iff `row.enabled`. A row with
-   *     neither an org key nor an env key is still "active" here even
-   *     though `resolveModelSpec` now throws `NoCredentialsError` for that
-   *     case — session build goes through `resolveModelObject`, which
-   *     swallows `NoCredentialsError` and returns the attached model, so a
-   *     keyless org still builds; keylessness is a turn-time concern (the
-   *     engine's pre-run release/cap path), not a reason to skip this
-   *     preference entry.
-   *   - custom (`openai_compatible`) row → active iff `row.enabled` AND an
-   *     org credential exists at `llm:{row.id}` — custom providers have NO
-   *     env fallback, so a keyless custom row is exactly the case
-   *     `resolveModelSpec` throws `provider {name} has no API key` for, and
-   *     must not be treated as active here either (this is the key-delete
-   *     bug this fell through: an admin could delete the key backing
-   *     `orgPreferences[0]`, leaving new sessions with no key AND no
-   *     fallback until the array was rewritten).
-   */
-  private async orgPreferredModel(orgId: string): Promise<string | undefined> {
-    if (!this.opts.db) return undefined;
-    const prefs = await getOrgModelPreferences(this.opts.db, orgId);
-    return this.firstActivePreference(orgId, prefs);
-  }
-
-  /**
    * The first entry of `prefs` whose provider is active, or `undefined`.
-   * Shared by the org tier and the team tier of the cascade — both are
-   * defaults imposed on people who did not pick them, so both must fall
-   * through past an inactive provider instead of failing every build
-   * (llm-providers design decision 6). Only the user's own explicit
-   * default resolves straight through and fails loudly.
+   * Used by the team tier of the cascade — a team default is imposed on
+   * people who did not pick it, so it must fall through past an inactive
+   * provider instead of failing every member's build (llm-providers design
+   * decision 6). Only the user's own explicit default resolves straight
+   * through and fails loudly.
    */
   private async firstActivePreference(orgId: string, prefs: string[]): Promise<string | undefined> {
     if (!this.opts.db || prefs.length === 0) return undefined;
@@ -2932,8 +2884,13 @@ export class EngineHost {
    * `overrideId` and the user default — that persisted value already
    * reflects whatever `setModel` (or the original create-time model) set.
    * Only on create does the preference cascade apply (TKAI-255):
-   * `overrideId ?? assistantDefault ?? childDefault ?? userDefault ?? teamDefault ?? orgPreferred ?? hardcoded`
-   * — most-specific wins. The tiers are opt-in via `prefs`:
+   * `overrideId ?? assistantDefault ?? childDefault ?? userDefault ?? teamDefault ?? opts.defaultModelId ?? "s"`
+   * — most-specific wins. Org model preferences are gone (superseded by the
+   * per-tier ordered target lists): the final fallback is the tier token
+   * `"s"`, which `resolveModelSpec` resolves through the org's tier map
+   * (`resolveTier` walks that tier's ordered list for the first active
+   * provider), so an org remap of `s` reaches every session that bottoms
+   * out at this fallback. The tiers are opt-in via `prefs`:
    *
    * - `userId` names the person whose personal default may apply. Callers
    *   building a SHARED principal-owned session (team/org assistant, a
@@ -2969,9 +2926,8 @@ export class EngineHost {
       prefs.childDefault ??
       (prefs.userId ? await this.userDefaultModel(prefs.userId) : undefined) ??
       (prefs.ownerTeamId ? await this.teamDefaultModel(orgId, prefs.ownerTeamId) : undefined) ??
-      (await this.orgPreferredModel(orgId)) ??
       this.opts.defaultModelId ??
-      "claude-haiku-4-5";
+      "s";
     return this.resolveModelObject(orgId, id);
   }
 

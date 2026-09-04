@@ -208,17 +208,6 @@ describe("reconcileInstanceConfig — org pass", () => {
     }
   });
 
-  it("org.modelPreferences overwrites the array", async () => {
-    const cfg: InstanceConfig = {
-      version: 1,
-      org: { modelPreferences: ["anthropic/claude-opus-4", "anthropic/claude-sonnet-4"] },
-    };
-    await reconcileInstanceConfig(deps(db), cfg);
-
-    const rows = await db.select({ mp: orgs.modelPreferences }).from(orgs);
-    expect(rows[0]!.mp).toEqual(["anthropic/claude-opus-4", "anthropic/claude-sonnet-4"]);
-  });
-
   it("org.bareSkillCommands sets the column", async () => {
     const cfg: InstanceConfig = { version: 1, org: { bareSkillCommands: true } };
     await reconcileInstanceConfig(deps(db), cfg);

@@ -1,8 +1,8 @@
 /**
  * Org model catalog — union of known (Anthropic/OpenAI/Google) provider
  * rows (or env-only zero-config synthesis) and custom `openai_compatible`
- * rows, ordered by org `modelPreferences` then alphabetically. See
- * `docs/plans/2026-07-16-llm-providers.md` Task 4.
+ * rows, in natural construction order (active entries first, then
+ * inactive). See `docs/plans/2026-07-16-llm-providers.md` Task 4.
  */
 import { describe, expect, it, beforeEach, vi } from "vitest";
 import { getModels } from "@earendil-works/pi-ai/compat";
@@ -11,9 +11,9 @@ import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { orgs } from "../schema/index.js";
-import { setOrgModelPreferences } from "./org.js";
 import { createLlmProvider, updateLlmProvider } from "./llm-providers.js";
 import { buildOrgCatalog, catalogValidIds } from "./model-catalog.js";
+import { registryModels } from "./model-registry.js";
 import { OPENROUTER_DEFAULT_MODEL_IDS } from "./openrouter.js";
 import { setApprovedModels } from "./approved-models.js";
 
@@ -233,34 +233,42 @@ describe("model catalog", () => {
   });
 
   describe("ordering", () => {
-    it("orders modelPreferences first (in order), then remaining actives alphabetically", async () => {
+    it("keeps natural construction order — no org preference reordering", async () => {
       vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
       vi.stubEnv("ANTHROPIC_OAUTH_TOKEN", "");
       vi.stubEnv("OPENAI_API_KEY", "");
       vi.stubEnv("GEMINI_API_KEY", "");
       vi.stubEnv("OPENROUTER_API_KEY", "");
       try {
-        const models = getModels("anthropic")
-          .map((m) => m.id)
-          .sort();
-        expect(models.length).toBeGreaterThan(1);
-        const last = models[models.length - 1] as string;
-        const first = models[0] as string;
-
-        await setOrgModelPreferences(db, orgId, [`anthropic/${last}`]);
+        const registryOrder = registryModels("anthropic").map((m) => `anthropic/${m.id}`);
+        expect(registryOrder.length).toBeGreaterThan(1);
 
         const entries = await buildOrgCatalog(db, credentials, orgId);
-        const active = entries.filter((e) => e.active);
-        expect(active[0]?.id).toBe(`anthropic/${last}`);
+        const active = entries.filter((e) => e.active).map((e) => e.id);
 
-        // Remaining actives (excluding the preferred one) come alphabetically.
-        const rest = active.slice(1).map((e) => e.id);
-        const restIds = models
-          .filter((m) => m !== last)
-          .map((m) => `anthropic/${m}`)
-          .sort();
-        expect(rest).toEqual(restIds);
-        expect(rest[0]).toBe(`anthropic/${first}`);
+        // Active entries stay in the registry's own construction order, not
+        // alphabetical and not reordered by any org preference (removed).
+        expect(active).toEqual(registryOrder);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("inactive entries sort after active ones, both in construction order", async () => {
+      const row = await createLlmProvider(db, { orgId, kind: "google", name: "Google" });
+      await credentials.save({ type: "org", id: orgId }, `llm:${row.id}`, {
+        type: "api_key",
+        apiKey: "gemini-secret",
+      });
+      await updateLlmProvider(db, orgId, row.id, { enabled: false });
+
+      vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
+      try {
+        const entries = await buildOrgCatalog(db, credentials, orgId);
+        const firstInactiveIdx = entries.findIndex((e) => !e.active);
+        expect(firstInactiveIdx).toBeGreaterThan(-1);
+        // Nothing active appears after the first inactive entry.
+        expect(entries.slice(firstInactiveIdx).every((e) => !e.active)).toBe(true);
       } finally {
         vi.unstubAllEnvs();
       }

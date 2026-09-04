@@ -86,6 +86,12 @@ function buildHost(
     sandboxProvider: provider,
     eventStream: new InMemoryEventStream(),
     engineCredentials: new InMemoryCredentialStore(),
+    // This suite has no `db`, so the cascade's tier-token fallback ("s")
+    // can't resolve through the org tier map (tier resolution requires a
+    // db by design — see model-tiers.test.ts's no-db case). A concrete
+    // literal keeps session builds working without one, same as every
+    // other db-less host harness in this package.
+    defaultModelId: "claude-haiku-4-5",
     ...extra,
   });
 }

@@ -3769,16 +3769,6 @@ export interface PutLlmProviderKeyResponse {
 
 // `DELETE .../key` and `DELETE /:id` return 204 No Content — no response body.
 
-export interface GetLlmProviderPreferencesResponse {
-  preferences: string[];
-}
-
-export interface PutLlmProviderPreferencesRequest {
-  preferences: string[];
-}
-
-export type PutLlmProviderPreferencesResponse = GetLlmProviderPreferencesResponse;
-
 // `GET /openrouter/models` — OpenRouter's LIVE catalog merged with the
 // built-in pi-ai registry (live wins on collisions), sorted by id. Powers
 // the settings picker that edits an openrouter row's curated `models`

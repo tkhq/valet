@@ -93,7 +93,6 @@ export interface InstanceConfig {
   org?: {
     name?: string;
     features?: Record<string, boolean>;
-    modelPreferences?: string[];
     bareSkillCommands?: boolean;
     members?: InstanceMemberDecl[];
   };
@@ -451,8 +450,6 @@ function validateOrg(
         features[fk] = assertBoolean(fv, `org.features.${fk}`, path);
       }
       result.features = features;
-    } else if (key === "modelPreferences") {
-      result.modelPreferences = assertStringArray(v, "org.modelPreferences", path);
     } else if (key === "bareSkillCommands") {
       result.bareSkillCommands = assertBoolean(v, "org.bareSkillCommands", path);
     } else if (key === "members") {

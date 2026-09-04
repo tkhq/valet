@@ -12,16 +12,17 @@
  *      turns use it, not env. Rotate the key → the very next turn sees the
  *      new one, no reboot.
  *   2. Custom (openai_compatible) provider: create, probe against a fixture
- *      `/v1/models`, enable a model, set it as org default → a brand-new
- *      session resolves to it and completes a turn via the resolution
- *      bridge's org key.
+ *      `/v1/models`, enable a model → a brand-new session created with an
+ *      explicit model override resolves to it and completes a turn via the
+ *      resolution bridge's org key.
  *   3. Disable that provider → the existing session's next turn errors
  *      clearly; `PATCH /sessions/:id` repoints the default for new threads
  *      and `PATCH .../threads/:id` repoints the existing thread's pin
- *      (threads pin their model at creation); after the admin also
- *      repoints org preferences (the disabled model is no longer a valid
- *      preference — `PUT .../preferences` enforces this), new sessions fall
- *      back to the next entry in preference order.
+ *      (threads pin their model at creation). Org model preferences are
+ *      gone (superseded by the per-tier ordered target lists) — a brand-new
+ *      session with no override falls back to the tier `"s"` token, which
+ *      resolves through the org's tier map to the still-active Anthropic
+ *      provider with no admin action required.
  *   4. Non-admin members are 403'd off every settings route.
  *   5. No response body recorded anywhere in this test contains a stored key.
  */
@@ -37,7 +38,6 @@ import { driveTurn } from "../integration/_test-utils.js";
 import type {
   CreateLlmProviderResponse,
   CreateSessionResponse,
-  GetLlmProviderPreferencesResponse,
   GetSessionResponse,
   ListLlmProvidersResponse,
   ProbeLlmProviderResponse,
@@ -165,7 +165,8 @@ describe("api e2e: llm providers exit criteria (fixture-backed, no network)", ()
       expect(anthropicKeys).toEqual(["env-key", orgKey1, orgKey2]);
 
       // ── 4. Custom (openai_compatible) provider: create, probe, enable,
-      //      set default, new session resolves + completes a turn ────────
+      //      new session with an explicit override resolves + completes a
+      //      turn ─────────────────────────────────────────────────────────
       fakeModels = startFakeModelsServer([{ id: "model-a" }, { id: "model-b" }]);
       const createCustomRes = await fetch(`${api.baseUrl}/api/org/llm-providers`, {
         method: "POST",
@@ -201,13 +202,6 @@ describe("api e2e: llm providers exit criteria (fixture-backed, no network)", ()
       await j(enableModelRes);
 
       const customSpec = `${customProvider.id}/model-a`;
-      const setDefaultRes = await fetch(`${api.baseUrl}/api/org/llm-providers/preferences`, {
-        method: "PUT",
-        headers: HEADERS,
-        body: JSON.stringify({ preferences: [customSpec] }),
-      });
-      expect(setDefaultRes.status).toBe(200);
-      await j(setDefaultRes);
 
       customFaux = registerFauxProvider({ api: "openai-completions", provider: customProvider.id });
       const customKeys: Array<string | undefined> = [];
@@ -218,10 +212,12 @@ describe("api e2e: llm providers exit criteria (fixture-backed, no network)", ()
         },
       ]);
 
+      // No org default to set anymore (model preferences removed) — the
+      // custom provider's model is picked via an explicit override.
       const createCustomSessionRes = await fetch(`${api.baseUrl}/api/sessions`, {
         method: "POST",
         headers: HEADERS,
-        body: JSON.stringify({ workspace: join(workspaceRoot, "s2") }),
+        body: JSON.stringify({ workspace: join(workspaceRoot, "s2"), model: customSpec }),
       });
       expect(createCustomSessionRes.status).toBe(201);
       const { id: customSessionId } = await j<CreateSessionResponse>(createCustomSessionRes);
@@ -286,28 +282,12 @@ describe("api e2e: llm providers exit criteria (fixture-backed, no network)", ()
       await driveTurn({ baseUrl: api.baseUrl, wsUrl: api.wsUrl, sessionId: customSessionId, prompt: "recovered" });
       expect(anthropicKeys.at(-1)).toBe(orgKey2);
 
-      // ── 7. New sessions fall back to preference order. The disabled
-      //      model is no longer a valid preference (PUT .../preferences
-      //      re-validates against the active catalog on every write) — the
-      //      admin repoints preferences, and only then does a brand-new
-      //      session pick up the fallback. ─────────────────────────────────
-      const staleePrefsRes = await fetch(`${api.baseUrl}/api/org/llm-providers/preferences`, {
-        method: "PUT",
-        headers: HEADERS,
-        body: JSON.stringify({ preferences: [customSpec] }),
-      });
-      expect(staleePrefsRes.status).toBe(400);
-      await j(staleePrefsRes);
-
-      const fixPrefsRes = await fetch(`${api.baseUrl}/api/org/llm-providers/preferences`, {
-        method: "PUT",
-        headers: HEADERS,
-        body: JSON.stringify({ preferences: ["claude-haiku-4-5"] }),
-      });
-      expect(fixPrefsRes.status).toBe(200);
-      const fixedPrefs = await j<GetLlmProviderPreferencesResponse>(fixPrefsRes);
-      expect(fixedPrefs.preferences).toEqual(["claude-haiku-4-5"]);
-
+      // ── 7. A brand-new session with no override falls back to the tier
+      //      "s" token (org model preferences are gone) — no admin action
+      //      needed, unlike the old preference-repoint flow, because the
+      //      default tier map's "s" entry (Anthropic Haiku) is still active
+      //      via the org key from step 2. The persisted model is the tier
+      //      token itself, not the resolved spec (TKAI-285). ───────────────
       const createFallbackSessionRes = await fetch(`${api.baseUrl}/api/sessions`, {
         method: "POST",
         headers: HEADERS,
@@ -318,10 +298,11 @@ describe("api e2e: llm providers exit criteria (fixture-backed, no network)", ()
 
       nextAnthropicResponse();
       await driveTurn({ baseUrl: api.baseUrl, wsUrl: api.wsUrl, sessionId: fallbackSessionId, prompt: "fallback?" });
+      expect(anthropicKeys.at(-1)).toBe(orgKey2);
 
       const fallbackDetailRes = await fetch(`${api.baseUrl}/api/sessions/${fallbackSessionId}`);
       const fallbackDetail = await j<GetSessionResponse>(fallbackDetailRes);
-      expect(fallbackDetail.model).toBe("claude-haiku-4-5");
+      expect(fallbackDetail.model).toBe("s");
 
       // ── 8. Non-admin members are 403'd off the settings surface ────────
       const memberListRes = await fetch(`${api.baseUrl}/api/org/llm-providers`, { headers: MEMBER_HEADERS });
@@ -335,14 +316,6 @@ describe("api e2e: llm providers exit criteria (fixture-backed, no network)", ()
       });
       expect(memberCreateRes.status).toBe(403);
       await j(memberCreateRes);
-
-      const memberPrefsRes = await fetch(`${api.baseUrl}/api/org/llm-providers/preferences`, {
-        method: "PUT",
-        headers: MEMBER_HEADERS,
-        body: JSON.stringify({ preferences: [] }),
-      });
-      expect(memberPrefsRes.status).toBe(403);
-      await j(memberPrefsRes);
 
       const listRes = await fetch(`${api.baseUrl}/api/org/llm-providers`, { headers: HEADERS });
       const listBody = await j<ListLlmProvidersResponse>(listRes);

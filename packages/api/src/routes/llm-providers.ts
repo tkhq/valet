@@ -15,27 +15,24 @@
  * ever contains submitted key material; `PUT .../key` echoes only
  * `keyLast4`, computed from the request body before it's discarded.
  *
- * `GET /preferences` and `PUT /preferences` are registered before the
- * `/:id` routes so `"preferences"` isn't captured as a provider id.
+ * `GET /openrouter/models` is registered before the `/:id` routes so
+ * `"openrouter"` isn't captured as a provider id.
  */
 import { Hono, type Context } from "hono";
 import { completeSimple, getEnvApiKey } from "@earendil-works/pi-ai/compat";
 import type { CredentialOwner } from "@valet/engine";
 import type { AppEnv } from "../env.js";
-import { isOrgAdmin, getOrgModelPreferences, setOrgModelPreferences } from "../services/org.js";
-import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
+import { isOrgAdmin } from "../services/org.js";
 import {
   createLlmProvider,
   deleteLlmProvider,
   getLlmProvider,
-  isDefaultProviderNamespace,
   isKnownProviderKind,
   isLlmProviderKind,
   listLlmProviders,
   providerNamespace,
   updateLlmProvider,
   LlmProviderSingletonError,
-  DEFAULT_PROVIDER_IN_USE_ERROR,
   type LlmProviderKind,
   type UpdateLlmProviderOptions,
 } from "../services/llm-providers.js";
@@ -45,7 +42,6 @@ import type { LlmProviderModel, LlmProviderRow } from "../schema/index.js";
 import type {
   CreateLlmProviderRequest,
   CreateLlmProviderResponse,
-  GetLlmProviderPreferencesResponse,
   ListLlmProvidersResponse,
   LlmProviderSummary,
   OpenrouterRegistryResponse,
@@ -54,8 +50,6 @@ import type {
   ProbeLlmProviderResponse,
   PutLlmProviderKeyRequest,
   PutLlmProviderKeyResponse,
-  PutLlmProviderPreferencesRequest,
-  PutLlmProviderPreferencesResponse,
   TestLlmProviderRequest,
   TestLlmProviderResponse,
 } from "../wire/types.js";
@@ -141,56 +135,11 @@ async function toSummary(c: Context<AppEnv>, row: LlmProviderRow): Promise<LlmPr
   };
 }
 
-// ── GET /preferences, PUT /preferences — registered BEFORE /:id ─────────
-
-llmProvidersRouter.get("/preferences", async (c) => {
-  const forbidden = await requireOrgAdmin(c);
-  if (forbidden) return forbidden;
-
-  const { db } = c.var.providers;
-  const user = c.var.user;
-  const preferences = await getOrgModelPreferences(db, user.orgId);
-  const resp: GetLlmProviderPreferencesResponse = { preferences };
-  return c.json(resp);
-});
-
-llmProvidersRouter.put("/preferences", async (c) => {
-  const forbidden = await requireOrgAdmin(c);
-  if (forbidden) return forbidden;
-
-  const { db, engineCredentials } = c.var.providers;
-  const user = c.var.user;
-
-  let body: PutLlmProviderPreferencesRequest;
-  try {
-    body = (await c.req.json()) as PutLlmProviderPreferencesRequest;
-  } catch {
-    return c.json({ error: "invalid JSON body" }, 400);
-  }
-
-  if (!Array.isArray(body.preferences) || !body.preferences.every((p) => typeof p === "string")) {
-    return c.json({ error: "preferences must be an array of strings" }, 400);
-  }
-
-  // Each id must be active in the org catalog — bare ids remain valid
-  // back-compat for Anthropic (services/model-catalog.ts's catalogValidIds).
-  const entries = await buildOrgCatalog(db, engineCredentials, user.orgId);
-  const validIds = catalogValidIds(entries);
-  const unknownIds = body.preferences.filter((id) => !validIds.has(id));
-  if (unknownIds.length > 0) {
-    return c.json({ error: `unknown or inactive model id(s): ${unknownIds.join(", ")}` }, 400);
-  }
-
-  await setOrgModelPreferences(db, user.orgId, body.preferences);
-  const resp: PutLlmProviderPreferencesResponse = { preferences: body.preferences };
-  return c.json(resp);
-});
-
 // ── GET /openrouter/models — live OpenRouter catalog ∪ pi-ai registry ────
 //
-// Powers the settings model-selection picker for openrouter rows. Like
-// `/preferences`, registered before `/:id` so "openrouter" is never
-// captured as a provider id. Attempts OpenRouter's live `/api/v1/models`
+// Powers the settings model-selection picker for openrouter rows. Registered
+// before `/:id` so "openrouter" is never captured as a provider id. Attempts
+// OpenRouter's live `/api/v1/models`
 // (so brand-new models are pickable before any pi-ai registry bump) and
 // merges with the built-in registry; degrades to registry-only offline
 // (`live: false`).
@@ -375,21 +324,6 @@ llmProvidersRouter.delete("/:id/key", async (c) => {
   const existing = await getLlmProvider(db, user.orgId, id);
   if (!existing) return c.json(PROVIDER_NOT_FOUND, 404);
 
-  // Custom (openai_compatible) providers have NO env fallback — deleting the
-  // key backing `orgPreferences[0]` leaves new sessions with nothing to fall
-  // back to until the array is rewritten (same failure `EngineHost.
-  // orgPreferredModel`'s active-provider walk now guards against on the
-  // read side). Known kinds are exempt: they may still resolve via an env
-  // var, and even when no env var is configured that's a deployment-time
-  // fact the read-side fall-through already covers, not something this
-  // write-time guard needs to duplicate.
-  if (existing.kind === "openai_compatible") {
-    const preferences = await getOrgModelPreferences(db, user.orgId);
-    if (isDefaultProviderNamespace(existing, preferences)) {
-      return c.json({ error: DEFAULT_PROVIDER_IN_USE_ERROR }, 409);
-    }
-  }
-
   const owner: CredentialOwner = { type: "org", id: user.orgId };
   await engineCredentials.delete(owner, `llm:${id}`);
 
@@ -408,11 +342,6 @@ llmProvidersRouter.delete("/:id", async (c) => {
 
   const existing = await getLlmProvider(db, user.orgId, id);
   if (!existing) return c.json(PROVIDER_NOT_FOUND, 404);
-
-  const preferences = await getOrgModelPreferences(db, user.orgId);
-  if (isDefaultProviderNamespace(existing, preferences)) {
-    return c.json({ error: DEFAULT_PROVIDER_IN_USE_ERROR }, 409);
-  }
 
   const owner: CredentialOwner = { type: "org", id: user.orgId };
   await engineCredentials.delete(owner, `llm:${id}`);

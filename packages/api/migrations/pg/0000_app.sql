@@ -2,7 +2,6 @@ CREATE TABLE "orgs" (
 	"id" text PRIMARY KEY NOT NULL,
 	"name" text NOT NULL,
 	"features" jsonb DEFAULT '{}'::jsonb NOT NULL,
-	"model_preferences" jsonb DEFAULT '[]'::jsonb NOT NULL,
 	"sso_team_groups" jsonb,
 	"created_at" bigint NOT NULL,
 	"bare_skill_commands" boolean NOT NULL DEFAULT false,

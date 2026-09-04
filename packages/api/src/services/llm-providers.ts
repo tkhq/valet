@@ -10,10 +10,7 @@
  *
  * Model-id namespacing (design doc decision 2): `{providerKindOrRowId}/{modelId}`
  * — e.g. `anthropic/claude-haiku-4-5`, `prov_abc123/qwen-coder`. Bare ids
- * (no `/`) are back-compat and mean Anthropic. `isDefaultProviderNamespace`
- * below is the shared predicate for "is this row the org default model's
- * provider" that both the DELETE route (refuse while true) and future
- * resolution code (Task 5) can reuse.
+ * (no `/`) are back-compat and mean Anthropic.
  */
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
@@ -44,9 +41,6 @@ export class LlmProviderSingletonError extends Error {
     this.name = "LlmProviderSingletonError";
   }
 }
-
-/** Exact copy string the delete-refused-while-default guard returns. */
-export const DEFAULT_PROVIDER_IN_USE_ERROR = "provider is the org default model's provider";
 
 function newProviderId(): string {
   return `prov_${randomUUID()}`;
@@ -156,34 +150,22 @@ export async function deleteLlmProvider(db: AppDb, orgId: string, id: string): P
   await db.delete(llmProviders).where(and(eq(llmProviders.orgId, orgId), eq(llmProviders.id, id)));
 }
 
-/** A row's namespace in `orgs.modelPreferences` ids — the row id for custom
+/** A row's namespace in catalog/model-spec ids — the row id for custom
  * (`openai_compatible`) providers, the bare kind for known-kind providers. */
 export function providerNamespace(row: LlmProviderRow): string {
   return row.kind === "openai_compatible" ? row.id : row.kind;
 }
 
 /**
- * Splits a model-preference/catalog id into its provider namespace and bare
- * model id. Ids with no `/` are back-compat and mean Anthropic (design doc
+ * Splits a model-spec/catalog id into its provider namespace and bare model
+ * id. Ids with no `/` are back-compat and mean Anthropic (design doc
  * decision 2), so a bare id parses as the `anthropic` namespace. This is the
- * single source of truth for that back-compat rule — `isDefaultProviderNamespace`
- * below and `services/model-catalog.ts`'s preference-ordering/valid-id logic
- * both parse ids through here so the delete-guard/preferences path and the
- * catalog can never drift on what "bare id" means.
+ * single source of truth for that back-compat rule — `services/model-catalog.ts`,
+ * `services/model-resolution.ts`, and `services/model-tiers.ts` all parse ids
+ * through here so they never drift on what "bare id" means.
  */
 export function parseModelId(id: string): { namespace: string; modelId: string } {
   const slashIdx = id.indexOf("/");
   if (slashIdx === -1) return { namespace: "anthropic", modelId: id };
   return { namespace: id.slice(0, slashIdx), modelId: id.slice(slashIdx + 1) };
-}
-
-/**
- * True when `modelPreferences[0]` (the org default model) is namespaced to
- * `row`. Bare ids (no `/`) are back-compat and mean Anthropic (design doc
- * decision 2), so an unnamespaced default counts as `anthropic`'s namespace.
- */
-export function isDefaultProviderNamespace(row: LlmProviderRow, modelPreferences: string[]): boolean {
-  const first = modelPreferences[0];
-  if (!first) return false;
-  return parseModelId(first).namespace === providerNamespace(row);
 }

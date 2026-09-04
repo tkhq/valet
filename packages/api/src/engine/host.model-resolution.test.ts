@@ -21,7 +21,7 @@ import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { orgs, teams, users, type LlmProviderModel } from "../schema/index.js";
 import { createLlmProvider, updateLlmProvider } from "../services/llm-providers.js";
-import { setOrgModelPreferences } from "../services/org.js";
+import { DEFAULT_TIER_MAP, setOrgTierMap } from "../services/model-tiers.js";
 import { setOrgReasoningSettings } from "../services/reasoning.js";
 import { createTeam } from "../services/teams.js";
 import { NoCredentialsError } from "@valet/engine";
@@ -381,42 +381,52 @@ describe("EngineHost model resolution wiring", () => {
     api = undefined;
   });
 
-  it("new-session precedence: orgPreferences[0] used when no user default", async () => {
+  // Org model preferences are removed (superseded by the per-tier ordered
+  // target lists). The final cascade fallback is the tier "s" token, which
+  // `resolveModelSpec` resolves through the org's tier map (`resolveTier`
+  // walks that tier's ordered list for the first active provider) —
+  // re-pointing the org's "s" tier reaches every session bottoming out here.
+  it("new-session precedence: falls back to the tier \"s\" token when nothing else is set", async () => {
     api = await bootTestApi();
-    const { db, engineHost } = api.providers;
-    await setOrgModelPreferences(db, "local-org", ["anthropic/claude-sonnet-4-5"]);
-
-    const session = await defaultAssistantSessionFor(api.providers, 
+    const { engineHost } = api.providers;
+    const session = await defaultAssistantSessionFor(api.providers,
       { type: "user", id: "local-user" },
       { actorUserId: "local-user", orgId: "local-org" },
     );
-    expect(session.options.model.id).toBe("anthropic/claude-sonnet-4-5");
+    // The persisted spec is the tier token itself (TKAI-285); the resolved
+    // model comes from the built-in tier map's default target. No org key
+    // is configured, so resolution attaches the model via the
+    // no-credentials path, which carries the namespaced canonical id.
+    expect(session.options.modelSpec).toBe("s");
+    expect(session.options.model.id).toBe("anthropic/claude-haiku-4-5");
   });
 
-  it("new-session precedence: user default wins over orgPreferences[0]", async () => {
+  it("remapping the org's \"s\" tier changes what a fallback session resolves to", async () => {
+    api = await bootTestApi();
+    const { db, engineHost } = api.providers;
+    await setOrgTierMap(db, "local-org", { ...DEFAULT_TIER_MAP, s: [`google/${GOOGLE_MODEL}`] });
+
+    const session = await defaultAssistantSessionFor(api.providers,
+      { type: "user", id: "local-user" },
+      { actorUserId: "local-user", orgId: "local-org" },
+    );
+    expect(session.options.modelSpec).toBe("s");
+    expect(session.options.model.id).toBe(`google/${GOOGLE_MODEL}`);
+  });
+
+  it("new-session precedence: user default wins over the tier fallback", async () => {
     api = await bootTestApi();
     const { db, engineHost } = api.providers;
     await db.update(users).set({ defaultModel: "claude-opus-4-5" }).where(eq(users.id, "local-user"));
-    await setOrgModelPreferences(db, "local-org", ["anthropic/claude-sonnet-4-5"]);
 
-    const session = await defaultAssistantSessionFor(api.providers, 
+    const session = await defaultAssistantSessionFor(api.providers,
       { type: "user", id: "local-user" },
       { actorUserId: "local-user", orgId: "local-org" },
     );
     expect(session.options.model.id).toBe("claude-opus-4-5");
   });
 
-  it("new-session precedence: hardcoded claude-haiku-4-5 when nothing is set", async () => {
-    api = await bootTestApi();
-    const { engineHost } = api.providers;
-    const session = await defaultAssistantSessionFor(api.providers, 
-      { type: "user", id: "local-user" },
-      { actorUserId: "local-user", orgId: "local-org" },
-    );
-    expect(session.options.model.id).toBe("claude-haiku-4-5");
-  });
-
-  it("new-session precedence: falls through past a keyless-but-enabled custom preference (fix a's pin — key-delete can't brick new sessions)", async () => {
+  it("new-session precedence: the tier fallback walks past a keyless-but-enabled custom target (key-delete can't brick new sessions)", async () => {
     api = await bootTestApi();
     const { db, engineHost } = api.providers;
     const row = await createLlmProvider(db, {
@@ -428,17 +438,17 @@ describe("EngineHost model resolution wiring", () => {
     });
     // enabled: true (default), but no org credential was ever saved for
     // this row — same state as an admin deleting the key via DELETE
-    // .../:id/key without also rewriting orgPreferences.
-    await setOrgModelPreferences(db, "local-org", [`${row.id}/m1`, "anthropic/claude-haiku-4-5"]);
+    // .../:id/key without also rewriting the tier's target list.
+    await setOrgTierMap(db, "local-org", { ...DEFAULT_TIER_MAP, s: [`${row.id}/m1`, "anthropic/claude-haiku-4-5"] });
 
-    const session = await defaultAssistantSessionFor(api.providers, 
+    const session = await defaultAssistantSessionFor(api.providers,
       { type: "user", id: "local-user" },
       { actorUserId: "local-user", orgId: "local-org" },
     );
     expect(session.options.model.id).toBe("anthropic/claude-haiku-4-5");
   });
 
-  it("new-session precedence: falls through past a disabled provider to the next preference", async () => {
+  it("new-session precedence: the tier fallback walks past a disabled provider to the next target", async () => {
     api = await bootTestApi();
     const { db, engineHost } = api.providers;
     const row = await createLlmProvider(db, {
@@ -449,16 +459,16 @@ describe("EngineHost model resolution wiring", () => {
       models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
     });
     await updateLlmProvider(db, "local-org", row.id, { enabled: false });
-    await setOrgModelPreferences(db, "local-org", [`${row.id}/m1`, "anthropic/claude-haiku-4-5"]);
+    await setOrgTierMap(db, "local-org", { ...DEFAULT_TIER_MAP, s: [`${row.id}/m1`, "anthropic/claude-haiku-4-5"] });
 
-    const session = await defaultAssistantSessionFor(api.providers, 
+    const session = await defaultAssistantSessionFor(api.providers,
       { type: "user", id: "local-user" },
       { actorUserId: "local-user", orgId: "local-org" },
     );
     expect(session.options.model.id).toBe("anthropic/claude-haiku-4-5");
   });
 
-  it("new-session precedence: all preferences inactive falls through to the hardcoded default", async () => {
+  it("new-session precedence: every tier target inactive throws — no fallback beyond the tier itself", async () => {
     api = await bootTestApi();
     const { db, engineHost } = api.providers;
     const row = await createLlmProvider(db, {
@@ -469,21 +479,21 @@ describe("EngineHost model resolution wiring", () => {
       models: [{ id: "m1", name: "M1", contextWindow: 8000 }],
     });
     await updateLlmProvider(db, "local-org", row.id, { enabled: false });
-    await setOrgModelPreferences(db, "local-org", [`${row.id}/m1`]);
+    await setOrgTierMap(db, "local-org", { ...DEFAULT_TIER_MAP, s: [`${row.id}/m1`] });
 
-    const session = await defaultAssistantSessionFor(api.providers, 
-      { type: "user", id: "local-user" },
-      { actorUserId: "local-user", orgId: "local-org" },
-    );
-    expect(session.options.model.id).toBe("claude-haiku-4-5");
+    await expect(
+      defaultAssistantSessionFor(api.providers,
+        { type: "user", id: "local-user" },
+        { actorUserId: "local-user", orgId: "local-org" },
+      ),
+    ).rejects.toThrow(/unknown model "s"/);
   });
 
-  it("new-session precedence: owning team's default beats orgPreferences[0] (TKAI-255)", async () => {
+  it("new-session precedence: owning team's default beats the tier fallback (TKAI-255)", async () => {
     api = await bootTestApi();
     const { db, engineHost } = api.providers;
     const team = await createTeam(db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
     await db.update(teams).set({ defaultModel: "anthropic/claude-sonnet-4-5" }).where(eq(teams.id, team.id));
-    await setOrgModelPreferences(db, "local-org", ["anthropic/claude-haiku-4-5"]);
 
     const session = await engineHost.sessionFor("team-owned-1", {
       userId: "local-user",
@@ -523,7 +533,7 @@ describe("EngineHost model resolution wiring", () => {
       orgId: "local-org",
       workspace: "/tmp",
     });
-    expect(session.options.model.id).toBe("claude-haiku-4-5");
+    expect(session.options.model.id).toBe("anthropic/claude-haiku-4-5");
   });
 
   it("shared team assistant ignores the first waker's personal default (TKAI-255 review round)", async () => {
@@ -543,12 +553,11 @@ describe("EngineHost model resolution wiring", () => {
     expect(session.options.model.id).toBe("anthropic/claude-sonnet-4-5");
   });
 
-  it("shared team assistant with no team default falls to the org preference, not the waker's personal default (TKAI-255 review round)", async () => {
+  it("shared team assistant with no team default falls to the tier fallback, not the waker's personal default (TKAI-255 review round)", async () => {
     api = await bootTestApi();
     const { db } = api.providers;
     const team = await createTeam(db, { orgId: "local-org", name: "Platform", creatorUserId: "local-user" });
     await db.update(users).set({ defaultModel: "claude-opus-4-5" }).where(eq(users.id, "local-user"));
-    await setOrgModelPreferences(db, "local-org", ["anthropic/claude-haiku-4-5"]);
 
     const session = await defaultAssistantSessionFor(api.providers,
       { type: "team", id: team.id },
@@ -557,7 +566,7 @@ describe("EngineHost model resolution wiring", () => {
     expect(session.options.model.id).toBe("anthropic/claude-haiku-4-5");
   });
 
-  it("a team default on an inactive provider falls through to the org preference list (TKAI-255 review round)", async () => {
+  it("a team default on an inactive provider falls through to the tier fallback (TKAI-255 review round)", async () => {
     api = await bootTestApi();
     const { db, engineHost } = api.providers;
     const row = await createLlmProvider(db, {
@@ -573,7 +582,6 @@ describe("EngineHost model resolution wiring", () => {
     // pick it and cannot clear it, so the build must fall through instead
     // of failing for the whole team.
     await db.update(teams).set({ defaultModel: `${row.id}/m1` }).where(eq(teams.id, team.id));
-    await setOrgModelPreferences(db, "local-org", ["anthropic/claude-haiku-4-5"]);
 
     const session = await engineHost.sessionFor("team-owned-inactive", {
       userId: "local-user",

@@ -67,6 +67,11 @@ describe("EngineHost session 1Password credential resolution", () => {
       sandboxProvider: new VirtualSandboxProvider(),
       eventStream: new InMemoryEventStream(),
       engineCredentials: credentials,
+      // Most cases here pass no `db`, so the cascade's tier-token fallback
+      // ("s") can't resolve through the org tier map (tier resolution
+      // requires a db by design). A concrete literal keeps session builds
+      // working without one; `extra.db` (when passed) is unaffected.
+      defaultModelId: "claude-haiku-4-5",
       ...extra,
     });
     host = h;

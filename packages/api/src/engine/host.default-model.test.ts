@@ -39,16 +39,21 @@ describe("EngineHost default model", () => {
     expect(session.options.model.id).toBe("claude-opus-4-5");
   });
 
-  it("falls back to claude-haiku-4-5 when no default_model is set", async () => {
+  it("falls back to the tier \"s\" token when no default_model is set", async () => {
     api = await bootTestApi();
     const { engineHost } = api.providers;
 
-    const session = await defaultAssistantSessionFor(api.providers, 
+    const session = await defaultAssistantSessionFor(api.providers,
       { type: "user", id: "local-user" },
       { actorUserId: "local-user", orgId: "local-org" },
     );
 
-    expect(session.options.model.id).toBe("claude-haiku-4-5");
+    // Org model preferences are gone; the final fallback is the tier "s"
+    // token, which resolves through the default tier map to Anthropic
+    // Haiku. No org key is configured, so resolution attaches the model
+    // via the no-credentials path, which carries the namespaced id.
+    expect(session.options.modelSpec).toBe("s");
+    expect(session.options.model.id).toBe("anthropic/claude-haiku-4-5");
   });
 
   it("child session: explicit modelId wins over the owner's default", async () => {
