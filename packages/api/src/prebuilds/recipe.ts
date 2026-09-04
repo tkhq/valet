@@ -102,6 +102,7 @@ export interface PrebuildOverride {
   setup?: string[];
   skipDetect?: boolean;
   docker?: boolean;
+  resources?: PrebuildResources;
   /** Workspace volume size this repo requests (Kubernetes quantity, e.g.
    * "4Gi"). The api reads it at session create time. Like `docker`, this is a
    * session runtime knob in the repo config. Kubernetes bounds the claim
@@ -120,6 +121,12 @@ export interface PrebuildOverride {
    * command that reads repo files belongs in `setup`.
    */
   baseSetup?: string[];
+}
+
+/** Sandbox CPU and memory requested by a repository prebuild. */
+export interface PrebuildResources {
+  cpu?: number;
+  memory?: string;
 }
 
 /**
@@ -161,6 +168,44 @@ export async function loadPrebuildOverride(
       throw new Error(".valet/prebuild.yaml: docker must be a boolean");
     }
     override.docker = obj.docker;
+  }
+  if (obj.resources !== undefined) {
+    if (typeof obj.resources !== "object" || obj.resources === null || Array.isArray(obj.resources)) {
+      throw new Error(
+        '.valet/prebuild.yaml: resources must be a mapping with optional cpu and memory fields — use resources: { cpu: 2, memory: "4Gi" }',
+      );
+    }
+    const resourcesObj = obj.resources as Record<string, unknown>;
+    const resources: PrebuildResources = {};
+    if (resourcesObj.cpu !== undefined) {
+      if (typeof resourcesObj.cpu !== "number") {
+        throw new Error(
+          '.valet/prebuild.yaml: resources.cpu must be a positive finite number — use resources: { cpu: 2, memory: "4Gi" }',
+        );
+      }
+      if (!Number.isFinite(resourcesObj.cpu) || resourcesObj.cpu <= 0) {
+        throw new Error(
+          '.valet/prebuild.yaml: resources.cpu must be a positive finite number — use resources: { cpu: 2, memory: "4Gi" }',
+        );
+      }
+      resources.cpu = resourcesObj.cpu;
+    }
+    if (resourcesObj.memory !== undefined) {
+      if (typeof resourcesObj.memory !== "string") {
+        throw new Error(
+          '.valet/prebuild.yaml: resources.memory must be a positive quantity string — use resources: { cpu: 2, memory: "4Gi" }',
+        );
+      }
+      const memory = resourcesObj.memory.trim();
+      const bytes = parseStorageQuantity(memory);
+      if (bytes === null || bytes <= 0) {
+        throw new Error(
+          `.valet/prebuild.yaml: resources.memory "${resourcesObj.memory}" must be a positive Kubernetes quantity — use resources: { cpu: 2, memory: "4Gi" }`,
+        );
+      }
+      resources.memory = memory;
+    }
+    override.resources = resources;
   }
   if (obj.workspaceStorage !== undefined) {
     // Quote the value in YAML: an unquoted `4Gi` parses as a string, but a
