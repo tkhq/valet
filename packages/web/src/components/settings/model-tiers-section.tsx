@@ -1,12 +1,11 @@
 import { ArrowDown, ArrowUp, X } from "lucide-react";
 import { useState } from "react";
-import { Spinner } from "~/components/primitives";
+import { Button, Spinner } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
 import { AddModelTypeahead } from "~/components/settings/model-preferences-section";
 import { useModelTiers, useModels, usePatchModelTiers } from "~/api/settings";
 import { apiErrorMessage } from "~/api/policies";
 import { SIZE_TIERS, TIER_LABELS, type SizeTier } from "~/lib/model-tiers";
-import { Button } from "~/components/primitives";
 import type { PatchModelTiersRequest } from "@valet/api/wire";
 
 /** One-tier `PatchModelTiersRequest` — a computed `{ [tier]: next }` object
