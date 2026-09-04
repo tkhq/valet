@@ -731,15 +731,21 @@ export interface ToolContext {
     }>
   >;
   /**
-   * Switch the active model for *this thread*. Resolves the id, persists,
-   * emits `model_switched`. Takes effect on the next turn — the in-flight
-   * tool call finishes against the old model. Throws on unresolvable ids.
+   * Escalate (or de-escalate) the model for the rest of *this turn*.
+   * Resolves the id, retargets the running agent, emits `model_switched`.
+   * Takes effect on the next LLM call — the in-flight tool call finishes
+   * against the old model. Throws on unresolvable ids.
    *
-   * Intentionally thread-scoped only. Changing the session default is a
-   * user-facing setting (it affects every future thread the user opens),
-   * not something an agent should reach for unilaterally; that path lives
-   * on the API server (`PATCH /api/sessions/:id`) and is reachable only
-   * from the UI.
+   * Intentionally turn-scoped only (TKAI-338). The thread pin and the
+   * session default are user-facing settings; an agent switch is a property
+   * of the work in front of it, so it is never persisted and never survives
+   * the turn. Without that boundary a single escalation stranded the thread
+   * on an expensive model with no user action behind it and no way to see
+   * why. The user's own paths are `PATCH /api/sessions/:id/threads/:threadId`
+   * and the `/model` command.
+   *
+   * For work that needs a strong model across many turns, set the child
+   * session's `model` at spawn time rather than escalating repeatedly.
    */
   setModel: (args: { model: string }) => Promise<{
     fromModel: string;

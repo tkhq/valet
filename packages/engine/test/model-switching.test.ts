@@ -12,6 +12,8 @@
  */
 import { afterEach, describe, it, expect } from "vitest";
 import {
+  fauxAssistantMessage,
+  fauxToolCall,
   getModel,
   registerFauxProvider,
   type FauxProvider,
@@ -24,6 +26,7 @@ import {
   InMemorySessionStore,
   VirtualSandboxProvider,
   type BusEvent,
+  type ResolvedModel,
 } from "../src/index.js";
 import { switchModelTool } from "../src/builtin-tools/index.js";
 
@@ -281,5 +284,187 @@ describe("engine: model switching", () => {
       builtinToolNames as readonly string[]
     );
     expect(names).toContain("switch_model");
+  });
+});
+
+/**
+ * Agent-initiated escalation (TKAI-338).
+ *
+ * Harness note: every faux provider hands back a model whose `.id` is
+ * "faux-1", so two fauxes cannot be told apart by wire id. They ARE told
+ * apart by spec, via the host `resolveModel` seam plus `modelSpec` — the
+ * documented shape for a host whose spec differs from the wire id. That lets
+ * a test observe *which model a given LLM call reached* by which faux's
+ * queued response fired.
+ *
+ * Do NOT reach for `registerFauxProvider({ provider: "anthropic", model:
+ * "claude-…" })` here: overriding a real registry id does not intercept the
+ * stream, and the turn goes to the live Anthropic API.
+ */
+const CHEAP_SPEC = "escprov-cheap/faux-1";
+const STRONG_SPEC = "escprov-strong/faux-1";
+
+describe("engine: agent-initiated model escalation (TKAI-338)", () => {
+  interface EscalationSetup {
+    engine: Engine;
+    store: InMemorySessionStore;
+    events: BusEvent[];
+    cheapModel: Model<unknown>;
+    resolver: (spec: string) => Promise<ResolvedModel | null>;
+    cheapCalls: string[];
+    strongCalls: string[];
+  }
+
+  function setupEscalation(tag: string): EscalationSetup {
+    const cheapFaux = registerFauxProvider({ provider: `${tag}-cheap` });
+    const strongFaux = registerFauxProvider({ provider: `${tag}-strong` });
+    cleanups.push(() => cheapFaux.unregister());
+    cleanups.push(() => strongFaux.unregister());
+
+    const cheapModel = cheapFaux.getModel();
+    const strongModel = strongFaux.getModel();
+    const cheapCalls: string[] = [];
+    const strongCalls: string[] = [];
+
+    // Cheap model: the first call escalates. Its second queued response is
+    // the one that fires if the switch never lands — so the assertion can
+    // tell "escalation applied" from "escalation ignored".
+    cheapFaux.setResponses([
+      () => {
+        cheapCalls.push("escalate");
+        return fauxAssistantMessage(
+          [fauxToolCall("switch_model", { model: STRONG_SPEC }, { id: "tc-esc" })],
+          { stopReason: "toolUse" },
+        );
+      },
+      () => {
+        cheapCalls.push("continuation");
+        return fauxAssistantMessage("continued on the cheap model");
+      },
+    ]);
+    strongFaux.setResponses([
+      () => {
+        strongCalls.push("continuation");
+        return fauxAssistantMessage("continued on the strong model");
+      },
+    ]);
+
+    const resolver = async (spec: string): Promise<ResolvedModel | null> => {
+      if (spec === CHEAP_SPEC) return { model: cheapModel, apiKey: "k-cheap" };
+      if (spec === STRONG_SPEC) return { model: strongModel, apiKey: "k-strong" };
+      return null;
+    };
+
+    const store = new InMemorySessionStore();
+    const bus = new InMemoryEventStream();
+    const sandboxProvider = new VirtualSandboxProvider();
+    const events: BusEvent[] = [];
+    bus.subscribe({}, (e) => events.push(e));
+    const engine = new Engine({ providers: { store, stream: bus, sandboxProvider } });
+
+    return { engine, store, events, cheapModel, resolver, cheapCalls, strongCalls };
+  }
+
+  async function waitForStatus(
+    events: BusEvent[],
+    threadId: string,
+    status: string,
+    timeoutMs = 3000,
+  ): Promise<void> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const found = events.some(
+        (e) =>
+          e.event.type === "status" &&
+          e.event.threadId === threadId &&
+          e.event.status === status,
+      );
+      if (found) return;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    throw new Error(`timed out waiting for status=${status}`);
+  }
+
+  async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (predicate()) return;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    throw new Error("waitFor: timed out");
+  }
+
+  async function makeSession(s: EscalationSetup) {
+    return s.engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: s.cheapModel,
+      modelSpec: CHEAP_SPEC,
+      resolveModel: s.resolver,
+    });
+  }
+
+  it("takes effect on the next LLM call of the SAME turn", async () => {
+    const s = setupEscalation("esc-applies");
+    const session = await makeSession(s);
+
+    const receipt = await session.prompt("do something hard");
+    await waitForStatus(s.events, receipt.threadId, "idle");
+
+    // The turn escalated once, then the CONTINUATION reached the strong
+    // model — what the tool description and the prompt rules both promise
+    // ("switch_model ... in this turn, then continue").
+    expect(s.cheapCalls).toEqual(["escalate"]);
+    expect(s.strongCalls).toEqual(["continuation"]);
+  });
+
+  it("does not outlive the turn: the thread pin stays on the user's model", async () => {
+    const s = setupEscalation("esc-scope");
+    const session = await makeSession(s);
+
+    const thread = await session.ensureDefaultThread();
+    expect(thread.modelId()).toBe(CHEAP_SPEC);
+
+    const receipt = await session.prompt("do something hard");
+    await waitForStatus(s.events, receipt.threadId, "idle");
+
+    // The escalation was turn-scoped: the user's pin is what survives, in
+    // memory and on disk. Nothing strands the thread on the strong model.
+    expect(thread.modelId()).toBe(CHEAP_SPEC);
+    const persisted = await s.store.getThread(session.id, thread.id);
+    expect(persisted?.model).toBe(CHEAP_SPEC);
+  });
+
+  it("a later turn starts back on the user's model", async () => {
+    const s = setupEscalation("esc-next-turn");
+    const session = await makeSession(s);
+
+    const first = await session.prompt("do something hard");
+    await waitForStatus(s.events, first.threadId, "idle");
+    expect(s.strongCalls).toEqual(["continuation"]);
+
+    // Second turn: the cheap faux's remaining queued response is what should
+    // fire. If the escalation had persisted, the strong faux would run dry
+    // and this turn would fail instead.
+    const second = await session.prompt("a cheap follow-up");
+    await waitFor(() => s.cheapCalls.length === 2);
+    expect(second.threadId).toBe(first.threadId);
+    expect(s.cheapCalls).toEqual(["escalate", "continuation"]);
+    expect(s.strongCalls).toEqual(["continuation"]);
+  });
+
+  it("a user-initiated switch still persists across turns", async () => {
+    const s = setupEscalation("esc-user");
+    const session = await makeSession(s);
+
+    const thread = await session.ensureDefaultThread();
+    // No `tool:` prefix — this is the PATCH / `/model` path.
+    await thread.setModel(STRONG_SPEC, "set_via_api");
+
+    expect(thread.modelId()).toBe(STRONG_SPEC);
+    const persisted = await s.store.getThread(session.id, thread.id);
+    expect(persisted?.model).toBe(STRONG_SPEC);
   });
 });

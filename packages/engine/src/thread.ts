@@ -392,6 +392,21 @@ export class Thread {
    */
   private modelOverride?: string;
   /**
+   * Agent-initiated escalation, scoped to the CURRENT turn (TKAI-338).
+   *
+   * `switch_model` exists so the agent can move to a stronger model when the
+   * work turns out to be harder than it looked. That is a property of the
+   * turn, not an edit to the user's setting, so it lives here rather than in
+   * `modelOverride`: it applies to the rest of this turn (a gate resume
+   * re-reads it through `turnModelSpec`) and is cleared when the turn
+   * settles.
+   *
+   * Deliberately NOT persisted. An api restart mid-turn resumes on the
+   * user's model — the safe direction, and never a thread stranded on an
+   * expensive model with nobody who chose it.
+   */
+  private agentModelSwitch?: string;
+  /**
    * Per-turn API key from the host `resolveModel` seam. Resolved at turn start
    * (fresh turns and resume/replay), read by the Agent's `getApiKey`, cleared
    * at turn end. Never cached across turns — key rotation applies next turn.
@@ -1168,6 +1183,9 @@ export class Thread {
       }
       this.runningItem = null;
       this.fence = undefined;
+      // The escalation dies with the turn that requested it — including a
+      // turn that finished on the gate-resume path rather than the claim loop.
+      this.agentModelSwitch = undefined;
       void this.kick();
     }
     await this.emitQueueState();
@@ -1722,29 +1740,63 @@ export class Thread {
   }
 
   /**
-   * Set or clear this thread's model override. New value takes effect on
-   * the *next* LLM call (in-flight turns finish on their existing model).
-   * Pass `null` to clear and fall back to the session default.
+   * Set or clear the model, and emit `model_switched` so the wire / UI can
+   * react. Pass `null` to clear and fall back to the session default.
    *
-   * Persists via `store.saveThread` and emits a `model_switched` engine
-   * event so the wire / UI can react.
+   * `reason` selects the writer, and the two writers have different scopes
+   * (TKAI-338):
+   *
+   * - `tool:*` — the agent's own `switch_model`. A turn-scoped escalation:
+   *   it retargets the running agent so the next LLM call uses it, is NOT
+   *   persisted, and is dropped when the turn settles. The user's pin is
+   *   untouched, so nothing strands a thread on a model the user never
+   *   chose.
+   * - anything else (`set_via_api`, `slash_command`) — the user's own
+   *   choice. Persisted via `store.saveThread` and applied from the next
+   *   turn onward, exactly as before.
+   *
+   * Keeping one field per writer is deliberate: the previous single field
+   * let an agent escalation and a user setting overwrite each other, which
+   * is why the picker appeared to change on its own.
    */
   async setModel(
     modelId: string | null,
     reason: string = "set_via_api",
   ): Promise<{ fromModel: string; toModel: string }> {
     const sessionDefault = this.session.options.modelSpec ?? this.session.options.model.id;
-    const before = this.modelOverride ?? sessionDefault;
-    if (modelId === null) {
+    // A `tool:*` reason marks the agent's own switch_model call. That is a
+    // turn-scoped escalation, not a change to the setting the user picked,
+    // so it never touches `modelOverride` and is never persisted.
+    const isAgentSwitch = reason.startsWith("tool:");
+    const before = isAgentSwitch
+      ? (this.agentModelSwitch ?? this.modelOverride ?? sessionDefault)
+      : (this.modelOverride ?? sessionDefault);
+    if (isAgentSwitch) {
+      if (modelId === null) {
+        this.agentModelSwitch = undefined;
+      } else {
+        // Validate before assigning so an unknown id is rejected and the
+        // turn keeps its previous model.
+        await this.validateModelSpec(modelId);
+        this.agentModelSwitch = modelId;
+        // Retarget the live agent so the NEXT LLM CALL of this turn uses the
+        // new model — the contract switch_model advertises, and what the
+        // prompt rules mean by "switch_model ... in this turn, then continue".
+        await this.applyModelToRunningTurn(modelId);
+      }
+    } else if (modelId === null) {
       this.modelOverride = undefined;
+      await this.session.providers.store.saveThread(this.session.id, this.toThreadData());
     } else {
       // Validate before assigning so an unknown id is rejected and the
       // thread keeps its previous setting.
       await this.validateModelSpec(modelId);
       this.modelOverride = modelId;
+      await this.session.providers.store.saveThread(this.session.id, this.toThreadData());
     }
-    await this.session.providers.store.saveThread(this.session.id, this.toThreadData());
-    const after = this.modelOverride ?? sessionDefault;
+    const after = isAgentSwitch
+      ? (this.agentModelSwitch ?? this.modelOverride ?? sessionDefault)
+      : (this.modelOverride ?? sessionDefault);
     if (before !== after) {
       await this.session.emit({
         type: "model_switched",
@@ -1785,15 +1837,42 @@ export class Thread {
     }
   }
 
-  /** Layered resolution: item model → thread pin → session default. Returns
-   *  the live pi-ai Model to use for the next LLM call.
+  /**
+   * Point the live agent at `spec` for the remainder of the current turn.
+   *
+   * No-op when no turn is running: there is no agent state to retarget, and
+   * the next turn resolves its model from scratch anyway.
+   *
+   * With a host `resolveModel` seam present this also refreshes the per-turn
+   * API key, so an escalation that crosses providers still authenticates —
+   * the same pairing `applyResolvedKeyForResume` does on a gate resume.
+   */
+  private async applyModelToRunningTurn(spec: string): Promise<void> {
+    if (!this.runningItem) return;
+    const resolver = this.session.options.resolveModel;
+    if (!resolver) {
+      const m = resolveModelId(spec);
+      if (m) this.agent.state.model = m;
+      return;
+    }
+    const resolved = await resolver(spec);
+    // validateModelSpec already accepted this spec; a null here means the
+    // resolver changed its mind mid-turn. Fail loud rather than silently
+    // continuing on the old model after telling the agent it switched.
+    if (!resolved) throw new ValidationError(`unknown model id: ${spec}`);
+    this.turnApiKey = resolved.apiKey;
+    this.agent.state.model = resolved.model;
+  }
+
+  /** Layered resolution: agent escalation → item model → thread pin →
+   *  session default. Returns the live pi-ai Model for the next LLM call.
    *
    *  A pin that stops resolving FAILS THE TURN LOUD (spec decision 3) —
    *  silently falling back to the session default ran the turn on a model
    *  the user never chose, with no event and no transcript evidence. */
   resolveTurnModel(item?: QueueItem): PiModel {
     const sessionSpec = this.session.options.modelSpec ?? this.session.options.model.id;
-    const pin = item?.model ?? this.modelOverride;
+    const pin = this.agentModelSwitch ?? item?.model ?? this.modelOverride;
     // A pin that names the session's own effective spec resolves to the live
     // session model object — the session already holds it, and it may not be
     // in pi-ai's static registry at all (custom providers, test doubles).
@@ -1808,11 +1887,16 @@ export class Thread {
     return this.session.options.model;
   }
 
-  /** Effective model spec string for this turn: item model → thread pin →
-   *  session default spec (`modelSpec` — the canonical form; `model.id` is
-   *  the wire id and only coincides for bare/internal resolution). */
+  /** Effective model spec string for this turn: agent escalation → item
+   *  model → thread pin → session default spec (`modelSpec` — the canonical
+   *  form; `model.id` is the wire id and only coincides for bare/internal
+   *  resolution).
+   *
+   *  The escalation ranks first so a turn that suspended at a decision gate
+   *  resumes on the model it escalated to, not the one it started on. */
   private turnModelSpec(item?: QueueItem): string {
     return (
+      this.agentModelSwitch ??
       item?.model ??
       this.modelOverride ??
       this.session.options.modelSpec ??
@@ -2013,6 +2097,10 @@ export class Thread {
 
       await store.insertAttemptMarker(claimed.id, attemptId);
       this.runningItem = claimed;
+      // A fresh turn starts on the user's model. Any escalation belonged to
+      // the turn that just ended; clearing here (not only at settle) means
+      // no repair path can leak one turn's escalation into the next.
+      this.agentModelSwitch = undefined;
       this.turnStartedAt = Date.now();
       const admissionLink = linkFromTraceparent(claimed.metadata?.[TRACEPARENT_METADATA_KEY]);
       this.submissionSpan = engineTracer().startSpan("submission.run", {
@@ -2173,6 +2261,8 @@ export class Thread {
         this.submissionSpan = undefined;
         this.runningItem = null;
         this.fence = undefined;
+        // The escalation dies with the turn that requested it.
+        this.agentModelSwitch = undefined;
       }
     }
   }
@@ -3888,6 +3978,15 @@ export class Thread {
           (m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult",
         ) as Message[];
       },
+      // Re-read the live model between loop iterations (TKAI-338).
+      //
+      // pi-agent-core snapshots `state.model` into its loop config once per
+      // run, so a mid-run mutation is invisible to the remaining LLM calls
+      // without this hook. That is what made `switch_model` a no-op for the
+      // turn that called it: the tool moved the model, and the loop kept
+      // streaming against the model it started on. Returning the live state
+      // here is what makes "takes effect on the next LLM call" true.
+      prepareNextTurn: () => ({ model: this.agent.state.model }),
       // Per-turn key delivery: pi-agent-core calls this with the turn's provider
       // and stamps the result onto StreamOptions.apiKey (undefined → env fallback).
       ...(hasResolver ? { getApiKey: (_provider: string) => this.turnApiKey } : {}),
@@ -4027,9 +4126,9 @@ export class Thread {
         }));
       },
       setModel: async ({ model }) => {
-        // Intentionally thread-scoped only — see ToolContext.setModel docs.
-        // The session default is a user-facing setting; agents shouldn't
-        // change it unilaterally.
+        // The `tool:` prefix is what marks this as an agent-initiated,
+        // turn-scoped escalation rather than a change to the user's pin —
+        // see ToolContext.setModel docs and Thread.setModel.
         return this.setModel(model, `tool:${toolName}`);
       },
     };

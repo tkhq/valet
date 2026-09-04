@@ -41,7 +41,8 @@ created before this change have no pin and keep their old inherit behavior.
 
 ### 2. `QueueItem.model` is a real precedence layer
 
-Turn model resolution becomes: **item model → thread pin → session default**.
+Turn model resolution becomes: **agent escalation → item model → thread pin →
+session default**.
 `turnModelSpec` and both resolution paths take the running item. This makes
 the workflow session-node `model` field effective. One shared
 `validateModelSpec` serves `submitPrompt` admission and `setModel` (resolver
@@ -173,6 +174,49 @@ Two layers fix it:
   retrying; the proactive path feeds the circuit breaker without re-emitting.
   The `fallbackToFloor` gate keeps this off the normal small-model path, where
   the tail-budget floor legitimately exceeds a tiny usable window.
+
+## Amendment (2026-09-03, TKAI-338): agent escalation is turn-scoped
+
+The original design gave `switch_model` and the user's own controls one field,
+`engine_threads.model`. Two writers on one field produced a defect: the
+orchestrator persona tells the agent to escalate before it designs or spawns,
+so a routine turn rewrote the user's setting, the picker reported the new
+model, and the thread stayed on the expensive model for every later turn.
+
+Worse, the escalation did not do the thing it was for. `Thread.setModel` wrote
+the pin but never touched `agent.state.model`, and pi-agent-core snapshots the
+model into its loop config once per run. The turn that called `switch_model`
+finished on the model it started with. Escalation applied only to the turns
+that followed — the exact inverse of the intent. A turn that suspended at a
+decision gate behaved differently again, because `applyResolvedKeyForResume`
+re-read the spec and did apply it.
+
+The amendment splits the two writers by scope:
+
+- **User writes** (`PATCH .../threads/:threadId`, `/model`) keep
+  `modelOverride`: persisted, applied from the next turn, unchanged.
+- **Agent writes** (`switch_model`, marked by a `tool:` reason) go to
+  `Thread.agentModelSwitch`: in-memory, never persisted, ranked first in
+  `turnModelSpec` so a gate resume keeps it, and dropped when the turn
+  settles.
+
+`Thread.setModel` now retargets the live agent for an agent write, and
+`buildAgent` wires pi-agent-core's `prepareNextTurn` hook to re-read
+`agent.state.model` between loop iterations. Together those make the tool's
+advertised contract — "takes effect on the next LLM call" — true for the first
+time.
+
+Consequences worth stating:
+
+- An escalation no longer survives the turn. An agent that needs a strong
+  model on a later turn calls `switch_model` again. Work that needs one
+  throughout should set the child session's `model` at spawn.
+- A restart mid-turn resumes on the user's model, because the escalation was
+  never persisted. That is the safe direction: the fallback is always the
+  model a human chose.
+- The picker needs no special read. `modelOverride` holds only the user's
+  choice, so the picker, `/status`, and the runtime agree by construction
+  rather than by a display-time rule.
 
 ## Out of scope
 
