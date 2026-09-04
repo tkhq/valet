@@ -203,7 +203,7 @@ async function tryGrowWorkspace(
     // `pending` = the resize was requested but has not landed yet (NOT a
     // policy refusal) — the background resize finishes on its own, so a
     // later retry of the whole prep may succeed without another grow.
-    const outcome = growth.pending ? "wait_timeout" : "refused";
+    const outcome = growth.pending ? "pending" : "refused";
     console.error(`workspace prep: ${context} hit ENOSPC — workspace grow ${outcome}: ${growth.reason}`);
     recordSandboxWorkspaceGrow(outcome);
     return { retry: false, reason: growth.reason };
@@ -691,4 +691,3 @@ export async function resolveStartRef(sandbox: Sandbox, dir: string): Promise<Se
     capturedAt: Date.now(),
   };
 }
-

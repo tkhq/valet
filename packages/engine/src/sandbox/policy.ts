@@ -320,7 +320,7 @@ export class PolicySandbox implements Sandbox {
           console.error(`sandbox ${this.id}: in-run workspace grow failed:`, err);
           return null;
         }
-        recordSandboxWorkspaceGrow(growth.grown ? "grown" : growth.pending ? "wait_timeout" : "refused");
+        recordSandboxWorkspaceGrow(growth.grown ? "grown" : growth.pending ? "pending" : "refused");
         if (growth.grown) {
           return `[valet] The workspace volume was full and has been grown (${growth.from} → ${growth.to}). Retry the command.`;
         }

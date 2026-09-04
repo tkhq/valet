@@ -100,7 +100,7 @@
 import type * as k8s from "@kubernetes/client-node";
 import { setHeaderOptions } from "@kubernetes/client-node";
 import type { SandboxStatus } from "@valet/engine";
-import { SANDBOX_CONTAINER_NAME } from "./manifest.js";
+import { SANDBOX_CONTAINER_NAME, SESSION_ANNOTATION_KEY } from "./manifest.js";
 import type {
   K8sProviderConfig,
   PodOwnerReference,
@@ -416,6 +416,13 @@ function parseApiVersion(apiVersion: K8sProviderConfig["apiVersion"]): { group: 
 export interface ApplySandboxResult {
   cr: SandboxCRRead;
   adopted: boolean;
+  /** On the adopt branch: the `valet.dev/session` annotation the existing CR
+   * carried BEFORE the replace overwrote it. The replace erases it, so this
+   * is the only record of who owned the sandbox until now — `create()` warns
+   * when it differs from the incoming session (TKAI-402: workspace strings
+   * are not per-session, so sessions can silently trade one CR back and
+   * forth). Absent on the create branch. */
+  previousSession?: string;
 }
 
 /**
@@ -489,7 +496,12 @@ export async function applySandbox(
       spec,
     },
   });
-  return { cr: parseSandboxCRRead(replaced), adopted: true };
+  const previousSession = existing.metadata.annotations?.[SESSION_ANNOTATION_KEY];
+  return {
+    cr: parseSandboxCRRead(replaced),
+    adopted: true,
+    ...(previousSession !== undefined ? { previousSession } : {}),
+  };
 }
 
 /** Returns `null` when the CR does not exist (404) — never throws for the

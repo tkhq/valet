@@ -479,7 +479,7 @@ describe("ENOSPC → grow workspace → retry once", () => {
     logSpy.mockRestore();
   });
 
-  it("clone ENOSPC with a pending (timed-out) resize surfaces the retry-shortly reason", async () => {
+  it("clone ENOSPC with a pending resize surfaces the retry-shortly reason", async () => {
     const sandbox = new RecordingSandbox();
     sandbox.enableGrow({
       grown: false,

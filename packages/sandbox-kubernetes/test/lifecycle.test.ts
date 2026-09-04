@@ -529,6 +529,26 @@ describe("applySandbox", () => {
     expect(Object.prototype.hasOwnProperty.call(result.cr.spec, "operatingMode")).toBe(false);
   });
 
+  it("adopt reports the previous owner's session annotation before the replace erases it (TKAI-402)", async () => {
+    const api = new FakeCustomObjectsApi();
+    const existing = buildSandboxManifest(cfg, "sess-1", { sessionId: "session-old" });
+    api.seed(toCRRead(existing, { resourceVersion: "7" }));
+
+    const incoming = buildSandboxManifest(cfg, "sess-1", { sessionId: "session-new" });
+    const result = await applySandbox(api, cfg, incoming);
+
+    expect(result.adopted).toBe(true);
+    expect(result.previousSession).toBe("session-old");
+  });
+
+  it("create reports no previous session", async () => {
+    const api = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest(cfg, "sess-1", { sessionId: "session-new" });
+    const result = await applySandbox(api, cfg, manifest);
+    expect(result.adopted).toBe(false);
+    expect(result.previousSession).toBeUndefined();
+  });
+
   it("is idempotent — applying the same manifest twice in a row does not error and keeps the same name/uid", async () => {
     const api = new FakeCustomObjectsApi();
     const manifest = buildSandboxManifest(cfg, "sess-1", {});

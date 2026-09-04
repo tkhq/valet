@@ -65,7 +65,7 @@
  */
 import type * as k8s from "@kubernetes/client-node";
 import { setHeaderOptions } from "@kubernetes/client-node";
-import { CONTAINER_DEATH_PATTERN, SandboxStartupError } from "@valet/engine";
+import { CONTAINER_DEATH_PATTERN, SandboxStartupError, recordSandboxWorkspaceGrow } from "@valet/engine";
 import type {
   ExecJobHandle,
   ExecOpts,
@@ -114,12 +114,19 @@ import {
   buildSandboxManifest,
   credsSecretName,
   DOCKER_LABEL_KEY,
+  resolveWorkspaceStorageRequest,
   SANDBOX_CONTAINER_NAME,
   sandboxCrName,
   SESSION_ANNOTATION_KEY,
 } from "./manifest.js";
 import type { K8sProviderConfig } from "./types.js";
-import { growWorkspacePvc, type SandboxPvcApi } from "./workspace-pvc.js";
+import {
+  growWorkspacePvc,
+  parseStorageQuantity,
+  workspacePvcName,
+  type SandboxPvcApi,
+  type WorkspacePvcRead,
+} from "./workspace-pvc.js";
 
 /** How long `create()`/`restore()` polls for the CR to reach `Ready` before
  * giving up. Generous relative to Task 3's empirical ~15s pod-recreate
@@ -129,6 +136,24 @@ import { growWorkspacePvc, type SandboxPvcApi } from "./workspace-pvc.js";
  * importing it, since this module has no dependency on the policy layer. */
 const READY_TIMEOUT_MS = 60_000;
 const READY_POLL_INTERVAL_MS = 1_000;
+
+function reportAdoptedWorkspacePvcError(args: {
+  sandboxName: string;
+  pvcName: string;
+  namespace: string;
+  declared: string;
+  problem: string;
+  action: string;
+  cause?: string;
+}): void {
+  const message =
+    `k8s sandbox ${args.sandboxName}: ${args.problem} for adopted workspace PVC ${args.pvcName} ` +
+    `in namespace ${args.namespace}. The provider skipped convergence to ${args.declared}. ` +
+    `The provider continued sandbox adoption. ${args.action}`;
+  if (args.cause === undefined) console.warn(message);
+  else console.warn(`${message} Cause:`, args.cause);
+  recordSandboxWorkspaceGrow("error");
+}
 
 /** How old the Sandbox CR must be before an unscheduled Pending pod is a
  * TERMINAL capacity verdict rather than a retryable timeout. A cluster
@@ -769,7 +794,122 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     // workspace-survival intent). The flag comes from applySandbox's own
     // create/409 branch, so it cannot race the way an existence pre-GET
     // would.
-    const { cr: applied, adopted } = await applySandbox(this.deps.objectsApi, this.cfg, manifest);
+    const { cr: applied, adopted, previousSession } = await applySandbox(this.deps.objectsApi, this.cfg, manifest);
+
+    // Workspace strings are not guaranteed per-session (the web defaults every
+    // session on a repo to one shared path), so an adopt can silently hand one
+    // sandbox between sessions and the reconcile sweep then attributes it to
+    // the wrong owner. Surface it — this is a signal, not a repair (TKAI-402).
+    if (adopted && previousSession !== undefined && opts.sessionId !== undefined && previousSession !== opts.sessionId) {
+      console.warn(
+        `k8s sandbox ${name}: adopted by session ${opts.sessionId} but previously owned by session ${previousSession} — ` +
+          "two sessions share one workspace string; the sandbox and its volume now serve the new session",
+      );
+    }
+
+    // Converge an adopted claim onto the repo-declared workspace size
+    // (TKAI-402). The controller never resizes an owned PVC, so a claim
+    // provisioned before a repo declared (or raised) `workspaceStorage` stays
+    // undersized forever without this. That is an EXPECTED state in normal
+    // operation — repos add or raise the declaration after workspaces exist —
+    // so converging here is the declared-state fix, not a silent repair; the
+    // grow path logs, rate-limits (one EBS modify per ~6h per volume, a slot
+    // this convergence SPENDS — a reactive grow the same session may then be
+    // refused), and clamps to the deploy cap exactly like a reactive grow.
+    //
+    // Best-effort by construction: a failed or refused grow must never fail
+    // create() — on a StorageClass without allowVolumeExpansion the resize
+    // patch is rejected by admission every time, and the session must still
+    // boot on the small claim (prep's ENOSPC path owns the fallout). No
+    // capacity wait either (`resizeWaitTimeoutMs: 0`): on EBS the filesystem
+    // grows at MOUNT time, which happens after `waitReady` below — polling
+    // here would burn up to 120s against a pod that does not exist yet. The
+    // patch and cooldown annotation land; the kubelet finishes at mount.
+    if (adopted && this.deps.pvcApi && opts.workspaceStorage !== undefined) {
+      const declared = resolveWorkspaceStorageRequest(this.cfg, opts, name);
+      const declaredBytes = parseStorageQuantity(declared);
+      const pvcName = workspacePvcName(name);
+      let pvcRead: WorkspacePvcRead | null | undefined;
+      try {
+        pvcRead = await this.deps.pvcApi.readPvc(this.cfg.namespace, pvcName);
+      } catch (err) {
+        reportAdoptedWorkspacePvcError({
+          sandboxName: name,
+          pvcName,
+          namespace: this.cfg.namespace,
+          declared,
+          problem: "Kubernetes API read failed",
+          action: "Check Kubernetes API access before retrying.",
+          cause: err instanceof Error ? err.message : String(err),
+        });
+      }
+      if (pvcRead === null) {
+        reportAdoptedWorkspacePvcError({
+          sandboxName: name,
+          pvcName,
+          namespace: this.cfg.namespace,
+          declared,
+          problem: "PVC lookup returned no claim",
+          action: "Check the sandbox controller before retrying.",
+        });
+      }
+      let currentBytes: number | null = null;
+      if (pvcRead !== undefined && pvcRead !== null) {
+        if (!pvcRead.requestedStorage) {
+          reportAdoptedWorkspacePvcError({
+            sandboxName: name,
+            pvcName,
+            namespace: this.cfg.namespace,
+            declared,
+            problem: "Storage request is missing",
+            action: "Check the PVC storage request before retrying.",
+          });
+        } else {
+          const parsed = parseStorageQuantity(pvcRead.requestedStorage);
+          if (parsed === null || parsed <= 0) {
+            reportAdoptedWorkspacePvcError({
+              sandboxName: name,
+              pvcName,
+              namespace: this.cfg.namespace,
+              declared,
+              problem: "Storage request is invalid",
+              action: "Set the PVC storage request to a Kubernetes quantity before retrying.",
+            });
+          } else {
+            currentBytes = parsed;
+          }
+        }
+      }
+      if (declaredBytes !== null && currentBytes !== null && currentBytes < declaredBytes) {
+        try {
+          const growth = await growWorkspacePvc(this.deps.pvcApi, {
+            namespace: this.cfg.namespace,
+            crName: name,
+            maxStorage: this.cfg.workspaceStorageMax,
+            targetStorage: declared,
+            resizeWaitTimeoutMs: 0,
+          });
+          if (growth.grown) {
+            console.log(`k8s sandbox ${name}: grew adopted workspace PVC ${growth.from} → ${growth.to} (repo-declared size)`);
+            recordSandboxWorkspaceGrow("grown");
+          } else if (growth.pending) {
+            // Expected at create time: the resize was requested and the
+            // filesystem step lands when the pod mounts the volume.
+            console.log(`k8s sandbox ${name}: adopted workspace PVC resize to ${declared} requested; completes at mount`);
+            recordSandboxWorkspaceGrow("pending");
+          } else {
+            console.warn(`k8s sandbox ${name}: adopted workspace PVC below the declared ${declared} and not grown: ${growth.reason}`);
+            recordSandboxWorkspaceGrow("refused");
+          }
+        } catch (err) {
+          console.warn(
+            `k8s sandbox ${name}: adopted workspace PVC convergence to ${declared} failed (continuing on the existing claim):`,
+            err instanceof Error ? err.message : String(err),
+          );
+          recordSandboxWorkspaceGrow("error");
+        }
+      }
+    }
 
     // Best-effort: adopt the creds Secret under the Sandbox CR so an external CR
     // delete garbage-collects the Secret. Never fatal — the terminal
