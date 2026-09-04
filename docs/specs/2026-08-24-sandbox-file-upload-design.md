@@ -34,6 +34,9 @@ validation → path resolution → size cap on the file part → read + hash +
 type detection → 415 check → session/sandbox readiness → overwrite checks →
 parent mkdir → write → extraction → ref mint.
 
+The server buffers the file before the readiness wait and holds it for up to
+60 seconds. The route passes Hono's request signal to that wait.
+
 ### Size cap
 
 `VALET_MAX_UPLOAD_BYTES` (default `DEFAULT_MAX_UPLOAD_BYTES` from
@@ -148,9 +151,7 @@ attachments on both the hot turn and reload (`entriesToAgentMessages`).
 
 Budgets: 5 files, `DEFAULT_MAX_UPLOAD_BYTES` per file, 250 MB total.
 Uploads start on accept; chips show uploading/success/error, and the error
-state offers a retry that re-uploads the held File. A `409` with `wake:true`
-keeps the chip neutral until the sandbox status stream reports `ready`. The
-composer retries that upload once. Removing the chip cancels the wait and upload.
+state offers retry. The server waits up to 60 seconds for sandbox readiness.
 
 Send failure handling: the draft and chips are restored, and the failure is
 shown in the composer error strip. When the failure is an
@@ -172,10 +173,11 @@ mapped through `errorMessage`, which prefers the server's `corrective`.
 |--------|-------|
 | 400 | Bad multipart, missing file/filename, bad `extract` value, invalid path, read error. |
 | 404 | Unknown session or non-owner. |
-| 409 | Destination exists; sandbox is waking (`wake:true`), failed, or released. Only waking states carry `wake:true`. |
+| 408 | The client canceled while the route waited for the sandbox. |
+| 409 | Destination exists; readiness timed out (`wake:true`); or the sandbox was released or is unavailable. |
 | 413 | Content-Length or file above the cap. |
 | 415 | `extract=true` on a non-extractable file. |
 | 422 | Zip guard rejection or PDF extraction failure with `extract=true`. |
-| 500 | Session load, missing ready handle, mkdir, write, or destination-verification failure. |
+| 500 | Session load, startup/preparation, missing ready handle, mkdir, write, or destination-verification failure. |
 
 Every error body carries `error` and a `corrective` naming the next action.

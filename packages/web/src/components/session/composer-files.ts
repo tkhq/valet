@@ -41,8 +41,6 @@ export interface ComposerFile {
   file: File;
   /** Set when upload completes successfully. */
   attachmentRef?: string;
-  /** Set while the upload waits for a sandbox wake. */
-  waitingForSandbox?: boolean;
   /** Set when upload fails. */
   error?: string;
 }

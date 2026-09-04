@@ -21,14 +21,22 @@
  * attachmentRef, plus optional extracted[]/extractedTo for zips and pdf{}
  * for PDFs.
  *
- * Error responses per spec: 400, 404, 409 (three variants), 413, 415, 422.
+ * Error responses per spec: 400, 404, 408, 409, 413, 415, 422, 500.
  */
 
 import { Hono } from "hono";
 import { createHash } from "node:crypto";
 import { dirname } from "node:path";
 import { DEFAULT_MAX_UPLOAD_BYTES } from "@valet/shared";
-import type { AttachmentState, Sandbox } from "@valet/engine";
+import {
+  SANDBOX_READY_TIMEOUT_MS,
+  SandboxPreparationError,
+  SandboxStartupError,
+  SandboxUnavailableError,
+  WorkspaceProvisioningError,
+  type AttachmentState,
+  type Sandbox,
+} from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { resolveUploadDest } from "../services/path-validation.js";
 import { extractPdf, pdfStubMarkdown } from "../services/pdf-extract.js";
@@ -108,32 +116,32 @@ async function statIfExists(
   }
 }
 
-type UploadAvailability =
-  | { status: 409; body: { error: string; corrective: string; wake?: true } }
-  | { status: 500; body: { error: string; corrective: string } };
+type SandboxReadyError = { status: 408 | 409 | 500; body: { error: string; corrective: string; wake?: true } };
 
-export function sandboxUploadAvailability(state: AttachmentState): UploadAvailability | null {
-  if (state === "ready") return null;
-  if (state === "detached" || state === "provisioning" || state === "suspended") {
+export function sandboxReadyError(err: unknown, state: AttachmentState, aborted: boolean): SandboxReadyError {
+  if (aborted) return { status: 408, body: { error: "upload canceled", corrective: "Upload the file again." } };
+  if (err instanceof WorkspaceProvisioningError && state === "provisioning") {
     return {
       status: 409,
-      body: {
-        error: "sandbox not ready",
-        corrective: "The sandbox is waking. Retry in a few seconds.",
-        wake: true,
-      },
+      body: { error: "sandbox not ready", corrective: "The sandbox is still waking. Retry in a few seconds.", wake: true },
     };
   }
-  if (state === "error") {
+  if (err instanceof WorkspaceProvisioningError) {
+    return { status: 409, body: { error: "sandbox did not start", corrective: "Retry the upload to start it again." } };
+  }
+  if (err instanceof SandboxStartupError || err instanceof SandboxPreparationError) {
     return {
-      status: 409,
-      body: { error: "sandbox failed to start", corrective: "Recover the sandbox, then retry the upload." },
+      status: 500,
+      body: { error: "sandbox failed to start", corrective: "Retry the upload. If this repeats, fix the sandbox configuration." },
     };
   }
-  return {
-    status: 409,
-    body: { error: "sandbox was released", corrective: "Start a new session, then upload the file again." },
-  };
+  if (state === "released") {
+    return { status: 409, body: { error: "sandbox was released", corrective: "Start a new session, then upload the file again." } };
+  }
+  if (err instanceof SandboxUnavailableError) {
+    return { status: 409, body: { error: "sandbox is unavailable", corrective: "Start a new session, then upload the file again." } };
+  }
+  return { status: 500, body: { error: "Failed to prepare sandbox", corrective: "Try uploading again." } };
 }
 
 fileUploadRouter.post("/:id/files", async (c) => {
@@ -256,22 +264,31 @@ fileUploadRouter.post("/:id/files", async (c) => {
   }
 
   const attachment = engineSession.attachment;
-  const sandbox = attachment.current();
-  if (!sandbox) {
-    if (attachment.state === "ready") {
-      return c.json(
-        { error: "sandbox handle is missing", corrective: "Reload the session. If this repeats, contact support." },
-        500,
-      );
-    }
-    const unavailable = sandboxUploadAvailability(attachment.state);
-    if (unavailable && "wake" in unavailable.body) attachment.warm();
-    if (unavailable) return c.json(unavailable.body, unavailable.status);
+  const requestSignal = c.req.raw.signal;
+  if (attachment.state === "ready" && !attachment.current()) {
     return c.json(
       { error: "sandbox handle is missing", corrective: "Reload the session. If this repeats, contact support." },
       500,
     );
   }
+  if (attachment.state === "released") {
+    return c.json(
+      { error: "sandbox was released", corrective: "Start a new session, then upload the file again." },
+      409,
+    );
+  }
+
+  let sandbox: Sandbox;
+  try {
+    ({ sandbox } = await attachment.ensureReady({
+      timeoutMs: SANDBOX_READY_TIMEOUT_MS,
+      signal: requestSignal,
+    }));
+  } catch (err) {
+    const failure = sandboxReadyError(err, attachment.state, requestSignal.aborted);
+    return c.json(failure.body, failure.status);
+  }
+  if (requestSignal.aborted) return c.json({ error: "upload canceled", corrective: "Upload the file again." }, 408);
 
   // Overwrite protection: check every path this request will write before
   // writing any of them. The PDF sidecar counts — overwrite=false must not
