@@ -141,6 +141,11 @@ workspaceStorage: "4Gi"
   `VALET_SANDBOX_WORKSPACE_MAX` — a repo cannot request unbounded storage —
   and falls back to the deploy default on any unparseable quantity (a
   typo'd cap must never grant the request).
+- Quantity comparison accepts the `resource.Quantity` forms that Kubernetes
+  uses. These are DecimalSI (`n`, `u`, `m`, empty, `k`, `K`, `M`, `G`, `T`,
+  `P`, `E`), BinarySI (`Ki` through `Ei`), and signed decimal exponents.
+  The comparison rounds fractional byte counts away from zero. It rejects
+  negative, non-finite, and unsafe byte counts.
 - Only a FRESH claim is affected: the agent-sandbox controller leaves an
   existing owned PVC untouched, so restores/adoptions keep their size.
 - Create-time sizing costs no EBS modification. Reactive growth (Part B)
@@ -179,7 +184,7 @@ Schema doc: `docs/prebuild-yaml.md`. Immediate use: set `tkhq/mono` to
   session silently resolved default flags — `workspaceStorage` never reached
   the claim, and the repo `docker` flag (same guard since its introduction)
   never applied. The guard now accepts both spellings via the exported
-  `prebuildFlagsTarget`, logs the skip when a host is genuinely not GitHub,
+  `primaryGitHubRepoTarget`, logs the skip when a host is genuinely not GitHub,
   and `host.prebuild-flags.test.ts` pins the schema default through
   `loadSessionMeta` into the guard.
 - Second miss, same week: `buildChildSession` (the orchestrator-spawned

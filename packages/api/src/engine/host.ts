@@ -408,10 +408,9 @@ export interface SessionMeta {
   ownerTeamId?: string;
 }
 
-/** Where `resolveRepoPrebuildFlags` reads `.valet/prebuild.yaml` from, or why
- * it cannot. Exported (with {@link prebuildFlagsTarget}) for direct unit
- * coverage of the guard. */
-export type PrebuildFlagsTarget =
+/** The primary repo's GitHub coordinates, or why a GitHub read cannot run.
+ * Exported with {@link primaryGitHubRepoTarget} for direct guard coverage. */
+export type PrimaryGitHubRepoTarget =
   | { ok: true; owner: string; repo: string; ref: string }
   | { ok: false; reason: "no-repo" | "bad-full-name" }
   | { ok: false; reason: "non-github-host"; host: string };
@@ -424,7 +423,7 @@ export type PrebuildFlagsTarget =
  * which silently disabled `workspaceStorage` and the repo `docker` flag for
  * every bound session.
  */
-export function prebuildFlagsTarget(repos: SessionMeta["repos"]): PrebuildFlagsTarget {
+export function primaryGitHubRepoTarget(repos: SessionMeta["repos"]): PrimaryGitHubRepoTarget {
   const primary = repos?.[0];
   if (!primary) return { ok: false, reason: "no-repo" };
   const host = primary.host ?? "github";
@@ -1650,11 +1649,10 @@ export class EngineHost {
     const db = this.opts.db;
     if (!tokenDeps || !db) return [];
     try {
-      // Same target guard as `resolveRepoPrebuildFlags` (TKAI-385): a copy of
-      // this guard here once matched only "github.com" while `session_repos.host`
-      // stores "github", which silently disabled credentials.yaml wrappers for
-      // every DB-loaded session.
-      const target = prebuildFlagsTarget(meta.repos);
+      // The shared target guard accepts both stored GitHub host spellings
+      // (TKAI-385). A local copy once disabled credentials.yaml wrappers for
+      // every DB-loaded session because it accepted only "github.com".
+      const target = primaryGitHubRepoTarget(meta.repos);
       if (!target.ok) return [];
       const { owner, repo: repoName, ref } = target;
       const resolved = await resolveSessionGitHubToken(
@@ -1706,7 +1704,7 @@ export class EngineHost {
     const db = this.opts.db;
     if (!tokenDeps || !db) return defaults;
     try {
-      const target = prebuildFlagsTarget(meta.repos);
+      const target = primaryGitHubRepoTarget(meta.repos);
       if (!target.ok) {
         if (target.reason === "non-github-host") {
           console.warn(

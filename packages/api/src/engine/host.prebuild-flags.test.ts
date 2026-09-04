@@ -1,7 +1,6 @@
 /**
- * Unit coverage for `prebuildFlagsTarget` — the guard that decides whether
- * `resolveRepoPrebuildFlags` reads `.valet/prebuild.yaml` for a session
- * (TKAI-385).
+ * Unit coverage for `primaryGitHubRepoTarget`. Repo-backed configuration
+ * reads use this guard to select a session's primary GitHub repo (TKAI-385).
  *
  * Regression: the guard once matched only host === "github.com", but
  * `session_repos.host` stores "github" (the schema default). Every bound
@@ -13,16 +12,9 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
-import type {
-  ExecResult,
-  Sandbox,
-  SandboxCapabilities,
-  SandboxCreateOpts,
-  SandboxProvider,
-  SandboxStatus,
-} from "@valet/engine";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
+import { RecordingSandboxProvider } from "../test-helpers/recording-sandbox.js";
 import { agentSessions, githubInstallations, sessionRepos } from "../schema/index.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startGithubFixture, contentsBody, type GithubFixture } from "../test-helpers/github-fixture.js";
@@ -30,7 +22,7 @@ import { clearRepoPrebuildFlagsCache } from "../bakes/source-service.js";
 import { saveAppConfig, type GithubAppConfig } from "../services/github-app.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { loadSessionMeta } from "./session-meta.js";
-import { prebuildFlagsTarget } from "./host.js";
+import { primaryGitHubRepoTarget } from "./host.js";
 import type { RepoBinding } from "../wire/types.js";
 
 function binding(overrides: Partial<RepoBinding> = {}): RepoBinding & { targetDir: string } {
@@ -43,44 +35,44 @@ function binding(overrides: Partial<RepoBinding> = {}): RepoBinding & { targetDi
   };
 }
 
-describe("prebuildFlagsTarget", () => {
+describe("primaryGitHubRepoTarget", () => {
   it('host "github" (the session_repos schema default) resolves — the TKAI-385 regression', () => {
-    const target = prebuildFlagsTarget([binding({ host: "github" })]);
+    const target = primaryGitHubRepoTarget([binding({ host: "github" })]);
     expect(target).toEqual({ ok: true, owner: "acme", repo: "widgets", ref: "HEAD" });
   });
 
   it('host "github.com" (hand-built metas) also resolves', () => {
-    const target = prebuildFlagsTarget([binding({ host: "github.com" })]);
+    const target = primaryGitHubRepoTarget([binding({ host: "github.com" })]);
     expect(target).toEqual({ ok: true, owner: "acme", repo: "widgets", ref: "HEAD" });
   });
 
   it("absent host defaults to GitHub", () => {
-    const target = prebuildFlagsTarget([binding()]);
+    const target = primaryGitHubRepoTarget([binding()]);
     expect(target).toEqual({ ok: true, owner: "acme", repo: "widgets", ref: "HEAD" });
   });
 
   it("a bound ref is passed through", () => {
-    const target = prebuildFlagsTarget([binding({ host: "github", ref: "release-1.2" })]);
+    const target = primaryGitHubRepoTarget([binding({ host: "github", ref: "release-1.2" })]);
     expect(target).toEqual({ ok: true, owner: "acme", repo: "widgets", ref: "release-1.2" });
   });
 
   it("a non-GitHub host is skipped with the host named", () => {
-    const target = prebuildFlagsTarget([binding({ host: "gitlab.example.com" })]);
+    const target = primaryGitHubRepoTarget([binding({ host: "gitlab.example.com" })]);
     expect(target).toEqual({ ok: false, reason: "non-github-host", host: "gitlab.example.com" });
   });
 
   it("no repo bindings → no-repo", () => {
-    expect(prebuildFlagsTarget(undefined)).toEqual({ ok: false, reason: "no-repo" });
-    expect(prebuildFlagsTarget([])).toEqual({ ok: false, reason: "no-repo" });
+    expect(primaryGitHubRepoTarget(undefined)).toEqual({ ok: false, reason: "no-repo" });
+    expect(primaryGitHubRepoTarget([])).toEqual({ ok: false, reason: "no-repo" });
   });
 
   it("a fullName without owner/name parts → bad-full-name", () => {
-    const target = prebuildFlagsTarget([binding({ fullName: "widgets" })]);
+    const target = primaryGitHubRepoTarget([binding({ fullName: "widgets" })]);
     expect(target).toEqual({ ok: false, reason: "bad-full-name" });
   });
 });
 
-describe("prebuildFlagsTarget over loadSessionMeta (session_repos schema default)", () => {
+describe("primaryGitHubRepoTarget over loadSessionMeta (session_repos schema default)", () => {
   const ORG = "test-org";
   const USER = "test-user";
   const NOW = Date.now();
@@ -126,73 +118,10 @@ describe("prebuildFlagsTarget over loadSessionMeta (session_repos schema default
       orgId: ORG,
       workspace: "/tmp/s-flags",
     });
-    const target = prebuildFlagsTarget(meta.repos);
+    const target = primaryGitHubRepoTarget(meta.repos);
     expect(target).toEqual({ ok: true, owner: "tkhq", repo: "mono", ref: "HEAD" });
   });
 });
-
-/** Enough of a Sandbox that workspace prep's exec/read/write calls succeed
- * (same shape as `host.prebuild.test.ts`'s PrepFriendlySandbox). */
-class PrepFriendlySandbox implements Sandbox {
-  constructor(readonly id: string) {}
-  async readFile(): Promise<string> {
-    return "";
-  }
-  async readBinary(): Promise<Uint8Array> {
-    return new Uint8Array();
-  }
-  async writeFile(): Promise<void> {}
-  async writeBinary(): Promise<void> {}
-  async readdir(): Promise<string[]> {
-    return [];
-  }
-  async stat(): Promise<{ isFile: boolean; isDirectory: boolean; size: number }> {
-    throw new Error("ENOENT");
-  }
-  async mkdir(): Promise<void> {}
-  async rm(): Promise<void> {}
-  async exec(): Promise<ExecResult> {
-    return { stdout: "", stderr: "", exitCode: 0 };
-  }
-  async destroy(): Promise<void> {}
-}
-
-class RecordingSandboxProvider implements SandboxProvider {
-  readonly backend = "recording-test";
-  readonly createCalls: SandboxCreateOpts[] = [];
-  private sandboxes = new Map<string, PrepFriendlySandbox>();
-  private nextId = 1;
-
-  capabilities(): SandboxCapabilities {
-    return {
-      snapshot: "none",
-      persistentWorkspace: true,
-      tunnels: false,
-      warmPool: false,
-      hibernation: false,
-      customImage: true,
-    };
-  }
-
-  async create(opts: SandboxCreateOpts): Promise<Sandbox> {
-    this.createCalls.push(opts);
-    const id = `rec-${this.nextId++}`;
-    const sb = new PrepFriendlySandbox(id);
-    this.sandboxes.set(id, sb);
-    return sb;
-  }
-  async restore(id: string): Promise<Sandbox> {
-    const sb = this.sandboxes.get(id);
-    if (!sb) throw new Error(`recording sandbox not found: ${id}`);
-    return sb;
-  }
-  async destroy(id: string): Promise<void> {
-    this.sandboxes.delete(id);
-  }
-  async status(id: string): Promise<SandboxStatus> {
-    return this.sandboxes.has(id) ? { id, state: "ready", startedAt: Date.now() } : { id, state: "released" };
-  }
-}
 
 const { privateKey: privateKeyPem } = generateKeyPairSync("rsa", {
   modulusLength: 2048,

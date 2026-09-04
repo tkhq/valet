@@ -15,30 +15,54 @@ const BINARY_SUFFIXES: Record<string, number> = {
   Mi: 2 ** 20,
   Gi: 2 ** 30,
   Ti: 2 ** 40,
+  Pi: 2 ** 50,
+  Ei: 2 ** 60,
 };
 
 const DECIMAL_SUFFIXES: Record<string, number> = {
+  n: 1e-9,
+  u: 1e-6,
+  m: 1e-3,
+  "": 1,
   k: 1e3,
+  K: 1e3,
   M: 1e6,
   G: 1e9,
   T: 1e12,
+  P: 1e15,
+  E: 1e18,
 };
 
 /**
- * Parses a Kubernetes storage quantity ("1Gi", "500Mi", "2G", "1073741824")
- * to bytes, or null when unparseable. Covers the suffixes storage values
- * realistically use (binary Ki/Mi/Gi/Ti, decimal k/M/G/T, plain bytes) —
- * not the full quantity grammar (no milli/exponent forms, which are
- * nonsensical for a PVC size).
+ * Parses a Kubernetes storage quantity ("1Gi", "500m", "2G", "1e6") to
+ * bytes, or null when unparseable. The parser accepts DecimalSI, BinarySI,
+ * and decimal-exponent suffixes from resource.Quantity. It rounds fractional
+ * bytes away from zero so a positive value cannot become the disable value.
  */
 export function parseStorageQuantity(quantity: string): number | null {
-  const match = /^([0-9]+(?:\.[0-9]+)?)(Ki|Mi|Gi|Ti|k|M|G|T)?$/.exec(quantity.trim());
+  const match = /^([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))(Ki|Mi|Gi|Ti|Pi|Ei|[numkKMGTP]|E|[eE][+-]?[0-9]+)?$/.exec(
+    quantity.trim(),
+  );
   if (!match) return null;
   const value = Number(match[1]);
   if (!Number.isFinite(value)) return null;
-  const suffix = match[2];
-  const unit = suffix ? (BINARY_SUFFIXES[suffix] ?? DECIMAL_SUFFIXES[suffix]) : 1;
-  return Math.floor(value * unit);
+  const suffix = match[2] ?? "";
+  const exponent = /^[eE]([+-]?[0-9]+)$/.exec(suffix);
+  const unit = exponent
+    ? 10 ** Number(exponent[1])
+    : (BINARY_SUFFIXES[suffix] ?? DECIMAL_SUFFIXES[suffix]);
+  if (unit === undefined) return null;
+
+  const scaled = value * unit;
+  if (!Number.isFinite(scaled)) return null;
+
+  let bytes: number;
+  if (scaled > 0) bytes = Math.ceil(scaled);
+  else if (scaled < 0) bytes = Math.floor(scaled);
+  else if (/[1-9]/.test(match[1])) bytes = match[1].startsWith("-") ? -1 : 1;
+  else bytes = 0;
+
+  return Number.isSafeInteger(bytes) ? bytes : null;
 }
 
 /** Formats bytes as the largest binary suffix that divides evenly (else
