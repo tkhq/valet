@@ -173,6 +173,15 @@ Schema doc: `docs/prebuild-yaml.md`. Immediate use: set `tkhq/mono` to
 
 ## Deviations & follow-ups
 
+- Shipped broken, fixed same week: `EngineHost.resolveRepoPrebuildFlags`
+  only proceeded when the primary binding's host was `"github.com"`, but
+  `session_repos.host` stores `"github"` (the schema default). Every bound
+  session silently resolved default flags — `workspaceStorage` never reached
+  the claim, and the repo `docker` flag (same guard since its introduction)
+  never applied. The guard now accepts both spellings via the exported
+  `prebuildFlagsTarget`, logs the skip when a host is genuinely not GitHub,
+  and `host.prebuild-flags.test.ts` pins the schema default through
+  `loadSessionMeta` into the guard.
 - In-run growth is reactive (a command must fail once). Proactive growth
   from the kubelet volume stats already in Prometheus (grow at a
   threshold, before anything fails) remains open — TKAI-381.
