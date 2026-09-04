@@ -102,7 +102,7 @@ function inst(): Instruments {
     }),
     sandboxWorkspaceGrow: meter.createCounter("valet.sandbox.workspace_grow", {
       description:
-        "Workspace-volume grow attempts after an ENOSPC, by outcome (grown/refused/wait_timeout/error). Every fill event records here even when the grow succeeds, so a systemic many-workspaces-filling problem stays visible instead of being papered over by resizes.",
+        "Workspace-volume growth handling, by outcome (grown/refused/pending/error). Every fill event records here even when the grow succeeds, so a systemic many-workspaces-filling problem stays visible instead of being papered over by resizes.",
     }),
     cacheBreaks: meter.createCounter("valet.cache.breaks", {
       description:
@@ -199,14 +199,14 @@ export function recordSandboxFlagged(kind: SandboxFlagKind, count: number): void
   if (count > 0) inst().sandboxFlagged.add(count, { kind });
 }
 
-/** Outcome of one workspace-volume grow attempt (Sandbox.growWorkspace),
- * recorded by workspace prep on every ENOSPC it reacts to. A closed union so
- * a typo'd outcome cannot fragment the series. */
-export type WorkspaceGrowOutcome = "grown" | "refused" | "wait_timeout" | "error";
+/** Outcome of workspace-volume growth handling. This includes
+ * Sandbox.growWorkspace and adopted-claim convergence. A closed union keeps
+ * a typo'd outcome from fragmenting the series. */
+export type WorkspaceGrowOutcome = "grown" | "refused" | "pending" | "error";
 
-/** One workspace grow attempt after an ENOSPC. Recorded on EVERY attempt —
- * successes included — so many-workspaces-filling-at-once stays a visible,
- * alertable signal even when every individual grow succeeds. */
+/** One workspace growth outcome. Reactive callers record every attempt,
+ * including successes. Adoption records each attempted convergence or failed
+ * pre-read. */
 export function recordSandboxWorkspaceGrow(outcome: WorkspaceGrowOutcome): void {
   inst().sandboxWorkspaceGrow.add(1, { outcome });
 }

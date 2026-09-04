@@ -120,7 +120,13 @@ import {
   SESSION_ANNOTATION_KEY,
 } from "./manifest.js";
 import type { K8sProviderConfig } from "./types.js";
-import { growWorkspacePvc, parseStorageQuantity, workspacePvcName, type SandboxPvcApi } from "./workspace-pvc.js";
+import {
+  growWorkspacePvc,
+  parseStorageQuantity,
+  workspacePvcName,
+  type SandboxPvcApi,
+  type WorkspacePvcRead,
+} from "./workspace-pvc.js";
 
 /** How long `create()`/`restore()` polls for the CR to reach `Ready` before
  * giving up. Generous relative to Task 3's empirical ~15s pod-recreate
@@ -804,9 +810,25 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     if (adopted && this.deps.pvcApi && opts.workspaceStorage !== undefined) {
       const declared = resolveWorkspaceStorageRequest(this.cfg, opts, name);
       const declaredBytes = parseStorageQuantity(declared);
-      const pvcRead = await this.deps.pvcApi
-        .readPvc(this.cfg.namespace, workspacePvcName(name))
-        .catch(() => null);
+      const pvcName = workspacePvcName(name);
+      let pvcRead: WorkspacePvcRead | null | undefined;
+      try {
+        pvcRead = await this.deps.pvcApi.readPvc(this.cfg.namespace, pvcName);
+      } catch (err) {
+        console.warn(
+          `k8s sandbox ${name}: could not read adopted workspace PVC ${pvcName} in namespace ${this.cfg.namespace}; ` +
+            `skipped convergence to ${declared}. Sandbox adoption continued. Check Kubernetes API access before retrying:`,
+          err instanceof Error ? err.message : String(err),
+        );
+        recordSandboxWorkspaceGrow("error");
+      }
+      if (pvcRead === null) {
+        console.warn(
+          `k8s sandbox ${name}: adopted workspace PVC ${pvcName} was not found in namespace ${this.cfg.namespace}; ` +
+            `skipped convergence to ${declared}. Sandbox adoption continued. Check the sandbox controller before retrying.`,
+        );
+        recordSandboxWorkspaceGrow("error");
+      }
       const currentBytes = pvcRead?.requestedStorage ? parseStorageQuantity(pvcRead.requestedStorage) : null;
       if (declaredBytes !== null && currentBytes !== null && currentBytes < declaredBytes) {
         try {
@@ -824,7 +846,7 @@ export class KubernetesSandboxProvider implements SandboxProvider {
             // Expected at create time: the resize was requested and the
             // filesystem step lands when the pod mounts the volume.
             console.log(`k8s sandbox ${name}: adopted workspace PVC resize to ${declared} requested; completes at mount`);
-            recordSandboxWorkspaceGrow("wait_timeout");
+            recordSandboxWorkspaceGrow("pending");
           } else {
             console.warn(`k8s sandbox ${name}: adopted workspace PVC below the declared ${declared} and not grown: ${growth.reason}`);
             recordSandboxWorkspaceGrow("refused");

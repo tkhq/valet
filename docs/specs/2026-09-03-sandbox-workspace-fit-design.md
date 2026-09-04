@@ -110,8 +110,10 @@ caller retries.
   The annotation survives api restarts.
 - Budget: growth is one-way (a PVC cannot shrink), so
   `max × VALET_ORG_SANDBOX_CEILING` bounds what one org can accrete.
-- Visibility: every grow attempt records the
-  `valet.sandbox.workspace_grow` counter (outcome: grown/refused/error)
+- Visibility: every reactive grow attempt and adoption convergence failure
+  records the
+  `valet.sandbox.workspace_grow` counter (outcome:
+  grown/refused/pending/error)
   and a log line. Successes record too, so the
   `SandboxWorkspacesFillingSystemic` alert (5+ workspaces filling at once)
   still surfaces a systemic problem instead of being papered over.
@@ -151,8 +153,9 @@ workspaceStorage: "4Gi"
   `P`, `E`), BinarySI (`Ki` through `Ei`), and signed decimal exponents.
   The comparison rounds fractional byte counts away from zero. It rejects
   negative, non-finite, and unsafe byte counts.
-- Only a FRESH claim is affected: the agent-sandbox controller leaves an
-  existing owned PVC untouched, so restores/adoptions keep their size.
+- A fresh claim starts at the declared size. On adoption, the provider reads
+  the existing claim and requests a grow when it is smaller than the declared
+  size. It never requests a shrink.
 - Create-time sizing costs no EBS modification. Reactive growth (Part B)
   stays as the safety net below the declared size, and starts its doubling
   from it.
@@ -210,8 +213,9 @@ Schema doc: `docs/prebuild-yaml.md`. Immediate use: set `tkhq/mono` to
   there is no capacity wait at create time — the filesystem grows when the
   pod mounts the volume; prep's ENOSPC retry covers the residue. The
   convergence spends the volume's EBS modify slot, so a reactive grow in the
-  same ~6h window is refused. Outcomes record on
-  `valet.sandbox.workspace_grow`. Claims created before a repo
+  same ~6h window is refused. A pending request records `pending`. A read or
+  resize failure records `error`, logs the claim context, and does not block
+  adoption. Claims created before a repo
   declares or raises its size are an expected state, so this is declared-state
   convergence, not a silent repair. `create()` also warns when the adopted CR
   was owned by a DIFFERENT session — workspace strings are not per-session
@@ -241,7 +245,7 @@ Schema doc: `docs/prebuild-yaml.md`. Immediate use: set `tkhq/mono` to
 - During a large fan-out onto one repo, many PVCs grow at once; the
   external-resizer queue and account-level EBS ModifyVolume throttling can
   push individual grows past the 120s wait. Those record outcome
-  `wait_timeout` (the resize completes in the background; the next start
+  `pending` (the resize completes in the background; the next start
   attempt usually succeeds without growing).
 
 ## Out of scope

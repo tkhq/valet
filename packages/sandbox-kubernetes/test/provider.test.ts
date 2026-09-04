@@ -24,6 +24,13 @@ import type {
 import type { PodLivenessApi } from "../src/provider.js";
 import type { PodExecApi } from "../src/exec.js";
 
+const recordWorkspaceGrow = vi.hoisted(() => vi.fn());
+
+vi.mock("@valet/engine", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@valet/engine")>();
+  return { ...actual, recordSandboxWorkspaceGrow: recordWorkspaceGrow };
+});
+
 describe("looksSignalKilled", () => {
   it("flags the 129-192 signal-shaped exit-code band", () => {
     expect(looksSignalKilled(129)).toBe(true); // SIGHUP
@@ -611,12 +618,16 @@ describe("create() adoption convergence (TKAI-402)", () => {
   function makeAdoptingProvider(opts: {
     pvcRequested: string;
     previousSessionId: string;
+    readRejects?: string;
+    readReturnsNull?: boolean;
     patchRejects?: string;
   }) {
     const patches: PvcPatch[] = [];
     let requested = opts.pvcRequested;
     const pvcApi = {
       async readPvc() {
+        if (opts.readRejects !== undefined) throw new Error(opts.readRejects);
+        if (opts.readReturnsNull === true) return null;
         return { requestedStorage: requested, capacityStorage: requested, annotations: {} };
       },
       async patchPvcStorage(_ns: string, _name: string, storage: string) {
@@ -686,6 +697,48 @@ describe("create() adoption convergence (TKAI-402)", () => {
     warnSpy.mockRestore();
     expect(warned).toBe(true);
     expect(patches).toHaveLength(0);
+  });
+
+  it("reports an adopted claim read error and continues on the existing claim", async () => {
+    const { provider, patches } = makeAdoptingProvider({
+      pvcRequested: "1Gi",
+      previousSessionId: "session-old",
+      readRejects: "apiserver unavailable",
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    recordWorkspaceGrow.mockClear();
+
+    await expect(
+      provider.create({ workspace: "/ws/mono", sessionId: "session-new", workspaceStorage: "8Gi" }),
+    ).resolves.toBeDefined();
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("could not read adopted workspace PVC"),
+      "apiserver unavailable",
+    );
+    expect(recordWorkspaceGrow).toHaveBeenCalledWith("error");
+    expect(patches).toHaveLength(0);
+    warnSpy.mockRestore();
+  });
+
+  it("reports a missing adopted claim separately from a read error", async () => {
+    const { provider, patches } = makeAdoptingProvider({
+      pvcRequested: "1Gi",
+      previousSessionId: "session-old",
+      readReturnsNull: true,
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    recordWorkspaceGrow.mockClear();
+
+    await expect(
+      provider.create({ workspace: "/ws/mono", sessionId: "session-new", workspaceStorage: "8Gi" }),
+    ).resolves.toBeDefined();
+
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("adopted workspace PVC workspace-ws-mono was not found"));
+    expect(warnSpy).not.toHaveBeenCalledWith(expect.any(String), expect.anything());
+    expect(recordWorkspaceGrow).toHaveBeenCalledWith("error");
+    expect(patches).toHaveLength(0);
+    warnSpy.mockRestore();
   });
 
   it("an adopted claim at the growth cap does not warn (declared above the cap resolves to the cap)", async () => {
