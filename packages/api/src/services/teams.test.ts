@@ -1,4 +1,16 @@
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, vi } from "vitest";
+
+const seedDefaultAssistant = vi.hoisted(() => vi.fn());
+vi.mock("../assistants/service.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../assistants/service.js")>();
+  seedDefaultAssistant.mockImplementation(actual.insertDefaultAssistantForPrincipal);
+  return {
+    ...actual,
+    insertDefaultAssistantForPrincipal: (
+      ...args: Parameters<typeof actual.insertDefaultAssistantForPrincipal>
+    ) => seedDefaultAssistant(...args),
+  };
+});
 import { and, eq } from "drizzle-orm";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
@@ -91,6 +103,22 @@ describe("teams service", () => {
 
     const after = await db.select().from(assistants);
     expect(after).toHaveLength(before.length);
+  });
+
+  it("createTeam rolls the team back when the assistant seed throws", async () => {
+    seedDefaultAssistant.mockRejectedValueOnce(new Error("seed failed"));
+
+    await expect(createTeam(db, { orgId, name: "Rollback", creatorUserId: "u1" })).rejects.toThrow(
+      "seed failed",
+    );
+
+    const leftoverTeams = await db.select().from(teams).where(eq(teams.name, "Rollback"));
+    const leftoverAssistants = await db
+      .select()
+      .from(assistants)
+      .where(and(eq(assistants.ownerType, "team")));
+    expect(leftoverTeams).toHaveLength(0);
+    expect(leftoverAssistants).toHaveLength(0);
   });
 
   it("rejects a duplicate team name within the same org", async () => {
