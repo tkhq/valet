@@ -321,14 +321,14 @@ export function resolveSandboxEphemeralStorageLimit(env: NodeJS.ProcessEnv): str
  * build caches outside /workspace — is bounded separately by the
  * ephemeral-storage limit, so it does not land on this claim.
  *
- * Sizing per sandbox is one-way: a PVC cannot shrink. A new claim starts at
- * the current bounded target. When `create()` adopts an existing claim below
- * that target, the provider requests a best-effort grow. Adoption never waits
- * for capacity and never requests a shrink. A workspace prep ENOSPC can still
- * trigger on-demand growth (`Sandbox.growWorkspace`, capped by
- * `VALET_SANDBOX_WORKSPACE_MAX` below). Keep this default small: adoption can
- * apply a higher default to existing claims, and every provisioned byte has a
- * storage cost.
+ * Sizing per sandbox is one-way: a PVC cannot shrink. Changing this deploy
+ * default affects fresh claims. An existing undeclared claim keeps its size
+ * until the sandbox is destroyed or reactive ENOSPC growth changes it. When
+ * an explicit repo declaration supplies `SandboxCreateOpts.workspaceStorage`,
+ * `create()` can request a best-effort grow of an undersized adopted claim.
+ * Adoption never waits for capacity and never requests a shrink. Reactive
+ * growth remains capped by `VALET_SANDBOX_WORKSPACE_MAX` below. Keep this
+ * default small because every provisioned byte has a storage cost.
  *
  * `"0"` omits the value and falls back to the manifest builder's own
  * default rather than provisioning a zero-sized claim.
