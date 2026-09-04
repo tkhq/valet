@@ -117,6 +117,54 @@ describe("Session.credentialProvider credentialResolver seam", () => {
     faux.unregister();
   });
 
+  it("team owner principal: resolver receives { type: team, id }", async () => {
+    const faux = registerFauxProvider({ provider: "cred-seam-team" });
+    const seen: Array<{ owner: CredentialOwner; service: string }> = [];
+    const credentials = makeStore({
+      "team:team_1:github": { type: "oauth2", accessToken: "team-token" },
+      "user:u1:github": { type: "oauth2", accessToken: "user-token" },
+    });
+    const { engine } = makeEngine(credentials);
+    const session = await engine.createSession({
+      userId: "team:team_1",
+      orgId: "o1",
+      workspace: "/workspace",
+      sandbox: {},
+      model: faux.getModel(),
+      owner: { type: "team", id: "team_1" },
+      credentialResolver: async (owner, service) => {
+        seen.push({ owner, service });
+        return credentials.get(owner, service);
+      },
+    });
+
+    const provider = session.credentialProvider();
+    await expect(provider.get("github")).resolves.toMatchObject({ accessToken: "team-token" });
+    expect(seen).toEqual([{ owner: { type: "team", id: "team_1" }, service: "github" }]);
+    faux.unregister();
+  });
+
+  it("absent owner: resolver still receives { type: user, id: userId }", async () => {
+    const faux = registerFauxProvider({ provider: "cred-seam-user-default" });
+    const seen: CredentialOwner[] = [];
+    const { engine } = makeEngine(makeStore());
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/workspace",
+      sandbox: {},
+      model: faux.getModel(),
+      credentialResolver: async (owner) => {
+        seen.push(owner);
+        return null;
+      },
+    });
+
+    await session.credentialProvider().get("github");
+    expect(seen).toEqual([{ type: "user", id: "u1" }]);
+    faux.unregister();
+  });
+
   it("resolver that throws propagates out of get() (surfaces as the tool error)", async () => {
     const faux = registerFauxProvider({ provider: "cred-seam-4" });
     const { engine } = makeEngine(makeStore());
