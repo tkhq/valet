@@ -528,6 +528,11 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
     }
 
     case "model_switched": {
+      // A turn-scoped switch is the agent's own `switch_model`. It never
+      // touches the user's pin, so the picker and the thread list already
+      // show the right thing — refetching would be pure churn, and the
+      // orchestrator persona escalates on most turns.
+      if (ev.scope === "turn") return next;
       // Bump the nonce so `useInvalidateSessionOnModelSwitch` refetches the
       // session/threads queries. Mutation hooks only cover picker-originated
       // switches; `/model` commands and direct API switches arrive ONLY

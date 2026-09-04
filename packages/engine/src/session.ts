@@ -1013,7 +1013,12 @@ export class Session {
           updatedAt: d.updatedAt,
         }));
       },
-      setModel: (args) => thread.setModel(args.model),
+      // A plugin action reached from a slash command the USER typed, so this
+      // counts as a user switch and persists. The agent's own path is the
+      // Thread's turn context, which stamps a `tool:` reason and gets the
+      // turn-scoped escalation instead (TKAI-338). Passed explicitly rather
+      // than defaulted — the reason string now selects the writer.
+      setModel: (args) => thread.setModel(args.model, "slash_command"),
     };
   }
 
