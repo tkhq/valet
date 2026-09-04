@@ -2,6 +2,7 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { TanStackRouterVite } from "@tanstack/router-plugin/vite";
 import { resolve } from "node:path";
+import { valetServiceWorker } from "./src/pwa/vite-plugin";
 
 const API_URL = process.env.VITE_API_URL ?? "http://localhost:8788";
 
@@ -13,6 +14,7 @@ export default defineConfig({
       autoCodeSplitting: true,
     }),
     react(),
+    valetServiceWorker(),
   ],
   server: {
     port: 5173,
