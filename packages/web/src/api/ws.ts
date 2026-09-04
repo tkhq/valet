@@ -93,7 +93,6 @@ export function useSessionWebSocket(sessionId: string) {
       const lastOffset = useStreamStore.getState().bySession[sessionId]?.lastOffset;
       socket = new WebSocket(wsUrl(sessionId, lastOffset || undefined));
       socket.onopen = () => {
-        retryDelay = INITIAL_RETRY_MS;
         setConnection(sessionId, "open");
       };
       socket.onmessage = (ev) => {
@@ -105,6 +104,12 @@ export function useSessionWebSocket(sessionId: string) {
             console.debug(`[ws] seq=${wire.seq} ${wire.type} ${summary}`);
           }
           ingest(sessionId, wire);
+          // Reset backoff only after receiving init — confirms the session
+          // is valid and the connection is healthy. Resetting in onopen
+          // allowed a connect→immediate-close loop at INITIAL_RETRY_MS.
+          if (wire.type === "init") {
+            retryDelay = INITIAL_RETRY_MS;
+          }
         } catch (err) {
           console.error("ws parse failed:", err);
         }
@@ -113,8 +118,15 @@ export function useSessionWebSocket(sessionId: string) {
         // The matching onclose will trigger the reconnect.
         setConnection(sessionId, "error");
       };
-      socket.onclose = () => {
+      socket.onclose = (closeEv) => {
         if (cancelled) return;
+        // 4040 means the session does not exist or the user cannot view it.
+        // A retry cannot change that result. Other private close codes can
+        // describe temporary application state, so they keep the backoff.
+        if (closeEv.code === 4040) {
+          setConnection(sessionId, "error");
+          return;
+        }
         setConnection(sessionId, "closed");
         retryTimer = setTimeout(open, retryDelay);
         retryDelay = Math.min(MAX_RETRY_MS, retryDelay * 2);
