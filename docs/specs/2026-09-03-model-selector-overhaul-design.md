@@ -27,11 +27,17 @@ per-org tier map, but no UI exposes them. This change adds:
   a model field, and the personal `/settings/assistant` default-model control
   becomes tier-first.
 - Approved models is a new allowlist with a soft gate: an unset list approves
-  the whole catalog; when set, it constrains members but not org admins.
+  the whole catalog; when set, an org admin can still SELECT any model
+  (the server never blocks an admin's write). The pickers show approved
+  models to everyone by default; an admin's "show more" reveals the rest
+  of the catalog, a member's reveals only the remaining approved entries.
 - Tier map targets must be approved models when the allowlist is set.
 - Reasoning level is settable everywhere the model is settable.
 - Orgs get a default reasoning level and a max cap. The cap applies to
   everyone, including admins. Admins raise the cap when they need more.
+- Org model preferences (the ordered `orgs.model_preferences` fallback
+  chain) are removed. The per-tier ordered target lists are the org's
+  fallback now; the final cascade fallback is the `s` tier token.
 
 ## Current state (dev-v2)
 
@@ -182,11 +188,20 @@ run-time refusal and no auto-repair; the pin only becomes unselectable.
 ### 5. Resolution cascades
 
 Model (in `resolveModelForBuild`): insert `assistantDefault` after
-`overrideId` and before `childDefault`:
+`overrideId` and before `childDefault`. Org model preferences are removed
+(the per-tier target lists are the org's fallback now), so the cascade
+drops the `orgPreferredModel` tier and its final fallback becomes the `s`
+tier token:
 
 `existing?.model → overrideId → assistantDefault → childDefault →
-userDefault → teamDefault → orgPreferredModel → opts.defaultModelId →
-fallback`.
+userDefault → teamDefault → opts.defaultModelId → "s"`.
+
+`resolveModelSpec` already resolves tier tokens and persists the token as
+the canonical id, so the fallback works exactly like an explicit tier pick:
+`resolveTier` walks the org's `s`-tier target list for the first active
+provider, and a remap of that tier reaches every session that bottoms out
+at this fallback. `firstActivePreference` (the active-provider walk) stays
+— `teamDefaultModel` still uses it for the team tier above.
 
 Sessions built for an assistant pass `assistants.model` as
 `assistantDefault`. The value may be a tier token; `resolveModelSpec`
@@ -233,9 +248,10 @@ streams, so a tier remap to a weaker model degrades instead of failing.
 Org models page (`settings.organization.models.tsx`) gains sections:
 
 - **Model tiers** (admin-editable): five rows, one per tier, each an ordered
-  target list (primary + fallbacks) that reuses the `ModelPreferencesSection`
-  row pattern. Backed by new client methods + hooks for
-  `/api/org/model-tiers`.
+  target list (primary + fallbacks) using an up/down/remove row pattern.
+  Backed by new client methods + hooks for `/api/org/model-tiers`. (Org
+  model preferences, the row pattern's original source, are removed as of
+  the 2026-09-03 follow-up — see Deviations.)
 - **Approved models**: a "Restrict members to approved models" switch. On
   enable, seed the list from the current curated set. Below the switch, a
   catalog checklist. Backed by `/api/org/approved-models`.
@@ -321,7 +337,20 @@ Recorded during implementation (2026-09-03):
   session's current model always appears in the list, even after an admin
   drops it from the approved set, so the selector never shows a blank
   current selection. The model stops being selectable anywhere else.
-- **`ModelCombobox` (settings surfaces) does not filter unapproved models
-  for members.** A member can still see and pick a disallowed model in the
-  list; the server rejects the save and returns a message naming the
-  approved list.
+- **The chat `ModelPicker`'s baseline list is approved-only for everyone**
+  (2026-09-03 follow-up: org model preferences removal). Its "show
+  more"/search reveal differs by role: an org admin's reveal is the full
+  catalog, including unapproved entries (the server has a matching admin
+  bypass, so they can still select one); a member's reveal stays within
+  the approved set — an unapproved model never appears for a member,
+  search included.
+- **`ModelCombobox` (settings surfaces) filters unapproved models for
+  everyone** (2026-09-03 follow-up), with no admin reveal — org admins
+  manage the approved list on the org models page itself, not from this
+  control. The currently selected value stays labeled even after it loses
+  approval or leaves the catalog; only the option list is filtered.
+- **The approved-models seed (on first restricting a member) is the union
+  of every model enrolled in the org's tier map and the curated set**
+  (2026-09-03 follow-up), not the curated set alone. A tier-enrolled model
+  must start checked, or the very next tier-map edit would 400 (the
+  tier-map PATCH validates targets against the approved list).
