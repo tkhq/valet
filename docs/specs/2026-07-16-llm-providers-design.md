@@ -28,7 +28,7 @@
 7. **UI: settings → Organization → Models (admin-gated).**
    - Known providers: card per provider — key entry (write-only field, last-4 display), enabled toggle, env-fallback indicator ("using deployment key").
    - Custom providers: CRUD — name, baseUrl, key, model list editor + discovery probe, test button (1-token completion round-trip, result shown).
-   - Model preferences: drag-ordered list built from the active catalog; first = default (badge).
+   - Model preferences: drag-ordered list built from the active catalog; first = default (badge). (Removed 2026-09-03 — the model tier editor replaced this section; see the extension below.)
    - User settings `defaultModel` picker and the session model switcher consume the org catalog unchanged (they already hit `/api/models`).
 
 8. **Interactions with other in-flight specs.** Usage/telemetry's cost math reads pricing from this catalog (custom-provider `pricing` optional → cost absent, tokens-only, per that spec's rule). The policy engine is orthogonal (LLM calls are not plugin actions). Nothing here touches sandbox specs.

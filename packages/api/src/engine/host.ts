@@ -3113,7 +3113,7 @@ export class EngineHost {
       // Child sessions default to the "s" tier when no explicit overrideId
       // was passed (TKAI-285). The tier resolves through the org's tier map
       // to a concrete spec; childDefault sits after overrideId but before
-      // the user/team/org preference cascade.
+      // the user/team defaults and the tier fallback.
       childDefault: opts.modelId ? undefined : "s",
     });
     const reasoning = await this.resolveReasoningForBuild(existing, opts.orgId, {
