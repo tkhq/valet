@@ -13,6 +13,7 @@
  * also the emitted step order, which matters for determinism.
  */
 import { createHash } from "node:crypto";
+import type { SandboxResources } from "@valet/engine";
 import { parse as parseYaml } from "yaml";
 import { parseStorageQuantity } from "@valet/sandbox-kubernetes";
 
@@ -124,10 +125,7 @@ export interface PrebuildOverride {
 }
 
 /** Sandbox CPU and memory requested by a repository prebuild. */
-export interface PrebuildResources {
-  cpu?: number;
-  memory?: string;
-}
+export type PrebuildResources = Pick<SandboxResources, "cpu" | "memory">;
 
 /**
  * Loads `.valet/prebuild.yaml` if present. Returns `null` when the file

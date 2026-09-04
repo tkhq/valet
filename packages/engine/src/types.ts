@@ -1221,6 +1221,22 @@ export interface Sandbox {
   growWorkspace?(): Promise<WorkspaceGrowth>;
 }
 
+export interface SandboxResources {
+  cpu?: number;
+  memory?: string;
+  /** Node-local disk (container rootfs + emptyDirs) the sandbox reserves,
+   * as a Kubernetes quantity string (e.g. "2Gi"). The scheduler counts it
+   * against node allocatable, which caps how many sandboxes stack onto one
+   * node (TKAI-349: unbounded stacking exhausted a node's disk and took it
+   * NotReady). Providers without node-local disk accounting ignore it. */
+  ephemeralStorage?: string;
+  /** Node-local disk ceiling for the sandbox (quantity string, e.g. "8Gi").
+   * Past it the kubelet evicts the one runaway sandbox instead of the node
+   * failing. Independent of `ephemeralStorage` — an absent side is
+   * omitted, never inferred from the other. */
+  ephemeralStorageLimit?: string;
+}
+
 export interface SandboxCreateOpts {
   image?: string;
   workspace?: string;
@@ -1238,21 +1254,7 @@ export interface SandboxCreateOpts {
   workspaceStorage?: string;
   env?: Record<string, string>;
   timeout?: number;
-  resources?: {
-    cpu?: number;
-    memory?: string;
-    /** Node-local disk (container rootfs + emptyDirs) the sandbox reserves,
-     * as a Kubernetes quantity string (e.g. "2Gi"). The scheduler counts it
-     * against node allocatable, which caps how many sandboxes stack onto one
-     * node (TKAI-349: unbounded stacking exhausted a node's disk and took it
-     * NotReady). Providers without node-local disk accounting ignore it. */
-    ephemeralStorage?: string;
-    /** Node-local disk ceiling for the sandbox (quantity string, e.g. "8Gi").
-     * Past it the kubelet evicts the one runaway sandbox instead of the node
-     * failing. Independent of `ephemeralStorage` — an absent side is
-     * omitted, never inferred from the other. */
-    ephemeralStorageLimit?: string;
-  };
+  resources?: SandboxResources;
   metadata?: Record<string, unknown>;
   /**
    * The owning session's id. `Engine.materializeSandbox` stamps this on
@@ -1937,6 +1939,9 @@ export interface PrepStep {
 export interface DesiredSandboxSpec {
   /** Target OCI image ref. Ignored by the Task 3 attachment — Task 5 wires it. */
   image?: string;
+  /** Repository resource overrides. Undefined gives no authoritative opinion;
+   * an empty object authoritatively declares no repository overrides. */
+  resources?: Pick<SandboxResources, "cpu" | "memory">;
   /** Stable content hash across all steps; used by the diff engine in Task 4+. */
   specHash: string;
   steps: PrepStep[];

@@ -6,7 +6,7 @@
  * exec-based because provider readFile/writeFile semantics differ for
  * container-fs paths outside /workspace.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   APPLIED_PATH,
   readAppliedState,
@@ -90,7 +90,7 @@ describe("readAppliedState", () => {
     expect(await readAppliedState(sb2)).toBeNull();
   });
 
-  it("returns parsed state when file is valid", async () => {
+  it("returns parsed state for an old file without resources", async () => {
     const sb = makeSandbox();
     const state: AppliedState = {
       image: "img:v1",
@@ -100,6 +100,43 @@ describe("readAppliedState", () => {
     await seedAppliedState(sb, state);
     const result = await readAppliedState(sb);
     expect(result).toEqual(state);
+  });
+
+  it.each([
+    { cpu: 4, memory: "8Gi" },
+    { cpu: 0.5 },
+    { memory: "500Mi" },
+    {},
+  ])("returns parsed state with valid resources %j", async (resources) => {
+    const sb = makeSandbox();
+    const state = { image: "img:v1", specHash: "h", steps: {}, resources };
+    await seedAppliedState(sb, state);
+    expect(await readAppliedState(sb)).toEqual(state);
+  });
+
+  it.each([
+    null,
+    [],
+    "4",
+    4,
+    { cpu: "4" },
+    { cpu: null },
+    { cpu: 0 },
+    { cpu: -1 },
+    { memory: 8 },
+    { memory: null },
+    { memory: "" },
+    { memory: "   " },
+  ].map((resources) => ({ resources })))("returns null for invalid resources $resources", async ({ resources }) => {
+    const sb = makeSandbox();
+    await seedRawContent(sb, JSON.stringify({ image: "img:v1", specHash: "h", steps: {}, resources }));
+    expect(await readAppliedState(sb)).toBeNull();
+  });
+
+  it("returns null for a non-finite CPU value", async () => {
+    const sb = makeSandbox();
+    await seedRawContent(sb, '{"image":"img:v1","specHash":"h","steps":{},"resources":{"cpu":1e400}}');
+    expect(await readAppliedState(sb)).toBeNull();
   });
 });
 
@@ -168,6 +205,108 @@ describe("applyPlan — full apply on null applied", () => {
   });
 });
 
+// ── applyPlan resources ───────────────────────────────────────────────
+
+describe("applyPlan resources", () => {
+  const cases = [
+    { name: "writes authoritative desired resources", desiredResources: { cpu: 4, memory: "8Gi" }, expected: { cpu: 4, memory: "8Gi" } },
+    { name: "preserves prior resources when desired resources are undefined", desiredResources: undefined, expected: { cpu: 2, memory: "4Gi" } },
+    { name: "removes prior overrides for authoritative empty resources", desiredResources: {}, expected: {} },
+  ];
+
+  it.each(cases)("$name after each landed step", async ({ desiredResources, expected }) => {
+    const sb = makeSandbox();
+    const prior = { image: "img:v1", specHash: "old", steps: {}, resources: { cpu: 2, memory: "4Gi" } };
+    await seedAppliedState(sb, prior);
+    const snapshots: (AppliedState | null)[] = [];
+    const steps = [
+      makeStep("s1", "h1", false),
+      makeStep("s2", "h2", false, async () => { snapshots.push(await readAppliedState(sb)); }),
+    ];
+    const desired = { ...makeSpec(steps), resources: desiredResources };
+
+    const result = await applyPlan(sb, desired, "img:v1", prior);
+
+    expect(snapshots).toEqual([{ image: "img:v1", specHash: desired.specHash, steps: { s1: "h1" }, resources: expected }]);
+    expect(result.resources).toEqual(expected);
+    expect(await readAppliedState(sb)).toEqual(result);
+  });
+
+  it.each(cases)("$name in the returned state when no steps are pending", async ({ desiredResources, expected }) => {
+    const sb = makeSandbox();
+    const prior = { image: "img:v1", specHash: "old", steps: { s1: "h1" }, resources: { cpu: 2, memory: "4Gi" } };
+    await seedAppliedState(sb, prior);
+    const desired = { ...makeSpec([makeStep("s1", "h1", false)]), resources: desiredResources };
+    const execSpy = vi.spyOn(sb, "exec");
+
+    const result = await applyPlan(sb, desired, "img:v1", prior);
+
+    expect(result).toEqual({
+      ...prior,
+      specHash: desiredResources === undefined ? prior.specHash : desired.specHash,
+      resources: expected,
+    });
+    const writes = execSpy.mock.calls.filter(([cmd]) => cmd.includes("mkdir -p /etc/valet"));
+    expect(writes).toHaveLength(desiredResources === undefined ? 0 : 1);
+    expect(await readAppliedState(sb)).toEqual(result);
+  });
+
+  it("persists non-empty resources for a cold sandbox with no prep steps", async () => {
+    const sb = makeSandbox();
+    const desired = { ...makeSpec([]), resources: { cpu: 4, memory: "8Gi" } };
+
+    const result = await applyPlan(sb, desired, "img:v1", null);
+
+    expect(result).toEqual({ image: "img:v1", specHash: desired.specHash, steps: {}, resources: desired.resources });
+    expect(await readAppliedState(sb)).toEqual(result);
+  });
+
+  it("persists resource changes when all pending steps fail non-critically", async () => {
+    const sb = makeSandbox();
+    const prior: AppliedState = { image: "img:v1", specHash: "old", steps: { s1: "old-h1", s2: "h2" } };
+    await seedAppliedState(sb, prior);
+    const desired = {
+      ...makeSpec([
+        makeStep("s1", "new-h1", false, async () => { throw new Error("prep failed"); }),
+        makeStep("s2", "h2", false),
+      ]),
+      resources: { cpu: 4, memory: "8Gi" },
+    };
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await applyPlan(sb, desired, "img:v1", prior);
+
+      expect(result).toEqual({ ...prior, specHash: desired.specHash, resources: desired.resources });
+      expect(await readAppliedState(sb)).toEqual(result);
+    } finally {
+      consoleErrorSpy.mockRestore();
+    }
+  });
+
+  it("does not rewrite old state for authoritative empty resources", async () => {
+    const sb = makeSandbox();
+    const prior: AppliedState = { image: "img:v1", specHash: "old", steps: { s1: "h1" } };
+    await seedAppliedState(sb, prior);
+    const execSpy = vi.spyOn(sb, "exec");
+
+    await applyPlan(sb, { ...makeSpec([makeStep("s1", "h1", false)]), resources: {} }, "img:v1", prior);
+
+    expect(execSpy.mock.calls.filter(([cmd]) => cmd.includes("mkdir -p /etc/valet"))).toHaveLength(0);
+    expect(await readAppliedState(sb)).toEqual(prior);
+  });
+
+  it("keeps legacy files without a resource field when there is no opinion", async () => {
+    const sb = makeSandbox();
+    const prior: AppliedState = { image: "img:v1", specHash: "old", steps: {} };
+    await seedAppliedState(sb, prior);
+
+    const result = await applyPlan(sb, makeSpec([makeStep("s1", "h1", false)]), "img:v1", prior);
+
+    expect(result).not.toHaveProperty("resources");
+    expect(await readAppliedState(sb)).toEqual(result);
+  });
+});
+
 // ── applyPlan — subset re-run when one hash drifts ─────────────────────
 
 describe("applyPlan — subset re-run", () => {
@@ -189,7 +328,7 @@ describe("applyPlan — subset re-run", () => {
     ];
     const spec = makeSpec(steps, "spec-new");
 
-    await applyPlan(sb, spec, "img:v1", prior);
+    const result = await applyPlan(sb, spec, "img:v1", prior);
 
     // Only s2 should have run
     expect(applied).toEqual(["s2"]);
@@ -198,6 +337,7 @@ describe("applyPlan — subset re-run", () => {
     const written = await readAppliedState(sb);
     expect(written!.steps).toEqual({ s1: "h1", s2: "h2-NEW" });
     expect(written!.specHash).toBe("spec-new");
+    expect(result).toEqual(written);
   });
 });
 
