@@ -39,7 +39,10 @@ import {
   useTeams,
 } from "~/api/settings";
 import { ModelCombobox } from "~/components/settings/model-combobox";
+import { ReasoningSelect } from "~/components/settings/reasoning-select";
 import { curatedForCatalogId } from "~/lib/models";
+import { isSizeTier, TIER_LABELS } from "~/lib/model-tiers";
+import { reasoningLabelFor } from "~/lib/reasoning";
 
 /**
  * Says why a mirrored team has no controls, in the same words the API uses
@@ -337,7 +340,7 @@ function TeamRow({
 
       {open && (
         <div className="ml-6 mt-2 space-y-2 border-l border-line pl-4">
-          <TeamDefaultModel team={team} canMutate={canMutate} managed={managed} />
+          <TeamDefaults team={team} canMutate={canMutate} managed={managed} />
           <TeamMembers
             team={team}
             orgMembers={orgMembers}
@@ -363,18 +366,19 @@ function TeamRow({
 }
 
 /**
- * The team default model (TKAI-255). Member-started sessions in this
- * team's workspace start on it unless that member set a personal default;
- * shared team sessions (assistant, workflow runs, children) skip the
- * personal tier and start on it directly. A session's model persists, so
- * the setting only shapes sessions built after the change. Null falls
- * through to the org preference list. Editable by whoever can mutate the
- * team (team admin or org admin) — same gate as the roster controls, and
- * the API enforces it. NOT origin-gated: a mirrored team's membership
- * belongs to the identity provider, but its default model is Valet-local
- * state no sync rewrites.
+ * The team default model and reasoning level (TKAI-255; reasoning added
+ * Task 15). Member-started sessions in this team's workspace start on
+ * these unless that member set a personal default; shared team sessions
+ * (assistant, workflow runs, children) skip the personal tier and start on
+ * them directly. A session's model/reasoning persists, so the setting only
+ * shapes sessions built after the change. Null falls through to the org
+ * preference list / org default reasoning. Editable by whoever can mutate
+ * the team (team admin or org admin) — same gate as the roster controls,
+ * and the API enforces it. NOT origin-gated: a mirrored team's membership
+ * belongs to the identity provider, but its defaults are Valet-local state
+ * no sync rewrites.
  */
-function TeamDefaultModel({
+function TeamDefaults({
   team,
   canMutate,
   managed,
@@ -384,15 +388,19 @@ function TeamDefaultModel({
   managed: boolean;
 }) {
   const patchTeam = usePatchTeam();
-  // Same label chain as ModelCombobox (curated label, then catalog name,
-  // then raw id) so members and admins read the same words for one value.
+  // Same label chain as ModelCombobox (tier label, then curated label, then
+  // catalog name, then raw id) so members and admins read the same words
+  // for one value.
   const modelsQ = useModels();
   const entry = modelsQ.data?.models.find((m) => m.id === team.defaultModel);
-  const readOnlyLabel =
-    curatedForCatalogId(team.defaultModel)?.label ??
-    entry?.name ??
-    team.defaultModel ??
-    "Organization default";
+  const readOnlyModelLabel = team.defaultModel
+    ? isSizeTier(team.defaultModel)
+      ? TIER_LABELS[team.defaultModel]
+      : (curatedForCatalogId(team.defaultModel)?.label ?? entry?.name ?? team.defaultModel)
+    : "Organization default";
+  const readOnlyReasoningLabel = team.defaultReasoning
+    ? reasoningLabelFor(team.defaultReasoning)
+    : "Organization default";
 
   return (
     <div>
@@ -409,15 +417,36 @@ function TeamDefaultModel({
           </div>
         ) : (
           <span className="min-w-0 truncate text-sm text-ink" title={team.defaultModel ?? undefined}>
-            {readOnlyLabel}
+            {readOnlyModelLabel}
+          </span>
+        )}
+      </div>
+      <div className="flex flex-col gap-1 py-1 sm:flex-row sm:items-center sm:gap-3">
+        <span className="shrink-0 text-xs font-medium text-muted">Default reasoning</span>
+        {canMutate ? (
+          <div className="w-full max-w-xs">
+            <ReasoningSelect
+              value={team.defaultReasoning ?? null}
+              onChange={(defaultReasoning) =>
+                patchTeam.mutate({ id: team.id, body: { defaultReasoning } })
+              }
+              emptyLabel="Organization default"
+            />
+          </div>
+        ) : (
+          <span
+            className="min-w-0 truncate text-sm text-ink"
+            title={team.defaultReasoning ?? undefined}
+          >
+            {readOnlyReasoningLabel}
           </span>
         )}
       </div>
       <p className="text-xs text-muted">
-        New sessions started in this team's workspace use this model. A member's personal
-        default wins for sessions that member starts. Existing sessions keep their model,
-        including the team assistant if anyone has already opened it.
-        {managed && " The identity provider owns this team's membership; the default model is set here."}
+        New sessions started in this team's workspace use this model and reasoning level. A
+        member's personal default wins for sessions that member starts. Existing sessions keep
+        their settings, including the team assistant if anyone has already opened it.
+        {managed && " The identity provider owns this team's membership; the defaults are set here."}
       </p>
       {patchTeam.error != null && (
         <p className="text-xs text-danger-500">{errorText(patchTeam.error)}</p>

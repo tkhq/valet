@@ -1,3 +1,6 @@
+import { curatedForCatalogId } from "~/lib/models";
+import type { GetModelTiersResponse, ModelInfo } from "@valet/api/wire";
+
 /**
  * Size-tier vocabulary for the org model-tier settings
  * (`GET`/`PATCH /api/org/model-tiers`). A tier maps to an ordered list of
@@ -24,4 +27,30 @@ export function isSizeTier(id: string | null | undefined): id is SizeTier {
 /** Human label for a tier id, or the id unchanged when it isn't a known tier. */
 export function tierLabel(id: string): string {
   return isSizeTier(id) ? TIER_LABELS[id] : id;
+}
+
+/** Human label for a concrete catalog model id — the curated tier label
+ * when the id matches a known Anthropic tier (bare or `anthropic/`-
+ * namespaced), else the catalog's own `name`, else the id verbatim. Shared
+ * by the chat `ModelPicker` and the settings `ModelCombobox` so a model's
+ * label never drifts between the two surfaces. */
+export function labelFor(id: string, models: ModelInfo[]): string {
+  const curated = curatedForCatalogId(id);
+  if (curated) return curated.label;
+  return models.find((m) => m.id === id)?.name ?? id;
+}
+
+/** Subtitle for a Size tier row: the catalog name of the tier's first
+ * configured target, resolved against `models`. Falls back to the raw spec
+ * string when the target isn't in the catalog (a stale/retired pin), and
+ * to `undefined` when the tier has no configured targets or the tier map
+ * hasn't loaded yet. */
+export function tierSubtitle(
+  tier: SizeTier,
+  tierMap: GetModelTiersResponse | undefined,
+  models: ModelInfo[],
+): string | undefined {
+  const first = tierMap?.[tier]?.[0];
+  if (!first) return undefined;
+  return labelFor(first, models);
 }

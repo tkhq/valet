@@ -33,6 +33,7 @@ let meData: {
   orgId: string;
   orgRole: "admin" | "member";
   defaultModel: string | null;
+  defaultReasoning?: string | null;
 } | undefined = {
   id: "u1",
   email: "me@example.com",
@@ -42,6 +43,7 @@ let meData: {
   orgId: "org_1",
   orgRole: "admin",
   defaultModel: null,
+  defaultReasoning: null,
 };
 
 let orgData: { callerRole: "admin" | "member"; features: { organizations: boolean } } | undefined = {
@@ -81,6 +83,8 @@ vi.mock("~/api/settings", async (importOriginal) => {
     useMe: () => ({ data: meData, isLoading: false, error: null }),
     useOrg: () => ({ data: orgData, isLoading: false, error: null }),
     useModels: () => ({ data: modelsData, isLoading: false, error: null }),
+    useModelTiers: () => ({ data: { xs: [], s: [], m: [], l: [], xl: [] }, isLoading: false, error: null }),
+    useOrgReasoning: () => ({ data: {}, isLoading: false, error: null }),
     usePatchMe: () => ({ mutate: patchMeMutate, isPending: false, error: null }),
     usePatchOrg: () => ({ mutateAsync: patchOrgMutateAsync, isPending: false, error: null }),
   };
@@ -200,6 +204,7 @@ describe("AssistantPage", () => {
       orgId: "org_1",
       orgRole: "admin",
       defaultModel: null,
+      defaultReasoning: null,
     };
   });
 
@@ -209,7 +214,7 @@ describe("AssistantPage", () => {
     expect(screen.getByLabelText(/Personality/)).toBeTruthy();
     expect(
       screen.getByText(
-        "New sessions you start use this model; existing sessions keep theirs. You can switch the model per thread in the chat header. Shared team assistants do not use it.",
+        "New sessions you start use this model or size. Existing sessions keep theirs. Switch the model per thread in the chat header. Shared team assistants do not use it.",
       ),
     ).toBeTruthy();
   });
@@ -244,8 +249,10 @@ describe("AssistantPage", () => {
 
     // "Team or organization default", not "System default": clearing the
     // personal tier falls to the team default (team workspace) or the org
-    // preference list, not to a fixed product-wide model.
-    fireEvent.click(screen.getByText("Team or organization default"));
+    // preference list, not to a fixed product-wide model. Scoped to the
+    // combobox's own listbox — the reasoning select below shares the same
+    // fallback wording in its empty option.
+    fireEvent.click(within(screen.getByRole("listbox")).getByText("Team or organization default"));
     expect(patchMeMutate).toHaveBeenCalledWith({ defaultModel: null });
   });
 
@@ -258,6 +265,25 @@ describe("AssistantPage", () => {
     await waitFor(() =>
       expect(saveIdentityMutateAsync).toHaveBeenCalledWith({ name: "Nova" }),
     );
+  });
+
+  it("defaults the reasoning select to Inherit and selecting a level fires PATCH /api/me", async () => {
+    const user = userEvent.setup();
+    render(<AssistantPage />);
+    const select = screen.getByLabelText("Reasoning") as HTMLSelectElement;
+    expect(select.value).toBe("");
+
+    await user.selectOptions(select, "high");
+    expect(patchMeMutate).toHaveBeenCalledWith({ defaultReasoning: "high" });
+  });
+
+  it("resetting the reasoning select to Inherit clears with defaultReasoning: null", async () => {
+    meData = { ...meData!, defaultReasoning: "high" };
+    const user = userEvent.setup();
+    render(<AssistantPage />);
+
+    await user.selectOptions(screen.getByLabelText("Reasoning"), "");
+    expect(patchMeMutate).toHaveBeenCalledWith({ defaultReasoning: null });
   });
 });
 

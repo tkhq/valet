@@ -193,6 +193,14 @@ vi.mock("~/api/settings", async (importOriginal) => {
     usePatchTeam: () => ({ mutate: vi.fn(), isPending: false, error: null }),
     // The team default-model combobox reads the catalog through this hook.
     useModels: () => ({ data: { models: [] }, isLoading: false, error: null }),
+    // The Size group (Task 15) and the team-defaults reasoning select read
+    // these hooks — mocked so they don't need a QueryClientProvider here.
+    useModelTiers: () => ({
+      data: { xs: [], s: [], m: [], l: [], xl: [] },
+      isLoading: false,
+      error: null,
+    }),
+    useOrgReasoning: () => ({ data: {}, isLoading: false, error: null }),
   };
 });
 

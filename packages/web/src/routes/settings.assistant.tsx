@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { Section } from "~/components/settings/section";
 import { FieldRow } from "~/components/settings/field-row";
 import { ModelCombobox } from "~/components/settings/model-combobox";
+import { ReasoningSelect } from "~/components/settings/reasoning-select";
 import { IdentityFields } from "~/components/assistant/identity-fields";
 import { Spinner } from "~/components/primitives";
 import { useOrchestratorInfo } from "~/api/orchestrator";
@@ -10,8 +11,9 @@ import { useMe, usePatchMe } from "~/api/settings";
 /**
  * `/settings/assistant` — You · Assistant. Name + personality (shared
  * `IdentityFields`, same component/mutation the dashboard's identity header
- * uses) plus the default-model typeahead over `GET /api/models` +
- * `PATCH /api/me`.
+ * uses) plus the default-model typeahead (now tier-first, Task 15) over
+ * `GET /api/models` + `PATCH /api/me`, and the default-reasoning select
+ * over `GET /api/org/reasoning` + `PATCH /api/me`.
  */
 export const Route = createFileRoute("/settings/assistant")({
   component: AssistantPage,
@@ -45,12 +47,23 @@ export function AssistantPage() {
 
       <FieldRow
         label="Default model"
-        hint="New sessions you start use this model; existing sessions keep theirs. You can switch the model per thread in the chat header. Shared team assistants do not use it."
+        hint="New sessions you start use this model or size. Existing sessions keep theirs. Switch the model per thread in the chat header. Shared team assistants do not use it."
       >
         <ModelCombobox
           value={meQ.data?.defaultModel ?? null}
           onSelect={(id) => patchMe.mutate({ defaultModel: id })}
           onClear={() => patchMe.mutate({ defaultModel: null })}
+          emptyLabel="Team or organization default"
+        />
+      </FieldRow>
+
+      <FieldRow
+        label="Default reasoning"
+        hint="New sessions you start use this reasoning level. Existing sessions keep theirs."
+      >
+        <ReasoningSelect
+          value={meQ.data?.defaultReasoning ?? null}
+          onChange={(defaultReasoning) => patchMe.mutate({ defaultReasoning })}
           emptyLabel="Team or organization default"
         />
       </FieldRow>

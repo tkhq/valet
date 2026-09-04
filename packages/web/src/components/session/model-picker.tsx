@@ -9,8 +9,8 @@ import {
 } from "~/components/primitives";
 import { useMe, useModelTiers, useModels, useOrgReasoning } from "~/api/settings";
 import { curatedForCatalogId } from "~/lib/models";
-import { SIZE_TIERS, TIER_LABELS, isSizeTier, type SizeTier } from "~/lib/model-tiers";
-import { REASONING_LABELS, levelsUpTo } from "~/lib/reasoning";
+import { SIZE_TIERS, TIER_LABELS, isSizeTier, labelFor, tierSubtitle, type SizeTier } from "~/lib/model-tiers";
+import { REASONING_LABELS, levelsUpTo, reasoningLabelFor } from "~/lib/reasoning";
 import type { GetModelTiersResponse, ModelInfo } from "@valet/api/wire";
 import { cn } from "~/lib/cn";
 import { matchesNeedle } from "~/lib/text-match";
@@ -71,12 +71,6 @@ export interface ModelPickerProps {
   disabled?: boolean;
 }
 
-function labelFor(id: string, models: ModelInfo[]): string {
-  const curated = curatedForCatalogId(id);
-  if (curated) return curated.label;
-  return models.find((m) => m.id === id)?.name ?? id;
-}
-
 function isAnthropic(id: string): boolean {
   return id.startsWith("anthropic/") || !id.includes("/");
 }
@@ -111,28 +105,6 @@ export function filterModels(models: ModelInfo[], query: string): ModelInfo[] {
  * helper stays a pure two-input filter. */
 export function visibleModels(models: ModelInfo[], isAdmin: boolean): ModelInfo[] {
   return isAdmin ? models : models.filter((m) => m.approved);
-}
-
-/** Subtitle for a Size tier row: the catalog name of the tier's first
- * configured target, resolved against `models`. Falls back to the raw spec
- * string when the target isn't in the catalog (a stale/retired pin), and
- * to `undefined` when the tier has no configured targets or the tier map
- * hasn't loaded yet. */
-export function tierSubtitle(
-  tier: SizeTier,
-  tierMap: GetModelTiersResponse | undefined,
-  models: ModelInfo[],
-): string | undefined {
-  const first = tierMap?.[tier]?.[0];
-  if (!first) return undefined;
-  return labelFor(first, models);
-}
-
-/** Human label for a reasoning level id, falling back to the raw id for a
- * value outside the known vocabulary (e.g. a stale persisted level). */
-function reasoningLabelFor(level: string): string {
-  const found = Object.entries(REASONING_LABELS).find(([key]) => key === level);
-  return found ? found[1] : level;
 }
 
 /** Available thinking levels for whatever `currentId` currently names — a

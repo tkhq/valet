@@ -11,10 +11,11 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { ModelInfo } from "@valet/api/wire";
+import type { GetModelTiersResponse, ModelInfo } from "@valet/api/wire";
 
 let modelsData: { models: ModelInfo[] } = { models: [] };
 let isLoading = false;
+let tierMapData: GetModelTiersResponse | undefined;
 
 // importOriginal: see -new-session-dialog.test.tsx (packages/web root) for
 // why a bare replacement here is unsafe under vitest.config.ts's isolate:false.
@@ -23,6 +24,7 @@ vi.mock("~/api/settings", async (importOriginal) => {
   return {
     ...actual,
     useModels: () => ({ data: modelsData, isLoading, error: null }),
+    useModelTiers: () => ({ data: tierMapData, isLoading: false, error: null }),
   };
 });
 
@@ -30,6 +32,7 @@ import { ModelCombobox } from "./model-combobox";
 
 beforeEach(() => {
   isLoading = false;
+  tierMapData = { xs: [], s: [], m: [], l: [], xl: [] };
   modelsData = {
     models: [
       {
@@ -97,5 +100,59 @@ describe("ModelCombobox — catalog-driven", () => {
   it("warns when the persisted value matches nothing in the catalog or curated list", () => {
     render(<ModelCombobox value="ghost-provider/ghost-model" onSelect={vi.fn()} onClear={vi.fn()} />);
     expect(screen.getByText(/isn't in the current model registry/)).toBeTruthy();
+  });
+});
+
+describe("ModelCombobox — Size tier group", () => {
+  it("renders a tier row per SIZE_TIERS entry before the model rows, with a resolved subtitle", async () => {
+    tierMapData = { xs: [], s: [], m: [], l: [], xl: ["anthropic/claude-sonnet-4-5"] };
+    const user = userEvent.setup();
+    render(<ModelCombobox value={null} onSelect={vi.fn()} onClear={vi.fn()} />);
+    await user.click(screen.getByRole("combobox"));
+
+    const options = screen.getAllByRole("option");
+    // Five tier rows first, then the model rows.
+    expect(options[0].textContent).toContain("Extra Small");
+    expect(options[4].textContent).toContain("X-Large");
+    expect(options[4].textContent).toContain("Sonnet 4.5");
+    expect(options[5].textContent).toContain("Sonnet 4.5");
+  });
+
+  it("filters the Size group by tier label and token", async () => {
+    const user = userEvent.setup();
+    render(<ModelCombobox value={null} onSelect={vi.fn()} onClear={vi.fn()} />);
+    await user.click(screen.getByRole("combobox"));
+    await user.type(screen.getByRole("combobox"), "large");
+
+    const options = screen.getAllByRole("option");
+    const tierRows = options.filter((o) => o.textContent?.match(/Small|Medium|Large/));
+    // "large" matches both "Large" and "X-Large".
+    expect(tierRows).toHaveLength(2);
+  });
+
+  it("hides the Size group when the query matches no tier label or token", async () => {
+    const user = userEvent.setup();
+    render(<ModelCombobox value={null} onSelect={vi.fn()} onClear={vi.fn()} />);
+    await user.click(screen.getByRole("combobox"));
+    await user.type(screen.getByRole("combobox"), "llama");
+
+    expect(screen.queryByText("Extra Small")).toBeNull();
+    expect(screen.getByText("Llama 3")).toBeTruthy();
+  });
+
+  it("selecting a tier row submits the bare tier token", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    render(<ModelCombobox value={null} onSelect={onSelect} onClear={vi.fn()} />);
+    await user.click(screen.getByRole("combobox"));
+    await user.click(screen.getByText("Large"));
+
+    expect(onSelect).toHaveBeenCalledWith("l");
+  });
+
+  it("displays the tier label in the input when value is a tier token", () => {
+    render(<ModelCombobox value="l" onSelect={vi.fn()} onClear={vi.fn()} />);
+    expect(screen.getByDisplayValue("Large")).toBeTruthy();
+    expect(screen.queryByText(/isn't in the current model registry/)).toBeNull();
   });
 });

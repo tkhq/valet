@@ -6,10 +6,13 @@
  * vitest.config.ts's isolate:false does not bleed mocks across suites.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import type {
   AssistantSummary,
   AssistantBehavior,
+  GetModelTiersResponse,
+  GetOrgReasoningResponse,
+  ListModelsResponse,
   PluginSummary,
   TeamSummary,
 } from "@valet/api/wire";
@@ -20,11 +23,11 @@ import { integrationOptions, canEditAssistant } from "./assistants.$assistantId"
 const patchMutate = vi.fn();
 const archiveMutate = vi.fn();
 const navigateMock = vi.fn();
-// Per-section patch errors. The form calls usePatchAssistant four times per
-// render, in a fixed order: identity, skills, integrations, manage. The mock
-// hands each call the matching entry, so a test can place an error under ONE
-// section and assert it renders under that section only.
-const SECTION_ORDER = ["identity", "skills", "integrations", "manage"] as const;
+// Per-section patch errors. The form calls usePatchAssistant five times per
+// render, in a fixed order: identity, model, skills, integrations, manage.
+// The mock hands each call the matching entry, so a test can place an error
+// under ONE section and assert it renders under that section only.
+const SECTION_ORDER = ["identity", "model", "skills", "integrations", "manage"] as const;
 type Section = (typeof SECTION_ORDER)[number];
 let patchErrors: Partial<Record<Section, Error>> = {};
 let patchCallIndex = 0;
@@ -42,6 +45,9 @@ let meData: { id: string; orgRole: "admin" | "member" } = {
   id: "u1",
   orgRole: "member",
 };
+let modelsData: ListModelsResponse = { models: [] };
+let tierMapData: GetModelTiersResponse = { xs: [], s: [], m: [], l: [], xl: [] };
+let orgReasoningData: GetOrgReasoningResponse = {};
 // The routed param. Mutable so a test can navigate between two editor URLs
 // without a remount, exactly as the real router reuses the component.
 let routeParamId = "asst_1";
@@ -97,6 +103,9 @@ vi.mock("~/api/settings", async (importOriginal) => {
     ...actual,
     useMe: () => ({ data: meData, isLoading: false, error: null }),
     useTeams: () => ({ data: { teams: teamsData }, isLoading: false, error: null }),
+    useModels: () => ({ data: modelsData, isLoading: false, error: null }),
+    useModelTiers: () => ({ data: tierMapData, isLoading: false, error: null }),
+    useOrgReasoning: () => ({ data: orgReasoningData, isLoading: false, error: null }),
   };
 });
 
@@ -260,6 +269,9 @@ describe("AssistantEditorPage", () => {
     skillsData = { skills: [], complete: true };
     teamsData = [];
     meData = { id: "u1", orgRole: "member" };
+    modelsData = { models: [] };
+    tierMapData = { xs: [], s: [], m: [], l: [], xl: [] };
+    orgReasoningData = {};
     routeParamId = "asst_1";
     patchErrors = {};
     patchCallIndex = 0;
@@ -298,6 +310,72 @@ describe("AssistantEditorPage", () => {
     // The name input is disabled.
     const nameInput = screen.getByLabelText("Name") as HTMLInputElement;
     expect(nameInput.disabled).toBe(true);
+
+    // The model combobox and reasoning select are disabled too.
+    expect((screen.getByLabelText("Default model") as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByLabelText("Reasoning") as HTMLSelectElement).disabled).toBe(true);
+  });
+
+  it("selecting a model fires usePatchAssistant mutate with { id, body: { model } }", async () => {
+    modelsData = {
+      models: [
+        {
+          id: "anthropic/claude-sonnet-4-5",
+          name: "Claude Sonnet 4.5",
+          providerId: "anthropic",
+          providerKind: "anthropic",
+          providerName: "Anthropic",
+          active: true,
+          approved: true,
+        },
+      ],
+    };
+    assistantsData = [makeAssistant({ id: "asst_1", name: "Bot" })];
+    meData = { id: "u1", orgRole: "member" };
+    render(<AssistantEditorPage />);
+
+    fireEvent.focus(screen.getByLabelText("Default model"));
+    fireEvent.click(screen.getByText("Sonnet 4.5"));
+
+    expect(patchMutate).toHaveBeenCalledWith({
+      id: "asst_1",
+      body: { model: "anthropic/claude-sonnet-4-5" },
+    });
+  });
+
+  it("clearing the model fires mutate with { id, body: { model: null } }", async () => {
+    assistantsData = [
+      makeAssistant({ id: "asst_1", name: "Bot", model: "anthropic/claude-sonnet-4-5" }),
+    ];
+    meData = { id: "u1", orgRole: "member" };
+    render(<AssistantEditorPage />);
+
+    fireEvent.focus(screen.getByLabelText("Default model"));
+    // Scoped to the combobox's own listbox — the reasoning select below
+    // shares the same "Inherit" wording in its empty option.
+    fireEvent.click(within(screen.getByRole("listbox")).getByText("Inherit"));
+
+    expect(patchMutate).toHaveBeenCalledWith({ id: "asst_1", body: { model: null } });
+  });
+
+  it("selecting a reasoning level fires mutate with { id, body: { reasoning } }", async () => {
+    assistantsData = [makeAssistant({ id: "asst_1", name: "Bot" })];
+    meData = { id: "u1", orgRole: "member" };
+    render(<AssistantEditorPage />);
+
+    fireEvent.change(screen.getByLabelText("Reasoning"), { target: { value: "high" } });
+
+    expect(patchMutate).toHaveBeenCalledWith({ id: "asst_1", body: { reasoning: "high" } });
+  });
+
+  it("resetting reasoning to Inherit fires mutate with { id, body: { reasoning: null } }", async () => {
+    assistantsData = [makeAssistant({ id: "asst_1", name: "Bot", reasoning: "high" })];
+    meData = { id: "u1", orgRole: "member" };
+    render(<AssistantEditorPage />);
+
+    fireEvent.change(screen.getByLabelText("Reasoning"), { target: { value: "" } });
+
+    expect(patchMutate).toHaveBeenCalledWith({ id: "asst_1", body: { reasoning: null } });
   });
 
   it("saving identity fires usePatchAssistant mutate with { id, body: { name, personality } }", async () => {

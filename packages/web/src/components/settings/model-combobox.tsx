@@ -1,21 +1,27 @@
 import { useMemo, useState } from "react";
 import { Check } from "lucide-react";
 import { Input, Badge } from "~/components/primitives";
-import { useModels } from "~/api/settings";
+import { useModelTiers, useModels } from "~/api/settings";
 import { curatedForCatalogId, type ModelOption } from "~/lib/models";
+import { isSizeTier, SIZE_TIERS, TIER_LABELS, tierSubtitle } from "~/lib/model-tiers";
 import type { ModelInfo } from "@valet/api/wire";
 import { matchesNeedle } from "~/lib/text-match";
 
 /**
  * Text `Input` + filtered popover list — the model typeahead (split-settings
- * design, "You · Assistant" default-model control). Options come from the
- * org catalog (`GET /api/models`, Task 4/8) — already preference-ordered.
- * Entries whose id matches a curated `MODEL_CATALOG` tier (bare or
- * `anthropic/`-namespaced) render with the friendly label + tier badge;
- * everything else renders with its catalog `name` + provider hint.
- * Selecting an option always submits the catalog's own `id` verbatim — the
- * curated list only supplies display labels, never overrides the id being
- * written.
+ * design, "You · Assistant" default-model control). A "Size" group renders
+ * first — five tier rows (xs..xl, org-configured via
+ * `GET /api/org/settings/model-tiers`, same `tierSubtitle` helper the chat
+ * `ModelPicker` uses) that submit the bare tier token (e.g. `"l"`) rather
+ * than a concrete model id; the engine resolves the tier at run time. Below
+ * that, options come from the org catalog (`GET /api/models`, Task 4/8) —
+ * already preference-ordered. Entries whose id matches a curated
+ * `MODEL_CATALOG` tier (bare or `anthropic/`-namespaced) render with the
+ * friendly label + tier badge; everything else renders with its catalog
+ * `name` + provider hint. Selecting a model option always submits the
+ * catalog's own `id` verbatim — the curated list only supplies display
+ * labels, never overrides the id being written. When `value` is a tier
+ * token, the input displays `TIER_LABELS[value]`.
  *
  * Built with a plain filtered list under the input rather than a
  * Popover/Command primitive — this package's `components/primitives/` has
@@ -30,6 +36,7 @@ export function ModelCombobox({
   onSelect,
   onClear,
   emptyLabel = "System default",
+  disabled = false,
 }: {
   value: string | null;
   onSelect: (id: string) => void;
@@ -38,10 +45,14 @@ export function ModelCombobox({
    * and the clear row — the fallback differs per surface (personal: team
    * then org; team: the org preference list). */
   emptyLabel?: string;
+  /** Disables the input — a disabled `<input>` cannot receive focus, so
+   * this also keeps the dropdown from opening. */
+  disabled?: boolean;
 }) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const modelsQ = useModels();
+  const tierMapQ = useModelTiers();
 
   const models = modelsQ.data?.models ?? [];
   const registryIds = useMemo(() => new Set(models.map((m) => m.id)), [models]);
@@ -52,10 +63,20 @@ export function ModelCombobox({
     .filter((p): p is { m: ModelInfo; curated: ModelOption } => !!p.curated);
   const otherMatches = matches.filter((m) => !curatedForCatalogId(m.id));
 
+  // The Size group hides when the query matches no tier label or token —
+  // same substring matcher the model list search uses.
+  const filteredTiers = useMemo(() => {
+    if (query.trim().length === 0) return [...SIZE_TIERS];
+    return SIZE_TIERS.filter((t) => matchesNeedle(query, [TIER_LABELS[t], t]));
+  }, [query]);
+
   const selectedEntry = models.find((m) => m.id === value);
   const selectedCurated = curatedForCatalogId(value);
-  const displayValue = value ? (selectedCurated?.label ?? selectedEntry?.name ?? value) : "";
-  const isKnownValue = !value || registryIds.has(value) || !!selectedCurated;
+  const selectedTier = isSizeTier(value) ? value : undefined;
+  const displayValue = value
+    ? (selectedTier ? TIER_LABELS[selectedTier] : (selectedCurated?.label ?? selectedEntry?.name ?? value))
+    : "";
+  const isKnownValue = !value || !!selectedTier || registryIds.has(value) || !!selectedCurated;
 
   function select(id: string) {
     onSelect(id);
@@ -69,7 +90,8 @@ export function ModelCombobox({
     setOpen(false);
   }
 
-  const hasResults = curatedMatches.length > 0 || otherMatches.length > 0 || !!value;
+  const hasResults =
+    filteredTiers.length > 0 || curatedMatches.length > 0 || otherMatches.length > 0 || !!value;
 
   return (
     <div className="relative">
@@ -91,6 +113,7 @@ export function ModelCombobox({
         aria-label="Default model"
         role="combobox"
         aria-expanded={open}
+        disabled={disabled}
       />
       {open && (
         <div
@@ -109,6 +132,35 @@ export function ModelCombobox({
             >
               {emptyLabel}
             </button>
+          )}
+          {filteredTiers.length > 0 && (
+            <div>
+              <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.08em] text-muted">
+                Size
+              </div>
+              {filteredTiers.map((tier) => {
+                const subtitle = tierSubtitle(tier, tierMapQ.data, models);
+                return (
+                  <button
+                    key={tier}
+                    type="button"
+                    role="option"
+                    aria-selected={value === tier}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => select(tier)}
+                    className="flex w-full flex-col items-stretch gap-0.5 px-3 py-1.5 text-left text-sm hover:bg-ink-wash"
+                  >
+                    <span className="flex items-center gap-2">
+                      {value === tier && <Check className="h-3.5 w-3.5 text-moss" />}
+                      <span className="text-ink">{TIER_LABELS[tier]}</span>
+                    </span>
+                    {subtitle && (
+                      <span className="pl-[22px] text-xs text-muted leading-snug">{subtitle}</span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
           )}
           {curatedMatches.map(({ m, curated }) => (
             <button

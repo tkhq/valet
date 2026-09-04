@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { levelsUpTo, REASONING_LABELS, REASONING_LEVELS } from "./reasoning";
+import { levelsUpTo, reasoningLabelFor, REASONING_LABELS, REASONING_LEVELS } from "./reasoning";
 
 describe("REASONING_LEVELS / REASONING_LABELS", () => {
   it("lists the six reasoning levels in ascending order", () => {
@@ -32,5 +32,15 @@ describe("levelsUpTo", () => {
 
   it("returns just the first level when capped at the lowest", () => {
     expect(levelsUpTo("minimal")).toEqual(["minimal"]);
+  });
+});
+
+describe("reasoningLabelFor", () => {
+  it("looks up the label for a known level", () => {
+    expect(reasoningLabelFor("high")).toBe("High");
+  });
+
+  it("returns the id unchanged for a value outside the known vocabulary", () => {
+    expect(reasoningLabelFor("stale-level")).toBe("stale-level");
   });
 });

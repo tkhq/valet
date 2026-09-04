@@ -27,3 +27,12 @@ export function levelsUpTo(max: string | undefined): ReasoningLevel[] {
   if (idx < 0) return [...REASONING_LEVELS];
   return REASONING_LEVELS.slice(0, idx + 1);
 }
+
+/** Human label for a reasoning level id, falling back to the raw id for a
+ * value outside the known vocabulary (e.g. a stale persisted level). Shared
+ * by the chat `ModelPicker`'s reasoning row and the team-defaults editor so
+ * the label never drifts between the two surfaces. */
+export function reasoningLabelFor(level: string): string {
+  const found = Object.entries(REASONING_LABELS).find(([key]) => key === level);
+  return found ? found[1] : level;
+}
