@@ -620,6 +620,7 @@ describe("create() adoption convergence (TKAI-402)", () => {
     previousSessionId: string;
     readRejects?: string;
     readReturnsNull?: boolean;
+    omitRequestedStorage?: boolean;
     patchRejects?: string;
   }) {
     const patches: PvcPatch[] = [];
@@ -628,7 +629,11 @@ describe("create() adoption convergence (TKAI-402)", () => {
       async readPvc() {
         if (opts.readRejects !== undefined) throw new Error(opts.readRejects);
         if (opts.readReturnsNull === true) return null;
-        return { requestedStorage: requested, capacityStorage: requested, annotations: {} };
+        return {
+          ...(opts.omitRequestedStorage === true ? {} : { requestedStorage: requested }),
+          capacityStorage: requested,
+          annotations: {},
+        };
       },
       async patchPvcStorage(_ns: string, _name: string, storage: string) {
         if (opts.patchRejects !== undefined) throw new Error(opts.patchRejects);
@@ -713,7 +718,7 @@ describe("create() adoption convergence (TKAI-402)", () => {
     ).resolves.toBeDefined();
 
     expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("could not read adopted workspace PVC"),
+      expect.stringContaining("Kubernetes API read failed for adopted workspace PVC"),
       "apiserver unavailable",
     );
     expect(recordWorkspaceGrow).toHaveBeenCalledWith("error");
@@ -734,8 +739,49 @@ describe("create() adoption convergence (TKAI-402)", () => {
       provider.create({ workspace: "/ws/mono", sessionId: "session-new", workspaceStorage: "8Gi" }),
     ).resolves.toBeDefined();
 
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("adopted workspace PVC workspace-ws-mono was not found"));
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("PVC lookup returned no claim"));
     expect(warnSpy).not.toHaveBeenCalledWith(expect.any(String), expect.anything());
+    expect(recordWorkspaceGrow).toHaveBeenCalledWith("error");
+    expect(patches).toHaveLength(0);
+    warnSpy.mockRestore();
+  });
+
+  it("reports an adopted claim without a storage request and continues", async () => {
+    const { provider, patches } = makeAdoptingProvider({
+      pvcRequested: "1Gi",
+      previousSessionId: "session-old",
+      omitRequestedStorage: true,
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    recordWorkspaceGrow.mockClear();
+
+    await expect(
+      provider.create({ workspace: "/ws/mono", sessionId: "session-new", workspaceStorage: "8Gi" }),
+    ).resolves.toBeDefined();
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringMatching(/Storage request is missing.*workspace-ws-mono.*valet-sandboxes.*Check the PVC storage request/s),
+    );
+    expect(recordWorkspaceGrow).toHaveBeenCalledWith("error");
+    expect(patches).toHaveLength(0);
+    warnSpy.mockRestore();
+  });
+
+  it("reports an adopted claim with an invalid storage request and continues", async () => {
+    const { provider, patches } = makeAdoptingProvider({
+      pvcRequested: "invalid-quantity",
+      previousSessionId: "session-old",
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    recordWorkspaceGrow.mockClear();
+
+    await expect(
+      provider.create({ workspace: "/ws/mono", sessionId: "session-new", workspaceStorage: "8Gi" }),
+    ).resolves.toBeDefined();
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringMatching(/Storage request is invalid.*workspace-ws-mono.*valet-sandboxes.*Set the PVC storage request/s),
+    );
     expect(recordWorkspaceGrow).toHaveBeenCalledWith("error");
     expect(patches).toHaveLength(0);
     warnSpy.mockRestore();

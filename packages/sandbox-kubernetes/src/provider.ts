@@ -137,6 +137,24 @@ import {
 const READY_TIMEOUT_MS = 60_000;
 const READY_POLL_INTERVAL_MS = 1_000;
 
+function reportAdoptedWorkspacePvcError(args: {
+  sandboxName: string;
+  pvcName: string;
+  namespace: string;
+  declared: string;
+  problem: string;
+  action: string;
+  cause?: string;
+}): void {
+  const message =
+    `k8s sandbox ${args.sandboxName}: ${args.problem} for adopted workspace PVC ${args.pvcName} ` +
+    `in namespace ${args.namespace}. The provider skipped convergence to ${args.declared}. ` +
+    `The provider continued sandbox adoption. ${args.action}`;
+  if (args.cause === undefined) console.warn(message);
+  else console.warn(`${message} Cause:`, args.cause);
+  recordSandboxWorkspaceGrow("error");
+}
+
 /** How old the Sandbox CR must be before an unscheduled Pending pod is a
  * TERMINAL capacity verdict rather than a retryable timeout. A cluster
  * autoscaler provisions a node in 2–5 minutes, and the retryable timeout
@@ -815,21 +833,51 @@ export class KubernetesSandboxProvider implements SandboxProvider {
       try {
         pvcRead = await this.deps.pvcApi.readPvc(this.cfg.namespace, pvcName);
       } catch (err) {
-        console.warn(
-          `k8s sandbox ${name}: could not read adopted workspace PVC ${pvcName} in namespace ${this.cfg.namespace}; ` +
-            `skipped convergence to ${declared}. Sandbox adoption continued. Check Kubernetes API access before retrying:`,
-          err instanceof Error ? err.message : String(err),
-        );
-        recordSandboxWorkspaceGrow("error");
+        reportAdoptedWorkspacePvcError({
+          sandboxName: name,
+          pvcName,
+          namespace: this.cfg.namespace,
+          declared,
+          problem: "Kubernetes API read failed",
+          action: "Check Kubernetes API access before retrying.",
+          cause: err instanceof Error ? err.message : String(err),
+        });
       }
       if (pvcRead === null) {
-        console.warn(
-          `k8s sandbox ${name}: adopted workspace PVC ${pvcName} was not found in namespace ${this.cfg.namespace}; ` +
-            `skipped convergence to ${declared}. Sandbox adoption continued. Check the sandbox controller before retrying.`,
-        );
-        recordSandboxWorkspaceGrow("error");
+        reportAdoptedWorkspacePvcError({
+          sandboxName: name,
+          pvcName,
+          namespace: this.cfg.namespace,
+          declared,
+          problem: "PVC lookup returned no claim",
+          action: "Check the sandbox controller before retrying.",
+        });
       }
-      const currentBytes = pvcRead?.requestedStorage ? parseStorageQuantity(pvcRead.requestedStorage) : null;
+      let currentBytes: number | null = null;
+      if (pvcRead !== undefined && pvcRead !== null) {
+        if (!pvcRead.requestedStorage) {
+          reportAdoptedWorkspacePvcError({
+            sandboxName: name,
+            pvcName,
+            namespace: this.cfg.namespace,
+            declared,
+            problem: "Storage request is missing",
+            action: "Check the PVC storage request before retrying.",
+          });
+        } else {
+          currentBytes = parseStorageQuantity(pvcRead.requestedStorage);
+          if (currentBytes === null) {
+            reportAdoptedWorkspacePvcError({
+              sandboxName: name,
+              pvcName,
+              namespace: this.cfg.namespace,
+              declared,
+              problem: "Storage request is invalid",
+              action: "Set the PVC storage request to a Kubernetes quantity before retrying.",
+            });
+          }
+        }
+      }
       if (declaredBytes !== null && currentBytes !== null && currentBytes < declaredBytes) {
         try {
           const growth = await growWorkspacePvc(this.deps.pvcApi, {

@@ -179,13 +179,13 @@ function resourceRequirementsFrom(resources: SandboxResourceOpts): ResourceRequi
 }
 
 /**
- * Workspace claim size for a fresh sandbox (TKAI-385): a repo-declared
- * request (`SandboxCreateOpts.workspaceStorage`) wins over the deploy
- * default, CLAMPED to the growth cap — a repo cannot request unbounded
- * storage. An unparseable request or cap falls back to the default with a
- * log (never provision an unknown size). Only a FRESH claim is affected:
- * the agent-sandbox controller leaves an existing owned PVC untouched.
- * Exported for direct unit coverage.
+ * Workspace claim target (TKAI-385): a repo-declared request
+ * (`SandboxCreateOpts.workspaceStorage`) wins over the deploy default,
+ * CLAMPED to the growth cap. A repo cannot request unbounded storage. An
+ * unparseable request or cap falls back to the default with a log. A fresh
+ * claim starts at this target. During adoption, the provider uses this target
+ * for a best-effort grow of an undersized claim. It never shrinks a claim or
+ * waits for volume readiness. Exported for direct unit coverage.
  */
 export function resolveWorkspaceStorageRequest(
   cfg: K8sProviderConfig,

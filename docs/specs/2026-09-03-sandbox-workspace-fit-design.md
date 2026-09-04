@@ -213,9 +213,9 @@ Schema doc: `docs/prebuild-yaml.md`. Immediate use: set `tkhq/mono` to
   there is no capacity wait at create time — the filesystem grows when the
   pod mounts the volume; prep's ENOSPC retry covers the residue. The
   convergence spends the volume's EBS modify slot, so a reactive grow in the
-  same ~6h window is refused. A pending request records `pending`. A read or
-  resize failure records `error`, logs the claim context, and does not block
-  adoption. Claims created before a repo
+  same ~6h window is refused. A pending request records `pending`. A read,
+  validation, or resize failure records `error`, logs the claim context, and
+  does not block adoption. Claims created before a repo
   declares or raises its size are an expected state, so this is declared-state
   convergence, not a silent repair. `create()` also warns when the adopted CR
   was owned by a DIFFERENT session — workspace strings are not per-session

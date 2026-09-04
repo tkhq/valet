@@ -1218,8 +1218,10 @@ export interface SandboxCreateOpts {
    * relying on reactive growth. Providers with a sized persistent workspace
    * (kubernetes) honor it CLAMPED to the deploy's growth cap
    * (`VALET_SANDBOX_WORKSPACE_MAX`) — a repo cannot request unbounded
-   * storage; other providers ignore it. Only affects a freshly provisioned
-   * volume: an existing workspace keeps its size.
+   * storage; other providers ignore it. A fresh volume starts at this size.
+   * When kubernetes adopts an existing volume below this size, it requests a
+   * grow but never a shrink. Adoption growth is best-effort and does not wait
+   * for volume readiness.
    */
   workspaceStorage?: string;
   env?: Record<string, string>;
