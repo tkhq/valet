@@ -43,6 +43,7 @@
  * `services/slack-connect.ts`.
  */
 import { Hono, type Context } from "hono";
+import { and, eq, sql } from "drizzle-orm";
 import type { CredentialOwner, StoredCredential } from "@valet/engine";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
@@ -52,8 +53,12 @@ import { ONEPASSWORD_SERVICE, OnePasswordAuthError, onePasswordMeta } from "../s
 import { isDeniedCredentialService } from "../services/credential-resolution.js";
 import { PERSONAL_DISABLED, mapOnePasswordError } from "./_onepassword-errors.js";
 import { getAllowPersonalOnePassword } from "../services/org.js";
+import { canAdministerTeam, getTeamInOrg, isTeamMember } from "../services/teams.js";
+import { credentials } from "../schema/index.js";
 import type {
   CredentialSummary,
+  DelegateCredentialRequest,
+  DelegateCredentialResponse,
   DeleteCredentialResponse,
   ListCredentialsResponse,
   PutCredentialRequest,
@@ -68,8 +73,55 @@ const CREDENTIAL_TYPES: PutCredentialRequest["type"][] = ["oauth2", "api_key", "
 // 1Password token itself and never a reference.
 const ONEPASSWORD_REFERENCE_TYPES: PutCredentialRequest["type"][] = ["api_key", "oauth2", "bot_token"];
 
-function ownerFor(user: { id: string; orgId: string }, scope: "user" | "org"): CredentialOwner {
-  return scope === "org" ? { type: "org", id: user.orgId } : { type: "user", id: user.id };
+type CredentialScope = "user" | "org" | "team";
+
+function parseCredentialScope(raw: string | undefined): CredentialScope {
+  if (raw === "org" || raw === "team") return raw;
+  return "user";
+}
+
+function delegatedFromMeta(metadata: unknown): string | undefined {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return undefined;
+  const raw = (metadata as Record<string, unknown>).delegatedFrom;
+  return typeof raw === "string" && raw.length > 0 ? raw : undefined;
+}
+
+function rowHasSecret(stored: StoredCredential): boolean {
+  const value = stored.accessToken ?? stored.apiKey;
+  return typeof value === "string" && value.length > 0;
+}
+
+/**
+ * Team / org / user owner for a credential route. A failed team check
+ * returns 404, same as the other team surfaces — existence-hiding.
+ */
+async function resolveCredentialOwner(
+  c: Context<AppEnv>,
+  scope: CredentialScope,
+  teamId: string | undefined,
+  access: "read" | "write",
+): Promise<CredentialOwner | Response> {
+  const user = c.var.user;
+  if (scope === "org") {
+    const gate = await requireOrgAdmin(c);
+    if (gate) return gate;
+    return { type: "org", id: user.orgId };
+  }
+  if (scope === "team") {
+    if (!teamId) {
+      return c.json({ error: "teamId is required for scope=team. Pass teamId." }, 400);
+    }
+    const { db } = c.var.providers;
+    const team = await getTeamInOrg(db, user.orgId, teamId);
+    if (!team) return c.json({ error: "Team not found." }, 404);
+    const allowed =
+      access === "write"
+        ? await canAdministerTeam(db, teamId, user.id)
+        : await isTeamMember(db, teamId, user.id);
+    if (!allowed) return c.json({ error: "Team not found." }, 404);
+    return { type: "team", id: teamId };
+  }
+  return { type: "user", id: user.id };
 }
 
 function isCredentialKind(type: StoredCredential["type"]): type is PutCredentialRequest["type"] {
@@ -134,42 +186,80 @@ async function verifyOrgSlackCredential(
   return undefined;
 }
 
+async function toSummary(
+  service: string,
+  stored: StoredCredential,
+  connectedAt: string,
+  extra?: { delegatedFrom?: string; referenceBroken?: boolean },
+): Promise<CredentialSummary | null> {
+  if (!isCredentialKind(stored.type)) return null;
+  const metadata = stored.metadata;
+  return {
+    service,
+    type: stored.type,
+    scopes: stored.scopes,
+    connectedAt,
+    expiresAt: stored.expiresAt,
+    login: typeof metadata?.login === "string" ? metadata.login : undefined,
+    identityOnly: metadata?.identityOnly === true ? true : undefined,
+    refreshFailedAt: typeof metadata?.refreshFailedAt === "number" ? metadata.refreshFailedAt : undefined,
+    onepasswordRef: onePasswordMeta(stored)?.reference,
+    ...extra,
+  };
+}
+
 credentialsRouter.get("/", async (c) => {
-  const { engineCredentials } = c.var.providers;
-  const user = c.var.user;
-  const scope = c.req.query("scope") === "org" ? "org" : "user";
-  if (scope === "org") {
-    const gate = await requireOrgAdmin(c);
-    if (gate) return gate;
-  }
-  const owner = ownerFor(user, scope);
+  const { engineCredentials, db } = c.var.providers;
+  const scope = parseCredentialScope(c.req.query("scope"));
+  const ownerOrErr = await resolveCredentialOwner(c, scope, c.req.query("teamId"), "read");
+  if (ownerOrErr instanceof Response) return ownerOrErr;
+  const owner = ownerOrErr;
 
-  const listed = await engineCredentials.list(owner);
-  const credentials: CredentialSummary[] = [];
-  for (const item of listed) {
+  const listed: CredentialSummary[] = [];
+  if (owner.type === "team") {
+    // Read the team rows directly. `engineCredentials.get` follows a
+    // delegated reference and throws when it is broken — a list must not.
+    const rows = await db
+      .select()
+      .from(credentials)
+      .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, owner.id)));
+    for (const row of rows) {
+      if (!isCredentialKind(row.type)) continue;
+      const from = delegatedFromMeta(row.metadata);
+      let referenceBroken: boolean | undefined;
+      if (from) {
+        const stillMember = await isTeamMember(db, owner.id, from);
+        const source = stillMember ? await engineCredentials.get({ type: "user", id: from }, row.service) : null;
+        referenceBroken = !stillMember || source === null || !rowHasSecret(source);
+      }
+      listed.push({
+        service: row.service,
+        type: row.type,
+        scopes: Array.isArray(row.scopes) ? row.scopes.filter((s): s is string => typeof s === "string") : undefined,
+        connectedAt: new Date(row.createdAt).toISOString(),
+        expiresAt: row.expiresAt ?? undefined,
+        login:
+          row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
+            ? typeof (row.metadata as Record<string, unknown>).login === "string"
+              ? ((row.metadata as Record<string, unknown>).login as string)
+              : undefined
+            : undefined,
+        delegatedFrom: from,
+        referenceBroken,
+      });
+    }
+    return c.json({ credentials: listed } satisfies ListCredentialsResponse);
+  }
+
+  const items = await engineCredentials.list(owner);
+  for (const item of items) {
     const stored = await engineCredentials.get(owner, item.service);
-    if (!stored) continue; // deleted between list() and get() — skip rather than error
-    // `StoredCredential.type` additionally allows `"app_install"` (a legacy
-    // worker-only kind — GitHub App installs — never written through this
-    // manual-token surface, whose `PUT` validates against `CREDENTIAL_TYPES`
-    // below). Skip rather than widen `CredentialKind` for a kind this route
-    // can neither create nor manage.
-    if (!isCredentialKind(stored.type)) continue;
-    const metadata = stored.metadata;
-    credentials.push({
-      service: item.service,
-      type: stored.type,
-      scopes: item.scopes,
-      connectedAt: item.connectedAt,
-      expiresAt: stored.expiresAt,
-      login: typeof metadata?.login === "string" ? metadata.login : undefined,
-      identityOnly: metadata?.identityOnly === true ? true : undefined,
-      refreshFailedAt: typeof metadata?.refreshFailedAt === "number" ? metadata.refreshFailedAt : undefined,
-      onepasswordRef: onePasswordMeta(stored)?.reference,
-    });
+    if (!stored) continue;
+    const summary = await toSummary(item.service, stored, item.connectedAt);
+    if (summary) listed.push(summary);
   }
 
-  const resp: ListCredentialsResponse = { credentials };
+  const resp: ListCredentialsResponse = { credentials: listed };
   return c.json(resp);
 });
 
@@ -185,12 +275,10 @@ credentialsRouter.put("/:service", async (c) => {
     return c.json({ error: "invalid JSON body" }, 400);
   }
 
-  const scope = body.scope === "org" ? "org" : "user";
-  if (scope === "org") {
-    const gate = await requireOrgAdmin(c);
-    if (gate) return gate;
-  }
-  const owner = ownerFor(user, scope);
+  const scope = parseCredentialScope(body.scope);
+  const ownerOrErr = await resolveCredentialOwner(c, scope, body.teamId, "write");
+  if (ownerOrErr instanceof Response) return ownerOrErr;
+  const owner = ownerOrErr;
 
   // Availability gate (integration-availability design): a user-scope save
   // for a declared service whose deployment/org prerequisite is missing is
@@ -377,18 +465,93 @@ credentialsRouter.put("/:service", async (c) => {
   return c.json(resp);
 });
 
-credentialsRouter.delete("/:service", async (c) => {
-  const { engineCredentials } = c.var.providers;
+credentialsRouter.post("/:service/delegate", async (c) => {
+  const { engineCredentials, db } = c.var.providers;
   const user = c.var.user;
-  const scope = c.req.query("scope") === "org" ? "org" : "user";
-  if (scope === "org") {
-    const gate = await requireOrgAdmin(c);
-    if (gate) return gate;
+  const service = c.req.param("service");
+  let body: DelegateCredentialRequest;
+  try {
+    body = (await c.req.json()) as DelegateCredentialRequest;
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
   }
-  const owner = ownerFor(user, scope);
+  if (!body.teamId || typeof body.teamId !== "string") {
+    return c.json({ error: "teamId is required. Pass the team to share this credential with." }, 400);
+  }
+  const team = await getTeamInOrg(db, user.orgId, body.teamId);
+  if (!team || !(await isTeamMember(db, body.teamId, user.id))) {
+    return c.json({ error: "Team not found." }, 404);
+  }
+  const source = await engineCredentials.get({ type: "user", id: user.id }, service);
+  if (!source || (!rowHasSecret(source) && !onePasswordMeta(source))) {
+    return c.json(
+      { error: `Connect ${service} in Integrations first, then share it with the team.` },
+      400,
+    );
+  }
+  if (!isCredentialKind(source.type)) {
+    return c.json({ error: `${service} cannot be shared with a team.` }, 400);
+  }
+  const occupied = await engineCredentials.list({ type: "team", id: body.teamId });
+  if (occupied.some((item) => item.service === service)) {
+    return c.json({ error: `This team already has a ${service} credential.` }, 409);
+  }
+  await engineCredentials.save({ type: "team", id: body.teamId }, service, {
+    type: source.type,
+    metadata: { delegatedFrom: user.id, sourceType: source.type },
+  });
+  const resp: DelegateCredentialResponse = { ok: true };
+  return c.json(resp, 201);
+});
+
+credentialsRouter.delete("/:service/delegations/:teamId", async (c) => {
+  const { engineCredentials, db } = c.var.providers;
+  const user = c.var.user;
+  const service = c.req.param("service");
+  const teamId = c.req.param("teamId");
+  const team = await getTeamInOrg(db, user.orgId, teamId);
+  if (!team) return c.json({ error: "Team not found." }, 404);
+  const rows = await db
+    .select()
+    .from(credentials)
+    .where(
+      and(
+        eq(credentials.ownerType, "team"),
+        eq(credentials.ownerId, teamId),
+        eq(credentials.service, service),
+      ),
+    )
+    .limit(1);
+  const row = rows[0];
+  if (!row || delegatedFromMeta(row.metadata) !== user.id) {
+    return c.json({ error: "Team not found." }, 404);
+  }
+  await engineCredentials.delete({ type: "team", id: teamId }, service);
+  const resp: DeleteCredentialResponse = { ok: true };
+  return c.json(resp);
+});
+
+credentialsRouter.delete("/:service", async (c) => {
+  const { engineCredentials, db } = c.var.providers;
+  const user = c.var.user;
+  const scope = parseCredentialScope(c.req.query("scope"));
+  const ownerOrErr = await resolveCredentialOwner(c, scope, c.req.query("teamId"), "write");
+  if (ownerOrErr instanceof Response) return ownerOrErr;
+  const owner = ownerOrErr;
   const service = c.req.param("service");
 
   await engineCredentials.delete(owner, service);
+  if (owner.type === "user") {
+    await db
+      .delete(credentials)
+      .where(
+        and(
+          eq(credentials.ownerType, "team"),
+          eq(credentials.service, service),
+          sql`${credentials.metadata}->>'delegatedFrom' = ${user.id}`,
+        ),
+      );
+  }
 
   const resp: DeleteCredentialResponse = { ok: true };
   return c.json(resp);

@@ -10,6 +10,7 @@ import type { ValetPlugin } from "@valet/engine";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { orgMembers, users } from "../schema/index.js";
 import { OnePasswordAuthError, type OnePasswordCtx, type OnePasswordScope, type OnePasswordService } from "../services/onepassword.js";
+import { addMember, createTeam } from "../services/teams.js";
 import type { ListCredentialsResponse } from "../wire/types.js";
 
 const HEADERS = { "Content-Type": "application/json" };
@@ -863,5 +864,117 @@ describe("PUT /api/credentials/:service — metadata.onepassword smuggle guard",
     });
     expect(put.status).toBe(400);
     expect(await put.json()).toEqual({ error: "onepassword is a reserved service name" });
+  });
+});
+
+describe("team credential scope (TKAI-205)", () => {
+  async function teamWithMember() {
+    api = await bootTestApi();
+    const team = await createTeam(api.providers.db, {
+      orgId: "local-org",
+      name: "Platform",
+      creatorUserId: "local-user",
+    });
+    await addMember(api.providers.db, { teamId: team.id, userId: "test-member", role: "member" });
+    return team;
+  }
+
+  it("lets a member read team scope and refuses a non-admin PUT with 404", async () => {
+    const team = await teamWithMember();
+    const putAdmin = await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+      method: "PUT",
+      headers: HEADERS,
+      body: JSON.stringify({ type: "api_key", apiKey: "team-lin", scope: "team", teamId: team.id }),
+    });
+    expect(putAdmin.status).toBe(200);
+
+    const getMember = await fetch(
+      `${api!.baseUrl}/api/credentials?scope=team&teamId=${team.id}`,
+      { headers: MEMBER_HEADERS },
+    );
+    expect(getMember.status).toBe(200);
+    const { credentials: listed } = (await getMember.json()) as ListCredentialsResponse;
+    expect(listed).toEqual([
+      expect.objectContaining({ service: "linear", type: "api_key" }),
+    ]);
+    expect(JSON.stringify(listed)).not.toContain("team-lin");
+
+    const putMember = await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+      method: "PUT",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ type: "api_key", apiKey: "nope", scope: "team", teamId: team.id }),
+    });
+    expect(putMember.status).toBe(404);
+  });
+
+  it("delegates and revokes a personal credential, and 409s an occupied slot", async () => {
+    const team = await teamWithMember();
+    await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+      method: "PUT",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ type: "api_key", apiKey: "member-lin" }),
+    });
+    const share = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
+      method: "POST",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ teamId: team.id }),
+    });
+    expect(share.status).toBe(201);
+
+    const listed = (await (
+      await fetch(`${api!.baseUrl}/api/credentials?scope=team&teamId=${team.id}`, { headers: HEADERS })
+    ).json()) as ListCredentialsResponse;
+    expect(listed.credentials).toEqual([
+      expect.objectContaining({ service: "linear", delegatedFrom: "test-member", referenceBroken: false }),
+    ]);
+
+    const occupied = await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ teamId: team.id }),
+    });
+    expect(occupied.status).toBe(409);
+
+    const revoke = await fetch(
+      `${api!.baseUrl}/api/credentials/linear/delegations/${team.id}`,
+      { method: "DELETE", headers: MEMBER_HEADERS },
+    );
+    expect(revoke.status).toBe(200);
+    const after = (await (
+      await fetch(`${api!.baseUrl}/api/credentials?scope=team&teamId=${team.id}`, { headers: HEADERS })
+    ).json()) as ListCredentialsResponse;
+    expect(after.credentials).toEqual([]);
+  });
+
+  it("deletes matching team references when the source user credential is deleted", async () => {
+    const team = await teamWithMember();
+    await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+      method: "PUT",
+      headers: MEMBER_HEADERS,
+      body: JSON.stringify({ type: "api_key", apiKey: "member-lin" }),
+    });
+    expect(
+      (
+        await fetch(`${api!.baseUrl}/api/credentials/linear/delegate`, {
+          method: "POST",
+          headers: MEMBER_HEADERS,
+          body: JSON.stringify({ teamId: team.id }),
+        })
+      ).status,
+    ).toBe(201);
+
+    expect(
+      (
+        await fetch(`${api!.baseUrl}/api/credentials/linear`, {
+          method: "DELETE",
+          headers: MEMBER_HEADERS,
+        })
+      ).status,
+    ).toBe(200);
+
+    const listed = (await (
+      await fetch(`${api!.baseUrl}/api/credentials?scope=team&teamId=${team.id}`, { headers: HEADERS })
+    ).json()) as ListCredentialsResponse;
+    expect(listed.credentials).toEqual([]);
   });
 });
