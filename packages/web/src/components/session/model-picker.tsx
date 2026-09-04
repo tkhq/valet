@@ -167,7 +167,8 @@ export function ModelPicker({
   const tierMapQ = useModelTiers();
   const approvedModelsQ = useApprovedModels();
   const orgReasoningQ = useOrgReasoning();
-  const restricted = approvedModelsQ.data !== undefined && approvedModelsQ.data.approved !== null;
+  const approvalScopeResolved = approvedModelsQ.data !== undefined;
+  const restricted = approvalScopeResolved && approvedModelsQ.data.approved !== null;
 
   // Unrestricted pickers readmit a current pin. Restricted pickers keep it
   // in the trigger only and never make it selectable.
@@ -180,15 +181,17 @@ export function ModelPicker({
   // The baseline scope contains approved entries. A restriction disables
   // current-pin readmission.
   const approvedScoped = useMemo(() => {
+    if (!approvalScopeResolved) return [];
     const approved = models.filter((model) => model.approved);
     return restricted ? approved : withPinReadmitted(approved);
-  }, [models, currentId, restricted]);
+  }, [models, currentId, restricted, approvalScopeResolved]);
   // The unrestricted reveal follows the caller role. A restricted reveal
   // is the exact approved list for every role.
   const roleScoped = useMemo(() => {
+    if (!approvalScopeResolved) return [];
     if (restricted) return models.filter((model) => model.approved);
     return withPinReadmitted(visibleModels(models, isAdmin));
-  }, [models, isAdmin, currentId, restricted]);
+  }, [models, isAdmin, currentId, restricted, approvalScopeResolved]);
 
   // Collapse Anthropic aliases by default unless `showAll` or query is
   // active — a search should peek into the wider scope so a user typing
@@ -328,6 +331,9 @@ export function ModelPicker({
         <div ref={listRef} className="max-h-[440px] overflow-y-auto">
           {modelsQ.isLoading && (
             <div className="px-3 py-2 text-xs text-muted">Loading models…</div>
+          )}
+          {!modelsQ.isLoading && !approvalScopeResolved && (
+            <div className="px-3 py-2 text-xs text-muted">Loading model policy…</div>
           )}
           {!modelsQ.isLoading && models.length === 0 && (
             <div className="px-3 py-2 text-xs text-muted">No models available.</div>

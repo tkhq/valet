@@ -350,6 +350,20 @@ describe("ModelPicker — approved-models filter", () => {
     ).map((row) => row.textContent);
     expect(optionText.join(" ")).not.toContain("Llama 3");
   });
+
+  it("fails closed while the approved-model policy is unresolved", async () => {
+    approvedModelsData = undefined;
+    meData = makeMe({ orgRole: "admin" });
+    const user = userEvent.setup();
+    renderPicker();
+
+    await user.click(screen.getByRole("button", { name: "Choose model" }));
+    expect(document.querySelectorAll('[data-row-kind="model"]')).toHaveLength(0);
+    expect(screen.queryByText(/show \d+ more/)).toBeNull();
+
+    await user.type(screen.getByLabelText("Search models"), "llama");
+    expect(document.body.textContent).not.toContain("Llama 3");
+  });
 });
 
 describe("ModelPicker — reasoning row", () => {

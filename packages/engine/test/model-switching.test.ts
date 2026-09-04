@@ -259,6 +259,31 @@ describe("engine: model switching", () => {
     expect(await session.threadByKey("web:configured")).toBe(thread);
   });
 
+  it("createThread persists an explicit no-reasoning setting across restore", async () => {
+    const { engine, newEngine, store, baseModel } = setup();
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: baseModel,
+      sampling: { reasoning: "high" },
+    });
+
+    const thread = await session.createThread("web:no-reasoning", {
+      model: "s",
+      reasoning: null,
+    });
+    expect(thread.reasoning()).toBeUndefined();
+    expect((await store.getThread(session.id, thread.id))?.reasoning).toBe("off");
+
+    const restored = await newEngine().restoreSession({
+      sessionId: session.id,
+      options: { userId: "u1", orgId: "o1", workspace: "/", sandbox: {}, model: baseModel },
+    });
+    expect(restored.threadById(thread.id)?.toThreadData().reasoning).toBe("off");
+  });
+
   it("createThread does not expose a thread when persistence fails", async () => {
     const { engine, store, baseModel } = setup();
     const session = await engine.createSession({

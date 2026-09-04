@@ -51,6 +51,8 @@ Tier names remain in the open picker as helper choices. Each tier row shows the 
 
 This label rule applies to the chat picker and every settings `ModelCombobox` surface.
 
+A thread-sidebar pin uses the same resolved model name. When the stored pin is a size tier, the row renders the concrete model name followed by a separate pill containing the human tier label, such as `Claude Sonnet 5` and `Large`.
+
 ### Approved-model restriction
 
 When `approved_models` is non-null, the chat picker shows all approved models and no unapproved models. This rule applies to members and org admins.
@@ -60,6 +62,8 @@ The picker removes the `show more` action while the restriction is active. Tier 
 `PUT /api/org/approved-models` rejects a restricted list that omits a current tier target. The error tells the admin to repoint that tier before removing the model. This reverse validation complements the existing model-tier validation and preserves the invariant from both settings surfaces.
 
 When the restriction is off, the current curated catalog collapse and `show more` behavior remains.
+
+Until the approved-model policy query resolves, concrete model options fail closed and the catalog reveal remains hidden. Approved-model and tier-map writes serialize on the org row so concurrent updates cannot break the tier-target invariant.
 
 The current thread's selected model remains visible if an administrator removes its approval. This readmission is display-only. The user cannot select that model for another thread while the restriction is active.
 
@@ -122,4 +126,6 @@ The engine has an awaited thread factory. It writes initial settings before it e
 
 The API resolves fresh defaults without the persisted session row. It rejects an approved list that omits a configured tier target.
 
-The web app resolves closed labels from the first active catalog target. A restricted picker renders approved options without a catalog reveal.
+An explicit fresh default with no reasoning uses the engine's persisted `off` sentinel so it cannot inherit a historical session reasoning level after creation or restore.
+
+The web app resolves closed labels and thread pins from the first active catalog target. A restricted picker renders approved options without a catalog reveal.

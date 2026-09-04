@@ -10,6 +10,7 @@ import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
 import {
   getApprovedModels,
+  lockOrgModelPolicy,
   setApprovedModels,
   validateApprovedModelsList,
   validateTierTargetsRemainApproved,
@@ -56,13 +57,17 @@ approvedModelsRouter.put("/", async (c) => {
   const validIds = catalogValidIds(catalog);
   const error = validateApprovedModelsList(approved, validIds);
   if (error) return c.json({ error }, 400);
-  const tierError = validateTierTargetsRemainApproved(
-    approved,
-    await getOrgTierMap(db, user.orgId),
-  );
+  const tierError = await db.transaction(async (tx) => {
+    await lockOrgModelPolicy(tx, user.orgId);
+    const validationError = validateTierTargetsRemainApproved(
+      approved,
+      await getOrgTierMap(tx, user.orgId),
+    );
+    if (validationError) return validationError;
+    await setApprovedModels(tx, user.orgId, approved);
+    return null;
+  });
   if (tierError) return c.json({ error: tierError }, 400);
-
-  await setApprovedModels(db, user.orgId, approved);
   const body: PutApprovedModelsResponse = { approved };
   return c.json(body);
 });

@@ -24,6 +24,7 @@ import {
   isReasoningLevel,
   parseReasoningLevel,
   REASONING_LEVELS,
+  THREAD_REASONING_DISABLED,
   type ReasoningLevel,
 } from "./reasoning.js";
 import { detachedFromTrace, withSpan } from "./tracing.js";
@@ -709,7 +710,8 @@ export class Session {
       // default/channel/workflow threads all funnel through here; rehydrate
       // constructs Thread from persisted data and never re-stamps.
       model: initial?.model ?? this.options.modelSpec ?? this.options.model.id,
-      reasoning: initial?.reasoning ?? undefined,
+      reasoning:
+        initial?.reasoning === null ? THREAD_REASONING_DISABLED : initial?.reasoning,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };

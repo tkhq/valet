@@ -8,7 +8,7 @@
  * held to it. Tier tokens (xs, s, m, l, xl) always pass, since they resolve
  * at runtime via the tier map and may map to different models per org.
  */
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { orgs } from "../schema/index.js";
 import { TIER_SET, TIER_TOKENS, type TierMap } from "./model-tiers.js";
@@ -44,6 +44,16 @@ export async function setApprovedModels(
   approved: string[] | null,
 ): Promise<void> {
   await db.update(orgs).set({ approvedModels: approved }).where(eq(orgs.id, orgId));
+}
+
+/** Serialize approved-model and tier-map validation/writes on the org row. */
+export async function lockOrgModelPolicy(db: AppQueryable, orgId: string): Promise<void> {
+  // A self-assignment is a portable row lock for both node-postgres and
+  // PGlite. Keep it inside the caller's transaction.
+  await db
+    .update(orgs)
+    .set({ approvedModels: sql`${orgs.approvedModels}` })
+    .where(eq(orgs.id, orgId));
 }
 
 /**

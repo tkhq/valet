@@ -9,7 +9,7 @@ import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
 import { getOrgTierMap, setOrgTierMap, TIER_TOKENS, type TierMap } from "../services/model-tiers.js";
 import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
-import { getApprovedModels, isApproved } from "../services/approved-models.js";
+import { getApprovedModels, isApproved, lockOrgModelPolicy } from "../services/approved-models.js";
 import type { GetModelTiersResponse, PatchModelTiersRequest } from "../wire/types.js";
 
 /**
@@ -77,30 +77,35 @@ modelTiersRouter.patch("/", async (c) => {
   }
   const patch = validated as PatchModelTiersRequest;
 
-  // Build the merged tier map: start from stored/defaults, overlay the patch.
-  const current = await getOrgTierMap(db, user.orgId);
-  const merged: TierMap = { ...current };
-  for (const tier of TIER_TOKENS) {
-    if (tier in patch) {
-      merged[tier] = patch[tier as keyof PatchModelTiersRequest]!;
-    }
-  }
-
   // Validate every spec against the org catalog.
   const catalog = await buildOrgCatalog(db, engineCredentials, user.orgId);
   const validIds = catalogValidIds(catalog);
-  for (const tier of TIER_TOKENS) {
-    for (const spec of merged[tier]) {
-      if (!validIds.has(spec)) {
-        return c.json({ error: `unknown model spec "${spec}" in tier "${tier}". Pick a model from the model list (GET /api/models).` }, 400);
+
+  const result = await db.transaction(async (tx) => {
+    await lockOrgModelPolicy(tx, user.orgId);
+    // Build the merged tier map under the same row lock used by approved
+    // model writes, so neither policy can validate against stale state.
+    const current = await getOrgTierMap(tx, user.orgId);
+    const merged: TierMap = { ...current };
+    for (const tier of TIER_TOKENS) {
+      const replacement = patch[tier];
+      if (replacement) merged[tier] = replacement;
+    }
+
+    for (const tier of TIER_TOKENS) {
+      for (const spec of merged[tier]) {
+        if (!validIds.has(spec)) {
+          return { error: `unknown model spec "${spec}" in tier "${tier}". Pick a model from the model list (GET /api/models).` };
+        }
       }
     }
-  }
 
-  // Validate that all tier targets are approved.
-  const approvalErr = tierTargetsNotApproved(merged, await getApprovedModels(db, user.orgId));
-  if (approvalErr) return c.json({ error: approvalErr }, 400);
+    const approvalErr = tierTargetsNotApproved(merged, await getApprovedModels(tx, user.orgId));
+    if (approvalErr) return { error: approvalErr };
 
-  await setOrgTierMap(db, user.orgId, merged);
-  return c.json<GetModelTiersResponse>(merged);
+    await setOrgTierMap(tx, user.orgId, merged);
+    return { tierMap: merged };
+  });
+  if ("error" in result) return c.json({ error: result.error }, 400);
+  return c.json<GetModelTiersResponse>(result.tierMap);
 });

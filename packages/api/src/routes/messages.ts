@@ -535,10 +535,9 @@ messagesRouter.post("/:id/threads", async (c) => {
     return c.json({ error: "sourceThreadId must be a string. Select a thread from this session." }, 400);
   }
 
-  const source = body.sourceThreadId
-    ? engineSession.threadById(body.sourceThreadId)
-    : null;
-  if (body.sourceThreadId && !source) {
+  const sourceThreadId = body.sourceThreadId;
+  const source = sourceThreadId === undefined ? null : engineSession.threadById(sourceThreadId);
+  if (sourceThreadId !== undefined && !source) {
     return c.json({ error: "thread not found. Select a thread from this session." }, 404);
   }
 

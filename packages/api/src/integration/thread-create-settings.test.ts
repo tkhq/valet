@@ -48,7 +48,7 @@ async function createThread(
   return fetch(`${baseUrl}/api/sessions/${sessionId}/threads`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(sourceThreadId ? { sourceThreadId } : {}),
+    body: JSON.stringify(sourceThreadId === undefined ? {} : { sourceThreadId }),
   });
 }
 
@@ -126,6 +126,30 @@ describe("POST /api/sessions/:id/threads settings", () => {
     });
   }, 30_000);
 
+  it("does not inherit historical session reasoning when fresh defaults clear it", async () => {
+    api = await bootTestApi();
+    const sessionId = await createSession(api.baseUrl);
+    const source = (await listThreads(api.baseUrl, sessionId)).threads[0]!;
+    const sessionPatch = await fetch(`${api.baseUrl}/api/sessions/${sessionId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reasoning: "high" }),
+    });
+    expect(sessionPatch.status).toBe(200);
+    await api.providers.db
+      .update(users)
+      .set({ defaultReasoning: null, newThreadBehavior: "use_defaults" })
+      .where(eq(users.id, "local-user"));
+
+    const response = await createThread(api.baseUrl, sessionId, source.id);
+    expect(response.status).toBe(201);
+    const created = (await response.json()) as CreateThreadResponse;
+    expect(created.reasoning).toBeNull();
+    expect((await api.providers.engineStore.getThread(sessionId, created.id))?.reasoning).toBe(
+      "off",
+    );
+  }, 30_000);
+
   it("rejects a missing or cross-session source without creating a thread", async () => {
     api = await bootTestApi();
     const sessionId = await createSession(api.baseUrl);
@@ -133,7 +157,7 @@ describe("POST /api/sessions/:id/threads settings", () => {
     const otherSource = (await listThreads(api.baseUrl, otherSessionId)).threads[0]!;
     const before = (await listThreads(api.baseUrl, sessionId)).threads.length;
 
-    for (const sourceThreadId of ["th-missing", otherSource.id]) {
+    for (const sourceThreadId of ["", "th-missing", otherSource.id]) {
       const response = await createThread(api.baseUrl, sessionId, sourceThreadId);
       expect(response.status).toBe(404);
       expect(await response.json()).toEqual({

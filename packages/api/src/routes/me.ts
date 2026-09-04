@@ -26,7 +26,7 @@ import { validateDefaultModelId } from "../services/model-catalog.js";
 import { isOrgAdminUser } from "./_org-admin.js";
 import { assertModelSelectable } from "../services/approved-models.js";
 import { assertReasoningSelectable } from "../services/reasoning.js";
-import type { MeResponse, PatchMeResponse } from "../wire/types.js";
+import type { MeResponse, NewThreadBehavior, PatchMeResponse } from "../wire/types.js";
 
 export const meRouter = new Hono<AppEnv>();
 
@@ -109,7 +109,7 @@ meRouter.patch("/", async (c) => {
     image?: string;
     defaultModel?: string | null;
     defaultReasoning?: string | null;
-    newThreadBehavior?: "keep_current" | "use_defaults";
+    newThreadBehavior?: NewThreadBehavior;
   } = {};
 
   if ("name" in raw) {
