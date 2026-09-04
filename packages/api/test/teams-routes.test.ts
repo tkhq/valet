@@ -41,8 +41,10 @@ describe("teams routes", () => {
 
     const createRes = await createTeam(baseUrl, "Platform");
     expect(createRes.status).toBe(201);
-    const { team } = (await createRes.json()) as CreateTeamResponse;
+    const { team, defaultAssistant } = (await createRes.json()) as CreateTeamResponse;
     expect(team.name).toBe("Platform");
+    expect(defaultAssistant.isDefault).toBe(true);
+    expect(defaultAssistant.owner).toEqual({ type: "team", id: team.id });
 
     const listRes = await fetch(`${baseUrl}/api/teams`, { headers: HEADERS });
     expect(listRes.status).toBe(200);
