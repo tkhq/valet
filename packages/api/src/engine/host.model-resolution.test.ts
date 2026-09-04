@@ -468,7 +468,7 @@ describe("EngineHost model resolution wiring", () => {
     expect(session.options.model.id).toBe("anthropic/claude-haiku-4-5");
   });
 
-  it("new-session precedence: every tier target inactive throws — no fallback beyond the tier itself", async () => {
+  it("new-session precedence: every tier target inactive throws a corrective, tier-specific error — no fallback beyond the tier itself", async () => {
     api = await bootTestApi();
     const { db, engineHost } = api.providers;
     const row = await createLlmProvider(db, {
@@ -481,12 +481,16 @@ describe("EngineHost model resolution wiring", () => {
     await updateLlmProvider(db, "local-org", row.id, { enabled: false });
     await setOrgTierMap(db, "local-org", { ...DEFAULT_TIER_MAP, s: [`${row.id}/m1`] });
 
+    // Names the corrective action (repo rule) instead of the generic
+    // "unknown model" message — an admin can fix this without a redeploy.
     await expect(
       defaultAssistantSessionFor(api.providers,
         { type: "user", id: "local-user" },
         { actorUserId: "local-user", orgId: "local-org" },
       ),
-    ).rejects.toThrow(/unknown model "s"/);
+    ).rejects.toThrow(
+      /no active provider for tier "s" — enable a provider for one of its targets in Settings/,
+    );
   });
 
   it("new-session precedence: owning team's default beats the tier fallback (TKAI-255)", async () => {

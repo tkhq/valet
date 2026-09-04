@@ -68,6 +68,7 @@ import { resolveOpenAiCredential } from "../services/openai-key.js";
 import { hasOrgKey } from "../services/model-catalog.js";
 import { clampToMax, getOrgReasoningSettings, REASONING_SET, type ReasoningLevel } from "../services/reasoning.js";
 import { listLlmProviders, parseModelId, providerNamespace } from "../services/llm-providers.js";
+import { TIER_SET } from "../services/model-tiers.js";
 import type { AppDb } from "../lib/drizzle.js";
 import {
   agentSessions,
@@ -2797,6 +2798,16 @@ export class EngineHost {
       throw err;
     }
     if (!resolved) {
+      // A tier token (xs/s/m/l/xl) failing here means every one of the
+      // tier's targets is inactive (`resolveTier` found no active
+      // provider) — a distinct, actionable case from a genuinely unknown
+      // model id, and one an admin can fix without redeploying anything.
+      if (TIER_SET.has(spec.trim().toLowerCase())) {
+        throw new Error(
+          `EngineHost: no active provider for tier "${spec}" — enable a provider for one of its ` +
+            `targets in Settings → Organization → Models.`,
+        );
+      }
       throw new Error(`EngineHost: unknown model "${spec}" — not in the org catalog or pi-ai registry`);
     }
     return { model: resolved.model, spec: resolved.canonicalId ?? resolved.model.id };
@@ -2849,14 +2860,15 @@ export class EngineHost {
 
   /**
    * `teams.default_model` for the team that owns the session being built,
-   * filtered through the same active-provider walk as the org tier — a
-   * team default whose provider was later disabled falls through to the
-   * org preference list instead of failing every member's session build
-   * (members did not pick it and cannot clear it). `undefined` when unset,
-   * inactive, or the host has no `db`. Consulted only for team-owned
-   * sessions (TKAI-255) — a personal session never reads any team's
-   * preference, because a user can belong to several teams and none of
-   * them owns that session. Uncached, same as `userDefaultModel`.
+   * filtered through the same active-provider walk `firstActivePreference`
+   * applies elsewhere — a team default whose provider was later disabled
+   * falls through to the cascade's next tier (`opts.defaultModelId ?? "s"`)
+   * instead of failing every member's session build (members did not pick
+   * it and cannot clear it). `undefined` when unset, inactive, or the host
+   * has no `db`. Consulted only for team-owned sessions (TKAI-255) — a
+   * personal session never reads any team's default, because a user can
+   * belong to several teams and none of them owns that session. Uncached,
+   * same as `userDefaultModel`.
    */
   private async teamDefaultModel(orgId: string, teamId: string): Promise<string | undefined> {
     if (!this.opts.db) return undefined;

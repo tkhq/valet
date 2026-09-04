@@ -48,7 +48,7 @@ export function ModelCombobox({
   onClear: () => void;
   /** Names what the cleared state falls back to, for both the placeholder
    * and the clear row — the fallback differs per surface (personal: team
-   * then org; team: the org preference list). */
+   * then the cascade's next tier; team: the cascade's next tier). */
   emptyLabel?: string;
   /** Disables the input — a disabled `<input>` cannot receive focus, so
    * this also keeps the dropdown from opening. */

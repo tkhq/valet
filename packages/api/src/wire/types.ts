@@ -1681,7 +1681,7 @@ export interface TeamSummary {
   /**
    * Team default model (TKAI-255). Sessions this team owns start on it
    * unless the member set a personal default. Null = no team override —
-   * resolution falls through to the org preference list.
+   * resolution falls through to the cascade's next tier.
    */
   defaultModel: string | null;
   /** Team's default reasoning/thinking level. */
@@ -1710,7 +1710,7 @@ export interface CreateTeamResponse {
 }
 
 /** `PATCH /api/teams/:id` — team settings. `defaultModel: null` clears the
- * override back to the org preference list. */
+ * override back to the cascade's next tier. */
 export interface PatchTeamRequest {
   defaultModel?: string | null;
   /** Team's default reasoning/thinking level, or null to clear. */
@@ -3709,8 +3709,9 @@ export interface PatchIdentityLinkResponse {
 // `/api/org/llm-providers` — admin-gated provider CRUD + encrypted key
 // management. `LlmProviderSummary` never carries key material — only
 // `hasKey`/`keyLast4`. Model ids elsewhere in the wire protocol are
-// namespaced `{providerKindOrRowId}/{modelId}` (see the design doc); this
-// file's `preferences` endpoints move that ordered list.
+// namespaced `{providerKindOrRowId}/{modelId}` (see the design doc); the
+// per-tier ordered target lists (`/api/org/model-tiers`) are the org's
+// fallback chain now — org model preferences are removed.
 
 export type LlmProviderKindWire = "anthropic" | "openai" | "google" | "openrouter" | "openai_compatible";
 

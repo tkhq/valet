@@ -371,8 +371,8 @@ function TeamRow({
  * these unless that member set a personal default; shared team sessions
  * (assistant, workflow runs, children) skip the personal tier and start on
  * them directly. A session's model/reasoning persists, so the setting only
- * shapes sessions built after the change. Null falls through to the org
- * preference list / org default reasoning. Editable by whoever can mutate
+ * shapes sessions built after the change. Null falls through to the
+ * cascade's next tier / org default reasoning. Editable by whoever can mutate
  * the team (team admin or org admin) — same gate as the roster controls,
  * and the API enforces it. NOT origin-gated: a mirrored team's membership
  * belongs to the identity provider, but its defaults are Valet-local state

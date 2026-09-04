@@ -328,7 +328,7 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
   {
     // Team default model (TKAI-255). Null on rows from before the column:
     // those teams keep the old behavior — resolution falls through to the
-    // org preference list.
+    // cascade's next tier.
     describe: "teams.default_model column",
     probe: { kind: "column", table: "teams", column: "default_model" },
     sql: 'ALTER TABLE "teams" ADD COLUMN IF NOT EXISTS "default_model" text',
