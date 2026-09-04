@@ -1653,36 +1653,41 @@ describe("repoPrebuildFlags", () => {
     expect(result.docker).toBe(false);
   });
 
-  it("resolves false and does not cache when the fetch hangs (timeout seam)", async () => {
+  it("a hung fetch is never cached, and concurrent callers share ONE in-flight read", async () => {
     // A never-resolving fetch simulates a hung connection. The caller
-    // (host.ts resolveRepoDockerFlag) races this against a 5 s deadline;
+    // (host.ts resolveRepoPrebuildFlags) races this against a 5 s deadline;
     // here we use a 200 ms deadline so the suite stays fast.
+    let fetchCalls = 0;
     let hangResolve: (() => void) | undefined;
-    const hangingFetch: typeof fetch = () =>
-      new Promise<Response>((resolve) => {
-        hangResolve = () => resolve(new Response("{}", { status: 200 }));
+    const hangingFetch: typeof fetch = () => {
+      fetchCalls++;
+      return new Promise<Response>((resolve) => {
+        hangResolve = () =>
+          resolve(
+            new Response(JSON.stringify({ content: b64("docker: true"), encoding: "base64" }), {
+              status: 200,
+            }),
+          );
       });
+    };
 
     const timedOut = Symbol("timedOut");
-    const result = await Promise.race([
-      repoPrebuildFlags({ ...deps(), fetchImpl: hangingFetch }, "tok", "o", "r", "hang-ref"),
+    const first = repoPrebuildFlags({ ...deps(), fetchImpl: hangingFetch }, "tok", "o", "r", "hang-ref");
+    const raced = await Promise.race([
+      first,
       new Promise<typeof timedOut>((resolve) => setTimeout(() => resolve(timedOut), 200)),
     ]);
-    expect(result).toBe(timedOut); // the call is still pending — not cached
+    expect(raced).toBe(timedOut); // the call is still pending — nothing cached
 
-    // The key must NOT be in the cache. If it were, a subsequent call with the
-    // real fixture (docker: true) would return the cached false instead of true.
-    contentsHandler = (_owner, _repo, path) => {
-      if (path === ".valet/prebuild.yaml") {
-        return { body: { content: b64("docker: true"), encoding: "base64" } };
-      }
-      return { status: 404, body: { message: "Not Found" } };
-    };
-    const afterTimeout = await repoPrebuildFlags(deps(), "tok", "o", "r", "hang-ref");
-    expect(afterTimeout.docker).toBe(true); // real fetch ran — not served from a stale cache entry
-
-    // Resolve the hang to let the dangling promise settle cleanly.
+    // A second caller while the first hangs joins the SAME in-flight read —
+    // a fan-out of child spawns onto one cold key must not multiply GitHub
+    // calls under exactly the failure conditions that make them slow.
+    const second = repoPrebuildFlags({ ...deps(), fetchImpl: hangingFetch }, "tok", "o", "r", "hang-ref");
     hangResolve?.();
+    // Both callers get the eventual REAL answer, from one HTTP request.
+    expect((await first).docker).toBe(true);
+    expect((await second).docker).toBe(true);
+    expect(fetchCalls).toBe(1);
   });
 
   it("does not grow unboundedly — still resolves correctly after 1001 distinct keys", async () => {
@@ -1708,7 +1713,7 @@ describe("repoPrebuildFlags", () => {
       return { status: 404, body: { message: "Not Found" } };
     };
     const result = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
-    expect(result).toEqual({ docker: true, workspaceStorage: "4Gi" });
+    expect(result).toEqual({ docker: true, workspaceStorage: "4Gi", outcome: "declared" });
   });
 
   it("a malformed workspaceStorage value degrades to the defaults (best-effort, like every other read failure)", async () => {
@@ -1720,7 +1725,26 @@ describe("repoPrebuildFlags", () => {
     };
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const result = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
-    expect(result).toEqual({ docker: false });
+    expect(result).toEqual({ docker: false, outcome: "error" });
+    errSpy.mockRestore();
+  });
+
+  it("a transient failure is NOT cached — the next call re-reads and gets the real answer (TKAI-401)", async () => {
+    let calls = 0;
+    contentsHandler = (_owner, _repo, path) => {
+      if (path !== ".valet/prebuild.yaml") return { status: 404, body: { message: "Not Found" } };
+      calls++;
+      // First read: rate-limited. Second read: the real file.
+      return calls === 1
+        ? { status: 403, body: { message: "API rate limit exceeded" } }
+        : { body: { content: b64('docker: true\nworkspaceStorage: "8Gi"'), encoding: "base64" } };
+    };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const first = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
+    expect(first).toEqual({ docker: false, outcome: "error" });
+    const second = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
+    expect(second).toEqual({ docker: true, workspaceStorage: "8Gi", outcome: "declared" });
+    expect(calls).toBe(2);
     errSpy.mockRestore();
   });
 });

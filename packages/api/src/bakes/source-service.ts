@@ -244,22 +244,50 @@ function githubFetchOf(deps: GitHubTokenDeps): typeof fetch {
   return deps.fetchImpl ?? fetch;
 }
 
+/**
+ * A failed GitHub API request with the status preserved, so callers can tell
+ * "the repo answered: not there" (404) from "GitHub failed" (rate limit, 5xx,
+ * network) — the two must never share a fallback (TKAI-401: a transient
+ * failure read as "no file" was cached as a repo answer). `status` 0 means
+ * the request produced no HTTP response at all (network/DNS/TLS failure).
+ */
+export class GitHubApiError extends Error {
+  readonly status: number;
+  constructor(status: number, path: string, detail?: string) {
+    super(`GitHub API ${path} ${status === 0 ? "request failed" : `responded ${status}`}${detail ? `: ${detail}` : ""}`);
+    this.name = "GitHubApiError";
+    this.status = status;
+  }
+}
+
 async function fetchGithubJson(deps: GitHubTokenDeps, token: string | null, path: string): Promise<unknown> {
   const headers: Record<string, string> = {
     Accept: "application/vnd.github+json",
     "User-Agent": "Valet-App",
   };
   if (token) headers.Authorization = `Bearer ${token}`;
-  const res = await githubFetchOf(deps)(`${githubApiBase(deps)}${path}`, { headers });
+  let res: Response;
+  try {
+    res = await githubFetchOf(deps)(`${githubApiBase(deps)}${path}`, { headers });
+  } catch (err) {
+    throw new GitHubApiError(0, path, err instanceof Error ? err.message : String(err));
+  }
   if (!res.ok) {
-    if (!token) {
+    // Tokenless 404 stays a plain 404: on a public repo it means "no such
+    // file", exactly like an authenticated 404. Other tokenless failures name
+    // the corrective action.
+    if (!token && res.status !== 404) {
       throw new GitHubAuthError(
         "repository not accessible without a GitHub credential — connect GitHub or install the App",
       );
     }
-    throw new Error(`GitHub API ${path} responded ${res.status}`);
+    throw new GitHubApiError(res.status, path);
   }
-  return res.json();
+  try {
+    return await res.json();
+  } catch {
+    throw new GitHubApiError(res.status, path, "response was not JSON");
+  }
 }
 
 export interface ResolvedHead {
@@ -288,8 +316,11 @@ export async function resolveHeadSha(
   return { sha, defaultBranch };
 }
 
-/** Reads one file's content at `sha` via the Contents API. `null` for a
- * missing file OR any fetch/parse failure. */
+/** Reads one file's content at `sha` via the Contents API. `null` means the
+ * REPO answered "no such file" — a 404, or a non-file payload (a directory
+ * listing). Every other failure (auth, rate limit, 5xx, network) THROWS:
+ * a transient GitHub failure must never read as "no file" (TKAI-401 — that
+ * misread was cached and silently disabled repo-declared flags). */
 async function readGithubFile(
   deps: GitHubTokenDeps,
   token: string | null,
@@ -305,8 +336,9 @@ async function readGithubFile(
       token,
       `/repos/${owner}/${repo}/contents/${path}?ref=${encodeURIComponent(sha)}`,
     );
-  } catch {
-    return null;
+  } catch (err) {
+    if (err instanceof GitHubApiError && err.status === 404) return null;
+    throw err;
   }
   if (!isRecord(payload) || typeof payload.content !== "string" || payload.encoding !== "base64") return null;
   return Buffer.from(payload.content.replace(/\n/g, ""), "base64").toString("utf8");
@@ -340,7 +372,10 @@ export async function fetchRepoFile(
       return null;
     }
   }
-  return readGithubFile(deps, token, owner, repo, resolvedRef, path);
+  // This helper's contract stays null-on-ANY-failure (callers treat null as
+  // "no file", never an error) — swallow the non-404 throws readGithubFile
+  // now surfaces.
+  return readGithubFile(deps, token, owner, repo, resolvedRef, path).catch(() => null);
 }
 
 /** Resolves the recipe for `owner/repo@sha` entirely via the GitHub Contents
@@ -368,25 +403,39 @@ export interface RepoPrebuildFlags {
   /** `workspaceStorage: "4Gi"` — provision the workspace claim at this size
    * (clamped to the deploy cap by the provider). Absent when undeclared. */
   workspaceStorage?: string;
+  /** How the read resolved: `declared` = the file exists and parsed;
+   * `absent` = the repo answered "no file" (404); `error` = the read failed
+   * (rate limit, 5xx, network, bad YAML) and the values are DEFAULTS, not a
+   * repo answer. The host logs and meters this (TKAI-401: both shipped
+   * regressions were invisible because defaults looked like answers). */
+  outcome: "declared" | "absent" | "error";
 }
 
 const repoFlagsCache = new Map<string, { value: RepoPrebuildFlags; at: number }>();
+const repoFlagsInflight = new Map<string, Promise<RepoPrebuildFlags>>();
 const REPO_FLAGS_TTL_MS = 10 * 60 * 1000;
 
-/** Clears the module-level `repoPrebuildFlags` cache. Exposed for test
- * isolation only — production code must not call this. */
+/** Clears the module-level `repoPrebuildFlags` cache and in-flight memo.
+ * Exposed for test isolation only — production code must not call this. */
 export function clearRepoPrebuildFlagsCache(): void {
   repoFlagsCache.clear();
+  repoFlagsInflight.clear();
 }
 
 /** Best-effort read of `.valet/prebuild.yaml`'s session-runtime keys
  * (`docker`, `workspaceStorage`) for a repo ref. Errors (auth, rate limit,
- * bad YAML) resolve the defaults ({ docker: false }, no storage): the
- * session still starts. The session-create `docker` option is the
- * corrective override when the repo read cannot succeed.
+ * bad YAML) resolve the defaults ({ docker: false }, no storage) with
+ * `outcome: "error"`: the session still starts. The session-create `docker`
+ * option is the corrective override when the repo read cannot succeed.
  *
- * Results are cached per `owner/repo@ref` for 10 minutes (defaults are
- * cached too, so a missing file does not generate repeated API calls). */
+ * Caching: repo ANSWERS — a parsed file or a definitive "no file" (404) —
+ * are cached per `owner/repo@ref` for 10 minutes, so a missing file does not
+ * generate repeated API calls. Errors are NEVER cached: a rate-limited read
+ * is not a repo answer, and caching it silently disabled declared flags for
+ * every session on the repo for the TTL (TKAI-401). Concurrent misses for
+ * one key share a single in-flight read (a child fan-out onto one repo must
+ * not multiply GitHub calls under exactly the rate-limit conditions that
+ * make them fail). */
 export async function repoPrebuildFlags(
   deps: GitHubTokenDeps,
   token: string | null,
@@ -397,28 +446,40 @@ export async function repoPrebuildFlags(
   const key = `${owner}/${repo}@${ref}`;
   const hit = repoFlagsCache.get(key);
   if (hit && Date.now() - hit.at < REPO_FLAGS_TTL_MS) return hit.value;
-  let value: RepoPrebuildFlags = { docker: false };
-  try {
-    const read = (path: string) => readGithubFile(deps, token, owner, repo, ref, path);
-    const override = await loadPrebuildOverride(read);
-    value = {
-      docker: override?.docker === true,
-      ...(override?.workspaceStorage ? { workspaceStorage: override.workspaceStorage } : {}),
-    };
-  } catch (err) {
-    console.error(
-      `repoPrebuildFlags: read failed for ${key}:`,
-      err instanceof Error ? err.message : String(err),
-    );
-  }
-  // Crude size cap: clear the whole map rather than LRU-evict. The map holds
-  // at most ~1000 entries (owner/repo@ref strings + small objects), which is
-  // small enough in memory; clearing is O(1) and avoids the complexity of a
-  // real eviction policy. A hard limit of 1000 is far beyond any realistic
-  // session volume before the 10-min TTL would reclaim entries anyway.
-  if (repoFlagsCache.size >= 1000) repoFlagsCache.clear();
-  repoFlagsCache.set(key, { value, at: Date.now() });
-  return value;
+  const inflight = repoFlagsInflight.get(key);
+  if (inflight) return inflight;
+  const work = (async (): Promise<RepoPrebuildFlags> => {
+    let value: RepoPrebuildFlags;
+    try {
+      const read = (path: string) => readGithubFile(deps, token, owner, repo, ref, path);
+      const override = await loadPrebuildOverride(read);
+      value = {
+        docker: override?.docker === true,
+        ...(override?.workspaceStorage ? { workspaceStorage: override.workspaceStorage } : {}),
+        outcome: override === null ? "absent" : "declared",
+      };
+    } catch (err) {
+      console.error(
+        `repoPrebuildFlags: read failed for ${key}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+      // Not a repo answer — return defaults WITHOUT caching, so the next
+      // session retries instead of inheriting a transient failure.
+      return { docker: false, outcome: "error" };
+    }
+    // Crude size cap: clear the whole map rather than LRU-evict. The map holds
+    // at most ~1000 entries (owner/repo@ref strings + small objects), which is
+    // small enough in memory; clearing is O(1) and avoids the complexity of a
+    // real eviction policy. A hard limit of 1000 is far beyond any realistic
+    // session volume before the 10-min TTL would reclaim entries anyway.
+    if (repoFlagsCache.size >= 1000) repoFlagsCache.clear();
+    repoFlagsCache.set(key, { value, at: Date.now() });
+    return value;
+  })().finally(() => {
+    repoFlagsInflight.delete(key);
+  });
+  repoFlagsInflight.set(key, work);
+  return work;
 }
 
 /**

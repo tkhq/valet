@@ -32,6 +32,7 @@ import { pluginStore } from "../services/plugin-store.js";
 import {
   buildPluginCatalog,
   loadRoleFromMarkdown,
+  recordPrebuildFlagsResolved,
   type ActionPlugin,
   type CommandContext,
   type CommandDef,
@@ -1699,10 +1700,10 @@ export class EngineHost {
    * `githubTokenDeps`/`db` are not wired (db-less test environments).
    */
   private async resolveRepoPrebuildFlags(sessionId: string, meta: SessionMeta): Promise<RepoPrebuildFlags> {
-    const defaults: RepoPrebuildFlags = { docker: false };
+    const defaults: RepoPrebuildFlags = { docker: false, outcome: "error" };
     const tokenDeps = this.opts.githubTokenDeps;
     const db = this.opts.db;
-    if (!tokenDeps || !db) return defaults;
+    if (!tokenDeps || !db) return { docker: false, outcome: "absent" };
     try {
       const target = primaryGitHubRepoTarget(meta.repos);
       if (!target.ok) {
@@ -1711,7 +1712,7 @@ export class EngineHost {
             `EngineHost: resolveRepoPrebuildFlags: session ${sessionId} primary repo host "${target.host}" is not GitHub — using default flags`,
           );
         }
-        return defaults;
+        return { docker: false, outcome: "absent" };
       }
       const { owner, repo: repoName, ref } = target;
       const fullDeps = {
@@ -1723,10 +1724,6 @@ export class EngineHost {
         fetchImpl: tokenDeps.fetchImpl,
         now: tokenDeps.now,
       };
-      const resolved = await resolveSessionGitHubToken(
-        fullDeps,
-        { orgId: meta.orgId, sessionId, purpose: "api" },
-      );
       const TIMEOUT_MS = 5_000;
       const timedOut = Symbol("timedOut");
       let timeoutId: ReturnType<typeof setTimeout> | undefined;
@@ -1737,24 +1734,58 @@ export class EngineHost {
           (timeoutId as NodeJS.Timeout).unref();
         }
       });
-      const result = await Promise.race([
-        repoPrebuildFlags(fullDeps, resolved.token, owner, repoName, ref),
-        timeoutPromise,
-      ]);
+      // Token resolution runs INSIDE the race: the installation-token mint is
+      // a GitHub round trip too, and outside the race a blackholed GitHub
+      // hung every session build unboundedly (TKAI-401).
+      const work = (async (): Promise<RepoPrebuildFlags> => {
+        let token: string | null = null;
+        try {
+          const resolved = await resolveSessionGitHubToken(fullDeps, {
+            orgId: meta.orgId,
+            // The session owner's user credential is a valid tier for this
+            // read; without it, user-OAuth-only orgs resolved no token at all.
+            userId: meta.userId,
+            sessionId,
+            purpose: "api",
+          });
+          token = resolved.token;
+        } catch (err) {
+          // Tokenless degrade, mirroring `resolveApiTokenOrNull`: the
+          // contents read works unauthenticated on a public repo; a private
+          // repo then 404s, which reads as "no file".
+          console.warn(
+            `EngineHost: resolveRepoPrebuildFlags: no GitHub token for session ${sessionId} (${
+              err instanceof Error ? err.message : String(err)
+            }) — attempting a tokenless read`,
+          );
+        }
+        return repoPrebuildFlags(fullDeps, token, owner, repoName, ref);
+      })();
+      const result = await Promise.race([work, timeoutPromise]);
       clearTimeout(timeoutId);
       if (result === timedOut) {
         // Do not cache — a timeout is not a repo answer.
         console.error(
           `EngineHost: resolveRepoPrebuildFlags timed out for session ${sessionId}`,
         );
+        recordPrebuildFlagsResolved("timeout");
         return defaults;
       }
+      // The one line that says what the sandbox will actually get — both
+      // shipped TKAI-385 regressions were invisible because a silent default
+      // is indistinguishable from "nothing declared" (TKAI-401).
+      console.log(
+        `EngineHost: prebuild flags for session ${sessionId} (${owner}/${repoName}@${ref}): ` +
+          `workspaceStorage=${result.workspaceStorage ?? "none"} docker=${result.docker} (${result.outcome})`,
+      );
+      recordPrebuildFlagsResolved(result.outcome);
       return result;
     } catch (err) {
       console.error(
         `EngineHost: resolveRepoPrebuildFlags failed for session ${sessionId}:`,
         err instanceof Error ? err.message : String(err),
       );
+      recordPrebuildFlagsResolved("error");
       return defaults;
     }
   }

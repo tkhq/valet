@@ -239,4 +239,57 @@ describe("childSessionFor repo prebuild flags", () => {
     const contentsCall = fixture.calls.find((c) => c.path.includes("/contents/"));
     expect(contentsCall?.authHeader).toBe("Bearer inst-111");
   });
+
+  it("an org with NO GitHub configured still reads a public repo's flags tokenless (TKAI-401)", async () => {
+    fixture = startGithubFixture({
+      getContents: (_owner, _repo, path) =>
+        path === ".valet/prebuild.yaml"
+          ? contentsBody('workspaceStorage: "8Gi"\n', "blob1")
+          : { status: 404, body: { message: "Not Found" } },
+    });
+    const recorder = new RecordingSandboxProvider();
+    api = await bootTestApi({
+      sandboxProvider: recorder,
+      githubTokenDeps: {
+        key: deriveSecretKey("test-key"),
+        apiUrl: fixture.url,
+        githubUrl: fixture.url,
+      },
+    });
+    const { engineHost, db } = api.providers;
+    // No app config, no installation, no user credential: token resolution
+    // throws, and the read degrades to tokenless — which a public repo serves.
+    const childId = "child-tokenless-flags";
+    await db.insert(sessionRepos).values({
+      sessionId: childId,
+      host: "github",
+      fullName: "acme/open-widgets",
+      cloneUrl: "https://github.com/acme/open-widgets.git",
+      ref: null,
+      auth: "auto",
+      position: 0,
+      targetDir: "open-widgets",
+    });
+    const parent = await engineHost.sessionFor("parent-tokenless-flags", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp/parent-tokenless-flags",
+    });
+    const parentThread = parent.thread("web:default");
+    const child = await engineHost.childSessionFor(childId, {
+      parentSessionId: "parent-tokenless-flags",
+      parentThreadId: parentThread.id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+      owner: { type: "user", id: "local-user" },
+      workspace: `/tmp/${childId}`,
+    });
+    await child.attachment.ensureReady({ timeoutMs: 5_000 });
+
+    const call = recorder.createCalls.find((c) => c.sessionId === childId);
+    expect(call?.workspaceStorage).toBe("8Gi");
+    const contentsCall = fixture.calls.find((c) => c.path.includes("/contents/"));
+    expect(contentsCall).toBeDefined();
+    expect(contentsCall?.authHeader).toBeUndefined();
+  });
 });
