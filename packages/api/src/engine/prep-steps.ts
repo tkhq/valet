@@ -51,7 +51,7 @@ export function buildPrepSteps(
         hash: spec.hash,
         critical: spec.critical,
         async apply(sandbox) {
-          await installCredentialHelper(sandbox, snap.apiUrl);
+          await installCredentialHelper(sandbox, snap.apiUrl, snap.credentialCommands ?? []);
         },
       });
       continue;

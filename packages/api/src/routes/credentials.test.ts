@@ -16,6 +16,7 @@ const HEADERS = { "Content-Type": "application/json" };
 const MEMBER_HEADERS = { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" };
 
 class FakeOnePasswordService implements OnePasswordService {
+  findCandidates = async (): Promise<never[]> => [];
   resolveCalls: { scope: OnePasswordScope; reference: string }[] = [];
   /** Set to make `resolveReference` throw for the next/every call. */
   failWith: Error | undefined;

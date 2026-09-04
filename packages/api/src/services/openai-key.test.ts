@@ -89,6 +89,7 @@ describe("resolveOpenAiCredential", () => {
       listVaults: async () => [],
       resolveReference: async () => "",
       resolveCredential: async (row: StoredCredential) => row,
+      findCandidates: async () => [],
       findCredentialForService: async (scope: string) => {
         tried.push(scope);
         return null;

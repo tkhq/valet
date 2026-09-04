@@ -46,7 +46,8 @@
 import { recordSandboxWorkspaceGrow } from "@valet/engine";
 import type { ExecResult, Sandbox, SessionStartRef } from "@valet/engine";
 import { gitCredentialHelperScript, ghWrapperScript } from "./git-credential-helper.js";
-import { secretsCliScript } from "./secrets-cli-script.js";
+import { commandWrapperScript, opShimScript, secretsCliScript } from "./secrets-cli-script.js";
+import type { CredentialCommand } from "./credential-commands.js";
 import { ownerOf } from "../services/session-github-token.js";
 import { PREBUILT_REPO_PATH, type RecipeStep } from "../prebuilds/recipe.js";
 import type { RepoBinding } from "../wire/types.js";
@@ -62,6 +63,10 @@ const HELPER_PATH = "/usr/local/bin/git-credential-valet";
 /** The agent-facing secret broker. Installed the same way, for the same
  * reason: a generated script beats an image rebuild. */
 const SECRETS_CLI_PATH = "/usr/local/bin/valet-secrets";
+/** `op` resolves to a shim that names valet-secrets. The real CLI is in no
+ * image, so without this the reach for `op item get` is `command not found`,
+ * which reads as "the vault is wrong" rather than "that tool is not here". */
+const OP_SHIM_PATH = "/usr/local/bin/op";
 const GH_WRAPPER_PATH = "/usr/local/bin/valet-gh";
 /** The same wrapper script ALSO installs as `gh` itself — /usr/local/bin
  * precedes /usr/bin on PATH, so a plain `gh` transparently authenticates.
@@ -252,14 +257,30 @@ async function safeExecGrowRetry(
  * wires git to use the helper for every host (`credential.helper` + the
  * hard prerequisite `credential.useHttpPath`). Throws on any failure — an
  * unconfigured sandbox can't authenticate any clone below. */
-export async function installCredentialHelper(sandbox: Sandbox, apiUrl: string): Promise<void> {
+export async function installCredentialHelper(
+  sandbox: Sandbox,
+  apiUrl: string,
+  credentialCommands: CredentialCommand[] = [],
+): Promise<void> {
   await sandbox.mkdir(STAGING_DIR);
   const stagedHelper = posixJoin(STAGING_DIR, "git-credential-valet");
   const stagedGhWrapper = posixJoin(STAGING_DIR, "valet-gh");
   const stagedSecrets = posixJoin(STAGING_DIR, "valet-secrets");
+  const stagedOpShim = posixJoin(STAGING_DIR, "op");
   await sandbox.writeFile(stagedHelper, gitCredentialHelperScript(apiUrl));
   await sandbox.writeFile(stagedGhWrapper, ghWrapperScript(apiUrl));
   await sandbox.writeFile(stagedSecrets, secretsCliScript(apiUrl));
+  await sandbox.writeFile(stagedOpShim, opShimScript());
+  // One wrapper per declared command, staged beside the fixed scripts and
+  // installed in the same privileged exec below.
+  const staged = credentialCommands.map((cmd) => ({
+    cmd,
+    path: posixJoin(STAGING_DIR, cmd.command),
+    installed: `/usr/local/bin/${cmd.command}`,
+  }));
+  for (const { cmd, path } of staged) {
+    await sandbox.writeFile(path, commandWrapperScript(cmd));
+  }
 
   // System step: writing /usr/local/bin needs the sandbox's full (root)
   // privileges — in docker-enabled sandboxes non-privileged execs run as
@@ -272,7 +293,11 @@ export async function installCredentialHelper(sandbox: Sandbox, apiUrl: string):
       `cp ${shQuote(stagedGhWrapper)} ${GH_WRAPPER_PATH}`,
       `cp ${shQuote(stagedGhWrapper)} ${GH_SHIM_PATH}`,
       `cp ${shQuote(stagedSecrets)} ${SECRETS_CLI_PATH}`,
-      `chmod 755 ${HELPER_PATH} ${GH_WRAPPER_PATH} ${GH_SHIM_PATH} ${SECRETS_CLI_PATH}`,
+      `cp ${shQuote(stagedOpShim)} ${OP_SHIM_PATH}`,
+      ...staged.map(({ path, installed }) => `cp ${shQuote(path)} ${installed}`),
+      `chmod 755 ${HELPER_PATH} ${GH_WRAPPER_PATH} ${GH_SHIM_PATH} ${SECRETS_CLI_PATH} ${OP_SHIM_PATH}${staged
+        .map(({ installed }) => ` ${installed}`)
+        .join("")}`,
     ].join(" && "),
     { privileged: true },
   );

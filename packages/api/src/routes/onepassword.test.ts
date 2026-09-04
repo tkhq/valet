@@ -19,6 +19,7 @@ const HEADERS = { "Content-Type": "application/json" };
 const MEMBER_HEADERS = { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" };
 
 class FakeOnePasswordService implements OnePasswordService {
+  findCandidates = async (): Promise<never[]> => [];
   orgToken = false;
   personalToken = false;
   vaultsCalls: OnePasswordScope[] = [];

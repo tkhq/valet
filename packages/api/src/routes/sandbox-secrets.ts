@@ -18,7 +18,7 @@ import { eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import { agentSessions } from "../schema/index.js";
 import { onePasswordScopesFor } from "../services/credential-resolution.js";
-import { OnePasswordAuthError } from "../services/onepassword.js";
+import { OnePasswordAuthError, type OnePasswordScope } from "../services/onepassword.js";
 import type { ResolveSandboxSecretsResponse } from "../wire/types.js";
 
 export const sandboxSecretsRouter = new Hono<AppEnv>();
@@ -38,8 +38,43 @@ const REFERENCE = /^op:\/\/[^/\u0000-\u001f]+\/[^/\u0000-\u001f]+(?:\/[^/\u0000-
  * costs a round trip. */
 const MAX_REFERENCES = 25;
 
+/** A search term, not a document. Bounds the enumeration surface too. */
+const MAX_QUERY_LENGTH = 200;
+
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((v) => typeof v === "string");
+}
+
+/**
+ * The scopes one request may consult: what the owner rule allows, narrowed by
+ * an explicit `scope` when the caller sent one.
+ *
+ * Narrowed, never widened. The owner rule is the security control; `scope` is
+ * the caller saying which of its allowed scopes it meant, which matters once
+ * an org and a personal token are both connected, because the org token is
+ * tried first and silently answers anything it can read. Asking for a scope
+ * the rule excludes is refused by name rather than answered with nothing,
+ * since "nothing resolved" would send the reader to check vault names that
+ * were correct.
+ */
+function narrowScopes(
+  allowed: readonly OnePasswordScope[],
+  requested: unknown,
+): { ok: true; scopes: readonly OnePasswordScope[] } | { ok: false; error: string } {
+  if (requested === undefined) return { ok: true, scopes: allowed };
+  if (requested !== "org" && requested !== "personal") {
+    return { ok: false, error: "scope must be org or personal" };
+  }
+  if (!allowed.includes(requested)) {
+    return {
+      ok: false,
+      error:
+        requested === "personal"
+          ? "this session reads organization vaults only, so it cannot use a personal 1Password token. A session you own personally can."
+          : `this session cannot use the ${requested} scope.`,
+    };
+  }
+  return { ok: true, scopes: [requested] };
 }
 
 sandboxSecretsRouter.post("/resolve", async (c) => {
@@ -58,9 +93,9 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
     );
   }
 
-  let body: { references?: unknown };
+  let body: { references?: unknown; scope?: unknown };
   try {
-    body = (await c.req.json()) as { references?: unknown };
+    body = (await c.req.json()) as { references?: unknown; scope?: unknown };
   } catch {
     return c.json({ error: "invalid JSON body" }, 400);
   }
@@ -113,7 +148,10 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
   const row = rows[0];
   const ownerUserId = row?.ownerType === "user" ? row.ownerId || row.userId : undefined;
   const isOwnUserSession = ownerUserId !== undefined && ownerUserId === sandbox.userId;
-  const scopes = onePasswordScopesFor(isOwnUserSession ? "user" : undefined);
+  const allowed = onePasswordScopesFor(isOwnUserSession ? "user" : undefined);
+  const narrowed = narrowScopes(allowed, body.scope);
+  if (!narrowed.ok) return c.json({ error: narrowed.error }, 403);
+  const scopes = narrowed.scopes;
   const ctx = { orgId: sandbox.orgId, userId: sandbox.userId };
 
   // Every reference in parallel; within one, org scope first. A scope with
@@ -158,4 +196,80 @@ sandboxSecretsRouter.post("/resolve", async (c) => {
     unresolved: references.filter((r, i) => values[i] === null),
   };
   return c.json(resp);
+});
+
+/**
+ * `POST /find` — items whose title names a query, as references.
+ *
+ * Names only: vault, item, and the field segment a reference would address.
+ * No value crosses this route, which is what separates it from `/resolve`.
+ * It exists because naming a destination is useless if you do not know the
+ * destination: an agent told "use my Claude API key" had no way to turn that
+ * into `op://…`, and guessed, and read the guess's failure as no access.
+ *
+ * The response is TEXT, one candidate per line, because the caller is a POSIX
+ * shell with no JSON parser. Everything here is a title, so there is nothing
+ * a plain-text line can leak.
+ */
+sandboxSecretsRouter.post("/find", async (c) => {
+  const { onePassword, db } = c.var.providers;
+  const sandbox = c.var.sandbox;
+  if (!sandbox) {
+    return c.json(
+      {
+        error:
+          "this endpoint answers a sandbox only. Run valet-secrets inside a session, or send the session's x-valet-sandbox token.",
+      },
+      401,
+    );
+  }
+
+  let body: { query?: unknown; scope?: unknown };
+  try {
+    body = (await c.req.json()) as { query?: unknown; scope?: unknown };
+  } catch {
+    return c.json({ error: "invalid JSON body" }, 400);
+  }
+  const query = body.query;
+  if (typeof query !== "string" || query.trim() === "") {
+    // A blank query would list the vaults, which this surface does not offer.
+    return c.json({ error: "query must be a non-empty string naming the credential to look for" }, 400);
+  }
+  if (query.length > MAX_QUERY_LENGTH) {
+    return c.json({ error: `query must be ${MAX_QUERY_LENGTH} characters or fewer` }, 400);
+  }
+
+  const rows = await db
+    .select({
+      ownerType: agentSessions.ownerType,
+      ownerId: agentSessions.ownerId,
+      userId: agentSessions.userId,
+    })
+    .from(agentSessions)
+    .where(eq(agentSessions.id, sandbox.sessionId))
+    .limit(1);
+  const row = rows[0];
+  const ownerUserId = row?.ownerType === "user" ? row.ownerId || row.userId : undefined;
+  const isOwnUserSession = ownerUserId !== undefined && ownerUserId === sandbox.userId;
+  const allowed = onePasswordScopesFor(isOwnUserSession ? "user" : undefined);
+  const narrowed = narrowScopes(allowed, body.scope);
+  if (!narrowed.ok) return c.json({ error: narrowed.error }, 403);
+
+  const ctx = { orgId: sandbox.orgId, userId: sandbox.userId };
+  const lines: string[] = [];
+  for (const scope of narrowed.scopes) {
+    try {
+      for (const cand of await onePassword.findCandidates(scope, ctx, query)) {
+        // Scope-tagged, because the same name can sit in an org vault and a
+        // personal one, and the resolver takes the org copy first. Seeing both
+        // is how a caller knows to pass --scope.
+        lines.push(`${scope}\top://${cand.vault}/${cand.item}/${cand.field}`);
+      }
+    } catch {
+      // A scope with no token, a disabled toggle, or an SDK refusal has
+      // nothing to contribute to a search; the next scope may.
+    }
+  }
+
+  return c.text(lines.join("\n"), 200, { "content-type": "text/plain; charset=utf-8" });
 });

@@ -46,6 +46,7 @@ import { ownerOf, repoOf } from "../services/session-github-token.js";
 import { GitHubAuthError, resolveGitHubToken, type GitHubTokenDeps } from "../services/github-tokens.js";
 import { DEFAULT_FULL_BASE_IMAGE, resolveDefaultImage } from "../providers/sandbox-backend.js";
 import { resolveRecipe, loadPrebuildOverride, CANDIDATE_LOCKFILES, type ResolvedRecipe, type RecipeStep } from "../prebuilds/recipe.js";
+import { loadCredentialCommands, type CredentialCommand } from "../engine/credential-commands.js";
 import type { SpawnFn } from "../prebuilds/docker-builder.js";
 import type { ImageBuilder, PrebuildSpec } from "../prebuilds/builder.js";
 import { pushRefFor } from "../prebuilds/k8s-builder.js";
@@ -1767,5 +1768,33 @@ export class SourceService {
     if (this.schedulerTimer) clearInterval(this.schedulerTimer);
     this.pollTimer = undefined;
     this.schedulerTimer = undefined;
+  }
+}
+
+/**
+ * The repo's `.valet/credentials.yaml` declarations, for the same
+ * `owner/repo@ref` a prebuild is resolved against.
+ *
+ * Best-effort in the same shape as `repoDockerFlag`: a missing file, an
+ * unreadable repo or a malformed document yields no wrappers rather than
+ * failing the session. A repo that declares a command it does not have is
+ * a repo problem; a session that will not start is ours.
+ */
+export async function repoCredentialCommands(
+  deps: GitHubTokenDeps,
+  token: string | null,
+  owner: string,
+  repo: string,
+  ref: string,
+): Promise<CredentialCommand[]> {
+  try {
+    const read = (path: string) => readGithubFile(deps, token, owner, repo, ref, path);
+    return (await loadCredentialCommands(read)) ?? [];
+  } catch (err) {
+    console.error(
+      `repoCredentialCommands: read failed for ${owner}/${repo}@${ref}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return [];
   }
 }

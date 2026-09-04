@@ -264,6 +264,7 @@ describe("admitSignal edge ACL", () => {
       listVaults: unused,
       resolveReference: unused,
       resolveCredential: async (row) => row,
+      findCandidates: async () => [],
       findCredentialForService: async (scope) => {
         scopesTried.push(scope);
         return null;
