@@ -10,9 +10,10 @@ import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { orgs } from "../schema/index.js";
 import { createLlmProvider, updateLlmProvider } from "./llm-providers.js";
 import { resolveModelSpec } from "./model-resolution.js";
-import { getOrgTierMap, setOrgTierMap, DEFAULT_TIER_MAP, TIER_TOKENS, tierTargetsNotApproved, type TierMap } from "./model-tiers.js";
+import { getOrgTierMap, setOrgTierMap, DEFAULT_TIER_MAP, TIER_TOKENS, type TierMap } from "./model-tiers.js";
 import { buildOrgCatalog, catalogValidIds } from "./model-catalog.js";
 import { getApprovedModels, setApprovedModels } from "./approved-models.js";
+import { tierTargetsNotApproved } from "../routes/model-tiers.js";
 
 const orgId = "org-tiers";
 

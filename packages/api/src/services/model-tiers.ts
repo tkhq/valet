@@ -15,7 +15,6 @@ import type { AppQueryable } from "../lib/drizzle.js";
 import { orgs } from "../schema/index.js";
 import { listLlmProviders, parseModelId, providerNamespace } from "./llm-providers.js";
 import { hasOrgKey } from "./model-catalog.js";
-import { isApproved } from "./approved-models.js";
 
 /** The five size tiers, in order. */
 export const TIER_TOKENS = ["xs", "s", "m", "l", "xl"] as const;
@@ -105,20 +104,3 @@ export async function resolveTier(
   return undefined;
 }
 
-/**
- * Pure validation: every spec in a tier map must be in the approved list,
- * or the function returns an error message naming the corrective action.
- * A null approved list (unrestricted catalog) returns null.
- * Tier tokens always pass the approval check (resolved at runtime).
- */
-export function tierTargetsNotApproved(merged: TierMap, approved: string[] | null): string | null {
-  if (approved === null) return null;
-  for (const tier of TIER_TOKENS) {
-    for (const spec of merged[tier]) {
-      if (!isApproved(approved, spec)) {
-        return `Model "${spec}" in tier "${tier}" is not approved. Approve it first in Settings → Organization → Models.`;
-      }
-    }
-  }
-  return null;
-}
