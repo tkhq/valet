@@ -121,6 +121,11 @@ export interface GrowWorkspacePvcOpts {
   crName: string;
   /** Grow cap (quantity string). Default `DEFAULT_WORKSPACE_STORAGE_MAX`. */
   maxStorage?: string;
+  /** Grow TO this size (still capped at `maxStorage`) instead of doubling.
+   * Used by create-time adoption to converge an existing claim onto a
+   * repo-declared `workspaceStorage` (TKAI-402). Refused when the claim is
+   * already at or above the target. */
+  targetStorage?: string;
   /** Injectable clock/sleep for tests. */
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
@@ -171,6 +176,19 @@ export async function growWorkspacePvc(api: SandboxPvcApi, opts: GrowWorkspacePv
       current,
     );
   }
+  let targetBytes: number | undefined;
+  let targetQuantity: string | undefined;
+  if (opts.targetStorage !== undefined) {
+    const parsed = parseStorageQuantity(opts.targetStorage);
+    if (parsed === null || parsed <= 0) {
+      return refused(`target storage "${opts.targetStorage}" is not a parseable quantity`, current);
+    }
+    if (currentBytes >= parsed) {
+      return refused(`workspace is already at or above the ${opts.targetStorage} target`, current);
+    }
+    targetBytes = parsed;
+    targetQuantity = opts.targetStorage.trim();
+  }
 
   const lastGrowAt = Date.parse(pvc.annotations[WORKSPACE_GROW_ANNOTATION] ?? "");
   if (!Number.isNaN(lastGrowAt)) {
@@ -187,8 +205,15 @@ export async function growWorkspacePvc(api: SandboxPvcApi, opts: GrowWorkspacePv
     }
   }
 
-  const nextBytes = Math.min(currentBytes * 2, maxBytes);
-  const next = nextBytes === maxBytes ? maxQuantity : formatStorageQuantity(nextBytes);
+  const nextBytes = Math.min(targetBytes ?? currentBytes * 2, maxBytes);
+  const next =
+    nextBytes === maxBytes
+      ? maxQuantity.trim()
+      : targetQuantity !== undefined && nextBytes === targetBytes
+        ? // The caller's declared quantity, so the claim reads back exactly
+          // what the repo wrote (pre-validated above).
+          targetQuantity
+        : formatStorageQuantity(nextBytes);
   await api.patchPvcStorage(opts.namespace, pvcName, next, {
     [WORKSPACE_GROW_ANNOTATION]: new Date(now()).toISOString(),
   });

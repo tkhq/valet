@@ -142,6 +142,69 @@ describe("growWorkspacePvc", () => {
     expect(api.patches[0].annotations[WORKSPACE_GROW_ANNOTATION]).toBe(new Date(t.startMs).toISOString());
   });
 
+  it("targetStorage grows straight to the declared size, not a doubling (TKAI-402 adopted-claim convergence)", async () => {
+    const api = new FakePvcApi(pvc(), { capacityLagReads: 1 });
+    const t = fakeTime();
+    const result = await growWorkspacePvc(api, {
+      namespace: NS,
+      crName: CR,
+      targetStorage: "8Gi",
+      now: t.now,
+      sleep: t.sleep,
+    });
+    expect(result).toEqual({ grown: true, from: "1Gi", to: "8Gi" });
+    expect(api.patches[0].storage).toBe("8Gi");
+    // The grow stamps the same rate-limit annotation as a reactive doubling —
+    // one EBS modify per ~6h per volume, whoever spends it.
+    expect(api.patches[0].annotations[WORKSPACE_GROW_ANNOTATION]).toBe(new Date(t.startMs).toISOString());
+  });
+
+  it("targetStorage refuses without patching when the claim is already at or above the target", async () => {
+    const api = new FakePvcApi(pvc({ requestedStorage: "8Gi", capacityStorage: "8Gi" }));
+    const t = fakeTime();
+    const result = await growWorkspacePvc(api, {
+      namespace: NS,
+      crName: CR,
+      targetStorage: "8Gi",
+      now: t.now,
+      sleep: t.sleep,
+    });
+    expect(result.grown).toBe(false);
+    expect(result.reason).toMatch(/already at or above/);
+    expect(api.patches).toHaveLength(0);
+  });
+
+  it("targetStorage above the cap clamps to the cap", async () => {
+    const api = new FakePvcApi(pvc());
+    const t = fakeTime();
+    const result = await growWorkspacePvc(api, {
+      namespace: NS,
+      crName: CR,
+      targetStorage: "50Gi",
+      maxStorage: "20Gi",
+      now: t.now,
+      sleep: t.sleep,
+    });
+    expect(result).toEqual({ grown: true, from: "1Gi", to: "20Gi" });
+    expect(api.patches[0].storage).toBe("20Gi");
+  });
+
+  it("targetStorage still honors the EBS cooldown rate limit", async () => {
+    const recentGrow = new Date(1_000_000 - 60_000).toISOString();
+    const api = new FakePvcApi(pvc({ annotations: { [WORKSPACE_GROW_ANNOTATION]: recentGrow } }));
+    const t = fakeTime();
+    const result = await growWorkspacePvc(api, {
+      namespace: NS,
+      crName: CR,
+      targetStorage: "8Gi",
+      now: t.now,
+      sleep: t.sleep,
+    });
+    expect(result.grown).toBe(false);
+    expect(result.reason).toMatch(/grown recently/);
+    expect(api.patches).toHaveLength(0);
+  });
+
   it("caps at maxStorage, using the configured max quantity verbatim", async () => {
     const api = new FakePvcApi(pvc({ requestedStorage: "16Gi", capacityStorage: "16Gi" }));
     const t = fakeTime();

@@ -567,3 +567,99 @@ describe("create() cleanup after terminal startup failure", () => {
     expect(objectsApi.present).toBe(true);
   });
 });
+
+/** Adopt path: create 409s, GET returns a READY CR owned by another session,
+ * replace succeeds. Ready immediately so `waitReady` returns at once. */
+class AdoptReadyObjectsApi implements SandboxCustomObjectsApi {
+  constructor(private readonly previousSessionId: string) {}
+
+  private cr(name: string, annotations?: Record<string, string>): unknown {
+    return {
+      apiVersion: SANDBOX_CR_API_VERSION,
+      kind: "Sandbox",
+      metadata: { name, uid: "cr-uid-adopt", resourceVersion: "1", ...(annotations ? { annotations } : {}) },
+      spec: { podTemplate: {}, volumeClaimTemplates: [] },
+      status: { conditions: [{ type: "Ready", status: "True", reason: "DependenciesReady" }] },
+    };
+  }
+
+  async createNamespacedCustomObject(): Promise<unknown> {
+    throw new FakeApiError(409, "already exists");
+  }
+  async getNamespacedCustomObject(params: GetSandboxParams): Promise<unknown> {
+    return this.cr(params.name, { "valet.dev/session": this.previousSessionId });
+  }
+  async replaceNamespacedCustomObject(params: ReplaceSandboxParams): Promise<unknown> {
+    return this.cr(params.name);
+  }
+  async deleteNamespacedCustomObject(): Promise<unknown> {
+    return {};
+  }
+  async listNamespacedCustomObject(): Promise<unknown> {
+    return { items: [] };
+  }
+  async patchNamespacedCustomObject(): Promise<unknown> {
+    return {};
+  }
+}
+
+describe("create() adoption convergence (TKAI-402)", () => {
+  interface PvcPatch {
+    storage: string;
+  }
+
+  function makeAdoptingProvider(opts: { pvcRequested: string; previousSessionId: string }) {
+    const patches: PvcPatch[] = [];
+    let requested = opts.pvcRequested;
+    const pvcApi = {
+      async readPvc() {
+        return { requestedStorage: requested, capacityStorage: requested, annotations: {} };
+      },
+      async patchPvcStorage(_ns: string, _name: string, storage: string) {
+        patches.push({ storage });
+        requested = storage;
+      },
+    };
+    const provider = new KubernetesSandboxProvider(
+      {
+        objectsApi: new AdoptReadyObjectsApi(opts.previousSessionId),
+        podsApi: new FakePodsApi(),
+        execApi: fakePodExecApi,
+        livenessApi: new FakeLivenessApi(),
+        pvcApi,
+      },
+      providerCfg,
+    );
+    return { provider, patches };
+  }
+
+  it("grows an adopted claim up to the repo-declared workspaceStorage", async () => {
+    const { provider, patches } = makeAdoptingProvider({ pvcRequested: "1Gi", previousSessionId: "session-old" });
+    await provider.create({ workspace: "/ws/mono", sessionId: "session-new", workspaceStorage: "8Gi" });
+    expect(patches).toHaveLength(1);
+    expect(patches[0].storage).toBe("8Gi");
+  });
+
+  it("does not touch an adopted claim already at the declared size", async () => {
+    const { provider, patches } = makeAdoptingProvider({ pvcRequested: "8Gi", previousSessionId: "session-old" });
+    await provider.create({ workspace: "/ws/mono", sessionId: "session-new", workspaceStorage: "8Gi" });
+    expect(patches).toHaveLength(0);
+  });
+
+  it("does not touch an adopted claim when nothing is declared", async () => {
+    const { provider, patches } = makeAdoptingProvider({ pvcRequested: "1Gi", previousSessionId: "session-old" });
+    await provider.create({ workspace: "/ws/mono", sessionId: "session-new" });
+    expect(patches).toHaveLength(0);
+  });
+
+  it("warns when the adopted CR was owned by a different session", async () => {
+    const { provider } = makeAdoptingProvider({ pvcRequested: "1Gi", previousSessionId: "session-old" });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await provider.create({ workspace: "/ws/mono", sessionId: "session-new" });
+    const warned = warnSpy.mock.calls.some(
+      (args) => typeof args[0] === "string" && args[0].includes("previously owned by session session-old"),
+    );
+    warnSpy.mockRestore();
+    expect(warned).toBe(true);
+  });
+});

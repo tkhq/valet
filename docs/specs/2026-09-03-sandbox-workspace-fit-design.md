@@ -202,6 +202,16 @@ Schema doc: `docs/prebuild-yaml.md`. Immediate use: set `tkhq/mono` to
   `childSessionFor` end to end against a GitHub fixture. Workflow sessions
   (`buildWorkflowSession`) still load no repo bindings and read no flags —
   open follow-up if workflow sessions ever clone repos.
+- Adopted claims converge to the declared size (TKAI-402): `create()` on an
+  existing CR grows an undersized workspace PVC to the repo-declared
+  `workspaceStorage` through the same rate-limited grow path (one EBS modify
+  per ~6h per volume, clamped to the cap). Claims created before a repo
+  declares or raises its size are an expected state, so this is declared-state
+  convergence, not a silent repair. `create()` also warns when the adopted CR
+  was owned by a DIFFERENT session — workspace strings are not per-session
+  (the web defaults every session on a repo to one shared path), and the
+  silent handoff misattributes sandboxes; the identity question stays open in
+  TKAI-402.
 - In-run growth is reactive (a command must fail once). Proactive growth
   from the kubelet volume stats already in Prometheus (grow at a
   threshold, before anything fails) remains open — TKAI-381.

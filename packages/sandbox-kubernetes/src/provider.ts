@@ -114,6 +114,7 @@ import {
   buildSandboxManifest,
   credsSecretName,
   DOCKER_LABEL_KEY,
+  resolveWorkspaceStorageRequest,
   SANDBOX_CONTAINER_NAME,
   sandboxCrName,
   SESSION_ANNOTATION_KEY,
@@ -769,7 +770,43 @@ export class KubernetesSandboxProvider implements SandboxProvider {
     // workspace-survival intent). The flag comes from applySandbox's own
     // create/409 branch, so it cannot race the way an existence pre-GET
     // would.
-    const { cr: applied, adopted } = await applySandbox(this.deps.objectsApi, this.cfg, manifest);
+    const { cr: applied, adopted, previousSession } = await applySandbox(this.deps.objectsApi, this.cfg, manifest);
+
+    // Workspace strings are not guaranteed per-session (the web defaults every
+    // session on a repo to one shared path), so an adopt can silently hand one
+    // sandbox between sessions and the reconcile sweep then attributes it to
+    // the wrong owner. Surface it — this is a signal, not a repair (TKAI-402).
+    if (adopted && previousSession !== undefined && opts.sessionId !== undefined && previousSession !== opts.sessionId) {
+      console.warn(
+        `k8s sandbox ${name}: adopted by session ${opts.sessionId} but previously owned by session ${previousSession} — ` +
+          "two sessions share one workspace string; the sandbox and its volume now serve the new session",
+      );
+    }
+
+    // Converge an adopted claim onto the repo-declared workspace size
+    // (TKAI-402). The controller never resizes an owned PVC, so a claim
+    // provisioned before a repo declared (or raised) `workspaceStorage` stays
+    // undersized forever without this. That is an EXPECTED state in normal
+    // operation — repos add or raise the declaration after workspaces exist —
+    // so converging here is the declared-state fix, not a silent repair; the
+    // grow path logs, rate-limits (one EBS modify per ~6h per volume), and
+    // clamps to the deploy cap exactly like a reactive grow.
+    if (adopted && this.deps.pvcApi) {
+      const declared = opts.workspaceStorage !== undefined ? resolveWorkspaceStorageRequest(this.cfg, opts, name) : undefined;
+      if (declared !== undefined) {
+        const growth = await growWorkspacePvc(this.deps.pvcApi, {
+          namespace: this.cfg.namespace,
+          crName: name,
+          maxStorage: this.cfg.workspaceStorageMax,
+          targetStorage: declared,
+        });
+        if (growth.grown) {
+          console.log(`k8s sandbox ${name}: grew adopted workspace PVC ${growth.from} → ${growth.to} (repo-declared size)`);
+        } else if (!growth.reason?.includes("already at or above")) {
+          console.warn(`k8s sandbox ${name}: adopted workspace PVC below the declared ${declared} and not grown: ${growth.reason}`);
+        }
+      }
+    }
 
     // Best-effort: adopt the creds Secret under the Sandbox CR so an external CR
     // delete garbage-collects the Secret. Never fatal — the terminal
