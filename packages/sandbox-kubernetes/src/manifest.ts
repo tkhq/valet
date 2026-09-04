@@ -210,14 +210,18 @@ export function resolveWorkspaceStorageRequest(
   // The deploy default is a FLOOR (TKAI-403): a repo may grow its workspace,
   // never shrink it below what the deploy provisions for undeclared repos —
   // a below-default claim just burns the one ~6h EBS grow on a size the
-  // deploy already knew was too small.
+  // deploy already knew was too small. The floor itself is capped: a config
+  // that carries a default ABOVE the cap (the boot check catches the env
+  // route, but direct configs exist) must not let the floor un-do the clamp.
   const fallbackBytes = parseStorageQuantity(fallback);
   const clampBytes = parseStorageQuantity(clamp.storage);
   if (fallbackBytes !== null && clampBytes !== null && clampBytes < fallbackBytes) {
+    const maxBytes = parseStorageQuantity(max);
+    const floor = maxBytes !== null && maxBytes < fallbackBytes ? max.trim() : fallback.trim();
     console.log(
-      `k8s sandbox ${name}: repo-declared workspaceStorage ${opts.workspaceStorage} is below the ${fallback} deploy default — using the default`,
+      `k8s sandbox ${name}: repo-declared workspaceStorage ${opts.workspaceStorage} is below the ${floor} deploy floor — using the floor`,
     );
-    return fallback;
+    return floor;
   }
   return clamp.storage;
 }

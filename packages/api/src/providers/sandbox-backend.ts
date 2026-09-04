@@ -273,15 +273,18 @@ export function resolveSandboxApiUrl(
  * disable convention, except the values are quantity strings, not numbers.
  */
 function quantityEnv(name: string, raw: string | undefined, defaultValue: string): string | undefined {
-  if (raw === undefined || raw === "") return defaultValue;
-  if (raw === "0") return undefined;
-  const bytes = parseStorageQuantity(raw);
-  if (bytes === null || bytes <= 0) {
+  const trimmed = raw?.trim();
+  if (trimmed === undefined || trimmed === "") return defaultValue;
+  const bytes = parseStorageQuantity(trimmed);
+  // Any zero spelling disables ("0", "0Gi", padded) — the operator's intent
+  // is unambiguous, and the old code let some spellings through as junk.
+  if (bytes === 0) return undefined;
+  if (bytes === null || bytes < 0) {
     throw new Error(
       `${name}="${raw}" is not a positive Kubernetes quantity. Use a form like "2Gi" or "500Mi", or "0" to disable.`,
     );
   }
-  return raw.trim();
+  return trimmed;
 }
 
 /**
@@ -397,13 +400,18 @@ export function buildSandboxProvider(
       const workspaceStorageMax = resolveSandboxWorkspaceStorageMax(env);
       // Contradictory deploy config fails loud at boot (TKAI-403): a default
       // above the cap would give undeclared repos MORE than a repo that
-      // declares the same size gets after clamping.
-      if (workspaceStorage && workspaceStorageMax) {
-        const defaultBytes = parseStorageQuantity(workspaceStorage);
-        const maxBytes = parseStorageQuantity(workspaceStorageMax);
+      // declares the same size gets after clamping. Compare EFFECTIVE values:
+      // a "0"-disabled knob falls back to the manifest builder's constants
+      // ("1Gi" / "20Gi"), and skipping the check there let e.g. cap="0" +
+      // default="50Gi" through unchecked.
+      {
+        const effectiveDefault = workspaceStorage ?? "1Gi";
+        const effectiveMax = workspaceStorageMax ?? "20Gi";
+        const defaultBytes = parseStorageQuantity(effectiveDefault);
+        const maxBytes = parseStorageQuantity(effectiveMax);
         if (defaultBytes !== null && maxBytes !== null && defaultBytes > maxBytes) {
           throw new Error(
-            `VALET_SANDBOX_WORKSPACE_STORAGE="${workspaceStorage}" exceeds VALET_SANDBOX_WORKSPACE_MAX="${workspaceStorageMax}". ` +
+            `VALET_SANDBOX_WORKSPACE_STORAGE (effective "${effectiveDefault}") exceeds VALET_SANDBOX_WORKSPACE_MAX (effective "${effectiveMax}"). ` +
               "Lower the default or raise the cap.",
           );
         }

@@ -177,7 +177,9 @@ export async function loadPrebuildOverride(
         `.valet/prebuild.yaml: workspaceStorage "${obj.workspaceStorage}" is not a positive Kubernetes quantity — use a form like "4Gi" or "500Mi"`,
       );
     }
-    override.workspaceStorage = obj.workspaceStorage;
+    // Trimmed at source: every consumer trims defensively, but a padded
+    // value emitted into a CR fails admission, so never store one.
+    override.workspaceStorage = obj.workspaceStorage.trim();
   }
   if (obj.baseSetup !== undefined) {
     if (!Array.isArray(obj.baseSetup) || obj.baseSetup.some((s) => typeof s !== "string")) {

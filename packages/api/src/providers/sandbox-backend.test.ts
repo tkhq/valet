@@ -150,7 +150,7 @@ describe("buildSandboxProvider", () => {
         },
         { kubeConfig: fakeKubeConfig() },
       ),
-    ).toThrow(/VALET_SANDBOX_WORKSPACE_STORAGE="8Gi" exceeds VALET_SANDBOX_WORKSPACE_MAX="4Gi"/);
+    ).toThrow(/VALET_SANDBOX_WORKSPACE_STORAGE \(effective "8Gi"\) exceeds VALET_SANDBOX_WORKSPACE_MAX \(effective "4Gi"\)/);
   });
 });
 
@@ -174,6 +174,26 @@ describe("storage quantity env validation (TKAI-403)", () => {
     expect(resolveSandboxWorkspaceStorage({ VALET_SANDBOX_WORKSPACE_STORAGE: "0" })).toBeUndefined();
     expect(resolveSandboxWorkspaceStorage({})).toBe("1Gi");
     expect(resolveSandboxWorkspaceStorage({ VALET_SANDBOX_WORKSPACE_STORAGE: " 8Gi " })).toBe("8Gi");
+  });
+
+  it("every zero spelling disables — padded, suffixed", () => {
+    expect(resolveSandboxWorkspaceStorage({ VALET_SANDBOX_WORKSPACE_STORAGE: " 0 " })).toBeUndefined();
+    expect(resolveSandboxWorkspaceStorage({ VALET_SANDBOX_WORKSPACE_STORAGE: "0Gi" })).toBeUndefined();
+    expect(resolveSandboxWorkspaceStorage({ VALET_SANDBOX_WORKSPACE_STORAGE: "   " })).toBe("1Gi");
+  });
+
+  it("the default-over-cap boot check compares EFFECTIVE values — a \"0\" cap does not bypass it", () => {
+    expect(() =>
+      buildSandboxProvider(
+        {
+          VALET_SANDBOX_BACKEND: "kubernetes",
+          VALET_SANDBOX_IMAGE: "ghcr.io/example/sandbox:latest",
+          VALET_SANDBOX_WORKSPACE_STORAGE: "50Gi",
+          VALET_SANDBOX_WORKSPACE_MAX: "0",
+        },
+        { kubeConfig: fakeKubeConfig() },
+      ),
+    ).toThrow(/effective "50Gi".*effective "20Gi"/);
   });
 });
 
