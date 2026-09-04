@@ -543,6 +543,7 @@ describe("reconcileIdpTeams", () => {
       externalId: null,
       createdAt: local.createdAt,
       defaultModel: null,
+      defaultReasoning: null,
     });
     expect(await membershipsOf(db, "u1")).toEqual([
       { team: "platform", origin: "local", externalId: null, role: "admin" },
