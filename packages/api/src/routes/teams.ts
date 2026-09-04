@@ -59,6 +59,8 @@ import {
 } from "../schema/index.js";
 import { isOrgAdmin } from "../services/org.js";
 import { validateDefaultModelId } from "../services/model-catalog.js";
+import { assertModelSelectable } from "../services/approved-models.js";
+import { assertReasoningSelectable } from "../services/reasoning.js";
 import { ensureDefaultAssistantSession, listAssistantsForOwners } from "../assistants/service.js";
 import {
   addMember,
@@ -116,6 +118,7 @@ async function rowToSummary(
     // null = the caller is not on this team (they see it as an org admin).
     callerRole: mine?.role ?? null,
     defaultModel: row.defaultModel,
+    defaultReasoning: row.defaultReasoning,
   };
 }
 
@@ -401,7 +404,7 @@ teamsRouter.post("/", async (c) => {
 
 // ── Update ────────────────────────────────────────────────────────────────
 
-const PATCH_TEAM_FIELDS = new Set(["defaultModel"]);
+const PATCH_TEAM_FIELDS = new Set(["defaultModel", "defaultReasoning"]);
 
 /**
  * Team settings (TKAI-255). Strict whitelist, same shape as `PATCH /api/me`:
@@ -433,7 +436,7 @@ teamsRouter.patch("/:id", async (c) => {
   const unknownFields = Object.keys(raw).filter((k) => !PATCH_TEAM_FIELDS.has(k));
   if (unknownFields.length > 0) {
     return c.json(
-      { error: `unknown field(s): ${unknownFields.join(", ")}. Send only defaultModel.` },
+      { error: `unknown field(s): ${unknownFields.join(", ")}. Send only defaultModel or defaultReasoning.` },
       400,
     );
   }
@@ -441,6 +444,7 @@ teamsRouter.patch("/:id", async (c) => {
   // `team` from `loadTeamInOrg` above is fresh within this request; the
   // write branch swaps it for the UPDATE's own returned row, so no re-read.
   let fresh: TeamRow = team;
+  const update: { defaultModel?: string | null; defaultReasoning?: string | null } = {};
   if ("defaultModel" in raw) {
     const defaultModel = raw.defaultModel;
     if (defaultModel !== null && typeof defaultModel !== "string") {
@@ -451,7 +455,32 @@ teamsRouter.patch("/:id", async (c) => {
     }
     const invalid = await validateDefaultModelId(db, engineCredentials, user.orgId, defaultModel);
     if (invalid) return c.json({ error: invalid }, 400);
-    const updated = await db.update(teams).set({ defaultModel }).where(eq(teams.id, id)).returning();
+    if (defaultModel !== null) {
+      const isAdmin = await isOrgAdmin(db, user.orgId, user.id);
+      const err = await assertModelSelectable(db, user.orgId, isAdmin, defaultModel);
+      if (err) return c.json({ error: err }, 400);
+    }
+    update.defaultModel = defaultModel;
+  }
+  if ("defaultReasoning" in raw) {
+    const defaultReasoning = raw.defaultReasoning;
+    if (defaultReasoning !== null && typeof defaultReasoning !== "string") {
+      return c.json(
+        { error: "defaultReasoning must be a reasoning level string, or null to clear the override." },
+        400,
+      );
+    }
+    if (defaultReasoning === null) {
+      update.defaultReasoning = null;
+    } else {
+      const normalizedReasoning = defaultReasoning.trim().toLowerCase();
+      const err = await assertReasoningSelectable(db, user.orgId, normalizedReasoning);
+      if (err) return c.json({ error: err }, 400);
+      update.defaultReasoning = normalizedReasoning;
+    }
+  }
+  if (Object.keys(update).length > 0) {
+    const updated = await db.update(teams).set(update).where(eq(teams.id, id)).returning();
     // Zero rows = the team was deleted between the gate and the write.
     if (!updated[0]) return c.json({ error: "team not found" }, 404);
     fresh = updated[0];

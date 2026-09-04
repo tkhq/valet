@@ -104,8 +104,6 @@ org:
     ssoTeamSync: true                      # off unless declared; the file
                                            #   then wins over Settings at
                                            #   every boot
-  modelPreferences:
-    - anthropic/claude-opus-4
   bareSkillCommands: true
   members:
     - email: test@valet.test
@@ -319,13 +317,16 @@ this file and is deliberately left alone.
 The instance is single-org today (`ensureOrg` in `services/org.ts`). The
 reconciler calls `ensureOrg`, then:
 
-- **`name`, `features`, `modelPreferences`, `bareSkillCommands`** —
-  overwritten from the file on every boot. The file is the source of truth
-  for the fields it declares; a UI edit to a declared field lasts until the
-  next boot. Feature keys merge through `setOrgFeatures` (partial update),
-  so flags the file does not name keep their DB value — the merge is against
-  the raw jsonb, so a key this build does not name survives a write from the
-  settings page too.
+- **`name`, `features`, `bareSkillCommands`** — overwritten from the file on
+  every boot. The file is the source of truth for the fields it declares; a
+  UI edit to a declared field lasts until the next boot. Feature keys merge
+  through `setOrgFeatures` (partial update), so flags the file does not name
+  keep their DB value — the merge is against the raw jsonb, so a key this
+  build does not name survives a write from the settings page too.
+  (`modelPreferences` was a fourth declarable key here; it's removed as of
+  the 2026-09-03 model-selector-overhaul follow-up — `org.modelPreferences`
+  now fails config validation with a corrective "unknown key" message
+  instead of being silently accepted and reconciled.)
 
   Two feature keys are typed today: `organizations` and `ssoTeamSync`. Each
   reads as false when absent, which is what makes a gate default to off for
@@ -464,10 +465,14 @@ Non-secret provider shape only — `kind`, `name`, `baseUrl`, `models`,
 without a connected credential reconciles fine and waits for its key,
 same as one created in the UI.
 
-This section exists because `org.modelPreferences` references namespaced
-model ids (`{kind|rowId}/{modelId}`) that point at provider rows — after
-a wipe, a preference with no declared provider points at nothing. Declare
-both and the pair survives together.
+This section exists because namespaced model ids (`{kind|rowId}/{modelId}`)
+elsewhere point at provider rows — the org's tier map targets
+(`orgs.model_tiers`, model-selector-overhaul, TKAI-285) being the main
+example — and after a wipe, a target with no declared provider points at
+nothing. Declare both and the pair survives together. (Org model
+preferences, this section's original reason for existing, were removed
+2026-09-03 — see `docs/specs/2026-07-16-llm-providers-design.md`'s
+"Extension: org model preferences removed.")
 
 - **Known kinds** (`anthropic`, `openai`, `google`, `openrouter`) are
   per-org singletons — the kind is the identity. The reconciler adopts

@@ -15,6 +15,9 @@ import {
   type SessionRunFields,
 } from "../sessions/run-state.js";
 import { canAdministerSession, canViewSession } from "../services/session-access.js";
+import { isOrgAdminUser } from "./_org-admin.js";
+import { assertModelSelectable } from "../services/approved-models.js";
+import { assertReasoningSelectable } from "../services/reasoning.js";
 import { loadAssistantBySessionId, retireAssistant } from "../assistants/service.js";
 import {
   createSecurityEngagementService,
@@ -433,6 +436,14 @@ sessionsRouter.post("/", async (c) => {
       { error: "model must be a non-empty string. Send a model id from GET /api/models." },
       400,
     );
+  }
+  // A user-supplied model is held to the org's approved-models list, same as
+  // PATCH /api/sessions/:id. The server-picked security default below is
+  // exempt — it never came from the caller, so there is nothing to gate.
+  if (body.model !== undefined) {
+    const isAdmin = await isOrgAdminUser(c);
+    const err = await assertModelSelectable(db, user.orgId, isAdmin, body.model);
+    if (err) return c.json({ error: err }, 400);
   }
   // The session-default model. A security session with no explicit model uses
   // a capable default instead of the haiku floor `resolveModelForBuild` would
@@ -860,16 +871,18 @@ sessionsRouter.get("/:id", async (c) => {
     .from(messagesTable)
     .where(eq(messagesTable.sessionId, id));
 
-  // Surface the engine's session-default model. This is best-effort: if
-  // the engine session hasn't been materialized yet we just omit the
-  // field rather than spinning up a sandbox to read it.
+  // Surface the engine's session-default model + reasoning level. This is
+  // best-effort: if the engine session hasn't been materialized yet we just
+  // omit the fields rather than spinning up a sandbox to read them.
   const { engineHost } = c.var.providers;
   let model: string | undefined;
+  let reasoning: string | null | undefined;
   if (engineHost.isLive(id)) {
     const engineSession = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
     // The canonical spec, not the wire id (`modelSpec` differs whenever the
     // resolver returned a wire-ready model for a namespaced spec).
     model = engineSession.options.modelSpec ?? engineSession.options.model.id;
+    reasoning = engineSession.options.sampling?.reasoning ?? null;
   }
 
   const repos = await getSessionRepos(db, id);
@@ -880,6 +893,7 @@ sessionsRouter.get("/:id", async (c) => {
     ...rowToSummary(row, deriveRunFields(runStateRow(row), unsettled)),
     messageCount: Number(n ?? 0),
     model,
+    reasoning,
     profile: row.profile,
     docker: row.docker,
     ...(repos.length > 0 ? { repos } : {}),
@@ -927,14 +941,32 @@ sessionsRouter.patch("/:id", async (c) => {
   const wantsTitle = body.title !== undefined;
   const wantsProfile = body.profile !== undefined;
   const wantsOwner = body.teamId !== undefined;
+  const wantsReasoning = body.reasoning !== undefined;
   // A body with no field at all keeps the message this guard has always
   // sent. The model picker is still the only caller that can omit a field
   // by accident, and a contract test pins this exact response.
-  if (!wantsModel && !wantsTitle && !wantsProfile && !wantsOwner) {
+  if (!wantsModel && !wantsTitle && !wantsProfile && !wantsOwner && !wantsReasoning) {
     return c.json({ error: "model is required" }, 400);
   }
   if (wantsModel && (typeof body.model !== "string" || body.model.length === 0)) {
     return c.json({ error: "model must be a non-empty string. Send a model id from GET /api/models." }, 400);
+  }
+  if (wantsModel) {
+    const isAdmin = await isOrgAdminUser(c);
+    const err = await assertModelSelectable(db, row.orgId, isAdmin, body.model as string);
+    if (err) return c.json({ error: err }, 400);
+  }
+  // `reasoning: null` clears the override and always passes.
+  if (wantsReasoning && body.reasoning !== null) {
+    if (typeof body.reasoning !== "string") {
+      return c.json(
+        { error: "reasoning must be a reasoning level string, or null to clear the override." },
+        400,
+      );
+    }
+    const normalizedReasoning = body.reasoning.trim().toLowerCase();
+    const reasoningErr = await assertReasoningSelectable(db, row.orgId, normalizedReasoning);
+    if (reasoningErr) return c.json({ error: reasoningErr }, 400);
   }
 
   let nextTitle: string | undefined;
@@ -1038,22 +1070,37 @@ sessionsRouter.patch("/:id", async (c) => {
     }
   }
 
-  // Materialize the engine session only when the model changes. A rename
-  // must not start a sandbox — the header renames hibernated sessions too.
+  // Materialize the engine session only when the model or reasoning
+  // changes. A rename must not start a sandbox — the header renames
+  // hibernated sessions too.
   let model: string | undefined;
-  if (wantsModel && typeof body.model === "string") {
+  let reasoning: string | null | undefined;
+  if ((wantsModel && typeof body.model === "string") || wantsReasoning) {
     const engineSession = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
-    try {
-      await engineSession.setModel(body.model);
-    } catch (err) {
-      return c.json({ error: (err as Error).message }, 400);
+    if (wantsModel && typeof body.model === "string") {
+      try {
+        await engineSession.setModel(body.model);
+      } catch (err) {
+        return c.json({ error: (err as Error).message }, 400);
+      }
+    }
+    if (wantsReasoning) {
+      try {
+        await engineSession.setReasoning(
+          typeof body.reasoning === "string" ? body.reasoning.trim().toLowerCase() : null,
+        );
+      } catch (err) {
+        return c.json({ error: (err as Error).message }, 400);
+      }
     }
     model = engineSession.options.modelSpec ?? engineSession.options.model.id;
+    reasoning = engineSession.options.sampling?.reasoning ?? null;
   } else if (engineHost.isLive(id)) {
-    // Report the model the GET route would report. Same best-effort rule:
-    // do not wake a session to read it.
+    // Report the model/reasoning the GET route would report. Same
+    // best-effort rule: do not wake a session to read it.
     const engineSession = await engineHost.sessionFor(id, await loadSessionMeta(db, row));
     model = engineSession.options.modelSpec ?? engineSession.options.model.id;
+    reasoning = engineSession.options.sampling?.reasoning ?? null;
   }
 
   // A live session froze its profile into `SandboxCreateOpts` when it was
@@ -1143,6 +1190,7 @@ sessionsRouter.patch("/:id", async (c) => {
     ...rowToSummary(effectiveRow, deriveRunFields(runStateRow(effectiveRow), unsettled)),
     messageCount: Number(n ?? 0),
     model,
+    reasoning,
     profile: effectiveRow.profile,
     docker: effectiveRow.docker,
   };

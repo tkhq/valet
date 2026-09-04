@@ -25,6 +25,8 @@ import {
   patchAssistant,
   retireAssistant,
 } from "../assistants/service.js";
+import { setApprovedModels } from "../services/approved-models.js";
+import { setOrgReasoningSettings } from "../services/reasoning.js";
 import type {
   AssistantSummary,
   CreateAssistantResponse,
@@ -37,6 +39,11 @@ let api: TestApi | undefined;
 afterEach(async () => {
   await api?.cleanup();
   api = undefined;
+  // This file is in the "integration" vitest project, which — unlike
+  // "unit" — has no `vitest.setup.ts` scrub between tests (integration
+  // suites need the real ambient ANTHROPIC_API_KEY). A `vi.stubEnv` in one
+  // test would otherwise leak into the next.
+  vi.unstubAllEnvs();
 });
 
 const MEMBER_HEADERS = { "x-valet-test-user-id": "test-member" };
@@ -671,6 +678,164 @@ describe("personality and behavior config", () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     expect(body.error).toContain("limited to 500 characters");
+  });
+});
+
+describe("model and reasoning config (model-selector-overhaul Task 9)", () => {
+  it("PATCH writes both fields, and null clears them", async () => {
+    api = await bootTestApi();
+    const created = await create(api, { name: "Triage" });
+
+    const res = await fetch(`${api.baseUrl}/api/assistants/${created.id}`, {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ model: "l", reasoning: "High" }),
+    });
+    expect(res.status).toBe(200);
+    const patched = (await res.json()) as PatchAssistantResponse;
+    expect(patched.model).toBe("l");
+    // Stored normalized (trim + lowercase), same as PATCH /api/org/reasoning.
+    expect(patched.reasoning).toBe("high");
+
+    const listed = await list(api);
+    const row = listed.find((a) => a.id === created.id);
+    expect(row?.model).toBe("l");
+    expect(row?.reasoning).toBe("high");
+
+    const cleared = await fetch(`${api.baseUrl}/api/assistants/${created.id}`, {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ model: null, reasoning: null }),
+    });
+    expect(cleared.status).toBe(200);
+    const clearedBody = (await cleared.json()) as PatchAssistantResponse;
+    expect(clearedBody.model).toBeNull();
+    expect(clearedBody.reasoning).toBeNull();
+  });
+
+  it("rejects a malformed model or reasoning type", async () => {
+    api = await bootTestApi();
+    const created = await create(api, {});
+
+    const badModel = await fetch(`${api.baseUrl}/api/assistants/${created.id}`, {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ model: 123 }),
+    });
+    expect(badModel.status).toBe(400);
+    expect(((await badModel.json()) as { error: string }).error).toContain("model must be a string");
+
+    const badReasoning = await fetch(`${api.baseUrl}/api/assistants/${created.id}`, {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ reasoning: 123 }),
+    });
+    expect(badReasoning.status).toBe(400);
+    expect(((await badReasoning.json()) as { error: string }).error).toContain("reasoning must be a string");
+  });
+
+  it("rejects a model id that does not exist in the catalog and names the model list", async () => {
+    api = await bootTestApi();
+    const created = await create(api, {});
+
+    const res = await fetch(`${api.baseUrl}/api/assistants/${created.id}`, {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ model: "anthropic/clade-opus-4-7" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    // Same corrective-action wording as `validateDefaultModelId` (me.ts/teams.ts):
+    // names GET /api/models as the place to pick a real id.
+    expect(body.error).toContain("GET /api/models");
+
+    // The row was never written — confirms the 400 happened before any patch.
+    const listed = await list(api);
+    expect(listed.find((a) => a.id === created.id)?.model).toBeNull();
+  });
+
+  it("rejects an unknown reasoning level and names the valid ones", async () => {
+    api = await bootTestApi();
+    const created = await create(api, {});
+
+    const res = await fetch(`${api.baseUrl}/api/assistants/${created.id}`, {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ reasoning: "extreme" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("Unknown reasoning level");
+  });
+
+  it("rejects a reasoning level above the org max", async () => {
+    api = await bootTestApi();
+    await setOrgReasoningSettings(api.providers.db, "local-org", { max: "medium" });
+    const created = await create(api, {});
+
+    const res = await fetch(`${api.baseUrl}/api/assistants/${created.id}`, {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ reasoning: "high" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("exceeds the org max");
+  });
+
+  it("a plain member is held to the org's approved-models list; an org admin bypasses it", async () => {
+    // A real (non-tier) namespaced id must be catalog-active to pass the
+    // new `validateDefaultModelId` gate before the approved-list check even
+    // runs — zero-config anthropic needs an env key present.
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-test-stub");
+    api = await bootTestApi();
+    await setApprovedModels(api.providers.db, "local-org", ["anthropic/claude-haiku-4-5"]);
+    const memberOwned = await create(api, {}, MEMBER_HEADERS);
+
+    // `test-member` is a plain member: an unapproved model is refused.
+    const refused = await fetch(`${api.baseUrl}/api/assistants/${memberOwned.id}`, {
+      method: "PATCH",
+      headers: { ...JSON_HEADERS, ...MEMBER_HEADERS },
+      body: JSON.stringify({ model: "anthropic/claude-opus-4-7" }),
+    });
+    expect(refused.status).toBe(400);
+    const body = (await refused.json()) as { error: string };
+    expect(body.error).toContain("not in the org's approved list");
+
+    // A tier token always bypasses the approved-models gate.
+    const tiered = await fetch(`${api.baseUrl}/api/assistants/${memberOwned.id}`, {
+      method: "PATCH",
+      headers: { ...JSON_HEADERS, ...MEMBER_HEADERS },
+      body: JSON.stringify({ model: "l" }),
+    });
+    expect(tiered.status).toBe(200);
+
+    // `local-user` is an org admin: the same unapproved model is accepted.
+    const adminOwned = await create(api, {});
+    const allowed = await fetch(`${api.baseUrl}/api/assistants/${adminOwned.id}`, {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ model: "anthropic/claude-opus-4-7" }),
+    });
+    expect(allowed.status).toBe(200);
+    expect(((await allowed.json()) as PatchAssistantResponse).model).toBe("anthropic/claude-opus-4-7");
+  });
+
+  it("a PATCH that only sets model/reasoning does not evict the cached engine session", async () => {
+    api = await bootTestApi();
+    const created = await create(api, {});
+    const evict = vi.spyOn(api.providers.engineHost, "evictCache");
+
+    // Model/reasoning are consulted only at session BUILD time, and
+    // restore-no-clobber means an already-built session's persisted model
+    // stays put regardless — same as a team or org default-model change,
+    // which also does not evict (`routes/teams.ts`).
+    await fetch(`${api.baseUrl}/api/assistants/${created.id}`, {
+      method: "PATCH",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ model: "l", reasoning: "medium" }),
+    });
+    expect(evict).not.toHaveBeenCalled();
   });
 });
 

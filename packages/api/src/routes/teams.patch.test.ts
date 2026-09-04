@@ -6,7 +6,9 @@
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
-import { teamMembers, teams } from "../schema/index.js";
+import { orgMembers, teamMembers, teams, users } from "../schema/index.js";
+import { setApprovedModels } from "../services/approved-models.js";
+import { setOrgReasoningSettings } from "../services/reasoning.js";
 import type { ListTeamsResponse, PatchTeamResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -134,5 +136,84 @@ describe("PATCH /api/teams/:id", () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     expect(body.error).toMatch(/unknown field/);
+  });
+
+  it("sets defaultReasoning within the org cap, normalizing case; GET reflects it", async () => {
+    api = await bootTestApi();
+    await seedTeam(api);
+    await setOrgReasoningSettings(api.providers.db, "local-org", { max: "high" });
+
+    const res = await patchTeam(api, { defaultReasoning: "Medium" }, "test-lead");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as PatchTeamResponse;
+    expect(body.team.defaultReasoning).toBe("medium");
+
+    const listRes = await fetch(`${api.baseUrl}/api/teams`, {
+      headers: { "x-valet-test-user-id": "test-lead" },
+    });
+    const list = (await listRes.json()) as ListTeamsResponse;
+    expect(list.teams.find((t) => t.id === "team_1")?.defaultReasoning).toBe("medium");
+  });
+
+  it("400s a defaultReasoning level exceeding the org cap", async () => {
+    api = await bootTestApi();
+    await seedTeam(api);
+    await setOrgReasoningSettings(api.providers.db, "local-org", { max: "medium" });
+
+    const res = await patchTeam(api, { defaultReasoning: "high" }, "test-lead");
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/exceeds the org max/);
+  });
+
+  it("400s an unknown defaultReasoning level", async () => {
+    api = await bootTestApi();
+    await seedTeam(api);
+
+    const res = await patchTeam(api, { defaultReasoning: "not-a-level" }, "test-lead");
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/Unknown reasoning level/);
+  });
+
+  it("clears defaultReasoning when passed null, even above the org cap", async () => {
+    api = await bootTestApi();
+    await seedTeam(api);
+    await setOrgReasoningSettings(api.providers.db, "local-org", { max: "minimal" });
+
+    const res = await patchTeam(api, { defaultReasoning: null }, "test-lead");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as PatchTeamResponse;
+    expect(body.team.defaultReasoning).toBeNull();
+  });
+
+  it("400s a catalog-valid but unapproved defaultModel for a non-org-admin team admin; org admin bypasses", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
+    try {
+      api = await bootTestApi();
+      await seedTeam(api);
+      // `test-lead` is a team admin but, unlike the other `seedTeam`
+      // identities, must be a genuine org MEMBER here (not the stub-fallback
+      // admin the `x-valet-test-user-id` header resolves to for an unseeded
+      // id) so the approved-list gate has a non-admin caller to bind.
+      await api.providers.db
+        .insert(users)
+        .values({ id: "test-lead", email: "lead@dev", name: "Test Lead", role: "member" });
+      await api.providers.db
+        .insert(orgMembers)
+        .values({ orgId: "local-org", userId: "test-lead", role: "member", createdAt: Date.now() });
+      await setApprovedModels(api.providers.db, "local-org", ["anthropic/claude-opus-4-7"]);
+
+      const memberRes = await patchTeam(api, { defaultModel: "anthropic/claude-haiku-4-5" }, "test-lead");
+      expect(memberRes.status).toBe(400);
+      const body = (await memberRes.json()) as { error: string };
+      expect(body.error).toMatch(/approved list/);
+
+      // `local-user` (default identity, no header) is a real org admin.
+      const adminRes = await patchTeam(api, { defaultModel: "anthropic/claude-haiku-4-5" });
+      expect(adminRes.status).toBe(200);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });

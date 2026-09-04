@@ -81,6 +81,14 @@ export interface SessionData {
    * `Session.setModel`; resolved to a live `Model<any>` on each turn.
    */
   model?: string;
+  /**
+   * Persisted session-default reasoning level (one of `REASONING_LEVELS`).
+   * Layered at stream time: per-call option → thread pin → this. Mutated by
+   * `Session.setReasoning`; re-supplied to the engine as
+   * `CreateSessionOptions.sampling.reasoning`. A restore that does not
+   * re-supply the level keeps the persisted one (no clobber).
+   */
+  reasoning?: string;
   metadata?: Record<string, unknown>;
   createdAt: number;
   updatedAt: number;
@@ -100,6 +108,12 @@ export interface ThreadData {
   /** Persisted pause flag — the only stored piece of queue state; everything else in QueueState derives from durable queue items. */
   paused?: boolean;
   model?: string;
+  /**
+   * Per-thread reasoning-level pin (one of `REASONING_LEVELS`). Unset means
+   * the thread follows the session default. Mutated by
+   * `Thread.setReasoning`, read back on rehydrate.
+   */
+  reasoning?: string;
   summary?: string;
   metadata?: Record<string, unknown>;
   createdAt: number;

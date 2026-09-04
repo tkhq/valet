@@ -33,7 +33,6 @@ import {
   getSsoTeamGroups,
   normalizeSsoTeamGroups,
   renameOrg,
-  setOrgModelPreferences,
   setOrgMemberRole,
   setSsoTeamGroups,
   LAST_ADMIN_ERROR,
@@ -208,11 +207,6 @@ async function reconcileOrgPass(
 
     const merged: Record<string, boolean> = { ...existing, ...declared };
     await db.update(orgs).set({ features: merged }).where(eq(orgs.id, org.id));
-  }
-
-  // modelPreferences
-  if (orgCfg.modelPreferences !== undefined) {
-    await setOrgModelPreferences(db, org.id, orgCfg.modelPreferences);
   }
 
   // bareSkillCommands — direct column write

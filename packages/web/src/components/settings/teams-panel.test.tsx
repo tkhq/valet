@@ -7,7 +7,7 @@
  */
 import type { ReactNode } from "react";
 import { describe, expect, it, vi, afterEach, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 import type { OrgDirectoryUserWire } from "@valet/api/wire";
 
 /** Renders a real anchor so `getByRole("link")` and href assertions work
@@ -62,10 +62,12 @@ const teamsData = () => ({
       memberCount: 2,
       callerRole,
       defaultModel: teamDefaultModel,
+      defaultReasoning: teamDefaultReasoning,
     },
   ],
 });
 let teamDefaultModel: string | null = null;
+let teamDefaultReasoning: string | null = null;
 
 // The Assistant link points at the team's DEFAULT assistant, whose id only
 // the assistants list carries.
@@ -130,6 +132,7 @@ vi.mock("~/api/settings", () => ({
           providerKind: "anthropic",
           providerName: "Anthropic",
           active: true,
+          approved: true,
         },
         {
           id: "custom_1/llama-3",
@@ -138,12 +141,21 @@ vi.mock("~/api/settings", () => ({
           providerKind: "openai_compatible",
           providerName: "My Router",
           active: true,
+          approved: true,
         },
       ],
     },
     isLoading: false,
     error: null,
   }),
+  // The Size group (Task 15) reads the org tier map through this hook.
+  useModelTiers: () => ({
+    data: { xs: [], s: [], m: [], l: [], xl: [] },
+    isLoading: false,
+    error: null,
+  }),
+  // The team-defaults reasoning select reads the org cap through this hook.
+  useOrgReasoning: () => ({ data: {}, isLoading: false, error: null }),
 }));
 
 import { TeamsPanel } from "./teams-panel";
@@ -205,6 +217,7 @@ describe("TeamsPanel — team default model (TKAI-255)", () => {
   beforeEach(() => {
     patchTeamMutate.mockClear();
     teamDefaultModel = null;
+    teamDefaultReasoning = null;
   });
 
   it("team admin picks a model → PATCH with the catalog id", () => {
@@ -242,11 +255,47 @@ describe("TeamsPanel — team default model (TKAI-255)", () => {
     expect(screen.queryByText("custom_1/llama-3")).toBeNull();
   });
 
-  it("plain member with no team override reads 'Organization default'", () => {
+  it("plain member with no team override reads 'Organization default' for both model and reasoning", () => {
     callerRole = "member";
     orgRole = "member";
     openTeam();
-    expect(screen.getByText("Organization default")).toBeTruthy();
+    expect(screen.getAllByText("Organization default")).toHaveLength(2);
+  });
+
+  it("team admin picks a reasoning level → PATCH with the level", () => {
+    callerRole = "admin";
+    orgRole = "member";
+    openTeam();
+    fireEvent.change(screen.getByLabelText("Reasoning"), {
+      target: { value: "high" },
+    });
+    expect(patchTeamMutate).toHaveBeenCalledWith({
+      id: "team_1",
+      body: { defaultReasoning: "high" },
+    });
+  });
+
+  it("team admin clears reasoning back to Organization default → PATCH with null", () => {
+    callerRole = "admin";
+    orgRole = "member";
+    teamDefaultReasoning = "high";
+    openTeam();
+    fireEvent.change(screen.getByLabelText("Reasoning"), {
+      target: { value: "" },
+    });
+    expect(patchTeamMutate).toHaveBeenCalledWith({
+      id: "team_1",
+      body: { defaultReasoning: null },
+    });
+  });
+
+  it("plain member sees the reasoning value read-only, no select", () => {
+    callerRole = "member";
+    orgRole = "member";
+    teamDefaultReasoning = "high";
+    openTeam();
+    expect(screen.queryByLabelText("Reasoning")).toBeNull();
+    expect(screen.getByText("High")).toBeTruthy();
   });
 });
 
@@ -296,6 +345,13 @@ describe("TeamsPanel — add-member picker", () => {
     fireEvent.click(screen.getByRole("button", { name: /Add member/ }));
   }
 
+  // Scoped to the picker's own listbox: the team-defaults reasoning
+  // <select> also renders native <option> elements (role "option") on the
+  // same page, which an unscoped query would pick up too.
+  function pickerOptions() {
+    return within(screen.getByRole("listbox"));
+  }
+
   it("opens a search input listing only members not on the team", () => {
     openPicker();
     expect(screen.getByRole("combobox", { name: /Search members/ })).toBeTruthy();
@@ -323,7 +379,7 @@ describe("TeamsPanel — add-member picker", () => {
       target: { value: "zzz" },
     });
     expect(screen.getByText("No matching members.")).toBeTruthy();
-    expect(screen.queryByRole("option")).toBeNull();
+    expect(pickerOptions().queryByRole("option")).toBeNull();
   });
 
   it("adds a member on click", () => {
@@ -339,7 +395,7 @@ describe("TeamsPanel — add-member picker", () => {
     openPicker();
     const input = screen.getByRole("combobox", { name: /Search members/ });
     fireEvent.change(input, { target: { value: "@dev" } });
-    const options = screen.getAllByRole("option");
+    const options = pickerOptions().getAllByRole("option");
     expect(options[0]?.getAttribute("aria-selected")).toBe("true");
     expect(options[1]?.getAttribute("aria-selected")).toBe("false");
     expect(input.getAttribute("aria-activedescendant")).toBe(options[0]?.id);
@@ -349,7 +405,7 @@ describe("TeamsPanel — add-member picker", () => {
     openPicker();
     const input = screen.getByRole("combobox", { name: /Search members/ });
     fireEvent.keyDown(input, { key: "ArrowDown" });
-    const options = screen.getAllByRole("option");
+    const options = pickerOptions().getAllByRole("option");
     expect(options[1]?.getAttribute("aria-selected")).toBe("true");
     expect(input.getAttribute("aria-activedescendant")).toBe(options[1]?.id);
     fireEvent.keyDown(input, { key: "Enter" });
@@ -365,7 +421,7 @@ describe("TeamsPanel — add-member picker", () => {
     fireEvent.change(screen.getByRole("combobox", { name: /Search members/ }), {
       target: { value: "ada" },
     });
-    const options = screen.getAllByRole("option");
+    const options = pickerOptions().getAllByRole("option");
     // Zed Prada precedes Ada Lovelace in the roster; the prefix match wins.
     expect(options[0]?.textContent).toContain("Ada Lovelace");
     expect(options[1]?.textContent).toContain("Zed Prada");
@@ -390,7 +446,7 @@ describe("TeamsPanel — add-member picker", () => {
     render(<TeamsPanel orgMembers={[...orgMembers.slice(0, 2), ...many]} />);
     fireEvent.click(screen.getByRole("button", { name: "Expand Platform" }));
     fireEvent.click(screen.getByRole("button", { name: /Add member/ }));
-    expect(screen.getAllByRole("option")).toHaveLength(50);
+    expect(pickerOptions().getAllByRole("option")).toHaveLength(50);
     expect(screen.getByText(/10 more matches/)).toBeTruthy();
   });
 

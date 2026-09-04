@@ -2,13 +2,33 @@
  * `GET /api/org/model-tiers`  — returns the effective tier map (stored or defaults).
  * `PATCH /api/org/model-tiers` — updates `orgs.model_tiers`. Org-admin gated.
  *
- * Each spec in a tier's list must exist in the org catalog.
+ * Each spec in a tier's list must exist in the org catalog and be approved.
  */
 import { Hono } from "hono";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
 import { getOrgTierMap, setOrgTierMap, TIER_TOKENS, type TierMap } from "../services/model-tiers.js";
 import { buildOrgCatalog, catalogValidIds } from "../services/model-catalog.js";
+import { getApprovedModels, isApproved } from "../services/approved-models.js";
+import type { GetModelTiersResponse, PatchModelTiersRequest } from "../wire/types.js";
+
+/**
+ * Pure validation: every spec in a tier map must be in the approved list,
+ * or the function returns an error message naming the corrective action.
+ * A null approved list (unrestricted catalog) returns null.
+ * Tier tokens always pass the approval check (resolved at runtime).
+ */
+export function tierTargetsNotApproved(merged: TierMap, approved: string[] | null): string | null {
+  if (approved === null) return null;
+  for (const tier of TIER_TOKENS) {
+    for (const spec of merged[tier]) {
+      if (!isApproved(approved, spec)) {
+        return `Model "${spec}" in tier "${tier}" is not approved. Approve it first in Settings → Organization → Models.`;
+      }
+    }
+  }
+  return null;
+}
 
 export const modelTiersRouter = new Hono<AppEnv>();
 
@@ -16,7 +36,7 @@ modelTiersRouter.get("/", async (c) => {
   const user = c.var.user;
   const { db } = c.var.providers;
   const tierMap = await getOrgTierMap(db, user.orgId);
-  return c.json(tierMap);
+  return c.json<GetModelTiersResponse>(tierMap);
 });
 
 modelTiersRouter.patch("/", async (c) => {
@@ -41,9 +61,8 @@ modelTiersRouter.patch("/", async (c) => {
     return c.json({ error: `unknown tier(s): ${unknownKeys.join(", ")}. Valid tiers: ${TIER_TOKENS.join(", ")}` }, 400);
   }
 
-  // Build the merged tier map: start from stored/defaults, overlay the patch.
-  const current = await getOrgTierMap(db, user.orgId);
-  const merged: TierMap = { ...current };
+  // Validate and narrow to PatchModelTiersRequest.
+  const validated: Record<string, string[]> = {};
   for (const tier of TIER_TOKENS) {
     if (tier in raw) {
       const val = raw[tier];
@@ -53,7 +72,17 @@ modelTiersRouter.patch("/", async (c) => {
       if (val.length === 0) {
         return c.json({ error: `${tier} must have at least one model spec` }, 400);
       }
-      merged[tier] = val as string[];
+      validated[tier] = val as string[];
+    }
+  }
+  const patch = validated as PatchModelTiersRequest;
+
+  // Build the merged tier map: start from stored/defaults, overlay the patch.
+  const current = await getOrgTierMap(db, user.orgId);
+  const merged: TierMap = { ...current };
+  for (const tier of TIER_TOKENS) {
+    if (tier in patch) {
+      merged[tier] = patch[tier as keyof PatchModelTiersRequest]!;
     }
   }
 
@@ -68,6 +97,10 @@ modelTiersRouter.patch("/", async (c) => {
     }
   }
 
+  // Validate that all tier targets are approved.
+  const approvalErr = tierTargetsNotApproved(merged, await getApprovedModels(db, user.orgId));
+  if (approvalErr) return c.json({ error: approvalErr }, 400);
+
   await setOrgTierMap(db, user.orgId, merged);
-  return c.json(merged);
+  return c.json<GetModelTiersResponse>(merged);
 });

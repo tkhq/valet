@@ -285,9 +285,9 @@ export class PgSessionStore implements SessionStore {
     await this.db.query(
       `INSERT INTO engine_sessions (
          id, owner_type, owner_id, user_id, org_id, workspace, purpose, status,
-         sandbox_id, snapshot_id, parent_session_id, parent_thread_id, model, metadata,
-         start_ref, created_at, updated_at
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+         sandbox_id, snapshot_id, parent_session_id, parent_thread_id, model, reasoning,
+         metadata, start_ref, created_at, updated_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
        ON CONFLICT (id) DO UPDATE SET
          owner_type = EXCLUDED.owner_type,
          owner_id = EXCLUDED.owner_id,
@@ -296,6 +296,7 @@ export class PgSessionStore implements SessionStore {
          snapshot_id = EXCLUDED.snapshot_id,
          parent_thread_id = EXCLUDED.parent_thread_id,
          model = EXCLUDED.model,
+         reasoning = EXCLUDED.reasoning,
          metadata = EXCLUDED.metadata,
          start_ref = EXCLUDED.start_ref,
          updated_at = EXCLUDED.updated_at`,
@@ -313,6 +314,7 @@ export class PgSessionStore implements SessionStore {
         session.parentSessionId ?? null,
         session.parentThreadId ?? null,
         session.model ?? null,
+        session.reasoning ?? null,
         jsonOrNull(session.metadata),
         jsonOrNull(session.startRef),
         session.createdAt,
@@ -326,14 +328,15 @@ export class PgSessionStore implements SessionStore {
     await this.db.query(
       `INSERT INTO engine_threads (
          id, session_id, key, status, active_leaf_entry_id, queue_mode, paused,
-         model, summary, metadata, created_at, updated_at
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         model, reasoning, summary, metadata, created_at, updated_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
        ON CONFLICT (id) DO UPDATE SET
          status = EXCLUDED.status,
          active_leaf_entry_id = EXCLUDED.active_leaf_entry_id,
          queue_mode = EXCLUDED.queue_mode,
          paused = EXCLUDED.paused,
          model = EXCLUDED.model,
+         reasoning = EXCLUDED.reasoning,
          summary = EXCLUDED.summary,
          updated_at = EXCLUDED.updated_at`,
       [
@@ -345,6 +348,7 @@ export class PgSessionStore implements SessionStore {
         thread.queueMode,
         paused,
         thread.model ?? null,
+        thread.reasoning ?? null,
         thread.summary ?? null,
         jsonOrNull(thread.metadata),
         thread.createdAt,
@@ -1255,6 +1259,7 @@ function rowToSession(r: SessionRow): SessionData {
     parentSessionId: r.parentSessionId ?? undefined,
     parentThreadId: r.parentThreadId ?? undefined,
     model: r.model ?? undefined,
+    reasoning: r.reasoning ?? undefined,
     metadata: parseJson(r.metadata),
     startRef: parseJson(r.startRef),
     createdAt: r.createdAt,
@@ -1272,6 +1277,7 @@ function rowToThread(r: ThreadRow): ThreadData {
     queueMode: r.queueMode as ThreadData["queueMode"],
     paused: r.paused === null || r.paused === undefined ? undefined : Boolean(r.paused),
     model: r.model ?? undefined,
+    reasoning: r.reasoning ?? undefined,
     summary: r.summary ?? undefined,
     metadata: parseJson(r.metadata),
     createdAt: r.createdAt,

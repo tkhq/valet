@@ -50,6 +50,9 @@ import {
   UnknownAttachmentError,
   type AttachmentInfo,
 } from "../services/attachment-refs.js";
+import { isOrgAdminUser } from "./_org-admin.js";
+import { assertModelSelectable } from "../services/approved-models.js";
+import { assertReasoningSelectable } from "../services/reasoning.js";
 
 export const messagesRouter = new Hono<AppEnv>();
 
@@ -244,8 +247,9 @@ function threadToSummary(
   model?: string,
   key?: string,
   archivedAt?: number,
+  reasoning?: string | null,
 ): ThreadSummary {
-  return { id: threadId, sessionId, title, createdAt, model, key, archivedAt };
+  return { id: threadId, sessionId, title, createdAt, model, key, archivedAt, reasoning };
 }
 
 async function loadEngineSession(
@@ -304,6 +308,7 @@ messagesRouter.get("/:id/threads", async (c) => {
         t.modelId(),
         t.key,
         metaById.get(t.id)?.archivedAt,
+        t.reasoning() ?? null,
       ),
     );
   const body: ListThreadsResponse = { threads: summaries };
@@ -374,10 +379,11 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
   if (
     body.model === undefined &&
     body.archived === undefined &&
-    body.title === undefined
+    body.title === undefined &&
+    body.reasoning === undefined
   ) {
     return c.json(
-      { error: "nothing to patch: send model (null to clear), archived, and/or title" },
+      { error: "nothing to patch: send model (null to clear), archived, title, and/or reasoning" },
       400,
     );
   }
@@ -407,10 +413,41 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
     }
   }
 
+  if (body.model !== undefined && typeof body.model === "string") {
+    const isAdmin = await isOrgAdminUser(c);
+    const err = await assertModelSelectable(db, session.orgId, isAdmin, body.model);
+    if (err) return c.json({ error: err }, 400);
+  }
+
+  // `reasoning: null` clears the override and always passes. Storage/
+  // application of a thread-level override is Task 11 — this only
+  // validates so a bad value 400s instead of being silently accepted.
+  if (body.reasoning !== undefined && body.reasoning !== null) {
+    if (typeof body.reasoning !== "string") {
+      return c.json(
+        { error: "reasoning must be a reasoning level string, or null to clear the override." },
+        400,
+      );
+    }
+    const normalizedReasoning = body.reasoning.trim().toLowerCase();
+    const reasoningErr = await assertReasoningSelectable(db, session.orgId, normalizedReasoning);
+    if (reasoningErr) return c.json({ error: reasoningErr }, 400);
+  }
+
   if (body.model !== undefined) {
     try {
       await thread.setModel(
         typeof body.model === "string" ? body.model : null,
+      );
+    } catch (err) {
+      return c.json({ error: (err as Error).message }, 400);
+    }
+  }
+
+  if (body.reasoning !== undefined) {
+    try {
+      await thread.setReasoning(
+        typeof body.reasoning === "string" ? body.reasoning.trim().toLowerCase() : null,
       );
     } catch (err) {
       return c.json({ error: (err as Error).message }, 400);
@@ -459,6 +496,7 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
     thread.modelId(),
     thread.key,
     archivedAt,
+    thread.reasoning() ?? null,
   );
   return c.json(summary);
 });
@@ -488,6 +526,8 @@ messagesRouter.post("/:id/threads", async (c) => {
     body.title,
     thread.modelId(),
     thread.key,
+    undefined,
+    thread.reasoning() ?? null,
   );
   return c.json(summary, 201);
 });

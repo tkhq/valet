@@ -23,3 +23,14 @@ export async function requireOrgAdmin(c: Context<AppEnv>) {
   }
   return undefined;
 }
+
+/**
+ * Boolean-returning variant of the same check, for a caller that needs the
+ * admin flag itself rather than a 403 (e.g. `assertModelSelectable`'s
+ * admin-bypass parameter). Reuses `isOrgAdmin` so the two never drift.
+ */
+export async function isOrgAdminUser(c: Context<AppEnv>): Promise<boolean> {
+  const { db } = c.var.providers;
+  const user = c.var.user;
+  return isOrgAdmin(db, user.orgId, user.id);
+}

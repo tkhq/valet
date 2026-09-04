@@ -2,12 +2,13 @@ CREATE TABLE "orgs" (
 	"id" text PRIMARY KEY NOT NULL,
 	"name" text NOT NULL,
 	"features" jsonb DEFAULT '{}'::jsonb NOT NULL,
-	"model_preferences" jsonb DEFAULT '[]'::jsonb NOT NULL,
 	"sso_team_groups" jsonb,
 	"created_at" bigint NOT NULL,
 	"bare_skill_commands" boolean NOT NULL DEFAULT false,
 	"allow_public_artifacts" boolean NOT NULL DEFAULT false,
-	"model_tiers" jsonb
+	"model_tiers" jsonb,
+	"approved_models" jsonb,
+	"reasoning_settings" jsonb
 );
 --> statement-breakpoint
 CREATE TABLE "user" (
@@ -19,7 +20,8 @@ CREATE TABLE "user" (
 	"created_at" timestamp DEFAULT now() NOT NULL,
 	"updated_at" timestamp DEFAULT now() NOT NULL,
 	"role" text DEFAULT 'member' NOT NULL,
-	"default_model" text
+	"default_model" text,
+	"default_reasoning" text
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "user_email_unique" ON "user" ("email");
@@ -271,7 +273,8 @@ CREATE TABLE "teams" (
 	"origin" text DEFAULT 'local' NOT NULL,
 	"external_id" text,
 	"created_at" bigint NOT NULL,
-	"default_model" text
+	"default_model" text,
+	"default_reasoning" text
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX "teams_org_name" ON "teams" ("org_id","name");
@@ -295,6 +298,8 @@ CREATE TABLE "assistants" (
 	"name" text,
 	"personality" text,
 	"behavior" text,
+	"model" text,
+	"reasoning" text,
 	"session_id" text NOT NULL,
 	"is_default" boolean DEFAULT false NOT NULL,
 	"created_at" bigint NOT NULL,

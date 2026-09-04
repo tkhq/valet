@@ -12,6 +12,8 @@ import { createLlmProvider, updateLlmProvider } from "./llm-providers.js";
 import { resolveModelSpec } from "./model-resolution.js";
 import { getOrgTierMap, setOrgTierMap, DEFAULT_TIER_MAP, TIER_TOKENS, type TierMap } from "./model-tiers.js";
 import { buildOrgCatalog, catalogValidIds } from "./model-catalog.js";
+import { getApprovedModels, setApprovedModels } from "./approved-models.js";
+import { tierTargetsNotApproved } from "../routes/model-tiers.js";
 
 const orgId = "org-tiers";
 
@@ -168,6 +170,93 @@ describe("model-tiers", () => {
       for (const tier of TIER_TOKENS) {
         expect(validIds.has(tier)).toBe(true);
       }
+    });
+  });
+
+  describe("tierTargetsNotApproved", () => {
+    it("returns null when approved list is null (unrestricted)", () => {
+      const tierMap: TierMap = {
+        xs: ["anthropic/claude-haiku-4-5"],
+        s: ["anthropic/claude-sonnet-4-6"],
+        m: ["openai/gpt-4-turbo"],
+        l: ["anthropic/claude-opus-4-7"],
+        xl: ["anthropic/claude-opus-4-7"],
+      };
+      const err = tierTargetsNotApproved(tierMap, null);
+      expect(err).toBeNull();
+    });
+
+    it("returns null when all tier specs are approved", () => {
+      const tierMap: TierMap = {
+        xs: ["anthropic/claude-haiku-4-5"],
+        s: ["anthropic/claude-sonnet-4-6"],
+        m: ["openai/gpt-4-turbo"],
+        l: ["anthropic/claude-opus-4-7"],
+        xl: ["anthropic/claude-opus-4-7"],
+      };
+      const approved = [
+        "anthropic/claude-haiku-4-5",
+        "anthropic/claude-sonnet-4-6",
+        "openai/gpt-4-turbo",
+        "anthropic/claude-opus-4-7",
+      ];
+      const err = tierTargetsNotApproved(tierMap, approved);
+      expect(err).toBeNull();
+    });
+
+    it("returns error message when a tier contains an unapproved spec", () => {
+      const tierMap: TierMap = {
+        xs: ["anthropic/claude-haiku-4-5"],
+        s: ["anthropic/claude-sonnet-4-6"],
+        m: ["openai/gpt-4-turbo"],
+        l: ["anthropic/claude-opus-4-7"],
+        xl: ["anthropic/claude-opus-4-7"],
+      };
+      const approved = [
+        "anthropic/claude-haiku-4-5",
+        "anthropic/claude-sonnet-4-6",
+        // openai/gpt-4-turbo is NOT approved
+        "anthropic/claude-opus-4-7",
+      ];
+      const err = tierTargetsNotApproved(tierMap, approved);
+      expect(err).toBe(
+        `Model "openai/gpt-4-turbo" in tier "m" is not approved. Approve it first in Settings → Organization → Models.`,
+      );
+    });
+
+    it("returns error for the first unapproved spec found", () => {
+      const tierMap: TierMap = {
+        xs: ["anthropic/claude-haiku-4-5"],
+        s: ["anthropic/claude-sonnet-4-6"],
+        m: ["openai/gpt-4-turbo", "custom/model-x"],
+        l: ["anthropic/claude-opus-4-7"],
+        xl: ["anthropic/claude-opus-4-7"],
+      };
+      const approved = [
+        "anthropic/claude-haiku-4-5",
+        "anthropic/claude-sonnet-4-6",
+        // Neither openai/gpt-4-turbo nor custom/model-x is approved
+        "anthropic/claude-opus-4-7",
+      ];
+      const err = tierTargetsNotApproved(tierMap, approved);
+      // Should return error for the first unapproved spec
+      expect(err).toBe(
+        `Model "openai/gpt-4-turbo" in tier "m" is not approved. Approve it first in Settings → Organization → Models.`,
+      );
+    });
+
+    it("returns null when tier tokens are in the tier map (they always pass)", () => {
+      const tierMap: TierMap = {
+        xs: ["xs"], // Tier token as a spec
+        s: ["s"],
+        m: ["openai/gpt-4-turbo"],
+        l: ["l"],
+        xl: ["xl"],
+      };
+      const approved = ["openai/gpt-4-turbo"]; // Only gpt-4-turbo is approved
+      // But tier tokens always pass isApproved, so should return null
+      const err = tierTargetsNotApproved(tierMap, approved);
+      expect(err).toBeNull();
     });
   });
 });

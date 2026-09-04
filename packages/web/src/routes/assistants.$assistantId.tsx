@@ -18,6 +18,8 @@ import { assistantLabel, canAdministerOwner } from "~/components/session/assista
 import { Section } from "~/components/settings/section";
 import { FieldRow } from "~/components/settings/field-row";
 import { RadioCard } from "~/components/settings/radio-card";
+import { ModelCombobox } from "~/components/settings/model-combobox";
+import { ReasoningSelect } from "~/components/settings/reasoning-select";
 import { ServiceIcon } from "~/components/service-icon";
 import {
   Badge,
@@ -195,6 +197,7 @@ function AssistantEditorForm({
   // and it keeps each section's pending and error state under its OWN control
   // instead of surfacing every section's error under Identity.
   const identityPatch = usePatchAssistant();
+  const modelPatch = usePatchAssistant();
   const skillsPatch = usePatchAssistant();
   const integrationsPatch = usePatchAssistant();
   const managePatch = usePatchAssistant();
@@ -534,7 +537,39 @@ function AssistantEditorForm({
         </div>
       </Section>
 
-      {/* ── 2. Skills ────────────────────────────────────────────────── */}
+      {/* ── 2. Model ─────────────────────────────────────────────────── */}
+      <Section
+        title="Model"
+        description="Override the model and reasoning level this assistant's sessions use. Leave blank to inherit your default."
+      >
+        <FieldRow
+          label="Model"
+          hint="This assistant's sessions use this model or size instead of your default."
+        >
+          <ModelCombobox
+            value={assistant.model ?? null}
+            onSelect={(id) => modelPatch.mutate({ id: assistant.id, body: { model: id } })}
+            onClear={() => modelPatch.mutate({ id: assistant.id, body: { model: null } })}
+            emptyLabel="Inherit"
+            disabled={!canEdit}
+          />
+        </FieldRow>
+        <FieldRow
+          label="Reasoning"
+          hint="This assistant's sessions use this reasoning level instead of your default."
+        >
+          <ReasoningSelect
+            value={assistant.reasoning ?? null}
+            onChange={(reasoning) => modelPatch.mutate({ id: assistant.id, body: { reasoning } })}
+            disabled={!canEdit}
+          />
+        </FieldRow>
+        {modelPatch.error != null && (
+          <p className="pb-4 text-xs text-danger-500">{errorText(modelPatch.error)}</p>
+        )}
+      </Section>
+
+      {/* ── 3. Skills ────────────────────────────────────────────────── */}
       <Section
         title="Skills"
         description="Which skills this assistant can use. Skills extend what the assistant knows how to do."
@@ -653,7 +688,7 @@ function AssistantEditorForm({
         </div>
       </Section>
 
-      {/* ── 3. Integrations ──────────────────────────────────────────── */}
+      {/* ── 4. Integrations ──────────────────────────────────────────── */}
       <Section
         title="Integrations"
         description="Which integrations this assistant can use. An integration is a connected service like GitHub."
@@ -762,7 +797,7 @@ function AssistantEditorForm({
         )}
       </Section>
 
-      {/* ── 4. Manage ────────────────────────────────────────────────── */}
+      {/* ── 5. Manage ────────────────────────────────────────────────── */}
       <Section title="Manage" description="Promote or remove this assistant.">
         <div className="flex flex-col gap-2 py-4 sm:flex-row sm:items-start sm:justify-between sm:gap-6">
           <div className="min-w-0">

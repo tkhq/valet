@@ -21,6 +21,13 @@ export {
   SandboxPreparationError,
 } from "./errors.js";
 export {
+  REASONING_LEVELS,
+  isReasoningLevel,
+  parseReasoningLevel,
+  resolveReasoningLevel,
+  type ReasoningLevel,
+} from "./reasoning.js";
+export {
   parseMarkdownArtifact,
   renderTemplate,
   loadRoleFromMarkdown,

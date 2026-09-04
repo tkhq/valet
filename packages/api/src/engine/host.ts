@@ -8,6 +8,7 @@ import {
   assistantSessionId,
   parseAssistantSessionId,
   NoCredentialsError,
+  isReasoningLevel,
   type BlobStore,
   type ChildReader,
   type ChildSender,
@@ -63,11 +64,12 @@ import { securityToolPrepSteps } from "./security-bootstrap.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 import { orgFallbackPolicy, resolveUserCredentialRead, onePasswordScopesFor } from "../services/credential-resolution.js";
 import type { PrebuildPreflightOpts } from "../prebuilds/registry.js";
-import { getOrgModelPreferences } from "../services/org.js";
 import { resolveModelSpec } from "../services/model-resolution.js";
 import { resolveOpenAiCredential } from "../services/openai-key.js";
 import { hasOrgKey } from "../services/model-catalog.js";
+import { clampToMax, getOrgReasoningSettings, REASONING_SET, type ReasoningLevel } from "../services/reasoning.js";
 import { listLlmProviders, parseModelId, providerNamespace } from "../services/llm-providers.js";
+import { TIER_SET } from "../services/model-tiers.js";
 import type { AppDb } from "../lib/drizzle.js";
 import {
   agentSessions,
@@ -180,7 +182,7 @@ export interface EngineHostOpts {
   blobs?: BlobStore;
   /** Anthropic API key required for prompts. Without it, prompts fail. */
   anthropicApiKey?: string;
-  /** pi-ai model id; defaults to claude-haiku-4-5 for fast dogfooding. */
+  /** pi-ai model id or tier token; defaults to tier "s" when unset. */
   defaultModelId?: string;
   /** Default Docker image for new sandboxes. */
   defaultImage?: string;
@@ -903,6 +905,10 @@ export class EngineHost {
       userId: meta.userId,
       ownerTeamId: meta.ownerTeamId,
     });
+    const reasoning = await this.resolveReasoningForBuild(existing, meta.orgId, {
+      userId: meta.userId,
+      ownerTeamId: meta.ownerTeamId,
+    });
     const resolveModel = this.makeResolveModel(meta.orgId);
     const profile = meta.profile ?? "headless";
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
@@ -1047,6 +1053,7 @@ export class EngineHost {
             model,
             modelSpec,
             resolveModel,
+            ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
             systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
             tools: sessionTools.length ? sessionTools : undefined,
             skills: extras.skills.length ? extras.skills : undefined,
@@ -1070,6 +1077,7 @@ export class EngineHost {
           model,
           modelSpec,
           resolveModel,
+          ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
           systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
           tools: sessionTools.length ? sessionTools : undefined,
           skills: extras.skills.length ? extras.skills : undefined,
@@ -2135,6 +2143,12 @@ export class EngineHost {
        * `assistantSessionId(id)` at creation, so passing it is a no-op
        * there; omitted, the derived id is the fallback. */
       sessionId?: string;
+      /** Explicit model spec for a first build, same `overrideId` cascade
+       * slot `childSessionFor`/workflow session builds already expose via
+       * their own `modelId` opt (model-selector-overhaul Task 9) — no
+       * production caller passes this yet, but the slot stays consistent
+       * across every session-build entry point. */
+      modelId?: string;
     },
   ): Promise<Session> {
     const sessionId = opts?.sessionId ?? assistantSessionId(assistantId);
@@ -2144,7 +2158,7 @@ export class EngineHost {
     if (pending) return pending;
 
     const epoch = this.buildEpoch.get(sessionId) ?? 0;
-    const promise = this.buildAssistantSession(sessionId, assistantId, meta, epoch, 0).finally(() => {
+    const promise = this.buildAssistantSession(sessionId, assistantId, meta, epoch, 0, opts?.modelId).finally(() => {
       this.inflight.delete(sessionId);
     });
     this.inflight.set(sessionId, promise);
@@ -2157,6 +2171,7 @@ export class EngineHost {
     meta: { actorUserId: string; orgId: string },
     epoch: number,
     attempt: number,
+    overrideId?: string,
   ): Promise<Session> {
     if (!this.opts.db) {
       throw new Error("EngineHost: assistantSessionFor requires opts.db");
@@ -2214,7 +2229,14 @@ export class EngineHost {
     // actor's own default (TKAI-255 review round).
     const { model, spec: modelSpec } = await this.resolveModelForBuild(existing, meta.orgId, {
       userId: principal.type === "user" ? meta.actorUserId : undefined,
+      overrideId,
       ownerTeamId: principal.type === "team" ? principal.id : undefined,
+      assistantDefault: assistant.model ?? undefined,
+    });
+    const reasoning = await this.resolveReasoningForBuild(existing, meta.orgId, {
+      userId: principal.type === "user" ? meta.actorUserId : undefined,
+      ownerTeamId: principal.type === "team" ? principal.id : undefined,
+      assistantDefault: assistant.reasoning ?? undefined,
     });
     const queueMode: "steer" | "followup" = principal.type === "user" ? "steer" : "followup";
     // `principal`, not `meta.actorUserId`: an assistant session belongs to
@@ -2289,6 +2311,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(meta.orgId),
+      ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
       systemPrompt: personaPrefix + orchestratorPersona(principal, ownerDisplayName),
       tools: [...buildMemoryTools(), ...extras.tools],
       skills: extras.skills.length ? extras.skills : undefined,
@@ -2347,7 +2370,7 @@ export class EngineHost {
       // below drops it again if writes are still arriving — bounded
       // staleness instead of unbounded rebuild.
       session.suspendTimers();
-      return this.buildAssistantSession(sessionId, assistantId, meta, epochNow, attempt + 1);
+      return this.buildAssistantSession(sessionId, assistantId, meta, epochNow, attempt + 1, overrideId);
     }
     builtSession = session;
 
@@ -2820,65 +2843,28 @@ export class EngineHost {
       throw err;
     }
     if (!resolved) {
+      // A tier token (xs/s/m/l/xl) failing here means every one of the
+      // tier's targets is inactive (`resolveTier` found no active
+      // provider) — a distinct, actionable case from a genuinely unknown
+      // model id, and one an admin can fix without redeploying anything.
+      if (TIER_SET.has(spec.trim().toLowerCase())) {
+        throw new Error(
+          `EngineHost: no active provider for tier "${spec}" — enable a provider for one of its ` +
+            `targets in Settings → Organization → Models.`,
+        );
+      }
       throw new Error(`EngineHost: unknown model "${spec}" — not in the org catalog or pi-ai registry`);
     }
     return { model: resolved.model, spec: resolved.canonicalId ?? resolved.model.id };
   }
 
   /**
-   * `orgs.modelPreferences`, walked in preference order to find the first
-   * entry backed by an ACTIVE provider, or `undefined` when unset, the host
-   * has no `db`, or every preference's provider is inactive (disabled, or
-   * deleted/unknown for custom namespaces). Uncached — a preferences change
-   * applies on the very next session build (split-settings decision 9).
-   *
-   * Spec: new sessions must never resolve to an inactive provider (llm-
-   * providers design doc decision 6) — disabling the provider behind
-   * `orgPreferences[0]` must fall through to the next preference, not throw.
-   * This only guards the new-session default tier; `overrideId` and the
-   * user's explicit `defaultModel` still resolve straight through to
-   * `resolveModelObject` and throw on a disabled provider, per the spec's
-   * failure semantics for an explicit pick. Restore is untouched — it never
-   * consults preferences at all (persisted model always wins).
-   *
-   * One `listLlmProviders` query total (not one per preference / no full
-   * catalog build), plus one credential read per CUSTOM-namespaced
-   * preference entry (acceptable — preference lists are short and this only
-   * runs at session-build time, never per turn). "Active" mirrors the
-   * catalog's own `resolvable` definition (`services/model-catalog.ts`),
-   * which in turn mirrors `resolveModelSpec`'s throw condition:
-   *   - known kind (anthropic/openai/google), no row → always active
-   *     (zero-config path, same as `resolveModelSpec`'s no-row branch).
-   *   - known kind WITH a row → active iff `row.enabled`. A row with
-   *     neither an org key nor an env key is still "active" here even
-   *     though `resolveModelSpec` now throws `NoCredentialsError` for that
-   *     case — session build goes through `resolveModelObject`, which
-   *     swallows `NoCredentialsError` and returns the attached model, so a
-   *     keyless org still builds; keylessness is a turn-time concern (the
-   *     engine's pre-run release/cap path), not a reason to skip this
-   *     preference entry.
-   *   - custom (`openai_compatible`) row → active iff `row.enabled` AND an
-   *     org credential exists at `llm:{row.id}` — custom providers have NO
-   *     env fallback, so a keyless custom row is exactly the case
-   *     `resolveModelSpec` throws `provider {name} has no API key` for, and
-   *     must not be treated as active here either (this is the key-delete
-   *     bug this fell through: an admin could delete the key backing
-   *     `orgPreferences[0]`, leaving new sessions with no key AND no
-   *     fallback until the array was rewritten).
-   */
-  private async orgPreferredModel(orgId: string): Promise<string | undefined> {
-    if (!this.opts.db) return undefined;
-    const prefs = await getOrgModelPreferences(this.opts.db, orgId);
-    return this.firstActivePreference(orgId, prefs);
-  }
-
-  /**
    * The first entry of `prefs` whose provider is active, or `undefined`.
-   * Shared by the org tier and the team tier of the cascade — both are
-   * defaults imposed on people who did not pick them, so both must fall
-   * through past an inactive provider instead of failing every build
-   * (llm-providers design decision 6). Only the user's own explicit
-   * default resolves straight through and fails loudly.
+   * Used by the team tier of the cascade — a team default is imposed on
+   * people who did not pick it, so it must fall through past an inactive
+   * provider instead of failing every member's build (llm-providers design
+   * decision 6). Only the user's own explicit default resolves straight
+   * through and fails loudly.
    */
   private async firstActivePreference(orgId: string, prefs: string[]): Promise<string | undefined> {
     if (!this.opts.db || prefs.length === 0) return undefined;
@@ -2919,14 +2905,15 @@ export class EngineHost {
 
   /**
    * `teams.default_model` for the team that owns the session being built,
-   * filtered through the same active-provider walk as the org tier — a
-   * team default whose provider was later disabled falls through to the
-   * org preference list instead of failing every member's session build
-   * (members did not pick it and cannot clear it). `undefined` when unset,
-   * inactive, or the host has no `db`. Consulted only for team-owned
-   * sessions (TKAI-255) — a personal session never reads any team's
-   * preference, because a user can belong to several teams and none of
-   * them owns that session. Uncached, same as `userDefaultModel`.
+   * filtered through the same active-provider walk `firstActivePreference`
+   * applies elsewhere — a team default whose provider was later disabled
+   * falls through to the cascade's next tier (`opts.defaultModelId ?? "s"`)
+   * instead of failing every member's session build (members did not pick
+   * it and cannot clear it). `undefined` when unset, inactive, or the host
+   * has no `db`. Consulted only for team-owned sessions (TKAI-255) — a
+   * personal session never reads any team's default, because a user can
+   * belong to several teams and none of them owns that session. Uncached,
+   * same as `userDefaultModel`.
    */
   private async teamDefaultModel(orgId: string, teamId: string): Promise<string | undefined> {
     if (!this.opts.db) return undefined;
@@ -2954,8 +2941,13 @@ export class EngineHost {
    * `overrideId` and the user default — that persisted value already
    * reflects whatever `setModel` (or the original create-time model) set.
    * Only on create does the preference cascade apply (TKAI-255):
-   * `overrideId ?? userDefault ?? teamDefault ?? orgPreferred ?? hardcoded`
-   * — most-specific wins. The tiers are opt-in via `prefs`:
+   * `overrideId ?? assistantDefault ?? childDefault ?? userDefault ?? teamDefault ?? opts.defaultModelId ?? "s"`
+   * — most-specific wins. Org model preferences are gone (superseded by the
+   * per-tier ordered target lists): the final fallback is the tier token
+   * `"s"`, which `resolveModelSpec` resolves through the org's tier map
+   * (`resolveTier` walks that tier's ordered list for the first active
+   * provider), so an org remap of `s` reaches every session that bottoms
+   * out at this fallback. The tiers are opt-in via `prefs`:
    *
    * - `userId` names the person whose personal default may apply. Callers
    *   building a SHARED principal-owned session (team/org assistant, a
@@ -2963,22 +2955,108 @@ export class EngineHost {
    *   touch a shared session must not freeze their personal preference
    *   onto everyone (the resolved model persists, restore-no-clobber).
    * - `ownerTeamId` opts into the team tier for team-owned sessions.
+   * - `assistantDefault` is the assistant row's OWN stored `model` (Task 9,
+   *   model-selector-overhaul). Unlike `userId`, this is principal-scoped,
+   *   not actor-scoped: an assistant's stored model belongs to the
+   *   assistant itself, so passing it for a SHARED team/org assistant is
+   *   correct and does not leak whoever happened to wake the session first
+   *   — every waker sees the same assistant-level pick. It sits right
+   *   after `overrideId` because it is the next most specific choice: a
+   *   caller-supplied explicit override always wins, but absent one, the
+   *   assistant's own configured model outranks every other default tier.
    */
   private async resolveModelForBuild(
     existing: SessionData | null,
     orgId: string,
-    prefs: { userId?: string; overrideId?: string; ownerTeamId?: string; childDefault?: string },
+    prefs: {
+      userId?: string;
+      overrideId?: string;
+      ownerTeamId?: string;
+      childDefault?: string;
+      assistantDefault?: string;
+    },
   ): Promise<BuildModel> {
     if (existing?.model) return this.resolveModelObject(orgId, existing.model);
     const id =
       prefs.overrideId ??
+      prefs.assistantDefault ??
       prefs.childDefault ??
       (prefs.userId ? await this.userDefaultModel(prefs.userId) : undefined) ??
       (prefs.ownerTeamId ? await this.teamDefaultModel(orgId, prefs.ownerTeamId) : undefined) ??
-      (await this.orgPreferredModel(orgId)) ??
       this.opts.defaultModelId ??
-      "claude-haiku-4-5";
+      "s";
     return this.resolveModelObject(orgId, id);
+  }
+
+  /**
+   * `users.default_reasoning` for `userId`, or `undefined` if unset or the
+   * host has no `db`. Mirrors `userDefaultModel`: deliberately uncached, so
+   * a settings change applies on the very next session build.
+   */
+  private async userDefaultReasoning(userId: string): Promise<string | undefined> {
+    if (!this.opts.db) return undefined;
+    const rows = await this.opts.db
+      .select({ defaultReasoning: users.defaultReasoning })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+    return rows[0]?.defaultReasoning ?? undefined;
+  }
+
+  /**
+   * `teams.default_reasoning` for the team that owns the session being
+   * built. Mirrors `teamDefaultModel`, minus the active-provider walk —
+   * reasoning levels aren't provider-scoped, so a plain column read
+   * suffices. `undefined` when unset or the host has no `db`.
+   */
+  private async teamDefaultReasoning(orgId: string, teamId: string): Promise<string | undefined> {
+    if (!this.opts.db) return undefined;
+    const rows = await this.opts.db
+      .select({ defaultReasoning: teams.defaultReasoning })
+      .from(teams)
+      .where(eq(teams.id, teamId))
+      .limit(1);
+    return rows[0]?.defaultReasoning ?? undefined;
+  }
+
+  /**
+   * Resolve the session-default reasoning level to build/restore with.
+   * Same restore-no-clobber constraint as `resolveModelForBuild` above, and
+   * for the same reason: `Session.rehydrate` (`packages/engine/src/session.ts`)
+   * only preserves the persisted `SessionData.reasoning` when the host
+   * passes NO `sampling.reasoning` at all. Once this cascade feeds
+   * `sampling.reasoning` into every create/restoreSession call, a host that
+   * re-resolved a fresh cascade value on every rebuild would silently
+   * clobber an explicit `session.setReasoning(...)` the next time the
+   * session's cache entry is evicted and rebuilt (idle sweep, `evictAll()`
+   * on shutdown). So on restore (`existing` present), the *persisted* value
+   * always wins outright over every cascade tier. Only on create does the
+   * preference cascade apply:
+   * `assistantDefault ?? userDefault ?? teamDefault ?? orgDefault ?? undefined`
+   * — most-specific wins — and the resolved level (if any) is clamped to the
+   * org's cap (`clampToMax`). A cascade-resolved value that isn't a known
+   * level (a stale/invalid column) is treated as unset rather than thrown.
+   *
+   * `userId`/`ownerTeamId` follow the exact same opt-in gating each call
+   * site already uses for `resolveModelForBuild` — see that method's doc
+   * comment for the SHARED-session rationale.
+   */
+  private async resolveReasoningForBuild(
+    existing: SessionData | null,
+    orgId: string,
+    prefs: { userId?: string; ownerTeamId?: string; assistantDefault?: string },
+  ): Promise<string | undefined> {
+    if (existing?.reasoning) return existing.reasoning;
+    const settings = this.opts.db ? await getOrgReasoningSettings(this.opts.db, orgId) : {};
+    const level =
+      prefs.assistantDefault ??
+      (prefs.userId ? await this.userDefaultReasoning(prefs.userId) : undefined) ??
+      (prefs.ownerTeamId ? await this.teamDefaultReasoning(orgId, prefs.ownerTeamId) : undefined) ??
+      settings.default;
+    if (level === undefined || !REASONING_SET.has(level)) return undefined;
+    // Checked against REASONING_SET above, so this narrowing is safe — same
+    // pattern `services/reasoning.ts` uses for the identical cast.
+    return clampToMax(level as ReasoningLevel, settings.max);
   }
 
   /**
@@ -3080,8 +3158,12 @@ export class EngineHost {
       // Child sessions default to the "s" tier when no explicit overrideId
       // was passed (TKAI-285). The tier resolves through the org's tier map
       // to a concrete spec; childDefault sits after overrideId but before
-      // the user/team/org preference cascade.
+      // the user/team defaults and the tier fallback.
       childDefault: opts.modelId ? undefined : "s",
+    });
+    const reasoning = await this.resolveReasoningForBuild(existing, opts.orgId, {
+      userId: opts.owner.type === "user" ? opts.actorUserId : undefined,
+      ownerTeamId: opts.owner.type === "team" ? opts.owner.id : undefined,
     });
 
     const profile = opts.profile ?? "headless";
@@ -3177,6 +3259,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
+      ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
       systemPrompt: codingSystemPrompt({ secretsCli: specProvider !== undefined }),
       tools: childTools.length ? childTools : undefined,
       skills: provisionedExtras.skills.length ? provisionedExtras.skills : undefined,
@@ -3281,6 +3364,10 @@ export class EngineHost {
       overrideId: opts.modelId,
       ownerTeamId: opts.owner.type === "team" ? opts.owner.id : undefined,
     });
+    const reasoning = await this.resolveReasoningForBuild(existing, opts.orgId, {
+      userId: opts.owner.type === "user" ? opts.actorUserId : undefined,
+      ownerTeamId: opts.owner.type === "team" ? opts.owner.id : undefined,
+    });
 
     const sandboxMint = await this.mintSandboxEnv(sessionId, opts.actorUserId, opts.orgId, "headless");
     const credentialResolver = this.buildCredentialResolver(sessionId, opts.actorUserId, opts.orgId, opts.owner.type);
@@ -3314,6 +3401,7 @@ export class EngineHost {
       model,
       modelSpec,
       resolveModel: this.makeResolveModel(opts.orgId),
+      ...(reasoning !== undefined && isReasoningLevel(reasoning) ? { sampling: { reasoning } } : {}),
       systemPrompt: codingSystemPrompt({ secretsCli: false }),
       tools: extras.tools.length ? extras.tools : undefined,
       skills: extras.skills.length ? extras.skills : undefined,

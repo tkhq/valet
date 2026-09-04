@@ -33,8 +33,6 @@ org:
   name: Turnkey
   features:
     organizations: true
-  modelPreferences:
-    - anthropic/claude-opus-4
   bareSkillCommands: true
   members:
     - email: test@valet.test
@@ -90,7 +88,6 @@ describe("parseInstanceConfig", () => {
     });
     expect(cfg.org?.name).toBe("Turnkey");
     expect(cfg.org?.features).toEqual({ organizations: true });
-    expect(cfg.org?.modelPreferences).toEqual(["anthropic/claude-opus-4"]);
     expect(cfg.org?.bareSkillCommands).toBe(true);
     expect(cfg.org?.members).toEqual([{ email: "test@valet.test", role: "admin" }]);
     expect(cfg.teams).toEqual([

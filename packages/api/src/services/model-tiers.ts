@@ -4,7 +4,8 @@
  * A tier (`xs`, `s`, `m`, `l`, `xl`) maps to an ordered list of concrete
  * model specs. Resolution walks the list and returns the first spec whose
  * provider is active — the same active-provider walk `firstActivePreference`
- * in `engine/host.ts` applies to org model preferences.
+ * in `engine/host.ts` applies to the team-default cascade tier. Org model
+ * preferences are removed; these per-tier lists are the org's fallback now.
  *
  * The org's tier map lives in `orgs.model_tiers` (jsonb, nullable). A null
  * column means "use built-in defaults".
@@ -67,9 +68,11 @@ export async function setOrgTierMap(db: AppQueryable, orgId: string, tierMap: Ti
 
 /**
  * Walk a tier's spec list and return the first spec whose provider is active.
- * Returns `undefined` when no active provider exists for any entry.
+ * Returns `undefined` when no active provider exists for any entry — the
+ * host surfaces that case with a corrective, tier-specific error rather
+ * than a generic "unknown model" message.
  *
- * "Active" mirrors the catalog/preference logic in `engine/host.ts`:
+ * "Active" mirrors the catalog/active-provider-walk logic in `engine/host.ts`:
  *   - Known kind with no row → active (zero-config env-key path).
  *   - Known kind with a row → active iff `row.enabled`.
  *   - Custom (`openai_compatible`) → active iff `row.enabled` AND org key
@@ -103,3 +106,4 @@ export async function resolveTier(
   }
   return undefined;
 }
+

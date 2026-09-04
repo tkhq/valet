@@ -270,6 +270,7 @@ export async function createTeam(db: AppDb, opts: CreateTeamOptions): Promise<Te
     externalId: null,
     createdAt: now,
     defaultModel: null,
+    defaultReasoning: null,
   };
 
   try {
@@ -401,6 +402,7 @@ export async function listTeamsForUser(db: AppDb, userId: string): Promise<TeamR
       externalId: teams.externalId,
       createdAt: teams.createdAt,
       defaultModel: teams.defaultModel,
+      defaultReasoning: teams.defaultReasoning,
     })
     .from(teamMembers)
     .innerJoin(teams, eq(teamMembers.teamId, teams.id))
@@ -493,6 +495,7 @@ export async function listTeamsForOrg(db: AppDb, orgId: string): Promise<TeamRow
       externalId: teams.externalId,
       createdAt: teams.createdAt,
       defaultModel: teams.defaultModel,
+      defaultReasoning: teams.defaultReasoning,
     })
     .from(teams)
     .where(eq(teams.orgId, orgId))

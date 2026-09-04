@@ -36,6 +36,10 @@ import {
 import { assistantOwner, canAdministerAssistantOwner, canViewAssistantOwner } from "../assistants/access.js";
 import { readOwnerFilter } from "./_owner-filter.js";
 import { listTeamsForUser } from "../services/teams.js";
+import { assertModelSelectable } from "../services/approved-models.js";
+import { assertReasoningSelectable } from "../services/reasoning.js";
+import { validateDefaultModelId } from "../services/model-catalog.js";
+import { isOrgAdminUser } from "./_org-admin.js";
 import type {
   AssistantOwner,
   CreateAssistantRequest,
@@ -149,13 +153,24 @@ assistantsRouter.patch("/:id", async (c) => {
   }
   const personaErr = validateProfilePatch(body);
   if (personaErr) return c.json({ error: personaErr }, 400);
+  if (body.model !== undefined && body.model !== null && typeof body.model !== "string") {
+    return c.json({ error: "model must be a string, or null to clear it." }, 400);
+  }
+  if (body.reasoning !== undefined && body.reasoning !== null && typeof body.reasoning !== "string") {
+    return c.json({ error: "reasoning must be a string, or null to clear it." }, 400);
+  }
   if (
     body.name === undefined &&
     body.isDefault === undefined &&
     body.personality === undefined &&
-    body.behavior === undefined
+    body.behavior === undefined &&
+    body.model === undefined &&
+    body.reasoning === undefined
   ) {
-    return c.json({ error: "Send a name, isDefault: true, personality, or behavior." }, 400);
+    return c.json(
+      { error: "Send a name, isDefault: true, personality, behavior, model, or reasoning." },
+      400,
+    );
   }
 
   const row = await loadAssistant(db, c.req.param("id"));
@@ -164,11 +179,36 @@ assistantsRouter.patch("/:id", async (c) => {
     return c.json({ error: "assistant not found" }, 404);
   }
 
+  // `patch` diverges from `body` only for `reasoning`: normalized (trim +
+  // lowercase) before validation and storage, so "Medium" and "medium"
+  // store identically (precedent: routes/org-reasoning.ts).
+  const patch: PatchAssistantRequest = { ...body };
+  if (body.model !== undefined && body.model !== null) {
+    // Catalog-existence check first (same call shape as `me.ts`/`teams.ts`
+    // for this field class): without it, a typo'd model id 200s here and
+    // only surfaces as an uncaught error the next time the assistant's
+    // session builds (`resolveModelObject`'s "unknown model" throw has no
+    // catch between it and `ensureAssistantSession`). `catalogValidIds`
+    // already includes the five tier tokens, so "l" etc. still pass.
+    const { engineCredentials } = c.var.providers;
+    const invalid = await validateDefaultModelId(db, engineCredentials, user.orgId, body.model);
+    if (invalid) return c.json({ error: invalid }, 400);
+    const isAdmin = await isOrgAdminUser(c);
+    const err = await assertModelSelectable(db, user.orgId, isAdmin, body.model);
+    if (err) return c.json({ error: err }, 400);
+  }
+  if (body.reasoning !== undefined && body.reasoning !== null) {
+    const normalizedReasoning = body.reasoning.trim().toLowerCase();
+    const err = await assertReasoningSelectable(db, user.orgId, normalizedReasoning);
+    if (err) return c.json({ error: err }, 400);
+    patch.reasoning = normalizedReasoning;
+  }
+
   try {
     // applyProfilePatch owns the changed-values eviction rule (service.ts) —
     // cache-only, shared with the orchestrator /info route and the
     // assistants.* actions.
-    const updated = await applyProfilePatch(db, row, body, (sid) => engineHost.evictCache(sid));
+    const updated = await applyProfilePatch(db, row, patch, (sid) => engineHost.evictCache(sid));
     const response: PatchAssistantResponse = toAssistantSummary(updated);
     return c.json(response);
   } catch (err) {

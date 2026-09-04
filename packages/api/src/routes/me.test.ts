@@ -5,6 +5,8 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { users } from "../schema/index.js";
+import { setApprovedModels } from "../services/approved-models.js";
+import { setOrgReasoningSettings } from "../services/reasoning.js";
 import type { MeResponse } from "../wire/types.js";
 
 let api: TestApi | undefined;
@@ -165,6 +167,89 @@ describe("PATCH /api/me", () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  it("400s a catalog-valid but unapproved defaultModel for a plain member; org admin bypasses", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
+    try {
+      api = await bootTestApi();
+      // Approve only opus; haiku is catalog-valid but not on the list.
+      await setApprovedModels(api.providers.db, "local-org", ["anthropic/claude-opus-4-7"]);
+
+      const memberRes = await fetch(`${api.baseUrl}/api/me`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", "x-valet-test-user-id": "test-member" },
+        body: JSON.stringify({ defaultModel: "anthropic/claude-haiku-4-5" }),
+      });
+      expect(memberRes.status).toBe(400);
+      const body = (await memberRes.json()) as { error: string };
+      expect(body.error).toMatch(/approved list/);
+
+      // The default identity (`local-user`) is an org admin and bypasses the gate.
+      const adminRes = await fetch(`${api.baseUrl}/api/me`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ defaultModel: "anthropic/claude-haiku-4-5" }),
+      });
+      expect(adminRes.status).toBe(200);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("accepts a defaultReasoning level within the org cap, normalizing case", async () => {
+    api = await bootTestApi();
+    await setOrgReasoningSettings(api.providers.db, "local-org", { max: "high" });
+
+    const res = await fetch(`${api.baseUrl}/api/me`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ defaultReasoning: "Medium" }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as MeResponse;
+    expect(body.defaultReasoning).toBe("medium");
+  });
+
+  it("400s a defaultReasoning level exceeding the org cap", async () => {
+    api = await bootTestApi();
+    await setOrgReasoningSettings(api.providers.db, "local-org", { max: "medium" });
+
+    const res = await fetch(`${api.baseUrl}/api/me`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ defaultReasoning: "high" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/exceeds the org max/);
+  });
+
+  it("400s an unknown defaultReasoning level", async () => {
+    api = await bootTestApi();
+
+    const res = await fetch(`${api.baseUrl}/api/me`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ defaultReasoning: "not-a-level" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/Unknown reasoning level/);
+  });
+
+  it("clears defaultReasoning when passed null, even above the org cap", async () => {
+    api = await bootTestApi();
+    await setOrgReasoningSettings(api.providers.db, "local-org", { max: "minimal" });
+
+    const res = await fetch(`${api.baseUrl}/api/me`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ defaultReasoning: null }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as MeResponse;
+    expect(body.defaultReasoning).toBeNull();
   });
 
   it("rejects JSON-valid non-object bodies with 400, not 500", async () => {

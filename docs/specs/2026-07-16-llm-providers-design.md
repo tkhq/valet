@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-16
 **Status:** Implemented
-**Scope:** Org-level LLM provider configuration: BYO API keys for known providers (Anthropic/OpenAI/Google), custom OpenAI-compatible providers (base URL + key + models), an org-scoped model catalog with ordered default preferences, and the resolution bridge that threads provider/key/baseUrl into pi-ai per turn. Resolution: org key > deployment env fallback.
+**Scope:** Org-level LLM provider configuration: BYO API keys for known providers (Anthropic/OpenAI/Google), custom OpenAI-compatible providers (base URL + key + models), an org-scoped model catalog, and the resolution bridge that threads provider/key/baseUrl into pi-ai per turn. Resolution: org key > deployment env fallback. (The ordered default-preferences list this scope line originally named is removed — see "Extension: org model preferences removed" below.)
 
 ## Context
 
@@ -21,14 +21,14 @@
 3. **The org model catalog replaces the static `/api/models`.** Returned catalog = union of: pi-ai registry models for each *enabled* known provider (with contextWindow/pricing from the registry) + custom providers' declared models. Custom-provider model entry is manual, with a **discovery probe** ("fetch models") that calls the provider's `/v1/models` and offers the result as checkboxes — a convenience, not a dependency (some gateways don't implement it). Providers with no resolvable key (no org key AND no deployment env var) are listed as configured-but-inactive and their models excluded from pickers.
 
 4. **Resolution bridge (the core seam).** `resolveModel` becomes catalog-aware: parse namespace → look up provider row → build the pi-ai `Model` (registry lookup for known kinds; synthesized `Model` with `baseUrl` for openai_compatible) → resolve the key: **org credential first, deployment env second** (`ANTHROPIC_API_KEY`/`OPENAI_API_KEY`/`GEMINI_API_KEY` per pi-ai's env map; custom providers have no env fallback). The engine's model-resolution seam widens from `resolveModel(id) → Model` to `resolveModel(id) → { model, apiKey? }` (additive for the host-provided resolver; the engine's internal fallback returns no key, preserving env behavior), and `thread.ts` passes the key through as pi-ai's per-call `options.apiKey`. Keys are resolved **per turn** (no caching beyond the request) so a rotated key applies immediately.
-5. **Ordered org model preferences (legacy parity).** `orgs` gains `modelPreferences: string[]` (namespaced ids, admin-ordered). Semantics: first entry = org default model for new sessions; the list defines picker ordering (catalog models not listed sort after, alphabetically). Precedence for a new session: explicit override > user `defaultModel` > org preference #1 > built-in default. Restore keeps the persisted session model always (existing constraint).
+5. **Ordered org model preferences (legacy parity).** `orgs` gains `modelPreferences: string[]` (namespaced ids, admin-ordered). Semantics: first entry = org default model for new sessions; the list defines picker ordering (catalog models not listed sort after, alphabetically). Precedence for a new session: explicit override > user `defaultModel` > org preference #1 > built-in default. Restore keeps the persisted session model always (existing constraint). **Removed 2026-09-03** — see "Extension: org model preferences removed" below.
 
-6. **Failure semantics.** A turn whose model's provider is disabled/deleted or key-less fails fast with a clear engine error (surfaced like model-resolution errors today), and the session can be switched via the existing `PATCH /sessions/:id` model route; new sessions never resolve to inactive providers. Deleting a provider row revokes its credential and is refused while it's the org default (`modelPreferences[0]`). Custom-provider probe failures surface verbatim in the settings UI (this is an admin tool; raw errors are correct).
+6. **Failure semantics.** A turn whose model's provider is disabled/deleted or key-less fails fast with a clear engine error (surfaced like model-resolution errors today), and the session can be switched via the existing `PATCH /sessions/:id` model route; new sessions never resolve to inactive providers. Deleting a provider row revokes its credential and was refused while it was the org default (`modelPreferences[0]`) — that guard is gone with the preferences column it protected (see the Extension below).
 
 7. **UI: settings → Organization → Models (admin-gated).**
    - Known providers: card per provider — key entry (write-only field, last-4 display), enabled toggle, env-fallback indicator ("using deployment key").
    - Custom providers: CRUD — name, baseUrl, key, model list editor + discovery probe, test button (1-token completion round-trip, result shown).
-   - Model preferences: drag-ordered list built from the active catalog; first = default (badge).
+   - Model preferences: drag-ordered list built from the active catalog; first = default (badge). (Removed 2026-09-03 — the model tier editor replaced this section; see the extension below.)
    - User settings `defaultModel` picker and the session model switcher consume the org catalog unchanged (they already hit `/api/models`).
 
 8. **Interactions with other in-flight specs.** Usage/telemetry's cost math reads pricing from this catalog (custom-provider `pricing` optional → cost absent, tokens-only, per that spec's rule). The policy engine is orthogonal (LLM calls are not plugin actions). Nothing here touches sandbox specs.
@@ -51,13 +51,13 @@ With only deployment env `ANTHROPIC_API_KEY`: everything behaves as today (env-f
 - **Canonical-id echo form.** The resolver echoes the caller's namespace form: a bare spec (`claude-haiku-4-5`) stays bare, a namespaced spec (`anthropic/claude-haiku-4-5`, `openai/gpt-4.1`, `{rowId}/{modelId}`) stays namespaced. OpenAI/Google/custom models are only ever reachable namespaced (no bare form exists for them). Because the engine persists the returned `model.id` and feeds it back into the resolver on every subsequent turn, this makes resolution idempotent on its own output by construction — `resolve(resolve(spec).model.id)` yields the same provider and key, pinned by a dedicated round-trip test per kind.
 - **Compaction's summarizer honors the turn key.** `Thread.summarize()` (`packages/engine/src/thread.ts`) gained `apiKey: this.turnApiKey` at its `completeSimple` call site — a sanctioned engine edit beyond Task 1's original scope, needed because compaction runs *inside* a claimed turn and would otherwise silently fall back to the deployment env key even for a BYO-only custom provider.
 - **`/api/models` excludes inactive entries rather than flagging them.** `buildOrgCatalog` returns the full set (active + inactive, for admin/debug visibility); the public `/api/models` route filters to `active` only before responding — a disabled provider or a keyless known-kind never appears in a picker, it isn't shown-but-disabled. Every catalog entry's `id` (including Anthropic) is namespaced (`anthropic/claude-haiku-4-5`); the bare form is validation/persistence-only back-compat (`catalogValidIds` accepts both, session/user `defaultModel` fields may still hold the bare form).
-- **Preferences write route:** `PUT /api/org/llm-providers/preferences` (under the provider CRUD router), not a field on `PATCH /api/org`. It validates every submitted id against the *active* catalog set on every write (`catalogValidIds`) — an id that names a disabled provider or an inactive custom model is rejected with 400, even if it was valid when originally set.
-- **New-session precedence has a 5th tier.** `EngineHost.resolveModelForBuild`'s chain is `overrideId ?? userDefaultModel ?? firstActiveOrgPreference ?? this.opts.defaultModelId ?? "claude-haiku-4-5"` — the design doc's decision 5 omitted the `EngineHostOptions.defaultModelId` tier (used by `VALET_MODEL`/dogfood overrides). It defaults to the same literal, so behavior for hosts that don't set it is unchanged.
-- **`orgPreferences` fall-through past inactive entries (new-session tier only).** `EngineHost.orgPreferredModel` walks `orgs.modelPreferences` in order and returns the first entry whose provider is active (known-kind namespace with no row, or a row with `enabled: true`); it returns `undefined` — falling through to `defaultModelId`/the hardcoded default — when every preference is inactive. This satisfies decision 6/the exit criteria's "new sessions never resolve to inactive providers": disabling the provider behind `orgPreferences[0]` now falls back to `orgPreferences[1]`, etc., instead of throwing. The check is a single `listLlmProviders` query (`enabled` only, no per-preference credential probe), so it adds no N+1 relative to the resolution the build already does. This tier is new-session only: `overrideId` and the user's explicit `defaultModel` still resolve straight through and throw on a disabled provider (an explicit pick should fail loudly), and restore never consults preferences at all — a session persisted on a model whose provider is later disabled still throws on restore/next turn, per spec.
+- **Preferences write route (removed 2026-09-03).** `PUT /api/org/llm-providers/preferences` validated every submitted id against the *active* catalog set on every write (`catalogValidIds`). The route, its GET twin, and the delete-refused-while-default guard on `DELETE /:id`/`DELETE /:id/key` are all gone with `orgs.model_preferences` — see the Extension below.
+- **New-session precedence has a 5th tier (superseded 2026-09-03).** `EngineHost.resolveModelForBuild`'s chain was `overrideId ?? userDefaultModel ?? firstActiveOrgPreference ?? this.opts.defaultModelId ?? "claude-haiku-4-5"` — the design doc's decision 5 omitted the `EngineHostOptions.defaultModelId` tier (used by `VALET_MODEL`/dogfood overrides). It defaulted to the same literal, so behavior for hosts that didn't set it was unchanged. The current chain is in the Extension below.
+- **`orgPreferences` fall-through past inactive entries (removed 2026-09-03).** `EngineHost.orgPreferredModel` walked `orgs.modelPreferences` in order and returned the first entry whose provider was active, falling through to `defaultModelId`/the hardcoded default when every preference was inactive — satisfying decision 6/the exit criteria's "new sessions never resolve to inactive providers." The equivalent behavior for the current tier-map fallback is `resolveTier`'s own active-provider walk — see the Extension below.
 - **Known latents, left deliberately unfixed this pass:**
   - **Role-model override keeps the base-spec key.** `applyRoleForTurn` switches `agent.state.model` via the engine's internal `resolveRoleModel`, not the host resolver; `turnApiKey` stays whatever the base spec resolved to. A role that overrides to a different provider than the turn's base model runs under the wrong key.
   - **Probe/test `baseUrl` is admin-trusted**, not validated against an allowlist (SSRF-shaped surface, mitigated only by the route being org-admin-gated) — flagged in a code comment at the call site, not hardened this pass.
-- **Web: model-preference reordering uses up/down buttons**, not drag-and-drop — no dnd dependency exists in the repo, and the brief didn't require adding one.
+- **Web: model-preference reordering used up/down buttons**, not drag-and-drop — no dnd dependency exists in the repo, and the brief didn't require adding one. The pane itself (`ModelPreferencesSection`) is deleted as of 2026-09-03; `ModelTiersSection` reuses the same up/down/remove row pattern for tier targets.
 
 ## Extension: OpenRouter as a known kind (2026-07-28)
 
@@ -99,13 +99,15 @@ pi-ai's env-key map). Deviations from the other known kinds:
 
 ## Extension: team default model (2026-09-01, TKAI-255)
 
-Teams gain a nullable `teams.default_model`, the team-tier analog of `users.default_model`. The new-session chain in `EngineHost.resolveModelForBuild` becomes:
+Teams gain a nullable `teams.default_model`, the team-tier analog of `users.default_model`. The new-session chain in `EngineHost.resolveModelForBuild` became (2026-09-01):
 
 `overrideId ?? userDefaultModel ?? teamDefaultModel ?? firstActiveOrgPreference ?? this.opts.defaultModelId ?? "claude-haiku-4-5"`
 
+**Superseded 2026-09-03** — `firstActiveOrgPreference` and the hardcoded literal are both gone; see "Extension: org model preferences removed" below for the current chain.
+
 - **The team tier applies to team-owned sessions only.** A personal session never reads any team's preference: a user can belong to several teams, and none of them owns that session. The owning team reaches the resolver as `SessionMeta.ownerTeamId` (from the app row's `owner_type`/`owner_id` via `loadSessionMeta`, including the orchestrator's hand-built meta sources), as the principal for team assistant sessions, and as `opts.owner` for child and workflow builds.
 - **User beats team, but only on sessions that user starts.** The org sets the default; the team overrides the org; the member overrides both for their own sessions. A SHARED principal-owned session (a team or org assistant, a team-owned child or workflow run) skips the user tier entirely: its resolved model persists (restore-no-clobber), so the first member to touch it would otherwise freeze their personal preference onto every other member.
-- **Like the org tier, the team tier walks past inactive providers.** A team default is imposed on members who did not pick it and cannot clear it, so a default whose provider was later disabled falls through to the org preference list (decision 6) instead of failing every member's build. Only the user's own explicit default resolves straight through and fails loudly.
+- **Like the org tier, the team tier walks past inactive providers.** A team default is imposed on members who did not pick it and cannot clear it, so a default whose provider was later disabled falls through to the cascade's next tier instead of failing every member's build (originally the org preference list per decision 6; now the `"s"` tier fallback — see the Extension below). Only the user's own explicit default resolves straight through and fails loudly.
 - **Write path:** `PATCH /api/teams/:id { defaultModel }`, whitelist-strict like `PATCH /api/me`, validated via the shared `validateDefaultModelId` (`services/model-catalog.ts`), gated by `canAdministerTeam`. Not origin-gated: an IDP mirror's membership belongs to the identity provider, but `default_model` is Valet-local state no sync writes.
 - **Restore is unchanged:** the persisted session model always wins (restore-no-clobber).
 - **Ownership stays per-field.** `SessionMeta.ownerTeamId` feeds the model cascade ONLY. The engine principal for a team-owned `buildSession` session remains `{ type: "user" }` (pre-existing), so credentials and skills stay user-scoped; do not read `ownerTeamId` as the session's principal.
@@ -158,6 +160,35 @@ bundled catalog as the floor.
   last error. The catalog degrades silently by design, so this route is how an
   operator sees a stuck check. The admin LLM-providers UI does not render it
   yet — deferred to keep this change reviewable.
+
+## Extension: org model preferences removed (2026-09-03, model-selector-overhaul follow-up)
+
+Model size tiers (`docs/specs/2026-09-03-model-selector-overhaul-design.md`,
+TKAI-285) replace `orgs.model_preferences` as the org's fallback. This
+removes every piece this doc described for it:
+
+- `orgs.model_preferences`, `getOrgModelPreferences`/`setOrgModelPreferences`,
+  `GET`/`PUT /api/org/llm-providers/preferences`, `ModelPreferencesSection`
+  (web), and the delete-refused-while-default guard on `DELETE
+  /api/org/llm-providers/:id` and `.../:id/key`.
+- The catalog no longer preference-sorts. `buildOrgCatalog` returns entries
+  in construction order (active before inactive); the "not listed sort
+  after, alphabetically" rule in decision 5 no longer applies.
+
+The new-session model chain (`EngineHost.resolveModelForBuild`) is:
+
+`existing?.model ?? overrideId ?? assistantDefault ?? childDefault ??
+userDefault ?? teamDefault ?? opts.defaultModelId ?? "s"`
+
+The final fallback is the tier token `"s"`, not a hardcoded model id.
+`resolveModelSpec` resolves it through the org's tier map exactly like an
+explicit tier pick, and `resolveTier` is the walk-past-inactive-entries
+logic that `orgPreferredModel` used to do — an org remap of its `s` tier
+reaches every session that bottoms out at this fallback. When every one of
+a tier's targets is inactive, the host raises a corrective error naming
+the fix (`no active provider for tier "s" — enable a provider for one of
+its targets in Settings → Organization → Models`) instead of falling
+through further — there is no fallback beyond the tier itself.
 
 ## Non-goals
 

@@ -15,7 +15,7 @@ export interface ModelOption {
   label: string;
   description: string;
   /** Rough indicator for sorting / grouping. Lower = faster/cheaper. */
-  tier: "fast" | "balanced" | "powerful";
+  speedClass: "fast" | "balanced" | "powerful";
 }
 
 export const MODEL_CATALOG: readonly ModelOption[] = [
@@ -23,25 +23,25 @@ export const MODEL_CATALOG: readonly ModelOption[] = [
     id: "claude-haiku-4-5",
     label: "Haiku 4.5",
     description: "Fastest. Cheap. Good for everyday tasks and tool loops.",
-    tier: "fast",
+    speedClass: "fast",
   },
   {
     id: "claude-sonnet-4-5",
     label: "Sonnet 4.5",
     description: "Balanced quality and speed. Good default for most work.",
-    tier: "balanced",
+    speedClass: "balanced",
   },
   {
     id: "claude-sonnet-4-6",
     label: "Sonnet 4.6",
     description: "Higher quality than 4.5; same shape, slightly slower.",
-    tier: "balanced",
+    speedClass: "balanced",
   },
   {
     id: "claude-opus-4-7",
     label: "Opus 4.7",
     description: "Strongest reasoning. Slower and pricier; pick for hard work.",
-    tier: "powerful",
+    speedClass: "powerful",
   },
 ];
 

@@ -18,30 +18,48 @@
  *     from the row's own declared `models` array, resolvable ONLY via an
  *     org credential (no env fallback for custom providers).
  *
- * Ordering: entries the org has opted into (`orgs.modelPreferences`, most-
- * preferred first) sort first in that order, then the remaining active
- * entries sort alphabetically by (namespaced) id. Inactive entries
- * (disabled provider, or provider/row with no resolvable key) are appended
- * last — callers that only want the picker-visible set filter on `active`
- * (see `routes/models.ts`); `catalogValidIds` below already does this
- * filtering for validation call sites.
+ * Ordering: entries keep their natural construction order (known kinds in
+ * `KNOWN_KINDS` order, then OpenRouter, then custom `openai_compatible`
+ * rows). Inactive entries (disabled provider, or provider/row with no
+ * resolvable key) are appended last — callers that only want the
+ * picker-visible set filter on `active` (see `routes/models.ts`);
+ * `catalogValidIds` below already does this filtering for validation call
+ * sites. The per-tier ordered target lists (`services/model-tiers.ts`) are
+ * the org-level fallback chain now; the catalog itself carries no
+ * preference order.
  *
  * Model-id namespacing mirrors `services/llm-providers.ts`:
  * `{providerKindOrRowId}/{modelId}`; bare ids (no `/`) are back-compat for
  * Anthropic. `catalogValidIds` returns both forms for active Anthropic
- * entries so `PATCH /api/me` and the preferences route can validate either
- * shape against one set.
+ * entries so `PATCH /api/me` and other model-accepting routes can validate
+ * either shape against one set.
  */
 import { getEnvApiKey } from "@earendil-works/pi-ai/compat";
+import type { ThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
 import { registryModels } from "./model-registry.js";
 import type { CredentialOwner, CredentialStore } from "@valet/engine";
 import type { AppQueryable } from "../lib/drizzle.js";
-import { getOrgModelPreferences } from "./org.js";
 import { isKnownProviderKind, listLlmProviders, parseModelId, providerNamespace } from "./llm-providers.js";
 import { curatedOpenrouterModels, openrouterRegistry, toProviderModel } from "./openrouter.js";
 import type { LlmProviderModel } from "../schema/index.js";
 import type { ModelInfo } from "../wire/types.js";
 import { TIER_TOKENS } from "./model-tiers.js";
+import { getApprovedModels, isApproved } from "./approved-models.js";
+
+/** Canonical display/selection order for thinking levels — narrowest to
+ * broadest effort. `"off"` is never a selectable level, so it's excluded
+ * here rather than filtered out at every call site. */
+const THINKING_LEVEL_ORDER: readonly ThinkingLevel[] = ["minimal", "low", "medium", "high", "xhigh", "max"];
+
+/** The levels a reasoning model actually supports, in canonical order.
+ * `undefined` when the model doesn't reason at all, or the registry has no
+ * `thinkingLevelMap` for it (nothing to report). Only keys PRESENT in the
+ * map are considered — a `null` value marks a level explicitly unsupported,
+ * and a missing key is not claimed as supported either. */
+function thinkingLevelsFor(reasoning: boolean | undefined, map: ThinkingLevelMap | undefined): string[] | undefined {
+  if (!reasoning || !map) return undefined;
+  return THINKING_LEVEL_ORDER.filter((level) => map[level] !== undefined && map[level] !== null);
+}
 
 export type CatalogEntry = ModelInfo & { resolvable: boolean };
 
@@ -63,9 +81,9 @@ const KNOWN_KIND_LABEL: Record<KnownCatalogKind, string> = {
 /** True when an org credential exists at `llm:{rowId}` — the sole
  * resolvability signal for a custom (`openai_compatible`) row (no env
  * fallback, mirrors `resolveModelSpec`'s throw condition). Exported so
- * `engine/host.ts`'s `orgPreferredModel` can reuse this exact check instead
- * of re-deriving "is this row usable" logic that could drift from the
- * catalog's own `active` definition. */
+ * `engine/host.ts`'s `firstActivePreference` can reuse this exact check
+ * instead of re-deriving "is this row usable" logic that could drift from
+ * the catalog's own `active` definition. */
 export async function hasOrgKey(credentials: CredentialStore, orgId: string, rowId: string): Promise<boolean> {
   const owner: CredentialOwner = { type: "org", id: orgId };
   const stored = await credentials.get(owner, `llm:${rowId}`);
@@ -79,47 +97,35 @@ function knownKindEntries(
   resolvable: boolean,
   providerId: string,
   providerName: string,
+  approvedList: string[] | null,
 ): CatalogEntry[] {
-  return registryModels(kind).map((m) => ({
-    id: `${namespace}/${m.id}`,
-    name: m.name,
-    contextWindow: m.contextWindow,
-    reasoning: m.reasoning,
-    providerId,
-    providerKind: kind,
-    providerName,
-    active,
-    pricing: { input: m.cost.input, output: m.cost.output },
-    resolvable,
-  }));
+  return registryModels(kind).map((m) => {
+    const id = `${namespace}/${m.id}`;
+    return {
+      id,
+      name: m.name,
+      contextWindow: m.contextWindow,
+      reasoning: m.reasoning,
+      providerId,
+      providerKind: kind,
+      providerName,
+      active,
+      pricing: { input: m.cost.input, output: m.cost.output },
+      resolvable,
+      approved: isApproved(approvedList, id),
+      thinkingLevels: thinkingLevelsFor(m.reasoning, m.thinkingLevelMap),
+    };
+  });
 }
 
-/** A preference entry matches a catalog entry either by its full namespaced
- * id, or (for Anthropic entries only) by the bare model id — bare
- * preference ids are back-compat and mean Anthropic (`parseModelId`,
- * shared with `services/llm-providers.ts`'s delete-guard/preferences
- * logic, is the single source of truth for that rule). Returns the
- * matching index in `modelPreferences`, or -1 when unmatched. */
-function preferenceIndex(entry: CatalogEntry, modelPreferences: string[]): number {
-  const namespacedIdx = modelPreferences.indexOf(entry.id);
-  if (namespacedIdx !== -1) return namespacedIdx;
-  const { namespace, modelId } = parseModelId(entry.id);
-  if (namespace !== "anthropic") return -1;
-  return modelPreferences.findIndex((p) => parseModelId(p).namespace === "anthropic" && parseModelId(p).modelId === modelId);
-}
-
-function orderEntries(entries: CatalogEntry[], modelPreferences: string[]): CatalogEntry[] {
+/** Active entries keep their natural construction order; inactive entries
+ * (disabled provider, or no resolvable key) sort after them, also in
+ * construction order. No preference reordering — the org's per-tier target
+ * lists are the fallback chain now, not the catalog's own order. */
+function orderEntries(entries: CatalogEntry[]): CatalogEntry[] {
   const active = entries.filter((e) => e.active);
   const inactive = entries.filter((e) => !e.active);
-
-  const preferred = active
-    .filter((e) => preferenceIndex(e, modelPreferences) !== -1)
-    .sort((a, b) => preferenceIndex(a, modelPreferences) - preferenceIndex(b, modelPreferences));
-  const rest = active
-    .filter((e) => preferenceIndex(e, modelPreferences) === -1)
-    .sort((a, b) => a.id.localeCompare(b.id));
-
-  return [...preferred, ...rest, ...inactive];
+  return [...active, ...inactive];
 }
 
 /**
@@ -129,7 +135,9 @@ function orderEntries(entries: CatalogEntry[], modelPreferences: string[]): Cata
  */
 export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialStore, orgId: string): Promise<CatalogEntry[]> {
   const rows = await listLlmProviders(db, orgId);
-  const modelPreferences = await getOrgModelPreferences(db, orgId);
+  // Fetched once per build (not per entry) — every entry's `approved` flag
+  // is derived from this same snapshot.
+  const approvedList = await getApprovedModels(db, orgId);
 
   const entries: CatalogEntry[] = [];
 
@@ -139,7 +147,7 @@ export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialS
       const orgKey = await hasOrgKey(credentials, orgId, row.id);
       const resolvable = orgKey || Boolean(getEnvApiKey(kind));
       const active = row.enabled && resolvable;
-      entries.push(...knownKindEntries(kind, providerNamespace(row), active, resolvable, row.id, row.name));
+      entries.push(...knownKindEntries(kind, providerNamespace(row), active, resolvable, row.id, row.name, approvedList));
     } else {
       // No row for this kind — zero-config back-compat: synthesize a
       // registry entry only when the deployment env can resolve a key for
@@ -149,7 +157,7 @@ export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialS
       // `providerNamespace` would give a known-kind row).
       const envKey = getEnvApiKey(kind);
       if (!envKey) continue;
-      entries.push(...knownKindEntries(kind, kind, true, true, kind, KNOWN_KIND_LABEL[kind]));
+      entries.push(...knownKindEntries(kind, kind, true, true, kind, KNOWN_KIND_LABEL[kind], approvedList));
     }
   }
 
@@ -185,8 +193,9 @@ export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialS
     for (const sel of selection ?? []) {
       const reg = registry.get(sel.id);
       const m = reg ? toProviderModel(reg) : sel;
+      const id = `${namespace}/${m.id}`;
       entries.push({
-        id: `${namespace}/${m.id}`,
+        id,
         name: m.name,
         contextWindow: m.contextWindow,
         reasoning: reg?.reasoning,
@@ -196,6 +205,8 @@ export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialS
         active,
         pricing: m.pricing,
         resolvable,
+        approved: isApproved(approvedList, id),
+        thinkingLevels: thinkingLevelsFor(reg?.reasoning, reg?.thinkingLevelMap),
       });
     }
   }
@@ -204,8 +215,9 @@ export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialS
     const resolvable = await hasOrgKey(credentials, orgId, row.id);
     const active = row.enabled && resolvable;
     for (const m of row.models) {
+      const id = `${providerNamespace(row)}/${m.id}`;
       entries.push({
-        id: `${providerNamespace(row)}/${m.id}`,
+        id,
         name: m.name,
         contextWindow: m.contextWindow,
         providerId: row.id,
@@ -214,17 +226,22 @@ export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialS
         active,
         pricing: m.pricing,
         resolvable,
+        approved: isApproved(approvedList, id),
+        // No pi-ai registry entry exists for a custom row's declared model
+        // (there's nothing upstream to look reasoning up against), so it
+        // never has a thinkingLevels list.
       });
     }
   }
 
-  return orderEntries(entries, modelPreferences);
+  return orderEntries(entries);
 }
 
 /**
- * Set of ids valid for `defaultModel`/preferences validation — ACTIVE
- * entries only. Anthropic entries contribute both their namespaced id
- * (`anthropic/x`) and the bare back-compat id (`x`).
+ * Set of ids valid for model-field validation (`defaultModel`, tier
+ * targets, assistant model, approved-models entries) — ACTIVE entries only.
+ * Anthropic entries contribute both their namespaced id (`anthropic/x`) and
+ * the bare back-compat id (`x`).
  */
 export function catalogValidIds(entries: CatalogEntry[]): Set<string> {
   const ids = new Set<string>();

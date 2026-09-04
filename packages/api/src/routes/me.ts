@@ -6,13 +6,14 @@
  * membership row (shouldn't happen outside tests, but the query doesn't
  * assume it) reads as `"member"`.
  *
- * `PATCH` accepts a strict whitelist (`name`, `avatarUrl`, `defaultModel`);
+ * `PATCH` accepts a strict whitelist (`name`, `avatarUrl`, `defaultModel`, `defaultReasoning`);
  * any other key 400s rather than being silently ignored, so a typo'd field
  * name in a client doesn't quietly no-op. `defaultModel` (when non-null) is
  * validated against the org model catalog's active id set — the same set
  * `/api/models` reports (bare Anthropic ids remain valid back-compat, see
  * `services/model-catalog.ts`'s `catalogValidIds`) — and `null` clears the
- * override back to the host default.
+ * override back to the host default. `defaultReasoning` follows the same
+ * null-clears pattern.
  */
 import { Hono } from "hono";
 import { eq, and } from "drizzle-orm";
@@ -21,11 +22,14 @@ import type { AppDb } from "../lib/drizzle.js";
 import { requireUser } from "../middleware/auth.js";
 import { orgMembers, users } from "../schema/index.js";
 import { validateDefaultModelId } from "../services/model-catalog.js";
+import { isOrgAdminUser } from "./_org-admin.js";
+import { assertModelSelectable } from "../services/approved-models.js";
+import { assertReasoningSelectable } from "../services/reasoning.js";
 import type { MeResponse, PatchMeResponse } from "../wire/types.js";
 
 export const meRouter = new Hono<AppEnv>();
 
-const PATCH_FIELDS = new Set(["name", "avatarUrl", "defaultModel"]);
+const PATCH_FIELDS = new Set(["name", "avatarUrl", "defaultModel", "defaultReasoning"]);
 
 async function loadMeResponse(
   db: AppDb,
@@ -51,6 +55,7 @@ async function loadMeResponse(
     orgId: user.orgId,
     orgRole: membership?.role ?? "member",
     defaultModel: row.defaultModel,
+    defaultReasoning: row.defaultReasoning ?? null,
   };
 }
 
@@ -84,14 +89,14 @@ meRouter.patch("/", async (c) => {
   const unknownFields = Object.keys(raw).filter((k) => !PATCH_FIELDS.has(k));
   if (unknownFields.length > 0) {
     return c.json(
-      { error: `unknown field(s): ${unknownFields.join(", ")}. Send only name, avatarUrl, or defaultModel.` },
+      { error: `unknown field(s): ${unknownFields.join(", ")}. Send only name, avatarUrl, defaultModel, or defaultReasoning.` },
       400,
     );
   }
 
   // Keyed by db column name (`image`, not wire-level `avatarUrl`) since this
   // feeds `db.update(users).set(...)` directly.
-  const update: { name?: string; image?: string; defaultModel?: string | null } = {};
+  const update: { name?: string; image?: string; defaultModel?: string | null; defaultReasoning?: string | null } = {};
 
   if ("name" in raw) {
     if (typeof raw.name !== "string") {
@@ -118,7 +123,30 @@ meRouter.patch("/", async (c) => {
     const { engineCredentials } = c.var.providers;
     const invalid = await validateDefaultModelId(db, engineCredentials, user.orgId, defaultModel);
     if (invalid) return c.json({ error: invalid }, 400);
+    if (defaultModel !== null) {
+      const isAdmin = await isOrgAdminUser(c);
+      const err = await assertModelSelectable(db, user.orgId, isAdmin, defaultModel);
+      if (err) return c.json({ error: err }, 400);
+    }
     update.defaultModel = defaultModel;
+  }
+
+  if ("defaultReasoning" in raw) {
+    const defaultReasoning = raw.defaultReasoning;
+    if (defaultReasoning !== null && typeof defaultReasoning !== "string") {
+      return c.json(
+        { error: "defaultReasoning must be a reasoning level string, or null to clear the override." },
+        400,
+      );
+    }
+    if (defaultReasoning === null) {
+      update.defaultReasoning = null;
+    } else {
+      const normalizedReasoning = defaultReasoning.trim().toLowerCase();
+      const err = await assertReasoningSelectable(db, user.orgId, normalizedReasoning);
+      if (err) return c.json({ error: err }, 400);
+      update.defaultReasoning = normalizedReasoning;
+    }
   }
 
   if (Object.keys(update).length > 0) {
