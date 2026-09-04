@@ -10,28 +10,53 @@
  * `K8sProviderConfig.workspaceStorageMax` is unset. */
 export const DEFAULT_WORKSPACE_STORAGE_MAX = "20Gi";
 
-const BINARY_SUFFIXES: Record<string, number> = {
-  Ki: 2 ** 10,
-  Mi: 2 ** 20,
-  Gi: 2 ** 30,
-  Ti: 2 ** 40,
-  Pi: 2 ** 50,
-  Ei: 2 ** 60,
+const BINARY_SUFFIXES: Record<string, bigint> = {
+  Ki: 2n ** 10n,
+  Mi: 2n ** 20n,
+  Gi: 2n ** 30n,
+  Ti: 2n ** 40n,
+  Pi: 2n ** 50n,
+  Ei: 2n ** 60n,
 };
 
-const DECIMAL_SUFFIXES: Record<string, number> = {
-  n: 1e-9,
-  u: 1e-6,
-  m: 1e-3,
-  "": 1,
-  k: 1e3,
-  K: 1e3,
-  M: 1e6,
-  G: 1e9,
-  T: 1e12,
-  P: 1e15,
-  E: 1e18,
+const DECIMAL_SUFFIX_POWERS: Record<string, number> = {
+  n: -9,
+  u: -6,
+  m: -3,
+  "": 0,
+  k: 3,
+  K: 3,
+  M: 6,
+  G: 9,
+  T: 12,
+  P: 15,
+  E: 18,
 };
+
+const MAX_SAFE_BYTES = BigInt(Number.MAX_SAFE_INTEGER);
+const MAX_QUANTITY_LENGTH = 256;
+
+/** Rounds `digits / 10^decimalPlaces` up without a floating-point conversion. */
+function roundDecimalMagnitude(digits: string, decimalPlaces: number): bigint | null {
+  const normalized = digits.replace(/^0+/, "");
+  if (normalized.length === 0) return 0n;
+  if (!Number.isSafeInteger(decimalPlaces)) return null;
+
+  if (decimalPlaces <= 0) {
+    const outputDigits = normalized.length - decimalPlaces;
+    if (!Number.isSafeInteger(outputDigits) || outputDigits > 16) return null;
+    const magnitude = BigInt(normalized) * 10n ** BigInt(-decimalPlaces);
+    return magnitude <= MAX_SAFE_BYTES ? magnitude : null;
+  }
+
+  const wholeLength = normalized.length - decimalPlaces;
+  if (wholeLength <= 0) return 1n;
+  if (wholeLength > 16) return null;
+  const whole = BigInt(normalized.slice(0, wholeLength));
+  const fraction = normalized.slice(wholeLength);
+  const magnitude = whole + (/[1-9]/.test(fraction) ? 1n : 0n);
+  return magnitude <= MAX_SAFE_BYTES ? magnitude : null;
+}
 
 /**
  * Parses a Kubernetes storage quantity ("1Gi", "500m", "2G", "1e6") to
@@ -40,29 +65,32 @@ const DECIMAL_SUFFIXES: Record<string, number> = {
  * bytes away from zero so a positive value cannot become the disable value.
  */
 export function parseStorageQuantity(quantity: string): number | null {
-  const match = /^([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))(Ki|Mi|Gi|Ti|Pi|Ei|[numkKMGTP]|E|[eE][+-]?[0-9]+)?$/.exec(
-    quantity.trim(),
+  const trimmed = quantity.trim();
+  if (trimmed.length > MAX_QUANTITY_LENGTH) return null;
+  const match = /^([+-]?)([0-9]+(?:\.[0-9]*)?|\.[0-9]+)(Ki|Mi|Gi|Ti|Pi|Ei|[numkKMGTP]|E|[eE][+-]?[0-9]+)?$/.exec(
+    trimmed,
   );
   if (!match) return null;
-  const value = Number(match[1]);
-  if (!Number.isFinite(value)) return null;
-  const suffix = match[2] ?? "";
+  const sign = match[1];
+  const decimal = match[2];
+  const decimalPoint = decimal.indexOf(".");
+  const decimalPlaces = decimalPoint === -1 ? 0 : decimal.length - decimalPoint - 1;
+  const digits = decimal.replace(".", "");
+  const suffix = match[3] ?? "";
   const exponent = /^[eE]([+-]?[0-9]+)$/.exec(suffix);
-  const unit = exponent
-    ? 10 ** Number(exponent[1])
-    : (BINARY_SUFFIXES[suffix] ?? DECIMAL_SUFFIXES[suffix]);
-  if (unit === undefined) return null;
-
-  const scaled = value * unit;
-  if (!Number.isFinite(scaled)) return null;
-
-  let bytes: number;
-  if (scaled > 0) bytes = Math.ceil(scaled);
-  else if (scaled < 0) bytes = Math.floor(scaled);
-  else if (/[1-9]/.test(match[1])) bytes = match[1].startsWith("-") ? -1 : 1;
-  else bytes = 0;
-
-  return Number.isSafeInteger(bytes) ? bytes : null;
+  const binaryUnit = BINARY_SUFFIXES[suffix];
+  let magnitude: bigint | null;
+  if (binaryUnit !== undefined) {
+    const numerator = (BigInt(digits) * binaryUnit).toString();
+    magnitude = roundDecimalMagnitude(numerator, decimalPlaces);
+  } else {
+    const suffixPower = exponent ? Number(exponent[1]) : DECIMAL_SUFFIX_POWERS[suffix];
+    if (suffixPower === undefined || !Number.isSafeInteger(suffixPower)) return null;
+    magnitude = roundDecimalMagnitude(digits, decimalPlaces - suffixPower);
+  }
+  if (magnitude === null) return null;
+  if (magnitude === 0n) return 0;
+  return Number(sign === "-" ? -magnitude : magnitude);
 }
 
 /** Formats bytes as the largest binary suffix that divides evenly (else

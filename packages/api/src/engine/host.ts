@@ -416,11 +416,11 @@ export type PrimaryGitHubRepoTarget =
   | { ok: false; reason: "non-github-host"; host: string };
 
 /**
- * Picks the primary repo binding's GitHub coordinates for the prebuild-flags
- * read, or the reason it must be skipped. `session_repos.host` stores
- * "github" (the schema default); hand-built metas may carry "github.com" —
- * both mean GitHub. TKAI-385: a previous version matched only "github.com",
- * which silently disabled `workspaceStorage` and the repo `docker` flag for
+ * Resolves the primary repo binding's GitHub coordinates for prebuild and
+ * credentials config reads, or the reason both reads must be skipped.
+ * `session_repos.host` stores "github" (the schema default); hand-built metas
+ * may carry "github.com". Both values mean GitHub. TKAI-385: a previous
+ * version matched only "github.com", which disabled repo config reads for
  * every bound session.
  */
 export function primaryGitHubRepoTarget(repos: SessionMeta["repos"]): PrimaryGitHubRepoTarget {

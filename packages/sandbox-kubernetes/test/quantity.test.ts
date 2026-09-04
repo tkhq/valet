@@ -46,6 +46,14 @@ describe("parseStorageQuantity", () => {
     expect(parseStorageQuantity("0.0001m")).toBe(1);
   });
 
+  it("rounds an exact decimal before comparing it with a safe-integer cap", () => {
+    expect(parseStorageQuantity("9007199254740990.1")).toBe(Number.MAX_SAFE_INTEGER);
+    expect(clampStorageRequest("9007199254740990.1", "9007199254740990")).toEqual({
+      storage: "9007199254740990",
+      clamped: true,
+    });
+  });
+
   it("keeps negative fractional byte values negative", () => {
     expect(parseStorageQuantity("-0.1")).toBe(-1);
     expect(parseStorageQuantity("-1m")).toBe(-1);
@@ -61,6 +69,8 @@ describe("parseStorageQuantity", () => {
 
   it("rejects non-finite or unsafe byte counts", () => {
     expect(parseStorageQuantity("1e309")).toBeNull();
+    expect(parseStorageQuantity("1e1000000")).toBeNull();
+    expect(parseStorageQuantity(`1e${"9".repeat(100)}`)).toBeNull();
     expect(parseStorageQuantity("1E")).toBeNull();
     expect(parseStorageQuantity("1Ei")).toBeNull();
   });
