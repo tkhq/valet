@@ -3272,25 +3272,25 @@ export interface ModelRegistryStatusResponse {
 /** Model tier map: tier id (xs|s|m|l|xl) to list of model ids in that tier. */
 export type WireTierMap = Record<"xs" | "s" | "m" | "l" | "xl", string[]>;
 
-/** `GET /api/org/settings/model-tiers` — the org's model tier assignments. */
+/** `GET /api/org/model-tiers` — the org's model tier assignments. */
 export type GetModelTiersResponse = WireTierMap;
 
-/** `PATCH /api/org/settings/model-tiers` — partial tier updates. */
+/** `PATCH /api/org/model-tiers` — partial tier updates. */
 export type PatchModelTiersRequest = Partial<WireTierMap>;
 
-/** `GET /api/org/settings/approved-models` — the org's approved model list. */
+/** `GET /api/org/approved-models` — the org's approved model list. */
 export interface GetApprovedModelsResponse {
   /** List of approved model ids, or null if no approval list is set. */
   approved: string[] | null;
 }
 
-/** `PUT /api/org/settings/approved-models` — set or clear the approved list. */
+/** `PUT /api/org/approved-models` — set or clear the approved list. */
 export interface PutApprovedModelsRequest {
   /** List of approved model ids, or null to clear the list. */
   approved: string[] | null;
 }
 
-/** `PUT /api/org/settings/approved-models` — response. */
+/** `PUT /api/org/approved-models` — response. */
 export type PutApprovedModelsResponse = GetApprovedModelsResponse;
 
 /** Org-level reasoning settings. */
@@ -3301,10 +3301,10 @@ export interface OrgReasoningSettings {
   max?: string;
 }
 
-/** `GET /api/org/settings/reasoning` — the org's reasoning settings. */
+/** `GET /api/org/reasoning` — the org's reasoning settings. */
 export type GetOrgReasoningResponse = OrgReasoningSettings;
 
-/** `PATCH /api/org/settings/reasoning` — update reasoning settings. */
+/** `PATCH /api/org/reasoning` — update reasoning settings. */
 export type PatchOrgReasoningRequest = {
   /** Default reasoning level, or null to clear. */
   default?: string | null;
@@ -3312,7 +3312,7 @@ export type PatchOrgReasoningRequest = {
   max?: string | null;
 };
 
-/** `PATCH /api/org/settings/reasoning` — response. */
+/** `PATCH /api/org/reasoning` — response. */
 export type PatchOrgReasoningResponse = OrgReasoningSettings;
 
 // ── REST: usage (`/api/usage/summary`) ─────────────────────────────────

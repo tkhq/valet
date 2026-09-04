@@ -1,6 +1,6 @@
 /**
- * Reasoning level vocabulary (TKAI-xxx): the reasoning level ordering,
- * org settings, and cap validation.
+ * Reasoning level vocabulary (docs/specs/2026-09-03-model-selector-overhaul-design.md):
+ * the reasoning level ordering, org settings, and cap validation.
  *
  * A reasoning level (`minimal`, `low`, `medium`, `high`, `xhigh`, `max`)
  * is an org-configurable attribute. The org can set a default reasoning level

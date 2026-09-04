@@ -437,6 +437,14 @@ sessionsRouter.post("/", async (c) => {
       400,
     );
   }
+  // A user-supplied model is held to the org's approved-models list, same as
+  // PATCH /api/sessions/:id. The server-picked security default below is
+  // exempt — it never came from the caller, so there is nothing to gate.
+  if (body.model !== undefined) {
+    const isAdmin = await isOrgAdminUser(c);
+    const err = await assertModelSelectable(db, user.orgId, isAdmin, body.model);
+    if (err) return c.json({ error: err }, 400);
+  }
   // The session-default model. A security session with no explicit model uses
   // a capable default instead of the haiku floor `resolveModelForBuild` would
   // otherwise reach. A code session with no model keeps normal resolution

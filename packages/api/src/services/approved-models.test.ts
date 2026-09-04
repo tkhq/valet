@@ -56,6 +56,21 @@ describe("approved-models", () => {
     });
   });
 
+  describe("isApproved normalizes bare vs namespaced Anthropic spellings", () => {
+    it("a bare spec is approved under a namespaced list entry", () => {
+      expect(isApproved(["anthropic/claude-haiku-4-5"], "claude-haiku-4-5")).toBe(true);
+    });
+
+    it("a namespaced spec is approved under a bare list entry", () => {
+      expect(isApproved(["claude-haiku-4-5"], "anthropic/claude-haiku-4-5")).toBe(true);
+    });
+
+    it("a genuinely unlisted model still fails", () => {
+      expect(isApproved(["anthropic/claude-haiku-4-5"], "anthropic/claude-opus-4-7")).toBe(false);
+      expect(isApproved(["anthropic/claude-haiku-4-5"], "openai/gpt-4.1")).toBe(false);
+    });
+  });
+
   describe("round-trips and clears", () => {
     it("round-trips and clears", async () => {
       await setApprovedModels(db, orgId, ["a/b"]);

@@ -11,7 +11,7 @@ import { matchesNeedle } from "~/lib/text-match";
  * Text `Input` + filtered popover list — the model typeahead (split-settings
  * design, "You · Assistant" default-model control). A "Size" group renders
  * first — five tier rows (xs..xl, org-configured via
- * `GET /api/org/settings/model-tiers`, same `tierSubtitle` helper the chat
+ * `GET /api/org/model-tiers`, same `tierSubtitle` helper the chat
  * `ModelPicker` uses) that submit the bare tier token (e.g. `"l"`) rather
  * than a concrete model id; the engine resolves the tier at run time. Below
  * that, options come from the org catalog (`GET /api/models`, Task 4/8) —

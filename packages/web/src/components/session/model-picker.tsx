@@ -22,7 +22,7 @@ import { matchesNeedle } from "~/lib/text-match";
  * so it fits in a tight header.
  *
  * A "Size" group renders first — five tier rows (xs..xl, org-configured via
- * `GET /api/org/settings/model-tiers`) that submit the bare tier token
+ * `GET /api/org/model-tiers`) that submit the bare tier token
  * (e.g. `"l"`) rather than a concrete model id; the engine resolves the
  * tier at run time. They join the same keyboard-nav list as the model rows
  * below, always occupying the first `SIZE_TIERS.length` slots.

@@ -383,7 +383,7 @@ messagesRouter.patch("/:id/threads/:threadId", async (c) => {
     body.reasoning === undefined
   ) {
     return c.json(
-      { error: "nothing to patch: send model (null to clear), archived, and/or title" },
+      { error: "nothing to patch: send model (null to clear), archived, title, and/or reasoning" },
       400,
     );
   }

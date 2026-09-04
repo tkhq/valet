@@ -12,6 +12,7 @@ import { eq } from "drizzle-orm";
 import type { AppQueryable } from "../lib/drizzle.js";
 import { orgs } from "../schema/index.js";
 import { TIER_SET } from "./model-tiers.js";
+import { parseModelId } from "./llm-providers.js";
 
 /**
  * Read the org's approved model list from `orgs.approved_models`.
@@ -49,7 +50,12 @@ export async function setApprovedModels(
  * Pure check: is a spec in the approved list?
  * - Null list always returns true (unrestricted).
  * - Tier tokens (xs, s, m, l, xl) always return true (resolved at runtime).
- * - Otherwise, check membership in the list.
+ * - Otherwise, check membership in the list, comparing through `parseModelId`
+ *   so a bare Anthropic id (`claude-haiku-4-5`) and its namespaced spelling
+ *   (`anthropic/claude-haiku-4-5`) match each other. The catalog accepts
+ *   both spellings for Anthropic ids (`parseModelId`'s back-compat rule), so
+ *   the approved-list check must too, or a member gets rejected for a
+ *   spelling difference alone.
  */
 export function isApproved(approved: string[] | null, spec: string): boolean {
   // Null list: everything approved.
@@ -58,8 +64,12 @@ export function isApproved(approved: string[] | null, spec: string): boolean {
   // Tier tokens always pass (case-insensitive, like resolveModelSpec).
   if (TIER_SET.has(spec.trim().toLowerCase())) return true;
 
-  // Check membership.
-  return approved.includes(spec);
+  // Check membership, normalizing both sides through parseModelId.
+  const target = parseModelId(spec);
+  return approved.some((entry) => {
+    const parsed = parseModelId(entry);
+    return parsed.namespace === target.namespace && parsed.modelId === target.modelId;
+  });
 }
 
 /**

@@ -17,6 +17,7 @@ import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import type { SessionDetail, SessionSummary } from "../wire/types.js";
 import { startGithubFixture } from "../test-helpers/github-fixture.js";
 import { agentSessions, sessionRepos, imageSources, bakes, teams, teamMembers } from "../schema/index.js";
+import { setApprovedModels } from "../services/approved-models.js";
 import type { BuildStatus, ImageBuilder, PrebuildSpec } from "../prebuilds/builder.js";
 import type {
   CreateSessionResponse,
@@ -1073,5 +1074,95 @@ describe("POST /api/sessions — team ownership", () => {
     const res = await fetch(`${api.baseUrl}/api/sessions?ownerType=team`);
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toContain("both ownerType and ownerId");
+  });
+});
+
+/**
+ * POST /api/sessions holds a caller-supplied `model` to the same
+ * approved-models gate as `PATCH /api/sessions/:id` (final review, Task 8's
+ * pattern). A non-admin member sending an unapproved model must 400 before
+ * the session is ever created; an admin, or a member sending an approved
+ * model or a bare tier token, must succeed.
+ */
+describe("POST /api/sessions — approved-models gate", () => {
+  let api: TestApi | undefined;
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await api?.cleanup();
+    api = undefined;
+  });
+
+  // `test-member` is pre-seeded by `bootTestApi` as a genuine org MEMBER
+  // (see `integration/_setup.ts`), selectable via the
+  // `x-valet-test-user-id` header — no extra seeding needed here.
+
+  function postSession(target: TestApi, body: unknown, asUser?: string): Promise<Response> {
+    return fetch(`${target.baseUrl}/api/sessions`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(asUser ? { "x-valet-test-user-id": asUser } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it("400s a non-admin member's create with an unapproved model, naming the approved list", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
+    api = await bootTestApi();
+    await setApprovedModels(api.providers.db, "local-org", ["anthropic/claude-opus-4-7"]);
+    const workspace = await mkdtemp(join(tmpdir(), "valet-session-gate-unapproved-"));
+
+    const res = await postSession(
+      api,
+      { workspace, model: "anthropic/claude-haiku-4-5" },
+      "test-member",
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/approved list/);
+
+    // No session was created for the rejected request.
+    const rows = await api.providers.db
+      .select()
+      .from(agentSessions)
+      .where(eq(agentSessions.workspace, workspace));
+    expect(rows).toHaveLength(0);
+  });
+
+  it("succeeds for the same member sending an approved model", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
+    api = await bootTestApi();
+    await setApprovedModels(api.providers.db, "local-org", ["anthropic/claude-opus-4-7"]);
+    const workspace = await mkdtemp(join(tmpdir(), "valet-session-gate-approved-"));
+
+    const res = await postSession(
+      api,
+      { workspace, model: "anthropic/claude-opus-4-7" },
+      "test-member",
+    );
+    expect(res.status).toBe(201);
+  });
+
+  it("succeeds for the same member sending a bare tier token", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
+    api = await bootTestApi();
+    await setApprovedModels(api.providers.db, "local-org", ["anthropic/claude-opus-4-7"]);
+    const workspace = await mkdtemp(join(tmpdir(), "valet-session-gate-tier-"));
+
+    const res = await postSession(api, { workspace, model: "l" }, "test-member");
+    expect(res.status).toBe(201);
+  });
+
+  it("an org admin's create with the unapproved model succeeds", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
+    api = await bootTestApi();
+    await setApprovedModels(api.providers.db, "local-org", ["anthropic/claude-opus-4-7"]);
+    const workspace = await mkdtemp(join(tmpdir(), "valet-session-gate-admin-"));
+
+    // The default stub identity `local-user` (no header) is a real org admin.
+    const res = await postSession(api, { workspace, model: "anthropic/claude-haiku-4-5" });
+    expect(res.status).toBe(201);
   });
 });
