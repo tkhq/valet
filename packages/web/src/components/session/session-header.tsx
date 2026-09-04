@@ -31,7 +31,9 @@ import {
   useReplaceSandbox,
   useSetSessionModel,
   useSetSessionProfile,
+  useSetSessionReasoning,
   useSetThreadModel,
+  useSetThreadReasoning,
   useThreads,
 } from "~/api/queries";
 import { useMe, useOrg, useTeams } from "~/api/settings";
@@ -97,6 +99,8 @@ export function SessionHeader({
   const del = useDeleteSession();
   const setModel = useSetSessionModel(session.id);
   const setThreadModel = useSetThreadModel(session.id);
+  const setReasoning = useSetSessionReasoning(session.id);
+  const setThreadReasoning = useSetThreadReasoning(session.id);
   // The picker is thread-scoped (threads pin their model at creation —
   // TKAI-201): it shows and PATCHes the ACTIVE THREAD's model. Legacy
   // threads without a pin display, and keep tracking, the session default.
@@ -444,6 +448,19 @@ export function SessionHeader({
                     return;
                   }
                   setModel.mutate(id);
+                }}
+                currentReasoning={
+                  (threadScoped ? (activeThread?.reasoning ?? session.reasoning) : session.reasoning) ??
+                  undefined
+                }
+                onSelectReasoning={(level) => {
+                  if (threadScoped) {
+                    if (activeThread) {
+                      setThreadReasoning.mutate({ threadId: activeThread.id, reasoning: level });
+                    }
+                    return;
+                  }
+                  setReasoning.mutate(level);
                 }}
                 disabled={pickerDisabled}
               />

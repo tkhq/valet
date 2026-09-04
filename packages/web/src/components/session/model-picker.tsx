@@ -7,9 +7,11 @@ import {
   DropdownMenuLabel,
   DropdownMenuTrigger,
 } from "~/components/primitives";
-import { useModels } from "~/api/settings";
+import { useMe, useModelTiers, useModels, useOrgReasoning } from "~/api/settings";
 import { curatedForCatalogId } from "~/lib/models";
-import type { ModelInfo } from "@valet/api/wire";
+import { SIZE_TIERS, TIER_LABELS, isSizeTier, type SizeTier } from "~/lib/model-tiers";
+import { REASONING_LABELS, levelsUpTo } from "~/lib/reasoning";
+import type { GetModelTiersResponse, ModelInfo } from "@valet/api/wire";
 import { cn } from "~/lib/cn";
 import { matchesNeedle } from "~/lib/text-match";
 
@@ -19,19 +21,36 @@ import { matchesNeedle } from "~/lib/text-match";
  * small ghost button with the current model's short label and a chevron,
  * so it fits in a tight header.
  *
+ * A "Size" group renders first — five tier rows (xs..xl, org-configured via
+ * `GET /api/org/settings/model-tiers`) that submit the bare tier token
+ * (e.g. `"l"`) rather than a concrete model id; the engine resolves the
+ * tier at run time. They join the same keyboard-nav list as the model rows
+ * below, always occupying the first `SIZE_TIERS.length` slots.
+ *
  * Options come from the org catalog (`GET /api/models`, Task 4/8), listed
- * in response order (already preference-ordered). By default Anthropic
- * entries collapse to the curated tier list (one row per newest tier) so
- * `anthropic/claude-3-5-haiku-20241022` and its many aliases don't crowd
- * the picker; the "Show all" toggle reveals every entry. Non-Anthropic
- * providers always show — they can never be a duplicate of a Claude tier.
- * Entries matching a curated `MODEL_CATALOG` tier (bare or `anthropic/`-
- * namespaced) render with their curated label + description; others render
- * with the catalog `name` + provider hint. Selecting an item always submits
- * the catalog's own id verbatim.
+ * in response order (already preference-ordered). Members see only
+ * approved models; org admins see the full catalog — except a model
+ * already pinned as `currentId` is always shown, even if it has since lost
+ * approval, so the picker never renders as if the current pin doesn't
+ * exist. By default Anthropic entries collapse to the curated tier list
+ * (one row per newest tier) so `anthropic/claude-3-5-haiku-20241022` and
+ * its many aliases don't crowd the picker; the "Show all" toggle reveals
+ * every entry. Non-Anthropic providers always show — they can never be a
+ * duplicate of a Claude tier. Entries matching a curated `MODEL_CATALOG`
+ * tier (bare or `anthropic/`-namespaced) render with their curated label +
+ * description; others render with the catalog `name` + provider hint.
+ * Selecting an item always submits the catalog's own id verbatim.
+ *
+ * A reasoning row renders above the footer count line when
+ * `onSelectReasoning` is supplied: segmented buttons for "Default" plus
+ * every level up to the org's configured max. Levels the current
+ * model/tier doesn't support (per `ModelInfo.thinkingLevels`) render
+ * disabled; an undefined `thinkingLevels` disables nothing, since that
+ * means support is unknown, not absent.
  *
  * Keyboard: ↑/↓ move highlight, Enter selects, / focuses search (from
- * anywhere in the dropdown). Search matches name/id/provider substrings.
+ * anywhere in the dropdown). Search matches name/id/provider substrings
+ * for models, and label/token for tiers.
  *
  * `currentId` may be a value that is no longer in the catalog — it is
  * still labeled rather than blanked. An undefined `currentId` reads as
@@ -40,8 +59,14 @@ import { matchesNeedle } from "~/lib/text-match";
  */
 export interface ModelPickerProps {
   currentId?: string;
-  /** Called when the user picks a model. Returns the model id. */
+  /** Called when the user picks a model or a size tier. Returns the model
+   * id, or the bare tier token ("xs"|"s"|"m"|"l"|"xl"). */
   onSelect: (id: string) => void;
+  /** Current reasoning/thinking level, or undefined for "Default". */
+  currentReasoning?: string;
+  /** Called when the user picks a reasoning level; `null` means "Default".
+   * The reasoning row only renders when this is supplied. */
+  onSelectReasoning?: (level: string | null) => void;
   /** Disable interactions (e.g. while a mutation is in flight). */
   disabled?: boolean;
 }
@@ -80,9 +105,61 @@ export function filterModels(models: ModelInfo[], query: string): ModelInfo[] {
   return models.filter((m) => matchesNeedle(query, [m.name, m.id, m.providerName]));
 }
 
+/** Org-approval scope: admins see the full catalog, members see only
+ * `approved` entries. Callers that need to keep a currently-pinned model
+ * visible (even if it lost approval) must add it back themselves — this
+ * helper stays a pure two-input filter. */
+export function visibleModels(models: ModelInfo[], isAdmin: boolean): ModelInfo[] {
+  return isAdmin ? models : models.filter((m) => m.approved);
+}
+
+/** Subtitle for a Size tier row: the catalog name of the tier's first
+ * configured target, resolved against `models`. Falls back to the raw spec
+ * string when the target isn't in the catalog (a stale/retired pin), and
+ * to `undefined` when the tier has no configured targets or the tier map
+ * hasn't loaded yet. */
+export function tierSubtitle(
+  tier: SizeTier,
+  tierMap: GetModelTiersResponse | undefined,
+  models: ModelInfo[],
+): string | undefined {
+  const first = tierMap?.[tier]?.[0];
+  if (!first) return undefined;
+  return labelFor(first, models);
+}
+
+/** Human label for a reasoning level id, falling back to the raw id for a
+ * value outside the known vocabulary (e.g. a stale persisted level). */
+function reasoningLabelFor(level: string): string {
+  const found = Object.entries(REASONING_LABELS).find(([key]) => key === level);
+  return found ? found[1] : level;
+}
+
+/** Available thinking levels for whatever `currentId` currently names — a
+ * concrete model's own `thinkingLevels`, or (for a tier) the tier's first
+ * target's `thinkingLevels`. `undefined` means "unknown support", which the
+ * reasoning row must treat as "disable nothing", not "no support". */
+function thinkingLevelsFor(
+  currentId: string | undefined,
+  tierMap: GetModelTiersResponse | undefined,
+  models: ModelInfo[],
+): string[] | undefined {
+  if (!currentId) return undefined;
+  if (isSizeTier(currentId)) {
+    const first = tierMap?.[currentId]?.[0];
+    if (!first) return undefined;
+    return models.find((m) => m.id === first)?.thinkingLevels;
+  }
+  return models.find((m) => m.id === currentId)?.thinkingLevels;
+}
+
+type FlatEntry = { kind: "tier"; tier: SizeTier } | { kind: "model"; model: ModelInfo };
+
 export function ModelPicker({
   currentId,
   onSelect,
+  currentReasoning,
+  onSelectReasoning,
   disabled,
 }: ModelPickerProps) {
   const [open, setOpen] = useState(false);
@@ -93,6 +170,20 @@ export function ModelPicker({
   const listRef = useRef<HTMLDivElement>(null);
   const modelsQ = useModels();
   const models = modelsQ.data?.models ?? [];
+  const meQ = useMe();
+  const isAdmin = meQ.data?.orgRole === "admin";
+  const tierMapQ = useModelTiers();
+  const orgReasoningQ = useOrgReasoning();
+
+  // Approval scope, with the current pin always readmitted — a member must
+  // never see the picker act as if their own pinned model doesn't exist,
+  // even after it loses approval underneath them.
+  const approvalScoped = useMemo(() => visibleModels(models, isAdmin), [models, isAdmin]);
+  const visibleCatalog = useMemo(() => {
+    if (!currentId || approvalScoped.some((m) => m.id === currentId)) return approvalScoped;
+    const pinned = models.find((m) => m.id === currentId);
+    return pinned ? [...approvalScoped, pinned] : approvalScoped;
+  }, [approvalScoped, models, currentId]);
 
   // Collapse Anthropic aliases by default unless `showAll` or query is
   // active — a search should peek into the whole catalog so a user typing
@@ -100,18 +191,31 @@ export function ModelPicker({
   const filteredModels = useMemo(() => {
     const revealAll = showAll || query.trim().length > 0;
     const baseline = revealAll
-      ? models
-      : models.filter((m) => {
+      ? visibleCatalog
+      : visibleCatalog.filter((m) => {
           if (m.id === currentId) return true;
           if (!isAnthropic(m.id)) return true;
           return !!curatedForCatalogId(m.id);
         });
     return filterModels(baseline, query);
-  }, [models, showAll, query, currentId]);
+  }, [visibleCatalog, showAll, query, currentId]);
+
+  // The Size group hides when the query matches no tier label or token —
+  // same substring matcher the model list search uses.
+  const filteredTiers = useMemo(() => {
+    if (query.trim().length === 0) return [...SIZE_TIERS];
+    return SIZE_TIERS.filter((t) => matchesNeedle(query, [TIER_LABELS[t], t]));
+  }, [query]);
 
   const grouped = useMemo(() => groupByProvider(filteredModels), [filteredModels]);
-  const flat = filteredModels; // for keyboard nav indexing
-  const hiddenCount = models.length - filteredModels.length;
+  const flat: FlatEntry[] = useMemo(
+    () => [
+      ...filteredTiers.map((tier): FlatEntry => ({ kind: "tier", tier })),
+      ...filteredModels.map((model): FlatEntry => ({ kind: "model", model })),
+    ],
+    [filteredTiers, filteredModels],
+  );
+  const hiddenCount = visibleCatalog.length - filteredModels.length;
 
   // Reset highlight when the filtered set changes.
   useEffect(() => {
@@ -138,12 +242,23 @@ export function ModelPicker({
     el?.scrollIntoView({ block: "nearest" });
   }, [highlightIndex, open]);
 
-  const triggerLabel = currentId ? labelFor(currentId, models) : "Inherit";
+  const triggerLabel = currentId
+    ? isSizeTier(currentId)
+      ? TIER_LABELS[currentId]
+      : labelFor(currentId, models)
+    : "Inherit";
+  const reasoningLevels = levelsUpTo(orgReasoningQ.data?.max);
+  const activeThinkingLevels = thinkingLevelsFor(currentId, tierMapQ.data, models);
+
+  function isLevelDisabled(level: string): boolean {
+    if (!activeThinkingLevels) return false;
+    return !activeThinkingLevels.includes(level);
+  }
 
   function commitHighlighted() {
-    const m = flat[highlightIndex];
-    if (!m) return;
-    onSelect(m.id);
+    const entry = flat[highlightIndex];
+    if (!entry) return;
+    onSelect(entry.kind === "tier" ? entry.tier : entry.model.id);
     setOpen(false);
   }
 
@@ -175,7 +290,10 @@ export function ModelPicker({
           aria-label="Choose model"
         >
           <Sparkles className="h-3.5 w-3.5 text-muted" aria-hidden />
-          <span className="truncate text-xs">{triggerLabel}</span>
+          <span className="truncate text-xs">
+            {triggerLabel}
+            {currentReasoning && ` · ${reasoningLabelFor(currentReasoning)}`}
+          </span>
           <ChevronDown className="h-3.5 w-3.5 text-muted shrink-0 ml-auto" />
         </Button>
       </DropdownMenuTrigger>
@@ -209,13 +327,62 @@ export function ModelPicker({
           {!modelsQ.isLoading && models.length > 0 && flat.length === 0 && (
             <div className="px-3 py-2 text-xs text-muted">No matching models.</div>
           )}
+          {filteredTiers.length > 0 && (
+            <div>
+              <DropdownMenuLabel className="sticky top-0 bg-paper/95 backdrop-blur-sm py-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-muted">
+                Size
+              </DropdownMenuLabel>
+              {filteredTiers.map((tier, idx) => {
+                const isHighlighted = idx === highlightIndex;
+                const isSelected = currentId === tier;
+                const subtitle = tierSubtitle(tier, tierMapQ.data, models);
+                return (
+                  <button
+                    key={tier}
+                    type="button"
+                    data-model-index={idx}
+                    data-row-kind="tier"
+                    onMouseEnter={() => setHighlightIndex(idx)}
+                    onMouseDown={(e) => {
+                      // Prevent input blur from stealing focus before we
+                      // commit — otherwise the click can race the close.
+                      e.preventDefault();
+                      onSelect(tier);
+                      setOpen(false);
+                    }}
+                    className={cn(
+                      "flex w-full flex-col items-stretch gap-0.5 px-3 py-1.5 text-left transition-colors",
+                      isHighlighted ? "bg-moss-wash text-ink" : "text-ink hover:bg-neutral-100 dark:hover:bg-neutral-800",
+                    )}
+                  >
+                    <div className="flex items-center gap-2">
+                      {isSelected ? (
+                        <Check className="h-3.5 w-3.5 text-moss shrink-0" />
+                      ) : (
+                        <span className="h-3.5 w-3.5 shrink-0" />
+                      )}
+                      <span className="text-sm font-medium">{TIER_LABELS[tier]}</span>
+                      {isSelected && (
+                        <span className="text-[9px] font-medium uppercase tracking-wide text-moss/80">
+                          current
+                        </span>
+                      )}
+                    </div>
+                    {subtitle && (
+                      <div className="pl-[22px] text-xs text-muted leading-snug">{subtitle}</div>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
           {grouped.map(({ provider, entries }) => (
             <div key={provider}>
               <DropdownMenuLabel className="sticky top-0 bg-paper/95 backdrop-blur-sm py-1 text-[9px] font-semibold uppercase tracking-[0.08em] text-muted">
                 {provider}
               </DropdownMenuLabel>
               {entries.map((m) => {
-                const idx = flat.indexOf(m);
+                const idx = filteredTiers.length + filteredModels.indexOf(m);
                 const isHighlighted = idx === highlightIndex;
                 const isSelected = m.id === currentId;
                 const curated = curatedForCatalogId(m.id);
@@ -224,6 +391,7 @@ export function ModelPicker({
                     key={m.id}
                     type="button"
                     data-model-index={idx}
+                    data-row-kind="model"
                     onMouseEnter={() => setHighlightIndex(idx)}
                     onMouseDown={(e) => {
                       // Prevent input blur from stealing focus before we
@@ -264,42 +432,93 @@ export function ModelPicker({
             </div>
           ))}
         </div>
-        <div className="sticky bottom-0 bg-paper border-t border-line px-3 py-1.5 text-[10px] text-muted">
-          <span>
-            {flat.length} of {models.length} models
-            {hiddenCount > 0 && !showAll && !query && (
-              <>
-                {" · "}
-                <button
-                  type="button"
-                  className="italic underline decoration-dotted hover:text-ink"
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    setShowAll(true);
-                    searchRef.current?.focus();
-                  }}
-                >
-                  show {hiddenCount} more
-                </button>
-              </>
-            )}
-            {showAll && !query && (
-              <>
-                {" · "}
-                <button
-                  type="button"
-                  className="italic underline decoration-dotted hover:text-ink"
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    setShowAll(false);
-                    searchRef.current?.focus();
-                  }}
-                >
-                  recommended only
-                </button>
-              </>
-            )}
-          </span>
+        <div className="sticky bottom-0 bg-paper border-t border-line">
+          {onSelectReasoning && (
+            <div className="flex flex-wrap items-center gap-1 px-3 py-1.5 border-b border-line">
+              <span className="text-[10px] text-muted mr-0.5">Reasoning</span>
+              <button
+                type="button"
+                aria-label="Default reasoning"
+                aria-pressed={currentReasoning === undefined}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  onSelectReasoning(null);
+                }}
+                className={cn(
+                  "rounded-full border border-line px-2 py-0.5 text-[10px] transition-colors",
+                  currentReasoning === undefined
+                    ? "bg-moss-wash text-ink border-moss"
+                    : "text-muted hover:text-ink",
+                )}
+              >
+                Default
+              </button>
+              {reasoningLevels.map((level) => {
+                const levelDisabled = isLevelDisabled(level);
+                const active = currentReasoning === level;
+                return (
+                  <button
+                    key={level}
+                    type="button"
+                    aria-label={`${REASONING_LABELS[level]} reasoning`}
+                    aria-pressed={active}
+                    disabled={levelDisabled}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      onSelectReasoning(level);
+                    }}
+                    className={cn(
+                      "rounded-full border border-line px-2 py-0.5 text-[10px] transition-colors",
+                      levelDisabled
+                        ? "opacity-40 cursor-not-allowed"
+                        : active
+                          ? "bg-moss-wash text-ink border-moss"
+                          : "text-muted hover:text-ink",
+                    )}
+                  >
+                    {REASONING_LABELS[level]}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          <div className="px-3 py-1.5 text-[10px] text-muted">
+            <span>
+              {filteredModels.length} of {visibleCatalog.length} models
+              {hiddenCount > 0 && !showAll && !query && (
+                <>
+                  {" · "}
+                  <button
+                    type="button"
+                    className="italic underline decoration-dotted hover:text-ink"
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      setShowAll(true);
+                      searchRef.current?.focus();
+                    }}
+                  >
+                    show {hiddenCount} more
+                  </button>
+                </>
+              )}
+              {showAll && !query && (
+                <>
+                  {" · "}
+                  <button
+                    type="button"
+                    className="italic underline decoration-dotted hover:text-ink"
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      setShowAll(false);
+                      searchRef.current?.focus();
+                    }}
+                  >
+                    recommended only
+                  </button>
+                </>
+              )}
+            </span>
+          </div>
         </div>
       </DropdownMenuContent>
     </DropdownMenu>

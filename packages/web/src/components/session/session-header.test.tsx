@@ -17,10 +17,17 @@ const deleteMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const rateSessionMutate = vi.fn();
 const setModelMutate = vi.fn();
 const setThreadModelMutate = vi.fn();
+const setReasoningMutate = vi.fn();
+const setThreadReasoningMutate = vi.fn();
 /** Threads for the header's thread-scoped model picker. Empty by default:
  * the picker then falls back to the session default (legacy behavior). */
-let headerThreads: Array<{ id: string; sessionId: string; createdAt: number; model?: string }> =
-  [];
+let headerThreads: Array<{
+  id: string;
+  sessionId: string;
+  createdAt: number;
+  model?: string;
+  reasoning?: string | null;
+}> = [];
 let pauseMutateAsync = vi.fn().mockResolvedValue({ status: "hibernated" });
 let pauseIsPending = false;
 let replaceMutateAsync = vi.fn().mockResolvedValue({ ok: true });
@@ -54,6 +61,8 @@ vi.mock("~/api/queries", async (importOriginal) => {
     useDeleteSession: () => ({ isPending: false, mutateAsync: deleteMutateAsync }),
     useSetSessionModel: () => ({ isPending: false, mutate: setModelMutate }),
     useSetThreadModel: () => ({ isPending: false, mutate: setThreadModelMutate }),
+    useSetSessionReasoning: () => ({ isPending: false, mutate: setReasoningMutate }),
+    useSetThreadReasoning: () => ({ isPending: false, mutate: setThreadReasoningMutate }),
     useThreads: () => ({ data: { threads: headerThreads }, isLoading: false, error: null }),
     usePauseSession: () => ({ isPending: pauseIsPending, mutateAsync: pauseMutateAsync }),
     useReplaceSandbox: () => ({ isPending: false, mutateAsync: replaceMutateAsync }),
@@ -69,6 +78,8 @@ vi.mock("~/api/settings", () => ({
   useMe: () => ({ data: undefined, isLoading: false, error: null }),
   useOrg: () => ({ data: undefined, isLoading: false, error: null }),
   useTeams: () => ({ data: teamsData, isLoading: false, error: null }),
+  useModelTiers: () => ({ data: undefined, isLoading: false, error: null }),
+  useOrgReasoning: () => ({ data: undefined, isLoading: false, error: null }),
 }));
 
 vi.mock("~/api/orchestrator", () => ({
@@ -125,6 +136,8 @@ beforeEach(() => {
   deleteMutateAsync.mockClear();
   setModelMutate.mockClear();
   setThreadModelMutate.mockClear();
+  setReasoningMutate.mockClear();
+  setThreadReasoningMutate.mockClear();
   headerThreads = [];
   pauseMutateAsync = vi.fn().mockResolvedValue({ status: "hibernated" });
   pauseIsPending = false;
@@ -170,6 +183,40 @@ describe("SessionHeader — thread-scoped model picker", () => {
     renderHeader(undefined, undefined);
     const trigger = screen.getByRole("button", { name: "Choose model" }) as HTMLButtonElement;
     expect(trigger.disabled).toBe(false);
+  });
+});
+
+describe("SessionHeader — reasoning persistence", () => {
+  it("session-scoped: persists via patchSession when no threadId is in play", async () => {
+    const user = userEvent.setup();
+    renderHeader(undefined, undefined);
+
+    await user.click(screen.getByRole("button", { name: "Choose model" }));
+    // No org reasoning cap in this suite's settings mock, so `levelsUpTo`
+    // renders the full vocabulary — "High" is always present.
+    await user.click(screen.getByRole("button", { name: "High reasoning" }));
+
+    expect(setReasoningMutate).toHaveBeenCalledWith("high");
+    expect(setThreadReasoningMutate).not.toHaveBeenCalled();
+  });
+
+  it("thread-scoped: persists via patchThread against the active thread", async () => {
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1 }];
+    const user = userEvent.setup();
+    renderHeader(undefined, "th-1");
+
+    await user.click(screen.getByRole("button", { name: "Choose model" }));
+    await user.click(screen.getByRole("button", { name: "High reasoning" }));
+
+    expect(setThreadReasoningMutate).toHaveBeenCalledWith({ threadId: "th-1", reasoning: "high" });
+    expect(setReasoningMutate).not.toHaveBeenCalled();
+  });
+
+  it("displays the active thread's reasoning pin over the session default", () => {
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, reasoning: "xhigh" }];
+    renderHeader(undefined, "th-1");
+    const trigger = screen.getByRole("button", { name: "Choose model" });
+    expect(trigger.textContent).toContain("X-High");
   });
 });
 

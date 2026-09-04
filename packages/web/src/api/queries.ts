@@ -238,6 +238,21 @@ export function useSetSessionModel(sessionId: string) {
   });
 }
 
+/** PATCH /:id with a `reasoning` — set the session-default reasoning
+ * level (`null` clears it back to the account default). Mirrors
+ * `useSetSessionModel`: new threads pin it at creation, existing threads
+ * track it only when they carry no reasoning pin of their own. */
+export function useSetSessionReasoning(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<PatchSessionResponse, Error, string | null>({
+    mutationFn: (reasoning) => api.patchSession(sessionId, { reasoning }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.session(sessionId) });
+      qc.invalidateQueries({ queryKey: qk.sessions() });
+    },
+  });
+}
+
 /** PATCH /:id with a `title` — rename the session. The session row and the
  * session lists both render the title, so both caches are invalidated. */
 /** The caller's persisted 👍/👎 state for one session (TKAI-334). */
@@ -322,6 +337,19 @@ export function useSetThreadModel(sessionId: string) {
     onSuccess: () => {
       // Thread PATCH touches only the thread row; the session detail (and
       // its default model) is unchanged — no session invalidation.
+      qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
+    },
+  });
+}
+
+/** PATCH /threads/:id with a `reasoning` — set the thread's reasoning pin
+ * (`null` clears it back to tracking the session default). Mirrors
+ * `useSetThreadModel`. */
+export function useSetThreadReasoning(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation<PatchThreadResponse, Error, { threadId: string; reasoning: string | null }>({
+    mutationFn: ({ threadId, reasoning }) => api.patchThread(sessionId, threadId, { reasoning }),
+    onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.threads(sessionId) });
     },
   });
