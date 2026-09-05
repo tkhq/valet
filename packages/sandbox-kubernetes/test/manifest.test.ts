@@ -171,6 +171,24 @@ describe("buildSandboxManifest", () => {
     });
   });
 
+  it("lets a repository CPU override preserve every other deployment default", () => {
+    const cfg: K8sProviderConfig = {
+      ...baseConfig,
+      defaultResources: {
+        cpu: 1,
+        memory: "2Gi",
+        ephemeralStorage: "2Gi",
+        ephemeralStorageLimit: "8Gi",
+      },
+    };
+    const manifest = buildSandboxManifest(cfg, "sess-1", { resources: { cpu: 2.5 } });
+    const container = manifest.spec.podTemplate.spec.containers[0];
+    expect(container?.resources).toEqual({
+      requests: { cpu: "2.5", memory: "2Gi", "ephemeral-storage": "2Gi" },
+      limits: { cpu: "2.5", memory: "2Gi", "ephemeral-storage": "8Gi" },
+    });
+  });
+
   it("omits resources entirely when neither opts nor cfg provide any", () => {
     const manifest = buildSandboxManifest(baseConfig, "sess-1", {});
     const container = manifest.spec.podTemplate.spec.containers[0];

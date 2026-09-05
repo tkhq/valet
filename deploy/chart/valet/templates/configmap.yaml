@@ -28,6 +28,12 @@ data:
   # docker-enabled sandboxes to run containers (see values.yaml).
   VALET_SANDBOX_DOCKER_RUNTIME_CLASS: {{ .Values.sandbox.dockerRuntimeClass | quote }}
   {{- end }}
+  {{- if ne (toString .Values.sandbox.resources.cpu) "" }}
+  VALET_SANDBOX_CPU: {{ .Values.sandbox.resources.cpu | quote }}
+  {{- end }}
+  {{- if ne (toString .Values.sandbox.resources.memory) "" }}
+  VALET_SANDBOX_MEMORY: {{ .Values.sandbox.resources.memory | quote }}
+  {{- end }}
   # Per-sandbox node-disk request/limit (TKAI-349) — see values.yaml.
   VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST: {{ .Values.sandbox.ephemeralStorageRequest | quote }}
   VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT: {{ .Values.sandbox.ephemeralStorageLimit | quote }}
