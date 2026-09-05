@@ -123,7 +123,7 @@ describe("ModelPicker — catalog-driven", () => {
     const user = userEvent.setup();
     renderPicker({ currentId: "anthropic/claude-sonnet-4-5" });
 
-    await user.click(screen.getByRole("button", { name: "Choose model" }));
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
 
     // Model rows carry a stable data attribute — order = ModelInfo response
     // order (non-curated Llama 3 first, then curated Sonnet 4.5). Provider
@@ -143,7 +143,7 @@ describe("ModelPicker — catalog-driven", () => {
     const onSelect = vi.fn();
     renderPicker({ onSelect });
 
-    await user.click(screen.getByRole("button", { name: "Choose model" }));
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     // Row clicks use onMouseDown (avoids stealing focus from the sticky
     // search input); simulate that directly rather than user.click.
     const row = document.querySelector<HTMLElement>('[data-row-kind="model"]');
@@ -155,12 +155,12 @@ describe("ModelPicker — catalog-driven", () => {
 
   it("labels a bare persisted currentId via the curated fallback without crashing", () => {
     renderPicker({ currentId: "claude-haiku-4-5" });
-    expect(screen.getByRole("button", { name: "Choose model" }).textContent).toContain("Haiku 4.5");
+    expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain("Haiku 4.5");
   });
 
   it("labels a currentId that has fallen out of the catalog with the raw id, not a crash", () => {
     renderPicker({ currentId: "custom_1/retired-model" });
-    expect(screen.getByRole("button", { name: "Choose model" }).textContent).toContain(
+    expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain(
       "custom_1/retired-model",
     );
   });
@@ -171,18 +171,78 @@ describe("ModelPicker — catalog-driven", () => {
     const user = userEvent.setup();
     renderPicker({ currentId: "anthropic/claude-sonnet-4-5" });
 
-    await user.click(screen.getByRole("button", { name: "Choose model" }));
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     expect(screen.getByText("Loading models…")).toBeTruthy();
   });
 });
 
 describe("ModelPicker — Size tier group", () => {
+  it("shows the runtime model while keeping configured tier behavior", async () => {
+    modelsData = {
+      models: [
+        {
+          id: "anthropic/claude-sonnet-4-5",
+          name: "Claude Sonnet 4.5",
+          providerId: "anthropic",
+          providerKind: "anthropic",
+          providerName: "Anthropic",
+          active: true,
+          approved: true,
+          thinkingLevels: ["low"],
+        },
+        {
+          id: "anthropic/claude-opus-4-7",
+          name: "Claude Opus 4.7",
+          providerId: "anthropic",
+          providerKind: "anthropic",
+          providerName: "Anthropic",
+          active: true,
+          approved: true,
+          thinkingLevels: ["low", "medium", "high"],
+        },
+      ],
+    };
+    tierMapData = {
+      xs: [],
+      s: [],
+      m: [],
+      l: ["anthropic/claude-sonnet-4-5"],
+      xl: [],
+    };
+    orgReasoningData = { max: "high" };
+    const user = userEvent.setup();
+    renderPicker({
+      currentId: "l",
+      displayId: "anthropic/claude-opus-4-7",
+      onSelectReasoning: vi.fn(),
+    });
+
+    const trigger = screen.getByRole("button", { name: /Choose model:.*Opus 4\.7/ });
+    expect(trigger.textContent).toContain("Opus 4.7");
+
+    await user.click(trigger);
+    const largeRow = screen.getByText("Large").closest("button");
+    expect(largeRow?.textContent).toContain("current");
+    expect((screen.getByRole("button", { name: "Medium reasoning" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+  });
+
+  it("shows an unknown runtime model as its raw id", () => {
+    renderPicker({ currentId: "l", displayId: "custom_1/runtime-model" });
+
+    const trigger = screen.getByRole("button", {
+      name: "Choose model: custom_1/runtime-model",
+    });
+    expect(trigger.textContent).toContain("custom_1/runtime-model");
+  });
+
   it("renders a tier row per SIZE_TIERS entry before the provider groups, with a resolved subtitle", async () => {
     tierMapData = { xs: [], s: [], m: [], l: [], xl: ["anthropic/claude-sonnet-4-5"] };
     const user = userEvent.setup();
     renderPicker();
 
-    await user.click(screen.getByRole("button", { name: "Choose model" }));
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
 
     const tierRows = document.querySelectorAll<HTMLElement>('[data-row-kind="tier"]');
     expect(tierRows).toHaveLength(5);
@@ -200,7 +260,7 @@ describe("ModelPicker — Size tier group", () => {
     const onSelect = vi.fn();
     renderPicker({ onSelect, currentId: "l" });
 
-    await user.click(screen.getByRole("button", { name: "Choose model" }));
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     const tierRows = document.querySelectorAll<HTMLElement>('[data-row-kind="tier"]');
     const largeRow = Array.from(tierRows).find((r) => r.textContent?.includes("Large") && !r.textContent.includes("X-Large"));
     if (!largeRow) throw new Error("expected a Large tier row");
@@ -213,7 +273,7 @@ describe("ModelPicker — Size tier group", () => {
     const user = userEvent.setup();
     renderPicker();
 
-    await user.click(screen.getByRole("button", { name: "Choose model" }));
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     await user.type(screen.getByLabelText("Search models"), "llama");
 
     expect(document.querySelectorAll('[data-row-kind="tier"]')).toHaveLength(0);
@@ -236,7 +296,7 @@ describe("ModelPicker — Size tier group", () => {
     };
     tierMapData = { xs: [], s: [], m: [], l: ["openai/gpt-5.6-sol"], xl: [] };
     renderPicker({ currentId: "l", currentReasoning: "medium" });
-    expect(screen.getByRole("button", { name: "Choose model" }).textContent).toContain(
+    expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain(
       "GPT-5.6 Sol · Medium",
     );
   });
@@ -273,7 +333,7 @@ describe("ModelPicker — approved-models filter", () => {
     const user = userEvent.setup();
     renderPicker();
 
-    await user.click(screen.getByRole("button", { name: "Choose model" }));
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     expect(document.body.textContent).not.toContain("Llama 3");
   });
 
@@ -282,7 +342,7 @@ describe("ModelPicker — approved-models filter", () => {
     const user = userEvent.setup();
     renderPicker();
 
-    await user.click(screen.getByRole("button", { name: "Choose model" }));
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     expect(document.body.textContent).not.toContain("Llama 3");
   });
 
@@ -291,7 +351,7 @@ describe("ModelPicker — approved-models filter", () => {
     const user = userEvent.setup();
     renderPicker();
 
-    await user.click(screen.getByRole("button", { name: "Choose model" }));
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     expect(document.body.textContent).not.toContain("Llama 3");
     await user.click(screen.getByText(/show \d+ more/));
     expect(document.body.textContent).toContain("Llama 3");
@@ -302,7 +362,7 @@ describe("ModelPicker — approved-models filter", () => {
     const user = userEvent.setup();
     renderPicker();
 
-    await user.click(screen.getByRole("button", { name: "Choose model" }));
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     // Nothing more to reveal for this fixture: the one approved entry
     // (Sonnet 4.5) is already shown, so the affordance itself must not
     // render — a member's reveal scope is the same as the baseline.
@@ -318,7 +378,7 @@ describe("ModelPicker — approved-models filter", () => {
     const user = userEvent.setup();
     renderPicker({ currentId: "custom_1/llama-3" });
 
-    await user.click(screen.getByRole("button", { name: "Choose model" }));
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     expect(document.body.textContent).toContain("Llama 3");
   });
 
@@ -330,7 +390,7 @@ describe("ModelPicker — approved-models filter", () => {
       const user = userEvent.setup();
       renderPicker();
 
-      await user.click(screen.getByRole("button", { name: "Choose model" }));
+      await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
       expect(document.querySelectorAll('[data-row-kind="model"]')).toHaveLength(1);
       expect(document.body.textContent).toContain("Sonnet 4.5");
       expect(document.body.textContent).not.toContain("Llama 3");
@@ -342,9 +402,9 @@ describe("ModelPicker — approved-models filter", () => {
     approvedModelsData = { approved: ["anthropic/claude-sonnet-4-5"] };
     const user = userEvent.setup();
     renderPicker({ currentId: "custom_1/llama-3" });
-    expect(screen.getByRole("button", { name: "Choose model" }).textContent).toContain("Llama 3");
+    expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain("Llama 3");
 
-    await user.click(screen.getByRole("button", { name: "Choose model" }));
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     const optionText = Array.from(
       document.querySelectorAll<HTMLElement>('[data-row-kind="model"]'),
     ).map((row) => row.textContent);
@@ -357,7 +417,7 @@ describe("ModelPicker — approved-models filter", () => {
     const user = userEvent.setup();
     renderPicker();
 
-    await user.click(screen.getByRole("button", { name: "Choose model" }));
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     expect(document.querySelectorAll('[data-row-kind="model"]')).toHaveLength(0);
     expect(screen.queryByText(/show \d+ more/)).toBeNull();
 
@@ -374,7 +434,7 @@ describe("ModelPicker — reasoning row", () => {
   it("does not render when onSelectReasoning is not provided", async () => {
     const user = userEvent.setup();
     renderPicker();
-    await user.click(screen.getByRole("button", { name: "Choose model" }));
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     expect(screen.queryByRole("button", { name: "Default reasoning" })).toBeNull();
   });
 
@@ -383,7 +443,7 @@ describe("ModelPicker — reasoning row", () => {
     const onSelectReasoning = vi.fn();
     renderPicker({ onSelectReasoning, currentId: "anthropic/claude-sonnet-4-5" });
 
-    await user.click(screen.getByRole("button", { name: "Choose model" }));
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     expect(screen.getByRole("button", { name: "Default reasoning" })).toBeTruthy();
     const highButton = screen.getByRole("button", { name: "High reasoning" });
     highButton.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
@@ -414,7 +474,7 @@ describe("ModelPicker — reasoning row", () => {
     const user = userEvent.setup();
     renderPicker({ onSelectReasoning: vi.fn(), currentId: "anthropic/claude-sonnet-4-5" });
 
-    await user.click(screen.getByRole("button", { name: "Choose model" }));
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     expect((screen.getByRole("button", { name: "Medium reasoning" }) as HTMLButtonElement).disabled).toBe(
       false,
     );
@@ -427,7 +487,7 @@ describe("ModelPicker — reasoning row", () => {
     const user = userEvent.setup();
     renderPicker({ onSelectReasoning: vi.fn(), currentId: "anthropic/claude-sonnet-4-5" });
 
-    await user.click(screen.getByRole("button", { name: "Choose model" }));
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     expect((screen.getByRole("button", { name: "High reasoning" }) as HTMLButtonElement).disabled).toBe(
       false,
     );
@@ -452,7 +512,7 @@ describe("ModelPicker — reasoning row", () => {
     const user = userEvent.setup();
     renderPicker({ onSelectReasoning: vi.fn(), currentId: "l" });
 
-    await user.click(screen.getByRole("button", { name: "Choose model" }));
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     expect((screen.getByRole("button", { name: "Low reasoning" }) as HTMLButtonElement).disabled).toBe(
       false,
     );
@@ -463,6 +523,6 @@ describe("ModelPicker — reasoning row", () => {
 
   it("appends the reasoning level to the trigger label", () => {
     renderPicker({ currentId: "anthropic/claude-sonnet-4-5", currentReasoning: "high" });
-    expect(screen.getByRole("button", { name: "Choose model" }).textContent).toContain("· High");
+    expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain("· High");
   });
 });

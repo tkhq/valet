@@ -8,10 +8,11 @@
  * "a turn is running" / "sandbox is not ready to pause" bodies).
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { TooltipProvider } from "~/components/primitives";
 import type { ListAssistantsResponse, ListTeamsResponse, SessionDetail } from "@valet/api/wire";
+import { useStreamStore } from "~/stores/stream";
 
 const deleteMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const rateSessionMutate = vi.fn();
@@ -119,21 +120,56 @@ function baseSession(): SessionDetail {
   };
 }
 
-function renderHeader(sandbox?: { state: string; epoch: number }, threadId?: string) {
-  return render(
+function renderHeader(
+  sandbox?: { state: string; epoch: number },
+  threadId?: string,
+  session = baseSession(),
+) {
+  return render(headerElement(sandbox, threadId, session));
+}
+
+function headerElement(
+  sandbox?: { state: string; epoch: number },
+  threadId?: string,
+  session = baseSession(),
+) {
+  return (
     <TooltipProvider>
       <SessionHeader
-        session={baseSession()}
+        session={session}
         agentStatus="idle"
         conn="open"
         sandbox={sandbox}
         threadId={threadId}
       />
-    </TooltipProvider>,
+    </TooltipProvider>
   );
 }
 
+function activeModel(threadId: string, model: string) {
+  useStreamStore.getState().ingest("sess-1", {
+    seq: 1,
+    ts: Date.now(),
+    type: "model.state",
+    threadId,
+    queueItemId: `queue-${threadId}`,
+    model,
+  });
+}
+
+function idleModel(threadId: string) {
+  useStreamStore.getState().ingest("sess-1", {
+    seq: 2,
+    ts: Date.now(),
+    type: "model.state",
+    threadId,
+    queueItemId: null,
+    model: null,
+  });
+}
+
 beforeEach(() => {
+  useStreamStore.setState({ bySession: {} });
   deleteMutateAsync.mockClear();
   setModelMutate.mockClear();
   setThreadModelMutate.mockClear();
@@ -162,12 +198,91 @@ describe("SandboxChip — suspended state", () => {
 });
 
 describe("SessionHeader — thread-scoped model picker", () => {
+  it("shows the selected thread's active submission model", () => {
+    headerThreads = [
+      { id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-sonnet-4-5" },
+    ];
+    activeModel("th-1", "anthropic/claude-opus-4-7");
+
+    renderHeader(undefined, "th-1");
+
+    expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain(
+      "Opus 4.7",
+    );
+  });
+
+  it("follows active submission models when the selected thread changes", () => {
+    headerThreads = [
+      { id: "th-1", sessionId: "sess-1", createdAt: 1, model: "l" },
+      { id: "th-2", sessionId: "sess-1", createdAt: 2, model: "l" },
+    ];
+    activeModel("th-1", "anthropic/claude-opus-4-7");
+    activeModel("th-2", "anthropic/claude-haiku-4-5");
+    const { rerender } = renderHeader(undefined, "th-1");
+    expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain(
+      "Opus 4.7",
+    );
+
+    rerender(headerElement(undefined, "th-2"));
+
+    expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain(
+      "Haiku 4.5",
+    );
+  });
+
+  it("falls back to the configured model when model.state becomes idle", () => {
+    headerThreads = [
+      { id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-sonnet-4-5" },
+    ];
+    activeModel("th-1", "anthropic/claude-opus-4-7");
+    renderHeader(undefined, "th-1");
+    expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain(
+      "Opus 4.7",
+    );
+
+    act(() => idleModel("th-1"));
+
+    expect(screen.getByRole("button", { name: /^Choose model:/ }).textContent).toContain(
+      "Sonnet 4.5",
+    );
+  });
+
+  it("announces different runtime and configured models on the picker button", () => {
+    headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, model: "l" }];
+    activeModel("th-1", "openai/gpt-5.2");
+    renderHeader(undefined, "th-1");
+
+    expect(
+      screen.getByRole("button", {
+        name: "Choose model: openai/gpt-5.2",
+        description:
+          "Model for this thread (pinned at creation). New threads start on the session default. Currently using openai/gpt-5.2 for this submission. Configured as l.",
+      }),
+    ).toBeTruthy();
+  });
+
+  it("does not announce a difference for equivalent Anthropic model ids", () => {
+    headerThreads = [
+      { id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-opus-4-7" },
+    ];
+    activeModel("th-1", "anthropic/claude-opus-4-7");
+    renderHeader(undefined, "th-1");
+
+    expect(
+      screen.getByRole("button", {
+        name: "Choose model: Opus 4.7",
+        description:
+          "Model for this thread (pinned at creation). New threads start on the session default.",
+      }),
+    ).toBeTruthy();
+  });
+
   it("shows the ACTIVE THREAD's pinned model, not the session default", () => {
     headerThreads = [
       { id: "th-1", sessionId: "sess-1", createdAt: 1, model: "claude-opus-4-7" },
     ];
     renderHeader(undefined, "th-1");
-    const trigger = screen.getByRole("button", { name: "Choose model" });
+    const trigger = screen.getByRole("button", { name: /^Choose model:/ });
     expect(trigger.textContent).toContain("Opus 4.7");
   });
 
@@ -176,13 +291,32 @@ describe("SessionHeader — thread-scoped model picker", () => {
     // an archived thread): a session PATCH here would silently not affect
     // the pinned active thread, so the picker must disable instead.
     renderHeader(undefined, "th-unknown");
-    const trigger = screen.getByRole("button", { name: "Choose model" }) as HTMLButtonElement;
+    const trigger = screen.getByRole("button", { name: /^Choose model:/ }) as HTMLButtonElement;
+    expect(trigger.disabled).toBe(true);
+  });
+
+  it("announces the runtime model while the active thread is unresolved", () => {
+    activeModel("th-unknown", "anthropic/claude-opus-4-7");
+
+    renderHeader(undefined, "th-unknown", {
+      ...baseSession(),
+      model: "claude-sonnet-4-5",
+      reasoning: "high",
+    });
+
+    const trigger = screen.getByRole("button", {
+      name: "Choose model: Opus 4.7",
+      description:
+        "Model for this thread (pinned at creation). New threads start on the session default.",
+    }) as HTMLButtonElement;
+    expect(trigger.textContent).toContain("Opus 4.7");
+    expect(trigger.textContent).not.toContain("High");
     expect(trigger.disabled).toBe(true);
   });
 
   it("stays session-scoped and enabled when no threadId is in play", () => {
     renderHeader(undefined, undefined);
-    const trigger = screen.getByRole("button", { name: "Choose model" }) as HTMLButtonElement;
+    const trigger = screen.getByRole("button", { name: /^Choose model:/ }) as HTMLButtonElement;
     expect(trigger.disabled).toBe(false);
   });
 });
@@ -192,7 +326,7 @@ describe("SessionHeader — reasoning persistence", () => {
     const user = userEvent.setup();
     renderHeader(undefined, undefined);
 
-    await user.click(screen.getByRole("button", { name: "Choose model" }));
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     // No org reasoning cap in this suite's settings mock, so `levelsUpTo`
     // renders the full vocabulary — "High" is always present.
     await user.click(screen.getByRole("button", { name: "High reasoning" }));
@@ -206,7 +340,7 @@ describe("SessionHeader — reasoning persistence", () => {
     const user = userEvent.setup();
     renderHeader(undefined, "th-1");
 
-    await user.click(screen.getByRole("button", { name: "Choose model" }));
+    await user.click(screen.getByRole("button", { name: /^Choose model:/ }));
     await user.click(screen.getByRole("button", { name: "High reasoning" }));
 
     expect(setThreadReasoningMutate).toHaveBeenCalledWith({ threadId: "th-1", reasoning: "high" });
@@ -216,7 +350,7 @@ describe("SessionHeader — reasoning persistence", () => {
   it("displays the active thread's reasoning pin over the session default", () => {
     headerThreads = [{ id: "th-1", sessionId: "sess-1", createdAt: 1, reasoning: "xhigh" }];
     renderHeader(undefined, "th-1");
-    const trigger = screen.getByRole("button", { name: "Choose model" });
+    const trigger = screen.getByRole("button", { name: /^Choose model:/ });
     expect(trigger.textContent).toContain("X-High");
   });
 });

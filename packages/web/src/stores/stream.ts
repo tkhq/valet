@@ -125,6 +125,12 @@ export interface SessionStreamState {
    */
   queueByThread: Record<string, WireQueueState>;
   /**
+   * The concrete model running the active submission on each thread.
+   * Handshake `model.state` snapshots seed this transient map. A matching
+   * settlement or an explicit idle snapshot removes the thread entry.
+   */
+  activeModelByThread: Record<string, { queueItemId: string; model: string }>;
+  /**
    * Bumps on every `model_switched` wire event, whatever triggered the
    * switch (picker mutation, `/model` command, direct API call). The
    * session-view hook watches it and refetches the session/threads queries
@@ -246,6 +252,7 @@ const EMPTY: SessionStreamState = {
   messages: [],
   pendingGates: {},
   queueByThread: {},
+  activeModelByThread: {},
   modelSwitchNonce: 0,
   compactingByThread: {},
   compactionNonce: 0,
@@ -291,6 +298,7 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       next.errorByThread = {};
       next.sessionError = undefined;
       next.statusByThread = {};
+      next.activeModelByThread = {};
       // Compacting is transient too: the engine balances the start/end pair
       // in-process, but an api crash mid-compaction orphans the start frame
       // — without this reset the "Compacting context…" strip would survive
@@ -582,7 +590,32 @@ function reduce(slice: SessionStreamState, ev: WireEvent, sessionId: string): Se
       return next;
     }
 
+    case "model.state": {
+      if (ev.queueItemId === null) {
+        if (!slice.activeModelByThread[ev.threadId]) return ev.offset ? next : slice;
+        const { [ev.threadId]: _, ...rest } = slice.activeModelByThread;
+        next.activeModelByThread = rest;
+        return next;
+      }
+      const active = slice.activeModelByThread[ev.threadId];
+      if (active?.queueItemId === ev.queueItemId && active.model === ev.model) {
+        return ev.offset ? next : slice;
+      }
+      next.activeModelByThread = {
+        ...slice.activeModelByThread,
+        [ev.threadId]: { queueItemId: ev.queueItemId, model: ev.model },
+      };
+      return next;
+    }
+
     case "submission.settled": {
+      // Settlement is authoritative only for the active submission with the
+      // same queue item id. A queued, merged, or superseded item can settle
+      // while another item still runs on this thread.
+      if (slice.activeModelByThread[ev.threadId]?.queueItemId === ev.queueItemId) {
+        const { [ev.threadId]: _, ...rest } = slice.activeModelByThread;
+        next.activeModelByThread = rest;
+      }
       // Mark the originating user message with a terminal badge.
       //
       // Matching: prefer an exact `queueItemId` match — REST rows carry the
@@ -899,6 +932,17 @@ export const useStreamStore = create<StreamStore>((set) => ({
 
 export function useSessionStream(sessionId: string): SessionStreamState {
   return useStreamStore((s) => s.bySession[sessionId] ?? EMPTY);
+}
+
+/** The concrete model running the active submission on this thread. */
+export function useActiveModelForThread(
+  sessionId: string,
+  threadId: string | undefined,
+): string | undefined {
+  return useStreamStore((s) => {
+    if (!threadId) return undefined;
+    return s.bySession[sessionId]?.activeModelByThread[threadId]?.model;
+  });
 }
 
 /**

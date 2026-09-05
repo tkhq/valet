@@ -1,5 +1,5 @@
 import { Check, ChevronDown, Search, Sparkles } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   Button,
   DropdownMenu,
@@ -78,6 +78,11 @@ import { matchesNeedle } from "~/lib/text-match";
  */
 export interface ModelPickerProps {
   currentId?: string;
+  /** Model shown in the closed trigger. Picker behavior remains based on
+   * `currentId`. */
+  displayId?: string;
+  /** Extra context announced when the trigger receives focus. */
+  ariaDescription?: string;
   /** Called when the user picks a model or a size tier. Returns the model
    * id, or the bare tier token ("xs"|"s"|"m"|"l"|"xl"). */
   onSelect: (id: string) => void;
@@ -149,6 +154,8 @@ type FlatEntry = { kind: "tier"; tier: SizeTier } | { kind: "model"; model: Mode
 
 export function ModelPicker({
   currentId,
+  displayId,
+  ariaDescription,
   onSelect,
   currentReasoning,
   onSelectReasoning,
@@ -255,9 +262,14 @@ export function ModelPicker({
     el?.scrollIntoView({ block: "nearest" });
   }, [highlightIndex, open]);
 
-  const triggerLabel = currentId
-    ? selectionLabel(currentId, tierMapQ.data, models)
+  const triggerId = displayId ?? currentId;
+  const triggerLabel = triggerId
+    ? selectionLabel(triggerId, tierMapQ.data, models)
     : "Inherit";
+  const triggerReasoning = currentReasoning
+    ? ` · ${reasoningLabelFor(currentReasoning)}`
+    : "";
+  const descriptionId = useId();
   const reasoningLevels = levelsUpTo(orgReasoningQ.data?.max);
   const activeThinkingLevels = thinkingLevelsFor(currentId, tierMapQ.data, models);
 
@@ -298,16 +310,22 @@ export function ModelPicker({
           size="sm"
           disabled={disabled}
           className="font-normal gap-1.5"
-          aria-label="Choose model"
+          aria-label={`Choose model: ${triggerLabel}${triggerReasoning}`}
+          aria-describedby={ariaDescription ? descriptionId : undefined}
         >
           <Sparkles className="h-3.5 w-3.5 text-muted" aria-hidden />
           <span className="truncate text-xs">
             {triggerLabel}
-            {currentReasoning && ` · ${reasoningLabelFor(currentReasoning)}`}
+            {triggerReasoning}
           </span>
           <ChevronDown className="h-3.5 w-3.5 text-muted shrink-0 ml-auto" />
         </Button>
       </DropdownMenuTrigger>
+      {ariaDescription && (
+        <span id={descriptionId} className="sr-only">
+          {ariaDescription}
+        </span>
+      )}
       <DropdownMenuContent
         align="end"
         className="w-[340px] max-h-[min(70vh,560px)] overflow-hidden p-0"

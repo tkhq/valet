@@ -40,13 +40,20 @@ import { useMe, useOrg, useTeams } from "~/api/settings";
 import { useAssistants } from "~/api/assistants";
 import { useOrchestratorInfo } from "~/api/orchestrator";
 import { ApiError } from "~/api/client";
-import { queueBusy, useQueueStateForThread, type AgentStatus, type ConnectionStatus } from "~/stores/stream";
+import {
+  queueBusy,
+  useActiveModelForThread,
+  useQueueStateForThread,
+  type AgentStatus,
+  type ConnectionStatus,
+} from "~/stores/stream";
 import { assistantLabel } from "./assistant-rail";
 import { ModelPicker } from "./model-picker";
 import { RatingButtons } from "./rating-buttons";
 import { MoveSessionDialog } from "./move-session-dialog";
 import { buildTranscript } from "./transcript";
 import { cn } from "~/lib/cn";
+import { sameModelSpec } from "~/lib/models";
 import { useCopyToClipboard } from "~/lib/use-copy";
 import { formatElapsed, useElapsedSeconds } from "~/lib/use-elapsed";
 
@@ -113,6 +120,12 @@ export function SessionHeader({
   const threads = useThreads(session.id);
   const activeThread = threads.data?.threads.find((t) => t.id === threadId);
   const threadScoped = threadId !== undefined;
+  const modelConfigurationResolved = !threadScoped || activeThread !== undefined;
+  const configuredModel = activeThread ? (activeThread.model ?? session.model) : session.model;
+  const configuredReasoning = activeThread
+    ? (activeThread.reasoning ?? session.reasoning)
+    : session.reasoning;
+  const activeModel = useActiveModelForThread(session.id, threadId);
   const pickerDisabled = threadScoped
     ? !activeThread || setThreadModel.isPending
     : setModel.isPending;
@@ -304,6 +317,16 @@ export function SessionHeader({
   const canAdminister =
     teamId === null || team?.callerRole === "admin" || me.data?.orgRole === "admin";
   const workspaceHint = session.workspace ? `workspace: ${session.workspace}` : title;
+  const modelScopeHint = threadScoped
+    ? "Model for this thread (pinned at creation). New threads start on the session default."
+    : "Session-default model. New threads pin it at creation.";
+  const modelHint =
+    modelConfigurationResolved &&
+    activeModel &&
+    configuredModel &&
+    !sameModelSpec(activeModel, configuredModel)
+      ? `${modelScopeHint} Currently using ${activeModel} for this submission. Configured as ${configuredModel}.`
+      : modelScopeHint;
   // Renaming writes `session.title`, so it is offered only where the header
   // actually shows that field. An assistant's header shows the assistant's
   // own name instead, which is renamed on the assistants surface — an edit
@@ -428,16 +451,12 @@ export function SessionHeader({
       <div className="ml-auto flex items-center gap-1.5">
         {actionError && <span className="text-xs text-danger-500">{actionError}</span>}
         {canAdminister && (
-          <Tooltip
-            content={
-              threadScoped
-                ? "Model for this thread (pinned at creation). New threads start on the session default."
-                : "Session-default model. New threads pin it at creation."
-            }
-          >
+          <Tooltip content={modelHint}>
             <span>
               <ModelPicker
-                currentId={activeThread ? (activeThread.model ?? session.model) : session.model}
+                currentId={configuredModel}
+                displayId={activeModel ?? configuredModel}
+                ariaDescription={modelHint}
                 onSelect={(id) => {
                   if (threadScoped) {
                     // Disabled until activeThread resolves; the guard is
@@ -450,8 +469,7 @@ export function SessionHeader({
                   setModel.mutate(id);
                 }}
                 currentReasoning={
-                  (threadScoped ? (activeThread?.reasoning ?? session.reasoning) : session.reasoning) ??
-                  undefined
+                  modelConfigurationResolved ? (configuredReasoning ?? undefined) : undefined
                 }
                 onSelectReasoning={(level) => {
                   if (threadScoped) {

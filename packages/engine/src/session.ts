@@ -181,10 +181,16 @@ export interface EmitOptions {
    * claimed turn. When present, a superseded/zombie attempt's append is
    * rejected with StaleAttemptError — which `emit` rethrows (unlike every
    * other append failure) so the caller's in-flight turn stops. Fence-less
-   * emits (the default — settlement, gate lifecycle, queue_state, and
-   * anything outside a claimed attempt) NEVER reject on append failure.
+   * emits remain best-effort unless they explicitly opt into
+   * `throwOnAppendError` below.
    */
   fence?: WriteFence;
+  /**
+   * Surface a non-stale durable append failure to the caller. The default is
+   * false so existing wakeup/UX events remain best-effort; correctness-critical
+   * state publications opt in and decide how to recover.
+   */
+  throwOnAppendError?: boolean;
 }
 
 /** Settings pinned when an API caller creates a new thread. */
@@ -1560,12 +1566,12 @@ export class Session {
     // StaleAttemptError means a superseded/zombie attempt tried to land a
     // live-execution event — that's the attempt's stop signal, so it
     // rethrows. Every other failure (including a fenced append that fails
-    // for some other reason) stays log-and-continue; a fence-less emit never
-    // rejects.
+    // for some other reason) stays log-and-continue unless the caller marks
+    // this append correctness-critical with `throwOnAppendError`.
     try {
       await this.providers.stream.append(busEvent, opts?.eventKey ?? uid("ev"), opts?.fence);
     } catch (err) {
-      if (err instanceof StaleAttemptError) throw err;
+      if (err instanceof StaleAttemptError || opts?.throwOnAppendError) throw err;
       console.error(
         `[engine] event append failed (session=${this.id}, type=${event.type}):`,
         err instanceof Error ? err.message : String(err),

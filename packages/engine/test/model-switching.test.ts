@@ -28,6 +28,7 @@ import {
   fauxAssistantMessage,
   fauxToolCall,
   getModel,
+  registerBuiltInApiProviders,
   registerFauxProvider,
   Type,
   type FauxProvider,
@@ -38,9 +39,11 @@ import {
   Engine,
   InMemoryEventStream,
   InMemorySessionStore,
+  loadRoleFromMarkdown,
   VirtualSandboxProvider,
   type BusEvent,
   type DecisionGate,
+  type QueueItem,
   type ResolvedModel,
   type ToolDef,
 } from "../src/index.js";
@@ -99,6 +102,36 @@ function setup(): SetupResult {
   const baseModel = getModel("anthropic", HAIKU as never)!;
   const newEngine = () => new Engine({ providers: { store, stream: bus, sandboxProvider } });
   return { haikuFaux, opusFaux, engine, newEngine, store, events, baseModel };
+}
+
+function modelStateEvents(events: BusEvent[]) {
+  return events.flatMap((event) => event.event.type === "model_state" ? [event.event] : []);
+}
+
+function approvalTool(): ToolDef {
+  return {
+    name: "do_thing",
+    description: "Do a sensitive thing after approval.",
+    parameters: Type.Object({ arg: Type.String() }),
+    execute: async (args, ctx) => {
+      const resolution = await ctx.requestDecision({
+        type: "approval",
+        title: "approve do_thing?",
+        body: `arg=${args.arg}`,
+        resumeKey: `do_thing:${args.arg}`,
+      });
+      return { text: resolution.actionId === "approve" ? "approved" : "denied" };
+    },
+  };
+}
+
+async function waitForCondition(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("waitForCondition: timed out");
 }
 
 describe("engine: model switching", () => {
@@ -476,6 +509,493 @@ describe("engine: model switching", () => {
   });
 });
 
+describe("engine: active submission model state", () => {
+  it("publishes a concrete active model and clears only the matching settlement", async () => {
+    const faux = registerFauxProvider({ provider: "active-model" });
+    cleanups.push(() => faux.unregister());
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("do_thing", { arg: "x" }, { id: "tc-active" })], {
+        stopReason: "toolUse",
+      }),
+      fauxAssistantMessage("done"),
+    ]);
+    const store = new InMemorySessionStore();
+    const bus = new InMemoryEventStream();
+    const events: BusEvent[] = [];
+    bus.subscribe({}, (event) => events.push(event));
+    const engine = new Engine({
+      providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
+    });
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: faux.getModel(),
+      tools: [approvalTool()],
+    });
+    const thread = await session.ensureDefaultThread();
+
+    const receipt = await thread.submitPrompt("do it", {});
+    await waitForCondition(() => events.some((event) => event.event.type === "decision_gate"));
+
+    const active = {
+      queueItemId: receipt.queueItemId,
+      model: `${faux.getModel().provider}/${faux.getModel().id}`,
+    };
+    expect(modelStateEvents(events)).toEqual([
+      { type: "model_state", threadId: thread.id, ...active },
+    ]);
+    expect(await thread.currentModelState()).toEqual(active);
+    const snapshot = await thread.currentModelState();
+    if (!snapshot) throw new Error("active model snapshot missing");
+    snapshot.model = "mutated/by-test";
+    expect(await thread.currentModelState()).toEqual(active);
+
+    const now = Date.now();
+    for (const outcome of ["merged", "superseded"] as const) {
+      const unrelated: QueueItem = {
+        id: `q-unrelated-${outcome}`,
+        threadId: thread.id,
+        content: `${outcome} elsewhere`,
+        status: "queued",
+        attemptCount: 0,
+        maxAttempts: 10,
+        timeoutAt: now + 3_600_000,
+        createdAt: now,
+        updatedAt: now,
+      };
+      await store.admitSubmission(session.id, thread.id, unrelated);
+      await thread.settleReconciled(unrelated, { outcome }, null);
+      expect(await thread.currentModelState()).toEqual(active);
+      expect(modelStateEvents(events)).toHaveLength(1);
+    }
+
+    const gateEvent = events.find((event) => event.event.type === "decision_gate");
+    if (!gateEvent || gateEvent.event.type !== "decision_gate") {
+      throw new Error("decision gate missing");
+    }
+    await session.resolveDecision(gateEvent.event.gate.id, {
+      actionId: "approve",
+      resolvedBy: "u1",
+      resolvedAt: Date.now(),
+    });
+    await waitForCondition(() =>
+      events.some(
+        (event) =>
+          event.event.type === "submission_settled" &&
+          event.event.queueItemId === receipt.queueItemId,
+      ),
+    );
+
+    expect(modelStateEvents(events)).toEqual([
+      { type: "model_state", threadId: thread.id, ...active },
+      { type: "model_state", threadId: thread.id, queueItemId: null, model: null },
+    ]);
+    expect(await thread.currentModelState()).toBeNull();
+  });
+
+  it("publishes the queue-item model before pre-turn compaction invokes the model", async () => {
+    const faux = registerFauxProvider({
+      provider: "active-before-compaction",
+      models: [{ id: "tiny", name: "tiny", contextWindow: 100_000, maxTokens: 5 }],
+    });
+    cleanups.push(() => faux.unregister());
+    const store = new InMemorySessionStore();
+    const bus = new InMemoryEventStream();
+    const events: BusEvent[] = [];
+    bus.subscribe({}, (event) => events.push(event));
+    const model = faux.getModel("tiny");
+    if (!model) throw new Error("tiny faux model missing");
+    const options = {
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model,
+      compaction: { tailTurns: 1 },
+    };
+    const engineA = new Engine({
+      providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
+    });
+    const sessionA = await engineA.createSession(options);
+    const threadA = sessionA.thread();
+    await store.appendEntries(sessionA.id, threadA.id, [
+      {
+        id: "e-active-1",
+        sessionId: sessionA.id,
+        threadId: threadA.id,
+        parentId: null,
+        type: "message",
+        role: "user",
+        content: "first prompt",
+        createdAt: 1,
+      },
+      {
+        id: "e-active-2",
+        sessionId: sessionA.id,
+        threadId: threadA.id,
+        parentId: "e-active-1",
+        type: "message",
+        role: "assistant",
+        content: "x".repeat(300_000),
+        createdAt: 2,
+      },
+      {
+        id: "e-active-3",
+        sessionId: sessionA.id,
+        threadId: threadA.id,
+        parentId: "e-active-2",
+        type: "message",
+        role: "user",
+        content: "second prompt",
+        createdAt: 3,
+      },
+      {
+        id: "e-active-4",
+        sessionId: sessionA.id,
+        threadId: threadA.id,
+        parentId: "e-active-3",
+        type: "message",
+        role: "assistant",
+        content: "y".repeat(150_000),
+        createdAt: 4,
+      },
+    ]);
+
+    let activeBeforeFirstModelCall = false;
+    const summary =
+      "## Goal\n- test\n\n## Constraints & Preferences\n- (none)\n\n## Progress\n### Done\n- prior turns\n\n### In Progress\n- (none)\n\n### Blocked\n- (none)\n\n## Key Decisions\n- (none)\n\n## Next Steps\n- (none)\n\n## Critical Context\n- (none)\n\n## Relevant Files\n- (none)";
+    faux.setResponses([
+      () => {
+        activeBeforeFirstModelCall = modelStateEvents(events).some(
+          (event) => event.queueItemId !== null && event.model === `${model.provider}/${model.id}`,
+        );
+        return fauxAssistantMessage(summary);
+      },
+      fauxAssistantMessage("post-compaction response"),
+    ]);
+
+    const engineB = new Engine({
+      providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
+    });
+    const restored = await engineB.restoreSession({ sessionId: sessionA.id, options });
+    const receipt = await restored.prompt("third prompt");
+    await waitForCondition(() =>
+      events.some(
+        (event) =>
+          event.event.type === "submission_settled" &&
+          event.event.queueItemId === receipt.queueItemId,
+      ),
+    );
+
+    expect(activeBeforeFirstModelCall).toBe(true);
+    const activeIndex = events.findIndex(
+      (event) =>
+        event.event.type === "model_state" &&
+        event.event.queueItemId === receipt.queueItemId,
+    );
+    const compactionIndex = events.findIndex(
+      (event) => event.event.type === "compaction_start" && event.threadId === receipt.threadId,
+    );
+    expect(activeIndex).toBeGreaterThanOrEqual(0);
+    expect(activeIndex).toBeLessThan(compactionIndex);
+  });
+
+  it("publishes base, role, then idle model state for a successful role turn", async () => {
+    const baseFaux = registerFauxProvider({ provider: "active-role-success-base" });
+    const roleFaux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
+    cleanups.push(() => baseFaux.unregister());
+    cleanups.push(() => {
+      roleFaux.unregister();
+      registerBuiltInApiProviders();
+    });
+    let rolePrompt: string | undefined;
+    roleFaux.setResponses([
+      (context) => {
+        rolePrompt = context.systemPrompt;
+        return fauxAssistantMessage("review completed");
+      },
+    ]);
+    let nextRun:
+      | { provider: string; systemPrompt: string | undefined }
+      | undefined;
+    baseFaux.setResponses([
+      (context, _options, _state, model) => {
+        nextRun = { provider: model.provider, systemPrompt: context.systemPrompt };
+        return fauxAssistantMessage("plain follow-up completed");
+      },
+    ]);
+    const role = loadRoleFromMarkdown(`---
+name: reviewer
+description: Review code
+model: ${HAIKU}
+---
+
+Role-only instructions.
+`);
+    const store = new InMemorySessionStore();
+    const bus = new InMemoryEventStream({
+      fenceCheck: (fence) => store.isCurrentAttempt(fence.itemId, fence.attemptId),
+    });
+    const events: BusEvent[] = [];
+    bus.subscribe({}, (event) => events.push(event));
+    const engine = new Engine({
+      providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
+    });
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: baseFaux.getModel(),
+      systemPrompt: "Base instructions.",
+      roles: [role],
+    });
+    const thread = await session.ensureDefaultThread();
+
+    const receipt = await thread.submitPrompt("review this", { role: "reviewer" });
+    await waitForCondition(() =>
+      events.some(
+        (event) =>
+          event.event.type === "submission_settled" &&
+          event.event.queueItemId === receipt.queueItemId,
+      ),
+    );
+
+    expect(
+      modelStateEvents(events).filter(
+        (event) => event.queueItemId === receipt.queueItemId || event.queueItemId === null,
+      ),
+    ).toEqual([
+      {
+        type: "model_state",
+        threadId: thread.id,
+        queueItemId: receipt.queueItemId,
+        model: `${baseFaux.getModel().provider}/${baseFaux.getModel().id}`,
+      },
+      {
+        type: "model_state",
+        threadId: thread.id,
+        queueItemId: receipt.queueItemId,
+        model: `anthropic/${HAIKU}`,
+      },
+      { type: "model_state", threadId: thread.id, queueItemId: null, model: null },
+    ]);
+    expect(rolePrompt).toMatch(
+      /^Base instructions\.\n\nRole-only instructions\.\n{2,3}## Runtime model\n/,
+    );
+    expect(rolePrompt).toContain(`Active selection: ${HAIKU}`);
+    expect(rolePrompt).toContain("Temporary override: role model; expires when this turn ends");
+
+    const followUp = await thread.submitPrompt("plain follow-up", {});
+    await waitForCondition(() =>
+      events.some(
+        (event) =>
+          event.event.type === "submission_settled" &&
+          event.event.queueItemId === followUp.queueItemId,
+      ),
+    );
+    expect(nextRun?.provider).toBe(baseFaux.getModel().provider);
+    expect(nextRun?.systemPrompt).toMatch(/^Base instructions\.\n\n## Runtime model\n/);
+    expect(nextRun?.systemPrompt).not.toContain("Role-only instructions.");
+    expect(nextRun?.systemPrompt).toContain("Temporary override: none");
+  });
+
+  it("a generic role model-state failure skips the role provider and restores overlays", async () => {
+    const baseFaux = registerFauxProvider({ provider: "active-role-failure-base" });
+    const roleFaux = registerFauxProvider({ api: "anthropic-messages", provider: "anthropic" });
+    cleanups.push(() => baseFaux.unregister());
+    cleanups.push(() => {
+      roleFaux.unregister();
+      registerBuiltInApiProviders();
+    });
+    let roleCalls = 0;
+    roleFaux.setResponses([
+      () => {
+        roleCalls += 1;
+        return fauxAssistantMessage("must not run");
+      },
+    ]);
+    let nextRun:
+      | { provider: string; systemPrompt: string | undefined }
+      | undefined;
+    baseFaux.setResponses([
+      (context, _options, _state, model) => {
+        nextRun = { provider: model.provider, systemPrompt: context.systemPrompt };
+        return fauxAssistantMessage("plain follow-up completed");
+      },
+    ]);
+    const role = loadRoleFromMarkdown(`---
+name: reviewer
+description: Review code
+model: ${HAIKU}
+---
+
+Role-only instructions.
+`);
+    const store = new InMemorySessionStore();
+    const bus = new InMemoryEventStream({
+      fenceCheck: (fence) => store.isCurrentAttempt(fence.itemId, fence.attemptId),
+    });
+    const events: BusEvent[] = [];
+    bus.subscribe({}, (event) => events.push(event));
+    const append = bus.append.bind(bus);
+    let rejected = false;
+    vi.spyOn(bus, "append").mockImplementation(async (event, eventKey, fence) => {
+      if (
+        !rejected &&
+        event.event.type === "model_state" &&
+        event.event.model === `anthropic/${HAIKU}`
+      ) {
+        rejected = true;
+        throw new Error("role model state unavailable");
+      }
+      return append(event, eventKey, fence);
+    });
+    const engine = new Engine({
+      providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
+    });
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: baseFaux.getModel(),
+      systemPrompt: "Base instructions.",
+      roles: [role],
+    });
+    const thread = await session.ensureDefaultThread();
+
+    const failed = await thread.submitPrompt("review this", { role: "reviewer" });
+    await waitForCondition(() =>
+      events.some(
+        (event) =>
+          event.event.type === "submission_settled" &&
+          event.event.queueItemId === failed.queueItemId,
+      ),
+    );
+    expect(roleCalls).toBe(0);
+    expect(modelStateEvents(events)).toEqual([
+      {
+        type: "model_state",
+        threadId: thread.id,
+        queueItemId: failed.queueItemId,
+        model: `${baseFaux.getModel().provider}/${baseFaux.getModel().id}`,
+      },
+      { type: "model_state", threadId: thread.id, queueItemId: null, model: null },
+    ]);
+    expect(await thread.currentModelState()).toBeNull();
+
+    const next = await thread.submitPrompt("plain follow-up", {});
+    await waitForCondition(() =>
+      events.some(
+        (event) =>
+          event.event.type === "submission_settled" &&
+          event.event.queueItemId === next.queueItemId,
+      ),
+    );
+    expect(nextRun?.provider).toBe(baseFaux.getModel().provider);
+    expect(nextRun?.systemPrompt).toMatch(/^Base instructions\.\n\n## Runtime model\n/);
+    expect(nextRun?.systemPrompt).not.toContain("Role-only instructions.");
+    expect(nextRun?.systemPrompt).toContain("Temporary override: none");
+  });
+
+  it("rejects a stale role replacement before append and restores overlays", async () => {
+    const baseFaux = registerFauxProvider({ provider: "active-role-base" });
+    cleanups.push(() => baseFaux.unregister());
+    let nextRun:
+      | { provider: string; systemPrompt: string | undefined }
+      | undefined;
+    baseFaux.setResponses([
+      (ctx, _opts, _state, model) => {
+        nextRun = { provider: model.provider, systemPrompt: ctx.systemPrompt };
+        return fauxAssistantMessage("next prompt completed");
+      },
+    ]);
+    const role = loadRoleFromMarkdown(`---
+name: reviewer
+description: Review code
+model: ${HAIKU}
+---
+
+Role-only instructions.
+`);
+    const store = new InMemorySessionStore();
+    const bus = new InMemoryEventStream({
+      fenceCheck: (fence) => store.isCurrentAttempt(fence.itemId, fence.attemptId),
+    });
+    const events: BusEvent[] = [];
+    bus.subscribe({}, (event) => events.push(event));
+    const append = bus.append.bind(bus);
+    let interceptedRoleState = false;
+    vi.spyOn(bus, "append").mockImplementation(async (event, eventKey, fence) => {
+      if (
+        !interceptedRoleState &&
+        event.event.type === "model_state" &&
+        event.event.model === `anthropic/${HAIKU}` &&
+        fence
+      ) {
+        interceptedRoleState = true;
+        const replaced = await store.replaceSubmissionAttempt(
+          event.sessionId,
+          event.event.threadId,
+          fence.itemId,
+          {
+            sessionId: event.sessionId,
+            threadId: event.event.threadId,
+            itemId: fence.itemId,
+            attemptId: "att-role-successor",
+            ownerId: "role-successor",
+          },
+          { expectedAttemptId: fence.attemptId },
+        );
+        expect(replaced).toBeTruthy();
+        await store.forceSettle(event.sessionId, fence.itemId, "aborted", "successor settled");
+      }
+      return append(event, eventKey, fence);
+    });
+    const engine = new Engine({
+      providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
+    });
+    const session = await engine.createSession({
+      userId: "u1",
+      orgId: "o1",
+      workspace: "/",
+      sandbox: {},
+      model: baseFaux.getModel(),
+      systemPrompt: "Base instructions.",
+      roles: [role],
+    });
+    const thread = await session.ensureDefaultThread();
+    const first = await thread.submitPrompt("review this", { role: "reviewer" });
+    await waitForCondition(() => interceptedRoleState && !thread.hasActiveRun);
+
+    expect(modelStateEvents(events).filter((event) => event.queueItemId === first.queueItemId)).toEqual([
+      {
+        type: "model_state",
+        threadId: thread.id,
+        queueItemId: first.queueItemId,
+        model: `${baseFaux.getModel().provider}/${baseFaux.getModel().id}`,
+      },
+    ]);
+    expect(await thread.currentModelState()).toBeNull();
+
+    const second = await thread.submitPrompt("plain follow-up", {});
+    await waitForCondition(() =>
+      events.some(
+        (event) =>
+          event.event.type === "submission_settled" &&
+          event.event.queueItemId === second.queueItemId,
+      ),
+    );
+    expect(nextRun?.provider).toBe(baseFaux.getModel().provider);
+    expect(nextRun?.systemPrompt).toMatch(/^Base instructions\.\n\n## Runtime model\n/);
+    expect(nextRun?.systemPrompt).not.toContain("Role-only instructions.");
+    expect(nextRun?.systemPrompt).toContain("Temporary override: none");
+  });
+});
+
 /**
  * Agent-initiated escalation (TKAI-338).
  *
@@ -497,8 +1017,10 @@ describe("engine: agent-initiated model escalation (TKAI-338)", () => {
   interface EscalationSetup {
     engine: Engine;
     store: InMemorySessionStore;
+    bus: InMemoryEventStream;
     events: BusEvent[];
     cheapModel: Model<unknown>;
+    strongModel: Model<unknown>;
     resolver: (spec: string) => Promise<ResolvedModel | null>;
     cheapCalls: string[];
     strongCalls: string[];
@@ -551,7 +1073,7 @@ describe("engine: agent-initiated model escalation (TKAI-338)", () => {
     bus.subscribe({}, (e) => events.push(e));
     const engine = new Engine({ providers: { store, stream: bus, sandboxProvider } });
 
-    return { engine, store, events, cheapModel, resolver, cheapCalls, strongCalls };
+    return { engine, store, bus, events, cheapModel, strongModel, resolver, cheapCalls, strongCalls };
   }
 
   /**
@@ -607,6 +1129,66 @@ describe("engine: agent-initiated model escalation (TKAI-338)", () => {
     // ("switch_model ... in this turn, then continue").
     expect(s.cheapCalls).toEqual(["escalate"]);
     expect(s.strongCalls).toEqual(["continuation"]);
+    expect(modelStateEvents(s.events)).toEqual([
+      {
+        type: "model_state",
+        threadId: receipt.threadId,
+        queueItemId: receipt.queueItemId,
+        model: `${s.cheapModel.provider}/${s.cheapModel.id}`,
+      },
+      {
+        type: "model_state",
+        threadId: receipt.threadId,
+        queueItemId: receipt.queueItemId,
+        model: `${s.strongModel.provider}/${s.strongModel.id}`,
+      },
+      {
+        type: "model_state",
+        threadId: receipt.threadId,
+        queueItemId: null,
+        model: null,
+      },
+    ]);
+  });
+
+  it("rolls back an agent switch when its model-state append fails", async () => {
+    const s = setupEscalation("esc-append-fail");
+    const append = s.bus.append.bind(s.bus);
+    let rejected = false;
+    vi.spyOn(s.bus, "append").mockImplementation(async (event, eventKey, fence) => {
+      if (
+        !rejected &&
+        event.event.type === "model_state" &&
+        event.event.model === `${s.strongModel.provider}/${s.strongModel.id}`
+      ) {
+        rejected = true;
+        throw new Error("switch model state unavailable");
+      }
+      return append(event, eventKey, fence);
+    });
+    const session = await makeSession(s);
+
+    const receipt = await session.prompt("do something hard");
+    await waitForSettled(s.events);
+
+    expect(s.cheapCalls).toEqual(["escalate", "continuation"]);
+    expect(s.strongCalls).toEqual([]);
+    expect(modelStateEvents(s.events)).toEqual([
+      {
+        type: "model_state",
+        threadId: receipt.threadId,
+        queueItemId: receipt.queueItemId,
+        model: `${s.cheapModel.provider}/${s.cheapModel.id}`,
+      },
+      {
+        type: "model_state",
+        threadId: receipt.threadId,
+        queueItemId: null,
+        model: null,
+      },
+    ]);
+    const entries = await session.readEntries("web:default");
+    expect(JSON.stringify(entries)).toContain("switch_model failed: switch model state unavailable");
   });
 
   it("does not outlive the turn: the thread pin stays on the user's model", async () => {
