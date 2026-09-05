@@ -123,6 +123,8 @@ export class SandboxAttachment {
   private reconciling: Promise<void> | null = null;
   /** Backoff memo for a failed replacement (spec decision 6). */
   private convergeFailure: ConvergeFailure | null = null;
+  /** Last ignored non-isolated resource drift, for change-aware warnings. */
+  private ignoredResourceDriftKey: string | null = null;
 
   constructor(provider: SandboxProvider, createOpts: SandboxCreateOpts, specProvider?: SpecProvider) {
     this.provider = provider;
@@ -467,6 +469,20 @@ export class SandboxAttachment {
 
       // Only isolated providers replace on image or resource drift (decision 8).
       // Non-isolated providers still converge preparation steps in place.
+      const ignoredResourceDrift = this.provider?.capabilities().isolated !== true &&
+        resourceDrift(desired.resources, observed.resources);
+      if (ignoredResourceDrift) {
+        const warningKey = JSON.stringify([desired.resources, observed.resources]);
+        if (this.ignoredResourceDriftKey !== warningKey) {
+          console.warn(
+            `SandboxAttachment: ignored CPU/memory change for non-isolated provider ${this.provider?.backend ?? "unknown"}. ` +
+              "Use an isolated sandbox provider to apply resource settings.",
+          );
+          this.ignoredResourceDriftKey = warningKey;
+        }
+      } else {
+        this.ignoredResourceDriftKey = null;
+      }
       if (this.replacementNeeded(desired, observed)) {
         // Backoff: skip the replace when the SAME desired spec already failed
         // to replace within its exponential window (spec decision 6). A

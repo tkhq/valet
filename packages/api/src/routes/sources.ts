@@ -21,7 +21,7 @@ import { Hono } from "hono";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq } from "drizzle-orm";
 import { isPgUniqueViolation } from "@valet/store-postgres";
-import { parseResourceQuantity } from "@valet/engine";
+import { isValidSandboxCpu, parseResourceQuantity, sandboxCpuRange } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
 import { imageSources, bakes, type ImageSourceRow } from "../schema/index.js";
@@ -252,8 +252,8 @@ sourcesRouter.patch("/:id", async (c) => {
       }
       const parsed: NonNullable<ImageSourceRow["sandboxResources"]> = {};
       if (resources.cpu !== undefined) {
-        if (typeof resources.cpu !== "number" || !Number.isFinite(resources.cpu) || resources.cpu <= 0) {
-          return c.json({ error: "Set sandboxResources.cpu to a positive finite number, such as 2 or 0.5." }, 400);
+        if (!isValidSandboxCpu(resources.cpu)) {
+          return c.json({ error: `sandboxResources.cpu must be ${sandboxCpuRange()}. Set it to a value such as 2 or 0.5.` }, 400);
         }
         parsed.cpu = resources.cpu;
       }

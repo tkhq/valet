@@ -373,15 +373,18 @@ describe("sandbox deployment resource defaults", () => {
     expect(resolveSandboxMemory({ VALET_SANDBOX_MEMORY: "" })).toBeUndefined();
   });
 
-  it("parses a positive fractional CPU value", () => {
+  it("accepts fractional, exponent, and exactly-at-cap CPU values", async () => {
+    const { MAX_SANDBOX_CPU } = await import("@valet/shared");
     expect(resolveSandboxCpu({ VALET_SANDBOX_CPU: " 0.5 " })).toBe(0.5);
+    expect(resolveSandboxCpu({ VALET_SANDBOX_CPU: "6.4e1" })).toBe(MAX_SANDBOX_CPU);
+    expect(resolveSandboxCpu({ VALET_SANDBOX_CPU: String(MAX_SANDBOX_CPU) })).toBe(MAX_SANDBOX_CPU);
   });
 
-  it.each(["0", "-1", "Infinity", "NaN", "500m"])(
+  it.each(["0", "-1", "Infinity", "NaN", "500m", "64.001", "1e300"])(
     "rejects invalid CPU value %j with a corrective error",
     (cpu) => {
       expect(() => resolveSandboxCpu({ VALET_SANDBOX_CPU: cpu })).toThrow(
-        /VALET_SANDBOX_CPU=.*positive finite number.*value like "1" or "0.5"/,
+        /VALET_SANDBOX_CPU=.*greater than 0 and at most 64.*Set it to a value such as "1" or "0.5"/,
       );
     },
   );

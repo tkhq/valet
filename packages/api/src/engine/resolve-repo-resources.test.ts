@@ -1,3 +1,4 @@
+import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { imageSources } from "../schema/index.js";
@@ -61,11 +62,22 @@ describe("resolveRepoResources", () => {
     expect(result.resources).toEqual({ cpu: host === "github.com" ? 6 : 2, memory: "4Gi" });
   });
 
+  it("reads saved defaults fresh on every resolution", async () => {
+    await seed();
+    const yaml = async () => ({ docker: false, outcome: "absent" as const });
+    expect((await resolveRepoResources(harness.appDb, "org-a", primary, yaml)).resources?.cpu).toBe(2);
+
+    await harness.appDb.update(imageSources).set({ sandboxResources: { cpu: 6 } }).where(eq(imageSources.id, "org-a-github"));
+
+    expect((await resolveRepoResources(harness.appDb, "org-a", primary, yaml)).resources?.cpu).toBe(6);
+  });
+
   it("keeps fresh-create fallback separate from the opinion when YAML fails", async () => {
     await seed();
     const failed = await resolveRepoResources(harness.appDb, "org-a", primary, async () => ({ docker: false, outcome: "error" }));
     expect(failed.resources).toBeUndefined();
     expect(failed.initialResources).toEqual({ cpu: 2, memory: "4Gi" });
+    expect(failed.resourcesWithheld).toBe(true);
   });
 
   it("removes the opinion on DB failure but keeps successful YAML for a fresh create", async () => {
@@ -73,5 +85,6 @@ describe("resolveRepoResources", () => {
     const failed = await resolveRepoResources(harness.appDb, "org-a", primary, async () => ({ docker: false, outcome: "declared", resources: { cpu: 8 } }));
     expect(failed.resources).toBeUndefined();
     expect(failed.initialResources).toEqual({ cpu: 8 });
+    expect(failed.resourcesWithheld).toBe(true);
   });
 });

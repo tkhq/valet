@@ -2,6 +2,7 @@
 import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { MAX_SANDBOX_CPU } from "@valet/shared";
 import type { SourceSummary } from "~/api/sources";
 
 const patchMutate = vi.fn();
@@ -113,13 +114,26 @@ describe("RepoSandboxResourcesForm", () => {
     );
   });
 
-  it.each(["0", "-1", "not-a-number"])("rejects invalid CPU value %s", async (cpu) => {
+  it("accepts exponent input at the CPU cap", async () => {
+    const user = userEvent.setup();
+    render(<RepoSandboxResourcesForm source={makeSource()} />);
+
+    await user.type(screen.getByLabelText("CPU cores for acme/widgets"), "6.4e1");
+    await user.click(screen.getByRole("button", { name: "Save resources" }));
+
+    expect(patchMutate).toHaveBeenCalledWith(
+      { id: "src_1", body: { sandboxResources: { cpu: MAX_SANDBOX_CPU } } },
+      expect.anything(),
+    );
+  });
+
+  it.each(["0", "-1", "not-a-number", String(MAX_SANDBOX_CPU + 0.001), "1e300"])("rejects invalid CPU value %s", async (cpu) => {
     const user = userEvent.setup();
     render(<RepoSandboxResourcesForm source={makeSource()} />);
 
     await user.type(screen.getByLabelText("CPU cores for acme/widgets"), cpu);
 
-    expect(screen.getByText("Enter a positive CPU value, such as 2 or 0.5.")).toBeTruthy();
+    expect(screen.getByText(`Enter a CPU value greater than 0 and at most ${MAX_SANDBOX_CPU}, such as 2 or 0.5.`)).toBeTruthy();
     expect((screen.getByRole("button", { name: "Save resources" }) as HTMLButtonElement).disabled).toBe(true);
     expect(patchMutate).not.toHaveBeenCalled();
   });

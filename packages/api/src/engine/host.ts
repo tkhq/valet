@@ -604,6 +604,8 @@ export class EngineHost {
    * row read and its `cache.set` evicts an empty slot, and the stale build
    * then re-populates the cache and serves indefinitely. */
   private buildEpoch = new Map<string, number>();
+  /** Repo keys whose conservative resource-withholding warning is active. */
+  private resourceWithholdingWarnings = new Set<string>();
 
   /**
    * Idle-sweep interval handle (sandbox hibernation plan, Task 3), or
@@ -1714,16 +1716,21 @@ export class EngineHost {
    * available defaults; Docker and workspace storage remain YAML-only flags.
    */
   private async resolveRepoPrebuildFlags(sessionId: string, meta: SessionMeta): Promise<ResolvedRepoPrebuildFlags> {
-    const result = await resolveRepoResources(this.opts.db, meta.orgId, meta.repos?.[0], () => this.resolveRepoYamlFlags(sessionId, meta));
     const primary = meta.repos?.[0];
+    const result = await resolveRepoResources(this.opts.db, meta.orgId, primary, () => this.resolveRepoYamlFlags(sessionId, meta));
     if (primary) {
-      const resources = result.resources ?? result.initialResources;
-      console.log(
-        `EngineHost: prebuild flags for session ${sessionId} (${primary.fullName}@${primary.ref ?? "HEAD"}): ` +
-          `workspaceStorage=${result.workspaceStorage ?? "none"} docker=${result.docker} ` +
-          `cpu=${resources?.cpu ?? "none"} memory=${resources?.memory ?? "none"} ` +
-          `(yaml=${result.outcome}, resources=${result.resources === undefined ? "fresh-create fallback" : "authoritative"})`,
-      );
+      const warningKey = `${meta.orgId}/${primary.host ?? "github"}/${primary.fullName}`;
+      if (result.resourcesWithheld) {
+        if (!this.resourceWithholdingWarnings.has(warningKey)) {
+          console.warn(
+            `EngineHost: sandbox resource settings for ${primary.fullName} are withheld from existing compute because YAML authority is unavailable. ` +
+              "Valet will preserve live resources. Restore database and GitHub access, then retry reconciliation.",
+          );
+          this.resourceWithholdingWarnings.add(warningKey);
+        }
+      } else {
+        this.resourceWithholdingWarnings.delete(warningKey);
+      }
     }
     return result;
   }

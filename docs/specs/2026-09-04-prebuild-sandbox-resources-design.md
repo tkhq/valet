@@ -36,9 +36,13 @@ resources:
   memory: 8Gi
 ```
 
-Both fields are optional. `cpu` is a positive finite number. It can contain a
-fraction, such as `0.5`. `memory` is a positive Kubernetes quantity string, such
-as `8Gi` or `500Mi`. The loader trims `memory` before it stores the value.
+Both fields are optional. `cpu` must be greater than 0 and at most 64. It can
+contain a fraction, such as `0.5`. Kubernetes has no portable CPU maximum. The
+64-core platform cap fits common high-core nodes and rejects values that ordinary
+clusters cannot schedule. One shared validator supplies this contract to YAML,
+the settings API, deployment environment parsing, and the settings form. `memory`
+is a positive Kubernetes quantity string, such as `8Gi` or `500Mi`. The loader
+trims `memory` before it stores the value.
 
 If `resources` is not a mapping, the loader rejects the file. If a declared value
 is invalid, the loader rejects the file and names the corrective format in the
@@ -64,8 +68,8 @@ Empty values preserve the current behavior and omit CPU or memory defaults. The
 chart publishes non-empty values as `VALET_SANDBOX_CPU` and
 `VALET_SANDBOX_MEMORY` in the API ConfigMap.
 
-The API validates both environment variables at boot. CPU must be a positive
-finite number. Memory must be a positive Kubernetes quantity. Invalid values stop
+The API validates both environment variables at boot. CPU uses the shared range
+of greater than 0 and at most 64. Memory must be a positive Kubernetes quantity. Invalid values stop
 the API and name the variable and corrective format.
 
 The Kubernetes provider stores valid values in `K8sProviderConfig.defaultResources`.
@@ -176,15 +180,22 @@ resources. The provider reads the live fingerprint only from the reserved litera
 environment entry. It rejects `valueFrom` entries and does not use pod metadata.
 This immutable pod-spec value records the generation used when the pod was created.
 
-The provider compares the live pod's image and literal fingerprint with the
-applied CR in one pod read. A difference deletes the pod even when its image matches.
+The provider adds `VALET_SANDBOX_IMAGE_FINGERPRINT` to the sandbox container.
+This immutable value hashes the requested image before admission. An admission
+webhook can rewrite the live image to a digest or registry mirror without causing
+a false rollout. A requested image change changes the fingerprint and rolls the pod.
+
+The provider compares the live image and literal fingerprints with the applied CR
+in one pod read. A difference deletes the pod even when its image text matches.
 This comparison retries a stale pod if the CR update succeeded but pod deletion
 failed. The shared rollout waits for a new UID and a live pod with `Ready=True`.
-That pod must also match the requested image and any desired resource fingerprint.
-A stale CR Ready condition cannot complete creation while the pod is absent or
-Pending, including after an API restart. The workspace PVC remains. An
-authoritative `{}` applies deployment defaults or removes prior overrides.
-If the live pod read fails, creation fails without declaring resource convergence.
+That pod must carry the requested image fingerprint and any authoritative resource
+fingerprint. A stale CR Ready condition cannot complete creation while the pod is
+absent or Pending. Transient CR, pod-name, and pod-status reads retry inside the
+readiness deadline. A persistent read failure reports the last Kubernetes error
+and corrective checks. Unknown resource state never records convergence. The
+workspace PVC remains. An authoritative `{}` applies deployment defaults or
+removes prior overrides.
 
 Legacy CRs can lack a fingerprint. No-opinion adoption preserves marker absence
 and does not infer resource drift from the admitted pod. Image drift remains
@@ -239,9 +250,8 @@ provider failure follows the existing sandbox startup error path. An unschedulab
 Kubernetes request therefore fails visibly instead of silently falling back to
 smaller resources.
 
-This change does not add application-level resource caps. Cluster `ResourceQuota`
-and `LimitRange` objects remain the deployment guardrails. A later change can add
-Valet-specific caps if operators need them.
+Valet enforces a 64-core application cap before values reach a provider. Cluster
+`ResourceQuota` and `LimitRange` objects remain deployment-specific guardrails.
 
 ## Documentation and dogfood
 
@@ -276,7 +286,7 @@ optional for compatibility with older API servers. `PATCH /api/org/sources/:id`
 accepts `sandboxResources` only for repository sources. An omitted field preserves
 the saved object. A supplied object replaces it. `{}` or `null` clears it.
 Omitted CPU or memory fields inherit from deployment defaults when YAML also omits them.
-CPU must be a positive finite number. Memory must be a positive Kubernetes
+CPU must be greater than 0 and at most 64. Memory must be a positive Kubernetes
 quantity string; the API trims it before storage. Invalid values or unsupported
 fields return HTTP 400 with corrective guidance. Only organization administrators
 can update sources in their organization. A resource edit starts no bake and
@@ -291,7 +301,11 @@ metadata records this combined opinion. A failed read has no opinion for an
 existing sandbox. A fresh sandbox can use saved defaults as its fallback.
 If the database read fails but YAML succeeds, fresh compute can use the known
 YAML values. The resolver keeps these initial values separate from its authoritative
-resource opinion. Any failed lookup removes that opinion and protects adopted compute.
+resource opinion. Any failed lookup removes that opinion and protects adopted compute. The host
+logs once per repository while saved settings are withheld because YAML authority
+is unavailable. It clears the deduplication state after a successful authoritative
+read. The attachment also logs once per changed resource opinion when a
+non-isolated provider ignores the change.
 
 The UI explains this precedence beside the controls. Query invalidation refreshes
 saved values after a mutation. Background refresh updates untouched fields and
@@ -329,7 +343,7 @@ memory when Valet runs them inside its own sandbox.
 
 - Separate CPU or memory requests and limits.
 - A session API or web control for resource values.
-- Per-organization resource policy or application-level maximum values.
+- Per-organization resource policy or configurable maximum values.
 - GPU and other extended Kubernetes resources.
 - Automatic replacement after a deployment default changes.
 - Changes to test selection or test coverage.

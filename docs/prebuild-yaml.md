@@ -61,7 +61,7 @@ resources:
   memory: 8Gi
 ```
 
-`cpu` is a positive finite number of CPU cores. Fractions such as `0.5` are valid.
+`cpu` must be greater than 0 and at most 64 CPU cores. Fractions such as `0.5` are valid.
 `memory` is a positive Kubernetes quantity string, such as `8Gi` or `500Mi`.
 Valet trims memory values. Zero, negative, non-finite, or malformed values are invalid.
 
@@ -88,7 +88,8 @@ files elsewhere in the sandbox do not. YAML reads use the existing ten-minute
 cache. Saved settings are read on each reconciliation.
 
 If YAML or saved-default lookup fails, Valet preserves an existing sandbox's last
-known resources. A fresh sandbox uses available defaults. Invalid YAML is reported
+known resources. Valet logs once while settings are withheld from existing compute.
+A fresh sandbox uses available defaults. Invalid YAML is reported
 and is not cached. Provider startup errors remain visible, including requests
 that the cluster cannot schedule. Resource values must satisfy provider constraints.
 

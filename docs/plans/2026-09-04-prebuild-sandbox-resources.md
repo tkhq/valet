@@ -68,7 +68,7 @@ export interface PrebuildResources {
 ```
 
 Add `resources?: PrebuildResources` to `PrebuildOverride`. Validate `cpu` with
-`typeof value === "number"`, `Number.isFinite`, and `value > 0`. Validate
+the shared `(0, 64]` CPU policy. Validate
 `memory` with `parseStorageQuantity`, require a positive result, and store the
 trimmed string.
 
@@ -385,8 +385,9 @@ resolver on each invocation. Set `DesiredSandboxSpec.resources` only for
 `declared` or `absent` outcomes, and pass that opinion into `specHash`. Keep
 `error` outcomes non-authoritative.
 
-Update the outcome log so it prints CPU and memory beside Docker and workspace
-storage. Do not add a second repository file read or cache.
+Do not log resolved flags on every reconciliation. Read saved settings from the
+database each time, and deduplicate warnings when a failed authority read withholds
+saved settings from existing compute. Do not add a second repository file read or cache.
 
 - [ ] **Step 8: Run the host tests and verify GREEN**
 
@@ -436,7 +437,7 @@ Expected: FAIL because CPU and memory environment values are not resolved.
 
 Add exported `resolveSandboxCpu`, `resolveSandboxMemory`, and
 `resolveSandboxResources` helpers. Empty or unset values return `undefined`. CPU
-parses as a positive finite number. Memory uses `parseStorageQuantity` and returns
+uses the shared `(0, 64]` CPU policy. Memory uses `parseStorageQuantity` and returns
 a trimmed positive quantity. The aggregate helper merges valid values into the
 same object as ephemeral storage, and `buildSandboxProvider` passes that object as
 `defaultResources`.

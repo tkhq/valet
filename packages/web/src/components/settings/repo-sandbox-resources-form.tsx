@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { parseResourceQuantity } from "@valet/shared";
+import { isValidSandboxCpu, MAX_SANDBOX_CPU, parseResourceQuantity } from "@valet/shared";
 import type { SourceSummary } from "~/api/sources";
 import { usePatchSource } from "~/api/sources";
 import { ApiError } from "~/api/client";
@@ -55,8 +55,7 @@ export function RepoSandboxResourcesForm({ source }: { source: SourceSummary }) 
   const cpuValid =
     trimmedCpu === "" ||
     (/^\+?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(trimmedCpu) &&
-      Number.isFinite(cpuValue) &&
-      cpuValue > 0);
+      isValidSandboxCpu(cpuValue));
   const parsedMemory = trimmedMemory === "" ? null : parseResourceQuantity(trimmedMemory);
   const memoryValid = trimmedMemory === "" || (parsedMemory !== null && parsedMemory > 0);
 
@@ -117,7 +116,7 @@ export function RepoSandboxResourcesForm({ source }: { source: SourceSummary }) 
             />
             {!cpuValid && (
               <p id={cpuErrorId} className="text-xs text-danger-500">
-                Enter a positive CPU value, such as 2 or 0.5.
+                Enter a CPU value greater than 0 and at most {MAX_SANDBOX_CPU}, such as 2 or 0.5.
               </p>
             )}
           </div>

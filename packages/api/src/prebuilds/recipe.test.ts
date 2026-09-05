@@ -125,11 +125,15 @@ describe("loadPrebuildOverride", () => {
     expect(override).toEqual({ resources: { cpu: 4, memory: "8Gi" } });
   });
 
-  it("accepts fractional positive CPU", async () => {
-    const override = await loadPrebuildOverride(
+  it("accepts fractional, exponent, and exactly-at-cap CPU values", async () => {
+    const fractional = await loadPrebuildOverride(
       readerFor({ ".valet/prebuild.yaml": 'resources:\n  cpu: 0.5\n  memory: "1Gi"\n' }),
     );
-    expect(override).toEqual({ resources: { cpu: 0.5, memory: "1Gi" } });
+    expect(fractional).toEqual({ resources: { cpu: 0.5, memory: "1Gi" } });
+    expect(await loadPrebuildOverride(readerFor({ ".valet/prebuild.yaml": "resources:\n  cpu: 6.4e1\n" })))
+      .toEqual({ resources: { cpu: 64 } });
+    expect(await loadPrebuildOverride(readerFor({ ".valet/prebuild.yaml": "resources:\n  cpu: 64\n" })))
+      .toEqual({ resources: { cpu: 64 } });
   });
 
   it("parses CPU-only resources", async () => {
@@ -149,10 +153,12 @@ describe("loadPrebuildOverride", () => {
   it("rejects an invalid resources declaration", async () => {
     const cases = [
       ["resources: 1\n", /resources must be a mapping.*resources.*cpu.*memory/],
-      ["resources:\n  cpu: \"4\"\n", /resources\.cpu.*number.*resources.*cpu.*memory/],
-      ["resources:\n  cpu: 0\n", /resources\.cpu.*positive.*resources.*cpu.*memory/],
-      ["resources:\n  cpu: -1\n", /resources\.cpu.*positive.*resources.*cpu.*memory/],
-      ["resources:\n  cpu: .nan\n", /resources\.cpu.*finite.*resources.*cpu.*memory/],
+      ["resources:\n  cpu: \"4\"\n", /resources\.cpu.*greater than 0.*Set resources\.cpu/],
+      ["resources:\n  cpu: 0\n", /resources\.cpu.*greater than 0.*Set resources\.cpu/],
+      ["resources:\n  cpu: -1\n", /resources\.cpu.*greater than 0.*Set resources\.cpu/],
+      ["resources:\n  cpu: .nan\n", /resources\.cpu.*at most 64.*Set resources\.cpu/],
+      ["resources:\n  cpu: 64.001\n", /resources\.cpu.*at most 64.*Set resources\.cpu/],
+      ["resources:\n  cpu: 1e300\n", /resources\.cpu.*at most 64.*Set resources\.cpu/],
       ["resources:\n  memory: 4\n", /resources\.memory.*string.*resources.*cpu.*memory/],
       ["resources:\n  memory: \"0\"\n", /resources\.memory.*positive.*resources.*cpu.*memory/],
       ["resources:\n  memory: \"-1Gi\"\n", /resources\.memory.*positive.*resources.*cpu.*memory/],

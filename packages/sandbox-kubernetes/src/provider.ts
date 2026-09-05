@@ -98,6 +98,7 @@ import {
   classifyPodPending,
   deleteSandbox,
   getSandbox,
+  imageFingerprint,
   listSandboxMetadata,
   livePodDrift,
   podTemplateResourceFingerprint,
@@ -946,8 +947,9 @@ export class KubernetesSandboxProvider implements SandboxProvider {
         manifestImage,
         undefined,
         podTemplateResourceFingerprint(applied.spec.podTemplate),
-      );
-      if (check.differs) {
+        imageFingerprint(manifestImage),
+      ).catch(() => null);
+      if (check?.differs) {
         const podName = check.podName;
         const reason = check.imageDrift ? `image ${check.liveImage} → ${manifestImage}` : "CPU/memory changed";
         console.log(`k8s sandbox ${name}: rolling pod (${reason})`);
@@ -1185,31 +1187,58 @@ export class KubernetesSandboxProvider implements SandboxProvider {
    */
   private async waitReady(name: string, expected?: { image: string; resourceFingerprint?: string }): Promise<void> {
     const deadline = Date.now() + READY_TIMEOUT_MS;
+    const expectedImageFingerprint = expected ? imageFingerprint(expected.image) : undefined;
+    const rolledGenerations = new Set<string>();
+    let lastReadError: string | undefined;
+    let lastState: SandboxStatus["state"] = "provisioning";
     for (;;) {
-      const status = await sandboxStatus(this.deps.objectsApi, this.cfg, name, this.deps.podsApi, this.deps.podStatusApi);
-      if (status.state === "ready") {
-        if (!this.deps.podStatusApi) return;
-        // A CR can retain Ready=True after deletion. Creation and wake must
-        // observe the live replacement pod Ready, not just its new UID.
-        const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, name);
-        const pod = podName === null ? null : await this.deps.podStatusApi.getPodStatus(this.cfg.namespace, podName);
-        const liveImage = pod?.sandboxImage ?? pod?.containerStatuses?.find((container) => container.name === SANDBOX_CONTAINER_NAME)?.image;
-        const matchesDesired = expected === undefined || (liveImage === expected.image &&
-          (expected.resourceFingerprint === undefined || pod?.resourceFingerprint === expected.resourceFingerprint));
-        if (matchesDesired && pod?.phase === "Running" && pod.conditions?.some((condition) => condition.type === "Ready" && condition.status === "True")) return;
-      }
-      if (status.state === "error") {
-        throw new SandboxStartupError(name, status.error ?? "unknown");
+      try {
+        const status = await sandboxStatus(this.deps.objectsApi, this.cfg, name, this.deps.podsApi, this.deps.podStatusApi);
+        lastState = status.state;
+        if (this.deps.podStatusApi) {
+          // A CR can retain Ready=True after deletion. Creation and wake must
+          // observe a live Running, Ready pod, not only the CR condition.
+          const podName = await resolvePodName(this.deps.objectsApi, this.deps.podsApi, this.cfg, name);
+          const pod = podName === null ? null : await this.deps.podStatusApi.getPodStatus(this.cfg.namespace, podName);
+          const liveImage = pod?.sandboxImage ?? pod?.containerStatuses?.find(
+            (container) => container.name === SANDBOX_CONTAINER_NAME,
+          )?.image;
+          const imageMatches = expectedImageFingerprint === undefined ||
+            (pod?.imageFingerprint === undefined ? liveImage === expected?.image : pod.imageFingerprint === expectedImageFingerprint);
+          const resourcesMatch = expected?.resourceFingerprint === undefined ||
+            pod?.resourceFingerprint === expected.resourceFingerprint;
+          const matchesDesired = imageMatches && resourcesMatch;
+
+          // Admission webhooks can rewrite pod.spec.containers[].image. The
+          // immutable env fingerprint records the requested image generation,
+          // so a rewrite does not look like drift while a real image roll does.
+          const podReady = pod?.phase === "Running" &&
+            pod.conditions?.some((condition) => condition.type === "Ready" && condition.status === "True");
+          if (podName !== null && pod !== null && podReady && expected !== undefined && !matchesDesired && this.deps.podDeleteApi) {
+            const generation = `${podName}:${pod.imageFingerprint ?? "missing"}:${pod.resourceFingerprint ?? "missing"}`;
+            if (!rolledGenerations.has(generation)) {
+              rolledGenerations.add(generation);
+              console.log(`k8s sandbox ${name}: rolling stale pod generation during readiness`);
+              await this.deps.podDeleteApi.deletePod(this.cfg.namespace, podName);
+            }
+          } else if (
+            status.state === "ready" && matchesDesired && pod?.phase === "Running" &&
+            pod.conditions?.some((condition) => condition.type === "Ready" && condition.status === "True")
+          ) {
+            return;
+          }
+        } else if (status.state === "ready") {
+          return;
+        }
+        if (status.state === "error") {
+          throw new SandboxStartupError(name, status.error ?? "unknown");
+        }
+        lastReadError = undefined;
+      } catch (err) {
+        if (err instanceof SandboxStartupError) throw err;
+        lastReadError = err instanceof Error ? err.message : String(err);
       }
       if (Date.now() >= deadline) {
-        // A pod still unscheduled once the CR is past the pending grace
-        // window will not resolve on this timescale — capacity, quota, or
-        // scheduling gates. Fail terminally (SandboxStartupError) so
-        // waiters get the cause now instead of re-queueing behind a
-        // generic retryable timeout — the 2026-08-22 incident's sessions
-        // waited 47h that way. Inside the grace window the generic
-        // retryable timeout below applies and the CR is retained, so an
-        // autoscaler scale-up (2–5 min) still gets its Pending-pod signal.
         const pending = await this.podPendingReason(name);
         if (pending !== null) {
           throw new SandboxStartupError(
@@ -1218,7 +1247,11 @@ export class KubernetesSandboxProvider implements SandboxProvider {
               "The cluster has no schedulable capacity for this sandbox. Free or add node capacity, then retry.",
           );
         }
-        throw new Error(`Sandbox CR "${name}" did not become ready within ${READY_TIMEOUT_MS}ms (state: ${status.state})`);
+        const readDetail = lastReadError ? ` Last Kubernetes read error: ${lastReadError}.` : "";
+        throw new Error(
+          `Sandbox CR "${name}" did not become ready within ${READY_TIMEOUT_MS}ms (state: ${lastState}).${readDetail} ` +
+            "Check Kubernetes API access, the sandbox controller, and pod events, then retry.",
+        );
       }
       await sleep(READY_POLL_INTERVAL_MS);
     }

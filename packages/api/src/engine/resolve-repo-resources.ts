@@ -8,6 +8,8 @@ import type { RepoBinding } from "../wire/types.js";
 export interface ResolvedRepoPrebuildFlags extends RepoPrebuildFlags {
   /** Fresh compute can use these values even when existing compute must be preserved. */
   initialResources?: PrebuildResources;
+  /** Settings exist, but one authority read failed, so reconciliation must preserve live resources. */
+  resourcesWithheld?: boolean;
 }
 
 /** Read saved defaults outside the GitHub cache. Only two successful reads
@@ -49,5 +51,6 @@ export async function resolveRepoResources(
     ...flags,
     ...(saved.ok && yaml.outcome !== "error" ? { resources: combined } : {}),
     ...(Object.keys(combined).length > 0 ? { initialResources: combined } : {}),
+    ...(Object.keys(combined).length > 0 && (!saved.ok || yaml.outcome === "error") ? { resourcesWithheld: true } : {}),
   };
 }

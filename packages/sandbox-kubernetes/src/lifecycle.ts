@@ -101,7 +101,12 @@ import type * as k8s from "@kubernetes/client-node";
 import { createHash } from "node:crypto";
 import { setHeaderOptions } from "@kubernetes/client-node";
 import type { Sandbox, SandboxStatus } from "@valet/engine";
-import { SANDBOX_CONTAINER_NAME, SESSION_ANNOTATION_KEY } from "./manifest.js";
+import {
+  IMAGE_FINGERPRINT_ENV,
+  imageFingerprint,
+  SANDBOX_CONTAINER_NAME,
+  SESSION_ANNOTATION_KEY,
+} from "./manifest.js";
 import type {
   K8sProviderConfig,
   PodOwnerReference,
@@ -132,6 +137,26 @@ const POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name";
 const RESOURCE_OVERRIDES_ANNOTATION = "valet.dev/resource-overrides";
 const RESOURCE_FINGERPRINT_ANNOTATION = "valet.dev/resource-fingerprint";
 const RESOURCE_FINGERPRINT_ENV = "VALET_SANDBOX_RESOURCE_FINGERPRINT";
+
+export { imageFingerprint } from "./manifest.js";
+
+function withImageFingerprint(
+  template: SandboxCR["spec"]["podTemplate"], image: string,
+): SandboxCR["spec"]["podTemplate"] {
+  const fingerprint = imageFingerprint(image);
+  return {
+    ...template,
+    spec: {
+      ...template.spec,
+      containers: template.spec.containers.map((container) => {
+        if (container.name !== SANDBOX_CONTAINER_NAME) return container;
+        const env = (container.env ?? []).filter((entry) => entry.name !== IMAGE_FINGERPRINT_ENV);
+        env.push({ name: IMAGE_FINGERPRINT_ENV, value: fingerprint });
+        return { ...container, env };
+      }),
+    },
+  };
+}
 
 /** Read the desired-resource generation from the CR template, not live pod metadata. */
 export function podTemplateResourceFingerprint(template: unknown): string | undefined {
@@ -566,9 +591,13 @@ export async function applySandbox(
   } = {},
 ): Promise<ApplySandboxResult> {
   const { group, version } = parseApiVersion(cfg.apiVersion);
-  const requestedTemplate = opts.resourceOverrides === undefined ? manifest.spec.podTemplate : withResourceFingerprint(
+  const sandboxImage = manifest.spec.podTemplate.spec.containers.find(
+    (container) => container.name === SANDBOX_CONTAINER_NAME,
+  )?.image ?? "";
+  const resourceTemplate = opts.resourceOverrides === undefined ? manifest.spec.podTemplate : withResourceFingerprint(
     manifest.spec.podTemplate, resourceFingerprint(sandboxCpuMemoryResources(manifest.spec.podTemplate)),
   );
+  const requestedTemplate = withImageFingerprint(resourceTemplate, sandboxImage);
   try {
     const created = await api.createNamespacedCustomObject({
       group,
@@ -623,7 +652,10 @@ export async function applySandbox(
     const previousResources = sandboxCpuMemoryResources(existing.spec.podTemplate);
     // Legacy no-opinion adoption keeps fingerprint absence. Only an
     // authoritative opinion can start the one-time fingerprint migration roll.
-    const template = withResourceFingerprint(manifest.spec.podTemplate, podTemplateResourceFingerprint(existing.spec.podTemplate));
+    const template = withImageFingerprint(
+      withResourceFingerprint(manifest.spec.podTemplate, podTemplateResourceFingerprint(existing.spec.podTemplate)),
+      sandboxImage,
+    );
     spec = { ...spec, podTemplate: preserveCpuMemory(template, previousResources) };
   }
 
@@ -874,6 +906,8 @@ export interface PodStatusInfo {
   sandboxResources?: SandboxCpuMemoryResources;
   /** Resource generation from the named container's reserved literal env value. */
   resourceFingerprint?: string;
+  /** Requested-image generation, unchanged when admission rewrites the image. */
+  imageFingerprint?: string;
 }
 
 /** The subset of `@kubernetes/client-node`'s `CoreV1Api` needed to GET a
@@ -919,13 +953,15 @@ export function podStatusApiAdapter(api: Pick<k8s.CoreV1Api, "readNamespacedPod"
             typeof c.type === "string" && (c.status === "True" || c.status === "False" || c.status === "Unknown"),
         )
         .map((c) => ({ type: c.type, status: c.status, reason: c.reason, message: c.message }));
-      const fingerprint = pod.spec?.containers.find((container) => container.name === SANDBOX_CONTAINER_NAME)
-        ?.env?.find((entry) => entry.name === RESOURCE_FINGERPRINT_ENV);
+      const sandboxContainer = pod.spec?.containers.find((container) => container.name === SANDBOX_CONTAINER_NAME);
+      const fingerprint = sandboxContainer?.env?.find((entry) => entry.name === RESOURCE_FINGERPRINT_ENV);
+      const requestedImage = sandboxContainer?.env?.find((entry) => entry.name === IMAGE_FINGERPRINT_ENV);
       return {
         phase: pod.status?.phase, containerStatuses, conditions,
         sandboxImage: images.get(SANDBOX_CONTAINER_NAME),
         sandboxResources: sandboxCpuMemoryResources({ spec: pod.spec }),
         resourceFingerprint: fingerprint?.valueFrom === undefined ? fingerprint?.value : undefined,
+        imageFingerprint: requestedImage?.valueFrom === undefined ? requestedImage?.value : undefined,
       };
     },
   };
@@ -1024,6 +1060,7 @@ export async function livePodDrift(
   manifestImage: string,
   resources?: SandboxCpuMemoryResources,
   expectedResourceFingerprint?: string,
+  expectedImageFingerprint?: string,
 ): Promise<{
   differs: true;
   podName: string;
@@ -1039,7 +1076,11 @@ export async function livePodDrift(
 
   // Name-keyed lookup — position 0 is wrong when sidecars are injected first.
   const liveImage = status.sandboxImage ?? status.containerStatuses?.find((cs) => cs.name === SANDBOX_CONTAINER_NAME)?.image;
-  const imageDrift = Boolean(liveImage) && liveImage !== manifestImage;
+  const imageDrift = expectedImageFingerprint !== undefined
+    ? status.imageFingerprint === undefined
+      ? Boolean(liveImage) && liveImage !== manifestImage
+      : status.imageFingerprint !== expectedImageFingerprint
+    : Boolean(liveImage) && liveImage !== manifestImage;
   const resourcesDrift = expectedResourceFingerprint !== undefined
     ? status.resourceFingerprint !== expectedResourceFingerprint
     : resources !== undefined && (["requests", "limits"] as const).some((side) =>

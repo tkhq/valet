@@ -19,6 +19,7 @@
  */
 import * as k8s from "@kubernetes/client-node";
 import type { SandboxProvider, SandboxResources } from "@valet/engine";
+import { isValidSandboxCpu, sandboxCpuRange } from "@valet/shared";
 import { DockerSandboxProvider } from "@valet/sandbox-docker";
 import { LocalSandboxProvider } from "@valet/sandbox-local";
 import {
@@ -316,9 +317,9 @@ export function resolveSandboxCpu(env: NodeJS.ProcessEnv): number | undefined {
   const trimmed = raw?.trim();
   if (trimmed === undefined || trimmed === "") return undefined;
   const cpu = Number(trimmed);
-  if (!Number.isFinite(cpu) || cpu <= 0) {
+  if (!isValidSandboxCpu(cpu)) {
     throw new Error(
-      `VALET_SANDBOX_CPU="${raw}" is not a positive finite number. Use a value like "1" or "0.5".`,
+      `VALET_SANDBOX_CPU="${raw}" must be ${sandboxCpuRange()}. Set it to a value such as "1" or "0.5".`,
     );
   }
   return cpu;

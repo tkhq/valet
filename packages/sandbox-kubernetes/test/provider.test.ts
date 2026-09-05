@@ -23,7 +23,7 @@ import type {
   SandboxCpuMemoryResources,
   PodStatusInfo,
 } from "../src/lifecycle.js";
-import { sandboxCpuMemoryResources } from "../src/lifecycle.js";
+import { imageFingerprint, sandboxCpuMemoryResources } from "../src/lifecycle.js";
 import type { PodLivenessApi } from "../src/provider.js";
 import type { PodExecApi } from "../src/exec.js";
 
@@ -494,6 +494,12 @@ class FakeApiError extends Error {
 class ResourceAdoptingObjectsApi extends FakeObjectsApi {
   cr: SandboxCRRead;
   calls: string[] = [];
+  private failAfterReplace = false;
+  private failNextGet = false;
+
+  failNextGetAfterReplace(): void {
+    this.failAfterReplace = true;
+  }
 
   constructor(manifest: SandboxCR) {
     super();
@@ -514,6 +520,10 @@ class ResourceAdoptingObjectsApi extends FakeObjectsApi {
 
   override async getNamespacedCustomObject(): Promise<unknown> {
     this.calls.push("get");
+    if (this.failNextGet) {
+      this.failNextGet = false;
+      throw new Error("temporary resolvePodName failure");
+    }
     return this.cr;
   }
 
@@ -527,6 +537,10 @@ class ResourceAdoptingObjectsApi extends FakeObjectsApi {
       },
       status: this.cr.status,
     };
+    if (this.failAfterReplace) {
+      this.failAfterReplace = false;
+      this.failNextGet = true;
+    }
     return this.cr;
   }
 }
@@ -536,7 +550,12 @@ describe("create() resource adoption and pod rollout", () => {
     expect(actual).toEqual({ ...expected, metadata: { ...expected.metadata,
       annotations: { ...expected.metadata?.annotations, "valet.dev/resource-fingerprint": expect.any(String) },
     }, spec: { ...expected.spec, containers: expected.spec.containers.map((container) => ({ ...container,
-      env: [...(container.env ?? []), { name: "VALET_SANDBOX_RESOURCE_FINGERPRINT", value: expect.any(String) }],
+      env: [
+        ...(container.env ?? []).filter((entry) =>
+          entry.name !== "VALET_SANDBOX_RESOURCE_FINGERPRINT" && entry.name !== "VALET_SANDBOX_IMAGE_FINGERPRINT"),
+        { name: "VALET_SANDBOX_RESOURCE_FINGERPRINT", value: expect.any(String) },
+        { name: "VALET_SANDBOX_IMAGE_FINGERPRINT", value: expect.any(String) },
+      ],
     })) } });
   }
 
@@ -596,12 +615,14 @@ describe("create() resource adoption and pod rollout", () => {
       containerStatuses: [{ name: "sandbox", image: liveImage }],
       sandboxResources: liveResources, resourceFingerprint: liveFingerprint,
     } : podOverride;
+    const podStatusApi = { getPodStatus: vi.fn(async () => getLivePod()) };
     const restartWithPodState = () => new KubernetesSandboxProvider({
       objectsApi, podsApi: new FakePodsApi(), execApi: fakePodExecApi,
-      livenessApi: { getPodUid: async () => uid }, podStatusApi: { getPodStatus: async () => getLivePod() }, podDeleteApi,
+      livenessApi: { getPodUid: async () => uid }, podStatusApi, podDeleteApi,
     }, cfg);
     return { provider: restartWithPodState(), restart: restartWithPodState, objectsApi, deletedPods, cfg, podDeleteApi,
-      setLivePod, getLivePod, setAdmittedResources: (admitted: SandboxCpuMemoryResources) => { liveResources = admitted; } };
+      podStatusApi, setLivePod, getLivePod,
+      setAdmittedResources: (admitted: SandboxCpuMemoryResources) => { liveResources = admitted; } };
   }
 
   const prior = {
@@ -750,6 +771,21 @@ describe("create() resource adoption and pod rollout", () => {
     });
   });
 
+  it("accepts a live image rewritten by admission when its requested-image fingerprint matches", async () => {
+    const { provider, setLivePod, deletedPods } = setup(prior);
+    setLivePod("pod-mutated", {
+      phase: "Running",
+      sandboxImage: "mirror.internal/valet-sandbox@sha256:digest",
+      imageFingerprint: imageFingerprint(providerCfg.defaultImage),
+      sandboxResources: prior,
+      conditions: [{ type: "Ready", status: "True" }],
+    });
+
+    await provider.create({ workspace: "/ws/resources", preserveResourcesOnAdopt: true });
+
+    expect(deletedPods).toEqual([]);
+  });
+
   it("reports adopted ownership even after provider-side image replacement", async () => {
     const { provider } = setup(prior);
     const sandbox = await provider.create({ workspace: "/ws/resources", image: "image:new", preserveResourcesOnAdopt: true });
@@ -810,6 +846,40 @@ describe("create() resource adoption and pod rollout", () => {
     await provider.create({ workspace: "/ws/resources", preserveResourcesOnAdopt: true, env: { USER_FLAG: "keep" } });
     expect(bootFingerprint(objectsApi.cr.spec.podTemplate)).toBe(fingerprint);
     expect(objectsApi.cr.spec.podTemplate).toMatchObject({ spec: { containers: [{ env: expect.arrayContaining([{ name: "USER_FLAG", value: "keep" }]) }] } });
+  });
+
+  it("retries one transient resolvePodName read before accepting readiness", async () => {
+    const { provider, objectsApi } = setup(prior);
+    objectsApi.failNextGetAfterReplace();
+
+    await expect(provider.create({ workspace: "/ws/resources", preserveResourcesOnAdopt: true }))
+      .resolves.toBeDefined();
+  });
+
+  it("retries one transient live pod-status read before accepting readiness", async () => {
+    const { provider, podStatusApi } = setup(prior);
+    podStatusApi.getPodStatus.mockRejectedValueOnce(new Error("temporary apiserver reset"));
+
+    await expect(provider.create({ workspace: "/ws/resources", preserveResourcesOnAdopt: true }))
+      .resolves.toBeDefined();
+    expect(podStatusApi.getPodStatus.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it("times out with the persistent Kubernetes read failure and corrective action", async () => {
+    vi.useFakeTimers();
+    try {
+      const { provider, podStatusApi } = setup(prior);
+      podStatusApi.getPodStatus.mockRejectedValue(new Error("apiserver unavailable"));
+      const creating = provider.create({ workspace: "/ws/resources", preserveResourcesOnAdopt: true });
+      const assertion = expect(creating).rejects.toThrow(
+        /Last Kubernetes read error: apiserver unavailable.*Check Kubernetes API access.*then retry/,
+      );
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it.each([false, true])("waits through absent and Pending replacement pods despite stale CR Ready (restart: %s)", async (restartAfterDelete) => {

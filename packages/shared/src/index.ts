@@ -7,5 +7,6 @@ export * from './errors.js';
 export * from './format-bytes.js';
 export * from './scope-key.js';
 export * from './resource-quantity.js';
+export * from './sandbox-resources.js';
 export * from './skill-block.js';
 export * from './upload-limits.js';

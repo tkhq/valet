@@ -12,6 +12,7 @@ import { randomUUID } from "node:crypto";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 import type { BuildStatus, ImageBuilder, PrebuildSpec } from "../prebuilds/builder.js";
+import { MAX_SANDBOX_CPU } from "@valet/shared";
 import { bakes } from "../schema/index.js";
 
 const HEADERS = { "Content-Type": "application/json" };
@@ -343,9 +344,13 @@ describe("PATCH /api/org/sources/:id", () => {
     const saved = await patch({ sandboxResources: { cpu: 0.5, memory: " 8Gi " }, enabled: false });
     expect(saved.status).toBe(200);
     expect(await saved.json()).toMatchObject({ source: { sandboxResources: { cpu: 0.5, memory: "8Gi" } } });
+    const exponentAtCap = await patch({ sandboxResources: { cpu: 6.4e1 } });
+    expect(exponentAtCap.status).toBe(200);
+    expect(await exponentAtCap.json()).toMatchObject({ source: { sandboxResources: { cpu: MAX_SANDBOX_CPU } } });
+    expect((await patch({ sandboxResources: { cpu: MAX_SANDBOX_CPU } })).status).toBe(200);
     await patch({ schedule: "off" });
     const list = await fetch(`${api.baseUrl}/api/org/sources`, { headers: HEADERS });
-    expect(await list.json()).toMatchObject({ sources: [{ sandboxResources: { cpu: 0.5, memory: "8Gi" } }] });
+    expect(await list.json()).toMatchObject({ sources: [{ sandboxResources: { cpu: MAX_SANDBOX_CPU } }] });
     for (const cleared of [{}, null]) {
       await patch({ sandboxResources: { cpu: 2 } });
       const response = await patch({ sandboxResources: cleared });
@@ -360,7 +365,7 @@ describe("PATCH /api/org/sources/:id", () => {
     const patch = (id: string, sandboxResources: unknown, headers = HEADERS) => fetch(`${api!.baseUrl}/api/org/sources/${id}`, {
       method: "PATCH", headers, body: JSON.stringify({ sandboxResources }),
     });
-    for (const invalid of [[], "4", { cpu: 0 }, { cpu: -1 }, { cpu: "2" }, { cpu: null }, { memory: "0Gi" }, { memory: "-1Gi" }, { memory: "nope" }, { memory: 4 }, { gpu: 1 }]) {
+    for (const invalid of [[], "4", { cpu: 0 }, { cpu: -1 }, { cpu: "2" }, { cpu: null }, { cpu: MAX_SANDBOX_CPU + 0.001 }, { cpu: 1e300 }, { memory: "0Gi" }, { memory: "-1Gi" }, { memory: "nope" }, { memory: 4 }, { gpu: 1 }]) {
       const response = await patch(source.id, invalid);
       expect(response.status, JSON.stringify(invalid)).toBe(400);
       expect(await response.json()).toMatchObject({ error: expect.stringMatching(/Set|Use|Remove/) });

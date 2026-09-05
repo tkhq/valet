@@ -14,6 +14,7 @@
  */
 import { createHash } from "node:crypto";
 import type { SandboxResources } from "@valet/engine";
+import { isValidSandboxCpu, sandboxCpuRange } from "@valet/shared";
 import { parse as parseYaml } from "yaml";
 import { parseStorageQuantity } from "@valet/sandbox-kubernetes";
 
@@ -176,14 +177,9 @@ export async function loadPrebuildOverride(
     const resourcesObj = obj.resources as Record<string, unknown>;
     const resources: PrebuildResources = {};
     if (resourcesObj.cpu !== undefined) {
-      if (typeof resourcesObj.cpu !== "number") {
+      if (!isValidSandboxCpu(resourcesObj.cpu)) {
         throw new Error(
-          '.valet/prebuild.yaml: resources.cpu must be a positive finite number — use resources: { cpu: 2, memory: "4Gi" }',
-        );
-      }
-      if (!Number.isFinite(resourcesObj.cpu) || resourcesObj.cpu <= 0) {
-        throw new Error(
-          '.valet/prebuild.yaml: resources.cpu must be a positive finite number — use resources: { cpu: 2, memory: "4Gi" }',
+          `.valet/prebuild.yaml: resources.cpu must be ${sandboxCpuRange()}. Set resources.cpu to a value such as 2 or 0.5.`,
         );
       }
       resources.cpu = resourcesObj.cpu;

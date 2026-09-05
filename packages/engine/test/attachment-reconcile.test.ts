@@ -459,7 +459,8 @@ describe("SandboxAttachment.reconcile", () => {
     }
   });
 
-  it("non-isolated resource drift leaves the applied resource record unchanged", async () => {
+  it("non-isolated resource drift stays unapplied and warns once per unchanged drift", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const provider = new RecordingProvider({ isolated: false });
     const resources = { cpu: 2, memory: "4Gi" };
     const fake = new FakeSpecProvider({ specHash: "h1", resources, steps: [step("s1", "sh1")] });
@@ -477,6 +478,10 @@ describe("SandboxAttachment.reconcile", () => {
     const applied = await readAppliedState(sb);
     expect(applied?.resources).toEqual(resources);
     expect(applied?.steps).toEqual({ s1: "sh2" });
+    await att.reconcile();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/ignored CPU\/memory change.*non-isolated.*Use an isolated sandbox provider/));
+    warn.mockRestore();
   });
 
   it("failed resource replacement uses the desired spec hash backoff", async () => {

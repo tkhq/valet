@@ -372,6 +372,8 @@ describe("childSessionFor repo prebuild flags", () => {
   });
 
   it.each([null, { cpu: 2, memory: "4Gi" }])("a tokenless missing file preserves adoption and uses saved defaults %j for fresh compute", async (sandboxResources) => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const infoSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     fixture = startGithubFixture({
       getContents: () => ({ status: 404, body: { message: "Not Found" } }),
     });
@@ -419,6 +421,15 @@ describe("childSessionFor repo prebuild flags", () => {
     const call = recorder.createCalls.find((candidate) => candidate.sessionId === childId);
     expect(call?.resources).toEqual(sandboxResources ?? undefined);
     expect(call?.preserveResourcesOnAdopt).toBe(true);
+    const withholdingWarnings = warnSpy.mock.calls.filter(
+      ([message]) => typeof message === "string" && message.includes("sandbox resource settings for acme/private-widgets are withheld"),
+    );
+    expect(withholdingWarnings).toHaveLength(sandboxResources === null ? 0 : 1);
+    expect(infoSpy.mock.calls.some(
+      ([message]) => typeof message === "string" && message.includes("prebuild flags for session"),
+    )).toBe(false);
+    warnSpy.mockRestore();
+    infoSpy.mockRestore();
   });
 
   it("an org with NO GitHub configured still reads a public repo's flags tokenless (TKAI-401)", async () => {
