@@ -18,7 +18,8 @@
  * personal dev-cluster name.
  */
 import * as k8s from "@kubernetes/client-node";
-import type { SandboxProvider } from "@valet/engine";
+import type { SandboxProvider, SandboxResources } from "@valet/engine";
+import { isValidSandboxCpu, sandboxCpuRange } from "@valet/shared";
 import { DockerSandboxProvider } from "@valet/sandbox-docker";
 import { LocalSandboxProvider } from "@valet/sandbox-local";
 import {
@@ -309,6 +310,51 @@ export function resolveSandboxEphemeralStorageLimit(env: NodeJS.ProcessEnv): str
   return quantityEnv("VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT", env.VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT, "8Gi");
 }
 
+/** Optional deployment-wide CPU default. Repository resource declarations
+ * override this field without replacing the other deployment defaults. */
+export function resolveSandboxCpu(env: NodeJS.ProcessEnv): number | undefined {
+  const raw = env.VALET_SANDBOX_CPU;
+  const trimmed = raw?.trim();
+  if (trimmed === undefined || trimmed === "") return undefined;
+  const cpu = Number(trimmed);
+  if (!isValidSandboxCpu(cpu)) {
+    throw new Error(
+      `VALET_SANDBOX_CPU="${raw}" must be ${sandboxCpuRange()}. Set it to a value such as "1" or "0.5".`,
+    );
+  }
+  return cpu;
+}
+
+/** Optional deployment-wide memory default, expressed as a Kubernetes
+ * quantity. Repository resource declarations override this field only. */
+export function resolveSandboxMemory(env: NodeJS.ProcessEnv): string | undefined {
+  const raw = env.VALET_SANDBOX_MEMORY;
+  const trimmed = raw?.trim();
+  if (trimmed === undefined || trimmed === "") return undefined;
+  const bytes = parseStorageQuantity(trimmed);
+  if (bytes === null || bytes <= 0) {
+    throw new Error(
+      `VALET_SANDBOX_MEMORY="${raw}" is not a positive Kubernetes quantity. Use a form like "2Gi" or "500Mi".`,
+    );
+  }
+  return trimmed;
+}
+
+/** Resolves all deployment-wide sandbox resource defaults. The Kubernetes
+ * manifest merges repository declarations over this object per field. */
+export function resolveSandboxResources(env: NodeJS.ProcessEnv): SandboxResources {
+  const cpu = resolveSandboxCpu(env);
+  const memory = resolveSandboxMemory(env);
+  const ephemeralStorage = resolveSandboxEphemeralStorageRequest(env);
+  const ephemeralStorageLimit = resolveSandboxEphemeralStorageLimit(env);
+  return {
+    ...(cpu !== undefined ? { cpu } : {}),
+    ...(memory !== undefined ? { memory } : {}),
+    ...(ephemeralStorage !== undefined ? { ephemeralStorage } : {}),
+    ...(ephemeralStorageLimit !== undefined ? { ephemeralStorageLimit } : {}),
+  };
+}
+
 /**
  * Size of the PERSISTENT `/workspace` volume claim each sandbox provisions
  * (`VALET_SANDBOX_WORKSPACE_STORAGE`, default "1Gi"). Unlike the ephemeral
@@ -395,8 +441,8 @@ export function buildSandboxProvider(
       const podStatusApi = podStatusApiAdapter(coreApi);
       const podDeleteApi = podDeleteApiAdapter(coreApi);
       const pullSecret = env.VALET_SANDBOX_IMAGE_PULL_SECRET;
-      const ephemeralStorage = resolveSandboxEphemeralStorageRequest(env);
-      const ephemeralStorageLimit = resolveSandboxEphemeralStorageLimit(env);
+      const defaultResources = resolveSandboxResources(env);
+      const { ephemeralStorage, ephemeralStorageLimit } = defaultResources;
       const workspaceStorage = resolveSandboxWorkspaceStorage(env);
       const workspaceStorageMax = resolveSandboxWorkspaceStorageMax(env);
       if (ephemeralStorage && ephemeralStorageLimit) {
@@ -437,18 +483,10 @@ export function buildSandboxProvider(
         ...(workspaceStorage ? { defaultStorage: workspaceStorage } : {}),
         // On-demand workspace growth cap (Sandbox.growWorkspace).
         ...(workspaceStorageMax ? { workspaceStorageMax } : {}),
-        // Node-disk protection defaults (TKAI-349) — set here, on the
-        // provider config, because engine host paths pass no
-        // `opts.resources`; the manifest merges these per-field under any
-        // caller-provided resources, so every sandbox pod carries them.
-        ...(ephemeralStorage || ephemeralStorageLimit
-          ? {
-              defaultResources: {
-                ...(ephemeralStorage ? { ephemeralStorage } : {}),
-                ...(ephemeralStorageLimit ? { ephemeralStorageLimit } : {}),
-              },
-            }
-          : {}),
+        // Deployment defaults merge per field under repository resources.
+        // The node-disk request and limit protect every sandbox unless the
+        // operator explicitly disables them.
+        defaultResources,
         // Sandbox images v2 plan, Task 5: threaded when an external prebuild
         // registry requires authenticated pulls (`externalRegistry.pullSecret`
         // in the chart). Omitted (undefined, not []) for the bundled registry

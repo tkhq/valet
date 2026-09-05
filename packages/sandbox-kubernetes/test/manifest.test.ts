@@ -7,6 +7,8 @@ import {
   DOCKER_STATE_MOUNT_PATH,
   DOCKER_STATE_VOLUME_NAME,
   DOCKER_WORKLOAD_FS_GROUP,
+  IMAGE_FINGERPRINT_ENV,
+  imageFingerprint,
   SANDBOX_CR_API_VERSION,
   SANDBOX_POD_LABEL_KEY,
   buildSandboxManifest,
@@ -141,12 +143,15 @@ describe("buildSandboxManifest", () => {
     expect(manifest.spec.podTemplate.spec.containers[0]?.env).toEqual([
       { name: "VALET_SANDBOX_TOKEN", value: "tok-123" },
       { name: "VALET_API_URL", value: "http://valet-api.valet.svc.cluster.local" },
+      { name: IMAGE_FINGERPRINT_ENV, value: imageFingerprint(baseConfig.defaultImage) },
     ]);
   });
 
-  it("omits env when opts.env is not provided", () => {
+  it("emits only the requested-image fingerprint when opts.env is not provided", () => {
     const manifest = buildSandboxManifest(baseConfig, "sess-1", {});
-    expect(manifest.spec.podTemplate.spec.containers[0]?.env).toBeUndefined();
+    expect(manifest.spec.podTemplate.spec.containers[0]?.env).toEqual([
+      { name: IMAGE_FINGERPRINT_ENV, value: imageFingerprint(baseConfig.defaultImage) },
+    ]);
   });
 
   it("maps opts.resources cpu (number) and memory (string) to requests/limits", () => {
@@ -168,6 +173,24 @@ describe("buildSandboxManifest", () => {
     expect(container?.resources).toEqual({
       requests: { cpu: "1", memory: "1Gi" },
       limits: { cpu: "1", memory: "1Gi" },
+    });
+  });
+
+  it("lets a repository CPU override preserve every other deployment default", () => {
+    const cfg: K8sProviderConfig = {
+      ...baseConfig,
+      defaultResources: {
+        cpu: 1,
+        memory: "2Gi",
+        ephemeralStorage: "2Gi",
+        ephemeralStorageLimit: "8Gi",
+      },
+    };
+    const manifest = buildSandboxManifest(cfg, "sess-1", { resources: { cpu: 2.5 } });
+    const container = manifest.spec.podTemplate.spec.containers[0];
+    expect(container?.resources).toEqual({
+      requests: { cpu: "2.5", memory: "2Gi", "ephemeral-storage": "2Gi" },
+      limits: { cpu: "2.5", memory: "2Gi", "ephemeral-storage": "8Gi" },
     });
   });
 

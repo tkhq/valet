@@ -142,9 +142,20 @@ Three additive changes to the manifest builder and provider config:
    `whenUnsatisfiable: ScheduleAnyway` — sandboxes must still schedule under
    pressure; the request in (1) is the hard concentration cap.
 
+Chart version `0.10.7` adds optional `sandbox.resources.cpu` and
+`sandbox.resources.memory` deployment defaults. It renders them as
+`VALET_SANDBOX_CPU` and `VALET_SANDBOX_MEMORY` only when they are nonempty.
+The api validates both values at boot. A repository resource declaration
+overrides only the fields that it sets. The manifest preserves the other
+deployment defaults, including both ephemeral-storage fields.
+
+Chart changes must use an unpublished version. Release validation checks GHCR
+and rejects a version that already exists, even when lint and golden tests pass.
+
 Deployment note — the protection does NOT cover pods that already exist.
-A CR spec replace does not roll the pod (verified in the reconcile plan's
-exploration notes), and the only automatic pod-roll trigger is image drift.
+A CR spec replace does not roll the pod. The provider replaces pods for image
+drift or an authoritative CPU/memory change. Ephemeral-storage changes alone do
+not trigger that replacement.
 A legacy pod carries no ephemeral-storage request, so the scheduler counts
 it as using zero disk and can keep packing new sandboxes onto its node. The
 window closes per sandbox on its first post-deploy suspend/wake or

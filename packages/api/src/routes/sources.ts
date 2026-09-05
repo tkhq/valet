@@ -21,6 +21,7 @@ import { Hono } from "hono";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq } from "drizzle-orm";
 import { isPgUniqueViolation } from "@valet/store-postgres";
+import { isValidSandboxCpu, parseResourceQuantity, sandboxCpuRange } from "@valet/shared";
 import type { AppEnv } from "../env.js";
 import { requireOrgAdmin } from "./_org-admin.js";
 import { imageSources, bakes, type ImageSourceRow } from "../schema/index.js";
@@ -235,6 +236,39 @@ sourcesRouter.patch("/:id", async (c) => {
   }
 
   // kind-scoped fields
+  if (body.sandboxResources !== undefined) {
+    if (existing.kind !== "repo") {
+      return c.json({ error: "Set sandboxResources on a repository source only." }, 400);
+    }
+    const resources = body.sandboxResources;
+    if (resources === null) {
+      patch.sandboxResources = null;
+    } else {
+      if (!isRecord(resources) || Array.isArray(resources)) {
+        return c.json({ error: "Set sandboxResources to an object with optional cpu and memory fields, or null to clear defaults." }, 400);
+      }
+      if (Object.keys(resources).some((field) => field !== "cpu" && field !== "memory")) {
+        return c.json({ error: "Remove unsupported sandboxResources fields. Use cpu and memory only." }, 400);
+      }
+      const parsed: NonNullable<ImageSourceRow["sandboxResources"]> = {};
+      if (resources.cpu !== undefined) {
+        if (!isValidSandboxCpu(resources.cpu)) {
+          return c.json({ error: `sandboxResources.cpu must be ${sandboxCpuRange()}. Set it to a value such as 2 or 0.5.` }, 400);
+        }
+        parsed.cpu = resources.cpu;
+      }
+      if (resources.memory !== undefined) {
+        const memory = typeof resources.memory === "string" ? resources.memory.trim() : "";
+        const quantity = parseResourceQuantity(memory);
+        if (quantity === null || quantity <= 0) {
+          return c.json({ error: "Set sandboxResources.memory to a positive Kubernetes quantity, such as 8Gi or 500Mi." }, 400);
+        }
+        parsed.memory = memory;
+      }
+      patch.sandboxResources = Object.keys(parsed).length > 0 ? parsed : null;
+    }
+  }
+
   if (body.setupCommands !== undefined) {
     if (existing.kind !== "base") {
       return c.json({ error: "setupCommands can only be set on kind='base' sources" }, 400);

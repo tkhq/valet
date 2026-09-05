@@ -43,6 +43,13 @@ const FULL_PROFILE_COMMAND = [
 export const WORKSPACE_VOLUME_NAME = "workspace";
 export const WORKSPACE_MOUNT_PATH = "/workspace";
 export const SESSION_LABEL_KEY = "valet.dev/session-id";
+export const IMAGE_FINGERPRINT_ENV = "VALET_SANDBOX_IMAGE_FINGERPRINT";
+
+/** Immutable generation marker for the requested image before admission mutation. */
+export function imageFingerprint(image: string): string {
+  return createHash("sha256").update(image).digest("hex");
+}
+
 /** Shared pod label retained so pods created with the previous hostname
  * spread selector can still count new sandbox pods. */
 export const SANDBOX_POD_LABEL_KEY = "valet.dev/sandbox";
@@ -295,6 +302,13 @@ export function buildSandboxManifest(
   // EINVAL). VALET_DOCKER_USERNS=1 selects the rootful branch in
   // start-docker.sh; the docker (local dev) backend keeps rootlesskit.
   // Never sets privileged.
+  // Reserved literal generation marker. Append after caller env so it cannot
+  // be overridden; admission may rewrite `image` but leaves this request hash.
+  container.env = [
+    ...(container.env ?? []).filter((entry) => entry.name !== IMAGE_FINGERPRINT_ENV),
+    { name: IMAGE_FINGERPRINT_ENV, value: imageFingerprint(image) },
+  ];
+
   if (opts.docker) {
     container.securityContext = {
       seccompProfile: { type: "Unconfined" },

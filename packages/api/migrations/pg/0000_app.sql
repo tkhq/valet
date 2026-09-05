@@ -913,6 +913,7 @@ CREATE TABLE "image_sources" (
 	"repo_host" text,
 	"repo_full_name" text,
 	"clone_url" text,
+	"sandbox_resources" jsonb,
 	"schedule" text NOT NULL DEFAULT 'nightly' CHECK (schedule IN ('nightly','off')),
 	"enabled" boolean NOT NULL DEFAULT TRUE,
 	"last_bound_at" bigint,

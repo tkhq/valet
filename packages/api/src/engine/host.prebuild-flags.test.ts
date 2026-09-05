@@ -15,7 +15,7 @@ import { generateKeyPairSync } from "node:crypto";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { RecordingSandboxProvider } from "../test-helpers/recording-sandbox.js";
-import { agentSessions, githubInstallations, sessionRepos } from "../schema/index.js";
+import { agentSessions, githubInstallations, sessionRepos, imageSources } from "../schema/index.js";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { startGithubFixture, contentsBody, type GithubFixture } from "../test-helpers/github-fixture.js";
 import { clearRepoPrebuildFlagsCache } from "../bakes/source-service.js";
@@ -162,14 +162,14 @@ describe("childSessionFor repo prebuild flags", () => {
     clearRepoPrebuildFlagsCache();
   });
 
-  it("a child bound to a repo gets the repo's workspaceStorage and docker flag", async () => {
+  it("a child bound to a repo gets the repo's runtime flags and resources", async () => {
     fixture = startGithubFixture({
       createInstallationToken: (id) => ({
         body: { token: `inst-${id}`, expires_at: new Date(Date.now() + 3600_000).toISOString() },
       }),
       getContents: (_owner, _repo, path) =>
         path === ".valet/prebuild.yaml"
-          ? contentsBody('workspaceStorage: "8Gi"\ndocker: true\n', "blob1")
+          ? contentsBody('workspaceStorage: "8Gi"\ndocker: true\nresources:\n  cpu: 4\n  memory: 8Gi\n', "blob1")
           : { status: 404, body: { message: "Not Found" } },
     });
     const recorder = new RecordingSandboxProvider();
@@ -232,12 +232,204 @@ describe("childSessionFor repo prebuild flags", () => {
     expect(call).toBeDefined();
     expect(call?.workspaceStorage).toBe("8Gi");
     expect(call?.docker).toBe(true);
+    expect(call?.resources).toEqual({ cpu: 4, memory: "8Gi" });
 
     // The contents read must be AUTHENTICATED with the minted installation
     // token — a change that swallows token errors and proceeds tokenless
     // would keep the flags green against this permissive fixture otherwise.
     const contentsCall = fixture.calls.find((c) => c.path.includes("/contents/"));
     expect(contentsCall?.authHeader).toBe("Bearer inst-111");
+    expect(fixture.calls.filter((c) => c.path.includes("/contents/.valet/prebuild.yaml"))).toHaveLength(1);
+  });
+
+  it.each([null, { cpu: 2, memory: "4Gi" }])("an authenticated missing file applies saved defaults %j authoritatively", async (sandboxResources) => {
+    fixture = startGithubFixture({
+      createInstallationToken: (id) => ({
+        body: { token: `inst-${id}`, expires_at: new Date(Date.now() + 3600_000).toISOString() },
+      }),
+      getContents: () => ({ status: 404, body: { message: "Not Found" } }),
+    });
+    const recorder = new RecordingSandboxProvider();
+    api = await bootTestApi({
+      sandboxProvider: recorder,
+      githubTokenDeps: {
+        key: deriveSecretKey("test-key"),
+        apiUrl: fixture.url,
+        githubUrl: fixture.url,
+      },
+    });
+    const { engineHost, db, engineCredentials } = api.providers;
+    await saveAppConfig({ credentials: engineCredentials }, "local-org", appConfig);
+    const now = Date.now();
+    await db.insert(githubInstallations).values({
+      id: "ghi_absent_resources",
+      orgId: "local-org",
+      installationId: 222,
+      accountLogin: "acme",
+      accountType: "Organization",
+      repositorySelection: "all",
+      suspended: false,
+      cachedToken: null,
+      cachedTokenExpiresAt: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const childId = "child-absent-resources";
+    await db.insert(imageSources).values({
+      id: "child-saved-defaults", orgId: "local-org", kind: "repo", name: "acme/widgets",
+      repoHost: "github", repoFullName: "acme/widgets", sandboxResources,
+      createdAt: now, updatedAt: now,
+    });
+    await db.insert(sessionRepos).values({
+      sessionId: childId,
+      host: "github",
+      fullName: "acme/widgets",
+      cloneUrl: "https://github.com/acme/widgets.git",
+      ref: null,
+      auth: "auto",
+      position: 0,
+      targetDir: "widgets",
+    });
+    const parent = await engineHost.sessionFor("parent-absent-resources", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp/parent-absent-resources",
+    });
+    const child = await engineHost.childSessionFor(childId, {
+      parentSessionId: "parent-absent-resources",
+      parentThreadId: parent.thread("web:default").id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+      owner: { type: "user", id: "local-user" },
+      workspace: `/tmp/${childId}`,
+    });
+    await child.attachment.ensureReady({ timeoutMs: 5_000 });
+
+    const call = recorder.createCalls.find((candidate) => candidate.sessionId === childId);
+    expect(call?.resources).toEqual(sandboxResources ?? {});
+    expect(call?.preserveResourcesOnAdopt).toBe(false);
+  });
+
+  it("a REST-created repo session gets nonempty repository resources", async () => {
+    fixture = startGithubFixture({
+      getContents: (_owner, _repo, path) =>
+        path === ".valet/prebuild.yaml"
+          ? contentsBody("resources:\n  memory: 8Gi\n", "blob-rest")
+          : { status: 404, body: { message: "Not Found" } },
+    });
+    const recorder = new RecordingSandboxProvider();
+    api = await bootTestApi({
+      sandboxProvider: recorder,
+      githubTokenDeps: {
+        key: deriveSecretKey("test-key"),
+        apiUrl: fixture.url,
+        githubUrl: fixture.url,
+      },
+    });
+    const { engineHost, db } = api.providers;
+    const sessionId = "rest-prebuild-resources";
+    const now = Date.now();
+    await db.insert(imageSources).values({
+      id: "rest-saved-defaults", orgId: "local-org", kind: "repo", name: "acme/open-widgets",
+      repoHost: "github", repoFullName: "acme/open-widgets", sandboxResources: { cpu: 4, memory: "4Gi" },
+      createdAt: now, updatedAt: now,
+    });
+    await db.insert(agentSessions).values({
+      id: sessionId,
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: `/tmp/${sessionId}`,
+      status: "active",
+      ownerType: "user",
+      ownerId: "local-user",
+      profile: "headless",
+      createdAt: now,
+      updatedAt: now,
+    });
+    await db.insert(sessionRepos).values({
+      sessionId,
+      host: "github",
+      fullName: "acme/open-widgets",
+      cloneUrl: "https://github.com/acme/open-widgets.git",
+      ref: null,
+      auth: "auto",
+      position: 0,
+      targetDir: "open-widgets",
+    });
+
+    const session = await engineHost.sessionFor(sessionId, {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: `/tmp/${sessionId}`,
+      repos: [binding({ fullName: "acme/open-widgets" })],
+    });
+    await session.attachment.ensureReady({ timeoutMs: 5_000 });
+
+    expect(recorder.createCalls.find((call) => call.sessionId === sessionId)?.resources).toEqual({
+      cpu: 4,
+      memory: "8Gi",
+    });
+  });
+
+  it.each([null, { cpu: 2, memory: "4Gi" }])("a tokenless missing file preserves adoption and uses saved defaults %j for fresh compute", async (sandboxResources) => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const infoSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    fixture = startGithubFixture({
+      getContents: () => ({ status: 404, body: { message: "Not Found" } }),
+    });
+    const recorder = new RecordingSandboxProvider();
+    api = await bootTestApi({
+      sandboxProvider: recorder,
+      githubTokenDeps: {
+        key: deriveSecretKey("test-key"),
+        apiUrl: fixture.url,
+        githubUrl: fixture.url,
+      },
+    });
+    const { engineHost, db } = api.providers;
+    const childId = "child-tokenless-missing-resources";
+    await db.insert(imageSources).values({
+      id: "child-error-defaults", orgId: "local-org", kind: "repo", name: "acme/private-widgets",
+      repoHost: "github", repoFullName: "acme/private-widgets", sandboxResources,
+      createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    await db.insert(sessionRepos).values({
+      sessionId: childId,
+      host: "github",
+      fullName: "acme/private-widgets",
+      cloneUrl: "https://github.com/acme/private-widgets.git",
+      ref: null,
+      auth: "auto",
+      position: 0,
+      targetDir: "private-widgets",
+    });
+    const parent = await engineHost.sessionFor("parent-tokenless-missing-resources", {
+      userId: "local-user",
+      orgId: "local-org",
+      workspace: "/tmp/parent-tokenless-missing-resources",
+    });
+    const child = await engineHost.childSessionFor(childId, {
+      parentSessionId: "parent-tokenless-missing-resources",
+      parentThreadId: parent.thread("web:default").id,
+      actorUserId: "local-user",
+      orgId: "local-org",
+      owner: { type: "user", id: "local-user" },
+      workspace: `/tmp/${childId}`,
+    });
+    await child.attachment.ensureReady({ timeoutMs: 5_000 });
+
+    const call = recorder.createCalls.find((candidate) => candidate.sessionId === childId);
+    expect(call?.resources).toEqual(sandboxResources ?? undefined);
+    expect(call?.preserveResourcesOnAdopt).toBe(true);
+    const withholdingWarnings = warnSpy.mock.calls.filter(
+      ([message]) => typeof message === "string" && message.includes("sandbox resource settings for acme/private-widgets are withheld"),
+    );
+    expect(withholdingWarnings).toHaveLength(sandboxResources === null ? 0 : 1);
+    expect(infoSpy.mock.calls.some(
+      ([message]) => typeof message === "string" && message.includes("prebuild flags for session"),
+    )).toBe(false);
+    warnSpy.mockRestore();
+    infoSpy.mockRestore();
   });
 
   it("an org with NO GitHub configured still reads a public repo's flags tokenless (TKAI-401)", async () => {

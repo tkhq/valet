@@ -24,9 +24,12 @@ import {
   resolveHibernatedRetentionMs,
   resolveIdleMinutes,
   resolveSandboxApiUrl,
+  resolveSandboxCpu,
   resolveKubeConfig,
   resolveSandboxEphemeralStorageLimit,
   resolveSandboxEphemeralStorageRequest,
+  resolveSandboxMemory,
+  resolveSandboxResources,
   resolveSandboxWorkspaceStorage,
   resolveSandboxWorkspaceStorageMax,
 } from "./sandbox-backend.js";
@@ -359,6 +362,67 @@ describe("resolveSandboxEphemeralStorageRequest / Limit (TKAI-349)", () => {
     expect(resolveSandboxEphemeralStorageLimit({ VALET_SANDBOX_EPHEMERAL_STORAGE_LIMIT: "" })).toBe(
       "8Gi",
     );
+  });
+});
+
+describe("sandbox deployment resource defaults", () => {
+  it("leaves CPU and memory unset when their env vars are absent or empty", () => {
+    expect(resolveSandboxCpu({})).toBeUndefined();
+    expect(resolveSandboxCpu({ VALET_SANDBOX_CPU: "   " })).toBeUndefined();
+    expect(resolveSandboxMemory({})).toBeUndefined();
+    expect(resolveSandboxMemory({ VALET_SANDBOX_MEMORY: "" })).toBeUndefined();
+  });
+
+  it("accepts fractional, exponent, and exactly-at-cap CPU values", async () => {
+    const { MAX_SANDBOX_CPU } = await import("@valet/shared");
+    expect(resolveSandboxCpu({ VALET_SANDBOX_CPU: " 0.5 " })).toBe(0.5);
+    expect(resolveSandboxCpu({ VALET_SANDBOX_CPU: "6.4e1" })).toBe(MAX_SANDBOX_CPU);
+    expect(resolveSandboxCpu({ VALET_SANDBOX_CPU: String(MAX_SANDBOX_CPU) })).toBe(MAX_SANDBOX_CPU);
+  });
+
+  it.each(["0", "-1", "Infinity", "NaN", "500m", "64.001", "1e300"])(
+    "rejects invalid CPU value %j with a corrective error",
+    (cpu) => {
+      expect(() => resolveSandboxCpu({ VALET_SANDBOX_CPU: cpu })).toThrow(
+        /VALET_SANDBOX_CPU=.*greater than 0 and at most 64.*Set it to a value such as "1" or "0.5"/,
+      );
+    },
+  );
+
+  it("trims and accepts a positive Kubernetes memory quantity", () => {
+    expect(resolveSandboxMemory({ VALET_SANDBOX_MEMORY: " 1536Mi " })).toBe("1536Mi");
+  });
+
+  it.each(["0", "-1Gi", "8GB", "four gigs"])(
+    "rejects invalid memory value %j with a corrective error",
+    (memory) => {
+      expect(() => resolveSandboxMemory({ VALET_SANDBOX_MEMORY: memory })).toThrow(
+        /VALET_SANDBOX_MEMORY=.*positive Kubernetes quantity.*form like "2Gi" or "500Mi"/,
+      );
+    },
+  );
+
+  it("combines optional CPU and memory with the existing ephemeral-storage defaults", () => {
+    expect(
+      resolveSandboxResources({
+        VALET_SANDBOX_CPU: "1.25",
+        VALET_SANDBOX_MEMORY: "3Gi",
+      }),
+    ).toEqual({
+      cpu: 1.25,
+      memory: "3Gi",
+      ephemeralStorage: "2Gi",
+      ephemeralStorageLimit: "8Gi",
+    });
+  });
+
+  it("keeps only enabled fields in the aggregate resource defaults", () => {
+    expect(
+      resolveSandboxResources({
+        VALET_SANDBOX_MEMORY: "2Gi",
+        VALET_SANDBOX_EPHEMERAL_STORAGE_REQUEST: "0",
+      }),
+    ).toEqual({ memory: "2Gi", ephemeralStorageLimit: "8Gi" });
   });
 });
 

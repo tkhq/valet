@@ -18,7 +18,7 @@
  * step list and `steps` keys as evidence that the prior run was interrupted.
  */
 
-import type { Sandbox, PrepStep, DesiredSandboxSpec } from "../types.js";
+import type { Sandbox, SandboxResources, PrepStep, DesiredSandboxSpec } from "../types.js";
 
 /** Absolute path of the applied-state file inside the container filesystem. */
 export const APPLIED_PATH = "/etc/valet/applied.json";
@@ -31,6 +31,19 @@ export interface AppliedState {
   image: string;
   specHash: string;
   steps: Record<string, string>;
+  /** Repository CPU and memory overrides. Old files omit this field. */
+  resources?: Pick<SandboxResources, "cpu" | "memory">;
+}
+
+function validResources(resources: unknown): boolean {
+  if (typeof resources !== "object" || resources === null || Array.isArray(resources)) return false;
+  if ("cpu" in resources && resources.cpu !== undefined) {
+    if (typeof resources.cpu !== "number" || !Number.isFinite(resources.cpu) || resources.cpu <= 0) return false;
+  }
+  if ("memory" in resources && resources.memory !== undefined) {
+    if (typeof resources.memory !== "string" || resources.memory.trim().length === 0) return false;
+  }
+  return true;
 }
 
 /**
@@ -58,13 +71,12 @@ export async function readAppliedState(sandbox: Sandbox): Promise<AppliedState |
   if (
     typeof parsed !== "object" ||
     parsed === null ||
-    typeof (parsed as Record<string, unknown>).image !== "string" ||
-    typeof (parsed as Record<string, unknown>).specHash !== "string" ||
-    typeof (parsed as Record<string, unknown>).steps !== "object" ||
-    (parsed as Record<string, unknown>).steps === null ||
-    !Object.values((parsed as { steps: Record<string, unknown> }).steps).every(
-      (v) => typeof v === "string",
-    )
+    !("image" in parsed) || typeof parsed.image !== "string" ||
+    !("specHash" in parsed) || typeof parsed.specHash !== "string" ||
+    !("steps" in parsed) || typeof parsed.steps !== "object" ||
+    parsed.steps === null ||
+    !Object.values(parsed.steps).every((v) => typeof v === "string") ||
+    ("resources" in parsed && parsed.resources !== undefined && !validResources(parsed.resources))
   ) {
     return null;
   }
@@ -124,21 +136,23 @@ async function writeAppliedState(
 /**
  * Run the convergent plan for a sandbox.
  *
- * 1. Calls diffSteps to find which steps must run.
- * 2. Runs each pending step in order.
+ * 1. Persists changed authoritative resources with the prior successful steps.
+ * 2. Calls diffSteps and runs each pending step in order.
  * 3. After EACH successful step, rewrites the full applied file with:
- *    `{ image, specHash: desired.specHash, steps: { ...prior, [step.id]: step.hash } }`.
+ *    the image, desired spec hash, merged step hashes, and effective resources.
  *    The prior step ids are merged from `applied.steps` (existing applied state)
  *    so skipped steps are not erased from the record.
  * 4. Non-critical step failure: logs one line via console.error and continues.
  * 5. Critical step failure: re-throws (caller maps to SandboxPreparationError).
  *
- * Returns the ACTUAL applied state — the last state written to the file, which
+ * Returns the applied steps with the effective repository resources. It
  * includes prior applied steps merged with the steps this call landed. A step
  * that failed non-critically is NOT in the returned `steps`, so the caller's
  * observation cache reflects the true on-disk state and re-runs that step on
  * the next reconcile within the TTL (spec decision 10). When no step ran, the
- * return echoes the prior applied state (or an empty state) unchanged.
+ * return keeps the prior step hashes and uses the effective resources.
+ * A resource change records the desired spec hash even when no step succeeds.
+ * Resources come from `desired` when defined, otherwise from `applied`.
  */
 export async function applyPlan(
   sandbox: Sandbox,
@@ -149,12 +163,25 @@ export async function applyPlan(
   // Start with whatever was already successfully applied (skipped steps keep
   // their recorded hashes so we don't erase prior work from the file).
   const completedSteps: Record<string, string> = applied ? { ...applied.steps } : {};
-  const pending = diffSteps(desired.steps, applied);
-  if (pending.length === 0) {
-    // No step ran — echo the prior applied state (or an empty state) so the
-    // caller always builds its cache from the real on-disk truth.
-    return { image, specHash: applied?.specHash ?? desired.specHash, steps: completedSteps };
+  const resources = desired.resources !== undefined ? desired.resources : applied?.resources;
+  const resourceState = resources !== undefined ? { resources } : {};
+  const state: AppliedState = {
+    image,
+    specHash: applied?.specHash ?? desired.specHash,
+    steps: completedSteps,
+    ...resourceState,
+  };
+  // Missing resources and an empty object both mean no repository overrides.
+  const resourcesChanged = desired.resources !== undefined && (
+    desired.resources.cpu !== applied?.resources?.cpu ||
+    desired.resources.memory !== applied?.resources?.memory
+  );
+  if (resourcesChanged) {
+    // Resource metadata must survive even when no preparation step succeeds.
+    state.specHash = desired.specHash;
+    await writeAppliedState(sandbox, state);
   }
+  const pending = diffSteps(desired.steps, applied);
 
   for (const step of pending) {
     try {
@@ -173,20 +200,9 @@ export async function applyPlan(
 
     // Step succeeded — persist immediately so partial progress survives a kill
     completedSteps[step.id] = step.hash;
-    await writeAppliedState(sandbox, {
-      image,
-      specHash: desired.specHash,
-      steps: { ...completedSteps },
-    });
+    state.specHash = desired.specHash;
+    await writeAppliedState(sandbox, state);
   }
 
-  // The last state written to the file. `specHash` is the desired hash whenever
-  // any step landed; when every pending step failed non-critically nothing was
-  // written, so fall back to the prior applied hash (state on disk unchanged).
-  const anyLanded = Object.keys(completedSteps).length > (applied ? Object.keys(applied.steps).length : 0);
-  return {
-    image,
-    specHash: anyLanded ? desired.specHash : (applied?.specHash ?? desired.specHash),
-    steps: completedSteps,
-  };
+  return state;
 }

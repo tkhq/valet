@@ -136,6 +136,30 @@ On the local k8s deploy: edit a shim script, deploy — next prompt on a running
 
 ## Deviations from this spec (recorded during implementation)
 
+**Repository CPU and memory can trigger replacement** (added 2026-09-04).
+Authoritative resource drift now joins image drift as a replacement trigger for
+isolated providers. An empty resource object removes repository CPU and memory
+overrides. A transient read with no resource opinion preserves observed resources,
+including during image replacement. Both triggers share workspace preservation,
+spec-hash backoff, and suspended wake folding. Resource updates keep existing
+ephemeral-storage settings. Non-isolated providers keep their applied resources
+when preparation steps converge in place.
+On adoption after an API restart, the provider preserves CPU and memory when
+the engine sets `preserveResourcesOnAdopt`. The engine reads existing applied
+state before prep. Kubernetes rolls the pod for authoritative CPU or memory
+changes through the existing image replacement path, even when the image matches.
+Kubernetes fingerprints desired quantity values, so equivalent formats and
+admission-added resource defaults do not trigger repeated rolls. A reserved
+literal environment value records the live fingerprint. Pod annotations are
+insufficient because the controller updates them without changing container specs. A legacy
+no-opinion adoption keeps fingerprint absence; an authoritative apply can migrate
+it with one rollout. Creation requires the live pod to be Ready, not only the CR.
+The provider marks adopted state so prep failures retain or release it without
+deleting its workspace PVC. It stores repository override metadata in a CR annotation
+before rollout. A legacy applied-file reader migrates known overrides before
+replacement. The returned sandbox supplies that durable record to the engine,
+including after a crash that removed the old pod. Fresh pods still run full prep.
+
 **Child sessions now bind repos through the spawner.** Decision 13 said "binding a repo to a session" fires zero-config generation, but the orchestrator's child spawner dropped the `task` tool's `repo`/`branch` arguments: no `session_repos` row, no `ensureRepoSource`, no clone prep — a child "launched against a repo" had to shell-clone by hand and never produced a repository image. The spawner now parses `repo` (owner/repo shorthand, https URL, or ssh remote), writes the binding row before the child session is built (the first build is what wires clone prep — see `loadSessionMeta`), and fires the same fire-and-forget `ensureRepoSource` the REST create route uses.
 
 **`applyPlan` returns the actual applied map** (commit 76823092). The spec (decision 10) assumed the observation cache is built from the desired plan list. The implementation builds it from `applyPlan`'s real return value instead. A failed non-critical step is therefore not cached as applied and re-runs at the next window — closing a hole in decision 10 found during final review.

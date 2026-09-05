@@ -8,6 +8,7 @@
  * detect spec changes with a single string comparison.
  */
 import { createHash } from "node:crypto";
+import type { SandboxResources } from "@valet/engine";
 import type { RepoBinding } from "../wire/types.js";
 import type { RecipeStep } from "../prebuilds/recipe.js";
 import { gitCredentialHelperScript, ghWrapperScript } from "./git-credential-helper.js";
@@ -125,13 +126,25 @@ export function computeSpec(snap: ResolveSnapshot): SandboxSpec {
  * Produces a SHA-256 hex digest over the canonical JSON of a `SandboxSpec`.
  *
  * Canonical JSON: image first, then steps in array order with each step's
- * keys in fixed order (id, hash, critical). Never relies on object key
- * insertion order from a spread.
+ * keys in fixed order (id, hash, critical). When an authoritative resource
+ * opinion exists, resources follow with cpu before memory. An absent opinion
+ * keeps the legacy JSON and hash unchanged.
  */
-export function specHash(spec: SandboxSpec): string {
-  const canonical = JSON.stringify({
+export function specHash(
+  spec: SandboxSpec,
+  resources?: Pick<SandboxResources, "cpu" | "memory">,
+): string {
+  const canonicalSpec = {
     image: spec.image,
     steps: spec.steps.map((s) => ({ id: s.id, hash: s.hash, critical: s.critical })),
-  });
-  return sha256(canonical);
+    ...(resources !== undefined
+      ? {
+          resources: {
+            ...(resources.cpu !== undefined ? { cpu: resources.cpu } : {}),
+            ...(resources.memory !== undefined ? { memory: resources.memory } : {}),
+          },
+        }
+      : {}),
+  };
+  return sha256(JSON.stringify(canonicalSpec));
 }

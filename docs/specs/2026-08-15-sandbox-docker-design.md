@@ -128,6 +128,11 @@ When `opts.docker`, `buildDockerRunArgs`
 `systempaths=unconfined` unmasks `/proc/sys` so rootlesskit can set
 `net.ipv4.ip_forward` in its netns. Never `--privileged`.
 
+The provider also adapts the shared sandbox memory contract at this boundary.
+`SandboxResources.memory` is a positive Kubernetes quantity. The provider
+converts it to a decimal byte count for `docker run --memory`. The desired spec
+and applied metadata keep the configured quantity string unchanged.
+
 ### sandbox-kubernetes
 
 `ContainerSecurityContext`

@@ -116,6 +116,61 @@ describe("loadPrebuildOverride", () => {
     expect(override).toEqual({ workspaceStorage: "4Gi" });
   });
 
+  it("parses sandbox resources and trims padded memory", async () => {
+    const override = await loadPrebuildOverride(
+      readerFor({
+        ".valet/prebuild.yaml": 'resources:\n  cpu: 4\n  memory: " 8Gi "\n',
+      }),
+    );
+    expect(override).toEqual({ resources: { cpu: 4, memory: "8Gi" } });
+  });
+
+  it("accepts fractional, exponent, and exactly-at-cap CPU values", async () => {
+    const fractional = await loadPrebuildOverride(
+      readerFor({ ".valet/prebuild.yaml": 'resources:\n  cpu: 0.5\n  memory: "1Gi"\n' }),
+    );
+    expect(fractional).toEqual({ resources: { cpu: 0.5, memory: "1Gi" } });
+    expect(await loadPrebuildOverride(readerFor({ ".valet/prebuild.yaml": "resources:\n  cpu: 6.4e1\n" })))
+      .toEqual({ resources: { cpu: 64 } });
+    expect(await loadPrebuildOverride(readerFor({ ".valet/prebuild.yaml": "resources:\n  cpu: 64\n" })))
+      .toEqual({ resources: { cpu: 64 } });
+  });
+
+  it("parses CPU-only resources", async () => {
+    const override = await loadPrebuildOverride(
+      readerFor({ ".valet/prebuild.yaml": "resources:\n  cpu: 2\n" }),
+    );
+    expect(override).toEqual({ resources: { cpu: 2 } });
+  });
+
+  it("parses memory-only resources", async () => {
+    const override = await loadPrebuildOverride(
+      readerFor({ ".valet/prebuild.yaml": 'resources:\n  memory: "4Gi"\n' }),
+    );
+    expect(override).toEqual({ resources: { memory: "4Gi" } });
+  });
+
+  it("rejects an invalid resources declaration", async () => {
+    const cases = [
+      ["resources: 1\n", /resources must be a mapping.*resources.*cpu.*memory/],
+      ["resources:\n  cpu: \"4\"\n", /resources\.cpu.*greater than 0.*Set resources\.cpu/],
+      ["resources:\n  cpu: 0\n", /resources\.cpu.*greater than 0.*Set resources\.cpu/],
+      ["resources:\n  cpu: -1\n", /resources\.cpu.*greater than 0.*Set resources\.cpu/],
+      ["resources:\n  cpu: .nan\n", /resources\.cpu.*at most 64.*Set resources\.cpu/],
+      ["resources:\n  cpu: 64.001\n", /resources\.cpu.*at most 64.*Set resources\.cpu/],
+      ["resources:\n  cpu: 1e300\n", /resources\.cpu.*at most 64.*Set resources\.cpu/],
+      ["resources:\n  memory: 4\n", /resources\.memory.*string.*resources.*cpu.*memory/],
+      ["resources:\n  memory: \"0\"\n", /resources\.memory.*positive.*resources.*cpu.*memory/],
+      ["resources:\n  memory: \"-1Gi\"\n", /resources\.memory.*positive.*resources.*cpu.*memory/],
+      ["resources:\n  memory: \"8GB\"\n", /resources\.memory.*quantity.*resources.*cpu.*memory/],
+    ] as const;
+    for (const [yaml, error] of cases) {
+      await expect(loadPrebuildOverride(readerFor({ ".valet/prebuild.yaml": yaml }))).rejects.toThrow(
+        new RegExp(`\\.valet/prebuild\\.yaml:.*${error.source}`),
+      );
+    }
+  });
+
   it("rejects a non-string workspaceStorage (a bare number names no unit)", async () => {
     await expect(
       loadPrebuildOverride(readerFor({ ".valet/prebuild.yaml": "workspaceStorage: 4\n" })),

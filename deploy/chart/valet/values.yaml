@@ -146,6 +146,15 @@ sandbox:
   # the chart only threads the name through. Empty → field omitted.
   dockerRuntimeClass: ""
 
+  # Optional deployment-wide CPU and memory defaults for each sandbox.
+  # Repository resource declarations override these values per field.
+  # CPU is a positive number, including fractions such as 0.5. Memory is a
+  # positive Kubernetes quantity such as 2Gi or 500Mi. Empty means no
+  # deployment default for that field.
+  resources:
+    cpu: ""
+    memory: ""
+
   # Per-sandbox ephemeral-storage (node-local disk: container rootfs +
   # emptyDirs, including the DinD docker-state volume). The REQUEST caps how
   # many sandbox pods the scheduler stacks onto one node

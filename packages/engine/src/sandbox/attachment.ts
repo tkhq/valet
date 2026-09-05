@@ -27,8 +27,18 @@ import { type AppliedState, applyPlan, diffSteps, readAppliedState } from "./app
  */
 export const OBSERVE_TTL_MS = 5 * 60_000;
 
-/** Max backoff between failed image-replacement retries (spec decision 6). */
+/** Max backoff between failed replacement retries (spec decision 6). */
 const REPLACE_BACKOFF_CAP_MS = 30 * 60_000;
+
+/** Missing applied resources and an empty opinion both mean no overrides. */
+function resourceDrift(
+  desired: DesiredSandboxSpec["resources"],
+  applied: AppliedState["resources"],
+): boolean {
+  return desired !== undefined && (
+    desired.cpu !== applied?.cpu || desired.memory !== applied?.memory
+  );
+}
 
 /** A cached observation of what the live sandbox has applied (spec decision 4). */
 interface ObservationCache {
@@ -39,7 +49,7 @@ interface ObservationCache {
 }
 
 /**
- * Memo of the most recent failed image replacement (spec decision 6). A
+ * Memo of the most recent failed replacement (spec decision 6). A
  * `reconcile` whose desired spec hashes to `specHash` skips the replace while
  * inside the exponential backoff window from `failedAt`.
  */
@@ -92,9 +102,7 @@ interface Waiter {
  */
 export class SandboxAttachment {
   private provider: SandboxProvider | null;
-  // Not readonly: reconcile persists the reconciled image into createOpts so a
-  // later cold re-provision (failure recovery) boots the observed image (spec
-  // decision 9 — observed image is the source of truth).
+  // Reconcile persists the image and resources so failure recovery uses them.
   private createOpts: SandboxCreateOpts;
   private readonly specProvider: SpecProvider | undefined;
   private readonly estimateMs: number | undefined;
@@ -113,8 +121,10 @@ export class SandboxAttachment {
   private observation: ObservationCache | null = null;
   /** Single-flight guard for `reconcile` (spec decision 3). */
   private reconciling: Promise<void> | null = null;
-  /** Backoff memo for a failed image replacement (spec decision 6). */
+  /** Backoff memo for a failed replacement (spec decision 6). */
   private convergeFailure: ConvergeFailure | null = null;
+  /** Last ignored non-isolated resource drift, for change-aware warnings. */
+  private ignoredResourceDriftKey: string | null = null;
 
   constructor(provider: SandboxProvider, createOpts: SandboxCreateOpts, specProvider?: SpecProvider) {
     this.provider = provider;
@@ -420,9 +430,9 @@ export class SandboxAttachment {
    * failure is logged and the state machinery (reportFailure/backoff) governs.
    *
    * Cases:
-   *  - image drift → REPLACE: bump epoch, drop + release the old sandbox, and
-   *    cold-provision the desired image (its create boots the persisted
-   *    `createOpts.image`). Guarded by an exponential backoff memo so a spec
+   *  - image or resource drift → REPLACE: bump epoch, release the old sandbox,
+   *    and cold-provision with the persisted create options.
+   *    Guarded by an exponential backoff memo so a spec
    *    that keeps failing to replace is retried with growing spacing.
    *  - step drift → apply the drifted steps in place (same epoch) and refresh
    *    the observation cache.
@@ -457,18 +467,26 @@ export class SandboxAttachment {
       const observed = await this.observe(sandbox, epoch);
       if (this.destroyed || this._state !== "ready" || this._epoch !== epoch) return;
 
-      // ── Image drift → replace ──────────────────────────────────────
-      // Decision 8: only an isolated backend may pod-replace on image drift. A
-      // non-isolated backend (docker/local/virtual — shared host, no per-pod
-      // image) must NEVER tear down and re-provision, so it skips this branch
-      // and falls through to step-drift-only convergence. Today this is inert
-      // because desired.image is undefined for those backends; the guard makes
-      // the invariant explicit and holds even if a desired.image ever leaks in.
-      const isolated = this.provider?.capabilities().isolated === true;
-      if (isolated && desired.image !== undefined && desired.image !== observed.image) {
+      // Only isolated providers replace on image or resource drift (decision 8).
+      // Non-isolated providers still converge preparation steps in place.
+      const ignoredResourceDrift = this.provider?.capabilities().isolated !== true &&
+        resourceDrift(desired.resources, observed.resources);
+      if (ignoredResourceDrift) {
+        const warningKey = JSON.stringify([desired.resources, observed.resources]);
+        if (this.ignoredResourceDriftKey !== warningKey) {
+          console.warn(
+            `SandboxAttachment: ignored CPU/memory change for non-isolated provider ${this.provider?.backend ?? "unknown"}. ` +
+              "Use an isolated sandbox provider to apply resource settings.",
+          );
+          this.ignoredResourceDriftKey = warningKey;
+        }
+      } else {
+        this.ignoredResourceDriftKey = null;
+      }
+      if (this.replacementNeeded(desired, observed)) {
         // Backoff: skip the replace when the SAME desired spec already failed
         // to replace within its exponential window (spec decision 6). A
-        // repeatedly-failing image must not re-provision on every idle sweep.
+        // repeatedly-failing spec must not re-provision on every idle sweep.
         const failure = this.convergeFailure;
         if (failure && failure.specHash === desired.specHash) {
           const backoff = Math.min(REPLACE_BACKOFF_CAP_MS, 2 ** failure.attempts * 60_000);
@@ -477,9 +495,9 @@ export class SandboxAttachment {
 
         const oldSandbox = this._sandbox;
         const provider = this.provider;
-        // Persist the desired image BEFORE kicking the provision so its create
-        // boots it (observed-image source of truth, spec decision 9).
-        this.createOpts = { ...this.createOpts, image: desired.image };
+        // Persist before clearing the observation. A transient repository read
+        // has no resource opinion, so replacement keeps the observed overrides.
+        this.persistReplacementSpec(desired, observed);
         // Re-provision semantics: bump the epoch and drop the handle before
         // releasing the old sandbox (mirrors reportFailure).
         this._epoch += 1;
@@ -498,16 +516,11 @@ export class SandboxAttachment {
         // governs the memo, never a caller's readiness.
         if (this.inFlight) await this.inFlight.catch(() => {});
         if (this.destroyed) return;
-        // Converged = the sandbox is ready AND the freshly-booted image matches
-        // the desired image. A re-provision that ends in `error`, or one that
-        // "succeeds" onto a non-converging image (a tag that resolves to the
-        // old image, a provider that keeps the old container), both count as a
-        // failed replace — record the memo so a matching-spec reconcile inside
-        // the backoff window skips the replace instead of re-provisioning on
-        // every idle sweep (spec decision 6).
+        // A ready sandbox must match both authoritative image and resources.
+        // Record a failure when provisioning fails or the new spec still drifts.
         // Read through the getter so TS does not narrow `_state` to the literal
         // assigned before the await — the awaited provision mutated it.
-        const converged = this.state === "ready" && this.observedImage() === desired.image;
+        const converged = this.state === "ready" && !this.replacementNeeded(desired);
         if (converged) {
           this.convergeFailure = null;
         } else {
@@ -529,7 +542,9 @@ export class SandboxAttachment {
       // fallback here is belt-and-suspenders: it prevents writing an empty
       // image string into the applied file if observe() somehow produced one.
       const image = observed.image || this.createOpts.image || "";
-      const landed = await applyPlan(sandbox, desired, image, observed);
+      // Preparation cannot change provider resources. In particular, ignored
+      // resource drift on a non-isolated provider must not enter applied state.
+      const landed = await applyPlan(sandbox, { ...desired, resources: observed.resources }, image, observed);
       if (this.destroyed || this._state !== "ready" || this._epoch !== epoch) return;
       // Refresh the observation with what the in-place apply ACTUALLY landed —
       // a step that failed non-critically is absent from `landed.steps`, so it
@@ -566,6 +581,32 @@ export class SandboxAttachment {
    */
   private observationFromApplied(applied: AppliedState, epoch: number): ObservationCache {
     return { applied, at: Date.now(), epoch };
+  }
+
+  private replacementNeeded(desired: DesiredSandboxSpec, applied = this.observation?.applied): boolean {
+    return this.provider?.capabilities().isolated === true && (
+      (desired.image !== undefined && desired.image !== applied?.image) ||
+      resourceDrift(desired.resources, applied?.resources)
+    );
+  }
+
+  /** Replace only the repository CPU/memory opinion; keep other resources. */
+  private persistResources(resources: DesiredSandboxSpec["resources"]): void {
+    if (resources === undefined) return;
+    const next = { ...this.createOpts.resources };
+    delete next.cpu;
+    delete next.memory;
+    if (resources.cpu !== undefined) next.cpu = resources.cpu;
+    if (resources.memory !== undefined) next.memory = resources.memory;
+    this.createOpts = { ...this.createOpts, resources: next };
+  }
+
+  private persistReplacementSpec(desired: DesiredSandboxSpec, applied: AppliedState): void {
+    this.createOpts = {
+      ...this.createOpts,
+      image: desired.image ?? (applied.image || this.createOpts.image),
+    };
+    this.persistResources(desired.resources ?? applied.resources);
   }
 
   private async observe(sandbox: Sandbox, epoch: number): Promise<AppliedState> {
@@ -662,10 +703,9 @@ export class SandboxAttachment {
 
   private async doResume(): Promise<void> {
     // Wake folding (spec decision 3, wake-when-stale). Before waking the
-    // suspended sandbox, a cheap pre-check compares the desired image to what
-    // the cached observation says the sandbox has applied. On a mismatch, a
-    // plain resume would wake the STALE image, so instead we discard the
-    // suspended handle and cold-provision the desired image.
+    // suspended sandbox, compare the desired image and resources with the
+    // cached observation. If an isolated sandbox drifts, discard its suspended
+    // handle and cold-provision with the new spec.
     //
     // Epoch choice: a clean suspend/resume deliberately does NOT bump the epoch
     // (ops in flight before hibernation are not superseded). A stale wake that
@@ -681,11 +721,9 @@ export class SandboxAttachment {
       let staleWake = false;
       try {
         const desired = await this.specProvider();
-        staleWake =
-          desired.image !== undefined && desired.image !== this.observation.applied.image;
-        if (staleWake && desired.image !== this.observation.applied.image) {
-          // Persist the desired image so the fresh provision boots it.
-          this.createOpts = { ...this.createOpts, image: desired.image };
+        staleWake = this.replacementNeeded(desired, this.observation.applied);
+        if (staleWake) {
+          this.persistReplacementSpec(desired, this.observation.applied);
         }
       } catch (err) {
         // A failed pre-check must not strand the wake — fall through to the
@@ -837,12 +875,10 @@ export class SandboxAttachment {
       // pre-seam behavior. Only the cold `doProvision` runs prep — a
       // hibernation wake (`doResume`, same epoch) deliberately does not.
       //
-      // Task 5: the desired spec selects the boot image. Fetch the spec BEFORE
-      // create so the container boots the desired image; a freshly-created
-      // container has no applied state, so `applyPlan` runs with `applied:
-      // null` (a full apply — no observation read needed). The desired image is
-      // ALSO persisted into `createOpts` so a later failure re-provision boots
-      // the same reconciled image (spec decision 9).
+      // Fetch the spec before create so a fresh container boots the desired
+      // image. Persist the image for later failure recovery (spec decision 9).
+      // A provider can adopt an existing sandbox, so read its applied state
+      // after create. A fresh container has no file and runs the full plan.
       let desired: DesiredSandboxSpec | undefined;
       if (this.specProvider) {
         desired = await this.specProvider();
@@ -851,28 +887,58 @@ export class SandboxAttachment {
       if (desired?.image !== undefined && desired.image !== this.createOpts.image) {
         this.createOpts = { ...this.createOpts, image: desired.image };
       }
-      const sandbox = await provider.create({ ...this.createOpts, image: bootImage });
+      this.persistResources(desired?.resources);
+      const sandbox = await provider.create({
+        ...this.createOpts,
+        image: bootImage,
+        preserveResourcesOnAdopt: desired !== undefined && desired.resources === undefined,
+        readResourceOverrides: desired !== undefined && desired.resources === undefined
+          ? async (existing) => {
+            try {
+              return (await readAppliedState(existing))?.resources;
+            } catch (err) {
+              throw new SandboxPreparationError(err);
+            }
+          }
+          : undefined,
+      });
       if (this.destroyed) {
         await provider.destroy(sandbox.id).catch(() => {});
         return;
       }
       if (desired) {
         try {
-          const appliedImage = bootImage ?? "";
-          const landed = await applyPlan(sandbox, desired, appliedImage, null);
-          // Cache what the fresh container ACTUALLY has applied (spec decision
+          const applied = await readAppliedState(sandbox);
+          const appliedImage = applied?.image || bootImage || "";
+          // Provider metadata survives a provider-side image rollout and API
+          // restart. Null forbids a fallback to stale rebuilt create options.
+          let resources = desired.resources ?? sandbox.resourceOverrides ?? applied?.resources;
+          if (resources === undefined && applied === null && sandbox.resourceOverrides !== null) {
+            const { cpu, memory } = this.createOpts.resources ?? {};
+            if (cpu !== undefined || memory !== undefined) {
+              resources = { ...(cpu !== undefined ? { cpu } : {}), ...(memory !== undefined ? { memory } : {}) };
+            }
+          }
+          if (sandbox.resourceOverrides === null && desired.resources === undefined) {
+            // Discard rejected options now so a later no-opinion replacement
+            // cannot revive them. Keep any recovered applied opinion instead.
+            this.persistResources(resources ?? {});
+          }
+          const landed = await applyPlan(sandbox, { ...desired, resources }, appliedImage, applied);
+          // Cache what the returned sandbox ACTUALLY has applied (spec decision
           // 4): the state applyPlan last wrote, which excludes any step that
           // failed non-critically. reconcile trusts this within OBSERVE_TTL_MS
           // instead of re-reading the file, and re-runs a failed step next pass
           // (spec decision 10) instead of treating it as applied.
           this.observation = this.observationFromApplied(landed, this._epoch);
         } catch (prepErr) {
-          // Terminal for this provision. Best-effort destroy the unprepped
-          // sandbox unconditionally so the handle never leaks — even if a
-          // concurrent destroy() raced (it saw `_sandbox` still null and so
-          // could not tear this one down). Then classify as a startup-shaped
-          // failure via the outer catch.
-          await provider.destroy(sandbox.id).catch(() => {});
+          // Failed prep does not own adopted storage. Retain it, or release
+          // compute non-terminally. An explicit session destroy still wins.
+          if (sandbox.adopted && !this.destroyed) {
+            await provider.release?.(sandbox.id).catch(() => {});
+          } else {
+            await provider.destroy(sandbox.id).catch(() => {});
+          }
           if (this.destroyed) return;
           throw new SandboxPreparationError(prepErr);
         }

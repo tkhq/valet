@@ -105,6 +105,14 @@ export class PolicySandbox implements Sandbox {
     return this.attachment.sandboxId ?? "";
   }
 
+  get resourceOverrides(): Sandbox["resourceOverrides"] {
+    return this.attachment.current()?.resourceOverrides;
+  }
+
+  get adopted(): Sandbox["adopted"] {
+    return this.attachment.current()?.adopted;
+  }
+
   async readFile(path: string): Promise<string> {
     return this.dispatch((sb) => sb.readFile(path));
   }
@@ -387,11 +395,16 @@ function jobUnsupportedError(): Error {
 }
 
 // Compile-time guard (shape-drift trap): PolicySandbox must forward EVERY
-// Sandbox method, optional ones included. A wrapper that silently lacks a
+// Sandbox member, optional ones included. A wrapper that silently lacks a
 // newly added optional method turns that feature into a no-op for every
 // consumer of the wrapped sandbox, and every existing test still passes.
-// Adding a method to `Sandbox` breaks this assignment until PolicySandbox
-// forwards it.
-type PolicyForwardsAllSandboxMethods = PolicySandbox extends Required<Sandbox> ? true : never;
+// Optional data can retain undefined; optional methods must be callable.
+// `implements Sandbox` also checks the forwarded members' value types.
+type SandboxMethodKeys = {
+  [K in keyof Sandbox]-?: NonNullable<Sandbox[K]> extends (...args: never[]) => unknown ? K : never;
+}[keyof Sandbox];
+type PolicyForwardsAllSandboxMethods = PolicySandbox extends Required<Pick<Sandbox, SandboxMethodKeys>>
+  ? Exclude<keyof Sandbox, keyof PolicySandbox> extends never ? true : never
+  : never;
 const policyForwardsAllSandboxMethods: PolicyForwardsAllSandboxMethods = true;
 void policyForwardsAllSandboxMethods;

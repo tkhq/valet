@@ -6,7 +6,8 @@
  * specProvider closure and applies steps — recording sandbox providers capture
  * what exec sequences and image refs the closure produced.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { eq } from "drizzle-orm";
 import {
   type ExecResult,
   type Sandbox,
@@ -18,6 +19,9 @@ import {
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { agentSessions, imageSources, bakes, securityEngagements, securityCells } from "../schema/index.js";
 import type { RepoBinding } from "../wire/types.js";
+import { clearRepoPrebuildFlagsCache } from "../bakes/source-service.js";
+import { deriveSecretKey } from "../lib/secret-crypto.js";
+import { contentsBody, startGithubFixture, type GithubFixture } from "../test-helpers/github-fixture.js";
 
 const ORG = "local-org";
 const USER = "local-user";
@@ -165,10 +169,99 @@ const secondaryBinding: RepoBinding & { targetDir: string } = {
 
 describe("EngineHost buildSpecProvider", () => {
   let api: TestApi | undefined;
+  let fixture: GithubFixture | undefined;
 
   afterEach(async () => {
     await api?.cleanup();
     api = undefined;
+    await fixture?.close();
+    fixture = undefined;
+    clearRepoPrebuildFlagsCache();
+    vi.restoreAllMocks();
+  });
+
+  it("refreshes authoritative resources and omits an opinion after a read error", async () => {
+    clearRepoPrebuildFlagsCache();
+    let prebuildYaml = "resources:\n  cpu: 2\n  memory: 4Gi\n";
+    fixture = startGithubFixture({
+      getContents: (_owner, _repo, path) => {
+        if (path !== ".valet/prebuild.yaml") return { status: 404, body: { message: "Not Found" } };
+        if (prebuildYaml === "invalid") return contentsBody("resources:\n  cpu: nope\n", "bad-blob");
+        return contentsBody(prebuildYaml, "resource-blob");
+      },
+    });
+    const provider = makeIsolatedProvider();
+    api = await bootTestApi({
+      sandboxProvider: provider,
+      githubTokenDeps: {
+        key: deriveSecretKey("test-key"),
+        apiUrl: fixture.url,
+        githubUrl: fixture.url,
+      },
+    });
+    const sessionId = "sp-resource-refresh";
+    await insertSession(api.providers.db, sessionId);
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const session = await api.providers.engineHost.sessionFor(sessionId, {
+      userId: USER,
+      orgId: ORG,
+      workspace: `/tmp/${sessionId}`,
+      repos: [primaryBinding],
+    });
+    const specProvider = session.options.specProvider;
+    expect(specProvider).toBeDefined();
+
+    const initial = await specProvider!();
+    expect(initial.resources).toEqual({ cpu: 2, memory: "4Gi" });
+
+    now += 10 * 60 * 1_000 + 1;
+    prebuildYaml = "resources:\n  cpu: 4\n  memory: 8Gi\n";
+    const changed = await specProvider!();
+    expect(changed.resources).toEqual({ cpu: 4, memory: "8Gi" });
+    expect(changed.specHash).not.toBe(initial.specHash);
+
+    now += 10 * 60 * 1_000 + 1;
+    prebuildYaml = "invalid";
+    const failed = await specProvider!();
+    expect(failed.resources).toBeUndefined();
+  });
+
+  it("reads disabled repository defaults on every invocation while YAML remains cached", async () => {
+    clearRepoPrebuildFlagsCache();
+    let reads = 0;
+    fixture = startGithubFixture({
+      getContents: (_owner, _repo, path) => {
+        if (path !== ".valet/prebuild.yaml") return { status: 404, body: { message: "Not Found" } };
+        reads += 1;
+        return contentsBody("resources:\n  memory: 8Gi\n", "resource-memory");
+      },
+    });
+    api = await bootTestApi({
+      sandboxProvider: makeIsolatedProvider(),
+      githubTokenDeps: { key: deriveSecretKey("test-key"), apiUrl: fixture.url, githubUrl: fixture.url },
+    });
+    const { db, engineHost } = api.providers;
+    await db.insert(imageSources).values({
+      id: "saved-defaults", orgId: ORG, kind: "repo", name: "acme/widgets",
+      repoHost: "github", repoFullName: "acme/widgets", enabled: false,
+      sandboxResources: { cpu: 2, memory: "4Gi" }, createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    const sessionId = "sp-saved-resources";
+    await insertSession(db, sessionId);
+    const session = await engineHost.sessionFor(sessionId, {
+      userId: USER, orgId: ORG, workspace: `/tmp/${sessionId}`, repos: [primaryBinding],
+    });
+    const first = await session.options.specProvider!();
+    expect(first.resources).toEqual({ cpu: 2, memory: "8Gi" });
+    const cachedReads = reads;
+    await db.update(imageSources).set({ sandboxResources: { cpu: 4, memory: "16Gi" } }).where(eq(imageSources.id, "saved-defaults"));
+    const changed = await session.options.specProvider!();
+    expect(changed.resources).toEqual({ cpu: 4, memory: "8Gi" });
+    expect(changed.specHash).not.toBe(first.specHash);
+    expect(reads).toBe(cachedReads);
+    await db.update(imageSources).set({ sandboxResources: null }).where(eq(imageSources.id, "saved-defaults"));
+    expect((await session.options.specProvider!()).resources).toEqual({ memory: "8Gi" });
   });
 
   it("unbound session on isolated provider runs credential-scripts and git-identity steps", async () => {
