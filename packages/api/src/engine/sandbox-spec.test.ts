@@ -148,6 +148,36 @@ describe("golden hashes", () => {
   });
 });
 
+describe("resource opinion hashing", () => {
+  const spec = computeSpec(snapWithRepoBake);
+
+  it("preserves the existing hash when no resource opinion exists", () => {
+    expect(specHash(spec, undefined)).toBe(specHash(spec));
+    expect(specHash(spec)).toBe("244e2a15142201dd6129faa089e325349c1e03728eee45d81416b4d8d32d26e6");
+  });
+
+  it("uses fixed cpu then memory order independent of insertion order", () => {
+    expect(specHash(spec, { cpu: 4, memory: "8Gi" })).toBe(
+      specHash(spec, { memory: "8Gi", cpu: 4 }),
+    );
+  });
+
+  it.each([
+    ["empty", {}],
+    ["cpu", { cpu: 4 }],
+    ["memory", { memory: "8Gi" }],
+    ["cpu and memory", { cpu: 4, memory: "8Gi" }],
+  ])("distinguishes a %s opinion from no opinion", (_label, resources) => {
+    expect(specHash(spec, resources)).not.toBe(specHash(spec));
+  });
+
+  it("changes when either authoritative resource value changes", () => {
+    const base = specHash(spec, { cpu: 4, memory: "8Gi" });
+    expect(specHash(spec, { cpu: 2, memory: "8Gi" })).not.toBe(base);
+    expect(specHash(spec, { cpu: 4, memory: "4Gi" })).not.toBe(base);
+  });
+});
+
 // ── Hash sensitivity matrix ────────────────────────────────────────────────
 
 describe("hash sensitivity", () => {

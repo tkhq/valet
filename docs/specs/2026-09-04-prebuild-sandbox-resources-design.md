@@ -92,6 +92,8 @@ Precedence is per field:
 
 Only the primary repository binding supplies runtime values. Child sessions use
 the same resolution path as REST-created sessions.
+If token resolution fails, a tokenless missing-file answer remains a read error.
+The API removes its resource opinion before initial creation or reconciliation.
 
 ## Provision and reconcile behavior
 

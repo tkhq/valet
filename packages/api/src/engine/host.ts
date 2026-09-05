@@ -913,7 +913,8 @@ export class EngineHost {
     const profile = meta.profile ?? "headless";
     const sandboxMint = await this.mintSandboxEnv(sessionId, meta.userId, meta.orgId, profile);
     // Repo-declared session-runtime flags from `.valet/prebuild.yaml`:
-    // `docker` (session-create opt ORs over it) and `workspaceStorage`
+    // `docker` (session-create opt ORs over it), `workspaceStorage`, and
+    // CPU/memory resources
     // (TKAI-385: a large repo declares its workspace size up front so the
     // claim is provisioned big enough — no reactive resize needed).
     // `resolveRepoPrebuildFlags` is best-effort — any failure resolves the
@@ -922,6 +923,10 @@ export class EngineHost {
     // resolved.
     const repoFlags = await this.resolveRepoPrebuildFlags(sessionId, meta);
     const dockerFlag = meta.docker === true || repoFlags.docker;
+    const initialResources =
+      repoFlags.outcome !== "error" && repoFlags.resources && Object.keys(repoFlags.resources).length > 0
+        ? repoFlags.resources
+        : undefined;
     // Start-ref sink (engine traces spec, change 2 — host pattern B): the
     // specProvider closure resolves the primary clone's ref inside the sandbox
     // and calls this callback. The callback can fire before create/restore
@@ -988,6 +993,7 @@ export class EngineHost {
       env: sandboxEnv,
       profile,
       ...(dockerFlag ? { docker: true } : {}),
+      ...(initialResources ? { resources: initialResources } : {}),
       // Sizes a fresh claim; an adopted (existing) claim converges UP to this
       // through the provider's rate-limited grow at create time (TKAI-402).
       // A claim never shrinks.
@@ -1411,6 +1417,11 @@ export class EngineHost {
       // an edit is picked up on the next reconcile, like every other part of
       // the spec.
       snap.credentialCommands = await host.resolveRepoCredentialCommands(meta);
+      // Use the same cached runtime-config resolver as initial creation. A
+      // declared or absent repository answer is authoritative. An error has
+      // no resource opinion, so reconciliation preserves recorded overrides.
+      const repoFlags = await host.resolveRepoPrebuildFlags(sessionId, meta);
+      const resources = repoFlags.outcome === "error" ? undefined : (repoFlags.resources ?? {});
 
       // Best-effort prebuild-id recording — same as the old eager path.
       if (snap.repoBake) {
@@ -1431,8 +1442,9 @@ export class EngineHost {
 
       return {
         image: spec.image !== stockImage ? spec.image : undefined,
-        specHash: specHash(spec),
+        specHash: specHash(spec, resources),
         steps,
+        ...(resources !== undefined ? { resources } : {}),
       };
     };
   }
@@ -1700,7 +1712,7 @@ export class EngineHost {
 
   /**
    * Best-effort: reads `.valet/prebuild.yaml`'s session-runtime keys
-   * (`docker`, `workspaceStorage`) for the session's primary repo. Returns
+   * (`docker`, `workspaceStorage`, and CPU/memory) for the primary repo. Returns
    * the defaults ({ docker: false }, no storage) on any failure (no token,
    * no repos, non-GitHub host, network error, bad YAML) — the session still
    * starts without docker, on the default workspace size.
@@ -1782,7 +1794,14 @@ export class EngineHost {
         // degrade that is not a trustworthy repo answer (the authenticated
         // read may have found the file). Relabel it so the log/metric show a
         // failed resolution, not a missing file.
-        return degradedTokenless && flags.outcome === "absent" ? { ...flags, outcome: "error" } : flags;
+        if (degradedTokenless && flags.outcome === "absent") {
+          return {
+            docker: flags.docker,
+            ...(flags.workspaceStorage ? { workspaceStorage: flags.workspaceStorage } : {}),
+            outcome: "error",
+          };
+        }
+        return flags;
       })();
       const result = await Promise.race([work, timeoutPromise]).finally(() => clearTimeout(timeoutId));
       if (result === timedOut) {
@@ -1798,7 +1817,8 @@ export class EngineHost {
       // is indistinguishable from "nothing declared" (TKAI-401).
       console.log(
         `EngineHost: prebuild flags for session ${sessionId} (${owner}/${repoName}@${ref}): ` +
-          `workspaceStorage=${result.workspaceStorage ?? "none"} docker=${result.docker} (${result.outcome})`,
+          `workspaceStorage=${result.workspaceStorage ?? "none"} docker=${result.docker} ` +
+          `cpu=${result.resources?.cpu ?? "none"} memory=${result.resources?.memory ?? "none"} (${result.outcome})`,
       );
       recordPrebuildFlagsResolved(result.outcome);
       return result;
@@ -3236,13 +3256,17 @@ export class EngineHost {
         };
     // Repo-declared session-runtime flags from `.valet/prebuild.yaml`
     // (TKAI-385): the same read `buildSession` does, so a child bound to a
-    // repo gets the repo's `workspaceStorage` and `docker` exactly like a
+    // repo gets `workspaceStorage`, `docker`, and CPU/memory exactly like a
     // REST-created session. This was MISSING at first ship — child sandboxes
     // (the orchestrator's verify/task sessions) provisioned the 1Gi default
     // claim while REST sessions honored the declaration. Best-effort: any
     // failure resolves the defaults.
     const repoFlags = await this.resolveRepoPrebuildFlags(childSessionId, meta);
     const dockerFlag = opts.docker === true || repoFlags.docker;
+    const initialResources =
+      repoFlags.outcome !== "error" && repoFlags.resources && Object.keys(repoFlags.resources).length > 0
+        ? repoFlags.resources
+        : undefined;
     const specProvider = await this.buildSpecProvider(childSessionId, meta, undefined, personaCell != null);
     // Repo AGENTS.md instructions (agents-md spec, decision 5): a child
     // spawned with a repo binding reads its AGENTS.md exactly like a
@@ -3284,6 +3308,7 @@ export class EngineHost {
             : sandboxMint?.env,
         profile,
         ...(dockerFlag ? { docker: true } : {}),
+        ...(initialResources ? { resources: initialResources } : {}),
         // Sizes a fresh claim; an adopted (existing) claim converges UP to
         // this through the provider's rate-limited grow at create time
         // (TKAI-402). A claim never shrinks.
