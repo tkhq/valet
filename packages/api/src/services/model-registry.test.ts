@@ -335,4 +335,35 @@ describe("ModelRegistry", () => {
       }
     });
   });
+
+  describe("model catalog additions", () => {
+    it("serves Claude Fable 5.1 from pi 0.85.0", () => {
+      setModelRegistry(null);
+      const model = registryModelById("anthropic", "claude-fable-5-1");
+      expect(model?.name).toBe("Claude Fable 5.1");
+      expect(model?.api).toBe("anthropic-messages");
+      expect(model?.contextWindow).toBe(1_000_000);
+      expect(model?.maxTokens).toBe(128_000);
+    });
+
+    it("serves GPT-6 Astra with exact upstream metadata", () => {
+      setModelRegistry(null);
+      const model = registryModelById("openai", "gpt-6-astra");
+      expect(registryModels("openai").filter((entry) => entry.id === "gpt-6-astra")).toHaveLength(1);
+      expect(model).toMatchObject({
+        name: "GPT-6 Astra", api: "openai-responses", provider: "openai",
+        contextWindow: 272_000, maxTokens: 128_000,
+        cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5,
+          tiers: [{ inputTokensAbove: 272_000, input: 20, output: 75, cacheRead: 2, cacheWrite: 25 }] },
+        thinkingLevelMap: { off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
+        compat: { supportsStrictMode: true, supportsOpenAIGrammarTools: true, supportsAdditionalTools: true,
+          supportsToolSearch: true, supportsExplicitPromptCacheMode: true },
+      });
+    });
+
+    it("CANARY: pi does not bundle GPT-6 Astra yet", () => {
+      // When this fails, delete GPT-6 Astra from MANUAL_BUNDLED_MODELS and delete this test.
+      expect(getBuiltinModels("openai").map((model) => model.id)).not.toContain("gpt-6-astra");
+    });
+  });
 });

@@ -77,6 +77,19 @@ describe("resolveModelSpec (catalog-aware bridge)", () => {
     });
   });
 
+  describe("new model resolution", () => {
+    it.each([
+      ["anthropic/claude-fable-5-1", "claude-fable-5-1", "anthropic", "ANTHROPIC_API_KEY"],
+      ["openai/gpt-6-astra", "gpt-6-astra", "openai", "OPENAI_API_KEY"],
+    ] as const)("resolves %s", async (spec, wireId, provider, envName) => {
+      vi.stubEnv(envName, "test-key");
+      const resolved = await resolveModelSpec(db, credentials, orgId, spec);
+      expect(resolved?.model.id).toBe(wireId);
+      expect(resolved?.model.provider).toBe(provider);
+      expect(resolved?.canonicalId).toBe(spec);
+    });
+  });
+
   describe("org key over env, per known kind", () => {
     it("anthropic: org credential wins over ANTHROPIC_API_KEY", async () => {
       vi.stubEnv("ANTHROPIC_API_KEY", "env-anthropic");
@@ -336,17 +349,17 @@ describe("resolveModelSpec (catalog-aware bridge)", () => {
         name: "OpenRouter",
         models: [
           {
-            id: "moonshotai/kimi-k3",
-            name: "MoonshotAI: Kimi K3",
+            id: "moonshotai/not-in-baked-registry",
+            name: "MoonshotAI: Not in baked registry",
             contextWindow: 1_048_576,
             pricing: { input: 3, output: 15 },
           },
         ],
       });
       await saveKey(row.id, "org-openrouter");
-      const spec = "openrouter/moonshotai/kimi-k3";
+      const spec = "openrouter/moonshotai/not-in-baked-registry";
       const r1 = await resolveModelSpec(db, credentials, orgId, spec);
-      expect(r1?.model.id).toBe("moonshotai/kimi-k3"); // wire id
+      expect(r1?.model.id).toBe("moonshotai/not-in-baked-registry"); // wire id
       expect(r1?.canonicalId).toBe(spec);
       expect(r1?.model.api).toBe("openai-completions");
       expect(r1?.model.baseUrl).toBe("https://openrouter.ai/api/v1");
