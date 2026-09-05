@@ -1,7 +1,7 @@
 /**
  * Reasoning-effort seam (TKAI-352): the case/suite reasoning level reaches
  * pi-ai's StreamOptions.reasoning, the CLI validates its flag, and the
- * extra-models table resolves specs the static catalog lacks (unpriced).
+ * common bundled catalog resolves supplemental models with their metadata.
  */
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -31,7 +31,7 @@ describe("loader and CLI validation", () => {
 
 describe("reasoning threading", () => {
   it("suite-level reasoning reaches the model call and the trajectory metadata", async () => {
-    const faux = registerFauxProvider({ provider: "reason-1" });
+    const faux = registerFauxProvider({ provider: "reason-1", models: [{ id: "faux-reasoner-1", reasoning: true }] });
     let seen: string | undefined;
     faux.setResponses([
       (_context, options) => {
@@ -52,7 +52,7 @@ describe("reasoning threading", () => {
   });
 
   it("a case's own reasoning wins over the suite override", async () => {
-    const faux = registerFauxProvider({ provider: "reason-2" });
+    const faux = registerFauxProvider({ provider: "reason-2", models: [{ id: "faux-reasoner-2", reasoning: true }] });
     let seen: string | undefined;
     faux.setResponses([
       (_context, options) => {
@@ -72,16 +72,23 @@ describe("reasoning threading", () => {
   });
 });
 
-describe("extra-models fallback", () => {
-  it("resolves claude-fable-5-1 as a zero-cost clone with the right wire id", () => {
+describe("catalog resolution", () => {
+  it("resolves claude-fable-5-1 with upstream pricing", () => {
     const m = resolveEvalModel("anthropic/claude-fable-5-1");
     expect(m).toBeDefined();
     expect(m?.id).toBe("claude-fable-5-1");
     expect(m?.provider).toBe("anthropic");
-    // Zeroed, not deleted: pi-ai reads model.cost unguarded, and the
-    // engine renders an all-zero cost as "unpriced" downstream.
-    const cost = (m as { cost?: { input: number; output: number } }).cost;
-    expect(cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+    expect(m?.cost).toEqual({ input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5 });
+  });
+
+  it("resolves Astra with the same supplemental metadata as the API", () => {
+    expect(resolveEvalModel("openai/gpt-6-astra")).toMatchObject({
+      id: "gpt-6-astra", provider: "openai", api: "openai-responses",
+      contextWindow: 272_000, maxTokens: 128_000,
+      cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
+      compat: { supportsStrictMode: true, supportsOpenAIGrammarTools: true,
+        supportsAdditionalTools: true, supportsToolSearch: true, supportsExplicitPromptCacheMode: true },
+    });
   });
 
   it("still resolves catalog specs and rejects unknowns", () => {

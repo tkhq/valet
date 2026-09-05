@@ -40,6 +40,7 @@ import {
   InMemoryEventStream,
   InMemorySessionStore,
   loadRoleFromMarkdown,
+  resolveModelId,
   VirtualSandboxProvider,
   type BusEvent,
   type DecisionGate,
@@ -135,6 +136,18 @@ async function waitForCondition(predicate: () => boolean, timeoutMs = 3000): Pro
 }
 
 describe("engine: model switching", () => {
+  it("resolves Astra without a host registry using bare and provider-qualified ids", () => {
+    const astra = resolveModelId("gpt-6-astra");
+    expect(astra).toMatchObject({
+      id: "gpt-6-astra",
+      provider: "openai",
+      api: "openai-responses",
+      contextWindow: 272000,
+      maxTokens: 128000,
+    });
+    expect(resolveModelId("openai/gpt-6-astra")).toEqual(astra);
+  });
+
   it("keeps tool guidance consistent with supervisor-selected drafting and review tiers", () => {
     expect(taskTool.description).not.toContain("Pass `l` or `xl` for architecture");
     expect(taskTool.description).toContain("s/m/l for drafting");

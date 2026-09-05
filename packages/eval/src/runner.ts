@@ -87,35 +87,9 @@ export interface RunnerOptions {
   reasoning?: ReasoningLevel;
 }
 
-/**
- * Model specs the static pi-ai catalog does not know yet, resolved by
- * cloning a same-family catalog model and overriding the wire id. Cost is
- * DROPPED unless independently confirmed: a borrowed price is a wrong
- * price, and the scorecard's "unpriced" reads honestly. Remove entries as
- * pi-ai catalog updates land.
- */
-const EXTRA_MODELS: Record<string, { cloneOf: string; id: string }> = {
-  // Live Anthropic id confirmed via GET /v1/models on 2026-09-02; absent
-  // from pi-ai 0.84.2. Pricing unverified, so it runs unpriced.
-  "anthropic/claude-fable-5-1": { cloneOf: "anthropic/claude-fable-5", id: "claude-fable-5-1" },
-};
-
-/** Resolve a spec through the catalog, then the extra-models table. */
+/** Resolve an eval model through the engine's bundled catalog. */
 export function resolveEvalModel(spec: string): Model<string> | undefined {
-  const fromCatalog = resolveModelId(spec);
-  if (fromCatalog) return fromCatalog;
-  const extra = EXTRA_MODELS[spec];
-  if (extra === undefined) return undefined;
-  const base = resolveModelId(extra.cloneOf);
-  if (!base) return undefined;
-  // Zeroed cost, not a deleted one: pi-ai's usage accounting reads
-  // model.cost unguarded, and the engine's cost-is-null-not-zero rule
-  // turns an all-zero cost into "unpriced" on every surface downstream.
-  return {
-    ...(base as Model<string>),
-    id: extra.id,
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  } as Model<string>;
+  return resolveModelId(spec);
 }
 
 export interface CaseRunResult {

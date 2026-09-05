@@ -4,7 +4,7 @@
  * run": unknown model specs and unknown tool service/actions fail at SAVE
  * with an actionable message, instead of at run time inside a node.
  */
-import { getModel } from "@earendil-works/pi-ai/compat";
+import { bundledModel } from "@valet/engine/model-catalog";
 import type { ActionPlugin, ValetPlugin } from "@valet/engine";
 import type { ValidateEnvironment } from "@valet/workflow";
 
@@ -19,10 +19,10 @@ export function isKnownModelSpec(spec: string): boolean {
   if (slash > 0) {
     const provider = spec.slice(0, slash);
     const modelId = spec.slice(slash + 1);
-    return getModel(provider as never, modelId as never) != null;
+    return bundledModel(provider, modelId) != null;
   }
   for (const provider of ["anthropic", "openai", "google"] as const) {
-    if (getModel(provider, spec as never) != null) return true;
+    if (bundledModel(provider, spec) != null) return true;
   }
   return false;
 }

@@ -1,7 +1,5 @@
-// `getModel` is the compat catalog read; `calculateCost` is the same pricing
-// table the engine's cost comes from. (The newer `getBuiltinModel` lives under
-// `/providers/all`, not `/compat`, so the whole app stays on `/compat`.)
-import { getModel, calculateCost } from "@earendil-works/pi-ai/compat";
+import { calculateCost } from "@earendil-works/pi-ai/compat";
+import { bundledModel } from "@valet/engine/model-catalog";
 import type { ProviderKind, ProxyUsage } from "../proxy/types.js";
 
 /** pi-ai provider key for our two proxy kinds. Codex talks the Responses
@@ -12,18 +10,15 @@ function piProvider(kind: ProviderKind): "anthropic" | "openai" {
 
 function inRegistry(kind: ProviderKind, id: string): boolean {
   try {
-    // getModel is generically typed on literal ids; at runtime it
-    // indexes MODELS[provider][id]. Cast the id to the index type — a genuine
-    // third-party-typing narrowing (CLAUDE.md rule 3), commented here.
-    return !!getModel(piProvider(kind), id as never);
+    return !!bundledModel(piProvider(kind), id);
   } catch {
     return false;
   }
 }
 
 /**
- * Resolves a provider model id to the pi-ai REGISTRY KEY whose rate prices it,
- * or null if unpriceable. The id itself when pi-ai knows it; else its
+ * Resolves a provider model id to the bundled catalog key whose rate prices it,
+ * or null if unpriceable. The id itself when the catalog knows it; else its
  * date-suffix-stripped form if THAT is known — providers return a dated id in
  * responses (`gpt-4o-mini-2024-07-18`, `gpt-5-2025-08-07`,
  * `claude-haiku-4-5-20251001`) that is not a registry key, while the base id
@@ -43,10 +38,9 @@ export function resolveCanonicalModel(kind: ProviderKind, id: string): string | 
 }
 
 /**
- * Prices a proxied turn using the SAME table the engine's cost comes from
- * (pi-ai `calculateCost`). Returns null — UNPRICED, never 0 — when the model
- * is not in pi-ai's registry, so the caller stores NULL and a later
- * reprocess can price it. See spec finding 3.
+ * Prices a proxied turn with bundled model metadata and pi-ai `calculateCost`.
+ * If the bundled catalog has no matching model, returns null so the caller
+ * stores an unpriced record for later reprocessing. See spec finding 3.
  */
 export function priceUsage(kind: ProviderKind, modelId: string, usage: ProxyUsage): number | null {
   // The WHOLE computation is guarded: an unknown model OR a throw from pi-ai's
@@ -56,7 +50,7 @@ export function priceUsage(kind: ProviderKind, modelId: string, usage: ProxyUsag
   try {
     const canonical = resolveCanonicalModel(kind, modelId);
     if (!canonical) return null;
-    const model = getModel(piProvider(kind), canonical as never);
+    const model = bundledModel(piProvider(kind), canonical);
     if (!model) return null;
     const cost = calculateCost(model, {
       input: usage.input,

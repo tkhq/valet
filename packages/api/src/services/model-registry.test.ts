@@ -193,6 +193,37 @@ describe("ModelRegistry", () => {
     expect(registry.getModel("anthropic", "claude-brand-new")?.name).toBe("Claude Brand New");
   });
 
+  it("lets the runtime catalog override supplemental Astra metadata", async () => {
+    const registry = new ModelRegistry(db);
+    const bundled = registry.getModel("openai", "gpt-6-astra");
+    if (!bundled) throw new Error("The bundled catalog must include Astra.");
+    expect(bundled.contextWindow).toBe(272_000);
+    const fetched = { ...bundled, name: "Refreshed Astra", contextWindow: 400_000 };
+    fetchMock.mockImplementation(async (url: string) => jsonResponse(
+      url.endsWith("/openai.json") ? { "openai-responses": { [fetched.id]: fetched } } : {},
+    ));
+
+    await registry.refresh();
+    expect(registry.getModel("openai", "gpt-6-astra")).toEqual(fetched);
+    expect(registry.listModels("openai").filter((model) => model.id === fetched.id)).toEqual([fetched]);
+  });
+
+  it("keeps supplemental Astra when the runtime catalog omits it", async () => {
+    const registry = new ModelRegistry(db);
+    const bundled = registry.getModel("openai", "gpt-6-astra");
+    const fetched = validModel({
+      id: "synthetic-openai-model", provider: "openai", api: "openai-responses",
+      baseUrl: "https://api.openai.com/v1",
+    });
+    fetchMock.mockImplementation(async (url: string) => jsonResponse(
+      url.endsWith("/openai.json") ? { "openai-responses": { [fetched.id]: fetched } } : {},
+    ));
+
+    await registry.refresh();
+    expect(registry.getModel("openai", "gpt-6-astra")).toEqual(bundled);
+    expect(registry.getModel("openai", fetched.id)).toEqual(fetched);
+  });
+
   it("keeps bundled models that the upstream catalog omits", async () => {
     // The overlay adds and updates; it must not delete. A thin upstream
     // response cannot shrink the picker below the bundled floor.
@@ -362,7 +393,7 @@ describe("ModelRegistry", () => {
     });
 
     it("CANARY: pi does not bundle GPT-6 Astra yet", () => {
-      // When this fails, delete GPT-6 Astra from MANUAL_BUNDLED_MODELS and delete this test.
+      // If this fails, remove Astra from engine/src/model-catalog.ts and delete this test.
       expect(getBuiltinModels("openai").map((model) => model.id)).not.toContain("gpt-6-astra");
     });
   });
