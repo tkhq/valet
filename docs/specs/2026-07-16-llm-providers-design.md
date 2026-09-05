@@ -161,6 +161,15 @@ bundled catalog as the floor.
   operator sees a stuck check. The admin LLM-providers UI does not render it
   yet — deferred to keep this change reviewable.
 
+## Extension: manual bundled overlay (2026-09-05)
+
+Valet uses pi-ai and pi-agent-core 0.85.0. This release bundles
+`claude-fable-5-1`. The `MANUAL_BUNDLED_MODELS` table adds models that pi
+has committed but has not released. Pi bundled entries win by id. Each manual
+entry must match pi's generated catalog. A canary test fails when a later pi
+release bundles the id, which signals that the manual entry must be removed.
+The first entry is `gpt-6-astra` from unreleased pi commit `17de82d7`.
+
 ## Extension: org model preferences removed (2026-09-03, model-selector-overhaul follow-up)
 
 Model size tiers (`docs/specs/2026-09-03-model-selector-overhaul-design.md`,
