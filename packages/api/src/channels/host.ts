@@ -41,6 +41,7 @@ import type { EngineHost } from "../engine/host.js";
 import { agentSessions, users } from "../schema/index.js";
 import {
   ArchivedAssistantError,
+  assistantSenderIdentity as senderIdentityForAssistant,
   ensureDefaultAssistantSession,
   loadAssistant,
   loadAssistantBySessionId,
@@ -794,9 +795,13 @@ export class ChannelHost {
     // Whether the reply's TEXT landed on the channel, so a later attachment
     // failure does not produce a false "your reply was NOT posted" note.
     let textPosted = false;
+    const sender = await this.assistantSenderIdentity(sessionId);
     try {
       if (entry.content) {
-        await transport.send(target.conversationKey, { markdown: entry.content });
+        await transport.send(target.conversationKey, {
+          markdown: entry.content,
+          ...(sender !== undefined ? { sender } : {}),
+        });
         textPosted = true;
       }
       for (const part of entry.parts ?? []) {
@@ -889,6 +894,27 @@ export class ChannelHost {
   }
 
   /**
+   * Per-assistant outbound identity for a session's channel posts
+   * (TKAI-387): the assistant's `name` and `avatarUrl`, read from the row
+   * on every delivery so an edit takes effect on the next post. `undefined`
+   * when the session is not an assistant's, or when the assistant has no
+   * override set — the transport then posts under the bot's own identity.
+   * Best-effort: a lookup failure must not stop the delivery.
+   */
+  private async assistantSenderIdentity(
+    sessionId: string,
+  ): Promise<{ displayName?: string; avatarUrl?: string } | undefined> {
+    try {
+      const row = await loadAssistantBySessionId(this.deps.db, sessionId);
+      return row ? senderIdentityForAssistant(row) : undefined;
+    } catch (err) {
+      // Identity is decoration on the post; the text must still land.
+      console.error("[channels] assistant identity lookup failed", err);
+      return undefined;
+    }
+  }
+
+  /**
    * Resolve a submission's `ChannelOrigin` to an outbound target. Mirrors the
    * `channelThreadFor` rebuild hop: the transport turns the stored thread key
    * back into a conversationKey (Slack injects the workspace id it holds).
@@ -937,7 +963,11 @@ export class ChannelHost {
     if (!transport) return;
 
     const markdown = `\`${entry.command}\`\n${entry.output}`;
-    await transport.send(mapped.conversationKey, { markdown });
+    const sender = await this.assistantSenderIdentity(sessionId);
+    await transport.send(mapped.conversationKey, {
+      markdown,
+      ...(sender !== undefined ? { sender } : {}),
+    });
   }
 
   /** Rule 3: decision_gate → sendGatePrompt, record refs for the inbound gate_callback path. */
@@ -1010,7 +1040,14 @@ export class ChannelHost {
     },
     sessionId: string,
   ): Promise<void> {
-    const ref = await transport.sendGatePrompt(conversationKey, prompt);
+    // The card carries the asking assistant's identity, same as the
+    // auto-post: in a channel with several assistants the reader must see
+    // WHO is asking for approval. Resolution edits keep the posted identity.
+    const sender = await this.assistantSenderIdentity(sessionId);
+    const ref = await transport.sendGatePrompt(conversationKey, {
+      ...prompt,
+      ...(sender !== undefined ? { sender } : {}),
+    });
     this.gateActions.set(prompt.gateId, prompt.actions);
     this.recordGatePrompt(prompt.gateId, ref, sessionId);
     const settled = this.settledGates.get(prompt.gateId);
@@ -1475,8 +1512,12 @@ export class ChannelHost {
               // Recipient cannot resolve this gate (or its app row is gone):
               // fall through to the plain summary with the web link.
             }
+            const sender = event.sessionId
+              ? await this.assistantSenderIdentity(event.sessionId)
+              : undefined;
             await transport.send(conversationKey, {
               markdown: this.attentionMarkdown(event),
+              ...(sender !== undefined ? { sender } : {}),
             });
           } catch (err) {
             console.error(`[channels] ${channelType}: attention delivery failed`, err);

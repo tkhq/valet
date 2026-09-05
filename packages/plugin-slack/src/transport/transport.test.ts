@@ -1047,6 +1047,21 @@ describe("gate prompts", () => {
   });
 });
 
+describe("gate prompt identity (TKAI-387)", () => {
+  it("brands the approval card with the asking assistant's identity", async () => {
+    const transport = makeTransport();
+    await transport.sendGatePrompt(KEY, {
+      gateId: "gate-identity",
+      title: "Deploy?",
+      actions: [{ id: "approve", label: "Approve" }],
+      sender: { displayName: "Ledger", avatarUrl: "https://cdn.example.com/ledger.png" },
+    });
+    const body = lastCall("chat.postMessage");
+    expect(body.username).toBe("Ledger");
+    expect(body.icon_url).toBe("https://cdn.example.com/ledger.png");
+  });
+});
+
 describe("discrete sends", () => {
   it("replies in the turn's thread", async () => {
     const transport = makeTransport();
@@ -1071,6 +1086,78 @@ describe("discrete sends", () => {
     await expect(transport.send("slack:T1:D1", { markdown: "hi" })).rejects.toThrow(
       /Expected "slack:\{teamId\}:\{channelId\}:\{threadTs\}"/,
     );
+  });
+
+  it("passes the assistant identity as username/icon_url (TKAI-387)", async () => {
+    const transport = makeTransport();
+    await transport.send(KEY, {
+      markdown: "hi",
+      sender: { displayName: "Ledger", avatarUrl: "https://cdn.example.com/ledger.png" },
+    });
+    const body = lastCall("chat.postMessage");
+    expect(body.username).toBe("Ledger");
+    expect(body.icon_url).toBe("https://cdn.example.com/ledger.png");
+  });
+
+  it("omits username/icon_url when no sender identity is set (bot identity fallback)", async () => {
+    const transport = makeTransport();
+    await transport.send(KEY, { markdown: "hi" });
+    const body = lastCall("chat.postMessage");
+    expect(body.username).toBeUndefined();
+    expect(body.icon_url).toBeUndefined();
+  });
+
+  it("treats empty/whitespace identity fields as unset — Slack rejects an empty username", async () => {
+    const transport = makeTransport();
+    await transport.send(KEY, { markdown: "hi", sender: { displayName: "  ", avatarUrl: "" } });
+    const body = lastCall("chat.postMessage");
+    expect(body.username).toBeUndefined();
+    expect(body.icon_url).toBeUndefined();
+  });
+
+  it("retries without the identity override when the workspace lacks chat:write.customize", async () => {
+    const transport = makeTransport();
+    fake.failNext("chat.postMessage", "missing_scope");
+    await transport.send(KEY, { markdown: "hi", sender: { displayName: "Ledger" } });
+    const posts = fake.calls.filter((c) => c.method === "chat.postMessage");
+    expect(posts).toHaveLength(2);
+    expect(posts[0].body.username).toBe("Ledger");
+    expect(posts[1].body.username).toBeUndefined();
+    expect(posts[1].body.text).toBe("hi");
+  });
+
+  it("retries without identity for any Slack rejection, not only missing_scope", async () => {
+    const transport = makeTransport();
+    fake.failNext("chat.postMessage", "invalid_arguments");
+    await transport.send(KEY, { markdown: "must land", sender: { displayName: "Ledger" } });
+    const posts = fake.calls.filter((c) => c.method === "chat.postMessage");
+    expect(posts).toHaveLength(2);
+    expect(posts[0].body.username).toBe("Ledger");
+    expect(posts[1].body.username).toBeUndefined();
+  });
+
+  it("does not retry an HTTP failure because Slack might have accepted the request", async () => {
+    const transport = makeTransport();
+    fake.failNext("chat.postMessage", "server_error", 500);
+    await expect(
+      transport.send(KEY, { markdown: "must not duplicate", sender: { displayName: "Ledger" } }),
+    ).rejects.toThrow("server_error");
+    const posts = fake.calls.filter((c) => c.method === "chat.postMessage");
+    expect(posts).toHaveLength(1);
+  });
+
+  it("sanitizes long control-character names and drops malformed avatar URLs", async () => {
+    const transport = makeTransport();
+    await transport.send(KEY, {
+      markdown: "hi",
+      sender: {
+        displayName: `  Ledger\n${"x".repeat(100)}  `,
+        avatarUrl: "https://not a url",
+      },
+    });
+    const body = lastCall("chat.postMessage");
+    expect(body.username).toBe(`Ledger ${"x".repeat(73)}`);
+    expect(body.icon_url).toBeUndefined();
   });
 
   it("refuses a well-formed key from another workspace instead of posting anyway", async () => {

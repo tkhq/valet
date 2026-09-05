@@ -11,6 +11,7 @@ import { slackFetch, slackGet } from "./api.js";
 import { checkPrivateChannelAccess } from "./channel-access.js";
 import { buildContentBlocks, SLACK_TEXT_LIMIT, SLACK_MAX_BLOCKS } from "../message-chunking.js";
 import { SlackApi } from "../transport/api.js";
+import { slackIdentityOverride } from "../sender-identity.js";
 
 /**
  * Curried action builder. The first call binds T from the parameters
@@ -29,6 +30,53 @@ function action<TParams extends TSchema>(parameters: TParams) {
       ctx: PluginActionContext,
     ) => Promise<PluginActionResult>;
   }): PluginAction<TParams> => ({ ...rest, parameters });
+}
+
+type SlackPostData = { ok: boolean; error?: string; ts?: string; channel?: string };
+
+async function actionIdentity(ctx: PluginActionContext): Promise<{ username?: string; iconUrl?: string }> {
+  if (!ctx.resolveOutboundSender) {
+    return slackIdentityOverride(ctx.actor?.name ? { displayName: ctx.actor.name } : undefined);
+  }
+  try {
+    return slackIdentityOverride(await ctx.resolveOutboundSender());
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Post with the current assistant identity. If Slack rejects cosmetic override
+ * fields, retry once without them so the message body still lands.
+ */
+async function postActionMessage(
+  token: string,
+  body: Record<string, unknown>,
+  ctx: PluginActionContext,
+): Promise<{ res: Response; data: SlackPostData }> {
+  const override = await actionIdentity(ctx);
+  const post = async (postBody: Record<string, unknown>) => {
+    const res = await slackFetch('chat.postMessage', token, postBody);
+    try {
+      const data = (await res.json()) as SlackPostData;
+      return { res, data, providerRejected: res.ok && data.ok === false };
+    } catch {
+      return {
+        res,
+        data: { ok: false, error: 'invalid_response' },
+        providerRejected: false,
+      };
+    }
+  };
+  const { iconUrl, ...rest } = override;
+  const first = await post({ ...body, ...rest, ...(iconUrl ? { icon_url: iconUrl } : {}) });
+  if (
+    !first.providerRejected ||
+    (override.username === undefined && override.iconUrl === undefined)
+  ) {
+    return first;
+  }
+  return post(body);
 }
 
 /** Build a descriptive error from a Slack API response. */
@@ -246,7 +294,7 @@ async function openAndSendDM(
   token: string,
   userId: string,
   text: string,
-  actorName?: string,
+  ctx: PluginActionContext,
 ): Promise<PluginActionResult> {
   const openRes = await slackFetch('conversations.open', token, { users: userId });
   if (!openRes.ok) return slackError(openRes);
@@ -254,10 +302,6 @@ async function openAndSendDM(
   if (!openData.ok || !openData.channel?.id) return slackError(openRes, openData);
 
   const body: Record<string, unknown> = { channel: openData.channel.id, text };
-  if (actorName) body.username = actorName;
-  // V2-GAP: legacy callerIdentity also carried an avatar URL (icon_url on the
-  // Slack payload). ctx.actor in v2 hosts has no avatar field, so icon_url is
-  // never set until that's wired — hard-coded absent for now.
 
   // For long messages, use blocks so Slack doesn't split into separate threads.
   // Prefers markdown blocks (native table/formatting support), falls back to
@@ -267,9 +311,8 @@ async function openAndSendDM(
     body.text = text.slice(0, SLACK_TEXT_LIMIT); // notification fallback
   }
 
-  const res = await slackFetch('chat.postMessage', token, body);
+  const { res, data } = await postActionMessage(token, body, ctx);
   if (!res.ok) return slackError(res);
-  const data = (await res.json()) as { ok: boolean; error?: string; ts?: string; channel?: string };
   if (!data.ok) return slackError(res, data);
 
   return { success: true, data: { ts: data.ts, channel: data.channel } };
@@ -291,7 +334,7 @@ const dmOwner = action(Type.Object({
     if (!token) return { success: false, error: 'Missing bot_token' };
     const ownerSlackId = ownerSlackUserId(cred);
     if (!ownerSlackId) return { success: false, error: 'Owner has not linked their Slack identity. Ask them to link it in Settings > Integrations > Slack.' };
-    return openAndSendDM(token, ownerSlackId, p.text, ctx.actor?.name);
+    return openAndSendDM(token, ownerSlackId, p.text, ctx);
   },
 });
 
@@ -308,7 +351,7 @@ const dmUser = action(Type.Object({
     const cred = await ctx.credentials.get();
     const token = cred?.accessToken ?? "";
     if (!token) return { success: false, error: 'Missing bot_token' };
-    return openAndSendDM(token, p.user, p.text, ctx.actor?.name);
+    return openAndSendDM(token, p.user, p.text, ctx);
   },
 });
 
@@ -861,8 +904,6 @@ const sendMessage = action(Type.Object({
     if (p.unfurl_links !== undefined) body.unfurl_links = p.unfurl_links;
     if (p.unfurl_media !== undefined) body.unfurl_media = p.unfurl_media;
 
-    if (ctx.actor?.name) body.username = ctx.actor.name;
-
     // Attribute non-DM posts to the session owner (mirrors the channel
     // transport's attribution context block on agent-authored replies).
     const ownerSlackId = ownerSlackUserId(cred);
@@ -885,8 +926,7 @@ const sendMessage = action(Type.Object({
       body.blocks = userBlocks;
     }
 
-    const res = await slackFetch('chat.postMessage', token, body);
-    const data = (await res.json()) as { ok: boolean; error?: string; ts?: string; channel?: string };
+    const { res, data } = await postActionMessage(token, body, ctx);
     if (!res.ok || !data.ok) {
       return { success: false, error: `Slack API error: ${data.error || res.statusText}` };
     }
@@ -935,13 +975,12 @@ const replyToOrigin = action(Type.Object({
   execute: async (args, ctx) => {
     const o = await resolveSlackOrigin(ctx);
     if ('error' in o) return { success: false, error: o.error };
-    const res = await slackFetch('chat.postMessage', o.token, {
+    const { res, data } = await postActionMessage(o.token, {
       channel: o.channelId,
       thread_ts: o.threadTs,
       text: args.text,
-    });
+    }, ctx);
     if (!res.ok) return slackError(res);
-    const data = (await res.json()) as { ok: boolean; error?: string; ts?: string };
     if (!data.ok) return slackError(res, data);
     return { success: true, data: { channel: o.channelId, ts: data.ts } };
   },

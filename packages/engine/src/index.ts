@@ -188,6 +188,7 @@ export {
   type InboundChannelEvent,
   type InboundChannelMedia,
   type ChannelSender,
+  type ChannelSenderIdentity,
   type FetchedChannelMedia,
   type OutboundChannelMessage,
   type OutboundChannelAttachment,

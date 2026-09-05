@@ -297,6 +297,7 @@ CREATE TABLE "assistants" (
 	"owner_type" text NOT NULL,
 	"owner_id" text NOT NULL,
 	"name" text,
+	"avatar_url" text,
 	"personality" text,
 	"behavior" text,
 	"model" text,

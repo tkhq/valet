@@ -1186,6 +1186,13 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     probe: { kind: "column", table: "engine_threads", column: "reasoning" },
     sql: 'ALTER TABLE "engine_threads" ADD COLUMN IF NOT EXISTS "reasoning" text',
   },
+  {
+    // Per-assistant avatar for outbound channel posts (TKAI-387).
+    // Null = the bot's own icon.
+    describe: "assistants.avatar_url column",
+    probe: { kind: "column", table: "assistants", column: "avatar_url" },
+    sql: 'ALTER TABLE "assistants" ADD COLUMN IF NOT EXISTS "avatar_url" text',
+  },
 ];
 
 /** The repairs this database still lacks, by catalog probe — one query per

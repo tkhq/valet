@@ -83,6 +83,7 @@ import {
 } from "../schema/index.js";
 import {
   ArchivedAssistantError,
+  assistantSenderIdentity,
   loadAssistant,
   loadAssistantBySessionId,
 } from "../assistants/service.js";
@@ -2295,6 +2296,15 @@ export class EngineHost {
       ...(credentialResolver ? { credentialResolver } : {}),
       ...(policyResolver ? { policyResolver } : {}),
       ...(pluginStoreFactory ? { pluginStoreFactory } : {}),
+      resolveOutboundSender: async () => {
+        try {
+          const current = await loadAssistant(db, assistantId);
+          return current ? assistantSenderIdentity(current) : undefined;
+        } catch (err) {
+          console.error(`[engine-host] assistant identity lookup failed (assistant=${assistantId})`, err);
+          return undefined;
+        }
+      },
       owner: principal,
       queueMode,
       sandbox: {

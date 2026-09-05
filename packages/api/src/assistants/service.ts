@@ -29,6 +29,10 @@ import type { AssistantBehavior, AssistantSummary } from "../wire/types.js";
 import { parseAssistantBehavior, serializeAssistantBehavior , validateAssistantBehavior } from "./behavior.js";
 import { PERSONALITY_INJECT_CAP } from "./persona.js";
 
+/** Server cap on `avatarUrl` length. Slack truncates nothing here; the cap
+ * only keeps a pathological value out of the row. */
+export const AVATAR_URL_CAP = 2048;
+
 /** Raised when a request would leave a principal with no default assistant. */
 export class DefaultAssistantArchiveError extends Error {
   readonly code = "assistant_is_default";
@@ -57,6 +61,7 @@ export function toAssistantSummary(row: AssistantRow): AssistantSummary {
     id: row.id,
     owner: { type: row.ownerType, id: row.ownerId },
     ...(row.name !== null ? { name: row.name } : {}),
+    ...(row.avatarUrl !== null ? { avatarUrl: row.avatarUrl } : {}),
     ...(row.personality !== null ? { personality: row.personality } : {}),
     ...(() => {
       const behavior = parseAssistantBehavior(row.behavior, row.id);
@@ -112,6 +117,19 @@ export async function checkAssistantForOwner(
     return `unknown assistant: ${assistantId}`;
   }
   return null;
+}
+
+export function assistantSenderIdentity(
+  row: Pick<AssistantRow, "name" | "avatarUrl">,
+): { displayName?: string; avatarUrl?: string } | undefined {
+  const displayName = row.name ?? undefined;
+  const avatarUrl = row.avatarUrl ?? undefined;
+  return displayName === undefined && avatarUrl === undefined
+    ? undefined
+    : {
+        ...(displayName !== undefined ? { displayName } : {}),
+        ...(avatarUrl !== undefined ? { avatarUrl } : {}),
+      };
 }
 
 /**
@@ -175,6 +193,7 @@ function newAssistantRow(args: {
     ownerType: args.principal.type,
     ownerId: args.principal.id,
     name: args.name,
+    avatarUrl: null,
     personality: args.personality ?? null,
     behavior: args.behavior ?? null,
     model: null,
@@ -409,7 +428,24 @@ export async function createAssistant(
 export function validateProfilePatch(patch: {
   personality?: string | null;
   behavior?: unknown;
+  avatarUrl?: string | null;
 }): string | null {
+  if (patch.avatarUrl !== undefined && patch.avatarUrl !== null) {
+    if (typeof patch.avatarUrl !== "string") {
+      return "avatarUrl must be an https:// image URL, or null to clear it.";
+    }
+    try {
+      const parsed = new URL(patch.avatarUrl);
+      if (parsed.protocol !== "https:" || !parsed.hostname || /\s/.test(patch.avatarUrl)) {
+        return "avatarUrl must be an https:// image URL, or null to clear it.";
+      }
+    } catch {
+      return "avatarUrl must be an https:// image URL, or null to clear it.";
+    }
+    if (patch.avatarUrl.length > AVATAR_URL_CAP) {
+      return `avatarUrl is limited to ${AVATAR_URL_CAP} characters. Use a shorter URL.`;
+    }
+  }
   if (patch.personality !== undefined && patch.personality !== null && typeof patch.personality !== "string") {
     return "personality must be a string, or null to clear it.";
   }
@@ -436,6 +472,10 @@ export async function applyProfilePatch(
   row: AssistantRow,
   patch: {
     name?: string | null;
+    /** Outbound-post avatar (TKAI-387). Not part of the eviction check
+     * below: channel delivery reads it from the row on every post, so a
+     * cached session bakes nothing in. */
+    avatarUrl?: string | null;
     isDefault?: true;
     personality?: string | null;
     behavior?: AssistantBehavior | null;
@@ -466,6 +506,9 @@ export async function patchAssistant(
   row: AssistantRow,
   patch: {
     name?: string | null;
+    /** https URL, or null to clear. Callers validate with
+     * `validateProfilePatch` before calling. */
+    avatarUrl?: string | null;
     isDefault?: true;
     personality?: string | null;
     behavior?: AssistantBehavior | null;
@@ -486,6 +529,7 @@ export async function patchAssistant(
   // longer transaction widens the window where the default slot sits demoted.
   const changes: {
     name?: string | null;
+    avatarUrl?: string | null;
     personality?: string | null;
     behavior?: string | null;
     isDefault?: boolean;
@@ -493,6 +537,7 @@ export async function patchAssistant(
     reasoning?: string | null;
   } = {};
   if (patch.name !== undefined) changes.name = patch.name;
+  if (patch.avatarUrl !== undefined) changes.avatarUrl = patch.avatarUrl;
   if (patch.personality !== undefined) {
     // An explicit clear stores "" (neutral persona), NOT null: null means
     // "never configured" and falls back to the legacy

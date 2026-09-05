@@ -183,6 +183,21 @@ the same contract: one streamed message per gate segment.
 - **Sender.** `#441` renders a sender line for user messages. Confirm the
   channel-origin signal carries an author (1.2 sets it from `event.actor`) so
   the same line renders. If a gap remains on the events path, close it here.
+- **Outbound identity (TKAI-387).** Every auto-post, gate card, command result,
+  attention summary, and Slack outbound action carries the sending assistant's
+  identity. This includes `reply_to_origin`, `send_message`, `dm_owner`, and
+  `dm_user`. `ChannelHost` resolves the session's `assistants` row for host
+  deliveries. The engine gives actions a dynamic `resolveOutboundSender`
+  callback, so profile edits apply without a cached-session rebuild. The Slack
+  paths map `name` and `avatar_url` to `username` and `icon_url` on
+  `chat.postMessage` with the `chat:write.customize` scope. They sanitize the
+  name to Slack's 80-character limit and omit malformed avatar URLs. If Slack
+  rejects an identity override, they retry once without it. A network failure
+  does not retry because Slack might have accepted the first request. An
+  assistant with neither field set posts under the bot's own identity.
+  Resolution edits (`chat.update`) keep the identity the card posted with.
+  File attachments keep the app identity because Slack's upload API has no
+  equivalent override.
 
 ### Part 2 — one routing wizard, names not ids
 

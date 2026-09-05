@@ -123,18 +123,28 @@ describe('slack actions', () => {
     });
   });
 
-  it('dm_user opens a DM with the given user id and posts the message, using actor name as username', async () => {
+  it('dm_user posts with the current assistant identity', async () => {
     fetchMock
       .mockResolvedValueOnce(jsonResponse(200, { ok: true, channel: { id: 'D2' } }))
       .mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '111.222', channel: 'D2' }));
 
     const result = await action('slack.dm_user').execute(
       { user: 'U123', text: 'hi there' },
-      pluginCtx({ actor: { id: 'u1', name: 'Ada' } }),
+      pluginCtx({
+        resolveOutboundSender: async () => ({
+          displayName: 'Ada',
+          avatarUrl: 'https://example.com/a.png',
+        }),
+      }),
     );
 
     const [, postInit] = fetchMock.mock.calls[1] as [string, RequestInit];
-    expect(JSON.parse(postInit.body as string)).toEqual({ channel: 'D2', text: 'hi there', username: 'Ada' });
+    expect(JSON.parse(postInit.body as string)).toEqual({
+      channel: 'D2',
+      text: 'hi there',
+      username: 'Ada',
+      icon_url: 'https://example.com/a.png',
+    });
     expect(result).toEqual({ success: true, data: { ts: '111.222', channel: 'D2' } });
   });
 
@@ -179,6 +189,68 @@ describe('slack actions', () => {
     expect(url).toBe('https://slack.com/api/chat.postMessage');
     expect(JSON.parse(init.body as string)).toEqual({ channel: 'C1', thread_ts: '1.2', text: 'here is the answer' });
     expect(result).toEqual({ success: true, data: { channel: 'C1', ts: '9.9' } });
+  });
+
+  it('reply_to_origin uses the current assistant identity', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '9.9' }));
+    await action('slack.reply_to_origin').execute(
+      { text: 'branded answer' },
+      pluginCtx({
+        origin: { channelType: 'slack', threadKey: 'slack:C1:1.2', reply: 'manual' },
+        resolveOutboundSender: async () => ({
+          displayName: 'Ledger',
+          avatarUrl: 'https://cdn.example.com/ledger.png',
+        }),
+      }),
+    );
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toMatchObject({
+      username: 'Ledger',
+      icon_url: 'https://cdn.example.com/ledger.png',
+    });
+  });
+
+  it('reply_to_origin retries without rejected identity decoration', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(200, { ok: false, error: 'invalid_arguments' }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '9.9' }));
+    const result = await action('slack.reply_to_origin').execute(
+      { text: 'must land' },
+      pluginCtx({
+        origin: { channelType: 'slack', threadKey: 'slack:C1:1.2', reply: 'manual' },
+        resolveOutboundSender: async () => ({ displayName: 'Ledger' }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string).username).toBe('Ledger');
+    expect(JSON.parse((fetchMock.mock.calls[1] as [string, RequestInit])[1].body as string).username).toBeUndefined();
+    expect(result.success).toBe(true);
+  });
+
+  it('reply_to_origin does not retry an HTTP failure with an identity override', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(500, { ok: false, error: 'server_error' }));
+    const result = await action('slack.reply_to_origin').execute(
+      { text: 'must not duplicate' },
+      pluginCtx({
+        origin: { channelType: 'slack', threadKey: 'slack:C1:1.2', reply: 'manual' },
+        resolveOutboundSender: async () => ({ displayName: 'Ledger' }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ success: false });
+  });
+
+  it('reply_to_origin does not retry a malformed success response', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { ts: '9.9' }));
+    const result = await action('slack.reply_to_origin').execute(
+      { text: 'must not duplicate' },
+      pluginCtx({
+        origin: { channelType: 'slack', threadKey: 'slack:C1:1.2', reply: 'manual' },
+        resolveOutboundSender: async () => ({ displayName: 'Ledger' }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ success: false });
   });
 
   it('reply_to_origin errors with no channel origin, without calling Slack', async () => {
@@ -555,13 +627,13 @@ describe('slack actions', () => {
     expect(result).toEqual({ success: true, data: { ts: '125.678', channel: 'C1' } });
   });
 
-  it('send_message uses actor name as username when provided', async () => {
+  it('send_message uses the current assistant identity', async () => {
     mockGuardAllowsPublicChannel(fetchMock);
     fetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, ts: '126.789', channel: 'C1' }));
 
     const result = await action('slack.send_message').execute(
-      { channel: 'C1', text: 'from actor' },
-      pluginCtx({ actor: { id: 'u1', name: 'Alice' } }),
+      { channel: 'C1', text: 'from assistant' },
+      pluginCtx({ resolveOutboundSender: async () => ({ displayName: 'Alice' }) }),
     );
 
     const [, init] = fetchMock.mock.calls[1] as [string, RequestInit];

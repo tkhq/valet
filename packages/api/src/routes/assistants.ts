@@ -161,6 +161,7 @@ assistantsRouter.patch("/:id", async (c) => {
   }
   if (
     body.name === undefined &&
+    body.avatarUrl === undefined &&
     body.isDefault === undefined &&
     body.personality === undefined &&
     body.behavior === undefined &&
@@ -168,7 +169,7 @@ assistantsRouter.patch("/:id", async (c) => {
     body.reasoning === undefined
   ) {
     return c.json(
-      { error: "Send a name, isDefault: true, personality, behavior, model, or reasoning." },
+      { error: "Send a name, avatarUrl, isDefault: true, personality, behavior, model, or reasoning." },
       400,
     );
   }
