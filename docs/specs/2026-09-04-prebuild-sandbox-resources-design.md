@@ -10,10 +10,11 @@ with the deployment's implicit resource policy. This makes the Valet development
 loop slow when a sandbox receives too little CPU or memory.
 
 The sandbox providers already accept `SandboxCreateOpts.resources.cpu` and
-`SandboxCreateOpts.resources.memory`. The Docker provider maps these values to
-`docker run --cpus` and `--memory`. The Kubernetes provider maps each value to an
-equal request and limit on the sandbox container. The API does not populate these
-fields from repository or deployment configuration.
+`SandboxCreateOpts.resources.memory`. The Docker provider maps CPU to
+`docker run --cpus`. It converts memory to bytes for `docker run --memory`.
+The Kubernetes provider maps each value to an equal request and limit on the
+sandbox container. The API does not populate these fields from repository or
+deployment configuration.
 
 ## Goals
 
@@ -102,6 +103,13 @@ The API removes its resource opinion before initial creation or reconciliation.
 At session build time, `EngineHost` copies repository CPU and memory into
 `SandboxCreateOpts.resources`. The first provider create call therefore receives
 the requested resources.
+
+`SandboxResources.memory` uses a positive Kubernetes quantity on all providers.
+Desired specs and applied metadata keep the exact configured string. At its
+runtime boundary, Docker converts the quantity to a decimal byte count. This
+conversion supports DecimalSI, BinarySI, and decimal-exponent quantities. It
+rounds positive fractional bytes up. Docker rejects an invalid or non-positive
+quantity before it starts a container.
 
 `DesiredSandboxSpec` also carries an optional resource opinion. An empty resource
 object means the repository authoritatively declares no overrides. A missing

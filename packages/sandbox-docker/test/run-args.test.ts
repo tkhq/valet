@@ -111,9 +111,25 @@ describe("buildDockerRunArgs (pure)", () => {
     );
   });
 
-  it("emits --cpus/--memory when resources are set", () => {
+  it("emits CPU unchanged and converts binary memory to decimal bytes", () => {
     const args = buildDockerRunArgs({ ...baseOpts, resources: { cpu: 2, memory: "4Gi" } });
-    expect(args).toEqual(expect.arrayContaining(["--cpus", "2", "--memory", "4Gi"]));
+    expect(args).toEqual(expect.arrayContaining(["--cpus", "2", "--memory", "4294967296"]));
+  });
+
+  it.each([
+    ["8Gi", "8589934592"],
+    ["1.5G", "1500000000"],
+    ["1e3", "1000"],
+    ["0.1", "1"],
+  ])("converts Kubernetes memory quantity %s to %s bytes", (memory, bytes) => {
+    const args = buildDockerRunArgs({ ...baseOpts, resources: { memory } });
+    expect(args).toEqual(expect.arrayContaining(["--memory", bytes]));
+  });
+
+  it.each(["invalid", "0", "-1Gi"])("rejects invalid or non-positive memory %s", (memory) => {
+    expect(() => buildDockerRunArgs({ ...baseOpts, resources: { memory } })).toThrow(
+      `Invalid sandbox memory "${memory}". Use a positive Kubernetes quantity, such as "8Gi" or "500Mi".`,
+    );
   });
 
   it("is a pure function — identical inputs produce deep-equal output", () => {

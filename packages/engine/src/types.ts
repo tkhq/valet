@@ -1234,6 +1234,8 @@ export interface Sandbox {
 
 export interface SandboxResources {
   cpu?: number;
+  /** Positive Kubernetes quantity. Providers keep this value unchanged in
+   * desired and applied state, then adapt it at their runtime boundary. */
   memory?: string;
   /** Node-local disk (container rootfs + emptyDirs) the sandbox reserves,
    * as a Kubernetes quantity string (e.g. "2Gi"). The scheduler counts it
