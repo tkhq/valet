@@ -164,11 +164,23 @@ bundled catalog as the floor.
 ## Extension: manual bundled overlay (2026-09-05)
 
 Valet uses pi-ai and pi-agent-core 0.85.0. This release bundles
-`claude-fable-5-1`. The `MANUAL_BUNDLED_MODELS` table adds models that pi
-has committed but has not released. Pi bundled entries win by id. Each manual
+`claude-fable-5-1`. The `MANUAL_BUNDLED_MODELS` table in
+`packages/engine/src/model-catalog.ts` adds models that pi has committed
+but has not released. Pi bundled entries win by id. Each manual
 entry must match pi's generated catalog. A canary test fails when a later pi
 release bundles the id, which signals that the manual entry must be removed.
 The first entry is `gpt-6-astra` from unreleased pi commit `17de82d7`.
+
+API registry baselines, standalone engine resolution, evals, workflow model
+validation and execution, and proxy pricing use this common bundled catalog.
+The API keeps its runtime registry overlay, which takes precedence over the
+bundled records. Supplemental records preserve their context limits, pricing
+and compatibility flags. The engine exports the catalog through
+`@valet/engine/model-catalog`; `shared` remains dependency-free.
+
+Workflow completion tests replace the registered API transport and restore it
+after each case. This keeps cached workflow modules on the fake transport
+when CI reuses modules across test files.
 
 ## Extension: org model preferences removed (2026-09-03, model-selector-overhaul follow-up)
 

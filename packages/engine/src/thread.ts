@@ -1,12 +1,13 @@
 import { Agent } from "@earendil-works/pi-agent-core";
 import type { AgentEvent, AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
-import { getModel, isContextOverflow, streamSimple } from "@earendil-works/pi-ai/compat";
+import { isContextOverflow, streamSimple } from "@earendil-works/pi-ai/compat";
 // Root import (not /compat): the transient classifier lives in pi-ai's
 // utils and is only re-exported from the package root. It carries the
 // provider-maintained retryable/permanent taxonomy (incl. the quota
 // blacklist) — a hand-rolled copy would drift on every pi-ai upgrade.
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import { classifyCacheBreak, type CacheTurnSnapshot } from "./cache-telemetry.js";
+import { bundledModel } from "./model-catalog.js";
 import { appendRuntimeModelContext } from "./model-context.js";
 import { recordCacheBreak } from "./metrics.js";
 import type { Api, Message, Model, TextContent, ThinkingContent, ToolCall } from "@earendil-works/pi-ai/compat";
@@ -5219,11 +5220,11 @@ export function resolveModelId(spec: string): PiModel | undefined {
   if (slash > 0) {
     const provider = spec.slice(0, slash);
     const modelId = spec.slice(slash + 1);
-    return getModel(provider as never, modelId as never);
+    return bundledModel(provider, modelId);
   }
   const tryProviders = ["anthropic", "openai", "google"] as const;
   for (const p of tryProviders) {
-    const m = getModel(p, spec as never);
+    const m = bundledModel(p, spec);
     if (m) return m;
   }
   return undefined;

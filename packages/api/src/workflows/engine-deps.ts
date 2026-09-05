@@ -35,7 +35,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { definitionVersionId } from "./definition-version.js";
-import { completeSimple, getModel } from "@earendil-works/pi-ai/compat";
+import { completeSimple } from "@earendil-works/pi-ai/compat";
+import { bundledModel } from "@valet/engine/model-catalog";
 import type { Api, Model, Usage } from "@earendil-works/pi-ai/compat";
 import {
   parseAssistantSessionId,
@@ -73,12 +74,6 @@ import {
 } from "../assistants/service.js";
 import type { OnePasswordService } from "../services/onepassword.js";
 
-// Same compile-time-vs-runtime bridge `resolveModelId` solves in
-// `packages/engine/src/thread.ts` and `EngineHost.resolveModel` (host.ts):
-// pi-ai's `getModel` is typed against its literal MODELS table, but model
-// ids here come from a workflow definition's `LlmNode.model` string at
-// runtime. Not re-exported from `@valet/engine`, so duplicated here rather
-// than widening that internal export for one caller.
 type PiModel = Model<Api>;
 
 export interface WorkflowEngineDepsOpts {
@@ -563,13 +558,13 @@ function resolveWorkflowModel(spec: string): PiModel {
   if (slash > 0) {
     const provider = spec.slice(0, slash);
     const modelId = spec.slice(slash + 1);
-    const model = getModel(provider as never, modelId as never);
+    const model = bundledModel(provider, modelId);
     if (model) return model;
     throw new Error(`workflow engine-deps: unknown model "${spec}"`);
   }
   const tryProviders = ["anthropic", "openai", "google"] as const;
   for (const provider of tryProviders) {
-    const model = getModel(provider, spec as never);
+    const model = bundledModel(provider, spec);
     if (model) return model;
   }
   throw new Error(

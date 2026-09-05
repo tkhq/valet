@@ -7,10 +7,12 @@
  * failure path. The key-gated real-Anthropic completion path is exercised
  * separately in `src/integration/workflow-engine-deps.test.ts`.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { Type } from "typebox";
 import type { ActionPlugin, PluginAction, ValetPlugin } from "@valet/engine";
 import type { Usage } from "@earendil-works/pi-ai/compat";
+import * as piAi from "@earendil-works/pi-ai/compat";
+import { fauxAssistantMessage } from "@valet/engine/test-helpers";
 import { bootTestApi, type TestApi } from "../integration/_setup.js";
 import { buildWorkflowEngineDeps, mapPiAiUsage } from "./engine-deps.js";
 import { workflowDefinitions } from "../schema/index.js";
@@ -368,6 +370,36 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
 });
 
 describe("buildWorkflowEngineDeps: llmComplete", () => {
+  it.each(["openai/gpt-6-astra", "gpt-6-astra"])("completes with supplemental model %s", async (model) => {
+    const original = piAi.getApiProvider("openai-responses");
+    if (!original) throw new Error("The OpenAI Responses transport must be registered.");
+    const stream = vi.fn<piAi.ApiStreamSimpleFunction>(() => {
+      const events = piAi.createAssistantMessageEventStream();
+      events.end(fauxAssistantMessage("ok"));
+      return events;
+    });
+    // API tests reuse modules across files. Override the transport so an
+    // earlier import of engine-deps cannot bypass this test's fake response.
+    piAi.registerApiProvider({ api: "openai-responses", stream, streamSimple: stream });
+    try {
+      api = await bootTestApi();
+      const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+      const deps = buildWorkflowEngineDeps({
+        host: engineHost, store: workflowStore, db, engineStore,
+        actionPluginByService, credentials: engineCredentials,
+      });
+
+      const result = await deps.llmComplete({ model, prompt: "hi" });
+      expect(result.text).toBe("ok");
+      expect(stream).toHaveBeenCalledWith(expect.objectContaining({
+        id: "gpt-6-astra", provider: "openai", contextWindow: 272_000,
+        compat: expect.objectContaining({ supportsToolSearch: true }),
+      }), expect.anything(), expect.anything());
+    } finally {
+      piAi.registerApiProvider(original);
+    }
+  });
+
   it("throws descriptively for an unknown model id, without any network call", async () => {
     api = await bootTestApi();
     const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;

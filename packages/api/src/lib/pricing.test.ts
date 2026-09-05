@@ -14,6 +14,15 @@ describe("priceUsage", () => {
     expect(cost).not.toBeNull();
     expect(cost!).toBeGreaterThan(0);
   });
+  it("prices Astra through the bundled supplemental catalog", () => {
+    expect(resolveCanonicalModel("openai", "gpt-6-astra")).toBe("gpt-6-astra");
+    expect(priceUsage("openai", "gpt-6-astra", usage)).toBeCloseTo(0.035);
+  });
+  it("uses Astra's higher rates above the input token threshold", () => {
+    expect(priceUsage("openai", "gpt-6-astra", {
+      input: 273_000, output: 1000, cacheRead: 0, cacheWrite: 0, total: 274_000,
+    })).toBeCloseTo(5.535);
+  });
   it("returns null for an unknown model (unpriced, not zero)", () => {
     expect(priceUsage("openai", "totally-made-up-model", usage)).toBeNull();
   });

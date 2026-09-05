@@ -127,11 +127,10 @@ snaps with wrong arithmetic. At `--reasoning high`, Terra went 9/15 to
 measured). Effort moves both pass rate and cost, so treat it as part of a
 run's identity: the effective level is stamped into trajectory metadata.
 
-Models absent from the static pi-ai catalog resolve through a small
-extra-models table in `packages/eval/src/runner.ts` (first entry:
-`claude-fable-5-1`, confirmed against the live `GET /v1/models`). Clones
-carry a zeroed cost, which every surface renders as "unpriced". Do not
-borrow a related model's price: a borrowed price is a wrong price.
+Eval model resolution uses the engine's common bundled catalog. Pi-ai 0.85.0
+supplies `claude-fable-5-1` with upstream pricing. The supplemental catalog
+supplies `gpt-6-astra` with the same metadata used by the API and workflows.
+The old eval-only clone table is removed. Unknown models remain unresolved.
 
 ## Trajectory
 

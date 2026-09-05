@@ -56,7 +56,7 @@ import {
   type Model,
   type MutableModels,
 } from "@earendil-works/pi-ai";
-import { getBuiltinModels, type BuiltinProvider } from "@earendil-works/pi-ai/providers/all";
+import { bundledModel, bundledModels } from "@valet/engine/model-catalog";
 import type { AppDb } from "../lib/drizzle.js";
 import { startSweepTimer, type SweepTimer } from "../lib/sweep-timer.js";
 import { PgModelsStore } from "./models-store-pg.js";
@@ -88,56 +88,6 @@ const FETCH_TIMEOUT_MS = 10_000;
 export function modelRegistryUrl(): string | undefined {
   const raw = process.env.VALET_MODEL_REGISTRY_URL?.trim();
   return raw ? raw.replace(/\/+$/, "") : undefined;
-}
-
-/** Manual models that pi has not released. Pi bundled entries win by id. */
-const MANUAL_BUNDLED_MODELS: Partial<Record<RegistryProvider, RegistryModel[]>> = {
-  openai: [
-    // Source: generated openai.json at unreleased pi commit 17de82d7, after v0.85.0.
-    {
-      id: "gpt-6-astra",
-      name: "GPT-6 Astra",
-      api: "openai-responses",
-      provider: "openai",
-      baseUrl: "https://api.openai.com/v1",
-      reasoning: true,
-      input: ["text", "image"],
-      cost: {
-        input: 10,
-        output: 50,
-        cacheRead: 1,
-        cacheWrite: 12.5,
-        tiers: [{ inputTokensAbove: 272000, input: 20, output: 75, cacheRead: 2, cacheWrite: 25 }],
-      },
-      contextWindow: 272000,
-      maxTokens: 128000,
-      thinkingLevelMap: {
-        off: null,
-        minimal: null,
-        low: "low",
-        medium: "medium",
-        high: "high",
-        xhigh: "xhigh",
-        max: "max",
-      },
-      compat: {
-        supportsStrictMode: true,
-        supportsOpenAIGrammarTools: true,
-        supportsAdditionalTools: true,
-        supportsToolSearch: true,
-        supportsExplicitPromptCacheMode: true,
-      },
-    } satisfies Model<"openai-responses">,
-  ],
-};
-
-/** The pi bundled catalog plus unreleased manual entries. */
-function bundledModels(providerId: RegistryProvider): RegistryModel[] {
-  const builtin = [...getBuiltinModels(providerId satisfies BuiltinProvider)];
-  const manual = MANUAL_BUNDLED_MODELS[providerId];
-  if (!manual) return builtin;
-  const builtinIds = new Set(builtin.map((model) => model.id));
-  return [...builtin, ...manual.filter((model) => !builtinIds.has(model.id))];
 }
 
 /** Last-refresh state for one provider, surfaced by `GET /api/models`
@@ -312,7 +262,7 @@ export class ModelRegistry {
   /** One model by provider and WIRE id, or undefined when the provider does
    * not know it. Replaces the deprecated `getModel` compat read. */
   getModel(providerId: RegistryProvider, modelId: string): Model<Api> | undefined {
-    return this.models.getModel(providerId, modelId) ?? bundledModels(providerId).find((m) => m.id === modelId);
+    return this.models.getModel(providerId, modelId) ?? bundledModel(providerId, modelId);
   }
 
   /**
@@ -412,7 +362,7 @@ export function registryModels(providerId: RegistryProvider): RegistryModel[] {
  * bundled catalog when no registry is installed. */
 export function registryModelById(providerId: RegistryProvider, modelId: string): Model<Api> | undefined {
   if (active) return active.getModel(providerId, modelId);
-  return bundledModels(providerId).find((m) => m.id === modelId);
+  return bundledModel(providerId, modelId);
 }
 
 export async function getModelRegistryStatus(): Promise<ModelRegistryStatus> {
