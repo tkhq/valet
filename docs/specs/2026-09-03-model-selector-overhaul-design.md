@@ -151,7 +151,9 @@ gap where the tier route has no wire types):
   `PatchAssistantRequest`; echoed on `SessionData`, thread reads,
   `MeResponse`, `TeamSummary`, `AssistantSummary`.
 - `ModelInfo` gains `approved: boolean` and `thinkingLevels?: string[]`
-  (from pi-ai `thinkingLevelMap`, mapped in `model-catalog.ts`).
+  (from pi-ai `getSupportedThinkingLevels` with `"off"` stripped, mapped in
+  `model-catalog.ts`; `thinkingLevelMap` is a sparse override, not an
+  allowlist — TKAI-410).
 
 Routes:
 
