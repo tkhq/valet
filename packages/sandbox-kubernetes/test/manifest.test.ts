@@ -262,17 +262,21 @@ describe("buildSandboxManifest", () => {
     });
   });
 
-  describe("node spread (TKAI-349)", () => {
-    it("labels the pod template with the shared sandbox pod label", () => {
-      const manifest = buildSandboxManifest(baseConfig, "sess-1", {});
-      expect(manifest.spec.podTemplate.metadata?.labels).toEqual({
-        [SANDBOX_POD_LABEL_KEY]: "true",
-      });
+  describe("node and zone spread", () => {
+    it("stamps distinct session labels and retains the shared sandbox label on pods", () => {
+      for (const name of ["sess-1", "sess-2"]) {
+        const manifest = buildSandboxManifest(baseConfig, name, {});
+        expect(manifest.spec.podTemplate.metadata?.labels).toEqual({
+          [SESSION_LABEL_KEY]: name,
+          [SANDBOX_POD_LABEL_KEY]: "true",
+        });
+      }
     });
 
     it("keeps the pod label alongside the docker apparmor annotation", () => {
       const manifest = buildSandboxManifest(baseConfig, "sb-docker", { docker: true });
       expect(manifest.spec.podTemplate.metadata?.labels).toEqual({
+        [SESSION_LABEL_KEY]: "sb-docker",
         [SANDBOX_POD_LABEL_KEY]: "true",
       });
       expect(manifest.spec.podTemplate.metadata?.annotations).toEqual({
@@ -280,17 +284,25 @@ describe("buildSandboxManifest", () => {
       });
     });
 
-    it("emits a SOFT hostname topology spread constraint keyed on the sandbox pod label", () => {
-      // ScheduleAnyway on purpose: sandboxes must still schedule under
-      // pressure — the ephemeral-storage request is the hard concentration
-      // cap; this only balances placement.
-      const manifest = buildSandboxManifest(baseConfig, "sess-1", {});
+    it.each<SandboxCreateOpts>([
+      {},
+      { profile: "full" },
+      { docker: true },
+      { profile: "full", docker: true },
+    ])("uses soft node and zone spread across all session labels for %j", (options) => {
+      const manifest = buildSandboxManifest(baseConfig, "sess-1", options);
       expect(manifest.spec.podTemplate.spec.topologySpreadConstraints).toEqual([
         {
           maxSkew: 1,
           topologyKey: "kubernetes.io/hostname",
           whenUnsatisfiable: "ScheduleAnyway",
-          labelSelector: { matchLabels: { [SANDBOX_POD_LABEL_KEY]: "true" } },
+          labelSelector: { matchExpressions: [{ key: SESSION_LABEL_KEY, operator: "Exists" }] },
+        },
+        {
+          maxSkew: 2,
+          topologyKey: "topology.kubernetes.io/zone",
+          whenUnsatisfiable: "ScheduleAnyway",
+          labelSelector: { matchExpressions: [{ key: SESSION_LABEL_KEY, operator: "Exists" }] },
         },
       ]);
     });
