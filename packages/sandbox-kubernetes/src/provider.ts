@@ -1217,9 +1217,9 @@ export class KubernetesSandboxProvider implements SandboxProvider {
           if (podName !== null && pod !== null && podReady && expected !== undefined && !matchesDesired && this.deps.podDeleteApi) {
             const generation = `${podName}:${pod.imageFingerprint ?? "missing"}:${pod.resourceFingerprint ?? "missing"}`;
             if (!rolledGenerations.has(generation)) {
-              rolledGenerations.add(generation);
               console.log(`k8s sandbox ${name}: rolling stale pod generation during readiness`);
               await this.deps.podDeleteApi.deletePod(this.cfg.namespace, podName);
+              rolledGenerations.add(generation);
             }
           } else if (
             status.state === "ready" && matchesDesired && pod?.phase === "Running" &&

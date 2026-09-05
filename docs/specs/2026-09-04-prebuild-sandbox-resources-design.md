@@ -200,7 +200,9 @@ removes prior overrides.
 Legacy CRs can lack a fingerprint. No-opinion adoption preserves marker absence
 and does not infer resource drift from the admitted pod. Image drift remains
 independent. The first authoritative resource opinion, including `{}`, adds a
-fingerprint and can roll the legacy pod once. Later calls compare fingerprints.
+fingerprint and can roll the legacy pod once. On an image-mutating admission cluster,
+a legacy pod without the immutable image fingerprint can take one rollout; in-flight
+compute is lost but the workspace PVC is preserved. Later calls compare fingerprints.
 
 After provider creation, the engine reads the returned sandbox's applied state
 before prep. An adopted sandbox retains its recorded resources when the desired

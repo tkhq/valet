@@ -856,13 +856,36 @@ describe("create() resource adoption and pod rollout", () => {
       .resolves.toBeDefined();
   });
 
-  it("retries one transient live pod-status read before accepting readiness", async () => {
+  it("retries a transient live pod-status read inside waitReady", async () => {
     const { provider, podStatusApi } = setup(prior);
-    podStatusApi.getPodStatus.mockRejectedValueOnce(new Error("temporary apiserver reset"));
+    podStatusApi.getPodStatus
+      .mockRejectedValueOnce(new Error("temporary initial drift read reset"))
+      .mockRejectedValueOnce(new Error("temporary waitReady read reset"));
 
     await expect(provider.create({ workspace: "/ws/resources", preserveResourcesOnAdopt: true }))
       .resolves.toBeDefined();
-    expect(podStatusApi.getPodStatus.mock.calls.length).toBeGreaterThan(1);
+    expect(podStatusApi.getPodStatus).toHaveBeenCalledTimes(3);
+  });
+
+  it("retries a failed readiness rollout after a soft initial drift read failure", async () => {
+    vi.useFakeTimers();
+    try {
+      const { provider, podDeleteApi, podStatusApi } = setup(prior);
+      podStatusApi.getPodStatus.mockRejectedValueOnce(new Error("temporary initial drift read reset"));
+      podDeleteApi.deletePod.mockRejectedValueOnce(new Error("temporary pod deletion failure"));
+      let settled = false;
+      const creating = provider.create({ workspace: "/ws/resources", resources: { cpu: 2 } })
+        .then(() => { settled = true; });
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      await creating;
+
+      expect(settled).toBe(true);
+      expect(podDeleteApi.deletePod).toHaveBeenCalledTimes(2);
+      expect(podStatusApi.getPodStatus.mock.calls.length).toBeGreaterThan(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("times out with the persistent Kubernetes read failure and corrective action", async () => {
