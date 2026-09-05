@@ -177,6 +177,25 @@ to local chart installs.
 CI publishes the chart after merge to `dev-v2`. The infrastructure deploy
 must pin the new version and supply scheduling overrides to enable isolation.
 
+## Update (2026-09-04): sandbox node and zone spread
+
+The manifest builder extends the existing soft hostname spread to zones.
+It emits two `topologySpreadConstraints`: `kubernetes.io/hostname` with
+`maxSkew: 1`, and `topology.kubernetes.io/zone` with `maxSkew: 2`.
+Both use `ScheduleAnyway`, so uneven placement does not block scheduling.
+
+Both selectors use `matchExpressions` with `valet.dev/session-id` and
+`operator: Exists`. This counts sandbox pods in the namespace regardless
+of their distinct label values. The pod template now explicitly carries
+this label, using the same value as the Sandbox CR. The shared
+`valet.dev/sandbox: "true"` label remains for compatibility with older selectors.
+
+These preferences affect future pod placements. They do not move existing
+pods or balance actual IO usage. Existing pods without the session label
+do not count toward the new selectors until recreated from an updated template.
+The constraints add no node-pool selector or toleration and do not change
+resource requests or PVC provisioning.
+
 ## Non-goals
 
 - CI image publishing / remote clusters (follow-up when a prod cluster exists).

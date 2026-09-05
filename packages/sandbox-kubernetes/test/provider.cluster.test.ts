@@ -106,11 +106,19 @@ describe.skipIf(!isClusterReady)("KubernetesSandboxProvider targeted behaviors (
           kubectl(["-n", namespace, "get", "pod", name, "-o", `jsonpath=${jsonpath}`]).stdout.trim();
 
         expect(readPod("{.metadata.labels['valet\\.dev/sandbox']}")).toBe("true");
-        expect(readPod("{.spec.topologySpreadConstraints[0].topologyKey}")).toBe("kubernetes.io/hostname");
-        expect(readPod("{.spec.topologySpreadConstraints[0].whenUnsatisfiable}")).toBe("ScheduleAnyway");
-        expect(
-          readPod("{.spec.topologySpreadConstraints[0].labelSelector.matchLabels['valet\\.dev/sandbox']}"),
-        ).toBe("true");
+        expect(readPod("{.metadata.labels['valet\\.dev/session-id']}")).toBe(name);
+        for (const [index, topologyKey, maxSkew] of [
+          [0, "kubernetes.io/hostname", "1"],
+          [1, "topology.kubernetes.io/zone", "2"],
+        ]) {
+          const constraint = `.spec.topologySpreadConstraints[${index}]`;
+          expect(readPod(`{${constraint}.topologyKey}`)).toBe(topologyKey);
+          expect(readPod(`{${constraint}.maxSkew}`)).toBe(maxSkew);
+          expect(readPod(`{${constraint}.whenUnsatisfiable}`)).toBe("ScheduleAnyway");
+          expect(readPod(`{${constraint}.labelSelector.matchExpressions[0].key}`)).toBe("valet.dev/session-id");
+          expect(readPod(`{${constraint}.labelSelector.matchExpressions[0].operator}`)).toBe("Exists");
+          expect(readPod(`{${constraint}.labelSelector.matchLabels}`)).toBe("");
+        }
         expect(readPod("{.spec.containers[0].resources.requests['ephemeral-storage']}")).toBe("512Mi");
         expect(readPod("{.spec.containers[0].resources.limits['ephemeral-storage']}")).toBe("1Gi");
       } finally {
