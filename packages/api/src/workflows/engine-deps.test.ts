@@ -19,17 +19,11 @@ import { workflowDefinitions } from "../schema/index.js";
 import { LOCAL_ORG, LOCAL_USER } from "../providers/node.js";
 import { resolveDefaultAssistant } from "../assistants/service.js";
 
-vi.mock("@earendil-works/pi-ai/compat", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@earendil-works/pi-ai/compat")>();
-  return { ...actual, completeSimple: vi.fn(actual.completeSimple) };
-});
-
 let api: TestApi | undefined;
 
 afterEach(async () => {
   await api?.cleanup();
   api = undefined;
-  vi.mocked(piAi.completeSimple).mockReset();
 });
 
 async function seedRun(a: TestApi, runId: string, workflowId: string): Promise<void> {
@@ -377,20 +371,33 @@ describe("buildWorkflowEngineDeps: promptOrchestrator", () => {
 
 describe("buildWorkflowEngineDeps: llmComplete", () => {
   it.each(["openai/gpt-6-astra", "gpt-6-astra"])("completes with supplemental model %s", async (model) => {
-    const complete = vi.mocked(piAi.completeSimple).mockResolvedValue(fauxAssistantMessage("ok"));
-    api = await bootTestApi();
-    const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
-    const deps = buildWorkflowEngineDeps({
-      host: engineHost, store: workflowStore, db, engineStore,
-      actionPluginByService, credentials: engineCredentials,
+    const original = piAi.getApiProvider("openai-responses");
+    if (!original) throw new Error("The OpenAI Responses transport must be registered.");
+    const stream = vi.fn<piAi.ApiStreamSimpleFunction>(() => {
+      const events = piAi.createAssistantMessageEventStream();
+      events.end(fauxAssistantMessage("ok"));
+      return events;
     });
+    // API tests reuse modules across files. Override the transport so an
+    // earlier import of engine-deps cannot bypass this test's fake response.
+    piAi.registerApiProvider({ api: "openai-responses", stream, streamSimple: stream });
+    try {
+      api = await bootTestApi();
+      const { db, engineHost, engineStore, workflowStore, actionPluginByService, engineCredentials } = api.providers;
+      const deps = buildWorkflowEngineDeps({
+        host: engineHost, store: workflowStore, db, engineStore,
+        actionPluginByService, credentials: engineCredentials,
+      });
 
-    const result = await deps.llmComplete({ model, prompt: "hi" });
-    expect(result.text).toBe("ok");
-    expect(complete).toHaveBeenCalledWith(expect.objectContaining({
-      id: "gpt-6-astra", provider: "openai", contextWindow: 272_000,
-      compat: expect.objectContaining({ supportsToolSearch: true }),
-    }), expect.anything(), expect.anything());
+      const result = await deps.llmComplete({ model, prompt: "hi" });
+      expect(result.text).toBe("ok");
+      expect(stream).toHaveBeenCalledWith(expect.objectContaining({
+        id: "gpt-6-astra", provider: "openai", contextWindow: 272_000,
+        compat: expect.objectContaining({ supportsToolSearch: true }),
+      }), expect.anything(), expect.anything());
+    } finally {
+      piAi.registerApiProvider(original);
+    }
   });
 
   it("throws descriptively for an unknown model id, without any network call", async () => {

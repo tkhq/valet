@@ -178,6 +178,10 @@ bundled records. Supplemental records preserve their context limits, pricing
 and compatibility flags. The engine exports the catalog through
 `@valet/engine/model-catalog`; `shared` remains dependency-free.
 
+Workflow completion tests replace the registered API transport and restore it
+after each case. This keeps cached workflow modules on the fake transport
+when CI reuses modules across test files.
+
 ## Extension: org model preferences removed (2026-09-03, model-selector-overhaul follow-up)
 
 Model size tiers (`docs/specs/2026-09-03-model-selector-overhaul-design.md`,
