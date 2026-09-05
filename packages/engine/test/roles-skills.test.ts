@@ -118,7 +118,7 @@ You are a careful code reviewer. Always cite file paths.
     ) {
       await new Promise((r) => setTimeout(r, 5));
     }
-    expect(observed2.systemPrompt).toBe("Base instructions.");
+    expect(observed2.systemPrompt?.split("\n\n## Runtime model")[0]).toBe("Base instructions.");
     expect(observed2.systemPrompt).not.toContain("careful code reviewer");
 
     faux.unregister();
@@ -162,7 +162,7 @@ You are a careful code reviewer. Always cite file paths.
         e.event.type === "error" && (e.event as { code: string }).code === "role_not_found",
     );
     expect(errorEvent).toBeDefined();
-    expect(observed.systemPrompt).toBe("base"); // ran without overlay
+    expect(observed.systemPrompt?.split("\n\n## Runtime model")[0]).toBe("base"); // ran without role overlay
     faux.unregister();
   });
 });

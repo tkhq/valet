@@ -64,17 +64,47 @@ describe("orchestratorPersona", () => {
     expect(persona).toContain("switch_model");
   });
 
-  it("requires switch_model before architecting or coding", () => {
+  it("uses a strong supervisor model for judgment but permits small status turns", () => {
     const persona = flat(orchestratorPersona({ type: "user", id: "u1" }));
-    expect(persona).toContain("Before architecting, designing, debugging, reviewing, or a code change");
-    expect(persona).toContain("call switch_model with `l` or `xl`");
+    expect(persona).toContain("Use `l` or `xl` for planning, task assessment, supervision, and final judgment");
+    expect(persona).toContain("Brief status and routing may stay on `xs` or `s`");
     expect(persona).toContain("never name a specific model");
     expect(persona).toContain("task tool's `model`");
-    expect(persona).toContain("switch_model (or set the child's model) first");
-    expect(persona).toContain("Re-evaluate after you have read the code or a tool result");
-    expect(persona).toContain("switch_model mid-task after that evaluation");
-    expect(persona).toContain("Do not finish a hard task on a small tier just because you started there");
+    expect(persona).toContain("## Runtime model");
+    expect(persona).toContain("authoritative");
+    expect(persona).toContain("Respect explicit user model instructions");
+    expect(persona).toContain("does not change saved model preferences");
+    expect(persona).not.toContain("do not create runtime tier limits");
+    expect(persona).not.toContain("Before architecting, designing, debugging");
     expect(persona).not.toMatch(/Haiku|Sonnet|Opus|Codex/);
+  });
+
+  it("selects the smallest child tier that fits assessed complexity and risk", () => {
+    const persona = flat(orchestratorPersona({ type: "user", id: "u1" }));
+    expect(persona).toContain("Assess complexity and risk before you spawn");
+    expect(persona).toContain("Use `s` for mechanical tasks");
+    expect(persona).toContain("Use `m` for bounded implementation");
+    expect(persona).toContain("Use `l` for difficult drafting");
+    expect(persona).toContain("L deliberately overlaps drafting and review");
+    expect(persona).not.toContain("pass `l` for the task tool");
+  });
+
+  it("separates drafting from strong-model review and repeats the fix cycle", () => {
+    const persona = flat(orchestratorPersona({ type: "user", id: "u1" }));
+    expect(persona).toContain("Separate code quality from drafting");
+    expect(persona).toContain("For each code-change draft, run an independent review stage");
+    expect(persona).toContain("Use an `l` or `xl` child to review requirements and code quality");
+    expect(persona).toContain("An `xl` child reviews only");
+    expect(persona).toContain("report findings without fixing them");
+    expect(persona).toContain("Send findings to the drafting child");
+    expect(persona).toContain("Repeat review after fixes as needed");
+  });
+
+  it("requires a complete brief with the assigned tier and reason", () => {
+    const persona = flat(orchestratorPersona({ type: "user", id: "u1" }));
+    expect(persona).toContain("purpose, scope, assigned tier and reason, constraints, and acceptance checks");
+    expect(persona).toContain("one level of delegation");
+    expect(persona).toContain("Persistence is \"done\" for code changes");
   });
 
   it("names the push boundary and the child_status check", () => {

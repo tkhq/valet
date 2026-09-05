@@ -4,6 +4,7 @@ import {
   CODING_CRAFT_RULES,
   CODING_PERSISTENCE_RULES,
   CODING_SYSTEM_PROMPT,
+  CHILD_MODEL_RULES,
   MODEL_SWITCH_CORE,
   SECRETS_RULES,
   TOOL_USE_RULES,
@@ -39,23 +40,46 @@ describe("coding system prompt (TKAI-239 v1 port)", () => {
     expect(prompt).toContain("Treat the spawned branch as the base");
   });
 
-  it("runs explore, small diff, verify, then switch_model when stuck", () => {
+  it("runs explore, small diff, and verify", () => {
     expect(flat(CODING_SYSTEM_PROMPT)).toContain(flat(CODING_CRAFT_RULES));
     expect(CODING_SYSTEM_PROMPT).toContain("Grep or read before you write");
     expect(CODING_SYSTEM_PROMPT).toContain("Change only what the brief asked");
     expect(CODING_SYSTEM_PROMPT).toContain("A commit is not evidence the change works");
-    expect(CODING_SYSTEM_PROMPT).toContain("The same error three times: call switch_model");
-    expect(CODING_SYSTEM_PROMPT).toContain("with `l` or `xl`");
+    expect(CODING_SYSTEM_PROMPT).toContain("The same error three times");
+    expect(CODING_SYSTEM_PROMPT).toContain("try a different approach");
   });
 
-  it("tells a cheap coding session to switch_model before hard work and mid-task", () => {
+  it("keeps common model mechanics separate from child selection advice", () => {
     expect(flat(CODING_SYSTEM_PROMPT)).toContain(flat(MODEL_SWITCH_CORE));
-    expect(CODING_SYSTEM_PROMPT).toContain("call switch_model with `l` or `xl`");
+    expect(flat(CODING_SYSTEM_PROMPT)).toContain(flat(CHILD_MODEL_RULES));
+    expect(MODEL_SWITCH_CORE).toContain("## Runtime model");
+    expect(MODEL_SWITCH_CORE).toContain("authoritative");
+    expect(MODEL_SWITCH_CORE).toContain("Do not guess your own model");
+    expect(MODEL_SWITCH_CORE).toContain("Tier tokens are selection values");
+    expect(MODEL_SWITCH_CORE).toContain("current turn only");
+    expect(MODEL_SWITCH_CORE).toContain("next available tier permitted for your task");
+    expect(MODEL_SWITCH_CORE).toContain("report the blocker");
+    expect(MODEL_SWITCH_CORE).not.toContain("try the next larger tier");
     expect(CODING_SYSTEM_PROMPT).toContain("never name a specific model");
-    expect(CODING_SYSTEM_PROMPT).toContain("Re-evaluate after you have read the code or a tool result");
-    expect(CODING_SYSTEM_PROMPT).toContain("Do not finish a hard task on a small tier just because you started there");
     expect(CODING_SYSTEM_PROMPT).not.toContain("child_send");
+    expect(CODING_SYSTEM_PROMPT).not.toContain("Before architecting, designing, debugging");
     expect(CODING_SYSTEM_PROMPT).not.toMatch(/Haiku|Sonnet|Opus|Codex/);
+  });
+
+  it("tells a child to trust its assigned tier unless real attempts show a capability gap", () => {
+    expect(CHILD_MODEL_RULES).toContain("Trust the assigned selection during normal work");
+    expect(CHILD_MODEL_RULES).toContain("meaningful attempts");
+    expect(CHILD_MODEL_RULES).toContain("smallest sufficient tier");
+    expect(CHILD_MODEL_RULES).toContain("explain the capability gap");
+    expect(CHILD_MODEL_RULES).toContain("routine failing test");
+    expect(CHILD_MODEL_RULES).toContain("task length");
+    expect(CHILD_MODEL_RULES).toContain("missing credential");
+    expect(CHILD_MODEL_RULES).toContain("unavailable tool");
+    expect(CHILD_MODEL_RULES).toContain("Do not switch before coding");
+    expect(CHILD_MODEL_RULES).toContain("Drafting children use only `s`, `m`, or `l`");
+    expect(CHILD_MODEL_RULES).toContain("Reserve `xl` child use for review");
+    expect(CHILD_MODEL_RULES).not.toContain("Draft only on");
+    expect(CHILD_MODEL_RULES).not.toContain("call switch_model with `l` or `xl`");
   });
   // valet-secrets is installed in every prepped sandbox but appears on no
   // tool list. Without this paragraph the model asks for a pasted credential.
