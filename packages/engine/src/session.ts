@@ -521,7 +521,9 @@ export class Session {
     // the normative decision tree. Awaited so callers can rely on gate re-arming
     // (and settlement of finished/aborted/superseded/exhausted work) having been
     // applied before they resolve gates or read queue state. The actual
-    // gate-replay / resume drive kicked off here is still asynchronous.
+    // gate-replay / resume drive kicked off here is asynchronous — reconcile
+    // claims the work and KICKS the drive, never waits for the resumed turn
+    // (see resumeInterrupted's doc comment for the deadlock this prevents).
     await session.reconcile();
     return session;
   }

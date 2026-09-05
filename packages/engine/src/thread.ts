@@ -2928,6 +2928,18 @@ export class Thread {
    * the agent transcript, append synthetic toolResults for the interrupted
    * calls so the trailing message is toolResult-convertible, then continue the
    * turn and settle it normally.
+   *
+   * Resolves once the fresh attempt is claimed and the resume drive is
+   * KICKED — never when the resumed turn finishes. The drive runs
+   * fire-and-forget (matching `reconcileGate`'s replay kick): this method is
+   * awaited from `Session.reconcile()`, which `rehydrate`/`restoreSession`
+   * awaits, which the host's single-flight `sessionFor` hands to every
+   * threads/messages/decisions route. Awaiting the drive here held all of
+   * those pending for the resumed turn's full duration — and DEADLOCKED
+   * permanently when the resumed turn parked on a decision gate, because the
+   * human who had to resolve the gate could not load the session that was
+   * waiting on them (dev incident 2026-09-05; see
+   * test/restore-nonblocking.test.ts).
    */
   async resumeInterrupted(item: QueueItem): Promise<void> {
     const store = this.session.providers.store;
@@ -2956,7 +2968,18 @@ export class Thread {
     this.session.ensureTimers();
     await this.emitQueueState();
 
-    await this.driveResumeToCompletion(replaced, "interrupted — result lost in restart");
+    // Fire-and-forget: the inner drive settles its own failures (turn errors
+    // and settlement errors both land in emitError + settleTurn), so a
+    // rejection here is a bug in the drive itself — log it rather than let it
+    // surface as an unhandledRejection nobody owns.
+    this.driveResumeToCompletion(replaced, "interrupted — result lost in restart").catch(
+      (err: unknown) => {
+        this.emitError(
+          "resume_drive_rejected",
+          err instanceof Error ? err.message : String(err),
+        );
+      },
+    );
   }
 
   /**

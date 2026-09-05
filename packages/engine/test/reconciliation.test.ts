@@ -1075,7 +1075,13 @@ describe("reconciliation executor (integration)", () => {
       },
     });
 
-    // Item settled completed.
+    // restoreSession returns once the resume drive is kicked (never blocks on
+    // the resumed turn — see restore-nonblocking.test.ts); the settlement
+    // lands asynchronously.
+    await waitForAsync(
+      async () => (await store.getQueueItem(SESSION, itemId))?.status === "settled",
+      4000,
+    );
     const settled = await store.getQueueItem(SESSION, itemId);
     expect(settled?.status).toBe("settled");
     expect(settled?.outcome).toEqual({ outcome: "completed" });
@@ -1233,6 +1239,11 @@ describe("reconciliation executor (integration)", () => {
       },
     });
 
+    // The resume drive runs in the background after restore — wait for it.
+    await waitForAsync(
+      async () => (await store.getQueueItem(SESSION, itemId))?.status === "settled",
+      4000,
+    );
     const settled = await store.getQueueItem(SESSION, itemId);
     expect(settled?.status).toBe("settled");
     expect(settled?.outcome).toEqual({ outcome: "completed" });
@@ -1340,6 +1351,12 @@ describe("reconciliation executor (integration)", () => {
 
     await session.sweepOnce();
 
+    // The sweep's resume kick is fire-and-forget, same as the restore path —
+    // wait for the background drive to settle the item.
+    await waitForAsync(
+      async () => (await store.getQueueItem("sess-sweep", strandedId))?.status === "settled",
+      4000,
+    );
     const settled = await store.getQueueItem("sess-sweep", strandedId);
     expect(settled?.status).toBe("settled");
     expect(settled?.outcome).toEqual({ outcome: "completed" });
