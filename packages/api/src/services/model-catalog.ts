@@ -35,7 +35,7 @@
  * either shape against one set.
  */
 import { getEnvApiKey } from "@earendil-works/pi-ai/compat";
-import type { ThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels, type Api, type Model } from "@earendil-works/pi-ai";
 import { registryModels } from "./model-registry.js";
 import type { CredentialOwner, CredentialStore } from "@valet/engine";
 import type { AppQueryable } from "../lib/drizzle.js";
@@ -46,19 +46,20 @@ import type { ModelInfo } from "../wire/types.js";
 import { TIER_TOKENS } from "./model-tiers.js";
 import { getApprovedModels, isApproved } from "./approved-models.js";
 
-/** Canonical display/selection order for thinking levels — narrowest to
- * broadest effort. `"off"` is never a selectable level, so it's excluded
- * here rather than filtered out at every call site. */
-const THINKING_LEVEL_ORDER: readonly ThinkingLevel[] = ["minimal", "low", "medium", "high", "xhigh", "max"];
-
 /** The levels a reasoning model actually supports, in canonical order.
- * `undefined` when the model doesn't reason at all, or the registry has no
- * `thinkingLevelMap` for it (nothing to report). Only keys PRESENT in the
- * map are considered — a `null` value marks a level explicitly unsupported,
- * and a missing key is not claimed as supported either. */
-function thinkingLevelsFor(reasoning: boolean | undefined, map: ThinkingLevelMap | undefined): string[] | undefined {
-  if (!reasoning || !map) return undefined;
-  return THINKING_LEVEL_ORDER.filter((level) => map[level] !== undefined && map[level] !== null);
+ * `undefined` when the model doesn't reason (nothing to pick). Support
+ * comes from pi-ai's own `getSupportedThinkingLevels`, so this list and the
+ * engine's stream-time clamp share one definition. pi-ai reads
+ * `thinkingLevelMap` as a sparse OVERRIDE, not an allowlist: for a
+ * reasoning model, `minimal`..`high` are supported unless a level's value
+ * is explicitly `null`; only `xhigh`/`max` require a present entry
+ * (TKAI-410). `"off"` is never a selectable level, so it's stripped here
+ * rather than filtered out at every call site. Exported for the
+ * table-driven tests in `model-catalog.test.ts`. */
+export function thinkingLevelsFor(model: Model<Api> | undefined): string[] | undefined {
+  if (!model?.reasoning) return undefined;
+  const levels = getSupportedThinkingLevels(model).filter((level) => level !== "off");
+  return levels.length > 0 ? levels : undefined;
 }
 
 export type CatalogEntry = ModelInfo & { resolvable: boolean };
@@ -113,7 +114,7 @@ function knownKindEntries(
       pricing: { input: m.cost.input, output: m.cost.output },
       resolvable,
       approved: isApproved(approvedList, id),
-      thinkingLevels: thinkingLevelsFor(m.reasoning, m.thinkingLevelMap),
+      thinkingLevels: thinkingLevelsFor(m),
     };
   });
 }
@@ -206,7 +207,7 @@ export async function buildOrgCatalog(db: AppQueryable, credentials: CredentialS
         pricing: m.pricing,
         resolvable,
         approved: isApproved(approvedList, id),
-        thinkingLevels: thinkingLevelsFor(reg?.reasoning, reg?.thinkingLevelMap),
+        thinkingLevels: thinkingLevelsFor(reg),
       });
     }
   }
