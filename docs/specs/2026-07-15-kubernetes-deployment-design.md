@@ -156,6 +156,27 @@ the CR), or destroy the sandbox and let its owner re-provision. Infra-side
 mitigations (autoscaler headroom, node disk-pressure alerts) cover the gap
 in the meantime and are deployed separately.
 
+## Update (2026-09-04): api scheduling and resource defaults
+
+Chart 0.10.6 adds `api.nodeSelector`, `api.tolerations`, and `api.affinity`
+to the api Pod spec. Empty defaults omit these fields and add no scheduling
+constraints. Populated values pass through as Kubernetes scheduling fields.
+They apply only to the api Deployment.
+
+The agents-dev deploy can use these values to select a dedicated platform
+node group and tolerate its taint. Infrastructure must supply the matching
+node labels, taint, and chart overrides. This separates the api's kubelet
+from sandbox disk-IO storms behind the 2026-09-02 and 2026-09-04 outages.
+
+Default api resource requests are `250m` CPU and `1Gi` memory. Limits are
+`2` CPU and `2Gi` memory. The measured usage was approximately `0.12` CPU
+cores and `880 MiB` memory. Deployments can override `api.resources`.
+Scheduling defaults remain empty, but these resource defaults also apply
+to local chart installs.
+
+CI publishes the chart after merge to `dev-v2`. The infrastructure deploy
+must pin the new version and supply scheduling overrides to enable isolation.
+
 ## Non-goals
 
 - CI image publishing / remote clusters (follow-up when a prod cluster exists).

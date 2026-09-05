@@ -38,6 +38,18 @@ spec:
         app.kubernetes.io/component: api
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- with .Values.api.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.api.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.api.imagePullSecrets }}
       imagePullSecrets:
         {{- range . }}
