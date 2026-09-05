@@ -407,14 +407,17 @@ describe("model catalog", () => {
     });
 
     it("a non-registry openrouter selection (live-catalog pick) exposes thinkingLevels: undefined", async () => {
+      // The id must NOT exist in pi-ai's openrouter registry — a registry
+      // hit would legitimately carry levels now that support no longer
+      // requires a thinkingLevelMap.
       const row = await createLlmProvider(db, {
         orgId,
         kind: "openrouter",
         name: "OpenRouter",
         models: [
           {
-            id: "moonshotai/kimi-k3",
-            name: "MoonshotAI: Kimi K3",
+            id: "example/not-in-registry",
+            name: "Example: Not In Registry",
             contextWindow: 1_048_576,
             pricing: { input: 3, output: 15 },
           },
@@ -426,7 +429,7 @@ describe("model catalog", () => {
       });
 
       const entries = await buildOrgCatalog(db, credentials, orgId);
-      const entry = entries.find((e) => e.id === "openrouter/moonshotai/kimi-k3");
+      const entry = entries.find((e) => e.id === "openrouter/example/not-in-registry");
       expect(entry).toBeDefined();
       expect(entry?.thinkingLevels).toBeUndefined();
     });
