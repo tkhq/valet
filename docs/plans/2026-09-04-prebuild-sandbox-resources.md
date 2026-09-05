@@ -491,6 +491,33 @@ Keep repository values unchanged in desired specs and applied metadata.
 - Run shared quantity tests, Kubernetes quantity tests, and Docker argument tests.
 - Update the resource design and Docker spec in the implementation commit.
 
+### Task 6c: Persist per-repository sandbox settings
+
+- Add optional CPU/memory defaults to repository image sources, the existing
+  application migration, its Drizzle schema, and the boot schema repair list.
+- Expose saved defaults in the source wire response. Extend the existing
+  organization-admin source PATCH route with validation and clear semantics.
+- Read saved defaults outside the GitHub cache. Merge YAML over saved defaults
+  per field for initial creation and desired specs. On a failed YAML read,
+  preserve the existing sandbox's opinion and use saved defaults only as a
+  fresh-creation fallback.
+- Scope runtime lookup by session organization, host, and repository name.
+  Include disabled sources. Distinguish missing rows from database failures;
+  failed lookups cannot authoritatively remove existing resources.
+- Test scoped authorization, validation, persistence, clearing, precedence,
+  cache behavior, read failure, organization isolation, and unchanged bake identity.
+
+### Task 6d: Surface per-repository sandbox settings
+
+- Rename the organization navigation label to Sandbox settings. Retain the
+  existing URL for bookmark compatibility.
+- Add optional CPU and memory fields plus Save to each repository row. Explain
+  YAML precedence and empty-field defaults. Keep existing bake controls.
+- Keep resource edits available without an image builder. Use existing query
+  hooks and primitives. Sync refreshed values without losing unsaved edits.
+- Test save/clear, invalid input, server failure, refreshed values, and builder
+  absence. Verify the page in a local browser.
+
 ### Task 7: Document and dogfood the resource contract
 
 **Files:**

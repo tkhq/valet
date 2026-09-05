@@ -19,6 +19,7 @@ fields from repository or deployment configuration.
 
 - Let a repository declare sandbox CPU and memory in `.valet/prebuild.yaml`.
 - Let a deployment define default sandbox CPU and memory.
+- Let an organization administrator edit per-repository defaults in Sandbox settings.
 - Apply repository values on Docker and Kubernetes sandbox backends.
 - Apply repository changes at the next safe sandbox reconcile window.
 - Preserve the persistent working directory when a resource change replaces a sandbox.
@@ -40,8 +41,8 @@ as `8Gi` or `500Mi`. The loader trims `memory` before it stores the value.
 
 If `resources` is not a mapping, the loader rejects the file. If a declared value
 is invalid, the loader rejects the file and names the corrective format in the
-error. The existing best-effort repository reader then starts the session with
-deployment defaults. It does not cache the failed read.
+error. A fresh session then uses saved repository defaults before deployment
+defaults. The repository reader does not cache the failed read.
 
 The schema has one value for each resource. It does not expose separate requests
 and limits. The Kubernetes provider sets the request and limit to the same value.
@@ -86,9 +87,10 @@ five-second host timeout.
 
 Precedence is per field:
 
-1. A repository value wins when it is present.
-2. A deployment value applies when the repository omits that field.
-3. The provider omits the field when neither source defines it.
+1. A repository YAML value wins when it is present.
+2. A saved repository default applies when YAML omits that field.
+3. A deployment value applies when both repository sources omit that field.
+4. The provider omits the field when no source defines it.
 
 Only the primary repository binding supplies runtime values. Child sessions use
 the same resolution path as REST-created sessions.
@@ -128,16 +130,17 @@ not survive.
 A resource change on a suspended sandbox uses the existing wake-folding path. The
 attachment creates the new sandbox directly instead of first waking the stale one.
 
-Only `declared` and `absent` repository outcomes are authoritative. `declared`
-carries the parsed resource object. `absent` carries an empty resource object and
-can remove earlier repository overrides. `error` carries no resource opinion. If
+Only successful YAML and saved-default lookups can produce an authoritative
+opinion. `declared` combines saved defaults with parsed YAML overrides. `absent`
+uses saved defaults, or `{}` when none exist. It can remove earlier YAML overrides.
+`error` carries no resource opinion. If
 an `error` occurs during reconciliation, the attachment keeps its recorded
 resource overrides. If an image change still requires replacement during that
 error, the attachment copies the recorded overrides into the new create options.
 This rule prevents a timeout, rate limit, malformed file, or temporary GitHub
 failure from replacing a sandbox with deployment defaults. If the first read for
 a new sandbox fails, no recorded overrides exist, so initial provisioning uses
-deployment defaults.
+available saved repository defaults before deployment defaults.
 
 Provider creation can adopt existing compute after an API restart. The engine
 sets the internal `preserveResourcesOnAdopt` option when the desired spec has no
@@ -222,8 +225,8 @@ existing replace endpoint to apply new defaults to a running attachment.
 
 ## Failure behavior
 
-A repository read failure uses deployment defaults for a new sandbox and does not
-prevent session startup. It does not change resources on an existing sandbox. A
+A repository read failure uses available saved defaults before deployment defaults
+for a new sandbox. It does not prevent startup or change existing resources. A
 provider failure follows the existing sandbox startup error path. An unschedulable
 Kubernetes request therefore fails visibly instead of silently falling back to
 smaller resources.
@@ -233,6 +236,35 @@ and `LimitRange` objects remain the deployment guardrails. A later change can ad
 Valet-specific caps if operators need them.
 
 ## Documentation and dogfood
+
+### Repository settings in Valet
+
+The organization settings page is named **Sandbox settings**. It retains base
+and external image controls. Each repository row also has optional CPU and memory
+defaults, a save action, and the existing bake controls. Empty fields remove the
+saved default. Resource controls remain available when image builds are disabled.
+
+The API stores these defaults on the repository image source. Only organization
+administrators can change them. Existing source routes retain their URLs and
+organization checks. Resource edits do not trigger an image bake.
+Runtime lookup uses the session organization, repository host, and full name.
+Disabled image sources still supply sandbox defaults. A missing row means no
+saved defaults. A failed database read produces no opinion for existing sandboxes.
+
+Precedence is per field: repository YAML, saved repository defaults, deployment
+defaults, then provider behavior. The runtime resolver reads saved defaults on
+each invocation so a settings edit does not wait for the GitHub cache to expire.
+It caches only the GitHub answer. Successful repository reads combine saved
+defaults with YAML overrides into the authoritative resource opinion. Applied
+metadata records this combined opinion. A failed read has no opinion for an
+existing sandbox. A fresh sandbox can use saved defaults as its fallback.
+
+The UI explains this precedence beside the controls. Query invalidation refreshes
+saved values after a mutation. Background refresh updates untouched fields and
+preserves unsaved user edits. Validation uses the same positive CPU and memory
+rules as the YAML configuration. Save failures retain input and show a retry action.
+
+### Public configuration
 
 `docs/prebuild-yaml.md` documents the new mapping and its backend behavior. The
 Valet repository sets these values for its own sandbox:
