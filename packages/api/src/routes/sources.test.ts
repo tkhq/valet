@@ -333,6 +333,53 @@ describe("POST /api/org/sources (kind=repo)", () => {
 // ── PATCH /api/org/sources/:id ────────────────────────────────────────────────
 
 describe("PATCH /api/org/sources/:id", () => {
+  it("saves repository resources, preserves omitted fields, and clears defaults without baking", async () => {
+    const builder = new FakeImageBuilder();
+    api = await bootTestApi({ imageBuilder: builder });
+    const source = await seedRepoSource(api);
+    const patch = (body: Record<string, unknown>) => fetch(`${api!.baseUrl}/api/org/sources/${source.id}`, {
+      method: "PATCH", headers: HEADERS, body: JSON.stringify(body),
+    });
+    const saved = await patch({ sandboxResources: { cpu: 0.5, memory: " 8Gi " }, enabled: false });
+    expect(saved.status).toBe(200);
+    expect(await saved.json()).toMatchObject({ source: { sandboxResources: { cpu: 0.5, memory: "8Gi" } } });
+    await patch({ schedule: "off" });
+    const list = await fetch(`${api.baseUrl}/api/org/sources`, { headers: HEADERS });
+    expect(await list.json()).toMatchObject({ sources: [{ sandboxResources: { cpu: 0.5, memory: "8Gi" } }] });
+    for (const cleared of [{}, null]) {
+      await patch({ sandboxResources: { cpu: 2 } });
+      const response = await patch({ sandboxResources: cleared });
+      expect(await response.json()).toMatchObject({ source: { sandboxResources: null } });
+    }
+    expect(builder.specs).toEqual([]);
+  });
+
+  it("rejects invalid resources with corrective errors and enforces kind and organization scope", async () => {
+    api = await bootTestApi();
+    const source = await seedRepoSource(api);
+    const patch = (id: string, sandboxResources: unknown, headers = HEADERS) => fetch(`${api!.baseUrl}/api/org/sources/${id}`, {
+      method: "PATCH", headers, body: JSON.stringify({ sandboxResources }),
+    });
+    for (const invalid of [[], "4", { cpu: 0 }, { cpu: -1 }, { cpu: "2" }, { cpu: null }, { memory: "0Gi" }, { memory: "-1Gi" }, { memory: "nope" }, { memory: 4 }, { gpu: 1 }]) {
+      const response = await patch(source.id, invalid);
+      expect(response.status, JSON.stringify(invalid)).toBe(400);
+      expect(await response.json()).toMatchObject({ error: expect.stringMatching(/Set|Use|Remove/) });
+    }
+    const nonfinite = await fetch(`${api.baseUrl}/api/org/sources/${source.id}`, {
+      method: "PATCH", headers: HEADERS, body: '{"sandboxResources":{"cpu":1e309}}',
+    });
+    expect(nonfinite.status).toBe(400);
+    expect((await patch(source.id, { cpu: 2 }, MEMBER_HEADERS)).status).toBe(403);
+    const external = await createExternal(api.baseUrl);
+    expect((await patch(external.id, { cpu: 2 })).status).toBe(400);
+    const base = await createBase(api.baseUrl);
+    expect((await patch(base.id, null)).status).toBe(400);
+    const { imageSources } = await import("../schema/index.js");
+    const { eq } = await import("drizzle-orm");
+    await api.providers.db.update(imageSources).set({ orgId: "other-org" }).where(eq(imageSources.id, source.id));
+    expect((await patch(source.id, { cpu: 2 })).status).toBe(404);
+  });
+
   it("403s for a non-admin org member", async () => {
     api = await bootTestApi();
     const source = await createExternal(api.baseUrl);

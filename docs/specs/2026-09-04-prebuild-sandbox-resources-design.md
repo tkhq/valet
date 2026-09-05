@@ -256,8 +256,29 @@ The API stores these defaults on the repository image source. Only organization
 administrators can change them. Existing source routes retain their URLs and
 organization checks. Resource edits do not trigger an image bake.
 Runtime lookup uses the session organization, repository host, and full name.
+For GitHub, the lookup reads both `github` and `github.com` source rows.
+If both exist, the row matching the session's host wins, even when its defaults
+are empty. A missing session host means `github`. The alternate row applies only
+when the exact row is absent. Other repository hosts remain isolated.
 Disabled image sources still supply sandbox defaults. A missing row means no
 saved defaults. A failed database read produces no opinion for existing sandboxes.
+
+The nullable `image_sources.sandbox_resources` JSONB column stores this object:
+
+```json
+{ "cpu": 4, "memory": "8Gi" }
+```
+
+`GET /api/org/sources` returns it as `sandboxResources`. The wire field remains
+optional for compatibility with older API servers. `PATCH /api/org/sources/:id`
+accepts `sandboxResources` only for repository sources. An omitted field preserves
+the saved object. A supplied object replaces it. `{}` or `null` clears it.
+Omitted CPU or memory fields inherit from deployment defaults when YAML also omits them.
+CPU must be a positive finite number. Memory must be a positive Kubernetes
+quantity string; the API trims it before storage. Invalid values or unsupported
+fields return HTTP 400 with corrective guidance. Only organization administrators
+can update sources in their organization. A resource edit starts no bake and
+does not change the bake identity.
 
 Precedence is per field: repository YAML, saved repository defaults, deployment
 defaults, then provider behavior. The runtime resolver reads saved defaults on
@@ -266,6 +287,9 @@ It caches only the GitHub answer. Successful repository reads combine saved
 defaults with YAML overrides into the authoritative resource opinion. Applied
 metadata records this combined opinion. A failed read has no opinion for an
 existing sandbox. A fresh sandbox can use saved defaults as its fallback.
+If the database read fails but YAML succeeds, fresh compute can use the known
+YAML values. The resolver keeps these initial values separate from its authoritative
+resource opinion. Any failed lookup removes that opinion and protects adopted compute.
 
 The UI explains this precedence beside the controls. Query invalidation refreshes
 saved values after a mutation. Background refresh updates untouched fields and

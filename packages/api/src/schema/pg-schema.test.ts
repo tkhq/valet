@@ -867,6 +867,7 @@ describe("pg app schema + migrations", () => {
   // that database by dropping the columns, then re-run the migrations.
   describe("column repair for in-place 0000 edits", () => {
     const REPAIRED_COLUMNS: Array<{ table: string; column: string }> = [
+      { table: "image_sources", column: "sandbox_resources" },
       { table: "skill_sources", column: "created_by" },
       { table: "skill_sources", column: "kinds" },
       { table: "skill_sources", column: "discovery_scan" },

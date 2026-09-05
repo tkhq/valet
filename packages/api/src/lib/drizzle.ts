@@ -161,6 +161,11 @@ interface SchemaRepair {
  */
 const SCHEMA_REPAIRS: SchemaRepair[] = [
   {
+    describe: "image_sources.sandbox_resources column",
+    probe: { kind: "column", table: "image_sources", column: "sandbox_resources" },
+    sql: 'ALTER TABLE "image_sources" ADD COLUMN IF NOT EXISTS "sandbox_resources" jsonb',
+  },
+  {
     // Repository mirror columns on workflow_definitions. A deployed database
     // predating them holds only `local` rows, which is what the default
     // encodes, so the backfill is the default and nothing else is needed.

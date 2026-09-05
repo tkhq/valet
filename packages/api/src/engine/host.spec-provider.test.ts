@@ -7,6 +7,7 @@
  * what exec sequences and image refs the closure produced.
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
+import { eq } from "drizzle-orm";
 import {
   type ExecResult,
   type Sandbox,
@@ -224,6 +225,43 @@ describe("EngineHost buildSpecProvider", () => {
     prebuildYaml = "invalid";
     const failed = await specProvider!();
     expect(failed.resources).toBeUndefined();
+  });
+
+  it("reads disabled repository defaults on every invocation while YAML remains cached", async () => {
+    clearRepoPrebuildFlagsCache();
+    let reads = 0;
+    fixture = startGithubFixture({
+      getContents: (_owner, _repo, path) => {
+        if (path !== ".valet/prebuild.yaml") return { status: 404, body: { message: "Not Found" } };
+        reads += 1;
+        return contentsBody("resources:\n  memory: 8Gi\n", "resource-memory");
+      },
+    });
+    api = await bootTestApi({
+      sandboxProvider: makeIsolatedProvider(),
+      githubTokenDeps: { key: deriveSecretKey("test-key"), apiUrl: fixture.url, githubUrl: fixture.url },
+    });
+    const { db, engineHost } = api.providers;
+    await db.insert(imageSources).values({
+      id: "saved-defaults", orgId: ORG, kind: "repo", name: "acme/widgets",
+      repoHost: "github", repoFullName: "acme/widgets", enabled: false,
+      sandboxResources: { cpu: 2, memory: "4Gi" }, createdAt: Date.now(), updatedAt: Date.now(),
+    });
+    const sessionId = "sp-saved-resources";
+    await insertSession(db, sessionId);
+    const session = await engineHost.sessionFor(sessionId, {
+      userId: USER, orgId: ORG, workspace: `/tmp/${sessionId}`, repos: [primaryBinding],
+    });
+    const first = await session.options.specProvider!();
+    expect(first.resources).toEqual({ cpu: 2, memory: "8Gi" });
+    const cachedReads = reads;
+    await db.update(imageSources).set({ sandboxResources: { cpu: 4, memory: "16Gi" } }).where(eq(imageSources.id, "saved-defaults"));
+    const changed = await session.options.specProvider!();
+    expect(changed.resources).toEqual({ cpu: 4, memory: "8Gi" });
+    expect(changed.specHash).not.toBe(first.specHash);
+    expect(reads).toBe(cachedReads);
+    await db.update(imageSources).set({ sandboxResources: null }).where(eq(imageSources.id, "saved-defaults"));
+    expect((await session.options.specProvider!()).resources).toEqual({ memory: "8Gi" });
   });
 
   it("unbound session on isolated provider runs credential-scripts and git-identity steps", async () => {

@@ -14,6 +14,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import type { ParamMatcher } from "../policies/matchers.js";
+import type { PrebuildResources } from "../prebuilds/recipe.js";
 
 // Postgres rewrite of `schema/index.ts` (docs/specs/2026-07-15-postgres-backend-design.md,
 // decision 7). Timestamps convert SELECTIVELY, not blanket:
@@ -1725,6 +1726,7 @@ export const imageSources = pgTable(
     repoHost: text("repo_host"),
     repoFullName: text("repo_full_name"),
     cloneUrl: text("clone_url"),
+    sandboxResources: jsonb("sandbox_resources").$type<PrebuildResources>(),
     // Shared scheduling/state
     schedule: text("schedule", { enum: ["nightly", "off"] })
       .notNull()

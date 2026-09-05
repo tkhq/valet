@@ -342,6 +342,7 @@ describe("SourceService", () => {
         externalRef: null,
         pullSecretName: null,
         setupCommands: setup,
+        sandboxResources: null,
         profile: "headless",
         repoHost: null,
         repoFullName: null,
@@ -365,6 +366,7 @@ describe("SourceService", () => {
       // (pointless rebakes).
       const base: typeof imageSources.$inferSelect = {
         id: "b-env",
+        sandboxResources: null,
         orgId,
         kind: "base",
         parentId: null,
@@ -406,6 +408,16 @@ describe("SourceService", () => {
       const a = service.identityHash(src, null, { recipe: [{ id: "npm-ci", lockfile: "package-lock.json", command: "npm ci" }], setup: [] });
       const b = service.identityHash(src, null, { recipe: [], setup: [] });
       expect(a).not.toBe(b);
+    });
+
+    it("saved sandbox resource edits do not change the repository bake identity", async () => {
+      const srcId = await seedRepoSource(db);
+      const [before] = await db.select().from(imageSources).where(eq(imageSources.id, srcId));
+      const recipe = { recipe: [], setup: [] };
+      const identity = service.identityHash(before, "parent", recipe);
+      await db.update(imageSources).set({ sandboxResources: { cpu: 4, memory: "8Gi" } }).where(eq(imageSources.id, srcId));
+      const [after] = await db.select().from(imageSources).where(eq(imageSources.id, srcId));
+      expect(service.identityHash(after, "parent", recipe)).toBe(identity);
     });
   });
 
