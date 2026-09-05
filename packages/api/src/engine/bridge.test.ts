@@ -291,6 +291,44 @@ describe("busEventToWire", () => {
     ]);
   });
 
+  it("forwards active model_state with its submission pair", () => {
+    const out = busEventToWire(
+      ev({
+        type: "model_state",
+        threadId: "t1",
+        queueItemId: "q1",
+        model: "anthropic/claude-opus-4-7",
+      }),
+    );
+    expect(out).toEqual([
+      {
+        type: "model.state",
+        threadId: "t1",
+        queueItemId: "q1",
+        model: "anthropic/claude-opus-4-7",
+      },
+    ]);
+  });
+
+  it("forwards idle model_state with both submission fields cleared", () => {
+    const out = busEventToWire(
+      ev({
+        type: "model_state",
+        threadId: "t1",
+        queueItemId: null,
+        model: null,
+      }),
+    );
+    expect(out).toEqual([
+      {
+        type: "model.state",
+        threadId: "t1",
+        queueItemId: null,
+        model: null,
+      },
+    ]);
+  });
+
   it("forwards sandbox_status with estimateMs passthrough", () => {
     const out = busEventToWire(
       ev({

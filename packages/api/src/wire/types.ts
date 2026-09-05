@@ -1493,6 +1493,24 @@ export type WireEvent =
       scope?: "turn" | "thread";
     }
   | {
+      seq: number;
+      ts: number;
+      offset?: string;
+      type: "model.state";
+      threadId: string;
+      queueItemId: string;
+      model: string;
+    }
+  | {
+      seq: number;
+      ts: number;
+      offset?: string;
+      type: "model.state";
+      threadId: string;
+      queueItemId: null;
+      model: null;
+    }
+  | {
       /**
        * Compaction lifecycle (thread-model-pinning and compaction design,
        * decision 7). `compaction_start` shows a transient "compacting"

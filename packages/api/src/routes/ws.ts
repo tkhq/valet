@@ -8,10 +8,10 @@
  * Semantics:
  *   - One subscriber = one socket = one session.
  *   - `init` is sent first, metadata-only. Thread history loads via REST.
- *   - After `init`, the handshake seeds one `queue.state` frame per thread
- *     (durable queue rows) plus a `status` frame for each thread that is
- *     mid-turn, so a client connecting during a long tool call sees the
- *     agent as busy immediately.
+ *   - After `init`, the handshake seeds each thread's queue and non-idle
+ *     status before durable replay can advance that state.
+ *   - The handshake subscribes before reading active model state. The model
+ *     snapshot follows replay and buffered live frames, so it is authoritative.
  *   - Resume: `?fromOffset=<offset>` replays durable events after that offset
  *     before live delivery resumes. Durable frames carry a persistent
  *     `offset`; ephemeral frames (text_delta) never do. Without the query
@@ -35,6 +35,40 @@ const PING_INTERVAL_MS = 30_000;
 /** Page size for durable replay reads on resume. */
 const REPLAY_PAGE_SIZE = 500;
 
+export function createWsConnectionLifecycle() {
+  let closed = false;
+  let pingTimer: ReturnType<typeof setInterval> | undefined;
+  let unsubscribe: (() => void) | undefined;
+
+  return {
+    get closed() {
+      return closed;
+    },
+    setUnsubscribe(next: () => void) {
+      if (closed) {
+        next();
+        return;
+      }
+      unsubscribe = next;
+    },
+    startKeepalive(sendPing: () => void) {
+      if (closed || pingTimer !== undefined) return;
+      pingTimer = setInterval(sendPing, PING_INTERVAL_MS);
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      if (pingTimer !== undefined) {
+        clearInterval(pingTimer);
+        pingTimer = undefined;
+      }
+      const currentUnsubscribe = unsubscribe;
+      unsubscribe = undefined;
+      currentUnsubscribe?.();
+    },
+  };
+}
+
 export function registerWsRoutes(
   app: Hono<AppEnv>,
   upgradeWebSocket: UpgradeWebSocket,
@@ -52,8 +86,7 @@ export function registerWsRoutes(
         rawFromOffset !== undefined && rawFromOffset !== "" ? rawFromOffset : undefined;
 
       let seq = 0;
-      let pingTimer: ReturnType<typeof setInterval> | undefined;
-      let unsubscribe: (() => void) | undefined;
+      const lifecycle = createWsConnectionLifecycle();
       // Track the most recent assistant messageId per thread so text_delta
       // events can be tagged with a real id (engine emits deltas without one).
       const activeMessageByThread = new Map<string, string>();
@@ -82,8 +115,15 @@ export function registerWsRoutes(
               .from(agentSessions)
               .where(eq(agentSessions.id, sessionId))
               .limit(1);
+            if (lifecycle.closed) return;
             const row = rows[0];
-            if (!row || !(await canViewSession(providers.db, row, userId))) {
+            if (!row) {
+              ws.close(4040, "session not found");
+              return;
+            }
+            const canView = await canViewSession(providers.db, row, userId);
+            if (lifecycle.closed) return;
+            if (!canView) {
               ws.close(4040, "session not found");
               return;
             }
@@ -100,17 +140,19 @@ export function registerWsRoutes(
             // carry repo bindings — otherwise the session caches a prep-less
             // attachment and repo-bound sessions never clone. `loadSessionMeta`
             // assembles the complete meta (repos + git identity included).
-            const engineSession = await providers.engineHost.sessionFor(
-              sessionId,
-              await loadSessionMeta(providers.db, row),
-            );
+            const sessionMeta = await loadSessionMeta(providers.db, row);
+            if (lifecycle.closed) return;
+            const engineSession = await providers.engineHost.sessionFor(sessionId, sessionMeta);
+            if (lifecycle.closed) return;
             await engineSession.ensureDefaultThread();
+            if (lifecycle.closed) return;
 
             // Run state at handshake time, from the same derivation the REST
             // routes use (`sessions/run-state.ts`). Later changes arrive as
             // their own frames (`queue.state`, `decision_gate`,
             // `submission.settled`); this only seeds the opening view.
             const unsettled = await providers.engineStore.listUnsettledSubmissions(sessionId);
+            if (lifecycle.closed) return;
             const run = deriveRunFields(
               { status: row.status as SessionStatus, updatedAt: row.updatedAt },
               unsettled,
@@ -146,7 +188,9 @@ export function registerWsRoutes(
             // (no offset), so the client applies them unconditionally and a
             // later durable replay still converges to the same state.
             for (const thread of engineSession.listThreads()) {
-              send(ws, queueStateToWire(sessionId, thread.id, await thread.currentQueueState()));
+              const queueState = await thread.currentQueueState();
+              if (lifecycle.closed) return;
+              send(ws, queueStateToWire(sessionId, thread.id, queueState));
               const agentStatus = thread.currentAgentStatus;
               if (agentStatus !== "idle") {
                 send(ws, { type: "status", threadId: thread.id, status: agentStatus });
@@ -176,13 +220,15 @@ export function registerWsRoutes(
             // of (or duplicate) the durable events being replayed.
             let replaying = fromOffset !== undefined;
             const liveBuffer: DeliveredBusEvent[] = [];
-            unsubscribe = providers.eventStream.subscribe({ sessionId }, (busEvent: DeliveredBusEvent) => {
-              if (replaying) {
-                liveBuffer.push(busEvent);
-                return;
-              }
-              emit(busEvent);
-            });
+            lifecycle.setUnsubscribe(
+              providers.eventStream.subscribe({ sessionId }, (busEvent: DeliveredBusEvent) => {
+                if (replaying) {
+                  liveBuffer.push(busEvent);
+                  return;
+                }
+                emit(busEvent);
+              }),
+            );
 
             if (fromOffset !== undefined) {
               // Replay durable events strictly after `fromOffset`, in pages,
@@ -196,6 +242,7 @@ export function registerWsRoutes(
                   fromOffset: cursor,
                   limit: REPLAY_PAGE_SIZE,
                 });
+                if (lifecycle.closed) return;
                 if (events.length === 0) break;
                 for (const stored of events) {
                   emit(stored);
@@ -217,14 +264,37 @@ export function registerWsRoutes(
               replaying = false;
             }
 
+            // Seed per-thread model state after the subscription and replay.
+            // `currentModelState()` serializes with model transitions, so an
+            // earlier live event is sent before this authoritative snapshot.
+            // A later transition follows it through the installed subscription.
+            for (const thread of engineSession.listThreads()) {
+              const modelState = await thread.currentModelState();
+              if (lifecycle.closed) return;
+              send(ws, modelState
+                ? {
+                    type: "model.state",
+                    threadId: thread.id,
+                    queueItemId: modelState.queueItemId,
+                    model: modelState.model,
+                  }
+                : {
+                    type: "model.state",
+                    threadId: thread.id,
+                    queueItemId: null,
+                    model: null,
+                  });
+            }
+
             // Periodic keepalive.
-            pingTimer = setInterval(() => {
+            lifecycle.startKeepalive(() => {
               send(ws, { type: "ping" });
-            }, PING_INTERVAL_MS);
+            });
           } catch (err) {
             // Engine setup failed (e.g. workspace doesn't exist, Docker
             // unreachable). Surface as a wire error and close — never
             // throw past the handler, or it crashes the whole process.
+            if (lifecycle.closed) return;
             console.error("ws onOpen failed:", err);
             try {
               send(ws, {
@@ -254,8 +324,7 @@ export function registerWsRoutes(
         },
 
         onClose() {
-          if (pingTimer) clearInterval(pingTimer);
-          if (unsubscribe) unsubscribe();
+          lifecycle.close();
         },
 
         onError(err) {

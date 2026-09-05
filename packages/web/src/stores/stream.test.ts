@@ -41,6 +41,32 @@ function statusEvent(
   return { seq: ts, ts, type: "status", threadId, status };
 }
 
+function activeModelState(
+  threadId: string,
+  queueItemId: string,
+  model: string,
+): WireEvent {
+  return {
+    seq: 1,
+    ts: Date.now(),
+    type: "model.state",
+    threadId,
+    queueItemId,
+    model,
+  };
+}
+
+function idleModelState(threadId: string): WireEvent {
+  return {
+    seq: 1,
+    ts: Date.now(),
+    type: "model.state",
+    threadId,
+    queueItemId: null,
+    model: null,
+  };
+}
+
 describe("stream store reducer", () => {
   beforeEach(reset);
 
@@ -494,6 +520,220 @@ describe("stream store reducer", () => {
     expect(useStreamStore.getState().bySession[SESSION].sandbox).toBeDefined();
     resetSession(SESSION);
     expect(useStreamStore.getState().bySession[SESSION].sandbox).toBeUndefined();
+  });
+});
+
+describe("active model state", () => {
+  beforeEach(reset);
+
+  const THREAD_B = "thread-b";
+
+  it("preserves identity for an absent idle snapshot unless it advances the offset", () => {
+    const { ingest, setConnection } = useStreamStore.getState();
+    setConnection(SESSION, "open");
+    const before = useStreamStore.getState();
+    const beforeSlice = before.bySession[SESSION];
+
+    ingest(SESSION, idleModelState(THREAD));
+
+    expect(useStreamStore.getState()).toBe(before);
+    expect(useStreamStore.getState().bySession[SESSION]).toBe(beforeSlice);
+
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      offset: offset(1),
+      type: "model.state",
+      threadId: THREAD,
+      queueItemId: null,
+      model: null,
+    });
+
+    const afterOffset = useStreamStore.getState();
+    expect(afterOffset).not.toBe(before);
+    expect(afterOffset.bySession[SESSION]).not.toBe(beforeSlice);
+    expect(afterOffset.bySession[SESSION].lastOffset).toBe(offset(1));
+  });
+
+  it("preserves identity for an identical active snapshot unless it advances the offset", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, activeModelState(THREAD, "q-1", "openai/gpt-5.2"));
+    const before = useStreamStore.getState();
+    const beforeSlice = before.bySession[SESSION];
+
+    ingest(SESSION, activeModelState(THREAD, "q-1", "openai/gpt-5.2"));
+
+    expect(useStreamStore.getState()).toBe(before);
+    expect(useStreamStore.getState().bySession[SESSION]).toBe(beforeSlice);
+
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      offset: offset(1),
+      type: "model.state",
+      threadId: THREAD,
+      queueItemId: "q-1",
+      model: "openai/gpt-5.2",
+    });
+
+    const afterOffset = useStreamStore.getState();
+    expect(afterOffset).not.toBe(before);
+    expect(afterOffset.bySession[SESSION]).not.toBe(beforeSlice);
+    expect(afterOffset.bySession[SESSION].lastOffset).toBe(offset(1));
+    expect(afterOffset.bySession[SESSION].activeModelByThread).toBe(
+      beforeSlice.activeModelByThread,
+    );
+  });
+
+  it("sets an active model and replaces the model for the same submission", () => {
+    const { ingest } = useStreamStore.getState();
+
+    ingest(SESSION, activeModelState(THREAD, "q-1", "anthropic/claude-sonnet-4-5"));
+    expect(useStreamStore.getState().bySession[SESSION].activeModelByThread[THREAD]).toEqual({
+      queueItemId: "q-1",
+      model: "anthropic/claude-sonnet-4-5",
+    });
+
+    ingest(SESSION, activeModelState(THREAD, "q-1", "openai/gpt-5.2"));
+    expect(useStreamStore.getState().bySession[SESSION].activeModelByThread[THREAD]).toEqual({
+      queueItemId: "q-1",
+      model: "openai/gpt-5.2",
+    });
+  });
+
+  it("removes only the named thread on an explicit idle snapshot", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, activeModelState(THREAD, "q-1", "openai/gpt-5.2"));
+    ingest(SESSION, activeModelState(THREAD_B, "q-2", "anthropic/claude-opus-4-1"));
+
+    ingest(SESSION, idleModelState(THREAD));
+
+    const byThread = useStreamStore.getState().bySession[SESSION].activeModelByThread;
+    expect(byThread[THREAD]).toBeUndefined();
+    expect(byThread[THREAD_B]).toEqual({
+      queueItemId: "q-2",
+      model: "anthropic/claude-opus-4-1",
+    });
+  });
+
+  it("clears a matching submission and still applies fallback message badge logic", () => {
+    const { addUserMessage, ingest } = useStreamStore.getState();
+    const messageId = addUserMessage(SESSION, "run this", THREAD);
+    ingest(SESSION, activeModelState(THREAD, "q-active", "openai/gpt-5.2"));
+
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      type: "submission.settled",
+      sessionId: SESSION,
+      threadId: THREAD,
+      queueItemId: "q-active",
+      outcome: "failed",
+      error: "run failed",
+    });
+
+    const slice = useStreamStore.getState().bySession[SESSION];
+    expect(slice.activeModelByThread[THREAD]).toBeUndefined();
+    expect(slice.messages.find((message) => message.id === messageId)).toMatchObject({
+      settledOutcome: "failed",
+      settledError: "run failed",
+    });
+  });
+
+  it("clears a matching submission even when no message can be badged", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, activeModelState(THREAD, "q-active", "openai/gpt-5.2"));
+
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      type: "submission.settled",
+      sessionId: SESSION,
+      threadId: THREAD,
+      queueItemId: "q-active",
+      outcome: "completed",
+    });
+
+    expect(
+      useStreamStore.getState().bySession[SESSION].activeModelByThread[THREAD],
+    ).toBeUndefined();
+  });
+
+  it("keeps active state when a different submission settles and still badges its message", () => {
+    const { addUserMessage, ingest, setMessageQueueItemId } = useStreamStore.getState();
+    const messageId = addUserMessage(SESSION, "queued prompt", THREAD);
+    setMessageQueueItemId(SESSION, messageId, "q-queued");
+    ingest(SESSION, activeModelState(THREAD, "q-active", "openai/gpt-5.2"));
+
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      type: "submission.settled",
+      sessionId: SESSION,
+      threadId: THREAD,
+      queueItemId: "q-queued",
+      outcome: "superseded",
+    });
+
+    const slice = useStreamStore.getState().bySession[SESSION];
+    expect(slice.activeModelByThread[THREAD]).toEqual({
+      queueItemId: "q-active",
+      model: "openai/gpt-5.2",
+    });
+    expect(slice.messages.find((message) => message.id === messageId)?.settledOutcome).toBe(
+      "superseded",
+    );
+  });
+
+  it("keeps other threads when a matching submission settles", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, activeModelState(THREAD, "q-1", "openai/gpt-5.2"));
+    ingest(SESSION, activeModelState(THREAD_B, "q-2", "anthropic/claude-opus-4-1"));
+
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      type: "submission.settled",
+      sessionId: SESSION,
+      threadId: THREAD,
+      queueItemId: "q-1",
+      outcome: "completed",
+    });
+
+    const byThread = useStreamStore.getState().bySession[SESSION].activeModelByThread;
+    expect(byThread[THREAD]).toBeUndefined();
+    expect(byThread[THREAD_B]).toEqual({
+      queueItemId: "q-2",
+      model: "anthropic/claude-opus-4-1",
+    });
+  });
+
+  it("resets all active models on init before handshake snapshots reseed them", () => {
+    const { ingest } = useStreamStore.getState();
+    ingest(SESSION, activeModelState(THREAD, "q-1", "openai/gpt-5.2"));
+    ingest(SESSION, activeModelState(THREAD_B, "q-2", "anthropic/claude-opus-4-1"));
+
+    ingest(SESSION, {
+      seq: 2,
+      ts: Date.now(),
+      type: "init",
+      session: {
+        id: SESSION,
+        workspace: "/workspace",
+        status: "active",
+        kind: "code",
+        runState: "idle",
+        createdAt: 0,
+        updatedAt: 0,
+        lastActivityAt: 0,
+        owner: { type: "user", id: "user-1" },
+        messageCount: 0,
+        profile: "headless",
+        docker: false,
+      },
+    });
+
+    expect(useStreamStore.getState().bySession[SESSION].activeModelByThread).toEqual({});
   });
 });
 

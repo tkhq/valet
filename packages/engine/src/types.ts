@@ -1459,6 +1459,25 @@ export type EngineEventStatus =
   | "blocked_on_decision_gate"
   | "error";
 
+export interface ActiveModelState {
+  queueItemId: string;
+  model: string;
+}
+
+export type ModelStateEvent =
+  | {
+      type: "model_state";
+      threadId: string;
+      queueItemId: string;
+      model: string;
+    }
+  | {
+      type: "model_state";
+      threadId: string;
+      queueItemId: null;
+      model: null;
+    };
+
 export type EngineEvent =
   | { type: "message_start"; threadId: string; messageId: string; role: "assistant" | "system" }
   | { type: "text_delta"; threadId: string; text: string }
@@ -1510,6 +1529,7 @@ export type EngineEvent =
     }
   | { type: "thread_start"; threadId: string; parentThreadId?: string }
   | { type: "queue_state"; threadId: string; state: QueueState }
+  | ModelStateEvent
   | { type: "compaction_start" | "compaction_end"; threadId: string }
   | { type: "task_start" | "task_end"; childSessionId: string; threadId: string }
   | { type: "status"; threadId: string; status: EngineEventStatus }

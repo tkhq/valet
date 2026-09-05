@@ -634,7 +634,420 @@ async function seedCrashedRunningTurn(
   return { itemId, attemptId, callId };
 }
 
+async function resolveSeededGate(store: SessionStore): Promise<void> {
+  const gate = await store.getDecisionGate(SESSION, "g-crash");
+  if (!gate) throw new Error("seeded gate missing");
+  const resolution = { actionId: "approve", resolvedBy: "u1", resolvedAt: Date.now() };
+  await store.saveDecisionGate(SESSION, THREAD, {
+    ...gate,
+    status: "resolved",
+    resolution,
+    updatedAt: Date.now(),
+  });
+  const entries = await store.getEntries(SESSION, THREAD);
+  const gateEntry = entries.find(
+    (entry) => entry.type === "decision_gate" && entry.gate.id === gate.id,
+  );
+  if (!gateEntry || gateEntry.type !== "decision_gate") {
+    throw new Error("seeded gate entry missing");
+  }
+  gateEntry.resolution = resolution;
+  gateEntry.gate = { ...gateEntry.gate, status: "resolved", resolution };
+  await store.updateEntry(SESSION, THREAD, gateEntry);
+}
+
+function modelStatesFor(events: BusEvent[], queueItemId: string) {
+  return events.flatMap((event) =>
+    event.event.type === "model_state" &&
+    (event.event.queueItemId === queueItemId ||
+      (event.event.queueItemId === null && event.queueItemId === queueItemId))
+      ? [event.event]
+      : [],
+  );
+}
+
 describe("reconciliation executor (integration)", () => {
+  it.each(["resume", "replay"] as const)(
+    "%s publishes the resolved model before continuation and clears it after success",
+    async (mode) => {
+      const store = new InMemorySessionStore();
+      const spy = spyTool();
+      const { itemId } = await seedCrashedRunningTurn(store, {
+        withGate: mode === "replay",
+      });
+      if (mode === "replay") await resolveSeededGate(store);
+
+      const events: BusEvent[] = [];
+      const faux = registerFauxProvider({ provider: `recovery-success-${mode}` });
+      const model = faux.getModel();
+      let activeBeforeContinue = false;
+      faux.setResponses([
+        () => {
+          activeBeforeContinue = modelStatesFor(events, itemId).some(
+            (event) => event.queueItemId === itemId,
+          );
+          return fauxAssistantMessage("resumed and done");
+        },
+      ]);
+      const bus = new InMemoryEventStream();
+      bus.subscribe({}, (event) => events.push(event));
+      const engine = new Engine({
+        providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
+      });
+      const session = await engine.restoreSession({
+        sessionId: SESSION,
+        options: {
+          userId: "u1",
+          orgId: "o1",
+          workspace: "/",
+          sandbox: {},
+          model,
+          tools: [spy.def],
+          resolveModel: async () => ({ model, apiKey: "recovery-key" }),
+        },
+      });
+
+      await waitForAsync(
+        async () => (await store.getQueueItem(SESSION, itemId))?.status === "settled",
+        4000,
+      );
+      const thread = session.threadById(THREAD);
+      if (!thread) throw new Error("restored thread missing");
+      expect(activeBeforeContinue).toBe(true);
+      expect(modelStatesFor(events, itemId)).toEqual([
+        {
+          type: "model_state",
+          threadId: THREAD,
+          queueItemId: itemId,
+          model: `${model.provider}/${model.id}`,
+        },
+        { type: "model_state", threadId: THREAD, queueItemId: null, model: null },
+      ]);
+      expect(await thread.currentModelState()).toBeNull();
+      expect(thread.runningItemId()).toBeUndefined();
+      faux.unregister();
+    },
+  );
+
+  it.each(["resume", "replay"] as const)(
+    "%s clears active model state after a continuation error",
+    async (mode) => {
+      const store = new InMemorySessionStore();
+      const spy = spyTool();
+      const { itemId } = await seedCrashedRunningTurn(store, {
+        withGate: mode === "replay",
+      });
+      if (mode === "replay") await resolveSeededGate(store);
+
+      const faux = registerFauxProvider({ provider: `recovery-error-base-${mode}` });
+      const model = faux.getModel();
+      faux.setResponses([
+        () => {
+          throw new Error(`recovery continuation failed: ${mode}`);
+        },
+      ]);
+      const bus = new InMemoryEventStream();
+      const events: BusEvent[] = [];
+      bus.subscribe({}, (event) => events.push(event));
+      const engine = new Engine({
+        providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
+      });
+      const session = await engine.restoreSession({
+        sessionId: SESSION,
+        options: {
+          userId: "u1",
+          orgId: "o1",
+          workspace: "/",
+          sandbox: {},
+          model: faux.getModel(),
+          tools: [spy.def],
+          resolveModel: async () => ({ model, apiKey: "broken-key" }),
+        },
+      });
+
+      await waitForAsync(
+        async () => (await store.getQueueItem(SESSION, itemId))?.status === "settled",
+        4000,
+      );
+      const thread = session.threadById(THREAD);
+      if (!thread) throw new Error("restored thread missing");
+      expect((await store.getQueueItem(SESSION, itemId))?.outcome?.outcome).toBe("failed");
+      expect(modelStatesFor(events, itemId)).toEqual([
+        {
+          type: "model_state",
+          threadId: THREAD,
+          queueItemId: itemId,
+          model: `${model.provider}/${model.id}`,
+        },
+        { type: "model_state", threadId: THREAD, queueItemId: null, model: null },
+      ]);
+      expect(await thread.currentModelState()).toBeNull();
+      expect(thread.runningItemId()).toBeUndefined();
+      faux.unregister();
+    },
+  );
+
+  it.each(["resume", "replay"] as const)(
+    "a generic %s model-state failure skips continuation and restores the next prompt",
+    async (mode) => {
+      const store = new InMemorySessionStore();
+      const spy = spyTool();
+      const { itemId } = await seedCrashedRunningTurn(store, {
+        withGate: mode === "replay",
+      });
+      if (mode === "replay") await resolveSeededGate(store);
+
+      const recoveryFaux = registerFauxProvider({ provider: `recovery-emit-fail-${mode}` });
+      const nextFaux = registerFauxProvider({ provider: `recovery-emit-next-${mode}` });
+      let recoveryCalls = 0;
+      let nextCalls = 0;
+      let nextPromptSystem: string | undefined;
+      recoveryFaux.setResponses([
+        () => {
+          recoveryCalls += 1;
+          return fauxAssistantMessage("must not continue");
+        },
+      ]);
+      nextFaux.setResponses([
+        (context) => {
+          nextCalls += 1;
+          nextPromptSystem = context.systemPrompt;
+          return fauxAssistantMessage("next prompt completed");
+        },
+      ]);
+      const bus = new InMemoryEventStream();
+      const events: BusEvent[] = [];
+      bus.subscribe({}, (event) => events.push(event));
+      const append = bus.append.bind(bus);
+      let rejected = false;
+      vi.spyOn(bus, "append").mockImplementation(async (event, eventKey, fence) => {
+        if (
+          !rejected &&
+          event.event.type === "model_state" &&
+          event.event.queueItemId === itemId
+        ) {
+          rejected = true;
+          throw new Error("recovery model state unavailable");
+        }
+        return append(event, eventKey, fence);
+      });
+      const engine = new Engine({
+        providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
+      });
+      const session = await engine.restoreSession({
+        sessionId: SESSION,
+        options: {
+          userId: "u1",
+          orgId: "o1",
+          workspace: "/",
+          sandbox: {},
+          model: nextFaux.getModel(),
+          systemPrompt: "Baseline recovery prompt.",
+          tools: [spy.def],
+          resolveModel: async () => ({
+            model: rejected ? nextFaux.getModel() : recoveryFaux.getModel(),
+            apiKey: "recovery-key",
+          }),
+        },
+      });
+
+      await waitForAsync(
+        async () => (await store.getQueueItem(SESSION, itemId))?.status === "settled",
+        4000,
+      );
+      const thread = session.threadById(THREAD);
+      if (!thread) throw new Error("restored thread missing");
+      expect((await store.getQueueItem(SESSION, itemId))?.outcome?.outcome).toBe("failed");
+      expect(recoveryCalls).toBe(0);
+      expect(modelStatesFor(events, itemId)).toEqual([]);
+      expect(await thread.currentModelState()).toBeNull();
+      expect(thread.runningItemId()).toBeUndefined();
+
+      const next = await thread.submitPrompt("next prompt", {});
+      await waitForAsync(
+        async () => (await store.getQueueItem(SESSION, next.queueItemId))?.status === "settled",
+        4000,
+      );
+      expect(nextCalls).toBe(1);
+      expect(nextPromptSystem).toMatch(/^Baseline recovery prompt\.\n\n## Runtime model\n/);
+      expect(nextPromptSystem).toContain(`Current provider: ${nextFaux.getModel().provider}`);
+      expect(nextPromptSystem).toContain("Temporary override: none");
+      recoveryFaux.unregister();
+      nextFaux.unregister();
+    },
+  );
+
+  it.each(["resume", "replay"] as const)(
+    "%s clears active model state when settlement fails",
+    async (mode) => {
+      const store = new InMemorySessionStore();
+      const spy = spyTool();
+      const { itemId } = await seedCrashedRunningTurn(store, {
+        withGate: mode === "replay",
+      });
+      if (mode === "replay") await resolveSeededGate(store);
+      vi.spyOn(store, "finalizeSettlement").mockRejectedValueOnce(
+        new Error("settlement unavailable"),
+      );
+
+      const faux = registerFauxProvider({ provider: `recovery-settle-failure-${mode}` });
+      const model = faux.getModel();
+      faux.setResponses([fauxAssistantMessage("continuation completed")]);
+      const bus = new InMemoryEventStream();
+      const events: BusEvent[] = [];
+      bus.subscribe({}, (event) => events.push(event));
+      const engine = new Engine({
+        providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
+      });
+      const session = await engine.restoreSession({
+        sessionId: SESSION,
+        options: {
+          userId: "u1",
+          orgId: "o1",
+          workspace: "/",
+          sandbox: {},
+          model,
+          tools: [spy.def],
+          resolveModel: async () => ({ model, apiKey: "recovery-key" }),
+        },
+      });
+      const thread = session.threadById(THREAD);
+      if (!thread) throw new Error("restored thread missing");
+      await waitForAsync(
+        async () =>
+          events.some(
+            (event) => event.event.type === "error" && event.event.code === "settlement_failed",
+          ) && !thread.hasActiveRun,
+        4000,
+      );
+
+      expect(modelStatesFor(events, itemId)).toEqual([
+        {
+          type: "model_state",
+          threadId: THREAD,
+          queueItemId: itemId,
+          model: `${model.provider}/${model.id}`,
+        },
+        { type: "model_state", threadId: THREAD, queueItemId: null, model: null },
+      ]);
+      expect(await thread.currentModelState()).toBeNull();
+      expect(thread.runningItemId()).toBeUndefined();
+      faux.unregister();
+    },
+  );
+
+  it.each(["resume", "replay"] as const)(
+    "a stale %s model-state publish skips continuation, cleans up, and permits the next prompt",
+    async (mode) => {
+      const store = new InMemorySessionStore();
+      const spy = spyTool();
+      const { itemId } = await seedCrashedRunningTurn(store, {
+        withGate: mode === "replay",
+      });
+      if (mode === "replay") await resolveSeededGate(store);
+
+      const recoveryFaux = registerFauxProvider({ provider: `recovery-stale-${mode}` });
+      const nextFaux = registerFauxProvider({ provider: `recovery-next-${mode}` });
+      let recoveryCalls = 0;
+      let nextCalls = 0;
+      let nextPromptSystem: string | undefined;
+      recoveryFaux.setResponses([
+        () => {
+          recoveryCalls += 1;
+          return fauxAssistantMessage("must not continue");
+        },
+      ]);
+      nextFaux.setResponses([
+        (context) => {
+          nextCalls += 1;
+          nextPromptSystem = context.systemPrompt;
+          return fauxAssistantMessage("next prompt completed");
+        },
+      ]);
+      const bus = new InMemoryEventStream({
+        fenceCheck: (fence) => store.isCurrentAttempt(fence.itemId, fence.attemptId),
+      });
+      const events: BusEvent[] = [];
+      bus.subscribe({}, (event) => events.push(event));
+      const append = bus.append.bind(bus);
+      let intercepted = false;
+      vi.spyOn(bus, "append").mockImplementation(async (event, eventKey, fence) => {
+        if (
+          !intercepted &&
+          event.event.type === "model_state" &&
+          event.event.queueItemId === itemId &&
+          fence
+        ) {
+          intercepted = true;
+          const replaced = await store.replaceSubmissionAttempt(
+            event.sessionId,
+            event.event.threadId,
+            fence.itemId,
+            {
+              sessionId: event.sessionId,
+              threadId: event.event.threadId,
+              itemId: fence.itemId,
+              attemptId: `att-recovery-successor-${mode}`,
+              ownerId: `recovery-successor-${mode}`,
+            },
+            { expectedAttemptId: fence.attemptId },
+          );
+          expect(replaced).toBeTruthy();
+          await store.forceSettle(event.sessionId, fence.itemId, "aborted", "successor settled");
+        }
+        return append(event, eventKey, fence);
+      });
+      const engine = new Engine({
+        providers: { store, stream: bus, sandboxProvider: new VirtualSandboxProvider() },
+      });
+      const session = await engine.restoreSession({
+        sessionId: SESSION,
+        options: {
+          userId: "u1",
+          orgId: "o1",
+          workspace: "/",
+          sandbox: {},
+          model: nextFaux.getModel(),
+          systemPrompt: "Baseline recovery prompt.",
+          tools: [spy.def],
+          resolveModel: async () => ({
+            model: intercepted ? nextFaux.getModel() : recoveryFaux.getModel(),
+            apiKey: "recovery-key",
+          }),
+        },
+      });
+      const thread = session.threadById(THREAD);
+      if (!thread) throw new Error("restored thread missing");
+      await waitForAsync(async () => !thread.hasActiveRun, 4000);
+
+      expect(recoveryCalls).toBe(0);
+      expect(modelStatesFor(events, itemId)).toEqual([]);
+      expect(await thread.currentModelState()).toBeNull();
+      expect(thread.runningItemId()).toBeUndefined();
+
+      const next = await thread.submitPrompt("next prompt", {});
+      await waitForAsync(
+        async () => (await store.getQueueItem(SESSION, next.queueItemId))?.status === "settled",
+        4000,
+      );
+      expect(nextCalls).toBe(1);
+      expect(nextPromptSystem).toMatch(/^Baseline recovery prompt\.\n\n## Runtime model\n/);
+      expect(nextPromptSystem).toContain(`Current provider: ${nextFaux.getModel().provider}`);
+      expect(nextPromptSystem).toContain("Temporary override: none");
+      expect(modelStatesFor(events, next.queueItemId)).toEqual([
+        {
+          type: "model_state",
+          threadId: THREAD,
+          queueItemId: next.queueItemId,
+          model: `${nextFaux.getModel().provider}/${nextFaux.getModel().id}`,
+        },
+        { type: "model_state", threadId: THREAD, queueItemId: null, model: null },
+      ]);
+      recoveryFaux.unregister();
+      nextFaux.unregister();
+    },
+  );
+
   it("resumes a crashed running turn: dangling tool_call → error, continues, settles completed, no re-execution", async () => {
     const store = new InMemorySessionStore();
     const spy = spyTool();
