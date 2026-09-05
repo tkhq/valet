@@ -19,6 +19,20 @@ async function png(width = 8, height = 8): Promise<Uint8Array> {
   );
 }
 
+async function animatedWebp(): Promise<Uint8Array> {
+  const pixels = new Uint8Array(8 * 16 * 3);
+  for (let pixel = 0; pixel < 8 * 8; pixel += 1) {
+    pixels[pixel * 3] = 255;
+    pixels[(pixel + 8 * 8) * 3 + 2] = 255;
+  }
+  const tiff = await sharp(pixels, {
+    raw: { width: 8, height: 16, channels: 3, pageHeight: 8 },
+  }).tiff().toBuffer();
+  return new Uint8Array(
+    await sharp(tiff, { animated: true }).webp({ loop: 0, delay: [100, 100] }).toBuffer(),
+  );
+}
+
 function uploadBody(bytes: Uint8Array, type = "image/png"): FormData {
   const form = new FormData();
   form.append("file", new File([bytes], "avatar.png", { type }));
@@ -61,6 +75,8 @@ describe("profile-picture uploads", () => {
     const servedUser = await fetch(userResult.avatarUrl);
     expect(servedUser.status).toBe(200);
     expect(servedUser.headers.get("content-type")).toBe("image/webp");
+    expect(servedUser.headers.get("cache-control")).toBe("public, max-age=3600");
+    expect(servedUser.headers.get("x-content-type-options")).toBe("nosniff");
     const servedMetadata = await sharp(await servedUser.arrayBuffer()).metadata();
     expect(servedMetadata).toMatchObject({ format: "webp", width: 512, height: 256 });
 
@@ -126,6 +142,12 @@ describe("profile-picture uploads", () => {
       body: uploadBody(await png(), "image/jpeg"),
     });
     expect(mismatched.status).toBe(415);
+
+    const animated = await fetch(`${api.baseUrl}/api/me/avatar`, {
+      method: "POST",
+      body: uploadBody(await animatedWebp(), "image/webp"),
+    });
+    expect(animated.status).toBe(400);
 
     const oversized = await fetch(`${api.baseUrl}/api/me/avatar`, {
       method: "POST",
