@@ -21,7 +21,7 @@
  * costs one refetch, and must never fail the turn that triggered it.
  */
 import { eq } from "drizzle-orm";
-import type { ModelsStore, ModelsStoreEntry } from "@earendil-works/pi-ai";
+import type { ModelsStore, ModelsStoreEntry, ModelsStoreOperationOptions } from "@earendil-works/pi-ai";
 import type { AppDb } from "../lib/drizzle.js";
 import { modelRegistryCache } from "../schema/index.js";
 import { isRegistryModel, type RegistryModel } from "./model-registry-parse.js";
@@ -32,6 +32,20 @@ import { isRegistryModel, type RegistryModel } from "./model-registry-parse.js";
  * Sized well above the refresh interval so an ordinary 304 cycle never
  * trips it. */
 const MAX_ENTRY_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+/** Write options. Extends pi-ai's own options, so this store stays a
+ * `ModelsStore` and pi-ai can keep calling `write` with just a signal. */
+export interface ModelsStoreWriteOptions extends ModelsStoreOperationOptions {
+  /**
+   * Set the stored `etag` and `lastModified` to NULL.
+   *
+   * A write that merely omits the validators keeps them, which rule 2 in
+   * `write` needs. Clearing them is a different intent, so it needs its own
+   * flag: `services/model-registry.ts` sets it when upstream answers 404 or
+   * 501, where no cached body will ever be revalidated again.
+   */
+  clearValidators?: boolean;
+}
 
 export class PgModelsStore implements ModelsStore {
   constructor(
@@ -92,15 +106,32 @@ export class PgModelsStore implements ModelsStore {
    *
    * Omitting a key from the `onConflictDoUpdate` set leaves that column at
    * its stored value, which is how both rules are expressed below.
+   *
+   * `options.clearValidators` overrides rule 2 for the caller that means to
+   * stop revalidating. Rule 1 still holds, so clearing the validators does
+   * not throw away the cached models.
    */
-  async write(providerId: string, entry: ModelsStoreEntry): Promise<void> {
+  async write(
+    providerId: string,
+    entry: ModelsStoreEntry,
+    options: ModelsStoreWriteOptions = {},
+  ): Promise<void> {
     // Keep only well-formed models, so a half-built record never reaches the
     // model picker.
     const models = entry.models.filter((m): m is RegistryModel => isRegistryModel(m));
     const now = this.now();
-    const etag = entry.etag ?? null;
-    const lastModified = entry.lastModified ?? null;
+    const clear = options.clearValidators === true;
+    const etag = clear ? null : (entry.etag ?? null);
+    const lastModified = clear ? null : (entry.lastModified ?? null);
     const checkedAt = entry.checkedAt ?? now;
+    // Rule 2 keeps a stored validator when the write omits it. A clearing
+    // write means the opposite, so it sets the columns to NULL explicitly.
+    const validatorSet = clear
+      ? { etag: null, lastModified: null }
+      : {
+          ...(etag === null ? {} : { etag }),
+          ...(lastModified === null ? {} : { lastModified }),
+        };
     try {
       await this.db
         .insert(modelRegistryCache)
@@ -111,9 +142,7 @@ export class PgModelsStore implements ModelsStore {
             // Rule 1: an empty result keeps the stored catalog. The check
             // still happened, so `checkedAt` advances either way.
             ...(models.length === 0 ? {} : { models }),
-            // Rule 2: keep the stored validators when this write has none.
-            ...(etag === null ? {} : { etag }),
-            ...(lastModified === null ? {} : { lastModified }),
+            ...validatorSet,
             checkedAt,
             updatedAt: now,
           },

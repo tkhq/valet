@@ -150,11 +150,30 @@ bundled catalog as the floor.
   sends `If-None-Match`/`If-Modified-Since`, so an unchanged catalog costs a
   304. A 304 re-stamps `checkedAt`, which distinguishes "verified fresh" from
   "never checked".
-- **Off by default.** `VALET_MODEL_REGISTRY_URL` names the upstream base; each
-  provider is read from `{base}/{providerId}.json`. Unset means no fetch and
-  the bundled catalog, which is the behavior before this change. The
-  zero-config path is unaffected: an org with no `llm_providers` rows and only
-  `ANTHROPIC_API_KEY` still sees the Anthropic list.
+- **On by default, against pi.dev.** pi operates the catalog service, and each
+  provider is read from `{base}/api/models/providers/{providerId}`. pi's own
+  client for the same service is `withRemoteCatalog` in
+  `packages/coding-agent/src/core/remote-catalog-provider.ts`. The base URL
+  defaults to `https://pi.dev`, so a deployment gets fresh model metadata with
+  no configuration. `VALET_MODEL_REGISTRY_URL` overrides the host. Set it to
+  an EMPTY string to turn the fetch off, which an air-gapped deployment needs.
+  The zero-config path is unaffected: an org with no `llm_providers` rows and
+  only `ANTHROPIC_API_KEY` still sees the Anthropic list.
+- **A missing catalog stops revalidating.** A 404 or 501 means the registry
+  has no catalog for that provider. The entry keeps its cached models and
+  clears its validators. Without that, every later check would spend a
+  conditional request on a body that never arrives. Any other non-OK status is
+  transient: the cached body and its validators both stay, so the next check
+  revalidates instead of downloading the catalog again. A clearing write needs
+  the explicit `clearValidators` option, because an ordinary write that omits
+  the validators keeps them.
+- **An orphan validator cannot empty the overlay.** pi guards its call site
+  with `stored?.models.length ? stored.etag : undefined`, so a 304 never leaves
+  the overlay empty. `PgModelsStore.read` closes the same hole one level
+  lower: a row whose models all fail validation reads as `undefined`, so a
+  body-less entry never reaches the caller and no conditional request can be
+  built from it. That covers every caller, including pi-ai's own direct
+  `read` and `write`.
 - **Visibility.** `GET /api/models/registry-status` reports per provider the
   model count, `checkedAt`, whether the bundled fallback is in use, and the
   last error. The catalog degrades silently by design, so this route is how an

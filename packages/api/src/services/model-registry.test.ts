@@ -15,7 +15,10 @@ import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { modelRegistryCache } from "../schema/index.js";
 import { PgModelsStore } from "./models-store-pg.js";
 import {
+  DEFAULT_MODEL_REGISTRY_URL,
   ModelRegistry,
+  modelRegistryUrl,
+  providerCatalogUrl,
   registryModelById,
   registryModels,
   setModelRegistry,
@@ -131,6 +134,56 @@ describe("PgModelsStore", () => {
   it("deletes a provider's row", async () => {
     await store.write("anthropic", { models: [validModel()] });
     await store.delete("anthropic");
+    expect(await store.read("anthropic")).toBeUndefined();
+  });
+
+  it("keeps the stored validators when a write omits them", async () => {
+    await store.write("anthropic", {
+      models: [validModel()],
+      etag: '"v1"',
+      lastModified: 1_700_000_000_000,
+    });
+    // pi-ai persists { models, checkedAt } right after fetchModels resolves.
+    // That write must not erase the ETag the fetch just captured.
+    await store.write("anthropic", { models: [validModel()], checkedAt: 999 });
+
+    const entry = await store.read("anthropic");
+    expect(entry?.etag).toBe('"v1"');
+    expect(entry?.lastModified).toBe(1_700_000_000_000);
+    expect(entry?.checkedAt).toBe(999);
+  });
+
+  it("clears the validators when the caller asks, and keeps the models", async () => {
+    await store.write("anthropic", {
+      models: [validModel()],
+      etag: '"v1"',
+      lastModified: 1_700_000_000_000,
+    });
+    await store.write("anthropic", { models: [], checkedAt: 555 }, { clearValidators: true });
+
+    const entry = await store.read("anthropic");
+    // Rule 1 still holds: clearing the validators does not drop the catalog.
+    expect(entry?.models.map((m) => m.id)).toEqual(["claude-brand-new"]);
+    expect(entry?.etag).toBeUndefined();
+    expect(entry?.lastModified).toBeUndefined();
+    expect(entry?.checkedAt).toBe(555);
+  });
+
+  it("returns undefined for a row whose etag has no valid model behind it", async () => {
+    // pi guards its call site with `stored?.models.length ? stored.etag : undefined`
+    // so a 304 can never leave the overlay empty. This store closes the same
+    // hole one level lower: a row with no readable model reads as "nothing
+    // cached", so an orphan validator never reaches the caller and no
+    // conditional request can be built from it.
+    const now = Date.now();
+    await db.insert(modelRegistryCache).values({
+      providerId: "anthropic",
+      models: [{ id: "half-built" }],
+      etag: '"orphan-validator"',
+      lastModified: null,
+      checkedAt: now,
+      updatedAt: now,
+    });
     expect(await store.read("anthropic")).toBeUndefined();
   });
 });
@@ -299,7 +352,7 @@ describe("ModelRegistry", () => {
       expect(registry.listModels("anthropic").map((m) => m.id)).toContain("claude-brand-new");
     });
 
-    it("makes no network call and serves the bundle when no registry URL is set", async () => {
+    it("makes no network call and serves the bundle when the registry URL is empty", async () => {
       vi.stubEnv("VALET_MODEL_REGISTRY_URL", "");
       const registry = new ModelRegistry(db);
       await registry.start();
@@ -308,6 +361,91 @@ describe("ModelRegistry", () => {
       expect(fetchMock).not.toHaveBeenCalled();
       expect(registry.listModels("anthropic").length).toBeGreaterThan(0);
       expect((await registry.status()).remoteEnabled).toBe(false);
+    });
+  });
+
+  describe("upstream URL", () => {
+    it("defaults to pi.dev when the variable is unset", () => {
+      vi.stubEnv("VALET_MODEL_REGISTRY_URL", undefined);
+      expect(modelRegistryUrl()).toBe(DEFAULT_MODEL_REGISTRY_URL);
+      expect(DEFAULT_MODEL_REGISTRY_URL).toBe("https://pi.dev");
+    });
+
+    it("treats an explicit empty value as off", () => {
+      vi.stubEnv("VALET_MODEL_REGISTRY_URL", "");
+      expect(modelRegistryUrl()).toBeUndefined();
+      vi.stubEnv("VALET_MODEL_REGISTRY_URL", "   ");
+      expect(modelRegistryUrl()).toBeUndefined();
+    });
+
+    it("lets an override replace the host and drops a trailing slash", () => {
+      vi.stubEnv("VALET_MODEL_REGISTRY_URL", "https://mirror.test/");
+      expect(modelRegistryUrl()).toBe("https://mirror.test");
+    });
+
+    it("builds pi's provider path, not a .json file path", () => {
+      // The merged code asked for `{base}/{id}.json`, which 404s at pi.dev.
+      expect(providerCatalogUrl("https://pi.dev", "anthropic")).toBe(
+        "https://pi.dev/api/models/providers/anthropic",
+      );
+      expect(providerCatalogUrl("https://mirror.test", "open router")).toBe(
+        "https://mirror.test/api/models/providers/open%20router",
+      );
+    });
+
+    it("fetches the default host with no configuration", async () => {
+      vi.stubEnv("VALET_MODEL_REGISTRY_URL", undefined);
+      routeFetch(() => jsonResponse(catalogPayload(validModel())));
+      await new ModelRegistry(db).refresh();
+
+      const urls = fetchMock.mock.calls.map(([url]) => String(url));
+      expect(urls).toContain("https://pi.dev/api/models/providers/anthropic");
+    });
+  });
+
+  describe("a catalog that will never appear", () => {
+    it.each([404, 501])("clears the validators on HTTP %i so it stops revalidating", async (status) => {
+      routeFetch(() => jsonResponse(catalogPayload(validModel()), { etag: '"v1"' }));
+      await new ModelRegistry(db).refresh();
+      expect((await new PgModelsStore(db).read("anthropic"))?.etag).toBe('"v1"');
+
+      routeFetch(() => new Response("", { status }));
+      await new ModelRegistry(db).refresh();
+
+      // The body stays, so the picker keeps serving it, but the validator is
+      // gone: the next check does not spend a conditional request on a
+      // catalog the registry has said it does not have.
+      const stored = await new PgModelsStore(db).read("anthropic");
+      expect(stored?.models.map((m) => m.id)).toContain("claude-brand-new");
+      expect(stored?.etag).toBeUndefined();
+      expect(stored?.lastModified).toBeUndefined();
+
+      fetchMock.mockReset();
+      routeFetch(() => new Response("", { status }));
+      await new ModelRegistry(db).refresh();
+      const call = fetchMock.mock.calls.find(([url]) => String(url).includes("anthropic"));
+      const headers = (call?.[1] as { headers: Record<string, string> }).headers;
+      expect(headers["if-none-match"]).toBeUndefined();
+      expect(headers["if-modified-since"]).toBeUndefined();
+    });
+
+    it("keeps the validators on a transient 5xx so the next check stays cheap", async () => {
+      routeFetch(() => jsonResponse(catalogPayload(validModel()), { etag: '"v1"' }));
+      await new ModelRegistry(db).refresh();
+
+      routeFetch(() => new Response("boom", { status: 503 }));
+      await new ModelRegistry(db).refresh();
+
+      const stored = await new PgModelsStore(db).read("anthropic");
+      expect(stored?.models.map((m) => m.id)).toContain("claude-brand-new");
+      expect(stored?.etag).toBe('"v1"');
+
+      fetchMock.mockReset();
+      routeFetch(() => new Response(null, { status: 304 }));
+      await new ModelRegistry(db).refresh();
+      const call = fetchMock.mock.calls.find(([url]) => String(url).includes("anthropic"));
+      const headers = (call?.[1] as { headers: Record<string, string> }).headers;
+      expect(headers["if-none-match"]).toBe('"v1"');
     });
   });
 
