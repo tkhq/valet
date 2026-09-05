@@ -478,6 +478,19 @@ git add packages/api/src/providers/sandbox-backend.ts packages/api/src/providers
 git commit -m "feat(k8s): configure sandbox CPU and memory"
 ```
 
+### Task 6b: Normalize memory for Docker
+
+The Docker CLI rejects Kubernetes memory suffixes such as `8Gi`. Convert the
+provider's memory quantity to bytes before constructing `docker run` arguments.
+Keep repository values unchanged in desired specs and applied metadata.
+
+- Move the existing pure quantity parser into `@valet/shared` and retain its
+  Kubernetes export for compatibility. Expose it through the engine for providers.
+- Test binary, decimal, exponent, and fractional quantities at the Docker boundary.
+- Reject invalid quantities with an actionable error before starting Docker.
+- Run shared quantity tests, Kubernetes quantity tests, and Docker argument tests.
+- Update the resource design and Docker spec in the implementation commit.
+
 ### Task 7: Document and dogfood the resource contract
 
 **Files:**
