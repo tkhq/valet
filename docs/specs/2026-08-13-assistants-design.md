@@ -163,6 +163,33 @@ adds no new authorization surface.
 Creating and archiving an assistant follows the same rule as administering
 one: your own for a user assistant, team admin for a team's.
 
+## Profile pictures
+
+Amended 2026-09-05: `POST /api/assistants/:id/avatar` accepts a multipart
+profile-picture upload. The route uses the same administration rule as
+assistant edits. A failed authorization returns 404 before the API reads the
+file. The existing `PATCH avatarUrl` contract remains available for public
+HTTPS image URLs and null clears.
+
+The upload accepts JPEG, PNG, and WebP files up to 5 MB. The decoded image
+must have one frame and dimensions no larger than 4096 × 4096 pixels. The API
+checks the declared type against the decoded format. It then removes metadata,
+fits the image within 512 × 512 pixels, and rewrites it to WebP. SVG and remote
+URL fetching are not part of the upload path.
+
+The configured `BlobStore` holds the bytes. The `avatar_url` column holds an
+absolute `/avatars/...` URL with a cache version. Public reads need no Valet
+session because Slack fetches `icon_url` itself. The path contains a
+server-derived SHA-256 value over the owner and a fresh random version instead
+of an owner id. A new key for each upload keeps the prior persisted URL valid
+if a later database write fails. Only authenticated upload routes can write a
+server-derived blob key.
+
+`VALET_PUBLIC_URL` is the first choice for an absolute URL. The API then uses
+`BETTER_AUTH_URL`, followed by the request origin. A Slack deployment must
+configure a public HTTPS origin. Local HTTP URLs still support the web preview,
+but Slack correctly omits them through its existing HTTPS validation.
+
 ## Message attribution
 
 Several members prompt one team assistant session, so every prompt must say

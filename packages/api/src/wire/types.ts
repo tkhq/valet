@@ -3062,6 +3062,16 @@ export interface ResolveSandboxSecretsResponse {
 
 export type NewThreadBehavior = "keep_current" | "use_defaults";
 
+/** Profile-picture upload limits enforced before and during image decode. */
+export const PROFILE_PICTURE_MAX_BYTES = 5 * 1024 * 1024;
+export const PROFILE_PICTURE_MAX_DIMENSION = 4096;
+export const PROFILE_PICTURE_OUTPUT_MAX_DIMENSION = 512;
+
+/** Returned by POST /api/me/avatar and /api/assistants/:id/avatar. */
+export interface ProfilePictureUploadResponse {
+  avatarUrl: string;
+}
+
 export interface MeResponse {
   id: string;
   email: string;

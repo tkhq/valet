@@ -6,7 +6,7 @@
 
 Covers: the `/settings` layout shell and all sub-routes; user sections (profile, assistant identity, appearance, notifications); org sections (general, members, teams); the organizations feature gate; new `/api/me` and `/api/org*` routes; the `requireOrgAdmin` authz helper and its adoption by `teams.ts`.
 
-Does NOT cover: real login / identity providers (auth design pass, separate); invites and member removal (meaningless until login exists); billing; org-level integrations/credentials (`/integrations` stays per-user and stays a sibling page); avatar file upload (URL field only this phase).
+Does NOT cover: real login / identity providers (auth design pass, separate); invites and member removal (meaningless until login exists); billing; org-level integrations/credentials (`/integrations` stays per-user and stays a sibling page). The 2026-09-05 amendment adds avatar file upload and keeps the URL field.
 
 ## Background (what exists today)
 
@@ -63,6 +63,13 @@ Every control enumerated (surfaces alone are not a spec).
 - Avatar URL: text input with live preview circle, saved with the same Save → `PATCH /api/me {avatarUrl}`.
 - Email: read-only row with hint "Sign-in email — managed by your login once real auth ships."
 - Data: `GET /api/me`.
+
+**Amended 2026-09-05:** The profile page also uploads a picture through
+`POST /api/me/avatar`. The URL field remains for compatibility. The upload
+accepts JPEG, PNG, and WebP files up to 5 MB and 4096 × 4096 pixels. The API
+validates the decoded image, fits it within 512 × 512 pixels, rewrites it to
+WebP, and stores it in the configured `BlobStore`. The route derives the user
+id from the session. It never accepts a target user id from the client.
 
 ### You · Assistant
 - Assistant name: text input (writes `assistants.name` on the caller's default assistant).

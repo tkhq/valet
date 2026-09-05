@@ -21,6 +21,7 @@ import { integrationOptions, canEditAssistant } from "./assistants.$assistantId"
 // ── mocks ─────────────────────────────────────────────────────────────────
 
 const patchMutate = vi.fn();
+const uploadAssistantAvatarMutateAsync = vi.fn().mockResolvedValue({ avatarUrl: "/avatars/assistant.webp" });
 const archiveMutate = vi.fn();
 const navigateMock = vi.fn();
 // Per-section patch errors. The form calls usePatchAssistant five times per
@@ -78,6 +79,7 @@ vi.mock("~/api/assistants", async (importOriginal) => {
       return { mutate: patchMutate, isPending: false, error: patchErrors[section] ?? null };
     },
     useArchiveAssistant: () => ({ mutate: archiveMutate, isPending: false, error: null }),
+    useUploadAssistantAvatar: () => ({ mutateAsync: uploadAssistantAvatarMutateAsync, isPending: false, error: null }),
   };
 });
 
@@ -314,6 +316,17 @@ describe("AssistantEditorPage", () => {
     // The model combobox and reasoning select are disabled too.
     expect((screen.getByLabelText("Default model") as HTMLInputElement).disabled).toBe(true);
     expect((screen.getByLabelText("Reasoning") as HTMLSelectElement).disabled).toBe(true);
+  });
+
+  it("uploads a selected assistant profile picture", async () => {
+    assistantsData = [makeAssistant({ id: "asst_1", name: "Bot" })];
+    uploadAssistantAvatarMutateAsync.mockClear();
+    render(<AssistantEditorPage />);
+    const file = new File([new Uint8Array([1, 2, 3])], "avatar.png", { type: "image/png" });
+    fireEvent.change(screen.getByLabelText("Profile picture file"), { target: { files: [file] } });
+    await waitFor(() =>
+      expect(uploadAssistantAvatarMutateAsync).toHaveBeenCalledWith({ id: "asst_1", file }),
+    );
   });
 
   it("selecting a model fires usePatchAssistant mutate with { id, body: { model } }", async () => {
