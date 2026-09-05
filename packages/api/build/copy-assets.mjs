@@ -45,3 +45,26 @@ for (const f of PGLITE_FILES) {
   cpSync(src, resolve(pgliteOut, f));
 }
 console.log(`copy-assets: pglite (${PGLITE_FILES.join(", ")}) -> ${pgliteOut}`);
+
+// ── Sharp native runtime ────────────────────────────────────────────────────
+// The Node bundle loads Sharp from node_modules. The standalone executable
+// instead extracts its native addon and libvips beside the other assets.
+const sharpEntry = require.resolve("sharp");
+const sharpRequire = createRequire(sharpEntry);
+const { runtimePlatformArch } = sharpRequire("./libvips");
+const sharpPlatform = runtimePlatformArch();
+const sharpAddonPackage = sharpRequire.resolve(`@img/sharp-${sharpPlatform}/package`);
+const sharpLibvipsPackage = sharpRequire.resolve(`@img/sharp-libvips-${sharpPlatform}/package`);
+const sharpRoot = resolve(outDir, "sharp");
+const sharpModules = resolve(sharpRoot, "node_modules");
+const sharpImgOut = resolve(sharpModules, "@img");
+rmSync(sharpRoot, { recursive: true, force: true });
+mkdirSync(sharpModules, { recursive: true });
+cpSync(resolve(dirname(sharpEntry), ".."), resolve(sharpModules, "sharp"), { recursive: true });
+for (const name of ["detect-libc", "semver", "@img/colour"]) {
+  const packageJson = sharpRequire.resolve(`${name}/package.json`);
+  cpSync(dirname(packageJson), resolve(sharpModules, name), { recursive: true });
+}
+cpSync(dirname(sharpAddonPackage), resolve(sharpImgOut, `sharp-${sharpPlatform}`), { recursive: true });
+cpSync(dirname(sharpLibvipsPackage), resolve(sharpImgOut, `sharp-libvips-${sharpPlatform}`), { recursive: true });
+console.log(`copy-assets: sharp ${sharpPlatform} -> ${sharpRoot}`);

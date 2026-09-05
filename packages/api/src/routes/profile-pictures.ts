@@ -9,7 +9,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
-import sharp from "sharp";
+import type sharpType from "sharp";
 import { eq } from "drizzle-orm";
 import type { AppEnv } from "../env.js";
 import { assistantOwner, canAdministerAssistantOwner } from "../assistants/access.js";
@@ -34,6 +34,15 @@ const ACCEPTED_TYPES = new Map<string, string>([
 const HASH_PATTERN = /^[a-f0-9]{64}$/;
 
 type PictureKind = "users" | "assistants";
+type SharpFactory = typeof sharpType;
+
+declare global {
+  var __VALET_SHARP__: SharpFactory | undefined;
+}
+
+async function loadSharp(): Promise<SharpFactory> {
+  return globalThis.__VALET_SHARP__ ?? (await import("sharp")).default;
+}
 
 function pictureHash(kind: PictureKind, id: string, version: string): string {
   return createHash("sha256").update(`valet-profile-picture:${kind}:${id}:${version}`).digest("hex");
@@ -111,6 +120,7 @@ async function readAndNormalizeImage(c: Context<AppEnv>): Promise<Uint8Array | R
 
   const input = new Uint8Array(await part.arrayBuffer());
   try {
+    const sharp = await loadSharp();
     const image = sharp(input, {
       failOn: "error",
       limitInputPixels: PROFILE_PICTURE_MAX_DIMENSION * PROFILE_PICTURE_MAX_DIMENSION,

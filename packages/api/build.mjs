@@ -23,6 +23,9 @@ const external = [
   // Workers runtime; it's a virtual module that only exists on CF and is
   // guarded behind a runtime check on node.
   "cloudflare:sockets",
+  // Sharp dispatches to a platform-specific native addon at runtime. Bundling
+  // its loader breaks that package-relative lookup in the Node artifact.
+  "sharp",
   // @firecrawl/pdf-inspector and its platform-specific siblings ship native
   // .node binaries that cannot be bundled by esbuild. The main package
   // dispatches at runtime to the platform-suffixed variant; both the main

@@ -21,6 +21,7 @@ import { readFileSync, mkdirSync, mkdtempSync, writeFileSync, existsSync, rename
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
+import Module from "node:module";
 
 // Bun embeds this file into the binary; `assetsTarPath` is a readable
 // `/$bunfs/root/...` path at runtime (readable by fs.readFileSync).
@@ -104,8 +105,14 @@ function ensureAssetDir() {
   }
 }
 
-process.env.VALET_ASSET_DIR = ensureAssetDir();
+const assetDir = ensureAssetDir();
+process.env.VALET_ASSET_DIR = assetDir;
 process.env.VALET_BUNDLED = "1";
+
+// Sharp's loader chooses a native addon through dynamic require. Bun cannot
+// discover it while compiling, so load the extracted package from disk.
+const sharpRequire = Module.createRequire(join(assetDir, "sharp", "bootstrap.cjs"));
+globalThis.__VALET_SHARP__ = sharpRequire("sharp");
 
 // Import the esbuild bundle; its bottom-level `main()` runs with argv intact.
 await import("../dist/valet-api.mjs");
