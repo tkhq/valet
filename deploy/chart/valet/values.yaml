@@ -28,7 +28,23 @@ api:
 
   port: 8787
 
-  resources: {}
+  # Requests cover the measured usage: 0.12 CPU cores and 880 MiB of memory.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+  # Scheduling controls. Empty values add no scheduling constraints.
+  # The agents-dev deploy can pin the api to a dedicated, tainted "platform"
+  # node group. This isolates its kubelet from sandbox disk-IO storms on
+  # general nodes, which stranded the api during the 2026-09-02 and
+  # 2026-09-04 outages.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
 
   # Non-secret env, merged into the api ConfigMap.
   # BETTER_AUTH_URL must be https:// — better-auth marks session cookies
