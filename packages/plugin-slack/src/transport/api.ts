@@ -13,6 +13,8 @@ export class SlackApiError extends Error {
   constructor(
     readonly method: string,
     readonly detail: string,
+    readonly status?: number,
+    readonly providerRejected: boolean = false,
   ) {
     super(`slack ${method} failed: ${detail}`);
     this.name = "SlackApiError";
@@ -85,7 +87,14 @@ export class SlackApi {
   private async call(method: string, body: Record<string, unknown>): Promise<SlackResponse> {
     const res = await slackFetch(method, this.token, body, this.baseUrl);
     const parsed = (await res.json()) as SlackResponse;
-    if (!parsed.ok) throw new SlackApiError(method, parsed.error ?? `http ${res.status}`);
+    if (!parsed.ok) {
+      throw new SlackApiError(
+        method,
+        parsed.error ?? `http ${res.status}`,
+        res.status,
+        parsed.ok === false,
+      );
+    }
     return parsed;
   }
 
@@ -151,16 +160,10 @@ export class SlackApi {
     text: string;
     blocks?: Record<string, unknown>[];
     parse?: "none" | "full";
-    /** Same override pair as `postMessage`. An edit normally keeps the
-     * identity the message posted with, so callers rarely need these. */
-    username?: string;
-    iconUrl?: string;
   }): Promise<void> {
     const body: Record<string, unknown> = { channel: opts.channel, ts: opts.ts, text: opts.text };
     if (opts.blocks !== undefined) body.blocks = opts.blocks;
     if (opts.parse !== undefined) body.parse = opts.parse;
-    if (opts.username !== undefined) body.username = opts.username;
-    if (opts.iconUrl !== undefined) body.icon_url = opts.iconUrl;
     await this.call("chat.update", body);
   }
 

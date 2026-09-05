@@ -1126,6 +1126,40 @@ describe("discrete sends", () => {
     expect(posts[1].body.text).toBe("hi");
   });
 
+  it("retries without identity for any Slack rejection, not only missing_scope", async () => {
+    const transport = makeTransport();
+    fake.failNext("chat.postMessage", "invalid_arguments");
+    await transport.send(KEY, { markdown: "must land", sender: { displayName: "Ledger" } });
+    const posts = fake.calls.filter((c) => c.method === "chat.postMessage");
+    expect(posts).toHaveLength(2);
+    expect(posts[0].body.username).toBe("Ledger");
+    expect(posts[1].body.username).toBeUndefined();
+  });
+
+  it("does not retry an HTTP failure because Slack might have accepted the request", async () => {
+    const transport = makeTransport();
+    fake.failNext("chat.postMessage", "server_error", 500);
+    await expect(
+      transport.send(KEY, { markdown: "must not duplicate", sender: { displayName: "Ledger" } }),
+    ).rejects.toThrow("server_error");
+    const posts = fake.calls.filter((c) => c.method === "chat.postMessage");
+    expect(posts).toHaveLength(1);
+  });
+
+  it("sanitizes long control-character names and drops malformed avatar URLs", async () => {
+    const transport = makeTransport();
+    await transport.send(KEY, {
+      markdown: "hi",
+      sender: {
+        displayName: `  Ledger\n${"x".repeat(100)}  `,
+        avatarUrl: "https://not a url",
+      },
+    });
+    const body = lastCall("chat.postMessage");
+    expect(body.username).toBe(`Ledger ${"x".repeat(73)}`);
+    expect(body.icon_url).toBeUndefined();
+  });
+
   it("refuses a well-formed key from another workspace instead of posting anyway", async () => {
     // A host that rebuilds the key with a fixed middle segment produces
     // exactly this: it parses, its channel id is usable, and the reply would

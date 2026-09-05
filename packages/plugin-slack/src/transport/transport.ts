@@ -24,7 +24,6 @@ import {
   ChannelStreamError,
   type ChannelGatePrompt,
   type ChannelGateResolution,
-  type ChannelSenderIdentity,
   type ChannelStreamErrorKind,
   type ChannelTransport,
   type ChannelTransportFactory,
@@ -50,6 +49,7 @@ import {
 } from "../message-chunking.js";
 import { SKIP_SUBTYPES } from "../subtypes.js";
 import { SlackApi, SlackApiError, SLACK_MARKDOWN_TEXT_LIMIT } from "./api.js";
+import { slackIdentityOverride } from "../sender-identity.js";
 import { DirectoryCache } from "./directory-cache.js";
 import { fetchThreadTranscript } from "./thread-context.js";
 import { enrichSlackText } from "./text-enrich.js";
@@ -88,22 +88,6 @@ export function resetSlackDirectoryCache(): void {
 function truncatePlain(text: string, max: number): string {
   const points = [...text];
   return points.length > max ? `${points.slice(0, max - 1).join("")}…` : text;
-}
-
-/**
- * `chat.postMessage` override fields for a per-assistant identity
- * (`username`/`icon_url`, `chat:write.customize` scope). Empty strings are
- * treated as unset — Slack rejects an empty `username`. Absent or empty →
- * `{}`, so the post keeps the bot's own identity.
- */
-function identityOverride(sender: ChannelSenderIdentity | undefined): { username?: string; iconUrl?: string } {
-  if (!sender) return {};
-  const username = sender.displayName?.trim();
-  const iconUrl = sender.avatarUrl?.trim();
-  return {
-    ...(username ? { username } : {}),
-    ...(iconUrl ? { iconUrl } : {}),
-  };
 }
 
 /** Slack date token: renders the moment in each reader's own timezone. */
@@ -802,9 +786,9 @@ export class SlackTransport implements ChannelTransport {
   // ─── Discrete-message egress ──────────────────────────────────────────
 
   /**
-   * chat.postMessage, retried once without the identity override when the
-   * workspace lacks `chat:write.customize`. The override is decoration; the
-   * message itself must still land, under the bot's own identity.
+   * chat.postMessage, retried once without a rejected identity override.
+   * Provider error responses are safe to retry because Slack rejected them.
+   * Network errors and malformed success responses remain single-attempt.
    */
   private async postMessageAs(
     opts: Parameters<SlackApi["postMessage"]>[0],
@@ -813,7 +797,15 @@ export class SlackTransport implements ChannelTransport {
       return await this.api.postMessage(opts);
     } catch (err) {
       const hadOverride = opts.username !== undefined || opts.iconUrl !== undefined;
-      if (hadOverride && err instanceof SlackApiError && err.detail === "missing_scope") {
+      if (
+        hadOverride &&
+        err instanceof SlackApiError &&
+        err.method === "chat.postMessage" &&
+        err.providerRejected &&
+        err.status !== undefined &&
+        err.status >= 200 &&
+        err.status < 300
+      ) {
         const { username: _u, iconUrl: _i, ...rest } = opts;
         return this.api.postMessage(rest);
       }
@@ -838,7 +830,7 @@ export class SlackTransport implements ChannelTransport {
       text,
       threadTs,
       blocks,
-      ...identityOverride(message.sender),
+      ...slackIdentityOverride(message.sender),
     });
     return { conversationKey, messageId: res.ts };
   }
@@ -922,7 +914,7 @@ export class SlackTransport implements ChannelTransport {
       text,
       threadTs,
       blocks,
-      ...identityOverride(gate.sender),
+      ...slackIdentityOverride(gate.sender),
     });
     // The returned ref must round-trip through the inbound click:
     // `parseBlockActions` rebuilds the conversationKey from

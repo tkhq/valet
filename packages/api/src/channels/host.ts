@@ -41,6 +41,7 @@ import type { EngineHost } from "../engine/host.js";
 import { agentSessions, users } from "../schema/index.js";
 import {
   ArchivedAssistantError,
+  assistantSenderIdentity as senderIdentityForAssistant,
   ensureDefaultAssistantSession,
   loadAssistant,
   loadAssistantBySessionId,
@@ -905,14 +906,7 @@ export class ChannelHost {
   ): Promise<{ displayName?: string; avatarUrl?: string } | undefined> {
     try {
       const row = await loadAssistantBySessionId(this.deps.db, sessionId);
-      if (!row) return undefined;
-      const displayName = row.name ?? undefined;
-      const avatarUrl = row.avatarUrl ?? undefined;
-      if (displayName === undefined && avatarUrl === undefined) return undefined;
-      return {
-        ...(displayName !== undefined ? { displayName } : {}),
-        ...(avatarUrl !== undefined ? { avatarUrl } : {}),
-      };
+      return row ? senderIdentityForAssistant(row) : undefined;
     } catch (err) {
       // Identity is decoration on the post; the text must still land.
       console.error("[channels] assistant identity lookup failed", err);
@@ -969,7 +963,11 @@ export class ChannelHost {
     if (!transport) return;
 
     const markdown = `\`${entry.command}\`\n${entry.output}`;
-    await transport.send(mapped.conversationKey, { markdown });
+    const sender = await this.assistantSenderIdentity(sessionId);
+    await transport.send(mapped.conversationKey, {
+      markdown,
+      ...(sender !== undefined ? { sender } : {}),
+    });
   }
 
   /** Rule 3: decision_gate → sendGatePrompt, record refs for the inbound gate_callback path. */
@@ -1514,8 +1512,12 @@ export class ChannelHost {
               // Recipient cannot resolve this gate (or its app row is gone):
               // fall through to the plain summary with the web link.
             }
+            const sender = event.sessionId
+              ? await this.assistantSenderIdentity(event.sessionId)
+              : undefined;
             await transport.send(conversationKey, {
               markdown: this.attentionMarkdown(event),
+              ...(sender !== undefined ? { sender } : {}),
             });
           } catch (err) {
             console.error(`[channels] ${channelType}: attention delivery failed`, err);

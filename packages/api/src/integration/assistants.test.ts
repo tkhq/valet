@@ -648,14 +648,19 @@ describe("personality and behavior config", () => {
     expect(cleared.avatarUrl).toBeUndefined();
   });
 
-  it("PATCH rejects a non-https avatarUrl and names the fix", async () => {
+  it.each([
+    "http://cdn.example.com/ledger.png",
+    "https://",
+    "https://not a url",
+    "https://cdn.example.com/ledger.png\ninvalid",
+  ])("PATCH rejects malformed avatarUrl %j and names the fix", async (avatarUrl) => {
     api = await bootTestApi();
     const created = await create(api, { name: "Ledger" });
 
     const res = await fetch(`${api.baseUrl}/api/assistants/${created.id}`, {
       method: "PATCH",
       headers: JSON_HEADERS,
-      body: JSON.stringify({ avatarUrl: "http://cdn.example.com/ledger.png" }),
+      body: JSON.stringify({ avatarUrl }),
     });
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };

@@ -16,7 +16,7 @@ export interface FakeSlackApi {
   /** files.info registry: fileId → file object. */
   setFileInfo(fileId: string, file: Record<string, unknown>): void;
   /** Make the next call to `method` return `{ ok: false, error }` once. */
-  failNext(method: string, error?: string): void;
+  failNext(method: string, error?: string, status?: 200 | 500): void;
   /** Streams the fake has seen, keyed by ts. Models Slack's own state machine
    * so a test can prove the transport never appends to a closed stream. */
   streams: Map<string, FakeStream>;
@@ -42,7 +42,7 @@ export async function startFakeSlackApi(): Promise<FakeSlackApi> {
   const uploads: FakeSlackApi["uploads"] = [];
   const files = new Map<string, Uint8Array>();
   const fileInfos = new Map<string, Record<string, unknown>>();
-  const pendingFailures = new Map<string, string>();
+  const pendingFailures = new Map<string, { error: string; status: 200 | 500 }>();
   const streams = new Map<string, FakeStream>();
   let members: Array<Record<string, unknown>> = [];
   let channels: Array<Record<string, unknown>> = [];
@@ -85,7 +85,7 @@ export async function startFakeSlackApi(): Promise<FakeSlackApi> {
     const failure = pendingFailures.get(method);
     if (failure !== undefined) {
       pendingFailures.delete(method);
-      return c.json({ ok: false, error: failure });
+      return c.json({ ok: false, error: failure.error }, failure.status);
     }
 
     switch (method) {
@@ -186,7 +186,8 @@ export async function startFakeSlackApi(): Promise<FakeSlackApi> {
       channels = ch;
     },
     setFileInfo: (fileId, file) => fileInfos.set(fileId, file),
-    failNext: (method, error = "simulated_failure") => pendingFailures.set(method, error),
+    failNext: (method, error = "simulated_failure", status = 200) =>
+      pendingFailures.set(method, { error, status }),
     streams,
     stopStreamAsUser: (ts) => {
       const stream = streams.get(ts);

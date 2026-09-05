@@ -119,6 +119,19 @@ export async function checkAssistantForOwner(
   return null;
 }
 
+export function assistantSenderIdentity(
+  row: Pick<AssistantRow, "name" | "avatarUrl">,
+): { displayName?: string; avatarUrl?: string } | undefined {
+  const displayName = row.name ?? undefined;
+  const avatarUrl = row.avatarUrl ?? undefined;
+  return displayName === undefined && avatarUrl === undefined
+    ? undefined
+    : {
+        ...(displayName !== undefined ? { displayName } : {}),
+        ...(avatarUrl !== undefined ? { avatarUrl } : {}),
+      };
+}
+
 /**
  * The assistant that owns `sessionId`, if any. The assistants table is the
  * authority on which session ids are assistant sessions (the
@@ -418,7 +431,15 @@ export function validateProfilePatch(patch: {
   avatarUrl?: string | null;
 }): string | null {
   if (patch.avatarUrl !== undefined && patch.avatarUrl !== null) {
-    if (typeof patch.avatarUrl !== "string" || !/^https:\/\//.test(patch.avatarUrl)) {
+    if (typeof patch.avatarUrl !== "string") {
+      return "avatarUrl must be an https:// image URL, or null to clear it.";
+    }
+    try {
+      const parsed = new URL(patch.avatarUrl);
+      if (parsed.protocol !== "https:" || !parsed.hostname || /\s/.test(patch.avatarUrl)) {
+        return "avatarUrl must be an https:// image URL, or null to clear it.";
+      }
+    } catch {
       return "avatarUrl must be an https:// image URL, or null to clear it.";
     }
     if (patch.avatarUrl.length > AVATAR_URL_CAP) {
