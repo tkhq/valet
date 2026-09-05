@@ -130,6 +130,38 @@ function collectStatuses(attachment: SandboxAttachment): AttachmentStatus[] {
 }
 
 describe("SandboxAttachment", () => {
+  it("PolicySandbox forwards adoption ownership without provisioning", async () => {
+    const provider = new FakeProvider();
+    const attachment = new SandboxAttachment(provider, {});
+    const wrapper = new PolicySandbox(attachment);
+    expect(wrapper.adopted).toBeUndefined();
+    expect(provider.createCalls).toBe(0);
+    const pending = provider.nextDeferred();
+    const ready = attachment.ensureReady({ timeoutMs: 1000 });
+    pending.resolve({ ...makeFakeSandbox("sb-adopted"), adopted: true });
+    await ready;
+    expect(wrapper.adopted).toBe(true);
+    await attachment.destroy();
+    expect(wrapper.adopted).toBeUndefined();
+  });
+
+  it.each([{ cpu: 4, memory: "8Gi" }, {}, null, undefined])("PolicySandbox forwards current resource metadata %j without provisioning", async (resourceOverrides) => {
+    const provider = new FakeProvider();
+    const attachment = new SandboxAttachment(provider, {});
+    const wrapper = new PolicySandbox(attachment);
+    expect(wrapper.resourceOverrides).toBeUndefined();
+    expect(provider.createCalls).toBe(0);
+    const pending = provider.nextDeferred();
+    const ready = attachment.ensureReady({ timeoutMs: 1000 });
+    pending.resolve({ ...makeFakeSandbox("sb-resources"), resourceOverrides });
+    await ready;
+
+    expect(wrapper.resourceOverrides).toEqual(resourceOverrides);
+
+    await attachment.destroy();
+    expect(wrapper.resourceOverrides).toBeUndefined();
+  });
+
   it("1. lazy: constructing attachment + wrapper calls provider.create zero times", () => {
     const provider = new FakeProvider();
     const attachment = new SandboxAttachment(provider, {});

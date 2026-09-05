@@ -1,4 +1,5 @@
 export * from "./types.js";
+export { parseResourceQuantity } from "@valet/shared";
 // pi-ai passthroughs, re-exported so downstream packages (e.g. @valet/eval)
 // can type model handles and run side completions without their own pi-ai
 // dependency edge (which pnpm may peer-fork into a second instance with its
@@ -188,6 +189,7 @@ export {
   type InboundChannelEvent,
   type InboundChannelMedia,
   type ChannelSender,
+  type ChannelSenderIdentity,
   type FetchedChannelMedia,
   type OutboundChannelMessage,
   type OutboundChannelAttachment,

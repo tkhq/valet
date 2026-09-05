@@ -43,10 +43,15 @@ const FULL_PROFILE_COMMAND = [
 export const WORKSPACE_VOLUME_NAME = "workspace";
 export const WORKSPACE_MOUNT_PATH = "/workspace";
 export const SESSION_LABEL_KEY = "valet.dev/session-id";
-/** Pod-template label every sandbox pod carries. The topology spread
- * constraint's labelSelector counts pods by it, so sandboxes spread across
- * nodes as one group. Set on the POD template (not just the CR): the
- * controller is not guaranteed to propagate CR labels onto the pod. */
+export const IMAGE_FINGERPRINT_ENV = "VALET_SANDBOX_IMAGE_FINGERPRINT";
+
+/** Immutable generation marker for the requested image before admission mutation. */
+export function imageFingerprint(image: string): string {
+  return createHash("sha256").update(image).digest("hex");
+}
+
+/** Shared pod label retained so pods created with the previous hostname
+ * spread selector can still count new sandbox pods. */
 export const SANDBOX_POD_LABEL_KEY = "valet.dev/sandbox";
 /** CR annotation carrying the owning session's id (`SandboxCreateOpts.sessionId`).
  * An annotation, not a label: session ids contain characters a label value
@@ -297,6 +302,13 @@ export function buildSandboxManifest(
   // EINVAL). VALET_DOCKER_USERNS=1 selects the rootful branch in
   // start-docker.sh; the docker (local dev) backend keeps rootlesskit.
   // Never sets privileged.
+  // Reserved literal generation marker. Append after caller env so it cannot
+  // be overridden; admission may rewrite `image` but leaves this request hash.
+  container.env = [
+    ...(container.env ?? []).filter((entry) => entry.name !== IMAGE_FINGERPRINT_ENV),
+    { name: IMAGE_FINGERPRINT_ENV, value: imageFingerprint(image) },
+  ];
+
   if (opts.docker) {
     container.securityContext = {
       seccompProfile: { type: "Unconfined" },
@@ -324,16 +336,20 @@ export function buildSandboxManifest(
   const podSpec: SandboxCR["spec"]["podTemplate"]["spec"] = {
     containers: [container],
     restartPolicy: "Always",
-    // Soft hostname spread over the shared sandbox pod label (TKAI-349).
-    // ScheduleAnyway on purpose: sandboxes must still schedule under
-    // pressure; the ephemeral-storage request above is the hard
-    // concentration cap.
+    // Count all sandbox pods by session-label existence, regardless of value.
+    // Soft node and zone preferences do not block uneven placement.
     topologySpreadConstraints: [
       {
         maxSkew: 1,
         topologyKey: "kubernetes.io/hostname",
         whenUnsatisfiable: "ScheduleAnyway",
-        labelSelector: { matchLabels: { [SANDBOX_POD_LABEL_KEY]: "true" } },
+        labelSelector: { matchExpressions: [{ key: SESSION_LABEL_KEY, operator: "Exists" }] },
+      },
+      {
+        maxSkew: 2,
+        topologyKey: "topology.kubernetes.io/zone",
+        whenUnsatisfiable: "ScheduleAnyway",
+        labelSelector: { matchExpressions: [{ key: SESSION_LABEL_KEY, operator: "Exists" }] },
       },
     ],
   };
@@ -393,9 +409,9 @@ export function buildSandboxManifest(
   const spec: SandboxCR["spec"] = {
     podTemplate: {
       metadata: {
-        // The spread constraint's labelSelector counts pods by this label —
-        // see SANDBOX_POD_LABEL_KEY.
-        labels: { [SANDBOX_POD_LABEL_KEY]: "true" },
+        // Stamp the spread selector's label on the pod explicitly.
+        // The controller need not copy labels from the CR metadata.
+        labels: { [SESSION_LABEL_KEY]: name, [SANDBOX_POD_LABEL_KEY]: "true" },
         ...(opts.docker
           ? {
               annotations: {

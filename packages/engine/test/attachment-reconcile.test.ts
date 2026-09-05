@@ -8,6 +8,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   SandboxAttachment,
+  SandboxPreparationError,
   OBSERVE_TTL_MS,
   VirtualSandbox,
   type Sandbox,
@@ -25,11 +26,13 @@ import { readAppliedState } from "../src/sandbox/applied-state.js";
 
 /**
  * Provider that mints real VirtualSandboxes (so applied-state exec works) and
- * records every create with the image it booted, plus optional suspend/resume.
+ * records each create's image and resources, plus optional suspend/resume.
  */
 class RecordingProvider implements SandboxProvider {
   readonly backend = "recording";
   createImages: (string | undefined)[] = [];
+  createResources: SandboxCreateOpts["resources"][] = [];
+  preserveResourcesOnAdopt: boolean[] = [];
   destroyCalls: string[] = [];
   releaseCalls: string[] = [];
   suspendCalls: string[] = [];
@@ -38,6 +41,9 @@ class RecordingProvider implements SandboxProvider {
   private nextId = 1;
   private hibernation: boolean;
   private isolated: boolean;
+  private adopt: VirtualSandbox | undefined;
+  private rollAdoptedImage: boolean;
+  private resourceOverrides: Sandbox["resourceOverrides"];
   // Optional seams: assigned as instance properties ONLY when enabled so the
   // attachment's `provider.release ?`/`provider.resume ?` capability checks see
   // them as absent otherwise (deleting a prototype method would not work).
@@ -45,8 +51,14 @@ class RecordingProvider implements SandboxProvider {
   suspend?: (id: string) => Promise<void>;
   resume?: (id: string) => Promise<void>;
 
-  constructor(opts: { hibernation?: boolean; release?: boolean; isolated?: boolean } = {}) {
+  constructor(opts: {
+    hibernation?: boolean; release?: boolean; isolated?: boolean; adopt?: VirtualSandbox;
+    rollAdoptedImage?: boolean; resourceOverrides?: Sandbox["resourceOverrides"];
+  } = {}) {
     this.hibernation = opts.hibernation ?? false;
+    this.adopt = opts.adopt;
+    this.rollAdoptedImage = opts.rollAdoptedImage ?? false;
+    this.resourceOverrides = opts.resourceOverrides;
     // Default isolated:true so existing image-drift tests still exercise the
     // pod-replace branch (decision 8 gates it on isolation). A non-isolated
     // provider (opts.isolated:false) must never pod-replace.
@@ -81,7 +93,16 @@ class RecordingProvider implements SandboxProvider {
 
   async create(opts: SandboxCreateOpts): Promise<Sandbox> {
     this.createImages.push(opts.image);
-    const sb = new VirtualSandbox(`sb-${this.nextId++}`);
+    this.createResources.push(opts.resources === undefined ? undefined : { ...opts.resources });
+    this.preserveResourcesOnAdopt.push(opts.preserveResourcesOnAdopt === true);
+    if (this.adopt && opts.preserveResourcesOnAdopt && this.rollAdoptedImage) {
+      this.resourceOverrides = await opts.readResourceOverrides?.(this.adopt) ?? null;
+    }
+    const sb = this.adopt && opts.preserveResourcesOnAdopt && !this.rollAdoptedImage
+      ? this.adopt
+      : new VirtualSandbox(`sb-${this.nextId++}`);
+    Object.assign(sb, { resourceOverrides: this.resourceOverrides, adopted: this.adopt !== undefined });
+    this.adopt = undefined;
     this.sandboxes.push(sb);
     return sb;
   }
@@ -142,6 +163,370 @@ async function reachReady(
 // ── Tests ─────────────────────────────────────────────────────────────
 
 describe("SandboxAttachment.reconcile", () => {
+  it("cold provision applies desired resources and preserves ephemeral storage", async () => {
+    const provider = new RecordingProvider();
+    const fake = new FakeSpecProvider({
+      specHash: "h1", resources: { cpu: 4, memory: "8Gi" }, steps: [],
+    });
+    const att = await reachReady(provider, fake, {
+      resources: { cpu: 2, memory: "4Gi", ephemeralStorage: "10Gi", ephemeralStorageLimit: "20Gi" },
+    });
+
+    expect(provider.createResources).toEqual([
+      { cpu: 4, memory: "8Gi", ephemeralStorage: "10Gi", ephemeralStorageLimit: "20Gi" },
+    ]);
+    const sb = att.current();
+    if (!sb) throw new Error("expected ready sandbox");
+    expect((await readAppliedState(sb))?.resources).toEqual({ cpu: 4, memory: "8Gi" });
+  });
+
+  it("cold provision with no resource opinion keeps the existing create resources", async () => {
+    const provider = new RecordingProvider();
+    const fake = new FakeSpecProvider({ specHash: "h1", steps: [step("s1", "sh1")] });
+    const resources = { cpu: 2, memory: "4Gi", ephemeralStorage: "10Gi", ephemeralStorageLimit: "20Gi" };
+    const att = await reachReady(provider, fake, { resources });
+
+    expect(provider.createResources).toEqual([resources]);
+    const sb = att.current();
+    if (!sb) throw new Error("expected ready sandbox");
+    expect((await readAppliedState(sb))?.resources).toEqual({ cpu: 2, memory: "4Gi" });
+  });
+
+  it.each([{ cpu: 1 }, undefined])("adoption preserves recorded resources with rebuilt create resources %j", async (rebuilt) => {
+    const adopted = new VirtualSandbox("sb-existing");
+    const resources = { cpu: 4, memory: "8Gi" };
+    await adopted.writeFile("/etc/valet/applied.json", JSON.stringify({
+      image: "img:v1", specHash: "h1", steps: { s1: "sh1" }, resources,
+    }));
+    const provider = new RecordingProvider({ adopt: adopted });
+    const appliedSteps: string[] = [];
+    const fake = new FakeSpecProvider({
+      image: "img:v1", specHash: "h2",
+      steps: [
+        step("s1", "sh1", async () => { appliedSteps.push("s1"); }),
+        step("s2", "sh2", async () => { appliedSteps.push("s2"); }),
+      ],
+    });
+    const ephemeral = { ephemeralStorage: "10Gi", ephemeralStorageLimit: "20Gi" };
+    const att = await reachReady(provider, fake, { resources: { ...rebuilt, ...ephemeral } });
+
+    expect(att.current()).toBe(adopted);
+    expect(provider.preserveResourcesOnAdopt).toEqual([true]);
+    const state = await readAppliedState(adopted);
+    expect(state?.resources).toEqual(resources);
+    expect(state?.steps).toEqual({ s1: "sh1", s2: "sh2" });
+    expect(appliedSteps).toEqual(["s2"]);
+
+    fake.spec = { ...fake.spec, image: "img:v2", specHash: "h3" };
+    await att.reconcile();
+
+    expect(provider.createImages).toEqual(["img:v1", "img:v2"]);
+    expect(provider.createResources[1]).toEqual({ ...resources, ...ephemeral });
+    expect(att.currentEpoch()).toBe(2);
+    expect(att.state).toBe("ready");
+    expect(appliedSteps).toEqual(["s2", "s1", "s2"]);
+    const replacement = att.current();
+    if (!replacement) throw new Error("expected ready replacement");
+    expect((await readAppliedState(replacement))?.resources).toEqual(resources);
+  });
+
+  it.each([{ cpu: 2, memory: "4Gi" }, {}])("authoritative adoption rolls compute with resources %j", async (resources) => {
+    const adopted = new VirtualSandbox("sb-existing");
+    await adopted.writeFile("/etc/valet/applied.json", JSON.stringify({
+      image: "img:v1", specHash: "h1", steps: { s1: "sh1" }, resources: { cpu: 4, memory: "8Gi" },
+    }));
+    const provider = new RecordingProvider({ adopt: adopted });
+    let stepCalls = 0;
+    const fake = new FakeSpecProvider({
+      image: "img:v1", specHash: "h2", resources,
+      steps: [step("s1", "sh1", async () => { stepCalls++; })],
+    });
+    const att = await reachReady(provider, fake, { preserveResourcesOnAdopt: true });
+
+    expect(provider.createResources).toEqual([resources]);
+    expect(provider.preserveResourcesOnAdopt).toEqual([false]);
+    expect(att.current()).not.toBe(adopted);
+    const replacement = att.current();
+    if (!replacement) throw new Error("expected ready replacement");
+    expect((await readAppliedState(replacement))?.resources).toEqual(resources);
+    expect((await readAppliedState(adopted))?.resources).toEqual({ cpu: 4, memory: "8Gi" });
+    expect(stepCalls).toBe(1);
+  });
+
+  it.each([{ cpu: 4, memory: "8Gi" }, {}, undefined])("provider image rollout preserves the legacy resource opinion %j, not stale create options", async (resources) => {
+    const adopted = new VirtualSandbox("sb-existing");
+    await adopted.writeFile("/etc/valet/applied.json", JSON.stringify({
+      image: "img:v1", specHash: "h1", steps: { s1: "sh1" }, resources,
+    }));
+    const provider = new RecordingProvider({ adopt: adopted, rollAdoptedImage: true });
+    let stepCalls = 0;
+    const fake = new FakeSpecProvider({
+      image: "img:v2", specHash: "h2", steps: [step("s1", "sh1", async () => { stepCalls++; })],
+    });
+
+    const att = await reachReady(provider, fake, { resources: { cpu: 1 } });
+
+    const replacement = att.current();
+    if (!replacement) throw new Error("expected ready replacement");
+    expect(replacement).not.toBe(adopted);
+    expect((await readAppliedState(replacement))?.resources).toEqual(resources);
+    expect((await readAppliedState(replacement))?.image).toBe("img:v2");
+    expect(stepCalls).toBe(1);
+    await att.destroy();
+  });
+
+  it("a restarted attachment records durable provider overrides after the old applied file was lost", async () => {
+    const resources = { cpu: 4, memory: "8Gi" };
+    const provider = new RecordingProvider({ resourceOverrides: resources });
+    const fake = new FakeSpecProvider({ image: "img:v2", specHash: "h2", steps: [step("s1", "sh1")] });
+
+    const att = await reachReady(provider, fake, { resources: { cpu: 1 } });
+
+    const replacement = att.current();
+    if (!replacement) throw new Error("expected ready replacement");
+    expect((await readAppliedState(replacement))?.resources).toEqual(resources);
+    await att.destroy();
+  });
+
+  it.each([false, true])("unknown adoption discards stale resources before a later no-opinion image replacement (suspended: %s)", async (suspended) => {
+    const adopted = new VirtualSandbox("sb-existing");
+    const provider = new RecordingProvider({ adopt: adopted, hibernation: suspended });
+    const create = provider.create.bind(provider);
+    vi.spyOn(provider, "create").mockImplementationOnce(async (opts) => {
+      const sandbox = await create(opts);
+      sandbox.resourceOverrides = null;
+      return sandbox;
+    });
+    const fake = new FakeSpecProvider({ image: "img:v1", specHash: "h1", steps: [step("s1", "sh1")] });
+    const ephemeral = { ephemeralStorage: "10Gi", ephemeralStorageLimit: "20Gi" };
+    const att = await reachReady(provider, fake, { resources: { cpu: 1, memory: "2Gi", ...ephemeral } });
+    expect((await readAppliedState(adopted))?.resources).toBeUndefined();
+
+    if (suspended) await att.suspend();
+    fake.spec = { ...fake.spec, image: "img:v2", specHash: "h2" };
+    if (suspended) await att.ensureReady({ timeoutMs: 1000 });
+    else await att.reconcile();
+
+    expect.soft(provider.createResources[1]).toEqual(ephemeral);
+    const replacement = att.current();
+    if (!replacement) throw new Error("expected ready replacement");
+    expect.soft((await readAppliedState(replacement))?.resources).toBeUndefined();
+    expect(att.state).toBe("ready");
+    expect(att.currentEpoch()).toBe(2);
+    await att.destroy();
+  });
+
+  it.each([false, true])("an adopted applied-state read failure retains the workspace (release: %s)", async (release) => {
+    const adopted = new VirtualSandbox("sb-existing");
+    await adopted.writeFile("/workspace/keep.txt", "working directory data");
+    vi.spyOn(adopted, "exec").mockRejectedValueOnce(new Error("sandbox exec unavailable"));
+    const provider = new RecordingProvider({ adopt: adopted, release });
+    const fake = new FakeSpecProvider({ specHash: "h1", steps: [] });
+    const att = new SandboxAttachment(provider, {}, fake.provider());
+
+    await expect(att.ensureReady({ timeoutMs: 5000 })).rejects.toBeInstanceOf(SandboxPreparationError);
+
+    expect(att.state).toBe("error");
+    expect(provider.destroyCalls).toEqual([]);
+    expect(provider.releaseCalls).toEqual(release ? ["sb-existing"] : []);
+    expect(await adopted.readFile("/workspace/keep.txt")).toBe("working directory data");
+  });
+
+  it("a critical prep failure releases adopted compute without destroying its workspace", async () => {
+    const adopted = new VirtualSandbox("sb-existing");
+    const provider = new RecordingProvider({ adopt: adopted, release: true });
+    const fake = new FakeSpecProvider({ specHash: "h1", steps: [step("s1", "sh1", async () => { throw new Error("prep failed"); })] });
+    const att = new SandboxAttachment(provider, {}, fake.provider());
+
+    await expect(att.ensureReady({ timeoutMs: 1000 })).rejects.toBeInstanceOf(SandboxPreparationError);
+
+    expect(provider.destroyCalls).toEqual([]);
+    expect(provider.releaseCalls).toEqual(["sb-existing"]);
+  });
+
+  it.each([
+    { cpu: 4, memory: "4Gi" },
+    { cpu: 2, memory: "8Gi" },
+    { cpu: 4 },
+    {},
+  ])("resource drift to %j replaces and applies the full plan", async (resources) => {
+    const provider = new RecordingProvider({ release: true });
+    let stepCalls = 0;
+    const fake = new FakeSpecProvider({
+      specHash: "h1", resources: { cpu: 2, memory: "4Gi" },
+      steps: [step("s1", "sh1", async () => { stepCalls++; })],
+    });
+    const ephemeral = { ephemeralStorage: "10Gi", ephemeralStorageLimit: "20Gi" };
+    const att = await reachReady(provider, fake, { image: "stock:v1", resources: { ...fake.spec.resources, ...ephemeral } });
+    fake.spec = { ...fake.spec, specHash: "h2", resources };
+
+    await att.reconcile();
+
+    expect(att.currentEpoch()).toBe(2);
+    expect(provider.createImages).toEqual(["stock:v1", "stock:v1"]);
+    expect(provider.createResources).toEqual([
+      { cpu: 2, memory: "4Gi", ...ephemeral },
+      { ...resources, ...ephemeral },
+    ]);
+    expect(provider.releaseCalls).toEqual(["sb-1"]);
+    expect(provider.destroyCalls).toEqual([]);
+    expect(stepCalls).toBe(2);
+    expect(att.state).toBe("ready");
+    const sb = att.current();
+    if (!sb) throw new Error("expected ready sandbox");
+    expect((await readAppliedState(sb))?.resources).toEqual(resources);
+
+    await att.reconcile();
+    expect(provider.createResources).toHaveLength(2);
+  });
+
+  it("an absent applied resource field equals authoritative empty resources", async () => {
+    const provider = new RecordingProvider();
+    const fake = new FakeSpecProvider({ specHash: "h1", steps: [step("s1", "sh1")] });
+    const att = await reachReady(provider, fake);
+    fake.spec = { ...fake.spec, specHash: "h2", resources: {} };
+
+    await att.reconcile();
+
+    expect(provider.createResources).toHaveLength(1);
+    expect(att.currentEpoch()).toBe(1);
+  });
+
+  it("resource field order does not cause replacement", async () => {
+    const provider = new RecordingProvider();
+    const fake = new FakeSpecProvider({
+      specHash: "h1", resources: { cpu: 2, memory: "4Gi" }, steps: [],
+    });
+    const att = await reachReady(provider, fake, { resources: fake.spec.resources });
+    fake.spec = { ...fake.spec, resources: { memory: "4Gi", cpu: 2 } };
+
+    await att.reconcile();
+
+    expect(provider.createResources).toHaveLength(1);
+    expect(att.currentEpoch()).toBe(1);
+  });
+
+  it("no resource opinion keeps recorded resources while steps converge", async () => {
+    const provider = new RecordingProvider();
+    const resources = { cpu: 2, memory: "4Gi" };
+    const fake = new FakeSpecProvider({ specHash: "h1", resources, steps: [step("s1", "sh1")] });
+    const att = await reachReady(provider, fake, { resources });
+    fake.spec = { specHash: "h2", steps: [step("s1", "sh2")] };
+
+    await att.reconcile();
+
+    expect(provider.createResources).toHaveLength(1);
+    expect(att.currentEpoch()).toBe(1);
+    const sb = att.current();
+    if (!sb) throw new Error("expected ready sandbox");
+    const applied = await readAppliedState(sb);
+    expect(applied?.resources).toEqual(resources);
+    expect(applied?.steps).toEqual({ s1: "sh2" });
+  });
+
+  it.each([false, true])("image drift preserves observed resources after a no-opinion read (suspended: %s)", async (suspended) => {
+    vi.useFakeTimers();
+    try {
+      const provider = new RecordingProvider({ hibernation: true });
+      const fake = new FakeSpecProvider({ image: "img:v1", specHash: "h1", steps: [step("s1", "sh1")] });
+      const ephemeral = { ephemeralStorage: "10Gi", ephemeralStorageLimit: "20Gi" };
+      const att = await reachReady(provider, fake, { resources: { cpu: 1, ...ephemeral } });
+      const sb = att.current();
+      if (!sb) throw new Error("expected ready sandbox");
+      // Model an API restart: the applied file knows resources absent from create options.
+      const resources = { cpu: 4, memory: "8Gi" };
+      await sb.writeFile("/etc/valet/applied.json", JSON.stringify({
+        image: "img:v1", specHash: "h1", steps: { s1: "sh1" }, resources,
+      }));
+      await vi.advanceTimersByTimeAsync(OBSERVE_TTL_MS + 1);
+      await att.reconcile();
+      if (suspended) await att.suspend();
+      fake.spec = { ...fake.spec, image: "img:v2", specHash: "h2" };
+
+      if (suspended) await att.ensureReady({ timeoutMs: 5000 });
+      else await att.reconcile();
+
+      expect(provider.createImages).toEqual(["img:v1", "img:v2"]);
+      expect(provider.createResources[1]).toEqual({ ...resources, ...ephemeral });
+      expect(provider.resumeCalls).toEqual([]);
+      expect(att.currentEpoch()).toBe(2);
+      expect(att.state).toBe("ready");
+      const replacement = att.current();
+      if (!replacement) throw new Error("expected ready replacement");
+      expect((await readAppliedState(replacement))?.resources).toEqual(resources);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("non-isolated resource drift stays unapplied and warns once per unchanged drift", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const provider = new RecordingProvider({ isolated: false });
+    const resources = { cpu: 2, memory: "4Gi" };
+    const fake = new FakeSpecProvider({ specHash: "h1", resources, steps: [step("s1", "sh1")] });
+    const att = await reachReady(provider, fake, { resources });
+    fake.spec = { specHash: "h2", resources: { cpu: 4, memory: "8Gi" }, steps: [step("s1", "sh2")] };
+
+    await att.reconcile();
+
+    expect(provider.createResources).toEqual([resources]);
+    expect(provider.releaseCalls).toEqual([]);
+    expect(provider.destroyCalls).toEqual([]);
+    expect(att.currentEpoch()).toBe(1);
+    const sb = att.current();
+    if (!sb) throw new Error("expected ready sandbox");
+    const applied = await readAppliedState(sb);
+    expect(applied?.resources).toEqual(resources);
+    expect(applied?.steps).toEqual({ s1: "sh2" });
+    await att.reconcile();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/ignored CPU\/memory change.*non-isolated.*Use an isolated sandbox provider/));
+    warn.mockRestore();
+  });
+
+  it("failed resource replacement uses the desired spec hash backoff", async () => {
+    vi.useFakeTimers();
+    try {
+      const provider = new RecordingProvider();
+      const fake = new FakeSpecProvider({ specHash: "h1", resources: { cpu: 2 }, steps: [] });
+      const att = await reachReady(provider, fake, { resources: fake.spec.resources });
+      const create = provider.create.bind(provider);
+      provider.create = async (opts) => {
+        if (opts.resources?.cpu === 4) {
+          provider.createImages.push(opts.image);
+          provider.createResources.push({ ...opts.resources });
+          throw new Error("resource request could not be scheduled");
+        }
+        return create(opts);
+      };
+      fake.spec = { ...fake.spec, specHash: "h2", resources: { cpu: 4 } };
+      await att.reconcile();
+      expect(att.state).toBe("error");
+      expect(provider.createResources).toHaveLength(2);
+
+      fake.spec = { ...fake.spec, specHash: "h1", resources: { cpu: 2 } };
+      await att.ensureReady({ timeoutMs: 5000 });
+      fake.spec = { ...fake.spec, specHash: "h2", resources: { cpu: 4 } };
+      await att.reconcile();
+      expect(provider.createResources).toHaveLength(3);
+      expect(att.state).toBe("ready");
+
+      await vi.advanceTimersByTimeAsync(2 * 60_000 + 1);
+      await att.reconcile();
+      expect(provider.createResources).toHaveLength(4);
+      expect(att.state).toBe("error");
+
+      fake.spec = { ...fake.spec, specHash: "h1", resources: { cpu: 2 } };
+      await att.ensureReady({ timeoutMs: 5000 });
+      fake.spec = { ...fake.spec, specHash: "h3", resources: { cpu: 4 } };
+      await att.reconcile();
+      expect(provider.createResources).toHaveLength(6);
+      expect(att.state).toBe("error");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("no drift → no provider create and no observation exec beyond the boot write", async () => {
     const provider = new RecordingProvider();
     const fake = new FakeSpecProvider({
@@ -601,6 +986,56 @@ describe("SandboxAttachment.reconcile", () => {
 });
 
 describe("SandboxAttachment wake folding", () => {
+  it.each([{ cpu: 4, memory: "8Gi" }, {}])("resource drift to %j skips resume and cold provisions", async (resources) => {
+    const provider = new RecordingProvider({ hibernation: true, release: true });
+    const fake = new FakeSpecProvider({ specHash: "h1", resources: { cpu: 2, memory: "4Gi" }, steps: [] });
+    const ephemeral = { ephemeralStorage: "10Gi", ephemeralStorageLimit: "20Gi" };
+    const att = await reachReady(provider, fake, { resources: { ...fake.spec.resources, ...ephemeral } });
+    await att.suspend();
+    fake.spec = { ...fake.spec, specHash: "h2", resources };
+
+    const resumed = await att.ensureReady({ timeoutMs: 5000 });
+
+    expect(provider.resumeCalls).toEqual([]);
+    expect(provider.createResources).toHaveLength(2);
+    expect(provider.createResources[1]).toEqual({ ...resources, ...ephemeral });
+    expect(provider.releaseCalls).toEqual(["sb-1"]);
+    expect(resumed.epoch).toBe(2);
+    expect(att.state).toBe("ready");
+  });
+
+  it("a suspended sandbox resumes when the desired resources have no opinion", async () => {
+    const provider = new RecordingProvider({ hibernation: true });
+    const resources = { cpu: 2, memory: "4Gi" };
+    const fake = new FakeSpecProvider({ specHash: "h1", resources, steps: [] });
+    const att = await reachReady(provider, fake, { resources });
+    await att.suspend();
+    fake.spec = { specHash: "h2", steps: [] };
+
+    const resumed = await att.ensureReady({ timeoutMs: 5000 });
+
+    expect(provider.resumeCalls).toEqual(["sb-1"]);
+    expect(provider.createResources).toEqual([resources]);
+    expect(resumed.epoch).toBe(1);
+    expect(att.state).toBe("ready");
+  });
+
+  it("a non-isolated suspended sandbox resumes despite resource drift", async () => {
+    const provider = new RecordingProvider({ hibernation: true, isolated: false });
+    const resources = { cpu: 2, memory: "4Gi" };
+    const fake = new FakeSpecProvider({ specHash: "h1", resources, steps: [] });
+    const att = await reachReady(provider, fake, { resources });
+    await att.suspend();
+    fake.spec = { ...fake.spec, specHash: "h2", resources: { cpu: 4, memory: "8Gi" } };
+
+    const resumed = await att.ensureReady({ timeoutMs: 5000 });
+
+    expect(provider.resumeCalls).toEqual(["sb-1"]);
+    expect(provider.createResources).toEqual([resources]);
+    expect(resumed.epoch).toBe(1);
+    expect(att.state).toBe("ready");
+  });
+
   it("wake-when-stale: a suspended attachment with a changed image cold-provisions and does NOT resume", async () => {
     const provider = new RecordingProvider({ hibernation: true });
     const fake = new FakeSpecProvider({

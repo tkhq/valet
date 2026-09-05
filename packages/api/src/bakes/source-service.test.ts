@@ -342,6 +342,7 @@ describe("SourceService", () => {
         externalRef: null,
         pullSecretName: null,
         setupCommands: setup,
+        sandboxResources: null,
         profile: "headless",
         repoHost: null,
         repoFullName: null,
@@ -365,6 +366,7 @@ describe("SourceService", () => {
       // (pointless rebakes).
       const base: typeof imageSources.$inferSelect = {
         id: "b-env",
+        sandboxResources: null,
         orgId,
         kind: "base",
         parentId: null,
@@ -406,6 +408,16 @@ describe("SourceService", () => {
       const a = service.identityHash(src, null, { recipe: [{ id: "npm-ci", lockfile: "package-lock.json", command: "npm ci" }], setup: [] });
       const b = service.identityHash(src, null, { recipe: [], setup: [] });
       expect(a).not.toBe(b);
+    });
+
+    it("saved sandbox resource edits do not change the repository bake identity", async () => {
+      const srcId = await seedRepoSource(db);
+      const [before] = await db.select().from(imageSources).where(eq(imageSources.id, srcId));
+      const recipe = { recipe: [], setup: [] };
+      const identity = service.identityHash(before, "parent", recipe);
+      await db.update(imageSources).set({ sandboxResources: { cpu: 4, memory: "8Gi" } }).where(eq(imageSources.id, srcId));
+      const [after] = await db.select().from(imageSources).where(eq(imageSources.id, srcId));
+      expect(service.identityHash(after, "parent", recipe)).toBe(identity);
     });
   });
 
@@ -1616,6 +1628,28 @@ describe("repoPrebuildFlags", () => {
     expect(result.workspaceStorage).toBeUndefined();
   });
 
+  it("returns declared sandbox resources from .valet/prebuild.yaml", async () => {
+    contentsHandler = (_owner, _repo, path) => {
+      if (path === ".valet/prebuild.yaml") {
+        return {
+          body: {
+            content: b64('resources:\n  cpu: 4\n  memory: "8Gi"'),
+            encoding: "base64",
+          },
+        };
+      }
+      return { status: 404, body: { message: "Not Found" } };
+    };
+
+    const result = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
+
+    expect(result).toEqual({
+      docker: false,
+      resources: { cpu: 4, memory: "8Gi" },
+      outcome: "declared",
+    });
+  });
+
   it("returns false when the file is absent, and caches subsequent calls", async () => {
     let callCount = 0;
     contentsHandler = (_owner, _repo, path) => {
@@ -1623,8 +1657,7 @@ describe("repoPrebuildFlags", () => {
       return { status: 404, body: { message: "Not Found" } };
     };
     const result = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
-    expect(result.docker).toBe(false);
-    expect(result.workspaceStorage).toBeUndefined();
+    expect(result).toEqual({ docker: false, resources: {}, outcome: "absent" });
     expect(callCount).toBe(1);
     // Second call — should be served from cache, no new HTTP call.
     await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
@@ -1713,7 +1746,12 @@ describe("repoPrebuildFlags", () => {
       return { status: 404, body: { message: "Not Found" } };
     };
     const result = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
-    expect(result).toEqual({ docker: true, workspaceStorage: "4Gi", outcome: "declared" });
+    expect(result).toEqual({
+      docker: true,
+      resources: {},
+      workspaceStorage: "4Gi",
+      outcome: "declared",
+    });
   });
 
   it("a malformed workspaceStorage value degrades to the defaults (best-effort, like every other read failure)", async () => {
@@ -1726,6 +1764,7 @@ describe("repoPrebuildFlags", () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const result = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
     expect(result).toEqual({ docker: false, outcome: "error" });
+    expect(result).not.toHaveProperty("resources");
     errSpy.mockRestore();
   });
 
@@ -1743,7 +1782,12 @@ describe("repoPrebuildFlags", () => {
       return { status: 404, body: { message: "Not Found" } };
     };
     const authed = await repoPrebuildFlags(deps(), "tok", "o", "r", "main");
-    expect(authed).toEqual({ docker: false, workspaceStorage: "8Gi", outcome: "declared" });
+    expect(authed).toEqual({
+      docker: false,
+      resources: {},
+      workspaceStorage: "8Gi",
+      outcome: "declared",
+    });
   });
 
   it("distinct authenticated tokens use independent cached answers", async () => {
@@ -1774,8 +1818,13 @@ describe("repoPrebuildFlags", () => {
     const bAbsent = await repoPrebuildFlags(readDeps, "token-b", "o", "r", "a-declared");
 
     expect(aAbsent.outcome).toBe("absent");
-    expect(bDeclared).toEqual({ docker: false, workspaceStorage: "8Gi", outcome: "declared" });
-    expect(aDeclared).toEqual({ docker: true, outcome: "declared" });
+    expect(bDeclared).toEqual({
+      docker: false,
+      resources: {},
+      workspaceStorage: "8Gi",
+      outcome: "declared",
+    });
+    expect(aDeclared).toEqual({ docker: true, resources: {}, outcome: "declared" });
     expect(bAbsent.outcome).toBe("absent");
     expect(calls).toBe(4);
 
@@ -1809,7 +1858,12 @@ describe("repoPrebuildFlags", () => {
     );
 
     expect((await tokenA).outcome).toBe("absent");
-    expect(await tokenB).toEqual({ docker: false, workspaceStorage: "8Gi", outcome: "declared" });
+    expect(await tokenB).toEqual({
+      docker: false,
+      resources: {},
+      workspaceStorage: "8Gi",
+      outcome: "declared",
+    });
   });
 
   it("a transient failure is NOT cached — the next call re-reads and gets the real answer (TKAI-401)", async () => {
@@ -1820,14 +1874,25 @@ describe("repoPrebuildFlags", () => {
       // First read: rate-limited. Second read: the real file.
       return calls === 1
         ? { status: 403, body: { message: "API rate limit exceeded" } }
-        : { body: { content: b64('docker: true\nworkspaceStorage: "8Gi"'), encoding: "base64" } };
+        : {
+            body: {
+              content: b64('docker: true\nworkspaceStorage: "8Gi"\nresources:\n  cpu: 4\n  memory: "8Gi"'),
+              encoding: "base64",
+            },
+          };
     };
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const token = "github-secret-token-value";
     const first = await repoPrebuildFlags(deps(), token, "o", "r", "main");
     expect(first).toEqual({ docker: false, outcome: "error" });
+    expect(first).not.toHaveProperty("resources");
     const second = await repoPrebuildFlags(deps(), token, "o", "r", "main");
-    expect(second).toEqual({ docker: true, workspaceStorage: "8Gi", outcome: "declared" });
+    expect(second).toEqual({
+      docker: true,
+      workspaceStorage: "8Gi",
+      resources: { cpu: 4, memory: "8Gi" },
+      outcome: "declared",
+    });
     expect(calls).toBe(2);
     const logged = errSpy.mock.calls.flat().map(String).join(" ");
     expect(logged).not.toContain(token);
@@ -1850,7 +1915,12 @@ describe("repoPrebuildFlags", () => {
     const second = await repoPrebuildFlags(deps(), "tok", "o", "r", "malformed-ref");
 
     expect(first).toEqual({ docker: false, outcome: "error" });
-    expect(second).toEqual({ docker: false, workspaceStorage: "8Gi", outcome: "declared" });
+    expect(second).toEqual({
+      docker: false,
+      resources: {},
+      workspaceStorage: "8Gi",
+      outcome: "declared",
+    });
     expect(calls).toBe(2);
     errSpy.mockRestore();
   });
@@ -1872,7 +1942,7 @@ describe("repoPrebuildFlags", () => {
     const second = await repoPrebuildFlags(deps(), "tok", "o", "r", "invalid-base64-ref");
 
     expect(first).toEqual({ docker: false, outcome: "error" });
-    expect(second).toEqual({ docker: true, outcome: "declared" });
+    expect(second).toEqual({ docker: true, resources: {}, outcome: "declared" });
     expect(calls).toBe(2);
     errSpy.mockRestore();
   });
@@ -1902,8 +1972,8 @@ describe("repoPrebuildFlags", () => {
     resolvers[1]?.(
       new Response(JSON.stringify({ content: b64("docker: true"), encoding: "base64" }), { status: 200 }),
     );
-    expect(await second).toEqual({ docker: true, outcome: "declared" });
-    expect(await third).toEqual({ docker: true, outcome: "declared" });
+    expect(await second).toEqual({ docker: true, resources: {}, outcome: "declared" });
+    expect(await third).toEqual({ docker: true, resources: {}, outcome: "declared" });
     errSpy.mockRestore();
   });
 });

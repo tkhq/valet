@@ -98,9 +98,15 @@
  *   `Always` is strictly better for this workload shape.
  */
 import type * as k8s from "@kubernetes/client-node";
+import { createHash } from "node:crypto";
 import { setHeaderOptions } from "@kubernetes/client-node";
-import type { SandboxStatus } from "@valet/engine";
-import { SANDBOX_CONTAINER_NAME, SESSION_ANNOTATION_KEY } from "./manifest.js";
+import type { Sandbox, SandboxStatus } from "@valet/engine";
+import {
+  IMAGE_FINGERPRINT_ENV,
+  imageFingerprint,
+  SANDBOX_CONTAINER_NAME,
+  SESSION_ANNOTATION_KEY,
+} from "./manifest.js";
 import type {
   K8sProviderConfig,
   PodOwnerReference,
@@ -126,6 +132,92 @@ export const SANDBOX_KIND = "Sandbox";
  * see Task 3's smoke-test observations) once it has provisioned a backing
  * pod. */
 const POD_NAME_ANNOTATION = "agents.x-k8s.io/pod-name";
+
+/** Repository overrides, kept outside the pod so image rolls cannot erase them. */
+const RESOURCE_OVERRIDES_ANNOTATION = "valet.dev/resource-overrides";
+const RESOURCE_FINGERPRINT_ANNOTATION = "valet.dev/resource-fingerprint";
+const RESOURCE_FINGERPRINT_ENV = "VALET_SANDBOX_RESOURCE_FINGERPRINT";
+
+export { imageFingerprint } from "./manifest.js";
+
+function withImageFingerprint(
+  template: SandboxCR["spec"]["podTemplate"], image: string,
+): SandboxCR["spec"]["podTemplate"] {
+  const fingerprint = imageFingerprint(image);
+  return {
+    ...template,
+    spec: {
+      ...template.spec,
+      containers: template.spec.containers.map((container) => {
+        if (container.name !== SANDBOX_CONTAINER_NAME) return container;
+        const env = (container.env ?? []).filter((entry) => entry.name !== IMAGE_FINGERPRINT_ENV);
+        env.push({ name: IMAGE_FINGERPRINT_ENV, value: fingerprint });
+        return { ...container, env };
+      }),
+    },
+  };
+}
+
+/** Read the desired-resource generation from the CR template, not live pod metadata. */
+export function podTemplateResourceFingerprint(template: unknown): string | undefined {
+  if (!isRecord(template) || !isRecord(template.metadata) || !isRecord(template.metadata.annotations)) return undefined;
+  const value = template.metadata.annotations[RESOURCE_FINGERPRINT_ANNOTATION];
+  return typeof value === "string" ? value : undefined;
+}
+
+function withResourceFingerprint(
+  template: SandboxCR["spec"]["podTemplate"], fingerprint: string | undefined,
+): SandboxCR["spec"]["podTemplate"] {
+  // The controller updates existing pod annotations without changing pod specs.
+  // A reserved literal env value records the generation used at pod creation.
+  const containers = template.spec.containers.map((container) => {
+    if (container.name !== SANDBOX_CONTAINER_NAME) return container;
+    if (fingerprint === undefined && !container.env?.some((entry) => entry.name === RESOURCE_FINGERPRINT_ENV)) return container;
+    const env = (container.env ?? []).filter((entry) => entry.name !== RESOURCE_FINGERPRINT_ENV);
+    if (fingerprint !== undefined) env.push({ name: RESOURCE_FINGERPRINT_ENV, value: fingerprint });
+    return { ...container, env };
+  });
+  const spec = { ...template.spec, containers };
+  if (fingerprint === undefined && template.metadata?.annotations?.[RESOURCE_FINGERPRINT_ANNOTATION] === undefined) {
+    return { ...template, spec };
+  }
+  const annotations = { ...template.metadata?.annotations };
+  delete annotations[RESOURCE_FINGERPRINT_ANNOTATION];
+  if (fingerprint !== undefined) annotations[RESOURCE_FINGERPRINT_ANNOTATION] = fingerprint;
+  return { ...template, metadata: { ...template.metadata, annotations }, spec };
+}
+
+/** Fingerprint desired requests/limits, not admission-mutated pod resources. */
+export function resourceFingerprint(resources: SandboxCpuMemoryResources): string {
+  const values = (["requests", "limits"] as const).flatMap((side) =>
+    (["cpu", "memory"] as const).map((field) => normalizeQuantity(resources[side]?.[field]) ?? null),
+  );
+  return createHash("sha256").update(JSON.stringify(values)).digest("hex");
+}
+
+function readResourceOverridesAnnotation(cr: SandboxCRRead): Sandbox["resourceOverrides"] {
+  const serialized = cr.metadata.annotations?.[RESOURCE_OVERRIDES_ANNOTATION];
+  if (serialized === undefined) return undefined;
+  let value: unknown;
+  try { value = JSON.parse(serialized); } catch { return undefined; }
+  if (!isRecord(value) || Array.isArray(value)) return undefined;
+  if (value.cpu !== undefined && (typeof value.cpu !== "number" || !Number.isFinite(value.cpu) || value.cpu <= 0)) return undefined;
+  if (value.memory !== undefined && (typeof value.memory !== "string" || value.memory.trim().length === 0)) return undefined;
+  return {
+    ...(typeof value.cpu === "number" ? { cpu: value.cpu } : {}),
+    ...(typeof value.memory === "string" ? { memory: value.memory } : {}),
+  };
+}
+
+function resourceOverridesMetadata(
+  metadata: SandboxCR["metadata"], resourceOverrides: Sandbox["resourceOverrides"],
+): SandboxCR["metadata"] {
+  if (resourceOverrides === undefined) return metadata;
+  const annotations = { ...metadata.annotations };
+  delete annotations[RESOURCE_OVERRIDES_ANNOTATION];
+  if (resourceOverrides !== null) annotations[RESOURCE_OVERRIDES_ANNOTATION] = JSON.stringify(resourceOverrides);
+  return { ...metadata, annotations };
+}
 
 // ── Context-safe KubeConfig loading (decision 2) ───────────────────────
 
@@ -370,9 +462,8 @@ export function parseSandboxCRRead(value: unknown): SandboxCRRead {
   }
 
   // spec.podTemplate/volumeClaimTemplates are intentionally typed `unknown`
-  // on SandboxCRReadSpec (see types.ts) — we only validate their presence
-  // above, never their internal shape, since nothing here reads into
-  // podTemplate.spec.
+  // on SandboxCRReadSpec (see types.ts). Resource adoption narrows the known
+  // CPU/memory fields separately through sandboxCpuMemoryResources below.
   const spec: SandboxCRRead["spec"] = {
     podTemplate: specValue.podTemplate,
     volumeClaimTemplates: specValue.volumeClaimTemplates,
@@ -407,6 +498,61 @@ function parseApiVersion(apiVersion: K8sProviderConfig["apiVersion"]): { group: 
 
 // ── Lifecycle operations ────────────────────────────────────────────
 
+/** The CRD accepts both integer and string resource quantities. */
+export interface SandboxCpuMemoryResources {
+  requests?: { cpu?: string | number; memory?: string | number };
+  limits?: { cpu?: string | number; memory?: string | number };
+}
+
+/** Read only the named sandbox container's CPU/memory requests and limits. */
+export function sandboxCpuMemoryResources(template: unknown): SandboxCpuMemoryResources {
+  if (!isRecord(template) || !isRecord(template.spec) || !Array.isArray(template.spec.containers)) return {};
+  const container: unknown = template.spec.containers.find(
+    (value: unknown) => isRecord(value) && value.name === SANDBOX_CONTAINER_NAME,
+  );
+  if (!isRecord(container) || !isRecord(container.resources)) return {};
+  const result: SandboxCpuMemoryResources = {};
+  for (const side of ["requests", "limits"] as const) {
+    const values = container.resources[side];
+    if (!isRecord(values)) continue;
+    const known: NonNullable<SandboxCpuMemoryResources["requests"]> = {};
+    for (const field of ["cpu", "memory"] as const) {
+      if (typeof values[field] === "string" || typeof values[field] === "number") known[field] = values[field];
+    }
+    if (Object.keys(known).length > 0) result[side] = known;
+  }
+  return result;
+}
+
+/** Copy prior CPU/memory into a new template while keeping incoming storage. */
+function preserveCpuMemory(
+  template: SandboxCR["spec"]["podTemplate"],
+  previous: SandboxCpuMemoryResources,
+): unknown {
+  return {
+    ...template,
+    spec: {
+      ...template.spec,
+      containers: template.spec.containers.map((container) => {
+        if (container.name !== SANDBOX_CONTAINER_NAME) return container;
+        const resources: {
+          requests?: { cpu?: string | number; memory?: string | number; "ephemeral-storage"?: string };
+          limits?: { cpu?: string | number; memory?: string | number; "ephemeral-storage"?: string };
+        } = { ...container.resources };
+        for (const side of ["requests", "limits"] as const) {
+          const values: NonNullable<typeof resources.requests> = { ...resources[side] };
+          delete values.cpu;
+          delete values.memory;
+          Object.assign(values, previous[side]);
+          if (Object.keys(values).length > 0) resources[side] = values;
+          else delete resources[side];
+        }
+        return { ...container, resources: Object.keys(resources).length > 0 ? resources : undefined };
+      }),
+    },
+  };
+}
+
 /** `applySandbox`'s result: the read-back CR plus whether this call
  * CREATED it (vs. adopted an existing CR of the same name). `create()`
  * uses `adopted` to decide failed-create cleanup — a fresh CR is the
@@ -416,6 +562,8 @@ function parseApiVersion(apiVersion: K8sProviderConfig["apiVersion"]): { group: 
 export interface ApplySandboxResult {
   cr: SandboxCRRead;
   adopted: boolean;
+  /** Durable repository opinion; null means an adopted legacy record is unknown. */
+  resourceOverrides?: Sandbox["resourceOverrides"];
   /** On the adopt branch: the `valet.dev/session` annotation the existing CR
    * carried BEFORE the replace overwrote it. The replace erases it, so this
    * is the only record of who owned the sandbox until now — `create()` warns
@@ -436,17 +584,30 @@ export async function applySandbox(
   api: SandboxCustomObjectsApi,
   cfg: K8sProviderConfig,
   manifest: SandboxCR,
+  opts: {
+    preserveResourcesOnAdopt?: boolean;
+    resourceOverrides?: NonNullable<Sandbox["resourceOverrides"]>;
+    readResourceOverrides?: () => Promise<NonNullable<Sandbox["resourceOverrides"]> | undefined>;
+  } = {},
 ): Promise<ApplySandboxResult> {
   const { group, version } = parseApiVersion(cfg.apiVersion);
+  const sandboxImage = manifest.spec.podTemplate.spec.containers.find(
+    (container) => container.name === SANDBOX_CONTAINER_NAME,
+  )?.image ?? "";
+  const resourceTemplate = opts.resourceOverrides === undefined ? manifest.spec.podTemplate : withResourceFingerprint(
+    manifest.spec.podTemplate, resourceFingerprint(sandboxCpuMemoryResources(manifest.spec.podTemplate)),
+  );
+  const requestedTemplate = withImageFingerprint(resourceTemplate, sandboxImage);
   try {
     const created = await api.createNamespacedCustomObject({
       group,
       version,
       namespace: cfg.namespace,
       plural: SANDBOX_PLURAL,
-      body: manifest,
+      body: { ...manifest, metadata: resourceOverridesMetadata(manifest.metadata, opts.resourceOverrides),
+        spec: { ...manifest.spec, podTemplate: requestedTemplate } },
     });
-    return { cr: parseSandboxCRRead(created), adopted: false };
+    return { cr: parseSandboxCRRead(created), adopted: false, resourceOverrides: opts.resourceOverrides };
   } catch (err) {
     if (!isApiError(err) || err.code !== 409) throw err;
   }
@@ -458,6 +619,11 @@ export async function applySandbox(
     // now. Surface as a normal error; callers retry via their own policy.
     throw new Error(`applySandbox: 409 on create but "${manifest.metadata.name}" is not gettable afterward`);
   }
+  // Migrate before the CR update can start replacement. Once stored, the
+  // record survives pod deletion and a crash before create() returns.
+  const resourceOverrides = opts.preserveResourcesOnAdopt
+    ? readResourceOverridesAnnotation(existing) ?? await opts.readResourceOverrides?.() ?? null
+    : opts.resourceOverrides;
   // Adopt must satisfy create()'s postcondition: a READY sandbox. `create()`
   // unconditionally ends in `waitReady` (see provider.ts), so adopting a CR
   // AS Suspended can never satisfy the caller — the controller keeps the pod
@@ -478,10 +644,20 @@ export async function applySandbox(
   // before suspending, and a reportFailure-triggered re-create means the
   // engine actively needs the sandbox live — so the provider's create-adopt
   // must resume, not preserve Suspended.
-  const spec =
+  let spec: SandboxCRRead["spec"] =
     existing.spec.operatingMode === "Suspended"
-      ? { ...manifest.spec, operatingMode: manifest.spec.operatingMode ?? "Running" }
-      : manifest.spec;
+      ? { ...manifest.spec, podTemplate: requestedTemplate, operatingMode: manifest.spec.operatingMode ?? "Running" }
+      : { ...manifest.spec, podTemplate: requestedTemplate };
+  if (opts.preserveResourcesOnAdopt) {
+    const previousResources = sandboxCpuMemoryResources(existing.spec.podTemplate);
+    // Legacy no-opinion adoption keeps fingerprint absence. Only an
+    // authoritative opinion can start the one-time fingerprint migration roll.
+    const template = withImageFingerprint(
+      withResourceFingerprint(manifest.spec.podTemplate, podTemplateResourceFingerprint(existing.spec.podTemplate)),
+      sandboxImage,
+    );
+    spec = { ...spec, podTemplate: preserveCpuMemory(template, previousResources) };
+  }
 
   const replaced = await api.replaceNamespacedCustomObject({
     group,
@@ -492,7 +668,7 @@ export async function applySandbox(
     body: {
       apiVersion: manifest.apiVersion,
       kind: manifest.kind,
-      metadata: { ...manifest.metadata, resourceVersion: existing.metadata.resourceVersion },
+      metadata: { ...resourceOverridesMetadata(manifest.metadata, resourceOverrides), resourceVersion: existing.metadata.resourceVersion },
       spec,
     },
   });
@@ -500,6 +676,7 @@ export async function applySandbox(
   return {
     cr: parseSandboxCRRead(replaced),
     adopted: true,
+    resourceOverrides,
     ...(previousSession !== undefined ? { previousSession } : {}),
   };
 }
@@ -718,12 +895,19 @@ export interface PodStatusCondition {
   message?: string;
 }
 
-/** The subset of a `V1Pod`'s `.status` (plus per-container `image`, sourced
- * from `.spec.containers`) this module needs to classify a startup failure. */
+/** Pod status and container spec fields used for startup and drift checks. */
 export interface PodStatusInfo {
   phase?: string;
   containerStatuses?: PodContainerStatus[];
   conditions?: PodStatusCondition[];
+  /** Named sandbox container image, available before container status exists. */
+  sandboxImage?: string;
+  /** Named sandbox container CPU/memory from the live pod spec. */
+  sandboxResources?: SandboxCpuMemoryResources;
+  /** Resource generation from the named container's reserved literal env value. */
+  resourceFingerprint?: string;
+  /** Requested-image generation, unchanged when admission rewrites the image. */
+  imageFingerprint?: string;
 }
 
 /** The subset of `@kubernetes/client-node`'s `CoreV1Api` needed to GET a
@@ -738,7 +922,7 @@ export interface SandboxPodStatusApi {
 }
 
 /** The subset of `@kubernetes/client-node`'s `CoreV1Api` needed to delete
- * the backing pod for image-drift rolling (`create()` convergence path). */
+ * the backing pod for image or resource rolling (`create()` convergence). */
 export interface SandboxPodDeleteApi {
   /** Deletes a pod by name. Idempotent: a 404 (already gone) is treated as
    * success — the controller may have deleted the pod concurrently. */
@@ -746,7 +930,7 @@ export interface SandboxPodDeleteApi {
 }
 
 /** Wraps a real `k8s.CoreV1Api` instance. */
-export function podStatusApiAdapter(api: k8s.CoreV1Api): SandboxPodStatusApi {
+export function podStatusApiAdapter(api: Pick<k8s.CoreV1Api, "readNamespacedPod">): SandboxPodStatusApi {
   return {
     async getPodStatus(namespace, podName) {
       let pod: k8s.V1Pod;
@@ -769,7 +953,16 @@ export function podStatusApiAdapter(api: k8s.CoreV1Api): SandboxPodStatusApi {
             typeof c.type === "string" && (c.status === "True" || c.status === "False" || c.status === "Unknown"),
         )
         .map((c) => ({ type: c.type, status: c.status, reason: c.reason, message: c.message }));
-      return { phase: pod.status?.phase, containerStatuses, conditions };
+      const sandboxContainer = pod.spec?.containers.find((container) => container.name === SANDBOX_CONTAINER_NAME);
+      const fingerprint = sandboxContainer?.env?.find((entry) => entry.name === RESOURCE_FINGERPRINT_ENV);
+      const requestedImage = sandboxContainer?.env?.find((entry) => entry.name === IMAGE_FINGERPRINT_ENV);
+      return {
+        phase: pod.status?.phase, containerStatuses, conditions,
+        sandboxImage: images.get(SANDBOX_CONTAINER_NAME),
+        sandboxResources: sandboxCpuMemoryResources({ spec: pod.spec }),
+        resourceFingerprint: fingerprint?.valueFrom === undefined ? fingerprint?.value : undefined,
+        imageFingerprint: requestedImage?.valueFrom === undefined ? requestedImage?.value : undefined,
+      };
     },
   };
 }
@@ -789,7 +982,7 @@ export function podDeleteApiAdapter(api: k8s.CoreV1Api): SandboxPodDeleteApi {
 }
 
 /**
- * Reads the live backing pod for `name` and checks whether its first
+ * Reads the live backing pod for `name` and checks whether the named sandbox
  * container's image matches `manifestImage`. Returns `true` when a live pod
  * exists with a different image (the caller should delete the pod and re-wait
  * for the controller to reconcile a fresh one). Returns `false` in all other
@@ -808,18 +1001,95 @@ export async function livePodImageDiffers(
   name: string,
   manifestImage: string,
 ): Promise<{ differs: true; podName: string; liveImage: string } | { differs: false }> {
-  const podName = await resolvePodName(objectsApi, podsApi, cfg, name).catch(() => null);
+  const result = await livePodDrift(objectsApi, podsApi, podStatusApi, cfg, name, manifestImage).catch(() => null);
+  if (!result?.differs || result.liveImage === undefined) return { differs: false };
+  return { differs: true, podName: result.podName, liveImage: result.liveImage };
+}
+
+function normalizeQuantity(value: string | number | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const raw = String(value);
+  // Exact decimal mantissa/exponent arithmetic avoids floating-point rounding
+  // and supports fractional BinarySI values such as 1.5Gi = 1536Mi.
+  const match = raw.length <= 256
+    ? /^([+-]?)([0-9]+(?:\.[0-9]*)?|\.[0-9]+)(Ki|Mi|Gi|Ti|Pi|Ei|[numkKMGTP]|E|[eE][+-]?[0-9]+)?$/.exec(raw)
+    : null;
+  if (!match) return `raw:${raw}`;
+  const decimal = match[2];
+  const point = decimal.indexOf(".");
+  let power = point === -1 ? 0 : -(decimal.length - point - 1);
+  let mantissa = BigInt(decimal.replace(".", ""));
+  const suffix = match[3] ?? "";
+  const binaryPower = ["Ki", "Mi", "Gi", "Ti", "Pi", "Ei"].indexOf(suffix);
+  if (binaryPower !== -1) {
+    mantissa *= 2n ** BigInt((binaryPower + 1) * 10);
+  } else {
+    const powers: Record<string, number> = { n: -9, u: -6, m: -3, "": 0, k: 3, K: 3, M: 6, G: 9, T: 12, P: 15, E: 18 };
+    power += powers[suffix] ?? Number(suffix.slice(1));
+    if (!Number.isSafeInteger(power)) return `raw:${raw}`;
+  }
+  if (mantissa === 0n) return "quantity:0";
+  // resource.Quantity rounds sub-nano values away from zero and caps
+  // BinarySI magnitudes at int64 max before Kubernetes serializes them.
+  if (power < -9) {
+    const discarded = -9 - power;
+    if (discarded >= mantissa.toString().length) mantissa = 1n;
+    else {
+      const divisor = 10n ** BigInt(discarded);
+      mantissa = (mantissa + divisor - 1n) / divisor;
+    }
+    power = -9;
+  }
+  const maxBinary = 2n ** 63n - 1n;
+  if (binaryPower !== -1 && mantissa > maxBinary * 10n ** BigInt(-power)) {
+    mantissa = maxBinary;
+    power = 0;
+  }
+  while (mantissa % 10n === 0n) { mantissa /= 10n; power++; }
+  return `quantity:${match[1] === "-" ? "-" : ""}${mantissa}e${power}`;
+}
+
+/** Compare image and CPU/memory with one live pod read, including retry rolls.
+ * Read errors propagate so unknown resources cannot be recorded as applied. */
+export async function livePodDrift(
+  objectsApi: SandboxCustomObjectsApi,
+  podsApi: SandboxPodsApi,
+  podStatusApi: SandboxPodStatusApi,
+  cfg: K8sProviderConfig,
+  name: string,
+  manifestImage: string,
+  resources?: SandboxCpuMemoryResources,
+  expectedResourceFingerprint?: string,
+  expectedImageFingerprint?: string,
+): Promise<{
+  differs: true;
+  podName: string;
+  liveImage: string | undefined;
+  imageDrift: boolean;
+  resourcesDrift: boolean;
+} | { differs: false }> {
+  const podName = await resolvePodName(objectsApi, podsApi, cfg, name);
   if (!podName) return { differs: false };
 
-  const status = await podStatusApi.getPodStatus(cfg.namespace, podName).catch(() => null);
+  const status = await podStatusApi.getPodStatus(cfg.namespace, podName);
   if (!status) return { differs: false };
 
   // Name-keyed lookup — position 0 is wrong when sidecars are injected first.
-  const liveImage = status.containerStatuses?.find((cs) => cs.name === SANDBOX_CONTAINER_NAME)?.image;
-  if (!liveImage) return { differs: false };
-
-  if (liveImage === manifestImage) return { differs: false };
-  return { differs: true, podName, liveImage };
+  const liveImage = status.sandboxImage ?? status.containerStatuses?.find((cs) => cs.name === SANDBOX_CONTAINER_NAME)?.image;
+  const imageDrift = expectedImageFingerprint !== undefined
+    ? status.imageFingerprint === undefined
+      ? Boolean(liveImage) && liveImage !== manifestImage
+      : status.imageFingerprint !== expectedImageFingerprint
+    : Boolean(liveImage) && liveImage !== manifestImage;
+  const resourcesDrift = expectedResourceFingerprint !== undefined
+    ? status.resourceFingerprint !== expectedResourceFingerprint
+    : resources !== undefined && (["requests", "limits"] as const).some((side) =>
+    (["cpu", "memory"] as const).some((field) =>
+      normalizeQuantity(status.sandboxResources?.[side]?.[field]) !== normalizeQuantity(resources[side]?.[field]),
+    ),
+  );
+  if (!imageDrift && !resourcesDrift) return { differs: false };
+  return { differs: true, podName, liveImage, imageDrift, resourcesDrift };
 }
 
 /**

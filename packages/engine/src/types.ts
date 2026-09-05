@@ -668,6 +668,11 @@ export interface ToolContext {
    * `reply_to_origin` / `react_to_origin` read it so the model supplies no ids.
    */
   origin?: ChannelOrigin;
+  /**
+   * Resolve the sending assistant's current outbound identity. Hosts keep this
+   * dynamic so profile edits apply without rebuilding a cached session.
+   */
+  resolveOutboundSender?: () => Promise<{ displayName?: string; avatarUrl?: string } | undefined>;
   cwd?: string;
   repo?: { url?: string; branch?: string; ref?: string; provider?: string };
   credentials: CredentialProvider;
@@ -1184,6 +1189,17 @@ export interface WorkspaceGrowth {
 
 export interface Sandbox {
   id: string;
+  /** True when create adopted existing provider state or persistent storage.
+   * Preparation failures must retain it or use non-terminal release, not destroy.
+   * Providers must report true even if adoption also replaces the live compute.
+   * False or absent preserves fresh-create cleanup for existing providers. */
+  adopted?: boolean;
+  /** Internal provider record of repository CPU/memory overrides, not effective
+   * resources or deployment defaults. An object includes authoritative `{}`.
+   * Null means adopted compute has no recoverable override record. Undefined
+   * means the provider does not report this metadata. Providers must persist a
+   * known record before replacing compute so retries can return the same record. */
+  resourceOverrides?: Pick<SandboxResources, "cpu" | "memory"> | null;
   readFile(path: string): Promise<string>;
   readBinary(path: string): Promise<Uint8Array>;
   writeFile(path: string, content: string): Promise<void>;
@@ -1221,6 +1237,24 @@ export interface Sandbox {
   growWorkspace?(): Promise<WorkspaceGrowth>;
 }
 
+export interface SandboxResources {
+  cpu?: number;
+  /** Positive Kubernetes quantity. Providers keep this value unchanged in
+   * desired and applied state, then adapt it at their runtime boundary. */
+  memory?: string;
+  /** Node-local disk (container rootfs + emptyDirs) the sandbox reserves,
+   * as a Kubernetes quantity string (e.g. "2Gi"). The scheduler counts it
+   * against node allocatable, which caps how many sandboxes stack onto one
+   * node (TKAI-349: unbounded stacking exhausted a node's disk and took it
+   * NotReady). Providers without node-local disk accounting ignore it. */
+  ephemeralStorage?: string;
+  /** Node-local disk ceiling for the sandbox (quantity string, e.g. "8Gi").
+   * Past it the kubelet evicts the one runaway sandbox instead of the node
+   * failing. Independent of `ephemeralStorage` — an absent side is
+   * omitted, never inferred from the other. */
+  ephemeralStorageLimit?: string;
+}
+
 export interface SandboxCreateOpts {
   image?: string;
   workspace?: string;
@@ -1238,21 +1272,20 @@ export interface SandboxCreateOpts {
   workspaceStorage?: string;
   env?: Record<string, string>;
   timeout?: number;
-  resources?: {
-    cpu?: number;
-    memory?: string;
-    /** Node-local disk (container rootfs + emptyDirs) the sandbox reserves,
-     * as a Kubernetes quantity string (e.g. "2Gi"). The scheduler counts it
-     * against node allocatable, which caps how many sandboxes stack onto one
-     * node (TKAI-349: unbounded stacking exhausted a node's disk and took it
-     * NotReady). Providers without node-local disk accounting ignore it. */
-    ephemeralStorage?: string;
-    /** Node-local disk ceiling for the sandbox (quantity string, e.g. "8Gi").
-     * Past it the kubelet evicts the one runaway sandbox instead of the node
-     * failing. Independent of `ephemeralStorage` — an absent side is
-     * omitted, never inferred from the other. */
-    ephemeralStorageLimit?: string;
-  };
+  resources?: SandboxResources;
+  /**
+   * Internal adoption intent. If true, a provider that adopts existing compute
+   * keeps its CPU and memory requests and limits, even when resources is set.
+   * Fresh compute still uses resources and provider defaults. The engine sets
+   * this when the desired spec has no authoritative repository resource opinion.
+   */
+  preserveResourcesOnAdopt?: boolean;
+  /** Internal migration reader for adopted compute without durable override
+   * metadata. The provider calls this on the old handle before replacement and
+   * persists a returned object, including `{}`, before it deletes compute.
+   * Undefined means no record exists; it must not become stale create resources.
+   * A read error aborts adoption before replacement. Fresh creation skips it. */
+  readResourceOverrides?: (sandbox: Sandbox) => Promise<Pick<SandboxResources, "cpu" | "memory"> | undefined>;
   metadata?: Record<string, unknown>;
   /**
    * The owning session's id. `Engine.materializeSandbox` stamps this on
@@ -1459,6 +1492,25 @@ export type EngineEventStatus =
   | "blocked_on_decision_gate"
   | "error";
 
+export interface ActiveModelState {
+  queueItemId: string;
+  model: string;
+}
+
+export type ModelStateEvent =
+  | {
+      type: "model_state";
+      threadId: string;
+      queueItemId: string;
+      model: string;
+    }
+  | {
+      type: "model_state";
+      threadId: string;
+      queueItemId: null;
+      model: null;
+    };
+
 export type EngineEvent =
   | { type: "message_start"; threadId: string; messageId: string; role: "assistant" | "system" }
   | { type: "text_delta"; threadId: string; text: string }
@@ -1510,6 +1562,7 @@ export type EngineEvent =
     }
   | { type: "thread_start"; threadId: string; parentThreadId?: string }
   | { type: "queue_state"; threadId: string; state: QueueState }
+  | ModelStateEvent
   | { type: "compaction_start" | "compaction_end"; threadId: string }
   | { type: "task_start" | "task_end"; childSessionId: string; threadId: string }
   | { type: "status"; threadId: string; status: EngineEventStatus }
@@ -1937,6 +1990,9 @@ export interface PrepStep {
 export interface DesiredSandboxSpec {
   /** Target OCI image ref. Ignored by the Task 3 attachment — Task 5 wires it. */
   image?: string;
+  /** Repository resource overrides. Undefined gives no authoritative opinion;
+   * an empty object authoritatively declares no repository overrides. */
+  resources?: Pick<SandboxResources, "cpu" | "memory">;
   /** Stable content hash across all steps; used by the diff engine in Task 4+. */
   specHash: string;
   steps: PrepStep[];
@@ -2130,6 +2186,8 @@ export interface CreateSessionOptions {
    * behind a resolver it was given.
    */
   credentialResolver?: (owner: CredentialOwner, service: string) => Promise<StoredCredential | null>;
+  /** Resolve the assistant identity used by provider-specific outbound actions. */
+  resolveOutboundSender?: () => Promise<{ displayName?: string; avatarUrl?: string } | undefined>;
   /**
    * Optional host-provided org-policy resolver. Absent === the engine's
    * built-in fallback: `call_tool` derives approval from each action's

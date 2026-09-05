@@ -221,6 +221,18 @@ describe("SourcesSection", () => {
     expect(screen.getByLabelText("Enable bakes for acme/widgets")).toBeTruthy();
   });
 
+  it("repo row: keeps resource controls enabled when image builds are unavailable", () => {
+    const repo = makeSource({ id: "src_repo_1", kind: "repo", repoFullName: "acme/widgets" });
+    sourcesData = { sources: [repo], builderAvailable: false };
+    render(<SourcesSection />);
+
+    expect((screen.getByLabelText("CPU cores for acme/widgets") as HTMLInputElement).disabled).toBe(false);
+    expect((screen.getByLabelText("Memory for acme/widgets") as HTMLInputElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "Save resources" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "Bake now" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "History" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it("repo row: toggling the enabled switch PATCHes the source", () => {
     const repo = makeSource({ id: "src_repo_1", kind: "repo", enabled: true });
     sourcesData = { sources: [repo], builderAvailable: true };

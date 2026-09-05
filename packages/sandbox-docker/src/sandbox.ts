@@ -14,7 +14,11 @@ import type {
   SandboxProvider,
   SandboxStatus,
 } from "@valet/engine";
-import { CappedOutputBuffer, CONTAINER_DEATH_PATTERN } from "@valet/engine";
+import {
+  CappedOutputBuffer,
+  CONTAINER_DEATH_PATTERN,
+  parseResourceQuantity,
+} from "@valet/engine";
 
 /** 5-minute backstop eviction for job entries nobody polls to completion
  * (spec decision 9). Primary eviction is on first poll observing terminal
@@ -310,7 +314,15 @@ export function buildDockerRunArgs(opts: BuildDockerRunArgsOpts): string[] {
     }
   }
   if (opts.resources?.cpu) runArgs.push("--cpus", String(opts.resources.cpu));
-  if (opts.resources?.memory) runArgs.push("--memory", opts.resources.memory);
+  if (opts.resources?.memory !== undefined) {
+    const memoryBytes = parseResourceQuantity(opts.resources.memory);
+    if (memoryBytes === null || memoryBytes <= 0) {
+      throw new Error(
+        `Invalid sandbox memory "${opts.resources.memory}". Use a positive Kubernetes quantity, such as "8Gi" or "500Mi".`,
+      );
+    }
+    runArgs.push("--memory", String(memoryBytes));
+  }
   if (opts.profile === "full") {
     // Ephemeral loopback-only port — never exposed beyond the host, matches
     // the auth-gateway's JWT-fronted access model (spec: sandbox auth

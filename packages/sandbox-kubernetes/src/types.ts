@@ -180,21 +180,21 @@ export interface PodSecurityContext {
   fsGroup?: number;
 }
 
-/** `corev1.TopologySpreadConstraint` subset — the soft hostname spread the
- * manifest builder emits for sandbox pods (TKAI-349). */
+/** `corev1.TopologySpreadConstraint` subset for soft node and zone spread. */
 export interface TopologySpreadConstraint {
   maxSkew: number;
   topologyKey: string;
   whenUnsatisfiable: "DoNotSchedule" | "ScheduleAnyway";
-  labelSelector?: { matchLabels?: Record<string, string> };
+  labelSelector?: {
+    matchLabels?: Record<string, string>;
+    matchExpressions?: { key: string; operator: "Exists" }[];
+  };
 }
 
 /** `corev1.PodSpec` subset — only the fields the manifest builder sets. */
 export interface SandboxPodSpec {
   containers: SandboxContainer[];
-  /** Soft (ScheduleAnyway) spread of sandbox pods across nodes. The
-   * ephemeral-storage request is the hard concentration cap; this only
-   * balances placement while nodes have room. */
+  /** Soft (ScheduleAnyway) spread of sandbox pods across nodes and zones. */
   topologySpreadConstraints?: TopologySpreadConstraint[];
   /** See `PodSecurityContext` — set only for docker-enabled sandboxes. */
   securityContext?: PodSecurityContext;

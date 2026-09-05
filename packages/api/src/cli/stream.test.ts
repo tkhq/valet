@@ -79,10 +79,21 @@ describe("streamSession over a live socket", () => {
       );
       socket.send(
         JSON.stringify({
-          type: "submission.settled",
+          type: "model.state",
           seq: 3,
           ts: 3,
           offset: "3",
+          threadId: "t1",
+          queueItemId: "q1",
+          model: "anthropic/claude-opus-4-7",
+        }),
+      );
+      socket.send(
+        JSON.stringify({
+          type: "submission.settled",
+          seq: 4,
+          ts: 4,
+          offset: "4",
           sessionId: "s1",
           threadId: "t1",
           queueItemId: "q1",
@@ -112,9 +123,17 @@ describe("streamSession over a live socket", () => {
     expect(events.map((e) => e.type)).toEqual([
       "message_start",
       "text_delta",
+      "model.state",
       "submission.settled",
     ]);
-    const settled = events[2];
+    const modelState = events[2];
+    expect(modelState.type).toBe("model.state");
+    if (modelState.type === "model.state") {
+      expect(modelState.threadId).toBe("t1");
+      expect(modelState.queueItemId).toBe("q1");
+      expect(modelState.model).toBe("anthropic/claude-opus-4-7");
+    }
+    const settled = events[3];
     expect(settled.type).toBe("submission.settled");
     if (settled.type === "submission.settled") {
       expect(settled.outcome).toBe("completed");

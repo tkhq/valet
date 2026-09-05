@@ -90,15 +90,54 @@ export function modelRegistryUrl(): string | undefined {
   return raw ? raw.replace(/\/+$/, "") : undefined;
 }
 
-/** The bundled compile-time catalog for one provider — the fallback floor.
- * `getBuiltinModels` is the non-deprecated read of the same generated table
- * the retired `getModels` used, so the fallback list is byte-identical to
- * the pre-TKAI-327 catalog. */
+/** Manual models that pi has not released. Pi bundled entries win by id. */
+const MANUAL_BUNDLED_MODELS: Partial<Record<RegistryProvider, RegistryModel[]>> = {
+  openai: [
+    // Source: generated openai.json at unreleased pi commit 17de82d7, after v0.85.0.
+    {
+      id: "gpt-6-astra",
+      name: "GPT-6 Astra",
+      api: "openai-responses",
+      provider: "openai",
+      baseUrl: "https://api.openai.com/v1",
+      reasoning: true,
+      input: ["text", "image"],
+      cost: {
+        input: 10,
+        output: 50,
+        cacheRead: 1,
+        cacheWrite: 12.5,
+        tiers: [{ inputTokensAbove: 272000, input: 20, output: 75, cacheRead: 2, cacheWrite: 25 }],
+      },
+      contextWindow: 272000,
+      maxTokens: 128000,
+      thinkingLevelMap: {
+        off: null,
+        minimal: null,
+        low: "low",
+        medium: "medium",
+        high: "high",
+        xhigh: "xhigh",
+        max: "max",
+      },
+      compat: {
+        supportsStrictMode: true,
+        supportsOpenAIGrammarTools: true,
+        supportsAdditionalTools: true,
+        supportsToolSearch: true,
+        supportsExplicitPromptCacheMode: true,
+      },
+    } satisfies Model<"openai-responses">,
+  ],
+};
+
+/** The pi bundled catalog plus unreleased manual entries. */
 function bundledModels(providerId: RegistryProvider): RegistryModel[] {
-  // `BuiltinProvider` is pi-ai's union of generated-catalog keys. Every id
-  // in REGISTRY_PROVIDERS is one of them; the annotation states that at the
-  // boundary instead of widening the helper's signature.
-  return [...getBuiltinModels(providerId satisfies BuiltinProvider)];
+  const builtin = [...getBuiltinModels(providerId satisfies BuiltinProvider)];
+  const manual = MANUAL_BUNDLED_MODELS[providerId];
+  if (!manual) return builtin;
+  const builtinIds = new Set(builtin.map((model) => model.id));
+  return [...builtin, ...manual.filter((model) => !builtinIds.has(model.id))];
 }
 
 /** Last-refresh state for one provider, surfaced by `GET /api/models`

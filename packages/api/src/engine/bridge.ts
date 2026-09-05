@@ -335,6 +335,26 @@ export function busEventToWire(ev: DeliveredBusEvent): WireEventDraft[] {
         },
       ];
 
+    case "model_state":
+      if (e.queueItemId === null) {
+        return [
+          {
+            type: "model.state",
+            threadId: e.threadId,
+            queueItemId: null,
+            model: null,
+          },
+        ];
+      }
+      return [
+        {
+          type: "model.state",
+          threadId: e.threadId,
+          queueItemId: e.queueItemId,
+          model: e.model,
+        },
+      ];
+
     case "decision_gate":
       return [
         {

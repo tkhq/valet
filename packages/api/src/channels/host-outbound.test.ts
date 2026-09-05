@@ -23,7 +23,8 @@ import {
   type ValetPlugin,
 } from "@valet/engine";
 import { PgSessionStore, PgEventStream } from "@valet/store-postgres";
-import { agentSessions, teamMembers, teams, users } from "../schema/index.js";
+import { eq } from "drizzle-orm";
+import { agentSessions, assistants, teamMembers, teams, users } from "../schema/index.js";
 import { freshTestPgDb, type TestPgDb } from "../test-helpers/pg-test-db.js";
 import { EngineHost } from "../engine/host.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
@@ -310,8 +311,83 @@ describe("ChannelHost outbound delivery", () => {
     expect(fakeTransport.sent.filter((s) => s.message.markdown.includes("duplicate delivery test"))).toHaveLength(1);
   });
 
-  it("delivers a command_result to the channel the command came from", async () => {
+  it("brands the assistant's reply with its name and avatar (TKAI-387)", async () => {
     const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    await testDb.appDb
+      .update(assistants)
+      .set({ name: "Ledger", avatarUrl: "https://cdn.example.com/ledger.png" })
+      .where(eq(assistants.sessionId, session.id));
+    const threadId = session.thread("fake:99").id;
+    await engineStore.appendEntries(session.id, threadId, [
+      {
+        type: "message",
+        id: "brand-msg-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant",
+        content: "branded reply",
+        stopReason: "end_turn",
+      },
+    ]);
+
+    const event: BusEvent = {
+      sessionId: session.id,
+      threadId,
+      timestamp: Date.now(),
+      event: { type: "message_end", threadId, messageId: "brand-msg-1", reason: "end_turn" },
+    };
+    await eventStream.append(event, `brand-${randomUUID()}`);
+
+    await vi.waitFor(() => {
+      expect(fakeTransport.sent.some((s) => s.message.markdown.includes("branded reply"))).toBe(true);
+    });
+    const sent = fakeTransport.sent.find((s) => s.message.markdown.includes("branded reply"));
+    expect(sent?.message.sender).toEqual({
+      displayName: "Ledger",
+      avatarUrl: "https://cdn.example.com/ledger.png",
+    });
+  });
+
+  it("sends no identity override when the assistant has neither name nor avatar", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    const threadId = session.thread("fake:99").id;
+    await engineStore.appendEntries(session.id, threadId, [
+      {
+        type: "message",
+        id: "plain-msg-1",
+        sessionId: session.id,
+        threadId,
+        parentId: null,
+        createdAt: Date.now(),
+        role: "assistant",
+        content: "plain reply",
+        stopReason: "end_turn",
+      },
+    ]);
+
+    const event: BusEvent = {
+      sessionId: session.id,
+      threadId,
+      timestamp: Date.now(),
+      event: { type: "message_end", threadId, messageId: "plain-msg-1", reason: "end_turn" },
+    };
+    await eventStream.append(event, `plain-${randomUUID()}`);
+
+    await vi.waitFor(() => {
+      expect(fakeTransport.sent.some((s) => s.message.markdown.includes("plain reply"))).toBe(true);
+    });
+    const sent = fakeTransport.sent.find((s) => s.message.markdown.includes("plain reply"));
+    expect(sent?.message.sender).toBeUndefined();
+  });
+
+  it("delivers a branded command_result to the channel the command came from", async () => {
+    const session = await defaultAssistantSessionFor({ db: testDb.appDb, engineHost }, { type: "user", id: USER_ID }, { actorUserId: USER_ID, orgId: ORG_ID });
+    await testDb.appDb
+      .update(assistants)
+      .set({ name: "Ledger", avatarUrl: "https://cdn.example.com/ledger.png" })
+      .where(eq(assistants.sessionId, session.id));
     const sessionId = session.id;
     const threadId = session.thread("fake:99").id;
 
@@ -344,6 +420,10 @@ describe("ChannelHost outbound delivery", () => {
     });
     const hit = fakeTransport.sent.find((s) => s.message.markdown.includes("Queue"));
     expect(hit?.message.markdown).toContain("/status");
+    expect(hit?.message.sender).toEqual({
+      displayName: "Ledger",
+      avatarUrl: "https://cdn.example.com/ledger.png",
+    });
     // Dedup: the second append must not double-deliver.
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(fakeTransport.sent.filter((s) => s.message.markdown.includes("Queue"))).toHaveLength(1);
@@ -2029,9 +2109,20 @@ describe("ChannelHost.attentionDeliverer", () => {
     expect(host.gateForRef(ref)).toMatchObject({ gateId: "gate-1", sessionId: "sess-1" });
   });
 
-  it("an approval event without a gate keeps the plain summary message", async () => {
+  it("an approval event without a gate keeps a branded plain summary message", async () => {
     host = await buildHost({ publicUrl: "https://valet.example.com" });
     await linkIdentity(testDb.appDb, { provider: "fake", externalId: "77", userId: USER_ID });
+    await testDb.appDb.insert(assistants).values({
+      id: "asst-attention",
+      orgId: ORG_ID,
+      ownerType: "user",
+      ownerId: USER_ID,
+      name: "Ledger",
+      avatarUrl: "https://cdn.example.com/ledger.png",
+      sessionId: "sess-1",
+      isDefault: false,
+      createdAt: Date.now(),
+    });
 
     await host.attentionDeliverer().deliver(
       USER_ID,
@@ -2040,6 +2131,10 @@ describe("ChannelHost.attentionDeliverer", () => {
 
     expect(fakeTransport.gatePrompts).toHaveLength(0);
     expect(fakeTransport.sent).toHaveLength(1);
+    expect(fakeTransport.sent[0]?.message.sender).toEqual({
+      displayName: "Ledger",
+      avatarUrl: "https://cdn.example.com/ledger.png",
+    });
   });
 
   it("resolution edits EVERY recorded prompt for the gate — one message per recipient DM", async () => {

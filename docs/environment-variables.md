@@ -229,11 +229,19 @@ by hand as each user signs in. No wipe and no re-import is needed.
 | `VALET_MAX_UPLOAD_BYTES` | Per-upload size cap in bytes (default 52428800 = 50 MB). A request whose Content-Length exceeds the cap returns 413 before the body is parsed. A chunked body (no Content-Length) is buffered in memory before the cap check, so the cap bounds well-formed clients, not parser memory. Size the cap to your api memory budget. |
 | `VALET_SANDBOX_BACKEND` | `docker` (default) \| `local` \| `kubernetes` |
 | `VALET_SANDBOX_IMAGE` | Sandbox image ref (required for kubernetes; docker defaults to `node:20-bookworm`) |
+| `VALET_SANDBOX_CPU` | Optional Kubernetes sandbox CPU default. Use a value greater than 0 and at most 64, such as `4` or `0.5`. Empty leaves it unset. |
+| `VALET_SANDBOX_MEMORY` | Optional Kubernetes sandbox memory default. Use a positive quantity, such as `8Gi` or `500Mi`. Empty leaves it unset. |
 | `VALET_SANDBOX_IDLE_MINUTES` | Idle-hibernation window (default `30`, `0` disables). Only effective on backends with hibernation (kubernetes) |
 | `VALET_SANDBOX_NAMESPACE` | Kubernetes namespace for Sandbox CRs |
 | `VALET_SANDBOX_IMAGE_PULL_SECRET` | Image pull secret name (kubernetes) |
 | `VALET_KUBE_CONTEXT` | kubectl context (required when running out-of-cluster) |
 | `VALET_SANDBOX_API_URL` | URL sandboxes use to call back into the API (defaults to the auth base URL) |
+
+The Helm chart maps `sandbox.resources.cpu` and `sandbox.resources.memory` to
+these defaults. Repository YAML overrides saved repository defaults, which override
+deployment defaults per field. Kubernetes uses equal requests and limits. Invalid
+deployment values stop API startup. See [sandbox resources](prebuild-yaml.md#resources)
+for precedence, replacement, and read-failure behavior.
 
 Inside each sandbox, the provider injects: `VALET_SANDBOX_TOKEN`,
 `VALET_API_URL`, `VALET_SANDBOX_JWT_SECRET`, `VALET_SESSION_ID`,

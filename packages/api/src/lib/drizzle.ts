@@ -161,6 +161,11 @@ interface SchemaRepair {
  */
 const SCHEMA_REPAIRS: SchemaRepair[] = [
   {
+    describe: "image_sources.sandbox_resources column",
+    probe: { kind: "column", table: "image_sources", column: "sandbox_resources" },
+    sql: 'ALTER TABLE "image_sources" ADD COLUMN IF NOT EXISTS "sandbox_resources" jsonb',
+  },
+  {
     // Repository mirror columns on workflow_definitions. A deployed database
     // predating them holds only `local` rows, which is what the default
     // encodes, so the backfill is the default and nothing else is needed.
@@ -1185,6 +1190,13 @@ const SCHEMA_REPAIRS: SchemaRepair[] = [
     describe: "engine_threads.reasoning column",
     probe: { kind: "column", table: "engine_threads", column: "reasoning" },
     sql: 'ALTER TABLE "engine_threads" ADD COLUMN IF NOT EXISTS "reasoning" text',
+  },
+  {
+    // Per-assistant avatar for outbound channel posts (TKAI-387).
+    // Null = the bot's own icon.
+    describe: "assistants.avatar_url column",
+    probe: { kind: "column", table: "assistants", column: "avatar_url" },
+    sql: 'ALTER TABLE "assistants" ADD COLUMN IF NOT EXISTS "avatar_url" text',
   },
 ];
 

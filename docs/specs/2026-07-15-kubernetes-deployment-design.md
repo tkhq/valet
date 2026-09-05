@@ -142,9 +142,20 @@ Three additive changes to the manifest builder and provider config:
    `whenUnsatisfiable: ScheduleAnyway` — sandboxes must still schedule under
    pressure; the request in (1) is the hard concentration cap.
 
+Chart version `0.10.7` adds optional `sandbox.resources.cpu` and
+`sandbox.resources.memory` deployment defaults. It renders them as
+`VALET_SANDBOX_CPU` and `VALET_SANDBOX_MEMORY` only when they are nonempty.
+The api validates both values at boot. A repository resource declaration
+overrides only the fields that it sets. The manifest preserves the other
+deployment defaults, including both ephemeral-storage fields.
+
+Chart changes must use an unpublished version. Release validation checks GHCR
+and rejects a version that already exists, even when lint and golden tests pass.
+
 Deployment note — the protection does NOT cover pods that already exist.
-A CR spec replace does not roll the pod (verified in the reconcile plan's
-exploration notes), and the only automatic pod-roll trigger is image drift.
+A CR spec replace does not roll the pod. The provider replaces pods for image
+drift or an authoritative CPU/memory change. Ephemeral-storage changes alone do
+not trigger that replacement.
 A legacy pod carries no ephemeral-storage request, so the scheduler counts
 it as using zero disk and can keep packing new sandboxes onto its node. The
 window closes per sandbox on its first post-deploy suspend/wake or
@@ -176,6 +187,25 @@ to local chart installs.
 
 CI publishes the chart after merge to `dev-v2`. The infrastructure deploy
 must pin the new version and supply scheduling overrides to enable isolation.
+
+## Update (2026-09-04): sandbox node and zone spread
+
+The manifest builder extends the existing soft hostname spread to zones.
+It emits two `topologySpreadConstraints`: `kubernetes.io/hostname` with
+`maxSkew: 1`, and `topology.kubernetes.io/zone` with `maxSkew: 2`.
+Both use `ScheduleAnyway`, so uneven placement does not block scheduling.
+
+Both selectors use `matchExpressions` with `valet.dev/session-id` and
+`operator: Exists`. This counts sandbox pods in the namespace regardless
+of their distinct label values. The pod template now explicitly carries
+this label, using the same value as the Sandbox CR. The shared
+`valet.dev/sandbox: "true"` label remains for compatibility with older selectors.
+
+These preferences affect future pod placements. They do not move existing
+pods or balance actual IO usage. Existing pods without the session label
+do not count toward the new selectors until recreated from an updated template.
+The constraints add no node-pool selector or toleration and do not change
+resource requests or PVC provisioning.
 
 ## Non-goals
 

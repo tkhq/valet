@@ -86,6 +86,7 @@ import {
   type SummarizeResult,
 } from "./compaction.js";
 import type {
+  ActiveModelState,
   AwaitResultOptions,
   CompactionEntry,
   DecisionGate,
@@ -238,6 +239,10 @@ function delay(ms: number): Promise<void> {
   });
 }
 
+function concreteModelId(model: PiModel): string {
+  return `${model.provider}/${model.id}`;
+}
+
 /**
  * One Thread per (session, key). Owns its own pi-agent-core Agent instance,
  * its own queue, its own active leaf in the DAG, and its own GateManager.
@@ -266,6 +271,12 @@ export class Thread {
    * cleared when the turn settles. Replaces the old in-memory `activeItem`.
    */
   private runningItem: QueueItem | null = null;
+  /** Handshake-visible active model state. This state is not persisted. */
+  private committedModelState: ActiveModelState | null = null;
+  /** Settling item whose idle model-state delivery still needs a retry. */
+  private pendingModelStateClearQueueItemId: string | null = null;
+  /** Serializes model-state appends and reconnect snapshots. */
+  private modelStateTransitionTail: Promise<void> = Promise.resolve();
   /** Write fence for the claimed turn — `{ itemId, attemptId }`. Every store write during the turn carries it. */
   private fence: WriteFence | undefined;
   /**
@@ -1184,12 +1195,20 @@ export class Thread {
     // continuation stream failure both settle the turn `failed` instead of
     // wedging or mislabeling it.
     let continueError: unknown;
+    const baselineModel = this.agent.state.model;
+    const baselinePrompt = this.agent.state.systemPrompt;
     try {
       // Host resolver (if any) delivers this resumed turn's per-turn key
       // before the continuation LLM call; no-op when absent.
       await this.applyResolvedKeyForResume(this.runningItem ?? undefined);
-      await this.agent.continue();
-      await this.agent.waitForIdle();
+      const runningItem = this.runningItem;
+      if (
+        runningItem &&
+        await this.publishActiveModelState(runningItem.id, this.agent.state.model)
+      ) {
+        await this.agent.continue();
+        await this.agent.waitForIdle();
+      }
     } catch (err) {
       continueError = err;
       this.emitError(
@@ -1197,6 +1216,8 @@ export class Thread {
         err instanceof Error ? err.message : String(err),
       );
     } finally {
+      this.agent.state.model = baselineModel;
+      this.agent.state.systemPrompt = baselinePrompt;
       this.turnApiKey = undefined;
     }
     // Settle the resumed turn (reconciliation owns a fresh fenced attempt via
@@ -1206,26 +1227,40 @@ export class Thread {
       const store = this.session.providers.store;
       const fence = this.fence;
       const settleItem = this.runningItem;
-      const current = await store.getQueueItem(this.session.id, settleItem.id);
-      if (current?.status === "blocked_on_decision_gate") {
-        await this.fencedWrite(() =>
-          store.setSubmissionBlocked(this.session.id, this.id, settleItem.id, false, fence),
-        );
-      }
       try {
-        await this.settleTurn(
-          settleItem,
-          continueError !== undefined ? { error: continueError } : undefined,
-        );
-      } catch (err) {
-        this.emitError("settlement_failed", err instanceof Error ? err.message : String(err));
+        const current = await store.getQueueItem(this.session.id, settleItem.id);
+        if (current?.status === "blocked_on_decision_gate") {
+          await this.fencedWrite(() =>
+            store.setSubmissionBlocked(this.session.id, this.id, settleItem.id, false, fence),
+          );
+        }
+        try {
+          await this.settleTurn(
+            settleItem,
+            continueError !== undefined ? { error: continueError } : undefined,
+          );
+        } catch (err) {
+          this.emitError("settlement_failed", err instanceof Error ? err.message : String(err));
+        }
+      } finally {
+        await this.clearActiveModelState(settleItem.id, { finalizeLocal: true });
+        if (this.staleFenceDetected) {
+          try {
+            await store.deleteAttemptMarker(settleItem.id, fence.attemptId);
+          } catch (err) {
+            this.emitError(
+              "stale_marker_cleanup_failed",
+              err instanceof Error ? err.message : String(err),
+            );
+          }
+        }
+        this.runningItem = null;
+        this.fence = undefined;
+        // The escalation dies with the turn that requested it — including a
+        // turn that finished on the gate-resume path rather than the claim loop.
+        this.agentModelSwitch = undefined;
+        void this.kick();
       }
-      this.runningItem = null;
-      this.fence = undefined;
-      // The escalation dies with the turn that requested it — including a
-      // turn that finished on the gate-resume path rather than the claim loop.
-      this.agentModelSwitch = undefined;
-      void this.kick();
     }
     await this.emitQueueState();
   }
@@ -1822,18 +1857,39 @@ export class Thread {
       if (modelId === null) {
         this.agentModelSwitch = undefined;
       } else {
+        const priorLiveModel = this.agent.state.model;
+        const priorAgentModelSwitch = this.agentModelSwitch;
+        const priorTurnApiKey = this.turnApiKey;
         // Validate before assigning so an unknown id is rejected and the
         // turn keeps its previous model. The resolution is handed straight
         // to the apply step: resolving twice costs a second provider lookup
         // (a DB + credential read on the api host) and lets the two calls
         // disagree, e.g. validate accepting a NoCredentialsError that apply
         // then reports as "switch_model failed".
-        const resolved = await this.validateModelSpec(modelId);
-        // Retarget the live agent so the NEXT LLM CALL of this turn uses the
-        // new model — the contract switch_model advertises, and what the
-        // prompt rules mean by "switch_model ... in this turn, then continue".
-        await this.applyModelToRunningTurn(modelId, resolved);
-        this.agentModelSwitch = modelId;
+        try {
+          const resolved = await this.validateModelSpec(modelId);
+          // Retarget the live agent so the NEXT LLM CALL of this turn uses the
+          // new model — the contract switch_model advertises, and what the
+          // prompt rules mean by "switch_model ... in this turn, then continue".
+          await this.applyModelToRunningTurn(modelId, resolved);
+          this.agentModelSwitch = modelId;
+          if (
+            this.runningItem &&
+            !(await this.publishActiveModelState(this.runningItem.id, this.agent.state.model))
+          ) {
+            this.agent.state.model = priorLiveModel;
+            this.agentModelSwitch = priorAgentModelSwitch;
+            this.turnApiKey = priorTurnApiKey;
+          }
+        } catch (err) {
+          // The switch is not usable until its active-state disclosure lands.
+          // Restore all live turn-scoped values so the tool reports failure
+          // and any continuation stays on the previously disclosed model.
+          this.agent.state.model = priorLiveModel;
+          this.agentModelSwitch = priorAgentModelSwitch;
+          this.turnApiKey = priorTurnApiKey;
+          throw err;
+        }
       }
     } else if (modelId === null) {
       this.modelOverride = undefined;
@@ -2150,6 +2206,13 @@ export class Thread {
     return this.runningItem != null;
   }
 
+  /** Current committed submission model after all earlier transitions finish. */
+  currentModelState(): Promise<ActiveModelState | null> {
+    return this.enqueueModelStateTransition(async () =>
+      this.committedModelState ? { ...this.committedModelState } : null,
+    );
+  }
+
   /**
    * Best current reading of this thread's agent status, for a subscriber that
    * connects mid-turn (the WS handshake seeds a `status` frame from it).
@@ -2388,6 +2451,17 @@ export class Thread {
         );
         return;
       } finally {
+        await this.clearActiveModelState(claimed.id, { finalizeLocal: true });
+        if (this.staleFenceDetected && releaseFence) {
+          try {
+            await store.deleteAttemptMarker(claimed.id, releaseFence.attemptId);
+          } catch (err) {
+            this.emitError(
+              "stale_marker_cleanup_failed",
+              err instanceof Error ? err.message : String(err),
+            );
+          }
+        }
         this.submissionSpan?.end();
         this.submissionSpan = undefined;
         this.runningItem = null;
@@ -2680,6 +2754,7 @@ export class Thread {
     outcome: SubmissionOutcome,
     patch?: SettlePatchRef,
   ): Promise<void> {
+    await this.clearActiveModelState(itemId);
     // Deterministic eventKey `settled:{itemId}`: every settlement path (fenced
     // two-phase, retryFinalize, reconciliation, and the fenceless
     // settleUnclaimed sites) routes through here, so a double-emission across
@@ -2924,6 +2999,8 @@ export class Thread {
 
     let turnFailed = false;
     let turnError: unknown;
+    const baselineModel = this.agent.state.model;
+    const baselinePrompt = this.agent.state.systemPrompt;
     try {
       // Rest-state repair FIRST — before appending any recovery output.
       await this.repairRestState(item, fence, repairMessage);
@@ -2965,13 +3042,17 @@ export class Thread {
       // Host resolver (if any) delivers this resumed turn's per-turn key before
       // the continuation LLM call; no-op when absent.
       await this.applyResolvedKeyForResume(item);
-      await this.agent.continue();
-      await this.agent.waitForIdle();
+      if (await this.publishActiveModelState(item.id, this.agent.state.model)) {
+        await this.agent.continue();
+        await this.agent.waitForIdle();
+      }
     } catch (err) {
       turnFailed = true;
       turnError = err;
       this.emitError("resume_failed", err instanceof Error ? err.message : String(err));
     } finally {
+      this.agent.state.model = baselineModel;
+      this.agent.state.systemPrompt = baselinePrompt;
       this.turnApiKey = undefined;
     }
 
@@ -2979,12 +3060,22 @@ export class Thread {
       await this.settleTurn(item, turnFailed ? { error: turnError } : undefined);
     } catch (err) {
       this.emitError("settlement_failed", err instanceof Error ? err.message : String(err));
+      return;
+    } finally {
+      await this.clearActiveModelState(item.id, { finalizeLocal: true });
+      if (this.staleFenceDetected) {
+        try {
+          await store.deleteAttemptMarker(item.id, fence.attemptId);
+        } catch (err) {
+          this.emitError(
+            "stale_marker_cleanup_failed",
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+      }
       this.runningItem = null;
       this.fence = undefined;
-      return;
     }
-    this.runningItem = null;
-    this.fence = undefined;
     void this.kick();
   }
 
@@ -3316,6 +3407,24 @@ export class Thread {
       this.agent.state.model = turnModel;
     }
 
+    // Publish the model that was actually applied before any compaction can
+    // invoke an LLM. If the fence is stale, restore the turn-scoped values
+    // before the claim loop performs settlement and claim cleanup.
+    let modelStatePublished: boolean;
+    try {
+      modelStatePublished = await this.publishActiveModelState(item.id, this.agent.state.model);
+    } catch (err) {
+      this.agent.state.model = baselineModel;
+      this.turnApiKey = undefined;
+      await this.appendUserEntry(item);
+      throw err;
+    }
+    if (!modelStatePublished) {
+      this.agent.state.model = baselineModel;
+      this.turnApiKey = undefined;
+      return;
+    }
+
     // Pre-turn protection for the first post-restart turn (spec decision 5):
     // when the rehydrate seed says the persisted context already exceeds
     // usable, compact BEFORE this turn's LLM call — the regular proactive
@@ -3363,6 +3472,10 @@ export class Thread {
     const sender =
       this.attributeAuthors && !isSignalContent(item.content) ? item.author : undefined;
     try {
+      // A role can replace the queue-item model. Publish the replacement
+      // after the overlay applies and before the main agent run.
+      if (!(await this.publishActiveModelState(item.id, this.agent.state.model))) return;
+
       try {
         await this.runAgent(text, attachments, sender);
       } catch (err) {
@@ -4150,6 +4263,10 @@ export class Thread {
       // streaming against the model it started on. Returning the live state
       // here is what makes "takes effect on the next LLM call" true.
       prepareNextTurn: () => ({ model: this.agent.state.model }),
+      // A stale fenced publication means a successor owns this submission.
+      // abort() is best-effort while a tool is executing, so also stop at the
+      // turn boundary before the loop can start another provider request.
+      shouldStopAfterTurn: () => this.staleFenceDetected,
       // Per-turn key delivery: pi-agent-core calls this with the turn's provider
       // and stamps the result onto StreamOptions.apiKey (undefined → env fallback).
       ...(hasResolver ? { getApiKey: (_provider: string) => this.turnApiKey } : {}),
@@ -4224,6 +4341,7 @@ export class Thread {
       // The running submission's channel origin, when it is a channel signal,
       // so reply_to_origin / react_to_origin answer the right conversation.
       origin,
+      resolveOutboundSender: session.options.resolveOutboundSender,
       signal,
       decisionGateId: this.toolCtxOverlay.gateId,
       suspendedDecision: this.suspendedDecisionForReplay,
@@ -4688,6 +4806,104 @@ export class Thread {
   }
 
   /**
+   * Publish the concrete model that now serves `queueItemId`. The boolean is
+   * false when the fenced append discovers that a successor owns the item.
+   */
+  private publishActiveModelState(queueItemId: string, model: PiModel): Promise<boolean> {
+    return this.enqueueModelStateTransition(async () => {
+      if (this.staleFenceDetected) {
+        this.committedModelState = null;
+        return false;
+      }
+      const next: ActiveModelState = { queueItemId, model: concreteModelId(model) };
+      if (
+        this.committedModelState?.queueItemId === next.queueItemId &&
+        this.committedModelState.model === next.model
+      ) {
+        return true;
+      }
+
+      const event: EngineEvent = {
+        type: "model_state",
+        threadId: this.id,
+        queueItemId,
+        model: next.model,
+      };
+      if (this.fence) {
+        await this.fencedEmit(event, { queueItemId, throwOnAppendError: true });
+      } else {
+        await this.session.emit(event, { queueItemId, throwOnAppendError: true });
+      }
+      if (this.staleFenceDetected) {
+        this.committedModelState = null;
+        return false;
+      }
+      this.committedModelState = next;
+      return true;
+    });
+  }
+
+  /** Clear only the model state owned by `queueItemId`. */
+  private clearActiveModelState(
+    queueItemId: string,
+    opts: { finalizeLocal?: boolean } = {},
+  ): Promise<boolean> {
+    return this.enqueueModelStateTransition(async () => {
+      const clearsVisibleState = this.committedModelState?.queueItemId === queueItemId;
+      const retriesPendingDelivery = this.pendingModelStateClearQueueItemId === queueItemId;
+      if (!clearsVisibleState && !retriesPendingDelivery) {
+        return !this.staleFenceDetected;
+      }
+      if (clearsVisibleState) {
+        // Settlement cleanup owns the reconnect view immediately. Keep the
+        // failed idle delivery separate so the outer cleanup can retry it.
+        this.committedModelState = null;
+        this.pendingModelStateClearQueueItemId = queueItemId;
+      }
+      if (this.staleFenceDetected) {
+        this.pendingModelStateClearQueueItemId = null;
+        return false;
+      }
+
+      const event: EngineEvent = {
+        type: "model_state",
+        threadId: this.id,
+        queueItemId: null,
+        model: null,
+      };
+      try {
+        if (this.fence) {
+          await this.fencedEmit(event, { queueItemId, throwOnAppendError: true });
+        } else {
+          await this.session.emit(event, { queueItemId, throwOnAppendError: true });
+        }
+      } catch (err) {
+        this.emitError(
+          "model_state_emit_failed",
+          err instanceof Error ? err.message : String(err),
+        );
+        // The settlement path gets one retry from the outer claim/recovery
+        // finally. The reconnect snapshot was already cleared before the
+        // first attempt; final cleanup only retires the delivery marker.
+        if (opts.finalizeLocal) this.pendingModelStateClearQueueItemId = null;
+        return false;
+      }
+      this.pendingModelStateClearQueueItemId = null;
+      return !this.staleFenceDetected;
+    });
+  }
+
+  /** Run model-state transitions and snapshot reads in invocation order. */
+  private enqueueModelStateTransition<T>(transition: () => Promise<T>): Promise<T> {
+    const result = this.modelStateTransitionTail.then(transition);
+    this.modelStateTransitionTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  /**
    * Run a fenced store write. A StaleAttemptError means a successor now owns
    * the item: mark the turn stale (so settlement is skipped), abort the agent,
    * and swallow — never rethrow to the user (zombie self-fencing signal).
@@ -4716,6 +4932,7 @@ export class Thread {
    * callback with no caller to catch it.
    */
   private async fencedEmit(event: EngineEvent, opts: Omit<EmitOptions, "fence"> = {}): Promise<void> {
+    if (this.staleFenceDetected) return;
     try {
       await this.session.emit(event, { ...opts, fence: this.fence });
     } catch (err) {

@@ -13,6 +13,8 @@ export class SlackApiError extends Error {
   constructor(
     readonly method: string,
     readonly detail: string,
+    readonly status?: number,
+    readonly providerRejected: boolean = false,
   ) {
     super(`slack ${method} failed: ${detail}`);
     this.name = "SlackApiError";
@@ -85,7 +87,14 @@ export class SlackApi {
   private async call(method: string, body: Record<string, unknown>): Promise<SlackResponse> {
     const res = await slackFetch(method, this.token, body, this.baseUrl);
     const parsed = (await res.json()) as SlackResponse;
-    if (!parsed.ok) throw new SlackApiError(method, parsed.error ?? `http ${res.status}`);
+    if (!parsed.ok) {
+      throw new SlackApiError(
+        method,
+        parsed.error ?? `http ${res.status}`,
+        res.status,
+        parsed.ok === false,
+      );
+    }
     return parsed;
   }
 
@@ -123,6 +132,12 @@ export class SlackApi {
     text: string;
     threadTs?: string;
     blocks?: Record<string, unknown>[];
+    /** Per-assistant display name override (`chat:write.customize` scope).
+     * Absent = the app's own name. */
+    username?: string;
+    /** Per-assistant avatar override (`chat:write.customize` scope).
+     * Absent = the app's own icon. */
+    iconUrl?: string;
   }): Promise<{ ts: string }> {
     const body: Record<string, unknown> = {
       channel: opts.channel,
@@ -131,6 +146,8 @@ export class SlackApi {
     };
     if (opts.threadTs !== undefined) body.thread_ts = opts.threadTs;
     if (opts.blocks !== undefined) body.blocks = opts.blocks;
+    if (opts.username !== undefined) body.username = opts.username;
+    if (opts.iconUrl !== undefined) body.icon_url = opts.iconUrl;
     const res = await this.call("chat.postMessage", body);
     const ts = str(res.ts);
     if (!ts) throw new SlackApiError("chat.postMessage", "response missing ts");

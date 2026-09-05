@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { V1Pod } from "@kubernetes/client-node";
 import { SANDBOX_CONTAINER_NAME, SANDBOX_CR_API_VERSION, buildSandboxManifest } from "../src/index.js";
 import type { K8sProviderConfig, SandboxCondition, SandboxCR, SandboxCRRead } from "../src/index.js";
 import {
@@ -11,9 +12,12 @@ import {
   getSandbox,
   listSandboxes,
   livePodImageDiffers,
+  livePodDrift,
   mapConditionsToStatus,
   parseSandboxCRRead,
+  podStatusApiAdapter,
   resolvePodName,
+  resourceFingerprint,
   sandboxStatus,
   setOperatingMode,
 } from "../src/lifecycle.js";
@@ -29,6 +33,7 @@ import type {
   SandboxCustomObjectsApi,
   SandboxPodsApi,
   SandboxPodStatusApi,
+  SandboxCpuMemoryResources,
 } from "../src/lifecycle.js";
 
 const cfg: K8sProviderConfig = {
@@ -478,6 +483,126 @@ describe("parseSandboxCRRead", () => {
 });
 
 describe("applySandbox", () => {
+  const previousResources = [
+    { requests: { cpu: "250m", memory: "4Gi" }, limits: { cpu: "3", memory: "8Gi" } },
+    { requests: { cpu: "500m" }, limits: { memory: "8Gi" } },
+    { requests: { cpu: 2 }, limits: { memory: 8589934592 } },
+    undefined,
+  ];
+
+  it.each(previousResources)("preserves exact CPU/memory %j while updating ephemeral storage on adoption", async (resources) => {
+    const api = new FakeCustomObjectsApi();
+    const existing = toCRRead(buildSandboxManifest(cfg, "sess-resources", {}));
+    existing.spec.podTemplate = {
+      spec: { containers: [
+        { name: "sidecar", image: "sidecar:v1", resources: { requests: { cpu: "9" } } },
+        { name: SANDBOX_CONTAINER_NAME, image: cfg.defaultImage, resources },
+      ] },
+    };
+    api.seed(existing);
+    const manifest = buildSandboxManifest({ ...cfg, defaultResources: { cpu: 1, memory: "2Gi" } }, "sess-resources", {
+      resources: { cpu: 2, ephemeralStorage: "10Gi", ephemeralStorageLimit: "20Gi" },
+    });
+    const original = structuredClone(manifest);
+
+    const result = await applySandbox(api, cfg, manifest, { preserveResourcesOnAdopt: true });
+
+    expect(result.cr.spec.podTemplate).toEqual({
+      ...manifest.spec.podTemplate,
+      spec: {
+        ...manifest.spec.podTemplate.spec,
+        containers: [{
+          ...manifest.spec.podTemplate.spec.containers[0],
+          resources: {
+            requests: { ...resources?.requests, "ephemeral-storage": "10Gi" },
+            limits: { ...resources?.limits, "ephemeral-storage": "20Gi" },
+          },
+        }],
+      },
+    });
+    expect(manifest).toEqual(original);
+  });
+
+  it.each([{}, { cpu: 1, memory: "2Gi" }])("authoritative empty resources adopt deployment defaults %j", async (defaultResources) => {
+    const api = new FakeCustomObjectsApi();
+    const existing = buildSandboxManifest(cfg, "sess-resources", { resources: { cpu: 4, memory: "8Gi" } });
+    api.seed(toCRRead(existing));
+    const manifest = buildSandboxManifest({ ...cfg, defaultResources }, "sess-resources", { resources: {} });
+
+    const result = await applySandbox(api, cfg, manifest);
+
+    expect(result.cr.spec.podTemplate).toEqual(manifest.spec.podTemplate);
+  });
+
+  it("preserve-on-adopt still applies manifest resources to a fresh sandbox", async () => {
+    const api = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest({ ...cfg, defaultResources: { cpu: 1, memory: "2Gi" } }, "sess-new", {});
+
+    const result = await applySandbox(api, cfg, manifest, { preserveResourcesOnAdopt: true });
+
+    expect(result.adopted).toBe(false);
+    expect(result.cr.spec.podTemplate).toEqual(manifest.spec.podTemplate);
+  });
+
+  it.each([{ cpu: 4, memory: "8Gi" }, { cpu: 4 }, {}])("durably records only the caller overrides %j, not deployment defaults", async (resourceOverrides) => {
+    const api = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest({ ...cfg, defaultResources: { memory: "2Gi" } }, "sess-overrides", { resources: resourceOverrides });
+    const original = structuredClone(manifest);
+
+    const result = await applySandbox(api, cfg, manifest, { resourceOverrides });
+
+    expect(result.resourceOverrides).toEqual(resourceOverrides);
+    expect(api.get("sess-overrides")?.metadata.annotations?.["valet.dev/resource-overrides"]).toBe(JSON.stringify(resourceOverrides));
+    expect(manifest).toEqual(original);
+  });
+
+  it.each([{ cpu: 4, memory: "8Gi" }, {}])("preserves a durable override opinion %j without reading the old sandbox", async (resourceOverrides) => {
+    const api = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest(cfg, "sess-overrides", {});
+    const prior = toCRRead(manifest);
+    prior.metadata.annotations = { "valet.dev/resource-overrides": JSON.stringify(resourceOverrides) };
+    api.seed(prior);
+    let reads = 0;
+
+    const result = await applySandbox(api, cfg, manifest, {
+      preserveResourcesOnAdopt: true, resourceOverrides: { cpu: 1 },
+      readResourceOverrides: async () => { reads++; return { cpu: 1 }; },
+    });
+
+    expect(result.resourceOverrides).toEqual(resourceOverrides);
+    expect(api.get("sess-overrides")?.metadata.annotations?.["valet.dev/resource-overrides"]).toBe(JSON.stringify(resourceOverrides));
+    expect(reads).toBe(0);
+  });
+
+  it("authoritative empty overrides replace an old durable opinion", async () => {
+    const api = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest(cfg, "sess-overrides", {});
+    const prior = toCRRead(manifest);
+    prior.metadata.annotations = { "valet.dev/resource-overrides": '{"cpu":4}' };
+    api.seed(prior);
+
+    const result = await applySandbox(api, cfg, manifest, { resourceOverrides: {} });
+
+    expect(result.resourceOverrides).toEqual({});
+    expect(api.get("sess-overrides")?.metadata.annotations?.["valet.dev/resource-overrides"]).toBe("{}");
+  });
+
+  it.each([undefined, "invalid JSON", '{"cpu":"4"}'])("unknown legacy metadata %j does not become stale caller overrides", async (annotation) => {
+    const api = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest(cfg, "sess-overrides", {});
+    const prior = toCRRead(manifest);
+    prior.metadata.annotations = annotation === undefined ? {} : { "valet.dev/resource-overrides": annotation };
+    api.seed(prior);
+
+    const result = await applySandbox(api, cfg, manifest, {
+      preserveResourcesOnAdopt: true, resourceOverrides: { cpu: 1 },
+      readResourceOverrides: async () => undefined,
+    });
+
+    expect(result.resourceOverrides).toBeNull();
+    expect(api.get("sess-overrides")?.metadata.annotations?.["valet.dev/resource-overrides"]).toBeUndefined();
+  });
+
   it("creates a new CR when none exists", async () => {
     const api = new FakeCustomObjectsApi();
     const manifest = buildSandboxManifest(cfg, "sess-1", {});
@@ -957,5 +1082,98 @@ describe("livePodImageDiffers", () => {
     // manifestImage differs from old-image:v1 → should report differs=true.
     const result = await livePodImageDiffers(objectsApi, podsApi, podStatusApi, cfg, "sess-6", "new-image:v2");
     expect(result).toEqual({ differs: true, podName: "sess-6", liveImage: "old-image:v1" });
+  });
+});
+
+describe("livePodDrift", () => {
+  const cases: { live: SandboxCpuMemoryResources; desired: SandboxCpuMemoryResources; differs: boolean }[] = [
+    { live: { requests: { cpu: 2 } }, desired: { requests: { cpu: "2" } }, differs: false },
+    { live: { requests: { cpu: "500m" } }, desired: { requests: { cpu: 0.5 } }, differs: false },
+    { live: { limits: { memory: "4096Mi" } }, desired: { limits: { memory: "4Gi" } }, differs: false },
+    { live: { limits: { memory: "1536Mi" } }, desired: { limits: { memory: "1.5Gi" } }, differs: false },
+    { live: { requests: { memory: "1G" } }, desired: { requests: { memory: "1e9" } }, differs: false },
+    { live: { requests: { cpu: "1000u" } }, desired: { requests: { cpu: "1m" } }, differs: false },
+    { live: { requests: { cpu: "1e-3" } }, desired: { requests: { cpu: "1m" } }, differs: false },
+    { live: { requests: { memory: "1n" } }, desired: { requests: { memory: "0.1n" } }, differs: false },
+    { live: { limits: { memory: "9223372036854775807" } }, desired: { limits: { memory: "8Ei" } }, differs: false },
+    { live: { requests: { cpu: "501m" } }, desired: { requests: { cpu: 0.5 } }, differs: true },
+    { live: { limits: { memory: "4G" } }, desired: { limits: { memory: "4Gi" } }, differs: true },
+    { live: {}, desired: { requests: { cpu: 0 } }, differs: true },
+    { live: {}, desired: { requests: { cpu: "undefined" } }, differs: true },
+    { live: {}, desired: {}, differs: false },
+    { live: { limits: { memory: "8Gi" } }, desired: { limits: { memory: "4Gi" } }, differs: true },
+  ];
+
+  it.each(cases)("compares live quantities $live with $desired", async ({ live, desired, differs }) => {
+    const objectsApi = new FakeCustomObjectsApi();
+    const manifest = buildSandboxManifest(cfg, "sess-drift", {});
+    objectsApi.seed(toCRReadWithPodAnnotation(manifest, "pod-drift"));
+    let reads = 0;
+    const podStatusApi: SandboxPodStatusApi = {
+      getPodStatus: async () => {
+        reads++;
+        return {
+          phase: "Running", sandboxResources: live,
+          containerStatuses: [{ name: "sandbox", image: cfg.defaultImage }],
+        };
+      },
+    };
+
+    const result = await livePodDrift(objectsApi, new FakePodsApi([]), podStatusApi, cfg, "sess-drift", cfg.defaultImage, desired);
+
+    expect(result.differs).toBe(differs);
+    expect(resourceFingerprint(live) === resourceFingerprint(desired)).toBe(!differs);
+    expect(reads).toBe(1);
+  });
+
+  it("the pod status adapter reads CPU/memory from the named sandbox container", async () => {
+    const adapter = podStatusApiAdapter({
+      readNamespacedPod: async (): Promise<V1Pod> => ({
+        metadata: { annotations: { "valet.dev/resource-fingerprint": "new-template-generation" } },
+        spec: { containers: [
+          { name: "sidecar", image: "sidecar:v1", resources: { requests: { cpu: "9" } } },
+          { name: "sandbox", image: "image:v1", env: [{ name: "VALET_SANDBOX_RESOURCE_FINGERPRINT", value: "boot-generation" }], resources: {
+            requests: { cpu: "250m", memory: "4Gi", "ephemeral-storage": "10Gi" },
+            limits: { cpu: "4", memory: "8Gi", "ephemeral-storage": "20Gi" },
+          } },
+        ] },
+      }),
+    });
+
+    const status = await adapter.getPodStatus("valet-sandboxes", "pod-drift");
+
+    expect(status?.sandboxImage).toBe("image:v1");
+    expect(status?.resourceFingerprint).toBe("boot-generation");
+    expect(status?.sandboxResources).toEqual({
+      requests: { cpu: "250m", memory: "4Gi" }, limits: { cpu: "4", memory: "8Gi" },
+    });
+    const objectsApi = new FakeCustomObjectsApi();
+    objectsApi.seed(toCRReadWithPodAnnotation(buildSandboxManifest(cfg, "sess-drift", {}), "pod-drift"));
+    // The controller propagated desired metadata, but left the old pod spec intact.
+    const drift = await livePodDrift(objectsApi, new FakePodsApi([]), adapter, cfg, "sess-drift", "image:v1", undefined, "new-template-generation");
+    expect(drift).toMatchObject({ differs: true, imageDrift: false, resourcesDrift: true });
+  });
+
+  it("a propagated pod annotation does not supply a missing immutable fingerprint", async () => {
+    const adapter = podStatusApiAdapter({
+      readNamespacedPod: async (): Promise<V1Pod> => ({
+        metadata: { annotations: { "valet.dev/resource-fingerprint": "new-generation" } },
+        spec: { containers: [{ name: "sandbox", image: "image:v1", env: [
+          { name: "VALET_SANDBOX_RESOURCE_FINGERPRINT", valueFrom: { fieldRef: { fieldPath: "metadata.name" } } },
+        ] }] },
+      }),
+    });
+    expect((await adapter.getPodStatus("ns", "pod"))?.resourceFingerprint).toBeUndefined();
+  });
+
+  it("does not report convergence when the live pod read fails", async () => {
+    const objectsApi = new FakeCustomObjectsApi();
+    objectsApi.seed(toCRReadWithPodAnnotation(buildSandboxManifest(cfg, "sess-drift", {}), "pod-drift"));
+    const podStatusApi: SandboxPodStatusApi = {
+      getPodStatus: async () => { throw new Error("pod read failed"); },
+    };
+
+    await expect(livePodDrift(objectsApi, new FakePodsApi([]), podStatusApi, cfg, "sess-drift", cfg.defaultImage, {}))
+      .rejects.toThrow("pod read failed");
   });
 });

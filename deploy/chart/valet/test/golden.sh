@@ -50,6 +50,15 @@ helm template valet "$CHART_DIR" --kube-version 1.30.0 \
   > "$TMP_DIR/external-registry.yaml"
 pass "renders with externalRegistry.url set"
 
+helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set sandbox.resources.cpu=1.5 \
+  --set-string sandbox.resources.memory=3Gi \
+  > "$TMP_DIR/sandbox-resources.yaml"
+
+helm template valet "$CHART_DIR" --kube-version 1.30.0 \
+  --set sandbox.resources.cpu=0 \
+  > "$TMP_DIR/sandbox-zero-cpu.yaml"
+
 # --- RBAC: namespaced only, nothing cluster-scoped ---------------------
 grep -q '^kind: Role$' "$TMP_DIR/bundled.yaml" || fail "no namespaced Role rendered"
 grep -q '^kind: RoleBinding$' "$TMP_DIR/bundled.yaml" || fail "no RoleBinding rendered"
@@ -149,6 +158,21 @@ pass "external render: DATABASE_URL from externalDatabase.url, bundled postgres 
 grep -q 'VALET_SANDBOX_API_URL: "http://valet-api.default.svc.cluster.local:80"' "$TMP_DIR/bundled.yaml" \
   || fail "ConfigMap VALET_SANDBOX_API_URL is not the api Service's in-cluster DNS name"
 pass "VALET_SANDBOX_API_URL carries the api Service's .svc.cluster.local DNS name"
+
+# --- optional per-sandbox CPU/memory deployment defaults ----------------
+if grep -qE 'VALET_SANDBOX_(CPU|MEMORY):' "$TMP_DIR/bundled.yaml"; then
+  fail "default render includes optional VALET_SANDBOX_CPU or VALET_SANDBOX_MEMORY"
+fi
+grep -q 'VALET_SANDBOX_CPU: "1.5"' "$TMP_DIR/sandbox-resources.yaml" \
+  || fail "explicit sandbox.resources.cpu does not render VALET_SANDBOX_CPU"
+grep -q 'VALET_SANDBOX_MEMORY: "3Gi"' "$TMP_DIR/sandbox-resources.yaml" \
+  || fail "explicit sandbox.resources.memory does not render VALET_SANDBOX_MEMORY"
+grep -q 'VALET_SANDBOX_CPU: "0"' "$TMP_DIR/sandbox-zero-cpu.yaml" \
+  || fail "numeric zero sandbox.resources.cpu was omitted instead of reaching api validation"
+if grep -q 'VALET_SANDBOX_MEMORY:' "$TMP_DIR/sandbox-zero-cpu.yaml"; then
+  fail "CPU-only sandbox resources render includes VALET_SANDBOX_MEMORY"
+fi
+pass "optional sandbox CPU/memory defaults render independently, including numeric zero"
 
 # --- No Secret keys leak into the ConfigMap ------------------------------
 CONFIGMAP_BLOCK=$(awk '/^kind: ConfigMap$/{f=1} f&&/^---$/{exit} f' "$TMP_DIR/bundled.yaml")

@@ -44,7 +44,14 @@ import {
 import { ownerOf, repoOf } from "../services/session-github-token.js";
 import { GitHubAuthError, resolveGitHubToken, type GitHubTokenDeps } from "../services/github-tokens.js";
 import { DEFAULT_FULL_BASE_IMAGE, resolveDefaultImage } from "../providers/sandbox-backend.js";
-import { resolveRecipe, loadPrebuildOverride, CANDIDATE_LOCKFILES, type ResolvedRecipe, type RecipeStep } from "../prebuilds/recipe.js";
+import {
+  resolveRecipe,
+  loadPrebuildOverride,
+  CANDIDATE_LOCKFILES,
+  type PrebuildResources,
+  type ResolvedRecipe,
+  type RecipeStep,
+} from "../prebuilds/recipe.js";
 import { loadCredentialCommands, type CredentialCommand } from "../engine/credential-commands.js";
 import type { SpawnFn } from "../prebuilds/docker-builder.js";
 import type { ImageBuilder, PrebuildSpec } from "../prebuilds/builder.js";
@@ -426,6 +433,9 @@ export async function resolveRecipeFromGitHub(
 export interface RepoPrebuildFlags {
   /** `docker: true` — run a rootless docker daemon in the sandbox. */
   docker: boolean;
+  /** Authoritative repository CPU and memory overrides. An empty object
+   * means the file is absent or does not declare resource overrides. */
+  resources?: PrebuildResources;
   /** `workspaceStorage: "4Gi"` — provision the workspace claim at this size
    * (clamped to the deploy cap by the provider). Absent when undeclared. */
   workspaceStorage?: string;
@@ -463,8 +473,8 @@ export function clearRepoPrebuildFlagsCache(): void {
 }
 
 /** Best-effort read of `.valet/prebuild.yaml`'s session-runtime keys
- * (`docker`, `workspaceStorage`) for a repo ref. Errors (auth, rate limit,
- * bad YAML) resolve the defaults ({ docker: false }, no storage) with
+ * (`docker`, `resources`, `workspaceStorage`) for a repo ref. Errors (auth,
+ * rate limit, bad YAML) resolve the defaults ({ docker: false }, no storage) with
  * `outcome: "error"`: the session still starts. The session-create `docker`
  * option is the corrective override when the repo read cannot succeed.
  *
@@ -502,6 +512,7 @@ export async function repoPrebuildFlags(
       if (controller.signal.aborted) return { docker: false, outcome: "error" };
       value = {
         docker: override?.docker === true,
+        resources: override?.resources ?? {},
         ...(override?.workspaceStorage ? { workspaceStorage: override.workspaceStorage } : {}),
         outcome: override === null ? "absent" : "declared",
       };
