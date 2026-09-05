@@ -1,6 +1,6 @@
 # `.valet/prebuild.yaml` schema
 
-Place this file at the root of your repository to customize sandbox image prebuild behavior. All fields are optional. Omit the file entirely to use pure auto-detection.
+Place this file at the root of your repository to configure sandbox resources and image prebuilds. All fields are optional. Without this file, image builds use auto-detection and sandboxes use saved defaults.
 
 ## Test the recipe locally
 
@@ -50,6 +50,51 @@ Use `skipDetect` when your repo brings its own toolchain that the base image doe
 Type: `boolean` (default `false`)
 
 Set `true` to give this repo's sessions a rootless docker daemon inside the sandbox. The daemon runs as a non-root user; the sandbox is never privileged. Docker state is ephemeral — images pull again after the sandbox restarts. See `docs/specs/2026-08-15-sandbox-docker-design.md`.
+
+### `resources`
+
+Type: an object with optional `cpu` and `memory` fields.
+
+```yaml
+resources:
+  cpu: 4
+  memory: 8Gi
+```
+
+`cpu` is a positive finite number of CPU cores. Fractions such as `0.5` are valid.
+`memory` is a positive Kubernetes quantity string, such as `8Gi` or `500Mi`.
+Valet trims memory values. Zero, negative, non-finite, or malformed values are invalid.
+
+These fields size the running sandbox. They do not change the image bake.
+Kubernetes sets equal requests and limits on the sandbox container. Docker uses
+CPU and memory limits and converts the memory quantity to bytes. Non-isolated
+providers do not resize the host.
+
+Defaults apply separately to each field, in this order:
+
+1. A value in `.valet/prebuild.yaml`.
+2. A repository default saved in **Settings → Organization → Sandbox settings**.
+3. The deployment default, `VALET_SANDBOX_CPU` or `VALET_SANDBOX_MEMORY`.
+4. The provider's behavior when no value is set.
+
+For example, YAML can set CPU and retain the repository's saved memory default.
+In Sandbox settings, clear a field to remove its saved default. Resource controls
+remain available when prebuilds are disabled or no image builder is configured.
+Only the primary repository supplies settings. Child sessions use the same rules.
+
+Resource edits apply at the next safe reconciliation before a run. Valet replaces
+isolated compute when resources change. The persistent working directory survives;
+files elsewhere in the sandbox do not. YAML reads use the existing ten-minute
+cache. Saved settings are read on each reconciliation.
+
+If YAML or saved-default lookup fails, Valet preserves an existing sandbox's last
+known resources. A fresh sandbox uses available defaults. Invalid YAML is reported
+and is not cached. Provider startup errors remain visible, including requests
+that the cluster cannot schedule. Resource values must satisfy provider constraints.
+
+Changing deployment defaults alone does not restart a running attachment. Current
+defaults apply on the next creation or authoritative adoption, including API
+restart or recovery. An operator can replace a sandbox to apply them immediately.
 
 ### `baseSetup`
 

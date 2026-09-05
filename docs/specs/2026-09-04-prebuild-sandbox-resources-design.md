@@ -1,11 +1,11 @@
 # Repository sandbox CPU and memory
 
-Date: 2026-09-04. Status: approved for implementation.
+Date: 2026-09-04. Status: implemented.
 
 ## Problem
 
-Valet repositories can request persistent workspace storage and rootless Docker.
-They cannot request CPU or memory for their sandboxes. Large test suites then run
+Before this change, Valet repositories could request persistent storage and rootless Docker.
+They could not request CPU or memory for their sandboxes. Large test suites ran
 with the deployment's implicit resource policy. This makes the Valet development
 loop slow when a sandbox receives too little CPU or memory.
 
@@ -13,7 +13,7 @@ The sandbox providers already accept `SandboxCreateOpts.resources.cpu` and
 `SandboxCreateOpts.resources.memory`. The Docker provider maps CPU to
 `docker run --cpus`. It converts memory to bytes for `docker run --memory`.
 The Kubernetes provider maps each value to an equal request and limit on the
-sandbox container. The API does not populate these fields from repository or
+sandbox container. The API now populates these fields from repository or
 deployment configuration.
 
 ## Goals
