@@ -61,7 +61,7 @@ const ORGANIZATION_ITEMS = [
   { to: "/settings/organization/github", label: "GitHub" },
   { to: "/settings/organization/slack", label: "Slack" },
   { to: ORG_ONEPASSWORD_PATH, label: "1Password" },
-  { to: "/settings/organization/sandbox-images", label: "Sandbox images" },
+  { to: "/settings/organization/sandbox-images", label: "Sandbox settings" },
   { to: "/settings/organization/policies", label: "Policies" },
   { to: "/settings/organization/action-log", label: "Action log" },
 ] as const;

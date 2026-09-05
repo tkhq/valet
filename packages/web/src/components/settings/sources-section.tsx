@@ -3,6 +3,7 @@ import { Trash2 } from "lucide-react";
 import type { BakeSummary, SourceSummary } from "~/api/sources";
 import { Badge, Button, Dialog, DialogContent, DialogFooter, Input, Label, Spinner, Switch } from "~/components/primitives";
 import { Section } from "~/components/settings/section";
+import { RepoSandboxResourcesForm } from "~/components/settings/repo-sandbox-resources-form";
 import { ApiError } from "~/api/client";
 import { relativeTime } from "~/lib/relative-time";
 import {
@@ -15,7 +16,7 @@ import {
 } from "~/api/sources";
 
 /**
- * Organization · Sandbox images — unified sources page (sandbox-reconciliation
+ * Organization · Sandbox settings — unified sources page (sandbox-reconciliation
  * plan, Task 18). Three groups on one page: Base image (org-wide setup
  * commands), Repository images (auto-created, per-repo enabled toggle + bake
  * history), External images (admin-registered image refs for catalog use).
@@ -319,6 +320,8 @@ function RepoSourceRow({
       </div>
 
       {bakeError && <p className="text-xs text-danger-500">{bakeError}</p>}
+
+      <RepoSandboxResourcesForm source={source} />
 
       {showBakes && (
         <BakeHistoryTable

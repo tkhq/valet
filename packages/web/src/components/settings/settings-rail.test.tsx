@@ -46,6 +46,8 @@ describe("SettingsRail", () => {
     expect(screen.getAllByRole("link", { name: "Policies" })).toHaveLength(2);
     // Beside GitHub and Slack: per-provider setup lives on the rail.
     expect(screen.getByRole("link", { name: "1Password" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Sandbox settings" })).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "Sandbox images" })).toBeNull();
   });
 
   // The page holds the member's OWN personal token as well as the org one,

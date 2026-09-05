@@ -251,6 +251,8 @@ The organization settings page is named **Sandbox settings**. It retains base
 and external image controls. Each repository row also has optional CPU and memory
 defaults, a save action, and the existing bake controls. Empty fields remove the
 saved default. Resource controls remain available when image builds are disabled.
+Both fields show `Deployment default` when they are empty. Each repository uses
+unique input labels, and the save action reads `Save resources`.
 
 The API stores these defaults on the repository image source. Only organization
 administrators can change them. Existing source routes retain their URLs and
