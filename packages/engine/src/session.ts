@@ -1,4 +1,4 @@
-import { Thread, resolveModelId as resolveSessionModel } from "./thread.js";
+import { Thread, isItemDrivenInProcess, resolveModelId as resolveSessionModel } from "./thread.js";
 import { builtinTools } from "./builtin-tools/index.js";
 import { decideReconciliation, type ReconcileContext } from "./submission.js";
 import { buildCommandRegistry, type CommandRegistry } from "./commands/registry.js";
@@ -524,6 +524,12 @@ export class Session {
     // gate-replay / resume drive kicked off here is asynchronous — reconcile
     // claims the work and KICKS the drive, never waits for the resumed turn
     // (see resumeInterrupted's doc comment for the deadlock this prevents).
+    // One knock-on exception to "applied before resolve": on the dead-gate
+    // fall-through (gate expired/withdrawn while the engine was down), the
+    // blocked→running flip lands inside the background drive, so queue state
+    // can read blocked_on_decision_gate for a moment after restore resolves
+    // even though no pending gate exists; resolving a missing gate is a safe
+    // 404.
     await session.reconcile();
     return session;
   }
@@ -611,6 +617,15 @@ export class Session {
     // the pure tests, defensive here.
     const leaseUnexpired =
       !opts?.startup && item.leaseExpiresAt !== undefined && item.leaseExpiresAt > now;
+    // The startup override's "prior owner is gone" premise is FALSE when the
+    // owner is this same process: a host cache-evict + rebuild restores a
+    // second Session while the first one's background drive (resume, replay)
+    // is still running here. Stealing that live attempt runs the same turn's
+    // tools twice in one sandbox, so a drive registered in-process counts as
+    // live regardless of lease state. Known gap: an in-process turn driven by
+    // a normal prompt kick (kickLoop) is not registered — that steal predates
+    // the background-drive work and is tracked separately.
+    const drivenInProcess = isItemDrivenInProcess(item.id);
     const suspended = await store.getSuspendedTurn(this.id, item.threadId);
     let gateStatus: ReconcileContext["gateStatus"] = null;
     if (suspended) {
@@ -620,7 +635,7 @@ export class Session {
     const ctx: ReconcileContext = {
       now,
       hasTerminalAssistantEntry,
-      attemptLive: markerLive && leaseUnexpired,
+      attemptLive: (markerLive && leaseUnexpired) || drivenInProcess,
       suspended,
       gateStatus,
     };
