@@ -92,6 +92,25 @@ export function useCreateAssistant() {
   });
 }
 
+export function useUploadAssistantAvatar() {
+  const qc = useQueryClient();
+  return useMutation<{ avatarUrl: string }, Error, { id: string; file: File }>({
+    mutationFn: ({ id, file }) => api.uploadAssistantAvatar(id, file),
+    onSuccess: ({ avatarUrl }, { id }) => {
+      qc.setQueryData<ListAssistantsResponse>(qkAssistants.list(), (prev) =>
+        prev === undefined
+          ? prev
+          : {
+              assistants: prev.assistants.map((assistant) =>
+                assistant.id === id ? { ...assistant, avatarUrl } : assistant,
+              ),
+            },
+      );
+      qc.invalidateQueries({ queryKey: qkAssistants.list() });
+    },
+  });
+}
+
 /** Rename, promote to default, or rewrite persona/behavior. `isDefault:
  * true` demotes the previous default in the same write, so no separate
  * demote call exists. */

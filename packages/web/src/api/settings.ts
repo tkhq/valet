@@ -245,6 +245,19 @@ export function useTeamMembers(teamId: string, opts?: UseQueryOptions<ListTeamMe
 
 // ── Mutations ────────────────────────────────────────────────────────────
 
+export function useUploadMyAvatar() {
+  const qc = useQueryClient();
+  return useMutation<{ avatarUrl: string }, Error, File>({
+    mutationFn: (file) => api.uploadMyAvatar(file),
+    onSuccess: ({ avatarUrl }) => {
+      qc.setQueryData<MeResponse>(qkSettings.me(), (previous) =>
+        previous ? { ...previous, avatarUrl } : previous,
+      );
+      qc.invalidateQueries({ queryKey: qkSettings.me() });
+    },
+  });
+}
+
 export function usePatchMe() {
   const qc = useQueryClient();
   return useMutation<

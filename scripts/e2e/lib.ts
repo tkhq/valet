@@ -101,6 +101,7 @@ const INTEGRATION_CORE_FILES = [
   "src/integration/workflow-github-credential.e2e.test.ts",
   "src/integration/usage-summary.test.ts",
   "src/integration/plugin-entitlements.test.ts",
+  "src/integration/profile-pictures.test.ts",
   // Valet Security integration suites run keyless: the virtual sandbox
   // provider and abort-based settlement need no model key.
   "src/integration/security-settlement.test.ts",

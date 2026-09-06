@@ -17,6 +17,7 @@ import { render, screen, fireEvent, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 
 const patchMeMutate = vi.fn();
+const uploadMyAvatarMutateAsync = vi.fn().mockResolvedValue({ avatarUrl: "/avatars/me.webp" });
 const patchOrgMutateAsync = vi.fn().mockResolvedValue({ ok: true });
 const setPrefMutate = vi.fn();
 const navigateMock = vi.fn();
@@ -88,6 +89,7 @@ vi.mock("~/api/settings", async (importOriginal) => {
     useModelTiers: () => ({ data: { xs: [], s: [], m: [], l: [], xl: [] }, isLoading: false, error: null }),
     useOrgReasoning: () => ({ data: {}, isLoading: false, error: null }),
     usePatchMe: () => ({ mutate: patchMeMutate, isPending: false, error: null }),
+    useUploadMyAvatar: () => ({ mutateAsync: uploadMyAvatarMutateAsync, isPending: false, error: null }),
     usePatchOrg: () => ({ mutateAsync: patchOrgMutateAsync, isPending: false, error: null }),
   };
 });
@@ -156,6 +158,14 @@ describe("ProfilePage", () => {
     expect(
       screen.getByText("Sign-in email — managed by your login once real auth ships."),
     ).toBeTruthy();
+  });
+
+  it("uploads a selected profile picture", async () => {
+    uploadMyAvatarMutateAsync.mockClear();
+    render(<ProfilePage />);
+    const file = new File([new Uint8Array([1, 2, 3])], "avatar.png", { type: "image/png" });
+    fireEvent.change(screen.getByLabelText("Profile picture file"), { target: { files: [file] } });
+    await waitFor(() => expect(uploadMyAvatarMutateAsync).toHaveBeenCalledWith(file));
   });
 
   it("Save is disabled until a field is dirty, then PATCHes /api/me", () => {

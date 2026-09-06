@@ -61,6 +61,7 @@ import { reposRouter } from "./routes/repos.js";
 import { sourcesRouter, sourcesPublicRouter } from "./routes/sources.js";
 import { sandboxGitCredentialRouter } from "./routes/sandbox-git-credential.js";
 import { fileUploadRouter } from "./routes/sandbox-file-upload.js";
+import { profilePicturesPublicRouter, profilePicturesRouter } from "./routes/profile-pictures.js";
 import { policiesRouter, actionLogRouter } from "./routes/policies.js";
 import { mePolicyOverridesRouter, meGrantsRouter } from "./routes/me-policies.js";
 import { registerWsRoutes } from "./routes/ws.js";
@@ -213,6 +214,10 @@ export function createApp(
   // authed `artifactsRouter` mounted at the same prefix below the gate.
   app.route("/api/artifacts", buildArtifactsPublicRouter(auth ?? null));
 
+  // PUBLIC profile-picture read. Slack fetches assistant icon URLs without a
+  // Valet session, so only the server-derived path identifies the object.
+  app.route("/avatars", profilePicturesPublicRouter);
+
   // Public health check (no auth). Carries the running binary's version and
   // the resolved sandbox backend so `valet status` can report client/server
   // versions + skew (single-binary CLI plan, T6; spec decisions 6 & 9).
@@ -294,6 +299,9 @@ export function createApp(
   // half is mounted pre-auth above.
   app.route("/api/artifacts", artifactsRouter);
   app.route("/api/orchestrator", orchestratorRouter);
+  // Upload endpoints are mounted before the assistants router so its /:id
+  // routes cannot claim the profile-picture path.
+  app.route("/api", profilePicturesRouter);
   app.route("/api/assistants", assistantsRouter);
   app.route("/api/notifications", notificationsRouter);
   // Trigger routes first: workflowsRouter's `GET /:id` would otherwise

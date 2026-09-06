@@ -149,6 +149,7 @@ import type {
   PatchLlmProviderResponse,
   PatchMeRequest,
   PatchMeResponse,
+  ProfilePictureUploadResponse,
   PatchOrchestratorInfoRequest,
   PatchOrchestratorInfoResponse,
   PatchOrgMemberRequest,
@@ -358,6 +359,44 @@ const REQUEST_TIMEOUT_MS = 30_000;
 /** Status for a request that never reached a response. Distinct from any
  * HTTP status, because no server replied. */
 const NO_RESPONSE_STATUS = 0;
+
+async function requestForm<T>(path: string, form: FormData): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${BASE}${path}`, {
+      method: "POST",
+      body: form,
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      let payload: unknown = text;
+      try {
+        payload = JSON.parse(text);
+      } catch {}
+      if (res.status === 401) void maybeRedirectToLogin();
+      throw new ApiError(res.status, `POST ${path} → ${res.status}`, payload);
+    }
+    return (await res.json()) as T;
+  } catch (err) {
+    if (controller.signal.aborted) {
+      throw new ApiError(
+        NO_RESPONSE_STATUS,
+        `POST ${path} got no response in ${REQUEST_TIMEOUT_MS / 1000}s. Check that the server is running, then try again.`,
+      );
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function uploadProfilePicture(path: string, file: File): Promise<ProfilePictureUploadResponse> {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  return requestForm<ProfilePictureUploadResponse>(path, form);
+}
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const controller = new AbortController();
@@ -657,6 +696,8 @@ export const api = {
     request<CreateAssistantResponse>("POST", "/assistants", body),
   patchAssistant: (id: string, body: PatchAssistantRequest) =>
     request<PatchAssistantResponse>("PATCH", `/assistants/${encodeURIComponent(id)}`, body),
+  uploadAssistantAvatar: (id: string, file: File) =>
+    uploadProfilePicture(`/assistants/${encodeURIComponent(id)}/avatar`, file),
   // Archive, not destroy: the row keeps `archived_at` and the conversation
   // it held survives. `DELETE` carries it because the wire's
   // `PatchAssistantRequest` covers `name` and `isDefault` only, and the
@@ -1030,6 +1071,7 @@ export const api = {
   // settings shell (split-settings design): per-user profile, org, models
   getMe: () => request<MeResponse>("GET", "/me"),
   patchMe: (body: PatchMeRequest) => request<PatchMeResponse>("PATCH", "/me", body),
+  uploadMyAvatar: (file: File) => uploadProfilePicture("/me/avatar", file),
   listModels: () => request<ListModelsResponse>("GET", "/models"),
   getUsageSummary: () => request<UsageSummaryResponse>("GET", "/usage/summary"),
   usageBreakdown: (window: string = "7d", scope: UsageScopeName = "me", teamId?: string) => {

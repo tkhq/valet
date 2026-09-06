@@ -3,9 +3,11 @@ import { createFileRoute } from "@tanstack/react-router";
 import { Section } from "~/components/settings/section";
 import { FieldRow } from "~/components/settings/field-row";
 import { EnableOrgCard } from "~/components/settings/enable-org-card";
-import { Avatar, AvatarFallback, AvatarImage, Button, Input, Spinner } from "~/components/primitives";
-import { useMe, useOrg, usePatchMe } from "~/api/settings";
+import { Button, Input, Spinner } from "~/components/primitives";
+import { ProfilePictureUpload } from "~/components/settings/profile-picture-upload";
+import { useMe, useOrg, usePatchMe, useUploadMyAvatar } from "~/api/settings";
 import { authClient } from "~/lib/auth-client";
+import { errorText } from "~/lib/error-text";
 
 /**
  * `/settings/profile` — You · Profile. Name + avatar URL, one Save enabled
@@ -22,6 +24,7 @@ export function ProfilePage() {
   const meQ = useMe();
   const orgQ = useOrg();
   const patchMe = usePatchMe();
+  const uploadAvatar = useUploadMyAvatar();
 
   const [name, setName] = useState("");
   const [avatarUrl, setAvatarUrl] = useState("");
@@ -72,18 +75,22 @@ export function ProfilePage() {
                 aria-label="Name"
               />
             </FieldRow>
-            <FieldRow label="Avatar" hint="Paste an image URL.">
-              <div className="flex items-center gap-3">
-                <Avatar size="lg">
-                  <AvatarImage src={avatarUrl || undefined} alt="" />
-                  <AvatarFallback>{(name || "?").slice(0, 1).toUpperCase()}</AvatarFallback>
-                </Avatar>
+            <FieldRow label="Profile picture" hint="Upload an image, or keep using a public image URL.">
+              <div className="space-y-3">
+                <ProfilePictureUpload
+                  avatarUrl={avatarUrl}
+                  name={name}
+                  pending={uploadAvatar.isPending}
+                  error={uploadAvatar.error != null ? errorText(uploadAvatar.error) : undefined}
+                  onUpload={async (file) => {
+                    await uploadAvatar.mutateAsync(file);
+                  }}
+                />
                 <Input
                   value={avatarUrl}
                   onChange={(e) => setAvatarUrl(e.target.value)}
                   placeholder="https://…"
                   aria-label="Avatar URL"
-                  className="flex-1"
                 />
               </div>
             </FieldRow>

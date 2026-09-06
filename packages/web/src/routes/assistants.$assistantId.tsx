@@ -10,7 +10,12 @@ import type {
   PluginSummary,
   TeamSummary,
 } from "@valet/api/wire";
-import { useAssistants, usePatchAssistant, useArchiveAssistant } from "~/api/assistants";
+import {
+  useAssistants,
+  usePatchAssistant,
+  useArchiveAssistant,
+  useUploadAssistantAvatar,
+} from "~/api/assistants";
 import { usePlugins } from "~/api/integrations";
 import { useAllSkills } from "~/api/skills";
 import { useMe, useTeams } from "~/api/settings";
@@ -20,6 +25,7 @@ import { FieldRow } from "~/components/settings/field-row";
 import { RadioCard } from "~/components/settings/radio-card";
 import { ModelCombobox } from "~/components/settings/model-combobox";
 import { ReasoningSelect } from "~/components/settings/reasoning-select";
+import { ProfilePictureUpload } from "~/components/settings/profile-picture-upload";
 import { ServiceIcon } from "~/components/service-icon";
 import {
   Badge,
@@ -197,6 +203,7 @@ function AssistantEditorForm({
   // and it keeps each section's pending and error state under its OWN control
   // instead of surfacing every section's error under Identity.
   const identityPatch = usePatchAssistant();
+  const avatarUpload = useUploadAssistantAvatar();
   const modelPatch = usePatchAssistant();
   const skillsPatch = usePatchAssistant();
   const integrationsPatch = usePatchAssistant();
@@ -499,6 +506,21 @@ function AssistantEditorForm({
             onChange={(e) => editName(e.target.value)}
             disabled={!canEdit}
             placeholder="Assistant name"
+          />
+        </FieldRow>
+        <FieldRow
+          label="Profile picture"
+          hint="Slack uses this image for outbound posts when the app has chat:write.customize."
+        >
+          <ProfilePictureUpload
+            avatarUrl={assistant.avatarUrl}
+            name={displayName}
+            disabled={!canEdit}
+            pending={avatarUpload.isPending}
+            error={avatarUpload.error != null ? errorText(avatarUpload.error) : undefined}
+            onUpload={async (file) => {
+              await avatarUpload.mutateAsync({ id: assistant.id, file });
+            }}
           />
         </FieldRow>
         <FieldRow
