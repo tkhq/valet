@@ -1002,20 +1002,34 @@ describe("installWorkflowTemplate ownership", () => {
     expect(result.code).toBe("team_not_found");
   });
 
-  it("refuses a scheduled tool template for a team, naming the reason", async () => {
-    // A scheduled run acts as the workflow's OWNER (`scheduler.ts#fire`),
-    // and a team principal has no credential scope in the action invoker
-    // (`plugins/action-invoker.ts#credentialOwnerFor`) — every gmail step
-    // would fail on every run.
+  it("refuses a scheduled team template when the team has no credential, naming the service", async () => {
+    // The caller's personal Gmail does not fund a team run. Readiness looks
+    // at the team row, org-provided services, and App pins — not Integrations.
     await connect("gmail");
     await seedTeam("team-3", [OWNER.userId]);
     const result = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep", { teamId: "team-3" });
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected a refusal");
-    expect(result.code).toBe("unsupported_owner");
+    expect(result.code).toBe("not_connected");
     expect(result.error).toContain("gmail");
-    expect(result.error).toContain("Install this template into your own workspace.");
+    expect(result.error).toContain("for this team");
     expect(await db.select().from(workflowSchedules)).toHaveLength(0);
+  });
+
+  it("installs a scheduled team template when the team credential is ready", async () => {
+    await credentials.save({ type: "team", id: "team-3b" }, "gmail", {
+      type: "oauth2",
+      accessToken: "team-gmail",
+    });
+    await seedTeam("team-3b", [OWNER.userId]);
+    const result = await installWorkflowTemplate(deps(), OWNER, "gmail-sweep", { teamId: "team-3b" });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error);
+
+    const defs = await db.select().from(workflowDefinitions);
+    expect(defs[0]!.ownerType).toBe("team");
+    expect(defs[0]!.ownerId).toBe("team-3b");
+    expect(await db.select().from(workflowSchedules)).toHaveLength(1);
   });
 
   it("files a team install's event subscription with the team", async () => {

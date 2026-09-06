@@ -4,7 +4,7 @@
  *   GET    /api/teams                       → list teams the caller belongs to
  *   POST   /api/teams                       → create a team (caller auto-admitted as admin)
  *   PATCH  /api/teams/:id                   → update team settings (default model, TKAI-255)
- *   DELETE /api/teams/:id                   → delete a team (409s while it owns any workflow)
+ *   DELETE /api/teams/:id                   → delete a team (409s while a team-owned run is unsettled)
  *   POST   /api/teams/:id/members           → add/update a member
  *   PATCH  /api/teams/:id/members/:userId   → change a member's role
  *   DELETE /api/teams/:id/members/:userId   → remove a member
@@ -53,10 +53,14 @@ import {
   agentSessions,
   assistants,
   childWatches,
+  contentSources,
   teamMembers,
   teams,
+  type ContentSourceRow,
   type TeamRow,
 } from "../schema/index.js";
+import { listWorkflowSources } from "../services/content-sources.js";
+import { assertNoTeamOwnedActiveRuns, reapTeamWorkflows } from "../workflows/service.js";
 import { isOrgAdmin } from "../services/org.js";
 import { validateDefaultModelId } from "../services/model-catalog.js";
 import { assertModelSelectable } from "../services/approved-models.js";
@@ -64,11 +68,11 @@ import { assertReasoningSelectable } from "../services/reasoning.js";
 import { ensureDefaultAssistantSession, listAssistantsForOwners } from "../assistants/service.js";
 import {
   addMember,
-  assertNoTeamOwnedWorkflows,
   canAdministerTeam,
   ConfigManagedTeamError,
   createTeam,
   deleteTeam,
+  TeamHasActiveRunsError,
   getTeamInOrg,
   IdpManagedTeamError,
   type IdpManagedMutation,
@@ -94,6 +98,7 @@ import type {
   ListTeamsResponse,
   PatchTeamResponse,
   SetTeamMemberRoleRequest,
+  SkillSourceSummary,
   TeamRole,
   TeamSummary,
 } from "../wire/types.js";
@@ -119,6 +124,24 @@ async function rowToSummary(
     callerRole: mine?.role ?? null,
     defaultModel: row.defaultModel,
     defaultReasoning: row.defaultReasoning,
+  };
+}
+
+function toAdoptedSourceSummary(row: ContentSourceRow): SkillSourceSummary {
+  return {
+    id: row.id,
+    repo: row.repoFullName,
+    ref: row.ref,
+    subpath: row.subpath,
+    ownerType: row.ownerType,
+    ownerId: row.ownerId,
+    kinds: row.kinds,
+    enabled: row.enabled,
+    status: row.status,
+    skillCount: 0,
+    lastSyncedAt: row.lastSyncedAt,
+    lastSha: row.lastSha,
+    lastMessage: row.lastError,
   };
 }
 
@@ -178,6 +201,7 @@ function handleServiceError(err: unknown): { body: { error: string; code?: strin
     err instanceof TeamNameConflictError ||
     err instanceof LastAdminError ||
     err instanceof TeamOwnsWorkflowsError ||
+    err instanceof TeamHasActiveRunsError ||
     err instanceof IdpManagedTeamError ||
     err instanceof ConfigManagedTeamError
   ) {
@@ -378,7 +402,7 @@ teamsRouter.get("/:id/members", async (c) => {
 // ── Create ────────────────────────────────────────────────────────────────
 
 teamsRouter.post("/", async (c) => {
-  const { db } = c.var.providers;
+  const { db, contentSync } = c.var.providers;
   const user = c.var.user;
 
   let body: CreateTeamRequest;
@@ -392,8 +416,33 @@ teamsRouter.post("/", async (c) => {
   }
 
   try {
-    const team = await createTeam(db, { orgId: user.orgId, name: body.name, creatorUserId: user.id });
-    const resp: CreateTeamResponse = { team: await rowToSummary(db, team, user.id) };
+    const orgSources = await listWorkflowSources(db, {
+      orgId: user.orgId,
+      ownerType: "org",
+      ownerId: user.orgId,
+    });
+    const team = await createTeam(db, {
+      orgId: user.orgId,
+      name: body.name,
+      creatorUserId: user.id,
+      adoptSources: orgSources.map((source) => ({
+        repoFullName: source.repoFullName,
+        ref: source.ref,
+        subpath: source.subpath,
+        kinds: source.kinds,
+      })),
+    });
+    const adoptedSources: SkillSourceSummary[] = [];
+    for (const source of team.adoptedSources) {
+      // A failed first sync is reported on the row, same as source create.
+      await contentSync.syncOnce(source.id);
+      const rows = await db.select().from(contentSources).where(eq(contentSources.id, source.id)).limit(1);
+      adoptedSources.push(toAdoptedSourceSummary(rows[0] ?? source));
+    }
+    const resp: CreateTeamResponse = {
+      team: await rowToSummary(db, team, user.id),
+      adoptedSources,
+    };
     return c.json(resp, 201);
   } catch (err) {
     const mapped = handleServiceError(err);
@@ -493,7 +542,7 @@ teamsRouter.patch("/:id", async (c) => {
 // ── Delete ────────────────────────────────────────────────────────────────
 
 teamsRouter.delete("/:id", async (c) => {
-  const { db, engineHost } = c.var.providers;
+  const { db, engineHost, workflowStore } = c.var.providers;
   const user = c.var.user;
   const id = c.req.param("id");
 
@@ -504,13 +553,12 @@ teamsRouter.delete("/:id", async (c) => {
   const refusal = (await idpManagedRefusal(db, team, "delete")) ?? configManagedDeleteRefusal(team);
   if (refusal) return c.json(refusal, 409);
 
-  // Refuse for owned workflows BEFORE the destroy loop below. deleteTeam
-  // re-checks inside its transaction (authoritative under the ownership
-  // lock), but a refusal there would land after the assistants' engine
-  // sessions were already destroyed — turning a refused, no-op-looking
-  // delete into permanent history loss.
+  // Refuse for unsettled runs BEFORE the destroy loop below. deleteTeam
+  // reaps idle workflows inside its transaction. A refusal after the
+  // assistants' engine sessions were already destroyed would turn a
+  // no-op-looking delete into permanent history loss.
   try {
-    await assertNoTeamOwnedWorkflows(db, id);
+    await assertNoTeamOwnedActiveRuns(db, workflowStore, id);
   } catch (err) {
     const mapped = handleServiceError(err);
     if (mapped) return c.json(mapped.body, mapped.status);
@@ -533,7 +581,10 @@ teamsRouter.delete("/:id", async (c) => {
   }
 
   try {
-    await deleteTeam(db, { teamId: id });
+    await deleteTeam(db, {
+      teamId: id,
+      reapOwnedWorkflows: (tx) => reapTeamWorkflows(tx, workflowStore, id),
+    });
     // Destroy again after the commit: a wake racing the window between the
     // first destroy and the retire can re-cache a rebuilt session, and
     // cache hits bypass the archived-wake guard. Now the rows are retired,

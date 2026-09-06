@@ -28,6 +28,7 @@ import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { and, eq } from "drizzle-orm";
 import {
+  contentSources,
   githubInstallations,
   orgMembers,
   orgs,
@@ -358,6 +359,151 @@ describe("resolveContentSourceCredential", () => {
 
       expect(spy).not.toHaveBeenCalled();
       spy.mockRestore();
+    });
+  });
+
+  describe("an adopted team source", () => {
+    async function publishOrgSource(
+      overrides: Partial<ContentSourceRow> = {},
+    ): Promise<ContentSourceRow> {
+      const row = sourceRow({
+        id: "skillsrc_org_pub",
+        ownerType: "org",
+        ownerId: ORG,
+        createdBy: "u1",
+        repoFullName: "tkhq/tk-brain",
+        ref: "main",
+        subpath: "workflows",
+        enabled: true,
+        ...overrides,
+      });
+      await db.insert(contentSources).values(row);
+      return row;
+    }
+
+    it("uses the App when it matches an enabled org source", async () => {
+      await publishOrgSource();
+      await installApp();
+      fixture = startGithubFixture({
+        createInstallationToken: () => ({
+          body: { token: "ghs_adopt", expires_at: new Date(NOW + 3600_000).toISOString() },
+        }),
+      });
+
+      const credential = await resolveContentSourceCredential(
+        deps(),
+        sourceRow({
+          ownerType: "team",
+          ownerId: TEAM,
+          createdBy: "u2",
+          repoFullName: "tkhq/tk-brain",
+          ref: "main",
+          subpath: "workflows",
+        }),
+      );
+
+      expect(credential).toEqual({ kind: "installation", token: "ghs_adopt" });
+    });
+
+    it("falls back to created_by when the org source is disabled", async () => {
+      await publishOrgSource({ enabled: false });
+      await connectGitHub("u2", "ghu_u2", "hubot");
+      fixture = startGithubFixture();
+
+      const credential = await resolveContentSourceCredential(
+        deps(),
+        sourceRow({
+          ownerType: "team",
+          ownerId: TEAM,
+          createdBy: "u2",
+          repoFullName: "tkhq/tk-brain",
+          ref: "main",
+          subpath: "workflows",
+        }),
+      );
+
+      expect(credential).toEqual({ kind: "user", token: "ghu_u2", ownerScope: "team", login: "hubot" });
+    });
+
+    it("falls back to created_by when the org source is deleted", async () => {
+      await connectGitHub("u2", "ghu_u2", "hubot");
+      fixture = startGithubFixture();
+
+      const credential = await resolveContentSourceCredential(
+        deps(),
+        sourceRow({
+          ownerType: "team",
+          ownerId: TEAM,
+          createdBy: "u2",
+          repoFullName: "tkhq/tk-brain",
+          ref: "main",
+          subpath: "workflows",
+        }),
+      );
+
+      expect(credential).toEqual({ kind: "user", token: "ghu_u2", ownerScope: "team", login: "hubot" });
+    });
+
+    it("keeps created_by when the repository address differs", async () => {
+      await publishOrgSource();
+      await installApp();
+      await connectGitHub("u2", "ghu_u2", "hubot");
+      fixture = startGithubFixture({
+        createInstallationToken: () => ({
+          body: { token: "ghs_should_not", expires_at: new Date(NOW + 3600_000).toISOString() },
+        }),
+      });
+
+      const credential = await resolveContentSourceCredential(
+        deps(),
+        sourceRow({
+          ownerType: "team",
+          ownerId: TEAM,
+          createdBy: "u2",
+          repoFullName: "tkhq/other",
+          ref: "main",
+          subpath: "workflows",
+        }),
+      );
+
+      expect(credential).toEqual({ kind: "user", token: "ghu_u2", ownerScope: "team", login: "hubot" });
+    });
+
+    it("requires ref and subpath to agree, not only the repository", async () => {
+      await publishOrgSource();
+      await installApp();
+      await connectGitHub("u2", "ghu_u2", "hubot");
+      fixture = startGithubFixture({
+        createInstallationToken: () => ({
+          body: { token: "ghs_should_not", expires_at: new Date(NOW + 3600_000).toISOString() },
+        }),
+      });
+
+      const wrongRef = await resolveContentSourceCredential(
+        deps(),
+        sourceRow({
+          ownerType: "team",
+          ownerId: TEAM,
+          createdBy: "u2",
+          repoFullName: "tkhq/tk-brain",
+          ref: "develop",
+          subpath: "workflows",
+        }),
+      );
+      expect(wrongRef).toEqual({ kind: "user", token: "ghu_u2", ownerScope: "team", login: "hubot" });
+
+      const wrongSub = await resolveContentSourceCredential(
+        deps(),
+        sourceRow({
+          ownerType: "team",
+          ownerId: TEAM,
+          createdBy: "u2",
+          repoFullName: "tkhq/tk-brain",
+          ref: "main",
+          subpath: "skills",
+        }),
+      );
+      expect(wrongSub).toEqual({ kind: "user", token: "ghu_u2", ownerScope: "team", login: "hubot" });
     });
   });
 

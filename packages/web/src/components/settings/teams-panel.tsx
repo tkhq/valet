@@ -85,8 +85,9 @@ const CONFIG_MANAGED_NOTE =
 
 /** What a delete removes, for every team. */
 const DELETE_TEAM_NOTE =
-  "This deletes the team, its membership, and its skills and skill sources. If the team still owns " +
-  "workflows, the delete fails — move or delete those first. Org members themselves are not affected.";
+  "This deletes the team, its membership, its skills and skill sources, and its workflows. " +
+  "If a team workflow is still running, the delete fails — wait for it to finish, or cancel it, then try again. " +
+  "Org members themselves are not affected.";
 
 /**
  * The half a paused mirror's delete does not say on its own. The group is

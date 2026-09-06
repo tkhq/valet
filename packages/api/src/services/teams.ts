@@ -23,11 +23,16 @@ import {
   teamMembers,
   teams,
   workflowDefinitions,
+  type ContentSourceRow,
   type TeamRow,
 } from "../schema/index.js";
 import { retireAssistant } from "../assistants/service.js";
 import { getOrgFeatures, isOrgAdmin } from "./org.js";
-import { deleteMirroredContent } from "./content-sources.js";
+import {
+  adoptedTeamSourceRow,
+  deleteMirroredContent,
+  type AdoptedSourceSpec,
+} from "./content-sources.js";
 
 export type TeamRole = "admin" | "member";
 
@@ -61,6 +66,19 @@ export class TeamOwnsWorkflowsError extends Error {
   constructor(teamId: string) {
     super(`team ${teamId} still owns one or more workflows — reassign or delete them first`);
     this.name = "TeamOwnsWorkflowsError";
+  }
+}
+
+/** Thrown when a team delete would reap a workflow that still has a run
+ * in flight. Wait for the run to finish, or cancel it, then delete. */
+export class TeamHasActiveRunsError extends Error {
+  readonly code = "team_has_active_runs";
+  readonly statusCode = 409;
+  constructor(teamId: string) {
+    super(
+      `team ${teamId} has an unsettled workflow run. Wait for it to finish, or cancel it, then delete the team.`,
+    );
+    this.name = "TeamHasActiveRunsError";
   }
 }
 
@@ -248,7 +266,12 @@ export interface CreateTeamOptions {
   orgId: string;
   name: string;
   creatorUserId: string;
+  /** Org-owned workflow sources to copy as team-owned rows. Inserted in
+   * the same transaction as the team and the creator's membership. */
+  adoptSources?: readonly Omit<AdoptedSourceSpec, "orgId">[];
 }
+
+export type CreateTeamResult = TeamRow & { adoptedSources: ContentSourceRow[] };
 
 /**
  * Creates a team; the creator is auto-admitted as its first admin. The
@@ -257,7 +280,7 @@ export interface CreateTeamOptions {
  * two concurrent creates of the same name can't both pass the pre-check and
  * race into a raw 500 — the loser always sees `TeamNameConflictError`.
  */
-export async function createTeam(db: AppDb, opts: CreateTeamOptions): Promise<TeamRow> {
+export async function createTeam(db: AppDb, opts: CreateTeamOptions): Promise<CreateTeamResult> {
   const id = newTeamId();
   const now = Date.now();
   // A team created through this service is always `local`: it belongs to the
@@ -272,6 +295,7 @@ export async function createTeam(db: AppDb, opts: CreateTeamOptions): Promise<Te
     defaultModel: null,
     defaultReasoning: null,
   };
+  const adoptedSources: ContentSourceRow[] = [];
 
   try {
     await db.transaction(async (tx) => {
@@ -284,13 +308,21 @@ export async function createTeam(db: AppDb, opts: CreateTeamOptions): Promise<Te
 
       await tx.insert(teams).values(row);
       await tx.insert(teamMembers).values({ teamId: id, userId: opts.creatorUserId, role: "admin" });
+      for (const source of opts.adoptSources ?? []) {
+        const adopted = adoptedTeamSourceRow(
+          { orgId: opts.orgId, ...source },
+          { teamId: id, createdBy: opts.creatorUserId, now },
+        );
+        await tx.insert(contentSources).values(adopted);
+        adoptedSources.push(adopted);
+      }
     });
   } catch (err) {
     if (isTeamNameUniqueViolation(err)) throw new TeamNameConflictError(opts.orgId, opts.name);
     throw err;
   }
 
-  return row;
+  return { ...row, adoptedSources };
 }
 
 export interface AddMemberOptions {
@@ -547,12 +579,17 @@ export async function lockTeamForOwnership(tx: AppQueryable, teamId: string): Pr
 
 export interface DeleteTeamOptions {
   teamId: string;
+  /** Reaps team-owned workflows under the ownership lock, ahead of
+   * `assertNoTeamOwnedWorkflows`. The route passes `reapTeamWorkflows`. */
+  reapOwnedWorkflows?: (tx: AppQueryable) => Promise<void>;
 }
 
 /**
  * Deletes a team, its memberships, the skills it owns, and the skill
- * repositories it tracks. Rejects while the team owns any workflow, and
- * rejects on a team that is a LIVE mirror of an identity-provider group.
+ * repositories it tracks. When `reapOwnedWorkflows` is passed, team-owned
+ * workflows go with the team unless a run is unsettled. Without that
+ * callback, the delete still refuses while any team-owned workflow exists.
+ * Rejects on a team that is a LIVE mirror of an identity-provider group.
  *
  * A live mirror is refused because deletion here does not reach the source.
  * The group stays in the identity provider, so the next sign-in recreates the
@@ -587,6 +624,7 @@ export async function deleteTeam(db: AppDb, opts: DeleteTeamOptions): Promise<vo
 
   await db.transaction(async (tx) => {
     await lockTeamForOwnership(tx, opts.teamId);
+    if (opts.reapOwnedWorkflows) await opts.reapOwnedWorkflows(tx);
     await assertNoTeamOwnedWorkflows(tx, opts.teamId);
     await tx
       .delete(skills)
@@ -594,9 +632,9 @@ export async function deleteTeam(db: AppDb, opts: DeleteTeamOptions): Promise<vo
     // Each source's mirrored content goes with the source, through the same
     // helper the source delete uses. Without it a mirrored row outlives every
     // route that could remove it: a mirrored workflow is read-only, and its
-    // source would be gone. `assertNoTeamOwnedWorkflows` above already
-    // refuses while the team owns any workflow, so this reaches a source
-    // whose mirrored definitions were removed by that path first, and the
+    // source would be gone. Reap (or `assertNoTeamOwnedWorkflows`) already
+    // removed team-owned definitions, so this reaches a source whose
+    // mirrored workflows were removed by that path first, and the
     // templates it still holds.
     const teamSources = await tx
       .select({ id: contentSources.id, orgId: contentSources.orgId })
