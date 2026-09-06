@@ -147,8 +147,10 @@ describe("kill-mid-turn recovery (cross-process SIGKILL, exit criterion)", () =>
           },
         });
 
-        // restoreSession awaits reconciliation, which drives the resume to
-        // completion — the item is settled by the time awaitResult reads it.
+        // restoreSession awaits reconciliation, which claims the item and kicks
+        // the resume drive in the background (it never blocks on the resumed
+        // turn — see restore-nonblocking.test.ts); awaitResult waits for the
+        // settlement.
         const result = await session.thread().awaitResult(queueItemId);
 
         expect(result).toEqual({

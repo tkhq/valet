@@ -180,6 +180,46 @@ const UNATTENDED_TURN_RETRY_ATTEMPTS = 2;
 const UNATTENDED_TURN_RETRY_BACKOFF_MS = [10_000, 30_000];
 
 /**
+ * In-process background-drive registry: queue item ids whose turn is being
+ * driven fire-and-forget by a Thread in THIS process (resume-after-restart
+ * drives and gate replays — see `kickBackgroundDrive`).
+ *
+ * Why it exists: startup reconciliation's eager attempt takeover
+ * (`decideReconciliation` step 0, `attemptLive`) is justified by "the
+ * previous owner is gone by contract" — a restart replaced the process. A
+ * same-process rebuild (the host's `evictCache` + `sessionFor`, or an
+ * assistant build's epoch retry) breaks that premise: the previous owner's
+ * drive is STILL RUNNING here, and stealing its attempt runs the same turn's
+ * tools twice in one sandbox. `Session.reconcileItem` consults this registry
+ * and treats a registered item as live (wait) regardless of lease state.
+ *
+ * Module-level deliberately: the registry must span Engine instances (each
+ * rebuild constructs a fresh Engine over the same store). A pnpm-forked
+ * duplicate copy of @valet/engine would split the map — the failure mode is
+ * the pre-registry behavior (eager steal), never anything new.
+ *
+ * Refcounted so overlapping registrations of one item can never drop each
+ * other's liveness early.
+ */
+const liveBackgroundDrives = new Map<string, number>();
+
+function registerBackgroundDrive(itemId: string): void {
+  liveBackgroundDrives.set(itemId, (liveBackgroundDrives.get(itemId) ?? 0) + 1);
+}
+
+function unregisterBackgroundDrive(itemId: string): void {
+  const count = (liveBackgroundDrives.get(itemId) ?? 1) - 1;
+  if (count <= 0) liveBackgroundDrives.delete(itemId);
+  else liveBackgroundDrives.set(itemId, count);
+}
+
+/** True when a Thread in this process is currently driving `itemId`'s turn
+ * in the background. Consulted by `Session.reconcileItem`. */
+export function isItemDrivenInProcess(itemId: string): boolean {
+  return liveBackgroundDrives.has(itemId);
+}
+
+/**
  * What a compaction pass achieved. "compacted" = a summary was persisted;
  * "pruned" = tool-output elision only; "noop" = the pass found nothing to
  * reclaim; "insufficient" = the newest turn alone exceeds the usable window,
@@ -288,6 +328,10 @@ export class Thread {
   /** Serializes the claim loop; a second `kick()` while one is running joins the in-flight tail. */
   private kicking = false;
   private kickTail: Promise<void> = Promise.resolve();
+  /** Tail of every background drive kicked via `kickBackgroundDrive` (resume
+   * drives, gate replays). `abort()` joins it the same way it joins
+   * `kickTail`, so teardown never proceeds under a still-writing turn. */
+  private backgroundDriveTail: Promise<void> = Promise.resolve();
   /** In-process collect-window flush timer; armed by the first item of a window. */
   private collectTimer: ReturnType<typeof setTimeout> | null = null;
   /** Guards against the in-process timer and the session sweep both flushing the same window. */
@@ -1077,6 +1121,12 @@ export class Thread {
       await this.agent.waitForIdle();
     }
     await this.kickTail;
+    // Join background drives (resume-after-restart, gate replays) the same
+    // way: the pending-gate withdrawal above already unparked any drive
+    // waiting on a gate, and requestAbort's stamp makes its settlement record
+    // `aborted`. Without this join, Session.destroy tears down rows and
+    // sandbox under a still-writing resumed turn.
+    await this.backgroundDriveTail;
     // Settle any never-claimed (queued/collecting) items `aborted`.
     const unsettled = await store.listUnsettledSubmissions(this.session.id);
     for (const it of unsettled) {
@@ -1307,7 +1357,9 @@ export class Thread {
         // GateManager fires alongside this callback), so this stays a no-op.
       })
       .then((resolution) => {
-        void this.replayBlocked({ suspended, resolution });
+        this.kickBackgroundDrive("replay_drive_rejected", suspended.queueItemId, undefined, () =>
+          this.replayBlocked({ suspended, resolution }),
+        );
       })
       .catch((err) => {
         // Expiry / withdrawal of a re-armed gate must reach the SAME terminal
@@ -2237,6 +2289,42 @@ export class Thread {
    * second call while one is in flight joins the same tail (the store's
    * head-blocking makes a redundant claim a harmless null).
    */
+  /**
+   * The one idiom for kicking a turn drive fire-and-forget (resume drives,
+   * gate replays). Guarantees every background drive:
+   *
+   *  1. is registered in the in-process live-drive registry, so a
+   *     same-process rebuild's reconcile waits instead of CAS-stealing the
+   *     live attempt (see `liveBackgroundDrives`);
+   *  2. lands in `backgroundDriveTail`, so `abort()` (and through it
+   *     `Session.destroy`) can join it like it joins `kickTail`;
+   *  3. has a rejection owner: the inner drives settle their own failures,
+   *     so a rejection escaping here means the drive's finally never ran —
+   *     emit it, and clear the in-process claim if this drive still holds it
+   *     (otherwise `kickLoop`'s `runningItem` guard parks the thread forever
+   *     while the heartbeat keeps the lease fresh).
+   */
+  private kickBackgroundDrive(
+    errorCode: string,
+    itemId: string,
+    fenceAtKick: WriteFence | undefined,
+    drive: () => Promise<void>,
+  ): void {
+    registerBackgroundDrive(itemId);
+    const p = drive()
+      .catch((err: unknown) => {
+        this.emitError(errorCode, err instanceof Error ? err.message : String(err));
+        if (fenceAtKick !== undefined && this.fence === fenceAtKick) {
+          this.runningItem = null;
+          this.fence = undefined;
+        }
+      })
+      .finally(() => {
+        unregisterBackgroundDrive(itemId);
+      });
+    this.backgroundDriveTail = this.backgroundDriveTail.then(() => p);
+  }
+
   async kick(): Promise<void> {
     if (this.kicking) return this.kickTail;
     this.kicking = true;
@@ -2916,7 +3004,9 @@ export class Thread {
         this.fence = undefined;
         return;
       }
-      void this.replayBlocked({ suspended, resolution });
+      this.kickBackgroundDrive("replay_drive_rejected", suspended.queueItemId, undefined, () =>
+        this.replayBlocked({ suspended, resolution }),
+      );
     }
     await this.emitQueueState();
   }
@@ -2929,6 +3019,17 @@ export class Thread {
    * the agent transcript, append synthetic toolResults for the interrupted
    * calls so the trailing message is toolResult-convertible, then continue the
    * turn and settle it normally.
+   *
+   * Resolves once the fresh attempt is claimed and the resume drive is
+   * KICKED via `kickBackgroundDrive` — never when the resumed turn finishes.
+   * This method is awaited from `Session.reconcile()`, which
+   * `rehydrate`/`restoreSession` awaits, which the host's single-flight
+   * `sessionFor` hands to every threads/messages/decisions route. Awaiting
+   * the drive here held all of those pending for the resumed turn's full
+   * duration — and DEADLOCKED permanently when the resumed turn parked on a
+   * decision gate, because the human who had to resolve the gate could not
+   * load the session that was waiting on them (dev incident 2026-09-05; see
+   * test/restore-nonblocking.test.ts).
    */
   async resumeInterrupted(item: QueueItem): Promise<void> {
     const store = this.session.providers.store;
@@ -2957,7 +3058,9 @@ export class Thread {
     this.session.ensureTimers();
     await this.emitQueueState();
 
-    await this.driveResumeToCompletion(replaced, "interrupted — result lost in restart");
+    this.kickBackgroundDrive("resume_drive_rejected", item.id, this.fence, () =>
+      this.driveResumeToCompletion(replaced, "interrupted — result lost in restart"),
+    );
   }
 
   /**
