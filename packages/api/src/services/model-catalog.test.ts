@@ -6,13 +6,14 @@
  */
 import { describe, expect, it, beforeEach, vi } from "vitest";
 import { getModels } from "@earendil-works/pi-ai/compat";
+import { getSupportedThinkingLevels, type Model, type ThinkingLevelMap } from "@earendil-works/pi-ai";
 import type { AppDb } from "../lib/drizzle.js";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import { PgCredentialStore } from "../plugins/credential-store.js";
 import { deriveSecretKey } from "../lib/secret-crypto.js";
 import { orgs } from "../schema/index.js";
 import { createLlmProvider, updateLlmProvider } from "./llm-providers.js";
-import { buildOrgCatalog, catalogValidIds } from "./model-catalog.js";
+import { buildOrgCatalog, catalogValidIds, thinkingLevelsFor } from "./model-catalog.js";
 import { registryModels } from "./model-registry.js";
 import { OPENROUTER_DEFAULT_MODEL_IDS } from "./openrouter.js";
 import { setApprovedModels } from "./approved-models.js";
@@ -326,37 +327,75 @@ describe("model catalog", () => {
   });
 
   describe("thinkingLevels", () => {
-    it("a registry model with a thinkingLevelMap exposes its supported levels in canonical order", async () => {
+    // Full Model shape (no casts). pi-ai reads `thinkingLevelMap` as a
+    // sparse OVERRIDE, so support must come from pi-ai's own
+    // `getSupportedThinkingLevels`, not from key presence in the map
+    // (TKAI-410).
+    const makeModel = (reasoning: boolean, thinkingLevelMap?: ThinkingLevelMap): Model<"anthropic-messages"> => ({
+      id: "test-model",
+      name: "Test Model",
+      api: "anthropic-messages",
+      provider: "anthropic",
+      baseUrl: "https://api.anthropic.com",
+      reasoning,
+      ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
+      input: ["text"],
+      cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+      contextWindow: 200000,
+      maxTokens: 64000,
+    });
+
+    it.each([
+      {
+        name: "sparse map {xhigh, max} supports every level (claude-sonnet-5 shape)",
+        map: { xhigh: "x", max: "m" } satisfies ThinkingLevelMap,
+        expected: ["minimal", "low", "medium", "high", "xhigh", "max"],
+      },
+      {
+        name: "sparse map {max} supports minimal..high plus max (claude-sonnet-4-6 shape)",
+        map: { max: "m" } satisfies ThinkingLevelMap,
+        expected: ["minimal", "low", "medium", "high", "max"],
+      },
+      {
+        name: "an explicit null disables only that level (claude-fable-5 shape)",
+        map: { off: null, xhigh: "x", max: "m" } satisfies ThinkingLevelMap,
+        expected: ["minimal", "low", "medium", "high", "xhigh", "max"],
+      },
+      {
+        name: "an explicit null on a base level removes it",
+        map: { low: null, max: "m" } satisfies ThinkingLevelMap,
+        expected: ["minimal", "medium", "high", "max"],
+      },
+      {
+        name: "an absent map on a reasoning model supports minimal..high, not xhigh/max (claude-sonnet-4-5 shape)",
+        map: undefined,
+        expected: ["minimal", "low", "medium", "high"],
+      },
+    ])("$name", ({ map, expected }) => {
+      expect(thinkingLevelsFor(makeModel(true, map))).toEqual(expected);
+    });
+
+    it("a non-reasoning model exposes thinkingLevels: undefined", () => {
+      expect(thinkingLevelsFor(makeModel(false))).toBeUndefined();
+      expect(thinkingLevelsFor(makeModel(false, { max: "m" }))).toBeUndefined();
+    });
+
+    it("an absent model exposes thinkingLevels: undefined", () => {
+      expect(thinkingLevelsFor(undefined)).toBeUndefined();
+    });
+
+    it('catalog entries carry pi-ai\'s supported levels with "off" stripped', async () => {
       vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
       try {
-        const withMap = getModels("anthropic").find(
-          (m) => m.reasoning && m.thinkingLevelMap && Object.values(m.thinkingLevelMap).some((v) => v !== null),
-        );
-        expect(withMap).toBeDefined();
-        const map = withMap!.thinkingLevelMap!;
-        const canonicalOrder = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
-        const expected = canonicalOrder.filter((level) => map[level] !== undefined && map[level] !== null);
+        const reasoningModel = getModels("anthropic").find((m) => m.reasoning);
+        expect(reasoningModel).toBeDefined();
+        const expected = getSupportedThinkingLevels(reasoningModel!).filter((level) => level !== "off");
         expect(expected.length).toBeGreaterThan(0);
 
         const entries = await buildOrgCatalog(db, credentials, orgId);
-        const entry = entries.find((e) => e.id === `anthropic/${withMap!.id}`);
+        const entry = entries.find((e) => e.id === `anthropic/${reasoningModel!.id}`);
         expect(entry?.thinkingLevels).toEqual(expected);
-        // "off" is never a selectable level.
         expect(entry?.thinkingLevels).not.toContain("off");
-      } finally {
-        vi.unstubAllEnvs();
-      }
-    });
-
-    it("a reasoning model with no thinkingLevelMap exposes thinkingLevels: undefined", async () => {
-      vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-env-stub");
-      try {
-        const withoutMap = getModels("anthropic").find((m) => m.reasoning && !m.thinkingLevelMap);
-        expect(withoutMap).toBeDefined();
-
-        const entries = await buildOrgCatalog(db, credentials, orgId);
-        const entry = entries.find((e) => e.id === `anthropic/${withoutMap!.id}`);
-        expect(entry?.thinkingLevels).toBeUndefined();
       } finally {
         vi.unstubAllEnvs();
       }
@@ -383,14 +422,17 @@ describe("model catalog", () => {
     });
 
     it("a non-registry openrouter selection (live-catalog pick) exposes thinkingLevels: undefined", async () => {
+      // The id must NOT exist in pi-ai's openrouter registry — a registry
+      // hit would legitimately carry levels now that support no longer
+      // requires a thinkingLevelMap.
       const row = await createLlmProvider(db, {
         orgId,
         kind: "openrouter",
         name: "OpenRouter",
         models: [
           {
-            id: "moonshotai/not-in-baked-registry",
-            name: "MoonshotAI: Not in baked registry",
+            id: "example/not-in-registry",
+            name: "Example: Not In Registry",
             contextWindow: 1_048_576,
             pricing: { input: 3, output: 15 },
           },
@@ -402,7 +444,7 @@ describe("model catalog", () => {
       });
 
       const entries = await buildOrgCatalog(db, credentials, orgId);
-      const entry = entries.find((e) => e.id === "openrouter/moonshotai/not-in-baked-registry");
+      const entry = entries.find((e) => e.id === "openrouter/example/not-in-registry");
       expect(entry).toBeDefined();
       expect(entry?.thinkingLevels).toBeUndefined();
     });
