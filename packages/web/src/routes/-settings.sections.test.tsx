@@ -89,6 +89,7 @@ vi.mock("~/api/settings", async (importOriginal) => {
     useOrgReasoning: () => ({ data: {}, isLoading: false, error: null }),
     usePatchMe: () => ({ mutate: patchMeMutate, isPending: false, error: null }),
     usePatchOrg: () => ({ mutateAsync: patchOrgMutateAsync, isPending: false, error: null }),
+    useTeams: () => ({ data: { teams: [] }, isLoading: false, error: null }),
   };
 });
 
@@ -121,6 +122,19 @@ vi.mock("~/api/api-keys", () => ({
   useCreateApiKey: () => ({ mutate: createApiKeyMutate, isPending: false, error: null }),
   useRevokeApiKey: () => ({ mutate: revokeApiKeyMutate, isPending: false, error: null }),
 }));
+
+vi.mock("~/lib/workspace-scope", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/lib/workspace-scope")>();
+  return {
+    ...actual,
+    useWorkspaceScope: () => ({
+      key: "user",
+      teamId: undefined,
+      available: ["user"],
+      setKey: () => {},
+    }),
+  };
+});
 
 import { ProfilePage } from "./settings.profile";
 import { AssistantPage } from "./settings.assistant";

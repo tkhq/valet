@@ -75,7 +75,7 @@ export async function loadOwnedSession(c: Context<AppEnv>) {
   const userId = c.var.user.id;
   const rows = await db.select().from(agentSessions).where(eq(agentSessions.id, id)).limit(1);
   const row = rows[0];
-  if (!row || !(await canViewSession(db, row, userId))) return null;
+  if (!row || !(await canViewSession(db, row, userId, c.var.principal))) return null;
   return row;
 }
 
@@ -922,7 +922,7 @@ messagesRouter.post("/:id/decisions/:gateId/resolve", async (c) => {
   // Explicit resolve authorization, distinct from `loadEngineSession`'s
   // view check: answering a gate acts on the session's behalf. The same
   // named check gates the channel gate-callback path.
-  if (!(await canResolveSessionGate(c.var.providers.db, session, c.var.user.id))) {
+  if (!(await canResolveSessionGate(c.var.providers.db, session, c.var.user.id, c.var.principal))) {
     return c.json(
       { error: "Only the session owner or a member of its team can resolve this approval. Ask one of them." },
       403,
@@ -977,7 +977,7 @@ messagesRouter.post("/:id/decisions/:gateId/withdraw", async (c) => {
 
   // Same explicit resolve authorization as the resolve route above —
   // withdrawing settles the gate too.
-  if (!(await canResolveSessionGate(c.var.providers.db, session, c.var.user.id))) {
+  if (!(await canResolveSessionGate(c.var.providers.db, session, c.var.user.id, c.var.principal))) {
     return c.json(
       { error: "Only the session owner or a member of its team can resolve this approval. Ask one of them." },
       403,
