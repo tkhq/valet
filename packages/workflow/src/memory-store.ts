@@ -9,6 +9,7 @@ import {
   WorkflowFenceError,
   decodeRunCursor,
   encodeRunCursor,
+  splitRunOwner,
   type ListRunsFilter,
   type ListRunsPage,
   type NodeCheckpoint,
@@ -17,6 +18,7 @@ import {
   type RunWaitCondition,
   type WorkflowRun,
   type WorkflowRunListItem,
+  type WorkflowRunOwnerInput,
   type WorkflowStore,
 } from './store.js';
 
@@ -54,11 +56,12 @@ export class InMemoryWorkflowStore implements WorkflowStore {
     params: RunParams,
     definition: unknown,
     definitionVersionId: string,
-    owner?: { ownerType: string; ownerId: string },
+    owner?: WorkflowRunOwnerInput,
   ): Promise<WorkflowRun> {
     const existing = this.runs.get(runId);
     if (existing) return structuredClone(existing);
     const now = this.clock();
+    const { principal, actorUserId } = splitRunOwner(owner);
     const run: WorkflowRun = {
       runId,
       status: 'pending',
@@ -70,7 +73,8 @@ export class InMemoryWorkflowStore implements WorkflowStore {
       attempt: 0,
       wakeRequested: false,
       createdAt: now,
-      owner: owner ? structuredClone(owner) : undefined,
+      owner: principal,
+      actorUserId,
     };
     this.runs.set(runId, run);
     return structuredClone(run);
@@ -215,6 +219,7 @@ export class InMemoryWorkflowStore implements WorkflowStore {
       createdAt: run.createdAt,
       updatedAt: run.updatedAt,
       owner: run.owner ? structuredClone(run.owner) : undefined,
+      actorUserId: run.actorUserId,
       waitingOn: structuredClone(run.waitingOn),
       parentRunId: run.params.parentRunId,
       parentNodeId: run.params.parentNodeId,

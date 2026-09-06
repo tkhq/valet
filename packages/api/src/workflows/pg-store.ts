@@ -54,6 +54,7 @@ import {
   type RunWaitCondition,
   type WorkflowRun,
   type WorkflowRunListItem,
+  type WorkflowRunOwnerInput,
   type WorkflowStore,
 } from '@valet/workflow';
 
@@ -77,6 +78,7 @@ interface WorkflowRunRow {
   attempt: number;
   ownerType: string;
   ownerId: string;
+  actorUserId: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -154,6 +156,7 @@ function rawToRunRow(raw: Record<string, unknown>): WorkflowRunRow {
     attempt: toNum(raw.attempt, 'attempt'),
     ownerType: asString(raw.owner_type, 'owner_type'),
     ownerId: asString(raw.owner_id, 'owner_id'),
+    actorUserId: asStringOrNull(raw.actor_user_id, 'actor_user_id'),
     createdAt: toNum(raw.created_at, 'created_at'),
     updatedAt: toNum(raw.updated_at, 'updated_at'),
   };
@@ -206,6 +209,7 @@ function rowToRun(row: WorkflowRunRow): WorkflowRun {
     // than NULL columns — map that sentinel back to `undefined` so this
     // matches `InMemoryWorkflowStore`'s owner-omitted-means-undefined shape.
     owner: row.ownerId === '' ? undefined : { ownerType: row.ownerType, ownerId: row.ownerId },
+    actorUserId: row.actorUserId ?? undefined,
   };
 }
 
@@ -225,6 +229,7 @@ function rawToRunListItem(raw: Record<string, unknown>): WorkflowRunListItem {
     createdAt: toNum(raw.created_at, 'created_at'),
     updatedAt: toNum(raw.updated_at, 'updated_at'),
     owner: ownerId === '' ? undefined : { ownerType: asString(raw.owner_type, 'owner_type'), ownerId },
+    actorUserId: asStringOrNull(raw.actor_user_id, 'actor_user_id') ?? undefined,
     waitingOn: requiredJsonbColumn<RunWaitCondition[]>(raw.waiting_on, 'waiting_on'),
     parentRunId: asStringOrNull(raw.parent_run_id, 'parent_run_id') ?? undefined,
     parentNodeId: asStringOrNull(raw.parent_node_id, 'parent_node_id') ?? undefined,
@@ -288,16 +293,16 @@ export class PgWorkflowStore implements WorkflowStore {
     params: RunParams,
     definition: unknown,
     definitionVersionId: string,
-    owner?: { ownerType: string; ownerId: string },
+    owner?: WorkflowRunOwnerInput,
   ): Promise<WorkflowRun> {
     const now = this.clock();
     if (owner) {
       await this.db.query(
         `INSERT INTO workflow_runs
-           (id, workflow_id, definition_version_id, definition, params, status, waiting_on, wake_requested, attempt, owner_type, owner_id, created_at, updated_at)
-         VALUES ($1,$2,$3,$4,$5,'pending','[]',false,0,$6,$7,$8,$9)
+           (id, workflow_id, definition_version_id, definition, params, status, waiting_on, wake_requested, attempt, owner_type, owner_id, actor_user_id, created_at, updated_at)
+         VALUES ($1,$2,$3,$4,$5,'pending','[]',false,0,$6,$7,$8,$9,$10)
          ON CONFLICT (id) DO NOTHING`,
-        [runId, params.workflowId, definitionVersionId, JSON.stringify(definition), JSON.stringify(params), owner.ownerType, owner.ownerId, now, now],
+        [runId, params.workflowId, definitionVersionId, JSON.stringify(definition), JSON.stringify(params), owner.ownerType, owner.ownerId, owner.actorUserId ?? null, now, now],
       );
     } else {
       await this.db.query(
@@ -472,7 +477,7 @@ export class PgWorkflowStore implements WorkflowStore {
 
     // One row past the page tells us whether another page exists.
     const result = await this.db.query(
-      `SELECT id, workflow_id, status, outcome, owner_type, owner_id, created_at, updated_at,
+      `SELECT id, workflow_id, status, outcome, owner_type, owner_id, actor_user_id, created_at, updated_at,
               waiting_on,
               params->>'parentRunId' AS parent_run_id,
               params->>'parentNodeId' AS parent_node_id,
