@@ -36,7 +36,10 @@ import {
   useRemoveTeamMember,
   useSetTeamMemberRole,
   useTeamMembers,
+  useTeamOnePasswordRefs,
   useTeams,
+  usePutTeamOnePasswordRefs,
+  useDeleteTeamOnePasswordRefs,
 } from "~/api/settings";
 import { ModelCombobox } from "~/components/settings/model-combobox";
 import { useCredentials, useDisconnectCredential } from "~/api/integrations";
@@ -344,6 +347,7 @@ function TeamRow({
         <div className="ml-6 mt-2 space-y-2 border-l border-line pl-4">
           <TeamDefaults team={team} canMutate={canMutate} managed={managed} />
           <TeamCredentials team={team} orgMembers={orgMembers} canMutate={canMutate} />
+          <TeamOnePasswordRefs team={team} canMutate={canMutate} />
           <TeamMembers
             team={team}
             orgMembers={orgMembers}
@@ -437,6 +441,87 @@ function TeamCredentials({
           </li>
         ))}
       </ul>
+    </div>
+  );
+}
+
+/**
+ * Explicit `op://` refs this team may resolve. The org token stays the
+ * broker. A team does not hold its own service-account token.
+ */
+function TeamOnePasswordRefs({
+  team,
+  canMutate,
+}: {
+  team: TeamSummary;
+  canMutate: boolean;
+}) {
+  const refsQ = useTeamOnePasswordRefs(team.id);
+  const put = usePutTeamOnePasswordRefs();
+  const drop = useDeleteTeamOnePasswordRefs();
+  const [draft, setDraft] = useState("");
+  const refs = refsQ.data?.refs ?? [];
+
+  function save(next: string[]) {
+    if (next.length === 0) {
+      drop.mutate({ teamId: team.id });
+      return;
+    }
+    put.mutate({ teamId: team.id, body: { refs: next } });
+  }
+
+  return (
+    <div>
+      <h4 className="text-xs font-medium uppercase tracking-wide text-muted">1Password references</h4>
+      {refsQ.isLoading && <LoadingRow>Loading 1Password references…</LoadingRow>}
+      {refsQ.error && <ErrorRow>Could not load 1Password references. Reload the page.</ErrorRow>}
+      {!refsQ.isLoading && !refsQ.error && refs.length === 0 && (
+        <EmptyRow>
+          No 1Password references granted yet. A team admin can grant op:// refs from the org vault.
+        </EmptyRow>
+      )}
+      <ul className="mt-1 space-y-1">
+        {refs.map((ref) => (
+          <li key={ref} className="flex items-center justify-between gap-2 py-1">
+            <p className="truncate font-mono text-xs text-ink">{ref}</p>
+            {canMutate && (
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={put.isPending || drop.isPending}
+                aria-label={`Remove ${ref} from ${team.name}`}
+                onClick={() => save(refs.filter((item) => item !== ref))}
+              >
+                Remove
+              </Button>
+            )}
+          </li>
+        ))}
+      </ul>
+      {canMutate && (
+        <div className="mt-2 flex items-center gap-2">
+          <Input
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder="op://vault/item/field"
+            aria-label={`Grant 1Password reference to ${team.name}`}
+          />
+          <Button
+            size="sm"
+            disabled={put.isPending || draft.trim() === ""}
+            onClick={() => {
+              const next = draft.trim();
+              setDraft("");
+              save([...refs, next]);
+            }}
+          >
+            Grant
+          </Button>
+        </div>
+      )}
+      {(put.error || drop.error) && (
+        <p className="mt-1 text-xs text-danger-500">{errorText(put.error ?? drop.error)}</p>
+      )}
     </div>
   );
 }

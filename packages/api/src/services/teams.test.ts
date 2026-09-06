@@ -5,6 +5,7 @@ import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
 import {
   assistants,
   contentSources,
+  credentials,
   orgMembers,
   orgs,
   teamMembers,
@@ -269,6 +270,25 @@ describe("teams service", () => {
 
     const teams = await listTeamsForUser(db, "u1");
     expect(teams).toHaveLength(0);
+  });
+
+  it("deleteTeam drops team-owned credential rows including the 1Password grant", async () => {
+    const team = await createTeam(db, { orgId, name: "Platform", creatorUserId: "u1" });
+    await db.insert(credentials).values({
+      ownerType: "team",
+      ownerId: team.id,
+      service: "onepassword",
+      type: "service_account",
+      metadata: { refs: ["op://Shared/Acme/credential"] },
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    });
+    await deleteTeam(db, { teamId: team.id });
+    const leftover = await db
+      .select()
+      .from(credentials)
+      .where(and(eq(credentials.ownerType, "team"), eq(credentials.ownerId, team.id)));
+    expect(leftover).toEqual([]);
   });
 
   it("deleteTeam rejects deletion while the team owns a workflow", async () => {
