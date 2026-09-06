@@ -158,6 +158,23 @@ vi.mock("~/api/settings", () => ({
   useOrgReasoning: () => ({ data: {}, isLoading: false, error: null }),
 }));
 
+let teamCredentials: Array<{
+  service: string;
+  type: "oauth2" | "api_key";
+  connectedAt: string;
+  delegatedFrom?: string;
+  referenceBroken?: boolean;
+}> = [];
+
+vi.mock("~/api/integrations", () => ({
+  useCredentials: () => ({
+    data: { credentials: teamCredentials },
+    isLoading: false,
+    error: null,
+  }),
+  useDisconnectCredential: () => ({ mutateAsync: vi.fn(), isPending: false, error: null }),
+}));
+
 import { TeamsPanel } from "./teams-panel";
 
 const orgMembers: OrgDirectoryUserWire[] = [
@@ -493,6 +510,50 @@ describe("TeamsPanel — add-member picker", () => {
  * owner badges), so this row creates nothing and needs no pending or error
  * state of its own.
  */
+describe("TeamsPanel — team credentials", () => {
+  beforeEach(() => {
+    callerRole = "admin";
+    orgRole = "member";
+    teamCredentials = [];
+  });
+
+  afterEach(() => {
+    teamCredentials = [];
+  });
+
+  it("names the empty place when the team has no credentials", () => {
+    openTeam();
+    expect(screen.getByText("No credentials in Platform yet. Share one from Integrations.")).toBeTruthy();
+  });
+
+  it("lists a delegated row with the delegator name and a broken badge", () => {
+    teamCredentials = [
+      {
+        service: "linear",
+        type: "oauth2",
+        connectedAt: "2026-09-01T00:00:00Z",
+        delegatedFrom: "u2",
+        referenceBroken: true,
+      },
+    ];
+    openTeam();
+    expect(screen.getByText("linear")).toBeTruthy();
+    expect(screen.getByText("Shared by Two · broken")).toBeTruthy();
+    expect(screen.getByText("Broken")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Disconnect linear from Platform" })).toBeTruthy();
+  });
+
+  it("hides Disconnect from a plain member", () => {
+    callerRole = "member";
+    teamCredentials = [
+      { service: "linear", type: "oauth2", connectedAt: "2026-09-01T00:00:00Z" },
+    ];
+    openTeam();
+    expect(screen.getByText("Stored on the team")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Disconnect linear from Platform" })).toBeNull();
+  });
+});
+
 describe("TeamsPanel — team assistant link", () => {
   beforeEach(() => {
     callerRole = "member";

@@ -39,6 +39,7 @@ import {
   useTeams,
 } from "~/api/settings";
 import { ModelCombobox } from "~/components/settings/model-combobox";
+import { useCredentials, useDisconnectCredential } from "~/api/integrations";
 import { ReasoningSelect } from "~/components/settings/reasoning-select";
 import { curatedForCatalogId } from "~/lib/models";
 import { isSizeTier, TIER_LABELS } from "~/lib/model-tiers";
@@ -341,6 +342,7 @@ function TeamRow({
       {open && (
         <div className="ml-6 mt-2 space-y-2 border-l border-line pl-4">
           <TeamDefaults team={team} canMutate={canMutate} managed={managed} />
+          <TeamCredentials team={team} orgMembers={orgMembers} canMutate={canMutate} />
           <TeamMembers
             team={team}
             orgMembers={orgMembers}
@@ -361,6 +363,79 @@ function TeamRow({
         error={deleteTeam.error != null ? errorText(deleteTeam.error) : undefined}
         onConfirm={() => deleteTeam.mutate(team.id, { onSuccess: () => setConfirmDelete(false) })}
       />
+    </div>
+  );
+}
+
+/**
+ * Credentials this team can act as. The expanded team is the place.
+ * Direct rows and delegated rows share the list because ownership varies
+ * inside it, so each row names how it arrived.
+ */
+function TeamCredentials({
+  team,
+  orgMembers,
+  canMutate,
+}: {
+  team: TeamSummary;
+  orgMembers: OrgDirectoryUserWire[];
+  canMutate: boolean;
+}) {
+  const credsQ = useCredentials("team", { teamId: team.id });
+  const disconnect = useDisconnectCredential();
+  const nameFor = (userId: string) => orgMembers.find((m) => m.userId === userId)?.name ?? userId;
+  const rows = credsQ.data?.credentials ?? [];
+
+  return (
+    <div>
+      <h4 className="text-xs font-medium uppercase tracking-wide text-muted">Credentials</h4>
+      {credsQ.isLoading && <LoadingRow>Loading credentials…</LoadingRow>}
+      {credsQ.error && <ErrorRow>Could not load credentials. Reload the page.</ErrorRow>}
+      {!credsQ.isLoading && !credsQ.error && rows.length === 0 && (
+        <EmptyRow>No credentials in {team.name} yet. Share one from Integrations.</EmptyRow>
+      )}
+      <ul className="mt-1 space-y-1">
+        {rows.map((row) => (
+          <li key={row.service} className="flex items-center justify-between gap-2 py-1">
+            <div className="min-w-0">
+              <p className="truncate text-sm text-ink">{row.service}</p>
+              <p className="text-xs text-muted">
+                {row.delegatedFrom
+                  ? `Shared by ${nameFor(row.delegatedFrom)}`
+                  : "Stored on the team"}
+                {row.referenceBroken ? " · broken" : ""}
+              </p>
+              {row.referenceBroken && (
+                <p className="text-xs text-danger-500">
+                  The source credential is gone or the member left. Re-share it, or store a
+                  direct team credential.
+                </p>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              {row.referenceBroken && <Badge variant="danger">Broken</Badge>}
+              {canMutate && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={disconnect.isPending}
+                  aria-label={`Disconnect ${row.service} from ${team.name}`}
+                  onClick={() => {
+                    if (!confirm(`Disconnect ${row.service} from ${team.name}?`)) return;
+                    void disconnect.mutateAsync({
+                      service: row.service,
+                      scope: "team",
+                      teamId: team.id,
+                    });
+                  }}
+                >
+                  Disconnect
+                </Button>
+              )}
+            </div>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
