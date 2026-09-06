@@ -36,6 +36,7 @@ import { Badge, Button } from "~/components/primitives";
 import { useDisconnectCredential } from "~/api/integrations";
 import { ServiceIcon } from "~/components/service-icon";
 import { ConnectDialog } from "./connect-dialog";
+import { ShareWithTeam } from "./share-with-team";
 import { displayName, pluginDisplayName } from "./display-name";
 import { GithubOrgAppLine } from "./github-org-app-line";
 import { IdentityLinkBlock, useServiceIdentityLink } from "./identity-link-block";
@@ -294,15 +295,22 @@ function ServiceBlock({
     </Button>
   );
 
+  const shareControl =
+    service.connected && !orgProvided ? <ShareWithTeam service={service.service} title={title} /> : null;
+
   const controls = !service.connected ? (
     unconfigured || orgProvided ? null : connectControl
   ) : repair && !unconfigured && !orgProvided ? (
     <span className="flex items-center gap-3">
+      {shareControl}
       {disconnectControl}
       {connectControl}
     </span>
   ) : (
-    disconnectControl
+    <span className="flex items-center gap-3">
+      {shareControl}
+      {disconnectControl}
+    </span>
   );
 
   // Two reasons a service is unconfigured, and two different fixes. The
