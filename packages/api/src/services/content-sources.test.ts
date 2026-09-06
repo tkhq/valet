@@ -427,6 +427,15 @@ describe("content sources service", () => {
     expect(await db.select().from(workflowSchedules)).toHaveLength(0);
   });
 
+  it("refuses a team source delete from a plain member", async () => {
+    const team = await createTeam(db, { orgId: ORG, name: "Platform", creatorUserId: "u1" });
+    await addMember(db, { teamId: team.id, userId: "u2", role: "member" });
+    const source = await createContentSource(db, owner("u1"), { repo: "tkhq/ours", teamId: team.id });
+
+    expect(await deleteContentSource(db, owner("u2"), source.id)).toBe(false);
+    expect(await ownedContentSourceRow(db, owner("u1"), source.id)).not.toBeNull();
+  });
+
   it("refuses to delete another owner's source", async () => {
     const source = await createContentSource(db, owner("u1"), { repo: "tkhq/skills" });
 

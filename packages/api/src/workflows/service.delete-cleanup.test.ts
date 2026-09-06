@@ -7,13 +7,22 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import githubPlugin from "@valet/plugin-github/plugin";
 import { freshTestPgDb } from "../test-helpers/pg-test-db.js";
-import { eventSubscriptions, workflowSchedules } from "../schema/index.js";
+import {
+  eventSubscriptions,
+  teamMembers,
+  teams,
+  workflowDefinitions,
+  workflowSchedules,
+  workflowWebhooks,
+} from "../schema/index.js";
 import { eq } from "drizzle-orm";
 import {
   createWorkflowDefinition,
   deleteWorkflowDefinition,
   listRunsForOwner,
+  reapTeamWorkflows,
 } from "./service.js";
+import { TeamHasActiveRunsError } from "../services/teams.js";
 import { createWorkflowSchedule } from "./schedule-service.js";
 import { createWorkflowTrigger } from "./trigger-service.js";
 import { PgWorkflowStore } from "./pg-store.js";
@@ -161,5 +170,93 @@ describe("listRunsForOwner", () => {
     const emptyOwner: WorkflowOwner = { userId: "user_empty", orgId: "org_empty" };
     const page = await listRunsForOwner(deps, emptyOwner);
     expect(page?.runs).toEqual([]);
+  });
+});
+
+describe("reapTeamWorkflows", () => {
+  async function seedTeam(teamId: string): Promise<void> {
+    await db.insert(teams).values({
+      id: teamId,
+      orgId: OWNER.orgId,
+      name: teamId,
+      createdAt: NOW,
+    });
+    await db.insert(teamMembers).values({ teamId, userId: OWNER.userId, role: "admin" });
+  }
+
+  it("deletes every team-owned definition and its triggers", async () => {
+    await seedTeam("team_reap");
+    const one = await createWorkflowDefinition(deps, OWNER, {
+      name: "digest",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+      teamId: "team_reap",
+    });
+    const two = await createWorkflowDefinition(deps, OWNER, {
+      name: "review",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+      teamId: "team_reap",
+    });
+
+    const sched = await createWorkflowSchedule(
+      db,
+      USER,
+      { workflowId: one.id, name: "daily", cron: "0 9 * * *" },
+      NOW,
+    );
+    if (!sched.ok) throw new Error(sched.error);
+    const trigger = await createWorkflowTrigger(db, [githubPlugin], USER, {
+      workflowId: two.id,
+      name: "on-pr",
+      eventKeys: ["github.pull_request.opened"],
+    });
+    if (!trigger.ok) throw new Error(trigger.error);
+
+    await reapTeamWorkflows(db, deps.workflowStore, "team_reap");
+
+    const left = await db
+      .select()
+      .from(workflowDefinitions)
+      .where(eq(workflowDefinitions.ownerId, "team_reap"));
+    expect(left).toHaveLength(0);
+    const scheds = await db
+      .select()
+      .from(workflowSchedules)
+      .where(eq(workflowSchedules.workflowId, one.id));
+    expect(scheds).toHaveLength(0);
+    const hooks = await db
+      .select()
+      .from(workflowWebhooks)
+      .where(eq(workflowWebhooks.workflowId, two.id));
+    expect(hooks).toHaveLength(0);
+    const subs = await db
+      .select()
+      .from(eventSubscriptions)
+      .where(eq(eventSubscriptions.id, trigger.trigger.triggerId));
+    expect(subs).toHaveLength(0);
+  });
+
+  it("refuses while a team-owned run is unsettled", async () => {
+    await seedTeam("team_live");
+    const def = await createWorkflowDefinition(deps, OWNER, {
+      name: "live",
+      definition: { version: "dag/v1", nodes: [], edges: [] },
+      teamId: "team_live",
+    });
+    await deps.workflowStore.createRun(
+      "wfrun_live",
+      { workflowId: def.id, definitionVersionId: "v1" },
+      { version: "dag/v1", nodes: [], edges: [] },
+      "v1",
+      { ownerType: "team", ownerId: "team_live" },
+    );
+
+    await expect(reapTeamWorkflows(db, deps.workflowStore, "team_live")).rejects.toThrow(
+      TeamHasActiveRunsError,
+    );
+    const left = await db
+      .select()
+      .from(workflowDefinitions)
+      .where(eq(workflowDefinitions.ownerId, "team_live"));
+    expect(left.map((r) => r.id)).toEqual([def.id]);
   });
 });

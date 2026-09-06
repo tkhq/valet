@@ -8,6 +8,7 @@
  * | user   | that user's own GitHub credential            |
  * | team   | the credential of the user who ADDED the row |
  * |        | except `skillsrc_cfg_*`: the org App        |
+ * |        | except an adopted match: the org App         |
  * | org    | the org's GitHub App installation token     |
  * | (none) | no credential — the read is anonymous       |
  *
@@ -26,9 +27,16 @@
  * would read GitHub with no `Authorization` header, so a private team
  * folder would 404 on every poll. The file is an operator declaration, the
  * same act as an org config source, so those rows resolve with `auth:
- * "app"` and the same privilege as `ownerType === "org"`. A UI team source
- * (id not `skillsrc_cfg_`) still uses `created_by` and never climbs to the
- * App.
+ * "app"` and the same privilege as `ownerType === "org"`.
+ *
+ * A team source that matches an enabled org-owned source on
+ * `(repo_full_name, ref, subpath)` also uses the App. That is the adoption
+ * path: `createTeam` copies the org's workflow sources, and the copy must
+ * keep reading the same repositories the org already published. The match
+ * is re-checked every sync. If the org source is disabled or deleted, the
+ * team row falls back to `created_by`, then anonymous. A team source whose
+ * address does not match any org source still uses `created_by` and never
+ * climbs to the App.
  *
  * ## The binding is re-checked at READ time, not at creation
  *
@@ -68,7 +76,8 @@
  *                     no App installation that covers the repository.
  *                     The 404 names installing the App.
  */
-import type { ContentSourceRow } from "../schema/index.js";
+import { and, eq } from "drizzle-orm";
+import { contentSources, type ContentSourceRow } from "../schema/index.js";
 import {
   GitHubAuthError,
   resolveGitHubToken,
@@ -114,6 +123,37 @@ function usesOrgApp(source: ContentSourceRow): boolean {
   );
 }
 
+/** A team source that copies an enabled org workflow source on
+ * repo + ref + subpath reads through the App. Re-checked every sync: if
+ * the org source is gone or disabled, this returns false and the team
+ * row falls back to `created_by`, then anonymous. */
+async function matchesEnabledOrgSource(
+  db: GitHubTokenDeps["db"],
+  source: ContentSourceRow,
+): Promise<boolean> {
+  if (source.ownerType !== "team") return false;
+  const orgRows = await db
+    .select({
+      repoFullName: contentSources.repoFullName,
+      ref: contentSources.ref,
+      subpath: contentSources.subpath,
+    })
+    .from(contentSources)
+    .where(
+      and(
+        eq(contentSources.orgId, source.orgId),
+        eq(contentSources.ownerType, "org"),
+        eq(contentSources.enabled, true),
+      ),
+    );
+  return orgRows.some(
+    (row) =>
+      row.repoFullName === source.repoFullName &&
+      row.ref === source.ref &&
+      row.subpath === source.subpath,
+  );
+}
+
 /**
  * The credential this source may sync with. Never throws: a sync must not fail
  * a public repository over a credential it does not need.
@@ -137,8 +177,9 @@ export async function resolveContentSourceCredential(
   deps: GitHubTokenDeps,
   source: ContentSourceRow,
 ): Promise<SkillRepoCredential> {
+  const appPath = usesOrgApp(source) || (await matchesEnabledOrgSource(deps.db, source));
   try {
-    if (usesOrgApp(source)) {
+    if (appPath) {
       const owner = ownerOf(source.repoFullName);
       // A row whose repository name carries no `/` cannot name an
       // installation. `parseRepoInput` rejects that shape on the way in.
@@ -182,7 +223,7 @@ export async function resolveContentSourceCredential(
       : { kind: "user", token: resolved.token, ownerScope, login: resolved.login };
   } catch (err) {
     if (err instanceof GitHubAuthError) {
-      if (!usesOrgApp(source)) return ANONYMOUS;
+      if (!appPath) return ANONYMOUS;
       return isAppNotInstalledOnOwner(err) ? MISSING_APP : UNAVAILABLE;
     }
     // Only the message, and only to the server log. The source row is shown

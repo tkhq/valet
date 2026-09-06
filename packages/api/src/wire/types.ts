@@ -1709,6 +1709,9 @@ export interface CreateTeamRequest {
 
 export interface CreateTeamResponse {
   team: TeamSummary;
+  /** Org workflow sources copied onto the new team. Empty when the org
+   * publishes none. Each row is pending until its first sync finishes. */
+  adoptedSources?: SkillSourceSummary[];
 }
 
 /** `PATCH /api/teams/:id` — team settings. `defaultModel: null` clears the
